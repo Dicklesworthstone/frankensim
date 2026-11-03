@@ -31,7 +31,7 @@ mod boundary;
 mod modes;
 mod momentum;
 mod step;
-pub use boundary::{ChannelEnd, ImpermeableEndResponse};
+pub use boundary::{ChannelEnd, ImpermeableEndResponse, ImpermeableEndsResponse};
 use modes::Modes;
 pub use momentum::{BodyForce, ComponentForceDensity, ForcedChannelStep};
 
@@ -168,6 +168,14 @@ pub struct ChannelStep {
     /// These are conjugate numerical port efforts. Physical end-half-cell
     /// inertia and body-force corrections belong to the boundary composition.
     pub boundary_pressure_impulse_n_s: [f64; 2],
+    /// Actual interior-face momentum before and after the interval. Endpoint
+    /// half-cell momentum is supplied by the mechanical boundary owner.
+    pub resolved_momentum_before_kg_m_s: f64,
+    pub resolved_momentum_after_kg_m_s: f64,
+    /// Authored force impulse on the N-1 interior dual volumes, in channel +x.
+    pub interior_body_impulse_n_s: f64,
+    /// Actual resolved momentum change minus pressure and body impulses.
+    pub resolved_momentum_defect_n_s: f64,
     pub mutual_friction_heat_j: f64,
     pub wave_balance_defect_j: f64,
     /// First-order mass imported through the two explicit ports.
@@ -201,7 +209,7 @@ struct SolveWorkspace {
     rhs: Vec<f64>,
     factor: TridiagonalWorkspace,
     factor_step: Option<f64>,
-    boundary_inverse: [Option<f64>; 2],
+    boundary_inverse: [Option<[f64; 2]>; 2],
 }
 impl SolveWorkspace {
     fn new(n: usize) -> Result<Self, ChannelError> {
@@ -396,11 +404,9 @@ impl TwoFluidChannel {
         dt_s: f64,
         boundary: BoundaryVelocities,
         friction: MutualFriction,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<ChannelStep, ChannelError> {
-        let report = self.stage_step(dt_s, boundary, friction, BodyForce::None, &mut cancelled)?;
-        self.publish_step(report);
-        Ok(report)
+        self.step_forced(dt_s, boundary, BodyForce::None, friction, cancelled)
     }
 
     /// Prepare the original thermal owner's candidate before publishing a wave step.
@@ -416,16 +422,17 @@ impl TwoFluidChannel {
         dt_s: f64,
         boundary: BoundaryVelocities,
         friction: MutualFriction,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
         prepare_heat: impl FnOnce(&ChannelStep, &[f64]) -> Result<T, E>,
     ) -> Result<(ChannelStep, T), HeatStepError<E>> {
-        let report = self
-            .stage_step(dt_s, boundary, friction, BodyForce::None, &mut cancelled)
-            .map_err(HeatStepError::Channel)?;
-        let candidate = prepare_heat(&report, &self.pending_heat_j).map_err(HeatStepError::Heat)?;
-        poll(&mut cancelled).map_err(HeatStepError::Channel)?;
-        self.publish_step(report);
-        Ok((report, candidate))
+        self.step_forced_with_heat(
+            dt_s,
+            boundary,
+            BodyForce::None,
+            friction,
+            cancelled,
+            prepare_heat,
+        )
     }
 
     fn publish_step(&mut self, report: ChannelStep) {
@@ -438,6 +445,14 @@ impl TwoFluidChannel {
     }
 
     fn validate_pending(&self, cancelled: &mut impl FnMut() -> bool) -> Result<(), ChannelError> {
+        self.validate_pending_with_limits(true, cancelled)
+    }
+
+    fn validate_pending_with_limits(
+        &self,
+        physical_limits: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), ChannelError> {
         let n = self.cells();
         for i in 0..=n {
             if i % 128 == 0 {
@@ -449,7 +464,9 @@ impl TwoFluidChannel {
                     [self.pending[0].cells[i], self.pending[1].cells[i]],
                 );
                 if !c.pressure_perturbation_pa.is_finite()
-                    || c.pressure_perturbation_pa.abs() > self.limits.max_pressure_perturbation_pa
+                    || (physical_limits
+                        && c.pressure_perturbation_pa.abs()
+                            > self.limits.max_pressure_perturbation_pa)
                 {
                     return Err(ChannelError::Domain {
                         field: "pressure",
@@ -457,9 +474,11 @@ impl TwoFluidChannel {
                     });
                 }
                 if !c.temperature_perturbation_k.is_finite()
-                    || c.temperature_perturbation_k.abs()
-                        > self.limits.max_temperature_perturbation_k
-                    || c.temperature_perturbation_k.abs() > 0.1 * self.material.temperature_k()
+                    || (physical_limits
+                        && (c.temperature_perturbation_k.abs()
+                            > self.limits.max_temperature_perturbation_k
+                            || c.temperature_perturbation_k.abs()
+                                > 0.1 * self.material.temperature_k()))
                 {
                     return Err(ChannelError::Domain {
                         field: "temperature",
@@ -467,7 +486,8 @@ impl TwoFluidChannel {
                     });
                 }
                 if !c.density_perturbation_kg_m3.is_finite()
-                    || c.density_perturbation_kg_m3.abs() > 0.1 * self.material.density_kg_m3()
+                    || (physical_limits
+                        && c.density_perturbation_kg_m3.abs() > 0.1 * self.material.density_kg_m3())
                     || !c.specific_entropy_perturbation_j_kg_k.is_finite()
                 {
                     return Err(ChannelError::Domain {
@@ -482,8 +502,9 @@ impl TwoFluidChannel {
             );
             for speed in [face.normal_velocity_m_s, face.superfluid_velocity_m_s] {
                 if !speed.is_finite()
-                    || speed.abs() > self.limits.max_component_speed_m_s
-                    || speed.abs() > 0.1 * self.modes.speed[1]
+                    || (physical_limits
+                        && (speed.abs() > self.limits.max_component_speed_m_s
+                            || speed.abs() > 0.1 * self.modes.speed[1]))
                 {
                     return Err(ChannelError::Domain {
                         field: "component velocity",

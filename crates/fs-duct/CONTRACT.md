@@ -3265,3 +3265,38 @@ must participate in a native moving termination's momentum and energy. The
 native body mass. Pressure response is a perturbation about a balanced
 reference pressure, not an absolute load or a moving-mesh equation of state.
 
+
+
+## Coupled moving superfluid endpoints and resolved momentum
+
+The `superfluid` feature exposes `step_forced` and
+`step_forced_with_heat` for authored component body forces with prescribed
+flows at both ends. Every original `ChannelStep` reports actual before/after
+interior momentum, its authored body impulse, and a checked momentum residual
+against the two adjacent-cell pressure impulses. Interior dual volumes are
+counted once; endpoint half-cell inertia remains with the mechanical boundary
+composition. Closed forcing reuses this audit and adds the physical stationary
+wall half-cell reactions without another field scan.
+
+`impermeable_ends_response` returns the reciprocal 2-by-2 pressure response
+about caller-supplied outward midpoint velocities. The cross impedance comes
+from the original two-mode tridiagonal operators, retaining pressure feedback
+between both ends. Endpoint columns are cached per duration using existing
+factors and buffers; work/storage remain O(cells), with no step allocation.
+`boundary_half_mass_kg` and `boundary_body_force_outward_n` supply the exact
+half-cell inertia and authored force needed by a mechanical composition.
+
+The response query never publishes wave fields, clocks, or friction heat.
+An algebraic reference may exceed physical amplitude bounds, while retaining
+finite-value, Courant, original residual, momentum, and work checks. The actual
+forced step independently enforces every original physical bound. Anchoring
+the response at the force-only midpoint avoids artificial blocked-pressure
+loads during uniform translation or common acceleration. No nonlinear
+advection, moving mesh, or temperature-dependent reference update is implied.
+
+Focused validation: `superfluid_ports` checks reciprocal pressures against
+actual forced steps (both sound modes, linear and Gorter-Mellink friction),
+independent component momentum integration, duration-cache invalidation,
+common acceleration under tight pressure bounds, and nonpublication on
+physical refusal or late cancellation. Existing channel and forced-momentum
+suites remain applicable.

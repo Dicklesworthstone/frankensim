@@ -60,3 +60,7 @@ workspace = true
 [[test]]
 name = "superfluid_momentum"
 required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_ports"
+required-features = ["superfluid"]

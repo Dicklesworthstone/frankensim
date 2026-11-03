@@ -57,7 +57,7 @@ impl BodyForce<'_> {
     }
 
     // Barycentric acceleration, relative acceleration, and total force density.
-    fn components(self, i: usize, material: &TwoFluidState) -> (f64, f64, f64) {
+    pub(super) fn components(self, i: usize, material: &TwoFluidState) -> (f64, f64, f64) {
         let value = match self {
             Self::None => return (0.0, 0.0, 0.0),
             Self::Acceleration(a) => return (a, 0.0, material.density_kg_m3() * a),
@@ -100,6 +100,43 @@ pub struct ForcedChannelStep {
 }
 
 impl TwoFluidChannel {
+    /// Advance authored component forces and both prescribed boundary flows on
+    /// the original wave owner. The report audits resolved interior momentum;
+    /// a moving termination owns its separate endpoint half-cell inertia.
+    pub fn step_forced(
+        &mut self,
+        dt_s: f64,
+        boundary: BoundaryVelocities,
+        force: BodyForce<'_>,
+        friction: MutualFriction,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ChannelStep, ChannelError> {
+        let report = self.stage_step(dt_s, boundary, friction, force, &mut cancelled)?;
+        self.publish_step(report);
+        Ok(report)
+    }
+
+    /// Prepare coupled owners from a forced, moving-boundary proposal before
+    /// publishing any state. As with `step_with_heat`, the callback returns only
+    /// private candidates; its refusal or late cancellation preserves all owners.
+    pub fn step_forced_with_heat<T, E>(
+        &mut self,
+        dt_s: f64,
+        boundary: BoundaryVelocities,
+        force: BodyForce<'_>,
+        friction: MutualFriction,
+        mut cancelled: impl FnMut() -> bool,
+        prepare_heat: impl FnOnce(&ChannelStep, &[f64]) -> Result<T, E>,
+    ) -> Result<(ChannelStep, T), HeatStepError<E>> {
+        let report = self
+            .stage_step(dt_s, boundary, friction, force, &mut cancelled)
+            .map_err(HeatStepError::Channel)?;
+        let candidate = prepare_heat(&report, &self.pending_heat_j).map_err(HeatStepError::Heat)?;
+        poll(&mut cancelled).map_err(HeatStepError::Channel)?;
+        self.publish_step(report);
+        Ok((report, candidate))
+    }
+
     /// Momentum of the dynamically resolved interior faces. With stationary
     /// closed ends this equals the full-domain trapezoidal momentum integral.
     /// A moving mechanical termination must add its endpoint half-cell momentum.
@@ -160,33 +197,26 @@ impl TwoFluidChannel {
                 "closed forcing requires already stationary end velocities",
             ));
         }
-        let (before, before_scale) = self.momentum_of(&self.accepted, cancelled)?;
         let channel =
             self.stage_step(dt, BoundaryVelocities::CLOSED, friction, force, cancelled)?;
-        let (after, after_scale) = self.momentum_of(&self.pending, cancelled)?;
-        let mut body = 0.0;
+        let before = channel.resolved_momentum_before_kg_m_s;
+        let after = channel.resolved_momentum_after_kg_m_s;
+        let mut body = channel.interior_body_impulse_n_s;
         let mut correction = 0.0;
-        let mut scale = before_scale + after_scale;
+        let mut scale = before.abs() + after.abs() + body.abs();
         let mut wall = channel.boundary_pressure_impulse_n_s;
-        for i in 0..=n {
-            if i % 128 == 0 {
-                poll(cancelled)?;
-            }
+        for (end, i) in [0, n].into_iter().enumerate() {
             let (_, _, density) = force.components(i, &self.material);
-            let volume = self.cell_volume * if i == 0 || i == n { 0.5 } else { 1.0 };
+            let volume = 0.5 * self.cell_volume;
             let impulse = density * dt * volume;
             accumulate(&mut body, &mut correction, impulse);
-            // Equal-and-opposite component impulses cancel physically, but
-            // their uncancelled scale still bounds floating-point summation.
             scale += force.impulse_scale(i, &self.material, dt, volume);
-            if i == 0 {
-                wall[0] -= impulse;
-            }
-            if i == n {
-                wall[1] -= impulse;
-            }
+            wall[end] -= impulse;
         }
-        scale += wall[0].abs() + wall[1].abs();
+        scale += wall[0].abs()
+            + wall[1].abs()
+            + channel.boundary_pressure_impulse_n_s[0].abs()
+            + channel.boundary_pressure_impulse_n_s[1].abs();
         let defect = (after - before) - body - (wall[0] + wall[1]);
         let tolerance = 65536.0 * f64::EPSILON * scale;
         if ![body, wall[0], wall[1], defect, tolerance]
@@ -197,7 +227,10 @@ impl TwoFluidChannel {
                 "closed momentum transfer is not representable",
             ));
         }
-        if defect.abs() > tolerance {
+        // The original stage already checks actual interior momentum with the
+        // uncancelled component norms. Here only the endpoint rearrangement is
+        // new; retain that admitted residual rather than rescanning all faces.
+        if (defect - channel.resolved_momentum_defect_n_s).abs() > tolerance {
             return Err(ChannelError::MomentumBalance {
                 defect_n_s: defect,
                 tolerance_n_s: tolerance,
@@ -283,6 +316,46 @@ impl TwoFluidChannel {
             ));
         }
         Ok(work)
+    }
+
+    pub(super) fn audit_resolved_momentum(
+        &self,
+        force: BodyForce<'_>,
+        dt: f64,
+        pressure_impulse: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[f64; 4], ChannelError> {
+        let (before, before_scale) = self.momentum_of(&self.accepted, cancelled)?;
+        let (after, after_scale) = self.momentum_of(&self.pending, cancelled)?;
+        let mut body = 0.0;
+        let mut correction = 0.0;
+        let mut scale =
+            before_scale + after_scale + pressure_impulse[0].abs() + pressure_impulse[1].abs();
+        if force != BodyForce::None {
+            for i in 1..self.cells() {
+                if i % 128 == 0 {
+                    poll(cancelled)?;
+                }
+                let (_, _, density) = force.components(i, &self.material);
+                accumulate(&mut body, &mut correction, density * dt * self.cell_volume);
+                scale += force.impulse_scale(i, &self.material, dt, self.cell_volume);
+            }
+        }
+        let defect = (after - before) - body - (pressure_impulse[0] + pressure_impulse[1]);
+        let tolerance = 65536.0 * f64::EPSILON * scale;
+        if ![body, defect, tolerance].into_iter().all(f64::is_finite) {
+            return Err(ChannelError::Invalid(
+                "resolved momentum transfer is not representable",
+            ));
+        }
+        if defect.abs() > tolerance {
+            return Err(ChannelError::MomentumBalance {
+                defect_n_s: defect,
+                tolerance_n_s: tolerance,
+            });
+        }
+        poll(cancelled)?;
+        Ok([before, after, body, defect])
     }
 
     fn momentum_of(

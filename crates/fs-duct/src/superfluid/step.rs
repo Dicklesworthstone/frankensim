@@ -10,6 +10,21 @@ impl TwoFluidChannel {
         force: BodyForce<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ChannelStep, ChannelError> {
+        self.stage_step_with_limits(dt, boundary, friction, force, true, cancelled)
+    }
+
+    // A nonpublishing affine pressure query may use an artificial reference
+    // velocity. Only the final physical proposal is subject to amplitude limits;
+    // both paths retain the same original operator, finite checks and balances.
+    pub(super) fn stage_step_with_limits(
+        &mut self,
+        dt: f64,
+        boundary: BoundaryVelocities,
+        friction: MutualFriction,
+        force: BodyForce<'_>,
+        physical_limits: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ChannelStep, ChannelError> {
         poll(cancelled)?;
         let next_time = self.time_s + dt;
         if !positive(dt)
@@ -37,8 +52,9 @@ impl TwoFluidChannel {
         for (i, end) in endpoints.into_iter().enumerate() {
             if [end.normal_m_s, end.superfluid_m_s].into_iter().any(|v| {
                 !v.is_finite()
-                    || v.abs() > self.limits.max_component_speed_m_s
-                    || v.abs() > 0.1 * self.modes.speed[1]
+                    || (physical_limits
+                        && (v.abs() > self.limits.max_component_speed_m_s
+                            || v.abs() > 0.1 * self.modes.speed[1]))
             }) {
                 return Err(ChannelError::Domain {
                     field: "boundary velocity",
@@ -97,10 +113,10 @@ impl TwoFluidChannel {
         }
         source_work += self.force_half_step(force, dt / 2.0, cancelled)?;
         if force != BodyForce::None {
-            self.validate_pending(cancelled)?;
+            self.validate_pending_with_limits(physical_limits, cancelled)?;
         }
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
-        self.validate_pending(cancelled)?;
+        self.validate_pending_with_limits(physical_limits, cancelled)?;
         let after = energy(&self.pending, self.cell_volume, cancelled)?;
         let mut heat = 0.0;
         let mut correction = 0.0;
@@ -167,6 +183,7 @@ impl TwoFluidChannel {
             ));
         }
         poll(cancelled)?;
+        let momentum = self.audit_resolved_momentum(force, dt, pressure_impulse, cancelled)?;
         Ok(ChannelStep {
             time_s: next_time,
             wave_energy_before_j: before,
@@ -174,6 +191,10 @@ impl TwoFluidChannel {
             boundary_wave_work_j: work,
             body_force_work_j: source_work,
             boundary_pressure_impulse_n_s: pressure_impulse,
+            resolved_momentum_before_kg_m_s: momentum[0],
+            resolved_momentum_after_kg_m_s: momentum[1],
+            interior_body_impulse_n_s: momentum[2],
+            resolved_momentum_defect_n_s: momentum[3],
             mutual_friction_heat_j: heat,
             wave_balance_defect_j: defect,
             boundary_mass_kg: boundary_mass,
