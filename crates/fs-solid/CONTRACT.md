@@ -1899,6 +1899,20 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   `newmark` continues to mean zero sustained load; a preload is never inferred
   from internal forces. The energy audit uses the change in kinetic energy
   from the supplied initial state, alongside incremental internal work.
+  Newmark solves directly for endpoint acceleration with tangent
+  `M + gamma*h*C + beta*h^2*K_t`; position and velocity use the corresponding
+  increments. It never recovers acceleration from two absolute displacements.
+  Backtracking and the residual gate act on that same physical acceleration
+  equation. Force work uses the resolved kinematic displacement increment,
+  retaining momentum/work balance when the stored position cannot resolve it.
+  `velocities()` and `accelerations()` expose the accepted base-relative
+  generalized state, including angular components. Absolute displacement
+  remains `f64`; compensated position or sub-ULP constitutive strain is not
+  claimed. `tests/newmark_acceleration.rs` covers lumped and consistent mass,
+  sub-ULP vibration, changed base forcing, damping and kinetic/internal work.
+  Activating a fixed coordinate freezes its accepted displacement and clears
+  its velocity/acceleration. This is a kinematic boundary reset; no resolved
+  support-engagement impact or associated impulse/energy receipt is claimed.
   The initial Rayleigh reference tangent is frozen at the first admitted
   transient initialization (after any gravity/static preload) and retained
   across record boundaries, clones and retries after a partially accepted

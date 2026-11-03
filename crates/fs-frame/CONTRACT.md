@@ -33,6 +33,14 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   shear V = 2M/h. Newmark average acceleration with Newton on the
   fiber tangent, one commit per step. SI units (probed k₀ ≈ 4.4e7
   N/m, V_y ≈ 4.8e5 N; the 280 t default mass gives T ≈ 0.5 s).
+  The nonlinear unknown is endpoint acceleration, with tangent
+  `m + gamma*h*c + beta*h^2*k_t`. Drift and velocity use Newmark increments;
+  acceleration is never reconstructed by subtracting absolute drifts. The
+  checked path retains its force-equilibrium and displacement-correction
+  gates, whole-record rollback and single material commit per accepted step.
+  `tests/story_acceleration.rs` verifies finite nonlinear fiber acceleration
+  and velocity below absolute-drift resolution. Drift itself remains ordinary
+  `f64`, so accumulation of sub-ULP displacement/constitutive strain is not claimed.
 - `history::GroundMotion` + `StoryFrame::run_checked` bind a borrowed
   acceleration record to explicit SI units, its sample interval, and sample/Newton
   limits. The checked path returns paired relative-displacement and actual

@@ -499,14 +499,45 @@ impl DynamicHistory {
 }
 
 /// Newton acceptance: the force residual meets `tol`, or the iteration has
-/// reached the round-off floor — a correction negligible against the
-/// displacement scale while the residual is within `floor_tol`.
+/// reached the round-off floor — a correction negligible against the solved
+/// coordinate (displacement or acceleration) while within `floor_tol`.
 fn newton_done(rn: f64, tol: f64, floor_tol: f64, du_norm: f64, u_norm: f64) -> bool {
     rn <= tol || (rn <= floor_tol && du_norm <= 1e-13 * u_norm.max(1e-30))
 }
 
 fn inf_norm(v: &[f64]) -> f64 {
     v.iter().fold(0.0f64, |m, x| m.max(x.abs()))
+}
+
+/// The same bounded backtracking policy for displacement and acceleration
+/// coordinates. The trial callback assembles the actual physical position.
+fn backtrack<C: FnMut() -> Result<(), SolidError>>(
+    state: &[f64],
+    correction: &[f64],
+    rn: f64,
+    checkpoint: &mut C,
+    mut trial: impl FnMut(&[f64], &mut C) -> Result<(Assembled, f64), SolidError>,
+) -> Result<(Vec<f64>, Assembled), SolidError> {
+    let mut alpha = 1.0f64;
+    let mut last_err = None;
+    for _ in 0..10 {
+        checkpoint()?;
+        let candidate: Vec<f64> = state
+            .iter()
+            .zip(correction)
+            .map(|(a, b)| a + alpha * b)
+            .collect();
+        match trial(&candidate, checkpoint) {
+            Ok((asm, residual)) => {
+                if residual < rn || alpha <= 1.0 / 512.0 {
+                    return Ok((candidate, asm));
+                }
+            }
+            Err(e) => last_err = Some(e),
+        }
+        alpha *= 0.5;
+    }
+    Err(last_err.unwrap_or(SolidError::NewtonStalled { history: vec![rn] }))
 }
 
 /// Dense LU solve (partial pivoting). `None` if singular.
@@ -599,10 +630,20 @@ impl Frame2d {
         self.nodes.len() - 1
     }
 
-    /// Fix DOFs of a node (`[ux, uy, θ]`).
+    /// Freeze requested DOFs (`[ux, uy, θ]`) at their current displacement.
+    ///
+    /// Their accepted velocity and acceleration are set to zero. Adding a
+    /// support after motion is a kinematic boundary reset, not a resolved
+    /// impact or an impulse/work receipt. False entries retain existing support
+    /// conditions and do not alter the corresponding state.
     pub fn fix(&mut self, node: usize, dofs: [bool; 3]) {
         for k in 0..3 {
-            self.fixed[3 * node + k] |= dofs[k];
+            if dofs[k] {
+                let d = 3 * node + k;
+                self.fixed[d] = true;
+                self.vel[d] = 0.0;
+                self.acc[d] = 0.0;
+            }
         }
     }
 
@@ -856,6 +897,20 @@ impl Frame2d {
         &self.u
     }
 
+    /// Committed generalized velocities relative to the base. Each node stores
+    /// `(v_x, v_y, angular_velocity)` in m/s, m/s and rad/s.
+    #[must_use]
+    pub fn velocities(&self) -> &[f64] {
+        &self.vel
+    }
+
+    /// Committed generalized accelerations relative to the base. Each node
+    /// stores `(a_x, a_y, angular_acceleration)` in m/s², m/s² and rad/s².
+    #[must_use]
+    pub fn accelerations(&self) -> &[f64] {
+        &self.acc
+    }
+
     /// Committed basic forces `[N, Mᵢ, Mⱼ]` of an element.
     #[must_use]
     pub fn element_forces(&self, e: usize) -> [f64; 3] {
@@ -1029,16 +1084,6 @@ impl Frame2d {
     /// kink. Fiber laws are non-smooth at reversals and at the concrete
     /// tension cut-off (zero tangent at zero strain), where full Newton steps
     /// overshoot and cycle.
-    fn line_search(
-        &self,
-        u: &[f64],
-        du: &[f64],
-        rn: f64,
-        residual: impl Fn(&[f64], &Assembled) -> f64,
-    ) -> Result<(Vec<f64>, Assembled), SolidError> {
-        self.line_search_controlled(u, du, rn, residual, &mut || Ok(()))
-    }
-
     fn line_search_controlled(
         &self,
         u: &[f64],
@@ -1047,22 +1092,11 @@ impl Frame2d {
         residual: impl Fn(&[f64], &Assembled) -> f64,
         checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
     ) -> Result<(Vec<f64>, Assembled), SolidError> {
-        let mut alpha = 1.0f64;
-        let mut last_err = None;
-        for _ in 0..10 {
-            checkpoint()?;
-            let ut: Vec<f64> = u.iter().zip(du).map(|(a, b)| a + alpha * b).collect();
-            match self.assemble_controlled(&ut, checkpoint) {
-                Ok(asm) => {
-                    if residual(&ut, &asm) < rn || alpha <= 1.0 / 512.0 {
-                        return Ok((ut, asm));
-                    }
-                }
-                Err(e) => last_err = Some(e),
-            }
-            alpha *= 0.5;
-        }
-        Err(last_err.unwrap_or(SolidError::NewtonStalled { history: vec![rn] }))
+        backtrack(u, du, rn, checkpoint, |ut, checkpoint| {
+            let asm = self.assemble_controlled(ut, checkpoint)?;
+            let norm = residual(ut, &asm);
+            Ok((asm, norm))
+        })
     }
 
     /// Load-controlled static analysis: apply `load` (one entry per DOF) in
@@ -1393,6 +1427,13 @@ impl Frame2d {
             });
         }
         let (gamma, beta) = (0.5, 0.25);
+        let position_weight = beta * dt * dt;
+        let velocity_weight = gamma * dt;
+        if !position_weight.is_finite() {
+            return Err(SolidError::InvalidInput {
+                what: "Newmark time-step weights must be representable".into(),
+            });
+        }
         let m = self.reference_mass()?;
         let infl: Vec<f64> = (0..n)
             .map(|d| match d % 3 {
@@ -1489,69 +1530,103 @@ impl Frame2d {
         for step in 1..ground.len() {
             let p1 = pext(ground[step]);
             let (u0, v0, a0) = (self.u.clone(), self.vel.clone(), self.acc.clone());
-            let mut u = u0.clone();
+            let mut acc = a0.clone();
             let mut history = Vec::new();
             let mut done = None;
-            let kin = |u: &[f64]| -> (Vec<f64>, Vec<f64>) {
-                let acc: Vec<f64> = (0..n)
-                    .map(|d| {
-                        (u[d] - u0[d]) / (beta * dt * dt)
-                            - v0[d] / (beta * dt)
-                            - (0.5 / beta - 1.0) * a0[d]
-                    })
-                    .collect();
-                let vel: Vec<f64> = (0..n)
-                    .map(|d| v0[d] + dt * ((1.0 - gamma) * a0[d] + gamma * acc[d]))
-                    .collect();
-                (acc, vel)
+            // Acceleration is the nonlinear unknown; neither its residual nor
+            // its accepted value subtracts absolute positions or divides by h².
+            let increment = |acc: &[f64], d: usize| {
+                dt.mul_add(
+                    v0[d],
+                    (dt * dt) * beta.mul_add(acc[d], (0.5 - beta) * a0[d]),
+                )
             };
-            let dyn_residual = |u: &[f64], f: &[f64]| -> Vec<f64> {
-                let (acc, vel) = kin(u);
-                let cvel = cv(&vel);
+            let position =
+                |acc: &[f64]| -> Vec<f64> { (0..n).map(|d| u0[d] + increment(acc, d)).collect() };
+            let velocity = |acc: &[f64]| -> Vec<f64> {
                 (0..n)
-                    .map(|d| p1[d] - m.row_action(d, &acc) - cvel[d] - f[d])
+                    .map(|d| v0[d] + dt * gamma.mul_add(acc[d], (1.0 - gamma) * a0[d]))
                     .collect()
             };
-            let (mut f, mut kt, mut trials) = self.assemble(&u)?;
+            let dyn_residual = |acc: &[f64], f: &[f64]| -> Vec<f64> {
+                let cvel = cv(&velocity(acc));
+                (0..n)
+                    .map(|d| p1[d] - m.row_action(d, acc) - cvel[d] - f[d])
+                    .collect()
+            };
+            let mut u = position(&acc);
+            let mut assembled = self.assemble(&u);
+            if !assembled.as_ref().is_ok_and(|(f, k, _)| {
+                f.iter().chain(k).all(|v| v.is_finite())
+                    && dyn_residual(&acc, f).iter().all(|v| v.is_finite())
+            }) {
+                // A large explicit predictor can leave the material/geometric
+                // domain even when the implicit endpoint is well inside it.
+                // Use the old-position Newmark seed in that case. This local
+                // ratio only selects an iterate; accepted acceleration still
+                // solves force equilibrium without absolute-position subtraction.
+                for d in 0..n {
+                    acc[d] = -v0[d] / (beta * dt) - ((0.5 - beta) / beta) * a0[d];
+                }
+                u = position(&acc);
+                assembled = self.assemble(&u);
+            }
+            let (mut f, mut kt, mut trials) = assembled?;
             for it in 0..60 {
-                let r = dyn_residual(&u, &f);
+                let r = dyn_residual(&acc, &f);
+                if r.iter().any(|value| !value.is_finite()) {
+                    return Err(SolidError::NewtonStalled { history });
+                }
                 let rn = self.free_norm(&r);
                 history.push(rn);
-                let (acc, vel) = kin(&u);
                 if rn <= 1e-9 * fref {
+                    let vel = velocity(&acc);
                     let cvel = cv(&vel);
-                    done = Some((it, trials, f, acc, vel, cvel));
+                    done = Some((it, trials, f, vel, cvel));
                     break;
                 }
                 let mut keff = kt;
-                let (cm, cc) = (1.0 / (beta * dt * dt), gamma / (beta * dt));
-                m.add_scaled(&mut keff, cm);
+                for value in &mut keff {
+                    *value *= position_weight;
+                }
+                m.add_scaled(&mut keff, 1.0);
                 for i in 0..n {
                     for j in 0..n {
-                        keff[i * n + j] += cc * cmat[i * n + j];
+                        keff[i * n + j] += velocity_weight * cmat[i * n + j];
                     }
                 }
-                let du = self
+                let da = self
                     .solve_free(&keff, &r)
                     .ok_or_else(|| SolidError::NewtonStalled {
                         history: history.clone(),
                     })?;
-                if newton_done(rn, 1e-9 * fref, 1e-6 * fref, inf_norm(&du), inf_norm(&u)) {
+                if newton_done(rn, 1e-9 * fref, 1e-6 * fref, inf_norm(&da), inf_norm(&acc)) {
+                    let vel = velocity(&acc);
                     let cvel = cv(&vel);
-                    done = Some((it, trials, f, acc, vel, cvel));
+                    done = Some((it, trials, f, vel, cvel));
                     break;
                 }
-                let (ut, asm) = self.line_search(&u, &du, rn, |ut: &[f64], a: &Assembled| {
-                    self.free_norm(&dyn_residual(ut, &a.0))
+                let (at, asm) = backtrack(&acc, &da, rn, &mut || Ok(()), |at, _| {
+                    let asm = self.assemble(&position(at))?;
+                    let residual = dyn_residual(at, &asm.0);
+                    let norm = if residual.iter().all(|v| v.is_finite()) {
+                        self.free_norm(&residual)
+                    } else {
+                        f64::INFINITY
+                    };
+                    Ok((asm, norm))
                 })?;
-                u = ut;
+                acc = at;
+                u = position(&acc);
                 (f, kt, trials) = asm;
             }
-            let Some((iters, trials, f, acc, vel, cvel)) = done else {
+            let Some((iters, trials, f, vel, cvel)) = done else {
                 return Err(SolidError::NewtonStalled { history });
             };
             // Energy increments (trapezoidal over the step).
-            let du: Vec<f64> = (0..n).map(|d| u[d] - u0[d]).collect();
+            // Use the same resolved kinematic increment for force work, even
+            // when adding it to an absolute displacement rounds it away.
+            let du: Vec<f64> = (0..n).map(|d| increment(&acc, d)).collect();
             let e_in = 0.5 * (0..n).map(|d| du[d] * (p_prev[d] + p1[d])).sum::<f64>();
             let e_int = 0.5 * (0..n).map(|d| du[d] * (f_prev[d] + f[d])).sum::<f64>();
             let e_d = 0.5 * (0..n).map(|d| du[d] * (c_prev[d] + cvel[d])).sum::<f64>();

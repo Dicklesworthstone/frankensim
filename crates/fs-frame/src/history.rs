@@ -333,25 +333,31 @@ impl StoryFrame {
         let x0 = self.x;
         let v0 = self.v;
         let a0 = self.a;
-        let mut x = x0;
+        let mut a_new = a0;
+        let h = controls.dt_s;
+        let position_weight = beta * h * h;
+        // Solve for acceleration itself. Recovering it from x_new - x0
+        // amplifies absolute-position rounding by 1/h² and can lose a finite
+        // inertial response around a preloaded or plastically displaced state.
+        let kinematics = |acceleration: f64| {
+            let increment = h.mul_add(v0, (h * h) * beta.mul_add(acceleration, (0.5 - beta) * a0));
+            let velocity = v0 + h * gamma.mul_add(acceleration, (1.0 - gamma) * a0);
+            (x0 + increment, velocity)
+        };
         let mut converged = false;
         let mut last_correction_m = f64::INFINITY;
         let mut last_residual_n = f64::INFINITY;
         let mut iterations = 0usize;
 
         for iteration in 1..=controls.max_newton_iterations {
-            let a_new = (x - x0 - controls.dt_s * v0) / (beta * controls.dt_s * controls.dt_s)
-                - (0.5 - beta) / beta * a0;
-            let v_new = v0 + controls.dt_s * ((1.0 - gamma) * a0 + gamma * a_new);
+            let (x, v_new) = kinematics(a_new);
             let (fs, kt) = self.restoring(x);
             let residual = m * a_new + controls.damping_n_s_m * v_new + fs - p_ext;
-            let dynamic_tangent = m / (beta * controls.dt_s * controls.dt_s)
-                + controls.damping_n_s_m * gamma / (beta * controls.dt_s)
-                + kt;
+            let dynamic_tangent = m + gamma * h * controls.damping_n_s_m + position_weight * kt;
             let correction = -residual / dynamic_tangent;
-            x += correction;
+            a_new += correction;
             iterations = iteration;
-            last_correction_m = correction.abs();
+            last_correction_m = (position_weight * correction).abs();
             last_residual_n = residual.abs();
             if CHECKED
                 && (!a_new.is_finite()
@@ -382,9 +388,7 @@ impl StoryFrame {
             });
         }
 
-        let a_new = (x - x0 - controls.dt_s * v0) / (beta * controls.dt_s * controls.dt_s)
-            - (0.5 - beta) / beta * a0;
-        let v_new = v0 + controls.dt_s * ((1.0 - gamma) * a0 + gamma * a_new);
+        let (x, v_new) = kinematics(a_new);
         let restoring_shear_n = if CHECKED { self.restoring(x).0 } else { 0.0 };
         let equilibrium_residual_n = if CHECKED {
             m * a_new + controls.damping_n_s_m * v_new + restoring_shear_n - p_ext
