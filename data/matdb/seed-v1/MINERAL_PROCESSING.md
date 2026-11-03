@@ -402,6 +402,56 @@ Cu(II) reduction, 1000 Ah, 0.063546 kg/mol and efficiency 1, the independent
 reference is 1.185494183238305 kg copper. Efficiency is a caller input;
 electrode kinetics, current distribution and electrical energy are not inferred.
 
+## Finite-time reaction with a depleting reagent inventory
+
+`fs_material::reaction_batch::BilinearBatchReaction` connects a conserved
+two-reactant equation to an explicit source-bound kinetic law. For the written
+equation `a A + b B -> products`, it solves
+`dξ/dt = (k/V) (nA0-aξ) (nB0-bξ)` at constant volume and temperature. The
+coefficient has units m³/(mol s); both empirical orders are one, independently
+of the stoichiometric coefficients. Lower acid inventory reduces the rate as
+well as the maximum possible conversion. The runtime returns complete initial
+and final species inventories, gross consumed/formed amounts, actual extent,
+the availability bound, and the original equation and source card.
+
+The original card must bound typed elapsed time, volume, temperature and both
+reactant concentrations. The runtime supplies these coordinates from actual
+inputs and admits the complete monotone path through its endpoints. Additional
+declared conditions remain mandatory; a caller cannot substitute a different
+concentration in metadata. Zero reagent/time/rate preserves the complete
+inventory after source admission. Under-resolved progress and loss of a
+positive finite-time remaining stock refuse rather than becoming artificial
+complete conversion.
+
+The executable example uses the dolomite bicarbonate endpoint and an explicitly
+**synthetic** `k=0.005 m³/(mol s)`, 1 m³ reference volume and 298.15 K. At 10 s,
+10 mol dolomite plus 20 mol H⁺ gives 5 mol extent and consumes 10 mol H⁺. With
+only 2 mol initial H⁺, progress is slower and stays below the 1 mol availability
+ceiling. An ore-specific coefficient must come from compatible measurements;
+this example is not a published dolomite rate. Mineral inventory/volume is
+an empirical availability variable, not a solid activity or a surface law.
+
+The optional material-pack mode computes standard heat at that kinetic extent
+from the complete compatible USGS dolomite/H⁺/Ca²⁺/Mg²⁺/bicarbonate source set:
+
+```bash
+leach_pack_dir=/tmp/mining-materials
+mkdir -p "$leach_pack_dir"
+for pack in dolomite-solid-usgs-b2131-thermochemistry hydrogen-ion-aqueous-usgs-b2131 calcium-ion-aqueous-usgs-b2131 magnesium-ion-aqueous-usgs-b2131 bicarbonate-ion-aqueous-usgs-b2131; do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
+    --out "$leach_pack_dir/$pack.fsmatpk"
+done
+cargo run -p fs-material --example mineral_leaching -- \
+  --thermochemistry "$leach_pack_dir"
+cargo test -p fs-material reaction_batch
+```
+
+The 5 mol case gives −326500 J from the source-backed −65300 J/mol reaction
+enthalpy. This combines a declared kinetic model with real standard-state
+thermochemistry; it does not infer calibration, mixing heat, finite-solution
+activities, coupled reaction competition or plant temperature.
+
 ## Ball-mill energy and throughput
 
 `fs_material::comminution` implements the uncorrected

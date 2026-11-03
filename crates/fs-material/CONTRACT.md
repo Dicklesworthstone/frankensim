@@ -1,5 +1,39 @@
 # fs-material — CONTRACT
 
+## Finite-batch reaction with reagent depletion
+
+`reaction_batch::BilinearBatchReaction` binds an existing exactly conserved
+equation, two explicit consumed-species roles and the complete original
+constitutive card. For `a A + b B -> products`, the declared empirical law is
+`dξ/dt = (k/V) (nA0-aξ) (nB0-bξ)`, with `k` in m³/(mol s), constant positive
+batch volume and absolute temperature, and no inflow/outflow. Both stocks
+affect progress continuously. The two kinetic orders are declared as one;
+stoichiometric coefficients do not determine them. Mineral inventory divided
+by batch volume is an empirical availability variable, not pure-solid activity
+or exposed surface area. The source card must supply the coefficient and its
+support; admission does not establish an ore calibration.
+
+The card requires version 1, zero hidden state, original source hashes,
+provenance and finite typed ranges for elapsed time, volume, temperature and
+both actual concentrations. Time zero and the final time/concentrations must
+lie inside the original rectangular domain. Monotone concentration depletion
+makes endpoint admission sufficient for this law's complete path. All other
+declared conditions remain fixed and mandatory. Caller conditions cannot
+replace the owned coordinates; zero progress still requires admission.
+
+The analytic equal/unequal-capacity solutions advance the complete inventory
+through `ConservedReaction::advance_inventory`. Results retain the original
+model/reaction, complete initial/final species amounts, gross stoichiometric
+flows, extent, availability ceiling and consumed/remaining reactant accounts.
+The equation conserves atoms and charge exactly; floating-point amounts are
+not a numerical certificate. Unrepresentable progress or loss of a positive
+finite-time reactant remainder refuses without mutation or clipping.
+
+`mineral_leaching` demonstrates an explicitly synthetic dolomite/acid rate and
+optionally consumes five real USGS material packs for standard heat at the
+computed extent. It does not predict solution activities, equilibrium,
+surface evolution, multi-reaction competition or temperature evolution.
+
 ## Recovery contact-time curves and conservative residence
 
 `recovery::RecoveryKinetics` consumes the complete original constitutive card
