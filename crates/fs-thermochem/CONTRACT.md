@@ -1,5 +1,39 @@
 # CONTRACT: fs-thermochem
 
+## Source-bound ideal gas/aqueous partition
+
+`stoichiometry::thermodynamics::gas_liquid::IdealGasLiquidPartition` binds an
+original exactly conserved neutral equation `species(g) -> species(aq)` with
+coefficients -1/+1 to matched formation-Gibbs sources. Selected claims must
+own the declared gas/pure-species or aqueous/infinite-dilution phase and the
+same temperature, reference pressure and elemental convention. Original
+queries, selected answers and receipts remain in the standard reaction owner.
+
+The explicit ideal model uses `a_aq=n_aq/n_ref`, `a_g=p_partial/p_ref`, and
+`a_aq=K*a_g`, with `ln(K)=-Delta_r G/(R*T)`. The caller supplies `n_ref` as an
+amount at unit aqueous activity; unit molality is not a volume concentration.
+For a finite ideal headspace, `p_partial=n_g*R*T/V_g` closes an algebraic
+partition of a supplied gas-plus-aqueous total. Headspace volume and aqueous
+activity basis stay separate. Results expose both stocks, partial pressure,
+independently reduced component and log-equilibrium residuals, and the original
+model. Empty totals have zero stocks and undefined log-equilibrium residual.
+
+Logarithmic ratios avoid overflow and retain representable trace stocks even
+when the fractional partition underflows. Neither phase is calculated by
+subtracting the other from the total. A dominant stock can round to the total
+while a positive trace remains separately represented; its balance discrepancy
+is retained. Unrepresentable positive stocks or pressures refuse. This bounded
+algebra has no iterative work or persistent runtime state; numerical residuals
+are diagnostics, not interval certificates or propagated source uncertainty.
+
+The source temperature remains fixed. An ideal partial-pressure evaluation is
+not an experimentally validated pressure range. This owner supplies no measured
+Henry coefficient, solvent-density conversion, salinity/nonideal correction,
+dissolved chemical reaction, mass-transfer coefficient or transfer kinetics.
+Six focused test groups cover independent finite-partition and activity laws,
+extensive scaling, determinism, zero inventories, logarithmic trace stocks,
+source/phase/reference refusals and numerical range loss.
+
 ## Coupled pH and finite mineral precipitation
 
 `acid_base::precipitation::HydrolysisPrecipitation` composes the original

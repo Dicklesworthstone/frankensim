@@ -26,6 +26,8 @@ pub mod acid_base;
 pub mod caloric;
 /// Finite-inventory equilibrium of one reaction under explicit ideal activities.
 pub mod equilibrium;
+/// Source-bound partition of a neutral species between ideal gas and aqueous phases.
+pub mod gas_liquid;
 
 use std::collections::BTreeMap;
 
