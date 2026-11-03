@@ -590,6 +590,27 @@ differentiable lift). Pure Rust throughout.
   coherent interference, singular caustic regularization and area-light MIS
   remain outside this consumer.
 
+- `camera::area_lights::CurvedAreaEmitter` prepares area sampling on an
+  original native panel and its exact `SurfaceEmitter`, directly from the
+  surface scene or from an admitted camera emitter. Sources are one original
+  triangle or a consistently wound coplanar two-triangle panel with a shared
+  opposite edge and disjoint interiors; arbitrary mesh-union area is not
+  inferred. The bounded triangle-area distribution retains original geometry,
+  frame, winding, calibrated spectral radiance and emitting sides. Samples
+  retain their owner and physical area PDF; proper-rigid placement preserves
+  area. Sampling introduces no per-call allocation, chart conversion or
+  surrogate point fixture. Native surface-source discovery supplies each
+  distinct regular image. Its sampled differential intensity is
+  `Le * emitting_cosine / area_pdf`; the original polarized bundle supplies
+  Fresnel power, absorption, focusing and receiver obliquity exactly once.
+  Volume targets use the actual arriving ray's transverse area. Optional
+  molecular survival applies independently to each image on the same scene.
+  Aggregate work includes all authored seed searches and retained replays.
+  Unresolved or ambiguous searches refuse; finite seeds do not establish
+  image completeness. This incident-irradiance consumer does not add a second
+  emission term to camera continuation. General area-emitter camera MIS,
+  singular caustic integration and coherent interference remain outside it.
+
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original
   `CurvedRayleighScene` surface owner, checked by pointer identity. Native

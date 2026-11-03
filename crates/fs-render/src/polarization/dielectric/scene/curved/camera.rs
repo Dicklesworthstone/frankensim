@@ -65,6 +65,9 @@ use emission::SurfaceEmission;
 /// Physical camera and spectral pixel integration over these native paths.
 pub mod raster;
 
+/// Finite-area incident irradiance through original native optical images.
+pub mod area_lights;
+
 /// Molecular multiple-scattering camera paths on the original curved owner.
 #[cfg(feature = "volumes")]
 pub mod participating;
