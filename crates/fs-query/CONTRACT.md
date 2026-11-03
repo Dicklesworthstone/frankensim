@@ -1,5 +1,41 @@
 # fs-query — CONTRACT
 
+## Curved quadratic boundary distance and declared motion
+
+`triangle::quadratic` queries the complete six-node Lagrange triangle, including
+curved edges, through its exact quadratic Bernstein representation. Directed
+control hulls and separating planes bound the global distance; bounded
+subdivision covers the closed parameter triangle. Local optimization only
+proposes feasible upper witnesses. Interval directional derivatives can exclude
+cells containing no global minimum, including boundary minima, without assuming
+convexity or a successful local solve. Relative coordinates retain small geometry
+under common translation.
+
+A successful point receipt encloses the global minimum distance and every
+possible minimizing position within an authored physical witness tolerance.
+Distinct unresolved minima, exhausted cell/frontier budgets, degeneracy and
+insufficient parameter resolution refuse. The receipt retains original material
+barycentrics, the actual curved tangent normal, minimizer bounds and an oriented
+side enclosure. It does not assert a unique minimum or global patch injectivity.
+
+`PreparedQuadraticTriangleSurface` reuses the original deterministic feature BVH.
+Linear-time current and swept refits bound all six Bernstein controls while
+retaining incidence and patch IDs. A current query shares one subdivision budget
+across visited patches, returns a conservative complete nearby-patch set, and
+encloses oriented side over every patch still eligible as globally nearest.
+Traversal, retained output and frontier storage have separate explicit bounds.
+
+`quadratic::sweep::linear_sphere_quadratic_triangle` bounds the complete declared
+affine sphere-center and six-node path. Fixed separating planes admit whole time
+windows; the fallback subtracts directed midpoint-reconstruction and relative
+control-motion bounds from the global distance lower bound. A cached stationary
+distance receipt avoids repeated static grazing solves. An exact original-input
+axis-support fallback can admit touching without treating tolerance as allowed
+penetration. Time windows and aggregate distance cells are bounded separately.
+`PossibleContact` is the earliest unresolved window, not an impact-time root.
+These proofs concern the authored coordinate interpolation; they do not establish
+continuum trajectories, nonfolding volume maps, solid containment or response.
+
 ## Conservative nearness along moving material-contact paths
 
 `triangle::sweep::{linear_sphere_triangle_nearness,linear_spheres_nearness}` supplies a whole-path upper clearance bound for the declared affine coordinate motion, independently of the existing nonpenetration lower-bound certificate. A sphere/triangle query encloses exact normalization of both endpoint convex barycentric witnesses, interpolates those weights through the same moving triangle, and bounds the resulting quadratic relative path by its three Bernstein controls. The middle control uses endpoint relative vectors plus changes in barycentric weights times changes in triangle edges; common translation cancels before accumulation. Identical original endpoint data prove exact zero corrections. Thus steady planar sliding retains its normal clearance instead of accumulating a false tangential-distance gap.

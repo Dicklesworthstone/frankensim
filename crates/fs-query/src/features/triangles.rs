@@ -10,6 +10,9 @@
 use super::{Bvh, BvhKind, Feature, FeatureBox, FeatureComplex, MAX_COMPLEX_FEATURES};
 use fs_exec::Cx;
 
+/// Actual six-node curved geometry and bounded closest-point queries.
+pub mod quadratic;
+
 /// Conservative admission of declared linear sphere/triangle paths.
 pub mod sweep;
 
