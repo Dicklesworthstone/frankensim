@@ -534,3 +534,182 @@ fn g1_g3_g5_native_transient_spatial_ladder_shares_time_work_and_retains_final_m
         }
     }
 }
+
+
+fn capacity_history_time(spec: &mut ProjectSpec) -> &mut ConductionTransient {
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap()
+}
+
+fn capacity_history(
+    spec: &mut ProjectSpec, kind: fs_project::TransientBoundaryTarget, values: &[(f64, f64)],
+) {
+    let target = spec.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .boundaries[0].target.clone();
+    capacity_history_time(spec).boundary_schedules = vec![fs_project::TransientBoundarySchedule {
+        target, kind, source: "manufactured boundary cycle for native reverse verification".into(),
+        steps: values.iter().map(|&(until, value)| fs_project::TransientBoundaryStep {
+            until: QtyAny::new(until, fs_project::spec::dims::TIME),
+            value: QtyAny::new(value, kind.dims()),
+        }).collect(),
+    }];
+}
+
+fn capacity_history_run(
+    spec: &ProjectSpec, cards: &CardPackSet, output: Option<&str>,
+) -> (J, Vec<f64>) {
+    let mut spec = spec.clone();
+    if let Some(name) = output {
+        spec.outputs.as_mut().unwrap().push(OutputRequest {
+            name: name.into(), kind: "report".into(), region: None,
+        });
+    }
+    let decoded = decode(&spec);
+    assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, tetra_stl());
+    let (_, _, receipt, field) = run_conjugate_to_completion(&ledger, &decoded, cards);
+    let field = J::parse(&field).unwrap().get("temperature").unwrap().as_array().unwrap()
+        .iter().map(|value| value.as_f64().unwrap()).collect();
+    (J::parse(&receipt).unwrap(), field)
+}
+
+fn capacity_history_gradient(receipt: &J) -> &J {
+    receipt.get("transient").unwrap().get("adjoint").unwrap()
+}
+
+fn capacity_history_value(receipt: &J, field: &[f64], peak: bool) -> f64 {
+    if peak {
+        n(receipt.get("transient").unwrap().get("sampled_peak").unwrap(), "value_k")
+    } else {
+        field.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+    }
+}
+
+#[test]
+fn g1_capacity_boundary_history_reverse_retains_robin_and_power_controls_at_real_peaks() {
+    for radiating in [false, true] {
+        let mut spec = conduction_fixture_project(7, &tetra_stl());
+        declaration(&mut spec, 60.0, 2.0);
+        capacity_history_time(&mut spec).max_step.value = 0.35;
+        spec.power.as_mut().unwrap()[0].watts.value = 2.0;
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+            ThermalBoundaryCondition::Convection {
+                coefficient: QtyAny::new(2.0, fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT),
+                reference_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+            };
+        let cards = if radiating {
+            let (cards, identity) = radiation_product::emissivity_cards(&fixture_cards(), 0.6);
+            radiation_product::declare(&mut spec, &identity, "air", 293.15);
+            cards
+        } else { fixture_cards() };
+        spec.solver.as_mut().unwrap().tolerance_rel = 1e-12;
+        spec.envelope.as_mut().unwrap().ambient_lo.value = 280.0;
+        spec.envelope.as_mut().unwrap().ambient_hi.value = 345.0;
+        capacity_history(&mut spec, fs_project::TransientBoundaryTarget::ConvectionTemperature,
+            &[(0.4, 340.0), (2.0, 285.0)]);
+        let (plain, plain_field) = capacity_history_run(&spec, &cards, None);
+        for peak in [false, true] {
+            let output = if peak { "temperature-sampled-peak-adjoint" }
+                else { "temperature-final-adjoint" };
+            let (receipt, field) = capacity_history_run(&spec, &cards, Some(output));
+            assert_eq!(field, plain_field, "reverse reconstruction cannot change accepted heat history");
+            let gradient = capacity_history_gradient(&receipt);
+            close(n(gradient, "value_k"), capacity_history_value(&plain, &plain_field, peak), 0.0);
+            let robin = &gradient.get("robin").unwrap().as_array().unwrap()[0];
+            close(n(robin, "dtemperature_dreference_k_per_k"), 0.0, 0.0);
+            assert_eq!(robin.get("reference_history_held_fixed"), Some(&J::Bool(true)));
+            if peak {
+                assert!(n(gradient, "time_s") > 0.0 && n(gradient, "time_s") < 2.0);
+                let selected = n(gradient, "state_index") as usize;
+                for interval in &gradient.get("intervals").unwrap().as_array().unwrap()[selected..] {
+                    for power in interval.get("regional_power").unwrap().as_array().unwrap() {
+                        close(n(power, "dtemperature_ddelivered_watts_k_per_w"), 0.0, 0.0);
+                    }
+                }
+            }
+            for coordinate in ["power", "log-h"] {
+                let epsilon: f64 = if coordinate == "power" { 1e-3 } else { 1e-4 };
+                let mut plus = spec.clone();
+                let mut minus = spec.clone();
+                for (child, direction) in [(&mut plus, 1.0), (&mut minus, -1.0)] {
+                    if coordinate == "power" {
+                        child.power.as_mut().unwrap()[0].watts.value += direction * epsilon;
+                    } else {
+                        let ThermalBoundaryCondition::Convection { coefficient, .. } =
+                            &mut child.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition
+                            else { panic!("original prescribed Robin owner"); };
+                        coefficient.value *= (direction * epsilon).exp();
+                    }
+                }
+                let (plus_receipt, plus_field) = capacity_history_run(&plus, &cards, None);
+                let (minus_receipt, minus_field) = capacity_history_run(&minus, &cards, None);
+                let expected = (capacity_history_value(&plus_receipt, &plus_field, peak)
+                    - capacity_history_value(&minus_receipt, &minus_field, peak)) / (2.0 * epsilon);
+                let actual = if coordinate == "power" {
+                    n(&gradient.get("regional_power").unwrap().as_array().unwrap()[0],
+                        "dtemperature_duniform_added_watts_k_per_w")
+                } else { n(robin, "dtemperature_dlog_htc_k") };
+                close(actual, expected, 5e-6 + 3e-4 * expected.abs());
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_capacity_history_reverse_keeps_dynamic_prescribed_lifts_and_signed_flux_inputs() {
+    // One unprescribed vertex keeps the original capacity owner in its
+    // admitted domain. The source and initial state remain independent of
+    // three prescribed vertices whose values switch during reconstruction.
+    let mut spec = driven_face_project(&tetra_stl());
+    capacity_history_time(&mut spec).horizon.value = 1.0;
+    capacity_history_time(&mut spec).max_step.value = 0.6;
+    capacity_history_time(&mut spec).initial_temperature =
+        fs_project::TransientInitialTemperature::Uniform(
+            QtyAny::new(345.0, fs_project::spec::dims::TEMPERATURE));
+    spec.power.as_mut().unwrap()[0].watts.value = 1.5;
+    let cards = transient_conductivity_cards("nonlinear");
+    rebind_to(&mut spec, &cards);
+    spec.solver.as_mut().unwrap().tolerance_rel = 1e-12;
+    capacity_history(&mut spec, fs_project::TransientBoundaryTarget::FixedTemperature,
+        &[(0.3, 310.0), (0.7, 300.0), (1.0, 305.0)]);
+    let (receipt, field) = capacity_history_run(&spec, &cards, Some("temperature-final-adjoint"));
+    let gradient = capacity_history_gradient(&receipt);
+    assert!(n(gradient, "value_k") > 305.0 + 0.01,
+        "the functional must select the evolving free vertex");
+    let bath = &gradient.get("prescribed_temperature").unwrap()
+        .get("boundaries").unwrap().as_array().unwrap()[0];
+    assert_eq!(bath.get("boundary_history_held_fixed"), Some(&J::Bool(true)));
+    close(n(bath, "dtemperature_dprescribed_temperature_k_per_k"), 0.0, 0.0);
+    let epsilon = 1e-3;
+    let mut plus = spec.clone();
+    let mut minus = spec.clone();
+    plus.power.as_mut().unwrap()[0].watts.value += epsilon;
+    minus.power.as_mut().unwrap()[0].watts.value -= epsilon;
+    let (plus_receipt, plus_field) = capacity_history_run(&plus, &cards, None);
+    let (minus_receipt, minus_field) = capacity_history_run(&minus, &cards, None);
+    let expected = (capacity_history_value(&plus_receipt, &plus_field, false)
+        - capacity_history_value(&minus_receipt, &minus_field, false)) / (2.0 * epsilon);
+    close(n(&gradient.get("regional_power").unwrap().as_array().unwrap()[0],
+        "dtemperature_duniform_added_watts_k_per_w"), expected, 5e-6 + 3e-4 * expected.abs());
+    assert_eq!(field, capacity_history_run(&spec, &cards, None).1);
+
+    // Uniform delivered power adds the same temperature at every tetra vertex:
+    // dT/dP = horizon / (capacity * volume) = 1/(60/6) K/W, independently of
+    // the nonuniform, signed prescribed surface-flux history.
+    let mut flux = conduction_fixture_project(7, &tetra_stl());
+    declaration(&mut flux, 60.0, 1.0);
+    flux.solver.as_mut().unwrap().tolerance_rel = 1e-12;
+    flux.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+        ThermalBoundaryCondition::HeatFlux {
+            outward_flux: QtyAny::new(99.0, fs_project::spec::dims::HEAT_FLUX),
+        };
+    capacity_history(&mut flux, fs_project::TransientBoundaryTarget::HeatFlux,
+        &[(0.3, 2.0), (0.6, -1.0), (1.0, 3.0)]);
+    let (receipt, _) = capacity_history_run(&flux, &fixture_cards(), Some("temperature-final-adjoint"));
+    let gradient = capacity_history_gradient(&receipt);
+    assert!(gradient.get("prescribed_heat_flux").is_none(),
+        "an unused static flux is not a history-amplitude control");
+    close(n(&gradient.get("regional_power").unwrap().as_array().unwrap()[0],
+        "dtemperature_duniform_added_watts_k_per_w"), 0.1, 2e-7);
+}

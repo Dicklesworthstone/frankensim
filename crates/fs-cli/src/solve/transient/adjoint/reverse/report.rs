@@ -25,10 +25,14 @@ pub(super) fn render(
     let regional = result.region_names.iter().zip(&totals).map(|(name, &value)| Ok(format!(
         "{{\"region\":{},\"dtemperature_duniform_added_watts_k_per_w\":{}}}", json_string(name), number(value)?)))
         .collect::<Result<Vec<_>, SolveRefusal>>()?;
-    let robin = result.ports.iter().enumerate().map(|(i, name)| Ok(format!(
-        "{{\"region\":{},\"dtemperature_dreference_k_per_k\":{},\"dtemperature_dlog_htc_k\":{}}}",
-        json_string(name), number(result.references[i])?, number(result.coefficients[i])?)))
-        .collect::<Result<Vec<_>, SolveRefusal>>()?;
+    let robin = result.ports.iter().enumerate().map(|(i, name)| {
+        let history = if result.reference_histories[i] {
+            ",\"reference_history_held_fixed\":true"
+        } else { "" };
+        Ok(format!(
+            "{{\"region\":{},\"dtemperature_dreference_k_per_k\":{},\"dtemperature_dlog_htc_k\":{}{history}}}",
+            json_string(name), number(result.references[i])?, number(result.coefficients[i])?))
+    }).collect::<Result<Vec<_>, SolveRefusal>>()?;
     let mut initial = Vec::new();
     let mut initial_uniform = 0.0;
     for (i, &value) in result.initial.iter().enumerate() {
@@ -62,6 +66,9 @@ pub(super) fn render(
     let heat_flux = &result.prescribed_heat_flux;
     if !heat_flux.is_empty() {
         scope.push_str(" Independent original outward heat-flux densities are differentiated on their unchanged named P1 traces throughout the selected prefix. Their negative load contractions use the same complete physical dual, including all admitted feedback, with no extra timestep factor or solve.");
+    }
+    if result.boundary_histories {
+        scope.push_str(" Declared thermal histories are held fixed and sampled at the same interval starts as the forward trajectory, before every endpoint reconstruction and coupled tangent. A replaced static Robin reference has zero derivative and is marked reference_history_held_fixed; its coefficient remains a control. Scheduled static heat-flux controls are omitted and scheduled prescribed-temperature coordinates remain fixed. These are not derivatives of history values or switching times.");
     }
     poll(cx, deadline)?;
     Ok(format!("{{\"schema\":\"fs-cli-native-transient-adjoint-v1\",\"output\":{},\"method\":\"discrete-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_k_per_k\":{},\"dtemperature_dinitial_temperatures\":[{}],\"dtemperature_dcapacity_multiplier_k\":{},\"regional_power\":[{}],\"robin\":[{}],\"intervals\":[{}],\"reconstructed_solid_endpoints\":{},\"revalidated_solid_endpoints\":{},\"reconstruction_krylov_iterations\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_reconstruction_krylov_iterations\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{},\"authority\":\"Estimated\",\"scope\":{}{}{}{}{}{heat_flux}}}",

@@ -386,3 +386,79 @@ mod peak;
 mod initial_state;
 #[path = "transient/storage.rs"]
 mod storage;
+
+#[test]
+fn g1_g3_history_calibration_keeps_raw_samples_and_differentiates_retained_htc() {
+    for enthalpy in [false, true] {
+    let mut fixture = fixture();
+    fixture.project.envelope.as_mut().unwrap().ambient_lo.value = 280.0;
+    fixture.project.envelope.as_mut().unwrap().ambient_hi.value = 325.0;
+    let identity = fs_blake3::ContentHash::from_hex(
+        &fixture.project.materials.as_ref().unwrap()[0].card).unwrap();
+    let time = fixture.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap();
+    if enthalpy {
+        time.capacities.clear();
+        time.enthalpy = Some(fs_project::TransientEnthalpy {
+            max_newton_iterations: 32, max_backtracks: 24,
+            materials: vec![fs_project::TransientRegionEnthalpy {
+                region: "air".into(), material_card_identity: identity,
+                source: "synthetic sensible chart for held-history native calibration".into(),
+                reference_density: QtyAny::new(10.0, dims::DENSITY),
+                initial_specific_enthalpy: QtyAny::new(0.0, dims::SPECIFIC_ENTHALPY),
+                knots: [(-500.0, 243.15), (1000.0, 393.15)].into_iter()
+                    .map(|(h, temperature)| fs_project::TransientEnthalpyKnot {
+                        specific_enthalpy: QtyAny::new(h, dims::SPECIFIC_ENTHALPY),
+                        temperature: QtyAny::new(temperature, dims::TEMPERATURE),
+                        liquid_mass_fraction: 0.0,
+                    }).collect(),
+                phase_conductivity: None,
+            }],
+        });
+    }
+    time.boundary_schedules = vec![fs_project::TransientBoundarySchedule {
+        target: "air".into(),
+        kind: fs_project::TransientBoundaryTarget::ConvectionTemperature,
+        source: "manufactured chamber pulse held fixed during native calibration".into(),
+        steps: [(0.5, 293.15), (1.5, 320.0), (2.0, 300.0)].into_iter()
+            .map(|(until, value)| fs_project::TransientBoundaryStep {
+                until: QtyAny::new(until, dims::TIME),
+                value: QtyAny::new(value, dims::TEMPERATURE),
+            }).collect(),
+    }];
+    write_project(&fixture);
+    let raw = STUDY.replace("convection-temperature", "convection-coefficient")
+        .replace(":low 294K :high 300K", ":low 4W/m^2/K :high 8W/m^2/K");
+    std::fs::write(fixture.sources.join("study.fsim"), &raw).unwrap();
+    let raw_result = fixture.study(None, fs_cli::exit::SUCCESS);
+    let (_, raw_report) = fixture.report(&raw_result);
+    let controlled = raw.replace(":version 1",
+        ":version 3 :mean-control (nominal-adjoint :max-solves 1)");
+    std::fs::write(fixture.sources.join("study.fsim"), controlled).unwrap();
+    let result = fixture.study(None, fs_cli::exit::SUCCESS);
+    let (_, report) = fixture.report(&result);
+    assert_eq!(rows(&report), rows(&raw_report),
+        "calibration must retain every original history-driven probability solve");
+    assert_eq!(report.get("statistics"), raw_report.get("statistics"));
+    assert_eq!(report.get("mean_control").unwrap().f64_field("probe_solves_completed"), Some(1.0));
+    let coefficients = gradient(&report);
+    for coordinate in 0..2 {
+        let epsilon = if coordinate == 0 { 0.01 } else { 0.001 };
+        let mut values = Vec::new();
+        for sign in [-1.0, 1.0] {
+            let mut project = fixture.project.clone();
+            project.power.as_mut().unwrap()[0].watts.value =
+                5.0 + if coordinate == 0 { sign * epsilon } else { 0.0 };
+            let fs_project::ThermalBoundaryCondition::Convection { coefficient, .. } =
+                &mut project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                    .boundaries[0].condition else { panic!("retained prescribed Robin coefficient"); };
+            coefficient.value = 6.0 + if coordinate == 1 { sign * epsilon } else { 0.0 };
+            values.push(fixture.solve_project(900 + 2 * coordinate + values.len(), &project).2);
+        }
+        let difference = (values[1] - values[0]) / (2.0 * epsilon);
+        assert!(difference.abs() > 1e-5, "the original physical control must affect the trajectory");
+        assert!((coefficients[coordinate] - difference).abs() <= 5e-5 * difference.abs().max(1.0),
+            "held-history coordinate {coordinate}: adjoint={}, FD={difference}", coefficients[coordinate]);
+    }
+    }
+}

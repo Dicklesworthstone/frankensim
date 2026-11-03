@@ -71,6 +71,7 @@ struct Control {
     name: String,
     coefficient: f64,
     reference: f64,
+    reference_history_held_fixed: bool,
     reference_bar: f64,
     log_coefficient_bar: f64,
 }
@@ -107,6 +108,10 @@ impl Controls {
             }
             rows.push(Control {
                 name: boundary.target.clone(), coefficient: h, reference,
+                reference_history_held_fixed: setup.transient.as_ref().is_some_and(|time|
+                    time.boundary_schedules.iter().any(|history|
+                        history.target == boundary.target
+                            && history.kind == fs_project::TransientBoundaryTarget::ConvectionTemperature)),
                 reference_bar: 0.0, log_coefficient_bar: 0.0,
             });
         }
@@ -123,7 +128,9 @@ impl Controls {
             cx, problem, temperature, &names, load_weights, deadline,
         )?;
         for ((row, reference), coefficient) in self.rows.iter_mut().zip(references).zip(coefficients) {
-            row.reference_bar = finite(row.reference_bar + reference)?;
+            if !row.reference_history_held_fixed {
+                row.reference_bar = finite(row.reference_bar + reference)?;
+            }
             row.log_coefficient_bar = finite(row.log_coefficient_bar + coefficient)?;
         }
         self.steps = self.steps.checked_add(1)
@@ -136,12 +143,17 @@ impl Controls {
             return Err(bad("prescribed convection controls lost the selected reverse prefix"));
         }
         if self.rows.is_empty() { return Ok(String::new()); }
-        let rows = self.rows.iter().map(|row| Ok(format!(
-            "{{\"target\":{},\"coefficient_w_m2_k\":{},\"reference_temperature_k\":{},\"dtemperature_dreference_temperature_k_per_k\":{},\"dtemperature_dcoefficient_k_per_w_m2_k\":{},\"dtemperature_dlog_coefficient_k\":{}}}",
-            json_string(&row.name), number(row.coefficient)?, number(row.reference)?,
-            number(row.reference_bar)?, number(finite(row.log_coefficient_bar / row.coefficient)?)?,
-            number(row.log_coefficient_bar)?,
-        ))).collect::<Result<Vec<_>, SolveRefusal>>()?;
+        let rows = self.rows.iter().map(|row| {
+            let history = if row.reference_history_held_fixed {
+                ",\"reference_history_held_fixed\":true"
+            } else { "" };
+            Ok(format!(
+                "{{\"target\":{},\"coefficient_w_m2_k\":{},\"reference_temperature_k\":{},\"dtemperature_dreference_temperature_k_per_k\":{},\"dtemperature_dcoefficient_k_per_w_m2_k\":{},\"dtemperature_dlog_coefficient_k\":{}{history}}}",
+                json_string(&row.name), number(row.coefficient)?, number(row.reference)?,
+                number(row.reference_bar)?, number(finite(row.log_coefficient_bar / row.coefficient)?)?,
+                number(row.log_coefficient_bar)?,
+            ))
+        }).collect::<Result<Vec<_>, SolveRefusal>>()?;
         Ok(format!(
             ",\"prescribed_convection\":{{\"control_steps\":{},\"parameter_scope\":\"independent-original-reference-and-positive-coefficient-held-throughout-selected-trajectory\",\"boundaries\":[{}]}}",
             self.steps, rows.join(","),

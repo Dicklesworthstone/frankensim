@@ -6,7 +6,7 @@ use std::time::Instant;
 use fs_conduction::adjoint::robin::MeanFluxFeedback;
 use fs_conduction::{ConductionProblem, ScalarField, ThermalBc};
 use fs_exec::Cx;
-use fs_project::{ProjectSpec, ThermalBoundaryCondition};
+use fs_project::{ProjectSpec, ThermalBoundaryCondition, TransientBoundaryTarget};
 
 use super::{SolveRefusal, bad, finite, poll};
 use super::super::{json_string, lower, number};
@@ -56,6 +56,14 @@ impl Controls {
             poll(cx, deadline)?;
             let ThermalBoundaryCondition::HeatFlux { outward_flux }
                 = &boundary.condition else { continue; };
+            // The authored history replaces this unused static coordinate.
+            // Its held flux still enters every original forward/reverse row.
+            if setup.transient.as_ref().is_some_and(|time|
+                time.boundary_schedules.iter().any(|row| row.target == boundary.target
+                    && row.kind == TransientBoundaryTarget::HeatFlux))
+            {
+                continue;
+            }
             let region = problem.boundary.region_names().iter()
                 .position(|name| name == &boundary.target)
                 .ok_or_else(|| bad("prescribed heat-flux control has no physical trace"))?;

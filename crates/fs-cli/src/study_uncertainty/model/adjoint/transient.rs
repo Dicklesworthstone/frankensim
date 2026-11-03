@@ -225,6 +225,24 @@ fn radiation_reservoir(
     }
 }
 
+// A scheduled reference is held fixed while the original coefficient varies.
+// Require the producer to identify that distinction before using its h bar;
+// an ordinary frozen-reference row is not evidence for a scheduled trajectory.
+fn bind_convection_history(
+    row: &J, spec: &ProjectSpec, entity: &str, target: Target,
+) -> Result<()> {
+    let scheduled = policy(spec).is_some_and(|time| time.boundary_schedules.iter().any(|history|
+        history.target == entity
+            && history.kind == fs_project::TransientBoundaryTarget::ConvectionTemperature));
+    if scheduled && target == Target::ConvectionTemperature {
+        return Err(invalid("the declared boundary history replaces this static reference-temperature coordinate"));
+    }
+    match (scheduled, row.get("reference_history_held_fixed")) {
+        (false, None) | (true, Some(J::Bool(true))) => Ok(()),
+        _ => Err(invalid("convection derivative does not retain the declared reference-temperature history")),
+    }
+}
+
 /// Total-enthalpy controls are absolute original-boundary derivatives. Their
 /// physical point and selected prefix must agree with this calibration, rather
 /// than a frozen radiative Robin row or an unrelated same-unit temperature.
@@ -243,6 +261,7 @@ fn enthalpy_convection(
         return Err(invalid("prescribed-convection controls do not span the final trajectory"));
     }
     let row = named(controls, "boundaries", "target", entity)?;
+    bind_convection_history(row, spec, entity, target)?;
     let setup = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
         .ok_or_else(|| invalid("missing sampled prescribed-convection setup"))?;
     let mut laws = setup.boundaries.iter().filter_map(|boundary| {
@@ -466,6 +485,7 @@ pub(super) fn coefficients_with_reference(
                 enthalpy_convection(report, spec, entity, parameter.target, prefix_steps)?,
             Target::ConvectionCoefficient | Target::ConvectionTemperature => {
                 let row = named(report, "robin", "region", entity)?;
+                bind_convection_history(row, spec, entity, parameter.target)?;
                 if parameter.target == Target::ConvectionTemperature {
                     number(row, "dtemperature_dreference_k_per_k")?
                 } else {

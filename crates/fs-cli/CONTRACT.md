@@ -3131,14 +3131,33 @@ receipt. No missing tail, interpolated reservoir or fan dynamics are inferred.
 
 Forward uncertainty and design children preserve the declared histories and
 observe the real native sampled peak. Coordinates overwritten by a schedule
-refuse as static uncertainty controls. The single native trajectory-adjoint
-admission refuses scheduled boundaries until reverse reconstruction carries
-their actual per-step operators; nominal mean calibration therefore cannot
-publish a frozen-boundary gradient.
+refuse as static uncertainty controls. Both capacity and total-enthalpy
+trajectory adjoints reconstruct the same held boundary at each selected
+fine-interval start before the original endpoint, radiation, contact and
+convection linearizations. The reverse consumes the original retained T/h
+history and preserves its initial state and physical residual targets.
+
+History values and switch times are fixed data in these derivatives. A
+scheduled prescribed temperature retains its trace ownership and reports
+zero sensitivity to its unused static placeholder, marked
+`boundary_history_held_fixed`. A scheduled Robin reference similarly reports
+zero static-reference sensitivity and `reference_history_held_fixed`, while
+the original h derivative uses the actual reference on each interval.
+Scheduled static Neumann coordinates are omitted. Shared prescribed-vertex
+ambiguity and constitutive derivative refusals retain their original meaning.
+
+Nominal uncertainty calibration consumes these history-aware derivatives for
+the retained physical inputs. Coefficient controls must match the producer's
+held-reference marker and the sampled project. Calibration keeps all raw
+probability trajectories unchanged, including initial and intermediate peaks;
+it does not supply derivatives of schedule amplitudes or switching times.
 
 Focused existing-workflow regressions cover prescribed cycles with exact
 storage/reaction energy and initial peaks, signed-flux surface-area energy,
 unchanged Robin coefficients, canonical source identity, shared power/boundary
-switches, and native probability/calibration consumers. All changed Rust
+switches, and native probability/calibration consumers. Reverse regressions
+compare retained h, power, initial enthalpy, density and conductivity against
+independent scalar heat balances and fresh perturbed forward solves, including
+ambient radiation and intermediate sampled peaks. All changed Rust
 sources passed the pinned formatter's syntax parser through stdin. Native
 builds and these regressions were not executed in the full-disk environment.

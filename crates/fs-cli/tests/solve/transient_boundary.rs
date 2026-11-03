@@ -157,22 +157,29 @@ fn g1_reference_history_retains_the_original_robin_coefficient_in_both_storage_m
 }
 
 #[test]
-fn g0_scheduled_trajectory_refuses_frozen_boundary_adjoints_before_publishing_a_field() {
+fn g1_scheduled_capacity_adjoints_retain_the_original_forward_field() {
     for output in ["temperature-final-adjoint", "temperature-sampled-peak-adjoint"] {
         let mut spec = project(false);
         spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
             ThermalBoundaryCondition::HeatFlux { outward_flux: QtyAny::new(0.0, dims::HEAT_FLUX) };
         schedule(&mut spec, TransientBoundaryTarget::HeatFlux, &[(0.3, 2.0), (1.0, -1.0)]);
+        let (original, original_field) = run(&spec);
         spec.outputs.as_mut().unwrap().push(OutputRequest {
             name: output.into(), kind: "report".into(), region: None,
         });
-        let ledger = Ledger::open(":memory:").unwrap();
-        import_fixture(&ledger, &spec, tetra_stl());
-        let error = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
-            &decode(&spec), &fixture_cards(), &mut Vec::new()).unwrap_err();
-        assert_eq!(error.code, "cli-solve-conduction-transient");
-        assert!(error.what.contains("per-step reverse operators"));
-        assert_eq!(stage_receipt_hashes(&ledger, error.run.as_ref().unwrap()).len(), 4);
+        let (differentiated, field) = run(&spec);
+        assert_eq!(field.get("temperature"), original_field.get("temperature"),
+            "a history-aware reverse must not alter the physical trajectory");
+        let ordinary = original.get("transient").unwrap();
+        let history = differentiated.get("transient").unwrap();
+        for key in ["coarse", "fine", "energy", "sampled_peak", "boundary_history"] {
+            assert_eq!(history.get(key), ordinary.get(key), "{key}");
+        }
+        let adjoint = history.get("adjoint").unwrap();
+        assert_eq!(adjoint.str_field("output"), Some(output));
+        assert!(n(adjoint, "maximum_dual_relative_residual") <= 1e-8);
+        assert!(adjoint.get("prescribed_heat_flux").is_none(),
+            "the unused static flux is not an independent schedule coordinate");
     }
 }
 

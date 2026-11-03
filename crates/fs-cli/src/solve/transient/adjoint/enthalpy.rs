@@ -335,6 +335,12 @@ pub(in crate::solve::transient) fn finish(
     poll(cx, deadline)?;
     let n = problem.mesh.vertex_count();
     let elements = problem.mesh.element_count();
+    let policy = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+        .and_then(|setup| setup.transient.as_ref())
+        .ok_or_else(|| bad("enthalpy reverse lost its original transient declaration"))?;
+    let boundary_history = super::super::boundary_history::BoundaryHistory::bind(
+        cx, spec, policy, problem, deadline,
+    )?;
     if ends_s.is_empty() || tape.temperature.n != n || tape.initial_h.len() != n
         || tape.accepted.len() != ends_s.len()
         || tape.physical_tolerances_j.len() != ends_s.len()
@@ -554,14 +560,19 @@ pub(in crate::solve::transient) fn finish(
         let dt = ends_s[index] - start;
         let source = workload.map(|history|
             history.source(cx, problem.mesh, labels, start, deadline)).transpose()?;
+        // Reconstruct the exact held boundary used by this forward interval.
+        // It is the input to the physical convection/radiation owners, not an
+        // endpoint-frozen replacement of their feedback.
+        let boundary = boundary_history.as_ref().map(|history| history.at(cx, start)).transpose()?;
         let source_problem = ConductionProblem {
-            source: source.as_ref().unwrap_or(problem.source), ..problem
+            source: source.as_ref().unwrap_or(problem.source),
+            boundary: boundary.as_ref().unwrap_or(problem.boundary), ..problem
         };
         let feedback = convection::bind(
             cx, source_problem, &endpoint.temperature, natural, airflow, pressure_pa, deadline,
         )?;
         let step_problem = ConductionProblem {
-            boundary: feedback.as_ref().map_or(problem.boundary, |bound| &bound.boundary),
+            boundary: feedback.as_ref().map_or(source_problem.boundary, |bound| &bound.boundary),
             ..source_problem
         };
         let mut endpoint_config = config;
@@ -856,6 +867,10 @@ pub(in crate::solve::transient) fn finish(
             "Prescribed Neumann data, phase-law parameters and the time grid are fixed.",
             "Independent original outward heat-flux densities use the same complete physical dual and exact named P1 traces throughout the selected prefix. Phase-law parameters and the time grid are fixed.",
         ));
+    let original_scope = flux_scope.as_deref().or(pointwise_scope.as_deref()).unwrap_or(SCOPE);
+    let history_scope = boundary_history.as_ref().map(|_| format!(
+        "{original_scope} Authored thermal boundary histories are held fixed and reconstructed at each original fine-interval start before coupled feedback is bound. Marked static temperature placeholders have exactly zero derivative because the history replaces them; this is not a derivative of held values. Replaced static Neumann controls are omitted. No schedule-value or switch-time derivative is supplied, and the declared initial enthalpy remains unchanged."
+    ));
     poll(cx, deadline)?;
     Ok(format!(
         "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment}{prescribed_fragment}{robin_fragment}{flux_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
@@ -865,7 +880,7 @@ pub(in crate::solve::transient) fn finish(
         regional_storage.join(","), regional_power.join(","), intervals.join(","),
         selected.state, dual_iterations, number(worst_dual)?, ends_s.len(),
         linear.max_iterations, linear.restart, iteration_limit, estimate,
-        json_string(flux_scope.as_deref().or(pointwise_scope.as_deref()).unwrap_or(SCOPE)),
+        json_string(history_scope.as_deref().unwrap_or(original_scope)),
     ))
 }
 

@@ -107,7 +107,7 @@ fn g4_g5_peak_recovery_uses_retained_trajectories_without_reopening_sources() {
 }
 
 #[test]
-fn g1_boundary_cycles_reach_native_probability_peaks_and_refuse_frozen_mean_calibration() {
+fn g1_boundary_cycles_reach_native_probability_peaks_and_history_aware_mean_calibration() {
     let mut fixture = fixture();
     let card = fixture.project.materials.as_ref().unwrap()[0].card.clone();
     let setup = fixture.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
@@ -146,14 +146,13 @@ fn g1_boundary_cycles_reach_native_probability_peaks_and_refuse_frozen_mean_cali
     }];
     std::fs::write(fixture.sources.join("cooling-reference.fsim"),
         fs_project::print_sexpr(&fixture.project).unwrap()).unwrap();
-    let source = STUDY.replace(":samples 4", ":samples 2")
-        .replace("temperature-max", "temperature-peak")
+    let source = STUDY.replace("temperature-max", "temperature-peak")
         .replace(":target convection-temperature :entity \"air\"", ":target initial-specific-enthalpy :entity \"air\"")
         .replace(":low 294K :high 300K", ":low -1.5J/kg :high 18.5J/kg");
     std::fs::write(fixture.sources.join("study.fsim"), &source).unwrap();
     let completed = fixture.study(None, fs_cli::exit::SUCCESS);
     let (_, report) = fixture.report(&completed);
-    assert_eq!(rows(&report).len(), 2);
+    assert_eq!(rows(&report).len(), 4);
     for row in rows(&report) {
         assert!((row.f64_field("value_k").unwrap() - 340.0).abs() < 1e-10,
             "the native child must retain the hot intermediate boundary state");
@@ -161,12 +160,15 @@ fn g1_boundary_cycles_reach_native_probability_peaks_and_refuse_frozen_mean_cali
     let controlled = source.replace(":version 1",
         ":version 3 :mean-control (nominal-adjoint :max-solves 1)");
     std::fs::write(fixture.sources.join("study.fsim"), controlled).unwrap();
-    let refused = fixture.study(None, fs_cli::exit::REFUSED);
-    let (_, report) = fixture.report(&refused);
-    assert!(rows(&report).is_empty());
-    let control = report.get("mean_control").unwrap();
-    assert_eq!(control.str_field("status"), Some("refused"));
-    assert_eq!(control.get("gradient"), Some(&JsonValue::Null));
-    assert!(control.get("calibration").unwrap().str_field("failure").unwrap()
-        .contains("per-step reverse operators"));
+    let calibrated = fixture.study(None, fs_cli::exit::SUCCESS);
+    let (_, calibrated_report) = fixture.report(&calibrated);
+    assert_eq!(rows(&calibrated_report), rows(&report),
+        "calibration must preserve every original boundary-driven probability solve");
+    assert_eq!(calibrated_report.get("statistics"), report.get("statistics"));
+    let control = calibrated_report.get("mean_control").unwrap();
+    assert_eq!(control.f64_field("probe_solves_completed"), Some(1.0));
+    for coefficient in control.get("gradient").unwrap().as_array().unwrap() {
+        assert!(coefficient.as_f64().unwrap().abs() < 1e-10,
+            "a fully prescribed intermediate peak does not depend on prior heat or initial enthalpy");
+    }
 }

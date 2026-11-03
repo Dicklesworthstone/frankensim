@@ -17,6 +17,7 @@ struct Bath {
     vertices: Vec<usize>,
     mapped: bool,
     shared: bool,
+    history_held_fixed: bool,
     derivative: f64,
 }
 
@@ -62,6 +63,10 @@ impl Controls {
                 vertices: Vec::new(),
                 mapped: false,
                 shared: false,
+                history_held_fixed: setup.transient.as_ref().is_some_and(|time|
+                    time.boundary_schedules.iter().any(|history|
+                        history.target == declared.target
+                            && history.kind == fs_project::TransientBoundaryTarget::FixedTemperature)),
                 derivative: 0.0,
             });
         }
@@ -132,6 +137,10 @@ impl Controls {
             return Err(bad("prescribed bath derivative lost its nodal layout"));
         }
         for bath in &mut self.baths {
+            // Keep every trace in the ownership map, including intersections.
+            // The scheduled values are fixed data; their unused static
+            // placeholder has no influence on the accepted trajectory.
+            if bath.history_held_fixed { continue; }
             for (index, &vertex) in bath.vertices.iter().enumerate() {
                 if index % 256 == 0 { poll(cx, deadline)?; }
                 bath.derivative = finite(bath.derivative + nodal_bars[vertex])?;
@@ -169,8 +178,11 @@ impl Controls {
                     bath.vertices.len(), number(bath.derivative)?,
                 )
             };
+            let history = if bath.history_held_fixed {
+                ",\"boundary_history_held_fixed\":true"
+            } else { "" };
             Ok(format!(
-                "{{\"target\":{},\"temperature_k\":{},{state}}}",
+                "{{\"target\":{},\"temperature_k\":{},{state}{history}}}",
                 json_string(&bath.target), number(bath.temperature_k)?,
             ))
         }).collect::<Result<Vec<_>, SolveRefusal>>()?;

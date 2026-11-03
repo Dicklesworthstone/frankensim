@@ -585,3 +585,192 @@ fn g1_native_enthalpy_spatial_ladder_preserves_mass_energy_and_shared_time_allow
     for temperature in values(&field, "temperature") { close(temperature, 303.15, 2e-7); }
     close(n(&qoi.get("qoi").unwrap().as_array().unwrap()[0], "value"), 303.15, 2e-7);
 }
+
+fn held_boundary(
+    spec: &mut ProjectSpec, kind: fs_project::TransientBoundaryTarget, steps: &[(f64, f64)],
+) {
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.transient.as_mut().unwrap().boundary_schedules = vec![fs_project::TransientBoundarySchedule {
+        target: setup.boundaries[0].target.clone(), kind,
+        source: "declared held boundary for an independent trajectory derivative oracle".into(),
+        steps: steps.iter().map(|&(until, value)| fs_project::TransientBoundaryStep {
+            until: QtyAny::new(until, dims::TIME),
+            value: QtyAny::new(value, kind.dims()),
+        }).collect(),
+    }];
+}
+
+fn held_run(
+    spec: &ProjectSpec, bytes: &[u8], cards: &CardPackSet, output: Option<&str>,
+) -> (J, Vec<f64>) {
+    let mut spec = spec.clone();
+    if let Some(name) = output {
+        spec.outputs.as_mut().unwrap().push(OutputRequest {
+            name: name.into(), kind: "report".into(), region: None,
+        });
+    }
+    let decoded = decode(&spec);
+    assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes.to_vec());
+    let (_, _, receipt, field) = run_conjugate_to_completion(&ledger, &decoded, cards);
+    let field = J::parse(&field).unwrap();
+    (J::parse(&receipt).unwrap(), values(&field, "temperature").collect())
+}
+
+fn held_storage(spec: &mut ProjectSpec, density: f64, initial_h: f64) {
+    let declared = project(density, 1.0,
+        &[(-500.0, 243.15, 0.0), (1000.0, 393.15, 0.0)]);
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient =
+        declared.cooling.unwrap().conduction.unwrap().transient;
+    let policy = time(spec);
+    policy.initial_temperature = fs_project::TransientInitialTemperature::FromRegionalEnthalpy;
+    policy.max_step.value = 0.6;
+    policy.enthalpy.as_mut().unwrap().materials[0].initial_specific_enthalpy.value = initial_h;
+    spec.solver.as_mut().unwrap().tolerance_rel = 1e-12;
+}
+
+#[test]
+fn g1_held_enthalpy_baths_reverse_the_actual_lift_with_initial_storage_and_power() {
+    let bytes = tetra_stl();
+    let cards = transient_product::transient_conductivity_cards("constant-scalar");
+    let make = |delta: f64| {
+        let mut spec = transient_product::driven_face_project(&bytes);
+        held_storage(&mut spec, 6.0 + 0.2 * delta, 368.5 + 2.0 * delta);
+        rebind_to(&mut spec, &cards);
+        time(&mut spec).enthalpy.as_mut().unwrap().materials[0].material_card_identity =
+            fs_blake3::ContentHash::from_hex(&cards.materials()[0].card().to_hex()).unwrap();
+        spec.power.as_mut().unwrap()[0].watts.value = 4.0 + 3.0 * delta;
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+            ThermalBoundaryCondition::FixedTemperature {
+                temperature: QtyAny::new(330.0 + 0.5 * delta, dims::TEMPERATURE),
+            };
+        held_boundary(&mut spec, fs_project::TransientBoundaryTarget::FixedTemperature,
+            &[(0.3, 310.0), (0.7, 295.0), (1.0, 305.0)]);
+        spec
+    };
+    let (receipt, temperature) = held_run(
+        &make(0.0), &bytes, &cards, Some("temperature-final-adjoint"),
+    );
+    let gradient = receipt.path(&["transient", "adjoint"]).unwrap();
+    let bath = &gradient.path(&["prescribed_temperature", "boundaries"])
+        .unwrap().as_array().unwrap()[0];
+    assert_eq!(bath.get("boundary_history_held_fixed"), Some(&J::Bool(true)));
+    close(n(bath, "dtemperature_dprescribed_temperature_k_per_k"), 0.0, 0.0);
+    close(n(gradient, "active_ties"), 1.0, 0.0);
+
+    // Unit tetra: three prescribed vertices and one free apex. The original
+    // lumped mass gives C=rho*Cp/24; conductance is k/2 and the free apex gets
+    // exactly one quarter of the total volume power.
+    let capacity = 6.0 * 10.0 / 24.0;
+    let mut expected = 330.0;
+    let (mut initial, mut density, mut power, mut conductivity) = (0.1, 0.0, 0.0, 0.0);
+    for interval in gradient.get("intervals").unwrap().as_array().unwrap() {
+        let end = n(interval, "end_s");
+        let dt = end - n(interval, "start_s");
+        let bath = if end <= 0.3 { 310.0 } else if end <= 0.7 { 295.0 } else { 305.0 };
+        let denominator = capacity + dt;
+        let a = capacity / denominator;
+        let next = (capacity * expected + dt * (bath + 4.0 / 4.0)) / denominator;
+        initial *= a;
+        density = a * density + (10.0 / 24.0) * (expected - next) / denominator;
+        power = a * power + dt / (4.0 * denominator);
+        conductivity = a * conductivity - dt * (next - bath) / denominator;
+        expected = next;
+    }
+    let storage = &gradient.get("regional_storage").unwrap().as_array().unwrap()[0];
+    let source = &gradient.get("regional_power").unwrap().as_array().unwrap()[0];
+    let material = &gradient.path(&["material_controls", "conductivity_regions"])
+        .unwrap().as_array().unwrap()[0];
+    close(temperature.into_iter().fold(f64::NEG_INFINITY, f64::max), expected, 2e-8);
+    close(n(gradient, "value_k"), expected, 2e-8);
+    close(n(storage, "dtemperature_dinitial_specific_enthalpy_k_kg_per_j"), initial, 2e-9);
+    close(n(storage, "dtemperature_dreference_density_k_m3_per_kg"), density, 2e-9);
+    close(n(source, "dtemperature_duniform_added_watts_k_per_w"), power, 2e-9);
+    close(n(material, "dtemperature_dconductivity_multiplier_k"), conductivity, 2e-8);
+    let evaluate = |delta| held_run(&make(delta), &bytes, &cards, None).1
+        .into_iter().fold(f64::NEG_INFINITY, f64::max);
+    let secant = (evaluate(0.01) - evaluate(-0.01)) / 0.02;
+    // The perturbed static bath placeholder contributes exactly zero.
+    close(2.0 * initial + 0.2 * density + 3.0 * power, secant, 2e-6);
+}
+
+#[test]
+fn g1_held_enthalpy_robin_references_preserve_coefficient_and_peak_gradients() {
+    let bytes = transient_radiation::regular_tetra_stl();
+    let cards = fixture_cards();
+    let make = |delta: f64| {
+        let mut spec = conduction_fixture_project(7, &bytes);
+        held_storage(&mut spec, 6.0 + 0.2 * delta, 2.0 * delta);
+        spec.power.as_mut().unwrap()[0].watts.value = 4.0 + 3.0 * delta;
+        spec.envelope.as_mut().unwrap().ambient_lo.value = 280.0;
+        spec.envelope.as_mut().unwrap().ambient_hi.value = 350.0;
+        let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        setup.regions[0].seed = [0.0; 3].map(|value| QtyAny::new(value, dims::LENGTH));
+        setup.boundaries[0].condition = ThermalBoundaryCondition::Convection {
+            coefficient: QtyAny::new(2.0 + 0.5 * delta, dims::HEAT_TRANSFER_COEFFICIENT),
+            reference_temperature: QtyAny::new(300.0 + 0.75 * delta, dims::TEMPERATURE),
+        };
+        held_boundary(&mut spec, fs_project::TransientBoundaryTarget::ConvectionTemperature,
+            &[(0.3, 310.0), (0.7, 340.0), (1.0, 280.0)]);
+        spec
+    };
+    for output in ["temperature-final-adjoint", "temperature-sampled-peak-adjoint"] {
+        let (receipt, _) = held_run(&make(0.0), &bytes, &cards, Some(output));
+        let gradient = receipt.path(&["transient", "adjoint"]).unwrap();
+        let robin = &gradient.path(&["prescribed_convection", "boundaries"])
+            .unwrap().as_array().unwrap()[0];
+        assert_eq!(robin.get("reference_history_held_fixed"), Some(&J::Bool(true)));
+        close(n(robin, "dtemperature_dreference_temperature_k_per_k"), 0.0, 0.0);
+        let selected = n(gradient, "state_index") as usize;
+        close(n(gradient, "time_s"),
+            if output == "temperature-final-adjoint" { 1.0 } else { 0.7 }, 0.0);
+
+        // Symmetric regular tetra: uniform P1 state, V=8/3 and A=8*sqrt(3).
+        // This independently differentiates scalar storage plus the original
+        // Robin exchange using the held value on each selected interval.
+        let volume = 8.0 / 3.0;
+        let area = 8.0 * 3.0_f64.sqrt();
+        let capacity = 6.0 * 10.0 * volume;
+        let conductance = 2.0 * area;
+        let mut expected = 293.15;
+        let (mut initial, mut density, mut power, mut coefficient) = (0.1, 0.0, 0.0, 0.0);
+        for (index, interval) in gradient.get("intervals").unwrap().as_array().unwrap().iter().enumerate() {
+            if index >= selected {
+                let future = &interval.get("regional_power").unwrap().as_array().unwrap()[0];
+                close(n(future, "dtemperature_ddelivered_watts_k_per_w"), 0.0, 0.0);
+                continue;
+            }
+            let end = n(interval, "end_s");
+            let dt = end - n(interval, "start_s");
+            let reference = if end <= 0.3 { 310.0 } else if end <= 0.7 { 340.0 } else { 280.0 };
+            let denominator = capacity + dt * conductance;
+            let a = capacity / denominator;
+            let next = (capacity * expected + dt * (conductance * reference + 4.0)) / denominator;
+            initial *= a;
+            density = a * density + 10.0 * volume * (expected - next) / denominator;
+            power = a * power + dt / denominator;
+            coefficient = a * coefficient + dt * area * (reference - next) / denominator;
+            expected = next;
+        }
+        let storage = &gradient.get("regional_storage").unwrap().as_array().unwrap()[0];
+        let source = &gradient.get("regional_power").unwrap().as_array().unwrap()[0];
+        close(n(gradient, "value_k"), expected, 2e-8);
+        close(n(storage, "dtemperature_dinitial_specific_enthalpy_k_kg_per_j"), initial, 2e-9);
+        close(n(storage, "dtemperature_dreference_density_k_m3_per_kg"), density, 2e-9);
+        close(n(source, "dtemperature_duniform_added_watts_k_per_w"), power, 2e-9);
+        close(n(robin, "dtemperature_dcoefficient_k_per_w_m2_k"), coefficient, 2e-8);
+        close(n(robin, "dtemperature_dlog_coefficient_k"), 2.0 * coefficient, 2e-8);
+        let evaluate = |delta| {
+            let (receipt, field) = held_run(&make(delta), &bytes, &cards, None);
+            if output == "temperature-final-adjoint" {
+                field.into_iter().fold(f64::NEG_INFINITY, f64::max)
+            } else {
+                n(receipt.path(&["transient", "sampled_peak"]).unwrap(), "value_k")
+            }
+        };
+        let secant = (evaluate(0.01) - evaluate(-0.01)) / 0.02;
+        close(2.0 * initial + 0.2 * density + 3.0 * power + 0.5 * coefficient,
+            secant, 3e-6);
+    }
+}

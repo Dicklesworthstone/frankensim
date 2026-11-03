@@ -558,3 +558,51 @@ fn g0_density_derivative_uses_the_original_enthalpy_region_and_actual_density() 
     }
     assert!(coefficients(&receipt(true, controls), &base(), &[density], 301.0, "solid").is_err());
 }
+
+#[test]
+fn g0_scheduled_references_bind_the_retained_coefficient_in_both_storage_models() {
+    for enthalpy in [false, true] {
+        let mut spec = base();
+        let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        let ThermalBoundaryCondition::Convection { coefficient, reference_temperature } =
+            setup.boundaries[0].condition else { panic!("original prescribed Robin law"); };
+        let time = setup.transient.as_mut().unwrap();
+        if enthalpy {
+            time.enthalpy = Some(TransientEnthalpy {
+                materials: Vec::new(), max_newton_iterations: 20, max_backtracks: 12,
+            });
+        }
+        time.boundary_schedules = vec![fs_project::TransientBoundarySchedule {
+            target: "solid".into(),
+            kind: fs_project::TransientBoundaryTarget::ConvectionTemperature,
+            source: "declared chamber cycle, held fixed during coefficient differentiation".into(),
+            steps: [(0.5, 300.0), (2.0, 310.0)].into_iter().map(|(until, value)|
+                fs_project::TransientBoundaryStep {
+                    until: QtyAny::new(until, dims::TIME),
+                    value: QtyAny::new(value, dims::TEMPERATURE),
+                }).collect(),
+        }];
+        let controls = if enthalpy {
+            format!(r#", "prescribed_convection":{{"control_steps":8,"parameter_scope":"independent-original-reference-and-positive-coefficient-held-throughout-selected-trajectory","boundaries":[{{"target":"solid","coefficient_w_m2_k":{},"reference_temperature_k":{},"reference_history_held_fixed":true,"dtemperature_dcoefficient_k_per_w_m2_k":-0.2,"dtemperature_dreference_temperature_k_per_k":0}}]}}"#,
+                coefficient.value, reference_temperature.value)
+        } else {
+            format!(r#", "robin":[{{"region":"solid","reference_history_held_fixed":true,"dtemperature_dlog_htc_k":{},"dtemperature_dreference_k_per_k":0}}]"#,
+                -0.2 * coefficient.value)
+        };
+        let coefficient = parameter(Target::ConvectionCoefficient, "solid");
+        assert_eq!(coefficients(&receipt(enthalpy, &controls), &spec,
+            std::slice::from_ref(&coefficient), 301.0, "solid").unwrap(), [-0.2]);
+        assert!(coefficients(&receipt(enthalpy,
+            &controls.replace("\"reference_history_held_fixed\":true,", "")), &spec,
+            std::slice::from_ref(&coefficient), 301.0, "solid").is_err(),
+            "a frozen-reference derivative cannot stand in for the scheduled trajectory");
+        assert!(coefficients(&receipt(enthalpy, &controls), &spec,
+            &[parameter(Target::ConvectionTemperature, "solid")], 301.0, "solid").is_err(),
+            "the authored history replaces the unused static reference coordinate");
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .transient.as_mut().unwrap().boundary_schedules.clear();
+        assert!(coefficients(&receipt(enthalpy, &controls), &spec,
+            &[coefficient], 301.0, "solid").is_err(),
+            "a derivative with a held history must match the sampled physical declaration");
+    }
+}

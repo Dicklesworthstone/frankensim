@@ -6,13 +6,14 @@ use fs_conduction::adjoint::robin::RobinResponse;
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
 use fs_conduction::radiation::{EnclosureRadiationLinearization, GrayDiffuseEnclosure};
 use fs_exec::Cx;
-use fs_project::ProjectSpec;
+use fs_project::{ProjectSpec, TransientBoundaryTarget};
 use crate::solve::conjugate::ConjugatePath;
 use crate::solve::radiation::LoweredRadiation;
 use crate::solve::natural::NaturalLaw;
 use super::{Objective, Selected, Tape, finite, select, storage_bytes, flux_controls};
 use super::enthalpy::{material_controls, prescribed_controls};
 use super::super::{SolveRefusal, Workload, bad, lower, poll};
+use super::super::boundary_history::BoundaryHistory;
 
 mod report;
 mod radiation;
@@ -93,6 +94,8 @@ struct Derivatives {
     ports: Vec<String>,
     references: Vec<f64>,
     coefficients: Vec<f64>,
+    reference_histories: Vec<bool>,
+    boundary_histories: bool,
     primal_iterations: usize,
     dual_iterations: usize,
     max_dual_solves_per_step: usize,
@@ -131,6 +134,12 @@ pub(in crate::solve::transient) fn finish(
 ) -> Result<String, SolveRefusal> {
     poll(cx, deadline)?;
     let n = problem.mesh.vertex_count();
+    let policy = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+        .and_then(|setup| setup.transient.as_ref())
+        .ok_or_else(|| bad("capacity adjoint lost its transient boundary declaration"))?;
+    // The forward declaration is immutable. Reconstruct the same held row at
+    // each interval start, before any original coupled endpoint linearization.
+    let boundary_history = BoundaryHistory::bind(cx, spec, policy, problem, deadline)?;
     if tape.n != n || tape.states.len() != ends_s.len() + 1
         || labels.len() != problem.mesh.element_count() {
         return Err(bad("transient adjoint mesh, trajectory or time-grid identity differs"));
@@ -182,6 +191,10 @@ pub(in crate::solve::transient) fn finish(
         .filter_map(|(i, condition)| matches!(condition, ThermalBc::Robin { .. })
             .then_some(problem.boundary.region_names()[i].as_str())).collect();
     if ports.len() > 64 { return Err(bad("transient adjoint exceeds 64 boundary controls")); }
+    let reference_histories: Vec<bool> = ports.iter().map(|&name|
+        policy.boundary_schedules.iter().any(|row|
+            row.target == name && row.kind == TransientBoundaryTarget::ConvectionTemperature))
+        .collect();
     let radiation_workspace = radiation.map(|lowering|
         radiation_storage_bytes(n, ports.len(), lowering.surface_count(), lowering.is_enclosure()))
         .transpose()?.unwrap_or(0);
@@ -275,7 +288,11 @@ pub(in crate::solve::transient) fn finish(
         let dt = ends_s[index] - start;
         let source = workload.map(|history|
             history.source(cx, problem.mesh, labels, start, deadline)).transpose()?;
-        let step_problem = ConductionProblem { source: source.as_ref().unwrap_or(problem.source), ..problem };
+        let boundary = boundary_history.as_ref().map(|history| history.at(cx, start)).transpose()?;
+        let step_problem = ConductionProblem {
+            boundary: boundary.as_ref().unwrap_or(problem.boundary),
+            source: source.as_ref().unwrap_or(problem.source), ..problem
+        };
         let expected = &tape.states[index + 1];
         let natural_bound = natural.map(|coupling| natural::bind(
             cx, step_problem, expected, coupling.laws, coupling.pressure_pa, &ports, deadline,
@@ -482,7 +499,11 @@ pub(in crate::solve::transient) fn finish(
                 || air_bound.as_ref().is_some_and(|bound| bound.owns_region(ports[i])) {
                 continue;
             }
-            references[i] = finite(references[i] + gradient.references[i])?;
+            // The history replaces the static reference coordinate. Its
+            // values stay fixed here; h still acts on the actual held bath.
+            if !reference_histories[i] {
+                references[i] = finite(references[i] + gradient.references[i])?;
+            }
             coefficients[i] = finite(coefficients[i] + gradient.log_htc[i])?;
         }
         carry = step.previous_temperature_pullback(cx, &gradient.nodal_load).map_err(lower)?;
@@ -539,6 +560,8 @@ pub(in crate::solve::transient) fn finish(
         capacity: capacities, ports: fixed_ports.iter().map(|&i| ports[i].to_owned()).collect(),
         references: fixed_ports.iter().map(|&i| references[i]).collect(),
         coefficients: fixed_ports.iter().map(|&i| coefficients[i]).collect(),
+        reference_histories: fixed_ports.iter().map(|&i| reference_histories[i]).collect(),
+        boundary_histories: boundary_history.is_some(),
         primal_iterations, dual_iterations, max_dual_solves_per_step, worst_dual,
         reconstructed_steps, revalidated_steps, additional_storage_bytes, radiation, convection,
         material_controls, prescribed_temperature, prescribed_heat_flux,
