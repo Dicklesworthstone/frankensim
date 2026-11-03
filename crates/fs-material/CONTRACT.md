@@ -10435,3 +10435,35 @@ recovery. `mineral_recycle` demonstrates a closed circuit with real mineral/wate
 density packs and explicitly authored stage partitions. Focused tests cover the
 independent flow solution, both balance boundaries, evidence retention, zero/full
 return, small positive exits, and trapped or numerically ill-conditioned loops.
+
+
+## Grinding-circuit underflow purge
+
+`comminution::circuit::ClosedGrindingCircuit::solve_with_underflow_recycle`
+extends the existing full-return solve with a nonselective split of classifier
+underflow. The caller supplies the existing `Partition`; product returns to the
+mill and reject is an explicit external purge. Both original fractions are
+retained independently, including a small purge beside rounded unit recycle.
+The circuit still uses the original size-redistribution and classifier owners.
+
+The triangular equations use effective return s*r and the positive exit sum
+`t + s*(q + r*fragmented_fraction)`, with separate water escape
+`t + s*water_overflow`. A positive purge can discharge a previously driven
+trapped loop. Zero purge preserves the original full-return semantics and trap
+refusal. No coefficient normalization, new breakage law or hidden makeup is
+introduced. The solved actual mill/discharge conditions must remain inside
+both original source domains; the circulating-load ceiling applies to returned
+underflow, not the raw classifier underflow before purge.
+
+Results retain raw underflow, recycle, purge, overflow, and the caller's split.
+Local split and mixer accounts and the combined external dry/element/water
+boundary are independently checked with the original numerical settings.
+`product_minus_fresh_*` remains the literal overflow-minus-fresh difference;
+`external_minus_fresh_*` reports overflow plus purge minus fresh and is the
+conservation residual when purge is nonzero. Purge is not fine product.
+
+The existing `mineral_circuit` consumer accepts an optional purge fraction,
+prints every outlet, and forms any circuit-scale Bond estimate from fresh
+throughput and the combined external PSD. Zero dry flow has no P80. This
+prescribed split supplies no calibrated bleed-control policy, metal recovery
+optimization, selective rejection or purge-treatment prediction.

@@ -17,7 +17,7 @@ use fs_material::comminution::{
 };
 use fs_material::separation::{
     CLASSIFIER_LAW_ID, ClassifierCard, PARTICLE_DIAMETER_AXIS, ParticleClass, ParticleStream,
-    SOLIDS_FRACTION_AXIS,
+    Partition, SOLIDS_FRACTION_AXIS,
 };
 use fs_qty::{
     Dimensionless, Dims, Length, MassFlowRate, QuantitySpec, Temperature, chemistry::ElementId,
@@ -27,27 +27,34 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         println!(
-            "Usage: mineral_circuit [coarse_retained_fraction]\n\
-Default: 0.5; allowed range: [0,1]. The remaining coarse mass enters the fine class.\n\
+            "Usage: mineral_circuit [coarse_retained_fraction [underflow_purge_fraction]]\n\
+Defaults: coarse retention 0.5, underflow purge 0; both allowed in [0,1].\n\
+The remaining coarse mass enters the fine class; unpurged underflow returns to the mill.\n\
 Prints an authored steady recycle, conservative dry/Cu/water balances and discrete P80.\n\
-The independent Bond estimate uses fresh circuit throughput, F80 and product P80.\n\
+The independent Bond estimate uses fresh throughput, F80 and combined overflow+purge P80.\n\
 No fitted kinetics, predicted liberation or first-principles particle model is supplied."
         );
         return Ok(());
     }
-    if args.len() > 1 {
-        return Err("expected one optional retained fraction; use --help".into());
+    if args.len() > 2 {
+        return Err(
+            "expected optional coarse retention and underflow purge fractions; use --help".into(),
+        );
     }
     let retained: f64 = args.first().map_or(Ok(0.5), |value| value.parse())?;
     if !retained.is_finite() || !(0.0..=1.0).contains(&retained) {
         return Err("coarse retained fraction must be finite and in [0,1]".into());
     }
+    let purge: f64 = args.get(1).map_or(Ok(0.0), |value| value.parse())?;
+    let underflow_recycle =
+        Partition::from_fractions(Dimensionless::new(1.0 - purge), Dimensionless::new(purge))?;
     let description = format!(
         "Authored two-size scenario, not measured ore or a plant fit. Coarse retention={retained:.17e}; \
+         Nonselective classifier-underflow purge={purge:.17e}, remainder returned to the mill. \
          Coarse 200 um: fresh 10 kg/s with Cu 2 kg/s; fine 100 um: fresh 2 kg/s with Cu 0.2 kg/s; water 12 kg/s. \
          Fine material retains its class; coarse remainder becomes fine, carrying the same assays. \
          Classifier d50 = 100 um, sharpness = 2, water bypass = 0.2. Constant per-pass coefficients are \
-         explicitly assumed over actual mill dry flow 25..210 kg/s and solids mass fraction 0.6..0.95 \
+         explicitly assumed over actual mill dry flow 12..210 kg/s and solids mass fraction 0.5..0.95 \
          at 298.15 K. Separate Bond Wi = 15 kWh/dry metric tonne; utilization = 0.9."
     );
     let artifact = hash_domain(
@@ -62,7 +69,7 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
     let quantity = QuantitySpec::dimensional;
     let common_validity = ValidityDomain::unconstrained()
         .with_quantity("temperature", quantity(Temperature::DIMS), 298.15, 298.15)
-        .with_quantity(SOLIDS_FRACTION_AXIS, quantity(Dims::NONE), 0.6, 0.95);
+        .with_quantity(SOLIDS_FRACTION_AXIS, quantity(Dims::NONE), 0.5, 0.95);
     let mill = SizeRedistributionCard::new(
         [("coarse", 200e-6), ("fine", 100e-6)]
             .into_iter()
@@ -98,7 +105,7 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
         common_validity.clone().with_quantity(
             MILL_DRY_FLOW_AXIS,
             quantity(MassFlowRate::DIMS),
-            25.0,
+            12.0,
             210.0,
         ),
     )?;
@@ -141,7 +148,7 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
     )?;
     let conditions =
         QueryPoint::new().with_quantity("temperature", quantity(Temperature::DIMS), 298.15)?;
-    let solved = ClosedGrindingCircuit::new(mill, classifier).solve(
+    let solved = ClosedGrindingCircuit::new(mill, classifier).solve_with_underflow_recycle(
         &fresh,
         &conditions,
         &conditions,
@@ -150,28 +157,40 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
             relative_balance_tolerance: Dimensionless::new(1e-12),
             maximum_circulating_load: Dimensionless::new(20.0),
         },
+        underflow_recycle,
     )?;
+    let external = ParticleStream::mix(&[&solved.product, &solved.purge])?;
 
     println!("# {description}\n# Authored scenario source hash: {artifact}");
     println!(
-        "# Underflow recycles; overflow is the external product. P80 is discrete, without within-bin interpolation."
+        "# Unpurged underflow recycles. Overflow and purge are distinct external outlets. P80 is discrete, without within-bin interpolation."
     );
     println!("stream,dry_kg_s,Cu_kg_s,water_kg_s,P80_um");
     for (name, stream) in [
         ("fresh", &solved.fresh_feed),
         ("mill_feed", &solved.mill_feed),
         ("mill_discharge", &solved.mill_discharge),
+        ("classifier_underflow", &solved.classifier_underflow),
         ("recycle", &solved.recycle),
+        ("purge", &solved.purge),
         ("product", &solved.product),
+        ("combined_external", &external),
     ] {
+        let dry = stream.dry_solids()?.value();
+        let passing = if dry == 0.0 {
+            "undefined".to_owned()
+        } else {
+            format!(
+                "{:.3}",
+                1e6 * stream
+                    .discrete_passing_size(Dimensionless::new(0.8))?
+                    .value()
+            )
+        };
         println!(
-            "{name},{:.9},{:.9},{:.9},{:.3}",
-            stream.dry_solids()?.value(),
+            "{name},{dry:.9},{:.9},{:.9},{passing}",
             stream.element_flow(&copper)?.value(),
             stream.water().value(),
-            1e6 * stream
-                .discrete_passing_size(Dimensionless::new(0.8))?
-                .value()
         );
     }
     println!(
@@ -184,10 +203,10 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
         solved.mill_feed.solids_mass_fraction()?.value()
     );
     println!(
-        "Product minus fresh residuals [kg/s]: dry={:.6e}, Cu={:.6e}, water={:.6e}",
-        solved.closure.product_minus_fresh_solids.value(),
-        solved.closure.product_minus_fresh_elements[&copper].value(),
-        solved.closure.product_minus_fresh_water.value()
+        "Overflow + purge minus fresh residuals [kg/s]: dry={:.6e}, Cu={:.6e}, water={:.6e}",
+        solved.closure.external_minus_fresh_solids.value(),
+        solved.closure.external_minus_fresh_elements[&copper].value(),
+        solved.closure.external_minus_fresh_water.value()
     );
     println!(
         "Maximum checked balance discrepancy: {:.6e} kg/s; relative={:.6e}",
@@ -210,15 +229,15 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
         )?,
     )?;
     let f80 = fresh.discrete_passing_size(Dimensionless::new(0.8))?;
-    let p80 = solved
-        .product
-        .discrete_passing_size(Dimensionless::new(0.8))?;
+    // Every dry outlet belongs to the circuit's mass/size boundary. Using only
+    // the fine overflow would hide coarse material deliberately discharged.
+    let p80 = external.discrete_passing_size(Dimensionless::new(0.8))?;
     if p80 < f80 {
         let energy = bond.specific_energy(f80, p80)?.value();
         // Circuit-scale Bond energy uses fresh throughput, not circulating mill feed.
         let required_pinion_power = energy * fresh.dry_solids()?.value() / 0.9;
         println!(
-            "Independent Bond estimate: {:.6} J/kg dry ({:.6} kWh/dry metric tonne)",
+            "Independent Bond estimate to combined overflow+purge P80: {:.6} J/kg dry ({:.6} kWh/dry metric tonne)",
             energy,
             energy / 3600.0
         );
@@ -229,7 +248,7 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
         );
     } else {
         println!(
-            "Bond estimate unavailable: discrete product P80 equals fresh F80; this law requires strict size reduction."
+            "Bond estimate unavailable: combined external P80 equals fresh F80; this law requires strict size reduction."
         );
     }
     println!(

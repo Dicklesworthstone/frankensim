@@ -190,6 +190,23 @@ fn analytic_recycle_closes_each_class_copper_and_water_at_actual_conditions() {
     let (mc, cc) = conditions();
     let model = circuit(true);
     let result = model.solve(&fresh, &mc, &cc, settings()).unwrap();
+    let explicit = model
+        .solve_with_underflow_recycle(
+            &fresh,
+            &mc,
+            &cc,
+            settings(),
+            Partition::from_product(Dimensionless::new(1.0)).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(result, explicit);
+    assert_eq!(result.classifier_underflow, result.recycle);
+    assert_eq!(result.purge.dry_solids().unwrap().value(), 0.0);
+    assert_eq!(result.purge.water().value(), 0.0);
+    assert_eq!(
+        result.closure.product_minus_fresh_elements,
+        result.closure.external_minus_fresh_elements,
+    );
     // rcoarse=.95, rfine=.6; coarse half-retained each pass.
     // xcoarse=10/(1-.95*.5)=400/21; xfine=(2+.6*.5*xcoarse)/.4=135/7.
     close(
@@ -493,4 +510,226 @@ fn zero_recycle_and_scaling_preserve_physical_accounts() {
         model.solve(&wrong, &mc, &cc, settings()),
         Err(CircuitError::Invalid(_))
     ));
+}
+
+#[test]
+fn prescribed_bleed_closes_split_mixer_and_both_external_outlets() {
+    let (mc, cc) = conditions();
+    let fresh = feed();
+    let model = circuit(false);
+    let split =
+        Partition::from_fractions(Dimensionless::new(0.75), Dimensionless::new(0.25)).unwrap();
+    let mut allowance = settings();
+    // Returned load is 1.1271; raw classifier-underflow load is 1.5028.
+    // The declared limit applies only to the stream actually returned.
+    allowance.maximum_circulating_load = Dimensionless::new(1.2);
+    let result = model
+        .solve_with_underflow_recycle(&fresh, &mc, &cc, allowance, split)
+        .unwrap();
+    assert_eq!(result.underflow_recycle, split);
+    // xc=10/[.25+.75*(.05+.95*.5)]=1600/103.
+    // xf=[2+.75*.6*.5*xc]/[.25+.75*.4]=11320/1133.
+    close(
+        result.mill_feed.classes()[0].dry_solids().value(),
+        1600.0 / 103.0,
+    );
+    close(
+        result.mill_feed.classes()[1].dry_solids().value(),
+        11320.0 / 1133.0,
+    );
+    close(
+        result.mill_feed.classes()[0].elements()[&copper()].value(),
+        320.0 / 103.0,
+    );
+    close(
+        result.mill_feed.classes()[1].elements()[&copper()].value(),
+        1852.0 / 1133.0,
+    );
+    close(result.mill_feed.water().value(), 240.0 / 17.0);
+    close(result.circulating_load.value(), 1277.0 / 1133.0);
+    close(result.purge.dry_solids().unwrap().value(), 5108.0 / 1133.0);
+    close(
+        result.purge.element_flow(&copper()).unwrap().value(),
+        4799.0 / 5665.0,
+    );
+    close(result.purge.water().value(), 12.0 / 17.0);
+    close(
+        result.product.dry_solids().unwrap().value(),
+        8488.0 / 1133.0,
+    );
+    close(
+        result.product.element_flow(&copper()).unwrap().value(),
+        7664.0 / 5665.0,
+    );
+    close(result.product.water().value(), 192.0 / 17.0);
+
+    let mixed = ParticleStream::mix(&[&fresh, &result.recycle]).unwrap();
+    let raw = ParticleStream::mix(&[&result.recycle, &result.purge]).unwrap();
+    for (actual, reconstructed) in [
+        (&result.mill_feed, &mixed),
+        (&result.classifier_underflow, &raw),
+    ] {
+        close(actual.water().value(), reconstructed.water().value());
+        for (left, right) in actual.classes().iter().zip(reconstructed.classes()) {
+            close(left.dry_solids().value(), right.dry_solids().value());
+            close(
+                left.elements()[&copper()].value(),
+                right.elements()[&copper()].value(),
+            );
+        }
+    }
+    let external = ParticleStream::mix(&[&result.product, &result.purge]).unwrap();
+    close(external.dry_solids().unwrap().value(), 12.0);
+    close(external.element_flow(&copper()).unwrap().value(), 2.2);
+    close(external.water().value(), 12.0);
+    close(
+        result.closure.product_minus_fresh_solids.value(),
+        -result.purge.dry_solids().unwrap().value(),
+    );
+    close(
+        result.closure.product_minus_fresh_water.value(),
+        -result.purge.water().value(),
+    );
+    close(
+        result.closure.product_minus_fresh_elements[&copper()].value(),
+        -result.purge.element_flow(&copper()).unwrap().value(),
+    );
+    assert!(result.closure.external_minus_fresh_solids.value().abs() < 1e-12);
+    assert!(result.closure.external_minus_fresh_water.value().abs() < 1e-12);
+    assert!(
+        result.closure.external_minus_fresh_elements[&copper()]
+            .value()
+            .abs()
+            < 1e-12
+    );
+    assert!(result.closure.maximum_absolute_error.value() < 1e-12);
+}
+
+#[test]
+fn full_underflow_bleed_is_exactly_one_pass_with_zero_circulating_load() {
+    let (mc, cc) = conditions();
+    let fresh = feed();
+    let model = circuit(false);
+    let direct_discharge = model.mill().transform(&fresh, &mc).unwrap();
+    let direct_split = model.classifier().classify(&direct_discharge, &cc).unwrap();
+    let mut allowance = settings();
+    allowance.maximum_circulating_load = Dimensionless::new(0.0);
+    let result = model
+        .solve_with_underflow_recycle(
+            &fresh,
+            &mc,
+            &cc,
+            allowance,
+            Partition::from_product(Dimensionless::new(0.0)).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(result.mill_feed, fresh);
+    assert_eq!(result.mill_discharge, direct_discharge);
+    assert_eq!(result.classifier_underflow, direct_split.product);
+    assert_eq!(result.purge, direct_split.product);
+    assert_eq!(result.product, direct_split.reject);
+    assert_eq!(result.circulating_load.value(), 0.0);
+    assert_eq!(result.recycle.dry_solids().unwrap().value(), 0.0);
+    assert_eq!(result.recycle.water().value(), 0.0);
+    assert_eq!(result.recycle.element_grade(&copper()).unwrap(), None);
+    assert!(result.closure.maximum_absolute_error.value() < 1e-12);
+}
+
+#[test]
+fn purge_releases_a_loop_with_no_classifier_overflow_for_solids_or_water() {
+    let model = ClosedGrindingCircuit::new(circuit(false).mill().clone(), classifier(1.0));
+    let (mc, cc) = conditions();
+    let fresh = feed();
+    let original = fresh.clone();
+    assert!(matches!(
+        model.solve(&fresh, &mc, &cc, settings()),
+        Err(CircuitError::TrappedClass { .. })
+    ));
+    let result = model
+        .solve_with_underflow_recycle(
+            &fresh,
+            &mc,
+            &cc,
+            settings(),
+            Partition::from_product(Dimensionless::new(0.75)).unwrap(),
+        )
+        .unwrap();
+    close(result.mill_feed.classes()[0].dry_solids().value(), 16.0);
+    close(result.mill_feed.classes()[1].dry_solids().value(), 32.0);
+    close(result.mill_feed.water().value(), 48.0);
+    close(result.circulating_load.value(), 3.0);
+    assert_eq!(result.product.dry_solids().unwrap().value(), 0.0);
+    assert_eq!(result.product.water().value(), 0.0);
+    assert_eq!(result.product.element_grade(&copper()).unwrap(), None);
+    close(result.purge.dry_solids().unwrap().value(), 12.0);
+    close(result.purge.element_flow(&copper()).unwrap().value(), 2.2);
+    close(result.purge.water().value(), 12.0);
+    assert!(result.closure.maximum_absolute_error.value() < 1e-12);
+    assert_eq!(fresh, original);
+}
+
+#[test]
+fn independently_retained_tiny_purge_is_not_replaced_by_one_minus_returned() {
+    let model = ClosedGrindingCircuit::new(
+        mill(&[("fine", 100e-6)], &[("fine", vec![("fine", 1.0)])], false),
+        classifier(1.0),
+    );
+    let (mc, cc) = conditions();
+    let fresh = stream(&[("fine", 100e-6, 1e-20, 2e-21)], 1e-20);
+    let split =
+        Partition::from_fractions(Dimensionless::new(1.0), Dimensionless::new(1e-20)).unwrap();
+    let mut allowance = settings();
+    allowance.maximum_circulating_load = Dimensionless::new(2e20);
+    let result = model
+        .solve_with_underflow_recycle(&fresh, &mc, &cc, allowance, split)
+        .unwrap();
+    assert_eq!(result.underflow_recycle, split);
+    close(result.mill_feed.dry_solids().unwrap().value(), 1.0);
+    close(result.mill_feed.water().value(), 1.0);
+    close(result.purge.dry_solids().unwrap().value(), 1e-20);
+    close(result.purge.element_flow(&copper()).unwrap().value(), 2e-21);
+    close(result.purge.water().value(), 1e-20);
+    assert_eq!(result.product.dry_solids().unwrap().value(), 0.0);
+}
+
+#[test]
+fn purge_is_admitted_only_at_its_actual_mill_and_classifier_state() {
+    let (mc, cc) = conditions();
+    let fresh = feed();
+    let all_purge = Partition::from_product(Dimensionless::new(0.0)).unwrap();
+    let narrow_mill = circuit(true);
+    narrow_mill.solve(&fresh, &mc, &cc, settings()).unwrap();
+    // Full bleed changes the actual mill feed from 38.33 kg/s at 71.875%
+    // solids to 12 kg/s at 50%; the original narrow mill card must refuse.
+    assert!(matches!(
+        narrow_mill.solve_with_underflow_recycle(&fresh, &mc, &cc, settings(), all_purge),
+        Err(CircuitError::Breakage(BreakageError::OutsideValidity))
+    ));
+    let mut source = classifier_source(0.2);
+    source.validity = source.validity.with_quantity(
+        SOLIDS_FRACTION_AXIS,
+        QuantitySpec::dimensional(Dims::NONE),
+        0.0,
+        0.6,
+    );
+    let narrow_classifier = ClosedGrindingCircuit::new(
+        circuit(false).mill().clone(),
+        ClassifierCard::from_model_card(&source).unwrap(),
+    );
+    assert!(matches!(
+        narrow_classifier.solve(&fresh, &mc, &cc, settings()),
+        Err(CircuitError::Separation(SeparationError::OutsideValidity))
+    ));
+    let result = narrow_classifier
+        .solve_with_underflow_recycle(&fresh, &mc, &cc, settings(), all_purge)
+        .unwrap();
+    close(
+        result
+            .mill_discharge
+            .solids_mass_fraction()
+            .unwrap()
+            .value(),
+        0.5,
+    );
+    assert_eq!(narrow_classifier.classifier().model_card(), &source);
 }

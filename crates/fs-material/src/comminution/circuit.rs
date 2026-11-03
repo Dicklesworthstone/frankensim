@@ -1,12 +1,15 @@
 //! Steady closed grinding/classification with original, fixed process cards.
 //!
 //! For fresh feed f, mill feed x, per-pass redistribution B and classifier
-//! underflow fractions r, solve `x = f + diag(r) B x`. Strictly smaller daughter
+//! underflow fractions r and an explicit returned fraction s, solve
+//! `x = f + s diag(r) B x`. Strictly smaller daughter
 //! classes make this triangular in decreasing diameter. Each material account
 //! is solved once; no fixed-point iteration, guessed circulating load, inferred
 //! liberation or population-balance kinetics is introduced. Water obeys its
 //! own balance. An unforced trapped class is assigned zero initial circulation;
-//! a fed trapped class has no finite steady solution and refuses.
+//! a fed trapped class has no finite steady solution and refuses unless an
+//! explicit underflow purge provides an exit. The purge is a nonselective
+//! stream split, not another classifier or an inferred operating setting.
 //!
 //! Coefficients must apply to the actual solved circuit. The original mill and
 //! classifier evaluate that state before any result is published. Fixed source
@@ -18,7 +21,7 @@
 
 use super::breakage::{BreakageError, SizeRedistributionCard};
 use crate::separation::{
-    ClassifierCard, ParticleClass, ParticleStream, SOLIDS_FRACTION_AXIS, SeparationError,
+    ClassifierCard, ParticleClass, ParticleStream, Partition, SOLIDS_FRACTION_AXIS, SeparationError,
 };
 use fs_matdb::QueryPoint;
 use fs_qty::{Dimensionless, MassFlowRate, QuantitySpec, chemistry::ElementId};
@@ -47,7 +50,7 @@ pub enum CircuitError {
     Separation(SeparationError),
     /// Invalid settings, source coordinates or unsupported feed layout.
     Invalid(&'static str),
-    /// A positively fed size class has neither a product nor a smaller-size exit.
+    /// A positively fed size class has no overflow, purge or smaller-size exit.
     TrappedClass {
         /// Original size-class identity.
         class: String,
@@ -95,25 +98,37 @@ pub struct CircuitClosure {
     pub maximum_absolute_error: MassFlowRate,
     /// Largest relative discrepancy; zero for two zero compared flows.
     pub maximum_relative_error: Dimensionless,
-    /// Product minus fresh-feed dry solids, kg/s.
+    /// Overflow product minus fresh-feed dry solids, kg/s; excludes purge.
     pub product_minus_fresh_solids: MassFlowRate,
-    /// Product minus fresh-feed water, kg/s.
+    /// Overflow product minus fresh-feed water, kg/s; excludes purge.
     pub product_minus_fresh_water: MassFlowRate,
-    /// Product minus fresh-feed explicitly assayed elements, kg/s.
+    /// Overflow product minus fresh-feed explicitly assayed elements, kg/s.
     pub product_minus_fresh_elements: BTreeMap<ElementId, MassFlowRate>,
+    /// Combined overflow and purge minus fresh-feed dry solids, kg/s.
+    pub external_minus_fresh_solids: MassFlowRate,
+    /// Combined overflow and purge minus fresh-feed water, kg/s.
+    pub external_minus_fresh_water: MassFlowRate,
+    /// Combined overflow and purge minus fresh-feed assayed elements, kg/s.
+    pub external_minus_fresh_elements: BTreeMap<ElementId, MassFlowRate>,
 }
 
-/// Closed steady streams; classifier overflow is the circuit's external product.
+/// Closed steady streams with overflow product and an explicit underflow purge.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CircuitSolution {
     /// Original external input, including all makeup water.
     pub fresh_feed: ParticleStream,
-    /// Fresh feed plus classifier underflow, before the mill pass.
+    /// Fresh feed plus the returned part of classifier underflow, before milling.
     pub mill_feed: ParticleStream,
     /// Conservatively redistributed mill discharge, before classification.
     pub mill_discharge: ParticleStream,
-    /// Classifier underflow returned to the mill, including its water.
+    /// Raw classifier underflow, before the nonselective recycle/purge split.
+    pub classifier_underflow: ParticleStream,
+    /// Retained split: product is returned to the mill, reject leaves as purge.
+    pub underflow_recycle: Partition,
+    /// Returned part of classifier underflow, including its water.
     pub recycle: ParticleStream,
+    /// Nonselective underflow bleed leaving the circuit, including its water.
+    pub purge: ParticleStream,
     /// Classifier overflow leaving the circuit.
     pub product: ParticleStream,
     /// Recycle dry solids divided by fresh dry solids; 2.5 means 250%.
@@ -143,13 +158,10 @@ impl ClosedGrindingCircuit {
         &self.classifier
     }
 
-    /// Solve a positive fresh-solids feed with all makeup water already included.
+    /// Solve with all classifier underflow returned and no external purge.
     ///
-    /// The mill may declare `solids-mass-fraction` and/or `mill-dry-solids-flow`;
-    /// these axes are supplied from actual mill feed and cannot be overridden.
-    /// All other conditions remain explicit caller inputs. The classifier sees
-    /// actual discharge composition. Work is bounded by 128 size classes and
-    /// quadratic in that declared count, linear in the explicit element count.
+    /// Equivalent to [`Self::solve_with_underflow_recycle`] with a returned
+    /// fraction of one and purge fraction of zero.
     pub fn solve(
         &self,
         fresh: &ParticleStream,
@@ -157,7 +169,39 @@ impl ClosedGrindingCircuit {
         classifier_conditions: &QueryPoint,
         settings: CircuitSettings,
     ) -> Result<CircuitSolution, CircuitError> {
+        self.solve_with_underflow_recycle(
+            fresh,
+            mill_conditions,
+            classifier_conditions,
+            settings,
+            Partition::from_product(Dimensionless::new(1.0))?,
+        )
+    }
+
+    /// Solve a positive fresh-solids feed with an explicit underflow bleed.
+    ///
+    /// All makeup water is already included in `fresh`. The partition's product
+    /// fraction returns to the mill; its reject fraction is an external purge.
+    /// The same split applies to every size, element and carrier-water account.
+    /// Independently supplied fractions retain a tiny purge even when the
+    /// returned fraction rounds to one. No fraction is fitted or normalized.
+    ///
+    /// The mill may declare `solids-mass-fraction` and/or `mill-dry-solids-flow`;
+    /// these axes are supplied from actual mill feed and cannot be overridden.
+    /// All other conditions remain explicit caller inputs. The classifier sees
+    /// actual discharge composition. Work is bounded by 128 size classes and
+    /// quadratic in that declared count, linear in the explicit element count.
+    pub fn solve_with_underflow_recycle(
+        &self,
+        fresh: &ParticleStream,
+        mill_conditions: &QueryPoint,
+        classifier_conditions: &QueryPoint,
+        settings: CircuitSettings,
+        underflow_recycle: Partition,
+    ) -> Result<CircuitSolution, CircuitError> {
         settings.validate()?;
+        let returned = underflow_recycle.product().value();
+        let purged = underflow_recycle.reject().value();
         let dry_fresh = fresh.dry_solids()?.value();
         require(
             dry_fresh > 0.0,
@@ -196,6 +240,7 @@ impl ClosedGrindingCircuit {
         for (position, &i) in order.iter().enumerate() {
             let r = partitions[i].product().value();
             let q = partitions[i].reject().value();
+            let effective_return = product(returned, r)?;
             // Positive escape channels avoid cancellation in 1-r*Bii near a
             // closed loop. The card's independently retained off-diagonal
             // fractions define its breakage exit; columns are never normalized.
@@ -203,8 +248,13 @@ impl ClosedGrindingCircuit {
             // This is a coefficient sum, not a physical flow. Fusing avoids
             // rejecting a subnormal r*fragmented when q dominates the result;
             // the actual transported masses are still checked independently.
-            let escape = r.mul_add(fragmented, q);
-            if !escape.is_finite() || (escape == 0.0 && (q > 0.0 || (r > 0.0 && fragmented > 0.0)))
+            // Keep purge independent of 1-returned, so a representable small
+            // bleed can release an otherwise trapped loop.
+            let escape = returned.mul_add(r.mul_add(fragmented, q), purged);
+            if !escape.is_finite()
+                || (escape == 0.0
+                    && (purged > 0.0
+                        || (returned > 0.0 && (q > 0.0 || (r > 0.0 && fragmented > 0.0)))))
             {
                 return Err(CircuitError::Arithmetic(
                     "escape coefficient is unrepresentable",
@@ -223,7 +273,7 @@ impl ClosedGrindingCircuit {
                 } else {
                     fresh.classes()[i].elements()[&elements[channel - 1]].value()
                 };
-                let numerator = sum([original, product(r, account.value()?)?])?;
+                let numerator = sum([original, product(effective_return, account.value()?)?])?;
                 if escape == 0.0 && numerator > 0.0 {
                     return Err(CircuitError::TrappedClass {
                         class: classes[i].id.clone(),
@@ -236,7 +286,15 @@ impl ClosedGrindingCircuit {
                 };
             }
         }
-        let water_exit = self.classifier.water_partition().reject().value();
+        let water_overflow = self.classifier.water_partition().reject().value();
+        let water_exit = returned.mul_add(water_overflow, purged);
+        if !water_exit.is_finite()
+            || (water_exit == 0.0 && (purged > 0.0 || (returned > 0.0 && water_overflow > 0.0)))
+        {
+            return Err(CircuitError::Arithmetic(
+                "water escape coefficient is unrepresentable",
+            ));
+        }
         let water = match (fresh.water().value(), water_exit) {
             (0.0, _) => 0.0,
             (_, 0.0) => return Err(CircuitError::TrappedWater),
@@ -264,8 +322,15 @@ impl ClosedGrindingCircuit {
         let separated = self
             .classifier
             .classify(&mill_discharge, classifier_conditions)?;
+        let underflow_partitions = classes
+            .iter()
+            .map(|class| (class.id.clone(), underflow_recycle))
+            .collect::<Vec<_>>();
+        let underflow_split = separated
+            .product
+            .split(&underflow_partitions, underflow_recycle)?;
         let circulating_load = Dimensionless::new(quotient(
-            separated.product.dry_solids()?.value(),
+            underflow_split.product.dry_solids()?.value(),
             dry_fresh,
         )?);
         if circulating_load.value() > settings.maximum_circulating_load.value() {
@@ -274,12 +339,18 @@ impl ClosedGrindingCircuit {
                 maximum: settings.maximum_circulating_load,
             });
         }
-        let reconstructed = ParticleStream::mix(&[fresh, &separated.product])?;
+        let reconstructed = ParticleStream::mix(&[fresh, &underflow_split.product])?;
+        let reconstructed_underflow =
+            ParticleStream::mix(&[&underflow_split.product, &underflow_split.reject])?;
+        let external = ParticleStream::mix(&[&separated.reject, &underflow_split.reject])?;
         let closure = check_closure(
             fresh,
-            &mill_feed,
-            &reconstructed,
+            &[
+                (&mill_feed, &reconstructed),
+                (&separated.product, &reconstructed_underflow),
+            ],
             &separated.reject,
+            &external,
             &elements,
             settings,
         )?;
@@ -287,7 +358,10 @@ impl ClosedGrindingCircuit {
             fresh_feed: fresh.clone(),
             mill_feed,
             mill_discharge,
-            recycle: separated.product,
+            classifier_underflow: separated.product,
+            underflow_recycle,
+            recycle: underflow_split.product,
+            purge: underflow_split.reject,
             product: separated.reject,
             circulating_load,
             closure,
@@ -351,9 +425,9 @@ impl CircuitSettings {
 
 fn check_closure(
     fresh: &ParticleStream,
-    feed: &ParticleStream,
-    reconstructed: &ParticleStream,
+    local_accounts: &[(&ParticleStream, &ParticleStream)],
     outlet: &ParticleStream,
+    external: &ParticleStream,
     elements: &[ElementId],
     settings: CircuitSettings,
 ) -> Result<CircuitClosure, CircuitError> {
@@ -378,36 +452,59 @@ fn check_closure(
         maximum_relative = maximum_relative.max(relative);
         Ok(residual)
     };
-    check(feed.water().value(), reconstructed.water().value())?;
-    for (left, right) in feed.classes().iter().zip(reconstructed.classes()) {
-        check(left.dry_solids().value(), right.dry_solids().value())?;
-        for element in elements {
-            check(
-                left.elements()[element].value(),
-                right.elements()[element].value(),
-            )?;
+    for &(feed, reconstructed) in local_accounts {
+        check(feed.water().value(), reconstructed.water().value())?;
+        for (left, right) in feed.classes().iter().zip(reconstructed.classes()) {
+            check(left.dry_solids().value(), right.dry_solids().value())?;
+            for element in elements {
+                check(
+                    left.elements()[element].value(),
+                    right.elements()[element].value(),
+                )?;
+            }
         }
     }
-    let dry = check(outlet.dry_solids()?.value(), fresh.dry_solids()?.value())?;
-    let water = check(outlet.water().value(), fresh.water().value())?;
-    let element_residuals = elements
+    let dry = check(external.dry_solids()?.value(), fresh.dry_solids()?.value())?;
+    let water = check(external.water().value(), fresh.water().value())?;
+    let external_element_residuals = elements
         .iter()
         .map(|element| {
             Ok((
                 element.clone(),
                 MassFlowRate::new(check(
-                    outlet.element_flow(element)?.value(),
+                    external.element_flow(element)?.value(),
                     fresh.element_flow(element)?.value(),
                 )?),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, CircuitError>>()?;
+    // Overflow alone intentionally differs from fresh feed when purge leaves.
+    // Preserve those literal legacy deltas without treating them as a failed
+    // closure; only the complete external outlet closes against fresh feed.
+    let product_element_residuals = elements
+        .iter()
+        .map(|element| {
+            Ok((
+                element.clone(),
+                MassFlowRate::new(
+                    outlet.element_flow(element)?.value() - fresh.element_flow(element)?.value(),
+                ),
             ))
         })
         .collect::<Result<BTreeMap<_, _>, CircuitError>>()?;
     Ok(CircuitClosure {
         maximum_absolute_error: MassFlowRate::new(maximum_absolute),
         maximum_relative_error: Dimensionless::new(maximum_relative),
-        product_minus_fresh_solids: MassFlowRate::new(dry),
-        product_minus_fresh_water: MassFlowRate::new(water),
-        product_minus_fresh_elements: element_residuals,
+        product_minus_fresh_solids: MassFlowRate::new(
+            outlet.dry_solids()?.value() - fresh.dry_solids()?.value(),
+        ),
+        product_minus_fresh_water: MassFlowRate::new(
+            outlet.water().value() - fresh.water().value(),
+        ),
+        product_minus_fresh_elements: product_element_residuals,
+        external_minus_fresh_solids: MassFlowRate::new(dry),
+        external_minus_fresh_water: MassFlowRate::new(water),
+        external_minus_fresh_elements: external_element_residuals,
     })
 }
 

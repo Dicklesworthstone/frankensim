@@ -433,6 +433,51 @@ unavailable. Discrete passing sizes come only from the declared bins, without
 within-bin interpolation. Site fits must justify the fixed coefficients and
 their operating domains; this example supplies no plant calibration.
 
+#### Explicit classifier-underflow purge
+
+The same `comminution::circuit::ClosedGrindingCircuit` also supports
+`solve_with_underflow_recycle(fresh, mill_conditions, classifier_conditions,
+settings, underflow_recycle)`. The final argument is the existing `Partition`:
+its product fraction returns to the mill and its reject fraction leaves as a
+nonselective purge. Independent fractions preserve a very small positive
+bleed even when the returned fraction rounds to one. `solve` remains the
+full-return case.
+
+The solution retains the raw classifier underflow, returned stream, purge,
+overflow product and original split. It checks the underflow split, the
+fresh-plus-recycle mixer, and the combined external boundary independently
+for every dry class, declared element and water account. The existing
+`product_minus_fresh_*` fields retain their literal overflow-minus-fresh
+meaning; the new `external_minus_fresh_*` fields test overflow plus purge
+against fresh feed. No purged material is hidden in an artificial balance
+adjustment or counted as saleable fine product.
+
+For recycle `s`, purge `t`, classifier underflow `r` and overflow `q`, each
+triangular denominator is `t + s*(q + r*fragmented_fraction)`. Water uses
+`t + s*water_overflow`. Consequently a positive purge can release solids or
+water that otherwise have no external exit, while zero purge retains the
+existing trap refusal. Circulating-load limits apply to the actually returned
+dry flow, and the original cards still admit the solved operating state.
+
+The existing example accepts a second optional argument, the underflow purge
+fraction, default zero. Its declared authored support includes 12..210 kg/s
+dry mill flow and solids mass fractions 0.5..0.95 so the complete purge range
+can be demonstrated without implying empirical calibration:
+
+```bash
+cargo run -p fs-material --example mineral_circuit -- 0.5 0.1
+cargo run -p fs-material --example mineral_circuit -- 0.5 1.0
+```
+
+Full purge produces one mill pass followed by classification, with no recycle.
+The example prints purge and combined external streams separately; a zero
+dry-flow stream has an undefined P80. Its optional Bond estimate now uses the
+combined overflow-plus-purge P80 with fresh throughput. Using only the fine
+overflow would omit coarse material deliberately discharged from the circuit.
+For full purge in the authored case, the combined external P80 equals F80 and
+the strict-size-reduction Bond estimate is unavailable, even though the
+separately displayed fine overflow is smaller.
+
 ## From dry mill throughput to slurry and process water
 
 `fs_material::slurry` combines dry constituent mass flows with one liquid
