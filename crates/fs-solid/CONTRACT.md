@@ -682,6 +682,38 @@ G0/G1/G3/G4 regressions in `tests/moving_load/payload.rs` assert independent COM
 energy and angular-momentum identities, native forced acceleration, driven
 support impulse/work, physical tensor admission, parity, and atomic retry.
 
+### Localized instantaneous impulse ports
+
+`MovingShellMotion::apply_impulses` accepts bounded physical linear and free
+angular `ShellPointImpulse` inputs at the current accepted time. Forces and
+impulses share the exact original material-point transpose, including offset
+moments. The initialization mass LU is retained and reused to solve
+`M_ff delta_v_f = J_f`; attached payload and inter-node inertia are preserved.
+The event uses quadratic-cost actions and triangular solves, with no new
+factorization, contact solver, dependency edge or generalized coordinates.
+
+Original pin velocities remain continuous during an event. Their impulse on
+the shell is `(M delta_v - J)_c`, and its work uses that held prescribed
+velocity. Every receipt uses the velocity difference actually accepted after
+floating addition, full original inertia, and mean material velocity.
+Kinetic change is `v_mean^T M delta_v`, avoiding subtraction of large absolute
+energies. A free-row backward-error check scaled by the impulse and absolute
+mass-row products refuses unrepresentable kicks; it does not normalize or
+report the ideal solve increment as delivered momentum.
+
+Time, step, displacement, support motion and held endpoint forces stay fixed.
+The original force equilibrium refreshes acceleration and ordinary support
+reactions before one atomic publication. Invalid input, a failed physical
+solve, an unrepresentable kick or late cancellation retains the accepted
+motion. Viscosity supplies no impulse over a zero-duration event. The caller
+owns event timing, collision/restitution laws and duplicate prevention; the
+shell retains its existing reference-angular, small-rotation scope.
+
+G0/G1/G3/G4 regressions in `tests/moving_load/impulse.rs` independently inventory
+bare-shell and off-center anisotropic payload momentum/energy, driven-pin
+reaction/work, zero-free-impulse support events, unchanged force continuation,
+actual rounded increments, and atomic refusal/retry.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,

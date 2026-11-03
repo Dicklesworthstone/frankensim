@@ -20,6 +20,10 @@ pub use driven::ShellSupportMotion;
 mod payload;
 pub use payload::ShellRigidPayload;
 
+#[path = "moving_load/impulse.rs"]
+mod impulse;
+pub use impulse::{MovingShellImpulse, ShellPointImpulse};
+
 /// A reference material location on one original triangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellLoadPoint {
@@ -192,21 +196,38 @@ impl MovingShellModel {
         loads: &[ShellPointWrench],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ShellLoadProjection, MovingLoadError> {
-        poll(&mut cancelled)?;
-        if loads.len() > self.max_load_points {
+        self.project_components(
+            loads.len(),
+            loads
+                .iter()
+                .map(|load| (load.point, load.force_n, load.couple_nm)),
+            &mut cancelled,
+        )
+    }
+
+    // Forces and event impulses use the SAME material kinematics transpose.
+    // The caller owns whether the components are N / N m or N s / N m s.
+    fn project_components(
+        &self,
+        count: usize,
+        components: impl IntoIterator<Item = (ShellLoadPoint, [f64; 3], [f64; 3])>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ShellLoadProjection, MovingLoadError> {
+        poll(cancelled)?;
+        if count > self.max_load_points {
             return Err(invalid("moving shell load point budget exceeded"));
         }
         let mut full = vec![0.0; self.free_index.len()];
-        for load in loads {
-            poll(&mut cancelled)?;
-            let (nodes, _) = self.point(load.point)?;
-            finite(&load.force_n)?;
-            finite(&load.couple_nm)?;
-            let moment = add(load.couple_nm, cross(load.point.offset_m, load.force_n));
+        for (point, force, couple) in components {
+            poll(cancelled)?;
+            let (nodes, _) = self.point(point)?;
+            finite(&force)?;
+            finite(&couple)?;
+            let moment = add(couple, cross(point.offset_m, force));
             finite(&moment)?;
-            for (&node, &weight) in nodes.iter().zip(&load.point.barycentric) {
+            for (&node, &weight) in nodes.iter().zip(&point.barycentric) {
                 for axis in 0..3 {
-                    full[6 * node + axis] += weight * load.force_n[axis];
+                    full[6 * node + axis] += weight * force[axis];
                     full[6 * node + 3 + axis] += weight * moment[axis];
                 }
             }
@@ -214,7 +235,7 @@ impl MovingShellModel {
         finite(&full)?;
         let reduced = self.assembly.free_dofs.iter().map(|&i| full[i]).collect();
         let resultant = self.resultant(&full)?;
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(ShellLoadProjection {
             full,
             reduced,
@@ -332,12 +353,7 @@ impl MovingShellModel {
         let load = self.project(initial_loads, &mut cancelled)?;
         let a = &self.assembly;
         let n = a.mass.dimension();
-        let mut rhs = self.effective_load(load.reduced, supports.as_ref())?;
-        let elastic = a.stiffness.apply(displacement);
-        let viscous = a.damping.as_ref().map(|c| c.apply(velocity));
-        for i in 0..n {
-            rhs[i] -= elastic[i] + viscous.as_ref().map_or(0.0, |c| c[i]);
-        }
+        let rhs = self.acceleration_rhs(displacement, velocity, load.reduced, supports.as_ref())?;
         let mut acceleration = vec![0.0; n];
         let mut mass_solver = LuWorkspace::new(n).map_err(linear)?;
         mass_solver.factor(a.mass.values()).map_err(linear)?;
@@ -374,12 +390,32 @@ impl MovingShellModel {
         Ok(MovingShellMotion {
             model: self,
             integrator,
+            mass_solver,
             config,
             state,
             supports,
             full_load: load.full,
             reactions,
         })
+    }
+
+    // The original held-force equilibrium owns both initialization and the
+    // post-impulse acceleration. Prescribed support acceleration stays held.
+    fn acceleration_rhs(
+        &self,
+        displacement: &[f64],
+        velocity: &[f64],
+        load: Vec<f64>,
+        supports: Option<&ShellSupportMotion>,
+    ) -> Result<Vec<f64>, MovingLoadError> {
+        let mut rhs = self.effective_load(load, supports)?;
+        let elastic = self.assembly.stiffness.apply(displacement);
+        let viscous = self.assembly.damping.as_ref().map(|c| c.apply(velocity));
+        for (i, value) in rhs.iter_mut().enumerate() {
+            *value -= elastic[i] + viscous.as_ref().map_or(0.0, |c| c[i]);
+        }
+        finite(&rhs)?;
+        Ok(rhs)
     }
 
     fn check_field(&self, field: &[f64]) -> Result<(), MovingLoadError> {
@@ -502,6 +538,8 @@ pub struct MovingShellStep {
 pub struct MovingShellMotion<'a> {
     model: &'a MovingShellModel,
     integrator: PreparedNewmark<'a>,
+    // The mass factorization already used at initialization also owns kicks.
+    mass_solver: LuWorkspace,
     config: ShellTimeConfig,
     state: DynamicState,
     supports: Option<ShellSupportMotion>,
