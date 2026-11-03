@@ -551,3 +551,274 @@ fn implicit_stiff_film_prevents_the_crossing_of_the_uncorrected_candidate() {
     assert_eq!(disk.body().inertia, original.inertia);
     vector(receipt.motion.combined_momentum_residual, [0.; 3], 3e-10);
 }
+
+fn sliding_plane(disk: &DryDisk2) -> LubricationPlane2 {
+    let center = disk.body().center;
+    // Normal correction is inactive here; only the independently enabled
+    // tangent/spin block can enter the native coupled solve.
+    LubricationPlane2::new(
+        [center[0], center[1] - disk.radius() - 0.02],
+        [0.0, 1.0],
+        [0.004, 0.0],
+        0.005,
+        0.001,
+    )
+    .unwrap()
+    .with_tangential(0.03, 0.002)
+    .unwrap()
+}
+
+#[test]
+fn simultaneous_sliding_and_spin_films_close_native_body_wall_fluid_momentum_and_work() {
+    let origin = [-7.0, 26.0];
+    let viscosity = 0.04;
+    let (mut grid, mut disk) = fixture(0.4);
+    let initial = disk.body();
+    let before = joint(&grid, &disk, origin);
+    let planes = [
+        sliding_plane(&disk),
+        plane(&disk, [0.6, 0.8], 0.025, [-0.003, 0.001])
+            .with_tangential(0.03, 0.002)
+            .unwrap(),
+    ];
+    let external = [0.0005, -0.0002];
+    let external_couple = 0.0003;
+    let receipt = disk
+        .step_with_lubrication_planes(
+            &mut grid,
+            external,
+            external_couple,
+            origin,
+            viscosity,
+            &planes,
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let center = receipt.motion.collision_center;
+    let velocity = receipt.motion.native.velocity_midpoint;
+    let omega = receipt.motion.native.angular_velocity_midpoint;
+    assert!(
+        (omega - initial.angular_velocity).abs() > 1e-7,
+        "oracle must distinguish the solved midpoint spin from the old spin"
+    );
+    assert_eq!(receipt.planes[0].native.resistance_increment, 0.0);
+    assert!(receipt.planes[0].tangential_resistance_increment > 0.0);
+    let mut wall_total = [0.0; 3];
+    let mut loss = 0.0;
+    for (wall, exchange) in planes.into_iter().zip(&receipt.planes) {
+        let point = wall.translated(0.5).unwrap().point();
+        let normal = wall.normal();
+        let tangent = [-normal[1], normal[0]];
+        let gap = dot([center[0] - point[0], center[1] - point[1]], normal) - disk.radius();
+        let (cutoff, floor) = wall.tangential_scales().unwrap();
+        let k = std::f64::consts::PI
+            * viscosity
+            * (8.0 * disk.radius()).sqrt()
+            * (gap.max(floor).powf(-0.5) - cutoff.powf(-0.5));
+        let u = dot(
+            [
+                velocity[0] - wall.velocity()[0],
+                velocity[1] - wall.velocity()[1],
+            ],
+            tangent,
+        );
+        let tangent_force = tangent.map(|t| -k * u * t);
+        let spin = -k * disk.radius().powi(2) * omega;
+        let tangent_work = dot(tangent_force, velocity) + spin * omega;
+        let expected = [
+            exchange.native.first_solid_impulse[0] + tangent_force[0],
+            exchange.native.first_solid_impulse[1] + tangent_force[1],
+            exchange.native.first_solid_angular_impulse
+                + cross(
+                    [center[0] - origin[0], center[1] - origin[1]],
+                    tangent_force,
+                )
+                + spin,
+        ];
+        vector(exchange.body_impulse, expected, 3e-12);
+        close(exchange.body_center_couple, spin, 3e-14);
+        close(exchange.tangential_resistance_increment, k, 3e-12);
+        close(
+            exchange.body_work,
+            dot(exchange.native.first_solid_impulse, velocity) + tangent_work,
+            3e-14,
+        );
+        close(
+            exchange.plane_work,
+            dot(
+                [exchange.plane_impulse[0], exchange.plane_impulse[1]],
+                wall.velocity(),
+            ),
+            3e-14,
+        );
+        close(
+            exchange.plane_impulse[2],
+            cross(
+                [
+                    exchange.plane_footpoint[0] - origin[0],
+                    exchange.plane_footpoint[1] - origin[1],
+                ],
+                [exchange.plane_impulse[0], exchange.plane_impulse[1]],
+            ) + exchange.plane_couple,
+            3e-12,
+        );
+        for k in 0..3 {
+            assert_eq!(exchange.plane_impulse[k], -exchange.body_impulse[k]);
+            wall_total[k] += exchange.plane_impulse[k];
+        }
+        let expected_loss =
+            -exchange.native.solid_pair_work + k * (u * u + (disk.radius() * omega).powi(2));
+        close(exchange.dissipated_energy, expected_loss, 3e-14);
+        loss += expected_loss;
+    }
+    vector(receipt.body_impulse, wall_total.map(|j| -j), 3e-12);
+    close(receipt.dissipated_energy, loss, 3e-14);
+    close(receipt.body_work + receipt.plane_work + loss, 0.0, 3e-14);
+    let after = joint(&grid, &disk, origin);
+    vector(
+        core::array::from_fn(|k| after[k] - before[k] + wall_total[k]),
+        [
+            external[0],
+            external[1],
+            external_couple
+                + cross([center[0] - origin[0], center[1] - origin[1]], external)
+                + receipt.motion.periodic_angular_impulse,
+        ],
+        3e-10,
+    );
+    close(
+        receipt.motion.native.kinetic_energy_change,
+        receipt.motion.native.hydrodynamic.solid_work
+            + receipt.motion.physical_external_work
+            + receipt.motion.interior_correction_work
+            + receipt.body_work,
+        3e-14,
+    );
+    vector(receipt.motion.body_momentum_residual, [0.0; 3], 3e-10);
+    vector(receipt.motion.combined_momentum_residual, [0.0; 3], 3e-10);
+    assert_eq!(disk.body().mass, initial.mass);
+    assert_eq!(disk.body().inertia, initial.inertia);
+}
+
+#[test]
+fn inactive_tangent_option_preserves_the_exact_normal_only_tick() {
+    let (mut grid, mut disk) = fixture(0.4);
+    let mut other_grid = grid.clone();
+    let mut other_disk = disk.clone();
+    let wall = plane(&disk, [1.0, 0.0], 0.07, [0.002, 0.004]);
+    let with_inactive_tangent = wall.with_tangential(0.03, 0.002).unwrap();
+    let expected = disk
+        .step_with_lubrication_planes(
+            &mut grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &[wall],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let actual = other_disk
+        .step_with_lubrication_planes(
+            &mut other_grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &[with_inactive_tangent],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(other_grid.f, grid.f);
+    assert_eq!(other_disk.body(), disk.body());
+    assert_eq!(other_disk.angle(), disk.angle());
+}
+
+#[test]
+fn active_spin_film_refusal_preserves_state_and_exact_retry() {
+    let (mut grid, mut disk) = fixture(0.4);
+    let wall = sliding_plane(&disk);
+    let populations = grid.f.clone();
+    let body = disk.body();
+    let angle = disk.angle();
+    for (viscosity, candidate) in [
+        (0.04, wall.with_tangential(0.04, 0.002).unwrap()),
+        (f64::MAX, wall),
+    ] {
+        assert!(matches!(
+            disk.step_with_lubrication_planes(
+                &mut grid,
+                [0.0; 2],
+                0.0,
+                [0.0; 2],
+                viscosity,
+                &[candidate],
+                Default::default(),
+                &gate(),
+            ),
+            Err(DryDiskError2::Invalid(_))
+        ));
+        assert_eq!(grid.f, populations);
+        assert_eq!(disk.body(), body);
+        assert_eq!(disk.angle(), angle);
+    }
+    assert_eq!(
+        disk.step_with_lubrication_planes(
+            &mut grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.04,
+            &[wall],
+            DryDiskCouplingConfig2 {
+                maximum_evaluations: 2,
+                ..Default::default()
+            },
+            &gate(),
+        ),
+        Err(DryDiskError2::EvaluationBudget)
+    );
+    assert_eq!(grid.f, populations);
+    assert_eq!(disk.body(), body);
+    assert_eq!(disk.angle(), angle);
+    let cancelled = gate();
+    cancelled.request();
+    assert_eq!(
+        disk.step_with_lubrication_planes(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.04,
+            &[wall],
+            Default::default(),
+            &cancelled,
+        ),
+        Err(DryDiskError2::Cancelled)
+    );
+    let mut clean_grid = grid.clone();
+    let mut clean_disk = DryDisk2::new(&grid, disk.radius(), body, angle).unwrap();
+    let step = |g: &mut Grid, d: &mut DryDisk2| {
+        d.step_with_lubrication_planes(
+            g,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.04,
+            &[wall],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap()
+    };
+    let expected = step(&mut clean_grid, &mut clean_disk);
+    let actual = step(&mut grid, &mut disk);
+    assert_eq!(actual, expected);
+    assert_eq!(grid.f, clean_grid.f);
+    assert_eq!(disk.body(), clean_disk.body());
+    assert_eq!(disk.angle(), clean_disk.angle());
+}

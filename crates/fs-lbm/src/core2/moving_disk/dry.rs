@@ -418,6 +418,9 @@ impl DryDisk2 {
         if candidate.films.active != 0 {
             correction_center[0] -= candidate.films.impulse[0];
             correction_center[1] -= candidate.films.impulse[1];
+            if candidate.films.center_couple != 0.0 {
+                correction_center[2] -= candidate.films.center_couple;
+            }
         }
         let correction_origin = about_origin(correction_center, arm);
         let measured_correction: [f64; 3] = core::array::from_fn(|k| {
@@ -520,7 +523,12 @@ impl DryDisk2 {
         };
         let plane_receipts = if let Some(planes) = planes {
             planes.admit_endpoint(candidate.body.center, radius, cancel)?;
-            planes.receipts(candidate.exchange.velocity_midpoint, moment_origin, cancel)?
+            planes.receipts(
+                candidate.exchange.velocity_midpoint,
+                candidate.exchange.angular_velocity_midpoint,
+                moment_origin,
+                cancel,
+            )?
         } else {
             Vec::new()
         };
@@ -592,15 +600,23 @@ impl DryDisk2 {
             self.disk.radius,
         );
         let films = if let Some(planes) = context.planes {
-            planes.evaluate(exchange.velocity_midpoint, context.origin, cancel)?
+            planes.evaluate(
+                exchange.velocity_midpoint,
+                exchange.angular_velocity_midpoint,
+                context.origin,
+                cancel,
+            )?
         } else {
             FilmTotals2::default()
         };
         if films.active != 0 {
-            // Every normal film passes through the disk center. Its torque
-            // there is exactly zero, even for simultaneous oblique planes.
+            // The solve uses a center couple scaled by radius, while the
+            // separate film receipt keeps its full fixed-origin moment.
             target[0] += films.impulse[0];
             target[1] += films.impulse[1];
+            if films.center_couple != 0.0 {
+                target[2] += films.center_couple / self.disk.radius;
+            }
         }
         let residual = core::array::from_fn(|k| correction[k] - target[k]);
         if !target.into_iter().chain(residual).all(f64::is_finite) {

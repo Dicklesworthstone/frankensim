@@ -6964,8 +6964,10 @@ nonlinear probes may cross a plane so that a sufficiently strong implicit film
 can prevent crossing in the accepted solution. Geometry and final receipt
 checks, numerical budgets and cancellation gates run before fluid/body
 publication. Input plane descriptors are immutable; the caller advances them
-only after an accepted tick. This owner adds no tangential film, contact law,
-finite-plane recoil, plane rotation or resolved fluid-wall boundary.
+only after an accepted tick. Normal-only descriptors add no tangential film;
+the optional cylinder extension below supplies sliding and spin resistance.
+Contact, finite-plane recoil, plane rotation and a resolved fluid-wall boundary
+remain separate owners.
 
 The final actual-source closure passes six new film groups plus eight existing
 physical dry-disk and eight moving-disk/analytic geometry groups. These exercise
@@ -6974,6 +6976,71 @@ and translated-origin balances, driven-plane work, density-dependent Guo source
 and analytic interior moments, refusal/exact retry, and an implicit film that
 prevents the uncorrected candidate's crossing. Full Cargo remains blocked where
 the required sibling runtime dependency closure is absent.
+
+### Cylinder/plane tangential translation and spin
+
+`LubricationPlane2::with_tangential(cutoff_gap, minimum_gap)` explicitly adds
+the leading small-gap Stokes resistance of an infinite circular cylinder
+sliding and spinning beside a no-slip plane. The constructor alone retains
+the original normal-only model. Tangent/spin scales are independent of its
+normal cutoff and floor; all lengths and velocities are lattice quantities,
+and impulses/work are per unit out-of-plane depth for one lattice tick.
+
+With cylinder radius R, dynamic viscosity mu, relative center tangent speed
+u_t and body spin omega, the additional law is
+
+```text
+h_eff  = max(h, minimum_gap)
+zeta_t = 2*pi*mu*sqrt(2*R)*(1/sqrt(h_eff) - 1/sqrt(cutoff_gap))
+J_t    = -zeta_t*u_t*t
+tau_c  = -zeta_t*R^2*omega
+```
+
+The coefficient is exactly zero when disabled or h_eff is at/above cutoff.
+A rationalized root difference retains positive drag immediately inside the
+cutoff. Translation and spin have zero cross coefficients for this cylinder
+asymptotic law. Pure sliding has zero center couple, pure spin has zero net
+force, and rolling with zero contact-point slip still dissipates
+zeta_t*(u_t^2 + (R*omega)^2). These are the Jeffrey--Onishi cylinder
+coefficients, reproduced in [Reboux, Richardson and Jensen, equation (2.1)](https://personalpages.manchester.ac.uk/staff/oliver.jensen/OpenArchive/RebouxRichardsonJensen.pdf);
+the sphere's logarithmic mixed resistance is a different law.
+
+For example, a radius-2 cylinder may use independent normal and tangent scales:
+
+```rust
+let wall = LubricationPlane2::new(
+    [0.0, 0.0], [0.0, 1.0], [0.0, 0.0], 0.125, 1.0 / 1024.0,
+)?.with_tangential(1.0 / 32.0, 1.0 / 512.0)?;
+```
+
+At solve time, tangent cutoff must not exceed 0.02*R, a declared small-gap
+admission policy rather than a finite-gap accuracy bound. Positive floors and
+strictly positive actual gaps remain mandatory. This Estimated subgrid law
+does not resolve finite-span end effects, cavitation, contact, a finite-inertia
+wall or the destination of dissipated heat.
+
+Every selected film evaluates BOTH its translation and spin at the same
+solved native midpoint. Its center couple enters the existing three-unknown
+dry-inertia solve, scaled by radius with the original angular unknown. The
+fictitious-interior correction and its work exclude the complete film wrench.
+`PlaneLubricationExchange2.native` remains the original normal-only receipt;
+the added total body/plane impulses use the caller's same fixed origin.
+The plane's free couple at its actual midpoint footpoint p is
+-tau_c + (p-c) cross J_t. It accompanies the force reaction, so body plus plane
+angular impulse closes even for pure translation and pure spin. Plane work
+uses its prescribed translation; body work includes tau_c*omega.
+
+Three focused native law groups and three new coupled groups pass alongside
+all six existing normal-film groups. They cover the independent coefficients,
+rolling passivity, origin/common-velocity transforms, separate floor/cutoff
+behavior, a tangent-only active film outside the normal cutoff, simultaneous
+oblique films, solved-midpoint spin, body/exterior-fluid/wall momentum and work,
+exact inactive parity, typed tangent overflow/admission refusal, cancellation,
+and exact retry after an exhausted evaluation budget. The original normal
+pair-local assertion contract is unchanged. Validation compiles the complete
+current D2Q9/moving/dry numerical owners with the original Guo and cancellation
+leaves and genuine numerical dependencies; it is not a full workspace/runtime
+or three-dimensional validation.
 
 ### Electrically insulating interfaces in moving conductors
 
