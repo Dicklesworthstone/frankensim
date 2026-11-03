@@ -14,7 +14,9 @@ use fs_sparse::{Coo, Csr, DirectOrdering, Inertia, LdltOptions, SymbolicLdlt};
 
 use super::element::PreparedMixedMesh;
 use super::{MixedUpError, checkpoint, inertia_error, invalid};
-use crate::inertia::{ReferenceMass, SolidImpulseReport, SolidMomentum, impulse_moments};
+use crate::inertia::{
+    ReferenceMass, SolidImpulseReport, SolidMomentum, admit_reference_impulses, impulse_moments,
+};
 
 pub use crate::inertia::SolidImpulseControls;
 
@@ -113,16 +115,12 @@ pub(super) fn constrained_impulse(
     if bytes > controls.maximum_assembly_bytes {
         return Err(invalid("mixed impulse exceeds assembly byte cap"));
     }
-    let mut held = vec![false; nu];
-    for (index, &dof) in held_velocity_dofs.iter().enumerate() {
-        if index % 256 == 0 {
-            checkpoint(cx)?;
-        }
-        if dof >= nu || held[dof] {
-            return Err(invalid("distinct in-range held velocity DOFs required"));
-        }
-        held[dof] = true;
-    }
+    // Use the same compensated simultaneous-load resultant as displacement
+    // impulses. Pressure projection must not erase a small external impulse
+    // between large opposing entries before any balance account sees it.
+    let (held, external) =
+        admit_reference_impulses(nu, held_velocity_dofs, nodal_impulses, controls.balance, cx)
+            .map_err(inertia_error)?;
     let free: Vec<_> = (0..nu).filter(|&d| !held[d]).collect();
     if free.is_empty() {
         return Err(invalid(
@@ -136,16 +134,6 @@ pub(super) fn constrained_impulse(
                 .map_err(|_| invalid("pressure impulse gauge must name an original corner node"))
         })
         .transpose()?;
-    let mut external = vec![0.0; nu];
-    for (index, &(dof, value)) in nodal_impulses.iter().enumerate() {
-        if index % 256 == 0 {
-            checkpoint(cx)?;
-        }
-        if dof >= nu || !value.is_finite() {
-            return Err(invalid("finite in-range applied impulses required"));
-        }
-        external[dof] = finite(external[dof] + value)?;
-    }
     let mut gradient = Coo::new(np, nu);
     for (e, element) in mesh.elements.iter().enumerate() {
         let mut local = [[0.0; 30]; 4];

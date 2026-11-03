@@ -316,7 +316,7 @@ fn validate_motion(
     Ok(())
 }
 
-fn admit_impulses(
+pub(crate) fn admit_impulses(
     n: usize,
     held_velocity_dofs: &[usize],
     nodal_impulses_kg_m_s: &[(usize, f64)],

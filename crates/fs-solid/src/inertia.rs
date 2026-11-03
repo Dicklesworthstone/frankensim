@@ -10,6 +10,7 @@ use fs_sparse::{Coo, Csr};
 
 mod impulse;
 pub(crate) mod point;
+pub(crate) use impulse::admit_impulses as admit_reference_impulses;
 pub(crate) use impulse::moments as impulse_moments;
 pub use impulse::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
 pub use point::{SolidPointKinematics, SolidPointMobility, TetImpulsePoint};

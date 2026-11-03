@@ -592,6 +592,31 @@ fn g1_supported_pressure_gauge_has_analytic_reactions_and_incompatible_events_re
         }
         near(event.impulse.momentum.support.linear_kg_m_s[0], -0.1, 1e-11);
         near(event.impulse.pressure_work_j, 0.0, 1e-11);
+        // The same physical 0.1 N s load remains after large opposing entries.
+        // Losing it before KKT assembly would falsely accept zero pressure and
+        // zero support reaction while still reporting a zero balance defect.
+        let large = 2.0_f64.powi(54);
+        let cancelling = [(free[0], large), (free[0], 0.1), (free[0], -large)];
+        let resolved = accepted
+            .impulse_candidate(
+                &held,
+                &cancelling,
+                Some(0),
+                [0.0; 3],
+                impulse_controls(),
+                cx,
+            )
+            .unwrap();
+        near(resolved.impulse.external.linear_kg_m_s[0], 0.1, 0.0);
+        near(resolved.impulse.pressure_impulses_pa_s[1], -3.0, 1e-10);
+        near(
+            resolved.impulse.momentum.support.linear_kg_m_s[0],
+            -0.1,
+            1e-11,
+        );
+        for velocity in resolved.solid.velocity_mps().iter().flatten() {
+            near(*velocity, 0.0, 1e-11);
+        }
         assert!(
             accepted
                 .impulse_candidate(&held, &applied, None, [0.0; 3], impulse_controls(), cx)
