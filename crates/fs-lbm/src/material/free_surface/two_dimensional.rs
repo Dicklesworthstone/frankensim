@@ -5,10 +5,26 @@
 
 use super::{MaterialFreeSurfaceScaling, MaterialLbmError, PlanarWall3, finite, positive};
 use crate::core2::{Cell, Grid};
-use crate::freesurface::{ContactModel, FreeSurface, PlanarWall2};
+use crate::freesurface::{ContactModel, FreeSurface, FreeSurfacePressureError2, GasPressureLink2, PlanarWall2};
+use fs_exec::CancelGate;
 
 mod wetting;
 pub use wetting::MaterialFreeSurfaceWetting2;
+
+/// Physical coordinates of one actual native D2Q9 liquid/gas link.
+/// The domain origin is zero. The midpoint is halfway between cell centres,
+/// not a reconstructed interface intersection or geometric surface normal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialGasPressureLink2 {
+    /// Original native cell indices and incoming population direction.
+    pub link: GasPressureLink2,
+    /// Liquid cell centre [m].
+    pub liquid_center_m: [f64; 2],
+    /// Gas cell centre [m].
+    pub gas_center_m: [f64; 2],
+    /// Geometric midpoint of these two cell centres [m].
+    pub midpoint_m: [f64; 2],
+}
 
 /// Closed stationary rectangular D2Q9 domain, including its wall rows.
 #[derive(Clone, Copy, Debug)]
@@ -147,6 +163,62 @@ impl<'a> MaterialFreeSurface2<'a> {
         self.lattice.step();
     }
 
+    /// Advance the original dense owner under absolute external pressure [Pa]
+    /// sampled at exposed liquid cell centres [m]. Pressure is frozen for this
+    /// timestep and converted about the explicit construction-time reference.
+    /// The combined gas/capillary density departure must fit the supplied bound
+    /// in (0,1); this is not a physical equation of state or error certificate.
+    ///
+    /// The original material coefficients, mass-per-depth ledger and conversion
+    /// owner are retained. Pressure/geometry/cancellation refusal publishes
+    /// nothing. Gas storage and pressure-work heating are outside this frozen
+    /// isothermal liquid model, as for the sparse 3-D pressure adapter.
+    pub fn step_with_gas_pressure(
+        &mut self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn([f64; 2]) -> f64,
+    ) -> Result<(), MaterialLbmError> {
+        let reference = self.scaling.reference_pressure_pa.ok_or(MaterialLbmError::Invalid(
+            "absolute gas loading requires an explicit fixed pressure reference",
+        ))?;
+        let dx = self.scaling.cell_size_m;
+        let unit = self.scaling.pressure_unit_pa;
+        self.lattice.step_with_gas_pressure(gate, maximum_density_excursion, |coordinates| {
+            let position = coordinates.map(|c| (c as f64 + 0.5) * dx);
+            pressure_perturbation(reference, unit, pressure_pa(position), coordinates, &position)
+        })?;
+        Ok(())
+    }
+
+    /// Prescribe distinct absolute gas pressures at the actual missing links.
+    /// Uniform loads reproduce `step_with_gas_pressure` exactly. Both centres
+    /// and the midpoint are supplied in metres; the source decides its spatial
+    /// sampling. The same source binding, pressure bound and atomicity apply.
+    pub fn step_with_gas_link_pressure(
+        &mut self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(MaterialGasPressureLink2) -> f64,
+    ) -> Result<(), MaterialLbmError> {
+        let reference = self.scaling.reference_pressure_pa.ok_or(MaterialLbmError::Invalid(
+            "absolute gas loading requires an explicit fixed pressure reference",
+        ))?;
+        let dx = self.scaling.cell_size_m;
+        let unit = self.scaling.pressure_unit_pa;
+        self.lattice.step_with_gas_link_pressure(gate, maximum_density_excursion, |link| {
+            let liquid_center_m = link.liquid_cell.map(|c| (c as f64 + 0.5) * dx);
+            let gas_center_m = link.gas_cell.map(|c| (c as f64 + 0.5) * dx);
+            let midpoint_m = core::array::from_fn(|d| f64::midpoint(liquid_center_m[d], gas_center_m[d]));
+            let physical = MaterialGasPressureLink2 { link, liquid_center_m, gas_center_m, midpoint_m };
+            pressure_perturbation(
+                reference, unit, pressure_pa(physical), link.liquid_cell,
+                &[liquid_center_m[0], liquid_center_m[1], gas_center_m[0], gas_center_m[1], midpoint_m[0], midpoint_m[1]],
+            )
+        })?;
+        Ok(())
+    }
+
     /// Conserved mass per unit out-of-plane depth, kg/m, including carry.
     pub fn ledger_mass_kg_per_m(&self) -> Result<f64, MaterialLbmError> {
         finite(
@@ -194,4 +266,23 @@ impl<'a> MaterialFreeSurface2<'a> {
             pressure_perturbation_pa: self.scaling.pressure_perturbation_si(moments.rho)?,
         }))
     }
+}
+
+fn pressure_perturbation(
+    reference: f64,
+    unit: f64,
+    absolute: f64,
+    coordinates: [usize; 2],
+    positions: &[f64],
+) -> Result<f64, FreeSurfacePressureError2> {
+    let perturbation = (absolute - reference) / unit;
+    if !absolute.is_finite() || absolute <= 0.0 || !perturbation.is_finite()
+        || positions.iter().any(|x| !x.is_finite())
+    {
+        return Err(FreeSurfacePressureError2::Invalid {
+            coordinates: Some(coordinates),
+            reason: "absolute gas pressure and physical coordinates must admit a finite positive load",
+        });
+    }
+    Ok(perturbation)
 }

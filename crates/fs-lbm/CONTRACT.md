@@ -4534,6 +4534,27 @@ physical liquid/gas equation of state. Tests cover actual direction/reversal on
 all axes, pressure-reference invariance, material-density similitude, capillary
 zero-load equivalence, mass preservation and atomic refusal/cancellation.
 
+The dense D2Q9 `FreeSurface` now uses the same pressure law through
+`step_with_gas_pressure` and `step_with_gas_link_pressure`. Cell fields are
+sampled once per exposed cell; link fields independently load each missing
+gas population. Curvature and equal-density equilibria are cached per cell.
+The Guo half-source correction applies to ordinary and prescribed-pressure
+reconstruction, removing spurious moving-force stress from the dense boundary.
+One complete native candidate supplies atomic pressure/geometry/cancellation
+refusal while preserving the original mass and local conversion owner.
+The pressure and conservative-momentum wrappers share one collision/streaming
+kernel, including the same Guo correction. Pressure loading retains the legacy
+local conversion policy; `step_with_momentum` retains its separately admitted
+capacity-bounded momentum conversion. Neither wrapper silently selects the
+other's conversion policy.
+`MaterialFreeSurface2` exposes the same absolute-Pascal adapters and retains
+its mass-per-depth convention. Physical links carry both centres and their
+midpoint, without inferring a surface normal. G1/G3/G4 regression definitions
+cover loaded static equilibrium, independent link traction, forced even stress, zero-load
+replay, gauge/density similarity, mass closure and late failure rollback.
+These are implementation checks, not measured free-interface validation;
+the isothermal single-liquid and pressure-work exclusions above still apply.
+
 `MaterialFreeSurfaceScaling::free_surface3_from_cells_with_pressure` also
 admits a positive absolute liquid-pressure field at occupied initial cell
 centers, using that same fixed reference and pressure scale. The caller can

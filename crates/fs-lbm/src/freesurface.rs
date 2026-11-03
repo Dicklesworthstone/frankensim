@@ -3,8 +3,8 @@
 //! mass moves along streaming links with PAIRWISE-ANTISYMMETRIC
 //! exchange terms (so the ledger balances exactly by construction),
 //! missing populations from gas neighbors are reconstructed with the
-//! atmospheric-pressure anti-population closure (optionally shifted
-//! by a Laplace term from fill-field curvature), and cell conversions
+//! atmospheric-pressure anti-population closure by default (optionally loaded
+//! by prescribed gas pressure and a Laplace term from fill-field curvature), and cell conversions
 //! (fluid ↔ interface ↔ gas) redistribute their excess/deficit mass
 //! conservatively — with a carry accumulator so NOTHING is ever
 //! silently dropped. The battery gates the ledger at 1e-10 relative
@@ -16,6 +16,8 @@
 mod curvature;
 mod momentum;
 pub use momentum::{ConversionMomentumReport2, FreeSurfaceMomentumError2};
+mod pressure;
+pub use pressure::{FreeSurfacePressureError2, GasPressureLink2};
 pub(crate) mod wetting;
 pub use wetting::{ContactAngleError2, PlanarWall2};
 
@@ -614,21 +616,45 @@ impl FreeSurface {
         &mut self,
         gate: Option<&fs_exec::CancelGate>,
     ) -> Result<(), FreeSurfaceMomentumError2> {
-        assert!(
-            crate::admit_explicit_capillary_coefficient(self.sigma),
-            "surface tension exceeds conservative explicit capillary-wave domain"
-        );
+        self.stream_step_with_pressure(gate, None)
+            .map_err(|error| match error {
+                FreeSurfacePressureError2::Cancelled => FreeSurfaceMomentumError2::Cancelled,
+                FreeSurfacePressureError2::Invalid { reason, .. } => {
+                    FreeSurfaceMomentumError2::Invalid(reason)
+                }
+            })
+    }
+
+    // Pressure and momentum wrappers share collision, mass exchange and the
+    // force-consistent gas reconstruction. Each wrapper then owns its original
+    // conversion policy and publishes only its complete accepted candidate.
+    fn stream_step_with_pressure(
+        &mut self,
+        gate: Option<&fs_exec::CancelGate>,
+        pressure: Option<&pressure::GasPressure2<'_>>,
+    ) -> Result<(), FreeSurfacePressureError2> {
+        pressure::check_cancel(gate)?;
+        if !crate::admit_explicit_capillary_coefficient(self.sigma) {
+            return Err(FreeSurfacePressureError2::Invalid {
+                coordinates: None,
+                reason: "surface tension exceeds conservative explicit capillary-wave domain",
+            });
+        }
         if let Some(contact) = self.planar_contact {
-            assert_eq!(self.contact, ContactModel::Neutral,
-                "a planar contact angle requires neutral fallback walls");
-            self.admit_planar_wall(contact.wall)
-                .expect("planar wetting wall topology changed after admission");
+            if self.contact != ContactModel::Neutral || self.admit_planar_wall(contact.wall).is_err() {
+                return Err(FreeSurfacePressureError2::Invalid {
+                    coordinates: None,
+                    reason: "planar wetting wall topology or neutral fallback changed after admission",
+                });
+            }
         }
         if let Some(field) = &self.planar_contact_field {
-            assert_eq!(self.contact, ContactModel::Neutral,
-                "a planar contact field requires neutral fallback walls");
-            self.admit_planar_wall(field.wall)
-                .expect("dynamic wetting wall topology changed after admission");
+            if self.contact != ContactModel::Neutral || self.admit_planar_wall(field.wall).is_err() {
+                return Err(FreeSurfacePressureError2::Invalid {
+                    coordinates: None,
+                    reason: "dynamic wetting wall topology or neutral fallback changed after admission",
+                });
+            }
         }
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         self.refresh_fill();
@@ -638,7 +664,7 @@ impl FreeSurface {
         // and streaming with gas reconstruction.
         let mut new_f = self.grid.f.clone();
         for y in 0..ny {
-            if let Some(gate) = gate { momentum::poll(gate)?; }
+            pressure::check_cancel(gate)?;
             for x in 0..nx {
                 let i = self.grid.idx(x, y);
                 let flag = self.grid.flags[i];
@@ -667,16 +693,25 @@ impl FreeSurface {
                 }
                 // Stream (pull) with reconstruction from gas sources.
                 let mm = self.grid.moments(i);
-                // All missing populations share this cell's curvature and
-                // velocity. Reconstruct the gas equilibrium only once.
-                let mut gas_equilibrium = None;
+                // Curvature, physical velocity and the Guo half-source frame
+                // are common to this cell. Only a distinct link load requires
+                // another gas equilibrium evaluation.
+                let mut gas_equilibrium = pressure::GasEquilibrium2::default();
                 for q in 0..Q {
                     let src = self.grid.source(x, y, q);
                     new_f[i][q] = match src {
                         Some(s) if self.grid.flags[s] == Cell::Gas => {
-                            let eq = gas_equilibrium.get_or_insert_with(|| {
-                                equilibrium(self.reference_density(x, y), mm.u[0], mm.u[1])
-                            });
+                            let eq = gas_equilibrium.at_link(
+                                || self.reference_density(x, y),
+                                mm.u,
+                                core::array::from_fn(|d| mm.rho * self.grid.g[d] + self.grid.fext[i][d]),
+                                pressure,
+                                GasPressureLink2 {
+                                    liquid_cell: [x, y],
+                                    gas_cell: [s % nx, s / nx],
+                                    incoming_direction: q,
+                                },
+                            )?;
                             eq[q] + eq[OPP[q]] - post[i][OPP[q]]
                         }
                         Some(s) if self.grid.flags[s] == Cell::Wall => post[i][OPP[q]],

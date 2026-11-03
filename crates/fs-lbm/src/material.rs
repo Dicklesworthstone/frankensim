@@ -31,6 +31,8 @@ pub enum MaterialLbmError {
     Forcing(crate::thermal::ThermalForcingError),
     /// The existing sparse free-surface owner refused construction or evolution.
     FreeSurface(crate::d3q19::freesurface3::FreeSurfaceError3),
+    /// The existing dense free surface refused pressure loading or cancellation.
+    FreeSurfacePressure2(crate::freesurface::FreeSurfacePressureError2),
     /// Invalid or unrepresentable physical/numerical input.
     Invalid(&'static str),
 }
@@ -40,6 +42,7 @@ impl core::fmt::Display for MaterialLbmError {
             Self::Transport(error) => write!(f, "material LBM: {error}"),
             Self::Forcing(error) => write!(f, "material LBM: {error}"),
             Self::FreeSurface(error) => write!(f, "material LBM: {error}"),
+            Self::FreeSurfacePressure2(error) => write!(f, "material LBM: {error}"),
             Self::Invalid(message) => write!(f, "material LBM: {message}"),
         }
     }
@@ -53,6 +56,9 @@ impl From<MaterialError> for MaterialLbmError {
 }
 impl From<crate::d3q19::freesurface3::FreeSurfaceError3> for MaterialLbmError {
     fn from(error: crate::d3q19::freesurface3::FreeSurfaceError3) -> Self { Self::FreeSurface(error) }
+}
+impl From<crate::freesurface::FreeSurfacePressureError2> for MaterialLbmError {
+    fn from(error: crate::freesurface::FreeSurfacePressureError2) -> Self { Self::FreeSurfacePressure2(error) }
 }
 
 /// A frozen source binding and its common momentum/thermal lattice conversion.
