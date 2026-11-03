@@ -1418,6 +1418,34 @@ and wall heat remain separate owners. The underlying conservative mixture
 scheme retains its pressure-oscillation limitation at generally advecting
 unequal-caloric contacts.
 
+### Finite-rate chemistry with two inertial gas end walls
+
+`ReactingEuler1d::step_with_inertial_walls` composes the original source
+half steps around the simultaneous two-wall mixture pressure solve. Both
+wall momenta remain finite and gas momentum stays spatially resolved. The
+first chemistry half uses accepted cell volumes and the second uses actual
+moved volumes. A shortened native interval restarts both source halves and
+both walls from accepted state at that same duration.
+
+`ReactiveInertialWallsStep` retains complete reactive accounting and the
+original middle-stage wall report. Whole-system momentum subtracts both
+signed exterior-pressure/additional-force impulses, with no fixed-support
+term. Whole-system energy uses actual chemical gas-energy change, both wall
+kinetic changes and represented exterior/additional-force work. Each changed
+species reference participates once through the original coupled report;
+no separate chemical heat or posterior energy correction is added.
+
+All source, field and geometry workspaces are reused. Species, mesh, clock
+and both wall velocities publish together after complete physical acceptance
+and the final cancellation poll. Four authored G1/G3/G4 groups specify
+unequal-wall reactive recoil with an independent energy-gauge comparison,
+accepted-duration replay using moved source volumes, postcompression source
+refusal and cancellation/retry after prior motion. They parsed with the
+pinned formatter but have not been compiled or run in the constrained
+editing environment. Molecular transport and thermal walls remain separate
+owners. Existing chemistry/splitting and unequal-caloric-contact limits
+remain; no general accuracy, entropy or combustion-validity claim is added.
+
 ### Pressure-driven inertia of a resolved gas end wall
 
 `Euler1d::step_with_piston` couples the existing spatial Euler field to

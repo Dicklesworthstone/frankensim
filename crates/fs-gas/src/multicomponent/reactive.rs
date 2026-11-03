@@ -22,6 +22,8 @@ pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 mod cell;
 pub use cell::CellChemistry;
+mod inertial_walls;
+pub use inertial_walls::ReactiveInertialWallsStep;
 mod piston;
 pub use piston::ReactiveSharedPistonStep;
 pub use piston::{
