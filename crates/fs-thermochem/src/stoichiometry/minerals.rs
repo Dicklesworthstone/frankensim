@@ -25,6 +25,11 @@
 //! Cu(cr), CO(g), CO2(g) and O2(g) endpoints from the same JANAF reference.
 //! A carbon-monoxide reduction equation does not select an industrial reductant
 //! mixture, operating atmosphere, temperature, rate or metal recovery.
+//! Dry pyrite roasting and sulfur-to-acid balances use the explicit JANAF
+//! Fe-028, Fe-030, O-029, O-034, O-058, H-063 and H-075 phases. These are
+//! atom-balanced aggregate endpoints, not elementary reaction mechanisms.
+//! SO3(g) + H2O(l) -> H2SO4(l) selects pure liquid acid; it does not model
+//! absorption into aqueous acid, oleum, acid mist or heat of dilution.
 //! These equations conserve atoms and charge; they do not select pH/Eh,
 //! dissolved speciation, precipitates, gas transfer, rates or conversion.
 
@@ -72,6 +77,19 @@ pub enum MineralReaction {
     CupricOxideCarbonMonoxideReduction,
     /// Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g).
     CuprousOxideCarbonMonoxideReduction,
+    /// 4 FeS2(s) + 11 O2(g) -> 2 Fe2O3(s) + 8 SO2(g).
+    /// Dry hematite/SO2 roasting endpoint, distinct from aqueous oxidation.
+    PyriteRoastingToHematite,
+    /// 2 SO2(g) + O2(g) -> 2 SO3(g).
+    /// Aggregate gas-phase balance; no catalytic conversion or rate is inferred.
+    SulfurDioxideOxidation,
+    /// SO3(g) + H2O(l) -> H2SO4(l), with pure liquid acid as endpoint.
+    /// No aqueous dilution, absorber design or operating-dose claim.
+    SulfurTrioxideHydration,
+    /// 4 FeS2(s) + 15 O2(g) + 8 H2O(l) -> 2 Fe2O3(s) + 8 H2SO4(l).
+    /// Aggregate of roasting, SO2 oxidation and hydration with all sulfur
+    /// assigned to pure liquid acid. Actual sulfur capture remains a caller input.
+    PyriteToHematiteAndSulfuricAcid,
 }
 
 // One species: stable phase/charge id, element counts, charge, signed coefficient.
@@ -238,6 +256,45 @@ impl MineralReaction {
                     ("CO(g)", &[0, 1, 1], 0, -1),
                     ("Cu(s)", &[1, 0, 0], 0, 2),
                     ("CO2(g)", &[0, 1, 2], 0, 1),
+                ],
+            ),
+            Self::PyriteRoastingToHematite => (
+                "pyrite-roasting-to-hematite",
+                &["Fe", "S", "O"],
+                &[
+                    ("FeS2(s)", &[1, 2, 0], 0, -4),
+                    ("O2(g)", &[0, 0, 2], 0, -11),
+                    ("Fe2O3(s)", &[2, 0, 3], 0, 2),
+                    ("SO2(g)", &[0, 1, 2], 0, 8),
+                ],
+            ),
+            Self::SulfurDioxideOxidation => (
+                "sulfur-dioxide-oxidation",
+                &["S", "O"],
+                &[
+                    ("SO2(g)", &[1, 2], 0, -2),
+                    ("O2(g)", &[0, 2], 0, -1),
+                    ("SO3(g)", &[1, 3], 0, 2),
+                ],
+            ),
+            Self::SulfurTrioxideHydration => (
+                "sulfur-trioxide-hydration",
+                &["S", "O", "H"],
+                &[
+                    ("SO3(g)", &[1, 3, 0], 0, -1),
+                    ("H2O(l)", &[0, 1, 2], 0, -1),
+                    ("H2SO4(l)", &[1, 4, 2], 0, 1),
+                ],
+            ),
+            Self::PyriteToHematiteAndSulfuricAcid => (
+                "pyrite-to-hematite-and-sulfuric-acid",
+                &["Fe", "S", "O", "H"],
+                &[
+                    ("FeS2(s)", &[1, 2, 0, 0], 0, -4),
+                    ("O2(g)", &[0, 0, 2, 0], 0, -15),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, -8),
+                    ("Fe2O3(s)", &[2, 0, 3, 0], 0, 2),
+                    ("H2SO4(l)", &[0, 1, 4, 2], 0, 8),
                 ],
             ),
         };

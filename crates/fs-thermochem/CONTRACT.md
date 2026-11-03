@@ -19,14 +19,16 @@ inventory resolution refuse rather than clipping or disappearing. The exact
 certificate proves the integer equation; binary64 final amounts are separately
 evaluated, with no claim of exact numerical mass conservation.
 
-`stoichiometry::minerals::MineralReaction` provides fifteen explicit reference
+`stoichiometry::minerals::MineralReaction` provides nineteen explicit reference
 endpoints: lime hydration, calcite/dolomite acid neutralization to dissolved
 CO2 or retained bicarbonate, hydrated-lime neutralization, malachite acid
 leaching to dissolved copper and CO2, the net ionic Elsner gold-cyanidation
 balance, pyrite oxidation to either ferrous ions or ideal ferric hydroxide,
 magnesite calcination to crystalline MgO and gaseous CO2, magnetite
 oxidation to hematite, cuprous-oxide oxidation, and carbon-monoxide reduction
-of either cupric or cuprous oxide to crystalline copper and gaseous CO2.
+of either cupric or cuprous oxide to crystalline copper and gaseous CO2,
+dry pyrite roasting to hematite/SO2, SO2 oxidation to gaseous SO3, SO3 hydration
+to pure liquid H2SO4, and the net pyrite-to-hematite/pure-acid endpoint.
 The bicarbonate pathways consume half as many protons per mole of carbonate
 mineral as the CO2 pathways. The equations do not assign a universal measured
 acid consumption to an ore, nor infer gas transfer or commercial reagent purity.
@@ -43,6 +45,16 @@ These are per written equation at the admitted standard state. The runnable
 `mineral_processing` example accepts the three- or four-pack source sets,
 prints each consumed/formed mass, retains independently rounded molar masses,
 and exposes their mass-sum residual instead of adjusting a source value.
+The sulfur endpoints reuse the existing pyrite JANAF source with its explicit
+`source-phase-pyrite=1` condition. Their standard heats are −3339566 J/mol for
+`4 FeS2 + 11 O2 -> 2 Fe2O3 + 8 SO2`, −197846 J/mol for
+`2 SO2 + O2 -> 2 SO3`, and −132394 J/mol for
+`SO3(g) + H2O(l) -> H2SO4(l)`. The separately balanced five-source net equation
+`4 FeS2 + 15 O2 + 8 H2O -> 2 Fe2O3 + 8 H2SO4(l)` gives −5190102 J/mol,
+equal to the sum of the three stages at their matching extents. It explicitly
+assigns all sulfur to pure acid; it does not predict sulfur capture, catalytic
+conversion, acid concentration, dilution heat, or plant heat duty. The example
+accepts this five-pack source set as `--reaction pyrite-to-acid`.
 `faraday_yield` converts integrated charge, positive electron count, supplied
 molar mass and explicit current efficiency to product amount and mass.
 
@@ -60,7 +72,8 @@ already present in a total-energy formulation.
 G0/G1/G3 tests cover exact balances, source-backed CaO hydration through the real
 pack compiler, distinct pyrite and carbonate endpoints, acid-limited malachite
 inventory advancement, Elsner reagent ratios, source-backed copper oxide
-redox heat/metal/reductant balances with limiting inventories, Faraday copper yield,
+redox heat/metal/reductant balances with limiting inventories, sulfur-route
+oxygen/water/acid amounts and a source-backed Hess cycle, Faraday copper yield,
 unit/extent scaling and invalid/mislabelled reference states. This slice does
 not extend the ideal-gas EOS/species model, select thermodynamic pathways,
 authenticate caller species-to-pack associations, solve aqueous speciation,
@@ -1862,3 +1875,4 @@ residual and independent compressibility factor, a small positive/negative
 depressed-p family, and the complete screened binary flash against independent
 simultaneous cubic/fugacity phase compositions and lever-rule amount. The
 phase and stability tolerances stay at `1e-12`; iteration ceilings are retained.
+

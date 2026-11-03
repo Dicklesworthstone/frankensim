@@ -19,6 +19,160 @@ const SLUGS: [&str; 3] = [
     "calcium-hydroxide-solid-nist-mining",
 ];
 
+#[test]
+fn g1_sulfur_processing_closes_source_heat_and_hess_cycle() {
+    type Participant = (&'static str, &'static str, &'static str);
+    let cases: [(MineralReaction, &[Participant], f64); 4] = [
+        (
+            MineralReaction::PyriteRoastingToHematite,
+            &[
+                (
+                    "FeS2(s)",
+                    "pyrite-solid-janaf-thermochemistry",
+                    "source-phase-solid",
+                ),
+                ("O2(g)", "oxygen-gas-janaf-mining", "source-phase-gas"),
+                (
+                    "Fe2O3(s)",
+                    "hematite-solid-janaf-mining",
+                    "source-phase-solid",
+                ),
+                (
+                    "SO2(g)",
+                    "sulfur-dioxide-gas-janaf-mining",
+                    "source-phase-gas",
+                ),
+            ],
+            -3_339_566.0,
+        ),
+        (
+            MineralReaction::SulfurDioxideOxidation,
+            &[
+                (
+                    "SO2(g)",
+                    "sulfur-dioxide-gas-janaf-mining",
+                    "source-phase-gas",
+                ),
+                ("O2(g)", "oxygen-gas-janaf-mining", "source-phase-gas"),
+                (
+                    "SO3(g)",
+                    "sulfur-trioxide-gas-janaf-mining",
+                    "source-phase-gas",
+                ),
+            ],
+            -197_846.0,
+        ),
+        (
+            MineralReaction::SulfurTrioxideHydration,
+            &[
+                (
+                    "SO3(g)",
+                    "sulfur-trioxide-gas-janaf-mining",
+                    "source-phase-gas",
+                ),
+                ("H2O(l)", "water-liquid-janaf-mining", "source-phase-liquid"),
+                (
+                    "H2SO4(l)",
+                    "sulfuric-acid-liquid-janaf-mining",
+                    "source-phase-liquid",
+                ),
+            ],
+            -132_394.0,
+        ),
+        (
+            MineralReaction::PyriteToHematiteAndSulfuricAcid,
+            &[
+                (
+                    "FeS2(s)",
+                    "pyrite-solid-janaf-thermochemistry",
+                    "source-phase-solid",
+                ),
+                ("O2(g)", "oxygen-gas-janaf-mining", "source-phase-gas"),
+                ("H2O(l)", "water-liquid-janaf-mining", "source-phase-liquid"),
+                (
+                    "Fe2O3(s)",
+                    "hematite-solid-janaf-mining",
+                    "source-phase-solid",
+                ),
+                (
+                    "H2SO4(l)",
+                    "sulfuric-acid-liquid-janaf-mining",
+                    "source-phase-liquid",
+                ),
+            ],
+            -5_190_102.0,
+        ),
+    ];
+    let mut heats = Vec::new();
+    for (recipe, participants, expected) in cases {
+        let packs: Vec<_> = participants.iter().map(|p| compile(p.1, None)).collect();
+        let ids: Vec<_> = participants
+            .iter()
+            .map(|p| SpeciesId::new(p.0).unwrap())
+            .collect();
+        let points: Vec<_> = participants
+            .iter()
+            .map(|p| {
+                let point = phase_point(p.2);
+                if p.1 == "pyrite-solid-janaf-thermochemistry" {
+                    point
+                        .with_quantity(
+                            "source-phase-pyrite",
+                            QuantitySpec::dimensional(Dims::NONE),
+                            1.0,
+                        )
+                        .unwrap()
+                } else {
+                    point
+                }
+            })
+            .collect();
+        let mut offered: Vec<_> = (0..participants.len())
+            .map(|i| FormationEnthalpySource {
+                species: &ids[i],
+                pack: &packs[i],
+                at: &points[i],
+                reference_axis: REFERENCE,
+            })
+            .collect();
+        let reaction = recipe.build().unwrap();
+        let heat = reaction.standard_enthalpy_change(&offered).unwrap();
+        // Products minus reactants from literal JANAF 298.15 K formation rows.
+        assert_eq!(heat.molar().value(), expected, "{recipe:?}");
+        assert_eq!(heat.terms().len(), participants.len());
+        for term in heat.terms() {
+            let pack = packs
+                .iter()
+                .find(|pack| pack.pack_id() == term.pack_id)
+                .unwrap();
+            pack.claims().verify_receipt(&term.answer.receipt).unwrap();
+            assert_eq!(
+                term.answer.evidence.value.uncertainty,
+                UncertaintyModel::Unstated
+            );
+        }
+        assert!(
+            reaction
+                .standard_enthalpy_change(&offered[..offered.len() - 1])
+                .is_err()
+        );
+        offered.reverse();
+        assert_eq!(
+            reaction
+                .standard_enthalpy_change(&offered)
+                .unwrap()
+                .molar()
+                .value()
+                .to_bits(),
+            expected.to_bits()
+        );
+        heats.push(heat.molar().value());
+    }
+    // Four pyrite moles generate eight SO2, then eight SO3, then eight acid moles.
+    // The complete net equation queries its own five actual phase-correct sources.
+    assert_eq!(heats[0] + 4.0 * heats[1] + 8.0 * heats[2], heats[3]);
+}
+
 fn compile(slug: &str, omit_formation_axis: Option<&str>) -> NormalizedPack {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let nonce = std::time::SystemTime::now()

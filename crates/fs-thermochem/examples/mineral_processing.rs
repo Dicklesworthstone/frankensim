@@ -40,13 +40,17 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 7] = [
+const REACTIONS: [&str; 11] = [
     "lime-hydration",
     "magnesite-calcination",
     "magnetite-oxidation",
     "cuprous-oxide-oxidation",
     "cupric-oxide-reduction",
     "cuprous-oxide-reduction",
+    "pyrite-roasting",
+    "sulfur-dioxide-oxidation",
+    "sulfur-trioxide-hydration",
+    "pyrite-to-acid",
     "calcite-bicarbonate-neutralization",
 ];
 const USAGE: &str = "usage: mineral_processing [--reaction NAME] PACK... REACTED_PURE_REACTANT_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
@@ -153,6 +157,72 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
             ],
             equation: "Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g)",
         },
+        "pyrite-roasting" => ReactionCase {
+            reaction: MineralReaction::PyriteRoastingToHematite,
+            reference: REFERENCE,
+            packs: &[
+                "pyrite-solid-janaf-thermochemistry",
+                "oxygen-gas-janaf-mining",
+                "hematite-solid-janaf-mining",
+                "sulfur-dioxide-gas-janaf-mining",
+            ],
+            species: &["FeS2(s)", "O2(g)", "Fe2O3(s)", "SO2(g)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-solid",
+                "source-phase-gas",
+            ],
+            equation: "4 FeS2(s) + 11 O2(g) -> 2 Fe2O3(s) + 8 SO2(g), hematite endpoint",
+        },
+        "sulfur-dioxide-oxidation" => ReactionCase {
+            reaction: MineralReaction::SulfurDioxideOxidation,
+            reference: REFERENCE,
+            packs: &[
+                "sulfur-dioxide-gas-janaf-mining",
+                "oxygen-gas-janaf-mining",
+                "sulfur-trioxide-gas-janaf-mining",
+            ],
+            species: &["SO2(g)", "O2(g)", "SO3(g)"],
+            phase_axes: &["source-phase-gas", "source-phase-gas", "source-phase-gas"],
+            equation: "2 SO2(g) + O2(g) -> 2 SO3(g)",
+        },
+        "sulfur-trioxide-hydration" => ReactionCase {
+            reaction: MineralReaction::SulfurTrioxideHydration,
+            reference: REFERENCE,
+            packs: &[
+                "sulfur-trioxide-gas-janaf-mining",
+                "water-liquid-janaf-mining",
+                "sulfuric-acid-liquid-janaf-mining",
+            ],
+            species: &["SO3(g)", "H2O(l)", "H2SO4(l)"],
+            phase_axes: &[
+                "source-phase-gas",
+                "source-phase-liquid",
+                "source-phase-liquid",
+            ],
+            equation: "SO3(g) + H2O(l) -> H2SO4(l), pure liquid acid endpoint",
+        },
+        "pyrite-to-acid" => ReactionCase {
+            reaction: MineralReaction::PyriteToHematiteAndSulfuricAcid,
+            reference: REFERENCE,
+            packs: &[
+                "pyrite-solid-janaf-thermochemistry",
+                "oxygen-gas-janaf-mining",
+                "water-liquid-janaf-mining",
+                "hematite-solid-janaf-mining",
+                "sulfuric-acid-liquid-janaf-mining",
+            ],
+            species: &["FeS2(s)", "O2(g)", "H2O(l)", "Fe2O3(s)", "H2SO4(l)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-liquid",
+                "source-phase-solid",
+                "source-phase-liquid",
+            ],
+            equation: "4 FeS2(s) + 15 O2(g) + 8 H2O(l) -> 2 Fe2O3(s) + 8 H2SO4(l), all sulfur assigned to pure liquid acid",
+        },
         "calcite-bicarbonate-neutralization" => ReactionCase {
             reaction: MineralReaction::CalciteBicarbonateNeutralization,
             reference: USGS_REFERENCE,
@@ -235,6 +305,13 @@ fn reference_point(
     if pack_id == "calcite-solid-usgs-b2131-thermochemistry" {
         point = point.with_quantity(
             "source-phase-calcite",
+            QuantitySpec::dimensional(Dims::NONE),
+            1.0,
+        )?;
+    }
+    if pack_id == "pyrite-solid-janaf-thermochemistry" {
+        point = point.with_quantity(
+            "source-phase-pyrite",
             QuantitySpec::dimensional(Dims::NONE),
             1.0,
         )?;
@@ -397,7 +474,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("summed source-molar-mass conversion is not representable".into());
     }
     println!(
-        "Source-molar-mass rounding residual, formed minus consumed [kg]: {}",
+        "Source-molar-mass residual, formed minus consumed [kg]: {}",
         formed_mass - consumed_mass
     );
     println!(

@@ -58,6 +58,10 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         CuprousOxideOxidation,
         CupricOxideCarbonMonoxideReduction,
         CuprousOxideCarbonMonoxideReduction,
+        PyriteRoastingToHematite,
+        SulfurDioxideOxidation,
+        SulfurTrioxideHydration,
+        PyriteToHematiteAndSulfuricAcid,
     ] {
         let first = recipe.build().unwrap();
         let second = recipe.build().unwrap();
@@ -143,6 +147,53 @@ fn calcination_and_oxide_oxidation_keep_gas_endpoints_and_written_extent() {
         .unwrap();
     close(extent.value(), 2.0);
     close(amount(&oxidation, extent.value(), "Fe3O4(s)"), 8.0);
+}
+
+#[test]
+fn roasting_and_acid_endpoints_preserve_the_sulfur_and_oxygen_basis() {
+    let roasting = MineralReaction::PyriteRoastingToHematite.build().unwrap();
+    // One mole pyrite is a quarter mole of the written four-pyrite equation.
+    close(amount(&roasting, 0.25, "FeS2(s)"), 1.0);
+    close(amount(&roasting, 0.25, "O2(g)"), 2.75);
+    close(amount(&roasting, 0.25, "Fe2O3(s)"), 0.5);
+    close(amount(&roasting, 0.25, "SO2(g)"), 2.0);
+    assert!(
+        roasting
+            .terms()
+            .iter()
+            .all(|term| !term.species.as_str().contains("aq"))
+    );
+    let available = roasting
+        .limiting_extent(&[
+            (id("FeS2(s)"), Amount::new(4.0)),
+            (id("O2(g)"), Amount::new(5.5)),
+        ])
+        .unwrap();
+    close(available.value(), 0.5);
+    close(amount(&roasting, available.value(), "FeS2(s)"), 2.0);
+
+    let oxidation = MineralReaction::SulfurDioxideOxidation.build().unwrap();
+    close(amount(&oxidation, 1.0, "SO2(g)"), 2.0);
+    close(amount(&oxidation, 1.0, "O2(g)"), 1.0);
+    close(amount(&oxidation, 1.0, "SO3(g)"), 2.0);
+    let hydration = MineralReaction::SulfurTrioxideHydration.build().unwrap();
+    close(amount(&hydration, 2.0, "SO3(g)"), 2.0);
+    close(amount(&hydration, 2.0, "H2O(l)"), 2.0);
+    close(amount(&hydration, 2.0, "H2SO4(l)"), 2.0);
+    assert!(
+        hydration
+            .terms()
+            .iter()
+            .all(|term| term.species != id("H+(aq)"))
+    );
+    let overall = MineralReaction::PyriteToHematiteAndSulfuricAcid
+        .build()
+        .unwrap();
+    close(amount(&overall, 0.25, "FeS2(s)"), 1.0);
+    close(amount(&overall, 0.25, "O2(g)"), 3.75);
+    close(amount(&overall, 0.25, "H2O(l)"), 2.0);
+    close(amount(&overall, 0.25, "Fe2O3(s)"), 0.5);
+    close(amount(&overall, 0.25, "H2SO4(l)"), 2.0);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # Mineral processing: public sources and callable physics
 
-These **33 source profiles and 104 property claims** provide reusable mineral
+These source profiles provide reusable mineral
 and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and
 `matdb-catalog` discovery. No separate material registry or schema is required.
@@ -34,9 +34,13 @@ they are not a composite assay or a machine-authenticated elemental matrix.
 | `galena` | PbS | 7580 |
 | `arsenopyrite` | FeAsS | 6070; source parenthetical magnitude 150 |
 | `malachite` | Cu2CO3(OH)2 | 4050; source parenthetical magnitude 20 |
+| `stannite` | Cu2FeSnS4 | Reported endpoints 4300 and 4500 |
+| `cuprite` | Cu2O | 6140 |
+| `tenorite` | CuO | 6450, explicitly synthetic source material |
+| `kaolinite` | Al2Si2O5(OH)4 | Reported endpoints 2610 and 2680 |
 
-The last five profiles use the `-handbook-mineralogy` suffix. Their
-[mineral reference guide](MINING_MINERALS.md) details the additional 19 claims,
+The last nine profiles use the `-handbook-mineralogy` suffix. Their
+[mineral reference guide](MINING_MINERALS.md) details the additional 33 claims,
 including ordinal Mohs endpoints and the source's parenthetical density
 magnitudes. Those magnitudes carry no inferred probability or confidence level.
 These profiles also require their named mineral and unqualified specimen flags.
@@ -206,6 +210,68 @@ cargo run -p fs-thermochem --example mineral_processing -- \
   286.182
 ```
 
+### Sulfide roasting and sulfur-to-acid balances
+
+Two new gas profiles close the sulfur reaction chain with the existing pyrite,
+oxygen, hematite, water and sulfuric-acid sources. Each adds `molar-mass`,
+`standard-molar-formation-enthalpy` and `standard-molar-entropy`, at
+298.15 K / 100000 Pa with the same explicit JANAF elemental reference.
+
+| Profile | Molar mass, kg/mol | Formation enthalpy, J/mol | Entropy, J/(mol K) | JANAF table |
+| --- | ---: | ---: | ---: | --- |
+| `sulfur-dioxide-gas-janaf-mining` | 0.064064 | −296842 | 248.212 | [O-034](https://janaf.nist.gov/tables/O-034.html) |
+| `sulfur-trioxide-gas-janaf-mining` | 0.080063 | −395765 | 256.769 | [O-058](https://janaf.nist.gov/tables/O-058.html) |
+
+These retain gas standard states, not an assertion that a gas is stable under
+arbitrary plant conditions. No temperature curve or uncertainty band is invented.
+The existing `pyrite-solid-janaf-thermochemistry` pack retains JANAF's own
+119.967 g/mol mass and −171544 J/mol formation enthalpy. Its named pyrite phase
+condition is required; another FeS2 phase or a newer molar-mass evaluation is
+not silently substituted. The example selects that phase explicitly.
+
+| Endpoint | Integer equation | Standard heat, J/mol of written equation |
+| --- | --- | ---: |
+| `pyrite-roasting` | 4 FeS2 + 11 O2 → 2 Fe2O3 + 8 SO2 | −3339566 |
+| `sulfur-dioxide-oxidation` | 2 SO2 + O2 → 2 SO3 | −197846 |
+| `sulfur-trioxide-hydration` | SO3(g) + H2O(l) → H2SO4(l) | −132394 |
+| `pyrite-to-acid` | 4 FeS2 + 15 O2 + 8 H2O → 2 Fe2O3 + 8 H2SO4(l) | −5190102 |
+
+The last row is independently element/charge balanced and queries all five
+sources. Its heat equals one roasting extent plus four SO2-oxidation extents
+plus eight SO3-hydration extents. This Hess-cycle check also catches a wrong
+reaction-mole basis. All sulfur is assigned to pure liquid acid in that endpoint;
+conversion, capture efficiency, catalytic rates, aqueous acid concentration,
+heat of dilution and thermal losses require additional inputs.
+
+Compile the five packs and run the net balance for 119.967 kg of pure pyrite
+actually reacted:
+
+```bash
+sulfur_pack_dir="$(mktemp -d)"
+for pack in pyrite-solid-janaf-thermochemistry oxygen-gas-janaf-mining water-liquid-janaf-mining hematite-solid-janaf-mining sulfuric-acid-liquid-janaf-mining; do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
+    --out "$sulfur_pack_dir/$pack.fsmatpk"
+done
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --reaction pyrite-to-acid \
+  "$sulfur_pack_dir/pyrite-solid-janaf-thermochemistry.fsmatpk" \
+  "$sulfur_pack_dir/oxygen-gas-janaf-mining.fsmatpk" \
+  "$sulfur_pack_dir/water-liquid-janaf-mining.fsmatpk" \
+  "$sulfur_pack_dir/hematite-solid-janaf-mining.fsmatpk" \
+  "$sulfur_pack_dir/sulfuric-acid-liquid-janaf-mining.fsmatpk" \
+  119.967
+```
+
+That source mass represents approximately 1000 mol pyrite and 250 mol of the
+written equation. The declared endpoint consumes 3750 mol O2 and 2000 mol water,
+forms 500 mol hematite and 2000 mol pure acid, and gives approximately
+−1297.5255 MJ standard enthalpy change. The program reports source masses and
+their mass-sum residual, retaining differences in source atomic-weight
+evaluations and rounding rather than adjusting attributed values. These
+quantities are not an operating-dose or furnace temperature prediction.
+`--help` lists pack order for each individual stage.
+
 ## Run a source-backed reaction balance
 
 Compile the three native source packs and run the checked example:
@@ -292,7 +358,7 @@ caller-declared extent of 3 mol. The final inventory contains 7 mol malachite,
 An extent above 3 mol refuses. This is a declared material-flow calculation;
 the availability bound does not predict reaction progress or a commercial dose.
 
-`MineralReaction::build` provides twelve explicit endpoint choices:
+`MineralReaction::build` provides nineteen explicit endpoint choices:
 
 | Reference | What the equation accounts for |
 | --- | --- |
@@ -308,6 +374,13 @@ the availability bound does not predict reaction progress or a commercial dose.
 | `PyriteOxidationFerricHydroxide` | 3.75 mol O2 consumed and 4 mol H+ generated per mol pyrite |
 | `MagnesiteCalcination` | Forms one mol MgO and one mol gaseous CO2 per mol magnesite |
 | `MagnetiteOxidationToHematite` | Consumes 0.25 mol O2 and forms 1.5 mol hematite per mol magnetite |
+| `CuprousOxideOxidation` | Consumes 0.5 mol O2 and forms two mol CuO per mol Cu2O |
+| `CupricOxideCarbonMonoxideReduction` | One mol CO per mol CuO, forming copper and CO2 |
+| `CuprousOxideCarbonMonoxideReduction` | One mol CO per mol Cu2O, forming two mol copper and one mol CO2 |
+| `PyriteRoastingToHematite` | Consumes 2.75 mol O2 and forms 0.5 mol hematite and two mol SO2 per mol pyrite |
+| `SulfurDioxideOxidation` | Consumes 0.5 mol O2 and forms one mol SO3 per mol SO2 |
+| `SulfurTrioxideHydration` | One mol water per mol SO3, forming pure liquid acid |
+| `PyriteToHematiteAndSulfuricAcid` | Net declared endpoint: 3.75 mol O2 and two mol water per mol pyrite, forming 0.5 mol hematite and two mol pure acid |
 
 Pyrite equations use integer multiples of two/four FeS2; an extent is per
 equation as written. These endpoints follow the primary references cited in
@@ -860,3 +933,4 @@ deterministic ordering and source-reference mutations. They establish these
 bounded data/formula capabilities, not site calibration or full-workspace
 qualification. The source-backed command-line example is an additional real
 consumer of the shipped packs.
+
