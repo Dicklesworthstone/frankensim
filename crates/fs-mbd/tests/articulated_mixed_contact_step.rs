@@ -1,5 +1,8 @@
 //! G1/G3/G4: sustained native support reactions, mixed stacks and driven drift.
 
+#[path = "articulated_mixed_contact_step/elliptic.rs"]
+mod elliptic;
+
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, NormalVelocityLaw};
 use fs_ga::{Mat3, Se3, So3, Twist, Vec3, Wrench};
 use fs_mbd::articulated::motion::prescribed::{
@@ -114,7 +117,7 @@ fn vector(actual: Vec3, expected: Vec3) {
     close(actual.y, expected.y);
     close(actual.z, expected.z);
 }
-fn audit<P>(step: &MixedArticulatedContactStepResult<P>) {
+fn audit<P, R>(step: &MixedArticulatedContactStepResult<P, R>) {
     close(step.kinetic_work_residual, step.drift_energy_defect);
     vector(
         step.linear_momentum_residual,
@@ -132,7 +135,7 @@ fn audit<P>(step: &MixedArticulatedContactStepResult<P>) {
     );
 }
 
-fn translating_path(path: &MixedArticulatedContactPath<'_>) -> Result<(), &'static str> {
+fn translating_path<F>(path: &MixedArticulatedContactPath<'_, F>) -> Result<(), &'static str> {
     // These fixtures consist only of fixed or Cartesian prismatic bodies with
     // zero angular speed. Their unloaded dynamics have constant joint rates;
     // prescribed supports are stationary or in uniform straight translation.

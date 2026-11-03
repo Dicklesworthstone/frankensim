@@ -783,9 +783,9 @@ fn com_displacement(
     }
     Ok(displacement)
 }
-fn gaps<E>(
+fn gaps<E, F>(
     states: &[Kinematics],
-    contacts: &[ArticulatedFrictionalContact],
+    contacts: &[ArticulatedFrictionalContact<F>],
     time: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<ArticulatedContactGap>, ArticulatedContactStepError<E>> {

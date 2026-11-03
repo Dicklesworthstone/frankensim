@@ -5057,6 +5057,28 @@ continuous angular gravity integral along an arbitrary driven path, or a
 thermal partition. The focused native target is
 tests/articulated_mixed_contact_step.rs.
 
+### Directional and source-resolved mixed contact steps
+
+`step::mixed::elliptic` uses that same native step for oriented Coulomb ellipses
+and original source histories. The circular path/result types retain their
+default coefficient and contact-result types. Geometry checks read only the
+original witnesses; no alternate load, inertia, drift or work law is introduced.
+
+`step_mixed_articulated_elliptic_contacts_with` queries each active source once
+at the actual post-load-kick point velocity and assembled contact frame. Its
+non-Clone history candidates remain private through native contact and drift,
+endpoint separation, complete-path admission, physical balances and final
+cancellation. A late refusal returns no mechanical endpoint or source candidate.
+All plane/base work and force/couple reactions retain their native scope.
+
+Coefficients are held for the original first-order discretization. Source
+conditions, normal law, texture transport, support paths and geometric coverage
+remain explicit; total contact/splitting loss is not a thermal partition.
+Focused tests add circular-limit parity, oriented-traction reaction and
+8/16/32-step motion refinement, actual post-kick source selection and driven
+work, plus source/path/cancellation rollback and retry. The new tests were not
+executed in the constrained editing environment.
+
 ## Supported finite-payload separation impulses
 
 `articulated::motion::inventory::supported::release::release_payload_with_impulse`

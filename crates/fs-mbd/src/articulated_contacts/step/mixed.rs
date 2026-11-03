@@ -4,6 +4,9 @@
 //! native smooth step compose a first-order force/contact/drift interval. A
 //! prescribed boundary remains a physical source during all three stages.
 
+/// Directional contact and original source histories through the same step.
+pub mod elliptic;
+
 use super::{
     ArticulatedContactGap, ArticulatedContactStepConfig, ArticulatedContactStepError,
     com_displacement, drift, dynamics, finite_vector, gaps, impulse_pairing, poll,
@@ -33,7 +36,7 @@ use crate::articulated_contacts::trajectory::mixed::{
     MixedArticulatedTrajectoryState, MixedArticulatedTrajectorySystem,
 };
 use crate::articulated_contacts::trajectory::{ArticulatedTrajectoryMomentum, Impulses};
-use fs_contact::frictional_multicontact::FrictionalContactResult;
+use fs_contact::frictional_multicontact::{FrictionalContactConfig, FrictionalContactResult};
 use fs_ga::{Se3, Vec3, Wrench};
 use fs_math::dd::Dd;
 
@@ -55,7 +58,7 @@ pub enum MixedArticulatedContactDrift {
 /// Midpoint/end samples alone do not establish that claim. No interpolation of
 /// a prescribed support path is invented here. Callback-owned history must be
 /// staged until the entire returned step is accepted.
-pub struct MixedArticulatedContactPath<'a> {
+pub struct MixedArticulatedContactPath<'a, F = f64> {
     /// Original borrowed models, accepted states and held physical loads.
     pub systems: &'a [MixedArticulatedTrajectorySystem<'a>],
     /// Coupled states immediately after the load kick and simultaneous contact.
@@ -65,7 +68,7 @@ pub struct MixedArticulatedContactPath<'a> {
     /// Actual caller-supplied samples, one per system; free systems have None.
     pub support_paths: &'a [Option<PrescribedBasePath>],
     /// Original material contact features; planes translate once over the step.
-    pub contacts: &'a [ArticulatedFrictionalContact],
+    pub contacts: &'a [ArticulatedFrictionalContact<F>],
     /// Common initial physical clock, in seconds.
     pub time_before_s: f64,
     /// Duration of the original native unloaded drift, in seconds.
@@ -73,7 +76,7 @@ pub struct MixedArticulatedContactPath<'a> {
 }
 
 /// Accepted states and native evidence for one mixed sustained-contact step.
-pub struct MixedArticulatedContactStepResult<P> {
+pub struct MixedArticulatedContactStepResult<P, R = FrictionalContactResult> {
     /// Common initial physical clock, in seconds.
     pub time_before_s: f64,
     /// Common accepted physical clock, in seconds.
@@ -85,10 +88,7 @@ pub struct MixedArticulatedContactStepResult<P> {
     /// Original simultaneous law, including work determinacy and support sources.
     /// Its loss includes removal of the free load kick by support reactions; that
     /// force/contact splitting loss is numerical, not continuum friction heat.
-    pub contact: ArticulatedFrictionalContactResult<
-        FrictionalContactResult,
-        MixedArticulatedImpulseResponse,
-    >,
+    pub contact: ArticulatedFrictionalContactResult<R, MixedArticulatedImpulseResponse>,
     /// Original native drift receipts, including independent support quadrature.
     pub drift_responses: Vec<MixedArticulatedContactDrift>,
     /// Actual supplied support-path samples; free systems have None.
@@ -182,20 +182,69 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
     contacts: &[ArticulatedFrictionalContact],
     start_time_s: f64,
     config: ArticulatedContactStepConfig,
-    mut support_path: impl FnMut(
+    support_path: impl FnMut(
         usize,
         &PrescribedBaseMotionState,
         f64,
     ) -> Result<PrescribedBasePath, PrescribedBaseMotionError>,
     admit_path: impl FnOnce(&MixedArticulatedContactPath<'_>) -> Result<P, E>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<MixedArticulatedContactStepResult<P>, ArticulatedContactStepError<E>> {
-    poll(&mut cancelled)?;
-    let end_time_s = admission(systems, contacts, start_time_s, config)?;
+    step_with(
+        systems,
+        contacts,
+        start_time_s,
+        config,
+        |inputs, contacts, controls, cancelled| {
+            let contact = resolve_mixed_articulated_frictional_contacts(
+                inputs, contacts, controls, cancelled,
+            )
+            .map_err(contact_error)?;
+            let loss = contact.contact.dissipated_energy;
+            Ok((contact, loss))
+        },
+        support_path,
+        admit_path,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn step_with<F, R, P, E, X, C>(
+    systems: &[MixedArticulatedTrajectorySystem<'_>],
+    contacts: &[ArticulatedFrictionalContact<F>],
+    start_time_s: f64,
+    config: ArticulatedContactStepConfig,
+    resolve_contact: impl FnOnce(
+        &[MixedArticulatedContactSystem<'_>],
+        &[ArticulatedFrictionalContact<F>],
+        FrictionalContactConfig,
+        &mut C,
+    ) -> Result<
+        (
+            ArticulatedFrictionalContactResult<R, MixedArticulatedImpulseResponse>,
+            f64,
+        ),
+        X,
+    >,
+    mut support_path: impl FnMut(
+        usize,
+        &PrescribedBaseMotionState,
+        f64,
+    ) -> Result<PrescribedBasePath, PrescribedBaseMotionError>,
+    admit_path: impl FnOnce(&MixedArticulatedContactPath<'_, F>) -> Result<P, E>,
+    mut cancelled: C,
+) -> Result<MixedArticulatedContactStepResult<P, R>, X>
+where
+    X: From<ArticulatedContactStepError<E>>,
+    C: FnMut() -> bool,
+{
+    poll::<E>(&mut cancelled)?;
+    let end_time_s = admission::<E, F>(systems, contacts, start_time_s, config)?;
     let initial: Vec<_> = systems.iter().map(|system| system.state.clone()).collect();
-    let before = kinematics(systems, &initial, &mut cancelled)?;
-    let initial_gaps = gaps(&before, contacts, 0.0, &mut cancelled)?;
-    let momentum_before = totals(
+    let before = kinematics::<E>(systems, &initial, &mut cancelled)?;
+    let initial_gaps = gaps::<E, F>(&before, contacts, 0.0, &mut cancelled)?;
+    let momentum_before = totals::<E>(
         systems,
         &initial,
         config.angular_origin_world,
@@ -211,7 +260,7 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
     let mut body_work = Dd::ZERO;
     let mut load_support_work = Dd::ZERO;
     for (system_index, system) in systems.iter().enumerate() {
-        poll(&mut cancelled)?;
+        poll::<E>(&mut cancelled)?;
         let input = native_input(system.model, system.state);
         let view = input.system_view();
         let loads = system.loads;
@@ -224,9 +273,9 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
             loads.gravity_world,
             loads.external_body_wrench,
         )
-        .map_err(|error| dynamics(system_index, error))?;
+        .map_err(|error| dynamics::<E>(system_index, error))?;
         validate_external_wrenches(loads.external_body_wrench)
-            .map_err(|error| dynamics(system_index, error))?;
+            .map_err(|error| dynamics::<E>(system_index, error))?;
         let joint_impulses: Vec<_> = loads
             .generalized_force
             .iter()
@@ -236,13 +285,13 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
         let mut gravity_impulses = Vec::with_capacity(system.model.link_count());
         for (link_index, link) in system.model.links().iter().enumerate() {
             if link_index % 64 == 0 {
-                poll(&mut cancelled)?;
+                poll::<E>(&mut cancelled)?;
             }
             let gravity_force = before[system_index].world_from_link[link_index]
                 .rotation()
                 .inverse()
                 .rotate(loads.gravity_world)
-                .map_err(|error| dynamics(system_index, error.into()))?
+                .map_err(|error| dynamics::<E>(system_index, error.into()))?
                 .scale(link.inertia().mass() * config.duration);
             let gravity = Wrench::new(
                 link.inertia().center_of_mass().cross(gravity_force),
@@ -257,7 +306,7 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
         }
         let response = input
             .apply(&joint_impulses, &body_impulses)
-            .map_err(|error| dynamics(system_index, error))?;
+            .map_err(|error| dynamics::<E>(system_index, error))?;
         let after_kick = response.impulse_view();
         let after_kinematics = forward_kinematics(
             system.model,
@@ -265,10 +314,10 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
             view.joint_position,
             after_kick.joint_velocity_after,
         )
-        .map_err(|error| dynamics(system_index, error))?;
+        .map_err(|error| dynamics::<E>(system_index, error))?;
         for (link_index, gravity) in gravity_impulses.iter().enumerate() {
             if link_index % 64 == 0 {
-                poll(&mut cancelled)?;
+                poll::<E>(&mut cancelled)?;
             }
             let first = before[system_index].body_twist[link_index];
             let last = after_kinematics.body_twist[link_index];
@@ -300,7 +349,7 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
             &mut kinetic_change,
             config.angular_origin_world,
         );
-        apply_response(&mut post_contact[system_index], &response)?;
+        apply_response::<E>(&mut post_contact[system_index], &response)?;
         load_responses.push(response);
     }
     let inputs: Vec<_> = systems
@@ -308,19 +357,8 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
         .zip(&post_contact)
         .map(|(system, state)| native_input(system.model, state))
         .collect();
-    let contact = resolve_mixed_articulated_frictional_contacts(
-        &inputs,
-        contacts,
-        config.contact,
-        &mut cancelled,
-    )
-    .map_err(|error| {
-        if matches!(error, ArticulatedContactError::Cancelled) {
-            ArticulatedContactStepError::Cancelled
-        } else {
-            ArticulatedContactStepError::Contact(error)
-        }
-    })?;
+    let (contact, contact_loss) =
+        resolve_contact(&inputs, contacts, config.contact, &mut cancelled)?;
     for (state, response) in post_contact.iter_mut().zip(&contact.responses) {
         add_response(
             response,
@@ -329,7 +367,7 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
             &mut kinetic_change,
             config.angular_origin_world,
         );
-        apply_response(state, response)?;
+        apply_response::<E>(state, response)?;
     }
     let mut states_after = Vec::with_capacity(systems.len());
     let mut drift_responses = Vec::with_capacity(systems.len());
@@ -338,13 +376,13 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
     let mut drift_energy_defect = Dd::ZERO;
     let mut drift_momentum_defect = Impulses::default();
     for (system_index, (system, state)) in systems.iter().zip(&post_contact).enumerate() {
-        poll(&mut cancelled)?;
+        poll::<E>(&mut cancelled)?;
         let (receipt, defect) = match state {
             MixedArticulatedTrajectoryState::Free(state) => {
                 let step = drift(system.model, state, config.duration, &mut cancelled).map_err(
                     |error| {
                         if matches!(error, FreeFloatingMotionError::Cancelled) {
-                            ArticulatedContactStepError::Cancelled
+                            ArticulatedContactStepError::<E>::Cancelled
                         } else {
                             ArticulatedContactStepError::Drift {
                                 system_index,
@@ -378,8 +416,8 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
             }
             MixedArticulatedTrajectoryState::Prescribed(state) => {
                 let path = support_path(system_index, state, config.duration)
-                    .map_err(|error| prescribed_error(system_index, error))?;
-                poll(&mut cancelled)?;
+                    .map_err(|error| prescribed_error::<E>(system_index, error))?;
+                poll::<E>(&mut cancelled)?;
                 let efforts = vec![0.0; system.model.dof_count()];
                 let wrenches = vec![Wrench::default(); system.model.link_count()];
                 let step = step_prescribed_base(
@@ -394,11 +432,12 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
                     config.duration,
                     &mut cancelled,
                 )
-                .map_err(|error| prescribed_error(system_index, error))?;
+                .map_err(|error| prescribed_error::<E>(system_index, error))?;
                 if step.state_after.time_s != end_time_s {
-                    return Err(ArticulatedContactStepError::Invalid(
+                    return Err(ArticulatedContactStepError::<E>::Invalid(
                         "prescribed drift changed the common clock",
-                    ));
+                    )
+                    .into());
                 }
                 sources.add(
                     step.external_linear_impulse_world,
@@ -431,16 +470,17 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
             }
         };
         if !defect.is_finite() || defect.abs() > config.drift_energy_tolerance {
-            return Err(ArticulatedContactStepError::Balance(
+            return Err(ArticulatedContactStepError::<E>::Balance(
                 "one tree exceeds the unloaded drift work gate",
-            ));
+            )
+            .into());
         }
         drift_energy_defect = drift_energy_defect + Dd::from_f64(defect);
         drift_responses.push(receipt);
     }
-    let after = kinematics(systems, &states_after, &mut cancelled)?;
-    let endpoint_gaps = gaps(&after, contacts, config.duration, &mut cancelled)?;
-    let momentum_after = totals(
+    let after = kinematics::<E>(systems, &states_after, &mut cancelled)?;
+    let endpoint_gaps = gaps::<E, F>(&after, contacts, config.duration, &mut cancelled)?;
+    let momentum_after = totals::<E>(
         systems,
         &states_after,
         config.angular_origin_world,
@@ -460,17 +500,17 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
         if system.loads.gravity_world == Vec3::default() {
             continue;
         }
-        poll(&mut cancelled)?;
+        poll::<E>(&mut cancelled)?;
         let first_shape = relative_kinematics(system.model, first.joint_position)
-            .map_err(|error| dynamics(system_index, error))?;
-        poll(&mut cancelled)?;
+            .map_err(|error| dynamics::<E>(system_index, error))?;
+        poll::<E>(&mut cancelled)?;
         let last_shape = relative_kinematics(system.model, last.joint_position)
-            .map_err(|error| dynamics(system_index, error))?;
+            .map_err(|error| dynamics::<E>(system_index, error))?;
         let first_base = first.system_view().base.world_from_base;
         let last_base = last.system_view().base.world_from_base;
         for (link_index, link) in system.model.links().iter().enumerate() {
             if link_index % 64 == 0 {
-                poll(&mut cancelled)?;
+                poll::<E>(&mut cancelled)?;
             }
             let local_com = link.inertia().center_of_mass();
             let displacement = com_displacement(
@@ -480,7 +520,7 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
                 last_shape.world_from_link[link_index],
                 local_com,
             )
-            .map_err(|error| dynamics(system_index, error.into()))?;
+            .map_err(|error| dynamics::<E>(system_index, error.into()))?;
             for (displacement, gravity) in displacement.into_iter().zip([
                 system.loads.gravity_world.x,
                 system.loads.gravity_world.y,
@@ -498,7 +538,7 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
         - load_support_work
         - Dd::from_f64(contact.boundary_work)
         - drift_support_work
-        + Dd::from_f64(contact.contact.dissipated_energy))
+        + Dd::from_f64(contact_loss))
     .to_f64();
     let (linear_momentum_residual, angular_momentum_residual) = changes.difference(&sources);
     let actuator_splitting_work = (actuator_work - actuator_displacement_work).to_f64();
@@ -554,20 +594,20 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
         .iter()
         .all(|x| finite_vector(*x))
     {
-        return Err(ArticulatedContactStepError::Invalid(
+        return Err(ArticulatedContactStepError::<E>::Invalid(
             "nonfinite mixed step balance",
-        ));
+        ).into());
     }
     if drift_energy_defect.abs() > config.drift_energy_tolerance
         || kinetic_work_residual.abs() > config.energy_tolerance
         || linear_momentum_residual.norm() > config.linear_momentum_tolerance
         || angular_momentum_residual.norm() > config.angular_momentum_tolerance
     {
-        return Err(ArticulatedContactStepError::Balance(
+        return Err(ArticulatedContactStepError::<E>::Balance(
             "native mixed step exceeds work or momentum gate",
-        ));
+        ).into());
     }
-    poll(&mut cancelled)?;
+    poll::<E>(&mut cancelled)?;
     let path_admission = admit_path(&MixedArticulatedContactPath {
         systems,
         post_contact: &post_contact,
@@ -577,8 +617,8 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
         time_before_s: start_time_s,
         duration: config.duration,
     })
-    .map_err(ArticulatedContactStepError::Path)?;
-    poll(&mut cancelled)?;
+    .map_err(ArticulatedContactStepError::<E>::Path)?;
+    poll::<E>(&mut cancelled)?;
     Ok(MixedArticulatedContactStepResult {
         time_before_s: start_time_s,
         time_after_s: end_time_s,
@@ -615,9 +655,17 @@ pub fn step_mixed_articulated_frictional_contacts<P, E>(
     })
 }
 
-fn admission<E>(
+fn contact_error<E>(error: ArticulatedContactError) -> ArticulatedContactStepError<E> {
+    if matches!(error, ArticulatedContactError::Cancelled) {
+        ArticulatedContactStepError::Cancelled
+    } else {
+        ArticulatedContactStepError::Contact(error)
+    }
+}
+
+fn admission<E, F>(
     systems: &[MixedArticulatedTrajectorySystem<'_>],
-    contacts: &[ArticulatedFrictionalContact],
+    contacts: &[ArticulatedFrictionalContact<F>],
     time: f64,
     config: ArticulatedContactStepConfig,
 ) -> Result<f64, ArticulatedContactStepError<E>> {
