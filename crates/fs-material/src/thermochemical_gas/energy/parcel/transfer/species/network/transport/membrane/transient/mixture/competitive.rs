@@ -15,6 +15,8 @@
 
 /// Complete competitive breakthrough windows with original finite-gas accounts.
 pub mod adaptive;
+/// Optional source-bound mobile and trapped storage with complete thermostat heat.
+pub mod calorics;
 
 use super::super::{
     ResolvedMembraneDiffusionError,

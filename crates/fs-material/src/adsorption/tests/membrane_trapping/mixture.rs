@@ -1,6 +1,8 @@
 //! G0/G1/G3 actual finite-mixture uptake and shared-site displacement.
 #[path = "mixture/adaptive.rs"]
 mod adaptive;
+#[path = "mixture/calorics.rs"]
+mod calorics;
 use super::*;
 use crate::adsorption::competitive::CompetitiveAdsorbent;
 use crate::thermochemical_gas::energy::parcel::transfer::species::boundary::GasSpeciesBoundarySolve;

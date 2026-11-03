@@ -10880,3 +10880,16 @@ coefficients, preserve permutation invariance, and cover finite shared acid,
 source-time support, numerical range and atomic refusal. The executable
 `competing_mineral_leaching` uses explicitly synthetic CuO/calcite kinetic cards
 with the source-defined neutral carbonic endpoint for the gangue reaction.
+
+
+## Complete isothermal competitive-membrane calorics
+
+`transient::mixture::competitive::calorics` closes the mobile, trapped and actual-gas heat accounts through `with_caloric_closure`. Every original species/layer material explicitly supplies `gas_membrane_mobile_internal_energy_relative_to_gas_enthalpy` [J/mol]: condensed mobile internal energy minus the original gas molar enthalpy at the held temperature. Original Langmuir calorics supply the bound-phase difference through their adsorption heat. Solubility and gas heat capacity do not substitute for this condensed-phase datum.
+
+The extra property is pinned into the existing D/S source bundle. Every fixed or adaptive native probe therefore enforces its actual total-pressure domain using the original source. Missing data and unsupported source trajectories refuse. Summed mobile and bound storage determines membrane thermostat heat. Original gas thermostat accounts separately remove pressure-flow work, while actual original/final gas species inventories close a whole-system first-law residual under an explicit absolute joule allowance. Conserved species formation references cancel analytically; original independent mass/species budgets still apply.
+
+Layer/species dissolution and trapping accounts decompose storage and count binding once; they are not interlayer thermal-flux predictions. The dry skeleton has no sensible change at held temperature. The original transport solver, adaptive controller, accepted-only histories, finite work budgets and immutable failure behavior are retained.
+
+Three focused G0/G3 groups passed on the native material test executable: fixed/adaptive mobile heat is unchanged by a 1e24 gas-reference shift; layered competitive displacement agrees with an independent internal-energy reconstruction; and missing/late-invalid caloric sources and late cancellation publish no state. These are numerical implementation checks, not experimental validation or a DSR verdict. The existing Langmuir source's representable reference calibration remains its own obligation.
+
+Scope: stationary rigid geometry, additive per-species calorics and external thermostats. Temperature evolution, sorption heat capacity, thermal conduction, excess-mixture energy and entropy production are not claimed by this held-temperature account.
