@@ -676,6 +676,14 @@ impl OperatorGeneralizedAlpha {
             q_new[i] = state.q[i] + dq;
             v_new[i] = state.v[i] + dv;
             a_new[i] = acceleration;
+            if !(q_new[i].is_finite() && v_new[i].is_finite() && a_new[i].is_finite()) {
+                return Err(TimeSolveError::ModelRefused {
+                    phase: "accepted endpoint",
+                    reason: format!(
+                        "structural displacement, velocity or acceleration component {i} is not finite"
+                    ),
+                });
+            }
         }
         let admission = problem.validate_state(&q_new, &v_new);
         structural_poll(cancelled)?;

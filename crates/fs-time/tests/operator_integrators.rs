@@ -323,6 +323,27 @@ fn structural_rigid_acceleration_is_independent_of_coordinate_origin() {
 }
 
 #[test]
+fn structural_endpoint_overflow_does_not_publish_a_partial_step() {
+    let mass = DiagonalOp(vec![1.0]);
+    let zero = DiagonalOp(vec![0.0]);
+    let system = LinearSecondOrderSystem::new(&mass, &zero, &zero);
+    let method = OperatorGeneralizedAlpha::new(1, 1.0, 1.0, tight_newton());
+    let mut state = SecondOrderState::new(0.0, &[0.0], &[1.0e308], &[0.0]);
+    method.step(&mut state, &system, &[0.0]).unwrap();
+    // The next alpha-stage position is finite (1.5e308), but its accepted
+    // endpoint overflows. Preserve the entire already accepted trajectory.
+    let before = state.clone();
+    assert!(matches!(
+        method.step(&mut state, &system, &[0.0]),
+        Err(TimeSolveError::ModelRefused {
+            phase: "accepted endpoint",
+            ..
+        })
+    ));
+    assert_eq!(state, before);
+}
+
+#[test]
 fn structural_generalized_alpha_is_second_order_on_both_paths() {
     for operator_path in [false, true] {
         let coarse = structural_error(0.1, operator_path);
