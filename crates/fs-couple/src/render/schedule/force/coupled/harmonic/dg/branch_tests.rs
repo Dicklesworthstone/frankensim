@@ -10,6 +10,7 @@ use fs_math::det;
 use fs_vfit::mimo::MimoModel;
 use fs_vfit::mimo::load::MimoLoadLimits;
 use fs_vfit::model::PoleTerm;
+use crate::dg_port::DgTerminalChannelInput;
 
 const INLET: PortId = PortId(7);
 const OUTLET: PortId = PortId(3);
@@ -21,6 +22,49 @@ const RADIUS: f64 = 0.007;
 const LENGTH: f64 = 0.16;
 const BRANCH_RADIUS: f64 = 0.004;
 const BRANCH_LENGTH: f64 = 0.35;
+
+#[test]
+fn finite_gap_observes_the_branch_outlet_while_closed_mutual_terminal_keeps_its_reaction() {
+    let system = oscillator();
+    let omega = 1300.0;
+    let gate = CancelGate::new_clock_free();
+    let load = loaded(1, true, true, false).with_terminal_channels(vec![
+        DgTerminalChannelInput { port: SIDE, kind: super::terminal_tests::gap_kind(false) },
+        DgTerminalChannelInput { port: OUTLET, kind: DgTerminalChannelKind::Closed },
+    ], 8).unwrap();
+    let response = system.harmonic_response_with_load(
+        omega, &[C64::new(1e-5, -4e-6)], &load, &[column()], WORK, &gate,
+    ).unwrap();
+    let branch = &response.branches[0];
+    let outlet = branch.duct.ports.iter().find(|port| port.id == OUTLET).unwrap();
+    let gap = response.channels.iter().find(|channel| channel.port == SIDE).unwrap();
+    let closure = response.channels.iter().find(|channel| channel.port == OUTLET).unwrap();
+    assert_eq!(gap.duct_pressure_pa, outlet.pressure_pa);
+    assert!((gap.duct_pressure_pa - branch.bore_pressure_pa).abs()
+        > 1e-3 * gap.duct_pressure_pa.abs());
+    let (impedance, unit_velocity, _, _) = super::terminal_tests::gap_oracle(omega, false);
+    let expected_drop = impedance * gap.outward_flow_m3_s;
+    assert!((gap.pressure_drop_pa - expected_drop).abs() < 2e-9 * expected_drop.abs());
+    for (&velocity, unit) in gap.channel.as_ref().unwrap().velocities_m_s.iter().zip(unit_velocity) {
+        let expected = unit * expected_drop;
+        assert!((velocity - expected).abs() < 2e-9 * expected.abs());
+    }
+    let terminal = response.terminal.as_ref().unwrap();
+    assert_eq!(terminal.ports, [SIDE, OUTLET]);
+    assert_eq!(terminal.state.len(), 2);
+    assert!(closure.channel.is_none());
+    assert!(closure.outward_flow_m3_s.abs() < 1e-10 * gap.outward_flow_m3_s.abs());
+    assert!(closure.exterior_pressure_pa.abs() > 0.0);
+    let original = source(true, true);
+    let s = C64::new(600.0, -omega);
+    let expected_exterior = original.residues[0][2] / s * gap.outward_flow_m3_s;
+    assert!((closure.exterior_pressure_pa - expected_exterior).abs()
+        < 2e-9 * expected_exterior.abs());
+    let power_scale = response.authored_external_power_w.abs()
+        + response.terminal_power_w.abs() + gap.input_power_w.abs();
+    assert!(response.interface_power_residual_w.abs() < 2e-8 * power_scale + 1e-27);
+    assert!(response.power_residual_w.abs() < 2e-8 * power_scale + 1e-27);
+}
 
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap()
@@ -733,3 +777,4 @@ fn molecular_bore_and_chimney_retain_separate_losses_in_the_joint_power_balance(
     assert_eq!(load.state().step_count(), 0);
     assert_eq!(load.branches()[0].state().step_count(), 0);
 }
+

@@ -24,6 +24,8 @@ mod gas;
 pub use gas::ChannelGasUpdate;
 /// Axisymmetric passages using the same no-slip momentum and work owner.
 pub mod circular;
+/// Original continuous cell equations and physical harmonic observations.
+pub mod harmonic;
 use profile::MomentumProfile;
 
 /// Maximum transverse cells. All hot-step storage is allocated at construction.
@@ -137,6 +139,15 @@ impl From<&FixedChannel> for FixedChannel {
     fn from(value: &FixedChannel) -> Self { value.clone() }
 }
 impl FixedChannel {
+    /// Borrow the original continuous momentum field, independent of the
+    /// stepping clock and accepted history. Only a linear static-pressure
+    /// terminal is admitted; no kinetic-head linearization is inferred.
+    pub fn continuous_operator(&self) -> Result<harmonic::ChannelContinuousOperator<'_>, AcousticRealizeError> {
+        match self {
+            Self::Slit(value) => value.continuous_operator(),
+            Self::Circular(value) => value.continuous_operator(),
+        }
+    }
     /// Original planar field when the supplied geometry is a slit.
     pub const fn slit(&self) -> Option<&SlitChannel> {
         match self { Self::Slit(v) => Some(v), Self::Circular(_) => None }
@@ -195,6 +206,11 @@ fn invalid(what: &'static str) -> AcousticRealizeError {
 }
 
 impl SlitChannel {
+    /// Read-only original continuous momentum coefficients; all transverse
+    /// cells remain present and no discrete-step impedance is consulted.
+    pub fn continuous_operator(&self) -> Result<harmonic::ChannelContinuousOperator<'_>, AcousticRealizeError> {
+        self.profile.continuous_operator()
+    }
     /// Build a channel at rest from a complete, coherent gas state.
     ///
     /// # Errors
@@ -309,3 +325,4 @@ impl SlitChannel {
         self.profile.step(pressure_pa)
     }
 }
+

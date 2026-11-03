@@ -4,7 +4,8 @@
 pub use super::super::dg::ModalDgError as DgHarmonicCouplingError;
 use super::*;
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::dg_port::{DgBranchLoad, DgPortLoad};
+use crate::dg_port::{DgBranchLoad, DgPortLoad, DgTerminalChannelKind, DgTerminalChannelLoad};
+use crate::bernoulli_aperture::slit_channel::harmonic::ChannelHarmonicResponse;
 use fs_duct::dg::{DgBoundary, DgDuct, DgHarmonicResponse, PortId};
 use fs_vfit::mimo::load::PreparedMimoLoad;
 
@@ -50,6 +51,27 @@ pub struct DgHarmonicBranchResponse {
     pub duct: DgHarmonicResponse,
 }
 
+/// Original finite terminal passage or rigid closure in the joint AC solve.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DgHarmonicChannelResponse {
+    pub port: PortId,
+    pub duct_pressure_pa: C64,
+    pub exterior_pressure_pa: C64,
+    pub outward_flow_m3_s: C64,
+    /// Original pressure-drop multiplier, or rigid closure reaction [Pa].
+    pub pressure_drop_pa: C64,
+    /// Observed duct minus exterior pressure minus multiplier [Pa].
+    pub pressure_drop_residual_pa: C64,
+    /// Original field volume flow minus the shared terminal flow [m3/s].
+    pub flow_residual_m3_s: C64,
+    /// Observed pressure-plane difference times shared flow, cycle mean [W].
+    pub input_power_w: f64,
+    /// Shared pressure work minus the original cell field's pressure work [W].
+    pub interface_power_residual_w: f64,
+    /// Every original cell and its physical storage/heat; None for a closure.
+    pub channel: Option<ChannelHarmonicResponse>,
+}
+
 /// Continuous AC response of the original connected owners, in exp(-i omega t).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DgLoadedModalHarmonicResponse {
@@ -61,6 +83,8 @@ pub struct DgLoadedModalHarmonicResponse {
     pub duct: DgHarmonicResponse,
     /// Every original finite side branch, in its explicit attachment order.
     pub branches: Vec<DgHarmonicBranchResponse>,
+    /// Original finite terminal fields and rigid closures, in source order.
+    pub channels: Vec<DgHarmonicChannelResponse>,
     /// Complete original rational radiation/terminal response, when attached.
     pub terminal: Option<DgHarmonicTerminalResponse>,
     /// Signed mean exchange into the terminal, separate from known losses [W].
@@ -71,10 +95,10 @@ pub struct DgLoadedModalHarmonicResponse {
     pub inlet_pressure_pa: C64,
     /// Mean power of the authored generalized forces only [W].
     pub authored_external_power_w: f64,
-    /// Known modal, material, modal-radiation and DG storage [J]. Generic
+    /// Known modal, material, modal-radiation, DG and finite-channel storage [J]. Generic
     /// terminal storage is unavailable and is not included in this value.
     pub mean_stored_energy_j: f64,
-    /// Authored power minus modal, DG and terminal input powers [W].
+    /// Authored power minus modal, DG, finite-channel and terminal input powers [W].
     pub interface_power_residual_w: f64,
     /// Known loss plus terminal exchange minus authored external power [W].
     pub power_residual_w: f64,
@@ -82,8 +106,8 @@ pub struct DgLoadedModalHarmonicResponse {
     pub solve_relative_residual: f64,
 }
 impl DgLoadedModalHarmonicResponse {
-    /// Original mechanical/material/radiation loss plus DG wall loss and
-    /// actual matched-boundary absorption [W].
+    /// Original mechanical/material/radiation loss, DG wall loss, actual
+    /// matched-boundary absorption and finite-channel no-slip wall heat [W].
     pub fn total_dissipation_w(&self) -> f64 {
         self.modal.total_dissipation_w()
             + self.duct.wall_dissipation_w
@@ -92,6 +116,9 @@ impl DgLoadedModalHarmonicResponse {
             + self.branches.iter().fold(0.0, |sum, branch| {
                 sum + branch.duct.wall_dissipation_w + branch.duct.molecular_dissipation_w
                     + branch.duct.matched_absorption_w
+            })
+            + self.channels.iter().fold(0.0, |sum, channel| {
+                sum + channel.channel.as_ref().map_or(0.0, |field| field.viscous_dissipation_w)
             })
     }
 }
@@ -140,6 +167,7 @@ impl CoupledModalSystem {
             flow_column,
             None,
             &[],
+            &[],
             maximum_work,
             gate,
         )
@@ -151,14 +179,22 @@ impl CoupledModalSystem {
     /// Each finite branch keeps its entire source operator and its own material
     /// band. Junction flows and pressure continuity are solved simultaneously;
     /// no branch impedance is inverted at a bare resonant pole. The terminal
-    /// channel of a branch belongs to its actual outer outlet. Fixed finite gap
-    /// channels and driven mouths still require their own retained equations.
+    /// channel of a branch belongs to its actual outer outlet. Each finite gap
+    /// retains every original transverse/radial momentum cell and one pressure
+    /// drop; rigid closures enforce zero through-flow without deleting exterior
+    /// states. This is a zero-mean perturbation of the original fixed geometry
+    /// and source gas; the declared resolved-speed Mach limit still applies.
+    /// Driven mouths require their own retained source equations.
     ///
     /// Terminal flow is an additional unknown: p=B_out^T*x=C*z+D*u and
     /// (sI-A)z=B*u. No inverse of D or isolated terminal impedance is formed;
     /// strictly proper and singular-D loads remain valid frequency problems.
     /// The dense dimension includes every original DG and terminal state, each
-    /// terminal flow and one junction flow per branch, under the same 1024 cap.
+    /// terminal flow, one junction flow per branch, and all finite-gap cells
+    /// plus their pressure drops, under the same 1024 cap and work allowance.
+    /// Original channel observations additionally reserve 256*f+64*d*c work,
+    /// where f counts finite cells plus their drops and c counts channel inputs.
+    /// Both reservations precede the joint dense and returned-field allocations.
     /// Accepted states and source/passivity evidence remain unchanged. Terminal
     /// work is reported separately; an admitted fit supplies no generic energy
     /// certificate for its internal coordinates.
@@ -172,8 +208,8 @@ impl CoupledModalSystem {
         gate: &CancelGate,
     ) -> Result<DgLoadedModalHarmonicResponse, DgHarmonicCouplingError> {
         poll(Some(gate))?;
-        if !load.terminal_channels().is_empty() || load.has_driven_mouth() {
-            return Err(invalid("continuous modal/DG load response requires finite gap and driven-mouth states to be retained").into());
+        if load.has_driven_mouth() {
+            return Err(invalid("continuous modal/DG load response requires driven-mouth source equations to be retained").into());
         }
         let terminal = load.terminal().map(|owner| (owner, load.terminal_ports()));
         self.harmonic_response_bound(
@@ -184,6 +220,7 @@ impl CoupledModalSystem {
             flow_column,
             terminal,
             load.branches(),
+            load.terminal_channels(),
             maximum_work,
             gate,
         )
@@ -199,6 +236,7 @@ impl CoupledModalSystem {
         flow_column: &[f64],
         terminal: Option<(&PreparedMimoLoad, &[PortId])>,
         branches: &[DgBranchLoad],
+        channels: &[DgTerminalChannelLoad],
         maximum_work: usize,
         gate: &CancelGate,
     ) -> Result<DgLoadedModalHarmonicResponse, DgHarmonicCouplingError> {
@@ -223,6 +261,24 @@ impl CoupledModalSystem {
                 .any(|(i, id)| *id == inlet || terminal_ports[..i].contains(id))
         {
             return Err(invalid("continuous modal/DG coupling requires a complete original volume projection and one distinct terminal channel for every non-inlet port").into());
+        }
+        // Count every original finite cell and its pressure multiplier before
+        // any appended arrays or dense operator are allocated. Source channels
+        // already own their immutable M/A/G; borrowing them allocates nothing.
+        let mut channel_dimension = 0usize;
+        for (index, channel) in channels.iter().enumerate() {
+            poll(Some(gate))?;
+            if !terminal_ports.contains(&channel.input().port)
+                || channels[..index].iter().any(|other| other.input().port == channel.input().port)
+            {
+                return Err(invalid("continuous gaps require distinct original exterior terminal ports").into());
+            }
+            if let Some(original) = channel.channel() {
+                let field = original.continuous_operator()?;
+                channel_dimension = channel_dimension.checked_add(field.dimension())
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or_else(|| invalid("continuous terminal field dimension overflow"))?;
+            }
         }
         let pressure_column = &view
             .ports()
@@ -313,13 +369,25 @@ impl CoupledModalSystem {
             .checked_add(terminal_dimension)
             .and_then(|value| value.checked_add(terminal_ports.len()))
             .and_then(|value| value.checked_add(branches.len()))
+            .and_then(|value| value.checked_add(channel_dimension))
             .ok_or_else(|| invalid("continuous terminal harmonic dimension overflow"))?;
-        let mut operator = self.harmonic_operator(omega_rad_s, force, extra, maximum_work, gate)?;
+        let full_dimension = n.checked_add(self.radiation.as_ref().map_or(0, |r| r.model.poles.len()))
+            .and_then(|value| value.checked_add(extra))
+            .ok_or_else(|| invalid("continuous channel joint dimension overflow"))?;
+        let channel_work = channel_dimension.checked_mul(256)
+            .and_then(|value| channels.len().checked_mul(full_dimension)
+                .and_then(|value| value.checked_mul(64))
+                .and_then(|interface| value.checked_add(interface)))
+            .ok_or_else(|| invalid("continuous channel observation work overflow"))?;
+        let operator_work = maximum_work.checked_sub(channel_work)
+            .ok_or_else(|| invalid("continuous channel observations exceed the declared joint work allowance"))?;
+        let mut operator = self.harmonic_operator(omega_rad_s, force, extra, operator_work, gate)?;
         let dimension = operator.dimension;
         let offset = operator.original_dimension;
         let terminal_offset = offset + acoustic_dimension;
         let flow_offset = terminal_offset + terminal_dimension;
         let junction_offset = flow_offset + terminal_ports.len();
+        let channel_offset = junction_offset + branches.len();
         let source = view.generator_per_s();
         let terminal_source = terminal_view
             .as_ref()
@@ -406,6 +474,47 @@ impl CoupledModalSystem {
                     operator.values[(flow_offset + i) * dimension + flow_offset + j] =
                         C64::from_re(-load.d[i * ports + j]);
                 }
+            }
+        }
+        let mut channel_offsets = Vec::with_capacity(channels.len());
+        let mut next_channel = channel_offset;
+        for channel in channels {
+            poll(Some(gate))?;
+            channel_offsets.push(next_channel);
+            let port = terminal_ports.iter().position(|id| *id == channel.input().port)
+                .ok_or_else(|| invalid("continuous channel lost its original terminal row"))?;
+            let flow_row = flow_offset + port;
+            if let Some(original) = channel.channel() {
+                let field = original.continuous_operator()?;
+                let width = field.dimension();
+                let drop = next_channel + width;
+                let mass = field.cell_masses_kg();
+                let area = field.cell_areas_m2();
+                let shear = field.face_conductances_kg_s();
+                // Keep p_duct-p_exterior=drop and Q=A^T v simultaneously;
+                // no isolated duct, exterior, or gap impedance is inverted.
+                operator.values[flow_row * dimension + drop] = C64::from_re(-1.0);
+                operator.values[drop * dimension + flow_row] = C64::from_re(1.0);
+                for i in 0..width {
+                    poll(Some(gate))?;
+                    let row = next_channel + i;
+                    operator.values[row * dimension + row] =
+                        C64::from_re(shear[i] + shear[i + 1]) + s.scale(mass[i]);
+                    if i != 0 {
+                        operator.values[row * dimension + row - 1] = C64::from_re(-shear[i]);
+                    }
+                    if i + 1 != width {
+                        operator.values[row * dimension + row + 1] = C64::from_re(-shear[i + 1]);
+                    }
+                    operator.values[row * dimension + drop] = C64::from_re(-area[i]);
+                    operator.values[drop * dimension + row] = C64::from_re(-area[i]);
+                }
+                next_channel = drop + 1;
+            } else {
+                // The exterior still sees its complete original state and
+                // mutual matrix; this row supplies a rigid reaction, Q=0.
+                operator.values[flow_row * dimension..(flow_row + 1) * dimension].fill(C64::ZERO);
+                operator.values[flow_row * dimension + flow_row] = C64::from_re(1.0);
             }
         }
         let (state, relative) = solve_harmonic(
@@ -558,6 +667,93 @@ impl CoupledModalSystem {
                 duct: response,
             });
         }
+        let mut channel_responses = Vec::with_capacity(channels.len());
+        for (index, owner) in channels.iter().enumerate() {
+            poll(Some(gate))?;
+            let port = owner.input().port;
+            let port_index = terminal_ports.iter().position(|id| *id == port)
+                .ok_or_else(|| invalid("continuous channel observation lost its terminal row"))?;
+            let exterior = terminal.as_ref()
+                .ok_or_else(|| invalid("continuous channel lost its complete exterior response"))?;
+            let exterior_source = terminal_source.as_ref()
+                .ok_or_else(|| invalid("continuous channel lost its original exterior equations"))?;
+            let (observed, observed_port) = match branches.iter().position(|branch| branch.port() == port) {
+                Some(branch) => (&branch_responses[branch].duct, branch_ports[branch].1
+                    .ok_or_else(|| invalid("continuous finite gap cannot follow a sealed branch"))?),
+                None => (&duct, port),
+            };
+            let duct_pressure = observed.ports.iter().find(|value| value.id == observed_port)
+                .ok_or_else(|| invalid("continuous channel lost its physical pressure-plane observation"))?
+                .pressure_pa;
+            let exterior_pressure = exterior.pressure_pa[port_index];
+            let drop = duct_pressure - exterior_pressure;
+            let outward = exterior.outward_flow_m3_s[port_index];
+            let input_power = 0.5 * (drop * outward.conj()).re;
+            let (duct_offset, column) = terminal_columns[port_index];
+            let pressure_scale = column.iter().enumerate().map(|(i, b)|
+                b.abs() * state[offset + duct_offset + i].abs()).sum::<f64>()
+                + (0..terminal_dimension).map(|i|
+                    exterior_source.c[port_index * terminal_dimension + i].abs()
+                        * state[terminal_offset + i].abs()).sum::<f64>()
+                + (0..terminal_ports.len()).map(|i|
+                    exterior_source.d[port_index * terminal_ports.len() + i].abs()
+                        * state[flow_offset + i].abs()).sum::<f64>();
+            let (constitutive_drop, flow_residual, field, flow_scale, pressure_residual) =
+                if let Some(original) = owner.channel() {
+                    let view = original.continuous_operator()?;
+                    let start = channel_offsets[index];
+                    let velocities = &state[start..start + view.dimension()];
+                    let constitutive_drop = state[start + view.dimension()];
+                    let field = view.observe_harmonic(
+                        omega_rad_s, velocities, drop, maximum_work,
+                        self.config.solve_relative_tolerance, &mut || gate.is_requested(),
+                    )?;
+                    let maximum_mach = match owner.input().kind {
+                        DgTerminalChannelKind::Slit { maximum_mach, .. }
+                        | DgTerminalChannelKind::Circular { maximum_mach, .. } => maximum_mach,
+                        DgTerminalChannelKind::Closed => return Err(invalid(
+                            "continuous finite channel lost its physical geometry").into()),
+                    };
+                    if velocities.iter().any(|v| v.abs() > maximum_mach * owner.gas().sound_speed) {
+                        return Err(invalid("continuous terminal channel exceeds its declared local resolved-speed Mach limit").into());
+                    }
+                    let flow_scale = outward.abs() + view.cell_areas_m2().iter()
+                        .zip(velocities).map(|(area, v)| area * v.abs()).sum::<f64>();
+                    (constitutive_drop, field.flow_m3_s - outward, Some(field),
+                        flow_scale, drop - constitutive_drop)
+                } else {
+                    // Zero-through-flow closure retains the exterior reaction
+                    // and mutual states, with no fabricated fluid storage.
+                    (drop, -outward, None, flow.abs() + exterior.outward_flow_m3_s.iter()
+                        .map(|value| value.abs()).sum::<f64>(), C64::ZERO)
+                };
+            let pressure_scale = pressure_scale + constitutive_drop.abs();
+            let field_power = field.as_ref().map_or(0.0, |value| value.input_power_w);
+            let work_residual = input_power - field_power;
+            let work_scale = input_power.abs() + field_power.abs()
+                + 0.5 * pressure_scale * flow_scale;
+            let tolerance = self.config.solve_relative_tolerance
+                + 64.0 * f64::EPSILON * dimension as f64;
+            if ![drop, constitutive_drop, outward, flow_residual, pressure_residual]
+                .iter().all(|&v| complex_finite(v))
+                || ![input_power, flow_scale, pressure_scale, work_scale, work_residual]
+                    .iter().all(|value| value.is_finite())
+                || pressure_residual.abs() > tolerance * pressure_scale.max(1e-300)
+                || flow_residual.abs() > tolerance * flow_scale.max(1e-300)
+                || work_residual.abs() > tolerance * work_scale.max(1e-300)
+            {
+                return Err(invalid("continuous original terminal field disagrees with shared pressure, flow or work").into());
+            }
+            channel_responses.push(DgHarmonicChannelResponse {
+                port, duct_pressure_pa: duct_pressure, exterior_pressure_pa: exterior_pressure,
+                outward_flow_m3_s: outward, pressure_drop_pa: constitutive_drop,
+                pressure_drop_residual_pa: pressure_residual, flow_residual_m3_s: flow_residual,
+                input_power_w: input_power, interface_power_residual_w: work_residual, channel: field,
+            });
+        }
+        let channel_power_w = channel_responses.iter().map(|channel| channel.input_power_w).sum::<f64>();
+        let channel_storage_j = channel_responses.iter().map(|channel|
+            channel.channel.as_ref().map_or(0.0, |field| field.mean_stored_energy_j)).sum::<f64>();
         let pressure = duct
             .ports
             .iter()
@@ -582,7 +778,7 @@ impl CoupledModalSystem {
         let mean_stored_energy_j = branch_responses.iter().fold(
             modal.mean_stored_energy_j + duct.mean_stored_energy_j,
             |sum, branch| sum + branch.duct.mean_stored_energy_j,
-        );
+        ) + channel_storage_j;
         let interface_power_residual_w = authored_external_power_w
             - modal.external_power_w
             - duct.input_power_w
@@ -590,11 +786,13 @@ impl CoupledModalSystem {
                 .iter()
                 .map(|branch| branch.duct.input_power_w)
                 .sum::<f64>()
-            - terminal_power_w;
+            - terminal_power_w
+            - channel_power_w;
         let mut result = DgLoadedModalHarmonicResponse {
             modal,
             duct,
             branches: branch_responses,
+            channels: channel_responses,
             terminal,
             terminal_power_w,
             inlet_flow_m3_s: flow,
@@ -636,3 +834,4 @@ mod mimo_tests;
 
 #[cfg(test)]
 mod branch_tests;
+

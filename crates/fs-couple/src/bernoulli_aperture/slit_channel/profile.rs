@@ -68,6 +68,16 @@ fn solve(inverse: &[f64], lower: &[f64], upper: &[f64], rhs: &mut [f64]) {
 }
 
 impl MomentumProfile {
+    pub(super) fn continuous_operator(&self)
+        -> Result<super::harmonic::ChannelContinuousOperator<'_>, AcousticRealizeError>
+    {
+        if self.exit != SlitExit::StaticPressure {
+            return Err(invalid("continuous channel requires the original linear static-pressure terminal"));
+        }
+        Ok(super::harmonic::ChannelContinuousOperator::from_parts(
+            &self.mass, &self.area, &self.conductance,
+        ))
+    }
     pub(super) fn new(density: f64, length: f64, dt: f64, exit: SlitExit,
         area: Vec<f64>, conductance: Vec<f64>) -> Result<Self, AcousticRealizeError>
     {
@@ -277,3 +287,4 @@ impl MomentumProfile {
         Ok(step)
     }
 }
+

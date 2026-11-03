@@ -42,6 +42,13 @@ pub struct CircularChannel {
 }
 
 impl CircularChannel {
+    /// Original continuous annular momentum field, independent of the time
+    /// step and accepted history. No circular-to-planar substitution occurs.
+    pub fn continuous_operator(&self)
+        -> Result<super::harmonic::ChannelContinuousOperator<'_>, AcousticRealizeError>
+    {
+        self.profile.continuous_operator()
+    }
     /// Construct a quiescent circular passage. Geometry and complete gas state
     /// determine every inertial and viscous coefficient before any sample runs.
     pub fn from_gas(gas: &GasState, spec: CircularChannelSpec)
@@ -124,3 +131,4 @@ impl CircularChannel {
         self.profile.step(pressure)
     }
 }
+
