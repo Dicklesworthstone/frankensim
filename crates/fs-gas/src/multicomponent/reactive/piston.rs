@@ -10,6 +10,8 @@ use fs_qty::Time;
 
 mod molecular;
 mod thermal;
+mod two_chambers;
+pub use two_chambers::ReactiveSharedPistonStep;
 pub use thermal::{
     PistonThermalEnds, PistonThermalReport, SplitPistonThermalReport, ThermalReactiveStepReport,
 };

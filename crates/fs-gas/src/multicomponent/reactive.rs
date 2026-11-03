@@ -23,6 +23,7 @@ pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 mod cell;
 pub use cell::CellChemistry;
 mod piston;
+pub use piston::ReactiveSharedPistonStep;
 pub use piston::{
     PistonThermalEnds, PistonThermalReport, ReactivePistonStep, SplitPistonThermalReport,
     ThermalReactiveStepReport,

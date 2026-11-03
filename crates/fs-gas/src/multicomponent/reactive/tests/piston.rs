@@ -4,6 +4,7 @@ use crate::multicomponent::Boundary;
 
 mod molecular;
 mod thermal;
+mod two_chambers;
 
 const AREA: f64 = 0.1;
 

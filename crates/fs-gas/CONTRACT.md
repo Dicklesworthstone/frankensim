@@ -3678,3 +3678,28 @@ transport/Galilean endpoint admission. The native run used the actual network
 wall owner, heat, friction, transport and mesh source with explicit constant-Cv
 gas/network/transport fixtures. Material and shared-thermal paths were trapped,
 not exercised. Full Cargo/material/advection verification remains separate.
+
+## Two reacting chambers sharing one finite piston
+
+`ReactingEuler1d::step_with_shared_piston` composes both original chamber
+mechanisms with the existing two-field, moving-volume pressure/piston solve.
+Each source bank retains its species order, caloric references, original
+reactor and chemistry controls. The second source halves use the actual
+moved cell volumes. A shortened pressure interval restarts both complete
+source/pressure/source paths from their accepted endpoints.
+
+Whole-system admission uses both actual chemical-energy changes, the native
+piston kinetic change and applied-force displacement work. The two fixed
+outer support impulses remain explicit in momentum closure. Independent
+source energy gauges are never mixed, and no extra heat-release term is
+introduced. Existing trial fields/reactors are reused; both fields, meshes,
+clocks and the common piston publish only after the final cancellation poll.
+
+The native regression cases cover independent exothermic mechanisms and
+source references, cumulative physical balances, shared-duration replay,
+postcompression source refusal and cancellation/retry after prior motion.
+They parsed with the pinned formatter but were not compiled or executed in
+the constrained editing environment. This entry is adiabatic chemistry plus
+Euler transport; molecular transport, finite-wall heat and leakage retain
+their separate owners. Symmetric splitting alone establishes no accuracy
+order, entropy-stability theorem or combustion-mechanism validity.
