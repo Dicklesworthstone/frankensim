@@ -17,7 +17,7 @@
 //! No timestep, contact pressure or impact-heat allocation is inferred.
 
 use super::*;
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 
 /// Caller-declared instantaneous ellipse in the original contact tangent frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -356,14 +356,28 @@ pub fn solve_elliptic_frictional_contacts(
         .map(|(p, &q)| p.impulse(q))
         .collect();
     let mut velocities: Vec<_> = contacts.iter().map(|c| c.relative_velocity).collect();
+    let mut work = Dd::ZERO;
+    let mut work_scale = Dd::ZERO;
     for &i in &order {
         poll(&mut cancelled)?;
         for a in 0..3 {
+            let before = Dd::from_f64(contacts[i].relative_velocity[a]);
+            let mut velocity = before;
             for &j in &transformed.active_indices {
                 for b in 0..3 {
-                    velocities[i][a] += delassus[(3 * i + a) * d + 3 * j + b] * impulses[j][b];
+                    velocity = crate::multicontact::add_product(
+                        velocity,
+                        delassus[(3 * i + a) * d + 3 * j + b],
+                        impulses[j][b],
+                    );
                 }
             }
+            checked(velocity.lo)?;
+            velocities[i][a] = checked(velocity.to_f64())?;
+            let midpoint = before * Dd::from_f64(0.5) + velocity * Dd::from_f64(0.5);
+            let term = Dd::from_f64(impulses[i][a]) * midpoint;
+            work = work + term;
+            work_scale = work_scale + term.abs();
         }
     }
     if impulses
@@ -408,19 +422,12 @@ pub fn solve_elliptic_frictional_contacts(
             &mut residuals,
         )?;
     }
-    let mut work = 0.0;
-    let mut work_scale = 0.0;
-    for &i in &order {
-        for a in 0..3 {
-            let term =
-                impulses[i][a] * (0.5 * contacts[i].relative_velocity[a] + 0.5 * velocities[i][a]);
-            work += term;
-            work_scale += term.abs();
-        }
-    }
-    checked(work)?;
-    checked(work_scale)?;
-    residuals.coordinate_work_residual_j = checked(work - transformed.relative_work)?;
+    checked(work.lo)?;
+    checked(work_scale.lo)?;
+    residuals.coordinate_work_residual_j =
+        checked((work - Dd::from_f64(transformed.relative_work)).to_f64())?;
+    let work = checked(work.to_f64())?;
+    let work_scale = checked(work_scale.to_f64())?;
     let work_allowance = checked(config.energy_tolerance + 128.0 * f64::EPSILON * work_scale)?;
     if residuals.normal_impulse_violation > config.impulse_tolerance
         || residuals.normal_velocity_violation > config.velocity_tolerance

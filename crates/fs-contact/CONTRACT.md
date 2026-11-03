@@ -2197,3 +2197,24 @@ Painleve-regime theorem, a general impact integrator, or a geometry/CCD owner.
 Focused exact-source tests exercise loaded rest, static/sliding/breakaway
 friction, full off-diagonal inertia, shared contacts, elastic midpoint storage,
 fixed derivative actions, final replay, errors, cancellation and resource limits.
+
+
+## Complete simultaneous impulse response and work reductions
+
+The normal, circular Coulomb and directional-ellipse impact audits reduce each
+complete original Delassus response before rounding its reported velocity.
+Double-double products and sums retain small cross-contact motion between
+large opposing impulses, including geometrically inactive observations. Work
+uses the unrounded response and compensated impulse/midpoint products before
+the final assembled reduction; it does not subtract rounded bulk kinetic
+energies. The shared product accumulator retains representable fused
+cancellation when an individual velocity product would overflow.
+
+These reductions leave the physical contact laws, native solver candidates,
+determinacy classifications, contact tolerances, passivity allowances and
+cancellation/resource policies intact. Independent downstream native-state
+momentum and energy admission remains necessary. The normal three-body
+counterwork regression and circular/directional inactive-response regression
+exercise physical transfers that sequential f64 accumulation can erase. This
+is finite floating-point arithmetic, not an interval conservation certificate
+or a benchmark performance claim.

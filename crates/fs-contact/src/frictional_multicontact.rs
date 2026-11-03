@@ -21,6 +21,8 @@
 //! Total midpoint loss is an impact dissipation receipt, NOT a friction-heat
 //! allocation: prescribed motion and material energy partition belong downstream.
 
+use crate::multicontact::add_product;
+use fs_math::dd::Dd;
 use fs_solver::orthant::active_set::{SpdOrthantConfig, SpdOrthantError, solve_spd_orthant};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
@@ -819,14 +821,30 @@ fn audit(
         impulses[i].copy_from_slice(&point[3 * k..3 * k + 3]);
     }
     let mut velocities: Vec<_> = contacts.iter().map(|c| c.relative_velocity).collect();
+    let mut work = Dd::ZERO;
+    let mut work_scale = Dd::ZERO;
     for &i in order {
         poll(cancelled)?;
         for a in 0..3 {
+            let before = Dd::from_f64(contacts[i].relative_velocity[a]);
+            let mut velocity = before;
             for &j in active {
                 for b in 0..3 {
-                    velocities[i][a] += w[(3 * i + a) * d + 3 * j + b] * impulses[j][b];
+                    velocity =
+                        add_product(velocity, w[(3 * i + a) * d + 3 * j + b], impulses[j][b]);
                 }
             }
+            if !velocity.hi.is_finite() || !velocity.lo.is_finite() {
+                return Err(E::NonFinite);
+            }
+            velocities[i][a] = velocity.to_f64();
+            // Keep the complete contact response through the work pairing;
+            // neither an intermediate velocity nor cancelling row work is
+            // rounded before the assembled transfer is formed.
+            let midpoint = before * Dd::from_f64(0.5) + velocity * Dd::from_f64(0.5);
+            let term = Dd::from_f64(impulses[i][a]) * midpoint;
+            work = work + term;
+            work_scale = work_scale + term.abs();
         }
     }
     let mut r = FrictionalContactResiduals::default();
@@ -862,16 +880,11 @@ fn audit(
                 .max((p[1] + radius * (v[1] / speed)).hypot(p[2] + radius * (v[2] / speed)));
         }
     }
-    let mut work = 0.0;
-    let mut work_scale = 0.0;
-    for &i in order {
-        for a in 0..3 {
-            let term =
-                impulses[i][a] * (0.5 * contacts[i].relative_velocity[a] + 0.5 * velocities[i][a]);
-            work += term;
-            work_scale += term.abs();
-        }
+    if !work.lo.is_finite() || !work_scale.lo.is_finite() {
+        return Err(E::NonFinite);
     }
+    let work = work.to_f64();
+    let work_scale = work_scale.to_f64();
     if impulses
         .iter()
         .chain(&velocities)

@@ -35,6 +35,98 @@ fn solve(
 }
 
 #[test]
+fn circular_and_directional_contacts_retain_small_inactive_cross_response() {
+    use fs_contact::frictional_multicontact::elliptic::{
+        EllipticFriction, EllipticFrictionalContact, solve_elliptic_frictional_contacts,
+    };
+    // Three independent unit normal impulses cancel large opposite responses
+    // at another observed point, leaving exactly 1 m/s. The full observation
+    // row is [a,1,-a,a], with initial fourth physical rate 1/a. Tangent rows
+    // are independent and remain at rest, so both supplied friction laws have
+    // zero traction. Relative motion at an inactive point is still physical.
+    let a = 2.0_f64.powi(54);
+    let normal = [
+        1.0,
+        0.0,
+        0.0,
+        a,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        -a,
+        a,
+        1.0,
+        -a,
+        3.0 * a * a,
+    ];
+    for order in [[0, 1, 2, 3], [2, 0, 3, 1]] {
+        let contacts: Vec<_> = order
+            .iter()
+            .map(|&i| {
+                let mut c = contact(i as u64, [if i == 3 { 0.0 } else { -1.0 }, 0.0, 0.0], 0.5);
+                if i == 3 {
+                    c.gap = 1.0;
+                }
+                c
+            })
+            .collect();
+        let mut matrix = vec![0.0; 12 * 12];
+        for i in 0..12 {
+            matrix[12 * i + i] = 1.0;
+        }
+        for (i, &original_i) in order.iter().enumerate() {
+            for (j, &original_j) in order.iter().enumerate() {
+                matrix[(3 * i) * 12 + 3 * j] = normal[4 * original_i + original_j];
+            }
+        }
+        let circle = solve(&contacts, &matrix);
+        let ellipses: Vec<_> = contacts
+            .iter()
+            .map(|&c| EllipticFrictionalContact {
+                friction: EllipticFriction {
+                    coefficients_mu: [0.5, 0.25],
+                    principal_axis: [1.0, 0.0],
+                },
+                ..c.into()
+            })
+            .collect();
+        let directional = solve_elliptic_frictional_contacts(
+            &ellipses,
+            &matrix,
+            FrictionalContactConfig::default(),
+            || false,
+        )
+        .unwrap();
+        for (i, &original) in order.iter().enumerate() {
+            let expected_speed = if original == 3 { 1.0 } else { 0.0 };
+            for (actual, expected) in
+                circle.relative_velocities_after[i]
+                    .into_iter()
+                    .zip([expected_speed, 0.0, 0.0])
+            {
+                close(actual, expected);
+            }
+            for (actual, expected) in
+                directional.relative_velocities_after[i]
+                    .into_iter()
+                    .zip([expected_speed, 0.0, 0.0])
+            {
+                close(actual, expected);
+            }
+            for (a, b) in circle.impulses[i].into_iter().zip(directional.impulses[i]) {
+                close(a, b);
+            }
+        }
+        close(circle.relative_work, -1.5);
+        close(directional.relative_work, -1.5);
+    }
+}
+
+#[test]
 fn oblique_impact_solves_normal_and_shear_together() {
     let w = [1.0, 0.3, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0, 1.4];
     let mut c = contact(1, [-1.0, 3.0, 0.0], 0.4);

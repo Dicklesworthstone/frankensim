@@ -471,7 +471,7 @@ fn solve_mobility(
 
 // Preserve the fused owner's representable cancellation when the individual
 // product overflows. The common path remains an unscaled error-free product.
-fn add_product(sum: Dd, a: f64, b: f64) -> Dd {
+pub(crate) fn add_product(sum: Dd, a: f64, b: f64) -> Dd {
     let value = sum + Dd::from_f64(a) * Dd::from_f64(b);
     if value.hi.is_finite() && value.lo.is_finite() {
         value
