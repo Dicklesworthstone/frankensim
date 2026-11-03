@@ -385,6 +385,9 @@ pub mod patch;
 /// Simultaneous contact impulses on original cohesive motion and inertia.
 pub mod impact;
 
+/// Original cohesive motion through declared affine contact events.
+pub mod trajectory;
+
 /// Objective cohesive transport and exact finite-rotation work ports.
 pub mod objective;
 

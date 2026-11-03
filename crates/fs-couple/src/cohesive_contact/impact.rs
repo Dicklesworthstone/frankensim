@@ -145,7 +145,7 @@ pub fn normal_impacts_candidate_controlled<'m, 'a>(
     })
 }
 
-fn admit_motions(
+pub(super) fn admit_motions(
     motions: &[&CohesiveMotion<'_, '_>],
     preconditioners: &[&dyn Precond],
     maximum_bodies: usize,

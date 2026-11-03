@@ -221,6 +221,45 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         self.steps
     }
 
+    /// Original numerical controls, copied without changing the accepted body.
+    #[must_use]
+    pub fn dynamics_config(&self) -> DynamicsConfig {
+        self.config
+    }
+
+    /// Accepted prescribed offsets in original patch order and local axes.
+    /// Reconstructs each offset from its retained material jump and native map.
+    pub fn prescribed_jumps_m(&self, cx: &Cx<'_>) -> Result<Vec<[f64; 3]>, DynamicsError> {
+        self.prescribed_jumps_m_controlled(&mut || cx.checkpoint().is_err())
+    }
+
+    /// Read-only predicate counterpart; cancellation publishes no partial array.
+    pub fn prescribed_jumps_m_controlled(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 3]>, DynamicsError> {
+        if cancelled() {
+            return Err(Error::Cancelled.into());
+        }
+        let mut offsets = Vec::with_capacity(self.state.points.len());
+        for (patch, point) in self.state.system.patches.iter().zip(&self.state.points) {
+            if cancelled() {
+                return Err(Error::Cancelled.into());
+            }
+            let free = patch.jump(&self.state.displacements, [0.0; 3])?;
+            let jump = point.jump_m();
+            offsets.push([
+                finite(jump[0] - free[0])?,
+                finite(jump[1] - free[1])?,
+                finite(jump[2] - free[2])?,
+            ]);
+        }
+        if cancelled() {
+            return Err(Error::Cancelled.into());
+        }
+        Ok(offsets)
+    }
+
     /// Change the original sourced bond temperatures without resetting damage,
     /// velocity, time, trajectory count, mass or mechanical step controls.
     /// The next ordinary step evolves under the resulting interface forces.
@@ -325,6 +364,42 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             endpoint_prescribed_jumps_m,
             dt_s,
             self.time_s + dt_s,
+            cancelled,
+        )
+    }
+
+    /// Advance the original mechanics to an explicit physical clock coordinate.
+    /// The actual positive remainder drives the solve; no later clock edit is
+    /// used to synchronize independently retained bodies.
+    pub fn advance_to_time(
+        &self,
+        mean_force_n: &[f64],
+        endpoint_prescribed_jumps_m: &[[f64; 3]],
+        target_time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<DynamicsStep<'m, 'a>, DynamicsError> {
+        self.advance_to_time_controlled(
+            mean_force_n,
+            endpoint_prescribed_jumps_m,
+            target_time_s,
+            &mut || cx.checkpoint().is_err(),
+        )
+    }
+
+    /// Exact-target counterpart of [`Self::advance_controlled`], retaining all
+    /// native time, work, material, velocity and cancellation gates.
+    pub fn advance_to_time_controlled(
+        &self,
+        mean_force_n: &[f64],
+        endpoint_prescribed_jumps_m: &[[f64; 3]],
+        target_time_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DynamicsStep<'m, 'a>, DynamicsError> {
+        self.advance_at_controlled(
+            mean_force_n,
+            endpoint_prescribed_jumps_m,
+            target_time_s - self.time_s,
+            target_time_s,
             cancelled,
         )
     }

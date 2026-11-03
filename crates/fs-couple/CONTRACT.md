@@ -17733,6 +17733,43 @@ subsequent unloading and all-body refusal/replay. Frozen event geometry remains
 caller-owned; event-time search, persistent-contact stepping and allocation of
 instantaneous loss to heat or fracture require their own physical owners.
 
+### Cohesive trajectories with affine contact geometry
+
+`cohesive_contact::trajectory::advance_candidate` advances retained cohesive
+bodies through a complete bounded interval with fixed normal-first contact
+frames, sparse traces and affine prescribed surface motion. Constant reduced
+loads and affine prescribed interface offsets enter each original native
+midpoint/material-path solve. Native offset accessors reconstruct accepted
+offsets through the original material map; target-time advancement gives every
+body the same exact represented clock with its actual positive solve duration.
+
+Contact gaps are reconstructed from initial gaps, actual displacement
+increments and prescribed motion using compensated sums. Every accepted
+single native displacement path is straight, so nonnegative start and endpoint
+gaps admit the entire declared affine contact path. A penetrating proposal
+shortens the duration and recomputes all native candidates from the unchanged
+predecessor. Rejected material histories, interpolated physical states and
+projected gaps never enter the accepted trajectory. All active contacts enter
+the existing simultaneous Coulomb impact owner at the actual common event time.
+
+Native residual/Newton work is reserved before each body trial; successful
+trials refund unused work, and refused trials consume their reservation.
+Accepted-segment, body-trial, refinement, event, workspace and minimum-progress
+bounds apply. Whole-window publication is atomic. The report retains original
+contact determinacy, event times and losses, physical storage/work channels,
+and charged computation. One compensated account retains all accepted physical
+increments; sums of absolute native smooth and impact defects prevent numerical
+errors from cancelling into a claimed balance.
+
+Positive activation distance is an explicit spatial approximation. Timestep
+and activation-distance refinement govern trajectory accuracy. This admits the
+declared discrete affine paths, not the exact continuous nonlinear flow,
+undeclared geometric features or changing contact frames. Loaded resting
+contact, unresolved chatter or exhausted time progress returns a refusal;
+this adapter does not invent sustained reactions or claim a general
+Moreau--Jean method. Instantaneous losses remain separate from material
+fracture, viscosity and internal friction, with no automatic heat partition.
+
 ## Finite cohesive patch load line
 
 `cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.
