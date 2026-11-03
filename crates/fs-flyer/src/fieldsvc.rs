@@ -14,8 +14,8 @@
 //!     whenever a force-coupled component the active model supports
 //!     is absent from the sum.
 //!   - Ambient components are analytic (fs-atmo exact gradients); the
-//!     bound-circulation and ground-image components use the local
-//!     horseshoe kernel with a declared singularity core. The
+//!     bound-circulation and ground-image components use fs-vpm's
+//!     finite-core segment kernel and exact spatial derivatives. The
 //!     physical-wake (fs-vpm hybrid) and propeller-induced branches
 //!     are follow-up wiring — they are DECLARED unsupported by this
 //!     state version, so their omission is named but does not forbid
@@ -25,6 +25,9 @@ use crate::{Refusal, refuse};
 use fs_atmo::{Atmosphere, DEC17_AIR, FlatSiteLogLaw, TurbulenceField};
 use fs_blake3::hash_domain;
 use fs_math::det;
+use fs_vpm::filament3d::{
+    SegmentKinematics, segment_kinematics_with_core, segment_velocity_with_core,
+};
 
 /// Component bit: mean atmosphere (log law).
 pub const C_MEAN_ATMO: u32 = 1 << 0;
@@ -341,56 +344,50 @@ pub struct FieldSampleSet {
     pub meta: FieldMeta,
 }
 
-fn seg_velocity_cored(p: [f64; 3], a: [f64; 3], b: [f64; 3], core: f64) -> [f64; 3] {
-    // Biot–Savart finite segment with a smooth core (Vatistas n=2
-    // class): factor = c²/(c⁴ + core⁴)^{1/2} — deterministic sqrt only.
-    let r1 = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
-    let r2 = [p[0] - b[0], p[1] - b[1], p[2] - b[2]];
-    let c = [
-        r1[1] * r2[2] - r1[2] * r2[1],
-        r1[2] * r2[0] - r1[0] * r2[2],
-        r1[0] * r2[1] - r1[1] * r2[0],
-    ];
-    let c2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
-    let l1 = det::sqrt(r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2]);
-    let l2 = det::sqrt(r2[0] * r2[0] + r2[1] * r2[1] + r2[2] * r2[2]);
-    if l1 < 1e-12 || l2 < 1e-12 {
-        return [0.0; 3];
-    }
-    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let dot = ab[0] * (r1[0] / l1 - r2[0] / l2)
-        + ab[1] * (r1[1] / l1 - r2[1] / l2)
-        + ab[2] * (r1[2] / l1 - r2[2] / l2);
-    let denom = det::sqrt(c2 * c2 + core * core * core * core);
-    if denom < 1e-24 {
-        return [0.0; 3];
-    }
-    let k = dot * c2 / denom / (4.0 * core::f64::consts::PI * c2.max(1e-24));
-    [k * c[0], k * c[1], k * c[2]]
-}
-
-fn horseshoe_velocity(p: [f64; 3], b: &BoundSystem, mirror: bool) -> [f64; 3] {
-    let (sgn, refl) = if mirror { (-1.0, -1.0) } else { (1.0, 1.0) };
+fn horseshoe_segments(b: &BoundSystem, mirror: bool) -> [([f64; 3], [f64; 3]); 3] {
+    let refl = if mirror { -1.0 } else { 1.0 };
     let m = |q: [f64; 3]| [q[0], q[1], refl * q[2]];
     let l = m(b.tip_left_m);
     let r = m(b.tip_right_m);
     let lt = [l[0] - b.trail_m, l[1], l[2]];
     let rt = [r[0] - b.trail_m, r[1], r[2]];
-    let g = sgn * b.gamma_m2ps;
+    [(lt, l), (l, r), (r, rt)]
+}
+
+fn horseshoe_velocity(p: [f64; 3], b: &BoundSystem, mirror: bool) -> [f64; 3] {
+    let g = if mirror { -b.gamma_m2ps } else { b.gamma_m2ps };
     let mut v = [0.0f64; 3];
-    for (a, bb, gg) in [(lt, l, g), (l, r, g), (r, rt, g)] {
-        let s = seg_velocity_cored(p, a, bb, b.core_m);
-        v[0] += gg * s[0];
-        v[1] += gg * s[1];
-        v[2] += gg * s[2];
+    for (a, bb) in horseshoe_segments(b, mirror) {
+        let s = segment_velocity_with_core(p, a, bb, b.core_m * b.core_m);
+        v[0] += g * s[0];
+        v[1] += g * s[1];
+        v[2] += g * s[2];
     }
     v
 }
 
-/// Distance from p to the bound span line (core-mask predicate).
-fn dist_to_span(p: [f64; 3], b: &BoundSystem) -> f64 {
-    let a = b.tip_left_m;
-    let c = b.tip_right_m;
+fn horseshoe_kinematics(p: [f64; 3], b: &BoundSystem, mirror: bool) -> Option<SegmentKinematics> {
+    let g = if mirror { -b.gamma_m2ps } else { b.gamma_m2ps };
+    let mut out = SegmentKinematics::default();
+    if g == 0.0 {
+        return Some(out);
+    }
+    for (a, bb) in horseshoe_segments(b, mirror) {
+        let s = segment_kinematics_with_core(p, a, bb, b.core_m * b.core_m)?;
+        for i in 0..3 {
+            out.velocity[i] += g * s.velocity[i];
+            for j in 0..3 {
+                out.gradient[i][j] += g * s.gradient[i][j];
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Distance from p to any selected source segment, including trailing legs
+/// and ground images. The core mask is a reliability policy, not the compact
+/// support of vorticity: the Rosenhead–Moore core has algebraic tails.
+fn dist_to_segment(p: [f64; 3], a: [f64; 3], c: [f64; 3]) -> f64 {
     let ab = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
     let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
     let l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
@@ -439,9 +436,8 @@ fn u_at(state: &FieldSourceStateV1, mask: u32, p: [f64; 3], tick: u64) -> [f64; 
     u
 }
 
-/// Analytic gradient of the ANALYTIC components (atmosphere); the
-/// singular components contribute through the FD dual only, which the
-/// grad field completes by central differences for those bits.
+/// Analytic gradient of atmosphere components. The finite-core bound/image
+/// Jacobians are added separately from the same physical segment kernel.
 fn analytic_grad(state: &FieldSourceStateV1, mask: u32, p: [f64; 3], tick: u64) -> [[f64; 3]; 3] {
     let mut g = [[0.0f64; 3]; 3];
     if p[2] >= 0.0 {
@@ -504,6 +500,26 @@ pub fn sample_field(
     let has_singular =
         component_mask & (C_BOUND_CIRCULATION | C_GROUND_IMAGES) != 0 && state.bound.is_some();
     let core = state.bound.as_ref().map_or(0.0, |b| b.core_m);
+    if let Some(b) = state.bound.as_ref().filter(|_| has_singular) {
+        if !b.gamma_m2ps.is_finite()
+            || !b
+                .tip_left_m
+                .iter()
+                .chain(b.tip_right_m.iter())
+                .all(|x| x.is_finite())
+            || !b.trail_m.is_finite()
+            || b.trail_m < 0.0
+            || !b.core_m.is_finite()
+            || b.core_m < 0.0
+            || !(b.core_m * b.core_m).is_finite()
+        {
+            return Err(refuse(
+                "field-bound-invalid",
+                "non-finite bound geometry/circulation or invalid core/trailing length".into(),
+                "finite geometry/circulation, nonnegative trailing length and squared core",
+            ));
+        }
+    }
     let mut out = FieldSampleSet {
         u: Vec::with_capacity(n),
         grad_u: Vec::with_capacity(n),
@@ -541,20 +557,25 @@ pub fn sample_field(
     for i in 0..n {
         let p = grid.point(i);
         let solid = p[2] < 0.0;
-        let u = u_at(state, component_mask, p, tick);
-        // Gradient: analytic for the atmosphere + central differences
-        // for the singular components (one shared u_at path).
+        let mut u = u_at(state, component_mask & !singular_mask_bits, p, tick);
+        // Differentiate the actual finite-core velocity analytically. A
+        // singular zero-core point is explicitly invalid, never zero-valid.
         let mut g = analytic_grad(state, component_mask, p, tick);
-        if singular_mask_bits != 0 {
-            for j in 0..3 {
-                let mut pp = p;
-                let mut pm = p;
-                pp[j] += FD_H;
-                pm[j] -= FD_H;
-                let up = u_at(state, singular_mask_bits, pp, tick);
-                let um = u_at(state, singular_mask_bits, pm, tick);
-                for gi in 0..3 {
-                    g[gi][j] += (up[gi] - um[gi]) / (2.0 * FD_H);
+        let mut source_regular = true;
+        if let Some(b) = &state.bound {
+            for (bit, mirror) in [(C_BOUND_CIRCULATION, false), (C_GROUND_IMAGES, true)] {
+                if singular_mask_bits & bit == 0 {
+                    continue;
+                }
+                if let Some(s) = horseshoe_kinematics(p, b, mirror) {
+                    for i in 0..3 {
+                        u[i] += s.velocity[i];
+                        for j in 0..3 {
+                            g[i][j] += s.gradient[i][j];
+                        }
+                    }
+                } else {
+                    source_regular = false;
                 }
             }
         }
@@ -605,10 +626,16 @@ pub fn sample_field(
             [0.0; 3]
         };
         let in_core = has_singular
-            && state
-                .bound
-                .as_ref()
-                .is_some_and(|b| dist_to_span(p, b) < 4.0 * b.core_m);
+            && state.bound.as_ref().is_some_and(|b| {
+                [(C_BOUND_CIRCULATION, false), (C_GROUND_IMAGES, true)]
+                    .into_iter()
+                    .any(|(bit, mirror)| {
+                        singular_mask_bits & bit != 0
+                            && horseshoe_segments(b, mirror)
+                                .into_iter()
+                                .any(|(a, c)| dist_to_segment(p, a, c) < 4.0 * b.core_m)
+                    })
+            });
         let finite_ok =
             u.iter().all(|v| v.is_finite()) && g.iter().flatten().all(|v| v.is_finite());
         out.u.push(u);
@@ -621,7 +648,8 @@ pub fn sample_field(
         out.q_criterion.push(q);
         out.lambda2.push(l2v);
         out.kinetic_speed_gradient.push(ksg);
-        out.validity_mask.push(finite_ok && !solid);
+        out.validity_mask
+            .push(finite_ok && source_regular && !solid);
         out.singularity_core_mask.push(in_core);
         out.solid_exclusion_mask.push(solid);
     }
@@ -661,7 +689,7 @@ impl FieldSampleSet {
         {
             b.extend_from_slice(&v.to_bits().to_le_bytes());
         }
-        hash_domain("org.frankensim.wf.fieldsvc.v1", &b).to_hex()
+        hash_domain("org.frankensim.wf.fieldsvc.v2", &b).to_hex()
     }
 }
 

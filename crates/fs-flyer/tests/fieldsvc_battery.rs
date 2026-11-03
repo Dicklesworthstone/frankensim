@@ -380,9 +380,140 @@ fn solid_exclusion_and_determinism_golden() {
         "golden",
         &format!("\"digest\":\"{a}\",\"snapshot_id\":\"{id1}\""),
     );
+    // v2 intentionally uses the dimensionally consistent Rosenhead–Moore
+    // kernel and its exact Jacobian. Scaling, core-axis and independent
+    // velocity-difference checks below establish the changed physical result.
     assert_eq!(
-        a, "e07ab5cb99f09d73349dafbce22510e63177420f6cd7c65433d7b1f70586bdc3",
+        a, "af6497348b5400d8de85efe6f710a7187b119cb906fb4397916932ff083ef856",
         "fieldsvc golden moved — determinism regression or an \
          intentional kernel change requiring the golden-bump protocol"
+    );
+}
+
+fn sample_bound_point(
+    state: &FieldSourceStateV1,
+    p: [f64; 3],
+    mask: u32,
+) -> fs_flyer::fieldsvc::FieldSampleSet {
+    sample_field(
+        state,
+        &GridSpec {
+            origin_m: p,
+            dx_m: 1.0,
+            nx: 1,
+            ny: 1,
+            nz: 1,
+        },
+        mask,
+    )
+    .unwrap()
+}
+
+#[test]
+fn bound_velocity_and_vorticity_obey_physical_length_scaling() {
+    let state = lifting_state();
+    let p = [-0.03, 1.2, 2.53];
+    let mask = C_BOUND_CIRCULATION | C_GROUND_IMAGES;
+    let reference = sample_bound_point(&state, p, mask);
+    for scale in [1e-6, 1e-3, 1.0, 1e3, 1e6] {
+        let mut scaled = state.clone();
+        let b = scaled.bound.as_mut().unwrap();
+        b.tip_left_m = b.tip_left_m.map(|x| x * scale);
+        b.tip_right_m = b.tip_right_m.map(|x| x * scale);
+        b.trail_m *= scale;
+        b.core_m *= scale;
+        let result = sample_bound_point(&scaled, p.map(|x| x * scale), mask);
+        assert!(result.validity_mask[0]);
+        assert_eq!(
+            result.singularity_core_mask[0],
+            reference.singularity_core_mask[0]
+        );
+        for i in 0..3 {
+            assert!((result.u[0][i] * scale - reference.u[0][i]).abs() < 2e-11);
+            assert!((result.omega[0][i] * scale * scale - reference.omega[0][i]).abs() < 2e-9);
+            for j in 0..3 {
+                assert!(
+                    (result.grad_u[0][i][j] * scale * scale - reference.grad_u[0][i][j]).abs()
+                        < 2e-9
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn finite_core_bound_gradient_matches_independent_velocity_differences() {
+    let state = lifting_state();
+    let mask = C_BOUND_CIRCULATION | C_GROUND_IMAGES;
+    // Include the core axis and endpoint: u can vanish locally while curl is
+    // nonzero, and a positive core makes both locations smooth.
+    for p in [
+        [-0.1, 1.2, 2.6],
+        [0.0, 0.0, 2.5],
+        [0.0, 6.0, 2.5],
+        [-60.0, 7.0, 0.8],
+    ] {
+        let sample = sample_bound_point(&state, p, mask);
+        assert!(sample.validity_mask[0]);
+        let h = 2e-6;
+        for j in 0..3 {
+            let mut plus = p;
+            let mut minus = p;
+            plus[j] += h;
+            minus[j] -= h;
+            let up = sample_bound_point(&state, plus, mask).u[0];
+            let um = sample_bound_point(&state, minus, mask).u[0];
+            for i in 0..3 {
+                let fd = (up[i] - um[i]) / (2.0 * h);
+                let exact = sample.grad_u[0][i][j];
+                assert!(
+                    (fd - exact).abs() < 3e-6 * exact.abs().max(1.0),
+                    "{p:?} entry {i},{j}: {fd} vs {exact}"
+                );
+            }
+        }
+        let norm = sample.grad_u[0]
+            .iter()
+            .flatten()
+            .map(|x| x * x)
+            .sum::<f64>()
+            .sqrt();
+        assert!(sample.div_analytic[0].abs() < 5e-14 * norm.max(1.0));
+    }
+}
+
+#[test]
+fn core_masks_follow_selected_trailing_legs_and_ground_images() {
+    let state = lifting_state();
+    let leg = [-5.0, -6.0, 2.51];
+    assert!(sample_bound_point(&state, leg, C_BOUND_CIRCULATION).singularity_core_mask[0]);
+    assert!(!sample_bound_point(&state, leg, C_GROUND_IMAGES).singularity_core_mask[0]);
+    let image_leg = [leg[0], leg[1], -leg[2]];
+    assert!(sample_bound_point(&state, image_leg, C_GROUND_IMAGES).singularity_core_mask[0]);
+    assert!(!sample_bound_point(&state, image_leg, C_BOUND_CIRCULATION).singularity_core_mask[0]);
+    // Selecting only images must not mark the unselected physical span.
+    assert!(!sample_bound_point(&state, [0.0, 0.0, 2.5], C_GROUND_IMAGES).singularity_core_mask[0]);
+}
+
+#[test]
+fn singular_zero_core_derivative_is_invalid_and_bad_sources_refuse() {
+    let mut state = lifting_state();
+    state.bound.as_mut().unwrap().core_m = 0.0;
+    let singular = sample_bound_point(&state, [0.0, 0.0, 2.5], C_BOUND_CIRCULATION);
+    assert!(!singular.validity_mask[0]);
+    assert!(singular.normalized_divergence(0).is_none());
+    state.bound.as_mut().unwrap().core_m = -0.1;
+    assert_eq!(
+        sample_field(&state, &grid_small(), C_BOUND_CIRCULATION)
+            .unwrap_err()
+            .code,
+        "field-bound-invalid"
+    );
+    state.bound.as_mut().unwrap().core_m = f64::INFINITY;
+    assert_eq!(
+        sample_field(&state, &grid_small(), C_BOUND_CIRCULATION)
+            .unwrap_err()
+            .code,
+        "field-bound-invalid"
     );
 }

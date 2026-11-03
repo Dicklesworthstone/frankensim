@@ -29,6 +29,7 @@ fs-evidence = { path = "../fs-evidence" }
 fs-robust = { path = "../fs-robust" }
 fs-contact = { path = "../fs-contact" }
 fs-solver = { path = "../fs-solver" }
+fs-vpm = { path = "../fs-vpm" }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }

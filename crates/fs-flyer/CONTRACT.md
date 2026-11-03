@@ -16,6 +16,22 @@ the browser boundary remains in `fs-flyer-wasm`.
 
 ## Public types and semantics
 
+`fieldsvc` evaluates its bound horseshoe and flat-ground images through the
+same Rosenhead–Moore finite-segment kernel as `fs-vpm`. Velocity gradients,
+vorticity, strain, Q and lambda2 use exact spatial derivatives; the independent
+finite-difference divergence overlay remains a diagnostic with its declared
+step. Geometry and core scaled by s give velocity /s and gradient/vorticity
+/s² at fixed circulation. Positive-core axis and endpoint derivatives remain
+finite and retain the core's nonzero vorticity. Unregularized on-segment
+derivatives are masked invalid. The core reliability mask covers every
+selected span, trailing leg and image segment; it does not claim compact
+support of vorticity. Invalid core lengths and non-finite bound inputs refuse.
+The field digest domain is v2 for this intentional physical kernel change.
+`tests/fieldsvc_battery.rs` checks scaling, independent velocity differences,
+axis/endpoint behavior, image cancellation and selected-source masks (G0/G1).
+The field service still does not claim a resolved physical wake, propeller
+field or pressure; those components retain their existing explicit refusal.
+
 - `FlyerDesign { wing, canard, rudder, lateral, warp, masses… }` — frd-body-v1
   coordinates, +x forward from the wing leading edge, SI units, radians.
 - `LateralControlTopology::{WarpWithSlavedRudder{ratio}, WarpIndependentRudder}`;
