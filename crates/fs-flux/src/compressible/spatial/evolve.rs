@@ -10,6 +10,7 @@ pub(super) fn attempt(
     dt: f64,
     cfl: f64,
     reconstruction: Reconstruction,
+    force_controls: Option<forcing::ForceControl3d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     let first = spatial(
@@ -21,6 +22,7 @@ pub(super) fn attempt(
         &mut work.slopes,
         &mut work.flux,
         reconstruction,
+        force_controls,
         cancelled,
     )?;
     check_cfl::<Error>(first.rate * dt, cfl)?;
@@ -33,6 +35,7 @@ pub(super) fn attempt(
         &mut work.stage,
         dt,
         false,
+        force_controls,
         cancelled,
     )?;
     capture_boundaries(
@@ -52,6 +55,7 @@ pub(super) fn attempt(
         &mut work.slopes,
         &mut work.flux,
         reconstruction,
+        force_controls,
         cancelled,
     )?;
     check_cfl::<Error>(second.rate * dt, cfl)?;
@@ -64,6 +68,7 @@ pub(super) fn attempt(
         &mut work.candidate,
         dt,
         true,
+        force_controls,
         cancelled,
     )?;
     capture_boundaries(
@@ -91,11 +96,15 @@ fn spatial(
     slopes: &mut [[[f64; 5]; 3]],
     fluxes: &mut [Vec<SpatialFaceFlux>; 3],
     reconstruction: Reconstruction,
+    force_controls: Option<forcing::ForceControl3d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     let mut stats = StageStats::default();
     for (p, q) in primitive.iter_mut().zip(states) {
         *p = q.primitive(gas, &mut *cancelled)?;
+        if let Some(controls) = force_controls {
+            controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+        }
     }
     stats.limited = cartesian::slopes::<Error>(
         grid,
@@ -229,6 +238,7 @@ pub(super) fn update(
     output: &mut [State],
     dt: f64,
     final_stage: bool,
+    force_controls: Option<forcing::ForceControl3d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), Error> {
     cartesian::update::<5, Error, _>(
@@ -242,7 +252,10 @@ pub(super) fn update(
         cancelled,
         |k, row, cancelled| {
             let q = State::from_array(row.try_into().expect("five conserved components"));
-            q.primitive(gas, &mut *cancelled)?;
+            let primitive = q.primitive(gas, &mut *cancelled)?;
+            if let Some(controls) = force_controls {
+                controls.admit_velocity::<Error>(primitive.velocity, primitive.sound_speed)?;
+            }
             output[k] = q;
             Ok(())
         },

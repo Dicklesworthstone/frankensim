@@ -1290,6 +1290,51 @@ moving geometry, reciprocal moving-wall FSI, a shock adjoint, physical shock
 thickness or experimental validation. The full EOS-specific fully discrete
 entropy/invariant-domain and moving-domain programs remain separate work.
 
+### Conservative body forcing on the original three-dimensional owners
+
+`Euler3d::step_with_forcing` composes source half step, original SSP RK2
+advection and source half step inside the existing retry/publication owner.
+`BodyForce3d` distinguishes acceleration [m/s²] from force density [N/m³],
+with uniform or borrowed x-fast per-cell fields. Acceleration uses the density
+of each current source stage. The authored field is held over one attempted
+interval; callers with time-varying forcing must provide each new accepted
+interval's field explicitly.
+
+Each kick changes only momentum and total energy. For represented momentum
+increment `delta_p`, its work is
+`delta_p dot ((p_old/rho + p_new/rho)/2)`. This preserves source-only internal
+energy to floating-point accuracy and prevents a momentum increment lost to
+rounding from becoming spurious heat. Mass and composition are untouched.
+`ForceChange3d` reports extensive impulse and mechanical work separately from
+the original per-face boundary exchange; conservation residuals subtract both.
+There is no additional sensible-heat source or subtraction of formation energy.
+
+An explicit positive finite `ForceControl3d::maximum_mach` admits the accepted,
+kicked and native RK cell states. Original face CFL checks remain at both
+advective stages; the final source endpoint also passes a cell acoustic CFL
+check. The returned maximum CFL includes that endpoint. A failed kick,
+caloric recovery, Mach/CFL check or cancellation retains the accepted field,
+clock, loads and report. Every retry recopies the accepted state. An exactly
+zero force follows the ordinary step after validating its authored inputs.
+
+`MolecularEuler3d::step_with_forcing` places this same forced Euler interval
+between its original molecular halves. A shortened central interval or refused
+final molecular endpoint retries the whole composition from the accepted
+state. Current molecular/SGS stress, heat, physical wall work and the final
+Mach/acoustic checks keep their original owners and a common accepted duration.
+Its combined report carries both actual boundary exchange and body work.
+
+The added frozen-gas `ForcingWorkspace3d` stores one five-component conserved
+state per cell (40 nominal bytes/cell), with checked required bytes and actual
+capacity admission. It is reusable across retries; the added source sweeps
+allocate no arrays and poll cancellation. This supplies driven compressible
+flows and channel forcing. Gravity remains an explicit split source, without
+a hydrostatic well-balanced or turbulent-channel accuracy claim. Focused
+native regressions accompany the implementation. The five new Euler tests
+and two new coupled tests pass in the native debug build, including variable-Cp
+source work, force-driven stability retries, active dynamic channel SGS,
+physical wall energy and final-checkpoint rollback.
+
 ### Three-dimensional Newtonian stress, Fourier heat and the coupled field
 
 `spatial::molecular::MolecularTransport3d` binds the original gas's exact species

@@ -19,7 +19,9 @@ pub struct MolecularStepReport3d {
     pub after: Totals,
     /// Combined inward molecular and advective boundary transfer.
     pub boundary_change: Totals,
-    /// `after - before - boundary_change` for all five conservative components.
+    /// Accepted body impulse/work from the central forced Euler interval.
+    pub source_change: ForceChange3d,
+    /// after - before - boundary_change - source_change for all five components.
     pub conservation_residual: Totals,
 }
 
@@ -239,6 +241,42 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         &mut self,
         maximum_duration: Time,
         controls: MolecularStepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, MolecularError> {
+        self.step_impl(maximum_duration, controls, None, cancelled)
+    }
+
+    /// Sustain a driven viscous/channel flow with conservative body work.
+    /// Molecular halves retain their current source, SGS and wall flux owners.
+    /// A shortened or refused central force/advection/force interval retries
+    /// the WHOLE molecular split from the accepted state with one duration.
+    /// Allocate workspace from flow().forcing_workspace(maximum_bytes).
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, MolecularError> {
+        force_controls.admit::<Error>()?;
+        let active = force.admit::<Error>(self.accepted.states.len(), &mut cancelled)?;
+        workspace.admit(self.accepted.states.len())?;
+        if !active {
+            return self.step(maximum_duration, controls, cancelled);
+        }
+        self.step_impl(
+            maximum_duration, controls, Some((force, force_controls, workspace)), cancelled,
+        )
+    }
+
+    fn step_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        mut forcing: Option<(BodyForce3d<'_>, ForceControl3d, &mut ForcingWorkspace3d)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, MolecularError> {
         poll(&mut cancelled)?;
@@ -261,6 +299,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         let mut rate: f64 = 0.0;
         for q in &self.accepted.states {
             let p = q.primitive(&self.accepted.gas, &mut cancelled)?;
+            if let Some((_, controls, _)) = &forcing {
+                controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+            }
             let local: f64 = (0..3)
                 .map(|a| (p.velocity[a].abs() + p.sound_speed) / self.accepted.grid.spacing[a])
                 .sum();
@@ -288,9 +329,15 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 )?;
                 self.boundary_trial
                     .copy_from_slice(&self.molecular.boundary_impulses);
-                let advection =
-                    self.trial
-                        .step(Time::new(dt), controls.advection, &mut cancelled)?;
+                let advection = match forcing.as_mut() {
+                    Some((force, force_controls, workspace)) => self.trial.step_impl(
+                        Time::new(dt), controls.advection,
+                        Some((*force, *force_controls, &mut **workspace)), &mut cancelled,
+                    )?,
+                    None => self.trial.step(
+                        Time::new(dt), controls.advection, &mut cancelled,
+                    )?,
+                };
                 if advection.elapsed.value() != dt {
                     shortened = Some(advection.elapsed.value());
                     return Err(MolecularError::Invalid(
@@ -325,6 +372,21 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     }
                     *total = add_totals(*total, *impulse);
                 }
+                if let Some((_, force_controls, _)) = &forcing {
+                    let mut endpoint_rate = 0.0_f64;
+                    for state in &self.trial.states {
+                        let primitive = state.primitive(&self.trial.gas, &mut cancelled)?;
+                        force_controls.admit_velocity::<Error>(
+                            primitive.velocity, primitive.sound_speed,
+                        )?;
+                        let local: f64 = (0..3).map(|axis| {
+                            (primitive.velocity[axis].abs() + primitive.sound_speed)
+                                / self.trial.grid.spacing[axis]
+                        }).sum();
+                        endpoint_rate = endpoint_rate.max(local);
+                    }
+                    check_cfl::<Error>(endpoint_rate * dt, controls.advection.cfl)?;
+                }
                 let after = checked_totals(
                     &self.trial.states,
                     self.accepted.grid.cell_volume(),
@@ -335,7 +397,13 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     &mut cancelled,
                 )?;
                 let boundary_change = Totals::from_array(outward.map(|v| -v));
-                let conservation_residual = balance(before, after, boundary_change)?;
+                let source_change = advection.source_change;
+                let source_totals = Totals {
+                    mass: 0.0, momentum: source_change.impulse, energy: source_change.work,
+                };
+                let conservation_residual = balance(
+                    before, after, add_totals(boundary_change, source_totals),
+                )?;
                 poll(&mut cancelled)?;
                 Ok(MolecularStepReport3d {
                     elapsed: Time::new(dt),
@@ -346,6 +414,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     before,
                     after,
                     boundary_change,
+                    source_change,
                     conservation_residual,
                 })
             })();

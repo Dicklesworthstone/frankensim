@@ -14,6 +14,9 @@ use fs_qty::Time;
 
 mod cartesian;
 mod evolve;
+/// Conservative body impulse and mechanical work on the original time owner.
+pub mod forcing;
+pub use forcing::{BodyForce3d, ForceChange3d, ForceControl3d, ForcingWorkspace3d};
 /// Conservative evolution of every original species in a volumetric field.
 pub mod mixture;
 /// Source-owned molecular stress and heat transport for the volumetric field.
@@ -373,7 +376,8 @@ pub type BoundaryImpulse = Totals;
 pub struct StepReport {
     /// Accepted duration [s].
     pub elapsed: Time,
-    /// Largest sum of face CFL contributions from x, y and z over both stages.
+    /// Largest combined face CFL over both RK stages; with forcing, also
+    /// includes the final source endpoint's cell acoustic CFL.
     pub maximum_cfl: f64,
     /// Rejected trials before acceptance.
     pub halvings: usize,
@@ -389,7 +393,9 @@ pub struct StepReport {
     pub after: Totals,
     /// Net inward transfer integrated with the same two RK stages.
     pub boundary_change: Totals,
-    /// `after - before - boundary_change` in coherent SI units.
+    /// Body impulse and mechanical work over both source half steps.
+    pub source_change: ForceChange3d,
+    /// after - before - boundary_change - source_change in coherent SI units.
     pub conservation_residual: Totals,
 }
 
@@ -503,6 +509,43 @@ impl Euler3d {
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.step_impl(maximum_duration, controls, None, cancelled)
+    }
+
+    /// Symmetric force/advection/force composition on the original transaction.
+    /// The force is held over the accepted interval; every retry starts from
+    /// the original accepted field. Source work preserves internal energy.
+    /// Uniform acceleration and prescribed force density have distinct units.
+    /// The caller supplies bounded reusable scratch and a physical Mach cap.
+    /// Gravity does not imply a hydrostatic well-balanced discretization.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        force_controls.admit::<Error>()?;
+        let active = force.admit::<Error>(self.states.len(), &mut cancelled)?;
+        workspace.admit(self.states.len())?;
+        if !active {
+            return self.step(maximum_duration, controls, cancelled);
+        }
+        self.step_impl(
+            maximum_duration, controls, Some((force, force_controls, workspace)), cancelled,
+        )
+    }
+
+    fn step_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        mut forcing: Option<(BodyForce3d<'_>, ForceControl3d, &mut ForcingWorkspace3d)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -516,6 +559,9 @@ impl Euler3d {
         let mut rate: f64 = 0.0;
         for (p, q) in self.work.primitive.iter_mut().zip(&self.states) {
             *p = q.primitive(&self.gas, &mut cancelled)?;
+            if let Some((_, controls, _)) = &forcing {
+                controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+            }
             let local: f64 = (0..3)
                 .map(|a| (p.velocity[a].abs() + p.sound_speed) / self.grid.spacing[a])
                 .sum();
@@ -529,19 +575,19 @@ impl Euler3d {
             if !positive(dt) || self.time + dt <= self.time || !(self.time + dt).is_finite() {
                 return Err(Error::Invalid("unrepresentable volumetric time increment"));
             }
-            let trial = evolve::attempt(
-                &self.gas,
-                &self.grid,
-                self.boundaries,
-                &self.states,
-                &mut self.work,
-                dt,
-                controls.cfl,
-                reconstruction,
-                &mut cancelled,
-            );
+            let trial = match forcing.as_mut() {
+                Some((force, force_controls, workspace)) => forcing::attempt(
+                    &self.gas, &self.grid, self.boundaries, &self.states,
+                    &mut self.work, workspace, *force, *force_controls,
+                    dt, controls.cfl, reconstruction, &mut cancelled,
+                ),
+                None => evolve::attempt(
+                    &self.gas, &self.grid, self.boundaries, &self.states,
+                    &mut self.work, dt, controls.cfl, reconstruction, None, &mut cancelled,
+                ).map(|stats| (stats, ForceChange3d::default())),
+            };
             match trial {
-                Ok(stats) => {
+                Ok((stats, source_change)) => {
                     let after = checked_totals(
                         &self.work.candidate,
                         self.grid.cell_volume(),
@@ -555,6 +601,10 @@ impl Euler3d {
                     let a = after.array();
                     let b = before.array();
                     let c = boundary_change.array();
+                    let source = [
+                        0.0, source_change.impulse[0], source_change.impulse[1],
+                        source_change.impulse[2], source_change.work,
+                    ];
                     let report = StepReport {
                         elapsed: Time::new(dt),
                         maximum_cfl: stats.rate * dt,
@@ -565,11 +615,12 @@ impl Euler3d {
                         before,
                         after,
                         boundary_change,
+                        source_change,
                         conservation_residual: Totals::from_array(std::array::from_fn(|k| {
-                            a[k] - b[k] - c[k]
+                            a[k] - b[k] - c[k] - source[k]
                         })),
                     };
-                    if !a.into_iter().chain(b).chain(c).all(f64::is_finite) {
+                    if !a.into_iter().chain(b).chain(c).chain(source).all(f64::is_finite) {
                         return Err(Error::Invalid(
                             "unrepresentable volumetric extensive balance",
                         ));

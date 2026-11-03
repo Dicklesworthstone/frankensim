@@ -2561,8 +2561,8 @@ the evanescent wall correction. This is point-sampled slip-plane conditioning,
 without a viscous no-slip layer, wall-generated turbulence or calibrated
 near-ground spectrum. Four native regressions cover rotated profiles, exact
 wall-normal values, incompatible settings and evolving rollback/replay.
-They are included but were not executed while the build environment was
-unavailable.
+All four pass in the native debug build, together with the ten existing Mann
+inlet tests covering original, filtered and evolving boundary behavior.
 
 ### Source-owned NASA9 energy and local transport in the NSF grid
 
@@ -2883,9 +2883,8 @@ total-energy qualification is introduced.
 
 Five focused regressions are included for native-step equivalence, evolving
 molecular transport, independent channel heat, shared source/force ownership,
-ratio bounds and endpoint/cancellation rollback. These additions were
-source-reviewed; their native build and execution were unavailable during
-implementation.
+ratio bounds and endpoint/cancellation rollback. All five pass in the native
+debug build after execution was restored.
 
 ### No-claim boundaries (3-D coupled ports)
 

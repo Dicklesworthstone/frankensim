@@ -117,8 +117,9 @@ changes. This is an outer-flow slip-plane construction, without a viscous
 no-slip layer, ground-generated turbulence or a calibrated near-ground
 spectrum. Point observations are supported; homogeneous sinc filters do not
 supply the evanescent correction's spatial average. Six focused Rust
-regressions accompany this source-reviewed implementation; native compilation
-and execution were unavailable during the change.
+regressions accompany this implementation. After execution was restored,
+all six passed in the native debug build, including independent tensor
+covariance, all nine gradients and extreme far-field recovery.
 
 ## Invariants
 

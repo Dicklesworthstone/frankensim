@@ -296,6 +296,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut self.work.stage,
                         dt,
                         false,
+                        None,
                         &mut cancelled,
                     )?;
                     evolve::capture_boundaries(
@@ -331,6 +332,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut self.work.candidate,
                         dt,
                         true,
+                        None,
                         &mut cancelled,
                     )?;
                     evolve::capture_boundaries(
