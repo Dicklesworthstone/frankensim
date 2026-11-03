@@ -8,6 +8,9 @@
 /// Finite source gas and the pressure modes of a material-derived elastic wall.
 pub mod modal;
 
+/// Sealed source gas and full nonlinear membrane pressure/volume equilibrium.
+pub mod membrane;
+
 /// Nonlinear closed-gas cavity coupled to an inertial moving wall.
 pub mod piston;
 

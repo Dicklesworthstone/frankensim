@@ -245,6 +245,37 @@ fn pressure_loaded_modes_include_the_follower_tangent() {
 }
 
 #[test]
+fn pressure_volume_admission_validates_the_public_coordinate_map() {
+    let p = patch(8000.0, 8000.0, 4000.0, 0.2, 0.0);
+    let mut fixed = vec![None; 15];
+    for (dof, value) in prescribed(1.02) {
+        fixed[dof] = Some(value);
+    }
+    p.admit_pressure_perimeter(&fixed, || false).unwrap();
+    for invalid in [&fixed[..14], &vec![Some(0.0); 16][..]] {
+        assert!(matches!(
+            p.admit_pressure_perimeter(invalid, || false),
+            Err(MembraneError::Invalid(_))
+        ));
+    }
+    let mut nonfinite = fixed.clone();
+    nonfinite[0] = Some(f64::NAN);
+    assert!(matches!(
+        p.admit_pressure_perimeter(&nonfinite, || false),
+        Err(MembraneError::Invalid(_))
+    ));
+    fixed[5] = None;
+    assert!(matches!(
+        p.admit_pressure_perimeter(&fixed, || false),
+        Err(MembraneError::Invalid(_))
+    ));
+    assert!(matches!(
+        p.admit_pressure_perimeter(&fixed, || true),
+        Err(MembraneError::Cancelled)
+    ));
+}
+
+#[test]
 fn pressure_solve_refuses_free_perimeter_and_cancelled_work() {
     let p = patch(8000.0, 8000.0, 4000.0, 0.2, 0.0);
     let zero = vec![[0.0; 3]; 5];

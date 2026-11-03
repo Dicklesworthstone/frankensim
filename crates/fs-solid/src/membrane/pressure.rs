@@ -171,14 +171,29 @@ impl MembranePatch {
         Ok(work)
     }
 
-    // Constant pressure has a conservative potential on the eliminated free
-    // coordinates only when the open perimeter cannot move. Admission checks
-    // the actual triangle incidence, not optional named boundary patches.
-    pub(super) fn admit_pressure_perimeter(
+    /// Admit the fixed perimeter required for a conservative pressure-volume
+    /// coupling. `fixed` is a flat, three-coordinate-per-node displacement map:
+    /// `Some(value)` prescribes that coordinate [m], and `None` leaves it free.
+    /// Every open edge must have all coordinates prescribed at both endpoints;
+    /// interior edges must have consistent orientation and at most two incident
+    /// triangles. This checks actual triangle incidence, not named patches.
+    ///
+    /// Callers must preserve these prescribed values in every configuration
+    /// used with [`Self::pressure_work_j`] to obtain a path-independent volume
+    /// change. This admission does not establish an absolute enclosed volume.
+    pub fn admit_pressure_perimeter(
         &self,
         fixed: &[Option<f64>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), MembraneError> {
+        poll(&mut cancelled)?;
+        if fixed.len() != 3 * self.mesh.nodes.len()
+            || fixed.iter().flatten().any(|value| !value.is_finite())
+        {
+            return Err(MembraneError::Invalid(
+                "finite prescribed displacement map with three coordinates per node required",
+            ));
+        }
         let mut edges = BTreeMap::<[usize; 2], (u8, i8)>::new();
         for e in &self.elements {
             poll(&mut cancelled)?;

@@ -1,5 +1,42 @@
 # CONTRACT: fs-couple
 
+## Sealed finite gas and full nonlinear membrane equilibrium
+
+`cavity_phs::membrane::GasMembrane` joins the original finite-deformation
+`MembranePatch` to an original `ClosedGasParcel` or `ClosedRealGasParcel`.
+The caller anchors the parcel's actual volume to a reference shape, supplies
+absolute exterior pressure and a positive volume interval, and fixes the
+complete membrane perimeter through the original incidence admission.
+Orientation points out of the gas. Every trial retains those prescribed
+coordinates and obtains its swept volume from the membrane's exact
+unit-pressure work.
+
+The original material isentrope supplies pressure, temperature, gas energy
+and entropy at conserved mass and frozen composition. Ideal NASA calorics
+and homogeneous Peng–Robinson departures retain their original source
+domains. Native `GasMechanicalLoad` pulls this pressure through the current
+volume gradient and Hessian. The force tangent contains both the geometric
+pressure term and `-(rho*c^2/V) grad(V) grad(V)^T`, including nonzero gas
+stiffness at zero pressure jump. The original gas owner limits the chart to
+1..=256 free Cartesian coordinates; membrane mesh/material admission remains
+separate.
+
+The conservative potential is the membrane storage change plus native gas
+Delta U, exterior-pressure work and negative dead-load work. The held-pressure
+`p_final*Delta V` expression is not added again. The original Newton–Krylov
+owner closes the force residual with that same tangent. Repeated Krylov
+actions reuse an unchanged physical trial; rejected source/geometry proposals
+can backtrack. Cancellation, exhausted budgets and unresolved final residuals
+publish no coupled state. Full pressure loads remain on support-reaction rows.
+
+Focused synthetic tests cover independent pyramid equilibrium/work,
+variable-Cp entropy, native PR pressure/bulk/work, a six-coordinate geometric
+tangent/potential, gas stiffness at zero pressure jump, backtracking and
+unchanged reference inventory on refusal. Their presence does not assert
+native execution. This is reversible static equilibrium, not a heat/mass-transfer
+or finite-time integrator, gas-wave solver, vibration/stability certificate,
+or proof against enclosure contact and global surface intersection.
+
 ## Original spatial gas sources in three-dimensional pressure acoustics
 
 `cavity_modal::interior::heterogeneous::AxialGasInterior` binds the original
