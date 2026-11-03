@@ -25,12 +25,18 @@ use super::{
 use crate::{MassProperties, UnitQuaternion, Vec3, rocket::RocketState};
 use fs_ga::Mat3;
 
+/// Physical balanced point-nozzle reduction preserving semidefinite exit moments.
+/// Re-exported as `rocket::rigid::nozzles`.
+#[path = "nozzles.rs"]
+pub mod nozzles;
+
 /// A prepared physically admissible specific rotational inertia, in m².
 ///
 /// Principal moments may be zero, admitting a point at the COM or an ideal line
-/// distribution. Their triangle inequalities are checked before the tensor is
-/// expressed in material body axes. This same type describes either the
-/// retained propellant distribution or an independently declared outflow law.
+/// distribution. Principal-frame admission checks the inertia inequalities;
+/// physical nozzle preparation constructs a positive point-mass sum directly.
+/// This same type describes either the retained propellant distribution or an
+/// independently declared outflow law, in the fixed material body axes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpecificInertia {
     tensor_body_m2: Mat3,

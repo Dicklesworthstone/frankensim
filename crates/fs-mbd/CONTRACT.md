@@ -5232,3 +5232,44 @@ common boosts, batch permutation/subdivision, attachment gaps hidden by large
 coordinates, combined angular rejection, zero identities, invalid inventory,
 global budgets and late cancellation. Native execution is required before
 claiming numerical conformance; formatter parsing is not that evidence.
+
+## Balanced physical nozzle arrays and full spatial exhaust transport
+
+`rocket::rigid::nozzles` prepares simultaneous central nozzles and opposite-arm,
+equal-rate point-nozzle pairs. Relative exhaust velocities belong to the LOCAL
+rotating port. Structural pairing makes the outgoing mass first moment zero,
+matching the existing fixed-COM model without a fitted balance tolerance.
+From the same rates/arms/velocities it derives the resultant reaction force,
+relative reaction couple, full co-rotating exit inertia, and local-relative
+kinetic power. Zero/rank-deficient exit moments are physical and admitted by
+positive point-mass construction; no diagonal approximation or artificial
+positive inertia is inserted.
+
+`PreparedNozzleArray::forcing` maps these physical moments into the original
+full-tensor forcing. The thrust arm is zero and all relative tangential jet
+momentum is exported through the original swirl channel, so pure couples are
+supported and relative torque is counted once. `TensorRocketState::advance_nozzles`
+reuses native mass/inertia, analytic translation, bounded rotational substeps and
+exact burnout segmentation. Additional loads use the same prepared forcing with
+the existing `advance_spatial`; neither propulsion nor its moment is duplicated
+as an external wrench. Rates/geometry are held during a call and all valves close
+at the original propellant floor.
+
+`flux_at` reports instantaneous physical mass, absolute world linear momentum,
+angular momentum about the COM, and angular momentum about a supplied world
+point. It includes COM velocity advection, the full co-rotating orbital spin of
+the exported particles, relative jet angular momentum, and the COM orbital term.
+It is an instantaneous transport query, not an independently integrated impulse
+receipt. Local-relative kinetic power is a diagnostic only: no extra source-work,
+heat, pressure-work or caloric debit is introduced.
+
+Preparation is allocation-free, bounded to 16,384 groups, compensated in supplied
+order, and cancellation-polled in both passes. Stepping/query storage and work
+are independent of nozzle count. Focused G0/G1/G3/G4 tests cover physical
+individual-particle flux sums, origin/Galilean covariance, pure-couple depletion
+and burnout refinement, rotating off-axis venting, the original analytic central
+rocket, and admission/cancellation. Arbitrary unbalanced outflow, moving COM,
+internal relative-flow momentum, changing reservoir geometry, pressure thrust,
+thermal/chemical plume energy and complete open-system passivity remain outside
+this bounded model. The reservoir inertia law remains an independent physical
+declaration; balanced nozzle geometry does not determine it.

@@ -33,6 +33,9 @@ pub mod staging;
 #[path = "rigid/tensor.rs"]
 pub mod tensor;
 
+/// Balanced physical point-nozzle arrays on the full-tensor trajectory owner.
+pub use tensor::nozzles;
+
 mod sealed {
     pub trait Sealed {}
 }
