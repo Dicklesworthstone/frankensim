@@ -23,8 +23,9 @@ use fs_contact::capillary_bridge::asymmetric_contact_line::{
     SourceAsymmetricContactLineBridge,
 };
 use fs_contact::capillary_bridge::axisymmetric::asymmetric_contact_line::{
-    AsymmetricCircularContactLineLoadLine, AsymmetricCircularContactLineState,
-    AsymmetricCircularContactLineStep, SourceAsymmetricCircularContactLineBridge,
+    AsymmetricCircularContactLineLoadLine, AsymmetricCircularContactLineSourceRefresh,
+    AsymmetricCircularContactLineState, AsymmetricCircularContactLineStep,
+    SourceAsymmetricCircularContactLineBridge,
 };
 use fs_contact::capillary_bridge::axisymmetric::contact_line::{
     AxisymmetricContactLineLoadLine, AxisymmetricContactLineState, AxisymmetricContactLineStep,
@@ -505,6 +506,71 @@ impl<'a> CapillaryModalSystem<'a, AxisymmetricContactLineLoadLine<'a>> {
 }
 
 impl<'a> CapillaryModalSystem<'a, AsymmetricCircularContactLineLoadLine<'a>> {
+    /// Adopt an original-source material endpoint without resetting either
+    /// moving footprint, any native body, the clock or historical observations.
+    /// Returned surface parameter work stays separate from heat and subsequent
+    /// mechanical work. Every check precedes the joint source/state publication.
+    pub fn apply_source_refresh(
+        &mut self,
+        refresh: &'a AsymmetricCircularContactLineSourceRefresh,
+        gate: &CancelGate,
+    ) -> Result<f64, CapillaryModalError> {
+        poll(Some(gate))?;
+        if refresh.previous_state() != self.state {
+            return Err(ContactLineError::StateMismatch.into());
+        }
+        self.source.evaluate(refresh.previous_state())?;
+        let source = refresh.source();
+        let state = refresh.state();
+        let profile = source.evaluate(state)?;
+        let config = self.load_line.config();
+        let gap_tolerance = finite(
+            config.mechanical.gap_absolute_tolerance_m
+                + config.mechanical.gap_relative_tolerance * self.gap_m.abs(),
+        )?;
+        let gap_residual = finite(profile.gap_m - self.gap_m)?;
+        if gap_residual.abs() > gap_tolerance {
+            return Err(CapillaryModalError::GapMismatch {
+                residual_m: gap_residual,
+                tolerance_m: gap_tolerance,
+            });
+        }
+        let load_line = AsymmetricCircularContactLineLoadLine::new(
+            source,
+            self.load_line.compliance_m_per_n(),
+            config,
+        )?;
+        let before = self.total_energy_j()?;
+        let after = finite(self.network.total_energy_j()? + profile.surface_free_energy_j)?;
+        limit(
+            "native/circular-wetting energy magnitude after source refresh",
+            after.abs(),
+            self.network.config.maximum_total_energy_j,
+        )?;
+        let energy_tolerance = finite(
+            self.network.config.energy_absolute_tolerance_j
+                + self.network.config.energy_relative_tolerance
+                    * before
+                        .abs()
+                        .max(after.abs())
+                        .max(refresh.parameter_work_j().abs()),
+        )?;
+        let residual = finite((after - before) - refresh.parameter_work_j())?;
+        let error = refresh.estimated_parameter_work_error_j();
+        if residual.abs() + error > energy_tolerance {
+            return Err(CapillaryModalError::EnergyAccuracy {
+                residual_j: residual,
+                estimated_error_j: error,
+                tolerance_j: energy_tolerance,
+            });
+        }
+        poll(Some(gate))?;
+        self.source = source;
+        self.state = state;
+        self.load_line = load_line;
+        Ok(refresh.parameter_work_j())
+    }
+
     /// Bind both original circular contact-line histories to the actual native
     /// gap. Source replay and the independent body/work checks use the shared
     /// mechanical transaction, including the original liquid shape uncertainty.

@@ -21,8 +21,9 @@
 //! independent compatibility, work, source-accuracy and cancellation checks.
 
 use super::{
-    AsymmetricCircularContactLineState, AsymmetricCircularContactLineStep, CapillaryModalError,
-    CoupledModalSystem, MaterialStateId, ModalAcousticTimeModel, ModalCouplingError,
+    AsymmetricCircularContactLineSourceRefresh, AsymmetricCircularContactLineState,
+    AsymmetricCircularContactLineStep, CapillaryModalError, ContactLineError, CoupledModalSystem,
+    MaterialStateId, ModalAcousticTimeModel, ModalCouplingError,
     SourceAsymmetricCircularContactLineBridge, dot, finite, invalid, limit, network_response, poll,
 };
 use crate::render::schedule::force::coupled::CoupledModalFrame;
@@ -354,6 +355,113 @@ impl<'a> MultipleCircularWettingModalSystem<'a> {
             energy = finite(energy + profile.surface_free_energy_j)?;
         }
         Ok(energy)
+    }
+
+    /// Atomically adopt any nonempty subset of original source endpoints.
+    /// Every entry must match its exact current bridge predecessor. Input order
+    /// does not change work reduction order, and duplicate indices refuse.
+    /// Native motion, all gap/footprint coordinates, cross-bridge compliance,
+    /// physical time and historical frames remain intact. The returned signed
+    /// surface parameter work is not deposited heat or mechanical line loss.
+    pub fn apply_source_refreshes(
+        &mut self,
+        refreshes: &[(usize, &'a AsymmetricCircularContactLineSourceRefresh)],
+        gate: &CancelGate,
+    ) -> Result<f64, Error> {
+        poll(Some(gate))?;
+        let n = self.points.len();
+        if refreshes.is_empty() || refreshes.len() > n {
+            return Err(
+                invalid("bounded nonempty circular-wetting source refreshes required").into(),
+            );
+        }
+        let mut ordered = [None; MAX_CIRCULAR_WETTING_BRIDGES];
+        for &(index, refresh) in refreshes {
+            if index >= n || ordered[index].is_some() {
+                return Err(invalid(
+                    "unique in-range circular-wetting source-refresh indices required",
+                )
+                .into());
+            }
+            ordered[index] = Some(refresh);
+        }
+        let before = self.total_energy_j()?;
+        let mut after = self.network.total_energy_j()?;
+        let mut parameter_work = 0.0;
+        let mut error = 0.0;
+        for (index, point) in self.points.iter().enumerate() {
+            poll(Some(gate))?;
+            let old = point
+                .source
+                .evaluate(point.state)
+                .map_err(|e| Error::Bridge {
+                    index,
+                    error: e.into(),
+                })?;
+            let energy = if let Some(refresh) = ordered[index] {
+                if refresh.previous_state() != point.state {
+                    return Err(Error::Bridge {
+                        index,
+                        error: ContactLineError::StateMismatch.into(),
+                    });
+                }
+                let next =
+                    refresh
+                        .source()
+                        .evaluate(refresh.state())
+                        .map_err(|e| Error::Bridge {
+                            index,
+                            error: e.into(),
+                        })?;
+                let tolerance = finite(
+                    self.config.gap_absolute_tolerance_m
+                        + self.config.gap_relative_tolerance * point.gap.abs(),
+                )?;
+                let residual = finite(next.gap_m - point.gap)?;
+                if residual.abs() > tolerance {
+                    return Err(Error::Bridge {
+                        index,
+                        error: CapillaryModalError::GapMismatch {
+                            residual_m: residual,
+                            tolerance_m: tolerance,
+                        },
+                    });
+                }
+                parameter_work = finite(parameter_work + refresh.parameter_work_j())?;
+                error = finite(error + refresh.estimated_parameter_work_error_j())?;
+                next.surface_free_energy_j
+            } else {
+                old.surface_free_energy_j
+            };
+            after = finite(after + energy)?;
+        }
+        limit(
+            "native/multiple-wetting energy magnitude after source refresh",
+            after.abs(),
+            self.network.config.maximum_total_energy_j,
+        )?;
+        let tolerance = finite(
+            self.network.config.energy_absolute_tolerance_j
+                + self.network.config.energy_relative_tolerance
+                    * before.abs().max(after.abs()).max(parameter_work.abs()),
+        )?;
+        let residual = finite((after - before) - parameter_work)?;
+        if residual.abs() + error > tolerance {
+            return Err(CapillaryModalError::EnergyAccuracy {
+                residual_j: residual,
+                estimated_error_j: error,
+                tolerance_j: tolerance,
+            }
+            .into());
+        }
+        poll(Some(gate))?;
+        for (index, point) in self.points.iter_mut().enumerate() {
+            if let Some(refresh) = ordered[index] {
+                point.source = refresh.source();
+                point.state = refresh.state();
+            }
+        }
+        Ok(parameter_work)
     }
 
     /// External modal forces and one prescribed additional gap velocity [m/s]

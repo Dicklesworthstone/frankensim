@@ -198,6 +198,239 @@ fn states(system: &MultipleCircularWettingModalSystem<'_>) -> Vec<ModalAcousticS
         .flat_map(|m| m.states().iter().copied())
         .collect()
 }
+
+#[test]
+fn coupled_bridge_material_updates_are_atomic_and_keep_native_history_and_cross_compliance() {
+    use fs_contact::capillary_bridge::BridgeVolumeConstraint;
+    use fs_matdb::QueryPoint;
+    let gate = CancelGate::new_clock_free();
+    let (material, interfaces) = common::temperature_cards(1.0);
+    let source = common::temperature_source(&material, &interfaces, 300.0);
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    let mut system = owner([&source, &source], true);
+    let mut reordered = owner([&source, &source], true);
+    let initial = system.total_energy_j().unwrap();
+    let stale = source
+        .refresh_at_query_point(
+            system.state(1).unwrap(),
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    let frame = *system.step(&[0.0; 6], &[0.0; 2]).unwrap();
+    reordered.step(&[0.0; 6], &[0.0; 2]).unwrap();
+    let mut loss = frame.network_dissipation_j + frame.contact_line_dissipation_j;
+    let before = (
+        states(&system),
+        [system.state(0), system.state(1)],
+        [system.gap_m(0), system.gap_m(1)],
+        *system.last_frame().unwrap(),
+        [
+            *system.bridge_frame(0).unwrap(),
+            *system.bridge_frame(1).unwrap(),
+        ],
+        system.compliance_m_per_n().to_vec(),
+        system.samples_rendered(),
+    );
+    let refresh0 = source
+        .refresh_at_query_point(
+            system.state(0).unwrap(),
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    let refresh1 = source
+        .refresh_at_query_point(
+            system.state(1).unwrap(),
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    assert!(
+        system
+            .apply_source_refreshes(&[(0, &refresh0), (1, &stale)], &gate)
+            .is_err()
+    );
+    assert!(
+        system
+            .apply_source_refreshes(&[(0, &refresh0), (0, &refresh0)], &gate)
+            .is_err()
+    );
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(
+        system
+            .apply_source_refreshes(&[(0, &refresh0), (1, &refresh1)], &cancelled)
+            .is_err()
+    );
+    assert_eq!(
+        (
+            states(&system),
+            [system.state(0), system.state(1)],
+            [system.gap_m(0), system.gap_m(1)],
+            *system.last_frame().unwrap(),
+            [
+                *system.bridge_frame(0).unwrap(),
+                *system.bridge_frame(1).unwrap()
+            ],
+            system.compliance_m_per_n().to_vec(),
+            system.samples_rendered()
+        ),
+        before
+    );
+    assert_eq!(system.source(0).unwrap().identity(), source.identity());
+    assert_eq!(system.source(1).unwrap().identity(), source.identity());
+    let energy_before = system.total_energy_j().unwrap();
+    let work = system
+        .apply_source_refreshes(&[(0, &refresh0), (1, &refresh1)], &gate)
+        .unwrap();
+    let other_work = reordered
+        .apply_source_refreshes(&[(1, &refresh1), (0, &refresh0)], &gate)
+        .unwrap();
+    assert_eq!(work, other_work);
+    assert_eq!(
+        work,
+        refresh0.parameter_work_j() + refresh1.parameter_work_j()
+    );
+    assert_eq!(states(&system), before.0);
+    for i in 0..2 {
+        assert_eq!(
+            system.state(i).unwrap().wetted_radii_m(),
+            before.1[i].unwrap().wetted_radii_m()
+        );
+        assert_eq!(system.gap_m(i), before.2[i]);
+        assert_eq!(*system.bridge_frame(i).unwrap(), before.4[i]);
+    }
+    assert_eq!(*system.last_frame().unwrap(), before.3);
+    assert_eq!(system.compliance_m_per_n(), before.5);
+    assert_eq!(system.samples_rendered(), before.6);
+    close(
+        system.total_energy_j().unwrap() - energy_before,
+        work,
+        4e-18,
+    );
+    for _ in 0..4 {
+        let a = *system.step(&[0.0; 6], &[0.0; 2]).unwrap();
+        let b = *reordered.step(&[0.0; 6], &[0.0; 2]).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(states(&system), states(&reordered));
+        loss += a.network_dissipation_j + a.contact_line_dissipation_j;
+        close(
+            system.total_energy_j().unwrap() + loss - work,
+            initial,
+            5e-16,
+        );
+    }
+    assert_eq!(
+        system.bridge_frame(0).unwrap().bridge.regimes[0],
+        ContactLineRegime::Advancing
+    );
+
+    // A local material change leaves the other physical bridge untouched.
+    let warm = QueryPoint::new().with("T", 310.0).unwrap();
+    let local = system
+        .source(0)
+        .unwrap()
+        .refresh_at_query_point(
+            system.state(0).unwrap(),
+            &material,
+            interfaces.each_ref(),
+            &warm,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    let other = (
+        system.source(1).unwrap().identity(),
+        system.state(1),
+        system.gap_m(1),
+    );
+    let bodies = states(&system);
+    system
+        .apply_source_refreshes(&[(0, &local)], &gate)
+        .unwrap();
+    assert_eq!(
+        (
+            system.source(1).unwrap().identity(),
+            system.state(1),
+            system.gap_m(1)
+        ),
+        other
+    );
+    assert_eq!(states(&system), bodies);
+    assert_eq!(system.samples_rendered(), 5);
+}
+
+#[test]
+fn multiple_bridge_source_refresh_respects_the_combined_native_energy_budget() {
+    use fs_contact::capillary_bridge::BridgeVolumeConstraint;
+    use fs_matdb::QueryPoint;
+    let gate = CancelGate::new_clock_free();
+    let (material, interfaces) = common::temperature_cards(1.0);
+    let source = common::temperature_source(&material, &interfaces, 300.0);
+    let mut system = MultipleCircularWettingModalSystem::new(
+        network(false, 1e-30, 1e-30, 1.0),
+        bridges([&source, &source], false),
+        controls(),
+        &gate,
+    )
+    .unwrap();
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    let refresh0 = source
+        .refresh_at_query_point(
+            system.state(0).unwrap(),
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    let refresh1 = source
+        .refresh_at_query_point(
+            system.state(1).unwrap(),
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    let old = (
+        states(&system),
+        system.state(0),
+        system.state(1),
+        system.total_energy_j().unwrap(),
+    );
+    assert!(matches!(
+        system.apply_source_refreshes(&[(0, &refresh0), (1, &refresh1)], &gate),
+        Err(MultipleCircularWettingModalError::Native(
+            CapillaryModalError::EnergyAccuracy { .. }
+        ))
+    ));
+    assert_eq!(
+        (
+            states(&system),
+            system.state(0),
+            system.state(1),
+            system.total_energy_j().unwrap()
+        ),
+        old
+    );
+    assert_eq!(system.source(0).unwrap().identity(), source.identity());
+    assert_eq!(system.source(1).unwrap().identity(), source.identity());
+    assert_eq!(system.samples_rendered(), 0);
+    assert!(system.last_frame().is_none());
+}
 fn sources() -> [SourceAsymmetricCircularContactLineBridge; 2] {
     [
         source([1.05, 1.15], [2.0, 4.0], [1.0, 1.1], [1.1, 1.2]),

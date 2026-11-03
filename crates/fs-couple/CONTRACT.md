@@ -18425,6 +18425,16 @@ stability claim. G1/G3/G4 native tests cover unlike-source pin/move dynamics,
 individual friction sensitivity, surface exchange, reciprocal force and work,
 original connections, numerical-accuracy refusal and exact retry.
 
+Its `apply_source_refresh` adopts the original circular-line material endpoint
+only against the complete current predecessor. Both physical footprints, body
+coordinates and velocities, connections, gap column, time and historical
+observations remain intact. The original source error estimate and an independent
+combined mechanical/surface parameter-work balance must fit the native energy
+gate before source, state and load line publish together. Subsequent native
+motion uses the new surface tension, wetting thresholds and line resistances.
+The returned signed surface parameter work is a separate account; it is not
+automatically deposited heat or physical contact-line loss.
+
 ## Constitutive graphs on the finite thermal timeline
 
 `constitutive_graph::enthalpy::step_candidate` closes public material-law feedback on the existing `DepositionSimulation` and `BackwardEulerStep`. Each endpoint trial binds actual caloric temperatures and the original physical interval duration to declared graph inputs, solves the original dimensioned material equations using their consistent tangents, and deposits explicitly bound watt-valued graph outputs once into the receiving cells. An outer energy-coordinate Newton solve includes the converged material response in its numerical derivative. All trials borrow the same committed graph history; the returned joint candidate carries the thermal endpoint and proposed law history together. Fresh local and total joule gates and an independent external-supply evaluation precede return. Original material-source failures, events, cancellation, and aggregate numerical work limits preserve both committed histories.
@@ -18975,6 +18985,16 @@ retains the original connected, acute-angle, nonpositive-pressure, quasistatic
 liquid scope. This owner does not model liquid exchange/coalescence between
 bridges, changing contact geometry, bridge rupture, liquid inertia, evaporation,
 thermal deposition or exact within-sample trajectories.
+
+`MultipleCircularWettingModalSystem::apply_source_refreshes` accepts a bounded
+nonempty subset of those same original circular-line endpoint candidates in one
+atomic transfer. Every selected bridge must match its complete current history;
+duplicate indices refuse. Canonical bridge-index reduction retains input-order
+independence, all cross-bridge mechanical compliance and untouched bridge states.
+A late predecessor, source, energy or cancellation refusal publishes nothing.
+Native regressions cover thermal unpinning during continuing motion, combined
+surface parameter work, batch permutation, local updates and unchanged body,
+footprint, clock and observation history on both successful adoption and refusal.
 
 
 ## Damaged-area friction on original rotating rigid cohesive patches

@@ -137,6 +137,141 @@ fn states(
 }
 
 #[test]
+fn hot_source_continues_both_moving_footprints_and_native_bodies_without_reset() {
+    use fs_contact::capillary_bridge::BridgeVolumeConstraint;
+    use fs_matdb::QueryPoint;
+    let gate = CancelGate::new_clock_free();
+    let (material, interfaces) = common::temperature_cards(1.0);
+    let source = common::temperature_source(&material, &interfaces, 300.0);
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    let mut system = owner(&source, [1.05, 1.28], true);
+    let mut cold_reference = owner(&source, [1.05, 1.28], true);
+    let stale = source
+        .refresh_at_query_point(
+            system.state(),
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    let initial_energy = system.total_energy_j().unwrap();
+    let mut loss = 0.0;
+    for _ in 0..3 {
+        let frame = *system.step(&[0.0; 2], 0.0).unwrap();
+        cold_reference.step(&[0.0; 2], 0.0).unwrap();
+        loss += frame.network_dissipation_j + frame.contact_line_dissipation_j;
+    }
+    let before = (
+        states(&system),
+        system.state(),
+        system.gap_m(),
+        *system.last_frame().unwrap(),
+        system.samples_rendered(),
+        system.source().identity(),
+    );
+    let refresh = source
+        .refresh_at_query_point(
+            system.state(),
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    assert!(system.apply_source_refresh(&stale, &gate).is_err());
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(system.apply_source_refresh(&refresh, &cancelled).is_err());
+    assert_eq!(
+        (
+            states(&system),
+            system.state(),
+            system.gap_m(),
+            *system.last_frame().unwrap(),
+            system.samples_rendered(),
+            system.source().identity()
+        ),
+        before
+    );
+    let energy = system.total_energy_j().unwrap();
+    let parameter_work = system.apply_source_refresh(&refresh, &gate).unwrap();
+    assert_eq!(states(&system), before.0);
+    assert_eq!(system.state().wetted_radii_m(), before.1.wetted_radii_m());
+    assert_eq!(system.gap_m(), before.2);
+    assert_eq!(*system.last_frame().unwrap(), before.3);
+    assert_eq!(system.samples_rendered(), before.4);
+    assert_ne!(system.source().identity(), before.5);
+    close(
+        system.total_energy_j().unwrap() - energy,
+        parameter_work,
+        3e-18,
+    );
+    let hot_frame = *system.step(&[0.0; 2], 0.0).unwrap();
+    let cold_frame = *cold_reference.step(&[0.0; 2], 0.0).unwrap();
+    assert_eq!(hot_frame.bridge.regimes[0], ContactLineRegime::Advancing);
+    assert_eq!(cold_frame.bridge.regimes[0], ContactLineRegime::Pinned);
+    assert!(hot_frame.bridge.per_line_viscous_dissipation_j[0] > 0.0);
+    assert_ne!(states(&system), states(&cold_reference));
+    assert_ne!(
+        hot_frame.applied_mean_force_n,
+        cold_frame.applied_mean_force_n
+    );
+    loss += hot_frame.network_dissipation_j + hot_frame.contact_line_dissipation_j;
+    close(
+        system.total_energy_j().unwrap() + loss - parameter_work,
+        initial_energy,
+        3e-16,
+    );
+    assert_eq!(system.samples_rendered(), 4);
+}
+
+#[test]
+fn native_energy_refusal_of_circular_material_refresh_keeps_full_predecessor() {
+    use fs_contact::capillary_bridge::BridgeVolumeConstraint;
+    use fs_matdb::QueryPoint;
+    let gate = CancelGate::new_clock_free();
+    let (material, interfaces) = common::temperature_cards(1.0);
+    let source = common::temperature_source(&material, &interfaces, 300.0);
+    let mut system = owner_with_budget(&source, [1.05, 1.28], false, 1e-30, 1e-30);
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    let refresh = source
+        .refresh_at_query_point(
+            system.state(),
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    let before = (
+        states(&system),
+        system.state(),
+        system.gap_m(),
+        system.total_energy_j().unwrap(),
+    );
+    assert!(matches!(
+        system.apply_source_refresh(&refresh, &gate),
+        Err(CapillaryModalError::EnergyAccuracy { .. })
+    ));
+    assert_eq!(
+        (
+            states(&system),
+            system.state(),
+            system.gap_m(),
+            system.total_energy_j().unwrap()
+        ),
+        before
+    );
+    assert_eq!(system.source().identity(), source.identity());
+    assert_eq!(system.samples_rendered(), 0);
+    assert!(system.last_frame().is_none());
+}
+
+#[test]
 fn one_original_footprint_stays_pinned_while_the_other_advances_and_moves_both_bodies() {
     let source = source([1.05, 1.15], [2.0, 4.0], [1.0, 1.1], [1.1, 1.2]);
     let mut system = owner(&source, [1.05, 1.28], false);
