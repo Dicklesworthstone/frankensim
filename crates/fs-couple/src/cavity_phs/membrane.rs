@@ -7,6 +7,8 @@
 
 mod solve;
 pub use solve::{GasMembraneSolution, GasMembraneSolve};
+mod vibration;
+pub use vibration::GasMembraneVibration;
 
 use fs_material::thermochemical_gas::energy::entropy::{GasEntropyError, GasEntropySolve};
 use fs_material::thermochemical_gas::energy::parcel::mechanics::{
@@ -14,6 +16,7 @@ use fs_material::thermochemical_gas::energy::parcel::mechanics::{
 };
 use fs_material::thermochemical_gas::energy::parcel::{ClosedGasParcel, GasVolumeStep};
 use fs_material::thermochemical_gas::nonideal::energy::parcel::ClosedRealGasParcel;
+use fs_solid::membrane::vibration::VibrationError;
 use fs_solid::membrane::{MembraneError, MembranePatch};
 use fs_solver::{NewtonError, NewtonReport, SolverRunProgress};
 
@@ -120,6 +123,8 @@ pub enum GasMembraneError {
     Gas(GasEntropyError),
     /// The original nonlinear solver refused its input.
     Newton(NewtonError),
+    /// The original membrane modal owner refused the coupled spectrum.
+    Vibration(VibrationError),
     /// The native solve exhausted convergence or globalization.
     Unconverged(NewtonReport),
     /// The native solver stopped without an accepted equilibrium.
@@ -148,6 +153,14 @@ impl From<GasEntropyError> for GasMembraneError {
         match error {
             GasEntropyError::Cancelled => Self::Cancelled,
             other => Self::Gas(other),
+        }
+    }
+}
+impl From<VibrationError> for GasMembraneError {
+    fn from(error: VibrationError) -> Self {
+        match error {
+            VibrationError::Membrane(error) => error.into(),
+            other => Self::Vibration(other),
         }
     }
 }

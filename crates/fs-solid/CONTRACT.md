@@ -54,6 +54,16 @@ every pressure-force derivative and the loaded modal pencil with two interior
 nodes (nonzero follower stiffness). No experimental membrane validation or
 global injectivity/continuum stability certificate is claimed.
 
+`MembranePatch::modes_from_tangent` is the shared lower modal owner for
+composing physical models. It accepts a finite row-major full residual tangent
+in an ordered unique free-DOF map, reuses original geometry/material admission
+and reference mass, and retains the original symmetry, complete-positive-spectrum
+and residual gates. `MembraneModes` owns the same pressure projection and
+reconstruction as held-pressure `MembraneVibration`. This lower entry does not
+certify force equilibrium or constitutive provenance of a supplied matrix;
+the composing physical owner must supply the same accepted state, supports and
+complete tangent. Existing held-pressure solve semantics are unchanged.
+
 ## Variable-amplitude critical-plane Miner damage on native J2 histories
 
 The quasistatic and backward-Euler J2 fatigue owners now admit

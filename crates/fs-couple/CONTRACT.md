@@ -99,6 +99,35 @@ native execution. This is reversible static equilibrium, not a heat/mass-transfe
 or finite-time integrator, gas-wave solver, vibration/stability certificate,
 or proof against enclosure contact and global surface intersection.
 
+### Small vibrations of the same sealed gas and membrane
+
+`GasMembrane::solve_vibration` first solves the original coupled equilibrium,
+then reuses that one accepted source-bearing gas state for every tangent column.
+The complete pencil is
+`K_membrane - (p-pe) Hess(V) - (dp/dV) grad(V) grad(V)^T`; the original ideal/PR
+acoustic bulk modulus supplies `dp/dV`, including nonzero reservoir stiffness
+at zero pressure jump. Original membrane reference inertia, material/geometry
+admission, full-spectrum positivity, residual gates and nodal projection/
+reconstruction remain with `MembraneModes` and `fs-modal`. The dense leaf
+retains its 128-free-coordinate cap.
+
+The result exposes the same immutable equilibrium and native modal basis.
+Volume perturbation is `B.q`; gas-pressure perturbation is `(dp/dV) B.q`.
+This observes restoring pressure already included in the pencil, rather than
+adding another gas spring. Independent signed pressure-jump loads use the same
+work-conjugate port.
+
+Accepted volume and temperature must be strictly inside the declared geometric
+interval and entropy-solve bracket. A continuous homogeneous source branch
+around equilibrium remains caller authority; local checks do not certify
+unqueried source support or global phase stability. There is no added gas
+inertia, wave propagation, damping, thermal exchange or finite-amplitude time
+integration. Refusals publish no modal result or source mutation. Focused
+synthetic regressions cover analytic zero-jump stiffening with variable Cp,
+all six modes of a curved pressure-loaded shape, native PR departures,
+reciprocal pressure observations, endpoint/budget/cancellation refusal, and
+unstable/nonconservative pencils. Test presence does not claim execution.
+
 ## Original spatial gas sources in three-dimensional pressure acoustics
 
 `cavity_modal::interior::heterogeneous::AxialGasInterior` binds the original

@@ -1,4 +1,6 @@
 //! Focused synthetic-source coupling regressions, not empirical membrane/gas qualification.
+mod vibration;
+
 use super::*;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
