@@ -10352,3 +10352,33 @@ source receipts unchanged. Local temporal estimates remain distinct from
 global or spatial error certificates. Temperature and geometry stay fixed;
 gas-side caloric accounts do not supply sorption heat or whole-membrane
 energy closure.
+
+
+## Steady rougher-cleaner recycle with explicit purge
+
+`slurry::recycle::RougherCleanerCircuit` composes two original selective separators,
+a source-bound fresh slurry, and a declared nonselective cleaner-tail return in
+[0,1]. It solves each exact dry-component identity and the separate carrier
+analytically from its positive exit paths, then replays the existing separator,
+splitter and mixer operations. Results retain every density query/receipt, both
+separator prescriptions, the original circuit provenance, all internal streams,
+final product, purge, combined external tailings, per-component circulating
+loads/recovery, and internal/external conservation residuals.
+
+The external residual is checked relative to fresh feed, never inflated recycle;
+the mixer residual is checked relative to solved mixed flow (relative tolerance
+2e-12). No corrective material stream or coefficient normalization is introduced.
+Missing/extra partitions, blank circuit provenance, invalid return fractions,
+nonfinite or erased positive flows, and unacceptable closure refuse. A component
+with no external exit refuses even at zero fresh flow because its circulating
+state is nonunique. Zero fresh flow otherwise has no defined circulating-load
+or overall-recovery ratio. Inputs are immutable and work uses the existing
+128-solid bound and deterministic component order.
+
+This is a steady prescribed-partition balance. The supplied partitions must be
+applicable to the recycled blend; density evidence does not establish separator
+calibration, capacity, liberation, particle breakage, reagent demand or kinetic
+recovery. `mineral_recycle` demonstrates a closed circuit with real mineral/water
+density packs and explicitly authored stage partitions. Focused tests cover the
+independent flow solution, both balance boundaries, evidence retention, zero/full
+return, small positive exits, and trapped or numerically ill-conditioned loops.

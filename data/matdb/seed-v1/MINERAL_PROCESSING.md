@@ -675,6 +675,51 @@ for the single-rate card and 77.243303571% for the equal-mean uniform card.
 Half flow gives 48 h and respectively 89.648437500% and 83.574368019%.
 These source-bound arithmetic scenarios are not calibrated plant forecasts.
 
+## Closed rougher-cleaner recycle and purge
+
+`fs_material::slurry::recycle::RougherCleanerCircuit` closes the cleaner-tail
+return to the rougher feed. It retains both existing `SelectiveSeparator`
+prescriptions and every original constituent density query and receipt. Fresh
+feed, mixed rougher feed, both stage results, returned cleaner tail, purge,
+final concentrate, and combined external tailings remain inspectable.
+
+For each exact dry-component identity, and separately for the liquid carrier,
+let `r` and `c` be rougher and cleaner fractions to concentrate and `s` the
+nonselective cleaner-tail return. The steady mixed feed is
+`F / ((1-r) + r*(c + (1-c)*(1-s)))`. Summing positive exit paths preserves
+small product exits that subtracting a rounded loop gain from one would lose.
+The existing separators, splitter and mixer then replay the solved circuit.
+Both `fresh = final product + rougher tails + purge` and
+`mixed = fresh + recycle` are checked independently; no balance plug is added.
+
+The real-pack example uses the same four density packs as the open circuit:
+
+```bash
+cargo run -p fs-material --example mineral_recycle -- \
+  /tmp/mining-materials/magnetite-handbook-mineralogy-reference.fsmatpk \
+  /tmp/mining-materials/pyrite-handbook-mineralogy-reference.fsmatpk \
+  /tmp/mining-materials/dolomite-handbook-mineralogy-reference.fsmatpk \
+  /tmp/mining-materials/water-liquid-iapws-sr6-08.fsmatpk 0.8
+```
+
+Its authored fresh feed is 100 kg/s magnetite, 20 kg/s pyrite, 80 kg/s
+dolomite and 100 kg/s water. Rougher fractions are 0.95/0.30/0.05 for the
+minerals and 0.20 for water; cleaner fractions are 0.90/0.20/0.10 and 0.25.
+With 80% cleaner-tail return, final product contains respectively
+92.5324675325, 1.4851485149 and 0.4149377593 kg/s of dry constituents plus
+5.6818181818 kg/s water. Magnetite recovery is 92.5324675325%, compared with
+85.5% for the same two stages without return. This is a consequence of the
+declared constant partitions, not a calibrated recovery improvement claim.
+
+The solver reports each component's circulating load, overall recovery, and
+both residuals. Missing partitions, fully trapped identities, nonfinite
+flows and erased positive paths refuse. A fully trapped zero-feed identity
+also refuses because its stationary circulating inventory is undetermined.
+External closure is scaled by fresh flow, not the inflated internal flow;
+near-trapped ill-conditioned circuits can therefore refuse. These are steady
+prescribed partitions: changing liberation, capacity, reagent conditions or
+residence with recycle requires separately qualified models.
+
 ## Focused verification
 
 Normal workspace commands for these slices:

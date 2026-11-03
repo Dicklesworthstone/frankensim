@@ -29,6 +29,10 @@ use std::collections::BTreeMap;
 #[path = "slurry/separation.rs"]
 pub mod separation;
 
+/// Steady rougher-cleaner circuits with explicit cleaner-tail recycle and purge.
+#[path = "slurry/recycle.rs"]
+pub mod recycle;
+
 /// Source-qualified Herschel–Bulkley/Bingham rheology and laminar pipe hydraulics.
 #[path = "slurry/rheology.rs"]
 pub mod rheology;
