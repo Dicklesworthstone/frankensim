@@ -198,6 +198,7 @@ pub fn solve_weissinger_ground(
     // Forces (identical Kutta–Joukowsky reduction to the free-air path).
     let mut per: Vec<(SurfaceId, f64)> = Vec::new();
     let mut total = 0.0;
+    let mut total_force_n = [0.0; 3];
     for (j, p) in panels.iter().enumerate() {
         let seg = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
         let f = [
@@ -207,16 +208,24 @@ pub fn solve_weissinger_ground(
         ];
         let lift = -rho_kg_m3 * gamma[j] * f[2];
         total += lift;
+        let force_scale = rho_kg_m3 * gamma[j];
+        let force_x = force_scale * f[0];
+        let force_y = force_scale * f[1];
+        total_force_n[0] += force_x;
+        total_force_n[1] += force_y;
         match per.iter_mut().find(|(s, _)| *s == p.surface) {
             Some((_, acc)) => *acc += lift,
             None => per.push((p.surface, lift)),
         }
     }
+    // Preserve the existing lift accumulation and its exact z projection.
+    total_force_n[2] = -total;
     Ok(SolveReport {
         gamma,
         condition_est: 0.0,
         surface_lift_n: per,
         total_lift_n: total,
+        total_force_n,
     })
 }
 

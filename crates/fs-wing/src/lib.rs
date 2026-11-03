@@ -172,10 +172,16 @@ pub struct SolveReport {
     /// Reciprocal-condition ESTIMATE of the influence matrix (1-norm
     /// power-iteration class; an estimate, honestly labeled).
     pub condition_est: f64,
-    /// Per-surface lift (force along −z_freestream-normal) [N].
+    /// Per-surface negative body-z force component [N].
     pub surface_lift_n: Vec<(SurfaceId, f64)>,
-    /// Total lift [N].
+    /// Total negative body-z force component [N]; not wind-axis lift.
     pub total_lift_n: f64,
+    /// Circulatory Kutta–Joukowsky force [N] in frd body axes.
+    /// Includes the streamwise and lateral components of the same panel
+    /// forces used for `total_lift_n`; `total_force_n[2] == -total_lift_n`.
+    /// This is not the complete aircraft force: no profile drag, thrust or
+    /// weight is included, and no separate induced-drag model is added.
+    pub total_force_n: [f64; 3],
 }
 
 /// The WeissingerLLinear solve: no-penetration at every control point,
@@ -321,21 +327,30 @@ pub fn solve_weissinger_linear(
     // component opposing +z (frd lift is −z).
     let mut per: Vec<(SurfaceId, f64)> = Vec::new();
     let mut total = 0.0;
+    let mut total_force_n = [0.0; 3];
     for (j, p) in panels.iter().enumerate() {
         let seg = sub(p.b, p.a);
         let f_vec = cross3(freestream_mps, seg);
         let lift = -rho_kg_m3 * gamma[j] * f_vec[2];
         total += lift;
+        let force_scale = rho_kg_m3 * gamma[j];
+        let force_x = force_scale * f_vec[0];
+        let force_y = force_scale * f_vec[1];
+        total_force_n[0] += force_x;
+        total_force_n[1] += force_y;
         match per.iter_mut().find(|(s, _)| *s == p.surface) {
             Some((_, acc)) => *acc += lift,
             None => per.push((p.surface, lift)),
         }
     }
+    // Preserve the existing lift accumulation and its exact z projection.
+    total_force_n[2] = -total;
     Ok(SolveReport {
         gamma,
         condition_est,
         surface_lift_n: per,
         total_lift_n: total,
+        total_force_n,
     })
 }
 

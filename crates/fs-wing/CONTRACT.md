@@ -21,7 +21,7 @@ safeguarded iteration, branch identity).
   quarter chord, control point at three-quarter chord, unit normal.
 - `flat_surface(...)` — rectangular n_span×n_chord layout builder.
 - `solve_weissinger_linear(panels, freestream, rho) -> SolveReport
-  { gamma, condition_est, surface_lift_n, total_lift_n }`.
+  { gamma, condition_est, surface_lift_n, total_lift_n, total_force_n }`.
 
 - `images::CertifiedGround` + `solve_weissinger_ground` — the exact
   vortex-image system across the certified flat plane (mirrored corners,
@@ -31,6 +31,38 @@ safeguarded iteration, branch identity).
 - `nonlinear::solve_nonlinear` — the production force path: strip-level
   section closure vs TRAILING-SHEET induced alpha, warm-started
   safeguarded relaxation, branch identity, enforced operator-reuse rule.
+
+### Complete circulatory force vectors
+
+`SolveReport::total_force_n` and `NonlinearReport::total_force_n` expose all
+three body-frame components [N] of the existing Kutta–Joukowsky reduction,
+`sum(rho * gamma_j * (velocity_j cross (b_j - a_j)))`. Linear free-air,
+certified-ground and nonlinear solves accumulate the streamwise and lateral
+components alongside the existing lift reduction. `total_lift_n` and
+`surface_lift_n` retain their negative body-z meaning; they are not wind-axis
+lift magnitudes. The new vector's z component is assigned directly from
+`-total_lift_n`, preserving that exact projection and the existing scalar
+multiplication and accumulation order.
+
+This makes vertical-fin sideforce and canted-wing loads available to linear
+solve consumers without reconstructing circulation forces. It adds no
+allocation or extra influence solve. The vector includes only the represented
+circulatory force; profile drag, thrust and weight belong to their existing
+owners, and this report adds no separate induced-drag model. Each solve retains
+its existing choice of incident velocity, wash and circulation closure.
+
+The nonlinear section equation still measures incidence and trailing-sheet
+induction in the global body xz plane. Reporting its full force vector does
+not make that section closure objective for arbitrarily oriented or vertical
+lifting surfaces. The linear rotation fixtures do not assert such a nonlinear
+model extension. Ground-image rotation invariance is asserted only for
+rotations preserving the certified horizontal plane.
+
+`tests/force_vector_battery.rs` supplies physical regressions for signed
+vertical/canted linear loading, rigid-rotation covariance of circulation and
+force, force perpendicularity to uniform incident flow, ground-plane-preserving
+rotation, and the analytic `q*S*cl` force projection under explicit local flow
+and wash for a constant section coefficient of either sign.
 
 ### Spatially varying strip inflow
 

@@ -92,8 +92,15 @@ pub struct NonlinearReport {
     /// Includes geometric twist and trailing-sheet induction exactly once.
     /// Section drag/moment consumers use this same incidence as the lift law.
     pub alpha_eff_rad: Vec<f64>,
-    /// Total lift [N] (Kutta–Joukowsky, −z component).
+    /// Total negative body-z force component [N]; not wind-axis lift.
     pub total_lift_n: f64,
+    /// Circulatory Kutta–Joukowsky force [N] in frd body axes, using the
+    /// same incident velocities and circulation as `total_lift_n`.
+    /// Its z component is exactly `-total_lift_n`. Profile drag, thrust,
+    /// weight and a separate induced-drag model are not included.
+    /// The section closure still uses body-xz incidence and induction;
+    /// this vector does not generalize that closure to vertical surfaces.
+    pub total_force_n: [f64; 3],
 }
 
 /// The section closure the caller supplies: cl(strip index, α_eff [rad])
@@ -588,8 +595,9 @@ fn solve_nonlinear_impl(
         });
     }
     let branch_id = hash_domain("org.frankensim.fs-wing.branch.v1", &pattern).to_hex();
-    // Kutta–Joukowsky total lift.
+    // Kutta–Joukowsky force and the existing body-z lift receipt.
     let mut total = 0.0;
+    let mut total_force_n = [0.0; 3];
     for (j, p) in panels.iter().enumerate() {
         let freestream = local_velocity
             .as_ref()
@@ -606,7 +614,14 @@ fn solve_nonlinear_impl(
         let f = [fx1 - fx2, fy1 - fy2, fz1 - fz2];
         let term = -rho * gamma[j] * f[2];
         total += term;
+        let force_scale = rho * gamma[j];
+        let force_x = force_scale * f[0];
+        let force_y = force_scale * f[1];
+        total_force_n[0] += force_x;
+        total_force_n[1] += force_y;
     }
+    // Preserve the existing lift accumulation and its exact z projection.
+    total_force_n[2] = -total;
     Ok(NonlinearReport {
         gamma,
         residual,
@@ -615,5 +630,6 @@ fn solve_nonlinear_impl(
         regimes,
         alpha_eff_rad,
         total_lift_n: total,
+        total_force_n,
     })
 }
