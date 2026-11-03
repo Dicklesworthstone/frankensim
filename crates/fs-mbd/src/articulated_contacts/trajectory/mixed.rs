@@ -177,10 +177,9 @@ pub struct MixedArticulatedTrajectoryResult {
 /// they are neither physical dissipation nor corrected momenta. Angular impulse
 /// translation retains separate source/origin terms. Signed work and native
 /// actual increments are reduced before rounding; global residuals do not
-/// subtract large rounded whole-window totals. Prescribed smooth steps and
-/// impulses supply polarized increments. Free smooth steps retain their native
-/// endpoint-based diagnostic limitation, reduced per system and stage before
-/// global summation. Extreme native source magnitudes still have finite precision.
+/// subtract large rounded whole-window totals. Both smooth owners and native
+/// impulses supply compensated actual increments. Extreme native source
+/// magnitudes still have finite precision.
 pub fn advance_mixed_articulated_events(
     systems: &[MixedArticulatedTrajectorySystem<'_>],
     events: &[ArticulatedTrajectoryEvent<'_>],
@@ -258,26 +257,17 @@ pub fn advance_mixed_articulated_events(
                             step.external_angular_impulse_world,
                             config.angular_origin_world,
                         );
-                        for sum in [&mut momentum_change, &mut smooth_momentum_defect] {
-                            sum.add(
-                                step.momentum_after.linear_momentum_world,
-                                step.momentum_after.angular_momentum_world,
-                                config.angular_origin_world,
-                            );
-                            sum.add(
-                                step.momentum_before.linear_momentum_world.scale(-1.0),
-                                step.momentum_before.angular_momentum_world.scale(-1.0),
-                                config.angular_origin_world,
-                            );
-                        }
-                        smooth_momentum_defect.add(
-                            step.external_linear_impulse_world.scale(-1.0),
-                            step.external_angular_impulse_world.scale(-1.0),
+                        momentum_change.add(
+                            step.linear_momentum_change_world,
+                            step.angular_momentum_change_world,
                             config.angular_origin_world,
                         );
-                        kinetic_change = kinetic_change
-                            + Dd::from_f64(step.momentum_after.kinetic_energy)
-                            - Dd::from_f64(step.momentum_before.kinetic_energy);
+                        smooth_momentum_defect.add(
+                            step.linear_momentum_residual_world,
+                            step.angular_momentum_residual_world,
+                            config.angular_origin_world,
+                        );
+                        kinetic_change = kinetic_change + Dd::from_f64(step.kinetic_energy_change);
                         actuator_work = actuator_work + Dd::from_f64(step.actuator_work);
                         smooth_external_work =
                             smooth_external_work + Dd::from_f64(step.external_work);

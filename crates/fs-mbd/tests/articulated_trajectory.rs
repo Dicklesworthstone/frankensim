@@ -8,6 +8,10 @@ use fs_mbd::articulated::{
     ArticulatedModel, FreeFloatingBaseState, JointModel, Link, SpatialInertia,
 };
 use fs_mbd::articulated_contacts::friction::ArticulatedFrictionalContact;
+use fs_mbd::articulated_contacts::trajectory::mixed::{
+    MixedArticulatedTrajectoryResult, MixedArticulatedTrajectoryState,
+    MixedArticulatedTrajectorySystem, advance_mixed_articulated_events,
+};
 use fs_mbd::articulated_contacts::trajectory::{
     ArticulatedTrajectoryConfig, ArticulatedTrajectoryError, ArticulatedTrajectoryEvent,
     ArticulatedTrajectoryResult, ArticulatedTrajectorySystem, advance_articulated_events,
@@ -614,4 +618,135 @@ fn late_refusal_cancellation_budget_and_equal_time_events_never_publish_partial_
     ));
     let retry = advance_articulated_events(&systems, &events, config(2.5), || false).unwrap();
     assert_eq!(retry.states_after, expected.states_after);
+}
+
+fn through_mixed(
+    systems: &[ArticulatedTrajectorySystem<'_>],
+    controls: ArticulatedTrajectoryConfig,
+) -> MixedArticulatedTrajectoryResult {
+    let states: Vec<_> = systems
+        .iter()
+        .map(|system| MixedArticulatedTrajectoryState::Free(system.state.clone()))
+        .collect();
+    let inputs: Vec<_> = systems
+        .iter()
+        .zip(&states)
+        .map(|(system, state)| MixedArticulatedTrajectorySystem {
+            model: system.model,
+            state,
+            loads: system.loads,
+        })
+        .collect();
+    advance_mixed_articulated_events(
+        &inputs,
+        &[],
+        0.,
+        controls,
+        |_, _, _| panic!("free system has no support path"),
+        || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn free_windows_retain_small_transverse_work_beside_large_translation() {
+    let model = body(1., 1.);
+    let initial = state(Vec3::default(), Vec3::new(1e8, 0., 0.));
+    let wrenches = [Wrench::new(Vec3::default(), Vec3::new(0., 1., 0.))];
+    let systems = [ArticulatedTrajectorySystem {
+        model: &model,
+        state: &initial,
+        loads: no_loads(&wrenches),
+    }];
+    let controls = ArticulatedTrajectoryConfig {
+        maximum_smooth_step: 1.,
+        ..config(1.)
+    };
+    let result = advance_articulated_events(&systems, &[], controls, || false).unwrap();
+    vector(
+        result.states_after[0].base.twist_body.linear,
+        Vec3::new(1e8, 1., 0.),
+    );
+    close(result.external_work, 0.5);
+    close(result.kinetic_work_residual, 0.);
+    close(result.smooth_kinetic_work_residual, 0.);
+    vector(result.external_linear_impulse_world, Vec3::new(0., 1., 0.));
+    vector(
+        result.external_angular_impulse_about_origin_world,
+        Vec3::new(0., 0., 5e7) - controls.angular_origin_world.cross(Vec3::new(0., 1., 0.)),
+    );
+    // The rounded absolute energies erase the genuine 0.5 J transfer.
+    assert_eq!(
+        result.momentum_before.kinetic_energy,
+        result.momentum_after.kinetic_energy
+    );
+    audit(&result);
+    let mixed = through_mixed(&systems, controls);
+    assert_eq!(
+        mixed.states_after[0],
+        MixedArticulatedTrajectoryState::Free(result.states_after[0].clone())
+    );
+    close(mixed.kinetic_energy_change, 0.5);
+    close(mixed.kinetic_work_residual, 0.);
+    vector(mixed.linear_momentum_change_world, Vec3::new(0., 1., 0.));
+    vector(mixed.smooth_linear_momentum_residual, Vec3::default());
+    vector(mixed.smooth_angular_momentum_residual, Vec3::default());
+}
+
+#[test]
+fn free_windows_preserve_small_counterwork_and_cross_system_momentum() {
+    let model = body(1., 1.);
+    let initial = [
+        state(Vec3::new(0., -1., 0.), Vec3::new(1e16 - 2., 0., 0.)),
+        state(Vec3::default(), Vec3::new(1., 0., 0.)),
+        state(Vec3::new(0., 1., 0.), Vec3::new(-1e16 - 2., 0., 0.)),
+    ];
+    let wrenches =
+        [4., 1., 4.].map(|force| [Wrench::new(Vec3::default(), Vec3::new(force, 0., 0.))]);
+    let systems: Vec<_> = initial
+        .iter()
+        .zip(&wrenches)
+        .map(|(state, loads)| ArticulatedTrajectorySystem {
+            model: &model,
+            state,
+            loads: no_loads(loads),
+        })
+        .collect();
+    let controls = ArticulatedTrajectoryConfig {
+        maximum_smooth_step: 1.,
+        ..config(1.)
+    };
+    let result = advance_articulated_events(&systems, &[], controls, || false).unwrap();
+    // Both large velocity changes are representable: each is exactly 4 m/s.
+    // The independent midpoint works are +4e16, +1.5, -4e16 J in input order.
+    assert_eq!(result.states_after[0].base.twist_body.linear.x, 1e16 + 2.);
+    assert_eq!(result.states_after[2].base.twist_body.linear.x, -1e16 + 2.);
+    close(result.external_work, 1.5);
+    vector(result.momentum_before.linear_world, Vec3::new(-3., 0., 0.));
+    vector(result.momentum_after.linear_world, Vec3::new(6., 0., 0.));
+    vector(result.external_linear_impulse_world, Vec3::new(9., 0., 0.));
+    close(result.kinetic_work_residual, 0.);
+    // Independently rounded ~1e32 J endpoint totals can differ by one ULP
+    // (~1.8e16 J). Neither zero nor that difference represents the real 1.5 J.
+    // The per-stage polarized increments and work above supply the balance.
+    let rounded_difference =
+        result.momentum_after.kinetic_energy - result.momentum_before.kinetic_energy;
+    let spacing =
+        result.momentum_after.kinetic_energy.next_up() - result.momentum_after.kinetic_energy;
+    assert!(rounded_difference.abs() <= spacing);
+    assert!((rounded_difference - 1.5).abs() > 1.0);
+    audit(&result);
+    let mixed = through_mixed(&systems, controls);
+    for (native, state) in result.states_after.iter().zip(&mixed.states_after) {
+        assert_eq!(
+            *state,
+            MixedArticulatedTrajectoryState::Free(native.clone())
+        );
+    }
+    close(mixed.kinetic_energy_change, 1.5);
+    close(mixed.external_work, 1.5);
+    close(mixed.kinetic_work_residual, 0.);
+    vector(mixed.linear_momentum_change_world, Vec3::new(9., 0., 0.));
+    vector(mixed.linear_momentum_residual, Vec3::default());
+    vector(mixed.angular_momentum_residual, Vec3::default());
 }

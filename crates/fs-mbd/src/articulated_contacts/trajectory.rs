@@ -114,12 +114,13 @@ pub struct ArticulatedTrajectoryResult {
     pub contact_dissipated_energy: f64,
     /// Sum of the smooth integrator's measured numerical work defects.
     pub smooth_kinetic_work_residual: f64,
-    /// Actual global kinetic change minus supplied work plus impact loss.
-    /// Smooth numerical integration error remains visible in this quantity.
+    /// Actual native stage/event kinetic increments minus work plus impact loss.
+    /// Large rounded endpoint energies are not subtracted. Smooth numerical
+    /// integration error remains visible in this quantity.
     pub kinetic_work_residual: f64,
-    /// Actual linear change minus external impulse, in N s.
+    /// Actual native stage/event linear increments minus external impulse, N s.
     pub linear_momentum_residual: Vec3,
-    /// Actual angular change minus external angular impulse, in N m s.
+    /// Actual stage/event angular increments minus external impulse, N m s.
     pub angular_momentum_residual: Vec3,
 }
 
@@ -193,6 +194,9 @@ impl std::error::Error for ArticulatedTrajectoryError {}
 /// A missed contact or inadequate smooth resolution is not repaired here.
 /// Angular impulses are translated from native world-origin receipts; ordinary
 /// floating-point cancellation can limit extremely distant-origin balances.
+/// Signed source/work sums and actual native stage/event increments are reduced
+/// before rounding. Endpoint physical totals remain independent diagnostics;
+/// their subtraction does not determine the complete-window residuals.
 pub fn advance_articulated_events(
     systems: &[ArticulatedTrajectorySystem<'_>],
     events: &[ArticulatedTrajectoryEvent<'_>],
@@ -210,10 +214,12 @@ pub fn advance_articulated_events(
         &mut cancelled,
     )?;
     let mut impulses = Impulses::default();
-    let mut actuator_work = 0.0;
-    let mut external_work = 0.0;
-    let mut loss = 0.0;
-    let mut smooth_defect = 0.0;
+    let mut momentum_change = Impulses::default();
+    let mut kinetic_change = Dd::ZERO;
+    let mut actuator_work = Dd::ZERO;
+    let mut external_work = Dd::ZERO;
+    let mut loss = Dd::ZERO;
+    let mut smooth_defect = Dd::ZERO;
     let mut accepted_events = Vec::with_capacity(events.len());
     let mut start = 0.0;
     for (interval_index, &count) in counts.iter().enumerate() {
@@ -249,9 +255,15 @@ pub fn advance_articulated_events(
                     step.external_angular_impulse_world,
                     config.angular_origin_world,
                 );
-                actuator_work += step.actuator_work;
-                external_work += step.external_work;
-                smooth_defect += step.kinetic_work_residual;
+                momentum_change.add(
+                    step.linear_momentum_change_world,
+                    step.angular_momentum_change_world,
+                    config.angular_origin_world,
+                );
+                kinetic_change = kinetic_change + Dd::from_f64(step.kinetic_energy_change);
+                actuator_work = actuator_work + Dd::from_f64(step.actuator_work);
+                external_work = external_work + Dd::from_f64(step.external_work);
+                smooth_defect = smooth_defect + Dd::from_f64(step.kinetic_work_residual);
                 states[system_index] = step.state_after;
             }
             previous_time = next_time;
@@ -292,13 +304,19 @@ pub fn advance_articulated_events(
                     response.external_angular_impulse_world,
                     config.angular_origin_world,
                 );
+                momentum_change.add(
+                    response.linear_momentum_change_world,
+                    response.angular_momentum_change_world,
+                    config.angular_origin_world,
+                );
+                kinetic_change = kinetic_change + Dd::from_f64(response.kinetic_energy_change);
                 state.base = response.base_after;
                 state
                     .joint_velocity
                     .clone_from(&response.joint_velocity_after);
             }
-            external_work += impact.plane_work;
-            loss += impact.contact.dissipated_energy;
+            external_work = external_work + Dd::from_f64(impact.plane_work);
+            loss = loss + Dd::from_f64(impact.contact.dissipated_energy);
             accepted_events.push(ArticulatedTrajectoryEventResult {
                 time: event.time,
                 impact,
@@ -312,16 +330,11 @@ pub fn advance_articulated_events(
         config.duration,
         &mut cancelled,
     )?;
-    let kinetic_work_residual = momentum_after.kinetic_energy
-        - momentum_before.kinetic_energy
-        - actuator_work
-        - external_work
-        + loss;
-    let linear_momentum_residual =
-        momentum_after.linear_world - momentum_before.linear_world - impulses.linear;
-    let angular_momentum_residual = momentum_after.angular_about_origin_world
-        - momentum_before.angular_about_origin_world
-        - impulses.angular;
+    let kinetic_work_residual = (kinetic_change - actuator_work - external_work + loss).to_f64();
+    let (linear_momentum_residual, angular_momentum_residual) =
+        momentum_change.difference(&impulses);
+    let [actuator_work, external_work, loss, smooth_defect] =
+        [actuator_work, external_work, loss, smooth_defect].map(Dd::to_f64);
     if ![
         actuator_work,
         external_work,
@@ -333,6 +346,8 @@ pub fn advance_articulated_events(
     .all(|value| value.is_finite())
         || !finite_vector(impulses.linear)
         || !finite_vector(impulses.angular)
+        || !finite_vector(momentum_change.linear)
+        || !finite_vector(momentum_change.angular)
         || !finite_vector(linear_momentum_residual)
         || !finite_vector(angular_momentum_residual)
     {
@@ -459,11 +474,8 @@ fn momentum(
     time: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ArticulatedTrajectoryMomentum, ArticulatedTrajectoryError> {
-    let mut total = ArticulatedTrajectoryMomentum {
-        linear_world: Vec3::default(),
-        angular_about_origin_world: Vec3::default(),
-        kinetic_energy: 0.0,
-    };
+    let mut spatial = Impulses::default();
+    let mut kinetic = Dd::ZERO;
     for (index, (system, state)) in systems.iter().zip(states).enumerate() {
         poll(cancelled)?;
         // Move the coordinate origin before evaluating native link momenta;
@@ -481,11 +493,18 @@ fn momentum(
             &state.joint_velocity,
         )
         .map_err(|error| smooth_error(index, time, error.into()))?;
-        total.linear_world = total.linear_world + value.linear_momentum_world;
-        total.angular_about_origin_world =
-            total.angular_about_origin_world + value.angular_momentum_world;
-        total.kinetic_energy += value.kinetic_energy;
+        spatial.add(
+            value.linear_momentum_world,
+            value.angular_momentum_world,
+            Vec3::default(),
+        );
+        kinetic = kinetic + Dd::from_f64(value.kinetic_energy);
     }
+    let total = ArticulatedTrajectoryMomentum {
+        linear_world: spatial.linear,
+        angular_about_origin_world: spatial.angular,
+        kinetic_energy: kinetic.to_f64(),
+    };
     if !finite_vector(total.linear_world)
         || !finite_vector(total.angular_about_origin_world)
         || !total.kinetic_energy.is_finite()
