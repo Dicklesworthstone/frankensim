@@ -4551,3 +4551,55 @@ its oscillatory pair and real relaxation pole, a live contour quadrature ladder,
 coupled tensor/Kelvin/consistent-mass roots against an independent determinant,
 source/resource/cancellation refusals, lossless roots and full-spectrum rank
 refusal (G0/G1/G3).
+
+### Physical boundary stiffness, damping and inertia in hereditary solid modes
+
+`ViscoElements::prepare_resonance_poles_with_port_load` adds a complete real
+power-conjugate port map B and symmetric numerical-PSD boundary coefficients
+K_port, C_port and M_port to the original hereditary spatial pencil. The
+opposing effort is `K_port*d+C_port*d'+M_port*d''`, where `d=B^T*u`; the
+body receives `-B*effort`. The mechanical pencil therefore receives
+`B*(K_port+s*C_port+s^2*M_port)*B^T` before balancing. Its causal impedance
+is `K_port/s+C_port+s*M_port`. No single-frequency impedance sample is
+continued, and no boundary mass, mutual entry or source Maxwell coordinate is
+discarded. This represents kinematically attached mass, springs and dampers;
+an attachment with independent moving coordinates requires its own state.
+
+The caller supplies the complete original free-coordinate force map, all
+three port matrices, a declared real-frequency band, and additional port,
+payload and preparation-work limits. Each coefficient is checked for exact
+symmetry, finite values and numerical positive semidefiniteness under a
+diagonal congruence, reusing the bounded shared fs-la Jacobi eigensolver.
+Negative diagonal entries and nonzero rows with zero diagonals refuse before
+numerical tolerance could conceal an active direction. The original matrices
+are retained unchanged; singular passive directions are allowed. These
+floating-point checks are not interval-certified passivity statements.
+
+The load's additional payload envelope is `24*n*p+80*p^2+256*p` bytes. Its
+preparation-work envelope is `3*(720*p^3+256*p^2)+6*n*p*(n+p)` scalar-work
+units; every individual PSD admission also obeys fs-la's unpolled-work cap.
+These limits are separate from the original source-pencil and Newton/Beyn
+budgets. Port projection is prepared once; repeated pole and contour queries
+reuse the original quadratic coefficients and fixed scales. Cancellation is
+polled before/after bounded PSD calls and at projection/observation rows.
+
+Each returned pole includes optional original port displacement, flow and
+opposing effort, load storage `(d^H*K_port*d+flow^H*M_port*flow)/2`, boundary
+heat `Re(flow^H*C_port*flow)`, net absorbed power `Re(flow^H*effort)`, and the
+signed defect `power-2*Re(s)*storage-heat`. These are complex-envelope forms
+at the mode's arbitrary normalization, not finite-cycle averages or admitted
+finite-amplitude trajectories. Boundary storage and loss remain separate
+from intrinsic material loss. The original mechanical and memory residuals
+include the added load. The intersection of original material and load bands
+gates `|s|` and the whole contour; analytic continuation is not measured-data
+validation at complex frequency. Existing numerical-root, multiplicity,
+completeness and spatial-accuracy limits remain unchanged.
+
+`tests/visco_loaded_poles.rs` checks an independently factorized loaded Prony
+cubic, original material memory ratios, independent boundary power/storage/heat,
+two mutually coupled ports against an independently assembled rational
+determinant with consistent cross mass, exact zero-load pole/vector parity,
+singular passive directions, source-band admission, active and malformed
+loads, exact resource boundaries, and cancellation (G0/G1/G3/G4). The full
+native fs-solid library builds, all four loaded-pole tests pass, and the five
+existing hereditary-pole regressions pass against the updated library.

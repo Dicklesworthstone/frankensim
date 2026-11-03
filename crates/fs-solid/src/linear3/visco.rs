@@ -42,7 +42,7 @@ pub use harmonic::{ViscoHarmonicError, ViscoHarmonicOperator, ViscoHarmonicRespo
 mod poles;
 pub use poles::{
     PreparedViscoPoles, ViscoMemorySite, ViscoPole, ViscoPoleBudget, ViscoPoleError,
-    ViscoPoleSpectrum,
+    ViscoPoleSpectrum, ViscoPolePortBudget, ViscoPolePortLoad, ViscoPolePortResponse,
 };
 
 /// Geometry and explicit quadrature; material frames must already be resolved.

@@ -16,6 +16,10 @@ use fs_la::nonlinear_eig::{
 };
 use fs_math::c64::C64;
 
+mod load;
+use load::PreparedPortLoad;
+pub use load::{ViscoPolePortBudget, ViscoPolePortLoad, ViscoPolePortResponse};
+
 /// Source-owned preparation and callback resources, separate from fs-la's
 /// numerical iteration budgets. Allocator overhead/process RSS are excluded.
 #[derive(Clone, Copy, Debug)]
@@ -60,6 +64,9 @@ pub struct ViscoPole {
     pub mechanical_residual: f64,
     /// Original Maxwell-strain equation residual; zero with no memory rows.
     pub memory_residual: f64,
+    /// Original attached port motion, storage and loss at the same arbitrary
+    /// modal amplitude. Absent for an unloaded preparation.
+    pub port_load: Option<ViscoPolePortResponse>,
     /// Shared solver's scaled final Newton correction.
     pub relative_step: f64,
     /// Number of shared Newton evaluations.
@@ -102,6 +109,11 @@ pub enum ViscoPoleError {
     },
     /// |s| lies outside the intersection of original material frequency bands.
     SourceBand { rate: C64, band_rad_s: (f64, f64) },
+    /// A supplied boundary coefficient is not numerically positive semidefinite.
+    LoadNotPassive {
+        coefficient: &'static str,
+        minimum_scaled_eigenvalue: f64,
+    },
     /// Displacement-only initialization cannot divide through this branch rate.
     SeedAtRelaxationRate { site: usize },
     /// Original mechanical and memory rows did not both pass.
@@ -165,6 +177,7 @@ pub struct PreparedViscoPoles<'a> {
     dimension: usize,
     band: (f64, f64),
     budget: ViscoPoleBudget,
+    port_load: Option<PreparedPortLoad>,
 }
 
 impl ViscoElements {
@@ -180,6 +193,36 @@ impl ViscoElements {
     pub fn prepare_resonance_poles(
         &self,
         budget: ViscoPoleBudget,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
+        self.prepare_poles(budget, None, cx)
+    }
+
+    /// Include a physical passive boundary in the ORIGINAL hereditary pencil.
+    /// For port displacement d=B^T*u the opposing effort is
+    /// K_port*d + C_port*d' + M_port*d''. Thus the complete mechanical
+    /// rows receive B*(K_port+s*C_port+s²*M_port)*B^T before balancing.
+    ///
+    /// This is the causal spring/damper/inertance law K_port/s+C_port+s*M_port,
+    /// not a continuation of samples of Z(omega). Each full port coefficient
+    /// must be symmetric PSD; mutual entries and singular passive directions
+    /// remain present. All source Maxwell coordinates survive. Port motion is
+    /// kinematically tied to the body; an attachment with independent moving
+    /// coordinates requires its own coupled state and is not represented here.
+    pub fn prepare_resonance_poles_with_port_load(
+        &self,
+        load: ViscoPolePortLoad<'_>,
+        budget: ViscoPoleBudget,
+        load_budget: ViscoPolePortBudget,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
+        self.prepare_poles(budget, Some((load, load_budget)), cx)
+    }
+
+    fn prepare_poles(
+        &self,
+        budget: ViscoPoleBudget,
+        load: Option<(ViscoPolePortLoad<'_>, ViscoPolePortBudget)>,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
         checkpoint(cx)?;
@@ -241,6 +284,16 @@ impl ViscoElements {
             work + 24 * nn,
             budget.maximum_assembly_work as u128,
         )?;
+        let port_load = load
+            .map(|(load, budget)| PreparedPortLoad::new(m, load, budget, cx))
+            .transpose()?;
+        if let Some(load) = &port_load {
+            band.0 = band.0.max(load.band_rad_s.0);
+            band.1 = band.1.min(load.band_rad_s.1);
+            if band.0 > band.1 {
+                return Err(invalid("material and boundary-load bands do not intersect"));
+            }
+        }
         let mut reduced = vec![usize::MAX; self.full_dofs];
         for (i, &dof) in self.equilibrium.free_dofs.iter().enumerate() {
             reduced[dof] = i;
@@ -308,6 +361,9 @@ impl ViscoElements {
                 }
             }
         }
+        if let Some(load) = &port_load {
+            load.add_to_pencil(&mut a, n, cx)?;
+        }
         if a.iter().flatten().any(|x| !x.is_finite()) {
             return Err(invalid(
                 "original hereditary coefficient is not representable",
@@ -322,6 +378,7 @@ impl ViscoElements {
             dimension: n,
             band,
             budget,
+            port_load,
         };
         let rate = budget.reference_rate_per_s;
         for i in 0..n {
@@ -510,6 +567,11 @@ impl PreparedViscoPoles<'_> {
         }
         Ok(ViscoPole {
             rate_per_s: s,
+            port_load: self
+                .port_load
+                .as_ref()
+                .map(|load| load.observe(s, &vector[..self.free_dofs().len()], cancelled))
+                .transpose()?,
             physical_vector: vector,
             mechanical_residual: residual[0],
             memory_residual: residual[1],
