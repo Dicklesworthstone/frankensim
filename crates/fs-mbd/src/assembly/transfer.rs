@@ -15,6 +15,9 @@ use super::{
 };
 use crate::{MassProperties, RigidBodyState, Vec3};
 
+/// Simultaneous closed networks of material handoffs between finite bodies.
+pub mod network;
+
 /// One existing donor parcel transferred to one receiver material point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointMassTransfer {
@@ -28,7 +31,7 @@ pub struct PointMassTransfer {
 /// Bounded work and physical acceptance for one two-body transfer event.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointMassTransferControls {
-    /// Counts both original bodies plus EVERY descriptor, including zeros.
+    /// Counts all original bodies plus EVERY descriptor, including zeros.
     /// Each positive capture and each nonzero separation impulse consumes one
     /// impulse slot. The same absolute balance gates also apply to each phase.
     pub assembly: AssemblyControls,
@@ -129,29 +132,7 @@ pub fn transfer_point_masses(
         impulses = impulses
             .checked_add(1 + usize::from(parcel.impulse_on_parcel_body_ns != Vec3::ZERO))
             .ok_or(AssemblyError::Invalid("transfer impulse count overflow"))?;
-        // Avoid first forming two large absolute world attachment positions:
-        // their rounded equality must not hide different material locations.
-        let mut gap = VectorSum::default();
-        gap.add(vector(
-            receiver
-                .pose()
-                .position_world()
-                .sub(donor.pose().position_world()),
-        )?);
-        gap.add(vector(
-            receiver
-                .pose()
-                .orientation()
-                .rotate_body_to_world(transfer.receiver_attachment_arm_body_m),
-        )?);
-        gap.add(vector(
-            donor
-                .pose()
-                .orientation()
-                .rotate_body_to_world(parcel.attachment_arm_body_m)
-                .scale(-1.0),
-        )?);
-        mismatch = mismatch.max(maximum(vector(gap.value())?));
+        mismatch = mismatch.max(attachment_mismatch(donor, receiver, transfer)?);
     }
     controls.assembly.validate(parts, impulses)?;
     if mismatch > controls.attachment_tolerance_m {
@@ -227,10 +208,11 @@ pub fn transfer_point_masses(
         )
     } else {
         combined_balance(
-            [*donor, *receiver],
-            [donor_properties, receiver_properties],
-            [released.state, captured.state],
-            [released.properties, captured.properties],
+            [(*donor, donor_properties), (*receiver, receiver_properties)],
+            [
+                (released.state, released.properties),
+                (captured.state, captured.properties),
+            ],
             origin,
             donor.center_of_mass_velocity_world(donor_properties)?,
             released.supplied_work_j,
@@ -260,10 +242,8 @@ pub fn transfer_point_masses(
 
 #[allow(clippy::too_many_arguments)]
 fn combined_balance(
-    before: [RigidBodyState; 2],
-    before_properties: [MassProperties; 2],
-    after: [RigidBodyState; 2],
-    after_properties: [MassProperties; 2],
+    before: impl IntoIterator<Item = (RigidBodyState, MassProperties)>,
+    after: impl IntoIterator<Item = (RigidBodyState, MassProperties)>,
     origin: Vec3,
     boost: Vec3,
     supplied: f64,
@@ -275,12 +255,26 @@ fn combined_balance(
     let mut angular = VectorSum::default();
     let mut first_moment = VectorSum::default();
     let mut energy = Sum::default();
-    for i in 0..2 {
+    let mut before = before.into_iter();
+    let mut after = after.into_iter();
+    loop {
         poll(cancelled)?;
-        let old = before[i];
-        let new = after[i];
-        let m0 = before_properties[i].mass();
-        let m1 = after_properties[i].mass();
+        let (old, old_properties, new, new_properties) = match (before.next(), after.next()) {
+            (Some((old, old_properties)), Some((new, new_properties))) => {
+                (old, old_properties, new, new_properties)
+            }
+            (None, None) => break,
+            _ => {
+                return Err(AssemblyError::Invalid(
+                    "matching transfer endpoint axes required",
+                ));
+            }
+        };
+        if old == new && old_properties == new_properties {
+            continue;
+        }
+        let m0 = old_properties.mass();
+        let m1 = new_properties.mass();
         let dm = finite(m1 - m0)?;
         mass.add(dm);
         linear.add(new.linear_momentum_world());
@@ -300,8 +294,8 @@ fn combined_balance(
                 .orientation()
                 .rotate_body_to_world(vector(l1.sub(l0))?),
         )?);
-        let w0 = before_properties[i].angular_velocity_body_checked(l0)?;
-        let w1 = after_properties[i].angular_velocity_body_checked(l1)?;
+        let w0 = old_properties.angular_velocity_body_checked(l0)?;
+        let w1 = new_properties.angular_velocity_body_checked(l1)?;
         let v0 = vector(Vec3::new(p0.x / m0, p0.y / m0, p0.z / m0))?;
         let v1 = vector(Vec3::new(p1.x / m1, p1.y / m1, p1.z / m1))?;
         // Polarized changes avoid subtracting large common spin or kinetic
@@ -323,4 +317,34 @@ fn combined_balance(
             energy_residual_j: finite(energy.value())?,
         },
     ))
+}
+
+// Keep attachment admission common to pair and network handoffs. In particular,
+// rounded equality of large world positions must not hide different local points.
+fn attachment_mismatch(
+    donor: &RigidBodyState,
+    receiver: &RigidBodyState,
+    transfer: &PointMassTransfer,
+) -> Result<f64, AssemblyError> {
+    let mut gap = VectorSum::default();
+    gap.add(vector(
+        receiver
+            .pose()
+            .position_world()
+            .sub(donor.pose().position_world()),
+    )?);
+    gap.add(vector(
+        receiver
+            .pose()
+            .orientation()
+            .rotate_body_to_world(transfer.receiver_attachment_arm_body_m),
+    )?);
+    gap.add(vector(
+        donor
+            .pose()
+            .orientation()
+            .rotate_body_to_world(transfer.release.attachment_arm_body_m)
+            .scale(-1.0),
+    )?);
+    Ok(maximum(vector(gap.value())?))
 }

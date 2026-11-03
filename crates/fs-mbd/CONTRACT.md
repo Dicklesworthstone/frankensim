@@ -5326,3 +5326,46 @@ internal relative-flow momentum, changing reservoir geometry, pressure thrust,
 thermal/chemical plume energy and complete open-system passivity remain outside
 this bounded model. The reservoir inertia law remains an independent physical
 declaration; balanced nozzle geometry does not determine it.
+
+## Simultaneous closed finite-body material-transfer networks
+
+`assembly::transfer::network::transfer_point_mass_network` composes the original
+native batch release and canonical-momentum capture owners across a directed
+graph. Every outgoing parcel uses its donor's ORIGINAL snapshot. All releases
+complete before any capture, so cycles and nodes that both give and receive
+never re-export newly received material during the same event. Each receiver
+captures its whole incoming batch together after rebasing original attachment
+arms by its own release COM shift.
+
+Two prefix-indexed adjacency tables route parcels in O(bodies + edges) work
+and storage, retaining original body and per-body input order. Reused descriptor
+buffers avoid per-edge staging allocations. Each participating body admits at
+most one release and one capture inertia; no dense network mobility matrix or
+repeated pairwise recoil solve is introduced. Canonical parcel momenta are
+consumed exactly once into the receivers, and no free parcel inventory is
+published alongside the final bodies.
+
+Original local attachment geometry and represented post-release positions
+must both coincide. Each intermediate retained donor must keep positive mass
+and admissible inertia even if incoming material later replaces its inventory.
+The event is instantaneous physical handoff, not finite flight, contact discovery,
+material/species mixing, or a continuous-flow integration scheme.
+
+The original shared controls count all bodies plus every edge, including zero
+mass. Positive capture and nonzero separation impulses share the aggregate
+impulse cap. Native per-phase balances and a common-origin global mass,
+linear/angular momentum and polarized kinetic/work/loss gate admit only the
+complete event. Unchanged isolated bodies contribute an exact zero change,
+without evaluating unnecessary absolute energies or distant moment arms.
+Separation work and sticking loss remain separately owned per body and globally;
+source debits and thermal destinations are explicit caller responsibilities.
+Cancellation and late failure publish no endpoint and preserve all inputs.
+
+Six focused regressions cover an independent three-body circulation oracle,
+shared incoming recoil, a rotating full-inertia off-center cycle with known
+central inertia, edge/body permutations and parcel subdivision, pair parity
+with canonical momentum and isolated owners, large common boosts, budgets,
+invalid intermediate inventory and terminal cancellation. Existing pairwise
+transfer reuses the same generalized physical-balance and attachment helpers.
+Native compilation and numerical execution remain necessary for conformance;
+formatter parsing and analytical checks do not substitute for them.
