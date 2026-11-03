@@ -9,12 +9,16 @@
 //!
 //! This module implements the `fs_time::se3::RattleProjection` seam. It is a
 //! projection owner, not collision detection, contact response, or a penalty
-//! force. Position projection uses bounded Newton corrections on SE(3);
-//! velocity projection is the exact mass-metric tangent projection at the
-//! supplied pose.
+//! force. Position projection uses bounded Newton corrections of COM position
+//! and body attitude; the COM correction follows the fixed plane normal.
+//! The composed candidate projection carries world linear momentum and central
+//! spin across the configuration repair before applying the normal mass-metric
+//! impulse. This preserves the plane's translation/rotation symmetries without
+//! treating a changed body basis as a physical impulse. It is not a complete
+//! variational RATTLE time integrator.
 
 use crate::{MassProperties, Vec3 as MbdVec3};
-use fs_ga::{Se3, Twist, Vec3};
+use fs_ga::{Se3, So3Tangent, Twist, Vec3};
 use fs_time::se3::{RattleProjection, Se3Error};
 
 /// Bounded controls for one point/plane projection.
@@ -124,8 +128,8 @@ impl PointPlaneRattle {
     pub fn normal_mobility(&self, pose: Se3) -> Result<f64, Se3Error> {
         let (angular_row, linear_row) = self.body_row(pose)?;
         let inverse_angular = self.inverse_inertia(angular_row)?;
-        let value = angular_row.dot(inverse_angular)
-            + linear_row.dot(linear_row) / self.properties.mass();
+        let value =
+            angular_row.dot(inverse_angular) + linear_row.dot(linear_row) / self.properties.mass();
         if value.is_finite() && value > 0.0 {
             Ok(value)
         } else {
@@ -134,19 +138,54 @@ impl PointPlaneRattle {
     }
 
     /// Project a complete candidate and return measured residuals.
+    ///
+    /// The configuration repair keeps world linear momentum and world central
+    /// spin fixed, then the tangent projection applies one normal point impulse.
+    /// COM translation during repair is normal to the plane. Consequently the
+    /// plane-tangent linear and plane-normal total angular momenta are retained
+    /// to roundoff. Other orbital components change with the explicit COM
+    /// relocation; that change must not be converted into an artificial spin.
+    /// The configuration repair can change kinetic energy for anisotropic
+    /// inertia and does not claim a symplectic or energy-preserving time step.
+    /// Refusal leaves both caller-owned inputs unchanged.
     pub fn project_candidate(
         &self,
         pose: &mut Se3,
         twist_body: &mut Twist,
     ) -> Result<PointPlaneProjectionReceipt, Se3Error> {
-        let position_violation_removed_m = self.project_position(pose)?;
-        let velocity_violation_removed_mps = self.project_velocity(pose, twist_body)?;
-        Ok(PointPlaneProjectionReceipt {
+        let mut candidate_pose = *pose;
+        let mut candidate_twist = *twist_body;
+        let position_violation_removed_m = self.project_position(&mut candidate_pose)?;
+        if candidate_pose.rotation() != pose.rotation() {
+            let velocity_world = pose.rotation().rotate(twist_body.linear)?;
+            let spin_body = self
+                .properties
+                .angular_momentum_body_checked(MbdVec3::new(
+                    twist_body.angular.x,
+                    twist_body.angular.y,
+                    twist_body.angular.z,
+                ))
+                .map_err(|_| invalid("rigid point/plane angular momentum"))?;
+            let spin_world =
+                pose.rotation()
+                    .rotate(Vec3::new(spin_body.x, spin_body.y, spin_body.z))?;
+            let world_to_body = candidate_pose.rotation().inverse();
+            candidate_twist = Twist::new(
+                self.inverse_inertia(world_to_body.rotate(spin_world)?)?,
+                world_to_body.rotate(velocity_world)?,
+            );
+        }
+        let velocity_violation_removed_mps =
+            self.project_velocity(&candidate_pose, &mut candidate_twist)?;
+        let receipt = PointPlaneProjectionReceipt {
             position_violation_removed_m,
             velocity_violation_removed_mps,
-            final_gap_m: self.gap(*pose)?,
-            final_normal_speed_mps: self.normal_speed(*pose, *twist_body)?,
-        })
+            final_gap_m: self.gap(candidate_pose)?,
+            final_normal_speed_mps: self.normal_speed(candidate_pose, candidate_twist)?,
+        };
+        *pose = candidate_pose;
+        *twist_body = candidate_twist;
+        Ok(receipt)
     }
 
     fn body_row(&self, pose: Se3) -> Result<(Vec3, Vec3), Se3Error> {
@@ -167,11 +206,14 @@ impl PointPlaneRattle {
         }
     }
 
-    fn correction(&self, pose: Se3, residual: f64) -> Result<Twist, Se3Error> {
+    // The scalar accompanies the body-coordinate correction so a position
+    // repair can move the COM strictly along the world normal. A coupled SE(3)
+    // screw exponential would add a tangential translation at finite rotation.
+    fn correction(&self, pose: Se3, residual: f64) -> Result<(Twist, f64), Se3Error> {
         let (angular_row, linear_row) = self.body_row(pose)?;
         let inverse_angular = self.inverse_inertia(angular_row)?;
-        let mobility = angular_row.dot(inverse_angular)
-            + linear_row.dot(linear_row) / self.properties.mass();
+        let mobility =
+            angular_row.dot(inverse_angular) + linear_row.dot(linear_row) / self.properties.mass();
         if !mobility.is_finite() || mobility <= 0.0 {
             return Err(invalid("rigid point/plane mobility"));
         }
@@ -179,9 +221,13 @@ impl PointPlaneRattle {
         if !multiplier.is_finite() {
             return Err(invalid("rigid point/plane multiplier"));
         }
-        Ok(Twist::new(
-            inverse_angular.scale(multiplier),
-            linear_row.scale(multiplier / self.properties.mass()),
+        let linear_amount = multiplier / self.properties.mass();
+        Ok((
+            Twist::new(
+                inverse_angular.scale(multiplier),
+                linear_row.scale(linear_amount),
+            ),
+            linear_amount,
         ))
     }
 }
@@ -192,11 +238,19 @@ impl RattleProjection for PointPlaneRattle {
         if initial.abs() <= self.controls.position_tolerance_m {
             return Ok(0.0);
         }
+        let mut candidate = *pose;
         let mut residual = initial;
         for iteration in 1..=self.controls.maximum_position_iterations {
-            *pose = pose.body_plus(self.correction(*pose, residual)?)?;
-            residual = self.gap(*pose)?;
+            let (correction, linear_amount) = self.correction(candidate, residual)?;
+            candidate = Se3::from_parts(
+                candidate
+                    .rotation()
+                    .body_plus(So3Tangent::new(correction.angular))?,
+                candidate.translation() + self.normal_world.scale(linear_amount),
+            )?;
+            residual = self.gap(candidate)?;
             if residual.abs() <= self.controls.position_tolerance_m {
+                *pose = candidate;
                 return Ok(initial.abs());
             }
             if iteration == self.controls.maximum_position_iterations {
@@ -214,14 +268,15 @@ impl RattleProjection for PointPlaneRattle {
         if initial.abs() <= self.controls.velocity_tolerance_mps {
             return Ok(0.0);
         }
-        *twist = twist.plus(self.correction(*pose, initial)?);
-        let residual = self.normal_speed(*pose, *twist)?;
+        let candidate = twist.plus(self.correction(*pose, initial)?.0);
+        let residual = self.normal_speed(*pose, candidate)?;
         if residual.abs() > self.controls.velocity_tolerance_mps {
             return Err(Se3Error::SolverDiverged {
                 iters: 1,
                 residual: residual.abs(),
             });
         }
+        *twist = candidate;
         Ok(initial.abs())
     }
 }

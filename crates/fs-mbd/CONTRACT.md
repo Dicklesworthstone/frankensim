@@ -1,5 +1,23 @@
 # CONTRACT: fs-mbd
 
+## Momentum-consistent fixed-plane candidate projection
+
+`rigid_rattle::PointPlaneRattle::project_candidate` carries world linear
+momentum and world central spin through its configuration repair before
+applying the original full-inertia normal point impulse. COM position is
+corrected strictly along the fixed world normal, while body attitude uses
+its own exponential. A changed body basis must not rotate the stored world
+momentum, and a finite rotational repair must not displace the COM tangentially.
+The composed projection preserves plane-tangent linear momentum and total
+angular momentum along the plane normal to roundoff. Normal COM relocation
+still changes the other orbital components; it does not manufacture spin to
+cancel them. Anisotropic kinetic energy can change during configuration repair.
+This is a bilateral candidate projector, not a full variational RATTLE time
+integrator, contact law, or an energy-conservation claim. Configuration, tangent,
+and composed projection failures leave their caller-owned states unchanged.
+Focused G0/G3/G4 tests cover full-inertia point response, plane symmetries,
+world rotations, COM-only repair, and nonlinear/endpoint refusal.
+
 ## Physical acceleration at articulated material points
 
 `InverseDynamics::prepare_point_motion` and `ForwardDynamics::prepare_point_motion`
@@ -1060,8 +1078,8 @@ fault injection, or G5 cross-ISA evidence.
 
 - No contacts, impacts, friction, complementarity, penetration handling, or
   static-friction capacity are represented.
-- No holonomic loop constraints, nonholonomic rolling constraints, RATTLE
-  projection, generalized-alpha lane, general Newton/Krylov API, or constraint
+- No holonomic loop constraints, nonholonomic rolling constraints,
+  generalized-alpha lane, general Newton/Krylov API, or constraint
   impulse/defect receipt is present. The articulated tree supports only fixed
   and scalar revolute/prismatic/helical joints.
 - The articulated lane provides a full 6x6 spatial inertia and an articulated
