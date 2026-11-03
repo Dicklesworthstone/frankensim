@@ -370,7 +370,8 @@ fn measured_exit_negative_current_feedback_keeps_the_jet_mouth_residual_increasi
         let omega_c = card_u/(4.0*v.momentum_thickness_m);
         let c = JetStepCoefficients { q_max, half_width_m: b,
             offset_m: v.geometry.effective_offset_m(), band_alpha: omega_c*dt/(1.0+omega_c*dt),
-            hp_alpha: 1.0/(1.0+0.5*omega_c*dt), leak_rate: omega_c/100.0, eta_override: None };
+            hp_alpha: 1.0/(1.0+0.5*omega_c*dt), leak_rate: omega_c/100.0, eta_override: None,
+            at_rest: omega_c == 0.0 };
         // prepare resets and recomputes the current pair from the retained intervals alone, so
         // advance_block's own prepare of this sample repeats it exactly.
         assert!(v.forced.as_mut().unwrap().prepare(u).unwrap().is_some());

@@ -212,6 +212,7 @@ fn same_sample_jet_feedback_sees_the_retained_radiation_pressure() {
         hp_alpha: 0.7,
         leak_rate: 10.0,
         eta_override: None,
+        at_rest: false,
     };
     let delayed = RetardedVelocity {
         past_m_s: 0.1,

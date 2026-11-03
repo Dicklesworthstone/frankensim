@@ -353,6 +353,8 @@ struct JetStepCoefficients {
     // The opt-in Nolle/Price transfer supplies the labium displacement directly; None keeps the
     // island's own receptivity chain and every default golden bit-identical.
     eta_override: Option<f64>,
+    // The card's speed is zero: no jet. See `jet_trial`.
+    at_rest: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1570,6 +1572,19 @@ impl FlueVoice {
         let hp_out = c.hp_alpha*(self.band_hp[1]+hp_in-self.band_hp[0]);
         let displacement_m = self.displacement_state
             + self.dt*(hp_out+seed-c.leak_rate*self.displacement_state);
+        // A jet at rest has no band, high-pass or leak corner: all three scale with U / theta and
+        // are zero at U = 0, where the high-pass would hold its last output and the integrator,
+        // without leak, would ramp on it for as long as the rest lasts (24 m, 0.29 s after the
+        // release of the R6 D4 flute render). With no jet there is no deflection and no
+        // receptivity memory: the chain takes the rest state the onset starts from, exactly zero,
+        // and the next blow starts from it. Before the first blow the chain is already exactly
+        // zero there, and a jet at rest carries no flow, so this changes no sample until a jet
+        // blows again after a rest.
+        let (band_state, hp_in, hp_out, displacement_m) = if c.at_rest {
+            ([0.0; 2], 0.0, 0.0, 0.0)
+        } else {
+            (band_state, hp_in, hp_out, displacement_m)
+        };
         let eta_m = match (c.eta_override, &self.forced) {
             (Some(eta), _) => eta,
             // The forced jet's prepared known part plus g_0 times this trial's exit velocity.
@@ -2051,7 +2066,7 @@ impl FlueVoice {
             };
             let coefficients = JetStepCoefficients { q_max, half_width_m: b,
                 offset_m: y0, band_alpha, hp_alpha, leak_rate,
-                eta_override: declared.then_some(0.0) };
+                eta_override: declared.then_some(0.0), at_rest: omega_c == 0.0 };
             below_edge_samples += usize::from(declared);
             let boundary = self.line.mouth_boundary()?;
             // The opt-in breath noise: ONE draw per accepted sample, before any nonlinear trial, from its own stream, on
@@ -3317,6 +3332,49 @@ mod speed_edge_tests {
         let held = (0..480).map(|n| HOLD_PA*f64::from(n)/480.0)
             .chain(core::iter::repeat_n(0.3, 7200));
         assert!(declared_samples(&mut slow, held) > 0);
+    }
+
+    #[test]
+    fn a_jet_at_rest_holds_no_displacement_and_blows_again_from_rest() {
+        // 10 ms up, 20 ms held, a smooth 100 ms release to rest, 200 ms at rest, then the same blow
+        // again. At U = 0 the band, high-pass and leak corners are all zero; the chain used to hold
+        // its last high-pass output and integrate it without leak, so the displacement grew
+        // linearly for as long as the rest lasted. On every sample at rest after the first blow
+        // the tapped displacement and the whole chain are exactly zero, so the second blow starts
+        // from the rest state the first one did, and it sounds.
+        let blow = || (0..480).map(|n| HOLD_PA*f64::from(n)/480.0)
+            .chain(core::iter::repeat_n(HOLD_PA, 960));
+        let pressures: Vec<f64> = blow()
+            .chain((0..=4800).rev().map(|n| HOLD_PA*f64::from(n)/4800.0))
+            .chain(core::iter::repeat_n(0.0, 9600))
+            .chain(blow()).collect();
+        let (hold_end, rest_end) = (1440, 1440 + 4801 + 9600);
+        let mut v = voice(1.0, 4096, false);
+        let (mut out, mut eta, mut at_rest) = (Vec::new(), Vec::new(), 0);
+        for (n, &pressure) in pressures.iter().enumerate() {
+            v.apply(FlueControl::SetBlowingPressure(pressure)).unwrap();
+            let mut p = [0.0];
+            let mut seen = None;
+            v.step_block_labium_observed(&mut p, |_, s| { seen = Some(s); Ok(()) }).unwrap();
+            let e = seen.expect("one observed sample").eta_m;
+            if n >= hold_end && v.jet_speed_m_s() == 0.0 {
+                at_rest += 1;
+                assert_eq!(e, 0.0, "sample {n}");
+                assert_eq!((v.band_state, v.band_hp, v.displacement_state),
+                    ([0.0; 2], [0.0; 2], 0.0), "sample {n}");
+            }
+            out.push(p[0]);
+            eta.push(e);
+        }
+        // The release's last sample, the 9600 at rest and the second blow's first (0 Pa).
+        assert_eq!(at_rest, 9602);
+        let peak = |r: core::ops::Range<usize>| eta[r].iter().fold(0.0_f64, |m, e| m.max(e.abs()));
+        eprintln!("peak |eta|/b: held {:.6e}, release {:.6e}, second blow {:.6e}",
+            peak(480..hold_end)/(0.5*v.geometry.flue_height_m),
+            peak(hold_end..rest_end)/(0.5*v.geometry.flue_height_m),
+            peak(rest_end..eta.len())/(0.5*v.geometry.flue_height_m));
+        assert!(eta[rest_end..].iter().any(|e| *e != 0.0));
+        assert!(out[rest_end..].iter().any(|p| *p != 0.0));
     }
 
     #[test]
