@@ -5,11 +5,15 @@
 //! convention. The logarithmic derivative is evaluated downwards; small real
 //! arguments use a convergent Riccati--Bessel series rather than cancellation
 //! in `sin(x)/x - cos(x)`. No Henyey--Greenstein fit replaces the angular law.
+//! Absorption follows the Riccati--Bessel Wronskian directly, so weak particle
+//! heating is not a subtraction of nearly equal scattered and extinct powers.
 //!
 //! Equations: Bohren & Huffman, *Absorption and Scattering of Light by Small
 //! Particles*, §§4.4, 4.6; the independently published algorithm and reference
 //! values are reproduced in Scott Prahl's [Mie algorithms notes]
 //! (https://miepython.readthedocs.io/en/3.0.0/07_algorithm.html).
+//! The loss identity is derived in [scatrs, Proposition 1]
+//! (https://usask-arg.github.io/scatrs/theory/mie.html#absorption-without-cancellation).
 //! The explicit domain is `1e-4 <= x <= 128`, `|m x| <= 512`. A finite series
 //! and a sampled angular-table discrepancy are numerical estimates, not
 //! certified error bounds. Nonspherical particles, dependent scattering,
@@ -187,15 +191,13 @@ impl MieSphere {
             .map_err(|_| MieError::Budget)?;
         // Exact index matching must not manufacture numerical haze.
         if m == C64::ONE {
-            return self.finish(vacuum_nm, x, coefficients);
+            return self.finish(vacuum_nm, x, coefficients, 0.0);
         }
         let derivatives = logarithmic_derivatives(cx, z, count, start)?;
         let check = logarithmic_derivatives(cx, z, count, start + 16)?;
-        if derivatives
-            .iter()
-            .zip(&check)
-            .any(|(&a, &b)| !finite(a) || !finite(b) || (a - b).abs() > 2e-12 * (1.0 + b.abs()))
-        {
+        if derivatives.iter().zip(&check).any(|(&(a, _), &(b, _))| {
+            !finite(a) || !finite(b) || (a - b).abs() > 2e-12 * (1.0 + b.abs())
+        }) {
             return Err(MieError::Numerical);
         }
         let (sin_x, cos_x) = det::sin_cos(x);
@@ -208,7 +210,8 @@ impl MieSphere {
         // Outgoing h^(1) under exp(-i omega t): xi = psi + i x*y_n.
         let mut chi_previous = -cos_x;
         let mut chi = -cos_x / x - sin_x;
-        for (index, derivative) in derivatives.into_iter().enumerate() {
+        let mut absorption_sum = 0.0;
+        for (index, (derivative, tail)) in derivatives.into_iter().enumerate() {
             if index % 32 == 0 {
                 poll(cx)?;
             }
@@ -217,13 +220,20 @@ impl MieSphere {
             let xi_previous = C64::new(psi_previous, chi_previous);
             let electric = derivative / m + C64::from_re(n / x);
             let magnetic = derivative * m + C64::from_re(n / x);
-            let a =
-                (electric.scale(psi) - C64::from_re(psi_previous)) / (electric * xi - xi_previous);
-            let b =
-                (magnetic.scale(psi) - C64::from_re(psi_previous)) / (magnetic * xi - xi_previous);
+            let electric_denominator = electric * xi - xi_previous;
+            let magnetic_denominator = magnetic * xi - xi_previous;
+            let a = (electric.scale(psi) - C64::from_re(psi_previous)) / electric_denominator;
+            let b = (magnetic.scale(psi) - C64::from_re(psi_previous)) / magnetic_denominator;
             if !finite(a) || !finite(b) {
                 return Err(MieError::Numerical);
             }
+            // Re(a)-|a|² = -Im(D/m)/|Delta_a|² follows from the real-x
+            // Wronskian; the magnetic identity replaces D/m by mD. Retaining
+            // tail=(n+1)/z-D gives -Im(mD)=Im(m*tail), without cancelling
+            // the much larger leading terms when the sphere is small.
+            let loss = multipole_absorption(-electric.im, electric_denominator)?
+                + multipole_absorption((m * tail).im, magnetic_denominator)?;
+            absorption_sum += (2.0 * n + 1.0) * loss;
             coefficients.push((a, b));
             let next_psi = if x < 0.25 {
                 small_psi(index + 2, x)
@@ -235,7 +245,7 @@ impl MieSphere {
             (chi_previous, chi) = (chi, next_chi);
         }
         poll(cx)?;
-        self.finish(vacuum_nm, x, coefficients)
+        self.finish(vacuum_nm, x, coefficients, absorption_sum)
     }
 
     fn finish(
@@ -243,21 +253,13 @@ impl MieSphere {
         vacuum_nm: f64,
         x: f64,
         coefficients: Vec<(C64, C64)>,
+        absorption_sum: f64,
     ) -> Result<MieSolution, MieError> {
-        let (mut scattering_sum, mut absorption_sum, mut moment_sum) = (0.0, 0.0, 0.0);
+        let (mut scattering_sum, mut moment_sum) = (0.0, 0.0);
         for (index, &(a, b)) in coefficients.iter().enumerate() {
             let n = (index + 1) as f64;
             let power = a.norm_sq() + b.norm_sq();
-            let loss = (a.re - a.norm_sq()) + (b.re - b.norm_sq());
-            // Roundoff near a passive lossless multipole is allowed; active
-            // amplification or a material absorption deficit is not.
-            if loss < -128.0 * f64::EPSILON * (a.abs() + b.abs()) {
-                return Err(MieError::Numerical);
-            }
             scattering_sum += (2.0 * n + 1.0) * power;
-            if self.extinction_k > 0.0 {
-                absorption_sum += (2.0 * n + 1.0) * loss.max(0.0);
-            }
             moment_sum += (2.0 * n + 1.0) / (n * (n + 1.0)) * (a * b.conj()).re;
             if let Some(&(next_a, next_b)) = coefficients.get(index + 1) {
                 moment_sum +=
@@ -578,24 +580,41 @@ fn logarithmic_derivatives(
     z: C64,
     count: usize,
     start: usize,
-) -> Result<Vec<C64>, MieError> {
+) -> Result<Vec<(C64, C64)>, MieError> {
     let mut result = Vec::new();
     result
         .try_reserve_exact(count)
         .map_err(|_| MieError::Budget)?;
-    result.resize(count, C64::ZERO);
+    result.resize(count, (C64::ZERO, C64::ZERO));
     let mut derivative = C64::ZERO;
     for n in (1..=start).rev() {
         if n % 32 == 0 {
             poll(cx)?;
         }
         let ratio = C64::from_re(n as f64) / z;
-        derivative = ratio - (derivative + ratio).recip();
+        let tail = (derivative + ratio).recip();
+        derivative = ratio - tail;
         if n > 1 && n - 1 <= count {
-            result[n - 2] = derivative;
+            result[n - 2] = (derivative, tail);
         }
     }
     Ok(result)
+}
+
+fn multipole_absorption(loss: f64, denominator: C64) -> Result<f64, MieError> {
+    let magnitude = denominator.abs();
+    // Divide successively instead of squaring a potentially large boundary
+    // denominator. A passive mode cannot have a negative dissipative flux.
+    let absorbed = (loss / magnitude) / magnitude;
+    if !loss.is_finite()
+        || loss < 0.0
+        || !magnitude.is_finite()
+        || magnitude == 0.0
+        || !absorbed.is_finite()
+    {
+        return Err(MieError::Numerical);
+    }
+    Ok(absorbed)
 }
 
 fn small_psi(n: usize, x: f64) -> f64 {

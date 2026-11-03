@@ -3836,6 +3836,17 @@ two starts; small real arguments use a convergent Riccati--Bessel series.
 Exact index matching retains zero scattering. Recurrence, multipole and angular
 work have explicit budgets and preparation polls cancellation.
 
+Absorbed power is accumulated from each multipole's Riccati--Bessel Wronskian,
+`-Im(D/m)/|Delta_a|²` and `-Im(mD)/|Delta_b|²`, without subtracting extinction and
+scattering or clamping their cancellation error into heat. The original downward
+recurrence retains its tail to evaluate the small-sphere magnetic loss without
+cancelling its leading terms. No second recurrence, fit or transport model is
+introduced. Negative dissipative flux refuses; an exactly real particle index
+retains zero absorption. G1/G3 regressions compare direct 150/200-digit Bessel
+references, resolve loss indices through `1e-30`, retain strong-absorption energy
+balance and carry the weak coefficient through native spectral beam heating.
+Finite multipole truncation and the existing host/model domain are unchanged.
+
 `MieSolution::phase_table` adaptively prepares the native matched angular sampler
 and reports observed normalization, moment and interpolation discrepancies.
 `MieSphere::visible_spectrum` prepares native absorption, scattering and spectral

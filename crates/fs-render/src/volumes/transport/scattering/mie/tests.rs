@@ -183,6 +183,147 @@ fn g0_absorption_optical_theorem_and_index_matching() {
 }
 
 #[test]
+fn g1_weak_absorption_matches_independent_high_precision_bessel_values() {
+    // Independent reference: direct Riccati--Bessel power series for psi_n(mx),
+    // psi_n(x), their analytic derivatives and xi_n(x), then Re(a)-|a|² at
+    // 150 and 200 decimal digits. Thirty extra orders beyond the production
+    // cutoff agreed to over 27 digits. These are full-series reference values;
+    // the tolerance includes the existing finite-order truncation at large x.
+    with_cx(|cx, _| {
+        for (x, n, k, expected) in [
+            (0.001, 1.5, 1e-24, 1.993_080_701_856_626_6e-27),
+            (0.1, 1.5, 1e-24, 2.004_237_769_078_977e-25),
+            (1.0, 1.5, 1e-24, 2.901_262_980_870_932_4e-24),
+            (2.0, 1.5, 1e-24, 9.169_658_552_356_753e-24),
+            (10.0, 1.5, 1e-24, 5.479_637_066_985_330_2e-23),
+            (50.0, 1.5, 1e-24, 2.038_180_437_356_593_7e-22),
+            (128.0, 1.33, 1e-24, 4.827_614_348_366_774e-22),
+            (2.0, 1.5, 1.0, 1.591_598_898_565_839_3),
+            (2.0, 1.1, 25.0, 0.014_612_713_789_718_393),
+        ] {
+            let sphere = sphere_for_x(x, n, k);
+            let result = sphere
+                .at_wavelength(cx, 550.0, MieBudget::default())
+                .unwrap();
+            let area = core::f64::consts::PI * sphere.radius_m.powi(2);
+            close(
+                result.cross_sections().absorption_m2 / (area * expected),
+                1.0,
+                1e-8,
+            );
+        }
+    });
+}
+
+#[test]
+fn g3_weak_particle_heat_scales_with_loss_without_a_roundoff_floor() {
+    with_cx(|cx, _| {
+        for x in [0.001, 0.1, 1.0, 2.0, 10.0, 128.0] {
+            let reference = sphere_for_x(x, 1.5, 1e-18)
+                .at_wavelength(cx, 550.0, MieBudget::default())
+                .unwrap()
+                .cross_sections();
+            for k in [1e-24, 1e-30] {
+                let actual = sphere_for_x(x, 1.5, k)
+                    .at_wavelength(cx, 550.0, MieBudget::default())
+                    .unwrap()
+                    .cross_sections();
+                assert!(actual.absorption_m2 > 0.0);
+                close(
+                    actual.absorption_m2 / reference.absorption_m2,
+                    k / 1e-18,
+                    2e-12 * k / 1e-18,
+                );
+                close(actual.scattering_m2 / reference.scattering_m2, 1.0, 2e-12);
+            }
+            let lossless = sphere_for_x(x, 1.5, 0.0)
+                .at_wavelength(cx, 550.0, MieBudget::default())
+                .unwrap();
+            assert_eq!(lossless.cross_sections().absorption_m2, 0.0);
+        }
+    });
+}
+
+#[test]
+fn g1_weak_mie_absorption_reaches_native_spectral_beam_heating() {
+    use crate::volumes::VolumeGrid;
+    use crate::volumes::transport::scattering::ScatteringGrid;
+    use crate::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget};
+    use fs_geom::{Point3, Vec3};
+
+    with_cx(|cx, _| {
+        for k in [0.0, 1e-24] {
+            let sphere = sphere_for_x(2.0, 1.5, k);
+            let spectrum = sphere
+                .visible_spectrum(
+                    cx,
+                    &[380.0, 550.0, 780.0],
+                    MieBudget::default(),
+                    0.002,
+                    4096,
+                )
+                .unwrap();
+            let densities = [1e-4];
+            let absorption = AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([1; 3], &densities, [0.0; 3], [1.0; 3]),
+                spectrum.absorption,
+                None,
+                AbsorbingGridBudget {
+                    max_grid_cells: 1,
+                    max_steps_per_segment: 8,
+                },
+            )
+            .unwrap();
+            let medium =
+                ScatteringGrid::try_new(cx, absorption, spectrum.scattering, spectrum.phase)
+                    .unwrap();
+            let report = medium
+                .deposit_beam_power(
+                    cx,
+                    Point3::new(0.5, 0.5, 0.0),
+                    Vec3::new(0.0, 0.0, 1.0),
+                    1.0,
+                    &[550.0],
+                    &[1e12],
+                    1,
+                )
+                .unwrap();
+            // Independent Q values above, converted to particle mass and then
+            // integrated through the uniform cell. Elastic scattering can be
+            // 10^23 times the heat; it is still not deposited as heat.
+            let mass_factor = 0.75 / (1000.0 * sphere.radius_m);
+            let ka = if k == 0.0 {
+                0.0
+            } else {
+                9.169_658_552_356_753e-24 * mass_factor
+            };
+            let ks = 1.798_418_163_226_263_9 * mass_factor;
+            let removed = 1e12 * -(-densities[0] * (ka + ks)).exp_m1();
+            let expected_heat = removed * ka / (ka + ks);
+            close(
+                report.absorbed_power_w[0],
+                expected_heat,
+                2e-11 * expected_heat,
+            );
+            close(report.scattered_power_w[0], removed * ks / (ka + ks), 0.02);
+            assert_eq!(report.cells.len(), 1);
+            assert_eq!(
+                report.cells[0].absorbed_power_w[0],
+                report.absorbed_power_w[0]
+            );
+            close(
+                report.transmitted_power_w[0]
+                    + report.absorbed_power_w[0]
+                    + report.scattered_power_w[0],
+                1e12,
+                0.02,
+            );
+        }
+    });
+}
+
+#[test]
 fn g1_angular_normalization_moment_and_resolved_phase_table() {
     with_cx(|cx, _| {
         for (x, n, k) in [
