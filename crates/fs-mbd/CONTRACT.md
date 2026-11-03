@@ -6002,3 +6002,34 @@ joint-limit/cancellation refusal, and a finite-data gravity-cancellation
 no-miss adversary. The twelve existing mixed sphere and sphere/plane groups
 also passed. Formatting of all four changed source/test files passed. This
 validation does not claim a full-workspace or DSR run.
+
+
+### Retained-inertia release and ejection through closed mechanisms
+
+`inventory::bilateral::release::release_payload` completes the same inventory
+lifecycle for a free mechanism carrying distance, spherical and ideal joint
+rows. The original attachment restores the exact retained link inertia; one
+native mixed impulse event transmits the retained side's separation impulse
+and all simultaneous row reactions. The separate payload responds through its
+original full spatial inertia, with the same physical point, offset moments,
+and free couple. Only the combined physical endpoint receives speed admission.
+
+Passive and explicit zero-impulse release still admit geometry, tangent
+residuals, combined rank and the existing condition floor, then preserve the
+retained state bits. Active release keeps the actual common-frame separation
+pair work and constraint work separately visible and independently capped.
+The balance remains delta_K - W_separation - W_constraint, with no invented
+capture loss, heat or fracture law. Constraint covectors use the shared native
+RNEA projection. Empty material rows delegate to the original release exactly.
+The auxiliary native event reports only retained-tree lab-frame source work;
+the original release receipt accounts for both sides in its common frame.
+
+Four regression groups cover an actual capture/loaded-motion/ejection cycle,
+independent retained-mode recoil and final-speed admission, passive finite-slip
+and signed-zero preservation, exact legacy delegation, spherical closure with
+an independently assembled full-tensor and cofactor-inverse oracle, and signed
+finite constraint work with separate budgets and atomic cancellation. Source/API
+and mathematical review were completed, including an exact-rational check of
+the geared-slider reaction and work equations. Native compilation, test
+execution, and pinned formatting are **UNRUN** after executor replacement
+removed the Rust toolchain and cached native environment.

@@ -1,9 +1,13 @@
-//! Payload capture retaining the original mixed rigid-constraint response.
+//! Payload capture and release retaining the original mixed rigid-constraint response.
 //!
 //! Loaded inertia, payload mismatch and all existing material/joint rows react
 //! together. The original inventory owner retains attachment identity, physical
 //! momentum audits, common-frame energy and nonnegative capture quadratics.
 //! No constraint engagement, pose projection or thermal destination is inferred.
+
+/// Payload release and ejection retaining material closures and ideal joint rows.
+#[path = "bilateral/release.rs"]
+pub mod release;
 
 use super::*;
 use super::super::spatial_loads::implicit::distance::joint;
