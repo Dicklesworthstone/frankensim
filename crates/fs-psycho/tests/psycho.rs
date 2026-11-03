@@ -5,8 +5,9 @@
 //! listening-law pin.
 
 use fs_psycho::{
-    Calibration, LISTENING_LAW, N_THIRD_OCTAVE_BANDS, PsychoError, SoundField, log_attack_time,
-    loudness_stationary, sharpness_din, spl_from_pcm_rms,
+    AIR_REFERENCE_PRESSURE_PA, Calibration, LISTENING_LAW, N_THIRD_OCTAVE_BANDS, PsychoError,
+    SoundField, log_attack_time, loudness_stationary, sharpness_din, spl_from_pcm_rms,
+    spl_from_pressure_rms,
 };
 
 /// ISO 532-1 Annex B.2 test signal 1: the 28 third-octave levels
@@ -205,6 +206,151 @@ fn uncalibrated_absolute_refuses_and_calibrated_works() {
         (spl - (94.0 - 6.0206)).abs() < 0.01,
         "calibrated SPL {spl:.3}"
     );
+}
+
+#[test]
+fn pressure_levels_and_full_scale_sine_calibration_agree() {
+    // G1: exact four-sample periodic records avoid a trig or FFT oracle.
+    let reference = AIR_REFERENCE_PRESSURE_PA;
+    let level = |p: &[f64]| spl_from_pressure_rms(p, reference).expect("pressure level");
+    assert_eq!(level(&[reference, -reference]), 0.0);
+    assert!((level(&[1.0, -1.0]) - 93.979_400_086_720_37).abs() < 1e-12);
+
+    let pcm = [1.0, 0.0, -1.0, 0.0];
+    let calibration = Calibration::from_pressure_scale(2.0, reference).expect("calibration");
+    let pressure = pcm.map(|x| 2.0 * x);
+    let from_pcm = spl_from_pcm_rms(&pcm, Some(calibration)).expect("calibrated PCM");
+    assert!((from_pcm - calibration.db_spl_at_full_scale).abs() < 1e-12);
+    assert!((from_pcm - level(&pressure)).abs() < 1e-12);
+
+    // Equal peak amplitudes do not imply equal RMS: the square wave is
+    // 3.0103 dB above the full-scale sine under this same pressure scale.
+    let square = spl_from_pcm_rms(&[1.0, -1.0], Some(calibration)).expect("square");
+    assert!((square - from_pcm - 3.010_299_956_639_812).abs() < 1e-12);
+    let half = spl_from_pcm_rms(&pcm.map(|x| 0.5 * x), Some(calibration)).expect("half");
+    assert!((from_pcm - half - 6.020_599_913_279_624).abs() < 1e-12);
+}
+
+#[test]
+fn pressure_level_retains_coherent_interference_and_energy_scaling() {
+    let reference = AIR_REFERENCE_PRESSURE_PA;
+    let level = |p: &[f64]| spl_from_pressure_rms(p, reference).expect("level");
+    let one = level(&[1.0, 0.0, -1.0, 0.0]);
+    // A phase-aligned second tone doubles pressure; a quadrature tone adds
+    // the same mean-square pressure. Do not sum dB or assume incoherence.
+    let coherent = level(&[2.0, 0.0, -2.0, 0.0]);
+    let quadrature = level(&[1.0, 1.0, -1.0, -1.0]);
+    assert!((coherent - one - 6.020_599_913_279_624).abs() < 1e-12);
+    assert!((quadrature - one - 3.010_299_956_639_812).abs() < 1e-12);
+    assert_eq!(one.to_bits(), level(&[-1.0, 0.0, 1.0, 0.0]).to_bits());
+    assert!(matches!(
+        spl_from_pressure_rms(&[0.0; 4], reference),
+        Err(PsychoError::DegenerateSignal { .. })
+    ));
+    // A different explicit reference changes only the level origin.
+    let underwater_reference = spl_from_pressure_rms(&[1.0, -1.0], 1e-6).expect("reference");
+    assert!((underwater_reference - 120.0).abs() < 1e-12);
+}
+
+#[test]
+fn logarithmic_level_preserves_finite_amplitudes_across_units() {
+    let calibration = Calibration {
+        db_spl_at_full_scale: 94.0,
+    };
+    let baseline = spl_from_pcm_rms(&[1.0, -1.0], Some(calibration)).expect("baseline");
+    for gain in [1e-300, 1e-200, 1e200, 1e300, f64::MAX, f64::from_bits(1)] {
+        let got = spl_from_pcm_rms(&[gain, -gain], Some(calibration)).expect("finite level");
+        // Independent platform-log oracle; both the large-square overflow and
+        // tiny-square underflow paths of the old implementation failed here.
+        let expected = baseline + 20.0 * gain.log10();
+        assert!(
+            (got - expected).abs() < 2e-11,
+            "gain {gain:e}: {got} vs {expected}"
+        );
+        // Unit/rescaling invariance, including references whose direct ratio
+        // or conversion to a sine RMS would overflow/underflow.
+        let level = spl_from_pressure_rms(&[gain, -gain], gain).expect("scaled reference");
+        assert_eq!(level, 0.0);
+        let cal = Calibration::from_pressure_scale(gain, gain).expect("scaled calibration");
+        assert!((cal.db_spl_at_full_scale + 3.010_299_956_639_812).abs() < 1e-12);
+    }
+    // The RMS itself is below the smallest representable positive f64, but
+    // its logarithmic level remains finite and meaningful.
+    let tiny = f64::from_bits(1);
+    let level = spl_from_pressure_rms(&[tiny, 0.0, 0.0, 0.0], tiny).expect("subnormal RMS");
+    assert!((level + 6.020_599_913_279_624).abs() < 2e-12);
+}
+
+#[test]
+fn amplitude_measurements_reject_invalid_samples_and_references() {
+    let calibration = Calibration {
+        db_spl_at_full_scale: 94.0,
+    };
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            spl_from_pcm_rms(&[0.5, bad, -0.5], Some(calibration)),
+            Err(PsychoError::NonFinite { .. })
+        ));
+        assert!(matches!(
+            spl_from_pressure_rms(&[0.5, bad, -0.5], AIR_REFERENCE_PRESSURE_PA),
+            Err(PsychoError::NonFinite { .. })
+        ));
+        assert!(matches!(
+            spl_from_pcm_rms(
+                &[0.5],
+                Some(Calibration {
+                    db_spl_at_full_scale: bad
+                })
+            ),
+            Err(PsychoError::NonFinite { .. })
+        ));
+        assert!(matches!(
+            log_attack_time(&[0.0, 0.5, bad, 1.0], 48_000.0, 2),
+            Err(PsychoError::NonFinite { .. })
+        ));
+        assert!(matches!(
+            log_attack_time(&[0.0, 0.5, 1.0], bad, 1),
+            Err(PsychoError::NonFinite { .. })
+        ));
+    }
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            Calibration::from_pressure_scale(bad, AIR_REFERENCE_PRESSURE_PA),
+            Err(PsychoError::InvalidParameter { .. })
+        ));
+        assert!(matches!(
+            Calibration::from_pressure_scale(1.0, bad),
+            Err(PsychoError::InvalidParameter { .. })
+        ));
+        assert!(matches!(
+            spl_from_pressure_rms(&[1.0], bad),
+            Err(PsychoError::InvalidParameter { .. })
+        ));
+    }
+    for signal in [&[][..], &[0.0, -0.0][..]] {
+        assert!(matches!(
+            spl_from_pcm_rms(signal, Some(calibration)),
+            Err(PsychoError::DegenerateSignal { .. })
+        ));
+    }
+}
+
+#[test]
+fn attack_time_is_invariant_to_amplitude_scale() {
+    // G3: dyadic ramp and gains preserve the input shape exactly. An envelope
+    // sum at 2^1020 used to overflow even though every sample is finite.
+    let ramp: Vec<f64> = (0..=1024).map(|i| f64::from(i) / 1024.0).collect();
+    let baseline = log_attack_time(&ramp, 1024.0, 64).expect("ramp");
+    for gain in [
+        2.0_f64.powi(-1000),
+        2.0_f64.powi(1000),
+        2.0_f64.powi(1020),
+        -8.0,
+    ] {
+        let scaled: Vec<_> = ramp.iter().map(|&x| gain * x).collect();
+        let actual = log_attack_time(&scaled, 1024.0, 64).expect("scaled attack");
+        assert_eq!(actual.to_bits(), baseline.to_bits(), "gain {gain:e}");
+    }
 }
 
 #[test]

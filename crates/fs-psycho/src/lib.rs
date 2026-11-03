@@ -47,6 +47,10 @@ use tables::{A0, DCB, DDF, DLL, LTQ, RAP, RNS, USL, ZUP};
 pub const N_THIRD_OCTAVE_BANDS: usize = 28;
 /// Specific-loudness grid: 0.1-Bark steps to 24 Bark.
 pub const N_BARK_STEPS: usize = 240;
+/// Conventional reference pressure for airborne SPL, in pascals (20 µPa).
+/// Other media or measurement conventions can supply their own reference to
+/// [`spl_from_pressure_rms`] and [`Calibration::from_pressure_scale`].
+pub const AIR_REFERENCE_PRESSURE_PA: f64 = 20.0e-6;
 
 /// Sound field of the level measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,13 +65,45 @@ pub enum SoundField {
 /// sine produces.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Calibration {
-    /// dB SPL at digital full scale.
+    /// dB SPL of a digital sine with PEAK amplitude 1 (RMS = 1/sqrt(2)).
+    /// This is not the level of a constant or square wave with magnitude 1.
     pub db_spl_at_full_scale: f64,
+}
+
+impl Calibration {
+    /// Construct a full-scale-sine calibration from the pressure represented
+    /// by digital sample 1 and an explicit RMS reference pressure, both in Pa.
+    ///
+    /// `pa_per_full_scale` is a linear sample scale, not an RMS sine level:
+    /// `p[j] = pa_per_full_scale * pcm[j]`. Thus the calibration includes the
+    /// sine's 1/sqrt(2) RMS factor exactly once. It does not certify a sensor or
+    /// physical model; callers supply the provenance of their pressure scale.
+    /// Use [`AIR_REFERENCE_PRESSURE_PA`] for conventional airborne dB SPL.
+    pub fn from_pressure_scale(
+        pa_per_full_scale: f64,
+        reference_pressure_pa: f64,
+    ) -> Result<Self, PsychoError> {
+        admit_positive_pressure(pa_per_full_scale)?;
+        admit_positive_pressure(reference_pressure_pa)?;
+        // Separate logarithms avoid overflowing the ratio or losing a tiny
+        // representable pressure while converting peak to RMS.
+        Ok(Self {
+            db_spl_at_full_scale: 20.0 / core::f64::consts::LN_10
+                * (det::ln(pa_per_full_scale)
+                    - det::ln(reference_pressure_pa)
+                    - 0.5 * core::f64::consts::LN_2),
+        })
+    }
 }
 
 /// Typed refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PsychoError {
+    /// An explicit physical reference or scale is outside its domain.
+    InvalidParameter {
+        /// The violated condition.
+        what: &'static str,
+    },
     /// Band-level vector has the wrong length.
     Shape {
         /// What disagreed.
@@ -99,6 +135,7 @@ pub enum PsychoError {
 impl core::fmt::Display for PsychoError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            PsychoError::InvalidParameter { what } => write!(f, "invalid parameter: {what}"),
             PsychoError::Shape { what } => write!(f, "shape mismatch: {what}"),
             PsychoError::NonFinite { what } => write!(f, "non-finite input: {what}"),
             PsychoError::UncalibratedAbsolute => write!(
@@ -373,18 +410,21 @@ pub fn log_attack_time(
             what: "empty signal or bad envelope window",
         });
     }
-    if sample_rate.is_nan() || sample_rate <= 0.0 {
+    if !sample_rate.is_finite() || sample_rate <= 0.0 {
         return Err(PsychoError::NonFinite {
             what: "sample rate",
         });
     }
+    let scale = finite_nonzero_peak(pcm)?;
     // Moving-average envelope of |x| (deterministic, no allocation
-    // tricks).
+    // tricks). The descriptor is level-relative: normalize BEFORE summing,
+    // so changing physical units or recording gain cannot overflow its
+    // envelope or underflow its threshold crossings.
     let mut env = vec![0.0f64; pcm.len() - env_window + 1];
-    let mut acc: f64 = pcm[..env_window].iter().map(|v| v.abs()).sum();
+    let mut acc: f64 = pcm[..env_window].iter().map(|v| v.abs() / scale).sum();
     env[0] = acc / env_window as f64;
     for i in 1..env.len() {
-        acc += pcm[i + env_window - 1].abs() - pcm[i - 1].abs();
+        acc += pcm[i + env_window - 1].abs() / scale - pcm[i - 1].abs() / scale;
         env[i] = acc / env_window as f64;
     }
     let peak = env.iter().fold(0.0f64, |a, &v| a.max(v));
@@ -400,13 +440,18 @@ pub fn log_attack_time(
             what: "envelope never crosses attack thresholds",
         });
     };
-    let dt = ((i90.max(i10 + 1)) - i10) as f64 / sample_rate;
-    Ok(det::ln(dt) / det::ln(10.0))
+    let rise_samples = ((i90.max(i10 + 1)) - i10) as f64;
+    Ok((det::ln(rise_samples) - det::ln(sample_rate)) / core::f64::consts::LN_10)
 }
 
 /// The only PCM-to-ABSOLUTE bridge in v1: RMS level in dB SPL, which
 /// REQUIRES calibration (the typed uncalibrated-absolute refusal the
 /// honest-scope law demands).
+/// The supplied samples are evaluated together, retaining coherent source
+/// interference and the actual waveform's crest factor. No peak normalization
+/// or mean subtraction is performed. A constant offset contributes to RMS;
+/// callers must provide the intended acoustic signal rather than ambient
+/// absolute pressure or an unwanted sensor offset.
 ///
 /// # Errors
 /// [`PsychoError::UncalibratedAbsolute`] when `calibration` is
@@ -415,16 +460,70 @@ pub fn spl_from_pcm_rms(pcm: &[f64], calibration: Option<Calibration>) -> Result
     let Some(cal) = calibration else {
         return Err(PsychoError::UncalibratedAbsolute);
     };
-    if pcm.is_empty() {
+    if !cal.db_spl_at_full_scale.is_finite() {
+        return Err(PsychoError::NonFinite {
+            what: "full-scale-sine calibration",
+        });
+    }
+    // Full-scale SINE reference: rms_fs = 1/sqrt(2). Work in logarithms
+    // because the level is representable even when x² or physical RMS is not.
+    Ok(cal.db_spl_at_full_scale
+        + 20.0 / core::f64::consts::LN_10 * (log_rms(pcm)? + 0.5 * core::f64::consts::LN_2))
+}
+
+/// Unweighted equivalent SPL of acoustic pressure samples in Pa over the
+/// supplied record: `20 log10(p_rms / reference_pressure_pa)`.
+///
+/// The reference is explicit; [`AIR_REFERENCE_PRESSURE_PA`] is conventional
+/// for airborne sound. Input is acoustic pressure relative to ambient, not
+/// thermodynamic absolute pressure. The caller owns that physical meaning and
+/// any microphone calibration. There is no weighting filter, DC removal,
+/// inferred calibration, or peak normalization. Silence and empty records
+/// refuse, as in [`spl_from_pcm_rms`].
+///
+/// Definition: NPL, "Sound Pressure Level and Intensity Level",
+/// <https://resource.npl.co.uk/acoustics/techguides/concepts/spl.html>.
+pub fn spl_from_pressure_rms(
+    pressure_pa: &[f64],
+    reference_pressure_pa: f64,
+) -> Result<f64, PsychoError> {
+    admit_positive_pressure(reference_pressure_pa)?;
+    Ok(20.0 / core::f64::consts::LN_10 * (log_rms(pressure_pa)? - det::ln(reference_pressure_pa)))
+}
+
+fn admit_positive_pressure(pressure_pa: f64) -> Result<(), PsychoError> {
+    if !(pressure_pa.is_finite() && pressure_pa > 0.0) {
+        return Err(PsychoError::InvalidParameter {
+            what: "pressure scale and reference must be positive and finite",
+        });
+    }
+    Ok(())
+}
+
+fn finite_nonzero_peak(samples: &[f64]) -> Result<f64, PsychoError> {
+    if samples.is_empty() {
         return Err(PsychoError::DegenerateSignal { what: "empty pcm" });
     }
-    let ms: f64 = pcm.iter().map(|v| v * v).sum::<f64>() / pcm.len() as f64;
-    if ms <= 0.0 {
+    let mut peak = 0.0_f64;
+    for &sample in samples {
+        if !sample.is_finite() {
+            return Err(PsychoError::NonFinite { what: "pcm sample" });
+        }
+        peak = peak.max(sample.abs());
+    }
+    if peak == 0.0 {
         return Err(PsychoError::DegenerateSignal { what: "silent pcm" });
     }
-    // Full-scale SINE reference: rms_fs = 1/sqrt(2).
-    let rms = det::sqrt(ms);
-    Ok(cal.db_spl_at_full_scale + 20.0 * det::ln(rms * det::sqrt(2.0)) / det::ln(10.0))
+    Ok(peak)
+}
+
+// Scaled sum of squares; O(N) work, constant storage, no intermediate x² in
+// physical units. At least one normalized square is 1, including subnormal
+// nonzero input, so finite signal amplitude cannot be misreported as silence.
+fn log_rms(samples: &[f64]) -> Result<f64, PsychoError> {
+    let scale = finite_nonzero_peak(samples)?;
+    let sum_squares: f64 = samples.iter().map(|&x| (x / scale).powi(2)).sum();
+    Ok(det::ln(scale) + 0.5 * det::ln(sum_squares / samples.len() as f64))
 }
 
 /// The listening law, pinned as data so a test can assert it never

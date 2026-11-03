@@ -33,6 +33,17 @@ test).
 - `spl_from_pcm_rms(pcm, calibration)` — the ONLY PCM-to-absolute
   bridge in v1: REFUSES without a [`Calibration`]
   (`UncalibratedAbsolute`, the honest-scope law in a type).
+- `Calibration::from_pressure_scale(pa_per_full_scale, reference_pressure_pa)`
+  converts an explicit linear pressure-per-sample scale to the existing
+  **peak-one sine** calibration, including its RMS factor exactly once.
+  `spl_from_pressure_rms` observes a physical acoustic pressure record directly,
+  with an explicit RMS reference (20 µPa is supplied as
+  `AIR_REFERENCE_PRESSURE_PA`). Both level paths use the same scaled
+  sum-of-squares kernel and logarithmic reconstruction: finite weak signals
+  are not silently called zero, and intermediate squaring cannot overflow.
+  No source independence, peak normalization, DC removal, weighting filter,
+  microphone calibration authority, or absolute thermodynamic pressure meaning
+  is inferred. Coherent sources must be combined before observation.
 - `roughness::roughness_dw_block` — Daniel-Weber roughness [asper]
   per 8192-sample analysis block (Pa input), ported from the
   Apache-2.0 MoSQITo reference with tables transcribed mechanically
@@ -154,6 +165,12 @@ test).
    low-band tables are load-bearing.
 6. Calibration: uncalibrated absolute SPL REFUSES by name;
    calibrated half-scale sine reads -6.02 dB re full scale.
+   G1/G3 amplitude tests also pin 20 µPa RMS = 0 dB, 1 Pa RMS =
+   93.9794 dB, the +3.0103 dB square-versus-sine crest-factor difference,
+   coherent doubling versus quadrature energy addition, explicit-reference
+   scaling, finite subnormal/large levels, and typed non-finite refusals.
+   Log-attack-time normalizes its envelope before accumulation, preserving
+   its level-relative meaning across changes of signal units and gain.
 7. Diffuse field differs measurably from free field (DDF live).
 8. Determinism bitwise; typed refusals for shape/NaN/degenerate.
 9. Signal-path fidelity: on bit-identical fixture PCM (1 kHz 60 dB
@@ -274,6 +291,10 @@ bridge `test_psycho_bridge.py`): bitwise equality between parsed
 without `--pa-per-full-scale`; partial per-metric refusal on short
 blocks while preserving valid metrics; RIFF WAV parser rejection of
 multichannel and oversize inputs.
+The report also emits unweighted full-record `spl_db` with an explicit
+`spl_reference_pa` of 20 µPa, retaining the existing calibration-source and
+`level_unverified` fields. This observation includes attack and release and is
+independent of the stationary loudness filterbank's skip interval.
 
 ## No-claim boundaries (the bead's remaining scope — OPEN)
 

@@ -14,7 +14,10 @@ use fs_psycho::fluctuation::{FS_FRAME, fluctuation_strength_frame};
 use fs_psycho::roughness::{DW_BLOCK, roughness_dw_block};
 use fs_psycho::signal::{loudness_stationary_from_pcm, loudness_time_varying};
 use fs_psycho::tonality::{prominence_ratio_ecma, tone_to_noise_ecma};
-use fs_psycho::{PsychoError, SoundField, log_attack_time, sharpness_din};
+use fs_psycho::{
+    AIR_REFERENCE_PRESSURE_PA, PsychoError, SoundField, log_attack_time, sharpness_din,
+    spl_from_pressure_rms,
+};
 
 /// Maximum admitted WAV byte size (64 MiB).
 pub const MAX_WAV_BYTES: usize = 64 * 1024 * 1024;
@@ -91,10 +94,7 @@ impl core::fmt::Display for BridgeError {
                 write!(f, "{}: {msg}", PsychoError::UncalibratedAbsolute)
             }
             Self::MissingCalibrationSource => {
-                write!(
-                    f,
-                    "missing required --calibration-source <sidecar|assumed>"
-                )
+                write!(f, "missing required --calibration-source <sidecar|assumed>")
             }
             Self::InvalidCalibrationSource(v) => {
                 write!(
@@ -110,7 +110,10 @@ impl core::fmt::Display for BridgeError {
             Self::UnknownArgument(arg) => write!(f, "unknown argument '{arg}'"),
             Self::Io(e) => write!(f, "io error: {e}"),
             Self::WavOversize { bytes, max_bytes } => {
-                write!(f, "wav size {bytes} bytes exceeds maximum {max_bytes} bytes")
+                write!(
+                    f,
+                    "wav size {bytes} bytes exceeds maximum {max_bytes} bytes"
+                )
             }
             Self::Multichannel { channels } => {
                 write!(f, "mono wav required (got {channels} channels)")
@@ -345,6 +348,9 @@ pub struct PsychoDescriptorReport {
     pub calibration_source: CalibrationSource,
     /// Whether absolute level is unverified (`true` for `Assumed`).
     pub level_unverified: bool,
+    /// Unweighted full-record equivalent SPL [dB re 20 µPa], including the
+    /// attack and release (independent of loudness's `time_skip_s`).
+    pub spl_db: Option<f64>,
     /// Stationary Zwicker loudness [sone] (ISO 532-1).
     pub loudness_sone: Option<f64>,
     /// Time-varying loudness N5 percentile [sone] (ISO 532-1).
@@ -396,6 +402,14 @@ pub fn evaluate_from_pa(
 ) -> PsychoDescriptorReport {
     let sr = f64::from(sample_rate);
     let mut refusals: BTreeMap<&'static str, String> = BTreeMap::new();
+
+    let spl_db = match spl_from_pressure_rms(pcm_pa, AIR_REFERENCE_PRESSURE_PA) {
+        Ok(level) => Some(level),
+        Err(e) => {
+            refusals.insert("spl_db", e.to_string());
+            None
+        }
+    };
 
     let (loudness_sone, sharpness_acum) =
         match loudness_stationary_from_pcm(pcm_pa, sr, time_skip_s, field) {
@@ -514,6 +528,7 @@ pub fn evaluate_from_pa(
         pa_per_full_scale,
         calibration_source,
         level_unverified: calibration_source.level_unverified(),
+        spl_db,
         loudness_sone,
         n5_sone,
         n50_sone,
@@ -554,13 +569,15 @@ impl PsychoDescriptorReport {
         }
         let refusals_json = format!("{{{}}}", refusals_entries.join(","));
         format!(
-            "{{\"schema\":\"fs-psycho-descriptors/1\",\"wav_sha256\":\"{}\",\"sample_rate\":{},\"field\":\"{}\",\"calibration\":{{\"pa_per_full_scale\":{},\"source\":\"{}\",\"level_unverified\":{}}},\"loudness_sone\":{},\"n5_sone\":{},\"n50_sone\":{},\"sharpness_acum\":{},\"roughness_asper\":{},\"tnr_db\":{},\"pr_db\":{},\"tonality_block\":{},\"fluctuation_vacil\":{},\"log_attack_time\":{},\"refusals\":{}}}",
+            "{{\"schema\":\"fs-psycho-descriptors/1\",\"wav_sha256\":\"{}\",\"sample_rate\":{},\"field\":\"{}\",\"calibration\":{{\"pa_per_full_scale\":{},\"source\":\"{}\",\"level_unverified\":{}}},\"spl_db\":{},\"spl_reference_pa\":{},\"loudness_sone\":{},\"n5_sone\":{},\"n50_sone\":{},\"sharpness_acum\":{},\"roughness_asper\":{},\"tnr_db\":{},\"pr_db\":{},\"tonality_block\":{},\"fluctuation_vacil\":{},\"log_attack_time\":{},\"refusals\":{}}}",
             json_escape(&self.wav_sha256),
             self.sample_rate,
             field_str,
             self.pa_per_full_scale,
             self.calibration_source.as_str(),
             self.level_unverified,
+            opt_f64(self.spl_db),
+            AIR_REFERENCE_PRESSURE_PA,
             opt_f64(self.loudness_sone),
             opt_f64(self.n5_sone),
             opt_f64(self.n50_sone),
@@ -850,8 +867,11 @@ mod tests {
         let pr = prominence_ratio_ecma(&pcm_pa, sr_f64).expect("pr").total_db;
         let fluc = fluctuation_strength_frame(&pcm_pa, sr_f64).expect("fluctuation");
         let lat = log_attack_time(&pcm_pa, sr_f64, 480).expect("lat");
+        let spl = spl_from_pressure_rms(&pcm_pa, AIR_REFERENCE_PRESSURE_PA).expect("spl");
 
         let checks = [
+            ("spl_db", spl),
+            ("spl_reference_pa", AIR_REFERENCE_PRESSURE_PA),
             ("loudness_sone", stat.sones),
             ("n5_sone", tv.n5),
             ("n50_sone", n50),
@@ -876,8 +896,15 @@ mod tests {
     /// G0: Missing or invalid `--pa-per-full-scale`, `--field`, or `--calibration-source` refuses.
     #[test]
     fn refuses_without_full_scale() {
-        let err = parse_args(["--wav", "x.wav", "--calibration-source", "sidecar", "--field", "free"])
-            .expect_err("missing --pa-per-full-scale must refuse");
+        let err = parse_args([
+            "--wav",
+            "x.wav",
+            "--calibration-source",
+            "sidecar",
+            "--field",
+            "free",
+        ])
+        .expect_err("missing --pa-per-full-scale must refuse");
         assert!(matches!(err, BridgeError::MissingOrInvalidFullScale(_)));
         assert!(
             err.to_string()
@@ -900,7 +927,14 @@ mod tests {
         }
 
         assert!(matches!(
-            parse_args(["--wav", "x.wav", "--pa-per-full-scale", "1.0", "--field", "free"]),
+            parse_args([
+                "--wav",
+                "x.wav",
+                "--pa-per-full-scale",
+                "1.0",
+                "--field",
+                "free"
+            ]),
             Err(BridgeError::MissingCalibrationSource)
         ));
         assert!(matches!(
@@ -923,7 +957,8 @@ mod tests {
         let samples_short: Vec<f32> = (0..(DW_BLOCK - 1))
             .map(|i| {
                 #[allow(clippy::cast_possible_truncation)]
-                let s = (0.05 * det::sin(2.0 * core::f64::consts::PI * 1000.0 * i as f64 / 48_000.0))
+                let s = (0.05
+                    * det::sin(2.0 * core::f64::consts::PI * 1000.0 * i as f64 / 48_000.0))
                     as f32;
                 s
             })
