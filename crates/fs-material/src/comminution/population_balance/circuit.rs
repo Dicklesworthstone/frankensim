@@ -30,6 +30,10 @@
 #[path = "circuit/holdup.rs"]
 pub mod holdup;
 
+/// Original Bond energy evaluated on actual continuous-circuit operating points.
+#[path = "circuit/power.rs"]
+pub mod power;
+
 use super::{
     ContinuousMillSolution, ContinuousPopulationBalanceMill, MEAN_RESIDENCE_TIME_AXIS,
     MILL_DRY_FLOW_AXIS, PopulationBalanceError, Sum, product, quotient, require,

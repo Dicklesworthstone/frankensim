@@ -156,6 +156,22 @@ Seven additional hold-up regressions independently check the inferred
 residence and product distribution, water exclusion, purge/no-recycle limits,
 source admission, infeasible targets, work exhaustion and numerical refusal.
 
+`population_balance::circuit::power::ContinuousBondCircuit` composes this
+original circuit with an original `BondGrindingCard`. Prescribed-residence
+and fixed-dry-inventory calls independently solve the circuit, then recompute
+fresh-feed F80 and the combined external overflow-plus-purge P80. The original
+Bond owner admits that actual size reduction; its specific energy multiplies
+fresh dry throughput, excluding circulating solids and carrier water. Results
+retain both original models, complete circuit streams and all available
+hold-up diagnostics. Caller-edited public results cannot stand in for admission.
+
+Six focused tests cover analytical energy/power, an inventory-controlled P80
+change under doubled feed, purge, fresh-tonnage accounting, original size/source
+refusals and preservation of original circuit/hold-up errors. Discrete P80 can
+jump as throughput changes, so this adapter makes no monotone power/capacity
+inverse or selection-rate/power calibration claim. Its net pinion estimate
+supplies no equipment power-draw law, drive efficiency or auxiliary demand.
+
 ## Finite gas/liquid oxygen supply during cyanidation
 
 `cyanide_leach::gas_transfer::AeratedGoldCyanidation` attaches a finite,

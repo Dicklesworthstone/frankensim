@@ -77,10 +77,47 @@ to 20 kg/s reduces the solved residence to about 3.5941 s. The returned circuit
 still reports its actual circulating flow, product size distribution, assays
 and water; fresh throughput is not substituted for circulating throughput.
 
-Neither API infers mill power or equipment capacity, calibrates
-selection/daughter data from a Bond work index, predicts liberation, or
-attaches a generic ore name to an unsupported classifier card. These inputs
-remain explicit and source-qualified.
+Neither continuous-mill control calibrates selection/daughter data from a
+Bond work index, predicts liberation, or attaches a generic ore name to an
+unsupported classifier card. These inputs remain explicit and source-qualified.
+
+## Bond energy and power at the solved operating state
+
+`population_balance::circuit::power::ContinuousBondCircuit` takes the original
+continuous circuit and an independently declared `BondGrindingCard`. It offers
+the same prescribed-residence and fixed-dry-hold-up controls. Each call solves
+the original circuit internally before evaluating fresh-feed F80 and the P80
+of **overflow plus purge**. The original work-index card must admit that actual
+size reduction. Estimated net pinion power is specific energy times **fresh
+dry throughput**; circulating ore and carrier water are not additional fresh
+tonnage. The original circuit, sources, streams and hold-up diagnostics remain
+available from the returned point.
+
+The example uses an explicitly authored 15 kWh/metric-tonne work index and
+prints the resulting power alongside the fixed-inventory response. In its
+two-bin illustration, the discrete P80 remains 100 micrometres even though
+fine-product fraction changes. Estimated power therefore changes from
+158.162338 kW at 10 kg/s fresh flow to 316.324676 kW at 20 kg/s.
+
+The three-bin analytical regression exercises the case that an unchanged P80
+would miss. Its synthetic rates, classifier and 15 kWh/metric-tonne index give:
+
+| Dry inventory, kg | Fresh dry flow, kg/s | Solved residence, s | External P80, micrometres | Estimated pinion power, kW |
+| ---: | ---: | ---: | ---: | ---: |
+| 752.760129631 | 10 | 40 | 100 | 270 |
+| 752.760129631 | 20 | 15.775944376 | 200 | 223.675324 |
+
+The discrete P80 jump lowers the Bond estimate in this particular fixture.
+It does not imply a plant power-draw prediction. A smooth monotone inverse
+from power to capacity is not available from these discrete quantiles, and
+the adapter does not manufacture one. Selection frequencies, daughter
+distributions, work-index test applicability, equipment power draw, drive
+efficiency and auxiliary loads require their own physical inputs. A finer
+overflow cannot conceal an unsupported or unreduced combined purge/product.
+
+The Bond relation and fresh-feed accounting follow the existing
+[GMG 2021 grinding-circuit guideline](https://gmggroup.org/wp-content/uploads/2024/07/GUIDELINE__Determining-the-Bond-Efficiency-of-Industrial-Grinding-Circuits_2021.pdf),
+sections 4–5; the population-balance fixture supplies no measured calibration.
 
 Seven focused regressions cover independent two-/three-class answers, mixed
 assays, purge and no-return identity, source and circulation limits, fed and
@@ -89,3 +126,5 @@ Seven additional fixed-hold-up regressions check independent residence and
 product-size answers, carrier-water exclusion from dry inventory, purge and
 no-recycle limits, source admission, infeasible targets, iteration exhaustion,
 overflowed tolerance and unresolved floating-point intervals.
+Six Bond-adapter tests add changing-P80 power, purge, fresh-tonnage accounting,
+original work-index/source restrictions and preserved physical-owner refusals.

@@ -5,6 +5,7 @@
 //! ranges are explicitly synthetic. Prescribed residence reports its resulting
 //! inventory; prescribed dry hold-up solves residence against circulating feed
 //! within an explicit valid bracket. Neither is inferred from a Bond work index.
+//! A separate authored Bond card estimates energy at each actual operating PSD.
 
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
@@ -13,12 +14,16 @@ use fs_matdb::{
 };
 use fs_material::{
     comminution::{
+        BondGrindingCard, BondSizeDomain, BondTestContext, BondWorkIndex,
         breakage::{BreakageTestContext, BreakageTransfer, SizeClass},
         circuit::CircuitSettings,
         population_balance::{
             ContinuousPopulationBalanceMill, MEAN_RESIDENCE_TIME_AXIS, MILL_DRY_FLOW_AXIS,
             SelectionBreakageClass,
-            circuit::{ContinuousGrindingCircuit, holdup::HoldupSolveSettings},
+            circuit::{
+                ContinuousGrindingCircuit, holdup::HoldupSolveSettings,
+                power::ContinuousBondCircuit,
+            },
         },
     },
     separation::{
@@ -212,9 +217,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "\nFixed dry hold-up 333.333333333 kg; full underflow recycle; residence bracket 1..20 s:"
     );
+    let powered = ContinuousBondCircuit::new(
+        circuit.clone(),
+        BondGrindingCard::new(
+            BondWorkIndex::from_kwh_per_metric_tonne(15.0)?,
+            BondTestContext {
+                specimen: "synthetic two-class assayed feed".into(),
+                method: "independently authored Bond work-index example".into(),
+                closing_screen: Length::new(125e-6),
+                provenance: Provenance {
+                    source: "authored 15 kWh/metric-tonne Bond input; not measured testwork".into(),
+                    license: "project example".into(),
+                    artifact: Some(hash_bytes(b"continuous-grinding-bond-example-v1")),
+                },
+            },
+            BondSizeDomain::new(
+                [Length::new(200e-6), Length::new(1e-3)],
+                [Length::new(70e-6), Length::new(150e-6)],
+            )?,
+        )?,
+    );
+    println!(
+        "Separate authored Bond input: Wi 15 kWh/metric-tonne; actual external P80 is recomputed."
+    );
     let doubled = ParticleStream::mix(&[&fresh, &fresh])?;
     for feed in [&fresh, &doubled] {
-        let fixed = circuit.at_dry_holdup(
+        let point = powered.at_dry_holdup(
             feed,
             Mass::new(333.333333333),
             &QueryPoint::new(),
@@ -229,6 +257,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 maximum_iterations: 80,
             },
         )?;
+        let fixed = point
+            .holdup_solution()
+            .expect("requested fixed dry hold-up");
         let flows = &fixed.solution.circuit;
         let fine = flows
             .product
@@ -250,9 +281,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             fixed.mass_residual.value(),
             fixed.iterations,
         );
+        println!(
+            "    F80 {:.1} um; combined overflow/purge P80 {:.1} um; Bond {:.6} kWh/t; estimated net pinion {:.6} kW",
+            point.fresh_f80.value() * 1e6,
+            point.external_p80.value() * 1e6,
+            point.specific_energy.value() / 3600.0,
+            point.net_pinion_power.value() / 1000.0,
+        );
     }
     println!(
-        "Purge is a nonselective outlet. No power draw, liberation, reactive mineralogy or calibration is inferred."
+        "Purge is a nonselective outlet. Bond energy does not calibrate selection rates or infer equipment power draw, liberation or reactive mineralogy."
     );
     Ok(())
 }
