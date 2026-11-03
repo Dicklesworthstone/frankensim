@@ -18105,6 +18105,40 @@ full coupled inertia, elastic storage, shared contacts, moving surfaces and
 physical refusals. Real damaged-cohesive-body integration cases are retained
 for the complete native runtime build.
 
+### Native sliding stops on the original contact response
+
+`cohesive_contact::trajectory::sustained::segment_candidate` advances supported
+motion to the requested endpoint or an admitted relative sliding stop. It
+reuses the existing complete held-force solve and original cohesive midpoint
+owner. An unpublished reflected trial supplies a signed time bracket; every
+subsequent time query recomputes contact forces and native material evolution
+from unchanged accepted bodies. Prescribed jump offsets are interpolated to
+each actual represented endpoint from their original physical time path.
+
+The allocation-free stopping locator alternates safeguarded secant and
+bisection. An approximate stop requires both a narrow actual time bracket and
+a small complete relative tangent-velocity vector. A perpendicular turn is not
+a stop. An exact full-vector zero may identify a point bracket. The final query
+freshly replays the original response; actual duration and velocity identity
+are checked, then the unchanged all-contact and full-work audit must pass.
+Another observed contact reversal triggers its earlier bracket before adoption.
+Simultaneous stops are listed only from actual relative velocities; a moving
+surface or second body can leave nonzero world velocities. No velocity, gap,
+force or material state is projected.
+
+Every failed or discarded probe spends bounded contact/native work but adds
+no physical displacement, loss or irreversible history. Final body receipts
+retain the work of the one actual admitted segment. Stopping brackets describe
+the local sampled native endpoint response, not earliest exact continuous-flow
+events or globally unique frictional dynamics. Minimum-time, transverse-turn,
+nonrepresentability, source, work-budget and cancellation refusals stay explicit.
+The original fixed-duration sustained API retains its strict behavior.
+
+Direct locator tests include constant/viscous response, full coupled inertia,
+moving surfaces, two-body momentum and false midpoint reflections. Native
+damaged-body cases exercise stopping followed by rest or opposite breakaway,
+moving-wall entrainment and coupled pair momentum through the original owners.
+
 ## Finite cohesive patch load line
 
 `cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.

@@ -22,6 +22,13 @@ use super::BodyLoad;
 use super::geometry::{self, GeometryError, Sum};
 
 mod audit;
+mod segment;
+mod stopping;
+pub use segment::{
+    SegmentCandidate, SegmentControls, SegmentError, SegmentReport, segment_candidate,
+    segment_candidate_controlled,
+};
+pub use stopping::{StoppingControls, StoppingError, StoppingReport};
 #[cfg(test)]
 #[path = "sustained/tests.rs"]
 mod tests;
@@ -178,6 +185,35 @@ pub fn step_candidate_controlled<'m, 'a>(
     controls: SustainedControls,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<SustainedCandidate<'m, 'a>, SustainedError> {
+    let mut work = Work::default();
+    let prepared = solve_actual_controlled(
+        motions,
+        contacts,
+        loads,
+        scales,
+        initial_forces_n,
+        duration_s,
+        controls,
+        &mut work,
+        cancelled,
+    )?;
+    let audited = prepared.audit(controls.audit, cancelled)?;
+    poll(cancelled)?;
+    Ok(prepared.accept(audited, &work))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_actual_controlled<'m, 'a>(
+    motions: &[&CohesiveMotion<'m, 'a>],
+    contacts: &[SustainedContact<'_>],
+    loads: &[BodyLoad<'_>],
+    scales: &[NaturalMapScales],
+    initial_forces_n: &[[f64; 3]],
+    duration_s: f64,
+    controls: SustainedControls,
+    work: &mut Work,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Prepared<'m, 'a>, SustainedError> {
     admit(
         motions,
         contacts,
@@ -217,13 +253,14 @@ pub fn step_candidate_controlled<'m, 'a>(
             .into());
         }
     }
-    let mut work = Work::default();
+    work.contact_solves = add(work.contact_solves, 1)?;
     let mut latest: Option<Trial<'m, 'a>> = None;
     let mu: Vec<_> = contacts.iter().map(|c| c.friction_coefficient).collect();
     let mut response = |forces: &[[f64; 3]], poller: &mut dyn FnMut() -> bool| {
         // Only the final replay may publish; release the obsolete native
         // candidate before allocating the next complete material response.
         drop(latest.take());
+        work.response_evaluations = add(work.response_evaluations, 1)?;
         let trial = evaluate(
             motions,
             contacts,
@@ -233,7 +270,7 @@ pub fn step_candidate_controlled<'m, 'a>(
             target_s,
             dt_s,
             controls,
-            &mut work,
+            work,
             &mut || poller(),
         )?;
         let paths = trial.sample.paths_m.clone();
@@ -306,22 +343,59 @@ pub fn step_candidate_controlled<'m, 'a>(
             native_energy_defect_j: step.energy_residual_j,
         });
     }
-    let accepted = audit::audit(&inputs, &body_work, dt_s, controls.audit, cancelled)?;
     poll(cancelled)?;
-    Ok(SustainedCandidate {
-        bodies: trial.steps,
-        report: SustainedReport {
-            elapsed_s: dt_s,
-            target_time_s: target_s,
-            contact_ids: contacts.iter().map(|c| c.id).collect(),
-            contact,
-            audit: accepted,
-            body_work,
-            body_trials: work.body_trials,
-            residual_evaluations: work.residual_evaluations,
-            native_newton_iterations: work.newton_iterations,
-        },
+    Ok(Prepared {
+        steps: trial.steps,
+        inputs,
+        elapsed_s: dt_s,
+        target_time_s: target_s,
+        contact_ids: contacts.iter().map(|c| c.id).collect(),
+        contact,
+        body_work,
     })
+}
+
+// Unpublished original mechanics. Event searches may inspect a reflected
+// continuation trial, but only the unchanged complete audit authorizes motion.
+struct Prepared<'m, 'a> {
+    steps: Vec<DynamicsStep<'m, 'a>>,
+    inputs: Vec<ContactAuditInput>,
+    elapsed_s: f64,
+    target_time_s: f64,
+    contact_ids: Vec<u64>,
+    contact: SolveReport,
+    body_work: Vec<BodyWork>,
+}
+impl<'m, 'a> Prepared<'m, 'a> {
+    fn audit(
+        &self,
+        controls: AuditControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<AuditReport, AuditError> {
+        audit::audit(
+            &self.inputs,
+            &self.body_work,
+            self.elapsed_s,
+            controls,
+            cancelled,
+        )
+    }
+    fn accept(self, audit: AuditReport, work: &Work) -> SustainedCandidate<'m, 'a> {
+        SustainedCandidate {
+            bodies: self.steps,
+            report: SustainedReport {
+                elapsed_s: self.elapsed_s,
+                target_time_s: self.target_time_s,
+                contact_ids: self.contact_ids,
+                contact: self.contact,
+                audit,
+                body_work: self.body_work,
+                body_trials: work.body_trials,
+                residual_evaluations: work.residual_evaluations,
+                native_newton_iterations: work.newton_iterations,
+            },
+        }
+    }
 }
 
 struct Trial<'m, 'a> {
@@ -614,6 +688,8 @@ fn history_capacity(motion: &CohesiveMotion<'_, '_>) -> Result<usize, ResponseEr
 
 #[derive(Default)]
 struct Work {
+    contact_solves: usize,
+    response_evaluations: usize,
     body_trials: usize,
     residual_evaluations: usize,
     newton_iterations: usize,
