@@ -1,0 +1,64 @@
+frankensim.matdb-source.v1
+observation	identity	Aqueous ammonium ion NH4+, NBS reference	NBS Table 18:N (prepared 1964), NH4+ state ao	The source molar mass is 18.0387 g/mol. The individual ammonium ion has charge +1 and one nitrogen and four hydrogen atoms. It is the conjugate acid of dissolved NH3, not neutral ammonia, a gaseous species or an ammonium salt. Its nitrogen amount remains distinct from cyanate nitrogen until an explicit reaction transfers it.
+observation	standard	Literal NBS 298.15 K thermodynamic row	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	The corrected CSV row gives standard molar formation enthalpy -132.51 kJ/mol, independently tabulated standard molar formation Gibbs energy -79.31 kJ/mol, and conventional ionic standard molar entropy 113.4 J/(mol K). The row also gives conventional ionic isobaric molar heat capacity 79.9 J/(mol K); it is a value at 298.15 K, not a temperature law. Printed signs and precision are retained. The ao state is the individual aqueous ion in a hypothetical ideal solution at unit molality, with activity coefficient referenced to infinite dilution. The ionic reference sets H+(ao) formation H/G, entropy and heat capacity to zero; individual-ion entropy and heat capacity are conventional, not absolute. This is not a measured finite-concentration 1 mol/kg solution. Per-row confidence distributions and cross-species covariances are absent; uncertainty remains Unstated.
+observation	scope	One matched source reference state	https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf, sections 5.5 to 5.8; https://doi.org/10.6028/jres.125.007	Every claim requires 298.15 K, 100000 Pa and source-elemental-reference-nbs1989. This identifies the NBS tables distributed by NIST with the 1989 errata; it does not assert that each row was re-evaluated in 1989. The values support explicit conserved peroxide oxidation, cyanate hydrolysis and ammonia/peroxide acid equilibria with matched NBS sources. Direct-G and reaction H-minus-T-S routes remain separate. These properties supply no reaction rate, catalyst effectiveness, treatment efficiency, nonideal activity coefficient, commercial reagent assay, heat of mixing, gas stripping, temperature extrapolation or plant discharge prediction.
+scalar	molar-mass	identity,scope	mass	18.0387	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	-132.51	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-79.31	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	113.4	J/mol/K	tabulated
+scalar	standard-isobaric-heat-capacity	identity,standard,scope	cp	79.9	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	standard-isobaric-heat-capacity	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	standard-isobaric-heat-capacity	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	standard-isobaric-heat-capacity	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	standard-isobaric-heat-capacity	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	standard-isobaric-heat-capacity	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	standard-isobaric-heat-capacity	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	standard-entropy	aqueous	1	1	1
+validity	standard-isobaric-heat-capacity	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	standard-entropy	ionic	1	1	1
+validity	standard-isobaric-heat-capacity	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	standard-entropy	identity	1	1	1
+validity	standard-isobaric-heat-capacity	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	standard-isobaric-heat-capacity	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	standard-isobaric-heat-capacity	specimen	0	0	1
