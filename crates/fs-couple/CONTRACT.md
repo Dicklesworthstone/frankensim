@@ -23717,3 +23717,56 @@ coefficient work and changed factor rank; split and merge equal histories; refus
 unequal-history collisions; and preserve accepted state under mass/map/clock,
 work-budget and cancellation refusals. This is prescribed endpoint coefficient
 evolution, not a solved thermal expansion, entropy or heat-feedback model.
+
+
+## Complete causal material resonance of shell images
+
+`shear_shell::coating::poles` prepares one immutable continuous model for
+`MaterialShellImage` or `MaterialShellAssemblyImage` through
+`prepare_coating_resonance`. It retains the original mass-normalized equilibrium
+basis, complete background/glue viscosity, original interface dashpots, and
+every already-selected substrate and coating memory row. The existing
+`fs_phs::PortHamiltonian::with_relaxation_branches` owns the internal-strain
+storage and loss; `fs_phs::harmonic::HarmonicModel` owns the prepared generator,
+local pole refinement and contour discovery. No new eigensolver, material fit,
+branch aggregation, projection or modal-damping approximation is introduced.
+
+State order is interleaved equilibrium modal displacement/momentum, followed
+by all substrate memory coordinates and then all coating coordinates in their
+original selected order. A mechanical seed can be lifted with `p=s*q` and
+`z=c.q/(1+s*tau)`; complete caller-supplied seeds also admit material relaxation
+directions, including at a source branch rate. Singular seed lifting refuses
+instead of removing those states. The full polynomial/linear state model is
+used during iterations and contours, without eliminating Maxwell denominators.
+
+Frozen films and unselected anchored constant-loss substrate images refuse:
+the existing explicit causal selections are required. Coating Prony lowering,
+source-fit tolerances, constant-loss substrate continuation and the original
+fixed spatial/bubble/mode basis remain independent approximation boundaries.
+The prepared image retains the intersection of real-frequency source bands;
+each mode reports whether its oscillation frequency lies there. The explicitly
+selected global continuation also has real relaxation modes and can have poles
+outside that real-axis band. Neither flag establishes experimental accuracy at
+complex frequency or widens source authority.
+
+Each pole carries original force-port motion and signed exterior/cavity volume
+flow, the complete state, original-equation residual, and independently evaluated
+mechanical storage, background/interface heat and per-memory-branch storage and
+heat. Equal-time coating factors may mix source films, so no per-film allocation
+is invented. `H=x*Qx/2`, `D`, and `2 Re(s) H+D` are complex-envelope accounts,
+not cycle averages of a decaying real trajectory. Independent energy/loss
+partition and decay residuals must pass the declared physical tolerance. Shape
+normalization is not finite-amplitude strain admission or acoustic observability.
+
+Complete coordinates, conservative preparation payload/work and separate shared
+query budgets remain explicit. Physical observations reserve their resources
+before spectral work. Preparation polls source rows and before/after synchronous
+shared physical admissions; the shared spectral iterations and observations poll
+the source cancellation gate. Source/history is immutable on success or refusal.
+Count, rank, contour conditioning and nested quadrature diagnostics are numerical
+evidence, not rigorous spectral completeness or damping enclosures.
+
+`tests/coating_poles.rs` exercises independent scalar rational dispersion and
+physical decay, a real material relaxation root, contour quadrature refinement,
+full cross-mode memory and single-component assembly parity, source/resource
+refusals, cancellation and exact replay (G0/G1/G3/G4).

@@ -83,19 +83,20 @@ impl ShellCoatingHarmonicResponse {
     }
 }
 
-struct Image<'a> {
-    modes: &'a [CompactBody],
-    background: &'a [f64],
-    force_ports: &'a [Vec<f64>],
-    exterior: &'a [f64],
-    cavity: &'a [f64],
-    films: Option<&'a ShellCoatingRelaxation>,
-    substrate: Option<&'a crate::shear_shell::constant_loss::relaxation::ShellSubstrateRelaxation>,
-    interfaces: Vec<(&'a [f64], f64)>,
+pub(super) struct Image<'a> {
+    pub(super) modes: &'a [CompactBody],
+    pub(super) background: &'a [f64],
+    pub(super) force_ports: &'a [Vec<f64>],
+    pub(super) exterior: &'a [f64],
+    pub(super) cavity: &'a [f64],
+    pub(super) films: Option<&'a ShellCoatingRelaxation>,
+    pub(super) substrate:
+        Option<&'a crate::shear_shell::constant_loss::relaxation::ShellSubstrateRelaxation>,
+    pub(super) interfaces: Vec<(&'a [f64], f64)>,
 }
 
 impl<'a> Image<'a> {
-    fn shell(image: &'a MaterialShellImage) -> Self {
+    pub(super) fn shell(image: &'a MaterialShellImage) -> Self {
         Self {
             modes: image.radiators(),
             background: image.damping().matrix_per_s(),
@@ -115,7 +116,7 @@ impl<'a> Image<'a> {
         }
     }
 
-    fn assembly(image: &'a MaterialShellAssemblyImage) -> Self {
+    pub(super) fn assembly(image: &'a MaterialShellAssemblyImage) -> Self {
         Self {
             modes: image.radiators(),
             background: image.damping().matrix_per_s(),
@@ -241,13 +242,13 @@ fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
 }
 
-fn projection(row: &[f64], state: &[C64]) -> C64 {
+pub(super) fn projection(row: &[f64], state: &[C64]) -> C64 {
     row.iter()
         .zip(state)
         .fold(C64::ZERO, |sum, (&a, &q)| sum + q.scale(a))
 }
 
-fn quadratic(
+pub(super) fn quadratic(
     matrix: &[f64],
     state: &[C64],
     gate: &CancelGate,

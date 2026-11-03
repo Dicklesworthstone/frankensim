@@ -26,6 +26,8 @@ use fs_qty::Pressure;
 pub mod relaxation;
 /// In-band source-law structural response and uncoated body comparison.
 pub mod harmonic;
+/// Natural modes of the complete selected causal shell material image.
+pub mod poles;
 pub mod strain;
 
 /// Cold-work ceiling for the complete coating stack across one shell.
