@@ -4280,3 +4280,29 @@ central/spinning recoil, full-tensor frame covariance, capture/release
 interoperability, large boosts, lost geometry and atomic refusal. This is
 instantaneous material detachment; no fracture, contact discovery, finite
 parcel extent, slosh, continuous mass flux or thermodynamic source is inferred.
+
+### Physical exhaust under gravity and applied forces
+
+`RocketState::advance_with_exhaust_forced` composes the same physical particle
+moments with held `ExhaustEnvironment` gravity and applied force. The original
+native changing-mass trajectory and burnout event remain authoritative. Exported
+momentum and energy integrate the velocity during emission; the external force
+continues through coast. Gravity impulse integrates retained mass, and gravity
+work integrates the correlated mass and velocity. Work is mechanical input to
+the retained vehicle, with no invented propellant caloric model or potential
+energy datum.
+
+The analytic moments use `d=F*b/M0-w*x`, avoiding `F/q` when the expelled rate
+is tiny. Positive small-depletion series preserve mean drift and velocity
+variance when force acceleration opposes gravity. No numerical quadrature,
+heap allocation or additional time steps enter this mechanics path. Zero loads
+select the original free-exhaust calculation; a closed or exhausted vehicle can
+still move under the declared loads.
+
+Both external impulse and external work are returned explicitly. Residuals
+subtract them in a chart about the initial velocity while using the actual
+native endpoint, exposing velocity and inventory rounding. Constant loads and
+relative exhaust moments are analytic assumptions, not a claim of exactness for
+changing thermochemistry, drag, rotation or shifting centre of mass. Independent
+time-quadrature regressions cover noncollinear burn/coast, gravity/mass
+correlation, force cancellation, small depletion and Galilean work transforms.

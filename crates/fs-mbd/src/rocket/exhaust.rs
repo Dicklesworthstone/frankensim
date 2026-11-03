@@ -21,12 +21,16 @@
 //! integral: https://ocw.mit.edu/courses/16-522-space-propulsion-spring-2015/.
 //! The energy expression above follows the Galilean particle-energy transform.
 //! The step is exact for held relative fluxes, including burnout and coast;
-//! changing gas states require caller-controlled time refinement. Rotation,
-//! shifting centre of mass, gravity and external mechanical work are excluded.
+//! changing gas states require caller-controlled time refinement. The forced
+//! extension includes held gravity and external mechanical work. Rotation and
+//! a shifting centre of mass are excluded.
 
 use super::{RocketError, RocketForcing, RocketState, RocketStep, mass_integrals, poll};
 use crate::Vec3;
 use fs_math::det;
+
+mod forced;
+pub use forced::ExhaustEnvironment;
 
 /// Physical comoving exhaust moments, held during the powered interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,15 +67,43 @@ pub struct ExhaustStep {
     pub mean_speed_squared_m2_s2: f64,
     /// Vehicle kinetic change, evaluated with its actual endpoint velocity [J].
     pub kinetic_energy_change_j: f64,
+    /// Impulse from the declared external force and gravity [N s], including
+    /// coast. Gravity acts on the changing retained vehicle mass.
+    pub external_impulse_n_s: Vec3,
+    /// Work of those external loads on the moving vehicle [J], including coast.
+    /// No gravitational potential or propellant caloric datum is introduced.
+    pub external_work_j: f64,
     /// Integrated emitted mass minus actual native propellant decrement [kg].
     /// Its inertial momentum/energy effect is included in the residuals below.
     pub mass_residual_kg: f64,
-    /// Actual retained momentum change plus exported momentum [kg m/s], in a
-    /// stable chart about the initial velocity. This exposes lost small recoil.
+    /// Actual retained momentum change plus exported momentum minus external
+    /// impulse [kg m/s], in a stable chart about the initial velocity. This
+    /// exposes lost small recoil.
     pub momentum_residual_kg_m_s: Vec3,
-    /// Actual kinetic change plus the inertial export correction [J], evaluated
-    /// without subtracting large common kinetic or formation-energy baselines.
+    /// Actual kinetic change plus the inertial export correction minus external
+    /// work [J], without subtracting large common kinetic or formation baselines.
     pub kinetic_energy_residual_j: f64,
+}
+
+impl ExhaustStep {
+    fn empty(mechanics: RocketStep) -> Self {
+        Self {
+            mechanics,
+            relative_momentum_n_s: Vec3::ZERO,
+            relative_energy_j: 0.0,
+            exhaust_momentum_world_kg_m_s: Vec3::ZERO,
+            exhaust_energy_world_j: 0.0,
+            relative_kinetic_transport_energy_j: 0.0,
+            mean_velocity_world_m_s: Vec3::ZERO,
+            mean_speed_squared_m2_s2: 0.0,
+            kinetic_energy_change_j: 0.0,
+            external_impulse_n_s: Vec3::ZERO,
+            external_work_j: 0.0,
+            mass_residual_kg: 0.0,
+            momentum_residual_kg_m_s: Vec3::ZERO,
+            kinetic_energy_residual_j: 0.0,
+        }
+    }
 }
 
 // Average L(t)^2 over a linearly decreasing mass interval. The positive series
@@ -152,20 +184,7 @@ impl RocketState {
             duration_s,
             &mut cancelled,
         )?;
-        let mut step = ExhaustStep {
-            mechanics,
-            relative_momentum_n_s: Vec3::ZERO,
-            relative_energy_j: 0.0,
-            exhaust_momentum_world_kg_m_s: Vec3::ZERO,
-            exhaust_energy_world_j: 0.0,
-            relative_kinetic_transport_energy_j: 0.0,
-            mean_velocity_world_m_s: Vec3::ZERO,
-            mean_speed_squared_m2_s2: 0.0,
-            kinetic_energy_change_j: 0.0,
-            mass_residual_kg: 0.0,
-            momentum_residual_kg_m_s: Vec3::ZERO,
-            kinetic_energy_residual_j: 0.0,
-        };
+        let mut step = ExhaustStep::empty(mechanics);
         let dm = mechanics.burned_propellant_mass_kg;
         if dm == 0.0 {
             poll(&mut cancelled)?;
