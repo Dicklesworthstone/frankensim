@@ -1,6 +1,6 @@
 //! Stage 3 + 5: the free-surface POUR validator and the deliverable
-//! render. A tank with a weir lip pours under a rotating-gravity TILT
-//! SCHEDULE (the moving frame fs-lbm's G3 gate pins); the outcome
+//! render. A tank with a weir lip pours in a prescribed rotating frame,
+//! including Euler, centrifugal and Coriolis acceleration; the outcome
 //! record carries the STRICT mass-ledger drift, the connected-component
 //! count of the 2-D liquid, and the dribble indicator (wetted
 //! outer-lip cells after the pour) — computed under BOTH contact
@@ -9,6 +9,7 @@
 //! fs-render's Woodcock tracker to the simulation's OWN mass buffer:
 //! the marketing shot and the physics are the same bytes.
 
+use fs_lbm::core2::frame::RigidFrame2;
 use fs_lbm::freesurface::{ContactModel, FreeSurface};
 use fs_lbm::rheology::{Rheology, update_tau};
 use fs_lbm::{Cell, Grid};
@@ -31,8 +32,8 @@ pub struct PourRig {
     /// Convert SI values with `sigma_lu = sigma_si * dt^2 / (rho_si * dx^3)`.
     /// This fixture coefficient is not a sourced fluid-property calibration.
     pub surface_tension: f64,
-    /// Tilt schedule: final angle (radians) reached linearly over the
-    /// run (rotating gravity — the fs-scenario moving-frame stand-in).
+    /// Final clockwise tilt (radians). The physical run uses a quintic
+    /// rest-to-rest schedule with zero endpoint angular acceleration.
     pub tilt_final: f64,
     /// Steps.
     pub steps: u32,
@@ -80,11 +81,82 @@ pub struct PourOutcome {
 /// Only on fs-lbm programmer contracts (fixture-scale).
 #[must_use]
 pub fn run_pour(rig: &PourRig, contact: ContactModel, law: Rheology) -> PourOutcome {
+    run_pour_in_frame(rig, contact, law, [0.5 * (rig.nx as f64 - 1.0), 0.5])
+}
+
+/// Pour in a prescribed rigid frame rotating about an explicit lattice pivot.
+///
+/// Cell centres have integer coordinates. The default [`run_pour`] pivot is
+/// the middle of the halfway-bounce-back floor. Gravity is transformed into
+/// this frame; native D2Q9 forcing includes centrifugal, Euler and Coriolis
+/// acceleration. Tilt and its derivatives come from the same quintic schedule,
+/// sampled at step midpoints, starting and finishing with zero spin and angular
+/// acceleration. The stationary lattice walls are the co-moving vessel walls.
+///
+/// The prescribed support supplies the vessel motion; no coupled finite-inertia
+/// vessel, gas motion, 3-D pour or quantitative jet-breakup model is claimed.
+///
+/// # Panics
+/// Nonfinite pivot/motion or the original native flow admission contracts.
+#[must_use]
+pub fn run_pour_in_frame(
+    rig: &PourRig,
+    contact: ContactModel,
+    law: Rheology,
+    pivot: [f64; 2],
+) -> PourOutcome {
+    assert!(
+        pivot.into_iter().all(f64::is_finite),
+        "finite pour pivot required"
+    );
+    run_pour_motion(rig, contact, law, Some(pivot))
+}
+
+/// Historical rotating-gravity smoke model, retained for explicit comparisons.
+///
+/// The linear gravity-angle ramp omits frame inertia and is not the momentum
+/// equation of a physically rotating vessel. Existing cross-ISA smoke goldens
+/// can select this model explicitly; physical pours use [`run_pour`].
+///
+/// # Panics
+/// The original native flow admission contracts.
+#[must_use]
+pub fn run_pour_rotating_gravity(
+    rig: &PourRig,
+    contact: ContactModel,
+    law: Rheology,
+) -> PourOutcome {
+    run_pour_motion(rig, contact, law, None)
+}
+
+fn tilt_kinematics(rig: &PourRig, time: f64) -> [f64; 3] {
+    let duration = f64::from(rig.steps);
+    let s = time / duration;
+    let shape = s * s * s * (10.0 + s * (-15.0 + 6.0 * s));
+    let speed = 30.0 * s * s * (1.0 - s) * (1.0 - s);
+    let acceleration = 60.0 * s * (1.0 - s) * (1.0 - 2.0 * s);
+    [
+        rig.tilt_final * shape,
+        rig.tilt_final * speed / duration,
+        rig.tilt_final * acceleration / duration / duration,
+    ]
+}
+
+fn run_pour_motion(
+    rig: &PourRig,
+    contact: ContactModel,
+    law: Rheology,
+    pivot: Option<[f64; 2]>,
+) -> PourOutcome {
     let (nx, ny) = (rig.nx, rig.ny);
     let mut grid = Grid::uniform(nx, ny, 0.55);
     grid.periodic_x = false;
     grid.periodic_y = false;
-    grid.g = [0.0, -rig.g0];
+    // Start the physical run at rest, before applying any half-source frame.
+    // The historical comparison retains its original initialization exactly.
+    if pivot.is_none() {
+        grid.g = [0.0, -rig.g0];
+    }
     for i in 0..nx * ny {
         grid.flags[i] = Cell::Gas;
     }
@@ -117,16 +189,31 @@ pub fn run_pour(rig: &PourRig, contact: ContactModel, law: Rheology) -> PourOutc
     let m0 = sim.ledger_mass();
     let mut mass_drift = 0.0f64;
     for step in 0..rig.steps {
-        // Tilt schedule: rotate gravity linearly to tilt_final.
-        // det::sin/cos: platform trig here was the xo2k build-mode
-        // divergence — release const-folds libm calls once the literal
-        // rig parameters inline, debug calls libm at runtime, and the
-        // ~1-ulp gravity difference compounds into poured_mass drift.
-        let theta = rig.tilt_final * f64::from(step) / f64::from(rig.steps);
-        sim.grid.g = [
-            rig.g0 * fs_math::det::sin(theta),
-            -rig.g0 * fs_math::det::cos(theta),
-        ];
+        if let Some(origin) = pivot {
+            let [theta, speed, acceleration] = tilt_kinematics(rig, f64::from(step) + 0.5);
+            // Clockwise tilt is negative counterclockwise frame rotation.
+            RigidFrame2 {
+                origin,
+                angular_velocity: -speed,
+                angular_acceleration: -acceleration,
+                origin_acceleration: [0.0; 2],
+            }
+            .prepare_step(
+                &mut sim.grid,
+                [
+                    rig.g0 * fs_math::det::sin(theta),
+                    -rig.g0 * fs_math::det::cos(theta),
+                ],
+            )
+            .expect("pour rigid-frame forcing");
+        } else {
+            // Preserve the explicit historical model's deterministic arithmetic.
+            let theta = rig.tilt_final * f64::from(step) / f64::from(rig.steps);
+            sim.grid.g = [
+                rig.g0 * fs_math::det::sin(theta),
+                -rig.g0 * fs_math::det::cos(theta),
+            ];
+        }
         // Carreau/power-law local viscosity adaptation (stage-3 band).
         let _ = update_tau(&mut sim.grid, law);
         sim.step();
@@ -170,6 +257,50 @@ pub fn run_pour(rig: &PourRig, contact: ContactModel, law: Rheology) -> PourOutc
 #[cfg(test)]
 mod capillary_tests {
     use super::*;
+
+    #[test]
+    fn rigid_tilt_schedule_starts_and_finishes_at_rest() {
+        let rig = PourRig::default();
+        assert_eq!(tilt_kinematics(&rig, 0.0), [0.0; 3]);
+        assert_eq!(
+            tilt_kinematics(&rig, f64::from(rig.steps)),
+            [rig.tilt_final, 0.0, -0.0]
+        );
+        let middle = tilt_kinematics(&rig, 0.5 * f64::from(rig.steps));
+        assert!((middle[0] - 0.5 * rig.tilt_final).abs() < 1e-15);
+        assert!(middle[1] > 0.0);
+        assert_eq!(middle[2], 0.0);
+    }
+
+    #[test]
+    fn original_flow_responds_to_rigid_tilt_pivot_even_without_gravity() {
+        let rig = PourRig {
+            g0: 0.0,
+            steps: 300,
+            tilt_final: 0.5,
+            surface_tension: 0.0,
+            ..PourRig::default()
+        };
+        let law = Rheology::Newtonian { nu: 0.0167 };
+        let left = run_pour_in_frame(&rig, ContactModel::Neutral, law, [0.5, 0.5]);
+        let right = run_pour_in_frame(&rig, ContactModel::Neutral, law, [46.5, 0.5]);
+        let gravity_only = run_pour_rotating_gravity(&rig, ContactModel::Neutral, law);
+        for result in [&left, &right, &gravity_only] {
+            assert!(result.mass_drift < 1e-10, "{}", result.mass_drift);
+            assert!(result.mass_field.iter().all(|v| v.is_finite()));
+        }
+        let difference = |a: &PourOutcome, b: &PourOutcome| {
+            a.mass_field
+                .iter()
+                .zip(&b.mass_field)
+                .map(|(x, y)| (x - y).abs())
+                .sum::<f64>()
+        };
+        assert!(difference(&left, &right) > 1e-3);
+        assert!(difference(&left, &gravity_only) > 1e-3);
+        // This response cannot come from rotating gravity: it is identically
+        // zero in all three runs. The only driving mechanism is frame inertia.
+    }
 
     #[test]
     fn capillary_pour_responds_to_tension_and_wetting_without_losing_mass() {

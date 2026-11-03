@@ -7,7 +7,7 @@
 //! path feeding fs-cheb Orr–Sommerfeld modal growth — min-max over
 //! modes and stations, the differentiable laminarity proxy of
 //! Appendix C), VALIDATION (fs-lbm free-surface pours over the lip
-//! under a rotating-gravity tilt schedule, strict mass ledger,
+//! in a rotating frame with full inertial forcing, strict mass ledger,
 //! Carreau viscosity band, explicit capillarity, 2-D liquid connectivity, and the
 //! CONTACT-LINE BRACKET — the genuinely open problem handled by
 //! reporting a sensitivity band, never pretended certainty),

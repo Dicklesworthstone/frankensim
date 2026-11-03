@@ -33,16 +33,29 @@ COMPOSITION with certificates at every joint.
   `modes` Orr–Sommerfeld modes (α = 1.02056, n = 32 collocation) of
   the real growth rate. Negative = every mode decays (laminar proxy).
 - `pour::PourRig` — the weir-tank fixture (48×28 lattice, lip column,
-  rotating-gravity tilt schedule, and explicit nonnegative lattice surface
+  rest-to-rest rigid tilt schedule, and explicit nonnegative lattice surface
   tension). Defaults use g0 = 6e-4, sigma = 0.002 and tilt 0.7 rad over
   900 steps. Set sigma explicitly to zero for a no-capillarity comparison.
   SI conversion is sigma_lu = sigma_SI dt² / (rho_SI dx³); the fixture
   default does not imply a sourced water or other fluid calibration.
-- `pour::run_pour(rig, contact, law) -> PourOutcome` — one pour;
+- `pour::run_pour(rig, contact, law) -> PourOutcome` — one physical rigid-frame pour;
   outcome carries `mass_drift` (worst relative ledger drift),
   `fragments` (2-D connected-component count), `poured_mass` (mass right of
   the weir), `dribble_cells` (wet outer-lip cells), and `mass_field`
   (the same bytes the render binds).
+- `pour::run_pour_in_frame(rig, contact, law, pivot)` selects an explicit
+  lattice pivot; the default is the centre of the halfway-bounce-back floor.
+  A quintic clockwise tilt starts and ends with zero angular velocity and
+  acceleration. Its midpoint angle/rates drive gravity, centrifugal, Euler
+  and Coriolis terms through `fs_lbm::core2::frame::RigidFrame2` on the
+  original populations. Force replacement preserves physical velocity and
+  stress before collision. The native viscosity, capillary, wetting and mass
+  operators remain active. Support motion is prescribed; no free vessel,
+  gas inertia, 3-D geometry or calibrated jet-breakup claim is added.
+- `pour::run_pour_rotating_gravity` explicitly retains the historical linear
+  gravity-only smoke model. It omits frame inertia and is not a physically
+  rotating vessel. The existing cross-ISA smoke golden selects this legacy
+  model explicitly; default and MID pours select the rigid-frame model.
 - `pour::render_pour(outcome, nx, ny, res)` — fs-render Woodcock
   transmittance bound ZERO-COPY to `outcome.mass_field`.
 - `robust::robustify(beta) -> RobustReport` — nominal (band-center)
@@ -150,14 +163,14 @@ REPORTED):
   bracket σ(5000) < 0 < σ(6000) re-gated through this crate's call
   path.
 - **vsl-002** the capillary-enabled pour crosses the lip while retaining
-  a strict mass ledger under the rotating-gravity tilt schedule.
+  a strict mass ledger under the rigid-frame tilt schedule.
 - **vsl-003** contact bracket: Neutral vs Wetting must change the solved
   mass field while both mass ledgers remain strict. A companion native
   pour test requires a nonzero response to turning surface tension off.
   These are numerical sensitivity checks, not calibrated contact-line
   or quantitative cylindrical-jet breakup validation.
-- **vsl-004** Carreau band: three fluids pour [7.04, 16.71, 18.13] —
-  spread 11.09 (the family responds); all ledgers strict.
+- **vsl-004** Carreau band under the rigid-frame schedule: three fluids
+  pour [2.04, 5.94, 6.53], spread 4.49; all ledgers remain strict.
 - **vsl-005** robustification: robust lip 0.92 stays stable off-band
   (−0.00044) while the nominal lip 1.11 goes UNSTABLE off-band
   (+0.00023) — the flagship claim, gated. The e-raced screen, driven
@@ -202,3 +215,14 @@ checked `LossSpan`. A support breach produces no race verdict.
 - **Film model fidelity**: `film_reynolds` is a documented U-shaped
   proxy; no claim that its Reynolds numbers match a resolved thin-film
   solution.
+
+## Rigid-frame momentum checks
+
+The original native flow tests retain mass, wetting/capillary response and
+Carreau sensitivity with the physical schedule. New tests verify its zero
+endpoint spin/acceleration and that moving the pivot changes the native flow
+even at exactly zero gravity. That zero-gravity response comes from frame
+inertia, not a rotated body-force proxy. A native comparison also verifies the
+explicit historical smoke path is bitwise identical to its prior implementation.
+The core's independent momentum/stress and pure-Coriolis tests cover the force
+operator; this consumer does not claim global energy exactness for LBM/VOF.

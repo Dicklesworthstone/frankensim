@@ -50,7 +50,7 @@ fn vsl_001_stability_objective() {
 /// vsl-002: the pour POURS and the ledger is strict — mass crosses
 /// the lip under the tilt schedule while total tracked mass drifts
 /// below 1e-10 relative at every step (the make-or-break audit,
-/// through the rotating-gravity moving frame).
+/// through the physical rotating frame, including inertial forces).
 #[test]
 fn vsl_002_tilt_pour_mass() {
     let rig = PourRig::default();
