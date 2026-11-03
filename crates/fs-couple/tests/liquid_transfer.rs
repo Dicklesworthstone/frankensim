@@ -6,7 +6,8 @@ use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::ContactModel3;
 use fs_lbm::material::free_surface::enthalpy::{
-    FreeSurfaceEnthalpyControls, FreeSurfaceMassExchangeControls, MaterialFreeSurfaceEnthalpy3,
+    FreeSurfaceEnthalpyControls, FreeSurfaceMassExchange, FreeSurfaceMassExchangeControls,
+    FreeSurfaceMassInflow, FreeSurfaceMassOutflow, MaterialFreeSurfaceEnthalpy3,
 };
 use fs_lbm::material::free_surface::{
     MaterialFreeSurfaceDomain3, MaterialFreeSurfaceInitialCell3, plan_free_surface_from_material,
@@ -418,5 +419,72 @@ fn g4_capacity_source_clock_geometry_and_cancellation_preserve_both_owners() {
         );
         unchanged(donor, &a);
         unchanged(receiver, &b);
+    });
+}
+
+#[test]
+fn g4_prepared_native_transfers_discard_cleanly_and_publish_the_immediate_outcome() {
+    with_pair(0.0, [0.0; 3], 0.3, 0.1, |donor, receiver, gate| {
+        let (before_donor, before_receiver) = (donor.clone(), receiver.clone());
+        let velocity_m_s = donor
+            .flow()
+            .sample_at_si(3, 3, 3)
+            .unwrap()
+            .unwrap()
+            .velocity_m_s;
+        let outflow = [FreeSurfaceMassOutflow {
+            exchange: FreeSurfaceMassExchange {
+                coordinates: CELL,
+                mass_kg: -1e-7,
+                specific_enthalpy_j_kg: donor.specific_enthalpy_at(CELL).unwrap(),
+                heat_j: 0.0,
+            },
+            velocity_m_s,
+        }];
+        let (mut immediate_donor, mut immediate_receiver) = (donor.clone(), receiver.clone());
+        let expected_outflow = immediate_donor
+            .eject_interface_outflow(&outflow, 0.0, controls(), gate)
+            .unwrap();
+        let inflow = [FreeSurfaceMassInflow {
+            exchange: FreeSurfaceMassExchange {
+                mass_kg: -expected_outflow.exchange.mass_change_kg,
+                ..outflow[0].exchange
+            },
+            velocity_m_s,
+        }];
+        let expected_inflow = immediate_receiver
+            .mix_interface_inflow(&inflow, controls(), gate)
+            .unwrap();
+
+        // A cancellation after both native solves causes the coupling owner
+        // to discard its proposals. Preparation published neither original
+        // trajectory, and no rollback operation is required.
+        let later_cancel = CancelGate::new_clock_free();
+        let outgoing = donor
+            .prepare_interface_outflow(&outflow, 0.0, controls(), &later_cancel)
+            .unwrap();
+        let incoming = receiver
+            .prepare_interface_inflow(&inflow, controls(), &later_cancel)
+            .unwrap();
+        assert_eq!(outgoing.report(), &expected_outflow);
+        assert_eq!(incoming.report(), &expected_inflow);
+        later_cancel.request();
+        assert!(later_cancel.is_requested());
+        drop(incoming);
+        drop(outgoing);
+        unchanged(donor, &before_donor);
+        unchanged(receiver, &before_receiver);
+
+        let outgoing = donor
+            .prepare_interface_outflow(&outflow, 0.0, controls(), gate)
+            .unwrap();
+        let incoming = receiver
+            .prepare_interface_inflow(&inflow, controls(), gate)
+            .unwrap();
+        assert!(!gate.is_requested());
+        assert_eq!(outgoing.publish(), expected_outflow);
+        assert_eq!(incoming.publish(), expected_inflow);
+        unchanged(donor, &immediate_donor);
+        unchanged(receiver, &immediate_receiver);
     });
 }

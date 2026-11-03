@@ -33,6 +33,32 @@ pub struct FreeSurfaceMassInflowReport {
     pub absolute_total_energy_defect_j: f64,
 }
 
+/// Accepted native inflow held for joint publication with another owner.
+/// Dropping this value leaves the original liquid unchanged. Its exclusive
+/// borrow prevents any intervening change to the original state or clock.
+#[must_use = "a prepared inflow changes the original liquid only when published"]
+pub struct PreparedFreeSurfaceMassInflow<'a, 's, 'm> {
+    owner: &'a mut MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    candidate: MassExchangeCandidate,
+    report: FreeSurfaceMassInflowReport,
+}
+
+impl PreparedFreeSurfaceMassInflow<'_, '_, '_> {
+    /// Original native balance against the exclusively borrowed starting state.
+    #[must_use]
+    pub fn report(&self) -> &FreeSurfaceMassInflowReport {
+        &self.report
+    }
+
+    /// Publish the already accepted proposal without allocation or failure.
+    /// A multi-owner caller must finish its joint checks and cancellation poll
+    /// before publishing any participant; publication does not poll again.
+    pub fn publish(self) -> FreeSurfaceMassInflowReport {
+        self.candidate.publish(self.owner);
+        self.report
+    }
+}
+
 #[derive(Default)]
 pub(super) struct KineticBalance {
     pub(super) carried_kinetic_energy_j: f64,
@@ -59,7 +85,7 @@ impl KineticBalance {
     }
 }
 
-impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
+impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// Mix positive liquid inflow into existing interfaces without changing
     /// pressure density or erasing physical nonequilibrium stress.
     ///
@@ -92,6 +118,20 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         controls: FreeSurfaceMassExchangeControls,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceMassInflowReport, Error> {
+        self.prepare_interface_inflow(inflows, controls, gate)
+            .map(|prepared| prepared.publish())
+    }
+
+    /// Prepare the same native mixing transaction for joint acceptance.
+    /// Exactly one lattice/enthalpy proposal is built; the complete owner and
+    /// its unchanged source/history bindings are not cloned. All native source,
+    /// momentum, heat, capacity and cancellation checks run before returning.
+    pub fn prepare_interface_inflow<'a>(
+        &'a mut self,
+        inflows: &[FreeSurfaceMassInflow],
+        controls: FreeSurfaceMassExchangeControls,
+        gate: &CancelGate,
+    ) -> Result<PreparedFreeSurfaceMassInflow<'a, 's, 'm>, Error> {
         poll(gate)?;
         if inflows.len() > self.controls.max_cells {
             return Err(Error::Invalid("inflow exceeds the original cell budget"));
@@ -144,18 +184,23 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 heat_j: mixture.heat_j,
             })
             .collect();
-        let (exchange, balance) = self.exchange_interface_mass_model(
+        let (candidate, exchange, balance) = self.prepare_interface_mass_model(
             &exchanges,
             Some(TransferMomentum::Mixing(&mixtures)),
             controls,
             gate,
         )?;
-        Ok(FreeSurfaceMassInflowReport {
+        let report = FreeSurfaceMassInflowReport {
             exchange,
             carried_kinetic_energy_j: balance.carried_kinetic_energy_j,
             kinetic_energy_change_j: balance.kinetic_energy_change_j,
             mixing_heat_j: balance.mixing_heat_j,
             absolute_total_energy_defect_j: balance.absolute_total_energy_defect_j,
+        };
+        Ok(PreparedFreeSurfaceMassInflow {
+            owner: self,
+            candidate,
+            report,
         })
     }
 }

@@ -27,7 +27,33 @@ pub struct FreeSurfaceMassOutflowReport {
     pub absolute_total_energy_defect_j: f64,
 }
 
-impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
+/// Accepted native ejection held for joint publication with another owner.
+/// Dropping this value leaves the original liquid unchanged. Its exclusive
+/// borrow prevents any intervening change to the original state or clock.
+#[must_use = "a prepared outflow changes the original liquid only when published"]
+pub struct PreparedFreeSurfaceMassOutflow<'a, 's, 'm> {
+    owner: &'a mut MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    candidate: MassExchangeCandidate,
+    report: FreeSurfaceMassOutflowReport,
+}
+
+impl PreparedFreeSurfaceMassOutflow<'_, '_, '_> {
+    /// Original native balance against the exclusively borrowed starting state.
+    #[must_use]
+    pub fn report(&self) -> &FreeSurfaceMassOutflowReport {
+        &self.report
+    }
+
+    /// Publish the already accepted proposal without allocation or failure.
+    /// A multi-owner caller must finish its joint checks and cancellation poll
+    /// before publishing any participant; publication does not poll again.
+    pub fn publish(self) -> FreeSurfaceMassOutflowReport {
+        self.candidate.publish(self.owner);
+        self.report
+    }
+}
+
+impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// Remove liquid at a prescribed velocity and apply its reciprocal recoil.
     ///
     /// For represented removal r, old mass m and remaining mass M, the accepted
@@ -54,6 +80,21 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         controls: FreeSurfaceMassExchangeControls,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceMassOutflowReport, Error> {
+        self.prepare_interface_outflow(outflows, maximum_mechanical_work_j, controls, gate)
+            .map(|prepared| prepared.publish())
+    }
+
+    /// Prepare the same native ejection transaction for joint acceptance.
+    /// Exactly one lattice/enthalpy proposal is built; the complete owner and
+    /// its unchanged source/history bindings are not cloned. The original
+    /// recoil, work, source and cancellation checks run before returning.
+    pub fn prepare_interface_outflow<'a>(
+        &'a mut self,
+        outflows: &[FreeSurfaceMassOutflow],
+        maximum_mechanical_work_j: f64,
+        controls: FreeSurfaceMassExchangeControls,
+        gate: &CancelGate,
+    ) -> Result<PreparedFreeSurfaceMassOutflow<'a, 's, 'm>, Error> {
         poll(gate)?;
         if outflows.len() > self.controls.max_cells
             || !maximum_mechanical_work_j.is_finite()
@@ -90,7 +131,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             }
             exchanges.push(outflow.exchange);
         }
-        let (exchange, balance) = self.exchange_interface_mass_model(
+        let (candidate, exchange, balance) = self.prepare_interface_mass_model(
             &exchanges,
             Some(TransferMomentum::Ejection {
                 velocities: &velocities,
@@ -99,12 +140,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             controls,
             gate,
         )?;
-        Ok(FreeSurfaceMassOutflowReport {
+        let report = FreeSurfaceMassOutflowReport {
             exchange,
             carried_kinetic_energy_j: balance.carried_kinetic_energy_j,
             kinetic_energy_change_j: balance.kinetic_energy_change_j,
             mechanical_work_j: balance.mechanical_work_j,
             absolute_total_energy_defect_j: balance.absolute_total_energy_defect_j,
+        };
+        Ok(PreparedFreeSurfaceMassOutflow {
+            owner: self,
+            candidate,
+            report,
         })
     }
 }

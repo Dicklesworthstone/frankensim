@@ -922,6 +922,18 @@ mass, coupled contact/surface restrictions and source-domain exits still refuse.
 This boundary does not infer evaporation recoil, nozzle pressure work, gas-volume
 displacement or thermodynamic phase expansion, and it does not advance time.
 
+### Prepared interface mass transfers
+
+`prepare_interface_inflow` and `prepare_interface_outflow` return typed handles
+that exclusively borrow the original thermal-flow owner and retain one accepted
+native lattice/enthalpy candidate. `report()` supports joint multi-owner balance
+checks; dropping a handle discards its candidate. Consuming `publish()` moves
+only the already accepted native fields into their original owner, with no new
+allocation, callbacks, cancellation poll or fallible work. Coupled callers must
+perform their final cancellation poll before publishing any participant. The
+exclusive borrow prevents stale-state publication; immediate inflow/outflow
+entries use the same preparation and publication arithmetic.
+
 ### Finite atmosphere on the native free-surface thermal timeline
 
 `step_with_finite_gas_environment` gives the same moving-liquid thermal owner

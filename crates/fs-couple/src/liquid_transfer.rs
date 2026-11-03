@@ -70,6 +70,8 @@ pub struct LiquidMassTransferReport {
 /// any remaining receiver representation error enters the joint balance.
 /// Original source, capacity, speed, force-frame and thermal-history admission
 /// remains active. Any refusal or cancellation preserves BOTH original owners.
+/// Each liquid builds only its original native proposal; neither complete
+/// trajectory nor its unchanged material/history bindings are cloned.
 pub fn transfer_interface_mass(
     donor: &mut MaterialFreeSurfaceEnthalpy3<'_, '_>,
     receiver: &mut MaterialFreeSurfaceEnthalpy3<'_, '_>,
@@ -103,7 +105,7 @@ pub fn transfer_interface_mass(
             "liquid transfer requires synchronized accepted physical clocks",
         ));
     }
-    // Project before cloning either trajectory: reject exhaustion, overflow,
+    // Project before preparing either trajectory: reject exhaustion, overflow,
     // zero-mass ghosts and unrepresentable transfer increments at the owners.
     let outgoing = -donor
         .project_interface_mass_exchange(transfer.donor, -transfer.mass_kg)?
@@ -134,9 +136,7 @@ pub fn transfer_interface_mass(
             .ok_or(Error::Invalid(
                 "liquid transfer requires retained donor enthalpy",
             ))?;
-    let mut next_donor = donor.clone();
-    let mut next_receiver = receiver.clone();
-    let withdrawal = next_donor.eject_interface_outflow(
+    let donor_proposal = donor.prepare_interface_outflow(
         &[FreeSurfaceMassOutflow {
             exchange: FreeSurfaceMassExchange {
                 coordinates: transfer.donor,
@@ -152,11 +152,11 @@ pub fn transfer_interface_mass(
         controls,
         gate,
     )?;
-    let mixing = next_receiver.mix_interface_inflow(
+    let receiver_proposal = receiver.prepare_interface_inflow(
         &[FreeSurfaceMassInflow {
             exchange: FreeSurfaceMassExchange {
                 coordinates: transfer.receiver,
-                mass_kg: -withdrawal.exchange.mass_change_kg,
+                mass_kg: -donor_proposal.report().exchange.mass_change_kg,
                 specific_enthalpy_j_kg,
                 heat_j: 0.0,
             },
@@ -165,6 +165,8 @@ pub fn transfer_interface_mass(
         controls,
         gate,
     )?;
+    let withdrawal = donor_proposal.report();
+    let mixing = receiver_proposal.report();
     let mass_defect_kg = withdrawal.exchange.mass_change_kg + mixing.exchange.mass_change_kg;
     let momentum_defect_kg_m_s = core::array::from_fn(|d| {
         withdrawal.exchange.momentum_change_kg_m_s[d] + mixing.exchange.momentum_change_kg_m_s[d]
@@ -190,8 +192,10 @@ pub fn transfer_interface_mass(
         ));
     }
     poll(gate)?;
-    *donor = next_donor;
-    *receiver = next_receiver;
+    // Both proposals exclusively borrow their original owners. No state can
+    // become stale, and publication after the joint check cannot fail halfway.
+    let withdrawal = donor_proposal.publish();
+    let mixing = receiver_proposal.publish();
     Ok(LiquidMassTransferReport {
         physical_time_s,
         point_m,

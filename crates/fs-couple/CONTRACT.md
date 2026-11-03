@@ -25302,6 +25302,19 @@ fit the supplied native budgets before either owner publishes. Cancellation,
 source/clock/geometry mismatch, capacity or speed refusal preserves both states.
 The original timelines continue from the accepted fills, motion and enthalpy.
 
+The finite liquid transfer prepares one native lattice/enthalpy candidate per
+participant and retains unchanged material and coupled-history bindings in the
+original owners. `prepare_interface_inflow` and `prepare_interface_outflow`
+return typed handles that exclusively borrow their originating trajectory;
+read-only reports support joint acceptance without stale-state publication.
+Dropping a handle discards its proposal. After joint checks and a final
+cancellation poll, both `publish` operations are infallible and allocate no new
+state. The existing immediate inflow/outflow APIs use the same preparation and
+publication. This removes the coupling wrapper's extra full-owner clones while
+retaining the original native conservation and admission arithmetic. Focused
+tests cover discarding both prepared proposals after cancellation and exact
+parity of published reports/states with the immediate native entry points.
+
 This is coincident-interface transfer between overlapping representations, not
 a resolved connector, pipe, jet, phase change or pressure-work model. It adds no
 compressible internal-energy, capillary-energy or whole-flow energy theorem.

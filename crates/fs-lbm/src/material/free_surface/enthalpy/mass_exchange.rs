@@ -9,9 +9,31 @@
 use super::*;
 
 mod inflow;
-pub use inflow::{FreeSurfaceMassInflow, FreeSurfaceMassInflowReport};
+pub use inflow::{
+    FreeSurfaceMassInflow, FreeSurfaceMassInflowReport, PreparedFreeSurfaceMassInflow,
+};
 mod outflow;
-pub use outflow::{FreeSurfaceMassOutflow, FreeSurfaceMassOutflowReport};
+pub use outflow::{
+    FreeSurfaceMassOutflow, FreeSurfaceMassOutflowReport, PreparedFreeSurfaceMassOutflow,
+};
+
+// Only fields actually changed by the native transaction are proposed. Source
+// bindings, coupled histories and the original physical clock stay in place.
+struct MassExchangeCandidate {
+    lattice: FreeSurface3,
+    h: BTreeMap<MassLocation3, f64>,
+    states: BTreeMap<MassLocation3, ResolvedLiquidState>,
+    rheology: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
+}
+
+impl MassExchangeCandidate {
+    fn publish(self, owner: &mut MaterialFreeSurfaceEnthalpy3<'_, '_>) {
+        owner.flow.lattice = self.lattice;
+        owner.h = self.h;
+        owner.states = self.states;
+        owner.rheology_samples = self.rheology;
+    }
+}
 
 #[derive(Clone, Copy)]
 enum TransferMomentum<'a> {
@@ -276,17 +298,26 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         controls: FreeSurfaceMassExchangeControls,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceMassExchangeReport, Error> {
-        self.exchange_interface_mass_model(exchanges, None, controls, gate)
-            .map(|(report, _)| report)
+        let (candidate, report, _) =
+            self.prepare_interface_mass_model(exchanges, None, controls, gate)?;
+        candidate.publish(self);
+        Ok(report)
     }
 
-    fn exchange_interface_mass_model(
-        &mut self,
+    fn prepare_interface_mass_model(
+        &self,
         exchanges: &[FreeSurfaceMassExchange],
         momentum: Option<TransferMomentum<'_>>,
         controls: FreeSurfaceMassExchangeControls,
         gate: &CancelGate,
-    ) -> Result<(FreeSurfaceMassExchangeReport, inflow::KineticBalance), Error> {
+    ) -> Result<
+        (
+            MassExchangeCandidate,
+            FreeSurfaceMassExchangeReport,
+            inflow::KineticBalance,
+        ),
+        Error,
+    > {
         poll(gate)?;
         if exchanges.len() > self.controls.max_cells
             || [
@@ -530,10 +561,15 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             ));
         }
         poll(gate)?;
-        self.flow.lattice = lattice;
-        self.h = h;
-        self.states = resolved.states;
-        self.rheology_samples = resolved.rheology;
-        Ok((report, kinetic_balance))
+        Ok((
+            MassExchangeCandidate {
+                lattice,
+                h,
+                states: resolved.states,
+                rheology: resolved.rheology,
+            },
+            report,
+            kinetic_balance,
+        ))
     }
 }
