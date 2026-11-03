@@ -30,7 +30,7 @@ use crate::linear3::TetAssemblyBudget;
 /// Native finite-deformation motion with distinct physical and numerical losses.
 pub mod dynamics;
 
-type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy);
+type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy, Vec<f64>);
 
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
@@ -272,6 +272,19 @@ impl<'a> FiniteViscoTetSolid<'a> {
             .collect()
     }
 
+    /// Original immutable reference coordinates [m], in native node order.
+    pub fn reference_nodes_m(&self) -> &'a [[f64; 3]] {
+        self.nodes_m
+    }
+    /// Original ordered material connectivity; deformation never rewrites it.
+    pub fn reference_tetrahedra(&self) -> &'a [[usize; 4]] {
+        self.tetrahedra
+    }
+    /// Original size and geometric-quality admission bounds.
+    pub fn assembly_budget(&self) -> TetAssemblyBudget {
+        self.budget
+    }
+
     pub fn displacement_m(&self) -> &[[f64; 3]] {
         &self.displacement_m
     }
@@ -481,7 +494,7 @@ impl<'a> FiniteViscoTetSolid<'a> {
                 equilibrium,
                 energy,
             },
-            motion,
+            motion.map(|(velocity, inertia)| (velocity, inertia, external)),
         ))
     }
 }

@@ -3938,6 +3938,28 @@ leaves displacement, velocity, time, original mass and all viscous histories
 unchanged. Dead loads are held over each interval; no follower/contact load,
 mass transfer or automatic thermal coupling is introduced.
 
+`advance_with_momentum` runs that SAME interval and adds an original-mass
+`SolidMotionMomentum` account about a supplied world origin. It transfers the
+already assembled dead-load vector from the native solve; it does not repeat
+geometry assembly, freeze/update material history again, or solve another
+momentum equation. Two sparse actions evaluate `M delta_v` and `M v_before`.
+Actual represented endpoint positions give
+`Delta L = sum((x_after-origin) cross M delta_v + delta_x cross M v_before)`.
+Compensated products/reductions preserve small signed contributions. External
+and support torque impulses use the same endpoint positions as the original
+force equation. The second angular term is separately reported as backward-
+Euler numerical drift, including coordinate rounding; it is not physical
+torque. Consumers must bound both the balance residual and that numerical
+defect, including accumulated absolute defects over a trajectory. Physical
+relaxation, signed endpoint-work defect and numerical kinetic loss retain
+their existing distinct accounts. The ordinary `advance` result is unchanged.
+An independent graded-simplex regression checks moving supports, body/nodal
+loads, actual angular inventory and nonzero numerical drift at two origins.
+
+Native plastic, viscoelastic and thermal Tet4 owners expose their immutable
+original reference coordinates/connectivity and assembly bounds for geometry
+consumers. These views borrow accepted owners and never rebuild material state.
+
 `tests/hyper_visco_dynamics.rs` checks unconstrained rigid acceleration against
 the independent discrete momentum solution; a deforming oscillator against
 the small-strain scalar Maxwell/backward-Euler recurrence with the original

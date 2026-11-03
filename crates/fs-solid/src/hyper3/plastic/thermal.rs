@@ -361,6 +361,19 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
         Ok(self)
     }
 
+    /// Original immutable reference coordinates [m], in native node order.
+    pub fn reference_nodes_m(&self) -> &'a [[f64; 3]] {
+        self.state.nodes_m
+    }
+    /// Original ordered material connectivity; deformation never rewrites it.
+    pub fn reference_tetrahedra(&self) -> &'a [[usize; 4]] {
+        self.state.tetrahedra
+    }
+    /// Original size and geometric-quality admission bounds.
+    pub fn assembly_budget(&self) -> TetAssemblyBudget {
+        self.state.budget
+    }
+
     pub fn families(&self) -> &[L] {
         &self.families
     }

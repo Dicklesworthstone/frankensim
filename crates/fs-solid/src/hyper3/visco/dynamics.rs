@@ -20,7 +20,9 @@ use super::{
 use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 
 pub use crate::inertia::InertialEnergy;
-pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
+pub use crate::inertia::{
+    SolidImpulseControls, SolidImpulseReport, SolidMomentum, SolidMotionMomentum,
+};
 pub use crate::inertia::{
     SolidPointKinematics, SolidPointMobility, SolidPointMobilityMatrix, TetImpulsePoint,
 };
@@ -422,6 +424,76 @@ impl<'a> FiniteViscoTetMotion<'a> {
         controls: FiniteViscoMotionControls,
         cx: &Cx<'_>,
     ) -> Result<FiniteViscoMotionStep<'a>, FiniteViscoTetError> {
+        self.advance_accounted(
+            dt_s,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            settings,
+            controls,
+            cx,
+        )
+        .map(|(step, _)| step)
+    }
+
+    /// Advance the same native interval and report actual original-mass momentum.
+    /// Endpoint load/support torque and backward-Euler angular drift stay
+    /// separate. Consumers must bound physical residuals AND numerical drift.
+    /// The original load assembly is reused without another material update.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_momentum(
+        &self,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        settings: HyperTetSettings,
+        controls: FiniteViscoMotionControls,
+        origin_m: [f64; 3],
+        cx: &Cx<'_>,
+    ) -> Result<(FiniteViscoMotionStep<'a>, SolidMotionMomentum), FiniteViscoTetError> {
+        if origin_m.iter().any(|x| !x.is_finite()) {
+            return Err(invalid("finite momentum origin required"));
+        }
+        let (step, force) = self.advance_accounted(
+            dt_s,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            settings,
+            controls,
+            cx,
+        )?;
+        let momentum = self
+            .mass
+            .backward_euler_momentum(
+                self.solid.nodes_m,
+                &self.solid.displacement_m,
+                &step.motion.solid.displacement_m,
+                &self.velocity_mps,
+                &step.motion.velocity_mps,
+                &force,
+                &step.equilibrium.reactions_n,
+                dt_s,
+                origin_m,
+                cx,
+            )
+            .map_err(inertia_error)?;
+        checkpoint(cx)?;
+        Ok((step, momentum))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_accounted(
+        &self,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        settings: HyperTetSettings,
+        controls: FiniteViscoMotionControls,
+        cx: &Cx<'_>,
+    ) -> Result<(FiniteViscoMotionStep<'a>, Vec<f64>), FiniteViscoTetError> {
         checkpoint(cx)?;
         if !controls.maximum_numerical_kinetic_loss_j.is_finite()
             || controls.maximum_numerical_kinetic_loss_j < 0.0
@@ -448,7 +520,8 @@ impl<'a> FiniteViscoTetMotion<'a> {
             Some(&inertia),
             cx,
         )?;
-        let (velocity_mps, inertia) = motion.expect("inertial endpoint supplies native motion");
+        let (velocity_mps, inertia, force) =
+            motion.expect("inertial endpoint supplies native motion");
         energy_gate(
             "backward-Euler numerical kinetic loss",
             inertia.numerical_loss_j,
@@ -461,21 +534,24 @@ impl<'a> FiniteViscoTetMotion<'a> {
             controls.material.equilibrium_work_tolerance_j,
         )?;
         checkpoint(cx)?;
-        Ok(FiniteViscoMotionStep {
-            motion: Self {
-                solid: step.solid,
-                velocity_mps,
-                reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
-                reference_nodal_density_kg_m3: self
-                    .reference_nodal_density_kg_m3
-                    .as_ref()
-                    .map(Arc::clone),
-                mass: Arc::clone(&self.mass),
+        Ok((
+            FiniteViscoMotionStep {
+                motion: Self {
+                    solid: step.solid,
+                    velocity_mps,
+                    reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                    reference_nodal_density_kg_m3: self
+                        .reference_nodal_density_kg_m3
+                        .as_ref()
+                        .map(Arc::clone),
+                    mass: Arc::clone(&self.mass),
+                },
+                equilibrium: step.equilibrium,
+                material_energy: step.energy,
+                inertia,
+                balance_error_j,
             },
-            equilibrium: step.equilibrium,
-            material_energy: step.energy,
-            inertia,
-            balance_error_j,
-        })
+            force,
+        ))
     }
 }

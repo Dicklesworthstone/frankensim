@@ -78,6 +78,111 @@ fn inventory(x: &[[f64; 3]; 4], v: &[[f64; 3]; 4], origin: [f64; 3]) -> ([f64; 3
 }
 
 #[test]
+fn native_interval_separates_actual_angular_motion_from_backward_euler_drift() {
+    with_cx(|cx| {
+        let law = material(true);
+        let old_v = [[0.03, -0.02, 0.01]; 4];
+        let motion =
+            FiniteViscoTetMotion::try_new_with_nodal_density(relaxed(&law, cx), &RHO, &old_v, cx)
+                .unwrap();
+        let old_u = motion.solid().displacement_m().to_vec();
+        let old_states = motion.solid().element_states().to_vec();
+        let dt = 0.03;
+        let travel = [0.0006, 0.0003, -0.0003];
+        let prescribed: Vec<_> = (0..12)
+            .map(|d| (d, old_u[d / 3][d % 3] + travel[d % 3]))
+            .collect();
+        let loads = [(0, 0.4), (4, -0.2), (11, 0.3)];
+        let body = [0.5, 0.0, -0.25];
+        let mut force = std::array::from_fn::<_, 4, _>(|_| body.map(|f| VOLUME * f / 4.0));
+        for &(dof, f) in &loads {
+            force[dof / 3][dof % 3] += f;
+        }
+        let total_mass: f64 = (0..4)
+            .map(|i| (0..4).map(|j| mass(i, j)).sum::<f64>())
+            .sum();
+        let expected_drift = cross(travel, old_v[0].map(|v| v * total_mass));
+        assert!(expected_drift.iter().any(|x| x.abs() > 1e-6));
+        for origin in [[0.0; 3], [0.4, -0.3, 0.2]] {
+            let (step, account) = motion
+                .advance_with_momentum(
+                    dt,
+                    &prescribed,
+                    &loads,
+                    body,
+                    settings(),
+                    controls(),
+                    origin,
+                    cx,
+                )
+                .unwrap();
+            let before_x =
+                std::array::from_fn(|i| std::array::from_fn(|c| NODES[i][c] + old_u[i][c]));
+            let after_x = std::array::from_fn(|i| {
+                std::array::from_fn(|c| NODES[i][c] + step.motion.solid().displacement_m()[i][c])
+            });
+            let after_v = std::array::from_fn(|i| step.motion.velocity_mps()[i]);
+            let before = inventory(&before_x, &old_v, origin);
+            let after = inventory(&after_x, &after_v, origin);
+            let mut expected_linear = [0.0; 3];
+            let mut expected_angular = [0.0; 3];
+            for node in 0..4 {
+                let impulse = force[node].map(|f| f * dt);
+                let moment = cross(
+                    std::array::from_fn(|c| after_x[node][c] - origin[c]),
+                    impulse,
+                );
+                for axis in 0..3 {
+                    expected_linear[axis] += impulse[axis];
+                    expected_angular[axis] += moment[axis];
+                }
+            }
+            for axis in 0..3 {
+                close(
+                    account.change.linear_kg_m_s[axis],
+                    after.0[axis] - before.0[axis],
+                    1e-12,
+                );
+                close(
+                    account.change.angular_kg_m2_s[axis],
+                    after.1[axis] - before.1[axis],
+                    1e-12,
+                );
+                close(
+                    account.applied.linear_kg_m_s[axis],
+                    expected_linear[axis],
+                    1e-13,
+                );
+                close(
+                    account.applied.angular_kg_m2_s[axis],
+                    expected_angular[axis],
+                    1e-13,
+                );
+                close(
+                    account.angular_integration_defect_kg_m2_s[axis],
+                    expected_drift[axis],
+                    1e-13,
+                );
+                close(account.linear_residual_kg_m_s[axis], 0.0, 1e-10);
+                close(account.angular_residual_kg_m2_s[axis], 0.0, 1e-10);
+                close(
+                    account.change.angular_kg_m2_s[axis]
+                        - account.applied.angular_kg_m2_s[axis]
+                        - account.support.angular_kg_m2_s[axis],
+                    expected_drift[axis],
+                    1e-10,
+                );
+            }
+            close(step.inertia.kinetic_change_j, after.2 - before.2, 1e-12);
+            assert!(step.material_energy.dissipated_j > 0.0);
+            close(step.motion.solid().time_s(), HOLD + dt, 1e-15);
+            assert_eq!(motion.solid().element_states(), old_states);
+            assert_eq!(motion.velocity_mps(), old_v);
+        }
+    });
+}
+
+#[test]
 fn graded_kick_keeps_relaxed_memory_and_accounts_moving_supports_before_native_advance() {
     with_cx(|cx| {
         let law = material(true);

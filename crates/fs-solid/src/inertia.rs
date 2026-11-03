@@ -9,10 +9,12 @@ use fs_exec::Cx;
 use fs_sparse::{Coo, Csr};
 
 mod impulse;
+mod motion;
 pub(crate) mod point;
 pub(crate) use impulse::admit_impulses as admit_reference_impulses;
 pub(crate) use impulse::moments as impulse_moments;
 pub use impulse::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
+pub use motion::SolidMotionMomentum;
 pub use point::{
     HexImpulsePoint, SolidPointKinematics, SolidPointMobility, SolidPointMobilityMatrix,
     Tet10ImpulsePoint, TetImpulsePoint,
