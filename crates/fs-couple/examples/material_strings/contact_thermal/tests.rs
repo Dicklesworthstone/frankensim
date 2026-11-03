@@ -17,6 +17,9 @@ mod material_heat;
 #[path = "string_heat_tests.rs"]
 mod string_heat;
 
+#[path = "caloric_reference_tests.rs"]
+mod caloric_reference;
+
 fn scoped(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

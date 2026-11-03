@@ -440,22 +440,9 @@ impl Profile {
             // Only the enthalpy datum shifts; native Cp integration is unchanged.
             let cold = span(low, initial)?;
             let hot = span(initial, high)?;
-            let offset = cold
-                .curve()
-                .knots()
-                .last()
-                .ok_or("empty source caloric chart")?
-                .specific_enthalpy_j_kg;
-            let mut knots = cold.curve().knots().to_vec();
-            for knot in &mut knots {
-                knot.specific_enthalpy_j_kg -= offset;
-            }
-            knots.extend_from_slice(&hot.curve().knots()[1..]);
-            let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
-                card.content_hash(),
-                SolidLiquidPhase::Solid,
-                knots,
-            )?;
+            // Keep the original Cp/density sources and sensible-density law in
+            // the chart consumed by the actual finite-cell thermal owner.
+            let curve = cold.try_join_at_reference(&hot, 0.0)?.curve().clone();
             let rho = state
                 .property("density")
                 .ok_or("missing source density")?
