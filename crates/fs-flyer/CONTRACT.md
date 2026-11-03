@@ -1919,3 +1919,72 @@ The event retains native actual-impulse and kinetic-increment receipts and
 separate motor, aerodynamic and carrier work. Original Flyer transfer checks
 and late-refusal atomicity apply. No collision/restitution law, shaft-lock mode,
 time advance or event-to-heat allocation is inferred.
+
+## Opt-in torque transport into downstream wing and carrier momentum
+
+`propcoupling::swirl::wake::coupled_step` projects the actual accepted native
+annular blade torque into a downstream azimuthal velocity before solving wing
+circulation and assembling its forces. Each original radial cell carries
+`L_i = Q_i/(rho U A_i)` and `v_theta = L_i/r`, so independently integrating
+`rho U r v_theta` over its physical area recovers the original signed `Q_i`.
+Prandtl factors are not inserted twice. Native at-disk induction `u` is distinct
+from downstream swirl; only a no-loss, matching-flow narrow-annulus limit
+recovers `2u`. Physical spin relative to the positive-thrust axis determines
+the direction, and material-relative wing velocity receives the opposite of
+the physical fluid swirl. Signed windmilling reverses angular transport.
+
+A bounded relaxed field/wing/rotor fixed point surrounds the unchanged inner
+two-way axial coupling. The same prepared geometry/operator and actual native
+disk-inflow samples are reused. Caller rotor branch seeds remain fixed through
+all outer trials. `CoupledWakeStep` retains the exact swirl velocity used in
+the accepted wing force solve, the native source fields from that evaluation,
+and the maximum used-versus-predicted strip-velocity discrepancy. Exhaustion
+refuses; there is no one-way fallback. The native result and its usual inner
+coupling residual remain available separately.
+
+The opt-in `spine::rotors::propulsion::swirl::wake::WakePropulsion` evaluates
+these loads at both initial and midpoint mechanical stages. It supports the
+admitted local section frames and derives spin from mounted physical shaft
+axis plus blade handedness. Actual wing forces/moments and signed native
+shaft torque reach the existing geared carrier/rotor integrator once each.
+The ordinary `SwirlPropulsion`, axial coupling, historical presets and their
+default payload types retain their existing behavior.
+
+The projection deliberately retains the original fixed-cylinder axial wash
+approximation. Its changing downstream axial speed changes mass flux at
+fixed area: no contraction/entrainment solution, radial pressure balance,
+free/helical wake or whole fluid/body conservation theorem is supplied.
+These are unobstructed rotor source fields, not a reconstructed exhaust after
+a wing has extracted momentum. The observation window is strictly
+`0 < downstream distance < 2R`. In-annulus queries on the disk or beyond that
+window refuse; upstream, lateral and hub samples are zero. Angular momentum
+is not silently discarded at a numerical cutoff.
+
+Resolved swirl kinetic power is integrated analytically, including its finite
+radial-cell logarithm, and compared with each native `(u/r)Q`. The sum of
+absolute cell discrepancies is bounded by caller-admitted absolute watts plus
+a relative allowance against native total swirl power. Monotone axial speed
+and convexity in `1/U` make the two inside-window endpoint limits a bound on
+the complete window. Opposite cell errors cannot cancel. The signed defect
+and changing mass flux remain visible; unresolved angular structure and model
+error are never relabeled as heat. The default relative projection allowance
+is 0.5 of the swirl channel, with zero absolute allowance; callers can require
+a tighter budget. This tolerance is explicitly separate from numerical
+convergence. Receiving disks potentially intersecting another downstream or
+coplanar source cylinder refuse. A wing sample receiving two nonzero
+overlapping angular fields also refuses without a wake-mixing model.
+
+Six end-to-end tests and two analytic projection tests cover actual
+handedness-dependent wing force, independent per-annulus polar integration of
+torque and resolved kinetic energy, zero/low-swirl behavior and second-order
+radial energy-error refinement, shaft-axis conventions, regenerative
+windmilling, actual midpoint global linear/angular momentum, world covariance,
+source-window limits, power-budget/iteration refusals, unsupported disk/wake
+overlap, and late-stage atomicity. In the symmetric downstream-wing fixture,
+reversing physical handedness changes vertical aerodynamic force from
+`+1.50626572984 N` to `-1.50626572984 N`; axial-only wash gives zero. The
+unmodified existing swirl/geared/spatial/coupling batteries pass another
+38 cases. These 46 native checks use full selected current source modules,
+fresh native airscrew and Lie/gyrostat builds, and original numerical kernels;
+the cached solver omits only unused runtime `Cx` wrappers. They are not a
+full workspace Cargo, cross-platform or real-time gate.

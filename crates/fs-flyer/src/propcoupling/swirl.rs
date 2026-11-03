@@ -13,6 +13,9 @@ use super::{
 use fs_airscrew::swirl::{self as rotor_swirl, Controls, Induction, Power, Solution};
 use fs_blake3::hash_domain;
 
+#[path = "swirl/wake.rs"]
+pub mod wake;
+
 /// Explicit numerical continuation of a previous complete accepted solve.
 /// These are seeds, not additional physical wake inertia or shaft momentum.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,6 +87,7 @@ pub fn coupled_step(
         axes, op, panels, strips, closure, None, rotor, disks, freestream, rho, spec, controls,
         warm, incident,
     )
+    .map(|(step, _)| step)
 }
 
 /// Native axial/angular rotor momentum coupled to explicit local wing frames.
@@ -129,6 +133,7 @@ pub fn coupled_step_with_section_frames(
         warm,
         incident,
     )
+    .map(|(step, _)| step)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -147,7 +152,7 @@ fn coupled_impl(
     controls: Controls,
     warm: Option<&WarmStart>,
     incident: IncidentInflow<'_>,
-) -> Result<CoupledSwirlStep, Refusal> {
+) -> Result<(CoupledSwirlStep, [f64; 2]), Refusal> {
     if warm.is_some_and(|w| !w.w_slip.into_iter().all(f64::is_finite)) {
         return Err(Refusal {
             code: "swirl-coupling-invalid",
@@ -156,6 +161,7 @@ fn coupled_impl(
         });
     }
     let mut rotors = [None, None];
+    let mut axial_samples = [0.0; 2];
     let mut coupled = coupled_step_with_rotors(
         op,
         panels,
@@ -189,6 +195,7 @@ fn coupled_impl(
                 torque_nm: solution.torque_nm,
                 power: solution.power,
             };
+            axial_samples[k] = axial;
             rotors[k] = Some(solution);
             Ok(loads)
         },
@@ -207,8 +214,11 @@ fn coupled_impl(
             ranked_repairs: vec!["require a complete two-rotor solve".into()],
         });
     };
-    Ok(CoupledSwirlStep {
-        coupled,
-        rotors: [left, right],
-    })
+    Ok((
+        CoupledSwirlStep {
+            coupled,
+            rotors: [left, right],
+        },
+        axial_samples,
+    ))
 }

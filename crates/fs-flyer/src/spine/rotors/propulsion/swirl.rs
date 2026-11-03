@@ -13,9 +13,12 @@ use super::{
 use crate::propcoupling::swirl::{self as coupling, CoupledSwirlStep, WarmStart};
 use fs_airscrew::swirl::Controls;
 
+#[path = "swirl/wake.rs"]
+pub mod wake;
+
 /// Real accepted wing/swirl loads on the carrier and physical shaft ports.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SwirlEvaluation<const N: usize> {
+pub struct SwirlEvaluation<const N: usize, S = CoupledSwirlStep> {
     /// Actual forces/moments and signed aerodynamic torques for the gear owner.
     pub loads: GearedLoads<N>,
     /// Body aerodynamic force, before world gravity is added [N].
@@ -23,18 +26,18 @@ pub struct SwirlEvaluation<const N: usize> {
     /// Signed absolute physical L/R rotor speeds [rad/s].
     pub propeller_absolute_speed_rad_s: [f64; 2],
     /// Same accepted native annular momentum and two-way wing solution.
-    pub coupled: CoupledSwirlStep,
+    pub coupled: S,
 }
 
 /// Accepted carrier/shaft motion and its real aerodynamic stage evaluations.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SwirlStep<const N: usize> {
+pub struct SwirlStep<const N: usize, S = CoupledSwirlStep> {
     /// Existing geared owner, including actual global momentum/work residuals.
     pub motion: GearedStep<N>,
     /// Start-of-step aerodynamic evaluation for the midpoint predictor.
-    pub initial: SwirlEvaluation<N>,
+    pub initial: SwirlEvaluation<N, S>,
     /// Accepted midpoint aerodynamic loads used by the mechanical step.
-    pub midpoint: SwirlEvaluation<N>,
+    pub midpoint: SwirlEvaluation<N, S>,
 }
 
 /// Explicit swirl selection on an existing admitted physical assembly.
