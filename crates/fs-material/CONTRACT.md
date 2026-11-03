@@ -66,6 +66,37 @@ and independently displays both contact-time curves. No deconvolution, field
 calibration, aqueous chemistry, segregation, adsorption, coupled reaction rate
 or actual process recovery is inferred by this forward hydraulic model.
 
+## Transient dissolved and undissolved constituent inventories
+
+`recovery::reactive::ReactiveTankCascade` advances both forms of the same
+constituent through 1..=64 equal, full, ideal tanks. Both remain in the tanks
+and advect with the declared carrier flow. Local irreversible first-order
+conversion transfers undissolved constituent to dissolved constituent;
+dissolved outlet is a feed to downstream recovery, not already refined metal.
+The original `LocalTransferCard` must explicitly authorize the transient local
+law, supply its inverse-second rate and retain source identity, provenance and
+typed validity conditions. Batch-contact and stationary-recovery declarations
+are not promoted into transient laws. Rates may differ between tanks, while
+each rate and its admitted external conditions remain fixed during a step.
+
+Each piecewise-constant feed/flow interval independently propagates per-tank
+inventories, both final-tank outlet integrals and the internal conversion
+integral. The result exposes initial/final/inlet/outlet constituent accounts
+and separate phase balance residuals. A stopped flow admits continued reaction
+with zero inlet and outlet. Restart exports retained dissolved and undissolved
+material according to their common hydraulic residence. Failed admission,
+numerical range or conservation checks leave the original state unchanged.
+
+Positive uniformization limits total combined exposure to 4096 and splits it
+into substeps of at most eight; longer intervals must be split by the caller.
+The floating-point residual is a check, not an interval certificate. Reagent
+depletion, passivation, phase slip, precipitation, temperature evolution and
+changes in carrier volume remain outside this dilute-constituent model.
+Independent one-tank solutions, stopped-flow conversion, hydraulic zero-rate
+equivalence, per-tank steady limits and pulse/restart split-interval checks
+exercise the new slice. `mineral_residence` prints the two retained forms,
+their effluents and internal conversion separately for an authored scenario.
+
 ## Continuous recovery from actual train flow
 
 `recovery::continuous::ContinuousRecoveryCard` admits a separately sourced

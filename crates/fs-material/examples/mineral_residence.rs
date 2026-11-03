@@ -5,7 +5,9 @@
 //! The hydraulic example transports feed metal through eight ideal full tanks.
 //! A separate, explicitly fixed 88% extraction is applied at the outlet. The
 //! time-dependent recovery cards are evaluated separately, not coupled to the
-//! hydraulic model or used to fit this example.
+//! hydraulic model or used to fit this example. A final, separately declared
+//! transient example retains undissolved and dissolved inventories together;
+//! its dissolved effluent is not final refining recovery.
 
 use std::{collections::BTreeMap, error::Error};
 
@@ -16,9 +18,14 @@ use fs_matdb::{
 };
 use fs_material::recovery::{
     ELAPSED_TIME_AXIS, MAXIMUM_RATE_PARAMETER, RATE_PARAMETER, RecoveryKinetics, SINGLE_RATE_LAW,
-    ULTIMATE_RECOVERY_PARAMETER, UNIFORM_RATE_LAW, residence::StirredTankCascade,
+    ULTIMATE_RECOVERY_PARAMETER, UNIFORM_RATE_LAW,
+    reactive::{
+        ConstituentInventory, LocalTransferCard, ReactiveTankCascade, TRANSFER_RATE_PARAMETER,
+        TRANSIENT_TRANSFER_LAW,
+    },
+    residence::StirredTankCascade,
 };
-use fs_qty::{Density, Dims, Frequency, QuantitySpec, Time, Volume, VolumetricFlowRate};
+use fs_qty::{Density, Dims, Frequency, Mass, QuantitySpec, Time, Volume, VolumetricFlowRate};
 
 const HOUR: f64 = 3600.0;
 const DRY_SOLIDS_PER_VOLUME: f64 = 1000.0; // kg dry solids per m³ of slurry.
@@ -183,6 +190,86 @@ fn main() -> Result<(), Box<dyn Error>> {
             "{hours:.1},{:.12},{:.12}",
             single.evaluate(time, &point)?.value(),
             uniform.evaluate(time, &point)?.value()
+        );
+    }
+    reactive_demo()
+}
+
+fn reactive_demo() -> Result<(), Box<dyn Error>> {
+    let source = "Authored transient local dissolution of one conserved metal constituent: k=1/(6h), pH9..11; eight equal ideal full tanks, 86400m3 total; initial undissolved grade3g/t, zero dissolved metal; neither phase slips relative to carrier; no reagent limit or plant calibration.";
+    let artifact = hash_domain("mineral-residence-authored-reactive-v1", source.as_bytes());
+    let law = LocalTransferCard::from_card(ConstitutiveModelCard {
+        law: LawId(TRANSIENT_TRANSFER_LAW.into()),
+        law_version: 1,
+        parameters: BTreeMap::from([(
+            TRANSFER_RATE_PARAMETER.into(),
+            LawParameter {
+                value: 1.0 / (6.0 * HOUR),
+                dims: Frequency::DIMS,
+            },
+        )]),
+        state_schema_version: 0,
+        initial_state: InitialStatePolicy::ZeroInternalState,
+        validity: ValidityDomain::unconstrained().with_quantity(
+            "pH",
+            QuantitySpec::dimensional(Dims::NONE),
+            9.0,
+            11.0,
+        ),
+        sources: vec![artifact],
+        provenance: Provenance {
+            source: source.into(),
+            license: "project-owned synthetic example".into(),
+            artifact: Some(artifact),
+        },
+    })?;
+    let mut model = ReactiveTankCascade::new(
+        "authored metal constituent",
+        Volume::new(86_400.0),
+        vec![law; 8],
+        vec![
+            ConstituentInventory {
+                undissolved: Mass::new(concentration(3.0).value() * 86_400.0 / 8.0),
+                dissolved: Mass::new(0.0),
+            };
+            8
+        ],
+    )?;
+    let conditions =
+        vec![
+            QueryPoint::new().with_quantity("pH", QuantitySpec::dimensional(Dims::NONE), 10.0)?;
+            8
+        ];
+    println!("# Separate coupled transient dissolution: {source}");
+    println!("# Original local-law source hash: {artifact}");
+    println!(
+        "# Conversion transfers metal internally; both phases remain until advected. Dissolved outlet is potential downstream feed, not final recovered metal."
+    );
+    println!(
+        "reactive_interval,flow_m3_s,undissolved_inventory_kg,dissolved_inventory_kg,converted_inside_kg,undissolved_outlet_kg,dissolved_outlet_kg,undissolved_residual_kg,dissolved_residual_kg"
+    );
+    for (name, hours, flow, grade) in [
+        ("pulse", 12.0, 1.0, 9.0),
+        ("after_pulse", 12.0, 1.0, 3.0),
+        ("stopped", 6.0, 0.0, 3.0),
+        ("restart_half_flow", 12.0, 0.5, 3.0),
+    ] {
+        let step = model.advance(
+            Time::new(hours * HOUR),
+            VolumetricFlowRate::new(flow),
+            concentration(grade),
+            Density::new(0.0),
+            &conditions,
+        )?;
+        println!(
+            "{name},{flow:.3},{:.9},{:.9},{:.9},{:.9},{:.9},{:.6e},{:.6e}",
+            step.final_inventory.undissolved.value(),
+            step.final_inventory.dissolved.value(),
+            step.converted.value(),
+            step.outlet.undissolved.value(),
+            step.outlet.dissolved.value(),
+            step.undissolved_residual.value(),
+            step.dissolved_residual.value()
         );
     }
     Ok(())

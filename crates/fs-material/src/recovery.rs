@@ -21,6 +21,10 @@ pub mod residence;
 #[path = "recovery/continuous.rs"]
 pub mod continuous;
 
+/// Transient undissolved-to-dissolved constituent transfer with retained inventories.
+#[path = "recovery/reactive.rs"]
+pub mod reactive;
+
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint};
 use fs_math::det;
 use fs_qty::{Dimensionless, Dims, Frequency, QuantitySpec, Time};
