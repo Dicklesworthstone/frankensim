@@ -66,6 +66,70 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn independent_energy_uses_admitted_mass_once_and_preserves_zero_extra_behavior() {
+    let model = catalog(0.0);
+    let gas = parcel(&model);
+    let row = SpeciesBoundaryRelativeTransfer {
+        species: id("B"), mass_into_gas_kg: gas.species_mass_kg(&id("B")).unwrap() * 0.1,
+        relative_energy_into_gas_j: 0.05,
+    };
+    let original = gas.exchange_species_boundary_relative(&model, &[row.clone()], controls(), || false).unwrap();
+    let mut calls = 0;
+    let added = gas.exchange_species_boundary_relative_with_energy(&model, &[row.clone()], |mass| {
+        calls += 1;
+        assert_eq!(mass, original.gas().mass_kg());
+        Ok(0.0)
+    }, controls(), || false).unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(added, original);
+    let heated = gas.exchange_species_boundary_relative_with_energy(&model, &[row], |_| Ok(0.2), controls(), || false).unwrap();
+    assert_eq!(heated.step().additional_internal_energy_j, 0.2);
+    near(heated.step().energy_into_gas_j-original.step().energy_into_gas_j, 0.2, 1e-10);
+    assert!(heated.gas().state().state().temperature > original.gas().state().state().temperature);
+    near(heated.step().energy_residual_j, 0.0, 1e-7);
+}
+
+#[test]
+fn standalone_energy_needs_no_species_placeholder_and_cancels_formation_references() {
+    let mut temperatures = Vec::new();
+    for reference in [0.0, -1e10] {
+        let model = catalog(reference);
+        let gas = parcel(&model);
+        let mut old_heat_owner = gas.clone();
+        old_heat_owner.add_heat(0.2, controls().gas, || false).unwrap();
+        let heated = gas.exchange_species_boundary_relative_with_energy(&model, &[], |mass| {
+            assert_eq!(mass, gas.mass_kg()); Ok(0.2)
+        }, controls(), || false).unwrap();
+        assert!(heated.step().species.is_empty());
+        assert_eq!(heated.gas().mass_kg(), gas.mass_kg());
+        near(heated.gas().state().state().temperature, old_heat_owner.state().state().temperature, 1e-9);
+        temperatures.push(heated.gas().state().state().temperature);
+    }
+    near(temperatures[0], temperatures[1], 1e-9);
+}
+
+#[test]
+fn invalid_mass_never_calls_energy_and_late_energy_cancel_publishes_nothing() {
+    let model = catalog(0.0);
+    let gas = parcel(&model);
+    let saved = gas.clone();
+    let bad = SpeciesBoundaryRelativeTransfer { species: id("B"),
+        mass_into_gas_kg: -gas.mass_kg(), relative_energy_into_gas_j: 0.0 };
+    let mut called = false;
+    assert!(gas.exchange_species_boundary_relative_with_energy(&model, &[bad], |_| {
+        called=true; Ok(0.0)
+    }, controls(), || false).is_err());
+    assert!(!called);
+    assert!(gas.exchange_species_boundary_relative_with_energy(&model, &[], |_| Ok(f64::NAN), controls(), || false).is_err());
+    let cancel = core::cell::Cell::new(false);
+    let result = gas.exchange_species_boundary_relative_with_energy(&model, &[], |_| {
+        cancel.set(true); Ok(0.2)
+    }, controls(), || cancel.get());
+    assert!(matches!(result, Err(GasEnergyError::Cancelled)));
+    assert_eq!(gas,saved);
+}
+
+#[test]
 fn influx_and_deposition_use_original_partial_enthalpy_and_preserve_carrier() {
     let catalog = catalog(0.0);
     let gas = parcel(&catalog);

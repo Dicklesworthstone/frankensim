@@ -79,6 +79,9 @@ pub struct GasSpeciesBoundaryStep {
     pub species: Vec<SpeciesBoundaryTransfer>,
     pub mass_into_gas_kg: f64,
     pub energy_into_gas_j: f64,
+    /// Non-advective internal-energy increment supplied by the enclosing owner.
+    /// Included in total energy above, but never assigned to a fictitious species.
+    pub additional_internal_energy_j: f64,
     /// For a source-relative input, intended species-reference energy change
     /// plus actual original-law sensible storage. Actual inventory rounding is
     /// separately bounded by the total and individual species mass budgets.
@@ -343,7 +346,7 @@ impl ClosedGasParcel {
         self.exchange_species_boundary_rows(catalog, transfers.iter().map(|row| BoundaryRow {
             species: &row.species, mass_into_gas_kg: row.mass_into_gas_kg,
             energy_j: row.energy_into_gas_j,
-        }), BoundaryEnergyCoordinate::Absolute, controls, cancelled)
+        }), BoundaryEnergyCoordinate::Absolute, |_| Ok(0.0), controls, cancelled)
     }
 
     /// Exchange external species and source-relative energy through the SAME
@@ -374,14 +377,46 @@ impl ClosedGasParcel {
         self.exchange_species_boundary_rows(catalog, transfers.iter().map(|row| BoundaryRow {
             species: &row.species, mass_into_gas_kg: row.mass_into_gas_kg,
             energy_j: row.relative_energy_into_gas_j,
-        }), BoundaryEnergyCoordinate::OriginalPartialEnthalpy, controls, cancelled)
+        }), BoundaryEnergyCoordinate::OriginalPartialEnthalpy, |_| Ok(0.0), controls, cancelled)
     }
 
+    /// Reconstruct the SAME species endpoint with an independently owned energy
+    /// increment, evaluated once at the admitted FINAL total mass.
+    ///
+    /// This seam allows a momentum owner to subtract its actual bulk kinetic
+    /// change from laboratory stream energy before the one original caloric
+    /// inversion. It also admits an explicitly owned heat/work increment. The
+    /// callback supplies internal energy, not another species enthalpy or an
+    /// implicit temperature clamp. It must close its opposite mechanical or
+    /// thermal account in the enclosing atomic candidate.
+    ///
+    /// The original owner validates sources and species inventories first and
+    /// passes its exact represented final mass to the callback. No approximate
+    /// caller mass or second gas reconstruction is needed. Source-relative
+    /// formation cancellation, vacuum refusal and all original budgets remain
+    /// active. The callback is not called when earlier source/mass admission
+    /// fails; cancellation or any later failure returns no gas endpoint.
+    pub fn exchange_species_boundary_relative_with_energy<'catalog>(
+        &self,
+        catalog: &'catalog ThermochemicalGasModel,
+        transfers: &[SpeciesBoundaryRelativeTransfer],
+        additional_energy: impl FnOnce(f64) -> Result<f64, GasEnergyError>,
+        controls: GasSpeciesBoundarySolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GasSpeciesBoundaryCandidate<'catalog>, GasEnergyError> {
+        self.exchange_species_boundary_rows(catalog, transfers.iter().map(|row| BoundaryRow {
+            species: &row.species, mass_into_gas_kg: row.mass_into_gas_kg,
+            energy_j: row.relative_energy_into_gas_j,
+        }), BoundaryEnergyCoordinate::OriginalPartialEnthalpy, additional_energy, controls, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn exchange_species_boundary_rows<'catalog, 'row>(
         &self,
         catalog: &'catalog ThermochemicalGasModel,
         transfers: impl ExactSizeIterator<Item = BoundaryRow<'row>>,
         coordinate: BoundaryEnergyCoordinate,
+        additional_energy: impl FnOnce(f64) -> Result<f64, GasEnergyError>,
         controls: GasSpeciesBoundarySolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasSpeciesBoundaryCandidate<'catalog>, GasEnergyError> {
@@ -412,26 +447,36 @@ impl ClosedGasParcel {
                 return Err(invalid("boundary streams need finite values and unique retained species"));
             }
         }
-        if ordered
+        let mut additional_energy = Some(additional_energy);
+        let idle_energy = if ordered
             .values()
             .all(|row| row.mass_into_gas_kg == 0.0 && row.energy_j == 0.0)
         {
             poll(&mut cancelled)?;
-            return Ok(GasSpeciesBoundaryCandidate {
+            let extra = additional_energy.take().expect("one energy evaluation")(self.mass_kg())?;
+            if !extra.is_finite() {
+                return Err(invalid("additional boundary internal energy is unrepresentable"));
+            }
+            if extra == 0.0 {
+                poll(&mut cancelled)?;
+                return Ok(GasSpeciesBoundaryCandidate {
                 gas: self.clone(),
                 catalog,
                 step: GasSpeciesBoundaryStep {
                     species: Vec::new(),
                     mass_into_gas_kg: 0.0,
                     energy_into_gas_j: 0.0,
+                    additional_internal_energy_j: 0.0,
                     stored_energy_change_j: 0.0,
                     mass_residual_kg: 0.0,
                     maximum_species_mass_residual_kg: 0.0,
                     energy_residual_j: 0.0,
                     iterations: 0,
                 },
-            });
-        }
+                });
+            }
+            Some(extra)
+        } else { None };
         let before = inventory(self.model(), self.mass_kg())?;
         let mut target = before.clone();
         let mut mass = Sum::default();
@@ -486,6 +531,19 @@ impl ClosedGasParcel {
                 "boundary exchange cannot produce vacuum or a vanished mass change",
             ));
         }
+        poll(&mut cancelled)?;
+        let additional_internal_energy_j = match idle_energy {
+            Some(extra) => extra,
+            None => additional_energy.take().expect("one energy evaluation")(next_mass)?,
+        };
+        if !additional_internal_energy_j.is_finite() {
+            return Err(invalid("additional boundary internal energy is unrepresentable"));
+        }
+        if additional_internal_energy_j != 0.0 {
+            relative.add(additional_internal_energy_j)?;
+            energy.add(additional_internal_energy_j)?;
+        }
+        poll(&mut cancelled)?;
         let model = if matches!(coordinate, BoundaryEnergyCoordinate::OriginalPartialEnthalpy)
             && target == before && mass.value == 0.0 {
             self.model().clone()
@@ -551,6 +609,7 @@ impl ClosedGasParcel {
                 species: rows,
                 mass_into_gas_kg: mass.value,
                 energy_into_gas_j: energy.value,
+                additional_internal_energy_j,
                 stored_energy_change_j: stored,
                 mass_residual_kg: mass_residual,
                 maximum_species_mass_residual_kg: maximum,

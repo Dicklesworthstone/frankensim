@@ -18,6 +18,9 @@ use fs_material::thermochemical_gas::energy::{GasEnergyError, GasHeatStep};
 mod kinematics;
 use kinematics::kinetic_energy;
 
+/// Source-relative species, bulk momentum and internal energy in one gas update.
+pub mod boundary;
+
 /// Original finite gas plus an explicitly initialized bulk momentum.
 ///
 /// This is a homogeneous mean-drift source reservoir, not a resolved gas-flow

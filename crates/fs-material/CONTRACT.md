@@ -1,5 +1,24 @@
 # fs-material — CONTRACT
 
+## Species exchange with separately owned internal energy
+
+`ClosedGasParcel::exchange_species_boundary_relative_with_energy` uses the
+original species-boundary inventory and caloric reconstruction with one extra
+internal-energy coordinate. A callback receives the admitted final total mass
+exactly once before temperature reconstruction. This permits a coupled momentum
+owner to remove its actual bulk kinetic change from total stream energy without
+predicting a different final mass, inventing a species, or reconstructing gas
+twice. Explicit external heat/work may use the same coordinate when its owner
+closes the opposite account.
+
+The extra increment is reported separately and included in the original total
+energy budget. Formation constants still cancel before caloric inversion, and
+all source, mass, species, temperature, cancellation and representability gates
+remain active. Existing entry points supply exactly zero extra energy and retain
+their original operation tree. Focused regressions specify zero-extra parity,
+one callback at actual final mass, heat-only use without species placeholders,
+reference shifts and early/late atomic refusals.
+
 ## Moving molecular interface mass, momentum and energy
 
 `sublimation::gas::kinetic::evaluate_molecular_interface` resolves one local

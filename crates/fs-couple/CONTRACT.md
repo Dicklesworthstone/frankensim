@@ -1,5 +1,27 @@
 # CONTRACT: fs-couple
 
+## Finite gas species and momentum in an explicit energy frame
+
+`MovingGasParcel::exchange_species_momentum_relative` retains the original
+finite gas inventory and momentum owner while applying integrated species
+streams and their complete impulse. Energies are specified relative to original
+partial enthalpies in one declared inertial frame; impulse uses the retained
+momentum frame. A translating energy frame can preserve small thermal changes
+beside large common drift when callers construct streams directly in that frame.
+
+The original gas owner supplies its exact admitted final mass to the additional
+energy callback. Actual endpoint mass and momentum determine kinetic change via
+the changing-mass midpoint identity with compensated arithmetic. That kinetic
+change is removed before ONE original caloric inversion. No absolute kinetic
+totals are subtracted, and no extra receiver-mixing heat may be added afterward.
+Per-component momentum budgets use exchanged impulse, not common drift or an
+unrelated large pressure component. Vanished impulse, invalid mass, caloric
+refusal and cancellation expose no partial endpoint. The enclosing phase/body
+owner must admit gross withdrawals and close reciprocal energy and momentum.
+Fixed gas volume, original thermochemistry and original auxiliary axes retain
+their existing meaning. Focused tests specify changing mass, common inertial
+boosts, native source reconstruction, exact idle state and atomic refusal.
+
 ## Stationary native gravity in evolving finite solids
 
 `FiniteSolidBody::new_with_gravity` and `new_with_gravity_and_sources`
