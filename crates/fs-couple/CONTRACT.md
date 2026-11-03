@@ -26367,3 +26367,38 @@ round trips across scales, legacy defaults, typed pressure/speed/topology
 refusal, and six actual native body/fluid steps. Independently authored native
 faces reproduce every population, body state and reservoir receipt exactly,
 and the prescribed inlet accelerates the immersed body.
+
+### Inertial ambient capture and complete molecular momentum
+
+`GasRocketState::advance_effusion_exchange_with_ambient` adds prescribed
+`EffusionAmbientPort` sources with fixed world velocities in the vessel's
+declared inertial frame. It extends the SAME vacuum/comoving material and native
+mechanical owners. The existing comoving entry point delegates with no ambient
+ports; all three port families share canonical IDs, one original gross species
+withdrawal budget and one finite-gas caloric solve.
+
+Each ambient samples its original Maxwellian relative to the actual starting
+vessel velocity through an `EffusiveDriftInterface`. Its accepted incoming
+species masses carry the complete conditional velocity vector, including
+tangential slip, and their original internal plus translational crossing energy.
+Outgoing gas keeps its original isotropic effusion law. Both directions enter
+the same changing-mass native momentum and kinetic-energy accounts; incoming
+crossing energy heats the gas once, without an added thermalization term or
+continuum pressure thrust. External wall pressure remains a separately authored
+load. Source volume does not impose a finite ambient inventory.
+
+The finite native step holds the sampled relative moments, so this remains a
+first-order approximation to an inertially fixed source. Subsequent steps must
+resample actual relative velocity. Original source identity, active species,
+temperature/pressure support, frame and authored relative-speed qualification
+remain binding. The final actual relative speed is admitted before publication;
+sampled and endpoint checks do not certify a continuous trajectory enclosure.
+Geometrically closed ports leave their source distribution and velocity inactive.
+Refusal or terminal cancellation exposes neither endpoint.
+
+Focused original-source regressions cover mixed-port zero-slip parity,
+independent half-range headwind moments, tangential momentum and energy,
+Galilean boosts of BOTH source and vessel, complete physical accounts and
+final-drift/frame/source/cancellation refusal. Rustfmt parsing and source/API
+review passed; native compilation and execution remain unverified with the
+missing constellation sibling manifests.

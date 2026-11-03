@@ -1,4 +1,5 @@
 //! G0/G1/G3/G4: original finite gas, simultaneous molecular ports and full ledgers.
+mod ambient;
 use super::*;
 use crate::rocket_blowdown::effusion::exchange::{
     EffusionExchangeCandidate, EffusionReservoirPort,

@@ -1,9 +1,10 @@
 //! Bidirectional molecular ports on the original finite translating vessel.
 //!
-//! An external source is prescribed to remain instantaneously COMOVING with
-//! the aperture throughout each held-rate interval. It supplies and receives
-//! the reported particles and their inertial momentum/energy. This is not a
-//! stationary ambient, a second free vessel, or an exterior wall-pressure law.
+//! A source can remain instantaneously COMOVING with the aperture or have a
+//! prescribed velocity in the declared inertial frame. Ambient distributions
+//! are sampled relative to the actual vessel velocity at each step. Sources
+//! supply and receive the reported particles and their inertial momentum/energy;
+//! they are not second finite vessels or an exterior wall-pressure law.
 //! The original molecular crossing energy enters the gas once; no additional
 //! invented thermalization heat or continuum pressure thrust is added.
 
@@ -18,11 +19,17 @@ use fs_material::thermochemical_gas::energy::{
         transfer::{
             snapshot::MAX_SNAPSHOT_TRANSFERS,
             species::{
-                effusion::momentum::{EffusiveBeamMomentum, EffusiveMomentumInterface},
+                effusion::{
+                    drift::{DriftingEffusiveSpeciesFlux, EffusiveDriftInterface},
+                    momentum::{EffusiveBeamMomentum, EffusiveMomentumInterface},
+                },
                 network::transport::{
                     GasTransportPaths,
                     effusion::{
-                        reservoir::{self, EffusionReservoirLink, ReservoirEffusionStep},
+                        reservoir::{
+                            self, EffusionDriftingReservoirLink, EffusionReservoirLink,
+                            ReservoirEffusionStep,
+                        },
                         vacuum::VacuumEffusionLink,
                     },
                 },
@@ -49,6 +56,24 @@ pub struct EffusionReservoirPort<'a> {
     pub interface: &'a EffusiveMomentumInterface,
     pub area_m2: f64,
     /// Unit vector OUT of the vessel in its declared inertial frame.
+    pub outward_normal_world: Vec3,
+}
+
+/// A Maxwellian source with fixed thermochemical state and inertial bulk velocity.
+/// Its nominal volume does not impose a finite donor inventory. The separate
+/// drift qualification admits the complete relative velocity and aperture law.
+#[derive(Clone, Copy, Debug)]
+pub struct EffusionAmbientPort<'a> {
+    pub id: u64,
+    pub source: &'a ClosedGasParcel,
+    /// Prescribed bulk gas velocity [m/s], fixed during the requested interval.
+    pub velocity_world_m_s: Vec3,
+    /// Must match the vessel/environment; no coordinate transform is inferred.
+    pub inertial_frame: u64,
+    pub interface: &'a EffusiveDriftInterface,
+    /// Separately exposed area [m²]; zero leaves this source and drift inactive.
+    pub area_m2: f64,
+    /// Unit vector OUT of the vessel in the same declared inertial frame.
     pub outward_normal_world: Vec3,
 }
 
@@ -152,12 +177,35 @@ impl StreamSum {
         let impulse = beam
             .impulse_for_mass_kg(mass)
             .map_err(|error| EffusionRocketError::Source { outlet: id, error })?;
-        let specific = beam
-            .beam()
-            .crossing_energy_j_kg
-            .ok_or(EffusionRocketError::Invalid(
-                "accepted particle stream lost original molecular energy",
-            ))?;
+        self.add_moments(
+            mass,
+            beam.beam().crossing_energy_j_kg,
+            [direction.x, direction.y, direction.z].map(|component| impulse * component),
+        )
+    }
+    fn add_drifting(
+        &mut self,
+        mass: f64,
+        beam: &DriftingEffusiveSpeciesFlux,
+        id: u64,
+    ) -> Result<(), EffusionRocketError> {
+        if mass == 0.0 {
+            return Ok(());
+        }
+        let impulse = beam
+            .impulse_for_mass_kg(mass)
+            .map_err(|error| EffusionRocketError::Source { outlet: id, error })?;
+        self.add_moments(mass, beam.incoming.crossing_energy_j_kg, impulse)
+    }
+    fn add_moments(
+        &mut self,
+        mass: f64,
+        specific: Option<f64>,
+        impulse: [f64; 3],
+    ) -> Result<(), EffusionRocketError> {
+        let specific = specific.ok_or(EffusionRocketError::Invalid(
+            "accepted particle stream lost original molecular energy",
+        ))?;
         let energy = mass * specific;
         if !energy.is_finite() || (specific != 0.0 && energy == 0.0) {
             return Err(EffusionRocketError::Invalid(
@@ -166,12 +214,8 @@ impl StreamSum {
         }
         self.mass.add(mass)?;
         self.energy.add(energy)?;
-        for (sum, component) in self
-            .impulse
-            .iter_mut()
-            .zip([direction.x, direction.y, direction.z])
-        {
-            sum.add(impulse * component)?;
+        for (sum, component) in self.impulse.iter_mut().zip(impulse) {
+            sum.add(component)?;
         }
         Ok(())
     }
@@ -293,6 +337,46 @@ impl GasRocketState {
         duration_s: f64,
         endpoint: GasEnergySolve,
         controls: EffusionRocketSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<EffusionExchangeCandidate, EffusionRocketError> {
+        self.advance_effusion_exchange_with_ambient(
+            environment,
+            vacuum_outlets,
+            reservoir_ports,
+            &[],
+            duration_s,
+            endpoint,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Exchange with vacuum, comoving sources and fixed inertial Maxwellians in
+    /// one original gas transaction and one native mechanical trajectory.
+    ///
+    /// Each ambient's velocity minus the ORIGINAL vessel velocity selects its
+    /// incoming half-space mass, full vector momentum and crossing energy. The
+    /// native step holds these relative moments for the finite interval; this
+    /// is a first-order frozen-moment approximation to the fixed ambient.
+    /// Repeated steps or the adaptive owner resample actual relative drift.
+    /// Final actual relative velocities must remain inside their original
+    /// qualification, without resampling rates or spending inventory twice.
+    /// Admission covers sampled and endpoint speeds; it is not an enclosure
+    /// of the continuous speed throughout the native held-moment trajectory.
+    ///
+    /// Tangential momentum and its energy enter through the same particles.
+    /// No additional thermalization heat, pressure thrust or exterior wall load
+    /// is inferred. All port IDs share one namespace and one withdrawal budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_effusion_exchange_with_ambient(
+        &self,
+        environment: EffusionRocketEnvironment,
+        vacuum_outlets: &[EffusionOutlet<'_>],
+        reservoir_ports: &[EffusionReservoirPort<'_>],
+        ambient_ports: &[EffusionAmbientPort<'_>],
+        duration_s: f64,
+        endpoint: GasEnergySolve,
+        controls: EffusionRocketSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<EffusionExchangeCandidate, EffusionRocketError> {
         poll(&mut cancelled)?;
@@ -304,11 +388,22 @@ impl GasRocketState {
             || vacuum_outlets
                 .len()
                 .checked_add(reservoir_ports.len())
+                .and_then(|n| n.checked_add(ambient_ports.len()))
                 .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS)
         {
             return Err(EffusionRocketError::Invalid(
                 "molecular exchange frame, loads, budget or port count",
             ));
+        }
+        for port in ambient_ports {
+            poll(&mut cancelled)?;
+            if port.inertial_frame != self.inertial_frame
+                || (port.area_m2 != 0.0 && !port.velocity_world_m_s.is_finite())
+            {
+                return Err(EffusionRocketError::Invalid(
+                    "ambient velocity needs the vessel frame and finite active components",
+                ));
+            }
         }
         let mut ordered = BTreeMap::new();
         for (id, interface, normal) in vacuum_outlets
@@ -319,6 +414,13 @@ impl GasRocketState {
                     .iter()
                     .map(|p| (p.id, p.interface, p.outward_normal_world)),
             )
+            .chain(ambient_ports.iter().map(|p| {
+                (
+                    p.id,
+                    p.interface.momentum_interface(),
+                    p.outward_normal_world,
+                )
+            }))
         {
             poll(&mut cancelled)?;
             let squared = normal.norm_squared();
@@ -353,11 +455,32 @@ impl GasRocketState {
                 area_m2: p.area_m2,
             })
             .collect();
-        let candidate = reservoir::step_candidate(
+        let drifting: Vec<_> = ambient_ports
+            .iter()
+            .map(|p| {
+                let relative = if p.area_m2 == 0.0 {
+                    Vec3::ZERO
+                } else {
+                    p.velocity_world_m_s.sub(self.vehicle.velocity_m_s)
+                };
+                let normal = p.outward_normal_world;
+                EffusionDriftingReservoirLink {
+                    id: p.id,
+                    parcel: 0,
+                    reservoir: p.source,
+                    interface: p.interface,
+                    area_m2: p.area_m2,
+                    relative_bulk_velocity_m_s: [relative.x, relative.y, relative.z],
+                    outward_unit_normal: [normal.x, normal.y, normal.z],
+                }
+            })
+            .collect();
+        let candidate = reservoir::step_candidate_with_drift(
             &parcels,
             GasTransportPaths::default(),
             &vacuum,
             &reservoirs,
+            &drifting,
             duration_s,
             &endpoints,
             controls.transport,
@@ -372,6 +495,7 @@ impl GasRocketState {
         let mut boundaries = gas.exchange.boundaries.iter().peekable();
         let mut vacuum = gas.vacuum_outlets.iter().peekable();
         let mut reservoirs = gas.reservoirs.iter().peekable();
+        let mut drifting = gas.drifting_reservoirs.iter().peekable();
         for (id, (interface, normal)) in ordered {
             poll(&mut cancelled)?;
             let source = |error| EffusionRocketError::Source { outlet: id, error };
@@ -393,7 +517,23 @@ impl GasRocketState {
             } else {
                 None
             };
-            if vacuum_momentum.is_some() == reciprocal_momentum.is_some() {
+            let drifting_source = if drifting.peek().is_some_and(|p| p.id == id) {
+                drifting.next()
+            } else {
+                None
+            };
+            let drifting_outgoing = drifting_source
+                .map(|row| {
+                    interface
+                        .vacuum_flux(&row.outgoing, &mut cancelled)
+                        .map_err(source)
+                })
+                .transpose()?;
+            if usize::from(vacuum_momentum.is_some())
+                + usize::from(reciprocal_momentum.is_some())
+                + usize::from(drifting_source.is_some())
+                != 1
+            {
                 return Err(EffusionRocketError::Invalid(
                     "accepted port lost its unique original source",
                 ));
@@ -442,6 +582,35 @@ impl GasRocketState {
                         normal,
                         id,
                     )?;
+                } else if let (Some(ambient), Some(momentum)) =
+                    (drifting_source, &drifting_outgoing)
+                {
+                    // The source and vessel can have distinct active species.
+                    // Each accepted direction uses its own original sample.
+                    if row.transfer.incoming_mass_kg > 0.0 {
+                        let index = ambient
+                            .incoming
+                            .species
+                            .binary_search_by(|b| b.species.cmp(&row.transfer.species))
+                            .map_err(|_| missing())?;
+                        pin.add_drifting(
+                            row.transfer.incoming_mass_kg,
+                            &ambient.incoming.species[index],
+                            id,
+                        )?;
+                    }
+                    if row.transfer.outgoing_mass_kg > 0.0 {
+                        let index = momentum
+                            .species()
+                            .binary_search_by(|b| b.species.cmp(&row.transfer.species))
+                            .map_err(|_| missing())?;
+                        pout.add(
+                            row.transfer.outgoing_mass_kg,
+                            &momentum.species()[index].outward,
+                            normal,
+                            id,
+                        )?;
+                    }
                 }
                 pmass.add(row.transfer.net_mass_into_gas_kg)?;
                 penergy.add(row.energy_into_gas_j)?;
@@ -461,7 +630,11 @@ impl GasRocketState {
                 net_energy_into_vessel_world_j: 0.0,
             });
         }
-        if boundaries.next().is_some() || vacuum.next().is_some() || reservoirs.next().is_some() {
+        if boundaries.next().is_some()
+            || vacuum.next().is_some()
+            || reservoirs.next().is_some()
+            || drifting.next().is_some()
+        {
             return Err(EffusionRocketError::Invalid(
                 "accepted molecular exchange lost its physical port",
             ));
@@ -641,6 +814,18 @@ impl GasRocketState {
                 momentum_bound_n_s: momentum_bound,
                 energy_bound_j: energy_bound,
             });
+        }
+        for port in ambient_ports {
+            poll(&mut cancelled)?;
+            if port.area_m2 > 0.0 {
+                let relative = port.velocity_world_m_s.sub(vehicle.velocity_m_s);
+                port.interface
+                    .admit_relative_velocity([relative.x, relative.y, relative.z])
+                    .map_err(|error| EffusionRocketError::Source {
+                        outlet: port.id,
+                        error,
+                    })?;
+            }
         }
         vehicle.propellant_mass_kg = reservoir.mass_kg();
         poll(&mut cancelled)?;
