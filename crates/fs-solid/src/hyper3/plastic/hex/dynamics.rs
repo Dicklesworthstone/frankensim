@@ -34,6 +34,11 @@ use super::super::thermal::FiniteThermoplasticElementEnergy;
 /// Shared physical kinetic-work account, including separately reported numerical loss.
 pub use crate::inertia::InertialEnergy;
 
+/// Impulses on the same full/mean-dilatation thermal-plastic solid and mass.
+pub mod impulse;
+pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
+pub use impulse::FiniteThermoplasticHexMotionImpulse;
+
 /// Complete accepted finite solid, velocity and immutable original mass.
 #[derive(Debug)]
 pub struct FiniteThermoplasticHexMotion<'a, L: FiniteThermalJ2Material = AffineThermalFiniteJ2> {

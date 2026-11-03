@@ -48,6 +48,11 @@ pub use super::dynamics::FinitePlasticMotionControls as FiniteThermoplasticContr
 /// Shared kinetic account; numerical loss is never caloric deposition.
 pub use crate::inertia::InertialEnergy;
 
+/// Zero-duration momentum transfer with complete thermal and plastic memory.
+pub mod impulse;
+pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
+pub use impulse::FiniteThermoplasticTetImpulse;
+
 /// Compact original-reference-volume account; no tangent/history duplication.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FiniteThermoplasticElementEnergy {

@@ -3048,6 +3048,18 @@ The `hyper_plastic_dynamics/impulse.rs` and `hyper_visco_dynamics/impulse.rs`
 regressions use independent cubic-simplex mass, deformed torque and support-work
 oracles, retained inelastic prehistory and subsequent native motion.
 
+`FiniteThermoplasticTetSolid::impulse_candidate` extends this same account to
+an already inertia-bound thermal tetrahedral solid; a quasistatic owner without
+original reference inertia refuses. `FiniteThermoplasticHexMotion` supplies
+the same event for both standard and mean-dilatation Hex8 formulations, using
+the original tensor-product quadrature mass and physical current positions.
+The thermal family bindings and reference temperatures, current temperature,
+all plastic/creep and quadrature history, physical/assumed deformation, stress,
+free energy and internal energy remain unchanged. The event advances no
+material interval and deposits no heat. `tests/thermoplastic_impulse.rs`
+checks hot plastically set bodies, independent reference-mass/torque/work
+oracles, moving supports, state retention and subsequent native thermal motion.
+
 ### Reference-aware finite-deformation response
 
 `hyper3` evaluates energy, Piola force and tangent through the original
