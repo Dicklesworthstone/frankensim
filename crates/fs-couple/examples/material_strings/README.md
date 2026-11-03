@@ -174,6 +174,28 @@ With the flag, the render runs one sample per callback, and the WAV bytes are
 unchanged. Like the WAV, the file must not exist already, and it is created
 only after admission.
 
+`--bridge-force NEW_FILE` writes the force the strings exert through their
+bridge connections, so a measured bridge-force record can be compared with the
+solver directly instead of through the body's pressure. The file has one
+tab-separated row per accepted mechanical sample: the physical sample, then one
+`connection_K_n` column per connection of the coupled network, in the network's
+own order (each string's connections first, in string order, then receiver
+links). A column is the original solver's `connection_forces_n`: for a pair
+connection, the force on its left attachment, in newtons, with that solver's
+sign. The header is written with the first row. Like `--bow-trace` the render
+runs one sample per callback and the WAV bytes are unchanged; the flag composes
+with `--decimate` (one row per mechanical sample) and cannot be combined with
+`--bow-trace` or `--contact-thermal`. The force is the reaction at the card's
+own bridge spring and dashpot, so it includes whatever body those connect to.
+Two properties of the card decide what it means: the stiffness of the bridge
+row (`K_N_M`) and the afterlength, which is the part of the string past the
+bridge (`FULL_SPAN_M` times one minus `BRIDGE_STATION`) and rings at its own
+modes. At 48 kHz, on a cello G string card (0.875 m span, bridge station 0.8,
+64 bending modes, the 0.4 m x 0.3 m laboratory plate), the Nyquist guard of the
+coupled network refused a bridge spring of 2e6 N/m and a 10 mm plate with 16
+modes, and admitted 1e6 N/m and a 40 mm plate with 2 modes; a rigid
+termination can only be approached up to that guard.
+
 ### Move the bow position along the string
 
 `migrating-bow.material-strings` moves a finite-width bow across the original

@@ -229,6 +229,9 @@ mod tension_loss;
 #[path = "tests/bow_trace.rs"]
 mod bow_trace;
 
+#[path = "tests/bridge_force.rs"]
+mod bridge_force;
+
 #[path = "tests/residual.rs"]
 mod residual;
 

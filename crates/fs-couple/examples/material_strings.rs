@@ -673,6 +673,15 @@ impl Ready {
             None=>write_pressure(&mut self.performance,output,&self.spec,decimate,gate),
         }
     }
+    /// `write` one sample per callback, with each accepted sample's connection reactions in `forces` (see
+    /// `write_bridge_force_pressure`). The WAV bytes are `write`'s, as for `write_traced`.
+    fn write_bridge_forces<W:Write+Seek>(&mut self,output:W,forces:&mut dyn Write,decimate:bool,gate:&CancelGate)
+        ->Result<(W,WavStreamSummary)> {
+        write_bridge_force_pressure(&mut self.performance,output,forces,&self.spec,decimate,gate,|performance|{
+            let system=performance.bank().system();
+            Some((system.last_frame()?.sample,system.coupled_frame()?.connection_forces_n.as_slice()))
+        })
+    }
 }
 
 /// Observe the original accepted mechanical steps before any output resampling.
@@ -745,6 +754,32 @@ fn write_traced_pressure<S:PressureRenderer,W:Write+Seek>(source:&mut S,output:W
     if let Some(error)=observed.failure { return Err(error); }
     result
 }
+/// `--bridge-force`: every accepted mechanical sample's connection reactions [N] beside the WAV. One row per sample: the
+/// physical sample, then one column per connection of the coupled network, in the network's order (each string's own
+/// connections first, in string order, then receiver links). For a pair connection the value is the force on its left
+/// attachment, the original solver's `connection_forces_n`; the sign is that solver's. The header is written with the first
+/// row, which is when the connection count is known. Same observation adapter as the bow trace: the WAV is unchanged.
+fn write_bridge_force_pressure<S:PressureRenderer,W:Write+Seek>(source:&mut S,output:W,forces:&mut dyn Write,
+    spec:&input::Spec,decimate:bool,gate:&CancelGate,
+    read:impl for<'s> Fn(&'s S)->Option<(u64,&'s [f64])>)->Result<(W,WavStreamSummary)> {
+    let mut header=false;
+    let mut observed=ObservedPressure { source,failure:None,observe:|source:&S|->Result<()> {
+        let (sample,reactions)=read(source).ok_or("a rendered sample left no accepted connection reactions")?;
+        if !header {
+            write!(forces,"sample")?;
+            for k in 0..reactions.len() { write!(forces,"\tconnection_{k}_n")?; }
+            writeln!(forces)?;
+            header=true;
+        }
+        write!(forces,"{sample}")?;
+        for reaction in reactions { write!(forces,"\t{reaction:e}")?; }
+        writeln!(forces)?;
+        Ok(())
+    } };
+    let result=write_pressure(&mut observed,output,spec,decimate,gate);
+    if let Some(error)=observed.failure { return Err(error); }
+    result
+}
 fn read_bounded(path:&Path,cap:usize)->Result<Vec<u8>> {
     let mut bytes=Vec::new();File::open(path)?.take(cap as u64+1).read_to_end(&mut bytes)?;
     if bytes.len()>cap {return Err(format!("{} exceeds {cap} bytes",path.display()).into());} Ok(bytes)
@@ -769,7 +804,7 @@ fn assemble_shell(args:&[std::ffi::OsString])->Result<()> {
     }
     Ok(())
 }
-/// Take `NAME PATH` (`--observer-store DIR`, `--bow-trace FILE`) out of the option pairs; the rest pass on.
+/// Take `NAME PATH` (`--observer-store DIR`, `--bow-trace FILE`, `--bridge-force FILE`) out of the option pairs; the rest pass on.
 fn path_option<'a>(args:&'a [std::ffi::OsString],name:&str)->Result<(Option<&'a Path>,Vec<std::ffi::OsString>)> {
     let (mut path,mut rest)=(None,Vec::new());
     for pair in args.chunks(2) {
@@ -862,8 +897,13 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     }
     let (trace_path,options)=path_option(&options,"--bow-trace")?;
     let (thermal_path,options)=path_option(&options,"--contact-thermal")?;
-    if response_only && (store_dir.is_some() || trace_path.is_some() || thermal_path.is_some() || source_options.decimate) {
+    let (force_path,options)=path_option(&options,"--bridge-force")?;
+    if response_only && (store_dir.is_some() || trace_path.is_some() || thermal_path.is_some() || force_path.is_some()
+        || source_options.decimate) {
         return Err("response-only commands accept body/source options; playback observer stores, traces, contact heat and decimation need a WAV render".into());
+    }
+    if force_path.is_some() && (trace_path.is_some() || thermal_path.is_some()) {
+        return Err("--bridge-force writes its own per-sample file; run it without --bow-trace or --contact-thermal".into());
     }
     let thermal_profile=thermal_path.map(|p|contact_thermal::Profile::parse(
         &sources.read_option(p,contact_thermal::MAX_BYTES)?)).transpose()?;
@@ -1184,12 +1224,16 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     let mut trace=trace_path.map(|path|OpenOptions::new().write(true).create_new(true).open(path)
         .map(std::io::BufWriter::new)).transpose()?;
     let trace_writer=trace.as_mut().map(|writer|writer as &mut dyn Write);
-    let written=match &contact_heat {
-        Some(heat)=>heat.write_observed(&mut ready,output,trace_writer,source_options.decimate,&gate),
-        None=>ready.write_observed(output,trace_writer,source_options.decimate,&gate),
+    let mut bridge_forces=force_path.map(|path|OpenOptions::new().write(true).create_new(true).open(path)
+        .map(std::io::BufWriter::new)).transpose()?;
+    let written=match (&contact_heat,bridge_forces.as_mut()) {
+        (Some(heat),_)=>heat.write_observed(&mut ready,output,trace_writer,source_options.decimate,&gate),
+        (None,Some(forces))=>ready.write_bridge_forces(output,forces,source_options.decimate,&gate),
+        (None,None)=>ready.write_observed(output,trace_writer,source_options.decimate,&gate),
     };
     coating_strain::describe(&ready.performance,&mut std::io::stderr().lock())?;
     if let Some(trace)=trace.as_mut() { trace.flush()?; }
+    if let Some(forces)=bridge_forces.as_mut() { forces.flush()?; }
     let (_,summary)=written.map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
     if let Some(frame)=ready.performance.fiber_support_frame() {
         eprintln!("bow_fiber_support_frame={frame:?}");
