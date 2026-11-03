@@ -4,6 +4,8 @@
 use super::*;
 #[path = "enthalpy/convection.rs"]
 mod convection;
+#[path = "enthalpy/airflow.rs"]
+mod airflow;
 use fs_project::{
     ConductionEnclosure, ConductionTransient, EnclosureRadiatingSurface,
     EnclosureViewFactorEvidence, RadiationSpatialModel, ThermalBoundaryCondition,

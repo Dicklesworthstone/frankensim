@@ -21,6 +21,7 @@ pub(super) struct AirflowStep {
     pub(super) radiation: Option<RadiativeEndpoint>,
     pub(super) enclosure: Option<radiation::EnclosureEndpoint>,
     pub(super) radiation_evidence: String,
+    pub(super) contact_evidence: Option<String>,
     pub(super) natural: Option<NaturalEndpoint>,
     pub(super) natural_evidence: String,
     pub(super) natural_iterations: usize,
@@ -110,6 +111,7 @@ fn inner_config(
     allowance_j: f64,
     initial_norm_j: f64,
 ) -> Result<EnthalpyStepConfig, SolveRefusal> {
+    let absolute_only = config.newton.relative_tolerance == 0.0;
     config.newton.absolute_tolerance = config.newton.absolute_tolerance.min(allowance_j);
     if initial_norm_j > 0.0 {
         config.newton.relative_tolerance = config
@@ -117,9 +119,11 @@ fn inner_config(
             .relative_tolerance
             .min(allowance_j / initial_norm_j);
     }
-    // Both tolerances must remain strictly positive under the shared Newton
-    // validator. Underflow is a refusal, never a hidden tolerance widening.
-    if config.newton.absolute_tolerance <= 0.0 || config.newton.relative_tolerance <= 0.0 {
+    // Keep the contact owner's absolute-only stopping rule. A requested
+    // positive tolerance that underflows is still a refusal, never a widening.
+    if config.newton.absolute_tolerance <= 0.0
+        || (!absolute_only && config.newton.relative_tolerance <= 0.0)
+    {
         return Err(bad("enthalpy airflow inner tolerance is not representable"));
     }
     config
@@ -137,6 +141,8 @@ pub(super) fn advance(
     engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    contact_config: Option<contact::enthalpy::Config>,
     old: &[f64],
     dt_s: f64,
     config: EnthalpyStepConfig,
@@ -157,6 +163,13 @@ pub(super) fn advance(
     {
         return Err(bad(
             "enthalpy airflow requires segments, matching history and positive step controls",
+        ));
+    }
+    if temperature_contacts.is_some() != contact_config.is_some()
+        || (temperature_contacts.is_some() && interfaces.is_some())
+    {
+        return Err(bad(
+            "enthalpy airflow requires matching live contacts and controls without duplicate frozen interfaces",
         ));
     }
     config
@@ -212,7 +225,8 @@ pub(super) fn advance(
     let radiation_factor = radiation.map_or(1, radiation::LoweredRadiation::max_solid_solves);
     let max_solid_solves = max_natural_iterations
         .checked_mul(radiation_factor)
-        .ok_or_else(|| bad("enthalpy airflow/radiation work allowance overflows"))?;
+        .and_then(|count| count.checked_mul(contact_config.map_or(1, |controls| controls.max_responses())))
+        .ok_or_else(|| bad("enthalpy airflow/contact/radiation work allowance overflows"))?;
     let max_updates = max_solid_solves
         .checked_mul(config.max_newton_iterations)
         .ok_or_else(|| bad("enthalpy airflow Newton allowance overflows"))?;
@@ -265,11 +279,20 @@ pub(super) fn advance(
         })?;
     let initial_seed_residual_norm_j = {
         let seed_boundary = boundary_at(problem.boundary, &regions, &seed_references)?;
+        let seed_problem = ConductionProblem { boundary: &seed_boundary, ..problem };
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-        radiative::evaluate(
-            cx, engine, ConductionProblem { boundary: &seed_boundary, ..problem },
-            interfaces, old, &initial_candidate, dt_s, config, radiation, enclosure,
-        )?.residual_norm_j
+        let initial = if let Some(contacts) = temperature_contacts {
+            contact::enthalpy::evaluate(
+                cx, engine, seed_problem, contacts, old, &initial_candidate,
+                dt_s, config, radiation, enclosure, deadline,
+            )?.0
+        } else {
+            radiative::evaluate(
+                cx, engine, seed_problem, interfaces, old, &initial_candidate,
+                dt_s, config, radiation, enclosure,
+            )?
+        };
+        initial.residual_norm_j
     };
     let physical_residual_tolerance_j = finite(
         config
@@ -316,10 +339,18 @@ pub(super) fn advance(
         let mut boundary = boundary_at(problem.boundary, &regions, references)?;
         let trial_problem = ConductionProblem { boundary: &boundary, ..problem };
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-        let initial_norm_j = radiative::evaluate(
-            cx, engine, trial_problem, interfaces, old, &initial_candidate,
-            dt_s, config, radiation, enclosure,
-        )?.residual_norm_j;
+        let initial = if let Some(contacts) = temperature_contacts {
+            contact::enthalpy::evaluate(
+                cx, engine, trial_problem, contacts, old, &initial_candidate,
+                dt_s, config, radiation, enclosure, deadline,
+            )?.0
+        } else {
+            radiative::evaluate(
+                cx, engine, trial_problem, interfaces, old, &initial_candidate,
+                dt_s, config, radiation, enclosure,
+            )?
+        };
+        let initial_norm_j = initial.residual_norm_j;
         let inner = inner_config(config, inner_allowance_j, initial_norm_j)?;
         let mut natural_endpoint = None;
         let mut natural_evidence = "null".to_string();
@@ -330,7 +361,8 @@ pub(super) fn advance(
             // allowances for the remaining air-reference discrepancy.
             natural_config.energy_tolerance_j = finite(config.energy_tolerance_j * 0.125)?;
             let solved = natural::advance(
-                cx, engine, trial_problem, interfaces, None, None, old, dt_s, natural_config,
+                cx, engine, trial_problem, interfaces, temperature_contacts, contact_config,
+                old, dt_s, natural_config,
                 radiation, enclosure, laws, pressure_pa, deadline,
             )?;
             natural_evidence = natural_step_row(&solved)?;
@@ -365,6 +397,25 @@ pub(super) fn advance(
                 boundary: boundary.clone(),
             });
             (solved.endpoint, solved.radiation_evidence, solved.radiation, solved.enclosure)
+        } else if let Some(contacts) = temperature_contacts {
+            let mut controls = contact_config
+                .ok_or_else(|| bad("enthalpy airflow lost its live contact controls"))?;
+            controls.native.step = inner;
+            controls.native.residual_tolerance_j = controls.native.residual_tolerance_j
+                .min(inner.newton.absolute_tolerance);
+            let solved = contact::enthalpy::advance(
+                cx, engine, trial_problem, contacts, old, dt_s, controls,
+                radiation, enclosure, deadline,
+            )?;
+            count(&mut solid_solves, solved.responses, max_solid_solves)?;
+            count(&mut nonlinear_updates, solved.nonlinear_updates, max_updates)?;
+            count(&mut krylov_iterations, solved.krylov_iterations, max_krylov)?;
+            if radiation.is_some() {
+                count(&mut radiation_trials, solved.responses, max_solid_solves)?;
+                maximum_radiation_energy_residual_j = maximum_radiation_energy_residual_j
+                    .max(solved.physical.energy_residual_j.abs());
+            }
+            (solved.conduction, solved.radiation_receipt.unwrap_or_else(|| "null".to_string()), None, None)
         } else if let Some(lowering) = radiation {
             let solved = radiative::advance(
                 cx, engine, trial_problem, interfaces, old, dt_s, inner,
@@ -432,7 +483,7 @@ pub(super) fn advance(
             "enthalpy airflow work does not match the shared exchange history",
         ));
     }
-    let last = last.ok_or_else(|| bad("enthalpy airflow accepted no solid response"))?;
+    let mut last = last.ok_or_else(|| bad("enthalpy airflow accepted no solid response"))?;
     // Standard branch receipts describe exactly the applied solid response.
     let outcome = exchange::cross_check_decomposition(
         outcome, last.convective_out_w, last.off_path_convective_out_w,
@@ -456,11 +507,19 @@ pub(super) fn advance(
         &regions, &physical_references,
     )?;
     count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-    let physical = radiative::evaluate(
-        cx, engine, ConductionProblem { boundary: &physical_boundary, ..problem },
-        interfaces, old, &last.endpoint.specific_enthalpy_j_kg,
-        dt_s, config, radiation, enclosure,
-    )?;
+    let physical_problem = ConductionProblem { boundary: &physical_boundary, ..problem };
+    let (physical, physical_contacts) = if let Some(contacts) = temperature_contacts {
+        let (evaluation, states) = contact::enthalpy::evaluate(
+            cx, engine, physical_problem, contacts, old, &last.endpoint.specific_enthalpy_j_kg,
+            dt_s, config, radiation, enclosure, deadline,
+        )?;
+        (evaluation, Some(states))
+    } else {
+        (radiative::evaluate(
+            cx, engine, physical_problem, interfaces, old, &last.endpoint.specific_enthalpy_j_kg,
+            dt_s, config, radiation, enclosure,
+        )?, None)
+    };
     poll(cx, deadline)?;
     let off_path_convective_out_w = sum(
         physical
@@ -492,11 +551,40 @@ pub(super) fn advance(
             "inspect the thermal tolerances, air paths and reservoir exchanges; no endpoint is published",
         ));
     }
+    if let Some(states) = &physical_contacts {
+        // Publish the same unchanged field and physical air/natural boundary
+        // used by the final audit; numerical inner histories stay intact.
+        if let Some(lowering) = radiation {
+            last.radiation_evidence = pointwise_contact_receipt(
+                &last.endpoint, &physical, lowering, physical_residual_tolerance_j,
+            )?;
+            maximum_radiation_energy_residual_j = maximum_radiation_energy_residual_j
+                .max(physical.energy_residual_j.abs());
+        }
+        last.endpoint.contact_fluxes = states.frozen_interfaces()
+            .fluxes(&last.endpoint.temperature).map_err(lower)?;
+        last.endpoint.robin_fluxes = physical.convective_robin_fluxes.clone();
+        last.endpoint.source_w = physical.source_w;
+        last.endpoint.neumann_out_w = physical.neumann_out_w;
+        last.endpoint.robin_out_w = physical.convective_out_w;
+        last.endpoint.dirichlet_in_w = physical.dirichlet_in_w;
+        last.endpoint.stored_energy_change_j = physical.stored_energy_change_j;
+        last.endpoint.energy_residual_j = physical.energy_residual_j;
+    }
+    let contact_evidence = match (contact_config, physical_contacts.as_ref()) {
+        (Some(controls), Some(states)) => Some(contact::enthalpy::step_receipt(
+            cx, controls, &physical, states, solid_solves, nonlinear_updates,
+            krylov_iterations, deadline,
+        )?),
+        (None, None) => None,
+        _ => return Err(bad("enthalpy airflow lost its accepted contact audit")),
+    };
     Ok(AirflowStep {
         endpoint: last.endpoint,
         radiation: last.radiation,
         enclosure: last.enclosure,
         radiation_evidence: last.radiation_evidence,
+        contact_evidence,
         natural: last.natural,
         natural_evidence: last.natural_evidence,
         natural_iterations, natural_solid_solves, natural_updates,

@@ -192,6 +192,10 @@ pub(super) fn advance(
             let mut controls = contact_config
                 .ok_or_else(|| bad("natural convection lost its enthalpy contact controls"))?;
             controls.native.step = inner;
+            // The contact fixed point has a separate physical gate. It must
+            // close within this outer boundary loop's inner allowance too.
+            controls.native.residual_tolerance_j = controls.native.residual_tolerance_j
+                .min(inner.newton.absolute_tolerance);
             let solved = contact::enthalpy::advance(
                 cx, engine, trial_problem, contacts, old, dt_s, controls,
                 radiation, enclosure, deadline,

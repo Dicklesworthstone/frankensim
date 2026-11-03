@@ -3309,3 +3309,29 @@ Native regression cases cover curve/surface agreement, evolving latent fraction,
 independent natural heat and original-history energy accounting, source-domain
 refusal and a widened-source retry. Syntax parsing and whitespace checks were
 performed; these native cases require the full dependency build to execute.
+
+### Live contact through transported-air enthalpy feedback — driver 104
+
+The original quasi-steady airflow/IQN-ILS loop now runs contact-aware enthalpy
+responses for every air trial. Natural convection on distinct targets composes
+through the same nested natural/contact owner. Each seed audit, inner response
+and accepted physical audit retains the original old enthalpy and re-evaluates
+the pinned source contact at the actual candidate temperature. Scalar and curve
+Newton contacts also retain optional pointwise ambient/enclosure radiation;
+source surfaces retain the bounded contact fixed point without radiation.
+
+Acceptance checks the unchanged field at the updated air references and natural
+coefficients. The physical residual and storage/heat gate both pass, together
+with the independent balance using actual branch air enthalpy gain. Forced
+convection alone heats air; off-path natural heat and nonlinear radiation are
+counted separately and once. Contact, Robin and pointwise-radiation evidence
+describes that same final physical audit. Contact response, Newton and Krylov
+counts include all rejected air, natural and contact trials, and their admitted
+work caps include the full nesting. No extra uncounted endpoint solve is used.
+Inner contact fixed points tighten their own physical stopping gate alongside
+Newton tolerances so they can satisfy the outer convection allowance.
+
+Capacity-only contact with derived convection, surface-law contact with
+radiation, contact history derivatives, air storage and time-varying flow remain
+outside this composition. Focused native regression cases exercise these joined
+owners; their runtime execution still requires the full dependency build.
