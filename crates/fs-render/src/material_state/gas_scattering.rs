@@ -13,7 +13,7 @@ mod composition;
 pub use composition::{
     GasCompositionGradientField, GasCompositionScatteringError, GasCompositionSecondOrderField,
     GasPartialDensityJet, GasPartialDensitySample, MaterialGasCompositionRefractiveField,
-    MaterialGasCompositionScatteringField,
+    MaterialGasCompositionScatteringField, PreparedMaterialGasCompositionRefractiveField,
 };
 
 use fs_blake3::{ContentHash, DomainHasher};

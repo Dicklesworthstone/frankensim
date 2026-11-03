@@ -84,6 +84,19 @@ pub struct MaterialGasCompositionRefractiveField<'a, F: GasCompositionGradientFi
     identity: ContentHash,
 }
 
+/// One wavelength's molecular coefficients, borrowed by any number of native
+/// curved-ray or angular-bundle solves. Preparation is stack-owned and never
+/// caches the spatial reconstruction: every stage still samples the original
+/// immutable provider. A query at another wavelength explicitly refuses.
+pub struct PreparedMaterialGasCompositionRefractiveField<
+    'binding,
+    'source,
+    F: GasCompositionGradientField + ?Sized,
+> {
+    field: &'binding MaterialGasCompositionRefractiveField<'source, F>,
+    spectral: MolecularRefractionWavelength<'source>,
+}
+
 impl<'a, F: GasCompositionGradientField + ?Sized> MaterialGasCompositionRefractiveField<'a, F> {
     /// Bind exact source/order identity and row count, then retain the caller's
     /// nonzero snapshot/reconstruction identity. An identity records a declared
@@ -127,12 +140,32 @@ impl<'a, F: GasCompositionGradientField + ?Sized> MaterialGasCompositionRefracti
         self.identity
     }
 
+    /// Prepare dispersion once before tracing this wavelength. The returned
+    /// field implements the same native gradient and, when supported by the
+    /// provider, Hessian interfaces. Retain it across rays, boundary segments
+    /// and connecting-ray trials to avoid repeating spectral preparation at
+    /// every adaptive ODE stage. No allocation or synchronized cache is used.
+    pub fn at_wavelength(
+        &self,
+        wavelength_nm: f64,
+    ) -> Result<PreparedMaterialGasCompositionRefractiveField<'_, 'a, F>, GasRefractiveFieldError>
+    {
+        Ok(PreparedMaterialGasCompositionRefractiveField {
+            field: self,
+            spectral: self
+                .model
+                .at_wavelength(wavelength_nm, self.basis)
+                .map_err(GasRefractiveFieldError::Gas)?,
+        })
+    }
+
     /// Original provider/material refusals remain available for diagnostics.
     pub fn sample_optics(
         &self,
         position_m: Point3,
         wavelength_nm: f64,
     ) -> Result<GradientIndexSample, GasRefractiveFieldError> {
+        // Preserve the unprepared API's provider-before-spectrum refusal order.
         admit_position(position_m)?;
         let mut buffer = [UNWRITTEN; MAX_GAS_MIXTURE_COMPONENTS];
         let samples = &mut buffer[..self.model.components().len()];
@@ -144,6 +177,21 @@ impl<'a, F: GasCompositionGradientField + ?Sized> MaterialGasCompositionRefracti
             .at_wavelength(wavelength_nm, self.basis)
             .map_err(GasRefractiveFieldError::Gas)?;
         self.optics(samples.iter(), &spectral)
+            .map(|(optical, _, _)| optical)
+    }
+
+    fn sample_prepared_optics(
+        &self,
+        position_m: Point3,
+        spectral: &MolecularRefractionWavelength<'_>,
+    ) -> Result<GradientIndexSample, GasRefractiveFieldError> {
+        admit_position(position_m)?;
+        let mut buffer = [UNWRITTEN; MAX_GAS_MIXTURE_COMPONENTS];
+        let samples = &mut buffer[..self.model.components().len()];
+        self.field
+            .sample_partial_densities(position_m, samples)
+            .map_err(GasRefractiveFieldError::Field)?;
+        self.optics(samples.iter(), spectral)
             .map(|(optical, _, _)| optical)
     }
 
@@ -204,7 +252,29 @@ impl<F: GasCompositionSecondOrderField + ?Sized> MaterialGasCompositionRefractiv
             .model
             .at_wavelength(wavelength_nm, self.basis)
             .map_err(GasRefractiveFieldError::Gas)?;
-        let (optical, index, g) = self.optics(samples.iter().map(|jet| &jet.sample), &spectral)?;
+        self.optical_jet(samples, &spectral)
+    }
+
+    fn sample_prepared_jet(
+        &self,
+        position_m: Point3,
+        spectral: &MolecularRefractionWavelength<'_>,
+    ) -> Result<IndexJet, GasRefractiveFieldError> {
+        admit_position(position_m)?;
+        let mut buffer = [UNWRITTEN_JET; MAX_GAS_MIXTURE_COMPONENTS];
+        let samples = &mut buffer[..self.model.components().len()];
+        self.field
+            .sample_partial_density_jets(position_m, samples)
+            .map_err(GasRefractiveFieldError::Field)?;
+        self.optical_jet(samples, spectral)
+    }
+
+    fn optical_jet(
+        &self,
+        samples: &[GasPartialDensityJet],
+        spectral: &MolecularRefractionWavelength<'_>,
+    ) -> Result<IndexJet, GasRefractiveFieldError> {
+        let (optical, index, g) = self.optics(samples.iter().map(|jet| &jet.sample), spectral)?;
         let mut diagonal = [0.0; 3];
         let mut off_diagonal = [0.0; 3];
         for (jet, coefficient) in samples.iter().zip(spectral.coefficients()) {
@@ -233,6 +303,80 @@ impl<F: GasCompositionSecondOrderField + ?Sized> MaterialGasCompositionRefractiv
         let hessian = IndexHessian::try_new(diagonal, off_diagonal)
             .map_err(|_| GasRefractiveFieldError::Field(GradientIndexError::NumericalRange))?;
         Ok(IndexJet::new(optical, hessian))
+    }
+}
+
+impl<F: GasCompositionGradientField + ?Sized>
+    PreparedMaterialGasCompositionRefractiveField<'_, '_, F>
+{
+    /// The sole vacuum wavelength admitted by this prepared field, in nanometres.
+    pub const fn wavelength_nm(&self) -> f64 {
+        self.spectral.wavelength_nm()
+    }
+
+    /// The original physical model/snapshot identity is unchanged by preparing
+    /// one of its wavelengths; molecular-scattering bindings retain this ID.
+    pub const fn content_identity(&self) -> ContentHash {
+        self.field.content_identity()
+    }
+
+    /// Sample the original partial densities and gradients using the retained
+    /// molecular coefficients. Provider and material refusals remain distinct.
+    pub fn sample_optics(
+        &self,
+        position_m: Point3,
+    ) -> Result<GradientIndexSample, GasRefractiveFieldError> {
+        self.field
+            .sample_prepared_optics(position_m, &self.spectral)
+    }
+
+    fn admit_wavelength(&self, wavelength_nm: f64) -> Result<(), GradientIndexError> {
+        if wavelength_nm == self.wavelength_nm() {
+            Ok(())
+        } else {
+            Err(crate::dielectric::DielectricError::InvalidWavelength.into())
+        }
+    }
+}
+
+impl<F: GasCompositionSecondOrderField + ?Sized>
+    PreparedMaterialGasCompositionRefractiveField<'_, '_, F>
+{
+    /// Sample the original partial-density jets with the same spectral
+    /// coefficients as ordinary refraction; no Hessian is approximated or cached.
+    pub fn sample_optical_jet(
+        &self,
+        position_m: Point3,
+    ) -> Result<IndexJet, GasRefractiveFieldError> {
+        self.field.sample_prepared_jet(position_m, &self.spectral)
+    }
+}
+
+impl<F: GasCompositionGradientField + ?Sized> GradientIndexField
+    for PreparedMaterialGasCompositionRefractiveField<'_, '_, F>
+{
+    fn sample(
+        &self,
+        position: Point3,
+        wavelength_nm: f64,
+    ) -> Result<GradientIndexSample, GradientIndexError> {
+        self.admit_wavelength(wavelength_nm)?;
+        self.sample_optics(position)
+            .map_err(GasRefractiveFieldError::into_gradient_error)
+    }
+}
+
+impl<F: GasCompositionSecondOrderField + ?Sized> SecondOrderIndexField
+    for PreparedMaterialGasCompositionRefractiveField<'_, '_, F>
+{
+    fn sample_second_order(
+        &self,
+        position: Point3,
+        wavelength_nm: f64,
+    ) -> Result<IndexJet, GradientIndexError> {
+        self.admit_wavelength(wavelength_nm)?;
+        self.sample_optical_jet(position)
+            .map_err(GasRefractiveFieldError::into_gradient_error)
     }
 }
 

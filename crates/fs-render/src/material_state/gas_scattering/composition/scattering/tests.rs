@@ -268,7 +268,7 @@ fn g1_effective_phase_preserves_the_complete_molecular_mueller_mixture() {
 }
 
 #[test]
-fn g1_native_curved_scene_consumes_this_exact_field_and_rejects_a_foreign_snapshot() {
+fn g1_native_curved_scene_consumes_prepared_optics_and_rejects_a_foreign_snapshot() {
     use crate::charts::TriMesh;
     use crate::gradient_index::event::GradientEventOptions;
     use crate::instances::{GeometryInstance, InstanceScene, RigidTransform, SharedGeometry};
@@ -303,6 +303,7 @@ fn g1_native_curved_scene_consumes_this_exact_field_and_rejects_a_foreign_snapsh
         let provider = CompositionField::new(&model, PartialDensityBasis::MassKgPerM3);
         let refractive = bind(&model, &provider);
         let scattering = refractive.bind_scattering_field(&[1.0, 1.0]).unwrap();
+        let prepared = refractive.at_wavelength(550.0).unwrap();
         let geometry = InstanceScene::try_new(vec![
             GeometryInstance::try_new(
                 71,
@@ -317,8 +318,8 @@ fn g1_native_curved_scene_consumes_this_exact_field_and_rejects_a_foreign_snapsh
         ])
         .unwrap();
         let media = [SceneMedium::GradientIndex {
-            field: &refractive,
-            identity: refractive.content_identity(),
+            field: &prepared,
+            identity: prepared.content_identity(),
         }];
         let bindings = vec![SurfaceBinding {
             object_id: 71,

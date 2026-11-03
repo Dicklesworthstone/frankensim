@@ -433,8 +433,9 @@ fn g1_molecular_dispersion_bends_chromatically_and_tracks_true_group_delay() {
         let colors = [380.0, 780.0].map(|lambda| {
             let start = field.sample(ray().origin, lambda).unwrap();
             assert!(start.group_index().unwrap() > start.phase_index());
+            let prepared = field.at_wavelength(lambda).unwrap();
             let result = propagate(
-                &field,
+                &prepared,
                 ray(),
                 Vec3::new(0.0, 0.0, 1.0),
                 lambda,
@@ -530,8 +531,9 @@ fn g1_spectral_composition_hessian_and_bundle_focusing_use_the_same_phase_law() 
         assert!(q < 0.0);
         let rate = (-q).sqrt();
         let expected = (40.0 * rate).sin() / rate;
+        let prepared = field.at_wavelength(lambda).unwrap();
         let bundle = propagate_bundle(
-            &field,
+            &prepared,
             ray(),
             Vec3::new(0.0, 1.0, 0.0),
             lambda,
@@ -556,4 +558,101 @@ fn g1_spectral_composition_hessian_and_bundle_focusing_use_the_same_phase_law() 
             2.0e-11,
         );
     }
+}
+
+#[test]
+fn g3_prepared_wavelength_preserves_native_curved_rays_and_focusing_exactly() {
+    for model in [model(), dispersive_model()] {
+        for basis in [
+            PartialDensityBasis::MassKgPerM3,
+            PartialDensityBasis::MoleculesPerM3,
+        ] {
+            let mut provider = CompositionField::new(&model, basis);
+            provider.gradient = [0.0, 0.3, -0.1];
+            provider.diagonal = [0.0, 0.05, 0.02];
+            provider.off_diagonal = [0.01, -0.01, 0.015];
+            let field = bind(&model, &provider);
+            for wavelength in [380.0, 550.0, 780.0] {
+                let prepared = field.at_wavelength(wavelength).unwrap();
+                assert_eq!(prepared.wavelength_nm(), wavelength);
+                assert_eq!(prepared.content_identity(), field.content_identity());
+                let point = Point3::new(0.1, -0.2, 0.3);
+                assert_eq!(
+                    prepared.sample_optics(point).unwrap(),
+                    field.sample_optics(point, wavelength).unwrap()
+                );
+                assert_eq!(
+                    prepared.sample_optical_jet(point).unwrap(),
+                    field.sample_optical_jet(point, wavelength).unwrap()
+                );
+                let axis = Vec3::new(0.0, 1.0, 0.0);
+                let original = propagate(&field, ray(), axis, wavelength, 5.0, options()).unwrap();
+                let reused = propagate(&prepared, ray(), axis, wavelength, 5.0, options()).unwrap();
+                assert!(reused.field_evaluations > 6);
+                assert_eq!(reused, original);
+                let bundle_options = BundleOptions {
+                    integration: options(),
+                    ..Default::default()
+                };
+                let original =
+                    propagate_bundle(&field, ray(), axis, wavelength, 5.0, bundle_options).unwrap();
+                let reused =
+                    propagate_bundle(&prepared, ray(), axis, wavelength, 5.0, bundle_options)
+                        .unwrap();
+                assert_eq!(reused, original);
+                assert_eq!(
+                    reused
+                        .project_at_endpoint(ray().dir, ProjectionOptions::default())
+                        .unwrap(),
+                    original
+                        .project_at_endpoint(ray().dir, ProjectionOptions::default())
+                        .unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_prepared_wavelength_retains_spectral_and_provider_refusals() {
+    let model = dispersive_model();
+    let mut provider = CompositionField::new(&model, PartialDensityBasis::MassKgPerM3);
+    let field = bind(&model, &provider);
+    for bad in [379.0, 781.0, f64::NAN, f64::INFINITY] {
+        assert!(field.at_wavelength(bad).is_err());
+    }
+    let prepared = field.at_wavelength(550.0).unwrap();
+    for wrong in [380.0, 550.0 + f64::EPSILON * 550.0, 780.0, f64::NAN] {
+        let expected =
+            GradientIndexError::Dielectric(crate::dielectric::DielectricError::InvalidWavelength);
+        assert_eq!(prepared.sample(ray().origin, wrong), Err(expected));
+        assert_eq!(
+            prepared.sample_second_order(ray().origin, wrong),
+            Err(expected)
+        );
+    }
+    assert_eq!(
+        prepared.sample(Point3::new(f64::NAN, 0.0, 0.0), 550.0),
+        Err(GradientIndexError::InvalidSample)
+    );
+    provider.refusal = Some(GradientIndexError::OutsideFieldDomain);
+    let field = bind(&model, &provider);
+    // Existing unprepared entry points retain provider-before-spectrum errors.
+    assert_eq!(
+        field.sample(ray().origin, f64::NAN),
+        Err(GradientIndexError::OutsideFieldDomain)
+    );
+    assert_eq!(
+        field.sample_second_order(ray().origin, f64::NAN),
+        Err(GradientIndexError::OutsideFieldDomain)
+    );
+    let prepared = field.at_wavelength(550.0).unwrap();
+    assert_eq!(
+        prepared.sample(ray().origin, 550.0),
+        Err(GradientIndexError::OutsideFieldDomain)
+    );
+    assert_eq!(
+        prepared.sample_second_order(ray().origin, 550.0),
+        Err(GradientIndexError::OutsideFieldDomain)
+    );
 }

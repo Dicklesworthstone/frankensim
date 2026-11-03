@@ -3811,6 +3811,17 @@ invalid/source/missing-row refusals. Two additional spectral regressions cover
 blue/red bending, spatial Hessians, analytic lens focusing and homogeneous
 and curved group-delay accumulation under the same explicit optical sources.
 
+`MaterialGasCompositionRefractiveField::at_wavelength` retains the material's
+stack-owned spectral preparation across native curved-ray stages, angular-bundle
+stages, boundary segments and connecting-ray trials. Its borrowed
+`PreparedMaterialGasCompositionRefractiveField` implements both existing field
+interfaces without a cache, lock or new optical law. Spatial values and jets
+still query the original provider; source/snapshot identity remains unchanged.
+A different wavelength refuses explicitly, so a prepared blue field cannot
+silently supply red refraction or delay. Focused regressions compare complete
+ray/bundle results exactly in both density bases, with and without sourced
+dispersion, and exercise the prepared field in the native curved molecular scene.
+
 `MaterialGasCompositionRefractiveField::bind_scattering_field` borrows that exact
 refractive model, provider, density basis and snapshot for native curved molecular
 transport. A stack-owned componentwise upper-density vector must satisfy the
