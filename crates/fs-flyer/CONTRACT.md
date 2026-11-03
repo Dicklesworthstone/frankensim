@@ -1595,3 +1595,46 @@ changes; aircraft and longitudinal pins and all physical bands are unchanged.
 As in the preceding velocity checks, this bounded source-selected build
 omits the unused continuation branch and unrelated runtime modules; it is not
 a full workspace Cargo or lifecycle validation.
+
+## Steady angular wake momentum in two-way geared propulsion
+
+`propcoupling::swirl::coupled_step` selects the native two-component
+`fs_airscrew::swirl` solver inside the original two-way wing/rotor iteration.
+Actual swirl changes the blade thrust, required shaft torque, wing wash and
+accepted circulation. `CoupledSwirlStep` retains both complete annular
+momentum solutions from the same accepted evaluation; no diagnostic rotor
+re-solve or one-way fallback supplies the published loads. `CoupledStep<P =
+BemtPower>` preserves the existing default while this explicit variant carries
+the native axial, angular-wake and profile power components separately.
+
+The original iteration, correction budget, rollback and per-disk residual
+gate are shared without arithmetic changes. Rotor continuation uses fixed
+caller-supplied annular seeds throughout each outer solve, so rejected outer
+trials never become new branch anchors. The complete accepted solution can
+produce the next `WarmStart`. These seeds are numerical data, not added air
+inertia or physical momentum. Model identity includes the selected swirl
+law and its native bounded-solve controls; the ordinary coupling digest stays
+unchanged.
+
+`spine::rotors::propulsion::swirl::SwirlPropulsion` binds this selection to an
+existing admitted `GearedPropulsion`. It reuses the same material-air sampling,
+spatial disk axes, wing force/moment assembly and absolute physical shaft
+rates. Required aerodynamic torque enters the existing external shaft ports
+with the actual blade handedness. It is not added again to the carrier-only
+wrench. Actual start and midpoint wing/swirl evaluations drive the original
+geared six-DOF step, including rotor acceleration, internal motor recoil,
+gyroscopic response, spin-plus-orbital momentum and physical work.
+
+Five regressions in `tests/swirl_propulsion.rs` establish two-way force and
+circulation changes, independent disk-inflow/native-solution reconstruction,
+signed shaft power, co-rotating torque ownership, actual global momentum
+change versus external impulse, regenerative windmilling acceleration, canted
+shaft world-frame covariance, and bounded/late-stage atomic refusal.
+Existing no-swirl force/torque and coupling golden arithmetic is preserved.
+
+The spatial wash supplied to wings and other disks remains the existing
+axial actuator-disk field. This selection adds no transported helical-wake
+velocity, dynamic swirl memory, radial pressure/contraction, reversed-flow
+closure, combination with harmonic wake models, historical calibration or
+whole-aircraft/fluid conservation theorem. Native original-module checks
+are distinct from full-workspace Cargo, cross-platform or real-time gates.

@@ -25,6 +25,9 @@ use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, StripSpec};
 #[path = "propulsion/dynamic.rs"]
 pub mod dynamic;
 
+#[path = "propulsion/swirl.rs"]
+pub mod swirl;
+
 /// Blade handedness relative to a mounted rotor's declared positive spin axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropellerHandedness {
@@ -130,7 +133,7 @@ trait AerodynamicSolution {
     fn load_fields(&self) -> AerodynamicFields<'_>;
 }
 
-impl AerodynamicSolution for CoupledStep {
+impl<P> AerodynamicSolution for CoupledStep<P> {
     fn load_fields(&self) -> AerodynamicFields<'_> {
         AerodynamicFields {
             gamma: &self.gamma,

@@ -29,6 +29,9 @@ use fs_wing::{Panel, induced_velocity_free};
 #[path = "propcoupling/spatial.rs"]
 pub mod spatial;
 
+#[path = "propcoupling/swirl.rs"]
+pub mod swirl;
+
 #[path = "propcoupling/disk_wash.rs"]
 pub(crate) mod disk_wash;
 
@@ -115,7 +118,7 @@ pub struct IncidentInflow<'a> {
 
 /// The coupled result.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CoupledStep {
+pub struct CoupledStep<P = BemtPower> {
     /// Converged disk-induced axial velocities [vi_L, vi_R] [m/s].
     pub w_slip: [f64; 2],
     /// L/R thrust [N].
@@ -126,7 +129,9 @@ pub struct CoupledStep {
     /// Thrust power uses local disk incident air, including the wing field;
     /// it is not the complete aircraft/wake energy balance. Induced/profile
     /// terms retain their original annular meanings and are not added as heat.
-    pub power: [BemtPower; 2],
+    /// The default is the original axial `BemtPower`; the explicitly selected
+    /// swirl coupling retains its separate angular wake power in `P`.
+    pub power: [P; 2],
     /// Wing total lift under the converged slipstream [N].
     pub wing_lift_n: f64,
     /// Converged per-panel circulations (the washed solve's Γ — the
@@ -300,12 +305,60 @@ fn coupled_step_impl(
     incident: Option<IncidentInflow<'_>>,
     spatial: Option<spatial::DiskAxes>,
 ) -> Result<CoupledStep, Refusal> {
-    let map_err = |e: fs_wing::Refusal| Refusal {
+    let map_err_a = |e: fs_airscrew::Refusal| Refusal {
         code: e.code,
         message: e.message,
         ranked_repairs: e.ranked_repairs,
     };
-    let map_err_a = |e: fs_airscrew::Refusal| Refusal {
+    coupled_step_with_rotors(
+        op,
+        panels,
+        strips,
+        closure,
+        rotor,
+        disks,
+        freestream,
+        rho,
+        spec,
+        warm,
+        incident,
+        spatial,
+        |_, axial, omega| {
+            let sol = bemt_solve(rotor, rho, axial, omega).map_err(map_err_a)?;
+            Ok(RotorLoads {
+                thrust_n: sol.thrust_n,
+                torque_nm: sol.torque_nm,
+                power: sol.power,
+            })
+        },
+    )
+}
+
+struct RotorLoads<P> {
+    thrust_n: f64,
+    torque_nm: f64,
+    power: P,
+}
+
+/// The same two-way iteration and acceptance for explicitly selected rotor
+/// laws. Only the actual rotor evaluation and its power payload vary.
+#[allow(clippy::too_many_arguments)]
+fn coupled_step_with_rotors<P: Copy>(
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    closure: SectionClosure<'_>,
+    rotor: &Rotor,
+    disks: &[PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    spec: &PropCouplingSolverSpec,
+    warm: Option<[f64; 2]>,
+    incident: Option<IncidentInflow<'_>>,
+    spatial: Option<spatial::DiskAxes>,
+    mut rotor_solve: impl FnMut(usize, f64, f64) -> Result<RotorLoads<P>, Refusal>,
+) -> Result<CoupledStep<P>, Refusal> {
+    let map_err = |e: fs_wing::Refusal| Refusal {
         code: e.code,
         message: e.message,
         ranked_repairs: e.ranked_repairs,
@@ -358,14 +411,14 @@ fn coupled_step_impl(
     let mut unrelaxed_done = false;
     // One evaluation of the fixed-point map G(x): wing under slipstream x,
     // disk inflows, BEMT, momentum slipstream.
-    type EvalOut = (
+    type EvalOut<P> = (
         [f64; 2],
         [f64; 2],
         [f64; 2],
-        [BemtPower; 2],
+        [P; 2],
         fs_wing::nonlinear::NonlinearReport,
     );
-    let evaluate = |x: &[f64; 2]| -> Result<EvalOut, Refusal> {
+    let mut evaluate = |x: &[f64; 2]| -> Result<EvalOut<P>, Refusal> {
         let du: Vec<f64> = if spatial.is_none() {
             wash.iter()
                 .map(|&factors| strip_wash(factors, *x))
@@ -411,13 +464,7 @@ fn coupled_step_impl(
         let mut g = [0.0f64; 2];
         let mut thrust = [0.0f64; 2];
         let mut torque = [0.0f64; 2];
-        let mut power = [BemtPower {
-            shaft_power_w: 0.0,
-            thrust_power_w: 0.0,
-            induced_power_w: 0.0,
-            profile_drag_power_w: 0.0,
-            residual_w: 0.0,
-        }; 2];
+        let mut power = [None; 2];
         for k in 0..2 {
             let vi = induced_velocity_free(disks[k].center_m, panels, &wing.gamma, freestream);
             let mut disk_incident = incident.map_or(freestream, |flow| flow.disk_velocity_mps[k]);
@@ -447,14 +494,20 @@ fn coupled_step_impl(
             } else {
                 (axial + vi[0]).max(0.1)
             };
-            let sol = bemt_solve(rotor, rho, v_disk, disks[k].omega_rad_s).map_err(map_err_a)?;
+            let sol = rotor_solve(k, v_disk, disks[k].omega_rad_s)?;
             thrust[k] = sol.thrust_n;
             torque[k] = sol.torque_nm;
-            power[k] = sol.power;
+            power[k] = Some(sol.power);
             let t_term = sol.thrust_n / (2.0 * rho * disk_area);
             g[k] = momentum_disk_root(v_disk, t_term)?;
         }
-        Ok((g, thrust, torque, power, wing))
+        Ok((
+            g,
+            thrust,
+            torque,
+            power.map(|p| p.expect("both rotors evaluated")),
+            wing,
+        ))
     };
     loop {
         let (g, thrust, torque, power, wing) = evaluate(&x)?;
