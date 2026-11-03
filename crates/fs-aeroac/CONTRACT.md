@@ -290,9 +290,11 @@ material scaling and domain/representability refusals.
   law as data (the marketing-mutation guard asserts it).
 - `regime` — bead l011o: pinned CentralMoment 2D tonal-lock rows
   (`PINNED_2D_CENTRAL_MOMENT_TONAL`), the named inverse-cascade mechanism,
-  `admit_broadband_spectrum` (refuses flatness at or below
+  `admit_broadband_spectrum` (refuses values outside `[0, 1]` and at or below
   `TONAL_FLATNESS_CEILING`), `measure_spectral_flatness` /
-  `classify_spectrum` (geometric/arithmetic power-mean; no table is
+  `classify_spectrum` (geometric/arithmetic power-mean over all supplied bins;
+  zero bins give zero flatness in a nonzero band, negative/nonfinite power and
+  a silent band refuse, and no noise floor is inserted; no table is
   minted), and `evaluate_slot_jet_3d_operator` (D3Q19 CentralMoment
   smoke). `SlotJet3dOperatorSmoke::incorporate_measured_spectrum`
   raises `broadband_demonstrated` only from a real spectrum that

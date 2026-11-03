@@ -10,6 +10,7 @@
 use crate::AeroacError;
 use crate::SCOPE_STATEMENT;
 use fs_lbm::d3q19::{CollisionModel3, equilibrium3};
+use fs_math::{dd::Dd, det};
 
 /// Mechanism recorded for the 2D tonal lock.
 pub const TWO_D_INVERSE_CASCADE: &str = "2D Navier-Stokes inverse-cascades kinetic energy \
@@ -127,36 +128,70 @@ pub const fn two_d_broadband_refusal() -> TwoDBroadbandRefusal {
     }
 }
 
-/// Geometric-to-arithmetic mean of a one-sided power spectrum.
+/// Geometric-to-arithmetic mean over every supplied one-sided power bin.
 ///
-/// White noise → 1. A pure tone → 0. This is the measurement the
-/// 3-D jet hunt must pass; it does not mint a broadband table.
+/// A flat nonzero spectrum gives one. Any zero bin in a nonzero spectrum
+/// gives zero; it is part of the declared band, not a bin to discard. No
+/// noise floor is invented. This is the measurement the 3-D jet hunt must
+/// pass; a high flatness alone does not establish turbulent broadband sound.
+/// The geometric/arithmetic definition follows Peeters (2004), as documented
+/// by <https://essentia.upf.edu/reference/streaming_Flatness.html>.
+///
+/// Two allocation-free passes normalize by the largest power and accumulate
+/// logarithms, so a common power-unit rescaling cannot overflow the sum or
+/// underflow the geometric mean before their ratio is formed.
 ///
 /// # Errors
-/// [`AeroacError`] if fewer than two finite positive bins remain.
+/// [`AeroacError`] for fewer than two bins, negative/nonfinite power, or an
+/// entirely silent band (the undefined ratio zero/zero).
 pub fn measure_spectral_flatness(power: &[f64]) -> Result<f64, AeroacError> {
-    let mut n = 0.0;
-    let mut sum = 0.0;
-    let mut log_sum = 0.0;
+    let mut maximum = 0.0_f64;
+    let mut has_zero = false;
     for &p in power {
         if !p.is_finite() {
             return Err(AeroacError::NonFinite {
                 what: "spectral power",
             });
         }
-        if p > 0.0 {
-            n += 1.0;
-            sum += p;
-            log_sum += p.ln();
+        if p < 0.0 {
+            return Err(AeroacError::InvalidParameter {
+                what: "spectral power must be nonnegative",
+            });
         }
+        maximum = maximum.max(p);
+        has_zero |= p == 0.0;
     }
-    if n < 2.0 || !(sum > 0.0) {
+    if power.len() < 2 || maximum == 0.0 {
         return Err(AeroacError::InvalidParameter {
-            what: "spectral flatness needs at least two positive power bins",
+            what: "spectral flatness needs at least two bins and nonzero band power",
         });
     }
-    let arith = sum / n;
-    Ok((log_sum / n).exp() / arith)
+    // Validate the complete band before this exact zero-product branch: a
+    // later negative/nonfinite bin must not disappear behind an earlier zero.
+    if has_zero {
+        return Ok(0.0);
+    }
+    let mut sum = Dd::ZERO;
+    let mut log_sum = Dd::ZERO;
+    let log_maximum = det::ln(maximum);
+    for &p in power {
+        let scaled = p / maximum;
+        sum = sum + Dd::from_f64(scaled);
+        // A positive original bin may scale into the subnormal range or zero.
+        // Its logarithm still matters; never mistake division underflow for a
+        // physically empty bin. Ordinary ratios avoid cancellation of logs.
+        let log_scaled = if scaled >= f64::MIN_POSITIVE {
+            det::ln(scaled)
+        } else {
+            det::ln(p) - log_maximum
+        };
+        log_sum = log_sum + Dd::from_f64(log_scaled);
+    }
+    let n = Dd::from_f64(power.len() as f64);
+    let log_flatness = (log_sum / n).to_f64() - det::ln((sum / n).to_f64());
+    // AM >= GM exactly. Enforce only this upper endpoint against rounding
+    // near a flat spectrum, without flooring small positive powers or ratios.
+    Ok(det::exp(log_flatness.min(0.0)))
 }
 
 /// A measured spectrum classified against [`TONAL_FLATNESS_CEILING`].
@@ -190,12 +225,18 @@ pub fn classify_spectrum(power: &[f64]) -> Result<SpectrumClass, AeroacError> {
 /// Refuse to treat a spectrum as broadband flute noise.
 ///
 /// # Errors
-/// [`AeroacError::InvalidParameter`] when `flatness` is non-finite or
-/// at or below [`TONAL_FLATNESS_CEILING`].
+/// [`AeroacError::NonFinite`] for nonfinite input, or
+/// [`AeroacError::InvalidParameter`] outside `[0, 1]` or at or below
+/// [`TONAL_FLATNESS_CEILING`].
 pub fn admit_broadband_spectrum(flatness: f64) -> Result<(), AeroacError> {
     if !flatness.is_finite() {
         return Err(AeroacError::NonFinite {
             what: "spectral flatness",
+        });
+    }
+    if !(0.0..=1.0).contains(&flatness) {
+        return Err(AeroacError::InvalidParameter {
+            what: "spectral flatness must lie in [0, 1]",
         });
     }
     if flatness <= TONAL_FLATNESS_CEILING {

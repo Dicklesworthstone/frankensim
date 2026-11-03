@@ -83,3 +83,75 @@ fn spectral_flatness_classifies_tone_and_white_without_minting_a_table() {
         "a measured white spectrum may raise the flag; a 3-D jet table is not invented"
     );
 }
+
+#[test]
+fn g0_zero_bins_remain_in_the_band_and_cannot_make_lines_broadband() {
+    let spec = SlotJet3dFollowUp::minimal_central_moment();
+    let smoke = evaluate_slot_jet_3d_operator(spec).unwrap();
+    for power in [[1.0, 0.0, 0.0, 1.0], [0.0, 4.0, 0.0, 0.0]] {
+        assert_eq!(measure_spectral_flatness(&power).unwrap(), 0.0);
+        assert_eq!(
+            classify_spectrum(&power).unwrap(),
+            SpectrumClass::Tonal { flatness: 0.0 }
+        );
+        assert!(
+            !smoke
+                .incorporate_measured_spectrum(&power, spec.broadband_flatness_floor)
+                .unwrap()
+                .broadband_demonstrated
+        );
+    }
+    assert!(matches!(
+        classify_spectrum(&[1.0, 1.0]).unwrap(),
+        SpectrumClass::Broadband { .. }
+    ));
+}
+
+#[test]
+fn g1_flatness_known_answer_and_g3_power_unit_invariance() {
+    // sqrt(1 * 4) / ((1 + 4) / 2) = 4/5, independently of power units.
+    for scale in [2.0_f64.powi(-1000), 1.0, 2.0_f64.powi(1000)] {
+        let measured = measure_spectral_flatness(&[scale, 4.0 * scale]).unwrap();
+        assert!((measured - 0.8).abs() < 3e-15, "{scale}: {measured}");
+    }
+    // Neither an overflowing raw sum nor an underflowing raw product may
+    // make a flat spectrum tonal. Equal nonzero bins give exactly one.
+    for level in [f64::from_bits(1), f64::MIN_POSITIVE, 1.0, f64::MAX] {
+        assert_eq!(measure_spectral_flatness(&[level; 64]).unwrap(), 1.0);
+    }
+}
+
+#[test]
+fn g1_positive_bins_survive_extreme_dynamic_range_without_a_noise_floor() {
+    let low = f64::from_bits(1);
+    let high = f64::MAX;
+    assert_eq!(low / high, 0.0);
+    // Factor the square root before multiplication; neither intermediate
+    // over/underflows, unlike low/high or the unscaled product reduction.
+    let expected = low.sqrt() * high.sqrt() / (high / 2.0);
+    let measured = measure_spectral_flatness(&[low, high]).unwrap();
+    assert!(measured > 0.0);
+    assert!((measured - expected).abs() <= 32.0 * low);
+}
+
+#[test]
+fn g0_invalid_power_and_impossible_flatness_are_refused() {
+    for power in [vec![], vec![1.0], vec![0.0, 0.0], vec![1.0, -1.0]] {
+        assert!(matches!(
+            measure_spectral_flatness(&power),
+            Err(AeroacError::InvalidParameter { .. })
+        ));
+    }
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            measure_spectral_flatness(&[0.0, 1.0, invalid]),
+            Err(AeroacError::NonFinite { .. })
+        ));
+        assert!(admit_broadband_spectrum(invalid).is_err());
+    }
+    assert!(measure_spectral_flatness(&[0.0, 1.0, -1.0]).is_err());
+    for invalid in [-1.0, 1.0 + f64::EPSILON, f64::MAX] {
+        assert!(admit_broadband_spectrum(invalid).is_err());
+    }
+    admit_broadband_spectrum(1.0).unwrap();
+}
