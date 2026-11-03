@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use super::topology::{circulation_is_closed, node_key};
 use super::{FarCell, FarField, cell_from_segs_with_cores};
 use crate::filament3d::advection::stage::{PreparedSources, StageSettings, integrate_nodes};
 use crate::filament3d::advection::{LineMotion, append_near_sources, prepare_near};
@@ -149,12 +150,6 @@ impl Bindings {
     }
 }
 
-fn node_key(point: [f64; 3]) -> [u64; 3] {
-    // Finite geometry is admitted before indexing. Signed zero is a single
-    // physical location, while all other coordinates keep their exact bits.
-    point.map(|v| if v == 0.0 { 0 } else { v.to_bits() })
-}
-
 fn shared_nodes(
     near: &FilamentWake,
     far: &FarField,
@@ -271,65 +266,12 @@ fn admit_sources(
     Ok(count)
 }
 
-#[derive(Default)]
-struct Balance {
-    sum: f64,
-    correction: f64,
-    magnitude: f64,
-}
-
-impl Balance {
-    fn add(&mut self, value: f64) {
-        let next = self.sum + value;
-        self.correction += if self.sum.abs() >= value.abs() {
-            (self.sum - next) + value
-        } else {
-            (value - next) + self.sum
-        };
-        self.sum = next;
-        self.magnitude += value.abs();
-    }
-
-    fn closed(&self) -> bool {
-        self.magnitude.is_finite()
-            && (self.sum + self.correction).abs() <= 64.0 * f64::EPSILON * self.magnitude
-    }
-}
-
 fn admit_circulation(
     near: &FilamentWake,
     far: &FarField,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), Refusal> {
-    let mut balances = BTreeMap::<[u64; 3], Balance>::new();
-    let mut count = 0_usize;
-    let mut failure = None;
-    let mut add = |a, b, gamma: f64| {
-        if failure.is_some() {
-            return;
-        }
-        if count % 256 == 0 {
-            if let Err(error) = checkpoint(cancelled) {
-                failure = Some(error);
-                return;
-            }
-        }
-        count += 1;
-        balances.entry(node_key(a)).or_default().add(-gamma);
-        balances.entry(node_key(b)).or_default().add(gamma);
-    };
-    for cell in &far.cells {
-        for &(a, b, gamma) in &cell.segs {
-            add(a, b, gamma);
-        }
-    }
-    near.visit_segments_with_core_growth(0.0, |source| {
-        add(source.start, source.end, source.circulation);
-    });
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if balances.values().any(|value| !value.closed()) {
+    if !circulation_is_closed(near, far, || checkpoint(cancelled))? {
         return Err(refusal(
             "wake-advection-topology-invalid",
             "retained near/far sources have unbalanced vortex endpoints",

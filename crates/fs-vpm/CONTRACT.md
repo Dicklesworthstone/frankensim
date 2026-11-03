@@ -554,6 +554,47 @@ integrals per station, finite-core velocity/Jacobian/curl at multiple core
 growth rates, retained material age and buffers, attached near/far continuity,
 row limits, idempotence and cancellation/late-refusal atomicity.
 
+## Complete physical wake impulse and interval exchange
+
+`FarField::hydrodynamic_impulse_per_density(near, origin_m, max_sources,
+cancelled)` returns a `WakeImpulse` containing all three linear and angular
+geometric impulse components of the supplied closed physical filament set.
+It uses the near sheet's physical shared edges, including its closing lifting
+line, and every retained exact far segment. Core growth, multipole caches and
+image devices do not enter these moments. Signed endpoint circulation must
+close within roundoff, using the same deterministic checker as hybrid
+advection. An open pruned or mismatched interface refuses; removal of an entire
+closed component requires separate caller accounting because closure alone
+cannot detect that missing history.
+
+A nearby deterministic anchor and compensated sums retain both moments before
+origin transport. `about_origin` re-expresses angular impulse without revisiting
+sources, preserving `J(O+a)=J(O)-a cross I`. `exchange_since` first differences
+the local compensated moments and then transports the difference, so a small
+change need not disappear between two large rounded world-origin readouts.
+Both endpoints use the later snapshot's origin as one fixed spatial reference;
+changing only a query origin generates no exchange.
+
+`WakeImpulseExchange` reports positive wake linear/angular impulse changes in
+N s and N m s for one declared constant uniform density, together with their
+negative mean force/moment equivalents over a positive elapsed interval. These
+are contributions from the represented wake, not a complete aircraft load
+model or arbitrary control-volume momentum. No load is automatically applied.
+Omitted body/bound vorticity, potential/added-mass impulse, imposed flow,
+supports, outer boundaries and numerical conversion/pruning changes retain
+their separate physical owners.
+
+The source cap precedes the near-geometry scan and bounds conservative
+near-edge capacity plus retained far records; far-cell count is separately
+capped, including empty cells. Closure uses O(N) scratch and O(N log N)
+indexing; geometric accumulation is linear. Source sweeps checkpoint every
+256 visits and before returning, and typed numerical/cap/cancellation refusals
+return no partial diagnostic. `tests/hybrid_impulse3d.rs` covers independent
+closed-edge integrals, partition equality, translation/rotation and origin
+transport, pure angular impulse, a small exchange hidden by a distant origin,
+supported-ring dynamics, density/time/sign conventions, image/core/cache
+exclusion, source bounds and refusal/cancellation.
+
 ## Self-induced attached near-wake motion
 
 `FilamentWake::shed_self_induced` convects the existing connected near wake

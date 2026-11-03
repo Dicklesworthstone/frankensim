@@ -24,6 +24,13 @@ use fs_blake3::hash_domain;
 #[path = "farfield3d/advection.rs"]
 mod advection;
 
+#[path = "farfield3d/topology.rs"]
+mod topology;
+
+#[path = "farfield3d/impulse.rs"]
+mod impulse;
+pub use impulse::{WakeImpulse, WakeImpulseExchange};
+
 /// Registered core-evolution mode (enters identity).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WakeCoreEvolutionMode {
