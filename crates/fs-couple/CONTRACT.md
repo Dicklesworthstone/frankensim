@@ -21762,6 +21762,33 @@ response with an independent six-dimensional spatial-mass solve, rotated and
 translated systems, support reactions, continuing motion, small loss during
 large common translation, and refused/cancelled events with a valid retry.
 
+### Coulomb glancing impacts on the same continuing states
+
+`RodMotion::apply_rigid_frictional_impact` extends this interface through
+`rigid_impact::friction`. The original centered/eccentric rod inertia, supported
+translation/frame masks, rigid full tensor and original material arms supply
+one complete normal-first 3x3 Delassus matrix. The existing
+`fs_contact::frictional_multicontact::solve_frictional_contacts` solves restitution
+and both Coulomb tangent components together using an explicitly selected
+interface coefficient. One accepted world vector acts on the rod and its
+opposite on the finite body through their original impulse owners. A nonzero
+tangent impulse requires collocated witnesses within the geometry allowance;
+their actual separation still participates in angular admission, without moving
+either point.
+
+The normal and frictional entries share the same compensated audit of actual
+stored momentum and pair kinetic increments, original stationary-support
+reactions, and independent endpoint/work gates. Both returned states retain
+original clocks, histories and continuing integrators; zero impulses preserve
+their bits. Coulomb determinacy, budget, source-state, geometry, cancellation
+or late balance refusal publishes neither state. Total impact loss remains
+distinct from a thermal/friction partition. Focused tests cover analytic
+sticking/sliding, zero-friction parity, independent 6x6 eccentric-inertia
+response, world-frame/boost/tangent-basis covariance, additional glancing spin,
+stationary support reactions, continuation and transactional retry. This
+remains an isolated frozen-pose event, not persistent contact, collision
+discovery or a simultaneous-contact island.
+
 ## Source-backed ellipsoidal fluid carriers
 
 `material_immersed::RetainedFluidEllipsoids` binds one centered uniform

@@ -1,4 +1,8 @@
 //! G0/G1/G3/G4: actual momentum exchange with a finite rigid participant.
+
+#[path = "rigid_impact/friction.rs"]
+mod friction;
+
 use super::*;
 use fs_couple::rod_motion::SpatialRodMotion;
 use fs_couple::rod_motion::impulse::RodImpulseControls;
