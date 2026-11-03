@@ -1,6 +1,6 @@
 //! Independent simultaneous-impact oracles through the native coupled inertia.
 
-use fs_contact::multicontact::{MultiImpactConfig, MultiImpactError};
+use fs_contact::multicontact::{MultiImpactConfig, MultiImpactDeterminacy, MultiImpactError};
 use fs_ga::{Mat3, Quat, Se3, So3, Twist, Vec3};
 use fs_mbd::articulated::{
     ArticulatedModel, FreeFloatingBaseState, JointModel, Link, SpatialInertia,
@@ -17,10 +17,10 @@ mod friction;
 #[path = "articulated_contacts/tangential.rs"]
 mod tangential;
 
-#[path = "articulated_contacts/planar.rs"]
-mod planar;
 #[path = "articulated_contacts/momentum.rs"]
 mod momentum;
+#[path = "articulated_contacts/planar.rs"]
+mod planar;
 
 fn close(actual: f64, expected: f64) {
     assert!(
@@ -508,11 +508,11 @@ fn feasible_pairwise_restitution_cannot_publish_global_energy_creation() {
     close(result.energy_balance_residual, 0.0);
 }
 
-/// G4: redundant normals have nonunique load distributions and cannot be
-/// silently assigned arbitrary impulses by this strictly positive-definite
-/// solver. A cancelled event likewise publishes no body endpoint state.
+/// G1/G4: redundant normals determine the same body response as the original
+/// single row, retaining explicit nonunique load-distribution semantics. A
+/// cancelled event still publishes no body endpoint state.
 #[test]
-fn redundant_constraints_and_cancellation_refuse_without_state_publication() {
+fn redundant_constraints_retain_physical_response_and_cancellation_remains_atomic() {
     let model = body(2.0, 0.5);
     let state = system(
         &model,
@@ -522,15 +522,81 @@ fn redundant_constraints_and_cancellation_refuse_without_state_publication() {
     );
     let before = free_floating_momentum(&model, state.base, &[], &[]).unwrap();
     let contact = plane(Vec3::new(-1.0, 0.0, 0.0), Vec3::default(), 0.5);
+    let redundant = resolve_articulated_contacts(
+        &[state],
+        &[contact, contact],
+        MultiImpactConfig::default(),
+        || false,
+    )
+    .unwrap();
+    let single =
+        resolve_articulated_contacts(&[state], &[contact], MultiImpactConfig::default(), || false)
+            .unwrap();
+    assert!(matches!(
+        redundant.normal_law.determinacy,
+        MultiImpactDeterminacy::UniqueVelocity(_)
+    ));
+    close(
+        redundant.normal_impulses.iter().sum(),
+        single.normal_impulses[0],
+    );
+    close_vector(
+        redundant.responses[0].base_after.twist_body.linear,
+        single.responses[0].base_after.twist_body.linear,
+    );
+    close_vector(
+        redundant.responses[0].base_after.twist_body.angular,
+        single.responses[0].base_after.twist_body.angular,
+    );
+    for speed in &redundant.relative_normal_speeds_after {
+        close(*speed, 0.5);
+    }
+    close(redundant.dissipated_energy, single.dissipated_energy);
+    close(redundant.energy_balance_residual, 0.0);
+    close_vector(redundant.linear_momentum_residual, Vec3::default());
+    close_vector(redundant.angular_momentum_residual, Vec3::default());
+
+    let tangentially_moving = ArticulatedNormalContact {
+        other: ContactCounterpart::PrescribedPlane {
+            point_world: Vec3::new(-1.0, 0.0, 0.0),
+            velocity_world: Vec3::new(0.2, 0.0, -0.3),
+        },
+        ..contact
+    };
+    let unchanged = resolve_articulated_contacts(
+        &[state],
+        &[contact, tangentially_moving],
+        MultiImpactConfig::default(),
+        || false,
+    )
+    .unwrap();
+    close_vector(
+        unchanged.responses[0].base_after.twist_body.linear,
+        single.responses[0].base_after.twist_body.linear,
+    );
+    close_vector(
+        unchanged.responses[0].base_after.twist_body.angular,
+        single.responses[0].base_after.twist_body.angular,
+    );
+    close(unchanged.plane_work, 0.0);
+    close(unchanged.energy_balance_residual, 0.0);
+
+    let independently_moving = ArticulatedNormalContact {
+        other: ContactCounterpart::PrescribedPlane {
+            point_world: Vec3::new(-1.0, 0.0, 0.0),
+            velocity_world: Vec3::new(0.0, 0.1, 0.0),
+        },
+        ..contact
+    };
     assert!(matches!(
         resolve_articulated_contacts(
             &[state],
-            &[contact, contact],
+            &[contact, independently_moving],
             MultiImpactConfig::default(),
             || false
         ),
         Err(ArticulatedContactError::ContactLaw(
-            MultiImpactError::Solver(_)
+            MultiImpactError::UnresolvedWork { .. }
         ))
     ));
     let contacts = [

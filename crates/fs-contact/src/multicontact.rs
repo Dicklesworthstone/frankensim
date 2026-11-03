@@ -9,6 +9,11 @@
 use fs_solver::orthant::active_set::{
     SpdOrthantConfig, SpdOrthantError, SpdOrthantSolution, solve_spd_orthant,
 };
+use fs_solver::orthant::{
+    GramOrthantConfig, GramOrthantError, GramOrthantSolution, solve_gram_orthant,
+};
+
+use crate::frictional_multicontact::{FrictionalContactError, range};
 
 /// Geometry and relative motion for one normal contact, in consistent units.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,7 +31,8 @@ pub struct NormalContactImpact {
 /// Numerical admission for the coupled impact event.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MultiImpactConfig {
-    /// Bounded positive-definite orthant solve. Gradient tolerance has speed units.
+    /// Bounded orthant solve. Gradient tolerance has speed units. For redundant
+    /// rows, max_iterations bounds Gram-coordinate sweeps instead of SPD solves.
     pub solver: SpdOrthantConfig,
     /// Nonnegative absolute allowance for numerical positive relative work.
     /// In SI this is joules; any allowed positive work remains in the receipt.
@@ -48,9 +54,62 @@ impl Default for MultiImpactConfig {
     }
 }
 
+/// What the admitted contact mobility determines. A velocity witness never
+/// grants physical authority to an individual redundant contact load.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MultiImpactDeterminacy {
+    /// Independent contact rows determine every impulse coordinate.
+    UniqueImpulses,
+    /// The normal complementarity law determines W_active*p even though p may
+    /// have a nullspace gauge. For a complete mechanical Gram matrix this also
+    /// determines the body's velocity increment and inactive kinematics;
+    /// arbitrary inactive cross rows have no such guarantee. Impulses are one
+    /// checked representative, not a local pressure, heat, or moving-support-
+    /// work allocation.
+    UniqueVelocity(NormalVelocityWitness),
+}
+
+/// Numerical admission of a positive-semidefinite normal contact mobility.
+/// This is a separated floating-point rank witness, not an interval proof.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormalVelocityWitness {
+    pub dimension: usize,
+    pub rank: usize,
+    /// Original W/scale eigen-equation residual.
+    pub spectral_residual: f64,
+    pub orthogonality_residual: f64,
+    /// Maximum entry of (B*B^T-W)/scale for the Gram candidate's factor B.
+    /// Every endpoint and work gate still uses the ORIGINAL supplied W.
+    pub reconstruction_residual: f64,
+    /// Maximum component of pre-impact relative velocity in the admitted
+    /// mobility nullspace. This is bounded in speed units before accepting a
+    /// work/loss value for an impulse representative.
+    pub relative_speed_range_residual: f64,
+}
+
+/// The existing numerical owner used by this event, with no invented SPD
+/// receipt for a singular contact set. The PSD lane is a bounded coordinate
+/// baseline; it does not claim a general conic or Painleve solver.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MultiImpactSolver {
+    PositiveDefinite(SpdOrthantSolution),
+    Semidefinite(GramOrthantSolution),
+}
+
+impl MultiImpactSolver {
+    /// Checked impulse representative in active contact order.
+    pub fn point(&self) -> &[f64] {
+        match self {
+            Self::PositiveDefinite(solution) => &solution.point,
+            Self::Semidefinite(solution) => &solution.point,
+        }
+    }
+}
+
 /// One globally admitted normal impulse vector, in original contact order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MultiImpactResult {
+    pub determinacy: MultiImpactDeterminacy,
     /// Nonnegative normal impulses; geometrically inactive entries are zero.
     pub normal_impulses: Vec<f64>,
     /// Independently reconstructed speeds, including inactive contacts.
@@ -61,14 +120,16 @@ pub struct MultiImpactResult {
     pub active_indices: Vec<usize>,
     /// Sum of midpoint relative speeds paired with their impulses.
     /// For a physical assembly this equals kinetic-energy change minus support work.
+    /// The PSD lane requires pre-impact relative motion to lie in the mobility
+    /// range, making this total independent of a nullspace impulse gauge.
     pub relative_work: f64,
     /// Nonnegative lost mechanical energy, excluding numerical positive work.
     /// This is not a thermal heat allocation.
     pub dissipated_energy: f64,
     /// Positive part of relative work, explicitly bounded by the numerical allowance.
     pub passivity_residual: f64,
-    /// Numerical solve receipt for the active principal Delassus matrix.
-    pub solver: SpdOrthantSolution,
+    /// Numerical candidate receipt; final acceptance uses the original matrix.
+    pub solver: MultiImpactSolver,
 }
 
 /// A refusal returns no partially admitted impact state.
@@ -85,6 +146,15 @@ pub enum MultiImpactError {
     },
     /// Generic positive-definite solve refused, including rank/curvature ambiguity.
     Solver(SpdOrthantError),
+    /// The bounded PSD candidate did not resolve the complementarity problem.
+    GramSolver(GramOrthantError),
+    /// The admitted velocity response does not suffice to determine source
+    /// work/loss. This conservative lane requires pre-impact relative motion
+    /// in the mobility range; it does not assign work to an arbitrary gauge.
+    UnresolvedWork {
+        range_velocity_residual: f64,
+        allowed: f64,
+    },
     /// Finite inputs generated unrepresentable arithmetic.
     NonFinite,
     /// Reconstructed endpoint separation or complementarity did not resolve.
@@ -133,9 +203,17 @@ impl From<SpdOrthantError> for MultiImpactError {
 /// Restitution targets can be mutually incompatible with global passivity.
 /// The actual relative impulse work is therefore checked after the solve.
 /// No sequential pairwise impulses or hidden restitution reduction is used.
-/// Zero restitution gives the admitted inelastic projection. Singular or
-/// insufficiently resolved active matrices refuse through the generic solver;
-/// this API does not choose an arbitrary impulse from a nonunique set.
+/// Zero restitution gives the admitted inelastic projection. Independent rows
+/// use the existing SPD active-set solver. Redundant PSD rows use the existing
+/// Gram-coordinate baseline with checked spectral/rank admission. For two
+/// normal-complementarity solutions, monotonicity gives delta_p^T W delta_p
+/// <= 0; PSD mobility then fixes W*p, without asserting that p is unique.
+/// A redundant result explicitly labels its impulse representative. Indefinite
+/// or rank-ambiguous mobility and unresolved original-system residuals refuse.
+/// Pre-impact relative motion must lie in the admitted mobility range for the
+/// PSD lane, so total relative work cannot depend on an impulse nullspace gauge.
+/// Incompatible prescribed support motion conservatively refuses; individual
+/// redundant support loads/work remain unassigned even when the total resolves.
 ///
 /// Positions are never advanced or repaired. A caller performing a physical
 /// update must check its measured endpoint speeds, world momentum and energy
@@ -196,9 +274,15 @@ pub fn solve_normal_impacts(
             hessian.push(delassus[i * n + j]);
         }
     }
-    let solver = solve_spd_orthant(&hessian, &linear, config.solver, &mut cancelled)?;
+    let (solver, determinacy) = solve_mobility(
+        &hessian,
+        &linear,
+        |i| contacts[active_indices[i]].relative_normal_speed,
+        config.solver,
+        &mut cancelled,
+    )?;
     let mut normal_impulses = vec![0.0; n];
-    for (&index, &impulse) in active_indices.iter().zip(&solver.point) {
+    for (&index, &impulse) in active_indices.iter().zip(solver.point()) {
         normal_impulses[index] = impulse;
     }
     let mut relative_normal_speeds_after = Vec::with_capacity(n);
@@ -244,6 +328,7 @@ pub fn solve_normal_impacts(
     }
     poll(&mut cancelled)?;
     Ok(MultiImpactResult {
+        determinacy,
         normal_impulses,
         relative_normal_speeds_after,
         restitution_targets,
@@ -253,6 +338,128 @@ pub fn solve_normal_impacts(
         passivity_residual: relative_work.max(0.0),
         solver,
     })
+}
+
+fn solve_mobility(
+    matrix: &[f64],
+    linear: &[f64],
+    relative_speed: impl Fn(usize) -> f64,
+    config: SpdOrthantConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(MultiImpactSolver, MultiImpactDeterminacy), MultiImpactError> {
+    let original_error = match solve_spd_orthant(matrix, linear, config, &mut *cancelled) {
+        Ok(solution) => {
+            return Ok((
+                MultiImpactSolver::PositiveDefinite(solution),
+                MultiImpactDeterminacy::UniqueImpulses,
+            ));
+        }
+        Err(
+            error @ (SpdOrthantError::NotPositiveDefinite { .. }
+            | SpdOrthantError::Degenerate { .. }),
+        ) => error,
+        Err(error) => return Err(error.into()),
+    };
+    // Reuse exactly the same original-matrix PSD, separated-rank, symmetry,
+    // eigen-equation and orthogonality admission as simultaneous Coulomb.
+    let admission = range::admit(matrix, linear.len(), config, cancelled).map_err(|error| {
+        if matches!(error, FrictionalContactError::Cancelled) {
+            MultiImpactError::Cancelled
+        } else {
+            MultiImpactError::Invalid("normal contact mobility admission")
+        }
+    })?;
+    let Some(admission) = admission else {
+        return Err(original_error.into());
+    };
+    let n = linear.len();
+    // All normal-complementarity roots share W*p. Their midpoint-work
+    // difference is therefore v_before dot delta_p, with delta_p in ker W.
+    // Admit only range-compatible relative motion before assigning TOTAL loss.
+    // Independently moving redundant supports can violate this even when all
+    // candidate impulses are passive and native velocity is unique.
+    let velocity_scale = (0..n).map(|i| relative_speed(i).abs()).fold(0.0, f64::max);
+    let mut normalized_range_residual = 0.0_f64;
+    if velocity_scale > 0.0 {
+        for &k in &admission.null {
+            poll(cancelled)?;
+            let component: f64 = (0..n)
+                .map(|i| admission.vectors[i * n + k] * (relative_speed(i) / velocity_scale))
+                .sum();
+            normalized_range_residual = normalized_range_residual.max(component.abs());
+        }
+    }
+    let relative_speed_range_residual = finite(normalized_range_residual * velocity_scale)?;
+    let allowed = finite(
+        config.gradient_tolerance + admission.zero_band * (n as f64).sqrt() * velocity_scale,
+    )?;
+    if relative_speed_range_residual > allowed {
+        return Err(MultiImpactError::UnresolvedWork {
+            range_velocity_residual: relative_speed_range_residual,
+            allowed,
+        });
+    }
+    let root_scale = admission.matrix_scale.sqrt();
+    let mut factor = Vec::with_capacity(n);
+    for i in 0..n {
+        poll(cancelled)?;
+        let mut row = Vec::with_capacity(admission.retained.len());
+        for &k in &admission.retained {
+            row.push(finite(
+                admission.vectors[i * n + k] * admission.eigenvalues[k].sqrt() * root_scale,
+            )?);
+        }
+        factor.push(row);
+    }
+    // The factor supplies a PSD numerical candidate, never a replacement
+    // physical mobility. Quantify its reconstruction before solving; the
+    // caller below independently enforces the law and work on original W.
+    let mut reconstruction_residual = 0.0_f64;
+    for i in 0..n {
+        poll(cancelled)?;
+        for j in 0..n {
+            let normalized_entry: f64 = factor[i]
+                .iter()
+                .zip(&factor[j])
+                .map(|(a, b)| (a / root_scale) * (b / root_scale))
+                .sum();
+            reconstruction_residual = reconstruction_residual
+                .max((normalized_entry - matrix[i * n + j] / admission.matrix_scale).abs());
+        }
+    }
+    if !reconstruction_residual.is_finite() || reconstruction_residual > 2.0 * admission.zero_band {
+        return Err(original_error.into());
+    }
+    let solution = solve_gram_orthant(
+        &factor,
+        linear,
+        GramOrthantConfig {
+            max_variables: config.max_variables,
+            max_columns: 64,
+            max_setup_products: 64 * 64 * 64,
+            max_sweeps: config.max_iterations,
+            gradient_tolerance: config.gradient_tolerance,
+        },
+        &mut *cancelled,
+    )
+    .map_err(|error| {
+        if matches!(error, GramOrthantError::Cancelled) {
+            MultiImpactError::Cancelled
+        } else {
+            MultiImpactError::GramSolver(error)
+        }
+    })?;
+    Ok((
+        MultiImpactSolver::Semidefinite(solution),
+        MultiImpactDeterminacy::UniqueVelocity(NormalVelocityWitness {
+            dimension: n,
+            rank: admission.retained.len(),
+            spectral_residual: admission.spectral_residual,
+            orthogonality_residual: admission.orthogonality_residual,
+            reconstruction_residual,
+            relative_speed_range_residual,
+        }),
+    ))
 }
 
 fn finite(value: f64) -> Result<f64, MultiImpactError> {
@@ -352,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn negative_gaps_and_nonunique_curvature_refuse_without_repair() {
+    fn negative_gaps_and_nonpassive_curvature_refuse_without_repair() {
         let mut penetrating = contact(-1.0, 0.0);
         penetrating.gap = -1.0e-15;
         penetrating.activation_tolerance = 1.0e-3;
@@ -365,7 +572,7 @@ mod tests {
         assert!(matches!(
             solve_normal_impacts(
                 &[contact(-1.0, 0.0); 2],
-                &[1.0; 4],
+                &[1.0, 2.0, 2.0, 1.0],
                 MultiImpactConfig::default(),
                 || false,
             ),
@@ -373,6 +580,201 @@ mod tests {
                 SpdOrthantError::NotPositiveDefinite { .. } | SpdOrthantError::Degenerate { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn redundant_normal_rows_resolve_motion_without_inventing_local_loads() {
+        for restitution in [0.0, 0.5, 1.0] {
+            let out = solve_normal_impacts(
+                &[contact(-1.0, restitution); 2],
+                &[1.0; 4],
+                MultiImpactConfig::default(),
+                || false,
+            )
+            .unwrap();
+            let MultiImpactDeterminacy::UniqueVelocity(witness) = &out.determinacy else {
+                panic!("duplicate contact rows cannot claim unique load allocation");
+            };
+            assert_eq!((witness.dimension, witness.rank), (2, 1));
+            assert!(witness.reconstruction_residual < 1e-14);
+            assert!(matches!(out.solver, MultiImpactSolver::Semidefinite(_)));
+            close(out.normal_impulses.iter().sum(), 1.0 + restitution);
+            for speed in out.relative_normal_speeds_after {
+                close(speed, restitution);
+            }
+            close(
+                out.dissipated_energy,
+                0.5 * (1.0 - restitution * restitution),
+            );
+            // Both [1+e, 0] and [(1+e)/2, (1+e)/2] satisfy the same law.
+            // The exposed representative must not erase that physical gauge.
+        }
+    }
+
+    #[test]
+    fn redundant_four_foot_impact_preserves_native_response_under_permutation_and_units() {
+        // Unit mass and roll/pitch inertias. Normal Jacobian at (x,y,0) is
+        // [1, y, -x]; four contact rows span only three mechanical coordinates.
+        let points = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+        for order in [[0, 1, 2, 3], [2, 0, 3, 1]] {
+            for (mass_scale, speed_scale) in [(1.0, 1.0), (4.0, 8.0)] {
+                let mut matrix = Vec::new();
+                let mut contacts = Vec::new();
+                for &i in &order {
+                    let [x, y] = points[i];
+                    contacts.push(contact((-1.0 + 0.2 * y + 0.15 * x) * speed_scale, 0.5));
+                    for &j in &order {
+                        matrix.push((1.0 + x * points[j][0] + y * points[j][1]) / mass_scale);
+                    }
+                }
+                let out =
+                    solve_normal_impacts(&contacts, &matrix, MultiImpactConfig::default(), || {
+                        false
+                    })
+                    .unwrap();
+                let MultiImpactDeterminacy::UniqueVelocity(witness) = &out.determinacy else {
+                    panic!("four-foot support has a one-dimensional load gauge");
+                };
+                assert_eq!(witness.rank, 3);
+                let mut increment = [0.0; 3];
+                for (k, &i) in order.iter().enumerate() {
+                    let [x, y] = points[i];
+                    let impulse = out.normal_impulses[k] / (mass_scale * speed_scale);
+                    increment[0] += impulse;
+                    increment[1] += y * impulse;
+                    increment[2] -= x * impulse;
+                    assert!(
+                        (out.relative_normal_speeds_after[k] / speed_scale
+                            + 0.5 * contacts[k].relative_normal_speed / speed_scale)
+                            .abs()
+                            < 2e-9
+                    );
+                }
+                for (value, expected) in increment.into_iter().zip([1.5, -0.3, 0.225]) {
+                    assert!((value - expected).abs() < 2e-9);
+                }
+                // Independent native kinetic energy, no assumed load split.
+                let loss = 0.5 * (1.0 - 0.25) * (1.0 + 0.2 * 0.2 + 0.15 * 0.15);
+                assert!(
+                    (out.dissipated_energy / (mass_scale * speed_scale * speed_scale) - loss).abs()
+                        < 2e-9
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn redundant_rows_preserve_distinct_restitution_targets_and_global_passivity() {
+        let out = solve_normal_impacts(
+            &[contact(-1.0, 0.0), contact(-1.0, 1.0)],
+            &[1.0; 4],
+            MultiImpactConfig::default(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(out.restitution_targets, vec![0.0, 1.0]);
+        close(out.normal_impulses[0], 0.0);
+        close(out.normal_impulses[1], 2.0);
+        close(out.dissipated_energy, 0.0);
+
+        // Duplicate the first row of the known energy-injecting chain. A
+        // redundant solve must retain the original global passivity refusal.
+        let error = solve_normal_impacts(
+            &[contact(-1.0, 1.0), contact(0.5, 1.0), contact(-1.0, 1.0)],
+            &[2.5, -1.5, 2.5, -1.5, 2.5, -1.5, 2.5, -1.5, 2.5],
+            MultiImpactConfig::default(),
+            || false,
+        )
+        .unwrap_err();
+        let MultiImpactError::EnergyIncrease { work, .. } = error else {
+            panic!("wrong refusal: {error:?}");
+        };
+        close(work, 0.109375);
+    }
+
+    #[test]
+    fn redundant_prescribed_motion_cannot_assign_arbitrary_dissipation() {
+        // W*p fixes p1+p2=2 and endpoint speeds [1,0]. Every nonnegative
+        // split meets the declared Newton laws, but work=-p2 ranges from -2
+        // to 0 J. A unique velocity must not publish one arbitrary loss.
+        let error = solve_normal_impacts(
+            &[contact(-1.0, 1.0), contact(-2.0, 0.0)],
+            &[1.0; 4],
+            MultiImpactConfig::default(),
+            || false,
+        )
+        .unwrap_err();
+        let MultiImpactError::UnresolvedWork {
+            range_velocity_residual,
+            allowed,
+        } = error
+        else {
+            panic!("wrong refusal: {error:?}");
+        };
+        assert!(range_velocity_residual > 0.7);
+        assert!(range_velocity_residual > allowed);
+    }
+
+    #[test]
+    fn weak_positive_modes_are_not_erased_to_obtain_a_redundant_solution() {
+        let off_diagonal = 1.0 - 1e-13;
+        assert!(matches!(
+            solve_normal_impacts(
+                &[contact(-1.0, 0.0); 2],
+                &[1.0, off_diagonal, off_diagonal, 1.0],
+                MultiImpactConfig::default(),
+                || false,
+            ),
+            Err(MultiImpactError::Solver(SpdOrthantError::Degenerate { .. }))
+        ));
+    }
+
+    #[test]
+    fn redundant_solver_cancellation_never_publishes_a_partial_event() {
+        let mut polls = 0;
+        solve_normal_impacts(
+            &[contact(-1.0, 0.5); 2],
+            &[1.0; 4],
+            MultiImpactConfig::default(),
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+        for stop in 1..=polls {
+            let mut seen = 0;
+            assert_eq!(
+                solve_normal_impacts(
+                    &[contact(-1.0, 0.5); 2],
+                    &[1.0; 4],
+                    MultiImpactConfig::default(),
+                    || {
+                        seen += 1;
+                        seen == stop
+                    },
+                ),
+                Err(MultiImpactError::Cancelled),
+                "checkpoint {stop}",
+            );
+        }
+    }
+
+    #[test]
+    fn maximum_redundant_contact_set_still_uses_one_physical_velocity() {
+        let out = solve_normal_impacts(
+            &[contact(-1.0, 0.5); 64],
+            &[1.0; 64 * 64],
+            MultiImpactConfig::default(),
+            || false,
+        )
+        .unwrap();
+        let MultiImpactDeterminacy::UniqueVelocity(witness) = out.determinacy else {
+            panic!("duplicated rows cannot determine individual loads");
+        };
+        assert_eq!((witness.dimension, witness.rank), (64, 1));
+        close(out.normal_impulses.iter().sum(), 1.5);
+        close(out.dissipated_energy, 0.375);
     }
 
     #[test]

@@ -28,7 +28,7 @@ use std::cell::{Cell, RefCell};
 
 mod natural;
 mod normal_gauge;
-mod range;
+pub(crate) mod range;
 
 /// Directional impulse ellipses through the original simultaneous Coulomb owner.
 pub mod elliptic;

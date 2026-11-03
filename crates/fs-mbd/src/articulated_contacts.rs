@@ -272,8 +272,11 @@ impl Prepared {
 /// line, preserving global angular as well as linear momentum. Prescribed
 /// planes contribute explicit external impulse and signed work.
 ///
-/// All gaps must be nonnegative. Singular/redundant impulse systems, invalid
-/// restitution candidates, unresolved endpoint balances, and cancellation
+/// All gaps must be nonnegative. Redundant rows may determine body motion with
+/// a nonunique impulse distribution; the law retains that distinction. Such
+/// events require the active preimpact speed to lie in the mobility range;
+/// the native Gram structure then also determines total support work. Invalid
+/// restitution candidates, unresolved endpoint balances and cancellation
 /// refuse atomically. No friction, contact detection, penetration repair,
 /// continuous forcing, or timestep advancement is performed.
 pub fn resolve_articulated_contacts(

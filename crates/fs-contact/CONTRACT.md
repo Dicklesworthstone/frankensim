@@ -1068,10 +1068,39 @@ positive numerical work is retained as `passivity_residual`; dissipation is not
 a hidden thermal-heat assignment. For a physical assembly, relative work equals
 kinetic-energy change minus prescribed-support work.
 
-The positive-definite numerical candidate admits at most 64 contact rows.
-Redundant/singular or unresolved active contact directions refuse explicitly;
-the API does not pick an arbitrary impulse from a nonunique set. Cancellation
-returns no accepted partial event. The existing one-contact law is unchanged.
+The positive-definite numerical candidate admits at most 64 contact rows and
+retains its original active-set path. Redundant positive-semidefinite rows now
+reuse the simultaneous Coulomb owner's original-matrix spectral/rank admission
+and `fs-solver::orthant::solve_gram_orthant` bounded coordinate baseline. The
+factor reconstruction is checked and reported; every accepted endpoint and
+work value is independently reconstructed from the original supplied mobility.
+No compliance, diagonal shift, or weakened physical tolerance is introduced.
+Indefinite, rank-ambiguous and unresolved directions still refuse.
+
+`MultiImpactDeterminacy` distinguishes `UniqueImpulses` from `UniqueVelocity`.
+For two normal-complementarity solutions, monotonicity gives
+`delta_p^T W delta_p <= 0`; admitted PSD mobility fixes `W*p`. With a complete
+mechanical Gram matrix this determines native velocity, but a redundant
+contact's impulse is only one law-satisfying representative. It is not an
+authoritative local load, pressure, heat or moving-support-work allocation.
+Before publishing a total loss, the PSD lane checks that pre-impact relative
+velocity lies in the admitted mobility range within the existing speed and
+spectral tolerances. Then `v_before dot delta_p` vanishes for an impulse gauge,
+so total relative work is determined. Incompatible redundant prescribed motion
+returns typed `UnresolvedWork`; no arbitrary dissipation is assigned. This is a
+sufficient admission, not a complete classification of every source-work case.
+`MultiImpactSolver` retains the actual SPD or Gram receipt rather than
+fabricating a positive pivot for a singular system. These are floating-point
+numerical admissions, not interval determinacy proofs. Cancellation returns no
+accepted partial event. The existing one-contact law is unchanged.
+
+G1/G3 unit regressions reconstruct rank-one impact/rebound and four-foot rigid
+support motion independently, including roll/pitch inertia, input permutation,
+unit scaling, differing restitution targets, the 64-row boundary and a
+redundant energy-injecting chain. Weak unresolved modes refuse; every queried
+PSD cancellation checkpoint refuses without publication. A redundant moving-
+support counterexample with one fixed endpoint velocity and a continuum of
+different passive losses must refuse.
 This is a bounded frictionless instantaneous response, not CCD, a Moreau–Jean
 time stepper, persistent contact, a Coulomb-cone solve, or a general
 Painleve/nonuniqueness classifier. The nonsmooth-contact bead remains open.

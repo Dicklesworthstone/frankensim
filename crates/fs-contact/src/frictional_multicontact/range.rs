@@ -22,19 +22,20 @@ use fs_solver::orthant::active_set::SpdOrthantConfig;
 
 /// Numerical PSD admission is separate from Coulomb determinacy. A separated
 /// mobility range alone says nothing about whether its law determines motion.
-pub(super) struct RangeAdmission {
+pub(crate) struct RangeAdmission {
     pub dimension: usize,
+    pub matrix_scale: f64,
     pub normalized: Vec<f64>,
     pub eigenvalues: Vec<f64>,
     pub vectors: Vec<f64>,
     pub retained: Vec<usize>,
     pub null: Vec<usize>,
     pub zero_band: f64,
-    spectral_residual: f64,
-    orthogonality_residual: f64,
+    pub(crate) spectral_residual: f64,
+    pub(crate) orthogonality_residual: f64,
 }
 
-pub(super) fn admit(
+pub(crate) fn admit(
     original: &[f64],
     d: usize,
     config: SpdOrthantConfig,
@@ -64,7 +65,7 @@ fn admit_spectrum(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Option<RangeAdmission>, FrictionalContactError> {
     poll(cancelled)?;
-    if d == 0 || d > config.max_variables || d > 63 {
+    if d == 0 || d > config.max_variables || d > 64 {
         return Ok(None);
     }
     // These checks are repeated because a failed Cholesky can precede the
@@ -145,6 +146,7 @@ fn admit_spectrum(
     }
     Ok(Some(RangeAdmission {
         dimension: d,
+        matrix_scale: scale,
         normalized: w,
         eigenvalues,
         vectors: q,
