@@ -15,6 +15,12 @@ use crate::{MassProperties, Pose, RigidBodyState, Vec3};
 mod batch;
 pub use batch::{PointMassReleaseBatchResult, release_point_masses};
 
+mod ejection;
+pub use ejection::{
+    PointMassEjection, PointMassEjectionBatchResult, PointMassEjectionControls, PointMassEjectionError,
+    eject_point_masses,
+};
+
 /// Material removed from the original body's existing mass distribution.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointMassRelease {

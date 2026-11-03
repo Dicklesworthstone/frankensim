@@ -5065,3 +5065,42 @@ cancellation. The continuation case now covers capture, actual constrained
 implicit motion, and ejection with the advanced state and original attachment.
 Existing constant affine rows are supported; nonlinear loops, changing ratios,
 contact-triggered release and finite-duration actuator models remain separate.
+
+## Simultaneous point ejection at prescribed relative velocity
+
+`assembly::release::eject_point_masses` closes the finite point-release model
+with prescribed FINAL parcel velocities relative to the recoiling retained
+rigid body at each physical attachment. All jets use one original body snapshot.
+For original total mass T, full central inertia I, arms r_i and relative
+velocities c_i, conservation gives dv=-sum(m_i c_i)/T and
+dw=-I^-1 sum(r_i cross m_i c_i), hence J_i=m_i(c_i+dv+dw cross r_i).
+The native `release_point_masses` owner then admits the actual retained
+COM/inertia, applies these impulses and computes their complete joint work.
+
+The projection uses O(inputs) fixed-order compensated reductions and one native
+original-inertia mobility action, without a dense 3N constraint solve. Its
+translation chart is anchored at the largest parcel's requested velocity and
+uses the represented retained-mass fraction directly; near-total central
+ejection therefore retains the small reduced-mass impulse. Computed native
+impulse descriptors reuse the staging allocation in the returned result.
+Every descriptor consumes its part slot, and every nonzero SOLVED impulse
+consumes an impulse slot. Even a zero-relative-speed parcel can need impulse
+to follow the shared recoil induced by another jet.
+
+Explicit finite nonnegative allowances bound supplied separation work and the
+maximum component of actual relative-velocity error. The original momentum and
+energy gates remain active. The velocity residual uses actual canonical
+momenta in one common translating chart and actual returned parcel/body
+positions; rounded-away recoil or geometry cannot be hidden by intended
+velocities. The source owner must debit the accepted supplied work. Cancellation
+or any late failure publishes no changed body, parcel or source state.
+
+Six focused G0/G3 regressions specify central reduced-mass response and extreme
+retained-mass ratio, parallel/opposed coupled jets, a full-tensor asymmetric
+case whose zero-speed parcel still needs impulse, covariance and subdivision,
+large common boosts and actual-velocity refusal, passive native parity, source
+work and input budgets, and late cancellation. Pinned Rustfmt parsing and
+independent rational-oracle checks passed; native compilation and execution
+remain unrun in this session. This is instantaneous point detachment, not a
+continuous nozzle/rocket law, pressure-thrust model, finite-fragment release,
+fracture model or propellant caloric source.
