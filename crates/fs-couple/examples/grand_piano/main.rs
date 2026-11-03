@@ -855,7 +855,11 @@ fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, mode
         engine::Instrument::new(scale, modes, options.sample_rate, options.substeps, options.modes, true)
     }?;
     if let Some(rates)=source_rates {piano.configure_source_hammer_dissipation(&rates)?;}
-    if let Some(spec) = stretching { piano.configure_string_stretching(spec)?; }
+    if let Some(spec) = stretching {
+        if let Some(frame) = polarization {
+            piano.configure_string_stretching(&frame.with_axial_projection(spec)?)?;
+        } else { piano.configure_string_stretching(spec)?; }
+    }
     Ok(piano)
 }
 fn load_board(text: Option<&str>, scale: &[geometry::Course]) -> Result<Vec<linear::BoardMode>, String> {
@@ -1347,13 +1351,15 @@ fn run_with(args: &[String]) -> Result<(), String> {
     let mut board_slopes: Option<Vec<[[f64; 2]; 88]>> = None;
     let (modes, board_source, surface, polarization, physical_damping, cavity) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
-        let source_ports = polarization.as_ref().map(|spec| spec.source_ports(&scale)).transpose()?;
+        let axial_keys = stretching.as_ref().map(|s| s.waves.keys().copied().collect::<Vec<_>>()).unwrap_or_default();
+        let source_ports = polarization.as_ref().map(|spec|
+            spec.source_ports_with_axial(&scale, &axial_keys)).transpose()?;
         let want_slopes = options.dump_board.is_some() && options.render.is_none() && !crowned_board::is_crowned(text);
         // `waves` couples the string's axial termination to the board's motion at the contact: the board must
         // keep its nodal rotations so the axial participation row can be derived from the board file.
         let want_axial = stretching.as_ref().is_some_and(|s| !s.waves.is_empty());
-        if want_axial && crowned_board::is_crowned(text) {
-            return Err("waves derive their axial participation row from a flat board's bridge beams; a crowned shell is not supported, and no default coupling is used".into());
+        if want_axial && crowned_board::is_crowned(text) && polarization.is_none() {
+            return Err("crowned longitudinal waves require --string-polarization with the actual bridge site, arm and signed string axis; no default axial coupling is used".into());
         }
         let prepared = prepare_geometric_board_with_source_ports(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
             options.board_band_hz, options.equilibrate_board_mass, options.consistent_board_mass,
@@ -1368,7 +1374,7 @@ fn run_with(args: &[String]) -> Result<(), String> {
             let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
             board_slopes = Some(board_geometry::BoardGeometry::read(text)?.bridge_slopes(motion, &keys)?);
         }
-        if want_axial {
+        if want_axial && projected.is_none() {
             let spec = stretching.as_mut().ok_or("waves need the string material")?;
             let motion = prepared.motion.as_ref().ok_or("waves need the retained board motion")?;
             let keys: Vec<u8> = spec.waves.keys().copied().collect();

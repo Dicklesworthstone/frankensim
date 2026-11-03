@@ -211,9 +211,18 @@ contact. It replaces the former single authored scalar `BRIDGE_AXIAL_PROJECTION 
 0.06`; the row is per mode, changes sign from mode to mode, and is 0 for a
 board with a perfectly flat string and no arm. There is no default: a `waves` key
 without its row refuses when the bank is configured (`axial_rows` of the
-specification), and `grand_piano` derives the rows from the board file when
-`--string-stretching` selects `waves` (`BoardGeometry::bridge_attachments`, then
-`MotionSurface::project_at`, so it is the same map as the bridge coefficient):
+specification). With `--string-polarization`, both `grand_piano` and
+`piano_exterior` derive it from the supplied frame's site, arm and signed string
+axis through `MotionSurface::project_at`. This is the same physical field used
+by both transverse directions, including full-vector crowned-shell motion.
+The axis must point away from the speaking span. Its sign controls the axial
+extension and reciprocal bridge force; it is not an unsigned orientation.
+With reduction, selected axial forces participate in the complete source-mode
+snapshots alongside the two transverse forces. No vertical-ratio substitution
+occurs when a complete frame is supplied.
+
+Without a supplied frame, `grand_piano` derives rows from a **flat** board's
+`BoardGeometry::bridge_attachments`:
 
 - **The arm** is the height of the outer fibre of the stiffener that contains the
   bridge station and lies on the string side of the panel's midplane
@@ -228,9 +237,11 @@ specification), and `grand_piano` derives the rows from the board file when
 - With `--board-reduction` the rotations are those of the reduced basis, built
   from vertical bridge-force snapshots only.
 
-`piano_exterior` and the live engine still use a labelled authored ratio
-(`EXTERIOR_AXIAL_RATIO`, `LIVE_BRIDGE_AXIAL_RATIO`, both 0.06 times the vertical
-row) until they carry rotation rows of their own.
+Without a supplied frame, `piano_exterior` retains its labelled authored ratio
+(`EXTERIOR_AXIAL_RATIO`, 0.06 times the vertical row) for the legacy path. The
+live engine has its separate axial input/approximation policy. A crowned
+`grand_piano` with `waves` requires the explicit string frame and refuses
+without it; no flat-board geometry is substituted for a shell.
 
 The retained axial sine modes have inertia, propagate their strain at the
 material wave speed, and exchange energy with transverse and bridge motion
@@ -246,8 +257,8 @@ restores their state together with the original mechanics. The additional-strain
 bound is checked across the complete reduced span. Loss of positive total
 tension refuses the trial rather than entering an unmodeled slack-string regime.
 
-This is a reduced moderate-slope model with an effective axial-to-transverse
-bridge port (`u(L, t) = eta * b(t)`). Both transverse slope forces and axial
+This is a reduced moderate-slope model with an axial termination
+`u(L, t) = sum_n a_n x_n(t)`. Both transverse slope forces and axial
 tension fluctuations at `x = L` act reciprocally on the bridge coordinates and
 close the same mechanical energy ledger. It remains simpler
 than the geometrically nonlinear Timoshenko string model in Chabassier,

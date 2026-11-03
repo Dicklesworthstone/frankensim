@@ -50,7 +50,7 @@ normal along +z, and a lateral viscous drag 0.35 times the primary drag.
 | `triangle` | Zero-based triangle index in the supplied or generated structural board mesh. |
 | `w0,w1,w2` | Barycentric location in that triangle's stored node order. Each lies in [0,1]; their sum is one. |
 | `arm_x_m,arm_y_m,arm_z_m` | Supplied vector from that structural interpolation site to the string's bridge attachment, in global metres. Zero explicitly means no arm. |
-| `string_x,string_y,string_z` | Global unit vector along the string. |
+| `string_x,string_y,string_z` | Global unit vector along the string. With longitudinal `waves`, it points away from the speaking span, so positive bridge motion extends the string. |
 | `hammer_x,hammer_y,hammer_z` | Global unit vector in the existing hammer contact direction, perpendicular to the string. |
 | `lateral_damper_ratio` | Finite value in [0,10] multiplying the primary damper drag for the other transverse direction. Zero explicitly disables lateral pad drag. |
 
@@ -76,6 +76,15 @@ moving or reorienting the original hammer-plane coupling. The lateral axis is
 `string_axis × hammer_axis`, and its coefficient is its dot product with the
 same bridge motion. These rows enter the existing loaded mass coordinates once.
 Both string directions exert reciprocal forces on the same board.
+
+When a course selects `waves` through `--string-stretching`, its axial
+participation is the projection of this **same** bridge motion onto the
+supplied signed string axis. Both renderers use that row, including crowned
+shells and their in-plane translations. The bridge arm, direction and source
+motion therefore cannot diverge between axial and transverse mechanics.
+An exactly zero axial projection stays zero. The frame is already in the
+played equilibrium chart; its direction is not reconstructed from a note,
+vertical bridge coefficient or an assumed downbearing angle.
 
 A flat DKT board has transverse nodal translation and two physical rotations.
 An explicitly supplied bridge arm can therefore provide lateral motion through
@@ -106,6 +115,9 @@ therefore enter the reduced space without weakening that consistency check.
 This applies to flat boards and the actual equilibrium of crowned/preloaded
 shells in both piano frontends. See [BOARD_REDUCTION.md](BOARD_REDUCTION.md) for
 the explicit source and runtime budgets and the scope of projection error.
+Courses selecting `waves` also contribute their axial force to those source
+snapshots, so a mode invisible to both transverse forces can be retained.
+Without `waves`, the original two-direction reduction is unchanged.
 
 ## Played behavior and limits
 
@@ -133,7 +145,8 @@ audio clock, output effect, detuning law or new oscillator is introduced.
 
 This remains a reduced string/board model. The file supplies one frame per
 course, shared by that course's unison and duplex segments. It does not resolve
-3-D hammer contact, string torsion, longitudinal waves, bridge material
+3-D hammer contact, string torsion, bridge material
 deformation, falling felt pads or a complete piano action. A supplied frame
 and a larger mode budget are not a convergence, real-time or perceptual
-similarity certificate.
+similarity certificate. Longitudinal waves retain the explicit constitutive,
+bandwidth and strain limits in [STRING_STRETCHING.md](STRING_STRETCHING.md).

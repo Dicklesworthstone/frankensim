@@ -16,9 +16,9 @@ mod adaptive;
 pub const MAX_SOURCE_MODES: usize = 512;
 pub const MAX_RITZ_MODES: usize = 128;
 pub const MAX_SAMPLE_FREQUENCIES: usize = 16;
-/// At most two supplied transverse directions for each of the 88 keys.
-/// Doubling the port count does not increase the admitted scalar-work budget.
-const MAX_PORTS: usize = 176;
+/// Two transverse directions and one selected axial force for each of 88 keys.
+/// The additional ports do not increase the admitted scalar-work budget.
+const MAX_PORTS: usize = 264;
 /// Conservative source-coordinate visits in snapshot orthogonalization,
 /// residual measurement and projected-matrix construction, checked before
 /// allocating snapshots. This is a work admission bound, not a timing claim.
@@ -188,7 +188,7 @@ pub fn bridge_basis(lambda: &[f64], damping: &[f64], ports: &[Vec<f64>], options
         || damping.iter().any(|x| !x.is_finite() || *x < 0.0)
         || !(1..=MAX_PORTS).contains(&ports.len())
         || ports.iter().any(|p| p.len() != n || p.iter().any(|x| !x.is_finite())) {
-        return Err("Ritz reduction needs 1..=512 ascending positive source modes, matching nonnegative damping, 1..=176 finite bridge vectors and an admitted low-mode count".into());
+        return Err("Ritz reduction needs 1..=512 ascending positive source modes, matching nonnegative damping, 1..=264 finite bridge vectors and an admitted low-mode count".into());
     }
     if options.transfer_tolerance.is_some() {
         return adaptive::build(lambda, damping, ports, options);

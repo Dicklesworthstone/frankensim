@@ -23,6 +23,44 @@ fn same(a: &engine::Instrument, b: &engine::Instrument) {
 }
 
 #[test]
+fn exterior_longitudinal_mechanics_use_the_actual_frame_instead_of_vertical_ratio() {
+    let courses=vec![Course {unison:1,duplex_length_m:0.,detune_cents:0.,
+        ..steinway_scale::courses().unwrap()[48]}];
+    let board=board::demonstration();
+    let axial:Vec<_>=(0..board.len()).map(|i|0.02*(i+1) as f64).collect();
+    let mesh=fs_plate::ShellMesh::new(vec![[0.,0.,0.],[1.,0.,0.],[0.,1.,0.]],vec![[0,1,2]]).unwrap();
+    let shapes=board.iter().zip(&axial).map(|(mode,a)|vec![[0.,*a,mode.bridge[48],0.,0.,0.];3]).collect();
+    let motion=MotionSurface::new(mesh,shapes).unwrap();
+    let frames=format!("{}\nsource,estimated,analytic three-direction bridge\ncourse,69,0,1,0,0,0,0,0,0,1,0,0,0,1,0.35\n",
+        string_polarization::HEADER);
+    let waves="frankensim-piano-string-stretching-v1\nwaves,69,150000,0.2,10000,16,0.02,0.05\n";
+    let options=Options {modes:12,substeps:8,..Options::default()};
+    let selected=controls(&courses,waves).with_string_polarization(&frames,&courses).unwrap();
+    let source=selected.source_ports(&courses).unwrap().unwrap();
+    assert_eq!(source[0].axial.unwrap().direction,[0.,1.,0.]);
+    let mut selected=selected.instrument_with_motion(courses.clone(),&board,Some(&motion),&options).unwrap();
+    let build=||Controls::from_texts(&courses,None,None,Some("estimated")).unwrap()
+        .with_string_polarization(&frames,&courses).unwrap()
+        .instrument_with_motion(courses.clone(),&board,Some(&motion),&options).unwrap();
+    let material=linear::string_stretching::Specification::read(waves,&courses).unwrap();
+    let mut manual=build();let mut legacy=build();
+    let mut expected=material.clone();
+    expected.set_bridge_axial_rows(std::collections::BTreeMap::from([(69,axial)])).unwrap();
+    manual.configure_string_stretching(&expected).unwrap();
+    legacy.configure_string_stretching(&with_exterior_axial_rows(&material,&board).unwrap()).unwrap();
+    for p in [&mut selected,&mut manual,&mut legacy] {p.note_on(69,1.).unwrap();}
+    for sample in 0..600 {
+        if sample==300 {for p in [&mut selected,&mut manual,&mut legacy] {p.note_off(69).unwrap();}}
+        assert_eq!(selected.step().unwrap(),manual.step().unwrap());legacy.step().unwrap();
+    }
+    same(&selected,&manual);
+    assert!(selected.bank.longitudinal_mode_count()>0);
+    assert_ne!(selected.bank.q,legacy.bank.q);
+    assert!((selected.energy_j()+selected.accounting.dissipated_j()
+        -selected.accounting.input_work_j).abs()<1e-7);
+}
+
+#[test]
 fn complete_stretching_is_explicit_and_never_silently_used_as_linear_harmonic_data() {
     let parse = |args: &[&str]| Options::parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     let options = parse(&["--string-stretching", "strings.fsps", "score.mid", "--modes", "48"]).unwrap();

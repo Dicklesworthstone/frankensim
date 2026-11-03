@@ -214,8 +214,9 @@ before any projection: count, positivity and certificate fields, finite
 eigenvectors, mass normalization, and mutual mass orthogonality. An invalid
 source pair cannot disappear by being omitted from the reduced result.
 
-For every primary bridge in the admitted key set, and every supplied secondary
-string direction, preparation constructs:
+For every primary bridge in the admitted key set, every supplied secondary
+string direction, and each framed course selecting longitudinal `waves`,
+preparation constructs:
 
 1. The static displacement response to its bridge-force vector.
 2. Real and imaginary displacement responses at each selected harmonic
@@ -231,6 +232,10 @@ reduction. A wrong frame cannot become valid by hiding its discrepancy in a
 dropped mode. Source-force snapshots and the final motion surface share the
 same P1 or edge-cubic projection law, including physical rotations. There is no
 512-mode runtime motion object or inferred lateral coupling.
+For `waves`, the signed string-axis force at the same site and arm also enters
+these source snapshots. This preserves response directions invisible to both
+transverse ports. Its final axial row comes from the same reduced nodal field;
+adding axial mechanics after a transverse-only reduction is not this path.
 
 Each nonzero real-valued snapshot is normalized in the complete source-modal
 space **before** the protected low coordinates are removed. This prevents a
@@ -308,7 +313,8 @@ frequency intervals in reduced exterior CSV comments. A small snapshot
 projection residual does not bound the actual reduced transfer error away from
 the sampled responses, nor the error in a loaded string/board resonance or
 receiver pressure. The target set covers primary bridge forces and the actual
-secondary directions of a supplied polarization card. This retains response
+secondary directions of a supplied polarization card and its selected axial
+directions for `waves`. This retains response
 directions that a primary-only force may not excite. Receiver pressure is
 evaluated from the resulting shared geometry; receivers are not independent
 optimization targets.
@@ -316,7 +322,7 @@ optimization targets.
 An exact undamped source pole at a requested frequency refuses without adding
 a damping floor. Source modes, ports, harmonic samples, retained rank, and
 estimated scalar work are bounded before allocating the snapshot bank. The
-leaf permits at most 176 force vectors (two directions for each of 88 courses)
+leaf permits at most 264 force vectors (three directions for each of 88 courses)
 and 250 million estimated source-coordinate work visits; this is an admission
 budget for fixed selection, not a runtime claim. Adaptive preparation has a
 separate budget of eight billion estimated complex scalar-work visits. Source

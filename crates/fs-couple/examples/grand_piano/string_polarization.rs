@@ -27,6 +27,7 @@ pub struct Specification {
 
 pub struct Prepared {
     lateral: Vec<Vec<f64>>,
+    axial: BTreeMap<u8, Vec<f64>>,
     damper_ratios: Vec<f64>,
     pub source: String,
 }
@@ -113,14 +114,29 @@ impl Specification {
     /// basis: a lateral-only source mode must participate in Ritz selection.
     /// Rows follow the supplied scale order, including its silent courses.
     pub fn source_ports(&self, courses: &[Course]) -> Result<Vec<SourceBridgeFrame>, String> {
+        self.source_ports_with_axial(courses, &[])
+    }
+
+    /// Include the signed axial force at the SAME site for longitudinal keys.
+    /// It must enter the source snapshots before reduction, including modes
+    /// invisible to both transverse forces. No axial axis is inferred.
+    pub fn source_ports_with_axial(&self, courses: &[Course], axial_keys: &[u8])
+        -> Result<Vec<SourceBridgeFrame>, String> {
         self.validate_scale(courses)?;
+        if axial_keys.iter().enumerate().any(|(i, key)| !self.sites.contains_key(key)
+            || axial_keys[..i].contains(key)) {
+            return Err("axial bridge keys must be unique members of the supplied string frames".into());
+        }
         Ok(courses.iter().map(|course| {
             let site = &self.sites[&course.midi];
             let primary = SourceBridgePort { triangle: site.triangle, weights: site.weights,
                 arm_m: site.arm_m, direction: site.hammer_axis };
             let secondary = SourceBridgePort { direction: cross(site.string_axis, site.hammer_axis),
                 ..primary };
-            SourceBridgeFrame { midi: course.midi, primary, secondary }
+            let axial = axial_keys.contains(&course.midi).then_some(SourceBridgePort {
+                direction: site.string_axis, ..primary
+            });
+            SourceBridgeFrame { midi: course.midi, primary, secondary, axial }
         }).collect())
     }
 
@@ -136,6 +152,7 @@ impl Specification {
             return Err("string polarization requires the same complete board motion basis as primary mechanics".into());
         }
         let mut lateral = Vec::with_capacity(courses.len());
+        let mut axial = BTreeMap::new();
         let mut damper_ratios = Vec::with_capacity(courses.len());
         for (course, frame) in courses.iter().zip(frames) {
             let site = &self.sites[&course.midi];
@@ -145,6 +162,9 @@ impl Specification {
             let (secondary, _) = motion.project_at(frame.secondary.triangle, frame.secondary.weights,
                 frame.secondary.arm_m, frame.secondary.direction)
                 .map_err(|e| format!("string polarization key {}: {e}", course.midi))?;
+            let (longitudinal, _) = motion.project_at(site.triangle, site.weights,
+                site.arm_m, site.string_axis)
+                .map_err(|e| format!("string axial projection key {}: {e}", course.midi))?;
             let mut row = Vec::with_capacity(board.len());
             for (mode_index, mode) in board.iter().enumerate() {
                 let primary = primary[mode_index];
@@ -160,14 +180,30 @@ impl Specification {
                 row.push(secondary);
             }
             lateral.push(row);
+            axial.insert(course.midi, longitudinal);
             damper_ratios.push(site.lateral_damper_ratio);
         }
-        Ok(Prepared { lateral, damper_ratios, source: self.source.clone() })
+        Ok(Prepared { lateral, axial, damper_ratios, source: self.source.clone() })
     }
 }
 
 impl Prepared {
     pub fn secondary(&self) -> (&[Vec<f64>], &[f64]) { (&self.lateral, &self.damper_ratios) }
+
+    /// Bind the axial termination to the same bare-board field as both
+    /// transverse directions. The bank owns the subsequent loaded-basis map.
+    /// `string_axis` points away from the speaking span: positive displacement
+    /// lengthens that span. The opposite sign is a different supplied geometry.
+    pub fn with_axial_projection(&self, spec: &super::linear::string_stretching::Specification)
+        -> Result<super::linear::string_stretching::Specification, String> {
+        let rows = spec.waves.keys().map(|&key| self.axial.get(&key)
+            .cloned().map(|row| (key, row))
+            .ok_or_else(|| format!("longitudinal key {key} has no admitted string frame")))
+            .collect::<Result<_, _>>()?;
+        let mut spec = spec.clone();
+        spec.set_bridge_axial_rows(rows)?;
+        Ok(spec)
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +230,35 @@ mod tests {
         assert_eq!(projected.secondary().1, &[0.4]);
         let reversed = Specification::read(&card(&ROW.replace("0,1,0,0,0,1", "0,-1,0,0,0,1")), &[course()]).unwrap();
         assert!((reversed.project(&[course()], &board(), Some(&motion())).unwrap().secondary().0[0][0] + 1.1).abs() < 1e-14);
+    }
+    #[test]
+    fn axial_projection_uses_the_signed_frame_arm_and_full_vector_motion() {
+        let waves=super::super::linear::string_stretching::Specification::read(
+            "frankensim-piano-string-stretching-v1\nwaves,69,150000,0.2,6000,16,0.02,0.05\n",
+            &[course()]).unwrap();
+        for sign in [1.,-1.] {
+            let row=if sign>0. {ROW.to_owned()}else{ROW.replace("0,1,0,0,0,1","0,-1,0,0,0,1")};
+            let spec=Specification::read(&card(&row),&[course()]).unwrap();
+            let frame=spec.source_ports_with_axial(&[course()],&[69]).unwrap()[0];
+            let port=frame.axial.unwrap();
+            assert_eq!(port.arm_m,frame.primary.arm_m);
+            assert_eq!(port.direction,[0.,sign,0.]);
+            let bound=spec.project(&[course()],&board(),Some(&motion())).unwrap()
+                .with_axial_projection(&waves).unwrap();
+            // y translation 2 minus theta_x 4 times the 20 mm z arm.
+            assert!((bound.axial_rows[&69][0]-sign*1.92).abs()<1e-14);
+            assert_ne!(bound.axial_rows[&69][0],0.06*board()[0].bridge[48]);
+            assert_eq!(waves.axial_rows.len(),0,"supplied material remains immutable");
+            assert!(spec.source_ports(&[course()]).unwrap()[0].axial.is_none());
+            assert!(spec.source_ports_with_axial(&[course()],&[70]).is_err());
+            assert!(spec.source_ports_with_axial(&[course()],&[69,69]).is_err());
+        }
+        let spec=Specification::read(&card(ROW),&[course()]).unwrap();
+        let mut zero=motion();
+        for mode in &mut zero.shapes {for node in mode {node[1]=0.;node[3]=0.;}}
+        let bound=spec.project(&[course()],&board(),Some(&zero)).unwrap()
+            .with_axial_projection(&waves).unwrap();
+        assert_eq!(bound.axial_rows[&69],vec![0.],"zero physical projection must stay zero");
     }
     #[test]
     fn source_frames_retain_a_primary_invisible_mode_and_mutual_bridge_compliance() {

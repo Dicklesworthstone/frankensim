@@ -111,12 +111,24 @@ pub(crate) fn validate_frames(keys:&[u8],frames:&[SourceBridgeFrame])->Result<()
         if !product.is_finite() || product.abs()>1e-10 {
             return Err("source bridge directions must be orthogonal".into());
         }
+        if let Some(axial)=frame.axial {
+            if axial.triangle!=frame.primary.triangle || axial.weights!=frame.primary.weights
+                || axial.arm_m!=frame.primary.arm_m {
+                return Err("axial and transverse source forces must share one physical site and arm".into());
+            }
+            for transverse in [frame.primary,frame.secondary] {
+                let product:f64=axial.direction.iter().zip(transverse.direction).map(|(a,b)|a*b).sum();
+                if !product.is_finite() || product.abs()>1e-10 {
+                    return Err("axial source force must be orthogonal to both transverse directions".into());
+                }
+            }
+        }
     }
     Ok(())
 }
 
 /// Validate each supplied primary in the complete source basis, then append
-/// its actual secondary force. The caller supplies its own nodal DOF map;
+/// its actual secondary and selected axial forces. The caller supplies its own nodal DOF map;
 /// the site interpolation is shared with final runtime motion projection.
 pub(crate) fn append_secondary_ports(
     keys:&[u8],frames:&[SourceBridgeFrame],mesh:&ShellMesh,edge_cubic:bool,
@@ -130,7 +142,9 @@ pub(crate) fn append_secondary_ports(
     for (course,frame) in frames.iter().enumerate() {
         let primary=frame.primary.prepare(mesh,edge_cubic)?;
         let secondary=frame.secondary.prepare(mesh,edge_cubic)?;
+        let axial=frame.axial.map(|port|port.prepare(mesh,edge_cubic)).transpose()?;
         let mut lateral=Vec::with_capacity(source.modes.len());
+        let mut longitudinal=Vec::with_capacity(if axial.is_some(){source.modes.len()}else{0});
         for (i,pair) in source.modes.iter().enumerate() {
             let (value,scale)=primary.project_nodal(primary.nodes().map(|node|nodal(&pair.phi,node)))?;
             let expected=ports[course][i];
@@ -140,8 +154,12 @@ pub(crate) fn append_secondary_ports(
             }
             let (value,_)=secondary.project_nodal(secondary.nodes().map(|node|nodal(&pair.phi,node)))?;
             lateral.push(value);
+            if let Some(axial)=&axial {
+                longitudinal.push(axial.project_nodal(axial.nodes().map(|node|nodal(&pair.phi,node)))?.0);
+            }
         }
         ports.push(lateral);
+        if axial.is_some() {ports.push(longitudinal);}
     }
     Ok(())
 }
@@ -269,6 +287,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn longitudinal_source_force_retains_a_mode_invisible_to_both_transverse_ports() {
+        let mesh=ShellMesh::new(vec![[0.,0.,0.],[1.,0.,0.],[0.,1.,0.]],vec![[0,1,2]]).unwrap();
+        let source=SliceReport {window:(0.,20.),below_low:0,below_high:3,expected:3,
+            modes:[2,0,1].into_iter().enumerate().map(|(i,component)| {
+                let mut phi=vec![0.;18];phi[component]=1.;let lambda=((i+1) as f64).powi(2);
+                ModePair {lambda,phi,residual:0.,interval:(lambda,lambda)}
+            }).collect(),stats:fs_modal::SliceStats {shift:0.,factorizations:0,lanczos_iters:0,
+                restarts:0,factor_nnz_l:0,factor_peak_bytes:0,pivots_delayed:0}};
+        let primary=super::super::motion::SourceBridgePort {triangle:0,weights:[1.,0.,0.],
+            arm_m:[0.;3],direction:[0.,0.,1.]};
+        let axial=super::super::motion::SourceBridgePort {direction:[0.,1.,0.],..primary};
+        let frame=SourceBridgeFrame {midi:69,primary,axial:Some(axial),
+            secondary:super::super::motion::SourceBridgePort {direction:[1.,0.,0.],..primary}};
+        let nodal=|phi:&[f64],node:usize|std::array::from_fn(|c|phi[6*node+c]);
+        let mut ports=vec![vec![1.,0.,0.]];
+        append_secondary_ports(&[69],&[frame],&mesh,false,&source,&mut ports,nodal).unwrap();
+        assert_eq!(ports,vec![vec![1.,0.,0.],vec![0.,1.,0.],vec![0.,0.,1.]]);
+        let options=ritz::RitzOptions {max_modes:3,keep_low_modes:0,sample_hz:vec![0.3],
+            selection:ritz::Selection::Pivoted,transfer_tolerance:None};
+        let reduce=|ports:&[Vec<f64>]|project_modal(18,0.01,&source,ports,&options,
+            |x,y|y.copy_from_slice(x)).unwrap();
+        let transverse=reduce(&ports[..2]);let complete=reduce(&ports);
+        assert_eq!(transverse.modes.len(),2);assert_eq!(complete.modes.len(),3);
+        assert!(transverse.modes.iter().all(|mode|mode.phi[1]==0.));
+        assert!(complete.modes.iter().any(|mode|mode.phi[1].abs()>0.9));
+        assert!(complete.report.max_relative_snapshot_error<1e-12);
+        for invalid in [super::super::motion::SourceBridgePort {arm_m:[0.,0.,0.1],..axial},
+            super::super::motion::SourceBridgePort {direction:[1.,0.,0.],..axial}] {
+            let wrong=SourceBridgeFrame {axial:Some(invalid),..frame};
+            assert!(append_secondary_ports(&[69],&[wrong],&mesh,false,&source,
+                &mut vec![vec![1.,0.,0.]],nodal).is_err());
+        }
+    }
+
+    #[test]
     fn secondary_source_force_keeps_lateral_motion_and_bad_dropped_primary_refuses() {
         // G0: two uncoupled physical source coordinates at a known shell node.
         // The primary force cannot see lateral translation, but its supplied
@@ -283,7 +336,7 @@ mod tests {
                 restarts:0,factor_nnz_l:0,factor_peak_bytes:0,pivots_delayed:0}};
         let primary=super::super::motion::SourceBridgePort {triangle:0,weights:[1.,0.,0.],
             arm_m:[0.;3],direction:[0.,0.,1.]};
-        let frame=SourceBridgeFrame {midi:69,primary,
+        let frame=SourceBridgeFrame {midi:69,primary,axial:None,
             secondary:super::super::motion::SourceBridgePort {direction:[1.,0.,0.],..primary}};
         let original=vec![vec![1.,0.]];
         let mut ports=original.clone();

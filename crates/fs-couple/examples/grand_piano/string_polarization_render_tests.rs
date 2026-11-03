@@ -167,3 +167,36 @@ fn the_demonstration_material_front_door_uses_the_same_projected_geometry() {
     assert!(!old.bank.has_secondary_polarization());
     assert_eq!(selected.hammer_contact_count(), old.hammer_contact_count());
 }
+
+#[test]
+fn crowned_longitudinal_frames_reach_the_actual_render_front_door() {
+    let course=geometry::Course {unison:1,duplex_length_m:0.,detune_cents:0.,
+        ..geometry::demonstration_scale().unwrap()[48]};
+    let shell=crowned_board::elevate(&panel(),&[0.,0.,0.,0.,0.01],
+        "authored longitudinal frame integration").unwrap();
+    let board_path=input(&shell);
+    let scale_path=input(&geometry::write_scale(&[course]));
+    let frame_path=input(&frames());
+    let waves_path=input("frankensim-piano-string-stretching-v1\nwaves,69,150000,0.2,10000,16,0.02,0.05\n");
+    let output=format!("{}.wav",input("output parent"));
+    let mut args=["--board-geometry",&board_path,"--scale",&scale_path,"--render",&output,
+        "--string-stretching",&waves_path,"--modes","12","--substeps","8",
+        "--board-band-hz","400","--note","69","--velocity","1","--duration","0.03"]
+        .map(str::to_owned).to_vec();
+    let refused=run_with(&args).unwrap_err();
+    assert!(refused.contains("require --string-polarization"),"{refused}");
+    assert!(!std::path::Path::new(&output).exists());
+    args.extend(["--string-polarization".into(),frame_path]);
+    let options=Options::parse(&args).unwrap();
+    let prepared=prepare_geometric_board_motion(&shell,&[69],400.,false,false,false,0,true).unwrap();
+    let frame=string_polarization::Specification::read(&frames(),&[course]).unwrap()
+        .project(&[course],&prepared.modes,prepared.motion.as_ref()).unwrap();
+    let waves=load_string_stretching(&[course],&options).unwrap().unwrap();
+    let piano=prepare_instrument_with_physical_controls(vec![course],&prepared.modes,&options,
+        Some(&waves),Some(&frame)).unwrap();
+    assert!(piano.bank.longitudinal_mode_count()>0,"the render must retain actual axial inertia");
+    run_with(&args).unwrap();
+    let wav=std::fs::read(output).unwrap();
+    assert_eq!(&wav[..4],b"RIFF");
+    assert!(wav.len()>44);
+}

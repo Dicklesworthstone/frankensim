@@ -32,7 +32,7 @@ pub struct SourceBridgePort {
     pub direction: [f64; 3],
 }
 
-/// The two admitted transverse directions of one source string course.
+/// The admitted transverse directions and optional axial force of one course.
 /// The primary must match the geometric board's existing bridge coefficient
 /// in every source mode before that mode can be removed by reduction.
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +40,8 @@ pub struct SourceBridgeFrame {
     pub midi: u8,
     pub primary: SourceBridgePort,
     pub secondary: SourceBridgePort,
+    /// Present only when this course retains longitudinal string mechanics.
+    pub axial: Option<SourceBridgePort>,
 }
 
 /// One structural site's exact linear map, shared by source force snapshots

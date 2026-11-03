@@ -843,6 +843,9 @@ impl BoardGeometry {
                 value.report.source_modes, modes.len(), value.report.protected_low_modes));
             if source_frames.is_some() {
                 provenance.push_str("; Ritz targets include both supplied transverse bridge directions");
+                if source_frames.is_some_and(|frames|frames.iter().any(|f|f.axial.is_some())) {
+                    provenance.push_str(" and selected longitudinal bridge forces");
+                }
             }
             if let (Some(ritz::Selection::Pod { count, .. }), Some(first), Some(last)) = (reduction_options.map(|o| o.selection),
                 value.report.sample_hz.first(), value.report.sample_hz.last()) {
@@ -1606,7 +1609,7 @@ mod tests {
         // exposing the actual bending rotation to the lateral string force.
         let primary=motion::SourceBridgePort {triangle:site.triangle,weights:site.weights,
             arm_m:[0.,0.,0.012],direction:[0.,0.,1.]};
-        let frames=[motion::SourceBridgeFrame {midi:69,primary,
+        let frames=[motion::SourceBridgeFrame {midi:69,primary,axial:None,
             secondary:motion::SourceBridgePort {direction:[1.,0.,0.],..primary}}];
         for cubic in [false,true] {
             let source=geometry.prepare_inner(&[69],100.,true,true,false,cubic).unwrap();

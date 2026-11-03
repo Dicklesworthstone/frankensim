@@ -13,7 +13,8 @@ pub use score::Score;
 /// AUTHORED, and used only by `piano_exterior`: the axial participation row of a `waves` key is this fraction
 /// of the board's vertical bridge row. It is the former single scalar of `longitudinal_string.rs` (its comment
 /// read ~1.8 degrees of downbearing plus a 28 mm lever arm; no source was ever recorded), kept here until the
-/// exterior's crowned shell supplies rotation rows of its own. `grand_piano` has no such number: it derives each
+/// exterior has no supplied string frame. With --string-polarization, its actual full-vector motion supplies
+/// every axial row instead. `grand_piano` has no such number: it derives each
 /// row from its board's retained rotations (`BoardGeometry::bridge_attachments`, bead pexfp.44). The live engine's
 /// matching divergence is bead frankensim-live-piano-axial-row-3eh0l; the exterior's is recorded on pexfp.44.
 const EXTERIOR_AXIAL_RATIO: f64 = 0.06;
@@ -370,7 +371,9 @@ impl Controls {
     /// frames cover the complete scale in its source order, including silence.
     pub fn source_ports(&self, courses: &[Course])
         -> Result<Option<Vec<super::board_geometry::motion::SourceBridgeFrame>>, String> {
-        self.polarization.as_ref().map(|spec| spec.source_ports(courses)).transpose()
+        let keys = self.stretching.as_ref().map(|spec| spec.waves.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.polarization.as_ref().map(|spec| spec.source_ports_with_axial(courses, &keys)).transpose()
     }
     pub fn has_cavity(&self) -> bool { self.cavity.is_some() }
     /// Bind a `gas,ambient` cavity to the exterior's gas record. A bare
@@ -432,7 +435,11 @@ impl Controls {
             piano.configure_source_hammer_dissipation(rates)?;
         }
         if let Some(stretching) = &self.stretching {
-            piano.configure_string_stretching(&with_exterior_axial_rows(stretching, board)?)?;
+            let stretching = match &polarization {
+                Some(frame) => frame.with_axial_projection(stretching)?,
+                None => with_exterior_axial_rows(stretching, board)?,
+            };
+            piano.configure_string_stretching(&stretching)?;
         }
         if let Some(cavity) = &cavity { piano.configure_cavity(&cavity.loaded(&piano.bank)?)?; }
         Ok((piano,cavity.as_ref().map(cavity::Projected::report)))

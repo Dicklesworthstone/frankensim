@@ -323,6 +323,9 @@ impl CrownedBoard {
                 value.report.source_modes,modes.len(),value.report.protected_low_modes));
             if source_frames.is_some() {
                 provenance.push_str("; Ritz targets include both supplied transverse bridge directions");
+                if source_frames.is_some_and(|frames|frames.iter().any(|f|f.axial.is_some())) {
+                    provenance.push_str(" and selected longitudinal bridge forces");
+                }
             }
             (Some(value.physical_damping),Some(value.report))
         } else {(None,None)};
