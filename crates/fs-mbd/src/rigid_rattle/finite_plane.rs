@@ -18,11 +18,41 @@ use fs_math::dd::Dd;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FinitePointPlaneConstraint {
     properties: [MassProperties; 2],
-    point_body_m: Vec3,
-    plane_offset_body_m: Dd,
-    plane_normal_body: Vec3,
+    geometry: PreparedPlane,
     position_tolerance_m: f64,
     velocity_tolerance_mps: f64,
+}
+
+/// One original body-local infinite-plane geometry, shared by pair and graph
+/// motion. Normalization and the anchor's normal offset are prepared once;
+/// each evaluation returns the actual sliding reaction arm for its state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PreparedPlane {
+    pub point_body_m: Vec3,
+    plane_offset_body_m: Dd,
+    plane_normal_body: Vec3,
+}
+
+impl PreparedPlane {
+    pub(super) fn new(
+        point_body_m: Vec3,
+        plane_point_body_m: Vec3,
+        plane_normal_body: Vec3,
+    ) -> Result<Self, DistanceStepError> {
+        if !point_body_m.is_finite() || !plane_point_body_m.is_finite() {
+            return Err(DistanceStepError::Invalid("finite point/plane geometry"));
+        }
+        let plane_normal_body = plane_normal_body.normalized("plane normal")?;
+        let plane_offset_body_m = dot(vector(plane_normal_body), vector(plane_point_body_m));
+        if !plane_offset_body_m.to_f64().is_finite() {
+            return Err(DistanceStepError::Invalid("finite plane normal offset"));
+        }
+        Ok(Self {
+            point_body_m,
+            plane_offset_body_m,
+            plane_normal_body,
+        })
+    }
 }
 
 /// Both native bodies and their internal constraint impulse/work account.
@@ -66,16 +96,10 @@ impl FinitePointPlaneConstraint {
                 "finite point/plane geometry or tolerances",
             ));
         }
-        let plane_normal_body = plane_normal_body.normalized("plane normal")?;
-        let plane_offset_body_m = dot(vector(plane_normal_body), vector(plane_point_body_m));
-        if !plane_offset_body_m.to_f64().is_finite() {
-            return Err(DistanceStepError::Invalid("finite plane normal offset"));
-        }
+        let geometry = PreparedPlane::new(point_body_m, plane_point_body_m, plane_normal_body)?;
         Ok(Self {
             properties,
-            point_body_m,
-            plane_offset_body_m,
-            plane_normal_body,
+            geometry,
             position_tolerance_m,
             velocity_tolerance_mps,
         })
@@ -183,8 +207,20 @@ impl Constraint for FinitePointPlaneConstraint {
     }
 
     fn geometry(&self, states: [RigidBodyState; 2]) -> Result<Geometry, DistanceStepError> {
-        let point = states[0].point_kinematics(self.properties[0], self.point_body_m)?;
-        let carrier = states[1].point_kinematics(self.properties[1], Vec3::ZERO)?;
+        self.geometry
+            .geometry(states, self.properties, self.position_tolerance_m)
+    }
+}
+
+impl PreparedPlane {
+    pub(super) fn geometry(
+        &self,
+        states: [RigidBodyState; 2],
+        properties: [MassProperties; 2],
+        position_tolerance_m: f64,
+    ) -> Result<Geometry, DistanceStepError> {
+        let point = states[0].point_kinematics(properties[0], self.point_body_m)?;
+        let carrier = states[1].point_kinematics(properties[1], Vec3::ZERO)?;
         let normal = states[1]
             .pose()
             .orientation()
@@ -219,7 +255,7 @@ impl Constraint for FinitePointPlaneConstraint {
         let arm_error = value(sub(vector(represented_arm), projected));
         if !carrier_arm.is_finite()
             || !arm_error.is_finite()
-            || arm_error.x.hypot(arm_error.y).hypot(arm_error.z) > self.position_tolerance_m
+            || arm_error.x.hypot(arm_error.y).hypot(arm_error.z) > position_tolerance_m
         {
             return Err(DistanceStepError::Invalid(
                 "finite plane reaction arm is unrepresentable",

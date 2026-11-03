@@ -2,7 +2,8 @@
 //!
 //! The original pair constraint supplies positive-distance geometry. Spherical
 //! joints add three Cartesian closure rows through [`advance_joint_graph`].
-//! [`advance_articulated_graph`] also admits five-row revolute hinges. All
+//! [`advance_articulated_graph`] also admits moving point/plane joints and
+//! five-row revolute or prismatic joints. All
 //! scalar reactions share the native momentum owners and the complete mobility
 //! `J M^-1 J^T`; a chain is never approximated by independent pair solves.
 //! Central rod reactions conserve internal angular momentum; spherical rows
@@ -49,6 +50,14 @@ pub use driven_joints::{
 mod spatial;
 pub use spatial::{advance_spatial_articulated_graph, advance_spatial_driven_joint_graph};
 
+#[path = "graph/planes.rs"]
+mod planes;
+pub use planes::PointPlaneJoint;
+
+#[path = "graph/prismatic.rs"]
+mod prismatic;
+pub use prismatic::PrismaticJoint;
+
 /// Maximum simultaneous independent scalar rows in the bounded dense solve.
 pub const MAX_DISTANCE_ROWS: usize = 32;
 
@@ -71,6 +80,8 @@ enum RowKind {
     Distance(f64),
     Cartesian(usize),
     Revolute(revolute::AngularConstraint),
+    Plane(planes::PlaneRow),
+    FrameLock(prismatic::AngularConstraint),
 }
 #[derive(Clone, Copy)]
 struct Row {
@@ -92,7 +103,25 @@ impl Row {
         }
     }
     fn is_angular(self) -> bool {
-        matches!(self.kind, RowKind::Revolute(_))
+        matches!(self.kind, RowKind::Revolute(_) | RowKind::FrameLock(_))
+    }
+    // Joint constructors write complete groups into the admitted row bank.
+    // These widths are read only at the first row of each group.
+    fn group_width(self) -> usize {
+        match self.kind {
+            RowKind::Distance(_) => 1,
+            RowKind::Cartesian(component) => 3 - component,
+            RowKind::FrameLock(row) => 3 - row.component,
+            RowKind::Revolute(row) => 2 - row.component,
+            RowKind::Plane(row) => row.width - row.component,
+        }
+    }
+    fn angular_length(self) -> Option<f64> {
+        match self.kind {
+            RowKind::Revolute(row) => Some(row.length_m),
+            RowKind::FrameLock(row) => Some(row.length_m),
+            _ => None,
+        }
     }
 }
 #[derive(Clone, Copy)]
@@ -119,18 +148,20 @@ impl<'a> Rows<'a> {
     fn admits_impulses(self, impulses: &[f64], geometry: &[Geometry], maximum: f64) -> bool {
         let mut i = 0;
         while i < self.len() {
-            let (magnitude, width) = if matches!(self.get(i).kind, RowKind::Cartesian(0)) {
-                (impulses[i].hypot(impulses[i + 1]).hypot(impulses[i + 2]), 3)
-            } else if let RowKind::Revolute(row) = self.get(i).kind {
-                // Bound the complete physical couple, including nonorthogonal
-                // endpoint Jacobians at the admitted finite alignment error.
-                let couple = geometry[i]
-                    .normal
-                    .scale(impulses[i])
-                    .add(geometry[i + 1].normal.scale(impulses[i + 1]));
-                (norm(couple) / row.length_m, 2)
+            let row = self.get(i);
+            let width = row.group_width();
+            let magnitude = if matches!(row.kind, RowKind::Cartesian(0)) {
+                impulses[i].hypot(impulses[i + 1]).hypot(impulses[i + 2])
+            } else if row.is_angular() || matches!(row.kind, RowKind::Plane(_)) {
+                // Bound the summed physical force/couple, including admitted
+                // finite-residual nonorthogonality of angular Jacobians.
+                let mut resultant = geometry[i].normal.scale(impulses[i]);
+                for k in 1..width {
+                    resultant = resultant.add(geometry[i + k].normal.scale(impulses[i + k]));
+                }
+                norm(resultant) / row.angular_length().unwrap_or(1.0)
             } else {
-                (impulses[i].abs(), 1)
+                impulses[i].abs()
             };
             if !magnitude.is_finite() || magnitude > maximum {
                 return false;
@@ -143,19 +174,11 @@ impl<'a> Rows<'a> {
         let mut i = 0;
         let mut error: f64 = 0.0;
         while i < self.len() {
-            let (magnitude, width) = if matches!(self.get(i).kind, RowKind::Cartesian(0)) {
-                (
-                    geometry[i]
-                        .gap
-                        .hypot(geometry[i + 1].gap)
-                        .hypot(geometry[i + 2].gap),
-                    3,
-                )
-            } else if self.get(i).is_angular() {
-                (geometry[i].gap.hypot(geometry[i + 1].gap), 2)
-            } else {
-                (geometry[i].gap.abs(), 1)
-            };
+            let width = self.get(i).group_width();
+            let mut magnitude = geometry[i].gap.abs();
+            for k in 1..width {
+                magnitude = magnitude.hypot(geometry[i + k].gap);
+            }
             error = error.max(magnitude);
             i += width;
         }
@@ -167,27 +190,19 @@ impl<'a> Rows<'a> {
         position: f64,
         velocity: f64,
     ) -> Option<usize> {
-        for (i, row) in self.iter().enumerate() {
-            if matches!(row.kind, RowKind::Cartesian(0))
-                && (geometry[i]
-                    .gap
-                    .hypot(geometry[i + 1].gap)
-                    .hypot(geometry[i + 2].gap)
-                    > position
-                    || geometry[i]
-                        .rate
-                        .hypot(geometry[i + 1].rate)
-                        .hypot(geometry[i + 2].rate)
-                        > velocity)
-            {
+        let mut i = 0;
+        while i < self.len() {
+            let width = self.get(i).group_width();
+            let mut gap = geometry[i].gap.abs();
+            let mut rate = geometry[i].rate.abs();
+            for k in 1..width {
+                gap = gap.hypot(geometry[i + k].gap);
+                rate = rate.hypot(geometry[i + k].rate);
+            }
+            if width > 1 && (gap > position || rate > velocity) {
                 return Some(i);
             }
-            if matches!(row.kind, RowKind::Revolute(row) if row.component == 0)
-                && (geometry[i].gap.hypot(geometry[i + 1].gap) > position
-                    || geometry[i].rate.hypot(geometry[i + 1].rate) > velocity)
-            {
-                return Some(i);
-            }
+            i += width;
         }
         None
     }
@@ -201,10 +216,12 @@ pub struct DistanceGraphControls {
     /// Absolute initial/final closure tolerance [m], below every rod length.
     /// Spherical joints use their complete Euclidean separation norm. A hinge's
     /// alignment-sine norm is multiplied by its explicit length scale [m].
+    /// Sliders use the transverse gap norm and scaled full-frame sine norm.
     pub position_tolerance_m: f64,
     /// Absolute initial/final range-rate tolerance [m/s], or the Euclidean
-    /// relative point-speed tolerance for a spherical joint. A hinge's two
-    /// alignment derivatives are multiplied by its explicit length scale [m].
+    /// relative point-speed tolerance for a spherical joint. Angular derivative
+    /// groups use their explicit length scale; a slider's transverse rate is
+    /// measured against the actual moving points on its finite carrier.
     pub velocity_tolerance_mps: f64,
     /// Squared Cholesky-pivot floor after unit-diagonal scaling, in
     /// `[4096*EPSILON, 1)`. This admits regular rows, not a certified condition bound.
@@ -212,7 +229,8 @@ pub struct DistanceGraphControls {
     /// Maximum borrowed bodies, including unconstrained bodies.
     pub maximum_bodies: usize,
     /// Maximum simultaneous scalar rows, at most [`MAX_DISTANCE_ROWS`]. A rod
-    /// consumes one row, a spherical joint three, and a revolute hinge five.
+    /// consumes one row, a spherical joint three, and a revolute hinge or
+    /// prismatic joint five. An independent point/plane joint consumes one.
     pub maximum_constraints: usize,
     /// Maximum complete nonlinear trial evaluations, including the initial one.
     pub maximum_trial_evaluations: u32,
@@ -226,8 +244,9 @@ pub struct DistanceGraphControls {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DistanceResidual {
     /// Endpoint length minus the authored distance [m], or the selected world
-    /// Cartesian separation component of a spherical-joint row. Angular rows
-    /// carry `length_scale * axis_first.dot(transverse_second)` [m].
+    /// Cartesian separation component of a spherical-joint row. Plane rows
+    /// carry signed point/carrier separation. Angular rows carry the scaled
+    /// hinge alignment or full-frame sine component [m].
     pub gap_m: f64,
     /// Endpoint range rate minus its prescribed value [m/s], or the selected
     /// relative point-velocity component of a spherical-joint row. Angular rows
@@ -300,7 +319,8 @@ impl core::fmt::Display for DistanceGraphError {
 }
 impl std::error::Error for DistanceGraphError {}
 
-// The original point-only graph keeps its exact native event type and payload.
+// The original point-only graph keeps its exact native event type and size.
+// Geometry caches separately include each row's current reaction arms.
 // Angular closures opt into an event enum without changing the solve or forcing
 // a pure torque through a fictitious application point.
 trait NativeReaction: Sized {
@@ -744,6 +764,20 @@ impl<F: FreeFlow> Problem<'_, F> {
                 }
                 revolute::geometry(states, link.bodies.map(|b| self.properties[b]), row)
             }
+            RowKind::Plane(row) => planes::geometry(
+                states,
+                link.bodies.map(|b| self.properties[b]),
+                row,
+                self.controls.position_tolerance_m,
+            ),
+            RowKind::FrameLock(row) => {
+                if self.controls.position_tolerance_m >= row.length_m {
+                    return Err(DistanceStepError::Invalid(
+                        "frame-lock length must exceed closure tolerance",
+                    ));
+                }
+                prismatic::geometry(states, link.bodies.map(|b| self.properties[b]), row)
+            }
         }
     }
     fn apply<E: NativeReaction>(
@@ -762,18 +796,18 @@ impl<F: FreeFlow> Problem<'_, F> {
                     self.constraint(link)?
                         .pair_impulse(link.bodies.map(|b| states[b]), g.normal.scale(j))?,
                 ),
-                RowKind::Cartesian(_) => {
+                RowKind::Cartesian(_) | RowKind::Plane(_) => {
                     E::point(crate::apply_equal_and_opposite_impulse_at_body_points(
                         states[link.bodies[0]],
                         self.properties[link.bodies[0]],
-                        link.points_body_m[0],
+                        g.arms_body_m[0],
                         states[link.bodies[1]],
                         self.properties[link.bodies[1]],
-                        link.points_body_m[1],
+                        g.arms_body_m[1],
                         g.normal.scale(j),
                     )?)
                 }
-                RowKind::Revolute(_) => E::couple(
+                RowKind::Revolute(_) | RowKind::FrameLock(_) => E::couple(
                     link.bodies.map(|b| states[b]),
                     link.bodies.map(|b| self.properties[b]),
                     g.normal.scale(j),
@@ -840,10 +874,10 @@ impl<F: FreeFlow> Problem<'_, F> {
             // rotations contribute to its change; the native body-travel
             // caps and positive-axis branch still apply independently.
             let normal_travel = norm(g.normal.sub(before.normal));
-            let local = match link.kind {
-                RowKind::Revolute(row) => normal_travel / row.length_m <= 2.0 * chord,
-                _ => normal_travel <= chord,
-            };
+            let local = link.angular_length().map_or_else(
+                || normal_travel <= chord,
+                |length| normal_travel / length <= 2.0 * chord,
+            );
             if !local {
                 return Err(DistanceStepError::LocalBranch.into());
             }
@@ -896,7 +930,7 @@ impl Mobility {
                 if link.is_angular() {
                     direction
                 } else {
-                    link.points_body_m[k].cross(direction)
+                    g.arms_body_m[k].cross(direction)
                 }
             });
             angular.push(AngularRow {

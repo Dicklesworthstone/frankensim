@@ -496,6 +496,7 @@ fn g3_hinge_mixed_graph_is_frame_boost_endpoint_and_joint_order_covariant() {
             axes.reverse();
             hinge(bodies, points, axes, joint.angular_length_m())
         }
+        _ => unreachable!("this endpoint-swap fixture uses rods, balls and hinges"),
     });
     for joints in [[joints[2], joints[0], joints[1]], reversed] {
         let out = run(&s, &p, &joints, h);

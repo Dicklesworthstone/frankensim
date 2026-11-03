@@ -3,12 +3,13 @@
 use super::{
     ArticulatedJoint, Dd, DistanceDrive, DistanceGraphControls, DistanceGraphError,
     DistanceGraphStep, DistanceLink, DistanceStepError, FreeFlow, JointReactionImpulse, JointRows,
-    MAX_DISTANCE_ROWS, MassProperties, RevoluteJoint, RigidBodyIntegrator, RigidBodyState, Row,
-    Rows, SphericalJoint, Vec3, Wrench, advance_between_with, driven, limit,
-    planned_bytes_for_motion, poll, positive, reserved, revolute,
+    MAX_DISTANCE_ROWS, MassProperties, PointPlaneJoint, PrismaticJoint, RevoluteJoint,
+    RigidBodyIntegrator, RigidBodyState, Row, Rows, SphericalJoint, Vec3, Wrench,
+    advance_between_with, driven, limit, planned_bytes_for_motion, poll, positive, reserved,
+    revolute,
 };
 
-/// A passive ball/hinge or a prescribed radial actuator, in one coupled graph.
+/// Finite passive joints and prescribed radial actuators in one coupled graph.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DrivenJoint {
     /// An ideal internal actuator with a held quadratic range command. A
@@ -23,6 +24,10 @@ pub enum DrivenJoint {
     Spherical(SphericalJoint),
     /// Coincidence and directed axis alignment, with free axial rotation.
     Revolute(RevoluteJoint),
+    /// A moving material point on a finite freely recoiling plane carrier.
+    PointPlane(PointPlaneJoint),
+    /// A freely sliding rail coordinate with locked relative joint frames.
+    Prismatic(PrismaticJoint),
 }
 impl DrivenJoint {
     pub(super) fn articulated(self) -> ArticulatedJoint {
@@ -30,6 +35,8 @@ impl DrivenJoint {
             Self::Distance { link, .. } => ArticulatedJoint::Distance(link),
             Self::Spherical(joint) => ArticulatedJoint::Spherical(joint),
             Self::Revolute(joint) => ArticulatedJoint::Revolute(joint),
+            Self::PointPlane(joint) => ArticulatedJoint::PointPlane(joint),
+            Self::Prismatic(joint) => ArticulatedJoint::Prismatic(joint),
         }
     }
 }
@@ -40,13 +47,13 @@ pub struct DrivenJointStep {
     /// Actuator endpoints with the final represented range/rate, or the
     /// unchanged passive joint. Use this value for the next accepted interval.
     pub joint_after: DrivenJoint,
-    /// Row span in the native step, including both angular rows of a hinge.
+    /// Row span in the native step, including every angular lock row.
     pub rows: JointRows,
     /// Represented endpoint range minus the commanded polynomial [m].
-    /// Zero for spherical and revolute joints.
+    /// Zero for passive joints.
     pub length_representation_residual_m: f64,
     /// Represented final range rate minus the commanded rate [m/s].
-    /// Zero for spherical and revolute joints.
+    /// Zero for passive joints.
     pub rate_representation_residual_mps: f64,
     /// Signed actuator source work [J]. Passive joints contribute zero.
     pub actuator_work_j: f64,
@@ -78,7 +85,7 @@ pub struct DrivenJointGraphStep<FreeStep = crate::StepReceipt> {
     pub planned_live_bytes: usize,
 }
 
-/// Advance quadratic distance actuators, ball joints and hinges together.
+/// Advance quadratic distance actuators and finite passive joints together.
 ///
 /// Every row enters the same full-inertia force/couple mobility and bounded
 /// nonlinear solve. Actuator forces can therefore drive attached mechanisms
@@ -90,13 +97,13 @@ pub struct DrivenJointGraphStep<FreeStep = crate::StepReceipt> {
 /// Each distance follows `length(t) = length(0) + rate*t + acceleration*t²/2`.
 /// The existing distance command owner checks the entire interval's positive
 /// range, endpoint representability and separate COM/spin range rates. Only
-/// radial rows receive those commands; Cartesian point and angular hinge rows
+/// radial rows receive those commands; point/plane and angular lock rows
 /// retain their original geometry. Passive joints supply no source work. Their
 /// ordered point/couple work remains in the independently reported defect, so
 /// it cannot be mislabeled as actuator energy or silently erased.
 ///
-/// The original 32-scalar-row bound counts one row per rod, three per ball and
-/// five per hinge. Two fixed stack banks and one bounded continuation vector
+/// The 32-scalar-row bound counts one row per rod or point/plane, three per ball
+/// and five per hinge or slider. Two fixed stack banks and one continuation vector
 /// extend the native buffers, with no per-trial allocation. Every refusal or
 /// cancellation leaves all borrowed inputs unchanged. Command errors identify
 /// the actuator's first scalar row, matching the native residual/event order.

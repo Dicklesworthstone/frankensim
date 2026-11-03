@@ -12,6 +12,7 @@
 //! second-order motion on the admitted local branch. This does not assert
 //! symplecticity, exact energy conservation, or a global root certificate.
 
+use super::pair_step::Geometry;
 use crate::spatial_loads::{PreparedSpatialLoads, SpatialStepReceipt};
 use crate::{
     ActionReactionImpulseReceipt, DynamicsError, MassProperties, RigidBodyIntegrator,
@@ -202,7 +203,12 @@ impl RigidDistanceConstraint {
         if !gap.is_finite() || !rate.is_finite() {
             return Err(DistanceStepError::Invalid("distance or range rate"));
         }
-        Ok(Geometry { normal, gap, rate })
+        Ok(Geometry {
+            normal,
+            arms_body_m: self.points_body_m,
+            gap,
+            rate,
+        })
     }
 
     fn pair_impulse(
@@ -222,11 +228,6 @@ impl RigidDistanceConstraint {
     }
 }
 
-struct Geometry {
-    normal: Vec3,
-    gap: f64,
-    rate: f64,
-}
 impl super::pair_step::Constraint for RigidDistanceConstraint {
     fn properties(&self) -> [MassProperties; 2] {
         self.properties
@@ -238,13 +239,7 @@ impl super::pair_step::Constraint for RigidDistanceConstraint {
         &self,
         states: [RigidBodyState; 2],
     ) -> Result<super::pair_step::Geometry, DistanceStepError> {
-        let g = self.geometry(states)?;
-        Ok(super::pair_step::Geometry {
-            normal: g.normal,
-            arms_body_m: self.points_body_m,
-            gap: g.gap,
-            rate: g.rate,
-        })
+        self.geometry(states)
     }
 }
 

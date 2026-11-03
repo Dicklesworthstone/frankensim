@@ -31,8 +31,10 @@ pub enum GraphJoint {
 pub struct JointRows {
     /// First index into `step.position_impulses`, `velocity_impulses` and `residuals`.
     pub first_row: usize,
-    /// One for distance, three for spherical, five for revolute. Each point
-    /// closure uses world x/y/z; a hinge then uses its two body-relative axes.
+    /// One for distance or point/plane, three for spherical, five for a hinge
+    /// or slider. Spherical/hinge point closures use world x/y/z; hinges add
+    /// two tilt rows. Sliders use two carrier-relative plane rows followed by
+    /// three relative-frame alignment rows.
     pub row_count: usize,
 }
 
@@ -217,5 +219,10 @@ pub(super) fn geometry(
         Vec3::new(0., 1., 0.),
         Vec3::new(0., 0., 1.),
     ][axis];
-    Ok(Geometry { normal, gap, rate })
+    Ok(Geometry {
+        normal,
+        arms_body_m: points,
+        gap,
+        rate,
+    })
 }

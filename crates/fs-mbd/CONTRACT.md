@@ -5553,7 +5553,9 @@ point-gap angular impulse, scalar residuals and authored-joint row spans.
 
 The generic `DistanceGraphStep` defaults to its original point receipt, so
 existing distance, driven-distance and spherical APIs retain their event type
-and logical heap payload. The shared trial buffers and mobility factorization
+and native event layout. The current geometry-cache cost is specified in the
+moving-plane/prismatic extension below. Shared trial buffers and mobility
+factorization
 serve both paths. An articulated run adds one fixed 32-row stack bank and one
 bounded joint-row map; no per-trial allocation or per-step axis preparation is
 introduced. A hinge consumes five of the existing 32 scalar rows. Native body
@@ -5644,7 +5646,7 @@ Pair and graph paths share one statically selected native free-motion adapter.
 The force/couple mobility, native full-inertia response, two impulse stages,
 nonlinear trials, rank checks and authored-joint mapping remain the same
 owners. `DistanceGraphStep` and the joint receipts default to their original
-free-step type, preserving the held-wrench API and its logical payload. The
+free-step type, preserving the held-wrench API and native free-step layout. The
 spatial graph budgets one torque-bound scalar per body in addition to its actual
 larger native receipts and joint map. Each conservative torque bound is prepared
 once from the fixed-size load representation; no load-set traversal, fresh
@@ -5669,6 +5671,99 @@ mixed-drive and spatial groups) pass in the bounded actual-source build. This is
 or DSR gate. Held loads, resolved local travel and the original smooth bilateral
 joint assumptions remain required; arbitrary state-dependent force laws,
 contact, global branches and exact energy conservation remain outside this map.
+
+## Coupled moving planes and finite prismatic mechanisms
+
+`PointPlaneJoint` and `PrismaticJoint` enter the same native graph through
+`ArticulatedJoint` and `DrivenJoint`, including both original spatial-load
+entry points. They can share arbitrary finite bodies with rods, balls, hinges
+and quadratic radial actuators. Every point-force and angular-couple cross
+response enters the existing complete full-inertia mobility and simultaneous
+bounded impulse/free-step/impulse solve. No carrier is pinned or treated as
+infinitely massive, and no pose correction or sequential subsystem solve is
+introduced.
+
+`PointPlaneJoint` reuses the original finite point/plane geometry owner. Its
+plane normal is normalized once and only the body-normal anchor offset is
+retained. The instantaneous equation uses the material point relative to the
+carrier COM and the carrier's current world normal. Its rate includes the
+carrier angular velocity at that CURRENT sliding location, not at a fixed
+authored anchor. Native equal/opposite impulses act at the material point and
+its projected point on the plane. The cached body-local carrier arm therefore
+changes as the point slides; mobility, trials, endpoint reactions and receipts
+all use that same actual arm. Both original pair and new graph paths share
+this preparation and geometry implementation, including compensated relative
+positions and COM/spin rates, irrelevant tangential-anchor removal and reaction
+arm representability admission.
+
+`PrismaticJoint` contributes two such transverse plane rows followed by three
+relative-orientation rows. Local joint Z is the free sliding direction. The
+two caller-supplied normalized frames map joint axes into the respective native
+COM body frames, so neither inertia principal axes nor matching body attitudes
+are assumed. The complete joint frames remain aligned while arbitrary axial
+translation is permitted. The two planes are prepared once from the carrier
+frame and share the original moving-plane torque and finite recoil treatment.
+
+For current world joint frames `Q0` and `Q1`, let the relative quaternion be
+`Q0^-1 Q1 = (w,v)`. The angular gap vector is `g = 2 L w v`, where the caller
+supplies positive `angular_length_m = L`. Its exact world Jacobian for component
+`i` is `n_i = L Q0 [w*w e_i - v_i v + w (v cross e_i)]`; the rate is
+`n_i.dot(omega1 - omega0)`. These analytic moving-frame Jacobians apply native
+equal/opposite pure couples through the original momentum-impulse owner.
+Production uses no angular finite differences or additional inertia
+factorization. Common angular motion is cancelled before compensated pairing,
+and all reaction work and representability residuals remain in native receipts.
+
+The admitted orientation chart requires `w*w > 1/2`, equivalently relative
+rotation magnitude below pi/2. This excludes the sine chart's half-turn false
+zero and quarter-turn rank loss. `L` must exceed the absolute position tolerance
+`p`. The complete transverse gap/rate norms obey the original `(p,v)` controls;
+the complete angular gap norm is `L*abs(sin(theta))`, and its derivative norm
+obeys the same speed tolerance. At alignment the latter is
+`L*norm(omega1 - omega0)`. The complete two-row transverse impulse is bounded
+by `maximum_impulse_ns`. The summed physical three-row couple has its separate
+bound `L*maximum_impulse_ns`, including finite-residual nonorthogonality. Scalar
+component caps cannot replace these vector bounds. Native angular travel,
+moving-normal travel, rank, backtracking and endpoint admission remain binding.
+
+A rod or standalone point/plane consumes one scalar row, a ball three, and a
+hinge or slider five of the existing 32-row bound. The original pair and graph
+now share one `Geometry` representation containing both actual reaction arms.
+The three graph geometry banks therefore add `3*2*sizeof(Vec3)` logical bytes
+per scalar row (144 bytes for the native three-f64 vector), including legacy
+rod/ball entry points. Exact current native receipt, row-map and continuation
+sizes enter the existing preallocation byte admission. The bounded row banks
+remain on the stack, and the existing trial buffers are reused without
+per-trial allocation. Original distance/spherical native event types remain
+unchanged. Every failure and cancellation leaves all borrowed inputs intact.
+
+Three groups in `tests/rigid_plane_graph.rs` cover an independent coupled
+shared-carrier acceleration solution with original pair parity; two sliding
+masses exchanging orbital momentum with a rotating finite carrier against an
+independent continuous ODE, second-order refinement and reversal; and off-center
+full-tensor moving planes combined with radial actuation and spatial forces,
+with momentum/work closure, covariance, permutation, limits and cancellation.
+Six groups in `tests/rigid_prismatic_graph.rs` cover exact finite rail recoil,
+transverse load sharing, axial torque and free travel; rotating-rail centrifugal
+motion against an independent continuous ODE with refinement/reversal; a driven
+closed slider-crank against independent finite-carrier angular-momentum
+quadrature and actuator-work convergence; a full-tensor rail/hinge/actuator with
+native spatial receipt identity, repeated linear/angular momentum and work
+closure, rotation/common-boost covariance; a genuinely connected 32-row graph,
+exact byte boundary, frame-branch/hidden-rate/vector-cap refusals; and every
+observed cancellation checkpoint with identical retry. A native inline unit
+test independently derives orientation gaps from transformed axes and checks
+all moving-frame Jacobian components against central rotational differences.
+
+These nine new integration groups and the independent Jacobian unit test pass
+in the bounded actual-source native build, alongside all 73 previous affected
+native regressions. This is numerical source-level evidence, not a full
+Cargo workspace or DSR gate or independent experimental validation. The wider
+multibody work remains open. The extension admits smooth bilateral finite rails
+and infinite planes, with explicit local orientation and independent-row
+requirements. Travel stops, friction, unilateral impact/contact, rail motors,
+arbitrary dependent constraints, global branches and exact energy/symplectic
+claims require their own models.
 
 ## Finite rigid separation at prescribed relative linear and spin velocities
 

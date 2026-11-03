@@ -3,9 +3,9 @@
 use super::{
     ActionReactionImpulseReceipt, Dd, DistanceGraphControls, DistanceGraphError, DistanceGraphStep,
     DistanceLink, DistanceStepError, Geometry, JointGraphStep, JointRows, MAX_DISTANCE_ROWS,
-    MassProperties, NativeReaction, RigidBodyIntegrator, RigidBodyState, Row, RowKind, Rows,
-    SphericalJoint, Vec3, Wrench, advance_between, driven, limit, planned_bytes_for, poll,
-    positive, reserved,
+    MassProperties, NativeReaction, PointPlaneJoint, PrismaticJoint, RigidBodyIntegrator,
+    RigidBodyState, Row, RowKind, Rows, SphericalJoint, Vec3, Wrench, advance_between, driven,
+    limit, planned_bytes_for, poll, positive, reserved,
 };
 use crate::MomentumImpulseReceipt;
 
@@ -104,6 +104,10 @@ pub enum ArticulatedJoint {
     Spherical(SphericalJoint),
     /// Three point closures and two body-relative axis constraints.
     Revolute(RevoluteJoint),
+    /// A material point sliding freely on a plane carried by another body.
+    PointPlane(PointPlaneJoint),
+    /// Two transverse rail closures and three relative-frame locks.
+    Prismatic(PrismaticJoint),
 }
 impl ArticulatedJoint {
     pub(super) fn row_count(self) -> usize {
@@ -111,6 +115,8 @@ impl ArticulatedJoint {
             Self::Distance(_) => 1,
             Self::Spherical(_) => 3,
             Self::Revolute(_) => 5,
+            Self::PointPlane(_) => 1,
+            Self::Prismatic(_) => 5,
         }
     }
 
@@ -120,6 +126,14 @@ impl ArticulatedJoint {
         let (bodies, points) = match self {
             Self::Distance(link) => {
                 rows[0] = Row::distance(link);
+                return;
+            }
+            Self::PointPlane(joint) => {
+                rows[0] = joint.row(0, 1);
+                return;
+            }
+            Self::Prismatic(joint) => {
+                joint.write_rows(rows);
                 return;
             }
             Self::Spherical(joint) => (joint.bodies, joint.points_body_m),
@@ -183,7 +197,7 @@ pub enum JointReactionImpulse {
 pub type ArticulatedGraphStep<FreeStep = crate::StepReceipt> =
     JointGraphStep<JointReactionImpulse, FreeStep>;
 
-/// Advance distance, ball and revolute joints in one coupled full-inertia solve.
+/// Advance finite rods, balls, hinges, point/planes and sliders in one solve.
 ///
 /// Each hinge contributes five independent rows. Its angular equations are
 /// `g_i = L * a_first.dot(t_second_i)`, with two body-fixed transverse directions
@@ -195,13 +209,15 @@ pub type ArticulatedGraphStep<FreeStep = crate::StepReceipt> =
 /// The original bounded impulse/free-step/impulse owner supplies all trials,
 /// backtracking, native free evolution and endpoint reactions. Reactions apply
 /// in row order at unchanged poses, retaining shared-body work cross terms.
-/// Five scalar rows per hinge count toward the original 32-row limit; no
+/// Five scalar rows per hinge or slider count toward the 32-row limit; no
 /// dependent sixth alignment equation is added. The complete point reaction
 /// and complete hinge couple have separate vector bounds described by
 /// [`RevoluteJoint::new`]. Existing distance/spherical-only entry points retain
-/// their original native receipt type and heap payload.
+/// their original native receipt type. Every geometry cache now also retains
+/// the current two reaction arms, with their storage included in live-payload
+/// admission; moving-plane and slider rows use those same caches.
 ///
-/// This is a local smooth bilateral hinge, with finite bodies on both sides.
+/// These are local smooth bilateral joints, with finite bodies on both sides.
 /// It does not add joint friction, motors, stops, backlash, impacts, a fixed
 /// support, or a global/energy/symplectic certificate. Native work and momentum
 /// defects remain visible. Cancellation or refusal publishes no partial state.
@@ -358,7 +374,12 @@ pub(super) fn geometry(
     if !normal.is_finite() || !gap.is_finite() || !rate.is_finite() {
         return Err(DistanceStepError::Invalid("hinge angular geometry"));
     }
-    Ok(Geometry { normal, gap, rate })
+    Ok(Geometry {
+        normal,
+        arms_body_m: [Vec3::ZERO; 2],
+        gap,
+        rate,
+    })
 }
 
 impl NativeReaction for JointReactionImpulse {

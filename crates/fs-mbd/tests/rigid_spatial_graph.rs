@@ -416,6 +416,8 @@ fn g4_spatial_actuation_keeps_native_parity_complete_payload_and_atomic_continua
         },
         ArticulatedJoint::Spherical(joint) => DrivenJoint::Spherical(joint),
         ArticulatedJoint::Revolute(joint) => DrivenJoint::Revolute(joint),
+        ArticulatedJoint::PointPlane(joint) => DrivenJoint::PointPlane(joint),
+        ArticulatedJoint::Prismatic(joint) => DrivenJoint::Prismatic(joint),
     });
     let ordinary = advance_spatial_articulated_graph(
         &s,

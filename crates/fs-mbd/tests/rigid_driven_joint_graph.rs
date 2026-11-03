@@ -581,6 +581,8 @@ fn passive(joint: DrivenJoint) -> ArticulatedJoint {
         DrivenJoint::Distance { link, .. } => ArticulatedJoint::Distance(link),
         DrivenJoint::Spherical(joint) => ArticulatedJoint::Spherical(joint),
         DrivenJoint::Revolute(joint) => ArticulatedJoint::Revolute(joint),
+        DrivenJoint::PointPlane(joint) => ArticulatedJoint::PointPlane(joint),
+        DrivenJoint::Prismatic(joint) => ArticulatedJoint::Prismatic(joint),
     }
 }
 
@@ -758,6 +760,7 @@ fn swap_ends(joint: DrivenJoint) -> DrivenJoint {
             )
             .unwrap(),
         ),
+        _ => unreachable!("this endpoint-swap fixture uses rods, balls and hinges"),
     }
 }
 
