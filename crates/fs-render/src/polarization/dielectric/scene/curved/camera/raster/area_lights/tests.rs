@@ -4,7 +4,10 @@ use super::*;
 use super::super::{CAMERA_WAVELENGTHS, CurvedCameraRaster};
 use super::super::tests as fixtures;
 use crate::charts::TriMesh;
-use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
+use crate::dielectric::{
+    BeerLambertAbsorption, CauchyIor, DielectricEvent, DielectricGlass, DielectricSurface,
+    GlassProvenance, evaluate_rough_dielectric,
+};
 use crate::instances::{GeometryInstance, InstanceScene, RigidTransform, SharedGeometry};
 use crate::polarization::dielectric::scene::{Interaction, SurfaceBinding};
 use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, SceneMedium};
@@ -230,5 +233,133 @@ fn g1_area_pixels_match_independent_spectral_irradiance_and_native_lane_streams(
             ),
             Err(AreaLightRasterError::Transport { lane: 0, .. })
         ));
+    });
+}
+
+#[test]
+fn g1_rough_glass_pixels_match_dispersive_transmission_and_preserve_native_paths() {
+    fixtures::with_cx(|cx, _| {
+        // The original winding faces the light-side glass; the physical camera
+        // approaches from the inside. The source emits back toward that interface.
+        let emitter_geometry = GeometryInstance::try_new(
+            9,
+            hash_domain("rough-area-raster-source", b"9"),
+            SharedGeometry::mesh(TriMesh::new(
+                vec![[-0.3, -0.3, 2.0], [0.0, 0.6, 2.0], [0.3, -0.3, 2.0]],
+                vec![[0, 1, 2]],
+            )),
+            RigidTransform::identity(),
+        ).unwrap();
+        let geometry = InstanceScene::try_new(vec![panel(1, 1.0, 10.0), emitter_geometry]).unwrap();
+        let camera_medium = DielectricGlass::new(
+            CauchyIor::try_constant(1.0).unwrap(),
+            BeerLambertAbsorption::try_constant(0.1).unwrap(),
+            GlassProvenance::Custom,
+        );
+        let source_medium = DielectricGlass::new(
+            CauchyIor::try_new(1.45, 0.004, 0.0).unwrap(),
+            BeerLambertAbsorption::try_constant(0.15).unwrap(),
+            GlassProvenance::Custom,
+        );
+        let media = [
+            SceneMedium::Homogeneous(&camera_medium),
+            SceneMedium::Homogeneous(&source_medium),
+        ];
+        let native = CurvedPolarizedScene::try_new(
+            cx, &geometry, &media,
+            vec![
+                SurfaceBinding {
+                    object_id: 1,
+                    interaction: Interaction::Dielectric {
+                        outside: 1,
+                        inside: 0,
+                        surface: DielectricSurface::try_rough(0.25).unwrap(),
+                    },
+                },
+                SurfaceBinding { object_id: 9, interaction: Interaction::Opaque },
+            ],
+            100_000,
+        ).unwrap();
+        let emitters = [SurfaceEmitter::new(
+            9,
+            RadianceSpectrum::try_new(vec![(LAMBDA_MIN, 1.0), (LAMBDA_MAX, 5.0)]).unwrap(),
+            EmissionSides::Front,
+        )];
+        let camera = CurvedCameraScene::try_new(cx, &native, &emitters, None).unwrap();
+        let source = CurvedAreaEmitter::from_camera(cx, &camera, 9, 1).unwrap();
+        let seeds = [BundleImageSeed {
+            initial_direction: Vec3::new(0.0, 0.0, -1.0),
+            policy: BundleBranchPolicy::TransmitOrReflectTir,
+        }];
+        let bindings = [AreaLightBinding {
+            source: &source,
+            receiver_object_id: 1,
+            source_side: BoundarySide::Positive,
+            initial_medium: 1,
+            source_transverse_axis: Vec3::new(0.0, 1.0, 0.0),
+            seeds: &seeds,
+            image_options: BundleImageOptions { max_images: 1, ..BundleImageOptions::default() },
+            position_tolerance_m: 2e-7,
+        }];
+        let area = CurvedAreaLightCameraScene::try_new(cx, &camera, &bindings).unwrap();
+        let physical = fixtures::camera(0.01);
+        let raster = CurvedCameraRaster::try_new(&physical, 3, 2).unwrap();
+        let mut workspace = AreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
+        let (seed, pixel, sample) = (0x1234_5678_0000_0049_u64, 4, 9);
+        let ordinary = raster.sample_pixel(
+            cx, &camera, 0, settings().surfaces, seed, pixel, sample,
+        ).unwrap();
+        let result = raster.sample_pixel_area_lights(
+            cx, &area, 0, settings(), &mut workspace, seed, pixel, sample,
+        ).unwrap();
+        assert_eq!(result.pixel_sample().camera_ray(), ordinary.camera_ray());
+        assert_eq!(result.pixel_sample().wavelengths_nm(), ordinary.wavelengths_nm());
+        let ray = result.pixel_sample().camera_ray();
+        let camera_length = (1.0 - ray.origin.z) / ray.dir.z;
+        let receiver = Point3::new(
+            ray.origin.x + camera_length * ray.dir.x,
+            ray.origin.y + camera_length * ray.dir.y,
+            1.0,
+        );
+        let key = [seed as u32, (seed >> 32) as u32];
+        for lane in 0..CAMERA_WAVELENGTHS {
+            let wavelength = result.pixel_sample().wavelengths_nm()[lane];
+            let draw = philox4x32_10([pixel, sample, 0, 0x6372_6100 + lane as u32 * 64], key);
+            let root = unit(draw[0]).sqrt();
+            let v = unit(draw[1]);
+            let source_point = Point3::new(
+                -0.3 + 0.3 * root * (1.0 - v) + 0.6 * root * v,
+                -0.3 + 0.9 * root * (1.0 - v),
+                2.0,
+            );
+            let displacement = source_point.delta_from(receiver);
+            let distance_squared = displacement.dot(displacement);
+            let distance = distance_squared.sqrt();
+            let direction_to_source = displacement.scale(1.0 / distance);
+            let cosine = 1.0 / distance;
+            let wavelength_um = wavelength * 1e-3;
+            let eta = 1.45 + 0.004 / (wavelength_um * wavelength_um);
+            let bsdf = evaluate_rough_dielectric(
+                Vec3::new(0.0, 0.0, -1.0), ray.dir.scale(-1.0), direction_to_source,
+                1.0, eta, 0.25,
+            ).unwrap();
+            assert_eq!(bsdf.event, DielectricEvent::Transmission);
+            assert!(bsdf.value > 0.0 && bsdf.pdf > 0.0);
+            let radiance = 1.0 + 4.0 * (wavelength - LAMBDA_MIN) / (LAMBDA_MAX - LAMBDA_MIN);
+            let irradiance = radiance * 0.27 * cosine * cosine / distance_squared
+                * (-0.15 * distance).exp();
+            let p_light = distance_squared / (0.27 * cosine);
+            let light_weight = p_light * p_light / (p_light * p_light + bsdf.pdf * bsdf.pdf);
+            // The native scalar BSDF already has the radiance eta convention.
+            // No extra light-side n^2 factor belongs in this camera-side result.
+            let expected = (-0.1 * camera_length).exp() * bsdf.value * irradiance * light_weight;
+            near(result.area_radiance_w_m2_sr_nm()[lane], expected);
+            assert_eq!(result.area_samples()[lane], 1);
+            assert_eq!(result.images()[lane], 1);
+            assert_eq!(
+                result.pixel_sample().spectral_samples()[lane].path(),
+                ordinary.spectral_samples()[lane].path(),
+            );
+        }
     });
 }

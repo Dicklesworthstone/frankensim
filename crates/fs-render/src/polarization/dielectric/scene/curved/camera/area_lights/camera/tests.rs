@@ -2,6 +2,9 @@
 
 use super::*;
 use crate::charts::{Ray, TriMesh};
+use crate::conductor::{
+    ConductorDataStatus, ConductorIorSample, ConductorOptics, ConductorSource, ConductorSurface,
+};
 use crate::dielectric::{
     BeerLambertAbsorption, CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance,
 };
@@ -25,6 +28,7 @@ use crate::polarization::dielectric::scene::curved::camera::{
 };
 use crate::polarization::dielectric::scene::curved::camera::area_lights::CurvedAreaEmitter;
 use crate::spectral::SpectralReflectance;
+use crate::surface_detail::{BrushingPattern, SurfaceDetail};
 use fs_blake3::hash_domain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::fixtures::SphereChart;
@@ -144,6 +148,170 @@ fn near(actual: f64, expected: f64, relative: f64) {
         (actual - expected).abs() <= relative * expected.abs().max(1e-14),
         "{actual:.17e} != {expected:.17e}",
     );
+}
+
+fn metal() -> ConductorOptics {
+    let source = ConductorSource::try_new(fs_blake3::ContentHash([91; 32]),
+        ConductorDataStatus::Representative).unwrap();
+    ConductorOptics::try_new(core::array::from_fn(|i| {
+        ConductorIorSample::try_new(380.0 + 50.0 * i as f64, 0.2, 3.0).unwrap()
+    }), source).unwrap()
+}
+
+fn oriented_panel(id: u64, center: Point3, normal: Vec3, scale: f64) -> GeometryInstance {
+    let normal = unit(normal);
+    let tangent = unit(Vec3::new(normal.z, 0.0, -normal.x));
+    let bitangent = Vec3::new(normal.y * tangent.z - normal.z * tangent.y,
+        normal.z * tangent.x - normal.x * tangent.z,
+        normal.x * tangent.y - normal.y * tangent.x);
+    let point = |u, v| [center.x + scale * (u * tangent.x + v * bitangent.x),
+        center.y + scale * (u * tangent.y + v * bitangent.y),
+        center.z + scale * (u * tangent.z + v * bitangent.z)];
+    GeometryInstance::try_new(id, hash_domain("polarized-rough-area-panel", &id.to_le_bytes()),
+        SharedGeometry::mesh(TriMesh::new(vec![point(-1.0, -1.0), point(1.0, -1.0), point(0.0, 2.0)],
+            vec![[0, 1, 2]])), RigidTransform::identity()).unwrap()
+}
+
+#[test]
+fn g1_rough_area_connection_preserves_non_coplanar_polarized_camera_prefix() {
+    with_cx(|cx| {
+        let mirror_normal = unit(Vec3::new(-1.0, 0.0, 1.0));
+        let receiver = Point3::new(1.0, 0.0, 1.0);
+        let source = Point3::new(-1.0, 1.2, 1.8);
+        let incoming = unit(receiver.delta_from(source));
+        let outgoing = incoming.scale(-1.0);
+        let geometry = InstanceScene::try_new(vec![
+            oriented_panel(1, Point3::new(0.0, 0.0, 1.0), mirror_normal, 0.15),
+            oriented_panel(2, receiver, Vec3::new(1.0, 0.0, 0.0), 0.5),
+            oriented_panel(9, source, incoming, 0.3),
+        ]).unwrap();
+        let material = glass(1.0, 0.1);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let conductors = [metal()];
+        let alpha = 0.3;
+        let scene = CurvedPolarizedScene::try_new_with_materials(cx, &geometry, &media,
+            &conductors, &[], &[], vec![
+                SurfaceBinding { object_id: 1, interaction: Interaction::SmoothConductor { optics: 0, medium: 0 } },
+                SurfaceBinding { object_id: 2, interaction: Interaction::RoughConductor {
+                    optics: 0, medium: 0, surface: ConductorSurface::try_rough(alpha).unwrap(),
+                }}, opaque(9),
+            ], 100_000).unwrap();
+        let emitters = [emitter(9)];
+        let camera = CurvedCameraScene::try_new(cx, &scene, &emitters, None).unwrap();
+        let light = CurvedAreaEmitter::from_camera(cx, &camera, 9, 1).unwrap();
+        let seeds = [seed(incoming)];
+        let bindings = [AreaLightBinding {
+            source: &light, receiver_object_id: 2, source_side: BoundarySide::Positive,
+            initial_medium: 0, source_transverse_axis: Vec3::new(0.0, 1.0, 0.0),
+            seeds: &seeds, image_options: image_options(1), position_tolerance_m: 2e-7,
+        }];
+        let owner = CurvedAreaLightCameraScene::try_new(cx, &camera, &bindings).unwrap();
+        let mut workspace = AreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
+        let baseline = camera.sample_ray_with_samples(cx, camera_ray(), 550.0, 0,
+            settings().surfaces, |_| [0.0; 3]).unwrap();
+        let result = owner.sample_ray_with_samples(cx, camera_ray(), 550.0, 0, settings(), &mut workspace,
+            |_| [0.0; 3], |event, binding| {
+                assert_eq!((event, binding), (1, 0)); [4.0 / 9.0, 0.5]
+            }).unwrap();
+        // An independent native smooth-mirror prefix and facet Mueller
+        // reflection, followed by analytic GGX density/masking and flat source
+        // geometry. Neither the connection evaluator nor its MIS helper is
+        // used by this reference.
+        let prefix = camera.launch(camera_ray(), 550.0, 0).unwrap().advance(1.0).unwrap()
+            .reflect_conductor(mirror_normal, &conductors[0]).unwrap().beam.advance(1.0).unwrap();
+        let facet = unit(Vec3::new(-1.0 + outgoing.x, outgoing.y, outgoing.z));
+        let reflected = prefix.reflect_conductor(facet, &conductors[0]).unwrap().beam;
+        let cosine = -outgoing.x;
+        let half_cosine = -facet.x;
+        let denominator = half_cosine * half_cosine * (alpha * alpha - 1.0) + 1.0;
+        let d = alpha * alpha / (core::f64::consts::PI * denominator * denominator);
+        let masking = 2.0 * cosine /
+            (cosine + (alpha * alpha + (1.0 - alpha * alpha) * cosine * cosine).sqrt());
+        let distance2 = receiver.delta_from(source).dot(receiver.delta_from(source));
+        let p_light = distance2 / AREA;
+        let p_bsdf = d / 4.0;
+        let weight = p_light * p_light / (p_light * p_light + p_bsdf * p_bsdf);
+        let irradiance = LE * AREA * cosine / distance2 * (-0.1 * distance2.sqrt()).exp();
+        let expected = reflected.power().i * d * masking / (4.0 * cosine) * irradiance * weight;
+        near(result.area_radiance_w_m2_sr_nm(), expected, 1e-5);
+        near(result.radiance_sample().radiance_w_m2_sr_nm(), expected, 1e-5);
+        assert_eq!(baseline.radiance_w_m2_sr_nm(), 0.0);
+        assert_eq!(result.radiance_sample().path(), baseline.path());
+        let depolarized = PolarizedBeam::try_new(prefix.ray().origin, prefix.frame(), 550.0, prefix.medium(),
+            Stokes::unpolarized(prefix.power().i)).unwrap()
+            .reflect_conductor(facet, &conductors[0]).unwrap().beam;
+        assert!((reflected.power().i - depolarized.power().i).abs() > 1e-5 * reflected.power().i,
+            "depolarizing the camera prefix must change this non-coplanar metallic response");
+        assert_eq!((result.area_samples(), result.images()), (1, 1));
+    });
+}
+
+#[test]
+fn g1_rough_and_brushed_receivers_share_native_continuation_and_complementary_mis() {
+    with_cx(|cx| {
+        // Offset the radial brush from its native pole so this exercises the
+        // anisotropic finish rather than its documented isotropic fallback.
+        let x = 0.2;
+        let ray = Ray { origin: Point3::new(x, 0.0, 0.0), dir: Vec3::new(0.0, 0.0, 1.0) };
+        let geometry = InstanceScene::try_new(vec![panel(1, x, 1.0, 1.0), panel(9, x, -1.0, 0.3)]).unwrap();
+        let material = glass(1.0, 0.1);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let conductors = [metal()];
+        let detail = SurfaceDetail::try_new(0.12, 3.0, BrushingPattern::Radial, 0.0, None).unwrap();
+        let interactions = [
+            (Interaction::RoughConductor { optics: 0, medium: 0,
+                surface: ConductorSurface::try_rough(0.0001).unwrap() }, (0.0001, 0.0001)),
+            (Interaction::RoughConductor { optics: 0, medium: 0,
+                surface: ConductorSurface::try_rough(0.2).unwrap() }, (0.2, 0.2)),
+            (Interaction::BrushedConductor { optics: 0, medium: 0, detail }, detail.alpha_pair()),
+        ];
+        for (interaction, (alpha_x, alpha_y)) in interactions {
+            let scene = CurvedPolarizedScene::try_new_with_materials(cx, &geometry, &media,
+                &conductors, &[], &[], vec![SurfaceBinding { object_id: 1, interaction }, opaque(9)],
+                100_000).unwrap();
+            let emitters = [emitter(9)];
+            let camera = CurvedCameraScene::try_new(cx, &scene, &emitters, None).unwrap();
+            let light = CurvedAreaEmitter::from_camera(cx, &camera, 9, 1).unwrap();
+            let seeds = [seed(Vec3::new(0.0, 0.0, 1.0))];
+            let bindings = [AreaLightBinding {
+                source: &light, receiver_object_id: 1, source_side: BoundarySide::Positive,
+                initial_medium: 0, source_transverse_axis: Vec3::new(0.0, 1.0, 0.0),
+                seeds: &seeds, image_options: image_options(1), position_tolerance_m: 2e-7,
+            }];
+            let owner = CurvedAreaLightCameraScene::try_new(cx, &camera, &bindings).unwrap();
+            let mut workspace = AreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
+            let baseline = camera.sample_ray_with_samples(cx, ray, 550.0, 0,
+                settings().surfaces, |_| [0.0; 3]).unwrap();
+            let mut surface_draws = 0;
+            let mut area_draws = 0;
+            let result = owner.sample_ray_with_samples(cx, ray, 550.0, 0, settings(), &mut workspace,
+                |event| { assert_eq!(event, 0); surface_draws += 1; [0.0; 3] },
+                |event, binding| {
+                    assert_eq!((event, binding), (0, 0)); area_draws += 1; [4.0 / 9.0, 0.5]
+                }).unwrap();
+            // Independent normal-incidence conductor Fresnel, anisotropic GGX
+            // D(0), flat receiving geometry, Beer law and power partition.
+            let fresnel = ((1.0_f64 - 0.2).powi(2) + 9.0) / ((1.0_f64 + 0.2).powi(2) + 9.0);
+            let p_bsdf = 1.0 / (4.0 * core::f64::consts::PI * alpha_x * alpha_y);
+            let p_light = 4.0 / AREA;
+            let light_weight = p_light * p_light / (p_light * p_light + p_bsdf * p_bsdf);
+            let hit_weight = p_bsdf * p_bsdf / (p_light * p_light + p_bsdf * p_bsdf);
+            let attenuation = (-0.3_f64).exp();
+            let expected_nee = fresnel * p_bsdf * LE * AREA / 4.0 * attenuation * light_weight;
+            let expected_hit = fresnel * LE * attenuation * hit_weight;
+            near(baseline.radiance_w_m2_sr_nm(), fresnel * LE * attenuation, 2e-6);
+            near(result.area_radiance_w_m2_sr_nm(), expected_nee, 3e-6);
+            near(result.radiance_sample().radiance_w_m2_sr_nm(), expected_nee + expected_hit, 3e-6);
+            assert_eq!(result.radiance_sample().path(), baseline.path());
+            assert_eq!((surface_draws, area_draws), (1, 1));
+            assert_eq!((result.area_samples(), result.images()), (1, 1));
+            assert!(result.trace_evaluations() >= 3);
+            let repeated = owner.sample_ray_with_samples(cx, ray, 550.0, 0, settings(), &mut workspace,
+                |_| [0.0; 3], |_, _| [4.0 / 9.0, 0.5]).unwrap();
+            assert_eq!(result.radiance_sample(), repeated.radiance_sample());
+            assert_eq!(result.area_radiance_w_m2_sr_nm(), repeated.area_radiance_w_m2_sr_nm());
+        }
+    });
 }
 
 #[test]

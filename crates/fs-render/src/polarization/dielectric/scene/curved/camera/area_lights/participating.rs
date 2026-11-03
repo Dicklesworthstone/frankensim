@@ -1,6 +1,6 @@
 //! Finite-area lighting on the original molecular camera walk.
 //!
-//! Every selected diffuse or accepted molecular vertex samples the original
+//! Every selected continuous surface or accepted molecular vertex samples the original
 //! panel area and enumerates its authored native refractive images. Each image
 //! independently tracks source scattering survival on its solved curved arc.
 //! The reciprocal molecular contraction retains both subpaths' Stokes states;
@@ -27,18 +27,17 @@ use super::camera::{
     AreaLightCameraError, AreaLightCameraSample, AreaLightCameraSettings,
     AreaLightCameraWorkspace, ContinuationAnchor, CurvedAreaLightCameraScene,
     MAX_AREA_LIGHT_BINDINGS, MolecularAnchor, MolecularPhase, PathState,
-    SourceBinding, Work, diffuse_contribution, emitter_weight_for_source,
-    face_normal, nonnegative, validate_source_binding,
+    SourceBinding, SurfaceReceiver, Work, directional_contribution, emitter_weight_for_source,
+    nonnegative, validate_source_binding,
 };
 use super::super::{CameraRadianceError, CameraRadianceSample, CurvedCameraScene, phase_index};
 use super::super::emission::SurfaceEmission;
 use super::super::participating::CurvedRayleighCameraScene;
 use crate::charts::Ray;
-use crate::dielectric::DielectricError;
 use crate::gradient_index::event::BoundarySide;
-use crate::polarization::dielectric::scene::{Interaction, PathTermination, SceneError};
+use crate::polarization::dielectric::scene::{PathTermination, SceneError};
 use crate::polarization::dielectric::scene::curved::{
-    CurvedContact, CurvedPathResult, CurvedSceneError, CurvedTraceEvent, SceneMedium,
+    CurvedPathResult, CurvedSceneError, CurvedTraceEvent, SceneMedium,
 };
 use crate::polarization::dielectric::scene::curved::bundle::connection::BundleConnectionTarget;
 use crate::polarization::dielectric::scene::curved::bundle::connection::images::{
@@ -53,7 +52,6 @@ use crate::polarization::dielectric::transport::PolarizationFrame;
 use crate::volumes::transport::scattering::PhaseFunction;
 use fs_exec::Cx;
 use fs_geom::Vec3;
-use fs_math::det;
 
 /// One original emitting side and receiving molecular medium. The same seeds
 /// are evaluated at each actual sampled source point and accepted collision.
@@ -311,22 +309,12 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         area_samples: &mut impl FnMut(u32, usize) -> [f64; 2],
         source_samples: &mut impl FnMut(u32, u32, u32) -> f64,
     ) -> Result<(), AreaLightCameraError> {
-        let contact = *path.last_contact().ok_or(AreaLightCameraError::NumericalRange)?;
-        let native = self.surface_camera().scene.bindings.get(contact.witness.boundary_id)
-            .ok_or(AreaLightCameraError::NumericalRange)?;
-        let Interaction::DepolarizingDiffuse { medium, reflectance } = native.interaction
+        let Some(surface) = SurfaceReceiver::at_arrival(self.surface_camera(), path)?
             else { return Ok(()); };
-        if native.object_id != contact.object_id || medium != path.medium_index() {
-            return Err(AreaLightCameraError::NumericalRange);
-        }
-        let beam = path.beam();
-        let rho = self.surface_camera().scene.reflectances[reflectance].at(beam.wavelength_nm())
-            .map_err(|_| CameraRadianceError::Optics(DielectricError::InvalidWavelength))?;
-        if rho == 0.0 { return Ok(()); }
         let ordinal = path.surface_events().checked_sub(1).ok_or(AreaLightCameraError::NumericalRange)?;
-        let receiver = Receiver::Diffuse { contact, normal: face_normal(contact, beam.ray().dir), rho };
+        let receiver = Receiver::Surface(surface);
         for (index, binding) in self.area_lights.bindings.iter().enumerate() {
-            if binding.receiver_object_id != contact.object_id { continue; }
+            if binding.receiver_object_id != surface.contact.object_id { continue; }
             self.add_source(cx, path, receiver, binding.source_binding(), index, ordinal,
                 settings, initial_index, work, tracking, radiance, workspace, area_samples, source_samples)?;
         }
@@ -373,8 +361,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
             .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
         work.samples += 1;
         let target = match receiver {
-            Receiver::Diffuse { contact, normal, .. } => BundleConnectionTarget::try_diffuse_receiver(
-                contact.object_id, contact.witness.surface_point, normal, binding.position_tolerance_m),
+            Receiver::Surface(surface) => surface.target(binding.position_tolerance_m),
             Receiver::Molecular { .. } => BundleConnectionTarget::try_volume_receiver(
                 path.medium_index(), beam.ray().origin, sample.position_m().delta_from(beam.ray().origin),
                 binding.position_tolerance_m),
@@ -412,12 +399,17 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
             let bundle = connection.path().bundle();
             let endpoint = bundle.propagation().propagation();
             let (normal, factor, weights) = match receiver {
-                Receiver::Diffuse { normal, rho, .. } => {
-                    let incidence = -normal.dot(endpoint.ray.dir);
-                    if !incidence.is_finite() { return Err(AreaLightCameraError::NumericalRange); }
-                    if incidence <= 0.0 { continue; }
-                    (normal, rho, binding.source.mis_weights(sample, connection, target,
-                        settings.area_lights.connection.projection))
+                Receiver::Surface(surface) => {
+                    let response = surface.response(self.surface_camera(), connection, index)?;
+                    if response.factor == 0.0 { continue; }
+                    let weights = if surface.is_rough() {
+                        binding.source.surface_mis_weights(sample, connection, target,
+                            settings.area_lights.connection.projection, response.pdf)
+                    } else {
+                        binding.source.mis_weights(sample, connection, target,
+                            settings.area_lights.connection.projection)
+                    };
+                    (response.normal, response.factor, weights)
                 }
                 Receiver::Molecular { phase } => {
                     let frame = PolarizationFrame::try_new(endpoint.ray.dir, endpoint.transverse_axis)
@@ -437,16 +429,15 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                 source_radiance, cosine, sample.pdf_area_per_m2(), tracked.log_scattering_survival(),
                 tracked.ratio_tracking_zero())
                 .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
-            if irradiance == 0.0 || factor == 0.0 { continue; }
+            if irradiance == 0.0 || factor == 0.0 || weights.light_weight() == 0.0 { continue; }
             if beam.power().i == 0.0 {
                 return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
             }
-            let local_index = phase_index(beam.medium(), wavelength)?;
             let value = match receiver {
-                Receiver::Diffuse { .. } => diffuse_contribution(beam.power().i, initial_index,
-                    local_index, factor, irradiance, weights.light_weight())?,
-                Receiver::Molecular { .. } => molecular_contribution(beam.power().i, initial_index,
-                    local_index, factor, irradiance, weights.light_weight())?,
+                Receiver::Surface(surface) => surface.contribution(initial_index,
+                    factor, irradiance, weights.light_weight())?,
+                Receiver::Molecular { .. } => directional_contribution(beam.power().i, initial_index,
+                    phase_index(beam.medium(), wavelength)?, factor, irradiance, weights.light_weight())?,
             };
             radiance.add(value);
         }
@@ -497,22 +488,12 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
 
 #[derive(Clone, Copy)]
 enum Receiver<'a> {
-    Diffuse { contact: CurvedContact, normal: Vec3, rho: f64 },
+    Surface(SurfaceReceiver),
     Molecular { phase: &'a PhaseFunction },
 }
 
 #[derive(Default)]
 struct TrackingWork { draws: u32, candidates: u32 }
-
-fn molecular_contribution(prefix: f64, initial_index: f64, local_index: f64,
-    angular: f64, irradiance: f64, weight: f64) -> Result<f64, AreaLightCameraError> {
-    let ratio = initial_index / local_index;
-    let value = prefix * (ratio * ratio) * (angular * irradiance) * weight;
-    if value.is_finite() && value > 0.0 { return Ok(value); }
-    let value = det::exp(det::ln(prefix) + 2.0 * (det::ln(initial_index) - det::ln(local_index))
-        + det::ln(angular) + det::ln(irradiance) + det::ln(weight));
-    if value.is_finite() && value > 0.0 { Ok(value) } else { Err(AreaLightCameraError::NumericalRange) }
-}
 
 #[cfg(test)]
 mod tests;

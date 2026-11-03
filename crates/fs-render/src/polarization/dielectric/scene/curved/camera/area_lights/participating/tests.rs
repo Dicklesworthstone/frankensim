@@ -2,11 +2,11 @@
 
 use super::*;
 use crate::charts::TriMesh;
-use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
+use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance};
 use crate::gradient_index::GradientIndexOptions;
 use crate::gradient_index::event::GradientEventOptions;
 use crate::instances::{GeometryInstance, InstanceScene, RigidTransform, SharedGeometry};
-use crate::polarization::dielectric::scene::SurfaceBinding;
+use crate::polarization::dielectric::scene::{Interaction, SurfaceBinding};
 use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, CurvedTraceSettings};
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleBranchPolicy, BundleConnectionOptions,
@@ -14,6 +14,7 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::{
 use crate::polarization::dielectric::scene::curved::camera::{
     EmissionSides, RadianceSpectrum, SurfaceEmitter,
 };
+use crate::polarization::dielectric::scene::curved::camera::area_lights::camera::AreaLightBinding;
 use crate::polarization::dielectric::scene::curved::participating::{
     CurvedDensityField, CurvedRayleighMedium, CurvedRayleighScene,
 };
@@ -163,6 +164,76 @@ fn g1_molecular_area_and_emitter_terms_use_complementary_angular_weights() {
 struct HalfDensity;
 impl CurvedDensityField for HalfDensity {
     fn density_kg_m3(&self, _: Point3) -> Result<f64, VolumeTransportError> { Ok(0.5) }
+}
+
+#[test]
+fn g1_rough_surface_receivers_keep_noisy_survival_out_of_emitter_hit_partition() {
+    with_cx(|cx| {
+        let panel_at = |id: u64, z: f64, scale: f64| GeometryInstance::try_new(id,
+            hash_domain("rough-participating-area-panel", &id.to_le_bytes()),
+            SharedGeometry::mesh(TriMesh::new(
+                vec![[-scale, -scale, z], [scale, -scale, z], [0.0, 2.0 * scale, z]],
+                vec![[0, 1, 2]])), RigidTransform::identity()).unwrap();
+        let geometry = InstanceScene::try_new(vec![panel_at(1, 1.0, 1.0), panel_at(9, -1.0, 0.3)]).unwrap();
+        let material = glass();
+        let other = DielectricGlass::new(CauchyIor::try_constant(1.0).unwrap(),
+            BeerLambertAbsorption::try_constant(0.0).unwrap(), GlassProvenance::Custom);
+        let media = [SceneMedium::Homogeneous(&material), SceneMedium::Homogeneous(&other)];
+        let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media,
+            vec![SurfaceBinding { object_id: 1, interaction: Interaction::Dielectric {
+                outside: 1, inside: 0, surface: DielectricSurface::try_rough(0.2).unwrap(),
+            }}, SurfaceBinding { object_id: 9, interaction: Interaction::Opaque }], 100_000).unwrap();
+        let emitters = [SurfaceEmitter::new(9, RadianceSpectrum::try_constant(LE).unwrap(), EmissionSides::Front)];
+        let camera = CurvedCameraScene::try_new(cx, &scene, &emitters, None).unwrap();
+        let source = CurvedAreaEmitter::from_camera(cx, &camera, 9, 1).unwrap();
+        let seed = seeds(Vec3::new(0.0, 0.0, 1.0));
+        let proposal = binding(&source, &seed);
+        let bindings = [AreaLightBinding {
+            source: &source, receiver_object_id: 1, source_side: proposal.source_side,
+            initial_medium: 0, source_transverse_axis: proposal.source_transverse_axis,
+            seeds: &seed, image_options: proposal.image_options,
+            position_tolerance_m: proposal.position_tolerance_m,
+        }];
+        let surface = CurvedAreaLightCameraScene::try_new(cx, &camera, &bindings).unwrap();
+        let spectrum = MassScatteringSpectrum::constant(1.0).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let laws = [Some(CurvedRayleighMedium::try_new_heterogeneous(&spectrum, &HalfDensity,
+            1.0, ContentHash([84; 32]), &phase).unwrap()), None];
+        let transport = CurvedRayleighScene::try_new(cx, &scene, &laws).unwrap();
+        let molecular = CurvedRayleighCameraScene::try_new(cx, &camera, &transport).unwrap();
+        let owner = CurvedRayleighAreaLightCameraScene::try_new(cx, &molecular, &surface).unwrap();
+        let flight = |_| [0.99, 0.5, 0.0, 0.9];
+        let baseline = molecular.sample_ray_with_tracking_samples(cx, camera_ray(), 550.0, 0,
+            CurvedRayleighTraceSettings { surfaces: settings().area_lights.surfaces, max_volume_events: 8 },
+            |_| [0.0; 3], flight).unwrap();
+        let fresnel = ((1.4_f64 - 1.0) / (1.4 + 1.0)).powi(2);
+        let pdf = fresnel / (4.0 * core::f64::consts::PI * 0.2 * 0.2);
+        let (light_weight, hit_weight) = partition(4.0 / AREA, pdf);
+        let mut workspace = RayleighAreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
+        let mut hit_terms = [0.0; 2];
+        for (slot, candidate) in [false, true].into_iter().enumerate() {
+            let result = owner.sample_ray_with_tracking_samples(cx, camera_ray(), 550.0, 0,
+                settings(), &mut workspace, |_| [0.0; 3], flight,
+                |event, index| { assert_eq!((event, index), (0, 0)); [4.0 / 9.0, 0.5] },
+                |_, _| panic!("no real molecular vertex"),
+                |area, image, draw| {
+                    assert_eq!((area, image), (0, 0));
+                    if candidate && draw == 0 { 1.0 - (-0.25_f64).exp() } else { 0.99 }
+                }).unwrap();
+            let ratio = if candidate { 0.5 } else { 1.0 };
+            let expected_area = LE * AREA / 4.0 * pdf * (-0.6_f64).exp() * ratio * light_weight;
+            let expected_hit = LE * (-0.6_f64).exp() * hit_weight;
+            near(result.area_radiance_w_m2_sr_nm(), expected_area);
+            near(result.radiance_sample().radiance_w_m2_sr_nm(), expected_area + expected_hit);
+            assert_eq!(result.radiance_sample().path(), baseline.radiance_sample().path());
+            assert_eq!(result.volume_events(), 0);
+            assert_eq!((result.area_samples(), result.images()), (1, 1));
+            assert_eq!(result.source_candidates(), u32::from(candidate));
+            hit_terms[slot] = result.radiance_sample().radiance_w_m2_sr_nm()
+                - result.area_radiance_w_m2_sr_nm();
+        }
+        near(hit_terms[0], hit_terms[1]);
+    });
 }
 
 #[test]

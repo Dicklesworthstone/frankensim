@@ -693,13 +693,18 @@ differentiable lift). Pure Rust throughout.
 
 - `camera::area_lights::camera::CurvedAreaLightCameraScene` composes
   original panel area samples with the native surface camera at declared
-  depolarizing diffuse receivers. Each regular refractive image receives its
-  own power-heuristic weight before the physical irradiance, diffuse factor
-  and camera-prefix index ratio are composed. The camera retains its original
+  continuous receivers: diffuse, GGX glass, rough metal and body-locked brushed
+  metal. Each regular refractive image receives its own power-heuristic weight
+  before physical irradiance, the original polarized radiance BSDF and the
+  camera-prefix index ratio are composed. The camera retains its original
   continuation draws and native path. At an emitter hit, only the retained
-  last-diffuse suffix is reversed: original ordered object/geometry/frame/
+  last-continuous-surface suffix is reversed: original ordered object/geometry/frame/
   feature, media and selected branches must agree, as must resolved directions
-  and actual scalar continuation proposals. The same authored light-seed
+  and actual scalar continuation proposals. Rough anchors retain the original
+  incoming polarized beam, sampled outgoing direction and post-scatter medium.
+  Their sharp GGX proposal is checked at that exact recorded direction, while
+  native image resolution separately validates reversed geometry. Each matching
+  image evaluates its own directional PDF. The same authored light-seed
   catalog is reevaluated at that source point without adding the known camera
   direction as a light seed. Native angular-resolution, separation and parity
   rules decide overlap; an unrepresented image keeps full emitter-hit weight.
@@ -719,18 +724,25 @@ differentiable lift). Pure Rust throughout.
   refuses the whole pixel. G0/G1 regressions cover analytic paired estimators,
   unbound/direct sources, an unseeded ball-lens image, source ownership,
   cumulative limits, aperture/sample identity and independent spectral NEE.
+  Four additional authored regressions cover sharp rough/anisotropic metal
+  paired estimators, noncoplanar polarized prefixes, heterogeneous rough-glass
+  source survival and independent dispersive transmission in all four physical
+  camera wavelength lanes. Native camera paths and random draws remain
+  identical. The Rust regressions are unexecuted without a toolchain/build runner.
 
 - With `volumes`,
   `camera::area_lights::participating::CurvedRayleighAreaLightCameraScene`
-  adds finite-panel next-event sampling at original diffuse surfaces and real
-  molecular collisions. It borrows the exact admitted camera, source panels
+  adds finite-panel next-event sampling at original continuous surfaces and
+  real molecular collisions. It borrows the exact admitted camera, source panels
   and molecular scene. Each retained refractive image reuses its differentiated
   native geometry and independently tracked scattering survival. Molecular
   radiometry contracts both subpaths' full normalized Stokes states with the
   local reciprocal phase; source absorption, Fresnel transfer, focusing and
   the camera-to-vertex phase-index ratio occur once. No second camera survival,
   collision rate or sampled continuation-phase divisor is introduced.
-  Surface and molecular paths share the same original-source validation and
+  Continuous surfaces reuse the same original receiving BSDF, geometric
+  tangent, adjacent-media validation and camera radiance law as the clear
+  camera. Surface and molecular paths share original-source validation and
   reverse native history/image-membership implementation. Real collisions
   replace the angular anchor, including in unbound media; null candidates
   preserve it. Full emitter weight remains for unrepresented optical images.
