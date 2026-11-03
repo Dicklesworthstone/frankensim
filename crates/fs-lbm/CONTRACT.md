@@ -1200,8 +1200,14 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   resistance increment without mutating the lattice or a rigid-body state.
   `core2::VelocityPressureX2` plus the paired Grid step methods provide a
   low-Mach regularized velocity inlet at x-min and density outlet at x-max with
-  periodic y closure; density/velocity and non-equilibrium stress are
-  extrapolated from the respective first-interior columns.
+  periodic y closure. Density/velocity and physical Guo nonequilibrium stress
+  are extrapolated from the first-interior columns. Held gravity and local
+  force densities use `F = rho*g + fext` at each source and destination;
+  reconstruction restores the destination half-source after copying
+  `Pi_neq + (u F + F u)/2`. Original collision applies force once and original
+  streaming owns the selected-wall impulse. All face candidates are admitted
+  before publication using O(ny) reusable scratch. Scratch retains the original
+  collision-field extent on success or refusal.
 - `rheology::Rheology`, `rheology::update_tau`, and
   `rheology::channel_flow` — local apparent-viscosity laws with a shared,
   self-consistent constitutive solve in D2Q9 and D3Q19 `update_tau3`.
@@ -1665,8 +1671,8 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   reductions use fixed row-major/direction order.
 - D2Q9 regularized x faces impose the declared inlet velocity and outlet
   density to roundoff while copying the complementary moment and independently
-  measured non-equilibrium stress from the first interior column. The measured
-  and unmeasured open-step paths are bit-identical.
+  measured physical Guo non-equilibrium stress under each cell's `rho*g + fext`
+  from the first interior column. Measured and unmeasured paths are bit-identical.
 - Rheology laws reject inadmissible physical parameters. An unclipped local
   update closes its stress/viscosity relation to a relative tau defect of
   `1e-12`; the previous tau only initializes the solve. Every update reports
@@ -1759,9 +1765,13 @@ unique surviving one-ring fluid donor. The complete proposal and receipt are
 validated before flags, populations, relaxation times, or forces are
 published.
 D2Q9 regularized x flow requires at least three columns, non-periodic x,
-periodic y, fluid face/first-interior columns, zero gravity/external forcing,
-a positive finite outlet density, and a finite inlet speed squared below 0.03.
-Every condition is checked before collision.
+periodic y, fluid face/first-interior columns, complete finite gravity/external
+forcing, representable current-cell and prescribed-outlet total forces,
+a positive finite outlet density, and finite inlet speed squared below 0.03.
+These setup conditions are checked before collision. Predicted source velocities
+must also stay inside that low-Mach envelope and all reconstructed face
+populations must be finite with positive density; every row is admitted before
+streaming, so late refusal preserves the grid and restores collision scratch extent.
 Dynamic wetting queries return typed errors when either `QtyAny` input is not a
 velocity; for a non-finite signed speed or negative/non-finite pinning speed;
 when a selected `contact_line_speed` curve declares non-velocity abscissa
@@ -1859,8 +1869,11 @@ construction, exhaustive geometry, far-donor requirements, finite-population
 admission, and atomic refusal. A separate topology-transition fixture
 pins unique-donor fresh-cell initialization, exact covered/fresh counts,
 mass/momentum delta closure, replay, idempotence, and atomic no-donor/mixed-domain
-refusal. The file also covers regularized x-face moment/stress reconstruction,
-measured-path bit equivalence, and pre-step topology/forcing refusal.
+refusal. The file also covers force-free and forced regularized x-face
+moment/stress reconstruction, nonunit outlet density with unequal source and
+destination forces, measured-path bit equivalence and unchanged wall impulses,
+nonfinite/overflow forcing refusal, and late-source refusal without partial
+publication.
 
 `tests/extensions.rs` covers the current extension scaffolding: power-law and
 Newtonian-limit channel profiles, Carreau plateaus, Rayleigh-Bénard onset
@@ -3160,7 +3173,7 @@ Their presence does not claim native execution or empirical gas validation.
   claim.
 - `VelocityPressureX2` is a low-Mach regularized fixture boundary with periodic
   lateral closure. It is not a characteristic or non-reflecting far-field
-  condition, accepts no body force, and makes no unbounded-domain or blockage
+  condition and makes no unbounded-domain or blockage
   claim. The cylinder battery must disclose its domain, resolution, warm-up,
   averaging window, and lateral-domain sensitivity separately.
 - The cylinder fixture's diameter-10 stair step and `tau = 0.53` have no grid-

@@ -730,10 +730,25 @@ pub struct WallTopologyTransition2 {
 /// prescribing velocity. The outlet copies velocity and stress from
 /// `x = nx - 2` while prescribing density. This boundary pair is intended for
 /// x-directed crossflow fixtures with periodic y closure.
+/// Velocity and stress are physical Guo moments under the held acceleration
+/// and local external force density; each destination uses its own force.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityPressureX2 {
     inlet_velocity: [f64; 2],
     outlet_density: f64,
+}
+
+// Face candidates occupy reusable capacity after the collision field, but
+// callers always recover exactly the original collision-buffer extent.
+struct RegularizedScratch2<'a> {
+    post: &'a mut Vec<[f64; Q]>,
+    cells: usize,
+}
+
+impl Drop for RegularizedScratch2<'_> {
+    fn drop(&mut self) {
+        self.post.truncate(self.cells);
+    }
 }
 
 impl VelocityPressureX2 {
@@ -1959,7 +1974,7 @@ impl Grid {
         }
     }
 
-    fn validate_velocity_pressure_x(&self) {
+    fn validate_velocity_pressure_x(&self, boundary: VelocityPressureX2) {
         assert!(
             self.nx >= 3,
             "D2Q9 x-open flow requires at least three columns"
@@ -1969,15 +1984,25 @@ impl Grid {
             "D2Q9 x-open flow requires non-periodic x and periodic y"
         );
         assert!(
-            self.g.into_iter().all(|component| component == 0.0)
+            self.fext.len() == self.nx * self.ny
                 && self
-                    .fext
+                    .g
                     .iter()
-                    .flatten()
-                    .all(|component| *component == 0.0),
-            "D2Q9 regularized open boundaries currently require zero body force"
+                    .chain(self.fext.iter().flatten())
+                    .all(|f| f.is_finite()),
+            "D2Q9 regularized open boundaries require complete finite forcing"
         );
+        if self.g != [0.0; 2] {
+            for (cell, populations) in self.f.iter().enumerate() {
+                if matches!(self.flags[cell], Cell::Fluid | Cell::Interface) {
+                    let rho = populations.iter().sum::<f64>();
+                    assert!(rho.is_finite() && rho > 0.0, "invalid forced cell density");
+                    self.regularized_force(cell, rho);
+                }
+            }
+        }
         for y in 0..self.ny {
+            self.regularized_force(self.idx(self.nx - 1, y), boundary.outlet_density);
             for x in [0, 1, self.nx - 2, self.nx - 1] {
                 assert_eq!(
                     self.flags[self.idx(x, y)],
@@ -1988,34 +2013,97 @@ impl Grid {
         }
     }
 
-    fn regularized_source(&self, index: usize) -> (f64, [f64; 2], [[f64; 2]; 2]) {
-        let moments = self.moments(index);
-        let equilibrium = crate::equilibrium(moments.rho, moments.u[0], moments.u[1]);
-        let mut stress = [[0.0; 2]; 2];
-        for q in 0..Q {
-            let nonequilibrium = self.f[index][q] - equilibrium[q];
-            let e = [f64::from(E[q].0), f64::from(E[q].1)];
-            for row in 0..2 {
-                for column in 0..2 {
-                    stress[row][column] += e[row] * e[column] * nonequilibrium;
-                }
-            }
-        }
-        (moments.rho, moments.u, stress)
+    fn regularized_force(&self, index: usize, rho: f64) -> [f64; 2] {
+        let force = core::array::from_fn(|d| self.g[d].mul_add(rho, self.fext[index][d]));
+        assert!(
+            force.iter().all(|f| f.is_finite()),
+            "D2Q9 open-face total force overflow"
+        );
+        force
     }
 
-    fn apply_velocity_pressure_x(&mut self, boundary: VelocityPressureX2) {
+    fn regularized_source(
+        &self,
+        index: usize,
+        populations: &[f64; Q],
+    ) -> (f64, [f64; 2], [[f64; 2]; 2]) {
+        let (rho, momentum) = raw_population_moments(populations);
+        assert!(
+            rho.is_finite() && rho > 0.0,
+            "invalid D2Q9 open-face source density"
+        );
+        let force = self.regularized_force(index, rho);
+        let velocity = core::array::from_fn(|d| (momentum[d] + 0.5 * force[d]) / rho);
+        assert!(
+            velocity.iter().all(|u| u.is_finite())
+                && velocity.iter().map(|u| u * u).sum::<f64>() < MAX_REGULARIZED_BOUNDARY_SPEED_SQ,
+            "D2Q9 open-face source exceeds the low-Mach boundary envelope"
+        );
+        let [sxx, sxy, syy] = if force == [0.0; 2] {
+            nonequilibrium_stress(
+                populations,
+                &crate::equilibrium(rho, velocity[0], velocity[1]),
+            )
+        } else {
+            force_corrected_stress(populations, rho, velocity, force)
+        };
+        (rho, velocity, [[sxx, sxy], [sxy, syy]])
+    }
+
+    fn regularized_face_populations(
+        &self,
+        index: usize,
+        rho: f64,
+        velocity: [f64; 2],
+        stress: [[f64; 2]; 2],
+    ) -> [f64; Q] {
+        let mut populations = regularized_populations(rho, velocity, stress);
+        // The regularized tensor belongs to the physical population f + S/2.
+        // Rebind only after reconstruction, using the actual destination mass.
+        let force = self.regularized_force(index, populations.iter().sum());
+        if force != [0.0; 2] {
+            crate::thermal::forcing::reframe2(&mut populations, velocity, [0.0; 2], force);
+        }
+        let density = populations.iter().sum::<f64>();
+        assert!(
+            density.is_finite() && density > 0.0 && populations.iter().all(|f| f.is_finite()),
+            "D2Q9 regularized open-face populations must be finite with positive density"
+        );
+        populations
+    }
+
+    fn prepare_velocity_pressure_x(&self, post: &mut Vec<[f64; Q]>, boundary: VelocityPressureX2) {
+        // Read the same native pulls that streaming will publish. Appended
+        // face candidates reuse collision scratch and admit every row before
+        // any accepted population is changed, including a late-row refusal.
+        post.reserve(2 * self.ny);
         for y in 0..self.ny {
             let inlet = self.idx(0, y);
             let inlet_source = self.idx(1, y);
             let outlet_source = self.idx(self.nx - 2, y);
             let outlet = self.idx(self.nx - 1, y);
-            let (inlet_density, _, inlet_stress) = self.regularized_source(inlet_source);
-            let (_, outlet_velocity, outlet_stress) = self.regularized_source(outlet_source);
-            self.f[inlet] =
-                regularized_populations(inlet_density, boundary.inlet_velocity, inlet_stress);
-            self.f[outlet] =
-                regularized_populations(boundary.outlet_density, outlet_velocity, outlet_stress);
+            let pulled = |x, index| {
+                core::array::from_fn(|q| {
+                    self.stationary_pull_population(post, index, q, self.source(x, y, q))
+                })
+            };
+            let (inlet_density, _, inlet_stress) =
+                self.regularized_source(inlet_source, &pulled(1, inlet_source));
+            let (_, outlet_velocity, outlet_stress) =
+                self.regularized_source(outlet_source, &pulled(self.nx - 2, outlet_source));
+            let inlet_populations = self.regularized_face_populations(
+                inlet,
+                inlet_density,
+                boundary.inlet_velocity,
+                inlet_stress,
+            );
+            let outlet_populations = self.regularized_face_populations(
+                outlet,
+                boundary.outlet_density,
+                outlet_velocity,
+                outlet_stress,
+            );
+            post.extend_from_slice(&[inlet_populations, outlet_populations]);
         }
     }
 
@@ -2465,20 +2553,33 @@ impl Grid {
         measured_walls: Option<&[bool]>,
     ) -> MomentumExchange2 {
         self.collide_into(scratch);
-        let post = std::mem::take(scratch);
-        let receipt = self.stream_from_inner(&post, measured_walls);
-        self.apply_velocity_pressure_x(boundary);
-        *scratch = post;
+        let count = self.nx * self.ny;
+        let scratch = RegularizedScratch2 {
+            post: scratch,
+            cells: count,
+        };
+        self.prepare_velocity_pressure_x(scratch.post, boundary);
+        let receipt = self.stream_from_inner(scratch.post, measured_walls);
+        for y in 0..self.ny {
+            let inlet = self.idx(0, y);
+            let outlet = self.idx(self.nx - 1, y);
+            self.f[inlet] = scratch.post[count + 2 * y];
+            self.f[outlet] = scratch.post[count + 2 * y + 1];
+        }
         receipt
     }
 
     /// One collide-stream step followed by regularized x-face reconstruction.
+    /// Held `rho*g + fext` is applied once by collision. Face velocity and
+    /// extrapolated stress use the physical Guo frame, then each face restores
+    /// its own half-source. All face candidates are admitted before streaming;
+    /// a refusal leaves grid state unchanged but may change collision scratch.
     pub fn step_velocity_pressure_x(
         &mut self,
         scratch: &mut Vec<[f64; Q]>,
         boundary: VelocityPressureX2,
     ) {
-        self.validate_velocity_pressure_x();
+        self.validate_velocity_pressure_x(boundary);
         let _ = self.step_velocity_pressure_x_inner(scratch, boundary, None);
     }
 
@@ -2493,7 +2594,7 @@ impl Grid {
         measured_walls: &[bool],
     ) -> MomentumExchange2 {
         self.validate_measured_walls(measured_walls);
-        self.validate_velocity_pressure_x();
+        self.validate_velocity_pressure_x(boundary);
         self.step_velocity_pressure_x_inner(scratch, boundary, Some(measured_walls))
     }
 }

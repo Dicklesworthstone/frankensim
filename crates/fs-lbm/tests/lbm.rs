@@ -1962,6 +1962,162 @@ fn d2q9_regularized_x_faces_impose_moments_and_preserve_stress() {
 }
 
 #[test]
+fn d2q9_forced_regularized_faces_preserve_physical_stress_and_wall_receipt() {
+    // An independent population-space Guo source oracle: reconstruct f+S/2,
+    // then measure its second moment instead of correcting tensor entries.
+    fn physical_stress(grid: &Grid, index: usize) -> [[f64; 2]; 2] {
+        const EX: [f64; Q] = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0];
+        const EY: [f64; Q] = [0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0, -1.0];
+        const WEIGHTS: [f64; Q] = [
+            4.0 / 9.0,
+            1.0 / 9.0,
+            1.0 / 9.0,
+            1.0 / 9.0,
+            1.0 / 9.0,
+            1.0 / 36.0,
+            1.0 / 36.0,
+            1.0 / 36.0,
+            1.0 / 36.0,
+        ];
+        let moments = grid.moments(index);
+        let force: [f64; 2] =
+            core::array::from_fn(|d| grid.g[d].mul_add(moments.rho, grid.fext[index][d]));
+        let mut physical = grid.f[index];
+        for q in 0..Q {
+            let eu = EX[q] * moments.u[0] + EY[q] * moments.u[1];
+            let source = ((EX[q] - moments.u[0]) / CS2 + eu * EX[q] / (CS2 * CS2)) * force[0]
+                + ((EY[q] - moments.u[1]) / CS2 + eu * EY[q] / (CS2 * CS2)) * force[1];
+            physical[q] += 0.5 * WEIGHTS[q] * source;
+        }
+        d2q9_nonequilibrium_stress(&physical, moments.rho, moments.u)
+    }
+
+    let boundary = VelocityPressureX2::new([0.026, -0.004], 1.07);
+    let mut plain = Grid::uniform(9, 8, 0.83);
+    plain.periodic_x = false;
+    let mut external = vec![[0.0; 2]; plain.f.len()];
+    for y in 0..plain.ny {
+        for x in 0..plain.nx {
+            let cell = plain.idx(x, y);
+            plain.f[cell] = equilibrium(1.02 + 0.001 * y as f64, 0.018, 0.002);
+            plain.f[cell][0] -= 0.0004;
+            plain.f[cell][1] += 0.0002;
+            plain.f[cell][3] += 0.0002;
+            plain.f[cell][5] += 0.00002;
+            plain.f[cell][6] -= 0.00002;
+            plain.f[cell][7] += 0.00002;
+            plain.f[cell][8] -= 0.00002;
+            external[cell] = [1e-5 * (x + 1) as f64, -7e-6 * (y + x + 1) as f64];
+        }
+    }
+    let wall = plain.idx(4, 3);
+    plain.flags[wall] = Cell::Wall;
+    plain
+        .rebind_forcing([1.2e-4, -9e-5], &external, &mut Vec::new())
+        .unwrap();
+    let mut measured = plain.clone();
+    let mut mask = vec![false; plain.f.len()];
+    mask[wall] = true;
+    let (mut scratch, mut measured_scratch) = (Vec::new(), Vec::new());
+    let mut largest_stress = 0.0f64;
+    let mut largest_force_difference = 0.0f64;
+    for _ in 0..4 {
+        let mut original_stream = plain.clone();
+        let mut post = Vec::new();
+        original_stream.collide_into(&mut post);
+        let expected_receipt = original_stream.stream_from_with_wall_momentum(&post, &mask);
+        plain.step_velocity_pressure_x(&mut scratch, boundary);
+        let receipt = measured.step_velocity_pressure_x_with_wall_momentum(
+            &mut measured_scratch,
+            boundary,
+            &mask,
+        );
+        assert_eq!(receipt.measured_links, expected_receipt.measured_links);
+        assert!(receipt.measured_links > 0);
+        assert_eq!(
+            receipt.wall_impulse.map(f64::to_bits),
+            expected_receipt.wall_impulse.map(f64::to_bits)
+        );
+        assert_eq!(scratch.len(), plain.f.len());
+        assert_eq!(measured_scratch.len(), plain.f.len());
+        for (a, b) in plain.f.iter().zip(&measured.f) {
+            assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits));
+        }
+        for y in 0..plain.ny {
+            for x in 1..plain.nx - 1 {
+                let cell = plain.idx(x, y);
+                assert_eq!(
+                    plain.f[cell].map(f64::to_bits),
+                    original_stream.f[cell].map(f64::to_bits)
+                );
+            }
+            for (face_x, source_x) in [(0, 1), (plain.nx - 1, plain.nx - 2)] {
+                let face = plain.idx(face_x, y);
+                let source = plain.idx(source_x, y);
+                let actual = plain.moments(face);
+                let donor = plain.moments(source);
+                let (rho, velocity) = if face_x == 0 {
+                    (donor.rho, boundary.inlet_velocity())
+                } else {
+                    (boundary.outlet_density(), donor.u)
+                };
+                assert!((actual.rho - rho).abs() < 2e-12);
+                for d in 0..2 {
+                    assert!((actual.u[d] - velocity[d]).abs() < 2e-12);
+                    largest_force_difference = largest_force_difference.max(
+                        (plain.g[d] * (actual.rho - donor.rho) + plain.fext[face][d]
+                            - plain.fext[source][d])
+                            .abs(),
+                    );
+                }
+                let actual_stress = physical_stress(&plain, face);
+                let donor_stress = physical_stress(&plain, source);
+                for row in 0..2 {
+                    for column in 0..2 {
+                        largest_stress = largest_stress.max(donor_stress[row][column].abs());
+                        assert!(
+                            (actual_stress[row][column] - donor_stress[row][column]).abs() < 2e-12
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(largest_stress > 1e-8);
+    assert!(largest_force_difference > 1e-6);
+}
+
+#[test]
+fn d2q9_regularized_late_source_refusal_preserves_state_and_scratch_extent() {
+    let boundary = VelocityPressureX2::new([0.02, 0.0], 1.0);
+    for measured in [false, true] {
+        let mut grid = Grid::uniform(5, 8, 1.0);
+        grid.periodic_x = false;
+        // Only late rows exceed the source Mach envelope after streaming.
+        // Earlier face candidates have already occupied reusable scratch.
+        for x in 0..grid.nx {
+            let cell = grid.idx(x, 5);
+            grid.f[cell] = equilibrium(1.0, 0.35, 0.0);
+        }
+        grid.rebind_gravity([1e-5, -1e-5], &mut Vec::new()).unwrap();
+        let original = grid.f.clone();
+        let mask = vec![false; grid.f.len()];
+        let mut scratch = Vec::new();
+        let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if measured {
+                let _ =
+                    grid.step_velocity_pressure_x_with_wall_momentum(&mut scratch, boundary, &mask);
+            } else {
+                grid.step_velocity_pressure_x(&mut scratch, boundary);
+            }
+        }));
+        assert!(refusal.is_err());
+        assert_eq!(grid.f, original);
+        assert_eq!(scratch.len(), grid.f.len());
+    }
+}
+
+#[test]
 fn d2q9_regularized_x_faces_refuse_invalid_setup_before_advancing() {
     assert!(std::panic::catch_unwind(|| VelocityPressureX2::new([0.2, 0.0], 1.0)).is_err());
     assert!(std::panic::catch_unwind(|| VelocityPressureX2::new([0.02, 0.0], 0.0)).is_err());
@@ -1978,11 +2134,32 @@ fn d2q9_regularized_x_faces_refuse_invalid_setup_before_advancing() {
     assert!(scratch.is_empty());
 
     grid.periodic_x = false;
-    grid.g = [1e-6, 0.0];
+    grid.g = [f64::NAN, 0.0];
     let force_refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         grid.step_velocity_pressure_x(&mut scratch, boundary);
     }));
     assert!(force_refusal.is_err());
+    assert_eq!(grid.f, original);
+    assert!(scratch.is_empty());
+
+    grid.g = [0.0; 2];
+    let final_cell = grid.f.len() - 1;
+    grid.fext[final_cell] = [0.0, f64::INFINITY];
+    let local_force_refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        grid.step_velocity_pressure_x(&mut scratch, boundary);
+    }));
+    assert!(local_force_refusal.is_err());
+    assert_eq!(grid.f, original);
+    assert!(scratch.is_empty());
+    grid.fext[final_cell] = [0.0; 2];
+
+    // Each input and current-cell force is finite, but the prescribed outlet
+    // density would overflow rho*g. Refuse that request before collision.
+    grid.g = [f64::MAX * 0.5, 0.0];
+    let overflow_refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        grid.step_velocity_pressure_x(&mut scratch, VelocityPressureX2::new([0.02, 0.0], 4.0));
+    }));
+    assert!(overflow_refusal.is_err());
     assert_eq!(grid.f, original);
     assert!(scratch.is_empty());
 
