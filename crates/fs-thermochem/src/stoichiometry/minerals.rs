@@ -37,6 +37,10 @@
 //! absorption into aqueous acid, oleum, acid mist or heat of dilution.
 //! These equations conserve atoms and charge; they do not select pH/Eh,
 //! dissolved speciation, precipitates, gas transfer, rates or conversion.
+//! Copper electrowinning combines Cu(II) reduction and water oxidation with
+//! an inert oxygen-evolving anode; see Beukes and Badenhorst (2009):
+//! <https://www.saimm.co.za/Journal/v109n06p343.pdf>. Its electron transfer is
+//! four electrons per written equation; side reactions require separate models.
 
 use super::{ConservedReaction, ReactionBalanceError};
 use crate::{
@@ -101,6 +105,10 @@ pub enum MineralReaction {
     /// Aggregate of roasting, SO2 oxidation and hydration with all sulfur
     /// assigned to pure liquid acid. Actual sulfur capture remains a caller input.
     PyriteToHematiteAndSulfuricAcid,
+    /// 2 Cu2+(aq) + 2 H2O(l) -> 2 Cu(s) + O2(g) + 4 H+(aq).
+    /// Net productive pathway with an oxygen-evolving anode: four electrons
+    /// transferred per equation, or two per copper atom deposited.
+    CopperElectrowinning,
 }
 
 // One species: stable phase/charge id, element counts, charge, signed coefficient.
@@ -327,6 +335,17 @@ impl MineralReaction {
                     ("H2O(l)", &[0, 0, 1, 2], 0, -8),
                     ("Fe2O3(s)", &[2, 0, 3, 0], 0, 2),
                     ("H2SO4(l)", &[0, 1, 4, 2], 0, 8),
+                ],
+            ),
+            Self::CopperElectrowinning => (
+                "copper-electrowinning",
+                &["Cu", "H", "O"],
+                &[
+                    ("Cu[2+](aq)", &[1, 0, 0], 2, -2),
+                    ("H2O(l)", &[0, 2, 1], 0, -2),
+                    ("Cu(s)", &[1, 0, 0], 0, 2),
+                    ("O2(g)", &[0, 0, 2], 0, 1),
+                    ("H+(aq)", &[0, 1, 0], 1, 4),
                 ],
             ),
         };

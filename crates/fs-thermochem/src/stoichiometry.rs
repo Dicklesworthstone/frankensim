@@ -6,6 +6,8 @@
 //! through the ideal-gas species/EOS lane to perform this bookkeeping.
 
 pub mod minerals;
+/// Charge-driven advancement of an explicit reaction against finite stocks.
+pub mod electrolysis;
 /// Shared-inventory stages of independently admitted, exactly conserved reactions.
 pub mod network;
 
