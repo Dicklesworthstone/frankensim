@@ -1,4 +1,6 @@
 use super::*;
+
+mod coupled;
 use crate::compressible::mixture::molecular::{MolecularTransport2d, PlanarTransport};
 use crate::compressible::spatial::mixture::molecular::{
     DissipationControl, DissipationError, MolecularReport, MolecularTransport3d, MolecularWall3d,
@@ -604,7 +606,7 @@ fn g1_no_slip_isothermal_wall_transfers_shear_and_heat_conservatively() {
     }, |_| ([1.0, 0.0, 0.0], [0.0, 0.2, -0.1], 1.0));
     let source = SpatialTransport::new(
         flow.gas().clone(),
-        law(flow.gas(), 0.0, 0.03, 0.01, 0.04),
+        law(flow.gas(), 0.01, 0.03, 0.01, 0.04),
         || false,
     )
     .unwrap();
@@ -647,7 +649,7 @@ fn g1_no_slip_isothermal_wall_transfers_shear_and_heat_conservatively() {
         &flow,
         SpatialTransport::new(
             flow.gas().clone(),
-            law(flow.gas(), 0.0, 0.03, 0.01, 0.04),
+            law(flow.gas(), 0.01, 0.03, 0.01, 0.04),
             || false,
         )
         .unwrap(),

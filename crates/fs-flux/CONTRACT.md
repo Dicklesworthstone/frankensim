@@ -2335,6 +2335,42 @@ The oblique diffusion L1 errors on 8³/16³ cells are 6.45856775e-4 and
 is checked against independent discrete longitudinal/transverse symbols, and
 the integrated thermal gain equals lost kinetic energy without a heat source.
 
+### Coupled nonreacting evolving-species molecular flow in three dimensions
+
+`spatial::mixture::molecular::MolecularEuler3d` owns a complete nonreacting
+`D(h/2)-A(h)-D(h/2)` interval around the original `MixtureEuler3d`. It consumes
+a prepared `MolecularTransport3d`, preserving its admitted wall conditions and
+optional SGS configuration, and shares the planar `MolecularStepControl`.
+Held body acceleration or force density enters the original conservative
+source/advection owner between the molecular halves; acceleration uses the
+current compensated species density at each source stage.
+
+Every complete trial starts from the same accepted field. A shorter central
+advective step, final forced Mach/acoustic refusal or recoverable molecular
+refusal restarts both molecular halves at one common duration under the
+whole-step retry bound. Final force admission includes the state after the
+second molecular half, so wall
+cooling cannot evade the velocity/sound-speed guard. The final cancellation
+poll precedes publication of flow time, both owners' reports and all six faces'
+integrated loads. Immutable flow/operator access keeps their source, grid and
+boundary binding intact.
+
+The complete report and boundary iterator include both molecular halves and
+the advective interval. Held-source impulse and signed work remain separate
+from wall momentum, wall work and heat, and enter the total conservation
+residual exactly once. Species-referenced and absolute chemical-energy
+residuals use the original mixture caloric model. Actual field capacities,
+molecular/SGS scratch and complete boundary buffers enter the stored numerical
+budget; forcing scratch is admitted even for an identically zero source.
+Zero forcing retains the native unforced result bits.
+
+Focused checks cover an accelerating three-axis molecular composition wave,
+exactly absent species, negative source work, moving isothermal wall/source
+balance with unequal species calorics, whole-duration replay, last-publication
+cancellation, storage/work refusal and the final wall-cooling Mach guard.
+These checks exercise the existing molecular closure; they do not establish
+new SGS calibration, moving geometry or an entropy certificate.
+
 ## Two-fluid capillary displacement
 
 `capillary::step_newtonian_two_fluid_circular_meniscus` adds the displaced

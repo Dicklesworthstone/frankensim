@@ -20,6 +20,9 @@ pub use fs_gas::multicomponent::dissipation::{
 use fs_gas::multicomponent::{MixtureGas, SpatialPrimitive};
 use fs_qty::Time;
 
+mod coupled;
+pub use coupled::{MolecularEuler3d, MolecularStepControl, MolecularStepReport3d};
+
 #[cfg(feature = "experimental-sgs")]
 pub mod sgs;
 #[cfg(feature = "experimental-sgs")]
