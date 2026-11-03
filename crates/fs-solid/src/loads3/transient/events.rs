@@ -163,6 +163,9 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     /// fields are preserved bit-for-bit. No impulse or artificial work is added.
     /// The full new load, including fixed-node forces, becomes the accepted
     /// response input and the next Newmark interval's starting load.
+    /// Prescribed support displacement, velocity and acceleration stay fixed;
+    /// their original M_fc/C_fc/K_fc terms enter the free acceleration solve,
+    /// and reactions are refreshed for the next interval's support-work rule.
     ///
     /// No step slot is consumed because time does not advance. Work remains
     /// bounded by the existing linear-iteration allowance. Source/solve failure
@@ -170,9 +173,6 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     pub fn apply_load_jump(&mut self, load_after: &TetLoadCase3<'_, '_>, cx: &Cx<'_>)
         -> Result<LoadJump3, TransientError3> {
         check(cx)?;
-        if self.prescribed.is_some() {
-            return Err(TransientError3::Invalid("finite load jumps with prescribed support motion are not admitted"));
-        }
         let force = self.reduce_force(load_after, cx)?;
         let ku = self.apply(0.0, 1.0, &self.state.displacement, cx)?;
         let cv = self.apply(self.config.mass_damping_per_s, self.config.stiffness_damping_s,
@@ -182,6 +182,9 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             if i % 256 == 0 { check(cx)?; }
             rhs.push(number(force[i] + self.thermal[i] - ku[i] - cv[i])?);
         }
+        if let Some(supports) = &self.prescribed {
+            self.subtract_support_force(supports, &mut rhs, cx)?;
+        }
         let (a, iterations, force_residual_n) = solve(&self.operator(1.0, 0.0, cx), &rhs, self.config)?;
         let mut change = 0.0_f64;
         for (i, (&next, &old)) in a.iter().zip(&self.state.acceleration).enumerate() {
@@ -190,12 +193,14 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         }
         let mut full_force = Vec::with_capacity(load_after.nodal_forces_n().len());
         for &(d, f) in load_after.nodal_forces_n() { check(cx)?; full_force.push((d, f)); }
+        let supports = self.load_jump_supports(&a, &full_force, cx)?;
         let report = LoadJump3 { time_s: self.state.time_s, iterations, force_residual_n,
             acceleration_change_l2_m_s2: change };
         check(cx)?;
         self.state.acceleration = a;
         self.force = force;
         self.full_force = full_force;
+        self.prescribed = supports;
         Ok(report)
     }
 

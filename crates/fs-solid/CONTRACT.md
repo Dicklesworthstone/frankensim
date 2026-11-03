@@ -1437,7 +1437,7 @@ Input admission, full nodal displacement limits, element limits, sparse solve
 limits, per-node/element cancellation checkpoints and the energy/residual
 gates precede atomic publication. A clone retains the prescribed kinematics,
 reaction endpoint and immutable full thermal load as well as the free state.
-Force-only advancement, finite force jumps and reduced-only state adjoints
+Force-only advancement and reduced-only state adjoints
 explicitly refuse this lane; they cannot omit
 support terms while claiming a valid trajectory or gradient. Displacement
 impulses, changing restraint axes/topology, adaptive event discovery,
@@ -1456,13 +1456,33 @@ Malformed bindings, sampling failures and cancellation leave the accepted
 trajectory intact. These adapters do not infer analytic derivatives, impulses
 or an event schedule from displacement tables.
 
+`EventLoadHistory3::new_with_supports` explicitly indexes those original
+support, load and frame knots together under one schedule budget. Its support
+initializer requires the same full initial kinematics. Event stepping uses
+the exact left force before a knot and the right force after it, retaining
+the native support Newmark recurrence. Finite force jumps keep support u/v/a,
+include the original inertial/damping/stiffness lift in free acceleration,
+and refresh reactions for subsequent support-work accounting; they add no
+impulse or energy. A support-displacement jump, including one caused by a
+frame jump, refuses without advancing accepted motion. The existing adaptive
+two-half-step comparison now includes constrained-node kinematics as well as
+free motion, including fully prescribed bodies. Support-driven runs compare
+raw full/half disagreement for all kinematics: prescribed derivative errors
+also enter free acceleration through the consistent mass. No Richardson order
+is assumed for that recurrence, which can retain alternating acceleration
+error. This local consistency indicator is not a derivative-error bound;
+neither unknown events, exact support derivatives nor a global temporal bound
+are inferred. Accepted work, clock and fork/restart semantics
+remain those of the original trajectory.
+
 `tests/transient_supports3.rs` supplies G1 exact mass/stiffness/both-Rayleigh
 cross-term initialization, a closed-form accelerating-base oscillator with
 second-order refinement, fully prescribed thermal/external/support work and
 reaction checks, and G3/G4 fork, malformed-input and cancellation checks.
 `tests/transient_support_history3.rs` covers rigid translation with damping,
 agreement with explicit core endpoints, physical frame time beyond a clamped
-table, and transactional sampling, binding and cancellation refusals.
+table, a base-excited oscillator with both held-force pulse edges, full-support
+adaptive rejection, and transactional sampling, binding and cancellation refusals.
 
 ### Prescribed-support motion adjoints
 

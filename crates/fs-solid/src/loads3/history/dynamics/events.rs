@@ -9,6 +9,7 @@ use fs_scenario::frame::{Frame, FrameMotion};
 use fs_scenario::payload::{OutsideDomainPolicy, SampleSource, TableInterpolation};
 use fs_scenario::signal::Interp;
 use fs_qty::QtyAny;
+use super::super::supports::TetSupportSample3;
 
 fn invalid(what: &'static str) -> TransientHistoryError3 {
     TransientError3::Invalid(what).into()
@@ -22,6 +23,7 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), TransientHistoryError3> {
 /// Indexing does not certify resolution of a smooth signal between its knots.
 pub struct EventLoadHistory3<'a> {
     history: TetLoadHistory3<'a>,
+    supports: &'a [SupportMotion3<'a>],
     knots: Vec<f64>,
 }
 impl<'a> EventLoadHistory3<'a> {
@@ -32,9 +34,21 @@ impl<'a> EventLoadHistory3<'a> {
     /// surface histories are admitted. Setup polls between bounded scans.
     pub fn new(history: TetLoadHistory3<'a>, maximum_schedule_entries: usize, cx: &Cx<'_>)
         -> Result<Self, TransientHistoryError3> {
+        Self::new_with_supports(history, &[], maximum_schedule_entries, cx)
+    }
+
+    /// Bind prescribed support motion to the SAME finite load/frame schedule.
+    /// Its knots consume the existing aggregate entry allowance. Continuous
+    /// support motion uses the native inertial Newmark support equations;
+    /// a finite displacement jump (including a frame-induced jump) refuses at
+    /// the event, since it is not a finite force or a declared impulse model.
+    pub fn new_with_supports(history: TetLoadHistory3<'a>, supports: &'a [SupportMotion3<'a>],
+        maximum_schedule_entries: usize, cx: &Cx<'_>)
+        -> Result<Self, TransientHistoryError3> {
         checkpoint(cx)?;
         if maximum_schedule_entries == 0 || maximum_schedule_entries > 1_048_576
-            || history.surfaces.len() > 1024 || history.frames.frames.len() > 256 {
+            || history.surfaces.len() > 1024 || history.frames.frames.len() > 256
+            || supports.len() > 1024 {
             return Err(invalid("event schedule exceeds its explicit setup envelope"));
         }
         let mut index = Index { knots: Vec::new(), remaining: maximum_schedule_entries, cx };
@@ -50,6 +64,10 @@ impl<'a> EventLoadHistory3<'a> {
             VolumeHistory3::Fixed(_) | VolumeHistory3::FixedAcceleration(_) => {}
             VolumeHistory3::ForceDensity(v) | VolumeHistory3::Acceleration(v) => index.vector(v)?,
         }
+        for support in supports {
+            checkpoint(cx)?;
+            index.vector(support.displacement)?;
+        }
         for frame in &history.frames.frames {
             checkpoint(cx)?;
             if frame.name.len() > 4096 { return Err(invalid("event frame names exceed 4096 bytes")); }
@@ -59,7 +77,7 @@ impl<'a> EventLoadHistory3<'a> {
         index.knots.sort_by(f64::total_cmp);
         index.knots.dedup_by(|a, b| *a == *b);
         checkpoint(cx)?;
-        Ok(Self { history, knots: index.knots })
+        Ok(Self { history, supports, knots: index.knots })
     }
     pub fn knots_s(&self) -> &[f64] { &self.knots }
 
@@ -71,8 +89,31 @@ impl<'a> EventLoadHistory3<'a> {
         time_s: f64, displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]],
         config: TransientConfig3, cx: &Cx<'_>)
         -> Result<EventTransientRun3<'h, 'a, 'g, 'm, 'p, 's>, TransientHistoryError3> {
+        if !self.supports.is_empty() {
+            return Err(invalid("support schedules require explicit initial support velocity and acceleration"));
+        }
         let run = self.history.begin_transient(geometry, problem, thermal, time_s,
             displacement_m, velocity_m_s, config, cx)?;
+        Ok(EventTransientRun3 { schedule: self, run })
+    }
+
+    /// Initialize the bound supports and forces at one right-continuous time.
+    /// Full initial velocity and fixed-component acceleration are explicit,
+    /// as in `TetLoadHistory3::begin_transient_with_support_history`. Later
+    /// support derivatives follow the original discrete Newmark recurrence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_transient_with_supports<'h, 'g, 'm, 'p, 's>(&'h self,
+        geometry: &'g TetLoadGeometry3<'m>, problem: &'p TetLinearElasticProblem<'s>,
+        thermal: Option<TetThermalStrainField<'_>>, time_s: f64,
+        displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]],
+        prescribed_acceleration_m_s2: &[[f64; 3]], config: TransientConfig3, cx: &Cx<'_>)
+        -> Result<EventTransientRun3<'h, 'a, 'g, 'm, 'p, 's>, TransientHistoryError3> {
+        if self.supports.is_empty() {
+            return Err(invalid("an explicit support schedule is required for prescribed initialization"));
+        }
+        let run = self.history.begin_transient_with_support_history(geometry, problem,
+            thermal, self.supports, time_s, displacement_m, velocity_m_s,
+            prescribed_acceleration_m_s2, config, cx)?;
         Ok(EventTransientRun3 { schedule: self, run })
     }
 
@@ -96,8 +137,9 @@ impl<'a> EventLoadHistory3<'a> {
     // Sample small constant replacements only where a held vector changes.
     // Never clone an entire payload table or approximate t-minus by next_down.
     fn left_at<'g, 'm, 'p, 's>(&self, geometry: &'g TetLoadGeometry3<'m>,
-        problem: &'p TetLinearElasticProblem<'s>, time: f64, cx: &Cx<'_>)
-        -> Result<TetLoadCase3<'g, 'm>, TransientHistoryError3> {
+        problem: &'p TetLinearElasticProblem<'s>, time: f64,
+        maximum_displacement_m: f64, cx: &Cx<'_>)
+        -> Result<TetSupportSample3<'g, 'm, 'p, 's>, TransientHistoryError3> {
         let mut frames = FrameTree::new();
         for frame in &self.history.frames.frames {
             checkpoint(cx)?;
@@ -133,8 +175,16 @@ impl<'a> EventLoadHistory3<'a> {
         };
         let left = TetLoadHistory3 { surfaces: &surfaces, volume, frames: &frames,
             nodal_forces_n: self.history.nodal_forces_n };
+        let mut support_values = Vec::with_capacity(self.supports.len());
+        for support in self.supports {
+            checkpoint(cx)?;
+            support_values.push(vector_before(support.displacement, time)?);
+        }
+        let supports: Vec<_> = self.supports.iter().enumerate().map(|(i, row)| {
+            SupportMotion3 { displacement: support_values[i].as_ref().unwrap_or(row.displacement), ..*row }
+        }).collect();
         checkpoint(cx)?;
-        Ok(left.at(geometry, problem, time, cx)?.case)
+        Ok(left.at_with_supports(geometry, problem, &supports, time, maximum_displacement_m, cx)?)
     }
 }
 
@@ -237,12 +287,22 @@ impl<'g, 'm, 'p, 's> EventTransientRun3<'_, '_, 'g, 'm, 'p, 's> {
         let start_time_s = self.run.state().time_s;
         let end_time_s = self.schedule.endpoint(start_time_s, target_s, maximum_step_s)?;
         let geometry = self.run.geometry; let problem = self.run.problem;
-        let left = self.schedule.left_at(geometry, problem, end_time_s, cx)?;
-        let right = self.schedule.history.at(geometry, problem, end_time_s, cx)?;
+        let left = self.schedule.left_at(geometry, problem, end_time_s,
+            self.run.maximum_displacement_m(), cx)?;
+        let right = self.schedule.history.at_with_supports(geometry, problem,
+            self.schedule.supports, end_time_s, self.run.maximum_displacement_m(), cx)?;
+        if left.prescribed_dofs_m() != right.prescribed_dofs_m() {
+            return Err(invalid("discontinuous support displacement requires an explicit impulse or constraint transition"));
+        }
         let mut candidate = self.run.clone();
-        let interval = candidate.advance(&left, end_time_s-start_time_s, cx)?;
-        let jump = if left.nodal_forces_n() != right.case.nodal_forces_n() {
-            Some(candidate.apply_load_jump(&right.case, cx)?)
+        let interval = if self.schedule.supports.is_empty() {
+            candidate.advance(&left.loads.case, end_time_s-start_time_s, cx)?
+        } else {
+            candidate.advance_with_supports(&left.loads.case, left.prescribed_dofs_m(),
+                end_time_s-start_time_s, cx)?
+        };
+        let jump = if left.nodal_forces_n() != right.nodal_forces_n() {
+            Some(candidate.apply_load_jump(&right.loads.case, cx)?)
         } else { None };
         checkpoint(cx)?;
         self.run = candidate;

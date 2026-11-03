@@ -225,6 +225,20 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         check(cx)
     }
 
+    /// A zero-duration force change retains support kinematics and energy but
+    /// changes reactions, including the consistent-mass free acceleration term.
+    pub(super) fn load_jump_supports(&self, acceleration: &[f64],
+        full_force: &[(usize, f64)], cx: &Cx<'_>)
+        -> Result<Option<PrescribedMotion3>, TransientError3> {
+        let Some(supports) = &self.prescribed else { return Ok(None); };
+        let endpoint = self.endpoint(supports,
+            [&self.state.displacement, &self.state.velocity, acceleration], full_force, cx)?;
+        let mut candidate = supports.clone();
+        candidate.reactions = endpoint.reactions;
+        check(cx)?;
+        Ok(Some(candidate))
+    }
+
     fn full_motion(
         &self,
         supports: &PrescribedMotion3,

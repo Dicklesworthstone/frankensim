@@ -61,7 +61,10 @@ impl std::error::Error for AdaptiveHistoryError3 {}
 pub struct AdaptiveScheduledStep3 {
     pub first: ScheduledStep3,
     pub second: ScheduledStep3,
-    /// max(|fine-coarse| / (3 * component allowance)); asymptotic local estimate.
+    /// Maximum component discrepancy / allowance. Force-only runs use the
+    /// asymptotic |fine-coarse|/3 estimate. Prescribed-support runs use raw
+    /// disagreement: their derivative recurrence has no presumed Richardson
+    /// order, and its inertial coupling also affects the free acceleration.
     pub error_ratio: f64,
     pub rejected_attempts: usize,
     pub suggested_step_s: f64,
@@ -71,6 +74,12 @@ impl EventTransientRun3<'_, '_, '_, '_, '_, '_> {
     /// Compare one full interval with two half intervals from the same immutable
     /// checkpoint. Displacement, velocity AND acceleration must pass. Relative
     /// scaling uses changes from the accepted state, not an arbitrary offset.
+    /// Bound support derivatives participate too: an all-prescribed body does
+    /// not have zero motion error merely because its free vector is empty.
+    /// With prescribed supports, raw full/half disagreement is a local
+    /// consistency indicator, not a derivative-error bound. The original
+    /// recurrence can retain an alternating acceleration error; a small
+    /// discrepancy alone does not certify the authored motion's derivatives.
     ///
     /// The pair consumes two original lifetime step slots. Failed trials consume
     /// bounded computation but no accepted slots or source work. Budget, source,
@@ -128,6 +137,7 @@ fn discrepancy(base: &EventTransientRun3<'_, '_, '_, '_, '_, '_>,
     cx: &Cx<'_>) -> Result<f64, AdaptiveHistoryError3> {
     let (b, c, f) = (base.run.state(), coarse.run.state(), fine.run.state());
     let mut ratio = 0.0_f64;
+    let divisor = if base.schedule.supports.is_empty() { 3.0 } else { 1.0 };
     for (old, full, half, absolute) in [
         (&b.displacement, &c.displacement, &f.displacement, control.absolute_displacement_m),
         (&b.velocity, &c.velocity, &f.velocity, control.absolute_velocity_m_s),
@@ -137,11 +147,32 @@ fn discrepancy(base: &EventTransientRun3<'_, '_, '_, '_, '_, '_>,
             if i % 256 == 0 { checkpoint(cx)?; }
             let scale = (f-o).abs().max((c-o).abs());
             let tolerance = absolute + control.relative * scale;
-            let error = ((f-c) / 3.0).abs() / tolerance;
+            let error = ((f-c) / divisor).abs() / tolerance;
             if !scale.is_finite() || !tolerance.is_finite() || !error.is_finite() {
                 return Err(AdaptiveHistoryError3::Invalid("nonfinite motion-error comparison"));
             }
             ratio = ratio.max(error);
+        }
+    }
+    if !base.schedule.supports.is_empty() {
+        let b = base.run.nodal_motion(cx).map_err(TransientHistoryError3::from)?;
+        let c = coarse.run.nodal_motion(cx).map_err(TransientHistoryError3::from)?;
+        let f = fine.run.nodal_motion(cx).map_err(TransientHistoryError3::from)?;
+        for (field, absolute) in [control.absolute_displacement_m,
+            control.absolute_velocity_m_s, control.absolute_acceleration_m_s2]
+            .into_iter().enumerate()
+        {
+            for &d in base.run.material_problem().fixed_dofs {
+                checkpoint(cx)?;
+                let (o, c, f) = (b[field][d/3][d%3], c[field][d/3][d%3], f[field][d/3][d%3]);
+                let scale = (f-o).abs().max((c-o).abs());
+                let tolerance = absolute + control.relative * scale;
+                let error = (f-c).abs() / tolerance;
+                if !scale.is_finite() || !tolerance.is_finite() || !error.is_finite() {
+                    return Err(AdaptiveHistoryError3::Invalid("nonfinite support motion-error comparison"));
+                }
+                ratio = ratio.max(error);
+            }
         }
     }
     checkpoint(cx)?; Ok(ratio)

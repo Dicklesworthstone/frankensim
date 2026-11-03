@@ -77,7 +77,7 @@ fn g1_initial_acceleration_includes_mass_stiffness_and_both_damping_cross_terms(
             stiffness_damping_s: 0.006,
             ..Default::default()
         };
-        let run = load
+        let mut run = load
             .begin_transient_with_supports(&p, None, 0.0, &u, &v, &a, config, cx)
             .unwrap();
         // V=1/6, E=60, rho=6: M_ff=.1, M_fc=.05, K_ff=10, K_fc=-10.
@@ -105,6 +105,24 @@ fn g1_initial_acceleration_includes_mass_stiffness_and_both_damping_cross_terms(
             response.kinetic_plus_elastic_energy_j,
             run.state().total_energy_j,
         );
+        let energy = run.state().total_energy_j;
+        let loaded = g.assemble(&[],VolumeLoad3::None,&[(0,0.034),(3,0.012)],cx).unwrap();
+        let jump = run.apply_load_jump(&loaded,cx).unwrap();
+        close(jump.acceleration_change_l2_m_s2,0.012/0.1);
+        close(run.state().acceleration[0],expected+0.012/0.1);
+        assert_eq!(run.state().time_s,0.0); assert_eq!(run.state().step,0);
+        assert_eq!(run.state().total_energy_j,energy);
+        let jumped = run.nodal_motion(cx).unwrap();
+        assert_eq!(jumped[0],u); assert_eq!(jumped[1],v); assert_eq!(jumped[2][0],a[0]);
+        let right = run.recover_response(FRAME,0.01,cx).unwrap();
+        // Reaction change includes M_cf*delta(a_f) and the newly applied
+        // fixed-node force, not merely minus the external force.
+        close(right.support_reactions_n[0][0]-response.support_reactions_n[0][0],
+            0.05*(0.012/0.1)-0.034);
+        let h = 0.01;
+        let step = run.advance_with_supports(&loaded,
+            &[(0,u[0][0]+h*v[0][0]+0.5*h*h*a[0][0])],h,cx).unwrap();
+        close(step.balance_error_j,0.0);
     });
 }
 
@@ -282,7 +300,7 @@ fn g4_invalid_supports_cancel_and_incompatible_operations_preserve_the_checkpoin
             );
         }
         assert!(run.advance(&load, 0.01, cx).is_err());
-        assert!(run.apply_load_jump(&load, cx).is_err());
+        assert_eq!(run.apply_load_jump(&load, cx).unwrap().acceleration_change_l2_m_s2, 0.0);
         assert!(run.adjoint(TransientAdjointConfig3::default(), cx).is_err());
         with_cx(true, |cancelled| {
             assert_eq!(
