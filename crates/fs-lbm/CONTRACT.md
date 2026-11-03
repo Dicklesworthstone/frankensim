@@ -8905,3 +8905,18 @@ sinusoidal response has the declared second-order time discretization error.
 compatible collision models, physical-momentum closure, sinusoidal convergence,
 the incorrect-order negative control, serial/pooled bits and atomic refusals
 (G0/G1/G3/G4/G5). No new turbulence or open-boundary accuracy claim is made.
+
+### Shared momentum reduction for immersed finite bodies
+
+Single- and multiple-body partial-saturation coupling share one native spatial
+response assembly. Fixed-size double-double accumulators retain weak net forces
+and couples under opposing cell tractions before the original f64 Cholesky solve.
+A shared reaction reduction preserves actual fluid/body impulses, moments about
+the requested origin and body center, and work; moving, dry-body and lubrication
+owners consume the same corrected path. Collision and streaming arithmetic is
+unchanged, with no per-cell heap allocation or additional fluid solve.
+
+This does not manufacture sub-ULP population feedback: the measured momentum
+residual remains exposed. `partial_saturation_cancellation3` checks the actual
+single-/multiple-body response to analytically balanced incoming fluid loads;
+the internal `momentum_reduction_tests` checks a weak reaction couple and work.

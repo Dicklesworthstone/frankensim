@@ -493,10 +493,7 @@ impl BoundaryGrid3 {
         fs_la::factor::cholesky(&inertia, 3)
             .map_err(|_| invalid("world inertia must be numerically positive definite"))?;
 
-        let mut increment = external_impulse;
-        let mut weight_sum = 0.0;
-        let mut first = [0.0; 3];
-        let mut rotary = [[0.0; 3]; 3];
+        let mut response = multiple::Response::new(external_impulse);
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
@@ -526,49 +523,11 @@ impl BoundaryGrid3 {
                     moments(self.f.each_ref().map(|f| f[tile].0[lane]), force, cell)?;
                 let weight = epsilon * (tau - 0.5) / (1.0 - epsilon + tau - 0.5) * rho;
                 let slip = core::array::from_fn(|axis| velocity[axis] - solid_velocity[axis]);
-                let torque = cross(r, slip);
-                weight_sum += weight;
-                for axis in 0..3 {
-                    first[axis] = weight.mul_add(r[axis], first[axis]);
-                    increment[axis] = weight.mul_add(slip[axis], increment[axis]);
-                    increment[axis + 3] = weight.mul_add(torque[axis], increment[axis + 3]);
-                    let b = (axis + 1) % 3;
-                    let c = (axis + 2) % 3;
-                    rotary[axis][axis] =
-                        weight.mul_add(r[b].mul_add(r[b], r[c] * r[c]), rotary[axis][axis]);
-                    for other in 0..axis {
-                        rotary[axis][other] =
-                            (-weight * r[axis]).mul_add(r[other], rotary[axis][other]);
-                    }
-                }
+                response.add(weight, r, slip);
             }
         }
-        let mut matrix = [0.0; 36];
-        for axis in 0..3 {
-            matrix[axis * 6 + axis] = body.mass + 0.5 * weight_sum;
-            for other in 0..=axis {
-                matrix[(axis + 3) * 6 + other + 3] =
-                    body.inertia_world[axis][other] + 0.5 * rotary[axis][other];
-            }
-        }
-        // Lower-left block is sum(B rho [r]x)/2; upper-right is its transpose.
-        matrix[3 * 6 + 1] = -0.5 * first[2];
-        matrix[3 * 6 + 2] = 0.5 * first[1];
-        matrix[4 * 6] = 0.5 * first[2];
-        matrix[4 * 6 + 2] = -0.5 * first[0];
-        matrix[5 * 6] = -0.5 * first[1];
-        matrix[5 * 6 + 1] = 0.5 * first[0];
-        for i in 0..6 {
-            for j in 0..i {
-                matrix[j * 6 + i] = matrix[i * 6 + j];
-            }
-        }
-        if !matrix.into_iter().chain(increment).all(f64::is_finite) {
-            return Err(invalid("spatial inertia/response overflowed"));
-        }
-        fs_la::factor::cholesky(&matrix, 6)
-            .map_err(|_| invalid("coupled inertia is not numerically positive definite"))?
-            .solve(&mut increment);
+        let mut increment = response.increment();
+        response.factor(*body)?.solve(&mut increment);
         let midpoint = core::array::from_fn(|i| body.velocity[i] + 0.5 * increment[i]);
         let after = core::array::from_fn(|i| body.velocity[i] + increment[i]);
         let omega_mid = core::array::from_fn(|i| body.angular_velocity[i] + 0.5 * increment[i + 3]);
@@ -582,7 +541,7 @@ impl BoundaryGrid3 {
             ));
         }
 
-        let mut exchange = PartialSaturationExchange3::default();
+        let mut exchange = multiple::Exchange::default();
         let mut walls = WallMomentumExchange3::default();
         let mut forcing = PartialSaturationForcing3::default();
         let collide = collision_kernel3();
@@ -617,6 +576,7 @@ impl BoundaryGrid3 {
                         relaxation.increments(&physical, &fluid_eq, &f, &ordinary);
                     let solid_eq = equilibrium3(rho, solid_velocity);
                     let b = epsilon * (tau - 0.5) / (1.0 - epsilon + tau - 0.5);
+                    let mut mass_change = 0.0;
                     let mut fluid_impulse = [0.0; 3];
                     for q in 0..Q3 {
                         let solid_collision =
@@ -628,25 +588,14 @@ impl BoundaryGrid3 {
                             ordinary[q] + b * (solid_collision - fluid_collision[q])
                         };
                         let correction = post[q] - ordinary[q];
-                        exchange.fluid_population_mass_change += correction;
+                        mass_change += correction;
                         fluid_impulse[0] += f64::from(E3[q].0) * correction;
                         fluid_impulse[1] += f64::from(E3[q].1) * correction;
                         fluid_impulse[2] += f64::from(E3[q].2) * correction;
                     }
                     let offset =
                         core::array::from_fn(|axis| cell[axis] as f64 + 0.5 - moment_origin[axis]);
-                    let angular = cross(offset, fluid_impulse);
-                    let spin = cross(r, fluid_impulse);
-                    for axis in 0..3 {
-                        exchange.fluid_population_impulse[axis] += fluid_impulse[axis];
-                        exchange.body_impulse[axis] -= fluid_impulse[axis];
-                        exchange.fluid_population_angular_impulse[axis] += angular[axis];
-                        exchange.body_angular_impulse[axis] -= angular[axis];
-                        exchange.body_angular_impulse_about_center[axis] -= spin[axis];
-                    }
-                    exchange.body_work -= dot(fluid_impulse, solid_velocity);
-                    exchange.coupled_cells += 1;
-                    exchange.coupling_weight_sum += b;
+                    exchange.add(mass_change, fluid_impulse, offset, r, solid_velocity, b);
                 }
                 if !post.into_iter().all(f64::is_finite) {
                     return Err(PartialSaturationError3::Cell {
@@ -680,6 +629,7 @@ impl BoundaryGrid3 {
                 }
             }
         }
+        let exchange = exchange.finish();
         let walls = walls
             .checked()
             .map_err(|_| invalid("wall exchange overflowed"))?;

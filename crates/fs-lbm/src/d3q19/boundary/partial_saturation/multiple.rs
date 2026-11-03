@@ -7,6 +7,7 @@
 //! body. No dense cross-body inertia is invented for this collision law.
 
 use super::*;
+use fs_math::dd::Dd;
 
 /// One body's response in a simultaneous assembly. Fixed-wall exchange is
 /// owned once by [`PartialSaturationBodiesExchange3::walls`].
@@ -64,50 +65,69 @@ pub struct PartialSaturationBodiesExchange3<const N: usize> {
     pub population_angular_impulse_residual: [f64; 3],
 }
 
+// One fixed-size reduction per body, shared by the one-body and assembly
+// paths. Large opposing fluid tractions must cancel BEFORE the residual is
+// rounded beside a small applied impulse. The collision itself stays in f64.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Response {
-    weight: f64,
-    first: [f64; 3],
-    rotary: [[f64; 3]; 3],
-    increment: [f64; 6],
+    weight: Dd,
+    first: [Dd; 3],
+    rotary: [[Dd; 3]; 3],
+    increment: [Dd; 6],
 }
 
 impl Response {
-    fn add(&mut self, weight: f64, r: [f64; 3], slip: [f64; 3]) {
-        let torque = cross(r, slip);
-        self.weight += weight;
+    pub(super) fn new(external_impulse: [f64; 6]) -> Self {
+        Self {
+            increment: external_impulse.map(Dd::from_f64),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn add(&mut self, weight: f64, r: [f64; 3], slip: [f64; 3]) {
+        let weight = Dd::from_f64(weight);
+        let r = r.map(Dd::from_f64);
+        let slip = slip.map(Dd::from_f64);
+        self.weight = self.weight + weight;
         for i in 0..3 {
-            self.first[i] = weight.mul_add(r[i], self.first[i]);
-            self.increment[i] = weight.mul_add(slip[i], self.increment[i]);
-            self.increment[i + 3] = weight.mul_add(torque[i], self.increment[i + 3]);
+            self.first[i] = self.first[i] + weight * r[i];
+            self.increment[i] = self.increment[i] + weight * slip[i];
             let (j, k) = ((i + 1) % 3, (i + 2) % 3);
-            self.rotary[i][i] = weight.mul_add(r[j].mul_add(r[j], r[k] * r[k]), self.rotary[i][i]);
+            let torque = r[j] * slip[k] - r[k] * slip[j];
+            self.increment[i + 3] = self.increment[i + 3] + weight * torque;
+            self.rotary[i][i] = self.rotary[i][i] + weight * (r[j] * r[j] + r[k] * r[k]);
             for j in 0..i {
-                self.rotary[i][j] = (-weight * r[i]).mul_add(r[j], self.rotary[i][j]);
+                self.rotary[i][j] = self.rotary[i][j] - weight * r[i] * r[j];
             }
         }
     }
 
     pub(super) fn factor(self, body: PartialSaturationBody3) -> Result<fs_la::factor::Cholesky> {
+        let half = Dd::from_f64(0.5);
         let mut matrix = [0.0; 36];
         for i in 0..3 {
-            matrix[i * 6 + i] = body.mass + 0.5 * self.weight;
+            matrix[i * 6 + i] = (Dd::from_f64(body.mass) + half * self.weight).to_f64();
             for j in 0..=i {
-                matrix[(i + 3) * 6 + j + 3] = body.inertia_world[i][j] + 0.5 * self.rotary[i][j];
+                matrix[(i + 3) * 6 + j + 3] =
+                    (Dd::from_f64(body.inertia_world[i][j]) + half * self.rotary[i][j]).to_f64();
             }
         }
-        matrix[3 * 6 + 1] = -0.5 * self.first[2];
-        matrix[3 * 6 + 2] = 0.5 * self.first[1];
-        matrix[4 * 6] = 0.5 * self.first[2];
-        matrix[4 * 6 + 2] = -0.5 * self.first[0];
-        matrix[5 * 6] = -0.5 * self.first[1];
-        matrix[5 * 6 + 1] = 0.5 * self.first[0];
+        matrix[3 * 6 + 1] = (-half * self.first[2]).to_f64();
+        matrix[3 * 6 + 2] = (half * self.first[1]).to_f64();
+        matrix[4 * 6] = (half * self.first[2]).to_f64();
+        matrix[4 * 6 + 2] = (-half * self.first[0]).to_f64();
+        matrix[5 * 6] = (-half * self.first[1]).to_f64();
+        matrix[5 * 6 + 1] = (half * self.first[0]).to_f64();
         for i in 0..6 {
             for j in 0..i {
                 matrix[j * 6 + i] = matrix[i * 6 + j];
             }
         }
-        if !matrix.into_iter().chain(self.increment).all(f64::is_finite) {
+        if !matrix
+            .into_iter()
+            .chain(self.increment())
+            .all(f64::is_finite)
+        {
             return Err(invalid("assembly spatial response overflowed"));
         }
         fs_la::factor::cholesky(&matrix, 6)
@@ -115,12 +135,13 @@ impl Response {
     }
 
     pub(super) fn increment(self) -> [f64; 6] {
-        self.increment
+        self.increment.map(Dd::to_f64)
     }
 
-    pub(super) fn solve(mut self, body: PartialSaturationBody3) -> Result<PartialSaturationBody3> {
-        self.factor(body)?.solve(&mut self.increment);
-        Self::apply(body, self.increment)
+    pub(super) fn solve(self, body: PartialSaturationBody3) -> Result<PartialSaturationBody3> {
+        let mut increment = self.increment();
+        self.factor(body)?.solve(&mut increment);
+        Self::apply(body, increment)
     }
 
     pub(super) fn apply(
@@ -140,6 +161,66 @@ impl Response {
             ));
         }
         Ok(proposed)
+    }
+}
+
+// Reactions are consumed again by the dry-body interior-fluid correction.
+// Reduce actual cell corrections before rounding, and derive both sides from
+// the same sum so a weak net load survives opposing local fluid impulses.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Exchange {
+    mass: Dd,
+    impulse: [Dd; 3],
+    angular: [Dd; 3],
+    spin: [Dd; 3],
+    work: Dd,
+    weight: Dd,
+    cells: usize,
+}
+
+impl Exchange {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add(
+        &mut self,
+        mass: f64,
+        impulse: [f64; 3],
+        offset: [f64; 3],
+        arm: [f64; 3],
+        velocity: [f64; 3],
+        weight: f64,
+    ) {
+        self.mass = self.mass + Dd::from_f64(mass);
+        self.weight = self.weight + Dd::from_f64(weight);
+        let impulse = impulse.map(Dd::from_f64);
+        let offset = offset.map(Dd::from_f64);
+        let arm = arm.map(Dd::from_f64);
+        for i in 0..3 {
+            let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+            self.impulse[i] = self.impulse[i] + impulse[i];
+            self.angular[i] = self.angular[i] + offset[j] * impulse[k] - offset[k] * impulse[j];
+            self.spin[i] = self.spin[i] + arm[j] * impulse[k] - arm[k] * impulse[j];
+            self.work = self.work - impulse[i] * Dd::from_f64(velocity[i]);
+        }
+        self.cells += 1;
+    }
+
+    pub(super) fn finish(self) -> PartialSaturationExchange3 {
+        if self.cells == 0 {
+            return PartialSaturationExchange3::default();
+        }
+        let impulse = self.impulse.map(Dd::to_f64);
+        let angular = self.angular.map(Dd::to_f64);
+        PartialSaturationExchange3 {
+            fluid_population_mass_change: self.mass.to_f64(),
+            fluid_population_impulse: impulse,
+            fluid_population_angular_impulse: angular,
+            body_impulse: impulse.map(|value| -value),
+            body_angular_impulse: angular.map(|value| -value),
+            body_angular_impulse_about_center: self.spin.map(|value| -value.to_f64()),
+            body_work: self.work.to_f64(),
+            coupled_cells: self.cells,
+            coupling_weight_sum: self.weight.to_f64(),
+        }
     }
 }
 
@@ -338,7 +419,7 @@ impl BoundaryGrid3 {
             let inertia: [f64; 9] = core::array::from_fn(|i| body.inertia_world[i / 3][i % 3]);
             fs_la::factor::cholesky(&inertia, 3)
                 .map_err(|_| invalid("assembly world inertia must be positive definite"))?;
-            response[a].increment = external[a];
+            response[a] = Response::new(external[a]);
         }
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
@@ -415,6 +496,7 @@ impl BoundaryGrid3 {
                 0.5 * (bodies[a].angular_velocity[i] + proposed[a].angular_velocity[i])
             });
         }
+        let mut exchanges = [Exchange::default(); N];
         let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
@@ -472,30 +554,20 @@ impl BoundaryGrid3 {
                         }
                         let solid_eq = equilibrium3(rho, v);
                         let b = epsilon * (tau - 0.5) / (1.0 - total + tau - 0.5);
+                        let mut mass_change = 0.0;
                         let mut impulse = [0.0; 3];
                         for q in 0..Q3 {
                             let solid_collision =
                                 physical[OPP3[q]] - physical[q] + solid_eq[q] - eq[OPP3[q]];
                             let correction = b * (solid_collision - fluid_collision[q]);
                             summed[q] += correction;
-                            response.hydrodynamic.fluid_population_mass_change += correction;
+                            mass_change += correction;
                             impulse[0] += f64::from(E3[q].0) * correction;
                             impulse[1] += f64::from(E3[q].1) * correction;
                             impulse[2] += f64::from(E3[q].2) * correction;
                         }
                         let arm = core::array::from_fn(|i| cell[i] as f64 + 0.5 - origin[i]);
-                        let angular = cross(arm, impulse);
-                        let spin = cross(r, impulse);
-                        for i in 0..3 {
-                            response.hydrodynamic.fluid_population_impulse[i] += impulse[i];
-                            response.hydrodynamic.body_impulse[i] -= impulse[i];
-                            response.hydrodynamic.fluid_population_angular_impulse[i] += angular[i];
-                            response.hydrodynamic.body_angular_impulse[i] -= angular[i];
-                            response.hydrodynamic.body_angular_impulse_about_center[i] -= spin[i];
-                        }
-                        response.hydrodynamic.body_work -= dot(impulse, v);
-                        response.hydrodynamic.coupled_cells += 1;
-                        response.hydrodynamic.coupling_weight_sum += b;
+                        exchanges[a].add(mass_change, impulse, arm, r, v, b);
                     }
                     let mut residual = [0.0; 3];
                     for q in 0..Q3 {
@@ -554,6 +626,7 @@ impl BoundaryGrid3 {
         for a in 0..N {
             checkpoint(gate)?;
             let response = &mut report.bodies[a];
+            response.hydrodynamic = exchanges[a].finish();
             let dp = core::array::from_fn(|i| {
                 bodies[a].mass * (proposed[a].velocity[i] - bodies[a].velocity[i])
             });
@@ -700,3 +773,6 @@ fn admit_fractions<const N: usize>(
     }
     Ok(total)
 }
+
+#[cfg(test)]
+mod momentum_reduction_tests;
