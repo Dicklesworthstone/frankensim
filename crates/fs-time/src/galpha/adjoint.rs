@@ -284,7 +284,6 @@ impl OperatorFirstOrderGeneralizedAlpha {
             });
         }
         let a = 1.0 / (self.gamma * self.h);
-        let b = (1.0 - self.gamma) / self.gamma;
         if !a.is_finite() {
             return Err(FirstOrderAdjointError::InvalidInput(
                 "finite reciprocal of gamma*h required",
@@ -302,9 +301,9 @@ impl OperatorFirstOrderGeneralizedAlpha {
         let mut rate_eval = vec![0.0; self.n];
         let mut rhs = vec![0.0; self.n];
         for i in 0..self.n {
-            u_eval[i] = self
-                .alpha_f
-                .mul_add(next.u[i], (1.0 - self.alpha_f) * initial.u[i]);
+            let increment = (self.h * (1.0 - self.gamma))
+                .mul_add(initial.rate[i], (self.gamma * self.h) * next.rate[i]);
+            u_eval[i] = self.alpha_f.mul_add(increment, initial.u[i]);
             rate_eval[i] = self
                 .alpha_m
                 .mul_add(next.rate[i], (1.0 - self.alpha_m) * initial.rate[i]);
@@ -359,16 +358,20 @@ impl OperatorFirstOrderGeneralizedAlpha {
         if !finite(&mass_bar) || !finite(&internal_bar) || !finite(&parameters) {
             return Err(FirstOrderAdjointError::NonFiniteDerivative);
         }
-        // R_u0 = -alpha_m*a*M + (1-alpha_f)*r_u and
-        // R_rate0 = (1-alpha_m/gamma)*M. The direct endpoint-rate
-        // derivatives contribute -a*bar_rate1 and -b*bar_rate1 respectively.
+        // The forward unknown is c = gamma*h*rate_next, with
+        // u_next = u0 + h*(1-gamma)*rate0 + c. At fixed c,
+        // R_u0 = r_u and R_rate0 = (1-alpha_m)*M
+        //                          + alpha_f*h*(1-gamma)*r_u.
+        // This equivalent pullback avoids cancellation of 1/h terms in the
+        // initial-state cotangent when the terminal seed is a rate.
         let mut initial_bar = vec![0.0; self.n];
         let mut initial_rate_bar = vec![0.0; self.n];
         for i in 0..self.n {
-            initial_bar[i] = -a * terminal.1[i] + self.alpha_m * a * mass_bar[i]
-                - (1.0 - self.alpha_f) * internal_bar[i];
-            initial_rate_bar[i] =
-                -b * terminal.1[i] - (1.0 - self.alpha_m / self.gamma) * mass_bar[i];
+            initial_bar[i] = terminal.0[i] - internal_bar[i];
+            initial_rate_bar[i] = (self.h * (1.0 - self.gamma)).mul_add(
+                terminal.0[i] - self.alpha_f * internal_bar[i],
+                -(1.0 - self.alpha_m) * mass_bar[i],
+            );
         }
         for value in &mut parameters {
             *value = -*value;

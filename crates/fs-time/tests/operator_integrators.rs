@@ -432,6 +432,57 @@ fn first_order_generalized_alpha_dense_operator_order_and_agreement() {
     );
 }
 
+#[test]
+fn dense_first_order_preserves_acceleration_below_velocity_resolution() {
+    // u is velocity and rate is acceleration. A Galilean velocity offset
+    // must not change constant acceleration merely because h*rate cannot
+    // be represented as an increment of that large absolute velocity.
+    for rho in [0.0, 0.4, 1.0] {
+        let method = FirstOrderGeneralizedAlpha::new(&[2.0], &[0.0], 1, 1.0e-8, rho);
+        let (mut velocity, mut acceleration) = ([1.0e12], [1.0]);
+        for _ in 0..5 {
+            first_order_galpha_step(&method, &mut velocity, &mut acceleration, &[2.0]);
+            assert_close(&acceleration, &[1.0], 3.0e-15);
+            assert_eq!(velocity[0], 1.0e12);
+        }
+    }
+}
+
+#[test]
+fn operator_first_order_preserves_acceleration_below_velocity_resolution() {
+    let mass = DiagonalOp(vec![2.0]);
+    let evolution = DiagonalOp(vec![0.0]);
+    let system = LinearFirstOrderSystem::new(&mass, &evolution);
+    for rho in [0.0, 0.4, 1.0] {
+        let method = OperatorFirstOrderGeneralizedAlpha::new(1, 1.0e-8, rho, tight_newton());
+        let mut state = FirstOrderState::new(0.0, &[1.0e12], &[1.0]);
+        for _ in 0..5 {
+            method.step(&mut state, &system, &[2.0]).unwrap();
+            assert_close(&state.rate, &[1.0], 3.0e-15);
+            assert_eq!(state.u[0], 1.0e12);
+        }
+    }
+}
+
+#[test]
+fn first_order_endpoint_overflow_does_not_publish_a_partial_step() {
+    let mass = DiagonalOp(vec![1.0]);
+    let evolution = DiagonalOp(vec![0.0]);
+    let system = LinearFirstOrderSystem::new(&mass, &evolution);
+    let method = OperatorFirstOrderGeneralizedAlpha::new(1, 1.0, 1.0, tight_newton());
+    // The alpha-stage state is finite; only the accepted endpoint overflows.
+    let mut state = FirstOrderState::new(0.0, &[0.75 * f64::MAX], &[0.5 * f64::MAX]);
+    let before = state.clone();
+    assert!(matches!(
+        method.step(&mut state, &system, &[0.5 * f64::MAX]),
+        Err(TimeSolveError::ModelRefused {
+            phase: "accepted endpoint",
+            ..
+        })
+    ));
+    assert_eq!(state, before);
+}
+
 struct CubicDecay;
 
 impl FirstOrderProblem for CubicDecay {

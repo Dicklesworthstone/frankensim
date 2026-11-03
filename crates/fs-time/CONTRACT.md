@@ -244,7 +244,12 @@ where claimed below.
   Jansen–Whiting–Hulbert parameters αm = (3−ρ)/(2(1+ρ)), αf = 1/(1+ρ),
   γ = 1/2 + αm − αf. This is not the structural second-order formulation
   relabeled: state and rate are first-class and the residual is enforced at
-  `(t_n + αf h, u_n + αf (u_{n+1}−u_n))`.
+  `(t_n + αf h, u_n + αf Δu)`. The dense lane solves for endpoint rate;
+  the operator lane solves for `γh rate_{n+1}` and constructs `Δu` from
+  that correction and the old rate. Neither recovers a rate by subtracting
+  two absolute states. Thus a resolved acceleration survives even when a
+  velocity increment rounds away against a large velocity offset. Stored
+  state remains `f64`; sub-ULP state accumulation is not claimed.
 - Both implicit problem traits accept an optional `preconditioner_apply`
   action for their forward Newton/FGMRES solve. It receives the exact stage
   state (and first-order stage time), named effective-operator coefficients,
@@ -276,6 +281,9 @@ where claimed below.
   The pullback borrows existing input history and returns complete primal and
   adjoint reports. Failed solves, incomplete derivative writes, nonfinite
   results, insufficient workspace and cancellation return no partial gradient.
+  Stage reconstruction uses the same rate-derived increment as the forward
+  map, and the correction-variable pullback avoids cancelling `1/h` terms
+  in the initial-state gradient for an endpoint-rate objective.
 - `galpha::second_order_adjoint::SecondOrderVjp` and
   `OperatorGeneralizedAlpha::step_vjp` differentiate the structural
   Chung–Hulbert residual and Newmark correctors. Explicit transpose actions
@@ -667,6 +675,8 @@ Newton/Krylov telemetry; first-order-system order and dense/operator
 agreement plus bitwise split replay; the normalized small-Biot lumped thermal
 decay at one time constant bound directly to the canonical `fs-vvreg` Level-A
 row; nonlinear first-order self-convergence;
+constant acceleration under an unresolved increment of a large absolute
+velocity in both first-order lanes;
 and ARS(2,2,2)
 dense/operator agreement, nonlinear logistic order, split replay, and both
 stage iteration counts.

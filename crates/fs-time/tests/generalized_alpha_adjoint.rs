@@ -137,7 +137,7 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 
 // Test-only forward-mode arithmetic. The oracle has its own residual and
 // solves for the endpoint RATE by a direct 2x2 inverse; production uses
-// matrix-free Newton--Krylov with endpoint STATE as its unknown. Differentiating
+// matrix-free Newton--Krylov with a rate-scaled correction as its unknown. Differentiating
 // these converged reference Newton iterations is only an independent oracle.
 #[derive(Clone, Copy)]
 struct Dual {
@@ -421,4 +421,88 @@ fn trajectory_reverses_both_state_vectors_and_reduces_inverse_loss() {
         candidate[6 + i] -= parameter_gradient[i];
     }
     assert!(loss(candidate.map(c)).value < 0.999 * dual.value);
+}
+
+struct UniformAcceleration;
+
+impl FirstOrderProblem for UniformAcceleration {
+    fn dimension(&self) -> usize {
+        1
+    }
+    fn mass_apply(&self, input: &[f64], output: &mut [f64]) {
+        output[0] = 2.0 * input[0];
+    }
+    fn internal_force(&self, _t: f64, _u: &[f64], output: &mut [f64]) {
+        output[0] = 0.0;
+    }
+    fn tangent_apply(&self, _t: f64, _u: &[f64], _input: &[f64], output: &mut [f64]) {
+        output[0] = 0.0;
+    }
+}
+
+impl FirstOrderVjp for UniformAcceleration {
+    fn parameter_count(&self) -> usize {
+        0
+    }
+    fn mass_transpose_apply(&self, input: &[f64], output: &mut [f64]) -> Result<(), String> {
+        self.mass_apply(input, output);
+        Ok(())
+    }
+    fn tangent_transpose_apply(
+        &self,
+        _t: f64,
+        _u: &[f64],
+        _input: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), String> {
+        output[0] = 0.0;
+        Ok(())
+    }
+    fn residual_parameter_vjp(
+        &self,
+        _t: f64,
+        _u: &[f64],
+        _rate: &[f64],
+        _input: &[f64],
+        _output: &mut [f64],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn acceleration_pullback_survives_large_velocity_offset_and_small_timestep() {
+    for rho in [0.0, 0.4, 1.0] {
+        let method = OperatorFirstOrderGeneralizedAlpha::new(
+            1,
+            1.0e-10,
+            rho,
+            ImplicitSolveConfig::default(),
+        );
+        let initial = FirstOrderState::new(0.0, &[1.0e12], &[1.0]);
+        let gradient = method
+            .step_vjp(
+                &initial,
+                &UniformAcceleration,
+                &[2.0],
+                (&[0.0], &[1.0]),
+                &Identity,
+                config(),
+                method.adjoint_workspace_components(0, config()).unwrap(),
+                &mut || false,
+            )
+            .unwrap();
+        let alpha_m = (3.0 - rho) / (2.0 * (1.0 + rho));
+        close(gradient.rate[0], 1.0, 2.0e-14);
+        assert_eq!(
+            gradient.initial[0], 0.0,
+            "constant velocity offset changed acceleration"
+        );
+        close(
+            gradient.initial_rate[0],
+            -(1.0 - alpha_m) / alpha_m,
+            2.0e-14,
+        );
+        close(gradient.forcing[0], 1.0 / (2.0 * alpha_m), 2.0e-14);
+    }
 }

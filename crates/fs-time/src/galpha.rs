@@ -101,16 +101,6 @@ impl GeneralizedAlpha {
     }
 }
 
-fn matvec(a: &[f64], n: usize, x: &[f64], out: &mut [f64]) {
-    for i in 0..n {
-        let mut acc = 0.0f64;
-        for j in 0..n {
-            acc = a[i * n + j].mul_add(x[j], acc);
-        }
-        out[i] = acc;
-    }
-}
-
 /// One generalized-α step: (q, v, a) at t → t+h with load `f_next`
 /// evaluated at t + (1−αf)·h by the caller (constant loads just pass
 /// the value). Updates in place.
@@ -868,11 +858,9 @@ fn structural_increment(
 pub struct FirstOrderGeneralizedAlpha {
     n: usize,
     h: f64,
-    alpha_m: f64,
-    alpha_f: f64,
     gamma: f64,
-    mass: Vec<f64>,
     operator: Vec<f64>,
+    rate_history: Vec<f64>,
     effective: Lu,
 }
 
@@ -897,21 +885,24 @@ impl FirstOrderGeneralizedAlpha {
         assert!(h.is_finite() && h > 0.0, "first-order generalized-alpha h");
         assert!((0.0..=1.0).contains(&rho_inf), "rho_inf in [0,1]");
         let (alpha_m, alpha_f, gamma) = first_order_parameters(rho_inf);
-        let mass_scale = alpha_m / (gamma * h);
+        // Solve for endpoint rate directly: recovering it from two absolute
+        // states loses a resolved rate when their difference rounds away.
+        let operator_scale = alpha_f * gamma * h;
+        let history_scale = alpha_f * (1.0 - gamma) * h;
         let mut effective = vec![0.0; n * n];
+        let mut rate_history = vec![0.0; n * n];
         for i in 0..n * n {
-            effective[i] = mass_scale.mul_add(mass[i], alpha_f * operator[i]);
+            effective[i] = alpha_m.mul_add(mass[i], operator_scale * operator[i]);
+            rate_history[i] = (1.0 - alpha_m).mul_add(mass[i], history_scale * operator[i]);
         }
         let effective = lu(&effective, n)
             .expect("first-order generalized-alpha effective matrix must be nonsingular");
         Self {
             n,
             h,
-            alpha_m,
-            alpha_f,
             gamma,
-            mass: mass.to_vec(),
             operator: operator.to_vec(),
+            rate_history,
             effective,
         }
     }
@@ -937,27 +928,18 @@ pub fn first_order_galpha_step(
         n,
         "first-order generalized-alpha forcing dimension"
     );
-    let mass_scale = method.alpha_m / (method.gamma * method.h);
-    let mut rate_history = vec![0.0; n];
-    let mut state_history = vec![0.0; n];
+    let mut rhs = forcing.to_vec();
     for i in 0..n {
-        rate_history[i] =
-            mass_scale.mul_add(u[i], -(1.0 - method.alpha_m / method.gamma) * rate[i]);
-        state_history[i] = (1.0 - method.alpha_f) * u[i];
-    }
-    let mut mass_history = vec![0.0; n];
-    let mut operator_history = vec![0.0; n];
-    matvec(&method.mass, n, &rate_history, &mut mass_history);
-    matvec(&method.operator, n, &state_history, &mut operator_history);
-    let mut rhs = vec![0.0; n];
-    for i in 0..n {
-        rhs[i] = forcing[i] + mass_history[i] - operator_history[i];
+        for j in 0..n {
+            let entry = i * n + j;
+            rhs[i] = (-method.operator[entry]).mul_add(u[j], rhs[i]);
+            rhs[i] = (-method.rate_history[entry]).mul_add(rate[j], rhs[i]);
+        }
     }
     method.effective.solve(&mut rhs);
     for i in 0..n {
-        rate[i] = (rhs[i] - u[i]) / (method.gamma * method.h)
-            - ((1.0 - method.gamma) / method.gamma) * rate[i];
-        u[i] = rhs[i];
+        u[i] += method.h * method.gamma.mul_add(rhs[i], (1.0 - method.gamma) * rate[i]);
+        rate[i] = rhs[i];
     }
 }
 
@@ -1174,11 +1156,13 @@ impl OperatorFirstOrderGeneralizedAlpha {
             rate0: &state.rate,
             forcing,
         };
+        // Unknown = gamma*h*rate_next. Its effective Jacobian and public
+        // preconditioner weights are unchanged, but no absolute-state
+        // subtraction enters the rate or the nonlinear stage.
         let guess: Vec<f64> = state
-            .u
+            .rate
             .iter()
-            .zip(&state.rate)
-            .map(|(u, rate)| self.h.mul_add(*rate, *u))
+            .map(|rate| (self.gamma * self.h) * *rate)
             .collect();
         let setup = NewtonKrylovState::new(&residual, guess, self.solve.newton);
         first_order_poll(cancelled)?;
@@ -1205,8 +1189,19 @@ impl OperatorFirstOrderGeneralizedAlpha {
         if !report.converged {
             return Err(TimeSolveError::NotConverged(report));
         }
-        let u_new = newton.x;
-        let rate_new = first_order_rate(self, &state.u, &state.rate, &u_new);
+        let mut u_new = state.u.clone();
+        let mut rate_new = vec![0.0; self.n];
+        for i in 0..self.n {
+            let (increment, rate) = first_order_increment(self, state.rate[i], newton.x[i]);
+            u_new[i] += increment;
+            rate_new[i] = rate;
+            if !(u_new[i].is_finite() && rate_new[i].is_finite()) {
+                return Err(TimeSolveError::ModelRefused {
+                    phase: "accepted endpoint",
+                    reason: format!("first-order state or rate component {i} is not finite"),
+                });
+            }
+        }
         let telemetry = ImplicitStepTelemetry {
             step: state.steps,
             t_start: state.t,
@@ -1245,18 +1240,16 @@ impl<P: FirstOrderProblem + ?Sized> NonlinearProblem for FirstOrderStepResidual<
         self.method.n
     }
 
-    fn residual(&self, u_new: &[f64], output: &mut [f64]) {
+    fn residual(&self, correction: &[f64], output: &mut [f64]) {
         let method = self.method;
-        let rate_new = first_order_rate(method, self.u0, self.rate0, u_new);
         let mut u_eval = vec![0.0; method.n];
         let mut rate_eval = vec![0.0; method.n];
         for i in 0..method.n {
-            u_eval[i] = method
-                .alpha_f
-                .mul_add(u_new[i], (1.0 - method.alpha_f) * self.u0[i]);
+            let (increment, rate) = first_order_increment(method, self.rate0[i], correction[i]);
+            u_eval[i] = method.alpha_f.mul_add(increment, self.u0[i]);
             rate_eval[i] = method
                 .alpha_m
-                .mul_add(rate_new[i], (1.0 - method.alpha_m) * self.rate0[i]);
+                .mul_add(rate, (1.0 - method.alpha_m) * self.rate0[i]);
         }
         let mut mass = vec![0.0; method.n];
         let mut internal = vec![0.0; method.n];
@@ -1268,7 +1261,7 @@ impl<P: FirstOrderProblem + ?Sized> NonlinearProblem for FirstOrderStepResidual<
         }
     }
 
-    fn jacobian_apply(&self, u_new: &[f64], direction: &[f64], output: &mut [f64]) {
+    fn jacobian_apply(&self, correction: &[f64], direction: &[f64], output: &mut [f64]) {
         let method = self.method;
         let mass_scale = method.alpha_m / (method.gamma * method.h);
         let mut mass = vec![0.0; method.n];
@@ -1276,9 +1269,8 @@ impl<P: FirstOrderProblem + ?Sized> NonlinearProblem for FirstOrderStepResidual<
         let mut u_eval = vec![0.0; method.n];
         let mut tangent_direction = vec![0.0; method.n];
         for i in 0..method.n {
-            u_eval[i] = method
-                .alpha_f
-                .mul_add(u_new[i], (1.0 - method.alpha_f) * self.u0[i]);
+            let (increment, _) = first_order_increment(method, self.rate0[i], correction[i]);
+            u_eval[i] = method.alpha_f.mul_add(increment, self.u0[i]);
             tangent_direction[i] = method.alpha_f * direction[i];
         }
         let mut tangent = vec![0.0; method.n];
@@ -1291,17 +1283,20 @@ impl<P: FirstOrderProblem + ?Sized> NonlinearProblem for FirstOrderStepResidual<
 
     fn preconditioner_apply(
         &self,
-        u_new: &[f64],
+        correction: &[f64],
         outer_iteration: usize,
         inner_iteration: usize,
         residual: &[f64],
         output: &mut [f64],
     ) {
         let method = self.method;
-        let u_eval: Vec<f64> = u_new
+        let u_eval: Vec<f64> = correction
             .iter()
-            .zip(self.u0)
-            .map(|(&u_new, &u0)| method.alpha_f.mul_add(u_new, (1.0 - method.alpha_f) * u0))
+            .enumerate()
+            .map(|(i, &correction)| {
+                let (increment, _) = first_order_increment(method, self.rate0[i], correction);
+                method.alpha_f.mul_add(increment, self.u0[i])
+            })
             .collect();
         let weights = FirstOrderOperatorWeights {
             mass: method.alpha_m / (method.gamma * method.h),
@@ -1326,18 +1321,17 @@ fn first_order_parameters(rho_inf: f64) -> (f64, f64, f64) {
     (alpha_m, alpha_f, gamma)
 }
 
-fn first_order_rate(
+/// State increment and endpoint rate from the rate-bearing correction.
+/// Recovering the rate never subtracts two rounded absolute states.
+fn first_order_increment(
     method: &OperatorFirstOrderGeneralizedAlpha,
-    u0: &[f64],
-    rate0: &[f64],
-    u_new: &[f64],
-) -> Vec<f64> {
-    (0..method.n)
-        .map(|i| {
-            (u_new[i] - u0[i]) / (method.gamma * method.h)
-                - ((1.0 - method.gamma) / method.gamma) * rate0[i]
-        })
-        .collect()
+    rate0: f64,
+    correction: f64,
+) -> (f64, f64) {
+    (
+        (method.h * (1.0 - method.gamma)).mul_add(rate0, correction),
+        correction / (method.gamma * method.h),
+    )
 }
 
 fn require_dimension(
