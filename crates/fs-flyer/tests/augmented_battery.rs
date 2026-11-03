@@ -441,12 +441,15 @@ fn determinism_and_golden() {
     // reproduces the preceding x86_64 pin and fails both coupling regressions.
     // Golden bump 2026-11-03: transverse circulatory lift corrects induced
     // drag and the trim spectrum. Only the measured x86_64 pin changes.
+    // Golden bump 2026-11-03: accepted-circulation continuation changes trim
+    // roundoff and its spectrum. Only the measured x86_64 pin changes;
+    // physical mode attribution and sensitivity checks remain unchanged.
     #[cfg(target_arch = "aarch64")]
     const EXPECTED_DIGEST: &str =
         "389e2a7c4f5a97e8c8507e011979571d10cb87d50c3f57d0b06cd38955d29321";
     #[cfg(target_arch = "x86_64")]
     const EXPECTED_DIGEST: &str =
-        "8534327a3f9d497e407d6db6805247d80653e50f21f61980a25052ea6d2c766d";
+        "39f7c260c70bb8051a8cdee7ef0f57729d34ba368f2fcb853f0cc4e271d5cd1b";
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     const EXPECTED_DIGEST: &str =
         "48828f654100a2407311265ac37a06525e09ed8543aaca5737ddf86ed1756dcc";

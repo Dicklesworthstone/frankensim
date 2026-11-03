@@ -1119,12 +1119,32 @@ rejected state never becomes the retry's origin or Aitken history. Subsequent
 corrections retain the relaxation floor, and a second genuine growth refuses.
 Both the rejected trial and retry count against the unchanged candidate cap;
 there are at most `cap + 2` native map evaluations including initialization.
-The same acceptance tolerance remains in force. An admitted off-trim native
-fixture checks rollback at cap 5 and exhaustion at the registered cap 12; the
-old retry falsely classified its recovery as a second growth. Correct disk
-wash also resolves the former member-3 tick-1443 force input within the unchanged
-candidate-B tolerance; that local recovery does not establish a complete
-flight envelope. No one-way fallback is introduced.
+The same acceptance tolerance remains in force. Correct disk wash resolves the
+former member-3 tick-1443 force input within the unchanged candidate-B tolerance;
+that local recovery does not establish a complete flight envelope. The native
+zero-cap fixture still refuses unresolved joint loads. No one-way fallback is
+introduced.
+
+Within each solve, wing evaluations now continue from the evaluated predecessor's
+accepted circulation. The first wing evaluation retains its original cold seed;
+subsequent accepted trials transfer the already-owned gamma buffer without a
+copy. Rejected candidates cannot replace that anchor, so the retry restores both
+the slip and its wing-branch history. This avoids cold-start basin changes being
+mistaken for the physical coupled map. Continuous section-regime transitions are
+allowed; no alternate-root search is added. The coupling spec identity is v3.
+This policy does not retain wing circulation across ticks or prove uniqueness.
+
+`propcoupling_continuation` freezes the former fixed-control tick-553 input.
+Cold starts there alternated between valid wing roots producing roughly 4.361
+and 3.209 m/s of disk induction. The continued branch closes after initialization
+at a joint residual `7.216e-5`, below the original candidate-B `0.005` gate.
+Independent trailing-field/section reconstruction gives a wing mismatch
+`5.608e-11`, below its unchanged `1e-10` gate; native BEMT and actuator momentum
+also close at the returned circulation and actual evaluated wash. The former
+off-trim branch-chatter fixture likewise resolves within both original caps.
+The actual fixed-control lifecycle now reaches native station nonconvergence
+at tick 577; its 120-evaluation refusal remains explicit. The assisted member-3
+flight still reaches physical ground contact at tick 1102 with three undulations.
 
 `coupled_prop_airframe_step_with_incident` carries disk-induced velocity `vi`,
 with `T = 2 rho A vi (V_disk + vi)`, and applies `wash_factor * vi` at each

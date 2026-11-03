@@ -81,16 +81,20 @@ fn run_assisted_lifecycle(mode: PilotMode) -> (SimLoop, u64, Phase, f64, f64) {
 fn fixed_control_assisted_lifecycle_preserves_its_numerical_refusal() {
     let (sim, tick, phase, x_end, max_forward_m) = run_assisted_lifecycle(PilotMode::FixedControls);
     // Same-tick release retains its free vertical/pitch impulse. The aircraft
-    // climbs and turns back before the native outer coupling refuses growing
-    // correction residuals. This is a numerical refusal, not proof of a physical
-    // flight-envelope boundary. Keep its exact code/tick and real travel gate.
+    // climbs and turns back. Within-solve wing continuation resolves the former
+    // tick-553 outer refusal; native BEMT still exhausts its unchanged station
+    // budget at 577. Keep that numerical receipt and the real travel gate;
+    // neither stopping point establishes a physical flight-envelope boundary.
     assert_eq!(phase, Phase::Ended(TerminalEvent::EnvelopeExceeded));
-    assert_eq!(tick, 553);
+    assert_eq!(tick, 577);
     let r = sim
         .envelope_refusal()
         .expect("numerical terminal keeps its receipt");
-    assert_eq!(r.code, "PropAirframeCouplingDidNotConverge");
-    assert!(r.message.starts_with("second residual growth at "));
+    assert_eq!(r.code, "station-did-not-converge");
+    assert_eq!(
+        r.message,
+        "station 0 (r/R 0.3): 120 station evaluations exhausted"
+    );
     jlog("envelope-receipt", &format!("\"code\":\"{}\"", r.code));
     assert!(
         max_forward_m > 5.0,
@@ -435,9 +439,11 @@ fn original_dec17_reference_reports_the_corrected_rail_shortfall() {
         if mode == PilotMode::FixedControls {
             // Accepted local flow and transverse circulatory lift change
             // the settled trim; the unassisted reference still cannot lift.
+            // Accepted-circulation continuation changes final solver ulps;
+            // the physical rail terminal and travel gates remain unchanged.
             assert_eq!(
                 sim.digest_hex(),
-                "3b2ff6b1ef707e96d1f77f8a37c0d0bbe14173489d73d1cc9e8e15e16142aed9"
+                "85b6bb1598655281c9fee0abb4cafd3601559e56b370faa63c9f4ee60357e1ad"
             );
         }
         jlog(
@@ -631,8 +637,11 @@ fn golden_digest() {
     // Golden bump 2026-11-03: the wing divergence guard now measures the
     // dimensional mismatch before normalization at zero circulation. Changed
     // convergence paths shift final ulps; the outer refusal remains tick 553.
+    // Golden bump 2026-11-03: accepted wing-circulation continuation resolves
+    // that outer refusal. The unchanged plant now reaches native station
+    // nonconvergence at tick 577, retained explicitly in the lifecycle test.
     assert_eq!(
-        digest, "15b2ec100caa3cb4d7332f67829665b9ea441ffc42ede68d70ea3f4e7588ba5e",
+        digest, "2d7c3c369ea9239a57d66699ae915b90006fa56aa891f77ff8b8ac9bd44409d7",
         "lifecycle golden moved — determinism regression or an \
          intentional physics change requiring the golden-bump protocol"
     );

@@ -218,12 +218,33 @@ fn compact_uniform_loading_returns_the_accepted_local_force_state() {
         &camber_closure,
         accepted,
         None,
-        None,
+        Some(&coupled.gamma),
     )
     .unwrap();
-    assert_eq!(physical.gamma, coupled.gamma);
-    assert_eq!(physical.alpha_eff_rad, coupled.strip_alpha_eff_rad);
-    assert_eq!(physical.total_lift_n, coupled.wing_lift_n);
+    // The same accepted branch must already close at the returned flow; a
+    // cold restart has a different convergence path and final rounding.
+    assert_eq!(physical.iterations, 1);
+    let mut reconstructed_lift = 0.0;
+    for (s, strip) in strips.iter().enumerate() {
+        let v = accepted[s];
+        let speed = (v[0] * v[0] + v[2] * v[2]).sqrt();
+        let cl = camber_closure(s, coupled.strip_alpha_eff_rad[s]).0;
+        let target = -0.5 * speed * strip.chord_m * cl;
+        let circulation: f64 = strip.panel_indices.iter().map(|&j| coupled.gamma[j]).sum();
+        assert!(
+            (circulation - target).abs() / (circulation.abs() + 1e-9)
+                < fs_wing::nonlinear::GAMMA_TOL
+        );
+        for &j in &strip.panel_indices {
+            let panel = panels[j];
+            let cross_z = v[0] * (panel.b[1] - panel.a[1]) - v[1] * (panel.b[0] - panel.a[0]);
+            reconstructed_lift -= RHO * coupled.gamma[j] * cross_z;
+        }
+    }
+    assert!(
+        (reconstructed_lift - coupled.wing_lift_n).abs()
+            <= 16.0 * f64::EPSILON * reconstructed_lift.abs()
+    );
     assert_ne!(coupled.spec_digest, CANDIDATE_B.digest());
     assert_eq!(coupled, solve());
 }
@@ -684,17 +705,15 @@ fn nonconvergence_is_typed_and_spec_identity_is_sensitive() {
 }
 
 #[test]
-fn grown_native_correction_rolls_back_and_keeps_the_existing_budget() {
-    // Full-strength disk wash at an admitted off-trim native state. Its
-    // separated-strip map still chatters between branches; a correct retry
-    // must not relabel that unresolved physical solve as converged.
+fn native_off_trim_continuation_resolves_the_previous_branch_chatter() {
+    // Full-strength disk wash at the same admitted off-trim native state.
+    // Cold wing restarts previously exhausted caps 5/12 at residuals
+    // .0864128/.0860119. Continuing the first selected wing root resolves the
+    // actual joint equations; no tolerance or correction budget is increased.
     let mut design = fs_flyer::aircraft::wright_openloop_v1();
-    for (cap, expected_residual) in [
-        (5, 0.086_412_799_529_274_37),
-        (12, 0.086_011_921_941_914_73),
-    ] {
+    for cap in [5, 12] {
         design.coupling = PropCouplingSolverSpec { cap, ..CANDIDATE_B };
-        let error = design
+        let result = design
             .force_buildup_warm(
                 10.0,
                 -0.54,
@@ -704,24 +723,14 @@ fn grown_native_correction_rolls_back_and_keeps_the_existing_budget() {
                 RHO,
                 Some([2.0, 2.0]),
             )
-            .unwrap_err();
-        assert_eq!(error.code, "PropAirframeCouplingDidNotConverge");
-        let prefix = format!("cap {cap} exhausted: joint residual ");
-        let residual: f64 = error
-            .message
-            .strip_prefix(&prefix)
-            .expect("a recovering correction must not consume a false growth strike")
-            .parse()
             .unwrap();
-        // Correction 4 grows to residual 0.20955. Retrying from its
-        // predecessor gives 0.08641 at cap 5; the old algorithm instead
-        // advanced from the rejected point, leaving 0.18505 and then
-        // reporting a false second growth before the cap was exhausted.
-        assert!((residual - expected_residual).abs() < 1.0e-8);
-        assert!(residual > CANDIDATE_B.tol, "unresolved loads stay refused");
-        assert!(error.ranked_repairs[0].contains("never switch"));
+        let residual = result.coupled.residual;
+        assert!(residual < CANDIDATE_B.tol);
+        assert_eq!(result.coupled.corrections, 0);
+        assert!(result.force_n.iter().all(|f| f.is_finite()));
+        assert!((result.thrust_n[0] - result.thrust_n[1]).abs() < 1e-8);
         jlog(
-            "rollback-budget",
+            "continued-off-trim",
             &format!(
                 "\"cap\":{cap},\"residual\":{residual},\"tol\":{}",
                 CANDIDATE_B.tol
@@ -798,8 +807,10 @@ fn coupling_golden_digest() {
     // Measured with the original 350 RPM geometry, signed annular solve and
     // unchanged reciprocal-coupling, warm-start and liveness gates. Explicit
     // aircraft/trim/lifecycle and the native 120-tick startup golden are unchanged.
+    // Golden bump 2026-11-03: retain accepted wing circulation between outer
+    // trials. The same converged equations now have a declared branch path.
     assert_eq!(
-        digest, "0a50ecadfd76a292baab31b0ba8cfde93014c5d0c3ef9395eec6fee22ac50762",
+        digest, "9b506d0c0e67d67cb20d9fb95502ccf85097b8be9cfffd01e91ece42af790b2d",
         "coupling golden moved — determinism regression or an intentional \
          scheme change requiring the golden-bump protocol"
     );

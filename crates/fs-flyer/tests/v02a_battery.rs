@@ -248,9 +248,12 @@ fn v02a_golden_digest() {
     // only that measured pin changes and all physical gates remain intact.
     // Golden bump 2026-11-03: transverse circulatory lift corrects induced
     // drag and the trim linearization. Only the measured x86_64 pin changes.
+    // Golden bump 2026-11-03: accepted-circulation continuation changes trim
+    // roundoff and its linearization. Only the measured x86_64 pin changes;
+    // doubling-time and derivative checks retain their physical bounds.
     #[cfg(target_arch = "x86_64")]
     const EXPECTED_DIGEST: &str =
-        "b0063c1dde9f0d0251ffa8fa5d56d4a6f29306ddc597218c154dec65f3971923";
+        "37ed9c761ca8746db8dfddbdbd973dad73b1061d7c2a9f6aab6922f90ee832d4";
     #[cfg(not(target_arch = "x86_64"))]
     const EXPECTED_DIGEST: &str =
         "61e99ada8f4afecc337b219955bc557bf22f9a5358f440091e4417f3ee1fae1c";

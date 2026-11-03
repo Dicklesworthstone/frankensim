@@ -15,6 +15,9 @@
 //!      that predecessor at omega_min; second growth or cap exhaustion is
 //!      the typed `PropAirframeCouplingDidNotConverge` — NEVER a silent
 //!      one-way switch (plan law).
+//! Each wing evaluation continues from the accepted predecessor's circulation.
+//! A rejected outer trial does not replace that anchor. The first evaluation
+//! still selects its cold branch; this is within-solve, not across-tick memory.
 //!
 //! The spec tuple enters ModelId via its content digest.
 
@@ -91,9 +94,10 @@ impl PropCouplingSolverSpec {
         ] {
             p.extend_from_slice(&v.to_bits().to_le_bytes());
         }
-        // v2 binds one disk-induced velocity convention in both loading
-        // modes; v1 legacy wash applied an additional, erroneous factor 1/2.
-        hash_domain("org.frankensim.fs-flyer.prop-coupling-spec.v2", &p).to_hex()
+        // v3 binds accepted-circulation continuation within the outer solve.
+        // v2 established the common disk-induced wash convention; v1 had an
+        // additional, erroneous factor 1/2 in the legacy loading path.
+        hash_domain("org.frankensim.fs-flyer.prop-coupling-spec.v3", &p).to_hex()
     }
 }
 
@@ -427,6 +431,10 @@ fn coupled_step_with_rotors<P: Copy>(
     let mut omega_prev = 1.0f64;
     let mut res_prev = f64::INFINITY;
     let mut unrelaxed_done = false;
+    // This anchor belongs to the evaluated predecessor of the next proposal.
+    // Keep it through rejected trials, just like x_prev and r_prev. Moving the
+    // already-owned gamma vector adds no copy of the accepted wing state.
+    let mut accepted_gamma: Option<Vec<f64>> = None;
     // One evaluation of the fixed-point map G(x): wing under slipstream x,
     // disk inflows, BEMT, momentum slipstream.
     type EvalOut<P> = (
@@ -436,7 +444,7 @@ fn coupled_step_with_rotors<P: Copy>(
         [P; 2],
         fs_wing::nonlinear::NonlinearReport,
     );
-    let mut evaluate = |x: &[f64; 2]| -> Result<EvalOut<P>, Refusal> {
+    let mut evaluate = |x: &[f64; 2], warm_gamma: Option<&[f64]>| -> Result<EvalOut<P>, Refusal> {
         let du: Vec<f64> = if spatial.is_none() {
             wash.iter()
                 .map(|&factors| strip_wash(factors, *x))
@@ -461,7 +469,7 @@ fn coupled_step_with_rotors<P: Copy>(
             // Compose actual spatial prop wash before the section projection.
             // The same accepted vectors are returned with gamma below.
             solve_nonlinear_with_section_frames(
-                op, panels, strips, freestream, rho, closure, frames, &velocity, None,
+                op, panels, strips, freestream, rho, closure, frames, &velocity, warm_gamma,
             )
         } else {
             match (incident, spatial) {
@@ -473,7 +481,7 @@ fn coupled_step_with_rotors<P: Copy>(
                         .map(|(&v, &factors)| axes.velocity(v, factors, *x))
                         .collect();
                     solve_nonlinear_with_incident(
-                        op, panels, strips, freestream, rho, closure, &velocity, None, None,
+                        op, panels, strips, freestream, rho, closure, &velocity, None, warm_gamma,
                     )
                 }
                 (Some(flow), None) => solve_nonlinear_with_incident(
@@ -485,7 +493,7 @@ fn coupled_step_with_rotors<P: Copy>(
                     closure,
                     flow.strip_velocity_mps,
                     Some(&du),
-                    None,
+                    warm_gamma,
                 ),
                 (None, _) => solve_nonlinear(
                     op,
@@ -495,7 +503,7 @@ fn coupled_step_with_rotors<P: Copy>(
                     rho,
                     closure,
                     Some(&du),
-                    None,
+                    warm_gamma,
                 ),
             }
         }
@@ -544,7 +552,7 @@ fn coupled_step_with_rotors<P: Copy>(
         ))
     };
     loop {
-        let (g, thrust, torque, power, wing) = evaluate(&x)?;
+        let (g, thrust, torque, power, wing) = evaluate(&x, accepted_gamma.as_deref())?;
         let r = [g[0] - x[0], g[1] - x[1]];
         // det doctrine: sqrt is IEEE-exact; hypot is platform libm and
         // broke native-vs-wasm digest identity (E6.2 measurement).
@@ -635,6 +643,7 @@ fn coupled_step_with_rotors<P: Copy>(
             // collapses the cold-start transient of this weakly-coupled
             // map before the clamped corrections mop up.
             unrelaxed_done = true;
+            accepted_gamma = Some(wing.gamma);
             x = g;
             r_prev = Some(r);
             omega_prev = 1.0;
@@ -698,6 +707,7 @@ fn coupled_step_with_rotors<P: Copy>(
                 }
             }
         };
+        accepted_gamma = Some(wing.gamma);
         x_prev = x;
         for k in 0..2 {
             x[k] += omega * r[k];

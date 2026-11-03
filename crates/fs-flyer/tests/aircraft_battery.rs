@@ -506,8 +506,10 @@ fn trim_golden_digest() {
     // digest was reproduced before this correction; physical bands are intact.
     // Golden bump 2026-11-03: induced drag now uses transverse circulatory
     // lift. The measured trim changes; its physical acceptance bands do not.
+    // Golden bump 2026-11-03: the coupling spec v3 binds accepted-circulation
+    // continuation, with changed final solver ulps and unchanged trim bands.
     assert_eq!(
-        digest, "5580f03a746015c656b9d115900fc7b54517f5337fe61159af4a1b85385c7bbc",
+        digest, "c4e842d466e5d9a77b5026acbbb94d684e18dd5479f601c5d5d3a5608799f4e0",
         "trim golden moved — determinism regression or an intentional \
          model change requiring the golden-bump protocol"
     );

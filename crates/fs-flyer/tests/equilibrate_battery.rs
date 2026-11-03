@@ -227,8 +227,10 @@ fn golden_digest() {
     // initialization, settling law and physical acceptance gates are unchanged.
     // Golden bump 2026-11-03: accepted local flow and transverse circulatory
     // lift change the trim carried into tick zero. Settling gates are unchanged.
+    // Golden bump 2026-11-03: accepted-circulation continuation changes trim
+    // roundoff carried into tick zero. The same 57-tick settling closure passes.
     assert_eq!(
-        t0.digest, "3a050895cff37ba98fc6d89fece7c6bb8fde4eb86c5a1dff871a2d6990ce83fe",
+        t0.digest, "67e366e0454484616d236ec865d537b8dc2b71472ea0f7ff15c06cbde920aaf5",
         "tick-0 golden moved — determinism regression or an intentional \
          closure change requiring the golden-bump protocol"
     );
