@@ -5920,3 +5920,32 @@ finite-body pushing, system/contact permutations, a moving three-body column
 with either a prescribed support or a plane, guided finite-body sticking,
 detachment, and artificial-couple refusals. The original sustained-plane
 regressions remain tests of the same shared engine and its native refusal paths.
+
+
+### Payload capture on closed geared mechanisms
+
+`inventory::bilateral::capture_payload` joins the original rigid inventory owner
+to the native mixed-constraint impulse event. The incoming payload's momentum
+mismatch is formed against the actual carried velocity in one common
+translating frame; the loaded full spatial inertia and all distance, spherical,
+and ideal joint rows respond together. Only the combined physical endpoint
+receives speed admission. Exactly carried payloads supply zero mismatch and do
+not activate projection of an admitted finite tangent defect. Empty material
+rows reproduce the original capture path exactly.
+
+The inventory keeps its attachment identity, independent actual world and
+projected momentum accounts, and nonnegative relative-motion capture quadratic.
+Constraint-only physical wrenches are projected by the native zero-rate RNEA,
+including any rounded base resultant. Actual common-frame constraint work is
+reported and capped separately; it is not subtracted from capture loss or
+inferred as heat. The mixed normalized reciprocal condition also observes the
+existing payload condition floor, independently of pivot admission.
+
+Five regression groups cover independently reduced geared-slider capture and
+subsequent loaded motion, physical final-speed admission, world/frame and large
+boost covariance, spherical closure with a full-tensor rigid-body reference,
+finite constraint work and zero-mismatch passivity, exact legacy delegation,
+and atomic condition/rank/energy/speed/cancellation refusals. Source/API and
+independent mathematical review were completed. Native compilation, execution
+of these regressions, and pinned formatting are **UNRUN** in this increment:
+executor replacement removed the Rust toolchain and cached native environment.
