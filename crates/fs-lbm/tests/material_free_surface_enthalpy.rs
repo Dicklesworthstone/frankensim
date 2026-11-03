@@ -43,6 +43,9 @@ mod mass_exchange;
 #[path = "material_free_surface_enthalpy/pressure.rs"]
 mod pressure;
 
+#[path = "material_free_surface_enthalpy/wall_motion.rs"]
+mod wall_motion;
+
 fn card(hot_viscosity: f64, hot_density: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [

@@ -9829,3 +9829,16 @@ a later rotor refusal or cancellation accepts none. Tests cover bitwise
 one-element equivalence, source-free counterrotation, three spatial axes with
 body force/applied couples, same-face disjoint patches, overlap and atomic
 late refusal.
+
+
+### Thermal distributed wall momentum on the original VOF owner
+
+`MaterialFreeSurfaceEnthalpy3::step_with_planar_wall_velocity_field_si` and its explicit molecular-heating variant advance the original native free-surface candidate with the selected face velocity field, current cellwise material relaxation and retained Guo force frame. Native collision/streaming/conversion records the same bounded mass routes used by the existing extensive-enthalpy transport; no reconstructed companion flux or second fluid/thermal engine is introduced.
+
+The original thermal source, optional rheology/buoyancy, transport, wetting and enthalpy gates precede publication. The actual final native candidate is then readmitted for flooded-wall topology, population/Mach and ledger mass, followed by material scenario speed and SI conversion. Populations, enthalpy, material/rheology state, wetting and clock accept together only after cancellation polling.
+
+Global and local reciprocal impulse, angular impulse, face couple, response, mechanical work and pressure-reference reports are retained. Wall work is not deposited as caloric heat. The optional heating method reuses the existing held initial-state molecular stress-power source; its existing first-order splitting and thermal-domain limits remain.
+
+Scope is a fixed, completely flooded planar wall with tangential face velocities. Normal cover/vacate, finite moving edges, moving contact lines, prescribed gas-pressure actuation and a solved conduction boundary are not supplied by these new calls. Existing electrical and thermal surface-boundary ownership requirements remain operative.
+
+Five synthetic regression definitions cover zero-field parity with thermal and buoyant flow, actual mass-route enthalpy transport and work separation, one-time molecular source reuse, native-stress rheological closure, and transactional source refusal/cancellation/retry. Formatting/parsing and scoped whitespace checks passed. Native Rust regressions, convergence and performance were not executed in this resource-constrained session; these definitions are not a runtime validation or performance claim.

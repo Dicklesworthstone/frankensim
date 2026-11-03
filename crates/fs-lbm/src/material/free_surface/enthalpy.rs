@@ -6,7 +6,8 @@
 //! the native face and conversion/carry routes. The existing sparse Krylov
 //! owner solves that transport; no velocity-derived second mass flux exists.
 //!
-//! This is the single-liquid, constant-density, stationary-wall rung. A sourced
+//! This is the single-liquid, constant-density rung. Optional `motion` applies
+//! nonuniform tangential wall forcing on the same thermal trajectory. A sourced
 //! validity-wide constant surface tension retains the native capillary mechanics.
 //! Capillary work and surface-energy accuracy remain the native model's scope;
 //! no surface heat or total-energy closure is invented here. Optional
@@ -64,6 +65,10 @@ use buoyancy::{BoussinesqLiquid, resolve_liquid};
 
 /// Molecular stress power deposited into the moving liquid's finite enthalpy.
 pub mod viscous;
+
+/// Tangential wall forcing on the same evolving material/enthalpy trajectory.
+pub mod motion;
+pub use motion::{FreeSurfacePlanarWallEnthalpyReport, FreeSurfacePlanarWallViscousReport};
 
 /// Original T/shear source tables on actual native collision and molecular heat.
 pub mod rheology;
@@ -821,12 +826,36 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         body_heat: f64,
         absolute_heat: f64,
         additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
-        mut surface: Option<&mut SurfaceTensionResolver<'_>>,
+        surface: Option<&mut SurfaceTensionResolver<'_>>,
         wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
         gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
+        self.advance_prepared_enthalpy_with_wall(
+            heated, external, viscous, body_heat, absolute_heat, additional_forces,
+            surface, wetting_outer_gas, gas_pressure, None, gate,
+        ).map(|(report, _)| report)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_prepared_enthalpy_with_wall(
+        &mut self,
+        heated: BTreeMap<MassLocation3, f64>,
+        external: f64,
+        viscous: f64,
+        body_heat: f64,
+        absolute_heat: f64,
+        additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
+        mut surface: Option<&mut SurfaceTensionResolver<'_>>,
+        wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
+        wall: Option<motion::ThermalWallBoundary<'_>>,
+        gate: &CancelGate,
+    ) -> Result<(FreeSurfaceEnthalpyReport, Option<super::MaterialPlanarWallFieldReport3>), Error> {
         poll(gate)?;
+        if wall.is_some() && gas_pressure.is_some() {
+            return Err(Error::Invalid("thermal wall field does not own prescribed gas pressure"));
+        }
         let next_step = self.accepted_steps.checked_add(1)
             .filter(|count| *count <= (1_u64 << 53))
             .ok_or(Error::Invalid("native liquid clock exhausted"))?;
@@ -880,13 +909,22 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let prepared_wetting = self.prepare_wetting(
             &mut lattice, &resolved.states, wetting_outer_gas, gate,
         )?;
-        let mut trace = lattice.step_with_mass_transport_and_pressure(
-            gate,
-            &resolved.tau,
-            resolved.forces,
-            self.controls.max_mass_routes,
-            gas_pressure,
-        )?;
+        let (mut trace, wall_exchange) = match wall {
+            Some(boundary) => {
+                let (trace, exchange) = lattice.step_with_planar_wall_field_transport(
+                    boundary.native, boundary.controls, &resolved.tau,
+                    resolved.forces, self.controls.max_mass_routes, gate,
+                )?;
+                (trace, Some(exchange))
+            }
+            None => (
+                lattice.step_with_mass_transport_and_pressure(
+                    gate, &resolved.tau, resolved.forces,
+                    self.controls.max_mass_routes, gas_pressure,
+                )?,
+                None,
+            ),
+        };
         if self.thermocapillary.is_some() {
             // Resolve native conversion hysteresis through the SAME mass
             // routes before reconstructing geometry or advecting enthalpy.
@@ -973,6 +1011,20 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             #[cfg(feature = "enthalpy-coupling")]
             magnetic_motion,
         };
+        // Endpoint thermal/buoyancy refresh and wetting can refuse after native
+        // reflection. Recheck the actual final candidate, then convert every SI
+        // face receipt before accepting either source history or populations.
+        let wall_report = match (wall, wall_exchange) {
+            (Some(boundary), Some(mut exchange)) => {
+                lattice.refresh_planar_wall_field_endpoint(
+                    boundary.native, boundary.controls, &mut exchange, gate,
+                )?;
+                Some(self.flow.planar_wall_field_report_si(
+                    exchange, boundary.moment_origin_m, gate,
+                )?)
+            }
+            _ => None,
+        };
         poll(gate)?;
         self.flow.lattice = lattice;
         self.h = h;
@@ -981,7 +1033,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         self.wetting = accepted_wetting;
         self.surface_temperature_forces |= uses_surface_temperature;
         self.accepted_steps = next_step;
-        Ok(report)
+        Ok((report, wall_report))
     }
 
     fn location_at(&self, coordinates: [usize; 3]) -> Option<MassLocation3> {

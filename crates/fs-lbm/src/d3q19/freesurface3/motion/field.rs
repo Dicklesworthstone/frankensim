@@ -1,5 +1,6 @@
 //! Nonuniform face-quadrature motion through the original wall reflection.
 
+use super::super::transport::MassTransport3;
 use super::*;
 use fs_math::dd::Dd;
 
@@ -458,9 +459,60 @@ impl FreeSurface3 {
         controls: PlanarWallFieldControls3,
         gate: &CancelGate,
     ) -> Result<(Self, PlanarWallFieldReport3), FreeSurfaceError3> {
+        let (mut exchange, mass_before, before_speed) =
+            self.prepare_planar_wall_velocity_field(motion, controls, gate)?;
+        let mut candidate = self.clone();
+        candidate.step_inner_with_wall(gate, None, None, None, Some(&mut exchange))?;
+        let report = candidate.finish_planar_wall_velocity_field(
+            motion,
+            controls,
+            exchange,
+            mass_before,
+            before_speed,
+            gate,
+        )?;
+        Ok((candidate, report))
+    }
+
+    /// Thermal owner supplies the one private candidate and records the exact
+    /// same collision/streaming/conversion routes as its stationary-wall path.
+    /// No second flow solve or velocity-reconstructed companion flux occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_planar_wall_field_transport(
+        &mut self,
+        motion: PlanarWallVelocityField3<'_>,
+        controls: PlanarWallFieldControls3,
+        tau: &BTreeMap<(u64, usize), f64>,
+        forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
+        maximum_routes: usize,
+        gate: &CancelGate,
+    ) -> Result<(MassTransport3, PlanarWallFieldReport3), FreeSurfaceError3> {
         check_cancel(gate)?;
+        if let Some(forces) = forces {
+            self.rebind_force_field(forces, gate)?;
+        }
+        let (mut exchange, mass_before, before_speed) =
+            self.prepare_planar_wall_velocity_field(motion, controls, gate)?;
+        let mut trace = MassTransport3::new(self.mass_snapshot(), maximum_routes);
+        self.step_inner_with_wall(gate, Some(&mut trace), Some(tau), None, Some(&mut exchange))?;
+        trace.after = self.mass_snapshot();
+        let report = self.finish_planar_wall_velocity_field(
+            motion,
+            controls,
+            exchange,
+            mass_before,
+            before_speed,
+            gate,
+        )?;
+        Ok((trace, report))
+    }
+
+    fn admit_planar_wall_velocity_field_state(
+        &self,
+        motion: PlanarWallVelocityField3<'_>,
+        gate: &CancelGate,
+    ) -> Result<f64, FreeSurfaceError3> {
         let cells = self.domain_cells();
-        let field = WallFieldExchange3::new(motion, cells, controls, gate)?;
         let axis = motion.wall.axis();
         let a = (axis + 1) % 3;
         let b = (axis + 2) % 3;
@@ -477,7 +529,20 @@ impl FreeSurface3 {
             }
             Ok(())
         };
-        let (_, before_speed) = self.admit_planar_wall_state_with(motion.wall, gate, admit)?;
+        self.admit_planar_wall_state_with(motion.wall, gate, admit)
+            .map(|(_, maximum_speed)| maximum_speed)
+    }
+
+    fn prepare_planar_wall_velocity_field(
+        &self,
+        motion: PlanarWallVelocityField3<'_>,
+        controls: PlanarWallFieldControls3,
+        gate: &CancelGate,
+    ) -> Result<(PlanarWallStep3, f64, f64), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let cells = self.domain_cells();
+        let field = WallFieldExchange3::new(motion, cells, controls, gate)?;
+        let before_speed = self.admit_planar_wall_velocity_field_state(motion, gate)?;
         let mass_before = self.ledger_mass();
         if !mass_before.is_finite() || mass_before <= 0.0 {
             return Err(refused(
@@ -485,18 +550,49 @@ impl FreeSurface3 {
                 "wall field requires finite positive liquid mass",
             ));
         }
-        let mut exchange = PlanarWallStep3 {
+        let exchange = PlanarWallStep3 {
             wall: motion.wall,
-            extent: cells[axis] as i64,
+            extent: cells[motion.wall.axis()] as i64,
             velocity: [0.0; 3],
             impulse: [0.0; 3],
             rigid: None,
             field: Some(field),
         };
-        let mut candidate = self.clone();
-        candidate.step_inner_with_wall(gate, None, None, None, Some(&mut exchange))?;
-        let (_, after_speed) = candidate.admit_planar_wall_state_with(motion.wall, gate, admit)?;
-        let mass_after = candidate.ledger_mass();
+        Ok((exchange, mass_before, before_speed))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_planar_wall_velocity_field(
+        &self,
+        motion: PlanarWallVelocityField3<'_>,
+        controls: PlanarWallFieldControls3,
+        exchange: PlanarWallStep3,
+        mass_before: f64,
+        before_speed: f64,
+        gate: &CancelGate,
+    ) -> Result<PlanarWallFieldReport3, FreeSurfaceError3> {
+        let mut report = exchange
+            .field
+            .expect("field retained by original streaming")
+            .finish(controls, gate)?;
+        report.mass_before = mass_before;
+        report.maximum_speed = before_speed;
+        self.refresh_planar_wall_field_endpoint(motion, controls, &mut report, gate)?;
+        Ok(report)
+    }
+
+    /// A coupled owner may refresh forces/geometry after the native tick. Its
+    /// final candidate must still satisfy the same wall and ledger admission.
+    pub(crate) fn refresh_planar_wall_field_endpoint(
+        &self,
+        motion: PlanarWallVelocityField3<'_>,
+        controls: PlanarWallFieldControls3,
+        report: &mut PlanarWallFieldReport3,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        let after_speed = self.admit_planar_wall_velocity_field_state(motion, gate)?;
+        let mass_after = self.ledger_mass();
+        let mass_before = report.mass_before;
         let relative_mass_defect = ((mass_after - mass_before) / mass_before).abs();
         if !mass_after.is_finite()
             || !relative_mass_defect.is_finite()
@@ -507,16 +603,11 @@ impl FreeSurface3 {
                 "wall field exceeds its native liquid mass-conservation tolerance",
             ));
         }
-        let mut report = exchange
-            .field
-            .expect("field retained by original streaming")
-            .finish(controls, gate)?;
-        report.mass_before = mass_before;
         report.mass_after = mass_after;
         report.relative_mass_defect = relative_mass_defect;
-        report.maximum_speed = before_speed.max(after_speed);
+        report.maximum_speed = report.maximum_speed.max(after_speed);
         check_cancel(gate)?;
-        Ok((candidate, report))
+        Ok(())
     }
 
     /// Atomically publish the same fully admitted spatial wall-field candidate.

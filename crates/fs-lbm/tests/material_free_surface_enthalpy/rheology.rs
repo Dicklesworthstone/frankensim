@@ -12,6 +12,141 @@ mod pressure;
 
 const CELL: [usize; 3] = [3; 3];
 
+#[test]
+fn wall_driven_endpoint_uses_actual_native_stress_for_thermal_rheology() {
+    use fs_lbm::d3q19::freesurface3::{PlanarWall3, PlanarWallFieldControls3};
+    use fs_lbm::material::free_surface::MaterialPlanarWallVelocityField3;
+    let card = rheological_card(0.0002, 0.003, 0.0, 1000.0);
+    let gravity = [0.03, -0.02, 0.01];
+    with_liquid(
+        &card,
+        true,
+        true,
+        gravity,
+        solve(),
+        |_| 200000.0,
+        |liquid, gate| {
+            let wall_cell = [3, 3, 0];
+            let controls = PlanarWallFieldControls3 {
+                maximum_domain_cells: 512,
+                maximum_wall_faces: 64,
+                maximum_relative_mass_defect: 1e-11,
+                maximum_relative_face_mass_defect: 1e-12,
+            };
+            for _ in 0..3 {
+                let report = liquid
+                    .step_with_planar_wall_velocity_field_and_viscous_heating_si(
+                        MaterialPlanarWallVelocityField3 {
+                            wall: PlanarWall3::ZMin,
+                            moment_origin_m: [0.004, 0.004, 0.0],
+                            tangential_velocity_m_s: &[[0.03, 0.0]; 64],
+                        },
+                        controls,
+                        &[],
+                        gate,
+                    )
+                    .unwrap();
+                let material = liquid.material_at(wall_cell).unwrap();
+                let sample = liquid.rheology_at(wall_cell).unwrap();
+                let rate = independent_rate(
+                    stress_numerator(liquid, wall_cell, gravity),
+                    coordinate(material, "T"),
+                    0.0002,
+                    0.003,
+                );
+                near(sample.shear_rate_per_s, rate, 2e-10);
+                near(coordinate(material, "rate"), rate, 2e-10);
+                near(
+                    sample.collision_tau,
+                    0.5 + 3.0 * material.dynamic_viscosity_pa_s(),
+                    2e-12,
+                );
+                assert!(report.flow.wall.exchange.fluid_work_j > 0.0);
+                assert!(
+                    (report.flow.flow.enthalpy_after_j
+                        - report.flow.flow.enthalpy_before_j
+                        - report.flow.flow.viscous_heat_j)
+                        .abs()
+                        < 1e-8
+                );
+            }
+        },
+    );
+}
+
+#[test]
+fn wall_generated_source_refusal_preserves_history_and_allows_safe_retry() {
+    use fs_lbm::d3q19::freesurface3::{PlanarWall3, PlanarWallFieldControls3};
+    use fs_lbm::material::free_surface::MaterialPlanarWallVelocityField3;
+    let card = rheological_card(0.0, 0.00001, 0.0, 30.0);
+    with_liquid(
+        &card,
+        true,
+        true,
+        [0.0; 3],
+        solve(),
+        |_| 200000.0,
+        |liquid, gate| {
+            let mut expected = liquid.clone();
+            let bits = liquid.flow().lattice().grid().state_bits();
+            let h = liquid.total_enthalpy_j().unwrap();
+            let material = liquid.material_at(CELL).unwrap().clone();
+            let rheology = *liquid.rheology_at(CELL).unwrap();
+            let controls = PlanarWallFieldControls3 {
+                maximum_domain_cells: 512,
+                maximum_wall_faces: 64,
+                maximum_relative_mass_defect: 1e-11,
+                maximum_relative_face_mass_defect: 1e-12,
+            };
+            let velocities = [[0.09, 0.0]; 64];
+            let boundary = MaterialPlanarWallVelocityField3 {
+                wall: PlanarWall3::ZMin,
+                moment_origin_m: [0.004, 0.004, 0.0],
+                tangential_velocity_m_s: &velocities,
+            };
+            // The accepted input has an admitted rate. Reflection creates the
+            // source-exceeding shear only on the still-private native endpoint.
+            assert!(matches!(
+                liquid.step_with_planar_wall_velocity_field_si(boundary, controls, &[], gate,),
+                Err(FreeSurfaceEnthalpyError::Material(_))
+            ));
+            assert_eq!(liquid.flow().lattice().grid().state_bits(), bits);
+            assert_eq!(liquid.total_enthalpy_j().unwrap(), h);
+            assert_eq!(liquid.material_at(CELL), Some(&material));
+            assert_eq!(liquid.rheology_at(CELL), Some(&rheology));
+            assert_eq!(liquid.accepted_steps(), 0);
+            assert_eq!(liquid.physical_time_s(), 0.0);
+            let cancelled = CancelGate::new_clock_free();
+            cancelled.request();
+            assert!(
+                liquid
+                    .step_with_planar_wall_velocity_field_si(boundary, controls, &[], &cancelled)
+                    .is_err()
+            );
+            assert_eq!(liquid.flow().lattice().grid().state_bits(), bits);
+            let resting = MaterialPlanarWallVelocityField3 {
+                tangential_velocity_m_s: &[[0.0; 2]; 64],
+                ..boundary
+            };
+            let retry = liquid
+                .step_with_planar_wall_velocity_field_si(resting, controls, &[], gate)
+                .unwrap();
+            let direct = expected
+                .step_with_planar_wall_velocity_field_si(resting, controls, &[], gate)
+                .unwrap();
+            assert_eq!(retry, direct);
+            assert_eq!(
+                liquid.flow().lattice().grid().state_bits(),
+                expected.flow().lattice().grid().state_bits()
+            );
+            assert_eq!(
+                liquid.total_enthalpy_j().unwrap(),
+                expected.total_enthalpy_j().unwrap()
+            );
+        },
+    );
+}
+
 fn solve() -> RheologySolve {
     RheologySolve {
         maximum_iterations: 128,

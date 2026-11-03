@@ -29,6 +29,14 @@ pub struct FreeSurfaceViscousReport {
     pub applied: Vec<FreeSurfaceViscousCell>,
 }
 
+pub(super) struct PreparedViscousHeat {
+    pub heated: BTreeMap<MassLocation3, f64>,
+    pub external: f64,
+    pub absolute_heat: f64,
+    pub viscous: f64,
+    pub applied: Vec<FreeSurfaceViscousCell>,
+}
+
 /// Conductivity, molecular heating and momentum on one common interval.
 #[cfg(feature = "enthalpy-coupling")]
 #[derive(Clone, Debug)]
@@ -120,6 +128,29 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         heat: &[FreeSurfaceCellHeat],
         gate: &CancelGate,
     ) -> Result<FreeSurfaceViscousReport, Error> {
+        let prepared = self.prepare_viscous_heat(heat, gate)?;
+        let flow = self.advance_prepared_enthalpy(
+            prepared.heated,
+            prepared.external,
+            prepared.viscous,
+            0.0,
+            prepared.absolute_heat,
+            None,
+            gate,
+        )?;
+        Ok(FreeSurfaceViscousReport {
+            flow,
+            applied: prepared.applied,
+        })
+    }
+
+    // The same explicit molecular source preparation feeds stationary or
+    // moving-wall transport. Neither path thermalizes boundary work directly.
+    pub(super) fn prepare_viscous_heat(
+        &self,
+        heat: &[FreeSurfaceCellHeat],
+        gate: &CancelGate,
+    ) -> Result<PreparedViscousHeat, Error> {
         let applied = self.viscous_sources(gate)?;
         let (mut heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
         let masses = self.flow.lattice.mass_snapshot();
@@ -137,16 +168,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         if !viscous.is_finite() {
             return Err(Error::Invalid("liquid molecular heat sum overflows"));
         }
-        let flow = self.advance_prepared_enthalpy(
+        Ok(PreparedViscousHeat {
             heated,
             external,
             viscous,
-            0.0,
-            absolute_heat + viscous,
-            None,
-            gate,
-        )?;
-        Ok(FreeSurfaceViscousReport { flow, applied })
+            absolute_heat: absolute_heat + viscous,
+            applied,
+        })
     }
 
     /// Conductivity and authored heat share thermal substeps with the held

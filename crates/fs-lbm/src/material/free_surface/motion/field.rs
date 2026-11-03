@@ -1,7 +1,9 @@
 //! Sourced physical units for the original spatial wall-face operator.
 
 use super::*;
-use crate::d3q19::freesurface3::{PlanarWallFieldControls3, PlanarWallVelocityField3};
+use crate::d3q19::freesurface3::{
+    PlanarWallFieldControls3, PlanarWallFieldReport3, PlanarWallVelocityField3,
+};
 
 /// Prescribed tangential face velocities along one fixed flooded physical plane.
 ///
@@ -23,7 +25,7 @@ pub struct MaterialPlanarWallVelocityField3<'a> {
 /// Raw impulses close native population momentum. The perturbation and optional
 /// absolute loads are physical load interpretations and do not replace that
 /// raw account. Moments use the containing report's common origin. Boundary
-/// work is isothermal mechanical exchange, with no inferred thermal deposit.
+/// work is mechanical exchange, with no inferred thermal deposit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialWallWrenchExchange3 {
     pub fluid_impulse_kg_m_s: [f64; 3],
@@ -185,6 +187,34 @@ impl MaterialFreeSurface3<'_> {
         controls: PlanarWallFieldControls3,
         gate: &CancelGate,
     ) -> Result<(Self, MaterialPlanarWallFieldReport3), MaterialLbmError> {
+        let (velocities, origin) =
+            self.prepare_planar_wall_velocity_field_si(motion, controls, gate)?;
+        let (candidate, raw) = self.lattice.planar_wall_velocity_field_candidate(
+            PlanarWallVelocityField3 {
+                wall: motion.wall,
+                moment_origin: origin,
+                tangential_velocity: &velocities,
+            },
+            controls,
+            gate,
+        )?;
+        let report = self.planar_wall_field_report_si(raw, motion.moment_origin_m, gate)?;
+        Ok((
+            Self {
+                lattice: candidate,
+                scaling: self.scaling,
+            },
+            report,
+        ))
+    }
+
+    // Thermal and isothermal owners admit the same field before a native clone.
+    pub(crate) fn prepare_planar_wall_velocity_field_si(
+        &self,
+        motion: MaterialPlanarWallVelocityField3<'_>,
+        controls: PlanarWallFieldControls3,
+        gate: &CancelGate,
+    ) -> Result<(Vec<[f64; 2]>, [f64; 3]), MaterialLbmError> {
         if gate.is_requested() {
             return Err(FreeSurfaceError3::Cancelled.into());
         }
@@ -211,6 +241,22 @@ impl MaterialFreeSurface3<'_> {
             }
             velocities.push(native);
         }
+        let origin = vector_si(
+            motion.moment_origin_m,
+            scale.cell_size_m.recip(),
+            "wall field lattice moment origin is unrepresentable",
+        )?;
+        Ok((velocities, origin))
+    }
+
+    // Convert the actual native receipt before either enclosing owner accepts.
+    pub(crate) fn planar_wall_field_report_si(
+        &self,
+        raw: PlanarWallFieldReport3,
+        moment_origin_m: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<MaterialPlanarWallFieldReport3, MaterialLbmError> {
+        let scale = &self.scaling;
         let [impulse, force, work] = self.planar_wall_units()?;
         let angular_impulse = positive(
             impulse * scale.cell_size_m,
@@ -248,20 +294,6 @@ impl MaterialFreeSurface3<'_> {
                 })
                 .transpose()?,
         };
-        let origin = vector_si(
-            motion.moment_origin_m,
-            scale.cell_size_m.recip(),
-            "wall field lattice moment origin is unrepresentable",
-        )?;
-        let (candidate, raw) = self.lattice.planar_wall_velocity_field_candidate(
-            PlanarWallVelocityField3 {
-                wall: motion.wall,
-                moment_origin: origin,
-                tangential_velocity: &velocities,
-            },
-            controls,
-            gate,
-        )?;
         if raw.maximum_speed > scale.flow.u_lattice {
             return Err(MaterialLbmError::Invalid(
                 "wall field-driven liquid exceeds the original material scenario speed",
@@ -327,8 +359,8 @@ impl MaterialFreeSurface3<'_> {
             });
         }
         let report = MaterialPlanarWallFieldReport3 {
-            wall: motion.wall,
-            moment_origin_m: motion.moment_origin_m,
+            wall: raw.wall,
+            moment_origin_m,
             faces,
             exchange,
             wetted_area_m2: positive(
@@ -357,13 +389,7 @@ impl MaterialFreeSurface3<'_> {
         if gate.is_requested() {
             return Err(FreeSurfaceError3::Cancelled.into());
         }
-        Ok((
-            Self {
-                lattice: candidate,
-                scaling: self.scaling,
-            },
-            report,
-        ))
+        Ok(report)
     }
 
     /// Publish the same admitted native populations and physical field receipt.
