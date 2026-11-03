@@ -172,6 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for condition in [PiezoelectricWaveCondition::FixedField,PiezoelectricWaveCondition::ChargeFree] {
             let waves=sources[0].directional_waves([0.0,0.0,1.0],condition,1e-3)?;
             println!("Frozen local {condition:?} phase speeds [m/s]: {:?}",waves.mechanical.modes.map(|m|m.phase_speed_m_s));
+            println!("Frozen local {condition:?} energy velocities [m/s]: {:?}",waves.mechanical.modes.map(|m|m.energy_velocity_m_s));
         }
         Ok(())
     })

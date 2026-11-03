@@ -137,6 +137,14 @@ fn rotated_piezoacoustic_modes_preserve_speeds_and_satisfy_gauss_law() {
             before.mechanical.modes[i].phase_speed_m_s,
             after.mechanical.modes[i].phase_speed_m_s,
         );
+        let expected_velocity = apply(q, before.mechanical.modes[i].energy_velocity_m_s);
+        for (actual, expected) in after.mechanical.modes[i]
+            .energy_velocity_m_s
+            .into_iter()
+            .zip(expected_velocity)
+        {
+            near(actual, expected);
+        }
         let a = before.mechanical.modes[i].polarization;
         let n = before.mechanical.direction;
         let basis = mandel_basis();
@@ -174,4 +182,84 @@ fn rotated_piezoacoustic_modes_preserve_speeds_and_satisfy_gauss_law() {
             .directional_waves(n, PiezoelectricWaveCondition::FixedField, 1.0)
             .is_err()
     );
+}
+
+#[test]
+fn g0_charge_free_energy_velocity_includes_directional_electric_transport() {
+    let material = material();
+    let n: [f64; 3] = [0.6, 0.8, 0.0];
+    let waves = material
+        .directional_waves(n, PiezoelectricWaveCondition::ChargeFree, 0.01)
+        .unwrap();
+    let mode = waves.mechanical.modes[0];
+    near(mode.polarization[2].abs(), 1.0);
+    // For this decoupled z-polarized mode:
+    // rho*omega(k)^2 = G_zx*kx^2 + G_zy*ky^2
+    //                 + e_x,zx^2*kx^4/(2*(eps_x*kx^2+eps_y*ky^2)).
+    // Differentiate this scalar dispersion exactly, not a frozen C_eff(n).
+    let (gx, gy, e2, ex, ey, rho) = (25e9, 35e9, 64.0, 2e-8, 1.5e-8, 7500.0);
+    let eps = ex * n[0].powi(2) + ey * n[1].powi(2);
+    let modulus = gx * n[0].powi(2) + gy * n[1].powi(2) + 0.5 * e2 * n[0].powi(4) / eps;
+    let speed = (modulus / rho).sqrt();
+    near(mode.phase_speed_m_s, speed);
+    let expected = [
+        (gx * n[0] + e2 * n[0].powi(3) / eps - 0.5 * e2 * n[0].powi(5) * ex / eps.powi(2))
+            / (rho * speed),
+        (gy * n[1] - 0.5 * e2 * n[0].powi(4) * ey * n[1] / eps.powi(2)) / (rho * speed),
+        0.0,
+    ];
+    for (actual, expected) in mode.energy_velocity_m_s.into_iter().zip(expected) {
+        near(actual, expected);
+    }
+    let frozen_tensor_y_velocity = gy * n[1] / (rho * speed);
+    assert!((mode.energy_velocity_m_s[1] - frozen_tensor_y_velocity).abs() > 10.0);
+    near(
+        (0..3).map(|i| n[i] * mode.energy_velocity_m_s[i]).sum(),
+        speed,
+    );
+}
+
+#[test]
+fn g3_coupled_energy_velocities_match_the_full_wave_vector_dispersion_gradient() {
+    let material = material();
+    let k = [0.3, -0.4, 0.5];
+    for condition in [
+        PiezoelectricWaveCondition::FixedField,
+        PiezoelectricWaveCondition::ChargeFree,
+    ] {
+        let waves = material.directional_waves(k, condition, 0.01).unwrap();
+        for mode in 0..3 {
+            let speed = waves.mechanical.modes[mode].phase_speed_m_s;
+            for axis in 0..3 {
+                let h = 1e-5;
+                let mut plus = k;
+                let mut minus = k;
+                plus[axis] += h;
+                minus[axis] -= h;
+                let frequency = |k: [f64; 3]| {
+                    k.iter().map(|v| v * v).sum::<f64>().sqrt()
+                        * material
+                            .directional_waves(k, condition, 0.01)
+                            .unwrap()
+                            .mechanical
+                            .modes[mode]
+                            .phase_speed_m_s
+                };
+                let derivative = (frequency(plus) - frequency(minus)) / (2.0 * h);
+                assert!(
+                    (waves.mechanical.modes[mode].energy_velocity_m_s[axis] - derivative).abs()
+                        < 2e-8 * speed
+                );
+            }
+            near(
+                (0..3)
+                    .map(|i| {
+                        waves.mechanical.direction[i]
+                            * waves.mechanical.modes[mode].energy_velocity_m_s[i]
+                    })
+                    .sum(),
+                speed,
+            );
+        }
+    }
 }

@@ -8,9 +8,13 @@
 //! See COMSOL's *Piezoelectricity*, Wave Propagation in Piezoelectric Media:
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.043.html>.
 //!
-//! These are infinitesimal local phase speeds of the frozen lossless model,
+//! Phase speeds and energy velocities belong to the frozen lossless model.
+//! For charge-free waves the energy velocity differentiates the electrical
+//! constraint as the wave normal changes; freezing C_eff(n) misses electric
+//! energy transport transverse to the wave normal.
+//! These are infinitesimal local wave properties,
 //! not a finite-device resonance solve, a frequency-dependent material fit,
-//! group velocity, acoustic radiation or a measured ultrasonic calibration.
+//! acoustic radiation or a measured ultrasonic calibration.
 
 use super::{Result, TensorPiezoelectric, invalid};
 use crate::elastic::acoustic::{DirectionalElasticWaves, ElasticAcousticState};
@@ -30,7 +34,9 @@ pub enum PiezoelectricWaveCondition {
 pub struct DirectionalPiezoelectricWaves {
     /// Explicit electrical condition; device electrode constraints are separate.
     pub condition: PiezoelectricWaveCondition,
-    /// Three native Christoffel modes and source identity, in ascending speed order.
+    /// Three native Christoffel modes and source identity, in ascending speed
+    /// order. Energy velocity includes the reciprocal electric contribution
+    /// for charge-free waves, not only mechanical stress power.
     pub mechanical: DirectionalElasticWaves,
     /// Electric field per unit displacement-gradient amplitude [V/m], one
     /// vector per native mode. For a plane wave of displacement amplitude A
@@ -97,7 +103,7 @@ impl TensorPiezoelectric {
             maximum_absolute_mandel_strain,
         )
         .map_err(|_| invalid("native acoustic material admission failed"))?;
-        let mechanical = acoustic
+        let mut mechanical = acoustic
             .directional_waves(n)
             .map_err(|_| invalid("native piezoacoustic eigenmode solve failed"))?;
         let mut fields = [[0.0; 3]; 3];
@@ -118,6 +124,30 @@ impl TensorPiezoelectric {
                 *field = n.map(|x| scalar * x);
                 if field.iter().any(|x| !x.is_finite()) {
                     return Err(invalid("acoustic electric field is not representable"));
+                }
+                // Write t=(p.strain)/epsilon=-E_n. Differentiating the
+                // homogeneous wave-vector energy adds t*D/(rho*c) to the
+                // frozen-C_eff mechanical velocity, where
+                // D=e:strain-t*epsilon*n and n.D=0. Both the coupling and
+                // dielectric normal must vary; a fixed-D tensor is different.
+                let displacement: [f64; 3] = core::array::from_fn(|i| {
+                    (0..6)
+                        .map(|a| self.coupling_c_m2()[i][a] * strain[a])
+                        .sum::<f64>()
+                        + (0..3)
+                            .map(|j| self.permittivity_f_m()[i][j] * field[j])
+                            .sum::<f64>()
+                });
+                let mode = &mut mechanical.modes[mode];
+                for (velocity, electric_displacement) in
+                    mode.energy_velocity_m_s.iter_mut().zip(displacement)
+                {
+                    *velocity -= (scalar / mode.impedance_pa_s_m) * electric_displacement;
+                }
+                if mode.energy_velocity_m_s.iter().any(|v| !v.is_finite()) {
+                    return Err(invalid(
+                        "piezoacoustic energy velocity is not representable",
+                    ));
                 }
             }
         }

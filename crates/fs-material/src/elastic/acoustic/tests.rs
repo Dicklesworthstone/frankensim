@@ -40,6 +40,11 @@ fn isotropic_waves_and_pressure_share_one_elastic_energy() {
             near(mode.directional_modulus_pa, modulus, 1e-14);
             near(mode.phase_speed_m_s, (modulus / rho).sqrt(), 1e-14);
             near(mode.impedance_pa_s_m, rho * mode.phase_speed_m_s, 1e-14);
+            for (velocity, normal) in mode.energy_velocity_m_s.into_iter().zip(waves.direction) {
+                assert!(
+                    (velocity - mode.phase_speed_m_s * normal).abs() < 3e-13 * mode.phase_speed_m_s
+                );
+            }
             let alignment: f64 = (0..3)
                 .map(|i| mode.polarization[i] * waves.direction[i])
                 .sum();
@@ -154,6 +159,12 @@ fn full_tensor_rotation_preserves_hydrostatic_work_and_wave_modes() {
     let waves_b = b.directional_waves(rotated_direction).unwrap();
     for (mode_a, mode_b) in waves_a.modes.iter().zip(waves_b.modes) {
         near(mode_a.phase_speed_m_s, mode_b.phase_speed_m_s, 1e-13);
+        for (i, velocity) in mode_b.energy_velocity_m_s.into_iter().enumerate() {
+            let expected: f64 = (0..3)
+                .map(|j| q[i][j] * mode_a.energy_velocity_m_s[j])
+                .sum();
+            assert!((velocity - expected).abs() < 3e-12 * mode_a.phase_speed_m_s);
+        }
     }
     for i in 0..3 {
         for j in 0..3 {
@@ -193,5 +204,75 @@ fn invalid_source_tensors_directions_and_pressure_refuse() {
     assert!(ElasticAcousticState::try_new_mandel(indefinite, 1000.0, identity(), 0.001).is_err());
     for pressure in [f64::NAN, f64::INFINITY, f64::MAX] {
         assert!(state.hydrostatic_response(pressure).is_err());
+    }
+}
+
+#[test]
+fn g0_orthotropic_energy_follows_the_analytic_shear_ray_not_the_wave_normal() {
+    let law =
+        OrthotropicElastic::new([120e9, 60e9, 30e9], [0.0; 3], [20e9, 10e9, 15e9], 0.002).unwrap();
+    let rho = 5000.0;
+    let state = ElasticAcousticState::from_orthotropic(&law, rho, identity()).unwrap();
+    let waves = state.directional_waves([0.6, 0.8, 0.0]).unwrap();
+    let mode = waves.modes[0];
+    near(mode.polarization[2].abs(), 1.0, 1e-14);
+    let speed = ((15e9 * 0.36 + 10e9 * 0.64) / rho).sqrt();
+    let expected = [15e9 * 0.6 / (rho * speed), 10e9 * 0.8 / (rho * speed), 0.0];
+    for (actual, expected) in mode.energy_velocity_m_s.into_iter().zip(expected) {
+        assert!((actual - expected).abs() < 2e-13 * speed);
+    }
+    let normal_speed: f64 = (0..3)
+        .map(|i| waves.direction[i] * mode.energy_velocity_m_s[i])
+        .sum();
+    near(normal_speed, speed, 2e-13);
+    assert!((mode.energy_velocity_m_s[0] - speed * waves.direction[0]).abs() > 200.0);
+}
+
+#[test]
+fn g3_full_tensor_energy_velocity_matches_frequency_gradient_and_density_scaling() {
+    let stiffness = core::array::from_fn(|i| {
+        core::array::from_fn(|j| {
+            if i == j {
+                (10 + i) as f64 * 1e9
+            } else {
+                (i + j + 1) as f64 * 1e8
+            }
+        })
+    });
+    let state = ElasticAcousticState::try_new_mandel(stiffness, 3000.0, identity(), 0.001).unwrap();
+    let heavier =
+        ElasticAcousticState::try_new_mandel(stiffness, 12000.0, identity(), 0.001).unwrap();
+    let wave_vector = [0.47, -0.69, 0.83];
+    let waves = state.directional_waves(wave_vector).unwrap();
+    let reversed = heavier.directional_waves(wave_vector.map(|v| -v)).unwrap();
+    // Independent omega(k)=|k|c(k) differences exercise ALL normal/shear
+    // couplings and the derivative of normalization of the wave normal.
+    for mode in 0..3 {
+        let speed = waves.modes[mode].phase_speed_m_s;
+        for axis in 0..3 {
+            let h = 1e-5;
+            let mut plus = wave_vector;
+            let mut minus = wave_vector;
+            plus[axis] += h;
+            minus[axis] -= h;
+            let frequency = |k: [f64; 3]| {
+                k.iter().map(|v| v * v).sum::<f64>().sqrt()
+                    * state.directional_waves(k).unwrap().modes[mode].phase_speed_m_s
+            };
+            let derivative = (frequency(plus) - frequency(minus)) / (2.0 * h);
+            assert!(
+                (waves.modes[mode].energy_velocity_m_s[axis] - derivative).abs() < 2e-8 * speed
+            );
+            assert!(
+                (reversed.modes[mode].energy_velocity_m_s[axis]
+                    + 0.5 * waves.modes[mode].energy_velocity_m_s[axis])
+                    .abs()
+                    < 3e-13 * speed
+            );
+        }
+        let normal_speed: f64 = (0..3)
+            .map(|i| waves.direction[i] * waves.modes[mode].energy_velocity_m_s[i])
+            .sum();
+        near(normal_speed, speed, 3e-13);
     }
 }

@@ -41,7 +41,7 @@ pub struct ElasticAcousticState {
     stiffness_scale_pa: f64,
 }
 
-/// One Christoffel eigenmode; phase speed is not the group velocity.
+/// One Christoffel eigenmode with phase and energy-transport velocities.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ElasticWaveMode {
     /// Unit displacement polarization in the stiffness tensor's frame.
@@ -52,6 +52,12 @@ pub struct ElasticWaveMode {
     pub phase_speed_m_s: f64,
     /// Traction/velocity impedance `rho*c` on the wave-normal plane [Pa s/m].
     pub impedance_pa_s_m: f64,
+    /// Energy flux divided by total time-averaged wave energy density [m/s].
+    /// This equals `grad_k omega` on a smooth, separated acoustic branch and
+    /// satisfies `n.dot(energy_velocity) = phase_speed`. It need not be parallel
+    /// to the wave normal. At a repeated eigenvalue it belongs to the returned
+    /// polarization; a unique differentiable branch is not implied.
+    pub energy_velocity_m_s: [f64; 3],
 }
 
 /// Three elastic modes in ascending speed order for one propagation direction.
@@ -129,7 +135,9 @@ impl ElasticAcousticState {
             .into_iter()
             .any(|value| !value.is_finite() || value <= 0.0)
         {
-            return Err(invalid("isotropic bulk and shear moduli must be finite and positive"));
+            return Err(invalid(
+                "isotropic bulk and shear moduli must be finite and positive",
+            ));
         }
         Self::try_new_mandel(
             super::bulk_shear_stiffness(bulk_modulus_pa, shear_modulus_pa),
@@ -327,7 +335,9 @@ impl ElasticAcousticState {
     ///
     /// The existing tensor owner supplies the orthonormal Mandel basis; the
     /// existing `fs-la` spectral owner solves the fixed 3x3 symmetric problem.
-    /// This is a local infinitesimal phase-wave query, not a propagation solver.
+    /// Energy transport uses the same tensor contraction, without angular
+    /// differencing or additional eigenproblems. This is a local infinitesimal
+    /// wave query, not a propagation solver.
     pub fn directional_waves(
         &self,
         direction: [f64; 3],
@@ -364,6 +374,7 @@ impl ElasticAcousticState {
             directional_modulus_pa: 0.0,
             phase_speed_m_s: 0.0,
             impedance_pa_s_m: 0.0,
+            energy_velocity_m_s: [0.0; 3],
         }; 3];
         for mode in 0..3 {
             let mut polarization = core::array::from_fn(|i| vectors[3 * i + mode]);
@@ -400,11 +411,37 @@ impl ElasticAcousticState {
             if polarization[pivot] < 0.0 {
                 polarization = polarization.map(|value| -value);
             }
+            // For unit displacement-gradient amplitude, s = C:sym(a tensor n).
+            // The mean mechanical flux divided by total mean wave energy is
+            // v_j = a_i s_ij/(rho*c). Normalize C first, and use rho*c^2/Cscale
+            // from the SAME eigenpair, avoiding a large dimensional C*a product.
+            let strain: [f64; 6] =
+                core::array::from_fn(|a| (0..3).map(|i| projection[a][i] * polarization[i]).sum());
+            let stress: [f64; 6] = core::array::from_fn(|a| {
+                (0..6)
+                    .map(|b| (self.stiffness_mandel_pa[a][b] / self.stiffness_scale_pa) * strain[b])
+                    .sum()
+            });
+            let energy_velocity_m_s = core::array::from_fn(|j| {
+                let flux: f64 = (0..6)
+                    .map(|a| {
+                        stress[a]
+                            * (0..3)
+                                .map(|i| basis[a][i][j] * polarization[i])
+                                .sum::<f64>()
+                    })
+                    .sum();
+                (flux / values[mode]) * phase_speed_m_s
+            });
+            if energy_velocity_m_s.iter().any(|value| !value.is_finite()) {
+                return Err(invalid("elastic wave energy velocity is unrepresentable"));
+            }
             modes[mode] = ElasticWaveMode {
                 polarization,
                 directional_modulus_pa,
                 phase_speed_m_s,
                 impedance_pa_s_m,
+                energy_velocity_m_s,
             };
         }
         for i in 0..3 {

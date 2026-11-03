@@ -1874,16 +1874,27 @@ modulus `1/(I:s)`, pressure strain `-p s` and stored energy `p^2(I:s)/2`.
 Directional modes solve the Christoffel problem `Gamma a = rho c^2 a` through
 the existing `fs-la` spectral owner and return phase speed, polarization and
 wave-normal traction/velocity impedance `rho c`. The original identity survives.
+The same eigenpair and full tensor give energy velocity
+`v_j = a_i C_ijkl a_k n_l/(rho*c)` without angular differencing or another
+eigensolve. It is energy flux divided by total mean wave energy and equals
+`grad_k omega` on a smooth separated branch; `n.v=c`, but v can have a
+transverse component. At a repeated root it describes the selected polarization,
+not a unique differentiable branch. Charge-free piezoelectric waves also retain
+the electrical correction `-E_n D/(rho*c)`, with `n.D=0`: differentiating only
+a frozen direction-dependent effective stiffness omits this transverse flux.
+The fixed-field branch keeps the original mechanical result.
 Exact symmetry, positive definiteness, finite representability, solve residuals
 and the declared hydrostatic strain ceiling are checked; invalid states refuse
 without repairing source data. Degenerate polarizations identify a subspace.
 
 These are frozen, unstressed, small-strain model predictions. Static or
 isothermal source moduli do not establish measured adiabatic or high-frequency
-ultrasonic response. There is no attenuation, dispersion, group-velocity,
+ultrasonic response. There is no attenuation, dispersion,
 prestress, finite-strain or thermoelastic-relaxation claim. Focused tests cover
 analytic isotropic and orthotropic modes, oblique anisotropy, full-tensor frame
 covariance, hydrostatic strain/work, density scaling and invalid inputs.
+G0/G3 energy-transport regressions compare an independent orthotropic shear
+ray, analytic piezoelectric dispersion, full frequency gradients and co-rotation.
 
 ## Source-bound axial modulus references
 
