@@ -1,5 +1,31 @@
 # CONTRACT: fs-couple
 
+## Physical pressure from an explicitly selected lumped duct
+
+`acoustic_realize::duct_observer::BaffledDuctObserver` also admits the existing
+`BoreRealization::LumpedLadder` for an unbranched flanged cylinder/frustum bore with one uniform
+interior/exterior gas and its original numerical wall law. Both massive and
+quasistatic reeds use their unchanged implicit pressure/work junction. The
+original `fs-phs` terminal-flow row observes the accepted state; that flow enters
+the existing finite-aperture Rayleigh receiver and causal atmospheric filter.
+Internal source pressure is not added to physical microphone pressure.
+
+The original passive-pitch/dispersion gate and complete material state remain
+binding, including the original compact/Foster radiation-load approximation.
+Rayleigh observation does not certify that approximation's continuum loading
+accuracy. Axial propagation stays in the spatial ODE, so the receipt reports
+zero separately factored axial-delay samples; finite spatial resolution does
+not claim an exact continuum wavefront. Receiver geometry, exterior delay,
+quadrature band and source medium remain explicit. Regional media, a distinct
+exterior, source-bound walls, side openings and separate body receivers require
+their own supported owners and refuse on this bounded path. The native single
+widening spherical psi-line also refuses because its loaded boundary omits
+the Euler near-field flow; its approximate radiation-port current is not used
+as physical microphone flow. This extends the
+explicit physical-observation option; legacy source-pressure model comparisons
+retain their existing semantics. Focused G1/G3 tests check retarded inverse-range
+pressure for both reed choices, absolute-pressure substitution and refusals.
+
 ## Superfluid mutual-friction heat on the original thermal timeline
 
 The opt-in `superfluid::advance_closed_friction_heat` composes the original

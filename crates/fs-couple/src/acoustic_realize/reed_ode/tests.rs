@@ -277,7 +277,7 @@ fn quasistatic_warm_complete_body_closes_mouth_jet_and_original_loss_work() {
         // Observe the fluid port directly. Omitting the separate microphone
         // observation leaves every physical surface and feedback path in place.
         let pressure =
-            realize_quasistatic(system, state, None, source, reed, &gas, 1.0, duration, 1).unwrap()
+            realize_quasistatic(system, state, None, source, reed, &gas, 1.0, duration, 1, None).unwrap()
                 [0];
         let drop = mouth - pressure;
         let opening =
@@ -692,6 +692,7 @@ fn nonlinear_complete_reed_body_retains_finite_amplitude_stress_and_refines() {
                 1.0,
                 1.0 / f64::from(rate),
                 windows * refinement,
+                None,
             )
             .unwrap();
             let average: Vec<f64> = pressure
@@ -724,6 +725,7 @@ fn nonlinear_complete_reed_body_retains_finite_amplitude_stress_and_refines() {
                 1.0,
                 1.0 / f64::from(4 * RATE),
                 4 * windows,
+                None,
             )
             .unwrap()
         } else {
@@ -737,6 +739,7 @@ fn nonlinear_complete_reed_body_retains_finite_amplitude_stress_and_refines() {
                 1.0,
                 1.0 / f64::from(4 * RATE),
                 4 * windows,
+                None,
             )
             .unwrap()
         };

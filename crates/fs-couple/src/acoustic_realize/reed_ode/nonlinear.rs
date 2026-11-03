@@ -27,6 +27,7 @@ pub(super) fn realize_nonlinear(
     listener_m: f64,
     dt: f64,
     n: usize,
+    mut receiver: Option<&mut ReedOutletObserver<'_>>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let budget = fs_phs::linear_exact::LinearSplitBudget {
         max_modes: system.state_dim(),
@@ -125,15 +126,16 @@ pub(super) fn realize_nonlinear(
                 what: "nonlinear body and reed did not agree on the accepted pressure work",
             });
         }
-        let observed = average_output[source]
-            + plate_chain_radiation(
-                observation.as_ref(),
-                &next_state,
-                &state,
-                gas,
-                listener_m,
-                dt,
-            )?;
+        let observed = observe_pressure(
+            receiver.as_deref_mut(),
+            average_output[source],
+            observation.as_ref(),
+            &next_state,
+            &state,
+            gas,
+            listener_m,
+            dt,
+        )?;
         if !observed.is_finite() {
             return Err(AcousticRealizeError::Reed {
                 what: "nonlinear body and reed pressure left the finite set",

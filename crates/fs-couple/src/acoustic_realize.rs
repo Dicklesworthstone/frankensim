@@ -17,6 +17,7 @@ mod thermal_step;
 mod dirac_body;
 mod reed_ode;
 
+#[cfg(test)]
 use reed_ode::realize_reed_ode;
 
 use crate::modal_acoustic_time::{
@@ -326,7 +327,9 @@ pub struct RealizeOptions<'a> {
     pub observer_relaxation: Option<&'a fs_material::relaxation::RelaxationState>,
     /// Physical flanged-outlet microphone for an unbranched reed-driven duct.
     /// Its regional gas, exterior load and causal observation share the existing
-    /// owners. Other coupled members and unsupported bore selectors refuse.
+    /// owners. A uniform-medium lumped ladder exports its original terminal
+    /// flow instead of using the characteristic-line transfer. Other coupled
+    /// members and unsupported medium/wall combinations refuse explicitly.
     /// The observer law/relaxation above applies to this path's exterior gas;
     /// the receiver position replaces `assembly.listener.distance_m`.
     pub baffled_duct: Option<duct_observer::BaffledDuctObserver<'a>>,
@@ -345,12 +348,15 @@ impl From<Option<crate::air_path::GasAbsorptionModel>> for ObserverLaw<'_> {
     }
 }
 
-/// Realized observer pressure and the gas state that produced it.
+/// Realized pressure, its observation binding and the gas state that produced it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RealizedAssembly {
     /// Sample rate [Hz].
     pub sample_rate_hz: u32,
-    /// Observer pressure [Pa], one sample per period.
+    /// Pressure [Pa], one sample per period. A bound `duct_observer` supplies
+    /// exterior microphone pressure. Legacy duct images without that binding
+    /// retain their source-time/local pressure diagnostics; sharing Pa units
+    /// does not make those diagnostics an exterior acoustic observation.
     pub pressure_pa: Vec<f64>,
     /// Derived ambient state (rho, c, mu, …). On the physical duct path this is
     /// the exterior observer gas; `duct_observer` retains the interior regions.
@@ -4963,6 +4969,23 @@ fn realize_reed_on_duct(
     n: usize,
     bore: BoreRealization,
 ) -> Result<(Vec<f64>, BoreRealizationReceipt), AcousticRealizeError> {
+    realize_reed_on_duct_with_receiver(
+        duct, reed, plates, gas, listener_m, sample_rate_hz, n, bore, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn realize_reed_on_duct_with_receiver(
+    duct: &ViscothermalDuct,
+    reed: BeatingReed,
+    plates: &mut PlateBank,
+    gas: &GasState,
+    listener_m: f64,
+    sample_rate_hz: u32,
+    n: usize,
+    bore: BoreRealization,
+    receiver: Option<&mut crate::pcm_wav::baffled::BaffledPressure>,
+) -> Result<(Vec<f64>, BoreRealizationReceipt), AcousticRealizeError> {
     let physics = physics_duct(duct)?;
     let termination = match duct.termination {
         WaveguideEnd::Closed => Termination::Closed,
@@ -4972,6 +4995,11 @@ fn realize_reed_on_duct(
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
     match bore {
         BoreRealization::CharacteristicLine(ladder) => {
+            if receiver.is_some() {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "characteristic-line physical observation requires its original terminal transfer",
+                });
+            }
             let (samples, receipt) = crate::reed_bore::realize_reed_bore_with_ladder(
                 &physics,
                 gas,
@@ -5038,7 +5066,7 @@ fn realize_reed_on_duct(
                     max_pitch_error_cents,
                 });
             }
-            let samples = realize_reed_ode(
+            let samples = reed_ode::realize_reed_ode_with_receiver(
                 &sections,
                 duct_outlet(duct.termination),
                 &taps,
@@ -5049,6 +5077,7 @@ fn realize_reed_on_duct(
                 sample_rate_hz,
                 n,
                 duct.wall,
+                receiver,
             )?;
             Ok((
                 samples,

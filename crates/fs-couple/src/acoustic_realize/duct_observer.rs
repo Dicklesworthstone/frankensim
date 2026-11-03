@@ -1,19 +1,20 @@
 //! A physical duct microphone on the ordinary material-assembly entry point.
 //!
-//! The regional TMM, moving-reed junction, terminal volume-flow transfer,
-//! retarded Rayleigh receiver and causal atmosphere filter keep their original
-//! owners. Interior bore pressure and the compact jet proxy are not microphone
-//! signals. This adapter observes the accepted outgoing wave without rebuilding
-//! or retuning the reed, its geometry, or either medium.
+//! The moving-reed junction, regional TMM terminal transfer or native spatial
+//! ODE terminal flow, retarded Rayleigh receiver and causal atmosphere filter
+//! keep their original owners. Interior bore pressure and the compact jet proxy
+//! are not microphone signals. Observation never rebuilds or retunes the reed,
+//! its geometry, or either medium.
 
 use super::{
     AcousticRealizeError, BoreRealization, BoreRealizationReceipt, RealizeOptions,
-    RealizedAssembly, gas_state, physics_duct, sample_count, selected_observer_law, wall_pin,
+    RealizedAssembly, gas_state, physics_duct, realize_reed_on_duct_with_receiver, sample_count,
+    selected_observer_law, wall_pin,
 };
 use crate::air_path::{GasAbsorptionModel, ObserverFilter, ObserverFilterReceipt};
 use crate::driving_point::regional::RegionalDuct;
 use crate::driving_point::regional::material_wall::MaterialWallLayout;
-use crate::pcm_wav::baffled::CircularOutletReceiver;
+use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use crate::render::ReedBoreVoice;
 use crate::thin_plate::PlateBank;
 use fs_duct::{Termination, WallModel};
@@ -24,8 +25,17 @@ use fs_scenario::{AcousticAssembly, WaveguideEnd};
 ///
 /// This bounded image admits an unbranched cylinder/cone chain with its existing
 /// local wall law and flanged termination. Strings, separate body/plate/cavity
-/// members, other excitation, tone holes and nondefault bore discretizations
-/// refuse; none is silently dropped. Side-hole and general body microphones
+/// members, other excitation and tone holes refuse; none is silently dropped.
+/// The explicit lumped ladder admits cylinder/frustum chains with uniform
+/// interior/exterior gas and its original numerical wall. Its automatically
+/// selected single widening spherical psi-line refuses: that loaded terminal
+/// omits an Euler near-field contribution to physical volume flow.
+/// It observes the actual admitted loaded terminal flow;
+/// spatial propagation remains in the LC state, without a separate TMM transfer.
+/// The original compact/Foster mouth-load approximation remains; this receiver
+/// neither replaces it nor certifies its continuum radiation match.
+/// Regional media and source-bound walls still require the characteristic line.
+/// Side-hole and general body microphones
 /// retain their existing dedicated owners and are not inferred from this input.
 ///
 /// Frozen gas regions share one static pressure. This is not advective mixing,
@@ -75,7 +85,9 @@ pub struct BaffledDuctObservation {
     /// and the receiver's delay together count the center-reference range/c
     /// once. This is not individual dispersive propagation on each surface ray.
     pub filter: ObserverFilterReceipt,
-    /// Whole samples of axial propagation retained by the terminal transfer.
+    /// Whole samples of axial propagation factored out of the characteristic
+    /// terminal transfer. Zero for the lumped ladder: its propagation lives in
+    /// the actual spatial state, with the reported spatial approximation error.
     pub axial_delay_samples: usize,
     /// Retarded Rayleigh kernel's minimum and maximum sample delays.
     pub exterior_delay_samples: (usize, usize),
@@ -107,9 +119,10 @@ pub(super) fn realize(
             "physical duct observation requires only the reed and bore; other coupled members or excitations need their own physical receiver",
         ));
     }
-    if options.bore != BoreRealization::default() {
+    let is_lumped = matches!(options.bore, BoreRealization::LumpedLadder { .. });
+    if !is_lumped && options.bore != BoreRealization::default() {
         return Err(invalid(
-            "physical regional duct observation requires the original default characteristic-line ladder",
+            "physical duct observation requires the default characteristic line or an explicit lumped ladder",
         ));
     }
     let duct = assembly
@@ -159,10 +172,16 @@ pub(super) fn realize(
     };
     let regional = match binding.material_wall {
         Some(MaterialWallLayout::Segments(walls)) => regional
-            .with_material_wall_regions(walls).map_err(AcousticRealizeError::Duct)?,
+            .with_material_wall_regions(walls)
+            .map_err(AcousticRealizeError::Duct)?,
         _ => regional,
     };
     let exterior = *regional.exterior_gas();
+    if is_lumped && (gases.iter().any(|gas| *gas != exterior) || binding.material_wall.is_some()) {
+        return Err(invalid(
+            "physical lumped outlet observation requires one uniform interior/exterior gas and the original numerical wall; regional media and source-bound walls need their own spatial owner",
+        ));
+    }
     let [x, y, z] = binding.receiver.position_m;
     let range_m = x.hypot(y).hypot(z);
     if !range_m.is_finite() || range_m <= 0.0 {
@@ -212,6 +231,56 @@ pub(super) fn realize(
         .delay_speed_m_s
         .expect("admitted positive receiver delay");
     let count = sample_count(assembly.sample_rate_hz, assembly.duration_s)?;
+    if is_lumped {
+        let mut microphone = BaffledPressure::circular_outlet(
+            radius_m,
+            assembly.sample_rate_hz,
+            binding.receiver,
+            RayleighMedium {
+                density: exterior.density,
+                sound_speed: delay_speed_m_s,
+            },
+        )
+        .map_err(|error| {
+            AcousticRealizeError::DuctObserver(
+                crate::driving_point::regional::outlet::OutletError::Receiver(error),
+            )
+        })?;
+        let exterior_delay_samples = microphone.delay_samples;
+        let (mut pressure_pa, bore_receipt) = realize_reed_on_duct_with_receiver(
+            duct,
+            reed,
+            &mut PlateBank::default(),
+            &exterior,
+            range_m,
+            assembly.sample_rate_hz,
+            count,
+            options.bore,
+            Some(&mut microphone),
+        )?;
+        for pressure in &mut pressure_pa {
+            *pressure = observer.process(*pressure);
+            if !pressure.is_finite() {
+                return Err(invalid("physical lumped duct pressure left the finite set"));
+            }
+        }
+        return Ok(RealizedAssembly {
+            sample_rate_hz: assembly.sample_rate_hz,
+            pressure_pa,
+            gas: exterior,
+            bore_receipt: Some(bore_receipt),
+            observer_absorption: filter.absorption,
+            duct_observer: Some(BaffledDuctObservation {
+                segment_gases: gases,
+                exterior_gas: exterior,
+                material_wall: None,
+                receiver: binding.receiver,
+                filter,
+                axial_delay_samples: 0,
+                exterior_delay_samples,
+            }),
+        });
+    }
     let authored_wall = wall_pin(duct.wall);
     let wall = match binding.material_wall {
         Some(MaterialWallLayout::Uniform(material)) => WallModel::Law(material),

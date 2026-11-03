@@ -9,6 +9,7 @@ use super::*;
 mod nonlinear;
 use nonlinear::realize_nonlinear;
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn realize_reed_ode(
     sections: &[AcousticSection],
@@ -22,13 +23,73 @@ pub(super) fn realize_reed_ode(
     n: usize,
     wall: Option<LocallyReactingWall>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
+    realize_reed_ode_with_receiver(
+        sections,
+        outlet,
+        taps,
+        reed,
+        plates,
+        gas,
+        listener_m,
+        sample_rate_hz,
+        n,
+        wall,
+        None,
+    )
+}
+
+struct ReedOutletObserver<'a> {
+    flow: fs_phs::acoustic_outlet::AcousticOutletFlow,
+    receiver: &'a mut crate::pcm_wav::baffled::BaffledPressure,
+}
+
+// A physical microphone reads actual terminal flow. The legacy source-pressure
+// diagnostic remains available to existing internal model comparisons, but is
+// never mixed into this explicitly selected exterior observation.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn realize_reed_ode_with_receiver(
+    sections: &[AcousticSection],
+    outlet: ChainOutlet,
+    taps: &[AcousticTap],
+    reed: BeatingReed,
+    plates: &mut PlateBank,
+    gas: &GasState,
+    listener_m: f64,
+    sample_rate_hz: u32,
+    n: usize,
+    wall: Option<LocallyReactingWall>,
+    receiver: Option<&mut crate::pcm_wav::baffled::BaffledPressure>,
+) -> Result<Vec<f64>, AcousticRealizeError> {
     if !crate::reed_bore::reed_parameters_valid(reed) {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "reed parameters must be physical and finite",
         });
     }
     let inlets = if plates.is_empty() { 1 } else { 2 };
-    let line = ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?;
+    if receiver.is_some() && (!plates.is_empty() || !taps.is_empty()) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "physical ODE outlet observation requires separate receivers for plates and side openings",
+        });
+    }
+    let (line, mut receiver) = if let Some(receiver) = receiver {
+        let (line, flow) = fs_phs::acoustic_outlet::acoustic_chain_with_outlet_flow(
+            sections,
+            gas.density,
+            gas.sound_speed,
+            outlet,
+            inlets,
+            taps,
+            Some(&viscothermal_pin(gas)),
+            wall_pin(wall).as_ref(),
+        )
+        .map_err(render_phs_error)?;
+        (line, Some(ReedOutletObserver { flow, receiver }))
+    } else {
+        (
+            ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?,
+            None,
+        )
+    };
     let (bore, state, observation) = compose_plate_chain(plates, line, 1, gas, sample_rate_hz)?;
     // A bank keeps its independent point-force port at zero. Only the fluid
     // inlet supplies volume flow; surface reaction uses the original area map.
@@ -46,6 +107,7 @@ pub(super) fn realize_reed_ode(
             listener_m,
             dt,
             n,
+            receiver.as_mut(),
         );
     }
     if reed.mass_kg > 0.0 && linear.is_exact_quadratic() {
@@ -59,6 +121,7 @@ pub(super) fn realize_reed_ode(
             listener_m,
             dt,
             n,
+            receiver.as_mut(),
         );
     }
     realize_nonlinear(
@@ -71,7 +134,34 @@ pub(super) fn realize_reed_ode(
         listener_m,
         dt,
         n,
+        receiver.as_mut(),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_pressure(
+    receiver: Option<&mut ReedOutletObserver<'_>>,
+    source_pressure_pa: f64,
+    observation: Option<&PlateBankObservation>,
+    next_state: &[f64],
+    state: &[f64],
+    gas: &GasState,
+    listener_m: f64,
+    dt: f64,
+) -> Result<f64, AcousticRealizeError> {
+    if let Some(receiver) = receiver {
+        let flow = receiver
+            .flow
+            .volume_flow_m3_s(next_state)
+            .map_err(render_phs_error)?;
+        return receiver.receiver.step(&[flow]).map_err(|error| {
+            AcousticRealizeError::DuctObserver(
+                crate::driving_point::regional::outlet::OutletError::Receiver(error),
+            )
+        });
+    }
+    Ok(source_pressure_pa
+        + plate_chain_radiation(observation, next_state, state, gas, listener_m, dt)?)
 }
 
 fn prepare_reed_load(
@@ -106,6 +196,7 @@ fn realize_massive(
     listener_m: f64,
     dt: f64,
     n: usize,
+    mut receiver: Option<&mut ReedOutletObserver<'_>>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let budget = fs_phs::linear_exact::LinearSplitBudget {
         max_modes: system.state_dim(),
@@ -153,15 +244,16 @@ fn realize_massive(
                 what: "coupled reed and complete body did not agree on pressure work",
             });
         }
-        let pressure = average_output[source]
-            + plate_chain_radiation(
-                observation.as_ref(),
-                &next_state,
-                &state,
-                gas,
-                listener_m,
-                dt,
-            )?;
+        let pressure = observe_pressure(
+            receiver.as_deref_mut(),
+            average_output[source],
+            observation.as_ref(),
+            &next_state,
+            &state,
+            gas,
+            listener_m,
+            dt,
+        )?;
         if !pressure.is_finite() {
             return Err(AcousticRealizeError::Reed {
                 what: "coupled reed and complete body pressure left the finite set",
@@ -188,6 +280,7 @@ fn realize_quasistatic(
     listener_m: f64,
     dt: f64,
     n: usize,
+    mut receiver: Option<&mut ReedOutletObserver<'_>>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let budget = fs_phs::linear_exact::LinearSplitBudget {
         max_modes: system.state_dim(),
@@ -235,15 +328,16 @@ fn realize_quasistatic(
                 what: "quasistatic valve and complete body did not agree on pressure work",
             });
         }
-        let pressure = average_output[source]
-            + plate_chain_radiation(
-                observation.as_ref(),
-                &next_state,
-                &state,
-                gas,
-                listener_m,
-                dt,
-            )?;
+        let pressure = observe_pressure(
+            receiver.as_deref_mut(),
+            average_output[source],
+            observation.as_ref(),
+            &next_state,
+            &state,
+            gas,
+            listener_m,
+            dt,
+        )?;
         if !pressure.is_finite() {
             return Err(AcousticRealizeError::Reed {
                 what: "ODE reed pressure left the finite set",
