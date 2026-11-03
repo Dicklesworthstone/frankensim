@@ -147,6 +147,9 @@ pub enum MineralReaction {
     /// 4 Au(s) + 8 CN- + O2(aq) + 2 H2O(l) -> 4 Au(CN)2- + 4 OH-.
     /// Dissolved oxygen is a finite aqueous stock, distinct from a gas reservoir.
     GoldCyanidationDissolvedOxygen,
+    /// O2(g) -> O2(aq), neutral molecular oxygen dissolution.
+    /// The reference-state equilibrium does not supply a gas-transfer rate.
+    OxygenDissolution,
     /// HCN(aq) -> H+(aq) + CN[-](aq).
     /// HCN is the neutral undissociated solute, not the ionized source component.
     HydrogenCyanideDissociation,
@@ -376,6 +379,11 @@ impl MineralReaction {
                     ("Au(CN)2[-](aq)", &[1, 2, 2, 0, 0], -1, 4),
                     ("OH[-](aq)", &[0, 0, 0, 1, 1], -1, 4),
                 ],
+            ),
+            Self::OxygenDissolution => (
+                "oxygen-dissolution",
+                &["O"],
+                &[("O2(g)", &[2], 0, -1), ("O2(aq)", &[2], 0, 1)],
             ),
             Self::HydrogenCyanideDissociation => (
                 "hydrogen-cyanide-dissociation",

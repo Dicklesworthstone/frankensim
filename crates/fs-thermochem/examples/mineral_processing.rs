@@ -67,7 +67,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 40] = [
+const REACTIONS: [&str; 41] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
@@ -87,6 +87,7 @@ const REACTIONS: [&str; 40] = [
     "zinc-ferrite-goethite-leach",
     "gold-cyanidation",
     "gold-cyanidation-dissolved-oxygen",
+    "oxygen-dissolution",
     "hydrogen-cyanide-dissociation",
     "water-dissociation",
     "carbonic-component-dissociation",
@@ -306,6 +307,17 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-aqueous",
             ],
             equation: "4 Au(s) + 8 CN[-](aq) + O2(aq) + 2 H2O(l) -> 4 Au(CN)2[-](aq) + 4 OH[-](aq), dissolved oxygen on the NBS molal reference",
+        },
+        "oxygen-dissolution" => ReactionCase {
+            reaction: MineralReaction::OxygenDissolution,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "oxygen-gas-nbs1989-thermochemistry",
+                "oxygen-aqueous-nbs1989-thermochemistry",
+            ],
+            species: &["O2(g)", "O2(aq)"],
+            phase_axes: &["source-phase-gas", "source-phase-aqueous"],
+            equation: "O2(g) -> O2(aq), neutral gas dissolution on the NBS ideal-gas and molal aqueous references",
         },
         "hydrogen-cyanide-dissociation" => ReactionCase {
             reaction: MineralReaction::HydrogenCyanideDissociation,

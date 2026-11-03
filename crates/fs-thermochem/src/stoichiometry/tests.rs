@@ -54,6 +54,7 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         MalachiteCarbonicAcidLeach,
         GoldCyanidation,
         GoldCyanidationDissolvedOxygen,
+        OxygenDissolution,
         HydrogenCyanideDissociation,
         HydrogenSulfateDissociation,
         WaterDissociation,
