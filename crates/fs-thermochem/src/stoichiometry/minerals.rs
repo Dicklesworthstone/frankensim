@@ -1,7 +1,13 @@
 //! Reference mineral/reagent equations with explicit final species.
 //!
 //! Pyrite endpoints follow USGS Open-File Report 99-348:
-//! <https://pubs.usgs.gov/of/1999/0348/report.pdf>. Carbonate neutralizations
+//! <https://pubs.usgs.gov/of/1999/0348/report.pdf>. Its equations 3 and 4 give
+//! ferrous oxidation and ferric attack on pyrite, respectively. Ferrous
+//! oxidation is multiplied by four here to retain exact integer coefficients.
+//! Combining seven such oxidations with two ferric-pyrite attacks recovers
+//! the two-pyrite ferrous endpoint; intermediate iron is accounted for rather
+//! than treated as a free oxidant. No reaction rate or cycle turnover is inferred.
+//! Carbonate neutralizations
 //! combine mineral dissolution with CO3(2-) + 2 H+ -> CO2(aq) + H2O from
 //! the USGS PHREEQC database:
 //! <https://wwwbrr.cr.usgs.gov/projects/GWC_coupled/phreeqc.v1/html/phqc_66.htm>.
@@ -77,6 +83,12 @@ pub enum MineralReaction {
     GoldCyanidation,
     /// 2 FeS2(s) + 7 O2(g) + 2 H2O(l) -> 2 Fe2+ + 4 SO4(2-) + 4 H+.
     PyriteOxidationFerrous,
+    /// 4 Fe2+(aq) + O2(g) + 4 H+(aq) -> 4 Fe3+(aq) + 2 H2O(l).
+    /// Oxidation consumes one proton per ferrous ion; rate remains an input.
+    FerrousOxidationFerric,
+    /// FeS2(s) + 14 Fe3+(aq) + 8 H2O(l) -> 15 Fe2+(aq) + 2 SO4(2-)(aq) + 16 H+(aq).
+    /// Ferric iron is an explicit consumed inventory, not an unlimited catalyst.
+    FerricPyriteOxidation,
     /// 4 FeS2(s) + 15 O2(g) + 14 H2O(l) -> 4 Fe(OH)3(s) + 8 SO4(2-) + 16 H+.
     /// Ideal ferric-hydroxide endpoint; no claim that a particular solid precipitates.
     PyriteOxidationFerricHydroxide,
@@ -237,6 +249,29 @@ impl MineralReaction {
                     ("Fe[2+](aq)", &[1, 0, 0, 0], 2, 2),
                     ("SO4[2-](aq)", &[0, 1, 4, 0], -2, 4),
                     ("H+(aq)", &[0, 0, 0, 1], 1, 4),
+                ],
+            ),
+            Self::FerrousOxidationFerric => (
+                "ferrous-oxidation-ferric",
+                &["Fe", "O", "H"],
+                &[
+                    ("Fe[2+](aq)", &[1, 0, 0], 2, -4),
+                    ("O2(g)", &[0, 2, 0], 0, -1),
+                    ("H+(aq)", &[0, 0, 1], 1, -4),
+                    ("Fe[3+](aq)", &[1, 0, 0], 3, 4),
+                    ("H2O(l)", &[0, 1, 2], 0, 2),
+                ],
+            ),
+            Self::FerricPyriteOxidation => (
+                "ferric-pyrite-oxidation",
+                &["Fe", "S", "O", "H"],
+                &[
+                    ("FeS2(s)", &[1, 2, 0, 0], 0, -1),
+                    ("Fe[3+](aq)", &[1, 0, 0, 0], 3, -14),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, -8),
+                    ("Fe[2+](aq)", &[1, 0, 0, 0], 2, 15),
+                    ("SO4[2-](aq)", &[0, 1, 4, 0], -2, 2),
+                    ("H+(aq)", &[0, 0, 0, 1], 1, 16),
                 ],
             ),
             Self::PyriteOxidationFerricHydroxide => (

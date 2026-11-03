@@ -15,8 +15,9 @@
 //! `cargo run -p fs-thermochem --example mineral_processing -- \
 //! --malachite-inventory 10 12 100 3`
 //!
-//! In the source-pack modes, the final argument is kilograms of the first pure
-//! reactant actually reacted. It is not commercial feed mass; feed purity and
+//! In the source-pack modes, the final argument is kilograms of the first
+//! species actually reacted. For an aqueous ion this is its chemical-equivalent
+//! mass, not solution mass or an isolated pure-ion phase. Feed composition and
 //! conversion require separate evidence.
 //! This is standard-state bookkeeping at 298.15 K and 1 bar, not a plant
 //! temperature, reaction-rate, water-dosing or recovery prediction.
@@ -43,7 +44,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 13] = [
+const REACTIONS: [&str; 15] = [
     "lime-hydration",
     "magnesite-calcination",
     "magnetite-oxidation",
@@ -52,13 +53,15 @@ const REACTIONS: [&str; 13] = [
     "cuprous-oxide-reduction",
     "pyrite-roasting",
     "pyrite-oxidation-ferrous",
+    "ferrous-oxidation-ferric",
+    "ferric-pyrite-oxidation",
     "sulfur-dioxide-oxidation",
     "sulfur-trioxide-hydration",
     "pyrite-to-acid",
     "calcite-bicarbonate-neutralization",
     "dolomite-bicarbonate-neutralization",
 ];
-const USAGE: &str = "usage: mineral_processing [--equilibrium] [--reaction NAME] PACK... REACTED_PURE_REACTANT_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
+const USAGE: &str = "usage: mineral_processing [--equilibrium] [--reaction NAME] PACK... REACTED_SPECIES_EQUIVALENT_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
 
 fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
     Ok(match name {
@@ -208,6 +211,55 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-aqueous",
             ],
             equation: "2 FeS2(s) + 7 O2(g) + 2 H2O(l) -> 2 Fe[2+](aq) + 4 SO4[2-](aq) + 4 H+(aq), ferrous acid-generation endpoint",
+        },
+        "ferrous-oxidation-ferric" => ReactionCase {
+            reaction: MineralReaction::FerrousOxidationFerric,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "iron-ii-ion-aqueous-usgs-b2131",
+                "oxygen-gas-usgs-b2131",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+            ],
+            species: &["Fe[2+](aq)", "O2(g)", "H+(aq)", "Fe[3+](aq)", "H2O(l)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-gas",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+            ],
+            equation: "4 Fe[2+](aq) + O2(g) + 4 H+(aq) -> 4 Fe[3+](aq) + 2 H2O(l), ferrous oxidation endpoint",
+        },
+        "ferric-pyrite-oxidation" => ReactionCase {
+            reaction: MineralReaction::FerricPyriteOxidation,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "pyrite-solid-usgs-b2131-thermochemistry",
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+                "iron-ii-ion-aqueous-usgs-b2131",
+                "sulfate-ion-aqueous-usgs-b2131",
+                "hydrogen-ion-aqueous-usgs-b2131",
+            ],
+            species: &[
+                "FeS2(s)",
+                "Fe[3+](aq)",
+                "H2O(l)",
+                "Fe[2+](aq)",
+                "SO4[2-](aq)",
+                "H+(aq)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "FeS2(s) + 14 Fe[3+](aq) + 8 H2O(l) -> 15 Fe[2+](aq) + 2 SO4[2-](aq) + 16 H+(aq), ferric attack on pyrite",
         },
         "sulfur-dioxide-oxidation" => ReactionCase {
             reaction: MineralReaction::SulfurDioxideOxidation,
@@ -526,7 +578,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let amounts = reaction.amounts(extent)?;
 
     println!("{}, 298.15 K, 100000 Pa", case.equation);
-    println!("reacted pure {} mass [kg]: {reacted_kg}", case.species[0]);
+    println!(
+        "reacted {} equivalent mass [kg]: {reacted_kg}",
+        case.species[0]
+    );
     println!(
         "source reactant molar mass [kg/mol]: {}",
         molar_masses[0].value()
@@ -604,7 +659,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Reported source uncertainty magnitudes, where available, are not a propagated reaction interval."
     );
     println!(
-        "This uses actually reacted pure material; it does not predict conversion, plant temperature, kiln fuel duty or operating reagent doses."
+        "This uses actually reacted species-equivalent mass; it does not predict conversion, plant temperature, kiln fuel duty or operating reagent doses."
     );
     Ok(())
 }

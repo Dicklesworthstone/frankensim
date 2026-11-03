@@ -8,6 +8,8 @@ property	mass	molar-mass	dimensional
 property	hf	standard-molar-formation-enthalpy	dimensional
 property	gf	standard-molar-formation-gibbs-energy	dimensional
 property	s0	conventional-standard-molar-entropy	dimensional
+property	hf_uncertainty	reported-formation-enthalpy-uncertainty-magnitude	dimensional
+property	s_uncertainty	reported-conventional-entropy-uncertainty-magnitude	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	pressure	pressure	pressure
 axis	standard	source-standard-state	dimensional

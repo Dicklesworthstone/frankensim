@@ -965,6 +965,15 @@ endpoint consumes 3.5 mol oxygen and one mol water, and produces one mol Fe2+,
 two mol sulfate and two mol H+. The standard heat is -1452.4 kJ/mol pyrite.
 See [the source values, uncertainty conventions and runnable pack commands](MINING_ACID_GENERATION.md).
 
+The ferric-ion profile completes `FerrousOxidationFerric` and
+`FerricPyriteOxidation`, also exposed as `ferrous-oxidation-ferric` and
+`ferric-pyrite-oxidation` CLI modes. Their written-equation heats are -406.8
+and -28.6 kJ/mol respectively. Seven ferrous-oxidation extents plus two
+ferric-attack extents recover the original two-pyrite net equation and heat.
+Finite-stage tests restore an explicit ferric inventory and reject attempts
+to spend future reaction products before they exist. Actual rates, aqueous
+speciation and precipitation still require separately admitted models.
+
 ## Source-bound equilibrium constants and chemical driving force
 
 The `stoichiometry::thermodynamics::caloric` source route exposes
@@ -1059,7 +1068,7 @@ cargo test -p fs-material slurry::
 cargo test -p fs-material recovery::
 cargo test -p xtask --test mining_slurry_sources
 cargo test -p xtask --test mining_aqueous_sources
-cargo test -p xtask --test mining_acid_generation --test mining_equilibrium
+cargo test -p xtask --test mining_acid_generation --test mining_iron_redox --test mining_equilibrium
 cargo test -p fs-thermochem stoichiometry::tests
 cargo test -p fs-thermochem stoichiometry::electrolysis
 ```

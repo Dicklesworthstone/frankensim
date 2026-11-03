@@ -1,10 +1,14 @@
 # Aqueous pyrite oxidation and acid-generation references
 
-Five profiles add 24 claims from [USGS Bulletin 2131](https://doi.org/10.3133/b2131)
-and complete the existing ferrous-pyrite oxidation endpoint with the existing
-hydrogen-ion profile. They use the normal `matdb-pack` compiler and typed
+These six profiles use [USGS Bulletin 2131](https://doi.org/10.3133/b2131)
+and complete the ferrous-pyrite endpoint and ferrous/ferric redox cycle with the
+existing hydrogen-ion profile. They use the normal `matdb-pack` compiler and typed
 `NormalizedPack` queries. The selected rows were checked in the original report,
 including its [government-document mirror](https://digital.library.unt.edu/ark:/67531/metadc1114954/).
+
+The ferric profile also retains its separately tabulated formation-Gibbs claim.
+Its formation-enthalpy and entropy uncertainty magnitudes are exposed as dimensional
+metadata without replacing that existing Gibbs datum.
 
 ## Compatible source values
 
@@ -19,6 +23,7 @@ ionic entropy for individual ions.
 | `oxygen-gas-usgs-b2131` | [8](https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/14/) | 0.031999 | 0 | 205.15 |
 | `water-liquid-usgs-b2131` | [16](https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/22/) | 0.018015 | -285800 | 70.0 |
 | `iron-ii-ion-aqueous-usgs-b2131` | [7](https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/13/) | 0.055847 | -91100 | -107.1 |
+| `iron-iii-ion-aqueous-usgs-b2131` | [7](https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/13/) | 0.055847 | -49900 | -280.0 |
 | `sulfate-ion-aqueous-usgs-b2131` | [18](https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/24/) | 0.096064 | -909300 | 18.5 |
 | Existing `hydrogen-ion-aqueous-usgs-b2131` | [7](https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/13/) | 0.001008 | 0 | 0 |
 
@@ -51,6 +56,7 @@ Printed uncertainty magnitudes are retained as dimensioned metadata:
 | Oxygen | Not printed for the reference zero | 0.02 |
 | Liquid water | 100 | 0.1 |
 | Ferrous ion | 3000 | 2.0 |
+| Ferric ion | 5000 | 13.0 |
 | Sulfate ion | 400 | 0.4 |
 
 The source's calorimetric convention is twice the standard deviation of the
@@ -92,11 +98,40 @@ summing the report's rounded formation-Gibbs entries gives -2361600 J/mol;
 their 44.2075 J/mol difference remains visible rather than forcing either
 source quantity to agree by changing its published rounding.
 
+## Ferrous oxidation and ferric attack on pyrite
+
+The two explicit endpoints follow equations 3–4 of
+[USGS Open-File Report 99-348](https://pubs.usgs.gov/of/1999/0348/report.pdf),
+with the ferrous equation multiplied by four to retain integer coefficients:
+
+```text
+FerrousOxidationFerric:
+4 Fe2+(aq) + O2(g) + 4 H+(aq) -> 4 Fe3+(aq) + 2 H2O(l)
+
+FerricPyriteOxidation:
+FeS2(pyrite) + 14 Fe3+(aq) + 8 H2O(l)
+    -> 15 Fe2+(aq) + 2 SO4(2-)(aq) + 16 H+(aq)
+```
+
+The compatible sources give -406800 J/mol of the written ferrous-oxidation
+equation and -28600 J/mol of the ferric-pyrite equation. Seven oxidation
+extents plus two ferric-attack extents cancel the ferric inventory and recover
+the existing two-pyrite ferrous endpoint exactly, both in atom/charge counts
+and in its -2904800 J/mol standard heat.
+
+The finite-inventory regression starts with 28 mol Fe3+, attacks two mol
+pyrite, then oxidizes 28 mol of the resulting Fe2+ in a separate explicit
+stage. It restores the original ferric stock and retains the net ferrous,
+sulfate, proton, water and oxygen changes. Asking the same initial inventory
+to fund both gross reaction demands simultaneously refuses; products from a
+future stage cannot supply a present reagent deficit. Extents remain explicit
+inputs, with no inferred microbial rate, dissolved-oxygen transfer or pH.
+
 ## Run the source-backed balance
 
 ```bash
 acid_pack_dir="$(mktemp -d)"
-for pack in pyrite-solid-usgs-b2131-thermochemistry oxygen-gas-usgs-b2131 water-liquid-usgs-b2131 iron-ii-ion-aqueous-usgs-b2131 sulfate-ion-aqueous-usgs-b2131 hydrogen-ion-aqueous-usgs-b2131; do
+for pack in pyrite-solid-usgs-b2131-thermochemistry oxygen-gas-usgs-b2131 water-liquid-usgs-b2131 iron-ii-ion-aqueous-usgs-b2131 iron-iii-ion-aqueous-usgs-b2131 sulfate-ion-aqueous-usgs-b2131 hydrogen-ion-aqueous-usgs-b2131; do
   cargo run -p xtask -- matdb-pack \
     --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
     --out "$acid_pack_dir/$pack.fsmatpk"
@@ -110,14 +145,45 @@ cargo run -p fs-thermochem --example mineral_processing -- \
   "$acid_pack_dir/sulfate-ion-aqueous-usgs-b2131.fsmatpk" \
   "$acid_pack_dir/hydrogen-ion-aqueous-usgs-b2131.fsmatpk" 119.979
 cargo test -p xtask --test mining_acid_generation
+cargo test -p xtask --test mining_iron_redox
 ```
 
-The three focused tests compile the actual packs, verify literal values and
+The original three focused tests compile the actual packs, verify literal values and
 receipts, check phase/reference admission, exercise the oxygen-limited
 inventory and reject a caller's attempt to relabel JANAF pyrite as USGS.
+Three additional redox tests verify the ferric source, exact cycle cancellation,
+source-backed Hess heat and finite staged inventories.
+
+The same CLI supports each redox stage, including optional standard-equilibrium
+output from the original enthalpy and entropy claims:
+
+```bash
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --equilibrium --reaction ferrous-oxidation-ferric \
+  "$acid_pack_dir/iron-ii-ion-aqueous-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/oxygen-gas-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/hydrogen-ion-aqueous-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/iron-iii-ion-aqueous-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/water-liquid-usgs-b2131.fsmatpk" 55.847
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --equilibrium --reaction ferric-pyrite-oxidation \
+  "$acid_pack_dir/pyrite-solid-usgs-b2131-thermochemistry.fsmatpk" \
+  "$acid_pack_dir/iron-iii-ion-aqueous-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/water-liquid-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/iron-ii-ion-aqueous-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/sulfate-ion-aqueous-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/hydrogen-ion-aqueous-usgs-b2131.fsmatpk" 119.979
+```
+
+The first basis is 55.847 kg chemical-equivalent mass of reacted dissolved
+Fe2+, not solution mass or an isolated pure-ion phase. It represents 1000 mol
+Fe2+ and 250 mol written extent, with -101.7 MJ standard enthalpy change. The
+second consumes 1000 mol pyrite at 1000 mol written extent, with -28.6 MJ heat;
+ferric regeneration is a separate explicit stage. Neither CLI invocation
+implicitly supplies a finite inventory or predicts conversion.
 
 This endpoint retains ferrous iron in solution and uses gaseous oxygen as its
-source reference. Ferric oxidation, hydroxide or sulfate precipitation,
+source reference. Hydroxide or sulfate precipitation,
 dissolved-oxygen transfer, finite-concentration activities, microbial kinetics,
 process pH and heat of mixing need separate models. The standard heat does not
 predict a pile or tank temperature, and the ionic acid balance does not specify
