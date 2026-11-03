@@ -358,20 +358,19 @@ impl AeratedCarbonInLeachBatch {
                 return Err(CilError::Budget);
             }
             let remaining = end - current.state.elapsed.value();
-            step = step.min(remaining);
-            let proposed = current.state.elapsed.value() + step;
-            // Integrate the final interval through the exact requested endpoint.
-            // Repeated decimal steps can otherwise leave an unresolvable one-ulp tail.
-            let finish = if proposed >= end || end - proposed <= 8.0 * f64::EPSILON * end.abs() {
+            let final_pair = remaining > step && remaining - step < step;
+            let finish = if remaining <= step {
                 end
+            } else if final_pair {
+                current.state.elapsed.value().midpoint(end)
             } else {
-                proposed
+                current.state.elapsed.value() + step
             };
-            let middle =
-                current.state.elapsed.value() + 0.5 * (finish - current.state.elapsed.value());
+            let h = finish - current.state.elapsed.value();
+            let middle = current.state.elapsed.value().midpoint(finish);
             if middle <= current.state.elapsed.value() || finish <= middle {
                 return Err(CilError::Arithmetic(
-                    "positive aerated CIL substep is below clock resolution",
+                    "positive CIL substep is below clock resolution",
                 ));
             }
             let trial = (|| -> Result<_> {
@@ -383,7 +382,7 @@ impl AeratedCarbonInLeachBatch {
             let (full, refined) = match trial {
                 Err(CilError::Cyanidation(CyanidationError::TrialDepletion)) => {
                     rejected += 1;
-                    step = product(step, 0.5)?;
+                    step = product(h, 0.5)?;
                     continue;
                 }
                 other => other?,
@@ -403,7 +402,7 @@ impl AeratedCarbonInLeachBatch {
             let next_interval_error = sum([interval_error, error].into_iter())?;
             if error > local || next_interval_error > tolerance {
                 rejected += 1;
-                step = product(step, 0.5)?;
+                step = product(h, 0.5)?;
                 continue;
             }
             let trial_in = add_positive(self.oxygen_in, refined.inward)?;
@@ -414,9 +413,13 @@ impl AeratedCarbonInLeachBatch {
             largest = largest.max(error);
             interval_error = next_interval_error;
             accumulated = sum([accumulated, error].into_iter())?;
-            if error < local / 32.0 {
-                step = (step * 2.0).min(numerics.maximum_step.value());
-            }
+            step = if final_pair {
+                (end - finish).min(numerics.maximum_step.value())
+            } else if error < local / 32.0 {
+                (h * 2.0).min(numerics.maximum_step.value())
+            } else {
+                h
+            };
         }
 
         let (_, final_point) = boundary.rate(&current.state)?;

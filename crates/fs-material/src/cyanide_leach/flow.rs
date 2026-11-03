@@ -32,7 +32,8 @@ use std::collections::BTreeMap;
 
 /// Continuous leaching with a source-declared maintained oxygen reservoir.
 pub mod aeration;
-/// Continuous leaching with retained product and preg-robbing sorbents.
+
+/// Continuous aerated leaching with explicitly retained carbon populations.
 pub mod cil;
 
 /// Independent local authority, distinct from the original batch-age law.
@@ -522,12 +523,17 @@ impl CyanidationCstr {
             if accepted + rejected >= numerics.maximum_attempts {
                 return Err(CyanidationError::Budget);
             }
-            let finish =
-                if clock + step >= end || end - (clock + step) <= 8.0 * f64::EPSILON * end.abs() {
-                    end
-                } else {
-                    clock + step
-                };
+            let remaining = end - clock;
+            // Integrate the last two steps as a pair, without leaving a
+            // floating-point remainder too short for chemistry or transport.
+            let final_pair = remaining > step && remaining - step < step;
+            let finish = if remaining <= step {
+                end
+            } else if final_pair {
+                clock.midpoint(end)
+            } else {
+                clock + step
+            };
             let middle = clock.midpoint(finish);
             let h = finish - clock;
             if h <= 0.0 || middle <= clock || middle >= finish {
@@ -578,7 +584,9 @@ impl CyanidationCstr {
             error_sum = next_error;
             accepted += 1;
             clock = finish;
-            step = if error <= allowance / 8.0 {
+            step = if final_pair {
+                (end - finish).min(numerics.maximum_step.value())
+            } else if error <= allowance / 8.0 {
                 (h * 2.0).min(numerics.maximum_step.value())
             } else {
                 h
@@ -892,14 +900,14 @@ impl Problem<'_> {
     ) -> Result<()> {
         self.transport_admitted(state, h, time, work, &mut |_| Ok(()))
     }
-    fn transport_admitted(
+    fn transport_admitted<E: From<CyanidationError>>(
         &self,
         state: &mut Trial,
         h: f64,
         time: f64,
         work: &mut Work<'_, impl FnMut() -> bool>,
-        admit: &mut impl FnMut(&CyanidationFlowState) -> Result<()>,
-    ) -> Result<()> {
+        admit: &mut impl FnMut(&CyanidationFlowState) -> core::result::Result<(), E>,
+    ) -> core::result::Result<(), E> {
         if self.flow.value() == 0.0 || h == 0.0 {
             return Ok(());
         }
@@ -928,12 +936,23 @@ impl Problem<'_> {
             let (after, exported) = if before == target {
                 (before, product(before, x)?)
             } else {
-                let after = sum([product(before, e)?, product(target, u)?].into_iter())?;
-                if (before > 0.0 && e == 0.0) || after == before {
+                if before > 0.0 && e == 0.0 {
                     return Err(CyanidationError::Arithmetic(
-                        "finite transport change is below inventory resolution",
-                    ));
+                        "finite transport survival is below inventory resolution",
+                    )
+                    .into());
                 }
+                // Form the convex update around its nearer endpoint. Separately
+                // weighting two almost equal stocks can create artificial drift.
+                // A sub-ulp net change near equilibrium may round to the old
+                // stock while gross inlet and outlet transport remain resolved.
+                let after = if u <= 0.5 {
+                    let change = product((target - before).abs(), u)?;
+                    sum([before, if target > before { change } else { -change }].into_iter())?
+                } else {
+                    let change = product((before - target).abs(), e)?;
+                    sum([target, if before > target { change } else { -change }].into_iter())?
+                };
                 (
                     after,
                     sum([product(before, u)?, product(target, w)?].into_iter())?,
@@ -973,21 +992,22 @@ impl Problem<'_> {
     ) -> Result<()> {
         self.reaction_admitted(state, start, end, work, &mut |_| Ok(()))
     }
-    fn reaction_admitted(
+    fn reaction_admitted<E: From<CyanidationError>>(
         &self,
         state: &mut Trial,
         start: f64,
         end: f64,
         work: &mut Work<'_, impl FnMut() -> bool>,
-        admit: &mut impl FnMut(&CyanidationFlowState) -> Result<()>,
-    ) -> Result<()> {
+        admit: &mut impl FnMut(&CyanidationFlowState) -> core::result::Result<(), E>,
+    ) -> core::result::Result<(), E> {
         let h = end - start;
         let middle = start.midpoint(end);
-        let mut rate = |gold: f64, time: f64, work: &mut Work<'_, _>| -> Result<f64> {
-            let solution = evaluate(self.layout, &self.reacted(&state.raw, gold)?, time, work)?;
-            admit(&solution)?;
-            Ok(solution.rate.value())
-        };
+        let mut rate =
+            |gold: f64, time: f64, work: &mut Work<'_, _>| -> core::result::Result<f64, E> {
+                let solution = evaluate(self.layout, &self.reacted(&state.raw, gold)?, time, work)?;
+                admit(&solution)?;
+                Ok(solution.rate.value())
+            };
         let a = rate(0.0, start, work)?;
         let b = rate(product(product(h, 0.5)?, a)?, middle, work)?;
         let c = rate(product(product(h, 0.5)?, b)?, middle, work)?;

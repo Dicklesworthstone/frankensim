@@ -507,16 +507,16 @@ impl CarbonInLeachBatch {
                 return Err(CilError::Budget);
             }
             let remaining = end - state.elapsed.value();
-            step = step.min(remaining);
-            let proposed = state.elapsed.value() + step;
-            // Integrate the final interval through the exact requested endpoint.
-            // Repeated decimal steps can otherwise leave an unresolvable one-ulp tail.
-            let finish = if proposed >= end || end - proposed <= 8.0 * f64::EPSILON * end.abs() {
+            let final_pair = remaining > step && remaining - step < step;
+            let finish = if remaining <= step {
                 end
+            } else if final_pair {
+                state.elapsed.value().midpoint(end)
             } else {
-                proposed
+                state.elapsed.value() + step
             };
-            let middle = state.elapsed.value() + 0.5 * (finish - state.elapsed.value());
+            let h = finish - state.elapsed.value();
+            let middle = state.elapsed.value().midpoint(finish);
             if middle <= state.elapsed.value() || finish <= middle {
                 return Err(CilError::Arithmetic(
                     "positive CIL substep is below clock resolution",
@@ -531,7 +531,7 @@ impl CarbonInLeachBatch {
             let (full, refined) = match trial {
                 Err(CilError::Cyanidation(CyanidationError::TrialDepletion)) => {
                     rejected += 1;
-                    step = product(step, 0.5)?;
+                    step = product(h, 0.5)?;
                     continue;
                 }
                 other => other?,
@@ -543,7 +543,7 @@ impl CarbonInLeachBatch {
             )?;
             if error > local {
                 rejected += 1;
-                step = product(step, 0.5)?;
+                step = product(h, 0.5)?;
                 continue;
             }
             conservation_cil(&self.layout, &refined)?;
@@ -551,9 +551,13 @@ impl CarbonInLeachBatch {
             accepted += 1;
             largest = largest.max(error);
             accumulated = sum([accumulated, error].into_iter())?;
-            if error < local / 32.0 {
-                step = (step * 2.0).min(numerics.maximum_step.value());
-            }
+            step = if final_pair {
+                (end - finish).min(numerics.maximum_step.value())
+            } else if error < local / 32.0 {
+                (h * 2.0).min(numerics.maximum_step.value())
+            } else {
+                h
+            };
         }
         let capture = |role| -> Result<Amount> {
             Ok(Amount::new(sum(state

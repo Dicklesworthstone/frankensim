@@ -11,6 +11,10 @@
 //! residence distributions and counter-current carbon transfer require a
 //! separate solid-transport balance.
 
+/// One adaptive controller and shared work budget for aerated retained-carbon CIL.
+pub mod coupled;
+pub use coupled::{AeratedCilCstr, CilFlowAdvance, CilFlowState};
+
 use super::*;
 use crate::{
     aqueous_adsorption::{
@@ -137,11 +141,10 @@ impl CoupledTrial {
             .chain(self.vacant.iter().copied())
     }
     fn error(&self, other: &Self) -> CilFlowResult<f64> {
-        Ok(sum(
-            self.values()
-                .zip(other.values())
-                .map(|(a, b)| (a - b).abs()),
-        )?)
+        Ok(sum(self
+            .values()
+            .zip(other.values())
+            .map(|(a, b)| (a - b).abs()))?)
     }
 }
 
@@ -174,10 +177,16 @@ impl CarbonInLeachCstr {
         for species in [pair.counterion(), pair.adsorbed_pair()] {
             require_local(
                 model.chemistry.families().iter().all(|family| {
-                    family.species().iter().all(|candidate| candidate != species)
+                    family
+                        .species()
+                        .iter()
+                        .all(|candidate| candidate != species)
                 }) && layout.competition.as_ref().is_none_or(|metals| {
                     metals.model.families().iter().all(|family| {
-                        family.species().iter().all(|candidate| candidate != species)
+                        family
+                            .species()
+                            .iter()
+                            .all(|candidate| candidate != species)
                     })
                 }),
                 "ion-pair species cannot also be owned by a solution family",
@@ -187,7 +196,9 @@ impl CarbonInLeachCstr {
             layout
                 .competition
                 .as_ref()
-                .map_or(model.chemistry.reaction_network(), |m| m.model.reaction_network())
+                .map_or(model.chemistry.reaction_network(), |m| {
+                    m.model.reaction_network()
+                })
                 .reactions()
                 .iter()
                 .cloned()
@@ -291,7 +302,10 @@ impl CarbonInLeachCstr {
         numerics: FlowNumerics,
         mut cancelled: impl FnMut() -> bool,
     ) -> CilFlowResult<FlowCilAdvance> {
-        nonnegative(duration.value(), "continuous CIL duration must be nonnegative")?;
+        nonnegative(
+            duration.value(),
+            "continuous CIL duration must be nonnegative",
+        )?;
         nonnegative(flow.value(), "continuous CIL flow must be nonnegative")?;
         if cancelled() {
             return Err(FlowCilError::Cancelled);
@@ -305,32 +319,23 @@ impl CarbonInLeachCstr {
         require_local(
             counterion_feed.charge == 1
                 && counterion_feed.concentration.value()
-                    >= sum(
-                        [feed.accessible_gold.value(), feed.gold_complex.value()].into_iter(),
-                    )?,
+                    >= sum([feed.accessible_gold.value(), feed.gold_complex.value()].into_iter())?,
             "counterion feed must cover all incoming accessible and complexed Au",
         )?;
 
         // A zero-duration clone validates the complete feed/source surface with
         // the original CSTR owner and cannot publish into this wrapper.
         let mut preflight = self.tank.clone();
-        preflight.advance(
-            Time::new(0.0),
-            flow,
-            feed,
-            numerics,
-            || cancelled(),
-        )?;
+        preflight.advance(Time::new(0.0), flow, feed, numerics, || cancelled())?;
 
         let start = self.tank.elapsed().value();
         let end = add(start, duration.value())?;
-        let scale = sum(
-            self.tank
-                .raw
-                .iter()
-                .copied()
-                .chain(self.capacities.iter().copied()),
-        )?;
+        let scale = sum(self
+            .tank
+            .raw
+            .iter()
+            .copied()
+            .chain(self.capacities.iter().copied()))?;
         let tolerance = CyanidationNumerics {
             maximum_step: numerics.maximum_step,
             absolute_gold_error: numerics.absolute_amount_error,
@@ -357,10 +362,14 @@ impl CarbonInLeachCstr {
             if accepted + rejected >= numerics.maximum_attempts {
                 return Err(FlowCilError::Budget);
             }
-            let finish = if clock + step >= end
-                || end - (clock + step) <= 8.0 * f64::EPSILON * end.abs()
-            {
+            let remaining = end - clock;
+            // Integrate the last two steps as a pair, without leaving a
+            // floating-point remainder too short for chemistry or transport.
+            let final_pair = remaining > step && remaining - step < step;
+            let finish = if remaining <= step {
                 end
+            } else if final_pair {
+                clock.midpoint(end)
             } else {
                 clock + step
             };
@@ -434,7 +443,9 @@ impl CarbonInLeachCstr {
             largest = largest.max(error);
             accepted += 1;
             clock = finish;
-            step = if error <= allowance / 8.0 {
+            step = if final_pair {
+                (end - finish).min(numerics.maximum_step.value())
+            } else if error <= allowance / 8.0 {
                 (h * 2.0).min(numerics.maximum_step.value())
             } else {
                 h
@@ -485,14 +496,14 @@ impl CarbonInLeachCstr {
             current.tank.gold_dissolved,
         )?;
         let capture = |role| -> CilFlowResult<Amount> {
-            Ok(Amount::new(sum(
-                state
-                    .populations
-                    .iter()
-                    .zip(&self.state.populations)
-                    .filter(|(after, _)| after.role == role)
-                    .map(|(after, prior)| after.adsorbed.value() - prior.adsorbed.value()),
-            )?))
+            Ok(Amount::new(sum(state
+                .populations
+                .iter()
+                .zip(&self.state.populations)
+                .filter(|(after, _)| after.role == role)
+                .map(|(after, prior)| {
+                    after.adsorbed.value() - prior.adsorbed.value()
+                }))?))
         };
         if cancelled() {
             return Err(FlowCilError::Cancelled);
@@ -745,12 +756,7 @@ fn shifted_adsorption(
 ) -> CilFlowResult<CoupledTrial> {
     let total = sum(rates.iter().copied())?;
     let mut next = initial.clone();
-    next.tank.raw[3] = signed_shift(
-        initial.tank.raw[3],
-        -total,
-        duration,
-        f64::MAX,
-    )?;
+    next.tank.raw[3] = signed_shift(initial.tank.raw[3], -total, duration, f64::MAX)?;
     next.tank.raw[counterion_index] = signed_shift(
         initial.tank.raw[counterion_index],
         -total,
@@ -758,18 +764,8 @@ fn shifted_adsorption(
         f64::MAX,
     )?;
     for i in 0..rates.len() {
-        next.adsorbed[i] = signed_shift(
-            initial.adsorbed[i],
-            rates[i],
-            duration,
-            capacities[i],
-        )?;
-        next.vacant[i] = signed_shift(
-            initial.vacant[i],
-            -rates[i],
-            duration,
-            capacities[i],
-        )?;
+        next.adsorbed[i] = signed_shift(initial.adsorbed[i], rates[i], duration, capacities[i])?;
+        next.vacant[i] = signed_shift(initial.vacant[i], -rates[i], duration, capacities[i])?;
     }
     let admitted = admit_state(
         &next.tank,
@@ -791,9 +787,7 @@ fn signed_shift(initial: f64, rate: f64, duration: f64, maximum: f64) -> CilFlow
         return Ok(initial);
     }
     let change = product(rate.abs(), duration)?;
-    let next = sum(
-        [initial, if rate < 0.0 { -change } else { change }].into_iter(),
-    )?;
+    let next = sum([initial, if rate < 0.0 { -change } else { change }].into_iter())?;
     if next < 0.0 || next > maximum || (initial > 0.0 && next == 0.0) {
         return Err(CyanidationError::TrialDepletion.into());
     }
@@ -812,14 +806,12 @@ fn signed_fraction(value: f64, divisor: f64) -> CilFlowResult<f64> {
 fn average_rates(rates: [&Vec<f64>; 4]) -> CilFlowResult<Vec<f64>> {
     (0..rates[0].len())
         .map(|i| {
-            Ok(sum(
-                [rates[0][i], rates[1][i], rates[2][i], rates[3][i]]
-                    .into_iter()
-                    .zip([6.0, 3.0, 3.0, 6.0])
-                    .map(|(value, divisor)| signed_fraction(value, divisor))
-                    .collect::<CilFlowResult<Vec<_>>>()?
-                    .into_iter(),
-            )?)
+            Ok(sum([rates[0][i], rates[1][i], rates[2][i], rates[3][i]]
+                .into_iter()
+                .zip([6.0, 3.0, 3.0, 6.0])
+                .map(|(value, divisor)| signed_fraction(value, divisor))
+                .collect::<CilFlowResult<Vec<_>>>()?
+                .into_iter())?)
         })
         .collect()
 }
@@ -841,12 +833,7 @@ fn admit_state(
     }
     let mut proxy = || cancelled();
     let mut work = dosing::work(maximum_work, &mut proxy)?;
-    let solution = evaluate(
-        &tank.layout,
-        &tank.raw,
-        tank.elapsed().value(),
-        &mut work,
-    )?;
+    let solution = evaluate(&tank.layout, &tank.raw, tank.elapsed().value(), &mut work)?;
     let volume = tank.layout.charge.solution_volume;
     let concentration = AmountConcentration::new(quotient(tank.raw[3], volume.value())?);
     let counterion = tank.raw[counterion_index];
@@ -854,10 +841,7 @@ fn admit_state(
     for (index, population) in populations.iter().enumerate() {
         work.tick()?;
         let sorbent = population.sorbent();
-        let loading = AdsorbentLoading::new(quotient(
-            adsorbed[index],
-            sorbent.mass().value(),
-        )?);
+        let loading = AdsorbentLoading::new(quotient(adsorbed[index], sorbent.mass().value())?);
         let mut conditions = sorbent.conditions().clone();
         for (axis, dims) in owned_axes() {
             if matches!(axis, TEMPERATURE_AXIS | VOLUME_AXIS) {
@@ -914,14 +898,12 @@ fn admit_state(
 fn site_balance(states: &[CilSorbentState], capacities: &[f64]) -> CilFlowResult<f64> {
     let mut largest = 0.0_f64;
     for (state, &capacity) in states.iter().zip(capacities) {
-        let residual = sum(
-            [
-                state.adsorbed.value(),
-                state.vacant_capacity.value(),
-                -capacity,
-            ]
-            .into_iter(),
-        )?;
+        let residual = sum([
+            state.adsorbed.value(),
+            state.vacant_capacity.value(),
+            -capacity,
+        ]
+        .into_iter())?;
         if residual.abs() > 512.0 * f64::EPSILON * capacity.max(1.0) {
             return Err(FlowCilError::Arithmetic(
                 "retained carbon site inventory does not close",
@@ -980,10 +962,7 @@ fn conservation_cil_flow(
         cyanide: adjusted.cyanide,
         counterion,
         dissolved_oxygen: adjusted.dissolved_oxygen,
-        maximum_site_residual: Amount::new(site_balance(
-            &state.populations,
-            capacities,
-        )?),
+        maximum_site_residual: Amount::new(site_balance(&state.populations, capacities)?),
     })
 }
 

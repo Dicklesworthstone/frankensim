@@ -14,7 +14,7 @@ use fs_thermochem::stoichiometry::thermodynamics::{
     FormationGibbsSource, gas_liquid::IdealGasLiquidPartition,
 };
 
-fn local(rate: f64) -> LocalGoldCyanidation {
+pub(in crate::cyanide_leach) fn local(rate: f64) -> LocalGoldCyanidation {
     let mut validity = ValidityDomain::unconstrained();
     for (axis, dims) in local_axes() {
         let (lo, hi) = match axis {
@@ -143,13 +143,13 @@ fn transfer_card(kla: f64) -> ConstitutiveModelCard {
         },
     }
 }
-fn transfer(kla: f64) -> OxygenTransfer {
+pub(in crate::cyanide_leach) fn transfer(kla: f64) -> OxygenTransfer {
     OxygenTransfer::from_card(solubility(100_000.0), transfer_card(kla)).unwrap()
 }
-fn bare(rate: f64, charge: CyanidationCharge) -> CyanidationCstr {
+pub(in crate::cyanide_leach) fn bare(rate: f64, charge: CyanidationCharge) -> CyanidationCstr {
     CyanidationCstr::new(local(rate), charge, QueryPoint::new(), fixture::options()).unwrap()
 }
-fn feed(charge: &CyanidationCharge) -> CyanidationFeed {
+pub(in crate::cyanide_leach) fn feed(charge: &CyanidationCharge) -> CyanidationFeed {
     let c = |n: Amount| AmountConcentration::new(n.value() / charge.solution_volume.value());
     CyanidationFeed {
         accessible_gold: c(charge.accessible_gold),
@@ -173,7 +173,7 @@ fn feed(charge: &CyanidationCharge) -> CyanidationFeed {
         competing_metals: vec![],
     }
 }
-fn numerics() -> FlowNumerics {
+pub(in crate::cyanide_leach) fn numerics() -> FlowNumerics {
     FlowNumerics {
         maximum_step: Time::new(0.25),
         absolute_amount_error: Amount::new(2e-10),

@@ -24,10 +24,10 @@ use fs_qty::Pressure;
 /// Attachment retains the tank's original charge, elapsed clock and all history.
 #[derive(Clone, Debug)]
 pub struct AeratedCyanidationCstr {
-    tank: CyanidationCstr,
-    transfer: Arc<OxygenTransfer>,
-    oxygen_in: f64,
-    oxygen_out: f64,
+    pub(super) tank: CyanidationCstr,
+    pub(super) transfer: Arc<OxygenTransfer>,
+    pub(super) oxygen_in: f64,
+    pub(super) oxygen_out: f64,
 }
 
 /// One atomic interval, with liquid streams and gas exchange reported separately.
@@ -226,12 +226,16 @@ impl AeratedCyanidationCstr {
             if accepted + rejected >= numerics.maximum_attempts {
                 return Err(CyanidationError::Budget);
             }
-            let finish =
-                if clock + step >= end || end - (clock + step) <= 8.0 * f64::EPSILON * end.abs() {
-                    end
-                } else {
-                    clock + step
-                };
+            let remaining = end - clock;
+            // Integrate the final two steps as a pair, without a sub-resolution tail.
+            let final_pair = remaining > step && remaining - step < step;
+            let finish = if remaining <= step {
+                end
+            } else if final_pair {
+                clock.midpoint(end)
+            } else {
+                clock + step
+            };
             let middle = clock.midpoint(finish);
             let h = finish - clock;
             if h <= 0.0 || middle <= clock || middle >= finish {
@@ -281,7 +285,9 @@ impl AeratedCyanidationCstr {
             largest = largest.max(error);
             accepted += 1;
             clock = finish;
-            step = if error <= allowance / 8.0 {
+            step = if final_pair {
+                (end - finish).min(numerics.maximum_step.value())
+            } else if error <= allowance / 8.0 {
                 (h * 2.0).min(numerics.maximum_step.value())
             } else {
                 h
@@ -376,14 +382,14 @@ impl AeratedCyanidationCstr {
     }
 }
 
-struct Boundary<'a> {
-    transfer: &'a OxygenTransfer,
-    pressure: Pressure,
-    saturation: Amount,
-    extra: &'a QueryPoint,
+pub(super) struct Boundary<'a> {
+    pub(super) transfer: &'a OxygenTransfer,
+    pub(super) pressure: Pressure,
+    pub(super) saturation: Amount,
+    pub(super) extra: &'a QueryPoint,
 }
 impl Boundary<'_> {
-    fn admit(&self, state: &CyanidationFlowState) -> Result<QueryPoint> {
+    pub(super) fn admit(&self, state: &CyanidationFlowState) -> Result<QueryPoint> {
         // The transfer source owns the absolute process clock. It does not turn
         // the local leach card into a residence-time or batch-age correlation.
         let point = state.conditions.clone().with_quantity(
@@ -403,13 +409,13 @@ impl Boundary<'_> {
     }
 }
 #[derive(Clone)]
-struct GasTrial {
-    liquid: Trial,
-    inward: f64,
-    outward: f64,
+pub(super) struct GasTrial {
+    pub(super) liquid: Trial,
+    pub(super) inward: f64,
+    pub(super) outward: f64,
 }
 impl GasTrial {
-    fn new(raw: Vec<f64>) -> Self {
+    pub(super) fn new(raw: Vec<f64>) -> Self {
         Self {
             liquid: Trial {
                 outlet: vec![0.0; raw.len()],
@@ -420,16 +426,16 @@ impl GasTrial {
             outward: 0.0,
         }
     }
-    fn values(&self) -> impl Iterator<Item = f64> + '_ {
+    pub(super) fn values(&self) -> impl Iterator<Item = f64> + '_ {
         self.liquid.values().chain([self.inward, self.outward])
     }
 }
-struct AeratedProblem<'a> {
-    liquid: Problem<'a>,
-    boundary: Boundary<'a>,
+pub(super) struct AeratedProblem<'a> {
+    pub(super) liquid: Problem<'a>,
+    pub(super) boundary: Boundary<'a>,
 }
 impl AeratedProblem<'_> {
-    fn gas(
+    pub(super) fn gas(
         &self,
         state: &mut GasTrial,
         h: f64,
@@ -486,7 +492,7 @@ impl AeratedProblem<'_> {
     }
 }
 #[allow(clippy::too_many_arguments)]
-fn open_conservation(
+pub(super) fn open_conservation(
     layout: &FlowLayout,
     state: &CyanidationFlowState,
     initial: &[f64],
@@ -507,4 +513,4 @@ fn open_conservation(
 
 #[cfg(test)]
 #[path = "aeration/tests.rs"]
-mod tests;
+pub(super) mod tests;

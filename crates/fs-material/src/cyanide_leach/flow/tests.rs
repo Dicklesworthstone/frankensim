@@ -615,3 +615,43 @@ fn batch_card_feed_source_budget_and_cancellation_refusals_are_atomic() {
     );
     unchanged(&limited, &before);
 }
+
+#[test]
+fn resolved_gross_transport_accepts_rounding_at_near_equilibrium() {
+    let mut charge = fixture::charge(1.0);
+    charge.accessible_gold = Amount::new(0.2);
+    charge.solution_volume = Volume::new(1.0);
+    for target in [0.2_f64.next_down(), 0.2_f64.next_up()] {
+        let mut tank = CyanidationCstr::new(
+            model(0.0, false),
+            charge.clone(),
+            QueryPoint::new(),
+            fixture::options(),
+        )
+        .unwrap();
+        let mut inlet = feed(&charge);
+        inlet.accessible_gold = AmountConcentration::new(target);
+        let report = tank
+            .advance(
+                Time::new(0.25),
+                VolumetricFlowRate::new(0.5),
+                &inlet,
+                numerics(),
+                || false,
+            )
+            .unwrap();
+        // The exact net change is under half an ulp. Real streams still cross
+        // the boundary and their independent analytical integral is retained.
+        assert_eq!(
+            report.state.inventory.accessible_gold,
+            charge.accessible_gold
+        );
+        assert!(report.inlet.accessible_gold.value() > 0.0);
+        assert!(report.outlet.accessible_gold.value() > 0.0);
+        let x = 0.125_f64;
+        let exported = target * x + (0.2 - target) * -(-x).exp_m1();
+        close(report.outlet.accessible_gold.value(), exported, 2e-17);
+        balances(&report);
+        assert_eq!(report.interval_gold_dissolved, Amount::new(0.0));
+    }
+}
