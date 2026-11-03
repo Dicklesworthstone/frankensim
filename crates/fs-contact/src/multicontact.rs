@@ -6,6 +6,7 @@
 //! restitution. Geometry, inertia assembly and the physical state update belong
 //! to the caller. This is an instantaneous event, not a contact time stepper.
 
+use fs_math::dd::Dd;
 use fs_solver::orthant::active_set::{
     SpdOrthantConfig, SpdOrthantError, SpdOrthantSolution, solve_spd_orthant,
 };
@@ -112,13 +113,16 @@ pub struct MultiImpactResult {
     pub determinacy: MultiImpactDeterminacy,
     /// Nonnegative normal impulses; geometrically inactive entries are zero.
     pub normal_impulses: Vec<f64>,
-    /// Independently reconstructed speeds, including inactive contacts.
+    /// Independently reconstructed speeds, including inactive contacts. Each
+    /// complete original-matrix response is reduced before rounding to f64.
     pub relative_normal_speeds_after: Vec<f64>,
     /// Nonnegative rebound targets, used only on the active set.
     pub restitution_targets: Vec<f64>,
     /// Active contacts in caller order; indexes the solver's reduced vectors.
     pub active_indices: Vec<usize>,
-    /// Sum of midpoint relative speeds paired with their impulses.
+    /// Sum of midpoint relative speeds paired with their impulses. Products,
+    /// cancellation between contact rows and unrounded velocity responses are
+    /// retained in double-double arithmetic before this final f64 reduction.
     /// For a physical assembly this equals kinetic-energy change minus support work.
     /// The PSD lane requires pre-impact relative motion to lie in the mobility
     /// range, making this total independent of a nullspace impulse gauge.
@@ -286,39 +290,42 @@ pub fn solve_normal_impacts(
         normal_impulses[index] = impulse;
     }
     let mut relative_normal_speeds_after = Vec::with_capacity(n);
+    let mut work = Dd::ZERO;
+    let mut work_scale = Dd::ZERO;
     for i in 0..n {
         poll(&mut cancelled)?;
-        let mut speed = contacts[i].relative_normal_speed;
+        let before = Dd::from_f64(contacts[i].relative_normal_speed);
+        let mut speed = before;
         for (j, &impulse) in normal_impulses.iter().enumerate() {
-            speed = finite(delassus[i * n + j].mul_add(impulse, speed))?;
+            speed = add_product(speed, delassus[i * n + j], impulse);
         }
-        relative_normal_speeds_after.push(speed);
-    }
-    for &index in &active_indices {
-        let speed = relative_normal_speeds_after[index];
-        let gradient = finite(speed - restitution_targets[index])?;
-        let residual = if normal_impulses[index] > 0.0 {
-            gradient.abs()
-        } else {
-            (-gradient).max(0.0)
+        let rounded_speed = finite(speed.to_f64())?;
+        finite(speed.lo)?;
+        relative_normal_speeds_after.push(rounded_speed);
+        if contacts[i].gap <= contacts[i].activation_tolerance {
+            let gradient = finite((speed - Dd::from_f64(restitution_targets[i])).to_f64())?;
+            let residual = if normal_impulses[i] > 0.0 {
+                gradient.abs()
+            } else {
+                (-gradient).max(0.0)
+            }
+            .max((-rounded_speed).max(0.0));
+            if residual > config.solver.gradient_tolerance {
+                return Err(MultiImpactError::UnresolvedContact { index: i, residual });
+            }
         }
-        .max((-speed).max(0.0));
-        if residual > config.solver.gradient_tolerance {
-            return Err(MultiImpactError::UnresolvedContact { index, residual });
-        }
+        // Pair the impulse with the complete original response, before a
+        // rounded endpoint or midpoint can erase a small net transfer. Scaling
+        // the two endpoints first avoids overflow in their same-sign sum.
+        let midpoint = before * Dd::from_f64(0.5) + speed * Dd::from_f64(0.5);
+        let term = midpoint * Dd::from_f64(normal_impulses[i]);
+        work = work + term;
+        work_scale = work_scale + term.abs();
     }
-    let mut relative_work = 0.0;
-    let mut work_scale = 0.0;
-    for i in 0..n {
-        poll(&mut cancelled)?;
-        let midpoint = f64::midpoint(
-            contacts[i].relative_normal_speed,
-            relative_normal_speeds_after[i],
-        );
-        let work = finite(midpoint * normal_impulses[i])?;
-        relative_work = finite(relative_work + work)?;
-        work_scale = finite(work_scale + work.abs())?;
-    }
+    let relative_work = finite(work.to_f64())?;
+    finite(work.lo)?;
+    finite(work_scale.lo)?;
+    let work_scale = finite(work_scale.to_f64())?;
     let allowed = finite(config.energy_tolerance + 64.0 * f64::EPSILON * work_scale)?;
     if relative_work > allowed {
         return Err(MultiImpactError::EnergyIncrease {
@@ -462,6 +469,22 @@ fn solve_mobility(
     ))
 }
 
+// Preserve the fused owner's representable cancellation when the individual
+// product overflows. The common path remains an unscaled error-free product.
+fn add_product(sum: Dd, a: f64, b: f64) -> Dd {
+    let value = sum + Dd::from_f64(a) * Dd::from_f64(b);
+    if value.hi.is_finite() && value.lo.is_finite() {
+        value
+    } else {
+        let (a, b) = if a.abs() >= b.abs() {
+            (0.5 * a, b)
+        } else {
+            (a, 0.5 * b)
+        };
+        (sum * Dd::from_f64(0.5) + Dd::from_f64(a) * Dd::from_f64(b)) * Dd::from_f64(2.0)
+    }
+}
+
 fn finite(value: f64) -> Result<f64, MultiImpactError> {
     if value.is_finite() {
         Ok(value)
@@ -559,6 +582,63 @@ mod tests {
     }
 
     #[test]
+    fn full_cross_response_retains_small_motion_between_opposing_large_impulses() {
+        // Three unit-mobility contacts stop three independent unit speeds.
+        // The fourth, inactive observation has Jacobian [a, 1, -a, a].
+        // Its fourth mechanical rate is 1/a, so its initial speed is zero
+        // and its actual final speed is one. Neither an impulse iteration
+        // order nor the large opposing first/third transfers may erase it.
+        let a = 2.0_f64.powi(54);
+        let raw = [
+            1.0,
+            0.0,
+            0.0,
+            a,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            -a,
+            a,
+            1.0,
+            -a,
+            3.0 * a * a,
+        ];
+        let mut separated = contact(0.0, 0.0);
+        separated.gap = 1.0;
+        let original = [contact(-1.0, 0.0); 3];
+        for order in [[0, 1, 2, 3], [2, 0, 3, 1]] {
+            let contacts: Vec<_> = order
+                .iter()
+                .map(|&i| if i == 3 { separated } else { original[i] })
+                .collect();
+            let mut matrix = Vec::with_capacity(16);
+            for &i in &order {
+                for &j in &order {
+                    matrix.push(raw[4 * i + j]);
+                }
+            }
+            let result =
+                solve_normal_impacts(&contacts, &matrix, MultiImpactConfig::default(), || false)
+                    .unwrap();
+            for (row, &original_row) in order.iter().enumerate() {
+                if original_row == 3 {
+                    assert_eq!(result.normal_impulses[row], 0.0);
+                    assert_eq!(result.relative_normal_speeds_after[row], 1.0);
+                } else {
+                    assert_eq!(result.normal_impulses[row], 1.0);
+                    assert_eq!(result.relative_normal_speeds_after[row], 0.0);
+                }
+            }
+            assert_eq!(result.relative_work, -1.5);
+            assert_eq!(result.dissipated_energy, 1.5);
+        }
+    }
+
+    #[test]
     fn negative_gaps_and_nonpassive_curvature_refuse_without_repair() {
         let mut penetrating = contact(-1.0, 0.0);
         penetrating.gap = -1.0e-15;
@@ -580,6 +660,46 @@ mod tests {
                 SpdOrthantError::NotPositiveDefinite { .. } | SpdOrthantError::Degenerate { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn simultaneous_counterwork_matches_independent_three_body_kinetic_changes() {
+        // Three unit masses with velocities [0, v, v/2] and contact rows
+        // [1,-1,0], [0,1,-1]. Near e=sqrt(3)/2, large contact works cancel;
+        // a rounded relative midpoint can lose the entire net transfer.
+        let v = 2.0_f64.powi(30);
+        let e = 0.5 * 3.0_f64.sqrt();
+        let mut config = MultiImpactConfig::default();
+        config.solver.gradient_tolerance = 1.0e-5;
+        for restitution in [e.next_down(), e, e.next_up()] {
+            let out = solve_normal_impacts(
+                &[contact(-v, restitution), contact(0.5 * v, 0.0)],
+                &[2.0, -1.0, -1.0, 2.0],
+                config,
+                || false,
+            )
+            .unwrap();
+            let p = Dd::from_f64(out.normal_impulses[0]);
+            let q = Dd::from_f64(out.normal_impulses[1]);
+            // Reconstruct each body's velocity change, then its kinetic
+            // change. No contact-space W or returned endpoint enters this
+            // independent physical account, and no bulk K is subtracted.
+            let impulses = [p, q - p, -q];
+            let velocities = [0.0, v, 0.5 * v];
+            let mut kinetic_change = Dd::ZERO;
+            for (impulse, velocity) in impulses.into_iter().zip(velocities) {
+                kinetic_change = kinetic_change
+                    + impulse * (Dd::from_f64(velocity) + impulse * Dd::from_f64(0.5));
+            }
+            let expected = kinetic_change.to_f64();
+            assert!(expected.abs() < 1024.0);
+            assert!(
+                (out.relative_work - expected).abs() < 1.0e-10,
+                "contact work {}, native body change {expected}",
+                out.relative_work,
+            );
+            assert_eq!(out.dissipated_energy, (-expected).max(0.0));
+        }
     }
 
     #[test]
