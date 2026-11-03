@@ -8,6 +8,8 @@ const L: f64 = 0.02;
 const AREA: f64 = 0.0001;
 const MU: f64 = 0.01;
 
+mod barus;
+
 fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:e} != {b:e}");
 }
@@ -422,7 +424,7 @@ fn complete_network_tangent_is_reciprocal_and_differentiates_gap_and_wall_motion
 }
 
 #[test]
-fn unsupported_pressure_laws_collapsed_sliding_and_late_refusals_leave_outputs_untouched() {
+fn invalid_rows_collapsed_sliding_and_late_refusals_leave_outputs_untouched() {
     let base = film(&[H, H]);
     assert!(ShearedFilm::new(base.clone(), vec![walls(1.0)]).is_err());
     let mut invalid = vec![walls(1.0), walls(-1.0)];
@@ -435,15 +437,6 @@ fn unsupported_pressure_laws_collapsed_sliding_and_late_refusals_leave_outputs_u
     unrepresentable[0].lower[1] = -f64::MAX;
     unrepresentable[0].upper[1] = f64::MAX;
     assert!(ShearedFilm::new(base.clone(), unrepresentable).is_err());
-    let barus = base.with_barus_viscosity(1e-4).unwrap();
-    assert!(ShearedFilm::new(barus.clone(), vec![walls(1.0); 2]).is_err());
-    assert!(
-        ShearedFilm::from_stratified(
-            StratifiedFilm::new(&barus, vec![layers(), layers()]).unwrap(),
-            vec![walls(1.0); 2],
-        )
-        .is_err()
-    );
     let moving = ShearedFilm::new(base, vec![walls(1.0); 2]).unwrap();
     let sentinel = ShearChannelReport {
         volume_flow_m3_s: 42.0,

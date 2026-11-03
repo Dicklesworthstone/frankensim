@@ -3,7 +3,11 @@
 //! For normalized gap fluidity A = integral(1/mu dz), z0 = integral(z/mu dz)/A,
 //! entrainment is Qc = width*h*(z0*Ulower + (1-z0)*Uupper), and relative-wall
 //! resistance is S = width*length/(h*A). The native graph solves
-//! L*p = swept_volume_rate - div(Qc); pressure-driven flow is Qp = G*delta_p.
+//! L*psi = swept_volume_rate - div(Qc). A common Barus multiplier
+//! mu(z,p)=mu_0(z)*exp(alpha*p) leaves Qc unchanged and gives
+//! Qp=G*delta_psi. Its exact length-averaged shear multiplier is
+//! M=delta_p/delta_psi, with M=exp(alpha*p) at equal endpoint pressure.
+//! Thus S=width*length*M/(h*A); at alpha=0, psi=p and M=1 exactly.
 //!
 //! Normal pressure force alone does not account for a moving wall's work.
 //! Positive RESISTING wall forces along the oriented channel are
@@ -18,9 +22,13 @@
 //!
 //! Profiles and linear wall rows are prescribed and held fixed within a solve.
 //! The model supplies no fluid inertia, thermal/advection time owner, layer
-//! inventory, interface motion, slip or dry-contact friction. Nonzero Barus
-//! coefficients explicitly refuse: the constant-viscosity wall drag is not
-//! silently reused under a pressure-dependent law.
+//! inventory, interface motion, slip or dry-contact friction. Barus support
+//! remains the native classical Reynolds reduction: a prescribed common alpha
+//! and admitted pressure interval, not a general high-pressure or EHL claim.
+//! Cross-gap pressure corrections are outside this model; see Gustafsson et al.
+//! (2015), <https://doi.org/10.1016/j.apm.2015.03.028>.
+
+use fs_math::det;
 
 mod layer_work;
 use layer_work::LayerWork;
@@ -85,8 +93,9 @@ struct Coefficients {
 ///
 /// The original graph and profiles are retained. Force and tangent evaluations
 /// allocate no heap storage and use the existing bounded pressure factorization.
-/// At fixed geometry the complete velocity resistance is reciprocal and
-/// nonnegative. A normal-pressure force without the wall tractions is not the
+/// At fixed geometry the constant-viscosity resistance is reciprocal. Barus
+/// pressure dependence keeps nonnegative work but generally has a nonsymmetric
+/// tangent. A normal-pressure force without the wall tractions is not the
 /// operator represented here.
 ///
 /// Mean and relative wall rows are compiled before evaluating velocity. Small
@@ -131,9 +140,6 @@ impl ShearedFilm {
         profiles: Option<Vec<GapViscosityProfile>>,
         walls: Vec<WallVelocityPorts>,
     ) -> Result<Self, FilmError> {
-        if film.pressure_viscosity_coefficient_per_pa() != 0.0 {
-            return fail("sliding film requires pressure-independent layer viscosities");
-        }
         if walls.len() != film.channel_count()
             || walls.iter().any(|wall| {
                 wall.lower.len() != film.port_count()
@@ -316,7 +322,9 @@ impl ShearedFilm {
             let coefficient = &self.coefficients[k];
             let dp = state.pressure.pressure[edge.from]
                 - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
-            let pressure_flow = state.pressure.conductance[k] * dp;
+            let potential_drop = state.pressure.potential[edge.from]
+                - edge.to.map_or(0.0, |j| state.pressure.potential[j]);
+            let pressure_flow = state.pressure.conductance[k] * potential_drop;
             let pressure_loss = pressure_flow * dp;
             let shear_force = local.drag * local.relative_speed;
             let shear_loss = shear_force * local.relative_speed;
@@ -381,9 +389,10 @@ impl ShearedFilm {
     /// Exact directional derivative with independent configuration/rate directions.
     ///
     /// The native factorization is reused for
-    /// L*dp = A*B*dv - (dL)*p - div(dQc). Both wall pressure tractions and
-    /// the 1/h shear resistance are differentiated before their transpose
-    /// projection. Profiles and wall rows are fixed data during differentiation.
+    /// L*dpsi = A*B*dv - (dL)*psi - div(dQc). Both wall pressure tractions and
+    /// the M/h shear resistance are differentiated before their transpose
+    /// projection, including the Barus inverse and exact viscosity average.
+    /// Profiles and wall rows are fixed data during differentiation.
     /// Admission and output publication have the same atomic semantics as force.
     pub fn tangent_into(
         &self,
@@ -420,15 +429,15 @@ impl ShearedFilm {
             } else {
                 0.0
             };
-            let dp = state.pressure.pressure[edge.from]
-                - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
+            let dpsi = state.pressure.potential[edge.from]
+                - edge.to.map_or(0.0, |j| state.pressure.potential[j]);
             let entrainment_change = if coefficient.moving {
                 let mean_change = dot(&coefficient.mean_velocity, dv);
                 edge.width_m * (dh * local.mean_speed + local.gap * mean_change)
             } else {
                 0.0
             };
-            let flux_change = dg * dp + entrainment_change;
+            let flux_change = dg * dpsi + entrainment_change;
             rhs[edge.from] -= flux_change;
             if let Some(j) = edge.to {
                 rhs[j] += flux_change;
@@ -440,6 +449,16 @@ impl ShearedFilm {
             self.film.cell_count(),
             &mut rhs,
         )?;
+        let potential_change = rhs;
+        let alpha = self.film.pressure_viscosity_coefficient_per_pa();
+        if alpha != 0.0 {
+            for (dp, psi) in rhs[..self.film.cell_count()]
+                .iter_mut()
+                .zip(&state.pressure.potential)
+            {
+                *dp /= 1.0 - alpha * psi;
+            }
+        }
         let mut candidate = [0.0; MAX_PORTS];
         self.film.project(&rhs, &mut candidate);
         for (k, edge) in self.film.channels.iter().enumerate() {
@@ -453,8 +472,20 @@ impl ShearedFilm {
                 - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
             let pressure_change = rhs[edge.from] - edge.to.map_or(0.0, |j| rhs[j]);
             let relative_change = dot(&coefficient.relative_velocity, dv);
-            let shear_change = (-local.drag * (dh / local.gap)) * local.relative_speed
+            let mut shear_change = (-local.drag * (dh / local.gap)) * local.relative_speed
                 + local.drag * relative_change;
+            if alpha != 0.0 {
+                let (_, multiplier_change) = barus_mean(
+                    alpha,
+                    state.pressure.potential[edge.from],
+                    edge.to.map_or(0.0, |j| state.pressure.potential[j]),
+                    potential_change[edge.from],
+                    edge.to.map_or(0.0, |j| potential_change[j]),
+                )?;
+                shear_change += (coefficient.shear_scale / local.gap)
+                    * multiplier_change
+                    * local.relative_speed;
+            }
             let pressure_force_change = edge.width_m * (dh * dp + local.gap * pressure_change);
             for (j, output) in candidate[..self.film.ports].iter_mut().enumerate() {
                 *output += -coefficient.mean_velocity[j] * pressure_force_change
@@ -519,8 +550,86 @@ impl ShearedFilm {
             velocity,
             &entrainment[..self.film.channel_count()],
         )?;
+        let alpha = self.film.pressure_viscosity_coefficient_per_pa();
+        if alpha != 0.0 {
+            for (k, edge) in self.film.channels.iter().enumerate() {
+                if self.coefficients[k].moving {
+                    let (multiplier, _) = barus_mean(
+                        alpha,
+                        pressure.potential[edge.from],
+                        edge.to.map_or(0.0, |j| pressure.potential[j]),
+                        0.0,
+                        0.0,
+                    )?;
+                    channels[k].drag *= multiplier;
+                    if !channels[k].drag.is_finite() || channels[k].drag <= 0.0 {
+                        return fail("pressure-dependent sliding resistance is not representable");
+                    }
+                }
+            }
+        }
         Ok(State { pressure, channels })
     }
+}
+
+// Integrate exp(alpha*p(x)) along the passage, where psi(x) is affine.
+// The coincident-pressure divided difference and its derivative are evaluated
+// by a fixed convergent series; no pressure subtraction or quadrature is used.
+fn barus_mean(
+    alpha: f64,
+    from: f64,
+    to: f64,
+    from_change: f64,
+    to_change: f64,
+) -> Result<(f64, f64), FilmError> {
+    if alpha == 0.0 {
+        return Ok((1.0, 0.0));
+    }
+    let (high, low, high_change, low_change) = if from >= to {
+        (from, to, from_change, to_change)
+    } else {
+        (to, from, to_change, from_change)
+    };
+    let r = 1.0 - alpha * high;
+    let delta = high - low;
+    let x = alpha * delta / r;
+    let (mean, change) = if x <= 0.125 {
+        let mut logarithmic = 1.0;
+        let mut high_weight = 0.5;
+        let mut low_weight = 0.5;
+        let mut power = 1.0;
+        for n in 1..=20 {
+            power *= -x;
+            logarithmic += power / f64::from(n + 1);
+            high_weight += power / f64::from(n + 2);
+            low_weight += power * f64::from(n + 1) / f64::from(n + 2);
+        }
+        let mean = logarithmic / r;
+        let change = if high_change == 0.0 && low_change == 0.0 {
+            0.0
+        } else {
+            (alpha / r) * ((high_weight * high_change + low_weight * low_change) / r)
+        };
+        (mean, change)
+    } else {
+        let r_low = 1.0 - alpha * low;
+        let log_ratio = if x.is_finite() {
+            det::ln(1.0 + x)
+        } else {
+            det::ln(r_low) - det::ln(r)
+        };
+        let mean = (log_ratio / alpha) / delta;
+        let change = if high_change == 0.0 && low_change == 0.0 {
+            0.0
+        } else {
+            ((high_change / r - low_change / r_low) - mean * (high_change - low_change)) / delta
+        };
+        (mean, change)
+    };
+    if !mean.is_finite() || mean <= 0.0 || !change.is_finite() {
+        return fail("Barus sliding viscosity average or tangent is not representable");
+    }
+    Ok((mean, change))
 }
 
 #[derive(Clone, Copy, Default)]

@@ -32,8 +32,8 @@ velocity rows to the same work-conjugate mechanical ports as native normal
 film motion. Uniform-channel and retained-stratified constructors compile
 the harmonic shear viscosity and two independently integrated wall-distance
 entrainment weights. The existing graph and factorization solve
-`L p = A B v - div(Qc)`. Combined normal pressure and transposed wall
-tractions satisfy `F dot v = sum(G*(delta_p)^2 + S*(delta_U)^2)`;
+`L psi = A B v - div(Qc)`. Combined normal pressure and transposed wall
+tractions satisfy `F dot v = sum(G*delta_psi*delta_p + S*(delta_U)^2)`;
 total flow times pressure drop alone is not the sliding passage's heat.
 
 The directional tangent differentiates aperture conductance, entrainment,
@@ -41,8 +41,26 @@ pressure wall tractions and inverse-gap shear drag, reusing the native
 pressure factorization. Bounded stack scratch, atomic outputs and original
 pressure/gap limits remain. Zero wall rows recover the native pressure
 operator and exact passage closure; channels with nonzero wall rows require
-positive aperture. Nonzero Barus coefficients explicitly refuse. Per-channel
+positive aperture. Per-channel
 reports retain total flow, entrainment, pressure work and shear work.
+
+A common Barus law `mu(z,p)=mu_0(z)*exp(alpha*p)` retains the same pressure
+factorization and entrainment weights. The exact length-average multiplier
+`M=delta_p/delta_psi` multiplies the harmonic shear viscosity, including
+`M=exp(alpha*p)` when both endpoints have the same pressure. Stable divided
+differences retain this limit and its two-endpoint derivative. The complete
+tangent differentiates potential, physical pressure and this wall drag; it is
+generally nonsymmetric. Zero alpha preserves the original arithmetic. Layer
+work uses the same pressure and shear amplitudes, so its cross terms and sum
+remain consistent with the mechanical power without another flow solve.
+
+Four focused G1/G3/G4 groups check independent local Stokes-work quadrature
+along and across a layered passage, positive and suction pressure with unequal
+wall speeds, multicell continuity and full directional tangents, equal-pressure
+Couette drag, fixed-wall native identity and atomic pressure-barrier refusal.
+This is the existing classical thin-gap Reynolds approximation within the
+declared pressure range; it adds no cross-gap pressure correction, fluid
+compressibility, cavitation, thermal evolution or general EHL accuracy claim.
 
 Mean and relative wall velocity rows are compiled once and reused in flow,
 force and tangent evaluation. A small relative sliding coordinate therefore
