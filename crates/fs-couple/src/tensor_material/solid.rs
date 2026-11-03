@@ -7,6 +7,8 @@
 pub mod thermal;
 /// Exact source queries and memory-preserving operator rebuilding.
 pub mod source;
+/// Prepared fixed-clock mechanics with exact shared material history.
+pub mod prepared;
 
 use super::*;
 use fs_solid::linear3::visco::{ProjectedViscoSolid, ViscoElementError};
