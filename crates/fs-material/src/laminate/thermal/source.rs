@@ -14,8 +14,8 @@
 
 use super::{LaminaThermalStrain, LaminateThermalError, PreparedLaminateThermal};
 use crate::laminate::{
-    LaminaLayer, LaminateError, LaminateSection, LaminateShearModel, LayerLaw,
-    MAX_LAMINA_LAYERS, ReferenceSurface,
+    LaminaLayer, LaminateError, LaminateSection, LaminateShearModel, LayerLaw, MAX_LAMINA_LAYERS,
+    ReferenceSurface,
 };
 use crate::state_point::{
     DENSITY_PROPERTY, INVERSE_TEMPERATURE_DIMS, IntegratedIsotropicThermalExpansion,
@@ -200,8 +200,10 @@ impl LaminateThermalSource {
     /// cylindrical probe axes are fixed relative to the section x/y frame and
     /// rotate with it when a shell consumer places the section in world space.
     /// No closure selection changes the original claims, expansion paths, A/B/D
-    /// or reference mass. This remains held-temperature mechanics: the existing
-    /// differentiated shear potential only admits `DirectionalWhitney`.
+    /// or reference mass. The shear potential differentiates either selected
+    /// closure at fixed geometry and axes, including finite temperature work.
+    /// Whole-temperature-box shear capacity bounds currently admit only
+    /// `DirectionalWhitney`; coupled point derivatives do not certify that bound.
     pub fn try_new_with_shear_model(
         inputs: Vec<LaminaSourceInput>,
         reference: ReferenceSurface,
@@ -372,7 +374,7 @@ impl LaminateThermalSource {
                 self.reference_section.reference(),
                 self.shear_model(),
             )
-                .map_err(LaminateThermalSourceError::Section)?,
+            .map_err(LaminateThermalSourceError::Section)?,
         );
         let prepared = PreparedLaminateThermal::try_new(section, &profiles, &mut cancelled)
             .map_err(|e| match e {

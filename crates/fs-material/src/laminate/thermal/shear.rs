@@ -1,10 +1,12 @@
 //! Temperature derivatives of the ORIGINAL whole-stack shear approximation.
 //!
-//! The native laminate uses directional Whitney neutral axes and energy
-//! integrals, followed by a positive diagonal congruence for off-axis shear.
-//! Every layer affects those integrals. Differentiating raw local G, or putting
-//! a separate 5/6 on each layer, therefore gives the wrong thermal potential.
-//! This module differentiates that same native expression with fs-ad duals.
+//! The original source selects either directional Whitney neutral axes and
+//! energy integrals, or coupled equilibrated cylindrical bending with declared
+//! physical probe axes. Every layer affects the selected whole-stack closure.
+//! Differentiating raw local G, or putting a separate 5/6 on each layer, therefore
+//! gives the wrong thermal potential. This module differentiates the selected
+//! native expression with fs-ad duals, including the complete coupled A^-1 B,
+//! resultant normalization and transverse complementary energy when selected.
 //!
 //! For one section shear strain gamma and reference area A, Psi = A gamma^T H
 //! gamma / 2. Its layer-temperature conjugates are S_i = -Psi_{T_i}; the one
@@ -12,11 +14,12 @@
 //! arbitrary allocation of shear free/internal energy to individual layers.
 //! The entropy Hessian action exposes the nonlocal thermal-capacity response.
 //!
-//! This retains the native directional Whitney approximation; it does not
-//! promote it to a general coupled three-dimensional warping solution. The
-//! native numerical 5/6 fallback is refused here, even for a zero derivative
-//! direction. No derivative is claimed through that fallback or a source kink.
-//! Geometry, orientation, reference density and mass stay fixed.
+//! Neither reduction claims a general three-dimensional warping solution. The
+//! Whitney numerical 5/6 fallback is refused here, even for a zero derivative
+//! direction. No derivative is claimed through a fallback, source kink or
+//! unresolved coupled probe rank. Geometry, orientation, physical probe axes,
+//! reference density and mass stay fixed. The separate whole-temperature-box
+//! capacity bound currently admits only the directional Whitney closure.
 
 pub mod bounds;
 pub mod increment;
@@ -81,6 +84,7 @@ fn positive(x: f64) -> Result<(), LaminateShearThermoelasticError> {
 
 #[derive(Clone, Debug)]
 struct Layer {
+    thickness_m: f64,
     bottom: f64,
     top: f64,
     /// Rotated Q and its exact two temperature derivatives.
@@ -151,11 +155,7 @@ impl ResolvedLaminateShearThermoelastic {
             ));
         }
         let native = current.prepared().section();
-        if native.shear_model() != LaminateShearModel::DirectionalWhitney {
-            return Err(invalid(
-                "thermal shear derivatives require the directional Whitney closure",
-            ));
-        }
+        let model = native.shear_model();
         let mut layers = Vec::with_capacity(laws.len());
         let mut temperatures = Vec::with_capacity(laws.len());
         for (i, ((law, source), material)) in
@@ -195,6 +195,7 @@ impl ResolvedLaminateShearThermoelastic {
             let geometry = &native.layer_integrals()[i];
             let (sin, cos) = input.orientation_rad.sin_cos();
             layers.push(Layer {
+                thickness_m: input.thickness_m,
                 bottom: geometry.z_bottom_m,
                 top: geometry.z_top_m,
                 q,
@@ -206,12 +207,23 @@ impl ResolvedLaminateShearThermoelastic {
             });
             temperatures.push(resolved.temperature_k());
         }
-        // Evaluate the unmodified smooth Whitney branch before differentiating.
-        // A constant direction must not hide the native 5/6 fallback.
-        let value = evaluate(&layers, &|_, c| c[0], &mut cancelled)?;
+        // Admit the selected native branch before differentiating. A constant
+        // direction must not hide a Whitney fallback or coupled probe refusal.
+        let value = evaluate(&layers, model, &|_, c| c[0], &mut cancelled)?;
         let native_value = *native.shear_pa_m();
+        let operator_scale = native_value
+            .iter()
+            .chain(&value)
+            .map(|x| x.abs())
+            .fold(0.0_f64, f64::max);
         for (&actual, &expected) in value.iter().zip(&native_value) {
-            let scale = actual.abs().max(expected.abs());
+            // Coupled off-diagonal terms can vanish by cancellation. Compare
+            // their roundoff against the operator, preserving the legacy
+            // Whitney admission arithmetic exactly.
+            let scale = match model {
+                LaminateShearModel::DirectionalWhitney => actual.abs().max(expected.abs()),
+                LaminateShearModel::EquilibratedCylindrical { .. } => operator_scale,
+            };
             if (actual - expected).abs() > 4096.0 * f64::EPSILON * scale {
                 return Err(invalid(
                     "source shear potential disagrees with the native section operator",
@@ -223,6 +235,7 @@ impl ResolvedLaminateShearThermoelastic {
             check(&mut cancelled)?;
             let derivative = evaluate(
                 &layers,
+                model,
                 &|layer, c| Dual::<f64, 1> {
                     re: c[0],
                     eps: [if layer == coordinate { c[1] } else { 0.0 }],
@@ -258,7 +271,8 @@ impl ResolvedLaminateShearThermoelastic {
         &self.stiffness
     }
     /// dH/dT_i [Pa m/K] for each original layer, including all neutral-axis,
-    /// Whitney energy-integral and cross-shear dependencies.
+    /// energy-integral, resultant-normalization and cross-shear dependencies
+    /// of the original selected closure.
     pub fn stiffness_temperature_derivatives_pa_m_k(&self) -> &[[f64; 4]] {
         &self.gradient
     }
@@ -275,6 +289,7 @@ impl ResolvedLaminateShearThermoelastic {
         self.admit_direction(direction)?;
         let values = evaluate(
             &self.layers,
+            self.current.prepared().section().shear_model(),
             &|layer, c| seed(c, direction[layer], direction[layer]),
             &mut cancelled,
         )?;
@@ -346,6 +361,7 @@ impl ResolvedLaminateShearThermoelastic {
             check(&mut cancelled)?;
             let response = evaluate(
                 &self.layers,
+                self.current.prepared().section().shear_model(),
                 &|layer, c| {
                     seed(
                         c,
@@ -434,15 +450,33 @@ fn quadratic(
     )
 }
 
-// Same neutral-axis and polynomial energy integrals as LaminateSection. The
-// only different branch policy is a typed refusal in place of its numerical
-// fallback. fs-ad supplies the derivative arithmetic; no local AD engine or
-// finite-difference approximation is introduced here.
+// The coupled branch uses exactly the native generic kernel. The directional
+// branch below preserves its original operation order and typed fallback
+// refusal. Both retain original Q/G temperature derivatives through fs-ad.
 fn evaluate<T: Real>(
     layers: &[Layer],
+    model: LaminateShearModel,
     seed: &impl Fn(usize, [f64; 3]) -> T,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<[T; 4], LaminateShearThermoelasticError> {
+    if let LaminateShearModel::EquilibratedCylindrical { bending_axis_rad } = model {
+        let mut coupled = Vec::with_capacity(layers.len());
+        for (i, layer) in layers.iter().enumerate() {
+            check(cancelled)?;
+            coupled.push(crate::laminate::shear::EquilibratedLayer {
+                thickness_m: layer.thickness_m,
+                q: core::array::from_fn(|k| seed(i, layer.q.map(|row| row[k]))),
+                g: core::array::from_fn(|k| seed(i, layer.g.map(|row| row[k]))),
+            });
+        }
+        return crate::laminate::shear::equilibrated(
+            &coupled,
+            bending_axis_rad,
+            invalid,
+            &mut || check(cancelled),
+        )
+        .map(|(stiffness, _)| stiffness);
+    }
     let mut shear = [T::zero(); 4];
     for (i, layer) in layers.iter().enumerate() {
         check(cancelled)?;

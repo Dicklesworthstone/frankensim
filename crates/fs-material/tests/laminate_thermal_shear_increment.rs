@@ -6,7 +6,6 @@ use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
-use fs_material::laminate::ReferenceSurface;
 use fs_material::laminate::thermal::shear::{
     LaminateShearThermoelasticError, ResolvedLaminateShearThermoelastic,
 };
@@ -14,6 +13,7 @@ use fs_material::laminate::thermal::source::{
     LaminaElasticSource, LaminaExpansionSource, LaminaSourceInput, LaminateThermalSource,
 };
 use fs_material::laminate::thermal::thermoelastic::AffineLaminaThermoelastic;
+use fs_material::laminate::{LaminateShearModel, ReferenceSurface};
 use fs_material::state_point::{
     DENSITY_PROPERTY, INVERSE_TEMPERATURE_DIMS, MaterialPropertySelection,
     ORTHOTROPIC_THERMAL_EXPANSION_COEFFICIENT_PROPERTIES as CTE,
@@ -24,6 +24,12 @@ use std::sync::Arc;
 
 const RANGE: [f64; 2] = [280.0, 360.0];
 const LIMIT: f64 = 0.05;
+const MODELS: [LaminateShearModel; 2] = [
+    LaminateShearModel::DirectionalWhitney,
+    LaminateShearModel::EquilibratedCylindrical {
+        bending_axis_rad: 0.21,
+    },
+];
 
 fn temperature() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
@@ -138,13 +144,18 @@ fn input(index: usize, thickness_m: f64, orientation_rad: f64) -> LaminaSourceIn
 }
 
 fn source() -> LaminateThermalSource {
-    LaminateThermalSource::try_new(
+    source_with_model(LaminateShearModel::DirectionalWhitney)
+}
+
+fn source_with_model(model: LaminateShearModel) -> LaminateThermalSource {
+    LaminateThermalSource::try_new_with_shear_model(
         vec![
             input(0, 0.013, 0.1),
             input(1, 0.007, 0.55),
             input(2, 0.021, -0.32),
         ],
         ReferenceSurface::Midsurface,
+        model,
         || false,
     )
     .unwrap()
@@ -193,11 +204,18 @@ fn bilinear(left: [f64; 2], h: [f64; 4], right: [f64; 2]) -> f64 {
 
 #[test]
 fn homogeneous_increment_and_reciprocal_heat_have_closed_form() {
+    for model in MODELS {
+        check_homogeneous_increment(model);
+    }
+}
+
+fn check_homogeneous_increment(model: LaminateShearModel) {
     let angle: f64 = 0.37;
     let thickness = 0.04;
-    let source = LaminateThermalSource::try_new(
+    let source = LaminateThermalSource::try_new_with_shear_model(
         vec![input(0, thickness, angle)],
         ReferenceSurface::Midsurface,
+        model,
         || false,
     )
     .unwrap();
@@ -244,7 +262,13 @@ fn homogeneous_increment_and_reciprocal_heat_have_closed_form() {
 
 #[test]
 fn mixed_cells_telescope_reverse_and_keep_unchanged_coordinate_exactly_zero() {
-    let source = source();
+    for model in MODELS {
+        check_mixed_cells(model);
+    }
+}
+
+fn check_mixed_cells(model: LaminateShearModel) {
+    let source = source_with_model(model);
     let laws = laws(&source, RANGE);
     let t0 = [289.0, 305.0, 331.0];
     let t1 = [345.0, 305.0, 293.0];
@@ -281,11 +305,51 @@ fn mixed_cells_telescope_reverse_and_keep_unchanged_coordinate_exactly_zero() {
         &[[0.0; 4]; 3]
     );
     assert_eq!(unchanged.stiffness_increment_residual_pa_m(), &[0.0; 4]);
+
+    // Per-cell reciprocal transfers recover the change in the ONE stack
+    // internal energy, including mixed-temperature entropy at the fixed cell.
+    let (area, gamma0, gamma1) = (0.7, [0.013, -0.009], [0.015, -0.012]);
+    let s0 = a.state(gamma0, area, || false).unwrap();
+    let s1 = b.state(gamma1, area, || false).unwrap();
+    let force_work = 0.5
+        * area
+        * (0..2)
+            .map(|k| {
+                (s0.force_resultant_n_m[k] + s1.force_resultant_n_m[k]) * (gamma1[k] - gamma0[k])
+            })
+            .sum::<f64>();
+    let mut caloric = 0.0;
+    for i in 0..3 {
+        let entropy_work = t1[i] * s1.entropy_j_k[i] - t0[i] * s0.entropy_j_k[i];
+        let transfer = -0.5 * area * bilinear(gamma0, increments[i], gamma1) - entropy_work;
+        let reverse = -0.5
+            * area
+            * bilinear(
+                gamma1,
+                back.stiffness_coordinate_increments_pa_m()[i],
+                gamma0,
+            )
+            + entropy_work;
+        close(transfer, -reverse, 3e-16, 5e-12);
+        caloric += transfer;
+    }
+    close(
+        caloric,
+        force_work - (s1.internal_energy_j - s0.internal_energy_j),
+        3e-16,
+        5e-12,
+    );
 }
 
 #[test]
 fn symmetric_coordinate_path_converges_to_source_temperature_derivatives() {
-    let source = source();
+    for model in MODELS {
+        check_coordinate_refinement(model);
+    }
+}
+
+fn check_coordinate_refinement(model: LaminateShearModel) {
+    let source = source_with_model(model);
     let laws = laws(&source, RANGE);
     let center = [307.0, 319.0, 326.0];
     let direction = [7.0, -5.0, 11.0];

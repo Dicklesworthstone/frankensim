@@ -6,7 +6,7 @@ use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
-use fs_material::laminate::{LaminateShearModel, ReferenceSurface};
+use fs_material::laminate::thermal::shear::bounds::LaminateShearCapacityBound;
 use fs_material::laminate::thermal::shear::{
     LaminateShearThermoelasticError, ResolvedLaminateShearThermoelastic,
 };
@@ -14,6 +14,7 @@ use fs_material::laminate::thermal::source::{
     LaminaElasticSource, LaminaExpansionSource, LaminaSourceInput, LaminateThermalSource,
 };
 use fs_material::laminate::thermal::thermoelastic::AffineLaminaThermoelastic;
+use fs_material::laminate::{LaminateShearModel, ReferenceSurface};
 use fs_material::state_point::{
     DENSITY_PROPERTY, INVERSE_TEMPERATURE_DIMS, MaterialPropertySelection,
     ORTHOTROPIC_THERMAL_EXPANSION_COEFFICIENT_PROPERTIES as CTE,
@@ -26,6 +27,12 @@ const RANGE: [f64; 2] = [280.0, 360.0];
 const LIMIT: f64 = 0.05;
 const GAMMA: [f64; 2] = [0.013, -0.009];
 const AREA: f64 = 0.7;
+const MODELS: [LaminateShearModel; 2] = [
+    LaminateShearModel::DirectionalWhitney,
+    LaminateShearModel::EquilibratedCylindrical {
+        bending_axis_rad: 0.21,
+    },
+];
 
 fn point(t: f64) -> QueryPoint {
     QueryPoint::new()
@@ -144,6 +151,13 @@ fn input(index: usize, thickness: f64, angle: f64) -> LaminaSourceInput {
 fn source(inputs: Vec<LaminaSourceInput>, reference: ReferenceSurface) -> LaminateThermalSource {
     LaminateThermalSource::try_new(inputs, reference, || false).unwrap()
 }
+fn source_with_model(
+    inputs: Vec<LaminaSourceInput>,
+    reference: ReferenceSurface,
+    model: LaminateShearModel,
+) -> LaminateThermalSource {
+    LaminateThermalSource::try_new_with_shear_model(inputs, reference, model, || false).unwrap()
+}
 fn laws(source: &LaminateThermalSource) -> Vec<AffineLaminaThermoelastic> {
     source
         .layers()
@@ -190,36 +204,45 @@ fn multilayer_inputs(angle: f64) -> Vec<LaminaSourceInput> {
 }
 
 #[test]
-fn g0_equilibrated_source_refuses_whitney_derivatives_even_when_h_matches() {
-    let inputs = vec![input(0, 0.04, 0.37)];
-    let original = source(inputs.clone(), ReferenceSurface::Midsurface);
-    let coupled = LaminateThermalSource::try_new_with_shear_model(
-        inputs,
+fn coupled_point_potential_does_not_authorize_a_whitney_capacity_bound() {
+    let coupled = source_with_model(
+        vec![input(0, 0.04, 0.37)],
         ReferenceSurface::Midsurface,
-        LaminateShearModel::EquilibratedCylindrical { bending_axis_rad: 0.21 },
-        || false,
-    ).unwrap();
+        MODELS[1],
+    );
     let current = coupled.at_temperatures(&[321.0], || false).unwrap();
-    // Both closures are 5/6 h G for a homogeneous ply. Value agreement is
-    // insufficient authority to differentiate a different selected model.
-    for (actual, expected) in current.prepared().section().shear_pa_m().iter()
-        .zip(native_h(&original, &[321.0])) {
-        close(*actual, expected, 1e-12, 1e-12);
-    }
+    let laws = laws(&coupled);
+    ResolvedLaminateShearThermoelastic::try_new(&laws, &current, || false).unwrap();
+    // Even when both homogeneous values are 5/6 h G, a point potential
+    // cannot authorize the other model's whole-temperature-box proof.
     assert!(matches!(
-        ResolvedLaminateShearThermoelastic::try_new(&laws(&coupled), &current, || false),
+        LaminateShearCapacityBound::try_new(&laws, &current, || false),
         Err(LaminateShearThermoelasticError::Invalid(
-            "thermal shear derivatives require the directional Whitney closure"
+            "whole-temperature-box shear capacity bounds require the directional Whitney closure"
         ))
+    ));
+    assert!(matches!(
+        ResolvedLaminateShearThermoelastic::try_new(&laws, &current, || true),
+        Err(LaminateShearThermoelasticError::Cancelled)
     ));
 }
 
 #[test]
 fn homogeneous_rotated_layer_has_closed_shear_potential_and_no_affine_g_capacity() {
+    for model in MODELS {
+        check_homogeneous_potential(model);
+    }
+}
+
+fn check_homogeneous_potential(model: LaminateShearModel) {
     let angle: f64 = 0.37;
     let h = 0.04;
     let t = 321.0;
-    let source = source(vec![input(0, h, angle)], ReferenceSurface::Midsurface);
+    let source = source_with_model(
+        vec![input(0, h, angle)],
+        ReferenceSurface::Midsurface,
+        model,
+    );
     let laws = laws(&source);
     let shear = resolved(&source, &laws, &[t]);
     let derivative = shear.directional_derivatives(&[1.0], || false).unwrap();
@@ -280,7 +303,13 @@ fn homogeneous_rotated_layer_has_closed_shear_potential_and_no_affine_g_capacity
 
 #[test]
 fn unequal_layer_temperatures_have_native_directional_derivatives_and_nonlocal_entropy() {
-    let source = source(multilayer_inputs(0.0), ReferenceSurface::Midsurface);
+    for model in MODELS {
+        check_nonlocal_derivatives(model);
+    }
+}
+
+fn check_nonlocal_derivatives(model: LaminateShearModel) {
+    let source = source_with_model(multilayer_inputs(0.0), ReferenceSurface::Midsurface, model);
     let laws = laws(&source);
     let t = [302.0, 329.0, 314.0];
     let direction = [0.7, -0.4, 1.2];
@@ -360,6 +389,83 @@ fn unequal_layer_temperatures_have_native_directional_derivatives_and_nonlocal_e
         for j in 0..3 {
             close(columns[i][j], columns[j][i], 1e-16, 2e-10);
         }
+    }
+}
+
+#[test]
+fn coupled_derivatives_and_entropy_co_rotate_with_physical_probe_axes() {
+    let t = [302.0, 329.0, 314.0];
+    let direction = [0.7, -0.4, 1.2];
+    let angle: f64 = 0.37;
+    let prepare = |rotation, reference| {
+        let source = source_with_model(
+            multilayer_inputs(rotation),
+            reference,
+            LaminateShearModel::EquilibratedCylindrical {
+                bending_axis_rad: 0.21 + rotation,
+            },
+        );
+        resolved(&source, &laws(&source), &t)
+    };
+    let base = prepare(0.0, ReferenceSurface::Midsurface);
+    let offset = prepare(0.0, ReferenceSurface::Offset(0.008));
+    let rotated = prepare(angle, ReferenceSurface::Midsurface);
+    let a = base.directional_derivatives(&direction, || false).unwrap();
+    let b = offset
+        .directional_derivatives(&direction, || false)
+        .unwrap();
+    let r = rotated
+        .directional_derivatives(&direction, || false)
+        .unwrap();
+    let (s, c) = angle.sin_cos();
+    let rotation = [c, -s, s, c];
+    for derivative in 0..3 {
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut expected = 0.0;
+                for p in 0..2 {
+                    for q in 0..2 {
+                        expected +=
+                            rotation[2 * i + p] * a[derivative][2 * p + q] * rotation[2 * j + q];
+                    }
+                }
+                close(r[derivative][2 * i + j], expected, 2e-12, 2e-10);
+                close(
+                    b[derivative][2 * i + j],
+                    a[derivative][2 * i + j],
+                    2e-12,
+                    2e-10,
+                );
+            }
+        }
+    }
+    let original = base.state(GAMMA, AREA, || false).unwrap();
+    let transformed = rotated
+        .state(
+            [c * GAMMA[0] - s * GAMMA[1], s * GAMMA[0] + c * GAMMA[1]],
+            AREA,
+            || false,
+        )
+        .unwrap();
+    close(
+        original.free_energy_j,
+        transformed.free_energy_j,
+        2e-14,
+        1e-10,
+    );
+    close(
+        original.internal_energy_j,
+        transformed.internal_energy_j,
+        2e-14,
+        1e-10,
+    );
+    for i in 0..3 {
+        close(
+            original.entropy_j_k[i],
+            transformed.entropy_j_k[i],
+            2e-14,
+            1e-10,
+        );
     }
 }
 

@@ -51,8 +51,9 @@ impl ResolvedLaminateShearThermoelastic {
     /// Thus every hybrid corner uses an already admitted original source chart;
     /// independently rebound materials or different affine intervals refuse.
     /// Each sweep changes a layer's cached exact coefficient record, then
-    /// evaluates the original Whitney expression. It needs O(n²) scalar work,
-    /// O(n) storage, no source re-query and no new derivative preparation.
+    /// evaluates the original selected closure with its retained physical axes.
+    /// It needs O(n²) scalar work, O(n) storage, no source re-query and no new
+    /// derivative preparation.
     /// Prepare once per endpoint pair and reuse across spatial quadrature.
     pub fn temperature_increment(
         &self,
@@ -121,7 +122,12 @@ impl ResolvedLaminateShearThermoelastic {
                 let next = if step + 1 == changed.len() {
                     end.stiffness
                 } else {
-                    evaluate(&layers, &|_, coefficients| coefficients[0], &mut cancelled)?
+                    evaluate(
+                        &layers,
+                        self.current.prepared().section().shear_model(),
+                        &|_, coefficients| coefficients[0],
+                        &mut cancelled,
+                    )?
                 };
                 for k in 0..4 {
                     let delta = finite(next[k] - previous[k])?;

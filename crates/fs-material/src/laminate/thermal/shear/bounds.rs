@@ -8,6 +8,7 @@
 //! capacity test or an extrapolated material response.
 
 use super::{LaminateShearThermoelasticError, ResolvedLaminateShearThermoelastic, check, invalid};
+use crate::laminate::LaminateShearModel;
 use crate::laminate::thermal::source::ResolvedLaminateThermal;
 use crate::laminate::thermal::thermoelastic::{AffineLaminaThermoelastic, Interval, Jet};
 
@@ -30,12 +31,21 @@ impl LaminateShearCapacityBound {
     /// `current`. The current state is checked against the native smooth branch;
     /// interval poles, nonfinite bounds and an unresolved positive shear-energy
     /// denominator anywhere in the box refuse before publishing a bound.
+    /// Coupled equilibrated closures refuse: their point derivatives do not
+    /// supply the Whitney interval enclosure used by this capacity proof.
     pub fn try_new(
         laws: &[AffineLaminaThermoelastic],
         current: &ResolvedLaminateThermal,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LaminateShearThermoelasticError> {
         check(&mut cancelled)?;
+        // Coupled point derivatives do not certify this distinct Whitney
+        // interval expression over a temperature box.
+        if current.prepared().section().shear_model() != LaminateShearModel::DirectionalWhitney {
+            return Err(invalid(
+                "whole-temperature-box shear capacity bounds require the directional Whitney closure",
+            ));
+        }
         // Reuse source-identity, current-temperature and native-branch admission.
         ResolvedLaminateShearThermoelastic::try_new(laws, current, &mut cancelled)?;
         let n = laws.len();
