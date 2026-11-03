@@ -61,8 +61,8 @@ fn mixed_geometry(
     if !positive(length) {
         return Err(invalid("mixed-convection cell tangent is unrepresentable"));
     }
-    let frame =
-        AidingVerticalPlateFrame::try_new(plate_up, core.acceleration).map_err(FlowConvectionError::Geometry)?;
+    let frame = AidingVerticalPlateFrame::try_new(plate_up, core.acceleration)
+        .map_err(|error| FlowConvectionError::Geometry(error.into()))?;
     Ok((
         frame,
         displacement.map(|value| value / length),
@@ -162,7 +162,7 @@ pub(super) fn resolve(
                     tangent.map(|value| speed * value),
                     maximum_relative_density_departure,
                 )
-                .map_err(FlowConvectionError::Geometry)?;
+                .map_err(|error| FlowConvectionError::Geometry(error.into()))?;
             SourceCellConvectionLaw::AidingVerticalPlate { settings }
         }
     };
@@ -235,6 +235,7 @@ pub(super) fn admit_envelope<M: ThermalFluidTransport>(
                         tangent.map(|value| speed * value),
                         maximum_relative_density_departure,
                     )
+                    .map_err(MaterialConvectionError::from)
                     .and_then(|settings| {
                         // This is the native finite-cell owner's admission,
                         // including exact resting thermal equilibrium. Reuse the

@@ -1,6 +1,7 @@
 //! Explicit exposed-cell heat to the SAME gas used by the native instrument.
 use super::*;
 use fs_couple::air_path::input::convection::{
+    AidingVerticalPlateGasBoundary, AidingVerticalPlateSettings,
     ForcedGasBoundary, ForcedGasGeometry, GasConvectionBoundary,
     HorizontalPlateFacing, NaturalConvectionGeometry, NaturalGasBoundary,
 };
@@ -24,8 +25,8 @@ pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
         let geometry = row.word()?;
         let exposed_area_m2 = row.positive()?;
         let characteristic_length_m = row.positive()?;
-        // The final field is prescribed speed for forced convection, or the
-        // explicitly declared gravity magnitude for a natural geometry.
+        // Forced/natural rows end with speed/gravity. The aiding mixed row
+        // supplies signed upward speed followed by gravity and density bound.
         let driving = row.parse()?;
         let forced = |geometry| GasConvectionBoundary::Forced(ForcedGasBoundary {
             geometry, exposed_area_m2, characteristic_length_m, speed_m_s: driving,
@@ -43,7 +44,17 @@ pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
             "natural-sphere" => natural(NaturalConvectionGeometry::Sphere),
             "natural-horizontal-plate-up" => natural(NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Up)),
             "natural-horizontal-plate-down" => natural(NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Down)),
-            _ => return Err("convection-cell needs an explicit forced or natural geometry".into()),
+            "aiding-vertical-plate" => GasConvectionBoundary::AidingVerticalPlate(
+                AidingVerticalPlateGasBoundary {
+                    exposed_area_m2, characteristic_length_m,
+                    settings: AidingVerticalPlateSettings {
+                        speed_up_m_s: driving,
+                        gravity_m_s2: row.parse()?,
+                        maximum_relative_density_departure: row.parse()?,
+                    },
+                },
+            ),
+            _ => return Err("convection-cell needs an explicit forced, natural or aiding vertical-plate geometry".into()),
         };
         row.end()?;
         boundary.validate()?;
@@ -148,6 +159,12 @@ impl Reservoir {
                     eprintln!("contact_thermal_convection_cell={}; natural_geometry={:?}; area_m2={}; length_m={}; gravity_m_s2={}",
                         route.cell.0, boundary.geometry, boundary.exposed_area_m2,
                         boundary.characteristic_length_m, boundary.gravity_m_s2);
+                }
+                GasConvectionBoundary::AidingVerticalPlate(boundary) => {
+                    eprintln!("contact_thermal_convection_cell={}; aiding_vertical_plate; area_m2={}; height_m={}; speed_up_m_s={}; gravity_m_s2={}; maximum_relative_density_departure={}",
+                        route.cell.0, boundary.exposed_area_m2, boundary.characteristic_length_m,
+                        boundary.settings.speed_up_m_s, boundary.settings.gravity_m_s2,
+                        boundary.settings.maximum_relative_density_departure);
                 }
             }
         }

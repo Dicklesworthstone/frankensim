@@ -269,3 +269,138 @@ fn g1_turbulent_plate_retains_leading_edge_correction_and_domain() {
     near(sample.heat_into_wall_w, -20.0 * 0.1 * nu * film.thermal_conductivity);
     assert!(ForcedGasBoundary { speed_m_s: 0.1, ..boundary }.evaluate(&law, 320.0).is_err());
 }
+
+fn aiding_plate(speed_up_m_s: f64) -> AidingVerticalPlateGasBoundary {
+    AidingVerticalPlateGasBoundary {
+        characteristic_length_m: 0.1, exposed_area_m2: 0.01,
+        settings: AidingVerticalPlateSettings {
+            speed_up_m_s, gravity_m_s2: 9.81, maximum_relative_density_departure: 0.1,
+        },
+    }
+}
+
+// Independent published average-coefficient arithmetic. The adapter must
+// supply the actual film groups, not wall or bulk transport or half of delta T.
+fn independent_aiding_nusselt(re: f64, ra: f64, pr: f64) -> f64 {
+    let forced = 2.0 * 0.339 * pr.powf(1.0 / 3.0)
+        * (1.0 + 0.100 * pr.powf(-0.75)).powf(-2.0 / 9.0) * re.sqrt();
+    let natural = (4.0 / 3.0) * 0.503 * pr.powf(0.25)
+        * (1.0 + 0.670 * pr.powf(-9.0 / 16.0)).powf(-4.0 / 9.0)
+        * (ra / pr).powf(0.25);
+    let exponent = 3.5 * pr.powf(0.075);
+    (forced.powf(exponent) + natural.powf(exponent)).powf(1.0 / exponent)
+}
+
+#[test]
+fn g1_mixed_plate_uses_one_original_film_state_and_full_buoyancy_contrast() {
+    let law = air(100000.0);
+    let before = law.clone();
+    let boundary = aiding_plate(0.2);
+    let sample = boundary.evaluate(&law, 320.0).unwrap();
+    assert_eq!(sample.property_gas, law.at_temperature(Temperature::new(310.0)).unwrap());
+    assert!(sample.surface_gas.is_none());
+    let film = sample.property_gas.state();
+    let re = film.density * 0.2 * 0.1 / film.dynamic_viscosity;
+    let pr = film.dynamic_viscosity * film.specific_heat_cp / film.thermal_conductivity;
+    let ra = 9.81 / 310.0 * 20.0 * 0.1_f64.powi(3)
+        * film.density.powi(2) * film.specific_heat_cp
+        / (film.dynamic_viscosity * film.thermal_conductivity);
+    let nu = independent_aiding_nusselt(re, ra, pr);
+    let evaluated = sample.nusselt.as_ref().unwrap();
+    assert_eq!(evaluated.card().id, CorrelationId::ManningQureshiAidingVerticalPlate);
+    near(evaluated.groups()["Re"], re);
+    near(evaluated.groups()["Ra"], ra);
+    near(evaluated.groups()["Pr"], pr);
+    near(evaluated.evidence().value, nu);
+    near(sample.conductance_w_k, 0.01 * nu * film.thermal_conductivity / 0.1);
+    near(sample.heat_into_wall_w, -20.0 * sample.conductance_w_k);
+    assert!(sample.entropy_generation_w_k > 0.0);
+    let dense = boundary.evaluate(&air(200000.0), 320.0).unwrap();
+    near(dense.nusselt.as_ref().unwrap().groups()["Re"], 2.0 * re);
+    near(dense.nusselt.as_ref().unwrap().groups()["Ra"], 4.0 * ra);
+    near(dense.conductance_w_k / sample.conductance_w_k, 2.0_f64.sqrt());
+    assert_eq!(law, before);
+}
+
+#[test]
+fn g1_mixed_plate_preserves_pure_limits_and_exact_resting_equilibrium() {
+    let law = air(100000.0);
+    let natural = aiding_plate(0.0).evaluate(&law, 320.0).unwrap();
+    let natural_nu = natural.nusselt.as_ref().unwrap();
+    assert_eq!(natural_nu.groups()["Re"], 0.0);
+    near(natural_nu.evidence().value, independent_aiding_nusselt(
+        0.0, natural_nu.groups()["Ra"], natural_nu.groups()["Pr"]));
+    let mut previous = aiding_plate(0.2).evaluate(&law, 320.0).unwrap()
+        .nusselt.unwrap().evidence().value;
+    for speed in [1e-5, 1e-8, 1e-11] {
+        let nu = aiding_plate(speed).evaluate(&law, 320.0).unwrap()
+            .nusselt.unwrap().evidence().value;
+        assert!(nu <= previous * (1.0 + 2e-12));
+        assert!(nu >= natural_nu.evidence().value * (1.0 - 2e-12));
+        previous = nu;
+    }
+    near(previous, natural_nu.evidence().value);
+    let forced_boundary = AidingVerticalPlateGasBoundary {
+        settings: AidingVerticalPlateSettings { gravity_m_s2: 0.0, ..aiding_plate(-0.2).settings },
+        ..aiding_plate(-0.2)
+    };
+    let forced = forced_boundary.evaluate(&law, 320.0).unwrap();
+    let forced_nu = forced.nusselt.as_ref().unwrap();
+    assert_eq!(forced_nu.groups()["Ra"], 0.0);
+    near(forced_nu.evidence().value, independent_aiding_nusselt(
+        forced_nu.groups()["Re"], 0.0, forced_nu.groups()["Pr"]));
+    let resting = aiding_plate(0.0).evaluate(&law, 300.0).unwrap();
+    assert!(resting.nusselt.is_none() && resting.coefficient.is_none());
+    assert_eq!((resting.heat_into_wall_w, resting.entropy_generation_w_k), (0.0, 0.0));
+    let moving_equilibrium = aiding_plate(0.2).evaluate(&law, 300.0).unwrap();
+    assert!(moving_equilibrium.nusselt.is_some() && moving_equilibrium.conductance_w_k > 0.0);
+    assert_eq!(moving_equilibrium.heat_into_wall_w, 0.0);
+    assert!(AidingVerticalPlateGasBoundary {
+        settings: AidingVerticalPlateSettings { speed_up_m_s: 0.0, ..forced_boundary.settings },
+        ..forced_boundary
+    }.evaluate(&law, 320.0).is_err());
+}
+
+#[test]
+fn g0_mixed_plate_refuses_opposing_flow_density_departure_and_laminar_exits() {
+    let law = air(100000.0);
+    let before = law.clone();
+    for (wall, aiding_speed) in [(320.0, 0.2), (280.0, -0.2)] {
+        let admitted = aiding_plate(aiding_speed).evaluate(&law, wall).unwrap();
+        assert!(admitted.heat_into_wall_w * (300.0 - wall) > 0.0);
+        assert!(admitted.entropy_generation_w_k > 0.0);
+        assert!(matches!(aiding_plate(-aiding_speed).evaluate(&law, wall),
+            Err(GasConvectionError::Material(_))));
+    }
+    let bounded = AidingVerticalPlateGasBoundary {
+        settings: AidingVerticalPlateSettings {
+            maximum_relative_density_departure: 0.05, ..aiding_plate(0.2).settings
+        }, ..aiding_plate(0.2)
+    };
+    assert!(matches!(bounded.evaluate(&law, 320.0), Err(GasConvectionError::Material(_))));
+    assert!(matches!(aiding_plate(1e4).evaluate(&law, 320.0), Err(GasConvectionError::Correlation(_))));
+    assert!(matches!(AidingVerticalPlateGasBoundary { characteristic_length_m: 10.0,
+        ..aiding_plate(0.2) }.evaluate(&law, 320.0), Err(GasConvectionError::Correlation(_))));
+    let frame = AidingVerticalPlateFrame::try_new([0.0, 0.0, 1.0], [0.0, 0.0, -9.81]).unwrap();
+    assert!(frame.settings([0.1, 0.0, 0.2], 0.1).is_err());
+    assert!(aiding_plate(0.2).evaluate(&law, 1e9).is_err());
+    assert_eq!(law, before);
+}
+
+#[test]
+fn g3_mixed_plate_retains_named_and_humid_gas_composition() {
+    let helium = read_gas_record(&mut "mixture 300 100000 mole 1 He 1".split_ascii_whitespace(),
+        None, None).unwrap();
+    let humid = GasRecord::Legacy(GasState::try_new_moist_air(300.0, 100000.0, 0.25).unwrap());
+    for reference in [helium, humid] {
+        let law = IsobaricGasLaw::try_from_record(reference).unwrap();
+        let before = law.clone();
+        let sample = aiding_plate(0.2).evaluate(&law, 320.0).unwrap();
+        near(sample.property_gas.state().water_mole_fraction, law.reference().state().water_mole_fraction);
+        assert_eq!(sample.property_gas.state().specific_gas_constant, law.reference().state().specific_gas_constant);
+        assert_eq!(sample.property_gas.state().pressure, law.reference().state().pressure);
+        assert_eq!(sample.property_gas, law.at_temperature(Temperature::new(310.0)).unwrap());
+        assert!(sample.entropy_generation_w_k > 0.0);
+        assert_eq!(law, before);
+    }
+}

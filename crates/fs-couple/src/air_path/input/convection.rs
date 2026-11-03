@@ -1,19 +1,23 @@
 //! Source-gas convection into an explicitly prescribed reservoir.
 //!
 //! The original isobaric gas law supplies each correlation's property state:
-//! mean-film rho, mu, Cp and k for plates/cylinders and natural convection,
+//! mean-film rho, mu, Cp and k for plates/cylinders, natural and mixed convection,
 //! or bulk properties plus surface viscosity for forced spheres.
 //! fs-convection owns every correlation and its
 //! regime/evidence. This adapter
 //! supplies signed boundary heat, not a new thermal or fluid time integrator.
 //! Reservoir temperature, pressure, composition and velocity are prescribed.
 //! Natural convection uses explicit gravity and orientation with the original
-//! gas's thermal expansion. No finite gas inventory, rarefaction, radiation or
+//! gas's thermal expansion. Aiding mixed flow also requires signed axial speed
+//! and an explicit Boussinesq density bound. No finite gas inventory, rarefaction, radiation or
 //! moving exposure is inferred, and no coefficient is borrowed from another gas.
 
 mod natural;
+mod mixed;
 pub use natural::NaturalGasBoundary;
+pub use mixed::AidingVerticalPlateGasBoundary;
 pub use fs_convection::{HorizontalPlateFacing, NaturalConvectionGeometry};
+pub use fs_material::fluid_transport::{AidingVerticalPlateFrame, AidingVerticalPlateSettings};
 
 use fs_convection::{
     CorrelationError, CorrelationId, CorrelationInputs, HeatTransferCoefficient,
@@ -53,13 +57,14 @@ pub struct ForcedGasBoundary {
     pub speed_m_s: f64,
 }
 
-/// Explicit choice between a prescribed free stream and a quiescent reservoir.
-/// Zero stream speed never silently changes a forced correlation into a natural
-/// one; mixed convection requires its own declared model and flow alignment.
+/// Explicit choice of forced, natural or laminar aiding mixed convection.
+/// Zero speed never changes a forced-only card into a natural one. The declared
+/// mixed plate retains its own continuous pure limits and alignment checks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GasConvectionBoundary {
     Forced(ForcedGasBoundary),
     Natural(NaturalGasBoundary),
+    AidingVerticalPlate(AidingVerticalPlateGasBoundary),
 }
 
 impl GasConvectionBoundary {
@@ -67,6 +72,7 @@ impl GasConvectionBoundary {
         match self {
             Self::Forced(boundary) => boundary.validate(),
             Self::Natural(boundary) => boundary.validate(),
+            Self::AidingVerticalPlate(boundary) => boundary.validate(),
         }
     }
 
@@ -75,6 +81,7 @@ impl GasConvectionBoundary {
         match self {
             Self::Forced(boundary) => boundary.exposed_area_m2,
             Self::Natural(boundary) => boundary.exposed_area_m2,
+            Self::AidingVerticalPlate(boundary) => boundary.exposed_area_m2,
         }
     }
 
@@ -84,6 +91,7 @@ impl GasConvectionBoundary {
         match self {
             Self::Forced(boundary) => boundary.evaluate(gas, wall_temperature_k),
             Self::Natural(boundary) => boundary.evaluate(gas, wall_temperature_k),
+            Self::AidingVerticalPlate(boundary) => boundary.evaluate(gas, wall_temperature_k),
         }
     }
 }
@@ -121,8 +129,9 @@ pub struct GasConvectionSample {
     /// Same gas law evaluated at the wall, retained when the forced-sphere relation
     /// needs surface viscosity. Other geometries do not query this state.
     pub surface_gas: Option<GasRecord>,
-    /// None only for exact natural-convection equilibrium when the geometry's
-    /// correlation does not admit Ra=0. No out-of-range coefficient is inferred.
+    /// None only for exact resting thermal equilibrium when the declared
+    /// natural/mixed correlation does not admit the zero-driving point.
+    /// No out-of-range coefficient or heat derivative is inferred.
     pub nusselt: Option<NusseltEvaluation>,
     /// Paired with `nusselt`; an absent coefficient certifies zero heat only.
     pub coefficient: Option<Evidence<HeatTransferCoefficient>>,

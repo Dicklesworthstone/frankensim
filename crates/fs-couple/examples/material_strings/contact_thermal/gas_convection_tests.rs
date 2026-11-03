@@ -1,6 +1,7 @@
 //! Native profile -> original finite heat -> pressure/PCM, manufactured sources.
 use super::*;
 use fs_couple::air_path::input::convection::{
+    AidingVerticalPlateGasBoundary, AidingVerticalPlateSettings,
     ForcedGasBoundary, ForcedGasGeometry, GasConvectionBoundary,
     NaturalConvectionGeometry, NaturalGasBoundary,
 };
@@ -53,6 +54,46 @@ fn gas_boundary_grammar_preserves_old_profiles_and_refuses_false_exposure() {
 }
 
 #[test]
+fn gas_boundary_mixed_grammar_requires_signed_speed_gravity_and_density_bound() {
+    for speed in [-0.2, 0.0, 0.2] {
+        let route = format!("convection 1\nconvection-cell 10 aiding-vertical-plate 1e-6 0.002 {speed} 9.81 0.1\n");
+        let parsed = Profile::parse(version_five(profile_text(false), &route).as_bytes()).unwrap();
+        let GasConvectionBoundary::AidingVerticalPlate(boundary) = parsed.convection[0].boundary else {
+            panic!("explicit mixed plate changed to another convection model");
+        };
+        assert_eq!(boundary.settings.speed_up_m_s, speed);
+        assert_eq!(boundary.settings.gravity_m_s2, 9.81);
+        assert_eq!(boundary.settings.maximum_relative_density_departure, 0.1);
+    }
+    for driving in ["0.2", "0.2 9.81", "0.2 -9.81 0.1", "0.2 9.81 -0.1",
+        "0.2 9.81 1", "NaN 9.81 0.1", "0.2 9.81 NaN", "0.2 9.81 0.1 0"]
+    {
+        let route = format!("convection 1\nconvection-cell 10 aiding-vertical-plate 1e-6 0.002 {driving}\n");
+        assert!(Profile::parse(version_five(profile_text(false), &route).as_bytes()).is_err(),
+            "accepted incomplete or invalid mixed driving: {driving}");
+    }
+    let crossflow = "convection 1\nconvection-cell 10 aiding-cylinder-crossflow 1e-6 0.002 0.2 9.81 0.1\n";
+    assert!(Profile::parse(version_five(profile_text(false), crossflow).as_bytes()).is_err());
+}
+
+#[test]
+fn gas_boundary_mixed_preparation_admits_the_entire_authored_temperature_interval() {
+    for (lower_temperature, speed, density_bound) in [(280.0, 0.2, 0.1), (300.0, -0.2, 0.1), (300.0, 0.2, 0.001)] {
+        scoped(|cx, gate| {
+            let text = profile_text(false).replace("cells 8", "cells 9")
+                .replace("dry-contacts 1", &format!("cell 30 wire.fsmatpk {lower_temperature} 310 320 0 0 2 0.001 0 2 1e-9 1e-4\ndry-contacts 1"));
+            let route = format!("convection 1\nconvection-cell 30 aiding-vertical-plate 1e-6 0.002 {speed} 9.81 {density_bound}\n");
+            let profile = Profile::parse(version_five(text, &route).as_bytes()).unwrap();
+            let source = ready(cx, gate, &profile, false, 20.0, 37, 48000, None);
+            // A cooling interval crossing the bulk temperature would reverse
+            // buoyancy; a fixed signed stream cannot be declared aiding there.
+            assert!(profile.prepare(&source, gate).is_err());
+            assert_eq!(source.performance.samples_rendered(), 0);
+        });
+    }
+}
+
+#[test]
 fn source_gas_cooling_enters_the_original_backward_euler_external_heat_once() {
     for (route, boundary) in [
         ("cylinder-crossflow 1e-6 0.0003 1",
@@ -65,10 +106,21 @@ fn source_gas_cooling_enters_the_original_backward_euler_external_heat_once() {
                 geometry: NaturalConvectionGeometry::Sphere,
                 characteristic_length_m: 0.001, exposed_area_m2: 1e-6, gravity_m_s2: 9.81,
             })),
+        ("aiding-vertical-plate 1e-6 0.002 0.2 9.81 0.1",
+            GasConvectionBoundary::AidingVerticalPlate(AidingVerticalPlateGasBoundary {
+                characteristic_length_m: 0.002, exposed_area_m2: 1e-6,
+                settings: AidingVerticalPlateSettings {
+                    speed_up_m_s: 0.2, gravity_m_s2: 9.81,
+                    maximum_relative_density_departure: 0.1,
+                },
+            })),
     ] {
     scoped(|cx, gate| {
+        // The upward mixed stream must aid buoyancy throughout the authored
+        // source interval, not only at this step's initial temperature.
+        let lower = if matches!(boundary, GasConvectionBoundary::AidingVerticalPlate(_)) { 300.0 } else { 280.0 };
         let text = profile_text(false).replace("cells 8", "cells 9")
-            .replace("dry-contacts 1", "cell 30 wire.fsmatpk 280 310 320 0 0 2 0.001 0 2 1e-9 1e-4\ndry-contacts 1");
+            .replace("dry-contacts 1", &format!("cell 30 wire.fsmatpk {lower} 310 320 0 0 2 0.001 0 2 1e-9 1e-4\ndry-contacts 1"));
         let profile = Profile::parse(version_five(text,
             &format!("convection 1\nconvection-cell 30 {route}\n")).as_bytes()).unwrap();
         let source = ready(cx, gate, &profile, false, 20.0, 37, 48000, None);

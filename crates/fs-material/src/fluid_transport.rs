@@ -12,8 +12,10 @@ use crate::gas_mixture::ResolvedGasMixtureState;
 use crate::liquid::ResolvedLiquidState;
 use crate::moist_air::ResolvedMoistAirState;
 
+mod mixed;
 mod thermal;
 mod water;
+pub use mixed::{AidingVerticalPlateFrame, AidingVerticalPlateGroups, AidingVerticalPlateSettings};
 pub use thermal::{ThermalFluidTransport, ThermalFluidTransportState};
 
 /// Immutable transport coefficients for one evaluated material state point.
