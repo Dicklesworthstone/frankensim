@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 // Manufactured source k(T)=a+bT and Cv(T)=c+dT for one explicit kilogram.
 // These arbitrary units/state ranges are analytic fixtures, not metal data.
-fn source(
+pub(super) fn source(
     conductivity: [f64; 2],
     capacity: [f64; 2],
     interval: [f64; 2],

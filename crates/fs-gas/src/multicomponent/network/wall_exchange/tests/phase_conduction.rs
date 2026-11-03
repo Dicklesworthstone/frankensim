@@ -19,7 +19,7 @@ use std::sync::Arc;
 // Manufactured chart: cp=1, Tm=5, latent heat=10, rho=20. On its
 // isothermal plateau phi=(h-4)/10, and the independently authored source is
 // k=scale*(0.1+1.9*phi). These numbers are not measured material data.
-fn source(scale: f64, maximum_fraction: f64, anchor: f64) -> Arc<PhaseWallConductionSource> {
+pub(super) fn source(scale: f64, maximum_fraction: f64, anchor: f64) -> Arc<PhaseWallConductionSource> {
     let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
     let mut claims = ClaimSet::new();
     let claim = |end: f64, multiplier: f64| PropertyClaim {
@@ -101,7 +101,7 @@ fn source(scale: f64, maximum_fraction: f64, anchor: f64) -> Arc<PhaseWallConduc
     )
 }
 
-fn cell(h: f64) -> DepositedCell {
+pub(super) fn cell(h: f64) -> DepositedCell {
     DepositedCell {
         id: CellId(1),
         segment_id: 1,

@@ -185,6 +185,59 @@ impl<'law> NetworkWallOperator<'law> {
     pub fn last_shared_wall_report(&self) -> Option<SharedWallReport> {
         self.shared.as_ref()?.last_report
     }
+
+    /// Bind original k(T) or k(T(h),phi(h)) and L/A to shared gas-facing ports.
+    ///
+    /// Rows follow shared-wall order and entries follow each wall's port order.
+    /// A bound port's original conductance remains its gas film; the original
+    /// material contributes solid resistance once in series. `None` retains
+    /// that port's complete authored coefficient. Bind before evolution.
+    ///
+    /// Initial-state layers refresh at each source half and must support its
+    /// endpoint. Implicit layers refresh on every proposed wall state, including
+    /// phase evolution at constant temperature, without inferring dk/dh. All
+    /// conductivity work shares the gas/wall source budget across both halves.
+    /// The original storage and complete-network transaction remain sole owners.
+    #[cfg(feature = "material")]
+    pub fn with_shared_wall_conduction(
+        mut self,
+        layers: Vec<Vec<Option<MaterialWallConduction>>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, WallExchangeError> {
+        poll(&mut cancelled)?;
+        let shared = self.shared.as_mut().ok_or(WallExchangeError::Invalid(
+            "material conduction requires shared walls",
+        ))?;
+        if self.last_report.is_some()
+            || self.trial_active
+            || layers.len() != shared.groups.len()
+            || shared
+                .groups
+                .iter()
+                .any(|g| g.storage.conduction_layers().is_some())
+            || !layers.iter().flatten().any(Option::is_some)
+        {
+            return Err(WallExchangeError::Invalid(
+                "shared wall conduction state or topology",
+            ));
+        }
+        for (group, layers) in shared.groups.iter_mut().zip(layers) {
+            group.storage.bind_conduction(layers, &mut cancelled)?;
+        }
+        poll(&mut cancelled)?;
+        Ok(self)
+    }
+
+    /// Original material source, geometry and time evaluation per gas port.
+    #[cfg(feature = "material")]
+    pub fn shared_wall_conduction(&self, wall: usize) -> Option<&[Option<MaterialWallConduction>]> {
+        self.shared
+            .as_ref()?
+            .groups
+            .get(wall)?
+            .storage
+            .conduction_layers()
+    }
 }
 
 impl SharedWalls<'_> {
@@ -288,6 +341,15 @@ impl SharedWalls<'_> {
                     iterations: receipt.iterations,
                 })?;
                 links.candidate.push(receipt);
+            }
+            #[cfg(feature = "material")]
+            for group in &self.groups {
+                group.storage.admit_conduction_endpoint(
+                    group.storage.candidate,
+                    true,
+                    &self.work,
+                    cancelled,
+                )?;
             }
         }
         let report = total.report(duration);

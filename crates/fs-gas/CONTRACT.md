@@ -3072,6 +3072,40 @@ first-half wall state. Original h/u, latent energy, pressure-work conventions,
 uniform-wall applicability, authored conductances and first-order composition
 retain the limits described above.
 
+## Original material conductivity on shared gas/wall ports
+
+With `experimental-euler,material`, both the frozen and evolving-mixture
+network wall owners expose `with_shared_wall_conduction`. Rows follow the
+existing shared-wall order and entries follow each wall's gas-port order.
+Each optional `MaterialWallConduction` retains its original temperature or
+phase-dependent conductivity source and planar length/area geometry. A bound
+port's authored conductance remains the gas-side film; solid resistance is
+added once in series. Unbound ports retain their complete authored coefficient.
+The resulting conductance is never written back as the next step's gas film,
+and no material density, heat capacity or latent energy becomes extra storage.
+
+`InitialState` samples original k at the beginning of each source half and
+checks its final state. `ImplicitEndpoint` resolves k(T(h),phi(h)) at each
+proposed wall inventory inside the existing simultaneous gas/wall balance.
+The phase form requires the same original equilibrium chart as the wall's
+caloric owner, so conductivity can change on an isothermal latent plateau.
+The existing temperature-coordinate form retains its original source and
+admitted geometry. Implicit evaluation requires original caloric storage.
+
+The shared energy-root kernel is unchanged in ownership and physical balance.
+An implicit conductivity binding suppresses the incomplete capacity-only
+Newton slope; the bounded scalar solver uses bisection without inventing dk/dh
+or asserting nonlinear uniqueness. Every actual conductivity query spends the
+existing source-attempt budget, including failed proposals and final checks.
+If wall-to-wall links subsequently move the inventory, all bound conductivity
+sources admit that final candidate before publication. Domain, work or
+cancellation refusal preserves the previously accepted gas and wall states.
+
+This is a uniform-wall resistance model, not a resolved through-wall thermal
+profile. The material supplies conductivity and the caller supplies the actual
+resistance geometry and gas film. Source support at sampled states does not
+establish a continuous-path certificate or empirical heat-transfer accuracy.
+
 ## Connected finite wall inventories
 
 `NetworkWallOperator::with_shared_wall_links` connects the existing shared-wall

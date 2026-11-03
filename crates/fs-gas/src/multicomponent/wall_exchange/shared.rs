@@ -7,6 +7,8 @@ use super::*;
 use crate::dynamics::CaloricDomain;
 use std::cell::Cell;
 
+#[cfg(feature = "material")]
+mod conduction;
 pub(crate) mod links;
 
 /// One compact volume's thermal boundary and optional original finite storage.
@@ -58,7 +60,8 @@ pub struct SharedWall<'law> {
 /// bounded by StepControl.maximum_halvings. No numerical work is unbounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SharedWallControl {
-    /// Across every group, including brackets, failed iterates and final checks.
+    /// Across every group, including material conductivity, brackets, failed
+    /// iterates and final checks.
     pub maximum_source_evaluations: usize,
 }
 impl Default for SharedWallControl {
@@ -144,6 +147,8 @@ pub(crate) struct Group<'law> {
     pub(crate) energies: Vec<f64>,
     pub(crate) heat: Vec<f64>,
     residuals: Vec<f64>,
+    #[cfg(feature = "material")]
+    conduction: Option<conduction::SharedConduction>,
 }
 
 impl<'law> Group<'law> {
@@ -161,6 +166,8 @@ impl<'law> Group<'law> {
             energies: super::super::allocated(n, 0.0)?,
             heat: super::super::allocated(n, 0.0)?,
             residuals: super::super::allocated(n, 0.0)?,
+            #[cfg(feature = "material")]
+            conduction: None,
         })
     }
 }
@@ -293,6 +300,15 @@ impl Group<'_> {
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<(f64, Option<f64>, f64), WallExchangeError> {
         let wall = self.after(change, work)?;
+        let wall_slope = wall.slope;
+        #[cfg(feature = "material")]
+        let wall_slope = if self.conduction.as_ref().is_some_and(|c| c.implicit) {
+            // The original conductivity owner does not supply dk/dh here.
+            // A thermal-capacity tangent alone would be the wrong derivative.
+            None
+        } else {
+            wall_slope
+        };
         let mut sums = [0.0; 3];
         let mut corrections = [0.0; 3];
         for (i, port) in self.accepted.ports.iter().enumerate() {
@@ -300,6 +316,18 @@ impl Group<'_> {
                 return Err(WallExchangeError::Cancelled);
             }
             let state = self.initial[i];
+            let conductance = port.conductance_w_per_k;
+            #[cfg(feature = "material")]
+            let conductance = match &self.conduction {
+                Some(binding) => binding.conductance(
+                    i,
+                    conductance,
+                    wall.thermal,
+                    self.accepted.storage.heat_storage.as_ref(),
+                    work,
+                )?,
+                None => conductance,
+            };
             let caloric = MeteredGas {
                 original: gas(port.gas, wall.temperature),
                 work,
@@ -317,7 +345,7 @@ impl Group<'_> {
                     drag: WallDrag::None,
                     thermal: WallThermal::Reservoir {
                         temperature_k: wall.temperature,
-                        conductance_w_per_k: port.conductance_w_per_k,
+                        conductance_w_per_k: conductance,
                     },
                 },
                 control,
@@ -326,10 +354,10 @@ impl Group<'_> {
             self.energies[i] = update.energy;
             self.heat[i] = update.report.heat_to_gas_j;
             self.residuals[i] = update.report.thermal_residual_j;
-            let tangent = if wall.slope.is_some() {
+            let tangent = if wall_slope.is_some() {
                 let endpoint = caloric.primitive(state[0], update.energy, cancelled)?;
                 let capacity = caloric.caloric(endpoint.temperature)?.1 * self.volumes[i];
-                let integrated = port.conductance_w_per_k * duration.value();
+                let integrated = conductance * duration.value();
                 if !positive(capacity) {
                     return Err(WallExchangeError::Invalid("shared gas capacity"));
                 }
@@ -348,7 +376,7 @@ impl Group<'_> {
             )?;
         }
         let residual = wall.change + sums[0];
-        let slope = wall.slope.map(|s| 1.0 + s * sums[2]);
+        let slope = wall_slope.map(|s| 1.0 + s * sums[2]);
         if !residual.is_finite() || slope.is_some_and(|s| !positive(s)) {
             return Err(WallExchangeError::Invalid("shared wall coupled equation"));
         }
@@ -365,6 +393,16 @@ impl Group<'_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<WallCellReport, WallExchangeError> {
         self.initial_wall = initial_wall;
+        #[cfg(feature = "material")]
+        if let Some(binding) = &mut self.conduction {
+            binding.prepare(
+                initial_wall,
+                self.accepted.storage.heat_storage.as_ref(),
+                &self.accepted.ports,
+                work,
+                cancelled,
+            )?;
+        }
         let wall_initial = self.after(0.0, work)?.temperature;
         let initial = self.evaluate(gas, 0.0, duration, control, work, cancelled)?;
         let mut iterations = 0;
@@ -465,6 +503,8 @@ impl Group<'_> {
                 thermal_residual_j: maximum_flux,
             });
         }
+        #[cfg(feature = "material")]
+        self.admit_conduction_endpoint(wall.thermal, false, work, cancelled)?;
         self.candidate = wall.thermal;
         Ok(WallCellReport {
             elapsed: duration,

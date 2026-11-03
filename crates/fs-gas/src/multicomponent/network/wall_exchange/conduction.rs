@@ -134,7 +134,7 @@ impl MaterialWallConduction {
         self.area
     }
 
-    fn conductance(
+    pub(crate) fn conductance(
         &self,
         thermal: WallThermal,
         caloric: Option<&MaterialWallCaloric<'_>>,
