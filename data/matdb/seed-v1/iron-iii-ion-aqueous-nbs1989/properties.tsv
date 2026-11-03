@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	identity	Iron(III) ion, NBS reference	NBS Table 41:Fe (prepared 1966), Fe3+ state ao	Free Fe3+(aq), distinct from Fe2+(aq), iron metal, ore iron and ferricyanide. The existing USGS iron(III) profile keeps its own reference and values. The source state ao denotes an individual aqueous species, not a completely ionized salt ai.
+observation	standard	Literal corrected NBS iron thermochemistry	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	The original row gives formula mass 55.8470 g/mol, formation enthalpy -48.5 kJ/mol, directly tabulated formation Gibbs energy -4.7 kJ/mol and conventional ionic entropy -315.9 J/(mol K). Ionic entropy uses the H+(aq)=0 convention. Heat capacity and per-row uncertainty distributions are absent; neither is invented.
+observation	scope	Explicit legacy NBS aqueous standard state	NBS Tables, sections 5.5 to 5.8; https://doi.org/10.6028/jres.125.007	Claims require 298.15 K, 100000 Pa and source-elemental-reference-nbs1989. The hypothetical ideal unit-molality state is referred to infinite dilution. This source profile does not supply activity coefficients, protonated complexes, hydrolysis, precipitation, iron redox interconversion, ore dissolution, photolysis or a kinetic rate.
+observation	limitation	Legacy iron-cyanide equilibrium discrepancy	Keefe and Miller (1996), Was ferrocyanide a prebiotic reagent?; https://ntrs.nasa.gov/api/citations/19980201273/downloads/19980201273.pdf	Legacy NBS cyanide constants disagree with later critical values; see MINING_IRON_CYANIDE_REFERENCE.md. Select this reference explicitly; the literal data are not a validated cyanide-capture calibration.
+scalar	molar-mass	identity,scope	mass	55.8470	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope,limitation	hf	-48.5	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope,limitation	gf	-4.7	kJ/mol	tabulated
+scalar	conventional-entropy	identity,standard,scope,limitation	s0	-315.9	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	conventional-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	conventional-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	conventional-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	conventional-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	conventional-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	conventional-entropy	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	conventional-entropy	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	conventional-entropy	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	conventional-entropy	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	conventional-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	conventional-entropy	specimen	0	0	1
