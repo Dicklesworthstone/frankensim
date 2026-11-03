@@ -58,6 +58,49 @@ fn product_sum(a: &[f64], b: &[f64]) -> Result<f64> {
 }
 
 impl SupportedSpectralSolid {
+    /// Full-coordinate incremental mobility with support velocities fixed.
+    /// Contact kinematics still include their actual nonzero velocities.
+    /// Both normal and frictional laws use this same original free-mass action.
+    pub(super) fn momentum_response(
+        &self,
+        impulse: &[f64],
+        cx: &Cx<'_>,
+    ) -> core::result::Result<Vec<f64>, LinearSolidImpulseError> {
+        let n = self.coordinates.len();
+        if impulse.len() != n {
+            return Err(LinearSolidImpulseError::Invalid(
+                "support contact response requires every represented coordinate",
+            ));
+        }
+        let mut free_impulse = Vec::new();
+        free_impulse
+            .try_reserve_exact(self.free_rows.len())
+            .map_err(|_| {
+                LinearSolidImpulseError::Invalid("support contact response allocation refused")
+            })?;
+        for (index, &row) in self.free_rows.iter().enumerate() {
+            if index % 256 == 0 {
+                cx.checkpoint()
+                    .map_err(|_| LinearSolidImpulseError::Cancelled)?;
+            }
+            free_impulse.push(impulse[row]);
+        }
+        let free_response = self.free.momentum_response(&free_impulse, cx)?;
+        let mut response = Vec::new();
+        response.try_reserve_exact(n).map_err(|_| {
+            LinearSolidImpulseError::Invalid("support contact response allocation refused")
+        })?;
+        response.resize(n, 0.0);
+        for (index, &row) in self.free_rows.iter().enumerate() {
+            if index % 256 == 0 {
+                cx.checkpoint()
+                    .map_err(|_| LinearSolidImpulseError::Cancelled)?;
+            }
+            response[row] = free_response[index];
+        }
+        Ok(response)
+    }
+
     /// Apply an impulse in ORIGINAL represented-coordinate order and prescribe
     /// the support velocities immediately AFTER the event [m/s]. Supports may
     /// retain their current velocities, or jump; positions and time stay fixed.

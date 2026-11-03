@@ -5527,3 +5527,39 @@ analytic all-mode continuation, independent P1 consistent-mass world
 linear/angular impulse, redundant contacts under boosts and tangent-frame
 rotation, and late native-readback refusal with unchanged-state retry.
 Native compilation and test execution remain outstanding.
+
+
+### Simultaneous Coulomb impacts with moving solid supports
+
+`SupportedSpectralSolid::apply_frictional_impacts` uses the same original
+non-associated normal/two-tangent `fs-contact` law as the complete free solid
+owners. Contact covectors include every represented coordinate. Prescribed
+supports retain their accepted instantaneous velocities: they contribute to
+actual approach/slip and work, while their incremental compliance is zero.
+Normal and frictional supported events now share one private full-coordinate
+mobility action using every free spectral mode.
+
+The complete contact matrix is `J_f M_ff^-1 J_f^T`, retaining normal/tangent
+and inter-contact coupling. Original consistent mass supplies
+`R_c = M_cf Delta-v_f - J_c`, including direct contact impulses at prescribed
+coordinates. Applied-contact, opposing-surface and support-actuator work are
+separate. Actual final slip, normal/complementarity and Coulomb residuals,
+relative passivity, original momentum and whole-solid energy all gate one
+unpublished native impulse candidate before both owners accept.
+
+The original trajectory keeps displacement, time, support acceleration,
+prepared matrices, material state and prior cumulative work. Contact loss is
+not assigned to heat or counted again as viscous dissipation. Native contact
+determinacy and redundant-impulse representative qualifications remain intact;
+a uniquely determined velocity does not establish unique local contact loads
+or source-work partitions. Adapter workspace/product limits, native solver
+limits and original supported-state limits retain their separate scopes.
+No prepared operator is cloned or refactored.
+
+Four focused G1/G3/G4 regression definitions cover analytical sliding and
+sticking against moving supports, original cross-mass reaction and work,
+independent elastic continuation, common-boost work transformation, locked
+contact refusal, cancellation/budgets and a late original-energy refusal
+followed by an unchanged-state retry. Native execution remains outstanding.
+Geometry/event discovery, sustained friction and physical loss destinations
+remain separate owners.

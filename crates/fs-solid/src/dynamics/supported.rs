@@ -24,8 +24,12 @@ use fs_exec::Cx;
 use fs_sparse::{Coo, Csr};
 
 mod admission;
+mod frictional_impact;
 mod impact;
 mod impulse;
+pub use frictional_impact::{
+    SupportedSolidFrictionalImpactError, SupportedSolidFrictionalImpactReport,
+};
 pub use impact::{SupportedSolidNormalImpactError, SupportedSolidNormalImpactReport};
 pub use impulse::SupportedSolidImpulse;
 

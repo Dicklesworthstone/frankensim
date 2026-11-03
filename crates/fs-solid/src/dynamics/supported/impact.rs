@@ -71,42 +71,11 @@ impl SupportedSpectralSolid {
         cx: &Cx<'_>,
     ) -> ImpactResult<SupportedSolidNormalImpactReport> {
         poll(cx)?;
-        let n = self.coordinates.len();
         let proposal = impact::propose(
             &self.velocity,
             contacts,
             controls,
-            |impulse, cx| {
-                let mut free_impulse = Vec::new();
-                free_impulse
-                    .try_reserve_exact(self.free_rows.len())
-                    .map_err(|_| {
-                        LinearSolidImpulseError::Invalid(
-                            "support impact response allocation refused",
-                        )
-                    })?;
-                for (index, &row) in self.free_rows.iter().enumerate() {
-                    if index % 256 == 0 {
-                        cx.checkpoint()
-                            .map_err(|_| LinearSolidImpulseError::Cancelled)?;
-                    }
-                    free_impulse.push(impulse[row]);
-                }
-                let free_response = self.free.momentum_response(&free_impulse, cx)?;
-                let mut response = Vec::new();
-                response.try_reserve_exact(n).map_err(|_| {
-                    LinearSolidImpulseError::Invalid("support impact response allocation refused")
-                })?;
-                response.resize(n, 0.0);
-                for (index, &row) in self.free_rows.iter().enumerate() {
-                    if index % 256 == 0 {
-                        cx.checkpoint()
-                            .map_err(|_| LinearSolidImpulseError::Cancelled)?;
-                    }
-                    response[row] = free_response[index];
-                }
-                Ok(response)
-            },
+            |impulse, cx| self.momentum_response(impulse, cx),
             cx,
         )?;
         let mut support_velocity = zeros(self.support_rows.len())?;
