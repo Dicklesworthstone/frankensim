@@ -13,8 +13,10 @@
 //!
 //! Fixed liquid volume, temperature, dry masses and finite initial dissolved O2
 //! are explicit. A sufficient initial counterion reserve is required rather
-//! than inventing counterion-limited kinetics. Initial reagent doses are kept;
-//! new doses, gas exchange, carbon movement and regeneration are not modeled.
+//! than inventing counterion-limited kinetics. Delivered dissolved reagent doses
+//! retain the original clock and every carbon inventory. The aeration adapter
+//! supplies maintained-pressure oxygen; carbon movement and regeneration remain
+//! separate operations.
 //! RK4 full/two-half differences divided by 15 estimate local inventory error;
 //! they are not certified bounds or ore/carbon calibration evidence.
 
@@ -24,10 +26,14 @@ use crate::aqueous_adsorption::{
     flow::{AdsorptionFlowError, LocalLangmuirRate, MAX_POPULATIONS, RetainedSorbent},
 };
 
-mod ion_pair;
 /// Maintained-pressure oxygen exchange coupled to simultaneous carbon-in-leach.
 pub mod aeration;
+mod ion_pair;
 pub use ion_pair::IonPairTransfer;
+
+/// Dissolved reagent additions preserving all liquid and carbon inventories.
+pub mod reagent_feed;
+pub use reagent_feed::CilReagentDoseReceipt;
 
 /// Actual concentration of the explicitly transferred aqueous counterion [mol/m³].
 pub const COUNTERION_AXIS: &str = "ion-pair-counterion-concentration";
@@ -211,6 +217,8 @@ pub struct CilDoseReceipt {
     /// Re-speciated common solution and unchanged instantaneous carbon stocks.
     pub state: CilState,
     pub conservation: CilConservation,
+    /// Complete sodium balance, including sorbed Na when Na is the pair counterion.
+    pub sodium_balance: Amount,
     pub work: usize,
 }
 impl CilDoseReceipt {
@@ -258,7 +266,7 @@ impl CilAdvance {
     pub fn models(&self) -> &[CarbonPopulation] {
         &self.layout.populations
     }
-    /// Original accepted dissolved reagent inputs retained at attachment.
+    /// Accepted dissolved reagent inputs retained by this report.
     pub fn reagent_inputs(&self) -> dosing::ReagentInputs {
         self.layout.leach.reagents
     }
@@ -292,6 +300,10 @@ impl CarbonInLeachBatch {
             "CIL population IDs must be unique",
         )?;
         let leach = fresh.layout;
+        ensure(
+            !leach.conditions.axes().contains_key(COUNTERION_AXIS),
+            "CIL owns the actual ion-pair counterion coordinate",
+        )?;
         for species in [pair.counterion(), pair.adsorbed_pair()] {
             ensure(
                 leach
@@ -429,86 +441,9 @@ impl CarbonInLeachBatch {
     pub fn initial_charge(&self) -> &CyanidationCharge {
         &self.layout.leach.charge
     }
-    /// Accepted reagent doses preceding attachment.
+    /// Cumulative accepted dissolved reagent doses.
     pub fn reagent_inputs(&self) -> dosing::ReagentInputs {
         self.layout.leach.reagents
-    }
-
-    /// Add finite dissolved NaCN or NaOH equivalents at the retained clock.
-    ///
-    /// The dose changes neither sorbed loading nor gold progress instantaneously.
-    /// The actual aqueous state, optional metal competition and every carbon
-    /// source are re-admitted together before publication. Cyanide and sodium
-    /// additions extend the explicit CIL totals without rebasing the original
-    /// charge or clearing numerical history.
-    pub fn dose_reagent(
-        &mut self,
-        reagent: dosing::DissolvedSodiumReagent,
-        amount: Amount,
-        maximum_work: usize,
-        mut cancelled: impl FnMut() -> bool,
-    ) -> Result<CilDoseReceipt> {
-        let mut work = dosing::work(maximum_work, &mut cancelled)?;
-        let mut leach = dosing::prepare(&self.layout.leach, reagent, amount, &mut work)?;
-        if leach.charge.dissolved_oxygen.value() < product(0.25, leach.limit)? {
-            leach.limit = product(4.0, leach.charge.dissolved_oxygen.value())?;
-        }
-
-        let mut next = (*self.layout).clone();
-        next.leach = Arc::new(leach);
-        if reagent == dosing::DissolvedSodiumReagent::SodiumCyanide {
-            next.total_cyanide = sum([next.total_cyanide, amount.value()].into_iter())?;
-        }
-        let doses_pair_counterion = next.pair.counterion().as_str() == dosing::SODIUM;
-        if doses_pair_counterion {
-            next.total_counterion = sum([next.total_counterion, amount.value()].into_iter())?;
-        }
-
-        // Recheck the same no-hidden-counterion-limitation condition against the
-        // possibly expanded NaCN-driven cumulative gold ceiling. Preloaded carbon
-        // already owns one bound counterion per preloaded Au pair.
-        let preloaded = sum([
-            next.total_gold,
-            -next.leach.charge.accessible_gold.value(),
-            -next.leach.charge.gold_complex.value(),
-        ]
-        .into_iter())?;
-        let required_counterion = sum([
-            preloaded,
-            next.leach.charge.gold_complex.value(),
-            next.leach.limit,
-        ]
-        .into_iter())?;
-        ensure(
-            next.total_counterion >= required_counterion,
-            "insufficient counterion reserve after CIL reagent dose",
-        )?;
-
-        let mut stocks = Stocks::from_state(&self.state);
-        if doses_pair_counterion {
-            stocks.counterion = sum([stocks.counterion, amount.value()].into_iter())?;
-        }
-        let layout = Arc::new(next);
-        let state = evaluate_cil(
-            &layout,
-            self.state.elapsed.value(),
-            &stocks,
-            &mut work,
-        )?;
-        let conservation = conservation_cil(&layout, &state)?;
-        work.tick()?;
-        let receipt = CilDoseReceipt {
-            layout: layout.clone(),
-            reagent,
-            delivered: amount,
-            inputs: layout.leach.reagents,
-            state: state.clone(),
-            conservation,
-            work: work.used,
-        };
-        self.layout = layout;
-        self.state = state;
-        Ok(receipt)
     }
 
     /// Advance all dissolved, sorbed and vacant stocks together, or publish nothing.
@@ -573,10 +508,13 @@ impl CarbonInLeachBatch {
             }
             let remaining = end - state.elapsed.value();
             step = step.min(remaining);
-            let finish = if step == remaining {
+            let proposed = state.elapsed.value() + step;
+            // Integrate the final interval through the exact requested endpoint.
+            // Repeated decimal steps can otherwise leave an unresolvable one-ulp tail.
+            let finish = if proposed >= end || end - proposed <= 8.0 * f64::EPSILON * end.abs() {
                 end
             } else {
-                state.elapsed.value() + step
+                proposed
             };
             let middle = state.elapsed.value() + 0.5 * (finish - state.elapsed.value());
             if middle <= state.elapsed.value() || finish <= middle {
@@ -966,4 +904,4 @@ fn ensure(condition: bool, reason: &'static str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::cyanide_leach) mod tests;

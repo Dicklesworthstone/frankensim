@@ -50,6 +50,21 @@ impl AeratedCilAdvance {
     }
 }
 
+/// Accepted dissolved-reagent addition with the original oxygen-source admission.
+#[derive(Clone, Debug)]
+pub struct AeratedCilDoseReceipt {
+    pub cil: CilReagentDoseReceipt,
+    pub oxygen_partial_pressure: Pressure,
+    pub oxygen_saturation: Amount,
+    pub transfer_conditions: QueryPoint,
+    transfer: Arc<OxygenTransfer>,
+}
+impl AeratedCilDoseReceipt {
+    pub fn transfer(&self) -> &OxygenTransfer {
+        &self.transfer
+    }
+}
+
 impl AeratedCarbonInLeachBatch {
     /// Attach gas exchange to freshly admitted simultaneous CIL.
     ///
@@ -67,7 +82,10 @@ impl AeratedCarbonInLeachBatch {
         let model = &chemical.model;
         ensure(
             model.chemistry.families().iter().all(|family| {
-                family.species().iter().all(|species| species != external_gas)
+                family
+                    .species()
+                    .iter()
+                    .all(|species| species != external_gas)
             }) && chemical
                 .charge
                 .spectators
@@ -75,7 +93,10 @@ impl AeratedCarbonInLeachBatch {
                 .all(|ion| &ion.species != external_gas)
                 && chemical.competition.as_ref().is_none_or(|metals| {
                     metals.model.families().iter().all(|family| {
-                        family.species().iter().all(|species| species != external_gas)
+                        family
+                            .species()
+                            .iter()
+                            .all(|species| species != external_gas)
                     })
                 })
                 && closed.layout.pair.counterion() != external_gas
@@ -191,20 +212,73 @@ impl AeratedCarbonInLeachBatch {
         Amount::new(self.oxygen_out)
     }
 
-    /// Add dissolved NaCN or NaOH without resetting gas-transfer history.
+    /// Add dissolved NaCN/NaOH while retaining the open oxygen boundary.
     ///
-    /// No gas pressure is retained between advances, so the next advance admits
-    /// its own pressure and transfer context against the newly re-speciated CIL
-    /// state. The gas source and cumulative in/out accounts remain unchanged.
+    /// The dose itself transfers no oxygen. The next advance supplies and
+    /// admits its pressure and transfer context. Use `dose_reagent_at_pressure`
+    /// to admit that gas boundary as part of the same atomic delivery.
     pub fn dose_reagent(
         &mut self,
         reagent: dosing::DissolvedSodiumReagent,
         amount: Amount,
         maximum_work: usize,
-        cancelled: impl FnMut() -> bool,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<CilDoseReceipt> {
-        self.batch
-            .dose_reagent(reagent, amount, maximum_work, cancelled)
+        let mut work = dosing::work(maximum_work, &mut cancelled)?;
+        let next = reagent_feed::prepare_addition(&self.batch, reagent, amount, true, &mut work)?;
+        let conservation =
+            open_conservation(&next.layout, &next.state, self.oxygen_in, self.oxygen_out)?;
+        let receipt = reagent_feed::receipt(&next, reagent, amount, conservation, &mut work)?;
+        self.batch = next;
+        Ok(receipt)
+    }
+
+    /// Add dissolved NaCN/NaOH without resetting carbon, gas or leach history.
+    ///
+    /// The explicit boundary admits the post-dose oxygen-transfer source at the
+    /// retained clock. This instantaneous delivery transfers no oxygen itself.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dose_reagent_at_pressure(
+        &mut self,
+        reagent: dosing::DissolvedSodiumReagent,
+        delivered: Amount,
+        oxygen_partial_pressure: Pressure,
+        transfer_conditions: &QueryPoint,
+        maximum_work: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AeratedCilDoseReceipt> {
+        let mut work = dosing::work(maximum_work, &mut cancelled)?;
+        let next =
+            reagent_feed::prepare_addition(&self.batch, reagent, delivered, true, &mut work)?;
+        let saturation = self
+            .transfer
+            .solubility()
+            .equilibrium_aqueous_amount(
+                oxygen_partial_pressure,
+                next.layout.leach.charge.amount_at_unit_activity,
+            )
+            .map_err(CyanidationError::from)?;
+        self.transfer
+            .validate_extras(&next.layout.leach.conditions, transfer_conditions)?;
+        let boundary = Boundary {
+            transfer: &self.transfer,
+            pressure: oxygen_partial_pressure,
+            saturation,
+            extra: transfer_conditions,
+        };
+        let (_, actual_transfer_conditions) = boundary.rate(&next.state)?;
+        let conservation =
+            open_conservation(&next.layout, &next.state, self.oxygen_in, self.oxygen_out)?;
+        let cil = reagent_feed::receipt(&next, reagent, delivered, conservation, &mut work)?;
+        let answer = AeratedCilDoseReceipt {
+            cil,
+            oxygen_partial_pressure,
+            oxygen_saturation: saturation,
+            transfer_conditions: actual_transfer_conditions,
+            transfer: self.transfer.clone(),
+        };
+        self.batch = next;
+        Ok(answer)
     }
 
     /// Advance at fixed prescribed O2 partial pressure. A later call may change
@@ -228,24 +302,26 @@ impl AeratedCarbonInLeachBatch {
             duration.value() == 0.0 || end > start,
             "aerated CIL duration is below clock resolution",
         )?;
-        let saturation = self.transfer.solubility().equilibrium_aqueous_amount(
-            oxygen_partial_pressure,
-            self.batch.layout.leach.charge.amount_at_unit_activity,
-        )?;
+        let saturation = self
+            .transfer
+            .solubility()
+            .equilibrium_aqueous_amount(
+                oxygen_partial_pressure,
+                self.batch.layout.leach.charge.amount_at_unit_activity,
+            )
+            .map_err(CyanidationError::from)?;
         self.transfer
             .validate_extras(&self.batch.layout.leach.conditions, transfer_conditions)?;
         check_clock(&self.batch.layout.leach.model.source, end)?;
         check_clock(self.transfer.source(), end)?;
 
-        let scale = sum(
-            [
-                self.batch.layout.total_gold,
-                sum(self.batch.layout.capacities.iter().copied())?,
-                self.batch.state.solution.dissolved_oxygen.value(),
-                saturation.value(),
-            ]
-            .into_iter(),
-        )?;
+        let scale = sum([
+            self.batch.layout.total_gold,
+            sum(self.batch.layout.capacities.iter().copied())?,
+            self.batch.state.solution.dissolved_oxygen.value(),
+            saturation.value(),
+        ]
+        .into_iter())?;
         let tolerance = CyanidationNumerics {
             maximum_step: numerics.maximum_step,
             absolute_gold_error: numerics.absolute_amount_error,
@@ -279,6 +355,7 @@ impl AeratedCarbonInLeachBatch {
         let (mut accepted, mut rejected) = (0usize, 0usize);
         let mut largest = 0.0_f64;
         let mut accumulated = self.accumulated_error;
+        let mut interval_error = 0.0;
 
         while current.state.elapsed.value() < end {
             work.tick()?;
@@ -287,12 +364,16 @@ impl AeratedCarbonInLeachBatch {
             }
             let remaining = end - current.state.elapsed.value();
             step = step.min(remaining);
-            let finish = if step == remaining {
+            let proposed = current.state.elapsed.value() + step;
+            // Integrate the final interval through the exact requested endpoint.
+            // Repeated decimal steps can otherwise leave an unresolvable one-ulp tail.
+            let finish = if proposed >= end || end - proposed <= 8.0 * f64::EPSILON * end.abs() {
                 end
             } else {
-                current.state.elapsed.value() + step
+                proposed
             };
-            let middle = current.state.elapsed.value() + 0.5 * (finish - current.state.elapsed.value());
+            let middle =
+                current.state.elapsed.value() + 0.5 * (finish - current.state.elapsed.value());
             if middle <= current.state.elapsed.value() || finish <= middle {
                 return Err(CilError::Arithmetic(
                     "positive aerated CIL substep is below clock resolution",
@@ -314,20 +395,18 @@ impl AeratedCarbonInLeachBatch {
             };
             let chemistry_error =
                 Stocks::from_state(&refined.state).error(&Stocks::from_state(&full.state))?;
-            let gas_error = sum(
-                [
-                    (refined.inward - full.inward).abs(),
-                    (refined.outward - full.outward).abs(),
-                ]
-                .into_iter(),
-            )?;
+            let gas_error = sum([
+                (refined.inward - full.inward).abs(),
+                (refined.outward - full.outward).abs(),
+            ]
+            .into_iter())?;
             let error = sum([chemistry_error, gas_error].into_iter())?;
             let local = product(
                 tolerance,
                 quotient(finish - current.state.elapsed.value(), duration.value())?,
             )?;
-            let next_accumulated = sum([accumulated, error].into_iter())?;
-            if error > local || next_accumulated > tolerance {
+            let next_interval_error = sum([interval_error, error].into_iter())?;
+            if error > local || next_interval_error > tolerance {
                 rejected += 1;
                 step = product(step, 0.5)?;
                 continue;
@@ -338,7 +417,8 @@ impl AeratedCarbonInLeachBatch {
             current = refined;
             accepted += 1;
             largest = largest.max(error);
-            accumulated = next_accumulated;
+            interval_error = next_interval_error;
+            accumulated = sum([accumulated, error].into_iter())?;
             if error < local / 32.0 {
                 step = (step * 2.0).min(numerics.maximum_step.value());
             }
@@ -350,15 +430,15 @@ impl AeratedCarbonInLeachBatch {
         let conservation =
             open_conservation(&self.batch.layout, &current.state, oxygen_in, oxygen_out)?;
         let capture = |role| -> Result<Amount> {
-            Ok(Amount::new(sum(
-                current
-                    .state
-                    .populations
-                    .iter()
-                    .zip(&initial_state.populations)
-                    .filter(|(p, _)| p.role == role)
-                    .map(|(after, before)| after.adsorbed.value() - before.adsorbed.value()),
-            )?))
+            Ok(Amount::new(sum(current
+                .state
+                .populations
+                .iter()
+                .zip(&initial_state.populations)
+                .filter(|(p, _)| p.role == role)
+                .map(|(after, before)| {
+                    after.adsorbed.value() - before.adsorbed.value()
+                }))?))
         };
         let mut cil = CilAdvance {
             layout: self.batch.layout.clone(),
@@ -407,9 +487,26 @@ struct Boundary<'a> {
 }
 impl Boundary<'_> {
     fn rate(&self, state: &CilState) -> Result<(f64, QueryPoint)> {
+        ensure(
+            !self.extra.axes().contains_key(COUNTERION_AXIS),
+            "CIL owns the gas source's actual counterion coordinate",
+        )?;
+        let chemical_conditions = state
+            .solution
+            .conditions
+            .clone()
+            .with_quantity(
+                COUNTERION_AXIS,
+                QuantitySpec::dimensional(AmountConcentration::DIMS),
+                quotient(
+                    state.dissolved_counterion.value(),
+                    state.solution.conditions.axes()[VOLUME_AXIS],
+                )?,
+            )
+            .map_err(CyanidationError::from)?;
         self.transfer
             .rate_at_conditions(
-                &state.solution.conditions,
+                &chemical_conditions,
                 state.solution.dissolved_oxygen,
                 self.pressure,
                 self.saturation,
@@ -461,21 +558,14 @@ fn displaced(
     Ok(sample)
 }
 fn average(rates: [&Rates; 4]) -> Result<Rates> {
-    let cil = Stocks::average([
-        &rates[0].cil,
-        &rates[1].cil,
-        &rates[2].cil,
-        &rates[3].cil,
-    ])?;
+    let cil = Stocks::average([&rates[0].cil, &rates[1].cil, &rates[2].cil, &rates[3].cil])?;
     let component = |values: [f64; 4]| -> Result<f64> {
-        Ok(sum(
-            values
-                .into_iter()
-                .zip([6.0, 3.0, 3.0, 6.0])
-                .map(|(r, d)| signed_scale(r, 1.0 / d))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter(),
-        )?)
+        Ok(sum(values
+            .into_iter()
+            .zip([6.0, 3.0, 3.0, 6.0])
+            .map(|(r, d)| signed_scale(r, 1.0 / d))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter())?)
     };
     Ok(Rates {
         cil,
@@ -562,15 +652,13 @@ fn open_conservation(
     ] {
         check_balance(residual, scale)?;
     }
-    let oxygen_scale = sum(
-        [
-            layout.leach.charge.dissolved_oxygen.value(),
-            quotient(solution.gold_dissolved.value(), 4.0)?,
-            oxygen_in,
-            oxygen_out,
-        ]
-        .into_iter(),
-    )?;
+    let oxygen_scale = sum([
+        layout.leach.charge.dissolved_oxygen.value(),
+        quotient(solution.gold_dissolved.value(), 4.0)?,
+        oxygen_in,
+        oxygen_out,
+    ]
+    .into_iter())?;
     if oxygen.abs() > 2048.0 * f64::EPSILON * oxygen_scale.max(1.0) {
         return Err(CilError::Arithmetic(
             "open-boundary CIL oxygen balance does not close",

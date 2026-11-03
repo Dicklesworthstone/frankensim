@@ -235,6 +235,161 @@ fn zero_pressure_strips_oxygen_while_retaining_carbon_and_atomic_history() {
     assert_eq!(aerated.oxygen_out(), cumulative_out);
 }
 
+#[test]
+fn dissolved_reagents_preserve_open_oxygen_and_loaded_carbon_history() {
+    let mut initial = fixture::charge(1.0);
+    initial.dissolved_oxygen = Amount::new(0.0);
+    let mut bath = AeratedCarbonInLeachBatch::from_batch(cil(initial, 1.0), transfer(0.3)).unwrap();
+    let pressure = Pressure::new(100_000.0);
+    bath.advance(
+        Time::new(0.2),
+        pressure,
+        &QueryPoint::new(),
+        numerics(1.0),
+        || false,
+    )
+    .unwrap();
+    assert!(bath.oxygen_in().value() > 0.0);
+    let before = bath.state().clone();
+    let gas_in = bath.oxygen_in();
+    let gas_out = bath.oxygen_out();
+    let numerical_error = bath.accumulated_error;
+    let receipt = bath
+        .dose_reagent_at_pressure(
+            dosing::DissolvedSodiumReagent::SodiumCyanide,
+            Amount::new(0.3),
+            pressure,
+            &QueryPoint::new(),
+            1_000_000,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(receipt.cil.state.elapsed, before.elapsed);
+    assert_eq!(
+        receipt.cil.state.solution.gold_dissolved,
+        before.solution.gold_dissolved
+    );
+    assert_eq!(
+        receipt.cil.state.solution.dissolved_oxygen,
+        before.solution.dissolved_oxygen
+    );
+    for (a, b) in receipt
+        .cil
+        .state
+        .populations
+        .iter()
+        .zip(&before.populations)
+    {
+        assert_eq!(a.adsorbed, b.adsorbed);
+        assert_eq!(a.vacant_capacity, b.vacant_capacity);
+    }
+    assert_eq!(bath.oxygen_in(), gas_in);
+    assert_eq!(bath.oxygen_out(), gas_out);
+    assert_eq!(bath.accumulated_error, numerical_error);
+    close(
+        receipt.cil.conservation.dissolved_oxygen.value(),
+        0.0,
+        2e-12,
+    );
+    close(receipt.cil.conservation.cyanide.value(), 0.0, 3e-9);
+    close(receipt.cil.sodium_balance.value(), 0.0, 2e-12);
+    close(
+        receipt.transfer_conditions.axes()[PH_AXIS],
+        receipt.cil.state.solution.speciation.ph.value(),
+        0.0,
+    );
+    bath.advance(
+        Time::new(0.1),
+        pressure,
+        &QueryPoint::new(),
+        numerics(1.0),
+        || false,
+    )
+    .unwrap();
+    assert!(bath.oxygen_in().value() > gas_in.value());
+    assert!(bath.state().solution.gold_dissolved.value() > before.solution.gold_dissolved.value());
+}
+
+#[test]
+fn reagent_source_refusal_leaves_aerated_accounts_and_inputs_untouched() {
+    let mut bath =
+        AeratedCarbonInLeachBatch::from_batch(cil(fixture::charge(1.0), 1.0), transfer(0.3))
+            .unwrap();
+    bath.advance(
+        Time::new(0.1),
+        Pressure::new(100_000.0),
+        &QueryPoint::new(),
+        numerics(1.0),
+        || false,
+    )
+    .unwrap();
+    let before = format!("{bath:?}");
+    assert!(
+        bath.dose_reagent_at_pressure(
+            dosing::DissolvedSodiumReagent::SodiumHydroxide,
+            Amount::new(0.1),
+            Pressure::new(300_000.0),
+            &QueryPoint::new(),
+            1_000_000,
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(format!("{bath:?}"), before);
+    let receipt = bath
+        .dose_reagent_at_pressure(
+            dosing::DissolvedSodiumReagent::SodiumHydroxide,
+            Amount::new(0.1),
+            Pressure::new(100_000.0),
+            &QueryPoint::new(),
+            1_000_000,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(receipt.cil.inputs.sodium_hydroxide, Amount::new(0.1));
+}
+
+#[test]
+fn decimal_endpoints_and_tighter_continuation_keep_real_error_history() {
+    let mut closed = cil(fixture::charge(1.0), 1.0);
+    closed
+        .advance(Time::new(0.1), numerics(1.0), || false)
+        .unwrap();
+    assert_eq!(closed.state().elapsed, Time::new(0.1));
+
+    let mut bath =
+        AeratedCarbonInLeachBatch::from_batch(cil(fixture::charge(1.0), 1.0), transfer(0.3))
+            .unwrap();
+    let first = bath
+        .advance(
+            Time::new(0.2),
+            Pressure::new(100_000.0),
+            &QueryPoint::new(),
+            numerics(1.0),
+            || false,
+        )
+        .unwrap();
+    let history = first.cil.accumulated_error_estimate.value();
+    assert!(history > 0.0);
+    let tighter = CilNumerics {
+        absolute_amount_error: Amount::new(history * 0.25),
+        relative_amount_error: Dimensionless::new(0.0),
+        ..numerics(1.0)
+    };
+    let next = bath
+        .advance(
+            Time::new(0.1),
+            Pressure::new(100_000.0),
+            &QueryPoint::new(),
+            tighter,
+            || false,
+        )
+        .unwrap();
+    close(next.cil.state.elapsed.value(), 0.3, 1e-15);
+    let accumulated = next.cil.accumulated_error_estimate.value();
+    assert!(accumulated >= history);
+    assert!(accumulated - history <= tighter.absolute_amount_error.value() * (1.0 + 1e-12));
+}
 
 #[test]
 fn reagent_dose_preserves_aeration_accounts_and_clock() {
@@ -270,4 +425,75 @@ fn reagent_dose_preserves_aeration_accounts_and_clock() {
     for (state, before) in dose.state.populations.iter().zip(adsorbed) {
         assert_eq!(state.adsorbed, before);
     }
+}
+
+#[test]
+fn gas_source_uses_actual_counterion_and_refuses_frozen_coordinates() {
+    let closed = cil(fixture::charge(1.0), 1.0);
+    let concentration = closed.state().dissolved_counterion.value()
+        / closed.initial_charge().solution_volume.value();
+    let mut source = transfer_card(0.3);
+    source.validity = source.validity.with_quantity(
+        COUNTERION_AXIS,
+        QuantitySpec::dimensional(AmountConcentration::DIMS),
+        concentration - 1e-6,
+        concentration + 1e-6,
+    );
+    let original = OxygenTransfer::from_card(solubility(100_000.0), source).unwrap();
+    let mut bath = AeratedCarbonInLeachBatch::from_batch(closed, original).unwrap();
+    let initial = bath
+        .advance(
+            Time::new(0.0),
+            Pressure::new(100_000.0),
+            &QueryPoint::new(),
+            numerics(1.0),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(
+        initial.transfer_conditions.axes()[COUNTERION_AXIS],
+        concentration
+    );
+    let before = format!("{bath:?}");
+    assert!(
+        bath.dose_reagent_at_pressure(
+            dosing::DissolvedSodiumReagent::SodiumHydroxide,
+            Amount::new(0.1),
+            Pressure::new(100_000.0),
+            &QueryPoint::new(),
+            1_000_000,
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(format!("{bath:?}"), before);
+    assert!(
+        bath.advance(
+            Time::new(0.2),
+            Pressure::new(100_000.0),
+            &QueryPoint::new(),
+            numerics(1.0),
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(format!("{bath:?}"), before);
+    let frozen = QueryPoint::new()
+        .with_quantity(
+            COUNTERION_AXIS,
+            QuantitySpec::dimensional(AmountConcentration::DIMS),
+            concentration,
+        )
+        .unwrap();
+    assert!(
+        bath.advance(
+            Time::new(0.0),
+            Pressure::new(100_000.0),
+            &frozen,
+            numerics(1.0),
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(format!("{bath:?}"), before);
 }
