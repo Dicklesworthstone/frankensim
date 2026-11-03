@@ -1,12 +1,13 @@
-//! Same-position pressure impulses preserve the complete conservative history.
+//! Same-position impulses preserve the complete conservative history.
 
 use super::{
     ConservativeFormulation, ConservativeTetError, ConservativeTetSolid, MixedUpError, checkpoint,
-    gate, invalid,
+    gate, inertia_error, invalid,
 };
 use crate::hyper3::mixed::impulse::{
     MixedImpulseControls, MixedImpulseReport, constrained_impulse,
 };
+use crate::inertia::SolidMomentum;
 use fs_exec::Cx;
 use std::sync::Arc;
 
@@ -17,21 +18,29 @@ pub struct ConservativeTetImpulse<'a> {
 }
 
 impl<'a> ConservativeTetSolid<'a> {
-    /// Apply an instantaneous load through original mass AND exact weak volume
-    /// constraints at the accepted configuration. Geometry, material points,
+    /// Apply an instantaneous load through original consistent mass, including
+    /// exact weak volume constraints when required. Geometry, material points,
     /// reference density, stored pressure and time are retained unchanged.
     ///
-    /// Held components keep their current velocity. A pressure gauge is zero
-    /// impulse on one original corner and is admitted only for a true connected
+    /// FullMaterial and OriginalMaterial use the original checked mass solve;
+    /// only `controls.balance` applies, no pressure impulse is introduced, and
+    /// pressure/rate arrays and `kkt_inertia` are empty. A pressure gauge
+    /// must be None for these compressible formulations. Physical event work
+    /// enters the same cumulative account as subsequent native time intervals.
+    ///
+    /// Held components keep their current velocity. In ExactIncompressible,
+    /// a pressure gauge is zero impulse on one original corner and is admitted
+    /// only for a true connected
     /// constant null mode. Other rank deficiencies refuse in the native solver.
     ///
-    /// Pre-event velocity must satisfy the stated weak volume-rate allowance.
+    /// ExactIncompressible pre-event velocity must satisfy the stated weak
+    /// volume-rate allowance.
     /// The time integrator enforces endpoint volume, so its displacement-chord
     /// velocity is not automatically an admissible tangent velocity. This event
     /// does not conceal a large pre-existing defect by a dissipative projection.
     ///
     /// # Errors
-    /// Non-exact formulation, invalid input, incompatible velocity/gauge,
+    /// Invalid input, incompatible velocity/gauge,
     /// insufficient sparse/workspace budgets, native factorization or physical
     /// balance failure, or cancellation. No accepted state is mutated.
     #[allow(clippy::too_many_arguments)]
@@ -45,15 +54,6 @@ impl<'a> ConservativeTetSolid<'a> {
         cx: &Cx<'_>,
     ) -> Result<ConservativeTetImpulse<'a>, ConservativeTetError> {
         checkpoint(cx)?;
-        let ConservativeFormulation::ExactIncompressible {
-            maximum_point_volume_work_defect,
-            ..
-        } = self.definition.formulation
-        else {
-            return Err(invalid(
-                "pressure impulse requires exact-incompressible conservative motion",
-            ));
-        };
         let positions: Vec<[f64; 3]> = self
             .definition
             .nodes_m
@@ -61,32 +61,71 @@ impl<'a> ConservativeTetSolid<'a> {
             .zip(&self.displacement_m)
             .map(|(x, u)| core::array::from_fn(|c| x[c] + u[c]))
             .collect();
-        let (velocity_mps, impulse) = constrained_impulse(
-            &self.mesh,
-            &self.mass,
-            &positions,
-            &self.velocity_mps,
-            held_velocity_dofs,
-            nodal_impulses_kg_m_s,
-            pressure_gauge_node,
-            origin_m,
-            controls,
-            |e, q| {
-                let point = &self.points[e * self.mesh.points_per_element + q];
-                point
-                    .volume_state(
-                        point.accepted_deformation(),
-                        maximum_point_volume_work_defect,
-                    )
-                    .map(|volume| volume.endpoint_cofactor)
-                    .map_err(|error| MixedUpError::Material {
-                        element: e,
-                        point: q,
-                        error,
-                    })
-            },
-            cx,
-        )?;
+        let (velocity_mps, impulse) = if let ConservativeFormulation::ExactIncompressible {
+            maximum_point_volume_work_defect,
+            ..
+        } = self.definition.formulation
+        {
+            constrained_impulse(
+                &self.mesh,
+                &self.mass,
+                &positions,
+                &self.velocity_mps,
+                held_velocity_dofs,
+                nodal_impulses_kg_m_s,
+                pressure_gauge_node,
+                origin_m,
+                controls,
+                |e, q| {
+                    let point = &self.points[e * self.mesh.points_per_element + q];
+                    point
+                        .volume_state(
+                            point.accepted_deformation(),
+                            maximum_point_volume_work_defect,
+                        )
+                        .map(|volume| volume.endpoint_cofactor)
+                        .map_err(|error| MixedUpError::Material {
+                            element: e,
+                            point: q,
+                            error,
+                        })
+                },
+                cx,
+            )?
+        } else {
+            if pressure_gauge_node.is_some() {
+                return Err(invalid("a compressible impulse has no pressure gauge"));
+            }
+            let (velocity, momentum) = self
+                .mass
+                .impulse_candidate(
+                    &positions,
+                    &self.velocity_mps,
+                    held_velocity_dofs,
+                    nodal_impulses_kg_m_s,
+                    origin_m,
+                    controls.balance,
+                    cx,
+                )
+                .map_err(inertia_error)?;
+            let report = MixedImpulseReport {
+                external: momentum.applied,
+                external_work_j: momentum.applied_work_j,
+                pressure: SolidMomentum {
+                    origin_m,
+                    linear_kg_m_s: [0.0; 3],
+                    angular_kg_m2_s: [0.0; 3],
+                },
+                momentum,
+                pressure_work_j: 0.0,
+                pressure_nodes: Vec::new(),
+                pressure_impulses_pa_s: Vec::new(),
+                volume_rate_before_m3_s: Vec::new(),
+                volume_rate_after_m3_s: Vec::new(),
+                kkt_inertia: None,
+            };
+            (velocity, report)
+        };
         // Only external/support work enters the conservative trajectory ledger.
         // Pressure work is independently zero-gated; it is not supplied energy.
         let work = impulse.external_work_j + impulse.momentum.support_work_j;

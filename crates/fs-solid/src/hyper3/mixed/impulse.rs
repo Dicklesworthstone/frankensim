@@ -53,7 +53,9 @@ pub struct MixedImpulseReport {
     pub pressure_impulses_pa_s: Vec<f64>,
     pub volume_rate_before_m3_s: Vec<f64>,
     pub volume_rate_after_m3_s: Vec<f64>,
-    pub kkt_inertia: Inertia,
+    /// Actual native KKT factor inertia for a constrained impulse. None when
+    /// the original checked mass solver supplies an unconstrained impulse.
+    pub kkt_inertia: Option<Inertia>,
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -334,7 +336,7 @@ pub(super) fn constrained_impulse(
         pressure_impulses_pa_s,
         volume_rate_before_m3_s: before_rate,
         volume_rate_after_m3_s: after_rate,
-        kkt_inertia: expected,
+        kkt_inertia: Some(expected),
     };
     checkpoint(cx)?;
     Ok((velocity, report))

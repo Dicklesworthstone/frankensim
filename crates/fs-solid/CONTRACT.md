@@ -4302,6 +4302,26 @@ mass. `FullMaterial` evaluates the original finite-strain energy through the
 objective C-based discrete gradient in `fs-material`. Initial displacement and
 velocity are explicit; preparation does not silently relax a supplied state.
 
+`ConservativeTetSolid::impulse_candidate` applies zero-duration nodal impulses
+through the same full consistent reference mass for `FullMaterial` and
+`OriginalMaterial`. Current deformed positions supply the angular-momentum
+arms. Held velocity coordinates retain their actual velocity, and the shared
+impulse owner reports their reaction impulses and signed work. Displacement,
+physical time, material points, original density, retained bulk volumes and
+algebraic pressure remain unchanged. Applied and support impulse work enter
+the original compensated cumulative account; the initial energy is not reset.
+Subsequent native intervals therefore retain the entire physical work history.
+
+The same public method retains the native pressure-impulse constraint solve
+for `ExactIncompressible`. Compressible formulations use only `controls.balance`
+and require no pressure gauge; pressure/rate arrays are empty and pressure
+momentum/work is zero. `MixedImpulseReport::kkt_inertia` is `Some` only when the
+native constrained factor exists, and `None` for the checked mass solve.
+The caller owns restitution/contact physics and any opposite body's impulse.
+G1/G3 fixtures in `tests/mixed_conservative_bulk/impulse.rs` compare independent
+quadratic-simplex momentum and kinetic integrals, signed support impulses,
+moving-support work, retained state, native continuation and refusal behavior.
+
 Each interval uses centered kinematics, `v_after = 2 Delta u / dt - v_before`,
 and force `2 M (Delta u - dt v_before) / dt^2`. The native consistent P2 mass
 retains its signed entries and quadratic body-force weights. The inertia work

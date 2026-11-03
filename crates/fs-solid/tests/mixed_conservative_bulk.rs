@@ -21,6 +21,9 @@ const DENSITY: f64 = 6.0;
 const KAPPA: f64 = 60.0;
 const WORK_ALLOWANCE: f64 = 2e-9;
 
+#[path = "mixed_conservative_bulk/impulse.rs"]
+mod impulse;
+
 fn with_cx(cancelled: bool, run: impl FnOnce(&Cx<'_>)) {
     let cancel = CancelGate::new_clock_free();
     if cancelled {
