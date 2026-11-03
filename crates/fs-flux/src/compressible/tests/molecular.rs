@@ -13,7 +13,7 @@ use fs_thermochem::transport::kinetic::{
 };
 use fs_thermochem::{ChargeVector, ElementId, ElementalMatrix};
 
-fn bank(g: &FrozenGas) -> IdealGasEquilibriumV1 {
+pub(super) fn bank(g: &FrozenGas) -> IdealGasEquilibriumV1 {
     let models = g.source().components().to_vec();
     let ids: Vec<_> = models.iter().map(|m| m.species().clone()).collect();
     IdealGasEquilibriumV1::new(
@@ -28,7 +28,7 @@ fn bank(g: &FrozenGas) -> IdealGasEquilibriumV1 {
     )
     .unwrap()
 }
-fn law(flow: &Euler2d, mu: f64, bulk: f64, k: f64) -> ConstantTransport {
+pub(super) fn law(flow: &Euler2d, mu: f64, bulk: f64, k: f64) -> ConstantTransport {
     ConstantTransport::new(
         bank(flow.gas()),
         "manufactured-planar-transport",

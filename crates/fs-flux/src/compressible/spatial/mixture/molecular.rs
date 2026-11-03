@@ -25,26 +25,9 @@ pub mod sgs;
 #[cfg(feature = "experimental-sgs")]
 use sgs::SubgridTransport;
 
-/// Molecular behavior of one physical reflecting wall.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum MolecularWall3d {
-    /// Legacy stationary, adiabatic, impermeable slip wall.
-    SlipAdiabatic,
-    /// Impermeable no-slip wall. Velocity is in global Cartesian coordinates;
-    /// its normal component must be exactly zero because moving geometry is a
-    /// separate ALE/FSI problem.
-    NoSlip {
-        /// Prescribed wall velocity [m/s].
-        velocity: [f64; 3],
-        /// Adiabatic or prescribed-temperature thermal boundary.
-        thermal: WallThermalCondition,
-    },
-}
-impl Default for MolecularWall3d {
-    fn default() -> Self {
-        Self::SlipAdiabatic
-    }
-}
+/// Molecular behavior of one physical reflecting wall, in three dimensions.
+/// The original public path retains the shared planar/spatial wall condition.
+pub type MolecularWall3d = crate::compressible::molecular::MolecularWall<3>;
 
 /// Complete molecular interval; physical time remains with its composing owner.
 #[derive(Clone, Copy, Debug, PartialEq)]

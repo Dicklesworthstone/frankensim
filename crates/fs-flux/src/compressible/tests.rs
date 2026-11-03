@@ -11,6 +11,7 @@ use fs_thermochem::{
 };
 
 mod molecular;
+mod molecular_walls;
 
 pub(super) fn gas(cp_linear: f64) -> FrozenGas {
     // Manufactured NASA-9 source: R_specific=1, Cp/R=3.5+cp_linear*T.

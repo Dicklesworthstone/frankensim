@@ -2506,9 +2506,10 @@ their original Cartesian decomposition until exterior pressure is subtracted,
 so a large balanced ambient pressure cannot erase small rotated shear. No
 traction is inferred from scalar pressure. Compensated shared-node assembly
 and resultant, moment and work reduction retain small transmitted impulses
-among opposing face loads. The 2-D source retains its native
-slip-wall physics. Authored moving or isothermal walls refuse even at zero net
-energy transfer; changing a 3-D wall configuration invalidates its prior
+among opposing face loads. Both planar and volumetric sources preserve native
+no-slip shear; the planar face area includes its physical depth exactly once.
+Authored moving or isothermal walls refuse even at zero net
+energy transfer; changing a molecular wall configuration invalidates its prior
 complete-step report, while an identical configuration preserves it. Independent
 resultant, pure-couple, affine-work, frame-rotation and native no-slip half-cell
 shear checks cover this stationary one-way load transfer. It does not advance

@@ -3,11 +3,9 @@ use super::{
     Error, ROUNDING, WallPressureImpulse, WallTractionImpulse, WallVectorTractionImpulse, dot, unit,
 };
 use fs_flux::compressible::mixture::{MixtureEuler2d, reactive::ReactingEuler2d};
-use fs_flux::compressible::molecular::MolecularEuler2d;
+use fs_flux::compressible::molecular::{MolecularEuler2d, MolecularWall};
 use fs_flux::compressible::spatial::mixture::{MixtureEuler3d, reactive::ReactingEuler3d};
-use fs_flux::compressible::spatial::molecular::{
-    MolecularEuler3d, MolecularWall3d, WallThermalCondition,
-};
+use fs_flux::compressible::spatial::molecular::{MolecularEuler3d, WallThermalCondition};
 use fs_flux::compressible::spatial::{Boundaries3d, BoundarySide as SpatialSide, Euler3d};
 use fs_flux::compressible::{
     AxisBoundaries, Boundaries2d, BoundaryCondition, BoundarySide, Euler2d,
@@ -437,10 +435,11 @@ impl WallTractionImpulse {
 impl WallVectorTractionImpulse {
     /// Complete original planar molecular wall impulse in the structural frame.
     ///
-    /// The current 2-D source uses stationary adiabatic slip walls; its vector
-    /// therefore contains only the source's signed normal stress. No shear is
-    /// inferred from pressure. Face ordering, physical area and both molecular
-    /// half intervals remain those of the actual accepted flow.
+    /// Stationary adiabatic slip and no-slip walls retain their original signed
+    /// normal stress and resolved shear. No shear is inferred from pressure.
+    /// Face ordering, physical area (including depth) and both molecular half
+    /// intervals remain those of the actual accepted flow. Moving or isothermal
+    /// walls require reciprocal work or heat coupling and are not admitted.
     pub fn from_molecular_euler2d<L: TransportLaw>(
         flow: &MolecularEuler2d<L>,
         side: BoundarySide,
@@ -450,6 +449,7 @@ impl WallVectorTractionImpulse {
     ) -> Result<Self, Error> {
         let accepted = flow.flow();
         let (axis, sign, normal) = planar_frame(accepted.boundaries(), side, axes)?;
+        stationary_adiabatic_wall(flow.wall(side))?;
         let report = flow
             .last_step()
             .ok_or(Error::Invalid("no complete molecular wall interval"))?;
@@ -490,18 +490,7 @@ impl WallVectorTractionImpulse {
     ) -> Result<Self, Error> {
         let accepted = flow.flow();
         let (axis, sign, normal) = spatial_frame(accepted.boundaries(), side, axes)?;
-        match flow.wall(side) {
-            MolecularWall3d::SlipAdiabatic => {}
-            MolecularWall3d::NoSlip {
-                velocity,
-                thermal: WallThermalCondition::Adiabatic,
-            } if velocity == [0.0; 3] => {}
-            _ => {
-                return Err(Error::Invalid(
-                    "vector structural traction requires a stationary adiabatic wall",
-                ));
-            }
-        }
+        stationary_adiabatic_wall(flow.wall(side))?;
         let report = flow
             .last_step()
             .ok_or(Error::Invalid("no complete molecular wall interval"))?;
@@ -521,6 +510,19 @@ impl WallVectorTractionImpulse {
             embed_tangential_momentum(impulse.momentum, axes, axis),
             exterior_pressure_pa,
         )
+    }
+}
+
+fn stationary_adiabatic_wall<const D: usize>(wall: MolecularWall<D>) -> Result<(), Error> {
+    match wall {
+        MolecularWall::SlipAdiabatic => Ok(()),
+        MolecularWall::NoSlip {
+            velocity,
+            thermal: WallThermalCondition::Adiabatic,
+        } if velocity == [0.0; D] => Ok(()),
+        _ => Err(Error::Invalid(
+            "vector structural traction requires a stationary adiabatic wall",
+        )),
     }
 }
 

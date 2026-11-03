@@ -5,7 +5,11 @@ use fs_flux::compressible::spatial::{
     Boundaries3d, BoundarySide, CartesianGrid, Euler3d, State,
     molecular::{MolecularEuler3d, MolecularWall3d, WallThermalCondition},
 };
-use fs_flux::compressible::{AxisBoundaries, BoundaryCondition, molecular::MolecularStepControl};
+use fs_flux::compressible::{
+    AxisBoundaries, Boundaries2d, BoundaryCondition, BoundarySide as PlanarSide,
+    CartesianGrid as PlanarGrid, Euler2d, State as PlanarState,
+    molecular::{MolecularEuler2d, MolecularStepControl, MolecularWall2d},
+};
 use fs_gas::multicomponent::dissipation::ConstantTransport;
 
 const AXES: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -39,6 +43,35 @@ fn channel(velocity: [f64; 3], wall: MolecularWall3d) -> MolecularEuler3d<Consta
         .with_wall(BoundarySide::XMin, wall)
         .unwrap()
         .with_wall(BoundarySide::XMax, wall)
+        .unwrap()
+}
+
+fn planar_channel(
+    velocity: [f64; 2],
+    wall: MolecularWall2d,
+) -> MolecularEuler2d<ConstantTransport> {
+    let gas = gas();
+    let transport = law(&gas, 0.04);
+    let state = PlanarState::from_primitive(&gas, 1.0, velocity, 1.0).unwrap();
+    let flow = Euler2d::new(
+        gas,
+        PlanarGrid::new(4, 1, 0.5, 1.0, 2.0).unwrap(),
+        vec![state; 4],
+        Boundaries2d {
+            x: AxisBoundaries::Ends {
+                lower: BoundaryCondition::Reflecting,
+                upper: BoundaryCondition::Reflecting,
+            },
+            y: AxisBoundaries::Periodic,
+        },
+        || false,
+    )
+    .unwrap();
+    MolecularEuler2d::new(flow, transport, || false)
+        .unwrap()
+        .with_wall(PlanarSide::XMin, wall)
+        .unwrap()
+        .with_wall(PlanarSide::XMax, wall)
         .unwrap()
 }
 
@@ -457,4 +490,146 @@ fn identical_wall_configuration_and_cancelled_source_steps_retain_accepted_vecto
             .unwrap_err(),
         Error::Cancelled,
     );
+}
+
+#[test]
+fn planar_no_slip_wall_drag_reaches_spatial_force_torque_and_work_with_physical_depth() {
+    let mut flow = planar_channel(
+        [0.0, 0.3],
+        MolecularWall2d::NoSlip {
+            velocity: [0.0; 2],
+            thermal: WallThermalCondition::Adiabatic,
+        },
+    );
+    let report = flow
+        .step(Time::new(1e-6), MolecularStepControl::default(), || false)
+        .unwrap();
+    let axes = [AXES[0], AXES[1]];
+    let right =
+        WallVectorTractionImpulse::from_molecular_euler2d(&flow, PlanarSide::XMax, 0, axes, 0.25)
+            .unwrap();
+    let left =
+        WallVectorTractionImpulse::from_molecular_euler2d(&flow, PlanarSide::XMin, 0, axes, 0.0)
+            .unwrap();
+    assert_eq!(right.area_m2(), 2.0);
+    // Half-cell Newtonian shear is independent of the represented depth;
+    // the extensive support momentum below includes that depth exactly once.
+    let shear = 0.04 * 0.3 / 0.25;
+    assert!((right.mean_gas_traction_pa()[1] - shear).abs() < 1e-6 * shear);
+    assert!(
+        WallTractionImpulse::from_molecular_euler2d(&flow, PlanarSide::XMax, 0, axes, 0.25)
+            .is_err()
+    );
+    for axis in 0..2 {
+        close(
+            report.after.momentum[axis] - report.before.momentum[axis]
+                + 2.0 * right.gas_traction_impulse_pa_s()[axis]
+                + 2.0 * left.gas_traction_impulse_pa_s()[axis],
+            0.0,
+        );
+    }
+
+    let mut structural = mesh();
+    for node in &mut structural.nodes {
+        node[2] *= 2.0;
+    }
+    let raw = flow.boundary_impulses(PlanarSide::XMax)[0];
+    let expected = [
+        raw.momentum[0] - 0.25 * 2.0 * report.elapsed.value(),
+        raw.momentum[1],
+        0.0,
+    ];
+    // The physical patch centroid is (2, 1/2, 1), including its depth.
+    let torque = [
+        -expected[1],
+        expected[0],
+        2.0 * expected[1] - 0.5 * expected[0],
+    ];
+    let displacement = affine_displacements(&structural);
+    for rotated_frame in [false, true] {
+        let (positions, axes, expected, torque, displacement) = if rotated_frame {
+            (
+                structural.nodes.iter().copied().map(rotate).collect(),
+                [ROTATED[0], ROTATED[1]],
+                rotate(expected),
+                rotate(torque),
+                displacement.iter().copied().map(rotate).collect::<Vec<_>>(),
+            )
+        } else {
+            (
+                structural.nodes.clone(),
+                axes,
+                expected,
+                torque,
+                displacement.clone(),
+            )
+        };
+        let mesh = ShellMesh::new(positions, structural.tris.clone()).unwrap();
+        let surface = ShockLoadSurface::new(
+            &mesh,
+            vec![selection(ShellFace::Positive)],
+            budget(),
+            || false,
+        )
+        .unwrap();
+        let impulse = WallVectorTractionImpulse::from_molecular_euler2d(
+            &flow,
+            PlanarSide::XMax,
+            0,
+            axes,
+            0.25,
+        )
+        .unwrap();
+        let load = surface
+            .project_vector_tractions(&[impulse], [0.0; 3], || false)
+            .unwrap();
+        for axis in 0..3 {
+            close(load.resultant_impulse_n_s[axis], expected[axis]);
+            close(load.angular_impulse_n_m_s[axis], torque[axis]);
+        }
+        // Exact mean of the original affine field is (1/2, 4, 1/2).
+        close(
+            load.virtual_work_j(&displacement).unwrap(),
+            (0.5 * (raw.momentum[0] - 0.5 * report.elapsed.value()) + 4.0 * raw.momentum[1])
+                / report.elapsed.value(),
+        );
+    }
+}
+
+#[test]
+fn planar_vector_loads_refuse_moving_or_isothermal_metadata_even_without_energy_transfer() {
+    let source = gas();
+    let temperature = PlanarState::from_primitive(&source, 1.0, [0.0; 2], 1.0)
+        .unwrap()
+        .primitive(&source, || false)
+        .unwrap()
+        .temperature;
+    for wall in [
+        MolecularWall2d::NoSlip {
+            velocity: [0.0, 0.3],
+            thermal: WallThermalCondition::Adiabatic,
+        },
+        MolecularWall2d::NoSlip {
+            velocity: [0.0; 2],
+            thermal: WallThermalCondition::Isothermal(Temperature::new(temperature)),
+        },
+    ] {
+        let MolecularWall2d::NoSlip { velocity, .. } = wall else {
+            unreachable!()
+        };
+        let mut flow = planar_channel(velocity, wall);
+        flow.step(Time::new(1e-6), MolecularStepControl::default(), || false)
+            .unwrap();
+        assert_eq!(flow.boundary_impulses(PlanarSide::XMax)[0].energy, 0.0);
+        assert!(
+            WallVectorTractionImpulse::from_molecular_euler2d(
+                &flow,
+                PlanarSide::XMax,
+                0,
+                [AXES[0], AXES[1]],
+                0.0,
+            )
+            .is_err()
+        );
+    }
 }

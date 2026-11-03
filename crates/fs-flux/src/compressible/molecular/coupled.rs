@@ -62,6 +62,28 @@ pub struct MolecularEuler2d<L> {
     last_step: Option<MolecularStepReport>,
 }
 impl<L: TransportLaw> MolecularEuler2d<L> {
+    /// Apply one authored wall to both molecular half steps. Its shear, work
+    /// and heat join the original Euler wall pressure in the accepted account.
+    /// A changed condition invalidates the previous complete-step report;
+    /// identical reconfiguration preserves the accepted interval and loads.
+    pub fn with_wall(
+        mut self,
+        side: BoundarySide,
+        wall: MolecularWall2d,
+    ) -> Result<Self, MolecularError> {
+        let changed = self.molecular.wall(side) != wall;
+        self.molecular = self.molecular.with_wall(side, wall)?;
+        if changed {
+            self.last_step = None;
+        }
+        Ok(self)
+    }
+
+    /// Authored molecular wall on one original physical side.
+    pub fn wall(&self, side: BoundarySide) -> MolecularWall2d {
+        self.molecular.wall(side)
+    }
+
     /// Preserve the original accepted Euler field and bind its identical source law.
     pub fn new(
         flow: Euler2d,

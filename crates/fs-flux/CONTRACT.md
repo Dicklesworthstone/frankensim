@@ -1253,11 +1253,28 @@ no second viscous-heating source. Fourier diffusivity uses the source's
 volumetric **Cv** because the transported variable is internal energy at fixed
 cell mass and volume. There is no independently authored heat-capacity field.
 
-Periodic pairs reuse the same flux. Stationary reflecting walls enforce zero
-heat and work and zero tangential viscous traction, while retaining their normal
-viscous support impulse. Transmissive boundaries have zero molecular flux.
-These are adiabatic slip and zero-gradient conditions, not no-slip or finite
-thermal reservoirs. Molecular impulses and balances include physical grid depth.
+Periodic pairs reuse the same flux. Reflecting walls default to stationary
+adiabatic slip, retaining their normal viscous support impulse with zero heat,
+work and tangential traction. `MolecularTransport2d::with_wall` and
+`MolecularEuler2d::with_wall` additionally admit `MolecularWall2d::NoSlip` with
+finite tangential velocity and adiabatic or prescribed-temperature heat transfer.
+Resolved shear and Fourier heat use the physical half-cell distance; their
+conservative energy flux uses the actual wall velocity, so a stationary
+adiabatic no-slip wall exerts drag with zero boundary work. The original law is
+evaluated at the cell/wall mean temperature for an isothermal surface. No
+separate viscous-heating term is added. Normal wall motion, nonreflecting sides
+and out-of-domain wall temperatures refuse. Transmissive ends retain zero
+molecular flux. Molecular impulses and balances include physical grid depth.
+
+The authored wall velocity is constant along its side, so its tangential
+derivatives at the physical wall are zero even in a nonuniform boundary layer.
+No-slip velocity ghosts enter the adjacent interior cross derivatives. Four
+cell-gradient entries are prepared once and reused by neighboring faces,
+replacing repeated neighbor reconstruction. The shared `MolecularWall<D>`
+condition and frozen-source shear/heat/work kernel also serve the existing
+three-dimensional owner; `MolecularWall3d` retains its original public paths.
+The evolving-species owner continues to use its original shared gas-source
+molecular face kernel.
 
 `advance` integrates a complete requested molecular interval with SSP RK2 and
 bounded retries, then atomically publishes the field and per-face impulses. It
@@ -1278,6 +1295,10 @@ composition permits second-order smooth evolution when the constituent paths
 retain their order, while limiting and first-order retries reduce that order.
 Workspace is bounded and allocated at preparation, then reused. Runtime material
 law implementations may mutate only their evaluation workspaces.
+Changing an authored wall invalidates the complete coupled owner's prior report
+so old exchange cannot be relabeled under a new wall condition. Identical
+reconfiguration preserves accepted history; cancellation and source refusal
+publish no partial field, time or per-face exchange.
 
 Five focused G0/G1/G2/G3/G4 regressions exercise a 2-D Fourier mode, oblique
 longitudinal and transverse Newtonian modes, collision-diameter-only pressure
@@ -1285,10 +1306,17 @@ and shear changes, wall impulse/energy closure, late cancellation/replay,
 zero-transport recovery and atomic work refusal. Synthetic source and collision
 data test composition and conservation; they are not measurements of a real gas.
 This extension keeps spatially uniform frozen composition. It does not supply
-species diffusion, chemistry, Soret/Dufour effects, no-slip boundaries, turbulence,
+species diffusion, chemistry, Soret/Dufour effects, turbulence,
 rarefied gas, physical shock-thickness validation or mutual fluid/solid thermal
 evolution. Those capabilities require their original owners and additional
 admitted source data, rather than inferred closures.
+
+Seven additional planar wall regressions exercise independent all-four-side
+shear/heat/power, exact co-moving translation, native Couette momentum and wall
+heating under a common tangential boost, absence of spurious wall-normal stress,
+agreement with the actual three-dimensional extrusion, late cancellation/history
+and source-temperature admission. These are resolved continuum stencil and
+conservation checks, not a coarse-grid wall function or experimental validation.
 
 ## Three-dimensional conservative shock propagation
 

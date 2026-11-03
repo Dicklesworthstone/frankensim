@@ -9,11 +9,14 @@
 //! or reacting-flow solver. A composition change requires a new physical state.
 
 use super::*;
+pub use fs_gas::multicomponent::dissipation::WallThermalCondition;
 use fs_gas::multicomponent::dissipation::{DissipationError, TransportLaw};
 use fs_qty::{Pressure, Temperature};
 
 mod coupled;
 pub use coupled::{MolecularEuler2d, MolecularStepControl, MolecularStepReport};
+mod wall;
+pub use wall::{MolecularWall, MolecularWall2d};
 
 /// Explicit molecular substep and source-admissibility budgets.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,7 +174,7 @@ struct MolecularWorkspace {
     stage: Vec<State>,
     candidate: Vec<State>,
     primitive: Vec<Primitive>,
-    cv_density: Vec<f64>,
+    gradient: Vec<[[f64; 2]; 2]>,
     x_flux: Vec<NormalFaceFlux>,
     y_flux: Vec<NormalFaceFlux>,
     binary: Vec<f64>,
@@ -181,14 +184,16 @@ struct MolecularWorkspace {
 
 /// Prepared Fourier/Newtonian operator on the exact original gas and geometry.
 ///
-/// Periodic faces share one flux. Reflecting boundaries are stationary adiabatic
-/// slip walls: their normal viscous traction loads the support but transfers no
-/// heat or work. Transmissive boundaries have zero molecular flux. They do not
-/// represent a prescribed-temperature or no-slip wall.
+/// Periodic faces share one flux. Reflecting boundaries default to stationary
+/// adiabatic slip walls. Explicit no-slip sides resolve shear at the physical
+/// half-cell distance and admit prescribed tangential motion or temperature.
+/// The same energy flux carries their wall work and Fourier heat; no separate
+/// viscous heat source is added. Transmissive ends have zero molecular flux.
 pub struct MolecularTransport2d<L> {
     gas: FrozenGas,
     grid: CartesianGrid,
     boundaries: Boundaries2d,
+    walls: [MolecularWall2d; 4],
     law: L,
     boundary_impulses: Vec<BoundaryImpulse>,
     work: MolecularWorkspace,
@@ -213,6 +218,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             gas: flow.gas.clone(),
             grid: flow.grid,
             boundaries: flow.boundaries,
+            walls: [MolecularWall2d::SlipAdiabatic; 4],
             law,
             boundary_impulses: allocated(2 * (nx + ny), Totals::default())?,
             work: MolecularWorkspace {
@@ -220,7 +226,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 stage: allocated(n, State::default())?,
                 candidate: allocated(n, State::default())?,
                 primitive: allocated(n, Primitive::default())?,
-                cv_density: allocated(n, 0.0)?,
+                gradient: allocated(n, [[0.0; 2]; 2])?,
                 x_flux: allocated((nx + 1) * ny, NormalFaceFlux::default())?,
                 y_flux: allocated(nx * (ny + 1), NormalFaceFlux::default())?,
                 binary: allocated(species * species, 0.0)?,
@@ -234,6 +240,41 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
     /// Original immutable law identity and retained collision/source data.
     pub const fn law(&self) -> &L {
         &self.law
+    }
+
+    /// Configure a flat impermeable side. Its prescribed tangential velocity
+    /// and thermal condition apply to every molecular stage. Normal wall
+    /// motion requires conservative moving geometry and is not admitted here.
+    pub fn with_wall(
+        mut self,
+        side: BoundarySide,
+        wall: MolecularWall2d,
+    ) -> Result<Self, MolecularError> {
+        let AxisBoundaries::Ends { lower, upper } = self.boundaries.axis(side.axis()) else {
+            return Err(MolecularError::Invalid(
+                "periodic side has no physical wall",
+            ));
+        };
+        let condition = if side.sign() < 0.0 { lower } else { upper };
+        if condition != BoundaryCondition::Reflecting {
+            return Err(MolecularError::Invalid(
+                "wall requires a reflecting Euler side",
+            ));
+        }
+        let domain = self.gas.domain();
+        wall.validate(
+            side.axis(),
+            domain.minimum_temperature,
+            domain.maximum_temperature,
+        )
+        .map_err(MolecularError::Invalid)?;
+        self.walls[2 * side.axis() + usize::from(side.sign() > 0.0)] = wall;
+        Ok(self)
+    }
+
+    /// Authored wall, including the slip default on unused sides.
+    pub fn wall(&self, side: BoundarySide) -> MolecularWall2d {
+        self.walls[2 * side.axis() + usize::from(side.sign() > 0.0)]
     }
     /// Outward molecular transfer during the last complete accepted update.
     pub fn boundary_impulses(&self, side: BoundarySide) -> &[BoundaryImpulse] {
@@ -274,10 +315,11 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 &self.gas,
                 &self.grid,
                 self.boundaries,
+                &self.walls,
                 &self.work.current,
                 &mut self.law,
                 &mut self.work.primitive,
-                &mut self.work.cv_density,
+                &mut self.work.gradient,
                 &mut self.work.x_flux,
                 &mut self.work.y_flux,
                 &mut self.work.binary,
@@ -310,10 +352,11 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         &self.gas,
                         &self.grid,
                         self.boundaries,
+                        &self.walls,
                         &self.work.current,
                         &mut self.law,
                         &mut self.work.primitive,
-                        &mut self.work.cv_density,
+                        &mut self.work.gradient,
                         &mut self.work.x_flux,
                         &mut self.work.y_flux,
                         &mut self.work.binary,
@@ -346,10 +389,11 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         &self.gas,
                         &self.grid,
                         self.boundaries,
+                        &self.walls,
                         &self.work.stage,
                         &mut self.law,
                         &mut self.work.primitive,
-                        &mut self.work.cv_density,
+                        &mut self.work.gradient,
                         &mut self.work.x_flux,
                         &mut self.work.y_flux,
                         &mut self.work.binary,
@@ -480,10 +524,11 @@ fn spatial<L: TransportLaw>(
     gas: &FrozenGas,
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
+    walls: &[MolecularWall2d; 4],
     states: &[State],
     law: &mut L,
     primitive: &mut [Primitive],
-    cv_density: &mut [f64],
+    gradient: &mut [[[f64; 2]; 2]],
     x_flux: &mut [NormalFaceFlux],
     y_flux: &mut [NormalFaceFlux],
     binary: &mut [f64],
@@ -491,22 +536,67 @@ fn spatial<L: TransportLaw>(
 ) -> Result<f64, MolecularError> {
     let mut minimum_density = f64::INFINITY;
     let mut minimum_cv = f64::INFINITY;
-    for ((q, p), cv) in states.iter().zip(primitive.iter_mut()).zip(cv_density) {
+    for (q, p) in states.iter().zip(primitive.iter_mut()) {
         *p = q.primitive(gas, &mut *cancelled)?;
         let props = gas
             .source()
             .evaluate_properties(Temperature::new(p.temperature), Pressure::new(p.pressure))
             .map_err(Error::from)?;
-        *cv = p.density * props.mass_specific_cv().value();
-        if !positive(*cv) {
+        let cv = p.density * props.mass_specific_cv().value();
+        if !positive(cv) {
             return Err(MolecularError::Invalid(
                 "molecular volumetric heat capacity",
             ));
         }
         minimum_density = minimum_density.min(p.density);
-        minimum_cv = minimum_cv.min(*cv);
+        minimum_cv = minimum_cv.min(cv);
     }
     let [nx, _] = grid.shape;
+    // Each original cell gradient serves its neighboring faces. Mirror all
+    // velocity components at an authored no-slip wall; the Euler pressure
+    // boundary remains impermeable and retains its original slip ghost.
+    for (cell, derivatives) in gradient.iter_mut().enumerate() {
+        if cell % 64 == 0 {
+            poll(cancelled)?;
+        }
+        let coordinates = [cell % nx, cell / nx];
+        for axis in 0..2 {
+            let mut lower = neighbour(
+                primitive,
+                grid,
+                boundaries,
+                coordinates[0],
+                coordinates[1],
+                axis,
+                false,
+            );
+            let mut upper = neighbour(
+                primitive,
+                grid,
+                boundaries,
+                coordinates[0],
+                coordinates[1],
+                axis,
+                true,
+            );
+            for (outside, sample, wall) in [
+                (coordinates[axis] == 0, &mut lower, walls[2 * axis]),
+                (
+                    coordinates[axis] + 1 == grid.shape[axis],
+                    &mut upper,
+                    walls[2 * axis + 1],
+                ),
+            ] {
+                if outside && let Some(ghost) = wall.velocity_ghost(primitive[cell].velocity) {
+                    sample[1..3].copy_from_slice(&ghost);
+                }
+            }
+            for component in 0..2 {
+                derivatives[component][axis] =
+                    (upper[component + 1] - lower[component + 1]) / (2.0 * grid.spacing[axis]);
+            }
+        }
+    }
     let mut maximum_diffusivity: f64 = 0.0;
     for axis in 0..2 {
         let count = grid.shape[axis];
@@ -551,7 +641,13 @@ fn spatial<L: TransportLaw>(
                 let right = index(if face == count { count - 1 } else { face });
                 let pl = primitive[left];
                 let pr = primitive[right];
-                let t = 0.5 * pl.temperature + 0.5 * pr.temperature;
+                let wall_model = wall.then(|| walls[2 * axis + usize::from(face == count)]);
+                let t = match wall_model {
+                    Some(model @ MolecularWall2d::NoSlip { .. }) => {
+                        model.face_temperature(pl.temperature)
+                    }
+                    _ => 0.5 * pl.temperature + 0.5 * pr.temperature,
+                };
                 let p = 0.5 * pl.pressure + 0.5 * pr.pressure;
                 let coefficients = law.evaluate(
                     Temperature::new(t),
@@ -581,13 +677,6 @@ fn spatial<L: TransportLaw>(
                     ));
                 }
                 maximum_diffusivity = maximum_diffusivity.max(diffusivity);
-                let tangent_derivative = |cell: usize, component: usize| {
-                    let i = cell % nx;
-                    let j = cell / nx;
-                    let lower = neighbour(primitive, grid, boundaries, i, j, tangent, false);
-                    let upper = neighbour(primitive, grid, boundaries, i, j, tangent, true);
-                    (upper[component + 1] - lower[component + 1]) / (2.0 * grid.spacing[tangent])
-                };
                 let (normal_gradient, transverse_gradient, tangent_normal, tangent_transverse) =
                     if wall {
                         let cell = if face == 0 { right } else { left };
@@ -596,30 +685,44 @@ fn spatial<L: TransportLaw>(
                             sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
                             0.0,
                             0.0,
-                            tangent_derivative(cell, tangent),
+                            // The authored wall velocity is spatially constant:
+                            // its physical tangential derivative is zero, even
+                            // when the neighboring cell field is nonuniform.
+                            if matches!(wall_model, Some(MolecularWall2d::NoSlip { .. })) {
+                                0.0
+                            } else {
+                                gradient[cell][tangent][tangent]
+                            },
                         )
                     } else {
                         (
                             (pr.velocity[axis] - pl.velocity[axis]) / grid.spacing[axis],
                             (pr.velocity[tangent] - pl.velocity[tangent]) / grid.spacing[axis],
-                            0.5 * tangent_derivative(left, axis)
-                                + 0.5 * tangent_derivative(right, axis),
-                            0.5 * tangent_derivative(left, tangent)
-                                + 0.5 * tangent_derivative(right, tangent),
+                            0.5 * gradient[left][axis][tangent]
+                                + 0.5 * gradient[right][axis][tangent],
+                            0.5 * gradient[left][tangent][tangent]
+                                + 0.5 * gradient[right][tangent][tangent],
                         )
                     };
                 let normal_stress = longitudinal * normal_gradient + cross * tangent_transverse;
-                let shear_stress = if wall {
-                    0.0
+                let (shear_stress, energy) = if let Some(model) = wall_model {
+                    let (shear, energy) = model.shear_and_energy(
+                        axis,
+                        if face == 0 { -1.0 } else { 1.0 },
+                        pl.velocity,
+                        pl.temperature,
+                        0.5 * grid.spacing[axis],
+                        mu,
+                        conductivity,
+                    );
+                    (shear[tangent], energy)
                 } else {
-                    mu * (transverse_gradient + tangent_normal)
-                };
-                let energy = if wall {
-                    0.0
-                } else {
-                    -normal_stress * (0.5 * pl.velocity[axis] + 0.5 * pr.velocity[axis])
-                        - shear_stress * (0.5 * pl.velocity[tangent] + 0.5 * pr.velocity[tangent])
-                        - conductivity * (pr.temperature - pl.temperature) / grid.spacing[axis]
+                    let shear = mu * (transverse_gradient + tangent_normal);
+                    let energy = -normal_stress
+                        * (0.5 * pl.velocity[axis] + 0.5 * pr.velocity[axis])
+                        - shear * (0.5 * pl.velocity[tangent] + 0.5 * pr.velocity[tangent])
+                        - conductivity * (pr.temperature - pl.temperature) / grid.spacing[axis];
+                    (shear, energy)
                 };
                 if ![normal_stress, shear_stress, energy]
                     .into_iter()

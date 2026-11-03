@@ -158,24 +158,13 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 "channel dynamic transport requires no-slip walls",
             ));
         }
-        if let MolecularWall3d::NoSlip { velocity, thermal } = wall {
-            if velocity.iter().any(|v| !v.is_finite()) || velocity[side.axis()] != 0.0 {
-                return Err(MolecularError::Invalid(
-                    "wall velocity must be finite and tangential",
-                ));
-            }
-            if let WallThermalCondition::Isothermal(t) = thermal {
-                let domain = self.gas.domain();
-                if !t.value().is_finite()
-                    || !(domain.minimum_temperature..=domain.maximum_temperature)
-                        .contains(&t.value())
-                {
-                    return Err(MolecularError::Invalid(
-                        "wall temperature outside caloric domain",
-                    ));
-                }
-            }
-        }
+        let domain = self.gas.domain();
+        wall.validate(
+            side.axis(),
+            domain.minimum_temperature,
+            domain.maximum_temperature,
+        )
+        .map_err(MolecularError::Invalid)?;
         self.walls[2 * side.axis() + usize::from(side.sign() > 0.0)] = wall;
         Ok(self)
     }
@@ -488,11 +477,8 @@ fn spatial<L: TransportLaw>(
                     walls[2 * axis + 1],
                 ),
             ] {
-                if outside && let MolecularWall3d::NoSlip { velocity, .. } = wall {
-                    for component in 0..3 {
-                        sample[component + 1] =
-                            2.0 * velocity[component] - primitive[cell].velocity[component];
-                    }
+                if outside && let Some(ghost) = wall.velocity_ghost(primitive[cell].velocity) {
+                    sample[1..4].copy_from_slice(&ghost);
                 }
             }
             for component in 0..3 {
@@ -550,10 +536,9 @@ fn spatial<L: TransportLaw>(
             let pr = primitive[right];
             let wall_model = wall.then(|| walls[2 * axis + usize::from(face == count)]);
             let temperature = match wall_model {
-                Some(MolecularWall3d::NoSlip {
-                    thermal: WallThermalCondition::Isothermal(t),
-                    ..
-                }) => 0.5 * pl.temperature + 0.5 * t.value(),
+                Some(model @ MolecularWall3d::NoSlip { .. }) => {
+                    model.face_temperature(pl.temperature)
+                }
                 _ => 0.5 * pl.temperature + 0.5 * pr.temperature,
             };
             let pressure = 0.5 * pl.pressure + 0.5 * pr.pressure;
@@ -623,46 +608,31 @@ fn spatial<L: TransportLaw>(
                         .sum()
                 };
             let normal_stress = longitudinal * normal_derivative + cross * transverse_divergence;
-            let shear_stress: [f64; 2] = std::array::from_fn(|i| {
-                let t = tangential[i];
-                if let Some(model) = wall_model {
-                    match model {
-                        MolecularWall3d::SlipAdiabatic => 0.0,
-                        MolecularWall3d::NoSlip { velocity, .. } => {
-                            let sign = if face == 0 { -1.0 } else { 1.0 };
-                            mu * sign * (velocity[t] - pl.velocity[t]) / (0.5 * grid.spacing[axis])
-                        }
-                    }
-                } else {
+            let (shear_stress, energy) = if let Some(model) = wall_model {
+                let (shear, energy) = model.shear_and_energy(
+                    axis,
+                    if face == 0 { -1.0 } else { 1.0 },
+                    pl.velocity,
+                    pl.temperature,
+                    0.5 * grid.spacing[axis],
+                    mu,
+                    conductivity,
+                );
+                ([shear[tangential[0]], shear[tangential[1]]], energy)
+            } else {
+                let shear: [f64; 2] = std::array::from_fn(|i| {
+                    let t = tangential[i];
                     mu * ((pr.velocity[t] - pl.velocity[t]) / grid.spacing[axis]
                         + 0.5 * gradient[left][axis][t]
                         + 0.5 * gradient[right][axis][t])
-                }
-            });
-            let energy = if let Some(model) = wall_model {
-                match model {
-                    MolecularWall3d::SlipAdiabatic => 0.0,
-                    MolecularWall3d::NoSlip { velocity, thermal } => {
-                        let sign = if face == 0 { -1.0 } else { 1.0 };
-                        let heat = match thermal {
-                            WallThermalCondition::Adiabatic => 0.0,
-                            WallThermalCondition::Isothermal(t) => {
-                                -conductivity * sign * (t.value() - pl.temperature)
-                                    / (0.5 * grid.spacing[axis])
-                            }
-                        };
-                        -shear_stress[0] * velocity[tangential[0]]
-                            - shear_stress[1] * velocity[tangential[1]]
-                            + heat
-                    }
-                }
-            } else {
-                -normal_stress * (0.5 * pl.velocity[axis] + 0.5 * pr.velocity[axis])
-                    - shear_stress[0]
+                });
+                let energy = -normal_stress * (0.5 * pl.velocity[axis] + 0.5 * pr.velocity[axis])
+                    - shear[0]
                         * (0.5 * pl.velocity[tangential[0]] + 0.5 * pr.velocity[tangential[0]])
-                    - shear_stress[1]
+                    - shear[1]
                         * (0.5 * pl.velocity[tangential[1]] + 0.5 * pr.velocity[tangential[1]])
-                    - conductivity * (pr.temperature - pl.temperature) / grid.spacing[axis]
+                    - conductivity * (pr.temperature - pl.temperature) / grid.spacing[axis];
+                (shear, energy)
             };
             if ![normal_stress, shear_stress[0], shear_stress[1], energy]
                 .into_iter()
