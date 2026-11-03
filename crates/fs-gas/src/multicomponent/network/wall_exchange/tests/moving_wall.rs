@@ -22,7 +22,7 @@ fn moving_wall_network_entrainment_braking_and_reactions_close_actual_energy() {
     let g = gas(1, false, 0.0);
     let velocities = [0.0, 0.7, -0.4];
     let speeds = [0.8, 0.2, -0.7];
-    for darcy in [false, true] {
+    for resistance in 0..3 {
         let mut n = network(&g, &velocities, false);
         let before = fields(&n);
         let mut wall = NetworkWallOperator::new(
@@ -32,7 +32,15 @@ fn moving_wall_network_entrainment_braking_and_reactions_close_actual_energy() {
                 .map(|&speed| {
                     vec![
                         WallContact {
-                            drag: drag(darcy, speed),
+                            drag: if resistance == 2 {
+                                WallDrag::LinearQuadratic {
+                                    linear_rate_per_s: 2.0,
+                                    quadratic_per_m: 1.0,
+                                    wall_velocity_m_s: speed,
+                                }
+                            } else {
+                                drag(resistance == 1, speed)
+                            },
                             thermal: WallThermal::Adiabatic,
                         };
                         2
@@ -51,7 +59,9 @@ fn moving_wall_network_entrainment_braking_and_reactions_close_actual_energy() {
         let mut heating = 0.0;
         for (b, (&u, &speed)) in velocities.iter().zip(&speeds).enumerate() {
             let slip: f64 = u - speed;
-            let final_slip = if darcy {
+            let final_slip = if resistance == 2 {
+                slip / ((2.0 * dt).exp() + 0.5 * slip.abs() * (2.0 * dt).exp_m1())
+            } else if resistance == 1 {
                 slip / (1.0 + slip.abs() * dt)
             } else {
                 slip * (-2.0 * dt).exp()

@@ -2093,6 +2093,20 @@ continue to refuse drag. Four numerical-kernel and eight native integration
 regressions cover analytic slip relaxation, frame covariance, weak/strong drag,
 finite calorics, network composition and transactional refusal.
 
+`WallDrag::LinearQuadratic` applies authored linear and inertial resistance
+simultaneously to slip s = u-U: ds/dt = -a*s - b*abs(s)*s, with nonnegative
+a [1/s], b [1/m] and a prescribed constant wall velocity U. Its single exact
+frozen-coefficient update is s(t) = s(0)*exp(-a*t) /
+[1 + b*abs(s(0))*(1-exp(-a*t))/a], using the continuous a=0 limit. Stable
+exponential differences retain weak impulses; scaled rational decay admits
+strong resistance without splitting the two forces or clipping the residual
+slip. The existing accepted-impulse work and slip-heating account is shared.
+The zero-coefficient limits are the original linear and quadratic laws.
+G1 regressions compare an independent reciprocal-slip solution, subdivision,
+frame transformations and weak/strong limits; the mixture-network source test
+also checks actual species, temperature, support impulse and drive-work balances.
+No coefficient, transition law or applicability range is inferred.
+
 Thermal contacts may be adiabatic, a prescribed-temperature reservoir, or a
 finite lumped wall with explicit heat capacity in J/K. A contact's conductance
 is the complete exposed h*A in W/K. A safeguarded backward-Euler temperature

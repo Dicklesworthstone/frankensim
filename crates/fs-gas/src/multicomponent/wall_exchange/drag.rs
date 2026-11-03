@@ -58,6 +58,11 @@ pub(super) fn advance(
             }
             (1.0 / (1.0 + damping), damping / (1.0 + damping))
         }
+        WallDrag::LinearQuadratic {
+            linear_rate_per_s,
+            quadratic_per_m,
+            ..
+        } => combined_decay(linear_rate_per_s, quadratic_per_m, slip.abs(), dt),
     };
     if wall == 0.0 {
         let momentum = initial_momentum * factor;
@@ -110,6 +115,44 @@ pub(super) fn advance(
         ));
     }
     Ok(update)
+}
+
+// Exact Riccati decay of slip magnitude. Retain the removed fraction separately
+// so a resolved weak wall drive never becomes 1 - a rounded-to-one factor.
+fn combined_decay(linear: f64, quadratic: f64, slip: f64, dt: f64) -> (f64, f64) {
+    let exponent = linear * dt;
+    let surviving = det::exp(-exponent);
+    let removed = -det::expm1(-exponent);
+    // Integral of exp(-a*t). The two equivalent forms avoid a vanishing rate
+    // division near a=0 and an overflowing a*dt in the strong linear limit.
+    let exposure = if exponent == 0.0 {
+        dt
+    } else if exponent <= 1.0 {
+        dt * (removed / exponent)
+    } else {
+        removed / linear
+    };
+    let coefficient = quadratic * exposure;
+    let mut damping = coefficient * slip;
+    if coefficient < f64::MIN_POSITIVE || !damping.is_finite() {
+        // Only extreme scales need reordering. Pair smallest with largest so an
+        // intermediate overflow/underflow cannot erase a representable product.
+        let mut factors = [quadratic, exposure, slip];
+        factors.sort_unstable_by(f64::total_cmp);
+        let pair = factors[0] * factors[2];
+        damping = pair * factors[1];
+        if damping.is_infinite() {
+            let reciprocal = if pair.is_infinite() {
+                (1.0 / factors[2]) / factors[0] / factors[1]
+            } else {
+                (1.0 / pair) / factors[1]
+            };
+            // Here 1/damping is below 1/MAX, so 1 + 1/damping rounds to 1.
+            return (surviving * reciprocal, 1.0);
+        }
+    }
+    let denominator = 1.0 + damping;
+    (surviving / denominator, (removed + damping) / denominator)
 }
 
 #[cfg(test)]

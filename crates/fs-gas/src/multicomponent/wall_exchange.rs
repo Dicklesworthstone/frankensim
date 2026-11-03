@@ -61,6 +61,17 @@ pub enum WallDrag {
         /// Prescribed axial wall velocity in the gas coordinate [m/s].
         wall_velocity_m_s: f64,
     },
+    /// Authored viscous and inertial resistance acting simultaneously on slip:
+    /// d(u-U)/dt = -a*(u-U) - b*(u-U)*abs(u-U). Both coefficients are frozen
+    /// over the source interval. No Reynolds law or empirical blending is inferred.
+    LinearQuadratic {
+        /// Nonnegative linear momentum relaxation rate a [1/s].
+        linear_rate_per_s: f64,
+        /// Nonnegative quadratic coefficient b [1/m]; Darcy f/(2*Dh), if applicable.
+        quadratic_per_m: f64,
+        /// Prescribed axial wall velocity U [m/s]; zero gives a stationary support.
+        wall_velocity_m_s: f64,
+    },
 }
 impl WallDrag {
     /// Frozen fully developed circular Poiseuille relaxation, 32*mu/(rho*D²).
@@ -105,6 +116,15 @@ impl WallDrag {
             } => nonnegative(friction_factor)
                 && positive(hydraulic_diameter_m)
                 && wall_velocity_m_s.is_finite(),
+            Self::LinearQuadratic {
+                linear_rate_per_s,
+                quadratic_per_m,
+                wall_velocity_m_s,
+            } => {
+                nonnegative(linear_rate_per_s)
+                    && nonnegative(quadratic_per_m)
+                    && wall_velocity_m_s.is_finite()
+            }
         };
         if valid {
             Ok(())
@@ -117,7 +137,8 @@ impl WallDrag {
     pub(crate) const fn moving_velocity(self) -> Option<f64> {
         match self {
             Self::MovingLinear { wall_velocity_m_s, .. }
-            | Self::MovingDarcy { wall_velocity_m_s, .. } => Some(wall_velocity_m_s),
+            | Self::MovingDarcy { wall_velocity_m_s, .. }
+            | Self::LinearQuadratic { wall_velocity_m_s, .. } => Some(wall_velocity_m_s),
             _ => None,
         }
     }
