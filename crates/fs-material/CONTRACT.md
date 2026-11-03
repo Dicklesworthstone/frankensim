@@ -3085,6 +3085,15 @@ error is bounded by `(loss_rel + storage_rel)/(1 - storage_rel)` when
 and reports both lowering errors before its ring-down. These remain numerical
 sample/grid checks, without an inter-sample or experimental validation claim.
 
+The fractional-Zener spectrum accepts signed angular frequencies with the
+`exp(iωt)` convention: storage is even, loss is odd, and material-parameter
+tangents obey the same conjugate symmetry needed by real Fourier histories.
+At exactly zero frequency, modulus is `(E0, 0)` and the fixed-frequency
+gradients with respect to `[E0, Einf, alpha, tau]` are exactly `[1, 0, 0, 0]`
+and `[0, 0, 0, 0]`. This relaxed limit avoids undefined logarithmic AD products;
+the DC branch does not claim a derivative with respect to frequency, whose
+slope is not finite for fractional order below one.
+
 The public `visco::prony_ramp` is the shared allocation-free scalar branch owner:
 initial elastic strain plus total strain increment and `dt/tau` produce endpoint,
 interval mean and independent physical dashpot heat. Consumers retain their

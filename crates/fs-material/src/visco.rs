@@ -273,14 +273,25 @@ impl FractionalZener {
         })
     }
 
-    /// Storage and loss modulus `(E′, E″)` at angular frequency ω — the
-    /// [`Real`]-generic core shared by the f64 path and the AD tangents.
+    /// Storage and loss modulus `(E′, E″)` at signed angular frequency ω —
+    /// the [`Real`]-generic core shared by the f64 path and the AD tangents.
+    /// With the `exp(iωt)` convention, storage is even and loss is odd in ω.
+    /// At zero frequency the exact relaxed limit is used for material-parameter
+    /// tangents at fixed ω; this branch does not supply frequency derivatives
+    /// (the fractional law has no finite frequency slope there when α < 1).
     pub fn modulus_parts<R: Real>(e0: R, e_inf: R, alpha: R, tau: R, omega: R) -> (R, R) {
+        // Avoid ln(0) and its indeterminate AD products: E*(0) = E0 for every
+        // admitted alpha and tau, including arbitrarily small relaxation times.
+        if omega.value() == 0.0 {
+            return (e0, R::zero());
+        }
+        let negative_frequency = omega.value() < 0.0;
+        let magnitude = if negative_frequency { -omega } else { omega };
         // E* = E0 + (E∞ - E0) z/(1+z). Evaluate the smaller of
         // |z| and its reciprocal; no growing complex products or subtraction
         // of almost equal imaginary terms can erase weak physical loss.
         // Separate logarithms also avoid overflow/underflow of omega*tau.
-        let log_x = alpha * (omega.ln() + tau.ln());
+        let log_x = alpha * (magnitude.ln() + tau.ln());
         let low_frequency = log_x.value() <= 0.0;
         let u = if low_frequency {
             log_x.exp()
@@ -301,17 +312,19 @@ impl FractionalZener {
         } else {
             e_inf - correction
         };
-        (ep, scaled_delta * (s / den))
+        let loss = scaled_delta * (s / den);
+        (ep, if negative_frequency { -loss } else { loss })
     }
 
-    /// `(E′, E″)` at ω [rad/s] (deterministic `fs_math::det` elementary
-    /// functions via the f64 [`Real`] instantiation).
+    /// `(E′, E″)` at signed ω [rad/s] (deterministic `fs_math::det` elementary
+    /// functions via the f64 [`Real`] instantiation). Negative frequencies
+    /// give the complex conjugate response; zero gives `(E0, 0)`.
     #[must_use]
     pub fn modulus(&self, omega: f64) -> (f64, f64) {
         FractionalZener::modulus_parts(self.e0, self.e_inf, self.alpha, self.tau, omega)
     }
 
-    /// Loss factor `η(ω) = E″/E′`.
+    /// Signed loss factor `η(ω) = E″/E′`, odd in ω and zero at DC.
     #[must_use]
     pub fn loss_factor(&self, omega: f64) -> f64 {
         let (ep, epp) = self.modulus(omega);
@@ -320,7 +333,8 @@ impl FractionalZener {
 
     /// Exact AD gradients of `(E′, E″)` with respect to
     /// `[E0, E∞, α, τ]` at fixed ω (forward-mode duals through the same
-    /// generic code path as the value).
+    /// generic code path as the value). At zero frequency these are exactly
+    /// `[1, 0, 0, 0]` for storage and `[0, 0, 0, 0]` for loss.
     #[must_use]
     pub fn modulus_gradients(&self, omega: f64) -> ((f64, [f64; 4]), (f64, [f64; 4])) {
         let x = [self.e0, self.e_inf, self.alpha, self.tau];
@@ -1812,10 +1826,82 @@ mod tests {
         let gm = GeneralizedMaxwell::new(1.0e9, vec![(2.0e9, 2e-4)]).expect("gm");
         for k in -30..=30 {
             let w = det::exp(0.3 * f64::from(k)) / 2e-4;
-            let (fe, fi) = fz.modulus(w);
-            let (ge, gi) = gm.modulus(w);
-            assert!((fe - ge).abs() < 1e-6 * ge.abs(), "E' at {w}");
-            assert!((fi - gi).abs() < 1e-6 * gi.abs().max(1.0), "E'' at {w}");
+            for omega in [-w, w] {
+                let (fe, fi) = fz.modulus(omega);
+                let (ge, gi) = gm.modulus(omega);
+                assert!((fe - ge).abs() < 2e-13 * ge.abs(), "E' at {omega}");
+                assert!((fi - gi).abs() < 2e-13 * gi.abs(), "E'' at {omega}");
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_zener_signed_values_and_parameter_tangents_are_hermitian() {
+        // A real strain history needs conjugate material responses for its
+        // positive/negative Fourier pairs, including fitted-parameter tangents.
+        for alpha in [0.25, 0.7, 1.0] {
+            for tau in [1e-6, 1.0, 1e6] {
+                let law = FractionalZener::new(2e9, 3e9, alpha, tau).unwrap();
+                for wt in [1e-12, 0.2, 1.0, 5.0, 1e12] {
+                    let omega = wt / tau;
+                    let (storage, loss) = law.modulus(omega);
+                    assert!(storage.is_finite() && loss > 0.0);
+                    assert_eq!(law.modulus(-omega), (storage, -loss));
+                    assert_eq!(law.loss_factor(-omega), -law.loss_factor(omega));
+                    let (positive_storage, (positive_loss, positive_gradient)) =
+                        law.modulus_gradients(omega);
+                    let (negative_storage, (negative_loss, negative_gradient)) =
+                        law.modulus_gradients(-omega);
+                    assert_eq!(negative_storage, positive_storage);
+                    assert_eq!(negative_loss, -positive_loss);
+                    for (negative, positive) in negative_gradient.into_iter().zip(positive_gradient)
+                    {
+                        assert!(positive.is_finite());
+                        assert_eq!(negative, -positive);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_zener_dc_parameter_tangents_match_the_relaxed_limit() {
+        for (e0, e_inf, alpha, tau) in [
+            (2e9, 3e9, 0.25, 1e-3),
+            (2e9, 3e9, 1.0, 1e-3),
+            (1e-300, 3e-300, 0.5, 1e300),
+            (1e300, 1.5e300, 0.5, 1e-300),
+            (2.0, 3.0, 1e-12, f64::from_bits(1)),
+            (2.0, 3.0, 1.0, f64::MAX),
+        ] {
+            let law = FractionalZener::new(e0, e_inf, alpha, tau).unwrap();
+            for omega in [0.0, -0.0] {
+                assert_eq!(law.modulus(omega), (e0, 0.0));
+                assert_eq!(law.loss_factor(omega), 0.0);
+                assert_eq!(
+                    law.modulus_gradients(omega),
+                    ((e0, [1.0, 0.0, 0.0, 0.0]), (0.0, [0.0; 4]))
+                );
+            }
+        }
+        // The alpha tangent also tends to zero: x^alpha ln(x) -> 0 for
+        // every admitted alpha > 0, despite the logarithm's divergence.
+        for alpha in [0.25, 0.7, 1.0] {
+            let law = FractionalZener::new(2.0, 3.0, alpha, 0.1).unwrap();
+            for omega in [-1e-120, 1e-120] {
+                let ((storage, storage_gradient), (loss, loss_gradient)) =
+                    law.modulus_gradients(omega);
+                assert_eq!(storage, law.e0);
+                assert!(loss.abs() < 1e-25);
+                for ((actual, relaxed), loss_tangent) in storage_gradient
+                    .into_iter()
+                    .zip([1.0, 0.0, 0.0, 0.0])
+                    .zip(loss_gradient)
+                {
+                    assert!((actual - relaxed).abs() < 1e-25);
+                    assert!(loss_tangent.abs() < 1e-25);
+                }
+            }
         }
     }
 
