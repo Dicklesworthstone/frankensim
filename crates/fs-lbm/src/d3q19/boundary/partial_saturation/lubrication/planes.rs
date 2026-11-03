@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// One infinite planar surface with constant prescribed translation.
+/// One infinite planar surface with prescribed translation and optional axial spin.
 ///
 /// The normal points into the fluid half-space occupied by the spheres. The
 /// surface supplies a missing-film correction only: it does not create voxel
@@ -18,6 +18,9 @@ pub struct LubricationPlane3 {
     pub(super) point: [f64; 3],
     pub(super) normal: [f64; 3],
     pub(super) velocity: [f64; 3],
+    // Constant angular speed about the normal through point. This does not
+    // change the plane geometry or supply a finite axial torsional resistance.
+    pub(super) axial_spin: f64,
     pub(super) cutoff_gap: f64,
     pub(super) roughness_gap: f64,
     pub(super) tangential: Option<(f64, f64)>,
@@ -55,11 +58,48 @@ impl LubricationPlane3 {
             point,
             normal: normal.map(|x| x / length),
             velocity,
+            axial_spin: 0.0,
             cutoff_gap,
             roughness_gap,
             tangential: None,
             recoil: None,
         })
+    }
+
+    /// Prescribe constant angular speed about the plane normal through `point`.
+    /// The axis translates with the original prescribed velocity. Local surface
+    /// velocity is `V + angular_speed * n cross (x-point)` in lattice units.
+    /// Axial spin leaves the plane's normal and gap geometry unchanged.
+    ///
+    /// Each active film samples this velocity at its actual midpoint footpoint
+    /// in the original coupled solve. That local velocity must remain finite
+    /// and low-Mach; no global velocity bound exists on an infinite rotating
+    /// plane. The independently supplied resolved-fluid wall must use the same
+    /// motion. This method does not create that boundary or advance an actuator.
+    ///
+    /// Only the existing squeeze and optional tangent/parallel-spin asymptotics
+    /// are retained. Axial torsional resistance is finite in the small-gap limit
+    /// and is not added: a stationary sphere on the spin axis receives no extra
+    /// axial torque from this correction. General tilting rotation, combined
+    /// prescribed spin/finite recoil and solid contact remain outside this model.
+    /// The finite axial limit is described by Liu and Prosperetti, JFM (2010),
+    /// section 4, equation 4.1:
+    /// <https://pages.jh.edu/aprospe1/publications/PapersPublished/Rotating/LiuJFM_2010.pdf>.
+    ///
+    /// # Errors
+    /// Refuses nonfinite angular speed. Local speed admission occurs when an
+    /// active film is assembled, or through [`Self::velocity_at`].
+    /// A finite-inertia carrier owns its solved spin and refuses a nonzero
+    /// additional prescribed spin; zero remains an identity.
+    pub fn with_axial_spin(mut self, angular_speed: f64) -> Result<Self> {
+        if !angular_speed.is_finite() {
+            return Err(invalid("nonfinite lubrication plane angular speed"));
+        }
+        if angular_speed != 0.0 && self.recoil.is_some() {
+            return Err(invalid("finite plane cannot also prescribe axial spin"));
+        }
+        self.axial_spin = angular_speed;
+        Ok(self)
     }
 
     /// Enable the leading logarithmic translation/parallel-spin wall correction.
@@ -103,12 +143,45 @@ impl LubricationPlane3 {
         self.normal
     }
 
-    /// Constant prescribed world translation in lattice velocity units.
+    /// Constant prescribed translation of the spin axis in lattice velocity units.
     pub fn velocity(self) -> [f64; 3] {
         self.velocity
     }
 
-    /// Advance this prescribed geometry for a subsequent window.
+    /// Signed prescribed angular speed about the unit plane normal [1/tick].
+    pub fn axial_spin(self) -> f64 {
+        self.axial_spin
+    }
+
+    /// Prescribed local rigid velocity at a world point, in lattice units.
+    /// Points need not lie on the plane; the actual film owner uses its
+    /// orthogonal footpoint. Zero spin retains the original translation exactly.
+    ///
+    /// # Errors
+    /// Refuses nonfinite coordinates or a nonfinite/high-Mach local velocity.
+    pub fn velocity_at(self, point: [f64; 3]) -> Result<[f64; 3]> {
+        if !point.into_iter().all(f64::is_finite) {
+            return Err(invalid("nonfinite lubrication plane velocity point"));
+        }
+        if self.axial_spin == 0.0 {
+            return Ok(self.velocity);
+        }
+        if self.recoil.is_some() {
+            return Err(invalid("finite plane cannot also prescribe axial spin"));
+        }
+        let arm = core::array::from_fn(|i| point[i] - self.point[i]);
+        let rotation = cross(self.normal.map(|n| self.axial_spin * n), arm);
+        let velocity = core::array::from_fn(|i| self.velocity[i] + rotation[i]);
+        if !low_mach(velocity) {
+            return Err(invalid(
+                "lubrication plane local speed exceeds low-Mach envelope",
+            ));
+        }
+        Ok(velocity)
+    }
+
+/// Advance this prescribed geometry for a subsequent window. Axial spin
+    /// retains the same normal and follows the translating axis through `point`.
     ///
     /// # Errors
     /// Refuses negative/nonfinite time or overflow, without changing this value.
@@ -193,9 +266,11 @@ pub struct PlaneLubricationExchange3 {
     /// Sum of the free reaction couples at the individual plane footpoints.
     /// These retain total angular momentum for noncentral tangential traction.
     pub couple_impulse: [f64; 3],
-    /// Work received by the surface. For prescribed translation this is
-    /// `impulse dot velocity`; finite surfaces use their solved center/spin
-    /// midpoint velocities and the full reaction wrench.
+    /// Work received by the surface. Prescribed translation/axial rotation
+    /// uses the complete force/couple wrench about its translating spin axis,
+    /// independent of the reporting origin; its actuator supplies the negative.
+    /// Finite surfaces use their solved center/spin midpoint velocities and
+    /// receive that full-wrench work in kinetic state.
     pub work: f64,
     /// Present only for a finite-inertia surface, after the shared mode solve.
     pub finite_body: Option<FinitePlaneResponse3>,
@@ -224,11 +299,13 @@ impl BoundaryGrid3 {
     /// even outside the cutoff. At most 64 planes and 64 TOTAL active films are
     /// admitted. Opt-in tangent blocks retain translation/rotation reciprocity
     /// and require their independent scalar-mode budget. There is one shared
-    /// response solve, not sequential wall kicks.
+    /// response solve, not sequential wall kicks. Prescribed axial spin is
+    /// sampled at each active film footpoint and retains its rotational work.
     ///
     /// # Errors
     /// Inherits original immersed assembly admission; additionally refuses
-    /// overlap, duplicate planes, exhausted film budgets or invalid solves.
+    /// overlap, duplicate planes, inadmissible local surface speed, exhausted
+    /// film budgets or invalid solves.
     /// No body or population is published on any refusal.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_lubricated_partial_saturation_planes<const N: usize>(

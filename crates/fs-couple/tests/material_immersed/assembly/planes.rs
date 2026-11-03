@@ -3,6 +3,9 @@ use super::*;
 use fs_couple::material_immersed::dry::{PlaneFilmSi, ResolvedImmersedPlanes};
 use fs_lbm::d3q19::DryLubricatedPlanesExchange3;
 
+#[path = "planes/spinning.rs"]
+mod spinning;
+
 fn plane() -> PlaneFilmSi {
     PlaneFilmSi {
         point_m: [0.0229, 0.0, 0.0],

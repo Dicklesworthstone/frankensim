@@ -10,7 +10,9 @@ use fs_lbm::d3q19::{DryLubricatedPlanesExchange3, LubricationPlane3};
 /// does not create or translate a resolved no-slip fluid boundary. The scenario
 /// must supply the matching resolved boundary separately; a stationary plane
 /// can accompany an existing stationary domain wall. Finite-mass plane recoil,
-/// rotation, contact and a thermal destination for film loss are not supplied.
+/// tilting rotation, contact and a thermal destination for film loss are not supplied.
+/// Axial spin is supplied separately by `with_spinning_prescribed_planes`, keeping
+/// the original translating-plane descriptor and callers source-compatible.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlaneFilmSi {
     /// Point on the plane at attachment time [m].
@@ -59,6 +61,7 @@ impl PlaneFilmSi {
 pub struct ResolvedImmersedPlanes<'a, F: FluidTransport + ?Sized, const N: usize> {
     assembly: ResolvedImmersedBodies<'a, F, N>,
     source_planes: Vec<PlaneFilmSi>,
+    source_plane_axial_spins_rad_s: Vec<f64>,
     planes: Vec<LubricationPlane3>,
     next_planes: Vec<LubricationPlane3>,
 }
@@ -79,7 +82,38 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
         planes: &[PlaneFilmSi],
         gate: &CancelGate,
     ) -> Result<ResolvedImmersedPlanes<'a, F, N>, Error> {
+        self.attach_prescribed_planes(planes, None, gate)
+    }
+
+    /// Attach prescribed planar surfaces with signed angular speeds [rad/s]
+    /// about their own normals through the supplied points. Each spin axis
+    /// translates with its original `PlaneFilmSi::velocity_m_s`.
+    ///
+    /// Rates correspond one-to-one with `planes` and retain their original SI
+    /// values. The native rate is `omega * timestep`, with no length factor.
+    /// All normal/tangent resistance and work remain in the original simultaneous
+    /// fluid/body solve. The matching resolved wall must carry the same motion.
+    /// This adds no finite axial torsional law, tilted wall rotation or recoil.
+    /// Zero rates recover the existing prescribed-plane path exactly.
+    pub fn with_spinning_prescribed_planes(
+        self,
+        planes: &[PlaneFilmSi],
+        axial_spins_rad_s: &[f64],
+        gate: &CancelGate,
+    ) -> Result<ResolvedImmersedPlanes<'a, F, N>, Error> {
+        self.attach_prescribed_planes(planes, Some(axial_spins_rad_s), gate)
+    }
+
+    fn attach_prescribed_planes(
+        self,
+        planes: &[PlaneFilmSi],
+        axial_spins_rad_s: Option<&[f64]>,
+        gate: &CancelGate,
+    ) -> Result<ResolvedImmersedPlanes<'a, F, N>, Error> {
         poll(gate)?;
+        if axial_spins_rad_s.is_some_and(|rates| rates.len() != planes.len()) {
+            return Err(Error::Invalid("plane/spin source count mismatch"));
+        }
         if !matches!(self.native.surfaces, CarrierSurfaces::Spheres { .. }) {
             return Err(Error::Invalid("plane films require spherical dry bodies"));
         }
@@ -87,14 +121,22 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
             return Err(Error::Invalid("at most 64 prescribed film planes"));
         }
         let mut native = Vec::with_capacity(planes.len());
-        for &plane in planes {
+        for (index, &plane) in planes.iter().enumerate() {
             poll(gate)?;
-            native.push(plane.lattice(self.scaling())?);
+            let spin = axial_spins_rad_s.map_or(0.0, |rates| rates[index]);
+            let lattice_spin = finite(spin * self.scaling().timestep_s())?;
+            native.push(
+                plane
+                    .lattice(self.scaling())?
+                    .with_axial_spin(lattice_spin)?,
+            );
         }
         poll(gate)?;
         Ok(ResolvedImmersedPlanes {
             assembly: self,
             source_planes: planes.to_vec(),
+            source_plane_axial_spins_rad_s: axial_spins_rad_s
+                .map_or_else(|| vec![0.0; planes.len()], <[f64]>::to_vec),
             next_planes: native.clone(),
             planes: native,
         })
@@ -110,6 +152,12 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedPlanes<'a, 
     /// Original SI inputs in stable plane order, including their attachment pose.
     pub fn source_planes_si(&self) -> &[PlaneFilmSi] {
         &self.source_planes
+    }
+
+    /// Original signed SI angular-speed inputs in the stable source-plane order.
+    /// The original translating-plane constructor supplies exact zero rates.
+    pub fn source_plane_axial_spins_rad_s(&self) -> &[f64] {
+        &self.source_plane_axial_spins_rad_s
     }
 
     /// Authoritative accepted plane geometry and prescribed rate in lattice units.
@@ -134,6 +182,32 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedPlanes<'a, 
             )?,
             ..self.source_planes[index]
         })
+    }
+
+    /// Signed accepted plane rotation about its own normal [rad/s].
+    /// Observation conversion remains separate from native state publication.
+    pub fn plane_axial_spin_rad_s(&self, index: usize) -> Result<f64, Error> {
+        let plane = self
+            .planes
+            .get(index)
+            .ok_or(Error::Invalid("prescribed plane index out of range"))?;
+        finite(plane.axial_spin() / self.assembly.scaling().timestep_s())
+    }
+
+    /// Actual local rigid wall velocity [m/s] at a physical world point [m].
+    /// The native low-Mach admission applies at this point; an infinite rotating
+    /// plane has no global speed bound. This does not construct a resolved wall.
+    pub fn plane_velocity_at_si(&self, index: usize, point_m: [f64; 3]) -> Result<[f64; 3], Error> {
+        let plane = self
+            .planes
+            .get(index)
+            .ok_or(Error::Invalid("prescribed plane index out of range"))?;
+        let scaling = self.assembly.scaling();
+        let point = convert(point_m, 1.0 / scaling.cell_size_m())?;
+        convert(
+            plane.velocity_at(point)?,
+            scaling.cell_size_m() / scaling.timestep_s(),
+        )
     }
 
     /// Update bulk and ALL film viscosities together while retaining the accepted

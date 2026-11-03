@@ -9117,3 +9117,45 @@ normal response, shared-plane angular/work balances and origin shifts,
 common rigid rotation, forced sampled-body BGK/TRT coupling and atomic
 refusals. Native compilation and test execution remain outstanding.
 No measured physical-validation or performance claim is added.
+
+### Prescribed axial spin in the original sphere/plane film solve
+
+`LubricationPlane3::with_axial_spin` adds constant rotation about the plane
+normal through its translating `point`. Each active film uses
+`V + Omega cross (footpoint-point)` at the original exchange pose; the moving
+body owner supplies its original midpoint plane and midpoint sphere geometry.
+The same cached local velocity drives both the native simultaneous Schur solve
+and the accepted-slip dissipation. There is no additional body kick, fluid
+collision, contact projection, or clock. Existing normal/tangent cutoff,
+roughness, resistance-mode and positive-gap restrictions remain authoritative.
+
+Plane reaction work includes translation and the complete moment about the
+spin axis, including the existing free couple. Rotational work is accumulated
+from local lever arms with compensated summation, without subtracting large
+world-origin torques. Reports retain equal/opposite linear and total angular
+impulse, body work, nonnegative modeled loss, and the work residual. Zero spin
+retains the original arithmetic. Nonfinite or high-Mach active-footpoint
+velocity refuses before any body/fluid publication; no global Mach bound is
+claimed for an infinite rotating plane. Resolved-fluid boundaries remain a
+separate required owner and must share the prescribed surface motion.
+
+This extends only the original divergent squeeze and tangent/parallel-spin
+resistance. It does not add finite axial torsional resistance: a stationary
+sphere on the axis receives no added axial torque from this correction.
+The finite small-gap torsional limit is discussed by Liu and Prosperetti,
+JFM (2010), section 4, equation 4.1,
+<https://pages.jh.edu/aprospe1/publications/PapersPublished/Rotating/LiuJFM_2010.pdf>.
+General tilting planes, solid contact and complete resolved rotating-wall flow
+remain outside this correction. The separate finite-inertia plane owner keeps
+its original solved recoil, full-wrench work and Schur mobility; a finite
+carrier refuses an additional nonzero prescribed spin. Zero remains an identity.
+
+Six selected-source native Rust tests execute the original resistance solve,
+six-velocity body response, Cholesky, cancellation gate and deterministic math.
+They cover local rigid motion, rotation covariance, rolling-mode resistance,
+opposing footpoints and actuator torque, origin-independent work, translation/
+rotation cancellation, explicit absent axial drag, zero-spin continuation and
+local-speed refusal. Two public sampled-body integration tests additionally
+cover midpoint kinematics and atomic failure/retry; these source tests parsed
+but were not executed in the delivery environment. This is not a full crate
+build, resolved-wall validation or experimental calibration.

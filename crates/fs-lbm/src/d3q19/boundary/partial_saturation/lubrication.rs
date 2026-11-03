@@ -4,11 +4,14 @@
 //! gap geometry is frozen at the same pose as the native fluid/body exchange.
 
 use super::{multiple::Response, *};
+use fs_math::dd::Dd;
 
 mod finite_planes;
 pub use finite_planes::{FiniteLubricationPlane3, FinitePlaneResponse3};
 mod pairs;
 pub(in crate::d3q19::boundary) mod planes;
+#[cfg(test)]
+mod spinning_tests;
 pub use planes::{LubricatedPlanesExchange3, LubricationPlane3, PlaneLubricationExchange3};
 
 /// Constant Newtonian missing-film resistance in lattice units.
@@ -174,8 +177,9 @@ pub struct SphereLubricationExchange3<const N: usize> {
     pub plane_impulse: [f64; 3],
     /// Total plane reaction angular impulse about the same fixed world origin.
     pub plane_angular_impulse: [f64; 3],
-    /// Actual work received by planes. Prescribed surfaces have an external
-    /// driving reservoir; finite surfaces receive this work in kinetic state.
+    /// Actual work received by planes, including prescribed axial rotation.
+    /// Prescribed surfaces have an external driving reservoir; finite surfaces
+    /// receive their complete reaction-wrench work in kinetic state.
     pub plane_work: f64,
     /// Sum of `resistance * midpoint_mode_speed^2`, nonnegative. Tangential
     /// modes use radius-scaled spin so their speeds also have velocity units.
@@ -278,8 +282,11 @@ enum Counterpart {
     Plane {
         index: usize,
         point: [f64; 3],
+        // The prescribed rigid velocity at THIS film's midpoint footpoint.
+        // All modes share the same admitted sample throughout the solve.
+        velocity: [f64; 3],
         // A finite carrier receives the opposite wrench about its real center.
-        // None preserves the original prescribed-translation arithmetic.
+        // None preserves the prescribed-surface arithmetic.
         angular: Option<[f64; 3]>,
     },
 }
@@ -540,6 +547,7 @@ pub(super) fn solve<const N: usize>(
             if !point.into_iter().all(f64::is_finite) {
                 return Err(invalid("lubrication plane footpoint overflowed"));
             }
+            let velocity = plane.velocity_at(point)?;
             if let Some(input) = plane.recoil {
                 finite_planes::admit_point_speed(input.body, point)?;
             }
@@ -565,6 +573,7 @@ pub(super) fn solve<const N: usize>(
                     counterpart: Counterpart::Plane {
                         index,
                         point,
+                        velocity,
                         angular: plane_angular(plane.normal, [0.0; 3]),
                     },
                     normal: plane.normal,
@@ -579,6 +588,7 @@ pub(super) fn solve<const N: usize>(
                         counterpart: Counterpart::Plane {
                             index,
                             point,
+                            velocity,
                             angular: plane_angular(mode.linear, mode.angular),
                         },
                         normal: mode.linear,
@@ -642,13 +652,13 @@ pub(super) fn solve<const N: usize>(
                 bodies[pair.a].velocity[axis] - bodies[b].velocity[axis]
                     + 0.5 * (free[pair.a].increment[axis] - free[b].increment[axis])
             }
-            Counterpart::Plane { index, .. } => match planes[index].recoil {
+            Counterpart::Plane { index, velocity, .. } => match planes[index].recoil {
                 Some(input) => {
                     bodies[pair.a].velocity[axis] - input.body.velocity[axis]
                         + 0.5 * (free[pair.a].increment[axis] - plane_free[index].increment[axis])
                 }
                 None => {
-                    bodies[pair.a].velocity[axis] - planes[index].velocity[axis]
+                    bodies[pair.a].velocity[axis] - velocity[axis]
                         + 0.5 * free[pair.a].increment[axis]
                 }
             },
@@ -715,6 +725,9 @@ pub(super) fn solve<const N: usize>(
         active_resistance_modes: k,
         ..Default::default()
     };
+    // Keep actuator work about each plane's own moving axis. Subtracting two
+    // large torques about a remote reporting origin would erase weak work.
+    let mut plane_rotation_work = [Dd::ZERO; 64];
     for (pair, lambda) in pairs.iter().zip(impulse) {
         for axis in 0..3 {
             let value = lambda * pair.normal[axis];
@@ -751,6 +764,7 @@ pub(super) fn solve<const N: usize>(
         if let Counterpart::Plane { index, point, .. } = pair.counterpart {
             let reaction = pair.normal.map(|x| -lambda * x);
             let mut angular = cross(core::array::from_fn(|i| point[i] - origin[i]), reaction);
+            let mut couple = [0.0; 3];
             if let Some(spin_axis) = pair.angular {
                 let spin = spin_axis.map(|x| lambda * x);
                 let lever = cross(
@@ -761,10 +775,20 @@ pub(super) fn solve<const N: usize>(
                     // Opposite total body moment, expressed as force at the
                     // real wall point PLUS a free wall couple. Treating this as
                     // contact-point friction alone would lose the pressure moment.
-                    let couple = lever[i] - spin[i];
-                    plane_reports[index].couple_impulse[i] += couple;
-                    angular[i] += couple;
+                    couple[i] = lever[i] - spin[i];
+                    plane_reports[index].couple_impulse[i] += couple[i];
+                    angular[i] += couple[i];
                 }
+            }
+            let plane = planes[index];
+            if plane.axial_spin != 0.0 {
+                let orbital = cross(
+                    core::array::from_fn(|i| point[i] - plane.point[i]),
+                    reaction,
+                );
+                let about_axis = core::array::from_fn(|i| orbital[i] + couple[i]);
+                plane_rotation_work[index] = plane_rotation_work[index]
+                    + Dd::from_f64(plane.axial_spin * dot(plane.normal, about_axis));
             }
             for (total, value) in plane_reports[index].angular_impulse.iter_mut().zip(angular) {
                 *total += value;
@@ -828,14 +852,14 @@ pub(super) fn solve<const N: usize>(
                     0.5 * ((bodies[pair.a].velocity[i] + proposed[pair.a].velocity[i])
                         - (bodies[b].velocity[i] + proposed[b].velocity[i]))
                 }
-                Counterpart::Plane { index, .. } => match plane_reports[index].finite_body {
+                Counterpart::Plane { index, velocity, .. } => match plane_reports[index].finite_body {
                     Some(finite) => {
                         0.5 * ((bodies[pair.a].velocity[i] - planes[index].velocity[i])
                             + (proposed[pair.a].velocity[i] - finite.body_after.velocity[i]))
                     }
                     None => {
-                        0.5 * ((bodies[pair.a].velocity[i] - planes[index].velocity[i])
-                            + (proposed[pair.a].velocity[i] - planes[index].velocity[i]))
+                        0.5 * ((bodies[pair.a].velocity[i] - velocity[i])
+                            + (proposed[pair.a].velocity[i] - velocity[i]))
                     }
                 },
             }),
@@ -875,9 +899,14 @@ pub(super) fn solve<const N: usize>(
             .constitutive_residual
             .max((lambda + pair.resistance * slip).abs());
     }
-    for (plane, exchange) in planes.iter().zip(&mut plane_reports) {
+    for (index, (plane, exchange)) in planes.iter().zip(&mut plane_reports).enumerate() {
         if plane.recoil.is_none() {
-            exchange.work = dot(exchange.impulse, plane.velocity);
+            let translation_work = dot(exchange.impulse, plane.velocity);
+            exchange.work = if plane.axial_spin == 0.0 {
+                translation_work
+            } else {
+                (Dd::from_f64(translation_work) + plane_rotation_work[index]).to_f64()
+            };
         }
         report.plane_work += exchange.work;
         for i in 0..3 {
