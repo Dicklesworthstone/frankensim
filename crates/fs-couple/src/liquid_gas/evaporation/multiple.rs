@@ -80,7 +80,10 @@ pub struct DistributedLiquidGasReport {
     pub surfaces: Vec<NativeLiquidGasSurfaceStep>,
     pub mass_exchange: FreeSurfaceMassExchangeReport,
     pub flow: FreeSurfaceEnthalpyReport,
-    /// Actual common post-heat/phase EOS pressure used by the one native step.
+    /// Actual common gas EOS pressure used by the one native step.
+    /// An enclosing conduction transaction starts this receipt AFTER phase and
+    /// applies the resulting post-thermal pressure; its original thermal report
+    /// retains that same receipt.
     pub pressure: Option<FreeSurfaceFiniteGasPressureLoad>,
     pub native_liquid_enthalpy_change_j: f64,
     pub native_phase_caloric_defect_j: f64,
@@ -331,6 +334,49 @@ fn advance_native<'s, 'm, 'catalog, 'surface>(
     maximum_density_excursion: Option<f64>,
     gate: &CancelGate,
 ) -> Result<DistributedLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
+    advance_native_with_flow(
+        liquid,
+        gas,
+        catalog,
+        surfaces,
+        controls,
+        heat_controls,
+        maximum_density_excursion,
+        gate,
+        |next_liquid, next_gas| {
+            advance_flow(next_liquid, gas, next_gas, maximum_density_excursion, gate)
+        },
+    )
+}
+
+/// Keep source/native phase selection in one owner while its enclosing
+/// transaction supplies the ONE subsequent thermal/flow step.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_native_with_flow<'s, 'm, 'catalog, 'surface>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surfaces: impl ExactSizeIterator<
+        Item = (
+            LiquidGasEvaporationSurface<'surface>,
+            Option<(f64, GasFilmHeatSolve)>,
+        ),
+    >,
+    controls: DistributedLiquidGasSolve,
+    heat_controls: Option<GasLiquidChamberHeatSolve>,
+    maximum_density_excursion: Option<f64>,
+    gate: &CancelGate,
+    finish: impl FnOnce(
+        &mut MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        &mut ClosedGasParcel,
+    ) -> Result<
+        (
+            FreeSurfaceEnthalpyReport,
+            Option<FreeSurfaceFiniteGasPressureLoad>,
+        ),
+        Error,
+    >,
+) -> Result<DistributedLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
     poll(gate)?;
     admit_pressure(liquid, maximum_density_excursion)?;
     if [controls.mass_tolerance_kg, controls.energy_tolerance_j]
@@ -503,7 +549,7 @@ fn advance_native<'s, 'm, 'catalog, 'surface>(
     }
     let (
         phase_surfaces,
-        next_gas,
+        mut next_gas,
         catalog,
         phase,
         exchange,
@@ -613,13 +659,7 @@ fn advance_native<'s, 'm, 'catalog, 'surface>(
         });
     }
     poll(gate)?;
-    let (flow, pressure) = advance_flow(
-        &mut next_liquid,
-        gas,
-        &next_gas,
-        maximum_density_excursion,
-        gate,
-    )?;
+    let (flow, pressure) = finish(&mut next_liquid, &mut next_gas)?;
     let native_transport_mass = flow.mass_after_kg - flow.mass_before_kg;
     absolute_mass.add(native_transport_mass.abs())?;
     let native_mass = mass_exchange.mass_change_kg + native_transport_mass;

@@ -20,6 +20,8 @@ use fs_material::thermochemical_gas::{
 };
 use fs_thermal::evaporation::{EvaporationError, EvaporationLaw, GasFilm, surface_flux};
 
+#[path = "evaporating_liquid_gas/conduction.rs"]
+mod conduction;
 #[path = "evaporating_liquid_gas/fixture.rs"]
 mod fixture;
 #[path = "evaporating_liquid_gas/multiple.rs"]

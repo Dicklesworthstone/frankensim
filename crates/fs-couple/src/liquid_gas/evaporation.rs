@@ -7,6 +7,8 @@
 //! candidate publishes the gas and native liquid together, without a second
 //! film inventory or a reset of the atmosphere on subsequent calls.
 
+/// Phase transfer joined to original liquid, wall and finite-gas conduction.
+pub mod conduction;
 pub mod multiple;
 /// Chemistry, optional sensible heat and phase transfer on one native clock.
 pub mod reactive;

@@ -8,10 +8,15 @@ use fs_lbm::material::free_surface::{
     MaterialFreeSurfaceDomain3, MaterialFreeSurfaceInitialCell3, plan_free_surface_from_material,
 };
 use fs_matdb::*;
-use fs_material::liquid::surface::{LiquidCapillarity, resolve_liquid_surface_state};
+use fs_material::conductor::ElectricalPropertyBasis;
+use fs_material::liquid::surface::{
+    LiquidCapillarity, ResolvedLiquidSurfaceState, resolve_liquid_surface_state,
+};
 use fs_material::liquid_temperature::{LiquidTemperatureLaw, LiquidViscosityBasis};
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
-use fs_material::state_point::{MaterialPropertySelection, THERMAL_CONDUCTIVITY_DIMS};
+use fs_material::state_point::{
+    MaterialPropertySelection, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point,
+};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_thermal::evaporation::EvaporationProperties;
@@ -148,7 +153,7 @@ pub fn controls() -> EvaporatingLiquidGasSolve {
     }
 }
 
-fn liquid_card() -> MaterialCard {
+fn liquid_card(electrical: bool) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [
         ("density", Dims([-3, 1, 0, 0, 0, 0]), [1000.0; 2]),
@@ -180,6 +185,27 @@ fn liquid_card() -> MaterialCard {
                 observations: vec![],
                 provenance: Provenance {
                     source: "manufactured finite-phase native liquid".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    if electrical {
+        let basis = ElectricalPropertyBasis::Conductivity;
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(basis.property_name(), basis.dimensions()),
+                value: PropertyValue::Scalar {
+                    value: 1000.0,
+                    dims: basis.dimensions(),
+                },
+                validity: ValidityDomain::unconstrained().with("T", 280.0, 340.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "manufactured native conducting liquid".into(),
                     license: "test-only".into(),
                     artifact: None,
                 },
@@ -232,7 +258,26 @@ pub fn with_liquid_interfaces_pressure<R>(
     pressure_reference: Option<f64>,
     run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
-    let card = liquid_card();
+    with_liquid_configuration(datum, interfaces, pressure_reference, false, run)
+}
+
+/// The same phase fixture with an explicitly sourced conducting liquid bundle.
+pub fn with_electrical_liquid<R>(
+    datum: f64,
+    fill: f64,
+    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
+    with_liquid_configuration(datum, &[(INTERFACE, fill, 300.0)], None, true, run)
+}
+
+fn with_liquid_configuration<R>(
+    datum: f64,
+    interfaces: &[([usize; 3], f64, f64)],
+    pressure_reference: Option<f64>,
+    electrical: bool,
+    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
+    let card = liquid_card(electrical);
     let point = QueryPoint::new().with("T", 300.0).unwrap();
     let law = LiquidTemperatureLaw::try_new(
         &card,
@@ -250,6 +295,39 @@ pub fn with_liquid_interfaces_pressure<R>(
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
+    let (law, source) = if electrical {
+        let mut requirements = law
+            .reference_state()
+            .material()
+            .properties()
+            .iter()
+            .map(|property| property.requirement().clone())
+            .collect::<Vec<_>>();
+        requirements.push(ElectricalPropertyBasis::Conductivity.requirement().unwrap());
+        let material = resolve_material_state_point(
+            &card,
+            &law.reference_state().material().query(),
+            &requirements,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let law = LiquidTemperatureLaw::try_from_material(
+            &card,
+            material.clone(),
+            "T",
+            LiquidViscosityBasis::Dynamic,
+        )
+        .unwrap();
+        let source = ResolvedLiquidSurfaceState::try_from_material(
+            material,
+            LiquidViscosityBasis::Dynamic,
+            LiquidCapillarity::Neglected,
+        )
+        .unwrap();
+        (law, source)
+    } else {
+        (law, source)
+    };
     let caloric = EquilibriumEnthalpyPhaseCurve::try_single_phase(
         card.content_hash(),
         SolidLiquidPhase::Liquid,
