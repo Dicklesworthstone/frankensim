@@ -1260,11 +1260,23 @@ computed ambient absorption remain separate. The original conduction problem
 must have a thermal anchor before radiation is applied. Frozen emissivity,
 isothermal patch means and a black diffuse bath are explicit approximations;
 this adds no spatial visibility kernel, directional illumination,
-participating-medium model, radiation-only nullspace solver or coupled
-adjoint. `tests/radiation/open.rs` compares partial views and reflection with
+participating-medium model or radiation-only nullspace solver.
+`EnclosureRadiationLinearization::bind_open` and
+`EnclosureRadiationGradient::pullback_open_with_reference_feedback` reuse the
+closed thermal transpose with the exact completed open radiosity equations.
+One absolute bath-temperature control includes all reflected paths; only
+physical surfaces supply FEM traces, emissivity controls and state feedback.
+Original Robin/Neumann laws, smooth heterogeneous conductivity, matching
+contact and prescribed-temperature lifts retain their complete tangents.
+The unchanged primal must pass its physical residual gate before derivatives
+are returned. These are local discrete sensitivities, not error certificates.
+`tests/radiation/open.rs` compares partial views and reflection with
 independent scalar equations, checks equilibrium/near-equilibrium and cold-bath
 limits, and solves an actual conduction/convection/radiation slab against an
-independent heat-balance oracle.
+independent heat-balance oracle. It also compares bath, emissivity and source
+derivatives with complete nonlinear re-solves on Robin and prescribed-flux
+traces, and checks that the open radiosity derivative tends to the closed
+derivative as the escape vanishes.
 
 `solve_with_convective_gray_diffuse_enclosure` explicitly composes that same
 closed-enclosure exchange with original convection on each exact same-named

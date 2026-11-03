@@ -10,7 +10,8 @@ use std::collections::BTreeSet;
 use fs_exec::Cx;
 
 use super::{
-    EnclosureRadiosityLinearization, GrayDiffuseEnclosure, radiation_error,
+    EnclosureRadiosityLinearization, GrayDiffuseEnclosure, OpenDiffuseEnclosure,
+    RadiationSurface, RadiosityReport, radiation_error,
     radiation_mesh_identity_with_poll, require_temperature,
 };
 use crate::{
@@ -33,6 +34,9 @@ pub struct EnclosureRadiationGradient {
     /// Geometry, card selection and query temperature remain fixed. At eps=1,
     /// only feasible parameter directions have physical meaning.
     pub emissivities: Vec<f64>,
+    /// Derivative per kelvin of the single prescribed black environment.
+    /// Closed exchange has no external radiative temperature control.
+    pub ambient_temperature: Option<f64>,
     /// Total shared radiosity-transpose iterations, including patch Jacobian
     /// construction and the final emissivity contraction.
     pub radiosity_iterations: usize,
@@ -128,6 +132,37 @@ pub struct EnclosureRadiationLinearization {
     emissivities: Vec<f64>,
 }
 
+enum Enclosure<'a> {
+    Closed(&'a GrayDiffuseEnclosure),
+    Open(&'a OpenDiffuseEnclosure, f64),
+}
+
+impl Enclosure<'_> {
+    fn surfaces(&self) -> &[RadiationSurface] {
+        match self {
+            Self::Closed(model) => model.surfaces(),
+            Self::Open(model, _) => model.surfaces(),
+        }
+    }
+
+    fn solve(&self, cx: &Cx<'_>, means: &[f64]) -> Result<RadiosityReport, ConductionError> {
+        match self {
+            Self::Closed(model) => model.solve(cx, means),
+            Self::Open(model, bath) => model.solve(cx, means, *bath).map(|r| r.exchange),
+        }
+    }
+
+    fn linearize(&self, cx: &Cx<'_>, means: &[f64], heat_tolerance_w: f64)
+        -> Result<EnclosureRadiosityLinearization, ConductionError>
+    {
+        match self {
+            Self::Closed(model) => EnclosureRadiosityLinearization::new(cx, model, means, heat_tolerance_w),
+            Self::Open(model, bath) => EnclosureRadiosityLinearization::new_open(
+                cx, model, means, *bath, heat_tolerance_w),
+        }
+    }
+}
+
 impl EnclosureRadiationLinearization {
     /// Fresh combined boundary: shifted Robin references or additive Neumann flux.
     pub fn boundary(&self) -> &ThermalBoundary { &self.boundary }
@@ -177,11 +212,39 @@ impl EnclosureRadiationLinearization {
         heat_tolerance_w: f64,
         max_feedback_entries: usize,
     ) -> Result<Self, ConductionError> {
+        Self::bind_model(cx, problem, linear, temperature, regions,
+            convective_mean_slopes_w_m2_k2, reference_feedback, Enclosure::Closed(enclosure),
+            heat_tolerance_w, max_feedback_entries)
+    }
+
+    /// Bind an open cavity to the same complete material/contact/convection
+    /// tangent. The fixed bath participates only in radiosity; all FEM traces
+    /// and mean-temperature feedback factors remain physical surfaces.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_open(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, linear: LinearConfig,
+        temperature: &[f64], regions: &[&str], convective_mean_slopes_w_m2_k2: &[f64],
+        reference_feedback: &[f64], enclosure: &OpenDiffuseEnclosure,
+        ambient_temperature_k: f64, heat_tolerance_w: f64, max_feedback_entries: usize,
+    ) -> Result<Self, ConductionError> {
+        Self::bind_model(cx, problem, linear, temperature, regions,
+            convective_mean_slopes_w_m2_k2, reference_feedback,
+            Enclosure::Open(enclosure, ambient_temperature_k), heat_tolerance_w, max_feedback_entries)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_model(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, linear: LinearConfig,
+        temperature: &[f64], regions: &[&str], convective_mean_slopes_w_m2_k2: &[f64],
+        reference_feedback: &[f64], enclosure: Enclosure<'_>,
+        heat_tolerance_w: f64, max_feedback_entries: usize,
+    ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
         let n = problem.mesh.vertex_count();
         let m = regions.len();
         let p = enclosure.surfaces().len();
-        if !(2..=64).contains(&p) || m > 64
+        let minimum = match &enclosure { Enclosure::Closed(_) => 2, Enclosure::Open(_, _) => 1 };
+        if !(minimum..=64).contains(&p) || m > 64
             || n.checked_mul(4).and_then(|v| v.checked_mul(m))
                 .is_none_or(|v| v > max_feedback_entries)
         {
@@ -279,9 +342,7 @@ impl EnclosureRadiationLinearization {
         }
 
         let fresh = enclosure.solve(cx, &means)?;
-        let radiosity = EnclosureRadiosityLinearization::new(
-            cx, enclosure, &means, heat_tolerance_w,
-        )?;
+        let radiosity = enclosure.linearize(cx, &means, heat_tolerance_w)?;
         let mut feedback = reference_feedback.to_vec();
         let mut local_reference_slopes = vec![0.0; m];
         let mut replacements = Vec::with_capacity(p);
@@ -348,7 +409,7 @@ impl EnclosureRadiationLinearization {
             physical,
             ports,
             flux_feedback,
-            outward_flux: fresh.net_outward_flux_w_m2,
+            outward_flux: fresh.net_outward_flux_w_m2[..p].to_vec(),
             radiosity,
             radiosity_iterations,
             radiosity_relative_residual,
@@ -417,6 +478,7 @@ impl EnclosureRadiationLinearization {
             convection,
             radiation_regions: self.radiation_regions.clone(),
             emissivities,
+            ambient_temperature: radiation.ambient_temperature,
             radiosity_iterations: self.radiosity_iterations.checked_add(radiation.iterations)
                 .ok_or_else(|| invalid("enclosure radiosity transpose iteration count overflow"))?,
             radiosity_relative_residual: self.radiosity_relative_residual
@@ -461,6 +523,35 @@ impl EnclosureRadiationGradient {
             cx, problem, linear, temperature, regions, convective_mean_slopes_w_m2_k2,
             reference_feedback, enclosure, heat_tolerance_w, max_feedback_entries,
         )?;
+        Self::pullback_bound(cx, problem, interfaces, linear, temperature, regions,
+            nodal_weights, max_feedback_entries, bound)
+    }
+
+    /// Complete steady open-cavity transpose with one black-bath temperature
+    /// control and independently sourced physical-surface emissivities.
+    /// Original convection and prescribed flux remain separate heat channels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_open_with_reference_feedback(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig, temperature: &[f64], regions: &[&str],
+        convective_mean_slopes_w_m2_k2: &[f64], reference_feedback: &[f64],
+        enclosure: &OpenDiffuseEnclosure, ambient_temperature_k: f64,
+        heat_tolerance_w: f64, nodal_weights: &[f64], max_feedback_entries: usize,
+    ) -> Result<Self, ConductionError> {
+        let bound = EnclosureRadiationLinearization::bind_open(
+            cx, problem, linear, temperature, regions, convective_mean_slopes_w_m2_k2,
+            reference_feedback, enclosure, ambient_temperature_k, heat_tolerance_w, max_feedback_entries,
+        )?;
+        Self::pullback_bound(cx, problem, interfaces, linear, temperature, regions,
+            nodal_weights, max_feedback_entries, bound)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pullback_bound(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig, temperature: &[f64], regions: &[&str],
+        nodal_weights: &[f64], max_feedback_entries: usize, bound: EnclosureRadiationLinearization,
+    ) -> Result<Self, ConductionError> {
         let combined_problem = ConductionProblem { boundary: bound.boundary(), ..problem };
         let convection = RobinResponse::pullback_mean_robin_with_reference_and_flux_feedback(
             cx, combined_problem, interfaces, linear, temperature, regions,
