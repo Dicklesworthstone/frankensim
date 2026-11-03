@@ -584,6 +584,38 @@ in the separate `loads3` transient constructors. Three focused G1/G3 regressions
 in `load_history3` cover independent barycentric integration, graded `M*a`,
 weight/torque/reactions, scalar parity and refusals.
 
+## Moving force/couple ports on the native shell trajectory
+
+`moving_load::MovingShellModel` binds the original `shell::ShellPlate` geometry,
+six-DOF spatial operators and stationary support map once. A point or explicit
+patch quadrature transfers Cartesian forces and free couples with the transpose
+of its P1 material-point motion, including `offset cross force`. Full restrained
+rows survive for reactions. The same rows sample displacement, director rotation
+and material velocity; moving a load's attachment across triangles does not add
+the convective traversal velocity to that material velocity or its power.
+
+`MovingShellMotion` initializes acceleration from the original mass equilibrium
+and reuses `shell_time::PreparedNewmark` with beta=1/4 and gamma=1/2. Retained old
+and supplied new endpoint loads provide trapezoidal force and reference-moment
+impulses. Support and damping exchanges, supplied work, and measured momentum
+and energy residuals stay separate. Mass-proportional Rayleigh damping is a
+momentum sink; it is not silently attributed to internal material heat. Force
+projection is linear in point count, factors are reused, reaction evaluation
+visits only restrained rows, and impulse reductions need no extra dense vectors.
+The caller's point/step/horizon bounds and cancellation checks precede atomic
+publication; duplicate, stale or future endpoint timestamps refuse.
+
+This is the existing flat, small-rotation, estimate-only shell surrogate. Its
+angular inventory and wrench moments use original reference positions and the
+linearized director field. It is not a finite-rotation continuum shell,
+follower-force/contact solver, automatic patch tracker, moving-support law, or
+modal reduction. Time-varying load paths require temporal refinement. The
+physical subset of bead `frankensim-b8bxd.9.3` is implemented; that broader
+adapter's remaining features are not claimed complete. G0/G1/G3/G4 tests in
+`tests/moving_load.rs` exercise independent wrench resultants, rigid motion,
+reciprocal work, analytic accelerated translation, native damped/undamped moving
+loads, support reactions, common-edge traversal, and atomic refusal/retry.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,

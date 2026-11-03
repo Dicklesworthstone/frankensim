@@ -58,6 +58,8 @@ pub mod loads3;
 /// Source-bound finite-deformation textile membranes on the shared P1 mesh.
 pub mod membrane;
 pub mod mesh2;
+/// Moving force/couple ports on the native six-DOF shell trajectory.
+pub mod moving_load;
 /// History-dependent P1/Q1 plane-stress and plane-strain continua.
 pub mod plastic2;
 /// Incremental small-strain inelasticity (J2 and any `SmallStrainLaw`) on tetrahedra.
