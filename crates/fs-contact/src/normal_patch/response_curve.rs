@@ -311,6 +311,100 @@ pub fn build_finite_gap_response_curve(
 }
 
 impl FiniteGapResponseCurve {
+    /// Mean conservative force along a straight approach path, integrating the
+    /// SAME retained linear segments as `evaluate`. This is exact for the
+    /// interpolation model up to rounding; its physical authority stays an
+    /// estimate. No new half-space solve, quadrature or allocation is needed.
+    ///
+    /// Runtime cost is logarithmic lookup plus the number of crossed segments.
+    /// Local normalized trapezoids avoid subtracting large endpoint energies,
+    /// including for one-ULP paths. Out-of-table paths and discontinuous public
+    /// node energies refuse instead of supplying inconsistent mechanical work.
+    pub fn mean_force_between(
+        &self,
+        from_m: f64,
+        to_m: f64,
+    ) -> Result<f64, FiniteGapResponseCurveError> {
+        if self.nodes.len() > MAX_FINITE_GAP_RESPONSE_NODES {
+            return Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response curve path node bound",
+            });
+        }
+        let from = self.evaluate(from_m)?;
+        let to = self.evaluate(to_m)?;
+        if from_m == to_m {
+            return Ok(from.normal_force_n);
+        }
+        let (lo, hi, mut force, final_force) = if from_m < to_m {
+            (from_m, to_m, from.normal_force_n, to.normal_force_n)
+        } else {
+            (to_m, from_m, to.normal_force_n, from.normal_force_n)
+        };
+        let span = hi - lo;
+        let mut index = self.nodes.partition_point(|node| node.approach_m <= lo);
+        index = index.clamp(1, self.nodes.len() - 1);
+        let mut position = lo;
+        let mut mean = 0.0;
+        let mut error = 0.0;
+        loop {
+            let left = &self.nodes[index - 1];
+            let right = &self.nodes[index];
+            let width = right.approach_m - left.approach_m;
+            if !(width.is_finite()
+                && width > 0.0
+                && valid_response_node_values(left)
+                && valid_response_node_values(right)
+                && right.normal_force_n >= left.normal_force_n
+                && position >= left.approach_m
+                && position < right.approach_m)
+                || !((right.normal_force_n - left.normal_force_n) / width).is_finite()
+            {
+                return Err(FiniteGapResponseCurveError::InvalidInput {
+                    field: "response curve path segment",
+                });
+            }
+            let expected = left.curve_reversible_energy_j
+                + (0.5 * left.normal_force_n + 0.5 * right.normal_force_n) * width;
+            let allowance =
+                16.0 * f64::EPSILON * expected.abs().max(right.curve_reversible_energy_j.abs());
+            if !expected.is_finite()
+                || (expected - right.curve_reversible_energy_j).abs() > allowance
+            {
+                return Err(FiniteGapResponseCurveError::InvalidInput {
+                    field: "response curve discontinuous stored energy",
+                });
+            }
+            let end = hi.min(right.approach_m);
+            let end_force = if end == hi {
+                final_force
+            } else {
+                right.normal_force_n
+            };
+            let contribution = (0.5 * force + 0.5 * end_force) * ((end - position) / span);
+            let (sum, low) = fs_math::eft::two_sum(mean, contribution);
+            mean = sum;
+            error += low;
+            if end == hi {
+                break;
+            }
+            position = end;
+            force = end_force;
+            index += 1;
+            if index >= self.nodes.len() {
+                return Err(FiniteGapResponseCurveError::InvalidInput {
+                    field: "response curve incomplete path",
+                });
+            }
+        }
+        let mean = mean + error;
+        if !mean.is_finite() || mean < 0.0 || (mean == 0.0 && final_force > 0.0) {
+            return Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response curve path arithmetic",
+            });
+        }
+        Ok(mean)
+    }
+
     /// Evaluate without extrapolation. The returned force, tangent, and energy
     /// come from one line segment and therefore satisfy `dU/d(delta) = F`
     /// within that segment up to binary64 rounding.

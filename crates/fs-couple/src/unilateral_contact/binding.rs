@@ -81,7 +81,10 @@ impl BoundNormalContact {
         &self.source
     }
 
-    fn approach(&self, x: &[f64]) -> Result<f64, DContactError> {
+    // Mean forces need the original signed affine interval, including the
+    // fraction before a unilateral contact closes. Point observations still
+    // use the existing clipped indentation through `approach` below.
+    fn raw_approach(&self, x: &[f64]) -> Result<f64, DContactError> {
         if self
             .collocation
             .len()
@@ -102,6 +105,11 @@ impl BoundNormalContact {
                 what: "bound contact approach overflow",
             });
         }
+        Ok(delta)
+    }
+
+    fn approach(&self, x: &[f64]) -> Result<f64, DContactError> {
+        let delta = self.raw_approach(x)?;
         Ok(if self.source.supports_signed_approach() {
             delta
         } else {

@@ -137,6 +137,9 @@ impl NormalLawSource {
     /// Mean effort on the original straight approach path when the owner
     /// supplies one. This permits native componentwise work and reciprocal
     /// force projection without a global energy correction on other bodies.
+    /// Unilateral owners include the inactive part of a SIGNED affine path:
+    /// clipping both endpoints before this call would overcount onset work.
+    /// Point-contact loss and actual rate/duration admission remain separate.
     pub fn mean_force_between(
         &self,
         from_m: f64,
@@ -166,7 +169,47 @@ impl NormalLawSource {
                 }
                 Ok(Some(force))
             }
-            _ => Ok(None),
+            Self::HertzPoint(source) => {
+                let (from, to, active_fraction) = unilateral_path(from_m, to_m).ok_or(
+                    NormalLawSourceError::Point(NormalPatchError::InvalidInput {
+                        field: "finite signed normal approach path",
+                    }),
+                )?;
+                let active_force = source
+                    .conservative_path_average(from, to)
+                    .map_err(NormalLawSourceError::Point)?
+                    .mean_force_n;
+                let force = active_force * active_fraction;
+                if !force.is_finite()
+                    || (active_force > 0.0 && active_fraction > 0.0 && force == 0.0)
+                {
+                    return Err(NormalLawSourceError::Point(NormalPatchError::Overflow {
+                        field: "mechanical mean effort",
+                    }));
+                }
+                Ok(Some(force))
+            }
+            Self::FiniteGap(source) => {
+                let (from, to, active_fraction) = unilateral_path(from_m, to_m).ok_or(
+                    NormalLawSourceError::FiniteGap(FiniteGapResponseCurveError::InvalidInput {
+                        field: "finite signed normal approach path",
+                    }),
+                )?;
+                let active_force = source
+                    .mean_force_between(from, to)
+                    .map_err(NormalLawSourceError::FiniteGap)?;
+                let force = active_force * active_fraction;
+                if !force.is_finite()
+                    || (active_force > 0.0 && active_fraction > 0.0 && force == 0.0)
+                {
+                    return Err(NormalLawSourceError::FiniteGap(
+                        FiniteGapResponseCurveError::InvalidInput {
+                            field: "mechanical mean effort",
+                        },
+                    ));
+                }
+                Ok(Some(force))
+            }
         }
     }
 
@@ -217,4 +260,30 @@ impl NormalLawSource {
             }
         }
     }
+}
+
+// Preserve the fraction of the ORIGINAL affine coordinate spent in contact.
+// The storage source itself still receives only its admitted indentation.
+fn unilateral_path(from_m: f64, to_m: f64) -> Option<(f64, f64, f64)> {
+    if !from_m.is_finite() || !to_m.is_finite() {
+        return None;
+    }
+    let lo = from_m.min(to_m);
+    let hi = from_m.max(to_m);
+    let fraction = if hi <= 0.0 {
+        0.0
+    } else if lo >= 0.0 {
+        1.0
+    } else {
+        let span = hi - lo;
+        if !span.is_finite() {
+            return None;
+        }
+        hi / span
+    };
+    (fraction.is_finite() && (hi <= 0.0 || fraction > 0.0)).then_some((
+        from_m.max(0.0),
+        to_m.max(0.0),
+        fraction,
+    ))
 }

@@ -14,16 +14,11 @@ pub(super) fn admit(
         .iter()
         .any(|s| matches!(s.source, NormalLawSource::MaugisAttached(_)));
     if attached
-        && (contacts.iter().any(|s| {
-            !matches!(
-                s.source,
-                NormalLawSource::MaugisAttached(_) | NormalLawSource::DmtSphere(_)
-            )
-        }) || (inner.discrete_gradient_rule().is_none()
-            && inner.exact_quadratic_matrix().is_none()))
+        && inner.discrete_gradient_rule().is_none()
+        && inner.exact_quadratic_matrix().is_none()
     {
         return Err(DContactError::Parameter {
-            what: "attached Maugis dynamics needs complete native/quadratic inner work and supported normal paths",
+            what: "attached Maugis dynamics needs complete native/quadratic inner work",
         });
     }
     Ok(attached)
@@ -31,14 +26,25 @@ pub(super) fn admit(
 
 pub(super) fn coordinate_scale(storage: &BoundNormalStorage, coordinate: usize) -> Option<f64> {
     let mut scale = storage.inner.coordinate_scale(coordinate);
+    if !storage.component_rule {
+        return scale;
+    }
     if coordinate.is_multiple_of(2) && coordinate / 2 < storage.n_modes {
         for contact in &storage.contacts {
             let weight = contact.collocation[coordinate / 2].abs();
             if weight == 0.0 {
                 continue;
             }
-            if let NormalLawSource::MaugisAttached(source) = &contact.source {
-                let value = source.indentation_scale_m() / weight;
+            let contact_scale = match &contact.source {
+                NormalLawSource::MaugisAttached(source) => Some(source.indentation_scale_m()),
+                NormalLawSource::DmtSphere(source) => Some(source.interaction_range_m()),
+                NormalLawSource::HertzPoint(source) => {
+                    Some(source.envelope().maximum_indentation_m)
+                }
+                NormalLawSource::FiniteGap(source) => source.nodes.last().map(|n| n.approach_m),
+            };
+            if let Some(contact_scale) = contact_scale {
+                let value = contact_scale / weight;
                 if value.is_finite() && value > 0.0 {
                     scale = Some(scale.map_or(value, |old| old.min(value)));
                 }
@@ -84,11 +90,11 @@ impl ConstitutiveDiscreteGradient for BoundNormalStorage {
             }
         }
         for contact in &self.contacts {
-            let Ok(from) = contact.approach(a) else {
+            let Ok(from) = contact.raw_approach(a) else {
                 out.fill(f64::NAN);
                 return;
             };
-            let Ok(to) = contact.approach(b) else {
+            let Ok(to) = contact.raw_approach(b) else {
                 out.fill(f64::NAN);
                 return;
             };

@@ -45,6 +45,46 @@ impl SourcePointContact {
         let rate = increment / dt_s;
         self.validate_kinematics(initial_indentation_m, rate, dt_s)?;
         self.validate_kinematics(final_indentation_m, rate, dt_s)?;
+        self.path_average(initial_indentation_m, final_indentation_m)
+    }
+
+    /// Mean force of the original reversible Hertz storage, without assigning
+    /// a physical duration or rate to the path. This applies to both the elastic
+    /// Hertz and Hunt--Crossley owners: their conservative potential is the
+    /// same, while the latter's irreversible force remains a separate port.
+    ///
+    /// Only indentation is admitted here. A mechanical consumer must still
+    /// check its actual rate and duration through `validate_kinematics`; this
+    /// storage integral cannot establish dynamic applicability or supply loss.
+    pub fn conservative_path_average(
+        &self,
+        initial_indentation_m: f64,
+        final_indentation_m: f64,
+    ) -> Result<SourceElasticPathAverage, NormalPatchError> {
+        for indentation_m in [initial_indentation_m, final_indentation_m] {
+            if !indentation_m.is_finite() || indentation_m < 0.0 {
+                return Err(NormalPatchError::InvalidInput {
+                    field: "source point indentation",
+                });
+            }
+            let limit = self.envelope().maximum_indentation_m;
+            if indentation_m > limit {
+                return Err(NormalPatchError::OutsideApplicability {
+                    ratio: "source point indentation",
+                    value: indentation_m,
+                    limit,
+                });
+            }
+        }
+        self.path_average(initial_indentation_m, final_indentation_m)
+    }
+
+    fn path_average(
+        &self,
+        initial_indentation_m: f64,
+        final_indentation_m: f64,
+    ) -> Result<SourceElasticPathAverage, NormalPatchError> {
+        let increment = final_indentation_m - initial_indentation_m;
         let depth = initial_indentation_m.max(final_indentation_m);
         if depth == 0.0 {
             return Ok(SourceElasticPathAverage {

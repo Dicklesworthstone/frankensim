@@ -1984,3 +1984,27 @@ native `fs-phs` stepping. Local elastic contact remains quasistatic while the
 caller-owned bodies carry inertia. Fold crossing, snap-induced elastic waves,
 interfacial kinetic energy, damping, thermal partition and changing sources
 need additional physical owners. No release is converted to an impulse or heat.
+
+## Original normal work in mixed adhesive assemblies
+
+`NormalLawSource::mean_force_between` also supplies the original Hertz and
+finite-gap conservative paths, so their native mechanical footprints can share
+an assembly with finite-zone adhesion. Signed affine unilateral paths include
+the inactive gap fraction; the original source sees only positive indentation.
+This distinction preserves force/work consistency when a patch makes or loses
+contact during a step.
+
+`SourcePointContact::conservative_path_average` reuses the existing stable
+Hertz polynomial for both elastic and Hunt--Crossley storage, without assigning
+a duration or rate. The original elastic-only timed API retains its stricter
+model/rate/step admission. Actual Hunt--Crossley loss and its complete operating
+box remain with the mechanical dissipative port.
+
+`FiniteGapResponseCurve::mean_force_between` integrates the same retained
+piecewise-linear force segments as its stored energy. Lookup is logarithmic
+and work is linear in crossed segments, bounded by the original node limit,
+without allocation, quadrature or another half-space solve. Normalized local
+trapezoids and compensated accumulation avoid endpoint-energy cancellation.
+Extrapolation, invalid segments, discontinuous public node energy and
+unrepresentable work refuse. Source identities and interpolation estimate
+authority remain unchanged; no table refinement accuracy is newly claimed.

@@ -15926,9 +15926,9 @@ exact quadratic Hamiltonian, and each supported adhesive contact supplies its
 original path-mean force. Each force is projected through the same contact row
 and never used to correct another body's momentum coordinate. Unequal masses
 therefore retain pairwise action/reaction. Attached composites require complete
-inner work and Maugis/DMT contact paths; unsupported mixtures refuse instead of
-silently reverting to a global work correction. Native numerical coordinate
-probes use the retained contact's physical displacement scale. No analytic
+inner work and original contact paths; incomplete inner storage refuses instead
+of silently reverting to a global work correction. Native numerical coordinate
+probes use each retained contact's physical displacement scale. No analytic
 Newton action is claimed for the new path quadrature.
 
 Quadrature and original-source refusals produce nonfinite trial efforts in the
@@ -15956,6 +15956,32 @@ junction. The original terminal disk fold and unsupported high-Tabor
 continuation refuse without publishing a native state. Additional focused
 regressions check independent disk integrals, path reversal/subdivision, tiny
 paths at the fold, and inertial gap/contact/gap motion with unequal body masses.
+
+### Mixed adhesive and unilateral assemblies
+
+The same complete native rule admits all existing `NormalLawSource` owners in
+one assembly: Maugis, DMT, Hertz/Hunt--Crossley reversible storage and retained
+finite-gap response curves. The inner mechanical owner still supplies its own
+complete rule or exact quadratic energy. Each footprint scatters its original
+scalar path force only through its declared physical row; no common power-law
+fit or correction to unrelated momenta is introduced.
+
+Work paths retain the raw signed affine approach, including the inactive
+fraction before a unilateral patch closes. Hertz storage uses its original
+stable polynomial mean; finite-gap curves integrate their retained linear
+segments with compensated accumulation and unchanged estimate authority. The
+ordinary energy/force observations retain their existing unilateral clipping.
+Original source support, table continuity and bounded table size are checked;
+failure cannot become an optional work fallback. Native probe scales also
+cover coordinates connected only to Hertz, DMT or finite-gap footprints.
+
+Hunt--Crossley loss remains on the original separate dissipative port, which
+checks the actual rate and step. A conservative path mean supplies no physical
+duration and cannot waive those checks. Non-Maugis composites retain their
+existing stepping behavior. The `adhesive_mixed_storage` regressions exercise
+all four owners together on three unequal bodies, independent onset work,
+retained BEM source/authority, tiny and reversing paths, native Hertz/table
+closure and reopening, original rate/step refusals and atomic failed-step retry.
 
 ## Adhesive junctions on the native modal network
 
