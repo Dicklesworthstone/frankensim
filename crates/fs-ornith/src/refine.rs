@@ -1,8 +1,9 @@
 //! Stage 3: REFINE. The screen winner's section is rasterized into an
 //! fs-lbm channel as a bounce-back obstacle and driven to a steady
-//! state; aerodynamic forces come from a CONTROL-VOLUME momentum
-//! balance over the PUBLIC cell moments (∮ (ρuu + p·I)·n dA with
-//! p = ρ·c_s² — no reliance on fs-lbm internals). The gate is
+//! state; aerodynamic forces come from fs-lbm's native stationary-wall
+//! momentum exchange, averaged over the final 100 steps. The measured
+//! boundary impulse includes the pressure and viscous loads represented by
+//! the lattice without dropping unsteady storage or inlet reactions. The gate is
 //! MODEL-FORM honest: the panel method and the low-Re lattice flow are
 //! different physics, so agreement is gated on lift SIGN and
 //! order-of-magnitude band, never point-matching; the honesty label
@@ -10,15 +11,22 @@
 //! DWR adaptivity is the recorded successor.
 
 use crate::param::OrnithCandidate;
-use fs_lbm::{CS2, Cell, Grid, Q, equilibrium};
+use fs_lbm::{Cell, Grid, Q, equilibrium};
+
+const FLOW_STEPS: usize = 3200;
+const FORCE_SAMPLES: usize = 100;
 
 /// The refinement report — with its honesty label.
 #[derive(Debug, Clone)]
 pub struct RefineReport {
-    /// Control-volume lift (lattice units, +y).
+    /// Mean section lift over the final 100 steps (lattice units, +y).
     pub lift: f64,
-    /// Control-volume drag (lattice units, +x).
+    /// Mean section drag over the final 100 steps (lattice units, +x).
     pub drag: f64,
+    /// Lift coefficient, normalized by freestream dynamic pressure and chord.
+    pub cl: f64,
+    /// Drag coefficient, normalized by freestream dynamic pressure and chord.
+    pub cd: f64,
     /// Panel-method cl at the same trim (the screen's number).
     pub panel_cl: f64,
     /// Model-form honesty label (travels with every consumer).
@@ -79,6 +87,9 @@ pub fn refine(c: &OrnithCandidate) -> RefineReport {
     grid.periodic_x = false;
     grid.periodic_y = true;
     rasterize(&mut grid, c, chord, x0, y0);
+    // Only the section's walls contribute to the force receipt; inlet/outlet
+    // momentum injection is not part of the aerodynamic force on the section.
+    let section_walls: Vec<bool> = grid.flags.iter().map(|&cell| cell == Cell::Wall).collect();
     // Freestream init.
     for y in 0..ny {
         for x in 0..nx {
@@ -91,9 +102,10 @@ pub fn refine(c: &OrnithCandidate) -> RefineReport {
     let mut scratch: Vec<[f64; Q]> = Vec::new();
     let mut prev_u = vec![[0.0f64; 2]; nx * ny];
     let mut steadiness = f64::INFINITY;
+    let mut force_sum = [0.0f64; 2];
     // Two full flow-throughs (transit = nx/u_in = 1600 steps): one
     // transit was MEASURED unsettled (steadiness 1.1e-3).
-    for step in 0..3200 {
+    for step in 0..FLOW_STEPS {
         // Inlet/outlet columns pinned to freestream equilibrium (the
         // smoke boundary treatment; documented).
         for y in 0..ny {
@@ -106,7 +118,13 @@ pub fn refine(c: &OrnithCandidate) -> RefineReport {
                 grid.f[i1] = equilibrium(1.0, u_in, 0.0);
             }
         }
-        grid.step(&mut scratch);
+        if step >= FLOW_STEPS - FORCE_SAMPLES {
+            let exchange = grid.step_with_wall_momentum(&mut scratch, &section_walls);
+            force_sum[0] += exchange.wall_impulse[0];
+            force_sum[1] += exchange.wall_impulse[1];
+        } else {
+            grid.step(&mut scratch);
+        }
         if step % 100 == 99 {
             let mut worst = 0.0f64;
             for y in 0..ny {
@@ -125,35 +143,23 @@ pub fn refine(c: &OrnithCandidate) -> RefineReport {
             steadiness = worst;
         }
     }
-    // Control-volume momentum balance on a box around the obstacle:
-    // F = ∮ (ρ u (u·n) + p n) dA, force ON the body = −flux balance.
-    let (bx0, bx1) = (12usize, 72usize);
-    let (by0, by1) = (4usize, ny - 5);
-    let mut fx = 0.0f64;
-    let mut fy = 0.0f64;
-    let mut add_face = |i: usize, n: [f64; 2], grid: &Grid| {
-        let m = grid.moments(i);
-        let p = m.rho * CS2;
-        let un = m.u[0] * n[0] + m.u[1] * n[1];
-        fx += m.rho * m.u[0] * un + p * n[0];
-        fy += m.rho * m.u[1] * un + p * n[1];
-    };
-    for y in by0..=by1 {
-        add_face(grid.idx(bx0, y), [-1.0, 0.0], &grid);
-        add_face(grid.idx(bx1, y), [1.0, 0.0], &grid);
-    }
-    for x in bx0..=bx1 {
-        add_face(grid.idx(x, by0), [0.0, -1.0], &grid);
-        add_face(grid.idx(x, by1), [0.0, 1.0], &grid);
-    }
+    // Lattice dt = 1: each wall impulse is the mean force over one step.
+    // Average the settled tail to reduce the rasterized obstacle's fluctuations.
+    let drag = force_sum[0] / FORCE_SAMPLES as f64;
+    let lift = force_sum[1] / FORCE_SAMPLES as f64;
+    // Freestream rho = 1 and unit span: q_inf * c = 0.5 * U_inf^2 * c.
+    let reference_force = 0.5 * u_in * u_in * chord;
     let panel_cl = fs_bem::panel2d::solve(&c.section(64), c.alpha)
         .expect("ornith candidate must satisfy the bounded panel-solve contract")
         .cl;
     RefineReport {
-        lift: -fy,
-        drag: -fx,
+        lift,
+        drag,
+        cl: lift / reference_force,
+        cd: drag / reference_force,
         panel_cl,
-        honesty: "panel (inviscid, attached) vs D2Q9 BGK low-Re channel: SIGN and \
+        honesty: "panel (inviscid, attached) vs D2Q9 BGK low-Re channel: native wall \
+                  momentum exchange averaged over the final 100 steps; SIGN and \
                   order-band agreement only; LES model cards are the successor",
         steadiness,
     }

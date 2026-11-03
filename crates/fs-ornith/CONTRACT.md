@@ -36,11 +36,15 @@ at every joint.
   structured `fs_race::RaceError` rather than manufacturing a winner when the
   support or input contract fails.
 - `refine::{refine, RefineReport}` — fs-lbm channel flow around the
-  rasterized section; forces by CONTROL-VOLUME momentum balance over
-  the PUBLIC cell moments (∮(ρuu + p·I)·n dA, p = ρc_s² — no reliance
-  on fs-lbm internals); the report carries its MODEL-FORM HONESTY
-  label. Two full flow-throughs (one was MEASURED unsettled:
-  steadiness 1.1e-3 → 5.5e-6 after two).
+  rasterized section; forces use the native
+  `Grid::step_with_wall_momentum` receipt with only the section walls
+  selected. This measures the represented pressure and viscous load
+  directly, avoiding omitted control-volume storage and inlet/outlet
+  reactions. The report averages the final 100 of 3200 steps (two
+  flow-throughs), supplies `cl` and `cd` normalized by freestream
+  dynamic pressure times chord, and carries its MODEL-FORM HONESTY
+  label. The coarse D2Q9 BGK low-Re channel remains a sign/order-band
+  refinement, not a high-Re or LES airfoil prediction.
 - `certify::{certify, CertifyReport, LdSurrogate, pitch_dynamics,
   STALL_ANGLE}` — the 2-state NONLINEAR pitch model
   `θ̈ = −kθ(1 − θ²/θ_s²) − dθ̇` (stiffness from the BEM lift slope,
@@ -107,9 +111,12 @@ None.
   (6× saved — the P7 payoff measured after checked-span normalization);
   the flap metric responds to
   the gait.
-- **orn-003** refine: LBM control-volume lift agrees with the panel
-  sign; steadiness 5.5e-6 after two flow-throughs; honesty label
-  present.
+- **orn-003** refine: native wall-force lift agrees with the panel
+  sign and a declared coefficient order band; drag is positive,
+  steadiness is below 1e-4 after two flow-throughs, and the honesty
+  label is present.
+- **orn-003b** lift symmetry: zero incidence on a symmetric section
+  gives zero lift; reversing incidence reverses lift and preserves drag.
 - **orn-004** certify: SOS region of attraction verified; certified
   ROA area positive; conformal coverage ≥ 0.85 on 60 fresh candidates
   (target 0.90).
@@ -135,7 +142,7 @@ None.
   sections — wiring the 3D lifting surface is successor scope.
 - **Cumulant LBM/LES on sparse VDB lattices, DWR keyed to L/D, LES
   model cards**: the refinement here is D2Q9 BGK channel flow with a
-  control-volume force and an honesty label saying exactly that.
+  wall momentum-exchange force and an honesty label saying exactly that.
 - **Koopman/DMD trim models with conformal e-bands per trim state**:
   the pitch model is a 2-state companion form from the lift slope.
 - **NSGA-III reference-point selection**: fs-dfo's landed NSGA-II +

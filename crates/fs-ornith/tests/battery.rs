@@ -112,14 +112,37 @@ fn orn_003_refine_agreement() {
     let c = OrnithCandidate::from_genes(&[0.4, 0.6, 0.5, 0.2, 0.5]);
     let rep = refine(&c);
     let sign_ok = rep.lift.signum() == rep.panel_cl.signum();
+    let coefficient_ratio = rep.cl / rep.panel_cl;
     verdict(
         "orn-003-refine",
-        sign_ok && rep.steadiness < 1e-4 && !rep.honesty.is_empty(),
+        sign_ok
+            && (0.1..10.0).contains(&coefficient_ratio)
+            && rep.cd > 0.0
+            && rep.steadiness < 1e-4
+            && !rep.honesty.is_empty(),
         &format!(
-            "LBM lift {:.3e}, drag {:.3e} vs panel cl {:.4}: sign agreement {sign_ok}; steadiness {:.1e}; honesty label: '{}'",
-            rep.lift, rep.drag, rep.panel_cl, rep.steadiness, rep.honesty
+            "LBM lift {:.3e}, drag {:.3e}, cl {:.4}, cd {:.4} vs panel cl {:.4}: sign agreement {sign_ok}; coefficient ratio {coefficient_ratio:.3}; steadiness {:.1e}; honesty label: '{}'",
+            rep.lift, rep.drag, rep.cl, rep.cd, rep.panel_cl, rep.steadiness, rep.honesty
         ),
     );
+}
+
+/// A symmetric section has zero lift at zero incidence, opposite lift at
+/// opposite incidence, and equal positive drag on the reflected flows.
+#[test]
+fn orn_003b_refine_lift_symmetry() {
+    let mut c = OrnithCandidate::from_genes(&[0.5; GENE_DIM]);
+    c.alpha = 0.0;
+    let zero = refine(&c);
+    assert!(zero.cl.abs() < 1e-10);
+    assert!(zero.cd > 0.0);
+    c.alpha = 0.08;
+    let positive = refine(&c);
+    c.alpha = -0.08;
+    let negative = refine(&c);
+    assert!(positive.cl > 0.0 && negative.cl < 0.0);
+    assert!((positive.cl + negative.cl).abs() < 1e-10);
+    assert!((positive.cd - negative.cd).abs() < 1e-10);
 }
 
 /// orn-004: CERTIFY — the SOS/Lyapunov certificate verifies on the

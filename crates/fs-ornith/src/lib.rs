@@ -8,8 +8,8 @@
 //! documented drag proxy + fs-vpm flapping wake metric, generations
 //! E-RACED through fs-race so dominated candidates die early with the
 //! payoff MEASURED), REFINE (fs-lbm channel flow around the rasterized
-//! section; forces by CONTROL-VOLUME momentum balance over the public
-//! moments — panel-vs-LBM agreement gated within model-form evidence),
+//! section; forces by native wall momentum exchange averaged over the settled
+//! tail — panel-vs-LBM agreement gated within model-form evidence),
 //! TRIM & CERTIFY (2-state pitch model per candidate; fs-sos Lyapunov
 //! certificate → a CERTIFIED region-of-attraction proxy volume;
 //! conformal e-band around the surrogate screen), and the PARETO

@@ -5,7 +5,7 @@ edition.workspace = true
 license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Flagship 1 (plan sec-15.1): the ornithoid multi-inlet aircraft at smoke tier — BEM/VPM screening under e-raced generations, LBM refinement with control-volume forces, SOS-certified stability, and the certified Pareto atlas."
+description = "Flagship 1 (plan sec-15.1): the ornithoid multi-inlet aircraft at smoke tier — BEM/VPM screening under e-raced generations, LBM refinement with wall momentum-exchange forces, SOS-certified stability, and the certified Pareto atlas."
 
 [package.metadata.frankensim]
 layer = "L6"
