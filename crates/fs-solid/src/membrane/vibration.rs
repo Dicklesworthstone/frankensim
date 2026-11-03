@@ -1,12 +1,13 @@
-//! Small vibrations about the SAME source-bound, dead-load equilibrium.
+//! Small vibrations about the SAME source-bound, loaded equilibrium.
 //!
 //! The membrane owner supplies its exact material + geometric tangent and
 //! conserved reference mass; `fs-modal` supplies the generalized eigensolve.
 //! This is a bounded dense lowering, not a new eigensolver or an unstressed
 //! plate approximation. All free coordinates are retained. A zero/negative or
 //! unresolved eigenvalue refuses rather than being clipped into an audible mode.
-//! Pressure/volume ports below are linearized about the accepted geometry;
-//! they do not add follower-pressure prestress or a radiation/damping model.
+//! An explicitly held background pressure includes its equilibrium prestress
+//! and follower-load tangent. Pressure/volume ports for additional perturbations
+//! are linearized about that geometry; no radiation/damping model is inferred.
 
 use super::{MembraneError, MembranePatch, MembraneSolution, MembraneSolveSettings,
     finite_vectors, poll};
@@ -71,6 +72,22 @@ impl MembranePatch {
     pub fn solve_vibration(
         &self, dead_load_n: &[[f64;3]], prescribed: &[(usize,f64)],
         initial_displacement_m: &[[f64;3]], solve: MembraneSolveSettings,
+        settings: VibrationSettings, cancelled: impl FnMut() -> bool,
+    ) -> Result<MembraneVibration<'_>, VibrationError> {
+        self.solve_vibration_with_pressure(dead_load_n,0.0,prescribed,initial_displacement_m,
+            solve,settings,cancelled)
+    }
+
+    /// Pressure-loaded equilibrium and small vibrations of that SAME state.
+    /// The pencil is `K_material + K_geometric - dF_pressure/du`, with the
+    /// same fixed perimeter and held signed pressure used by the nonlinear
+    /// solve. The perturbation pressure port uses the same current-area load
+    /// owner. A finite gas reservoir would add its own stiffness and is not
+    /// implied by this held-pressure boundary condition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_vibration_with_pressure(
+        &self, dead_load_n: &[[f64;3]], pressure_pa: f64, prescribed: &[(usize,f64)],
+        initial_displacement_m: &[[f64;3]], solve: MembraneSolveSettings,
         settings: VibrationSettings, mut cancelled: impl FnMut() -> bool,
     ) -> Result<MembraneVibration<'_>, VibrationError> {
         poll(&mut cancelled)?;
@@ -93,7 +110,8 @@ impl MembranePatch {
         if n==0 || n>settings.max_free_dofs || n>MAX_DENSE_FREE_DOFS {
             return Err(MembraneError::Budget("positive bounded free-coordinate count for dense vibration").into());
         }
-        let equilibrium=self.solve(dead_load_n,prescribed,initial_displacement_m,solve,&mut cancelled)?;
+        let equilibrium=self.solve_with_pressure(dead_load_n,pressure_pa,prescribed,
+            initial_displacement_m,solve,&mut cancelled)?;
         // A converged kink or source-domain endpoint need not admit a unique
         // two-sided vibration tangent. Keep the original material refusal.
         self.admit_linearization(&equilibrium.displacement_m,&mut cancelled)?;
@@ -104,7 +122,14 @@ impl MembranePatch {
             poll(&mut cancelled)?;
             m[col*n+col]=self.nodal_mass_kg()[dof/3];
             direction[dof/3][dof%3]=1.0;
-            let action=self.tangent_apply(&equilibrium.displacement_m,&direction,&mut cancelled)?;
+            let mut action=self.tangent_apply(&equilibrium.displacement_m,&direction,&mut cancelled)?;
+            if pressure_pa != 0.0 {
+                let pressure=self.pressure_tangent_apply(&equilibrium.displacement_m,&direction,
+                    pressure_pa,&mut cancelled)?;
+                for (force,load) in action.iter_mut().zip(pressure) {
+                    for axis in 0..3 {force[axis]-=load[axis];}
+                }
+            }
             direction[dof/3][dof%3]=0.0;
             for (row,&r) in free_dofs.iter().enumerate() { k[row*n+col]=action[r/3][r%3]; }
         }
@@ -132,24 +157,7 @@ impl MembranePatch {
                 return Err(VibrationError::UnresolvedMode {index,lambda:mode.lambda,residual:mode.residual});
             }
         }
-        // Integral N_a n dA = oriented area vector / 3, on the CURRENT
-        // equilibrium triangle. Relative edges avoid global-translation loss.
-        let mut pressure_load_per_pa=vec![[0.0;3];self.mesh().nodes.len()];
-        for triangle in &self.mesh().elems {
-            poll(&mut cancelled)?;
-            let edge=|node:usize| -> [f64;3] {
-                std::array::from_fn(|axis| {
-                    let reference=if axis<2 {self.mesh().nodes[node][axis]-self.mesh().nodes[triangle[0]][axis]} else {0.0};
-                    reference+(equilibrium.displacement_m[node][axis]-equilibrium.displacement_m[triangle[0]][axis])
-                })
-            };
-            let a=edge(triangle[1]);let b=edge(triangle[2]);
-            let cross=[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
-            for &node in triangle { for axis in 0..3 {pressure_load_per_pa[node][axis]+=cross[axis]/6.0;} }
-        }
-        if !finite_vectors(&pressure_load_per_pa,self.mesh().nodes.len()) {
-            return Err(MembraneError::Invalid("unrepresentable equilibrium pressure port").into());
-        }
+        let pressure_load_per_pa=self.pressure_load_n(&equilibrium.displacement_m,1.0,&mut cancelled)?;
         let mut result=MembraneVibration {patch:self,equilibrium,free_dofs,modes,pressure_load_per_pa,volume_coupling:vec![]};
         result.volume_coupling=result.project_nodal_force(&result.pressure_load_per_pa)?;
         poll(&mut cancelled)?;

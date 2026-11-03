@@ -178,3 +178,6 @@ fn topology_domain_cancellation_and_work_refusals_publish_no_solution() {
 
 #[path="membrane/vibration.rs"]
 mod vibration;
+
+#[path="membrane/pressure.rs"]
+mod pressure;

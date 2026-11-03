@@ -1,5 +1,33 @@
 # fs-solid CONTRACT
 
+## Current-area pressure on finite-deformation membranes
+
+`MembranePatch::solve_with_pressure` uses the original membrane material,
+kinematics and Newton--Krylov owner with a uniform held pressure jump. Pressure
+acts on current oriented triangle areas, including the exact matrix-free
+follower-load tangent and loads at prescribed nodes. Positive pressure acts
+along the reference-oriented normal (initially +z); it is a signed pressure
+difference, not absolute thermodynamic pressure. Nonzero-pressure equilibrium
+requires a consistently oriented surface and a fully prescribed perimeter.
+
+`pressure_work_j` integrates current-area virtual work exactly along a straight
+nodal-displacement segment. At fixed perimeter this is pressure times swept
+volume. The equilibrium potential uses zero free displacement at the same
+prescribed perimeter as its pressure-work datum. Moving-edge segment work is
+path-dependent and is not advertised as a global potential.
+
+`solve_vibration_with_pressure` solves that same equilibrium and uses
+`K_material + K_geometric - dF_pressure/du` with the conserved reference mass.
+Its additional pressure/volume port reuses the exact current-area load owner.
+This holds the background pressure fixed; it does not infer gas compressibility,
+reservoir volume, flow, radiation or a finite-amplitude dynamic trajectory.
+The existing material-domain, cancellation, bounded solve and full-spectrum
+admission rules still apply. G1/G3 tests in `tests/membrane/pressure.rs` check
+analytic pyramid deflection/reactions/work, deformed-area frame covariance,
+every pressure-force derivative and the loaded modal pencil with two interior
+nodes (nonzero follower stiffness). No experimental membrane validation or
+global injectivity/continuum stability certificate is claimed.
+
 ## Variable-amplitude critical-plane Miner damage on native J2 histories
 
 The quasistatic and backward-Euler J2 fatigue owners now admit
