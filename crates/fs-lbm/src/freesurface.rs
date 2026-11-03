@@ -21,7 +21,7 @@ pub use pressure::{FreeSurfacePressureError2, GasPressureLink2};
 pub(crate) mod wetting;
 pub use wetting::{ContactAngleError2, PlanarWall2};
 
-use crate::core2::{Cell, Grid};
+use crate::core2::{Cell, ForceRebindError2, Grid};
 use crate::{CS2, E, OPP, Q, equilibrium};
 use fs_matdb::{InterfaceSystemCard, MatDbError, MaterialAnswer, QueryPoint, SelectionPolicy};
 use fs_qty::{Dims, QtyAny};
@@ -426,6 +426,32 @@ impl FreeSurface {
                 }
             }
         }
+    }
+
+    /// Replace held acceleration in lattice units without advancing the liquid.
+    ///
+    /// Uses the original Grid force-frame transform and this surface's reusable
+    /// collision scratch. Existing external forces remain held. Physical fluid
+    /// momentum/stress and density are preserved to population roundoff; tracked
+    /// interface mass, topology, capillarity and conversion history do not change.
+    /// Invalid inputs leave accepted state unchanged, though scratch may change.
+    pub fn rebind_gravity(&mut self, gravity: [f64; 2]) -> Result<(), ForceRebindError2> {
+        self.grid.rebind_gravity(gravity, &mut self.scratch)
+    }
+
+    /// Replace held lattice acceleration and external volume-force density.
+    ///
+    /// Supply one external vector per native cell, including gas and walls.
+    /// The total force remains `rho*g + external`. This applies no impulse or
+    /// work and performs no interface conversion; the next original step uses
+    /// the new held load. Admission and publication are atomic as in
+    /// [`Grid::rebind_forcing`], with no additional persistent force storage.
+    pub fn rebind_forcing(
+        &mut self,
+        gravity: [f64; 2],
+        external: &[[f64; 2]],
+    ) -> Result<(), ForceRebindError2> {
+        self.grid.rebind_forcing(gravity, external, &mut self.scratch)
     }
 
     /// Fill fraction of a cell (fluid 1, gas 0, interface m/ρ).

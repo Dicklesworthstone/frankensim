@@ -7107,6 +7107,26 @@ whole-grid impulse closure, and sourced SI gravity independent of liquid density
 This does not change the existing force, pressure, boundary or free-surface
 transport laws, or establish temporal order for arbitrary force histories.
 
+### Material-owned dense force histories
+
+`FreeSurface::{rebind_gravity,rebind_forcing}` reuse the native collision scratch
+to change held loads without stepping or altering tracked mass, topology or
+conversion history. `MaterialFreeSurface2` exposes the same operations with SI
+inputs: gravity in m/s² and a complete row-major external field in N/m³. The
+original source density and dx/dt convert `g_lat = g_SI*dt²/dx` and
+`F_lat = (F_SI/rho0)*dt²/dx`; collision uses `rho_lat*g_lat + F_lat`. Gravity-only
+replacement retains the external load. Physical density, momentum, stress and
+fill survive to native population roundoff, with the material source unchanged.
+
+All conversion precedes atomic native publication. Nonfinite inputs,
+disappearing nonzero loads and malformed fields refuse without changing accepted
+state. One temporary converted field is used, with no persistent duplicate.
+Three authored integration regressions cover SI force histories under density
+and scaling substitution, pressure-evolved nonunit density and stress, retained
+external loads and atomic refusal. These integration tests remain unexecuted
+under the dependency-build resource limit; focused native force-frame tests are
+separate evidence and do not constitute a full material/free-surface gate.
+
 ### Finite-slope thermocapillary height graphs
 
 `free_surface3_from_cells_with_height_graph_thermocapillarity` binds the original

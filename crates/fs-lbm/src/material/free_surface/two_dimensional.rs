@@ -4,7 +4,7 @@
 //! curvature, finite-depth wall friction or invented 3-D droplet is included.
 
 use super::{MaterialFreeSurfaceScaling, MaterialLbmError, PlanarWall3, finite, positive};
-use crate::core2::{Cell, Grid};
+use crate::core2::{Cell, ForceRebindError2, Grid};
 use crate::freesurface::{ContactModel, FreeSurface, FreeSurfacePressureError2, GasPressureLink2, PlanarWall2};
 use fs_exec::CancelGate;
 
@@ -159,6 +159,79 @@ impl<'a> MaterialFreeSurface2<'a> {
     #[must_use]
     pub const fn scaling(&self) -> &MaterialFreeSurfaceScaling<'a> {
         &self.scaling
+    }
+
+    /// Replace held gravity [m/s²] while retaining the external force field.
+    ///
+    /// The original liquid density, source identity and dx/dt scaling remain
+    /// fixed. This advances no time and adds no instantaneous momentum, work
+    /// or heat; the next native step receives the new acceleration. Physical
+    /// velocity, stress and density survive to population roundoff, while the
+    /// tracked interface mass, topology and conversion history remain unchanged.
+    pub fn rebind_gravity(&mut self, gravity_m_s2: [f64; 2]) -> Result<(), MaterialLbmError> {
+        let gravity = self.gravity_to_lattice(gravity_m_s2)?;
+        self.lattice.rebind_gravity(gravity)?;
+        Ok(())
+    }
+
+    /// Replace held gravity [m/s²] and external body-force density [N/m³].
+    ///
+    /// The row-major external field includes every cell, including gas/walls
+    /// that may later become wet. It excludes gravity: the native total is
+    /// `rho_lattice*g_lattice + external_lattice`. External force conversion
+    /// uses the original MATERIAL reference density, `F_lattice = F_SI/rho0
+    /// * dt²/dx`; the gravity contribution instead uses each current native
+    /// density. The 2-D model retains volume-force units, with integrated
+    /// momentum understood per unit out-of-plane depth.
+    ///
+    /// All SI values are converted before native atomic rebinding. Only one
+    /// temporary converted field is allocated; no second persistent force or
+    /// population owner is introduced. A rejected conversion or native state
+    /// leaves the original liquid and held forces unchanged. Loads remain held
+    /// until explicitly replaced; this operation does not step the solver.
+    pub fn rebind_forcing(
+        &mut self,
+        gravity_m_s2: [f64; 2],
+        external_n_m3: &[[f64; 2]],
+    ) -> Result<(), MaterialLbmError> {
+        if external_n_m3.len() != self.lattice.grid.f.len() {
+            return Err(ForceRebindError2::Invalid(
+                "external SI force field must cover every native cell",
+            ).into());
+        }
+        let gravity = self.gravity_to_lattice(gravity_m_s2)?;
+        let density = self.scaling.material.density_kg_m3();
+        let mut external = Vec::new();
+        external.try_reserve_exact(external_n_m3.len()).map_err(|_| {
+            MaterialLbmError::Invalid("SI force conversion allocation refused")
+        })?;
+        for physical in external_n_m3 {
+            let mut converted = [0.0; 2];
+            for d in 0..2 {
+                converted[d] = self.scaling.gravity_lattice(physical[d] / density)?;
+                if physical[d] != 0.0 && converted[d] == 0.0 {
+                    return Err(MaterialLbmError::Invalid(
+                        "nonzero SI force density disappeared in lattice conversion",
+                    ));
+                }
+            }
+            external.push(converted);
+        }
+        self.lattice.rebind_forcing(gravity, &external)?;
+        Ok(())
+    }
+
+    fn gravity_to_lattice(&self, gravity_m_s2: [f64; 2]) -> Result<[f64; 2], MaterialLbmError> {
+        let mut gravity = [0.0; 2];
+        for d in 0..2 {
+            gravity[d] = self.scaling.gravity_lattice(gravity_m_s2[d])?;
+            if gravity_m_s2[d] != 0.0 && gravity[d] == 0.0 {
+                return Err(MaterialLbmError::Invalid(
+                    "nonzero SI gravity disappeared in lattice conversion",
+                ));
+            }
+        }
+        Ok(gravity)
     }
 
     /// One native dense step at the admitted physical timestep. Preserves the

@@ -29,6 +29,8 @@ pub enum MaterialLbmError {
     Transport(MaterialError),
     /// An external thermal-flow force field was refused before stepping.
     Forcing(crate::thermal::ThermalForcingError),
+    /// The dense owner refused a physical-state-preserving force change.
+    DenseForcing(crate::core2::ForceRebindError2),
     /// The existing sparse free-surface owner refused construction or evolution.
     FreeSurface(crate::d3q19::freesurface3::FreeSurfaceError3),
     /// The existing dense free surface refused pressure loading or cancellation.
@@ -41,6 +43,7 @@ impl core::fmt::Display for MaterialLbmError {
         match self {
             Self::Transport(error) => write!(f, "material LBM: {error}"),
             Self::Forcing(error) => write!(f, "material LBM: {error}"),
+            Self::DenseForcing(error) => write!(f, "material LBM: {error}"),
             Self::FreeSurface(error) => write!(f, "material LBM: {error}"),
             Self::FreeSurfacePressure2(error) => write!(f, "material LBM: {error}"),
             Self::Invalid(message) => write!(f, "material LBM: {message}"),
@@ -50,6 +53,9 @@ impl core::fmt::Display for MaterialLbmError {
 impl std::error::Error for MaterialLbmError {}
 impl From<crate::thermal::ThermalForcingError> for MaterialLbmError {
     fn from(error: crate::thermal::ThermalForcingError) -> Self { Self::Forcing(error) }
+}
+impl From<crate::core2::ForceRebindError2> for MaterialLbmError {
+    fn from(error: crate::core2::ForceRebindError2) -> Self { Self::DenseForcing(error) }
 }
 impl From<MaterialError> for MaterialLbmError {
     fn from(error: MaterialError) -> Self { Self::Transport(error) }

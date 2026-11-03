@@ -26,6 +26,8 @@ use fs_qty::Dims;
 mod gas_pressure;
 #[path = "material_free_surface/gas_pressure2.rs"]
 mod gas_pressure2;
+#[path = "material_free_surface/forcing2.rs"]
+mod forcing2;
 
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!((actual - expected).abs() <= tolerance * expected.abs().max(1e-30),

@@ -271,8 +271,10 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         finite(lattice_velocity * self.velocity_scale, "free-surface velocity is unrepresentable")
     }
 
-    /// Constant rho0*g forcing in native reference-density-one units.
-    /// The actual solver's velocity includes the Guo half-force correction.
+    /// Signed acceleration [m/s²] to lattice acceleration, `g*dt²/dx`.
+    /// The sparse owner applies a reference-density force; the dense owner
+    /// multiplies this acceleration by each cell's current lattice density.
+    /// Both observe velocity with the Guo half-force correction.
     pub fn gravity_lattice(&self, gravity_m_s2: f64) -> Result<f64, MaterialLbmError> {
         finite(gravity_m_s2, "free-surface gravity must be finite")?;
         finite((gravity_m_s2 * self.timestep_s) / self.velocity_scale,
