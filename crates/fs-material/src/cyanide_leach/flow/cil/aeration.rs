@@ -153,10 +153,14 @@ impl AeratedCarbonInLeachCstr {
         }
         let start = self.cil.tank.elapsed().value();
         let end = add(start, duration.value())?;
-        let saturation = self.transfer.solubility().equilibrium_aqueous_amount(
-            oxygen_partial_pressure,
-            self.cil.tank.layout.charge.amount_at_unit_activity,
-        )?;
+        let saturation = self
+            .transfer
+            .solubility()
+            .equilibrium_aqueous_amount(
+                oxygen_partial_pressure,
+                self.cil.tank.layout.charge.amount_at_unit_activity,
+            )
+            .map_err(CyanidationError::from)?;
         self.transfer
             .validate_extras(&self.cil.tank.layout.conditions, transfer_conditions)
             .map_err(FlowCilError::from)?;
@@ -442,11 +446,16 @@ struct Boundary<'a> {
 }
 impl Boundary<'_> {
     fn admit(&self, state: &FlowCilState) -> CilFlowResult<QueryPoint> {
-        let point = state.solution.conditions.clone().with_quantity(
-            ELAPSED_TIME_AXIS,
-            QuantitySpec::dimensional(Time::DIMS),
-            state.elapsed.value(),
-        )?;
+        let point = state
+            .solution
+            .conditions
+            .clone()
+            .with_quantity(
+                ELAPSED_TIME_AXIS,
+                QuantitySpec::dimensional(Time::DIMS),
+                state.elapsed.value(),
+            )
+            .map_err(CyanidationError::from)?;
         self.transfer
             .rate_at_conditions(
                 &point,
