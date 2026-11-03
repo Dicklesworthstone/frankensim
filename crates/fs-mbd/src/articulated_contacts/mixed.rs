@@ -5,10 +5,13 @@
 //! endpoint audit; they are never represented by a large fictitious mass.
 
 use super::friction::elliptic::{
-    ArticulatedEllipticContact, ArticulatedEllipticContactResult, resolve_elliptic_event,
+    ArticulatedEllipticContact, ArticulatedEllipticContactResult, ArticulatedEllipticSourceError,
+    ArticulatedEllipticSourceResult, ArticulatedImpactGeometry, resolve_elliptic_event,
+    resolve_elliptic_event_with,
 };
 use super::friction::{
-    ArticulatedFrictionalContact, ArticulatedFrictionalContactResult, resolve_frictional_event,
+    ArticulatedFrictionalContact, ArticulatedFrictionalContactResult, ArticulatedImpactKinematics,
+    resolve_frictional_event,
 };
 use super::{
     ArticulatedContactError, ArticulatedContactResult, ArticulatedContactSystem,
@@ -20,6 +23,7 @@ use crate::articulated::{
     apply_free_floating_impulses, apply_prescribed_base_impulses, free_floating_impulse_delta,
     prescribed_base_impulse_delta,
 };
+use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, FrictionalContactResult};
 use fs_contact::multicontact::MultiImpactConfig;
 use fs_ga::{Twist, Vec3, Wrench};
@@ -144,6 +148,37 @@ pub fn resolve_mixed_articulated_elliptic_contacts(
     ArticulatedContactError,
 > {
     resolve_elliptic_event(systems, contacts, config, cancelled)
+}
+
+/// Resolve source-owned directional friction over free and prescribed mechanisms.
+///
+/// Each geometrically active contact samples its borrowed accepted source history
+/// once, in canonical contact-ID order, at the original material-point locations,
+/// contact axes and relative velocity. Inactive rows retain native endpoint
+/// kinematics but neither query nor advance source history. The returned source
+/// candidates retain their original input indices; histories need not be Clone.
+///
+/// The existing source transaction and mixed mechanical owner remain responsible
+/// for admission: source failure, joint-speed refusal, unresolved momentum/work
+/// or cancellation returns neither mechanical nor history candidates. The caller
+/// publishes all accepted owners together; callback-owned external side effects
+/// must be staged by their owner. Native total-boundary-work determinacy is
+/// retained without identifying redundant local loads or individual work shares.
+///
+/// Coefficients are held at their preimpact query. This adds no implicit
+/// velocity-dependent constitutive iteration, contact discovery or thermal solve.
+pub fn resolve_mixed_articulated_elliptic_contacts_with<S, E>(
+    systems: &[MixedArticulatedContactSystem<'_>],
+    contacts: &[ArticulatedImpactGeometry],
+    histories: &[S],
+    config: FrictionalContactConfig,
+    resolve: impl FnMut(&S, &ArticulatedImpactKinematics) -> Result<(EllipticFriction, S), E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    ArticulatedEllipticSourceResult<S, MixedArticulatedImpulseResponse>,
+    ArticulatedEllipticSourceError<E>,
+> {
+    resolve_elliptic_event_with(systems, contacts, histories, config, resolve, cancelled)
 }
 
 // Views share the physical assembly without changing the original public free

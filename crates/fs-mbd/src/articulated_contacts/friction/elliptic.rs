@@ -35,8 +35,8 @@ pub struct ArticulatedSourceCandidate<S> {
 /// All returned source states and mechanical responses belong to one accepted
 /// event. Borrowed inputs are unchanged; the consumer publishes them together.
 #[derive(Debug, Clone)]
-pub struct ArticulatedEllipticSourceResult<S> {
-    pub mechanical: ArticulatedEllipticContactResult,
+pub struct ArticulatedEllipticSourceResult<S, R = FreeFloatingImpulseResponse> {
+    pub mechanical: ArticulatedEllipticContactResult<R>,
     /// Geometrically active contacts only, in canonical contact-ID order.
     pub candidates: Vec<ArticulatedSourceCandidate<S>>,
 }
@@ -129,9 +129,20 @@ pub fn resolve_articulated_elliptic_contacts_with<S, E>(
     contacts: &[ArticulatedImpactGeometry],
     histories: &[S],
     config: FrictionalContactConfig,
+    resolve: impl FnMut(&S, &ArticulatedImpactKinematics) -> Result<(EllipticFriction, S), E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ArticulatedEllipticSourceResult<S>, ArticulatedEllipticSourceError<E>> {
+    resolve_elliptic_event_with(systems, contacts, histories, config, resolve, cancelled)
+}
+
+pub(in crate::articulated_contacts) fn resolve_elliptic_event_with<S, E, T: ContactSystem>(
+    systems: &[T],
+    contacts: &[ArticulatedImpactGeometry],
+    histories: &[S],
+    config: FrictionalContactConfig,
     mut resolve: impl FnMut(&S, &ArticulatedImpactKinematics) -> Result<(EllipticFriction, S), E>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<ArticulatedEllipticSourceResult<S>, ArticulatedEllipticSourceError<E>> {
+) -> Result<ArticulatedEllipticSourceResult<S, T::Response>, ArticulatedEllipticSourceError<E>> {
     if histories.len() != contacts.len() {
         return Err(ArticulatedContactError::Invalid(
             "one accepted source history per original contact required",

@@ -4338,3 +4338,41 @@ relative exhaust moments are analytic assumptions, not a claim of exactness for
 changing thermochemistry, drag, rotation or shifting centre of mass. Independent
 time-quadrature regressions cover noncollinear burn/coast, gravity/mass
 correlation, force cancellation, small depletion and Galilean work transforms.
+
+## Source-owned directional friction on supported mechanisms
+
+`articulated_contacts::mixed::resolve_mixed_articulated_elliptic_contacts_with`
+extends the original source-history transaction to freely moving, grounded and
+externally driven articulated trees. It samples each active original source
+history exactly once, in canonical contact-ID order, using actual native
+material-point locations, normalized contact axes and incoming relative
+velocity. Inactive geometry does not query or advance history. Returned source
+candidates retain their original input indices; accepted histories are borrowed
+and need not implement `Clone`.
+
+The source callback supplies the held preimpact friction ellipse and a private
+history candidate. The existing mixed inverse-mass/contact solve determines all
+finite-body recoil, coupled joint response, native support reactions and signed
+boundary work. The original total-work range witness remains authoritative for
+redundant events; a source callback does not turn representative contact loads
+or individual source-work shares into identified values.
+
+All mechanical and source candidates publish together only after the native
+endpoint momentum, work, speed-limit and constitutive gates pass. A later source
+error, mechanical refusal or cancellation returns neither set of candidates and
+leaves all borrowed accepted owners unchanged. Callback-owned external side
+effects require the caller's own staging. The free-only entry retains its
+original default response type and shares the same transaction implementation.
+
+This is a frozen event with coefficients held at the native incoming query. It
+does not add a nonlinear velocity-dependent source iteration, source texture
+transport, pressure inference, thermal solve or contact-time discovery.
+
+Four focused groups in `tests/articulated_mixed_sources.rs` cover independently
+derived full-tensor hinge recoil and driven work under incoming-speed source
+queries; canonical history mapping with inactive and redundant driven contacts;
+atomic source, speed-limit and late-cancellation refusal; and exact free-entry
+parity. All four groups and the five existing mixed-normal groups pass in the
+bounded native numerical target. Unrelated tangential, trajectory, bilateral
+and executor paths are excluded; blocked dense GEMM is guarded by an unexercised
+fail-fast fixture. This does not substitute for the full Cargo or DSR gate.
