@@ -4490,6 +4490,43 @@ moving support catches, mobile roots, branched response, full off-centre inertia
 world-frame and inertial-boost covariance, loaded gravity continuation and
 atomic refusal.
 
+## Simultaneous material detachment from one rigid snapshot
+
+`assembly::release::release_point_masses` releases several caller-identified
+point parcels already included in the same original rigid mass distribution.
+All positions and inherited velocities refer to the original snapshot. The
+retained COM and full central inertia account for the complete removed mass
+and first/second moments, with one original native inertia admission. The
+original point-release descriptors and canonical free-parcel type are reused.
+Zero-mass entries require zero impulse and produce no parcel; positive outputs
+retain their input order. Empty or all-zero input is a validated identity.
+
+Each parcel impulse has an equal/opposite action on the retained body at its
+original physical point. Shared recoil is coupled: the retained translation
+uses the SUM of all impulses and its rotation uses the SUM of their moments
+about the retained COM. Separation work includes the squared sums and their
+cross terms, plus each parcel's own impulse energy. Independent single-event
+work cannot be added to represent this simultaneous event. Initial-spin terms
+cancel because both sides share each original material-point velocity.
+
+Compensated fixed-order reductions take O(inputs) work, one retained-inertia
+admission and output-sized parcel storage, with no dense parcel-by-parcel
+system. The part budget includes the retained body and EVERY input slot,
+including zero masses, before any scan or allocation; nonzero impulses consume
+impulse slots. Canonical parcel momenta use FMA, and the retained momentum is
+recovered from the actual original momentum minus all actual parcel momenta.
+Actual returned positions/momenta, the first-moment defect under translation,
+and common-frame/polarized energy enter the existing balance gate. Cancellation
+is polled on each bounded pass and before atomic publication.
+
+Seven G0/G1/G3/G4 regression groups cover analytic opposing/co-directed jets,
+asymmetric COM/recoil, inherited rigid motion, singleton interoperability,
+full-tensor frame covariance and recapture, parcel subdivision/permutation,
+large common boosts, lost geometry, budgets and atomic refusal. These are
+finite-precision event checks under caller tolerances, without a time-step,
+fracture law, geometry-inventory proof, finite parcel extent, heat destination
+or continuous thermodynamic stream model.
+
 ## Simultaneous point-parcel capture
 
 `assembly::capture::capture_point_masses` attaches many zero-intrinsic-inertia
