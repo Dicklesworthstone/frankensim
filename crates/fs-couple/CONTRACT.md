@@ -3226,6 +3226,27 @@ outside this backend.
 
 ### Shared cavity exterior loading
 
+`SharedCavity::apply_modal_impulse` admits simultaneous surface momentum and
+exterior neck pressure impulses on the continuing original network.
+`apply_pressure_impulses` maps one uniform exterior pressure integral per
+original surface through its retained signed volume shapes. Positive pressure
+acts inward; the physical neck momentum change is `-area * integral(p dt)`.
+Source work is the signed pressure integral paired with mean outward volume
+flow. Projection overflow/underflow and unrepresentable resulting flow refuse
+before the native momentum, energy and endpoint-force checks publish a jump.
+Staging reuses retained scratch and allocates no new trajectory.
+
+Only physical surface and neck velocities jump. Position, cavity volume and
+compression pressure, viscous auxiliary velocities, thermal/molecular memory,
+proper radiation state, clocks and preceding interval port records remain
+unchanged. The native impulse receipt carries the event work separately;
+there is no invented heat, force duration or repeated internal pressure drive.
+This is the admitted finite-inertia small-signal image, not a shock-front model
+or an impulse reset for attached distributed ducts/algebraic constraints.
+`tests/shared_cavity_impulse.rs` checks physical mass/work and independent
+rank-one cavity motion at two rates, continuing viscous/thermal/radiation
+history, signed multimode pressure projection and atomic refusal/retry.
+
 `cavity_modal::shared::SharedCavity::with_exterior_radiation` connects the
 existing passive multiport model to the original surface/cavity/neck exact
 propagator. A selected neck column is in physical pressure/volume-flow units;

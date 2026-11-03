@@ -17,6 +17,7 @@ pub mod dg;
 pub mod harmonic;
 pub mod thermal;
 pub mod molecular;
+mod impulse;
 pub use dg::{SharedCavityDg, SharedCavityDgError, SharedCavityDgFrame};
 pub use thermal::{CylindricalCavityThermalOptions, CylindricalThermalCompression, ThermalCompressionArm};
 pub use thermal::{CylindricalMaterialWallCompression, CylindricalMaterialWallOptions};
@@ -71,6 +72,9 @@ pub struct SharedCavity {
     source: HelmholtzModalCavity,
     system: CoupledModalSystem,
     column: Vec<f64>,
+    // Keep the original pressure/volume-flow map; do not recover it by
+    // undoing the compression column's neck-area normalization.
+    surface_volume_shapes: Vec<f64>,
     surface_modes: usize,
     neck_component: usize,
     viscous_neck: Option<fs_phs::ZkDiffusive>,
@@ -188,6 +192,7 @@ impl SharedCavity {
         let mut charts = Vec::with_capacity(count);
         let mut models=Vec::with_capacity(neck_index+1);
         let mut column=vec![0.0;count];
+        let mut surface_volume_shapes=Vec::with_capacity(surface_modes);
         let mut offset=0;
         let mut loss=None;
         for (index,surface) in surfaces.into_iter().enumerate() {
@@ -196,6 +201,7 @@ impl SharedCavity {
                 return Err(network_invalid("surface volume projection must match its original modes"));
             }
             let pair=source.connections(index,neck_index,&surface.outward_volume_shapes)?;
+            surface_volume_shapes.extend_from_slice(&surface.outward_volume_shapes);
             charts.extend(surface.outward_volume_shapes.iter().map(|&projection|
                 fs_ports::PortCoordinateChart::MassNormalized {
                     reference_mass_kg: 1.0, volume_projection_m2_per_sqrt_kg: Some(projection),
@@ -307,6 +313,7 @@ impl SharedCavity {
             source,
             system,
             column,
+            surface_volume_shapes,
             surface_modes,
             neck_component: neck_index,
             viscous_neck,
