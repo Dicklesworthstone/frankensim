@@ -330,6 +330,12 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
         self.model
     }
 
+    /// The admitted scaling and damping point used by every original operator.
+    #[must_use]
+    pub fn parameters(&self) -> PlateDynamicsParameters {
+        self.parameters
+    }
+
     /// Jacobi inverse of the scaled mass diagonal, for both initialization
     /// primal and transposed mass solves. It is exact for lumped mass only;
     /// consistent mass retains its full sparse action in the iterative solve.

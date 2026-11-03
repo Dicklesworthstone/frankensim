@@ -119,6 +119,8 @@ pub mod phs_orbit;
 pub mod magnetostrictive;
 /// Full source-derived viscous tensors on the shared DKT and modal runtime.
 pub mod plate_viscosity;
+/// Reciprocal point impacts between a spatial plate and a finite rigid body.
+pub mod plate_impact;
 /// Accepted-step port schemas and physical accounting adapters.
 pub mod port_adoption;
 pub mod reed_bore;

@@ -1345,6 +1345,7 @@ dependencies = [
  "fs-orbit",
  "fs-phs",
  "fs-plate",
+ "fs-plate-transient",
  "fs-ports",
  "fs-psycho",
  "fs-qty",

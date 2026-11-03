@@ -1,5 +1,60 @@
 # CONTRACT: fs-couple
 
+## Spatial plate and finite rigid-body normal impacts
+
+`plate_impact::PlateRigidImpact` localizes one frictionless normal event between
+an original `fs-plate-transient::PlateDynamics` point and an original
+`fs-mbd::RigidBodyState`. The plate point's native work-conjugate transpose,
+complete scaled sparse mass and shared bounded mass solver determine its
+mobility; the body contributes its actual orientation, off-centre application
+arm and full tensor inertia. The original `fs-contact::impact` restitution law
+selects a single reciprocal impulse. No mass lumping or modal truncation occurs.
+
+Preparation borrows the original mesh and full reference mass before support
+elimination, checks every retained nonzero against the trajectory's reduced
+mass, and solves once for point mobility. Retaining constrained rows is required
+to recover actual dynamic support impulses: `M_full delta-v - J_full` includes
+both constrained-row cross inertia and the applied point load. The represented
+resultants are transverse Pz and bending Lx/Ly, including their external support
+transfers; stationary supports do no work. A reduced mass alone cannot establish
+those complete support reactions. In-plane momentum and drilling rotation
+require their corresponding shell/solid owner and are not inferred here.
+
+The event stages both original states, gates represented momentum changes,
+actual restitution speed, linear/angular balance including supports, and combined
+kinetic change plus the original nonnegative restitution loss. Polarized work
+from both bodies is accumulated together in double-double arithmetic before
+rounding, retaining loss against large common motion. Relative normal velocity
+likewise combines original COM, rotational and plate motion before rounding;
+a small approaching rotation cannot disappear into common translation and be
+misclassified as a no-op. Native structural impulse
+admission independently checks generalized transfer/work and recomputes the
+post-event acceleration with the existing finite load, stiffness and damping.
+No duration, heat deposition, pose repair or elastic-storage jump is invented.
+
+Only plate velocity/acceleration and rigid momenta publish, after the final
+cancellation poll. Physical time, plate displacement, all accepted telemetry and
+rigid pose remain unchanged; both native smooth integrators continue from those
+states. Telemetry is retained in place rather than copied. Point-location,
+full-mass-nonzero and live-workspace caps bound preparation/event work; inactive
+or separating contacts return without either mass solve or a state update.
+
+The normal is the fixed +z direction of the original small-deflection plate.
+Caller-supplied body/plate points must coincide in xy within an explicit
+tolerance; their signed z separation enters the existing gap law unchanged.
+This is one already-localized normal event, with stationary supports. Collision
+search, moving supports, finite plate-normal rotation, simultaneous contacts,
+friction and event adjoints remain outside this interface. Splitting the smooth
+trajectory at the event is the caller's responsibility.
+
+`tests/plate_impact.rs` independently compares consistent P1 plate inertia and
+off-centre full-tensor rigid response with dense mass/tensor inverses at plastic,
+partially elastic and elastic limits. It checks original damped and rigid
+continuation, constrained-row support inertia and the fixed-point limit,
+compensated physical loss, inactive/separating no-ops, mass/budget refusal and
+final-poll atomic cancellation. The bridge advances the flexible-body coupling
+gap in `frankensim-b8bxd.9.3`; it does not close its broader program.
+
 ## Rigid impacts against solids with material memory
 
 `inelastic_impact::{plastic_rigid_impact_candidate,visco_rigid_impact_candidate}`

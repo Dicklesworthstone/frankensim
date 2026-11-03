@@ -56,6 +56,7 @@ fs-nlmodal = { path = "../fs-nlmodal" }
 fs-orbit = { path = "../fs-orbit" }
 fs-phs = { path = "../fs-phs" }
 fs-plate = { path = "../fs-plate" }
+fs-plate-transient = { path = "../fs-plate-transient" }
 fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
 fs-query = { path = "../fs-query" }
