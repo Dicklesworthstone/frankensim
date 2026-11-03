@@ -10,14 +10,18 @@
 //! entropy sums. It retains both source properties and does not manufacture
 //! per-species formation-Gibbs claims or replace directly tabulated values.
 //!
-//! The caller supplies dimensionless activities relative to each retained
-//! standard state, including solvent and mineral activities. No concentration,
-//! pH, activity coefficient, equilibrium composition, rate or conversion is
-//! inferred. A gas activity is a fugacity ratio; identifying it with p/p° needs
-//! an additional ideal-gas assumption. This module does not impose that EOS.
+//! The direct diagnostic takes caller-supplied dimensionless activities
+//! relative to each retained standard state, including solvent and minerals.
+//! The separate [`equilibrium`] solver advances finite inventories along ONE
+//! reaction under explicit ideal-dilute and pure-condensed activity assumptions.
+//! Neither route infers a pH, a calibrated activity model, rates or complete
+//! aqueous speciation. A gas activity is a fugacity ratio; identifying it with
+//! p/p° needs an additional ideal-gas assumption that these routes do not impose.
 
 /// Standard reaction properties derived from matched enthalpy and entropy sources.
 pub mod caloric;
+/// Finite-inventory equilibrium of one reaction under explicit ideal activities.
+pub mod equilibrium;
 
 use std::collections::BTreeMap;
 

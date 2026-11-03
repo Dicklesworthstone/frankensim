@@ -149,6 +149,52 @@ log-only range limits, retained receipts and missing/mismatched reference
 conditions. The formulas follow IUPAC S05915 (standard equilibrium constant)
 and A00115 (relative activity); numerical checks do not calibrate a plant.
 
+### Finite-inventory equilibrium along one reaction
+
+`ConservedReaction::equilibrate_ideal` solves the signed reaction extent from
+complete finite stocks, direct formation-Gibbs sources and explicit activity
+models. Each aqueous participant requires a positive caller-declared amount
+at unit activity; its ideal law is `a = n / n_ref` on a fixed solvent basis.
+Each pure solid/liquid requires an explicit `PureCondensed` law with unit
+activity. The selected original source claim must own the matching phase;
+caller labels cannot assign an aqueous ion to the condensed branch. Gases
+and solid solutions require other laws. Standard-state source data do not
+authenticate the chosen activity approximations or their mixture consistency.
+
+The exact conserved equation supplies `n_i = n_i0 + nu_i * xi`. Both directions
+are bounded by available stocks, using inward-rounded ratios and FMA residuals.
+The solver does not clip inventories to zero, and a representable inventory
+limit can retain a tiny positive remainder. Interior `ln(Q/K)` is monotone
+because its derivative is the sum of `nu_i^2 / n_i` over ideal-aqueous species.
+Bounded deterministic bisection requires BOTH an acceptable finite logarithmic
+residual and an extent bracket within the caller's tolerances. Separate logs
+avoid forming overflowing or underflowing activity ratios. A limiting aqueous
+stock uses its analytic logarithmic endpoint; an unresolvable interior root
+refuses rather than being called complete conversion. Budget exhaustion,
+unrepresentable amounts and nonzero changes below stock resolution also refuse.
+
+Pure-phase constraints can terminate at either inventory boundary with the
+appropriate one-sided Gibbs inequality. A missing mineral may precipitate
+when this chosen reaction favors it, or remain absent when its formation is
+unfavorable. A zero-width feasible interval returns `InventoryBlocked` without
+evaluating undefined activities. All-condensed reactions with exactly zero
+standard Gibbs change return `NonUnique`, retaining the full feasible interval.
+The result retains canonical initial/final inventories, signed extent, numerical
+bracket, status, work count, declared activity laws and every standard source
+receipt. The bracket is not an interval-arithmetic or experimental uncertainty
+certificate. The finite result is equilibrium only along this reaction and
+under these assumptions; it does not solve competing reactions, charge-balance
+speciation, concentrated electrolytes, solvent depletion effects, stable-phase
+selection, nucleation barriers or kinetic recovery.
+
+Analytical tests cover ideal isomerization, equation reversal/scaling, mineral
+saturation, finite dissolution, precipitation from an initially absent phase,
+all-condensed degeneracy, zero stocks, source/model mismatch and bounded-work
+refusal. Actual USGS goethite/iron/water/proton packs exercise source-backed
+precipitation, dissolution and retained source receipts. The
+`mineral_equilibrium` example requires explicit inventories and an aqueous
+amount scale; it prints the assumptions and constrained result.
+
 ### Source-bound reversible electrochemical potential
 
 `stoichiometry::electrolysis::ElectrolysisReaction::standard_potential` evaluates

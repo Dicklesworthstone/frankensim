@@ -8,6 +8,8 @@ use fs_matdb::{
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
+mod equilibrium;
+
 const REFERENCE: &str = "source-elemental-reference-authored-gibbs-test";
 const PROPERTY: &str = "standard-molar-formation-gibbs-energy";
 

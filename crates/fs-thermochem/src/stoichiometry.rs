@@ -1,8 +1,10 @@
 //! Phase-independent reaction amounts and source-bound standard reaction heat.
 //!
 //! Exact element/charge balance stays in `fs_qty::chemistry`. These closures
-//! do not select a reaction pathway, predict conversion, integrate kinetics,
-//! or supply aqueous activities. In particular, a mineral is never admitted
+//! do not select a reaction pathway or integrate kinetics. The explicit ideal
+//! equilibrium submodule solves one finite reaction extent under caller-declared
+//! activity assumptions; ordinary amount/heat balances do not infer conversion.
+//! In particular, a mineral is never admitted
 //! through the ideal-gas species/EOS lane to perform this bookkeeping.
 
 pub mod minerals;
