@@ -101,3 +101,50 @@ Measured chemical support and separate kinetic/transport models remain needed
 for those process claims. Six focused tests check independent equilibrium
 answers and a bisection oracle, source admission, scaling, loaded-carbon release,
 zero inventories and retained small vacant-site amounts.
+
+## Finite-time competition between sorbent populations
+
+`fs_material::aqueous_adsorption::kinetics` adds an independent source-declared
+linear-driving-force rate to the original Langmuir equilibrium owner:
+`dq_i/dt = k_i * (q_eq,i(c) - q_i)`. Up to 128 explicitly identified sorbent
+populations share the same finite solution inventory of one analytical element.
+Each keeps its own dry mass, capacity, affinity, rate, initial loading and
+source conditions. An initially loaded population can release metal into the
+same solution from which another population takes it up.
+
+The finite liquid balance and reversible rate convention follow
+[Brandani, Adsorption 27 (2021), 353–368, equations 1, 6 and 7](https://doi.org/10.1007/s10450-020-00258-9).
+A carbon name or equilibrium fit does not supply the kinetic rate; a separate
+card must declare it with inverse-second units and applicability to actual
+elapsed time, concentration, loading, temperature and liquid volume.
+
+```bash
+cargo run -p fs-material --example mineral_adsorption_kinetics
+cargo test -p fs-material aqueous_adsorption::kinetics
+```
+
+The example compares two explicitly synthetic activated/natural-carbon
+scenarios containing 0.010 mol analytical Au in total. It advances the same
+bath for 5, then 20, then 75 seconds, preserving each accepted site stock and
+the absolute clock. In the initially unloaded case, both populations first
+adsorb. As the shared solution depletes, natural carbon later releases some
+metal while activated carbon continues taking it up. A second case starts
+with loaded natural carbon and directly demonstrates net desorption.
+Printed signed transfers, dissolved/adsorbed inventories and independent
+metal-balance residuals make that exchange explicit.
+
+Each implicit step solves one common concentration and uses bounded convex
+loading updates. Adaptive full-step/two-half-step comparison accepts the
+positive two-half solution; it never clips or normalizes stocks to repair a
+balance. Local and accumulated numerical error estimates remain distinct
+from source uncertainty and are not certified global bounds. Every source,
+work and cancellation check completes before publishing the whole advance.
+
+Eight focused kinetic test groups cover an independent finite-bath analytic
+curve, equilibrium approach, loaded-carbon desorption, competing populations,
+time/rate and extensive scaling, subdivision/order invariance, preserved
+history, positive trace stocks and atomic refusal. The original six aqueous
+equilibrium tests remain unchanged. These calculations are building blocks
+for finite-contact carbon recovery; they do not infer measured preg-robbing,
+aqueous speciation, simultaneous leaching, train flow, heat or calibrated
+CIP/CIL performance.

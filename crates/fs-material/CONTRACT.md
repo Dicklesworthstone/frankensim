@@ -1,5 +1,46 @@
 # fs-material — CONTRACT
 
+## Finite-time aqueous adsorption with competing sorbent populations
+
+`aqueous_adsorption::kinetics::AdsorptionBatch` adds persistent reversible
+uptake/desorption to the original `AqueousLangmuir` equilibrium owner.
+One to 128 independently declared sorbents share one finite dissolved
+inventory of the same analytical element. The original equilibrium source
+supplies capacity and affinity; a separate kinetic card explicitly supplies
+the constant inverse-second rate in `dq/dt=k*(q_eq(c)-q)`. Every population
+retains its original dry mass, loaded stock, source cards and conditions.
+No rate or preg-robbing response is inferred from a carbon name.
+
+An implicit step reduces to one monotone scalar balance for the common
+dissolved stock. Occupied and vacant sites use bounded convex interpolation
+from the nearer endpoint, preserving identical endpoints exactly. Actual
+source conditions are checked at intermediate and final accepted states.
+Full-step/two-half-step L1 comparison selects the positive two-half result
+without extrapolating, clipping stocks or normalizing conservation. All root,
+step and nested work is bounded; failure or cancellation leaves the complete
+accepted bath and absolute clock unchanged.
+
+Reports retain original models, signed interval/cumulative transfer, complete
+dissolved/site inventories, source points, conservation residuals and numerical
+work. Loaded sorbents may release metal while another population takes it up.
+Local and accumulated error estimates are separate diagnostics, not certified
+global bounds or source/model uncertainty. Fixed solution volume, dry masses,
+temperature and external chemistry are explicit. This owner does not supply
+aqueous speciation, competitive co-adsorbate chemistry, simultaneous dissolution,
+flow, heat, pore-diffusion identification or calibrated CIP/CIL recovery.
+
+Eight new focused groups check an independent finite-bath analytical curve,
+equilibrium approach, multiple sorbents, preloading/desorption, time/rate and
+extensive scaling, subdivision/order behavior, continuation, trace inventories
+and atomic source/work/cancellation refusals. All 124 tests in the original
+separation, comminution, reaction_batch and aqueous_adsorption native module
+scope pass, including the six original aqueous-equilibrium tests. The actual
+`mineral_adsorption_kinetics` example compiles and runs both synthetic
+activated/natural-carbon scenarios through three continued intervals; its
+initially unloaded natural carbon later desorbs as the shared bath depletes.
+The model and commands are documented in
+`data/matdb/seed-v1/MINING_SOLUTION_RECOVERY.md`.
+
 ## Persistent size-dependent leaching with one finite reagent bath
 
 `reaction_batch::shrinking_core::population::ShrinkingCoreBatch` advances

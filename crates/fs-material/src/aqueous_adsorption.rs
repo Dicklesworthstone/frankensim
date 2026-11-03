@@ -16,6 +16,10 @@
 //! aqueous speciation, charge balance, solvent adsorption, competitive uptake,
 //! leaching, elution chemistry, a kinetic rate or a prediction of plant recovery.
 
+/// Persistent finite-time uptake and desorption in one shared solution bath.
+#[path = "aqueous_adsorption/kinetics.rs"]
+pub mod kinetics;
+
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint};
 use fs_math::det;
 use fs_qty::{
