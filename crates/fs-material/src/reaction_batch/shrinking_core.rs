@@ -25,6 +25,10 @@
 //! evidence of ore calibration. Finite reagent depletion is integrated, not
 //! applied as a clip to an excess-reagent recovery curve.
 
+/// Persistent mineral/size populations sharing one finite reagent bath.
+#[path = "shrinking_core/population.rs"]
+pub mod population;
+
 use super::{ReactantAccount, stock};
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint};
 use fs_qty::{

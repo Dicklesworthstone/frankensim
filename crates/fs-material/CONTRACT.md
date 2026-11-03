@@ -1,5 +1,65 @@
 # fs-material — CONTRACT
 
+## Persistent size-dependent leaching with one finite reagent bath
+
+`reaction_batch::shrinking_core::population::ShrinkingCoreBatch` advances
+1..=128 explicitly assigned mineral/size populations in a single closed,
+well-mixed bath. Each population keeps its original conserved equation,
+source model, reactive-grain radius, original amount and accepted core.
+Film, surface-reaction and product-layer diffusion resistances remain in
+series. All local laws must consume the same reagent; products may not feed
+any modeled reactant in this irreversible closure.
+
+For penetration `u=1-r/R` and conversion `X=1-(1-u)^3`, the original local
+law integrates to
+`F(u)=(a/b)*rho*R*[r_f*X/3+r_s*u+R*r_d*u^2*(3-2u)/6]`.
+Every unfinished population receives the same incremental exposure
+`H=integral(C dt)`, so `F(u_new)-F(u_old)=H`. A scalar bath-clock integral
+closes reagent depletion against all original mineral stocks. Size populations
+therefore compete through actual reagent consumption, without processing order
+priority or clipping independent excess-reagent conversions. Positive
+incremental/tail polynomials and bounded inversions retain remaining cores;
+quadrature splits at exact population-completion exposure events.
+
+Repeated calls retain absolute elapsed time, original mineral-total loading
+(summed over its size bins), shrinking cores and the depleted bath. Dividing
+one identical bin into two does not change the source loading coordinate.
+Repeated reaction IDs require the same original terms and conservation
+certificate; per-bin extents aggregate into the existing exact reaction
+network. Reports expose **cumulative** network consumption/formation from the
+original complete inventory, per-population remaining amounts, geometry/molar
+residuals and original source points. Exposure continues accumulating during
+a post-completion hold. Invalid stock assignments, unsupported source domains,
+nonrepresentable positive stocks, work exhaustion or cancellation leave the
+accepted state untouched.
+
+The caller bounds all work, including nested core inversions, and chooses
+absolute/relative time tolerances. Adaptive quadrature and root residuals are
+estimates, not interval or global-error certificates. Fixed volume,
+temperature and coefficients, spherical fixed outer radii, additive local
+rates and one shared reagent are explicit assumptions. This owner does not
+infer mixture calibration, mineral liberation, activity/speciation, product
+inhibition, gas transfer, pore evolution, fragmentation, energy coupling or
+metal recovery.
+
+Seven public-API test groups use independent analytical film, diffusion and
+mixed-resistance solutions, different reagent stoichiometries, completion
+events, permutation/subdivision/continuation equivalence and atomic refusals;
+two additional intrinsic-coordinate tests cover tiny progress and positive
+tails. The complete original separation/comminution/reaction-batch module
+scope passes 110 native tests. The actual `grinding_to_leaching` example
+connects the existing selection/breakage mill, source-backed charge adapter
+and persistent shared bath. It consumes actual USGS CuO/calcite molar-mass
+packs and compares two synthetic grind durations through two consecutive
+leach advances while retaining dry-solids, carrier-water, copper and acid
+accounts. Its rates, mineral fractions, liberated-sphere interpretation and
+bath conditions are explicitly authored illustrations, not measured ore or
+plant forecasts.
+
+Run with compiled source packs:
+`cargo run -p fs-material --example grinding_to_leaching -- --materials PACK_DIR`.
+The two required pack names and assumptions are in the example's module docs.
+
 ## Grinding-stream collection for explicit mineral leach charges
 
 `comminution::leach_charge::CollectedLeachCharge` collects an original
