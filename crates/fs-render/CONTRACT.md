@@ -555,12 +555,19 @@ differentiable lift). Pure Rust throughout.
 
 - With `photometry`, `camera::point_lights::CurvedPointLightCameraScene`
   borrows the exact native camera and at most 64 explicitly bound original
-  point-fixture/diffuse-receiver branches. At every matching surface arrival it
-  preserves original emission and continuation, adding incoming camera Stokes-I
-  times `(n_camera/n_contact)^2 * reflectance * E/pi`. The native differentiated
-  source connection and calibrated source spectrum supply incident irradiance E;
+  point-fixture/continuous-receiver branches. Diffuse, rough dielectric and
+  rough/brushed conductor receivers preserve their original emission and
+  continuation. The original reciprocal polarized surface response contracts
+  the arriving source Stokes state with the complete camera analyser; diffuse
+  response retains `reflectance * E/pi`. The camera prefix and
+  `(n_camera/n_contact)^2` are applied once. Native differentiated source
+  connection and calibrated angular spectrum supply incident irradiance E;
   source solid-angle/receiver-area Jacobian, Fresnel transfer and Beer absorption
-  occur once. Source and receiver media must support second-order bundles.
+  occur once. Rough glass admits reflection and transmission from either actual
+  adjacent medium; its native radiance BSDF already owns local transmission eta.
+  Irradiance projects onto the actual source-facing geometric receiving plane.
+  Smooth delta receivers remain outside this continuous proposal. Source and
+  both adjacent receiver media must support second-order bundles.
   One prescribed branch and seed per original source/receiver pair selects a
   local contribution, without claiming all-image discovery or area-light MIS.
   Duplicate bindings, unsupported media, visibility/numerical failures and
@@ -578,15 +585,20 @@ differentiable lift). Pure Rust throughout.
   GRIN focusing, affine-index endpoint factors, multiple diffuse bounces and
   emission, source/receiver admission, numerical darkness, cumulative budgets,
   cancellation, empty-fixture pixel parity and spectral pixel radiometry.
+  Continuous-receiver controls cover bidirectional rough-glass reflection and
+  transmission with radiance reciprocity, complex-index and anisotropic metal
+  response, non-coplanar camera polarization, and a calibrated narrow-beam source
+  through a glass slab with an independent refracted bundle-area reference.
 
 - With `photometry` and `volumes`,
   `camera::point_lights::participating::CurvedRayleighPointLightCameraScene`
   composes the exact original molecular camera with its admitted point fixtures.
-  At matching diffuse arrivals, source scattering survival multiplies the
-  existing calibrated source contribution once. Camera-prefix survival remains
-  exclusively in the native molecular free-flight law; there is no second
-  camera extinction factor, phase weighting or collision rate in the diffuse
-  connection. Original surface emission, continuation and all camera random
+  At matching continuous surface arrivals, source scattering survival multiplies
+  the existing calibrated polarized source contribution once. Camera-prefix
+  survival remains exclusively in the native molecular free-flight law; there
+  is no second camera extinction factor, phase weighting or collision rate in
+  the surface connection. Rough-receiver controls compare the same original
+  molecular camera walk with independent source-only scattering attenuation. Original surface emission, continuation and all camera random
   streams remain unchanged. Source tracking has independent counter streams
   and cumulative draw/candidate limits across all connections and bounces.
   Legitimate zero ratio samples retain camera emission and continuation without

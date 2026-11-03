@@ -1,13 +1,14 @@
 //! Calibrated point fixtures on the original curved camera walk.
 //!
-//! At every selected depolarizing diffuse encounter, a bounded native bundle
-//! connection supplies physical incident irradiance E. The camera adds
-//! `prefix_I * (n_camera/n_contact)^2 * reflectance * E/pi` before the same
-//! surface samples its continuation. The fixture's source solid-angle/receiver
-//! area Jacobian, polarization transfer and absorption belong to E already;
-//! no additional inverse-square, Fresnel or source-index factor is applied.
-//! The diffuse depolarizer makes this scalar factorization valid even when
-//! either reciprocal optical subpath changes polarization.
+//! At every selected continuous surface encounter, a bounded native bundle
+//! connection supplies physical incident irradiance E. The receiver evaluates
+//! its original reciprocal polarized BSDF before the same surface samples its
+//! continuation. Diffuse response retains `reflectance * E/pi`; rough glass and
+//! rough/brushed metal retain their full direction-dependent Mueller response.
+//! The camera applies its prefix and `(n_camera/n_contact)^2` once. The source
+//! solid-angle/receiver-area Jacobian, Fresnel transfer and Beer absorption
+//! belong to E already; local rough transmission owns its radiance eta factor.
+//! No additional inverse-square, source-index factor or BSDF sampling occurs.
 //!
 //! Each source/receiver pair declares exactly one optical branch and local
 //! shooting seed. Success describes that branch, not all images of a fixture.
@@ -25,13 +26,13 @@
 //! numerical localization and each explicit connection tolerance remain
 //! allowances, not bounds on irradiance or an optical accuracy certificate.
 
+use super::area_lights::camera::{AreaLightCameraError, SurfaceReceiver, receiver_media};
 use super::emission::SurfaceEmission;
 use super::{
     CameraRadianceError, CameraRadianceSample, CurvedCameraScene, CurvedPathResult,
     CurvedSceneError, CurvedTraceSettings, phase_index,
 };
 use crate::charts::Ray;
-use crate::dielectric::DielectricError;
 use crate::photometry::source::PhotometricSource;
 use crate::photometry::source::bundle::{BundlePhotometryError, PlanarIrradianceReceiver};
 use crate::polarization::Stokes;
@@ -40,7 +41,7 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleConnectionOptions, BundleConnectionTarget,
 };
 use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, SceneMedium};
-use crate::polarization::dielectric::scene::{Interaction, PathTermination, SceneError};
+use crate::polarization::dielectric::scene::PathTermination;
 use crate::polarization::dielectric::transport::PolarizationFrame;
 use fs_exec::Cx;
 use fs_geom::Vec3;
@@ -53,7 +54,9 @@ pub mod participating;
 /// Fixed admission bound; camera rays allocate no fixture-owned workspace.
 pub const MAX_POINT_LIGHT_BRANCHES: usize = 64;
 
-/// One original fixture and one prescribed branch to a native diffuse object.
+/// One original fixture and one prescribed branch to a native continuous surface.
+/// Diffuse, rough dielectric and rough/brushed conductor receivers retain their
+/// original material laws; smooth delta receivers require a different proposal.
 /// The initial direction must lie in the native solver's local convergence
 /// basin for the actual sampled contact. A single seed does not cover every
 /// contact on a large receiver or discover other optical images. The original
@@ -71,7 +74,7 @@ pub struct PointLightBranch<'a> {
 }
 
 /// Original camera and per-connection limits, plus cumulative shooting limits
-/// across every diffuse encounter of one camera ray. A source trial retains
+/// across every selected continuous surface encounter of one camera ray. A source trial retains
 /// its own native integration, distance, surface and geometry-work limits.
 #[derive(Clone, Copy, Debug)]
 pub struct PointLightCameraSettings {
@@ -95,6 +98,8 @@ impl Default for PointLightCameraSettings {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PointLightCameraError {
     Camera(CameraRadianceError),
+    /// Original continuous-surface response or contact-consistency refusal.
+    SurfaceResponse(AreaLightCameraError),
     TooManyBindings,
     InvalidBinding {
         index: usize,
@@ -150,6 +155,15 @@ pub enum PointLightCameraError {
 impl From<CameraRadianceError> for PointLightCameraError {
     fn from(error: CameraRadianceError) -> Self {
         Self::Camera(error)
+    }
+}
+impl From<AreaLightCameraError> for PointLightCameraError {
+    fn from(error: AreaLightCameraError) -> Self {
+        match error {
+            AreaLightCameraError::Camera(error) => Self::Camera(error),
+            AreaLightCameraError::NumericalRange => Self::NumericalRange,
+            error => Self::SurfaceResponse(error),
+        }
     }
 }
 impl From<fs_exec::Cancelled> for PointLightCameraError {
@@ -221,12 +235,9 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
                 .bindings
                 .binary_search_by_key(&branch.receiver_object_id, |binding| binding.object_id)
                 .map_err(|_| invalid())?;
-            let Interaction::DepolarizingDiffuse { medium, .. } =
-                camera.scene.bindings[receiver].interaction
-            else {
-                return Err(invalid());
-            };
-            for slot in [branch.initial_medium, medium] {
+            let [first, second] = receiver_media(camera.scene.bindings[receiver].interaction)
+                .ok_or_else(invalid)?;
+            for slot in [branch.initial_medium, first, second] {
                 if !matches!(
                     camera.scene.media.get(slot),
                     Some(SceneMedium::Homogeneous(_) | SceneMedium::Differentiable { .. })
@@ -512,44 +523,11 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
         let contact = path
             .last_contact()
             .ok_or(PointLightCameraError::NumericalRange)?;
-        let scene = self.owner.camera.scene;
-        let binding = scene
-            .bindings
-            .get(contact.witness.boundary_id)
-            .ok_or(PointLightCameraError::NumericalRange)?;
-        if binding.object_id != contact.object_id {
-            return Err(PointLightCameraError::NumericalRange);
-        }
-        let Interaction::DepolarizingDiffuse {
-            medium,
-            reflectance,
-        } = binding.interaction
-        else {
+        let Some(receiver) = SurfaceReceiver::at_arrival(self.owner.camera, path)? else {
             return Ok(());
         };
-        if medium != path.medium_index() {
-            return Err(CameraRadianceError::from(CurvedSceneError::from(
-                SceneError::MediumMismatch {
-                    object_id: contact.object_id,
-                    expected: medium,
-                    actual: path.medium_index(),
-                },
-            ))
-            .into());
-        }
         let beam = path.beam();
         let wavelength_nm = beam.wavelength_nm();
-        let rho = scene.reflectances[reflectance]
-            .at(wavelength_nm)
-            .map_err(|_| CameraRadianceError::Optics(DielectricError::InvalidWavelength))?;
-        if rho == 0.0 {
-            return Ok(());
-        }
-        let normal = if contact.witness.normal.dot(beam.ray().dir) > 0.0 {
-            contact.witness.normal.scale(-1.0)
-        } else {
-            contact.witness.normal
-        };
         for (index, branch) in self.owner.branches.iter().enumerate() {
             if branch.receiver_object_id != contact.object_id || branch.source.flux_lm() == 0.0 {
                 continue;
@@ -568,12 +546,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
             }
             let mut options = self.settings.connection;
             options.max_trace_evaluations = options.max_trace_evaluations.min(remaining);
-            let target = BundleConnectionTarget::try_diffuse_receiver(
-                contact.object_id,
-                contact.witness.surface_point,
-                normal,
-                branch.position_tolerance_m,
-            )
+            let target = receiver.target(branch.position_tolerance_m)
             .map_err(|error| PointLightCameraError::Connection {
                 binding: index,
                 error,
@@ -614,9 +587,16 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
             {
                 return Err(PointLightCameraError::NumericalRange);
             }
-            let receiver = PlanarIrradianceReceiver::try_new(
+            let response = receiver.response(self.owner.camera, &connection.original, index)?;
+            if response.factor == 0.0 {
+                continue;
+            }
+            // Transmission reaches the same native contact from the other
+            // medium. Irradiance uses its actual source-facing geometric plane,
+            // not the camera-oriented shooting section.
+            let receiving_plane = PlanarIrradianceReceiver::try_new(
                 target.position_m(),
-                target.normal(),
+                response.normal,
                 target.position_tolerance_m(),
             )
             .map_err(|error| PointLightCameraError::Photometry {
@@ -627,7 +607,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
                 .source
                 .spectral_irradiance_from_refractive_bundle(
                     connection.original.path().bundle(),
-                    receiver,
+                    receiving_plane,
                     options.projection,
                 )
                 .map_err(|error| PointLightCameraError::Photometry {
@@ -661,17 +641,59 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
                 return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
             }
             let local_index = phase_index(beam.medium(), wavelength_nm)?;
-            let contribution = fixture_contribution(
-                beam.power().i,
-                self.initial_index,
-                local_index,
-                rho,
-                irradiance,
-                connection.log_scattering_survival,
-            )?;
+            let contribution = if receiver.is_rough() {
+                directional_fixture_contribution(
+                    beam.power().i,
+                    self.initial_index,
+                    local_index,
+                    response.factor,
+                    irradiance,
+                    connection.log_scattering_survival,
+                )?
+            } else {
+                fixture_contribution(
+                    beam.power().i,
+                    self.initial_index,
+                    local_index,
+                    response.factor,
+                    irradiance,
+                    connection.log_scattering_survival,
+                )?
+            };
             self.radiance = nonnegative(self.radiance + contribution)?;
         }
         Ok(())
+    }
+}
+
+// The original polarized BSDF already owns all local angular/Fresnel factors.
+// Keep source survival logarithmic just as for the diffuse molecular consumer;
+// the sampled camera free flight must never acquire a second survival factor.
+fn directional_fixture_contribution(
+    prefix: f64,
+    initial_index: f64,
+    local_index: f64,
+    factor: f64,
+    irradiance: f64,
+    log_scattering_survival: f64,
+) -> Result<f64, PointLightCameraError> {
+    let ratio = initial_index / local_index;
+    let value = prefix * (ratio * ratio) * (factor * irradiance)
+        * det::exp(log_scattering_survival);
+    if value.is_finite() && value > 0.0 {
+        return Ok(value);
+    }
+    let value = det::exp(
+        det::ln(prefix)
+            + 2.0 * (det::ln(initial_index) - det::ln(local_index))
+            + det::ln(factor)
+            + det::ln(irradiance)
+            + log_scattering_survival,
+    );
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(PointLightCameraError::NumericalRange)
     }
 }
 

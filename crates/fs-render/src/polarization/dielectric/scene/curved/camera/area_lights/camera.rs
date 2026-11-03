@@ -49,10 +49,9 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 mod receiver;
-pub(super) use receiver::SurfaceReceiver;
+pub(in super::super) use receiver::{SurfaceReceiver, receiver_media};
 #[cfg(feature = "volumes")]
 pub(super) use receiver::directional_contribution;
-use receiver::receiver_media;
 
 pub const MAX_AREA_LIGHT_BINDINGS: usize = 64;
 pub const MAX_AREA_LIGHT_DELTA_EVENTS: usize = 64;

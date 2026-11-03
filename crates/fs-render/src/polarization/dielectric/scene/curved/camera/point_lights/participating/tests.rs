@@ -338,6 +338,79 @@ fn g1_fixture_survival_does_not_repeat_the_sampled_camera_prefix_survival() {
 }
 
 #[test]
+fn g1_rough_point_receiver_tracks_source_survival_once_and_keeps_camera_walk() {
+    use crate::conductor::{ConductorOptics, ConductorSurface};
+
+    with_cx(|cx| {
+        let geometry = geometry();
+        let material = material();
+        let media = [SceneMedium::Homogeneous(&material)];
+        let conductors = [ConductorOptics::representative_tungsten()];
+        let alpha = 0.2;
+        let scene = CurvedPolarizedScene::try_new_with_materials(
+            cx, &geometry, &media, &conductors, &[], &[],
+            vec![
+                SurfaceBinding { object_id: 1, interaction: Interaction::RoughConductor {
+                    optics: 0, medium: 0, surface: ConductorSurface::try_rough(alpha).unwrap(),
+                }},
+                SurfaceBinding { object_id: 9, interaction: Interaction::Opaque },
+            ],
+            100_000,
+        ).unwrap();
+        let camera = CurvedCameraScene::try_new(cx, &scene, &[], None).unwrap();
+        let lamp = PhotometricSource::try_new(
+            RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.25]).unwrap(),
+            100.0, 1.0, AngularDistribution::isotropic(),
+            SourceSpectrum::try_from_bins([1.0; SPECTRAL_BINS]).unwrap(),
+        ).unwrap();
+        let branches = [PointLightBranch {
+            initial_direction: Vec3::new(0.0, 0.0, 1.0),
+            ..branch(&lamp)
+        }];
+        let fixtures = CurvedPointLightCameraScene::try_new(cx, &camera, &branches).unwrap();
+        let spectrum = MassScatteringSpectrum::constant(1.0).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let beta = 0.7;
+        let volumes = [Some(CurvedRayleighMedium::try_new(&spectrum, beta, &phase).unwrap())];
+        let transport = CurvedRayleighScene::try_new(cx, &scene, &volumes).unwrap();
+        let molecular = CurvedRayleighCameraScene::try_new(cx, &camera, &transport).unwrap();
+        let lit = CurvedRayleighPointLightCameraScene::try_new(cx, &molecular, &fixtures).unwrap();
+        let ordinary = molecular.sample_ray_with_tracking_samples(
+            cx, ray(), 550.0, 0, camera_settings(),
+            |_| [0.0; 3], |_| [0.99, 0.5, 0.2, 0.9],
+        ).unwrap();
+        let mut limits = settings();
+        limits.max_source_free_flight_draws = 0;
+        limits.max_source_candidates = 0;
+        let sample = lit.sample_ray_with_tracking_samples(
+            cx, ray(), 550.0, 0, limits,
+            |_| [0.0; 3], |_| [0.99, 0.5, 0.2, 0.9],
+            |_, _| panic!("uniform source scattering consumes no shadow RNG"),
+        ).unwrap();
+        let metal = conductors[0].complex_ior(550.0).unwrap();
+        let eta = metal.eta();
+        let k = metal.k();
+        let fresnel = ((1.2 - eta).powi(2) + k * k)
+            / ((1.2 + eta).powi(2) + k * k);
+        let intensity = lamp.flux_lm() * lamp.spectrum().bins_w_per_lumen_nm()[0]
+            / (4.0 * core::f64::consts::PI);
+        let source_distance = 0.75_f64;
+        // The selected camera path has already sampled its survival. Only the
+        // independent source leg receives exp(-beta*d); both legs retain Beer.
+        let expected = intensity / source_distance.powi(2)
+            * fresnel / (4.0 * core::f64::consts::PI * alpha * alpha)
+            * (-ABSORPTION * (source_distance + 0.5) - beta * source_distance).exp();
+        near(sample.fixture_radiance_w_m2_sr_nm(), expected);
+        near(sample.radiance_sample().radiance_w_m2_sr_nm(), expected);
+        assert_eq!(sample.radiance_sample().path(), ordinary.radiance_sample().path());
+        assert_eq!(sample.volume_events(), 0);
+        assert_eq!(sample.source_free_flight_draws(), 0);
+        assert_eq!(sample.source_candidates(), 0);
+        assert_eq!(sample.connections(), 1);
+    });
+}
+
+#[test]
 fn g1_stochastic_shadow_zero_keeps_positive_emission_and_the_original_camera_draws() {
     with_cx(|cx| {
         let geometry = geometry();

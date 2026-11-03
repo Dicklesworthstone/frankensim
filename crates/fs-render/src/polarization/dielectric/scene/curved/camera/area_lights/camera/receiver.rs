@@ -21,8 +21,8 @@ use fs_math::det;
 
 /// The two original adjacent media admitted by a continuous native receiver.
 /// Fixed-medium surfaces repeat the same index; smooth delta laws have no
-/// continuous solid-angle proposal and cannot become area-light receivers.
-pub(in super::super) fn receiver_media(interaction: Interaction) -> Option<[usize; 2]> {
+/// continuous solid-angle proposal and cannot become direct-light receivers.
+pub(in super::super::super) fn receiver_media(interaction: Interaction) -> Option<[usize; 2]> {
     match interaction {
         Interaction::DepolarizingDiffuse { medium, .. }
         | Interaction::BrushedConductor { medium, .. } => Some([medium, medium]),
@@ -37,7 +37,7 @@ pub(in super::super) fn receiver_media(interaction: Interaction) -> Option<[usiz
 /// Copy-only anchor state. Keeping the arriving beam preserves the native
 /// polarization analyser and its local medium before rough transmission.
 #[derive(Clone, Copy)]
-pub(in super::super) struct SurfaceReceiver {
+pub(in super::super::super) struct SurfaceReceiver {
     pub(in super::super) contact: CurvedContact,
     incoming: PolarizedBeam,
     medium: usize,
@@ -45,16 +45,16 @@ pub(in super::super) struct SurfaceReceiver {
 }
 
 #[derive(Clone, Copy)]
-pub(in super::super) struct SurfaceResponse {
-    pub(in super::super) normal: Vec3,
+pub(in super::super::super) struct SurfaceResponse {
+    pub(in super::super::super) normal: Vec3,
     /// Diffuse reflectance for the legacy diffuse path; otherwise a full
     /// reciprocal polarized radiance-BSDF contraction per steradian.
-    pub(in super::super) factor: f64,
+    pub(in super::super::super) factor: f64,
     pub(in super::super) pdf: f64,
 }
 
 impl SurfaceReceiver {
-    pub(in super::super) fn at_arrival(
+    pub(in super::super::super) fn at_arrival(
         camera: &CurvedCameraScene<'_, '_>,
         path: &CurvedPathResult,
     ) -> Result<Option<Self>, AreaLightCameraError> {
@@ -86,9 +86,9 @@ impl SurfaceReceiver {
         Ok(Some(Self { contact, incoming, medium, diffuse }))
     }
 
-    pub(in super::super) fn is_rough(self) -> bool { self.diffuse.is_none() }
+    pub(in super::super::super) fn is_rough(self) -> bool { self.diffuse.is_none() }
 
-    pub(in super::super) fn target(self, tolerance: f64)
+    pub(in super::super::super) fn target(self, tolerance: f64)
         -> Result<BundleConnectionTarget, BundleConnectionError> {
         if let Some((normal, _)) = self.diffuse {
             BundleConnectionTarget::try_diffuse_receiver(self.contact.object_id,
@@ -100,7 +100,7 @@ impl SurfaceReceiver {
         }
     }
 
-    pub(in super::super) fn response(
+    pub(in super::super::super) fn response(
         self, camera: &CurvedCameraScene<'_, '_>, connection: &BundleConnection, binding: usize,
     ) -> Result<SurfaceResponse, AreaLightCameraError> {
         let path = connection.path();
