@@ -508,3 +508,53 @@ fn g0_peak_calibration_selects_only_the_peak_report_and_preserves_material_inten
         assert_eq!(spec, original, "another objective cannot be silently relabeled");
     }
 }
+
+#[test]
+fn g0_capacity_scale_converts_the_native_normalized_derivative_at_its_actual_scale() {
+    let original = base();
+    let mut sampled = original.clone();
+    for row in &mut sampled.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap().capacities {
+        row.volumetric_heat_capacity.value *= 1.5;
+    }
+    let parameters = [parameter(Target::ThermalCapacityScale, "thermal-storage")];
+    let report = receipt(false, r#", "dtemperature_dcapacity_multiplier_k":-3"#);
+    let evaluate = |spec: &ProjectSpec, coordinates: &[f64]| {
+        super::coefficients_with_reference(&report, spec, &parameters, 301.0, "solid",
+            false, Some((&original, coordinates))).map(|value| value.gradient)
+    };
+    assert_eq!(evaluate(&sampled, &[1.5]).unwrap(), [-2.0]);
+    assert!(evaluate(&sampled, &[]).is_err());
+    assert!(evaluate(&sampled, &[0.0]).is_err());
+    assert!(evaluate(&sampled, &[3.0]).is_err());
+    assert!(coefficients(&report, &sampled, &parameters, 301.0, "solid").is_err(),
+        "a normalized native derivative has no absolute scale without its original declarations");
+    let mut wrong = sampled.clone();
+    wrong.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient.as_mut().unwrap()
+        .capacities[0].source.push_str(" changed");
+    assert!(evaluate(&wrong, &[1.5]).is_err());
+    let mut wrong = sampled;
+    wrong.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient.as_mut().unwrap()
+        .capacities[0].volumetric_heat_capacity.value += 1.0;
+    assert!(evaluate(&wrong, &[1.5]).is_err());
+}
+
+#[test]
+fn g0_density_derivative_uses_the_original_enthalpy_region_and_actual_density() {
+    let enthalpy = fs_project::parse_sexpr_migrating(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project/cooling-enthalpy.fsim"
+    ))).unwrap().decoded.spec;
+    let density = parameter(Target::EnthalpyReferenceDensity, "solid");
+    let controls = r#", "regional_storage":[{"region":"solid","material_index":0,"reference_density_kg_m3":1,"dtemperature_dreference_density_k_m3_per_kg":-0.25}]"#;
+    assert_eq!(coefficients(&receipt(true, controls), &enthalpy,
+        std::slice::from_ref(&density), 301.0, "solid").unwrap(), [-0.25]);
+    for invalid in [controls.replace("\"region\":\"solid\"", "\"region\":\"other\""),
+        controls.replace("\"material_index\":0", "\"material_index\":1"),
+        controls.replace("\"reference_density_kg_m3\":1", "\"reference_density_kg_m3\":2"),
+        controls.replace("-0.25", "null")]
+    {
+        assert!(coefficients(&receipt(true, &invalid), &enthalpy,
+            std::slice::from_ref(&density), 301.0, "solid").is_err());
+    }
+    assert!(coefficients(&receipt(true, controls), &base(), &[density], 301.0, "solid").is_err());
+}

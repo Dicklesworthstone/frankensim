@@ -610,6 +610,22 @@ assertion refuses. Samples start from the unchanged base; no thermal boundary,
 time grid or previously accepted sample is changed. These coordinates declare
 uncertainty in startup state without inferring a distribution from source bands.
 
+## Native authored thermal-storage inputs
+
+The uncertainty and finite operating-case binders admit
+`thermal-capacity-scale` for entity `thermal-storage`: a strictly positive,
+dimensionless common multiplier on all explicitly authored regional volumetric
+capacities. Every sample starts from the original capacities, preserving each
+region and source declaration. This coordinate refuses enthalpy storage and
+absent explicit capacities; it does not alter any material-card property.
+`enthalpy-reference-density` in kg/m³ selects one exact original enthalpy
+region's explicitly authored stationary reference density. It retains the
+material-card identity, source, specific-enthalpy/temperature chart, initial
+specific enthalpy, phase-conductivity law and geometry. Both controls require
+positive finite support and actual values; unrepresentable capacity products
+refuse before applying changes. Neither coordinate changes the initial
+temperature or introduces a new storage law.
+
 ## No-claim boundaries
 
 Native probability studies accept `:qoi "temperature-peak"` for a declared

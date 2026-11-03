@@ -23,7 +23,6 @@ fn initial_study(fixture: &Fixture, enthalpy: bool, controlled: bool, peak: bool
         (true, true) => "initial-specific-enthalpy :entity \"air\" :low 318.5J/kg :high 418.5J/kg",
     };
     let mut source = study_text(false, false, controlled)
-        .replace(":samples 4", ":samples 2")
         .replace(":wall-time 120s", ":wall-time 240s")
         .replace("convection-temperature :entity \"air\" :low 294K :high 300K", coordinate);
     if peak { source = source.replace(":qoi \"temperature-max\"", ":qoi \"temperature-peak\""); }

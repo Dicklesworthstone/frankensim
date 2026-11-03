@@ -91,6 +91,8 @@ fn target_name(target: Target) -> &'static str {
         Target::FixedTemperature => "fixed-temperature",
         Target::InitialTemperature => "initial-temperature",
         Target::InitialSpecificEnthalpy => "initial-specific-enthalpy",
+        Target::ThermalCapacityScale => "thermal-capacity-scale",
+        Target::EnthalpyReferenceDensity => "enthalpy-reference-density",
         Target::NaturalConvectionAmbient => "natural-convection-ambient",
         Target::RadiationReservoirTemperature => "radiation-reservoir-temperature",
         // These rows are normalized resistance controls until contact::convert

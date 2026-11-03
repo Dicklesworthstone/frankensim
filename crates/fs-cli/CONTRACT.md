@@ -1371,6 +1371,20 @@ The startup-control regressions use real sampled projects and native solves;
 the controls remain local discrete derivatives, with the original chart-knot,
 maximum-tie and physical-evidence limits.
 
+Authored storage uncertainty uses the same path. `thermal-capacity-scale`
+names `thermal-storage` and scales only the original explicitly declared
+constant regional capacities. The native adjoint differentiates a common
+multiplier of the sampled capacity matrix at one, so the adapter divides that
+coefficient by the actual sampled scale after checking every original region,
+source and capacity-times-scale value. `enthalpy-reference-density` consumes
+the native absolute density derivative for its exact regional material index
+and sampled density in kg/m³. It preserves the stationary geometry and original
+h/T chart, initial specific enthalpy, source/card identity and conductivity law.
+Both support final and sampled-peak calibration; their coefficients are zero
+when the selected peak is the initial state. Positive-support admission and
+the original source-law restrictions remain in force for all actual samples.
+These are declared engineering controls, not inferred material-card bands.
+
 Both storage modes supply independent uniform prescribed-bath temperatures and
 original outward heat-flux densities held through the full selected trajectory.
 Calibration checks the exact sampled kelvin or W/m2 value, the original boundary

@@ -383,3 +383,5 @@ mod peak;
 
 #[path = "transient/initial_state.rs"]
 mod initial_state;
+#[path = "transient/storage.rs"]
+mod storage;

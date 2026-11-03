@@ -75,6 +75,12 @@ pub enum Target {
     /// One region's original initial specific enthalpy. Requires explicit
     /// `from-regional-enthalpy` initialization and retains its chart and density.
     InitialSpecificEnthalpy,
+    /// Positive common multiplier of every explicitly declared regional
+    /// volumetric capacity. Entity is `thermal-storage`; no card is edited.
+    ThermalCapacityScale,
+    /// Absolute authored reference density of one original enthalpy region.
+    /// The stationary geometry, specific-enthalpy chart and initial h stay fixed.
+    EnthalpyReferenceDensity,
     /// Nominal dry-contact clamping pressure; the manufacturing band is retained.
     ContactPressure,
     /// Nominal TIM or adhesive thickness, not a change to the material card.
@@ -108,7 +114,8 @@ impl Target {
             | Self::FixedTemperature | Self::InitialTemperature => "K",
             Self::InitialSpecificEnthalpy => "J/kg",
             Self::HeatFlux => "W/m^2",
-            Self::FanSpeedRatio | Self::PowerScheduleScale => "1",
+            Self::FanSpeedRatio | Self::PowerScheduleScale | Self::ThermalCapacityScale => "1",
+            Self::EnthalpyReferenceDensity => "kg/m^3",
             Self::ContactPressure => "Pa",
             Self::ContactThickness | Self::ContactGap => "m",
             Self::ContactTorque => "N*m",
@@ -124,7 +131,8 @@ impl Target {
             | Self::FixedTemperature | Self::InitialTemperature => dims::TEMPERATURE,
             Self::InitialSpecificEnthalpy => dims::SPECIFIC_ENTHALPY,
             Self::HeatFlux => dims::HEAT_FLUX,
-            Self::FanSpeedRatio | Self::PowerScheduleScale => Dims::NONE,
+            Self::FanSpeedRatio | Self::PowerScheduleScale | Self::ThermalCapacityScale => Dims::NONE,
+            Self::EnthalpyReferenceDensity => dims::DENSITY,
             Self::ContactPressure => dims::PRESSURE,
             Self::ContactThickness | Self::ContactGap => dims::LENGTH,
             Self::ContactTorque => Dims([2, 1, -2, 0, 0, 0]),
@@ -276,6 +284,8 @@ fn parse_target(node: &Node) -> Result<Target> {
             "fixed-temperature" => Target::FixedTemperature,
             "initial-temperature" => Target::InitialTemperature,
             "initial-specific-enthalpy" => Target::InitialSpecificEnthalpy,
+            "thermal-capacity-scale" => Target::ThermalCapacityScale,
+            "enthalpy-reference-density" => Target::EnthalpyReferenceDensity,
             "contact-pressure" => Target::ContactPressure,
             "contact-thickness" => Target::ContactThickness,
             "contact-gap" => Target::ContactGap,
@@ -451,7 +461,8 @@ impl UncertaintyStudy {
                 || (matches!(target, Target::ConvectionCoefficient | Target::ConvectionTemperature
                     | Target::AirInletTemperature | Target::FanSpeedRatio
                     | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature
-                    | Target::FixedTemperature | Target::InitialTemperature) && low <= 0.0)
+                    | Target::FixedTemperature | Target::InitialTemperature
+                    | Target::ThermalCapacityScale | Target::EnthalpyReferenceDensity) && low <= 0.0)
                 || (target.contact_axis().is_some() && low <= 0.0) {
                 return Err(error("invalid probability support for the physical target"));
             }
@@ -677,6 +688,38 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
             }
             _ => return Err(error("unsupported initial-state target")),
         }
+    } else if matches!(parameter.target, Target::ThermalCapacityScale | Target::EnthalpyReferenceDensity) {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(error("thermal storage controls must be finite and positive"));
+        }
+        let time = project.cooling.as_mut().and_then(|c| c.conduction.as_mut())
+            .and_then(|c| c.transient.as_mut())
+            .ok_or_else(|| error("thermal storage inputs require an original transient trajectory"))?;
+        if parameter.target == Target::ThermalCapacityScale {
+            if parameter.entity != "thermal-storage" || time.enthalpy.is_some() || time.capacities.is_empty() {
+                return Err(error("thermal-capacity-scale requires thermal-storage and explicit constant regional capacities"));
+            }
+            // The sampler begins from the immutable original project on every
+            // call. Preserve each region and its engineering basis; no material
+            // database property, initial temperature or source watts are scaled.
+            for row in &time.capacities {
+                let capacity = row.volumetric_heat_capacity.value * value;
+                if !capacity.is_finite() || capacity <= 0.0 {
+                    return Err(error("scaled thermal capacity is not representable"));
+                }
+            }
+            for row in &mut time.capacities { row.volumetric_heat_capacity.value *= value; }
+            matches = 1;
+        } else {
+            let storage = time.enthalpy.as_mut()
+                .ok_or_else(|| error("enthalpy-reference-density requires original total-enthalpy storage"))?;
+            for material in &mut storage.materials {
+                if material.region == parameter.entity {
+                    material.reference_density.value = value;
+                    matches += 1;
+                }
+            }
+        }
     } else if parameter.target == Target::Power {
         for row in project.power.as_mut().ok_or_else(|| error("missing power map"))? {
             if row.region == parameter.entity { row.watts = QtyAny::new(value, parameter.target.dims()); matches += 1; }
@@ -769,3 +812,5 @@ mod sensitivity_tests;
 
 #[cfg(test)]
 mod initial_state_tests;
+#[cfg(test)]
+mod storage_tests;

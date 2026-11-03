@@ -26,6 +26,39 @@ pub(super) fn policy(spec: &ProjectSpec) -> Option<&ConductionTransient> {
         .as_ref()
 }
 
+// The native capacity derivative scales the sampled matrix at multiplier one.
+// Our authored coordinate scales the immutable original capacities, so the
+// chain rule is dJ/dscale = native_normalized_derivative / actual_scale.
+fn capacity_scale_coefficient(
+    report: &J, original: &ProjectSpec, sampled: &ProjectSpec, scale: f64,
+) -> Result<f64> {
+    let old = policy(original).ok_or_else(|| invalid("missing original constant storage"))?;
+    let actual = policy(sampled).ok_or_else(|| invalid("missing sampled constant storage"))?;
+    if !scale.is_finite() || scale <= 0.0 || old.enthalpy.is_some() || actual.enthalpy.is_some()
+        || old.capacities.is_empty() || old.capacities.len() != actual.capacities.len()
+    {
+        return Err(invalid("capacity scale lost its original positive constant-storage family"));
+    }
+    for (old, actual) in old.capacities.iter().zip(&actual.capacities) {
+        let expected = old.volumetric_heat_capacity.value * scale;
+        if old.region != actual.region || old.source != actual.source
+            || old.volumetric_heat_capacity.dims != fs_project::spec::dims::VOLUMETRIC_HEAT_CAPACITY
+            || actual.volumetric_heat_capacity.dims != old.volumetric_heat_capacity.dims
+            || !old.volumetric_heat_capacity.value.is_finite() || old.volumetric_heat_capacity.value <= 0.0
+            || !expected.is_finite() || expected <= 0.0
+            || actual.volumetric_heat_capacity.value.to_bits() != expected.to_bits()
+        {
+            return Err(invalid("sampled capacities differ from their original declarations times the calibration scale"));
+        }
+    }
+    let normalized = number(report, "dtemperature_dcapacity_multiplier_k")?;
+    let derivative = normalized / scale;
+    if !derivative.is_finite() || (normalized != 0.0 && derivative == 0.0) {
+        return Err(invalid("capacity scale derivative is not representable"));
+    }
+    Ok(derivative)
+}
+
 fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result<()> {
     let setup = spec
         .cooling
@@ -46,6 +79,10 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
                 == fs_project::TransientInitialTemperature::FromRegionalEnthalpy
                 && time.enthalpy.as_ref().is_some_and(|storage| storage.materials.iter()
                     .filter(|row| row.region == parameter.entity).count() == 1),
+            Target::ThermalCapacityScale => parameter.entity == "thermal-storage"
+                && time.enthalpy.is_none() && !time.capacities.is_empty(),
+            Target::EnthalpyReferenceDensity => time.enthalpy.as_ref().is_some_and(|storage|
+                storage.materials.iter().filter(|row| row.region == parameter.entity).count() == 1),
             Target::ConvectionCoefficient | Target::ConvectionTemperature => true,
             Target::AirInletTemperature
             | Target::FanSpeedRatio
@@ -372,20 +409,34 @@ pub(super) fn coefficients_with_reference(
         let entity = parameter.entity.as_str();
         let derivative = match parameter.target {
             Target::InitialTemperature => number(report, "dtemperature_duniform_initial_k_per_k")?,
-            Target::InitialSpecificEnthalpy => {
+            Target::InitialSpecificEnthalpy | Target::EnthalpyReferenceDensity => {
                 let storage = time.enthalpy.as_ref()
-                    .ok_or_else(|| invalid("initial enthalpy control lost its storage owner"))?;
+                    .ok_or_else(|| invalid("enthalpy storage control lost its storage owner"))?;
                 let (index, material) = storage.materials.iter().enumerate()
                     .find(|(_, row)| row.region == entity)
-                    .ok_or_else(|| invalid("initial enthalpy control lost its original region"))?;
+                    .ok_or_else(|| invalid("enthalpy storage control lost its original region"))?;
                 let row = named(report, "regional_storage", "region", entity)?;
                 if row.f64_field("material_index") != Some(index as f64)
                     || number(row, "reference_density_kg_m3")?.to_bits()
                         != material.reference_density.value.to_bits()
                 {
-                    return Err(invalid("initial enthalpy derivative differs from its original storage region"));
+                    return Err(invalid("enthalpy storage derivative differs from its original storage region"));
                 }
-                number(row, "dtemperature_dinitial_specific_enthalpy_k_kg_per_j")?
+                number(row, if parameter.target == Target::InitialSpecificEnthalpy {
+                    "dtemperature_dinitial_specific_enthalpy_k_kg_per_j"
+                } else { "dtemperature_dreference_density_k_m3_per_kg" })?
+            }
+            Target::ThermalCapacityScale => {
+                let (original, coordinates) = reference
+                    .ok_or_else(|| invalid("capacity scaling requires its immutable original storage declarations"))?;
+                if coordinates.len() != parameters.len() {
+                    return Err(invalid("capacity scale calibration coordinate count differs"));
+                }
+                let scale = coordinates[index];
+                if !scale.is_finite() || scale < parameter.low || scale > parameter.high {
+                    return Err(invalid("capacity sensitivity point is outside its declared scale support"));
+                }
+                capacity_scale_coefficient(report, original, spec, scale)?
             }
             Target::PowerScheduleScale => {
                 let (original, coordinates) = reference
@@ -461,7 +512,8 @@ pub(super) fn coefficients_with_reference(
                 | Target::AirInletTemperature | Target::FanSpeedRatio
                 | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature
                 | Target::FixedTemperature | Target::HeatFlux | Target::ContactPressure
-                | Target::ContactThickness | Target::ContactGap | Target::ContactTorque);
+                | Target::ContactThickness | Target::ContactGap | Target::ContactTorque
+                | Target::ThermalCapacityScale | Target::EnthalpyReferenceDensity);
         if sampled_peak && prefix_steps == 0 && future_only && derivative != 0.0 {
             return Err(invalid("an initial peak cannot depend on a future thermal control"));
         }
