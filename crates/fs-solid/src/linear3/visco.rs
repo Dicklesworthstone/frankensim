@@ -42,10 +42,11 @@ pub use harmonic::{ViscoHarmonicError, ViscoHarmonicOperator, ViscoHarmonicRespo
 mod poles;
 pub use poles::{
     PreparedViscoPoles, ViscoJointHarmonicBudget, ViscoJointHarmonicError,
-    ViscoJointHarmonicFactor, ViscoJointHarmonicLoad, ViscoJointHarmonicResponse, ViscoMemorySite,
-    ViscoPole, ViscoPoleBudget, ViscoPoleDescriptorLoad, ViscoPoleDynamicBudget, ViscoPoleDynamicLoad,
+    ViscoJointHarmonicFactor, ViscoJointHarmonicLoad, ViscoJointHarmonicResponse,
+    ViscoJointHarmonicStateSpaceLoad, ViscoMemorySite, ViscoPole, ViscoPoleBudget,
+    ViscoPoleDescriptorLoad, ViscoPoleDynamicBudget, ViscoPoleDynamicLoad,
     ViscoPoleDynamicResponse, ViscoPoleError, ViscoPolePortBudget, ViscoPolePortLoad,
-    ViscoPolePortResponse, ViscoPoleSpectrum,
+    ViscoPolePortResponse, ViscoPoleSpectrum, ViscoPoleStateSpaceLoad, ViscoPoleStateSpaceResponse,
 };
 
 /// Geometry and explicit quadrature; material frames must already be resolved.
@@ -683,15 +684,22 @@ impl ViscoElements {
             }
         }
         let static_constraint_error = match mesh {
-            SolidMeshRef::Tet4 { elements, .. } =>
-                super::validate_rigid_mode_constraints(nodes, elements, fixed),
-            SolidMeshRef::Tet10 { elements, .. } =>
-                super::validate_rigid_mode_constraints(nodes, elements, fixed),
-            SolidMeshRef::Hex { elements: HexConnectivity::Hex20(elements), .. } =>
-                super::validate_rigid_mode_constraints(nodes, elements, fixed),
-            SolidMeshRef::Hex { elements: HexConnectivity::Hex27(elements), .. } =>
-                super::validate_rigid_mode_constraints(nodes, elements, fixed),
-        }.err();
+            SolidMeshRef::Tet4 { elements, .. } => {
+                super::validate_rigid_mode_constraints(nodes, elements, fixed)
+            }
+            SolidMeshRef::Tet10 { elements, .. } => {
+                super::validate_rigid_mode_constraints(nodes, elements, fixed)
+            }
+            SolidMeshRef::Hex {
+                elements: HexConnectivity::Hex20(elements),
+                ..
+            } => super::validate_rigid_mode_constraints(nodes, elements, fixed),
+            SolidMeshRef::Hex {
+                elements: HexConnectivity::Hex27(elements),
+                ..
+            } => super::validate_rigid_mode_constraints(nodes, elements, fixed),
+        }
+        .err();
         checkpoint(cx)?;
         Ok(Self {
             elements: prepared,
@@ -973,7 +981,11 @@ impl ViscoElementState<'_> {
                 }
                 for (b, &d) in p.b.iter().zip(&e.dofs) {
                     force[d] += p.volume_m3 * b.iter().zip(stress).map(|(a, s)| a * s).sum::<f64>();
-                    mean_force[d] += p.volume_m3 * b.iter().zip(response.mean_stress).map(|(a, s)| a * s).sum::<f64>();
+                    mean_force[d] += p.volume_m3
+                        * b.iter()
+                            .zip(response.mean_stress)
+                            .map(|(a, s)| a * s)
+                            .sum::<f64>();
                 }
                 energy.stored_j += p.volume_m3 * state.stored;
                 energy.work_j += p.volume_m3 * state.work;
@@ -1003,8 +1015,13 @@ impl ViscoElementState<'_> {
             .iter()
             .map(|&d| force[d])
             .collect();
-        let reduced_mean_force_n = self.system.equilibrium.free_dofs.iter()
-            .map(|&d| mean_force[d]).collect();
+        let reduced_mean_force_n = self
+            .system
+            .equilibrium
+            .free_dofs
+            .iter()
+            .map(|&d| mean_force[d])
+            .collect();
         self.histories = histories;
         self.energy = energy;
         self.displacement_m.copy_from_slice(u_new);

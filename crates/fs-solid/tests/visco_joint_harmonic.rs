@@ -137,14 +137,14 @@ fn power(r: &ViscoJointHarmonicResponse) {
             .chain(&r.dynamic_load)
             .map(|l| l.average_dissipation_w.abs())
             .sum::<f64>()
-        + r.omega_rad_s * r.average_total_storage_j
+        + r.omega_rad_s * r.average_total_storage_j.unwrap()
         + 1e-30;
     assert!(
         r.body_power_balance_residual_w.abs() < 3e-10 * scale,
         "{r:?}"
     );
     assert!(
-        r.total_power_balance_residual_w.abs() < 3e-10 * scale,
+        r.total_power_balance_residual_w.unwrap().abs() < 3e-10 * scale,
         "{r:?}"
     );
     assert!(

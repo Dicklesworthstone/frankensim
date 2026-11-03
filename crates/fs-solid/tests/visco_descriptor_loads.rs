@@ -146,10 +146,10 @@ fn check_power(r: &ViscoJointHarmonicResponse) {
     let scale = r.average_input_power_w.abs()
         + r.average_material_heat_w.abs()
         + load.average_dissipation_w.abs()
-        + r.omega_rad_s * r.average_total_storage_j
+        + r.omega_rad_s * r.average_total_storage_j.unwrap()
         + 1e-30;
     assert!(r.body_power_balance_residual_w.abs() < 3e-10 * scale);
-    assert!(r.total_power_balance_residual_w.abs() < 3e-10 * scale);
+    assert!(r.total_power_balance_residual_w.unwrap().abs() < 3e-10 * scale);
     assert!(load.power_balance_residual_w.abs() < 3e-10 * scale);
     assert!(r.mechanical_residual < 2e-11);
     assert!(r.memory_residual < 2e-11);
@@ -180,8 +180,8 @@ fn constrained_inertance_retains_original_reaction_in_forced_response_and_finite
             let total_drag = b * b * drag;
             for omega in [0.1, 0.9, 2.5_f64.sqrt(), 3.0, 12.0] {
                 let s = C64::new(0.0, -omega);
-                let u = force
-                    / (C64::from_re(2.5) + (s * s).scale(total_mass) + s.scale(total_drag));
+                let u =
+                    force / (C64::from_re(2.5) + (s * s).scale(total_mass) + s.scale(total_drag));
                 let flow = (s * u).scale(b);
                 let momentum = flow.scale(mass);
                 let reaction = (s.scale(mass) + C64::from_re(drag)) * flow;
@@ -193,10 +193,26 @@ fn constrained_inertance_retains_original_reaction_in_forced_response_and_finite
                 near(account.state[1], reaction, force.abs());
                 near(account.flow[0], flow, force.abs());
                 near(account.effort[0], reaction, force.abs());
-                near(account.state[0].scale(1.0 / mass), account.flow[0], force.abs());
-                close(account.average_storage_j, 0.25 * momentum.norm_sq() / mass, 1e-25);
-                close(account.average_dissipation_w, 0.5 * drag * flow.norm_sq(), 1e-25);
-                close(account.average_absorbed_power_w, 0.5 * drag * flow.norm_sq(), 1e-25);
+                near(
+                    account.state[0].scale(1.0 / mass),
+                    account.flow[0],
+                    force.abs(),
+                );
+                close(
+                    account.average_storage_j,
+                    0.25 * momentum.norm_sq() / mass,
+                    1e-25,
+                );
+                close(
+                    account.average_dissipation_w,
+                    0.5 * drag * flow.norm_sq(),
+                    1e-25,
+                );
+                close(
+                    account.average_absorbed_power_w,
+                    0.5 * drag * flow.norm_sq(),
+                    1e-25,
+                );
                 close(
                     r.average_body_storage_j,
                     0.25 * (2.5 * u.norm_sq() + (s * u).norm_sq()),
@@ -232,10 +248,13 @@ fn constrained_inertance_retains_original_reaction_in_forced_response_and_finite
                 (pole.rate_per_s.scale(mass) + C64::from_re(drag)) * flow,
                 1.0,
             );
-            close(account.storage_j, 0.5 * account.state[0].norm_sq() / mass, 1e-25);
+            close(
+                account.storage_j,
+                0.5 * account.state[0].norm_sq() / mass,
+                1e-25,
+            );
             close(account.dissipation_w, drag * flow.norm_sq(), 1e-25);
-            let scale = 2.0 * pole.rate_per_s.abs()
-                * (account.body_storage_j + account.storage_j)
+            let scale = 2.0 * pole.rate_per_s.abs() * (account.body_storage_j + account.storage_j)
                 + account.dissipation_w;
             assert!(account.signed_power_defect_w.abs() < 3e-10 * scale);
             assert!(account.joint_decay_power_defect_w.abs() < 3e-10 * scale);
@@ -299,10 +318,22 @@ fn purely_algebraic_mutual_resistance_keeps_zero_storage_and_all_maxwell_strains
                 near(account.flow[i], velocity.scale([1.0, -0.5][i]), 1e-12);
             }
             // Check both uncondensed constraint rows, not only host impedance.
-            near(account.state[0].scale(2.0) + account.state[1].scale(0.5), velocity, 1e-12);
-            near(account.state[0].scale(0.5) + account.state[1], velocity.scale(-0.5), 1e-12);
+            near(
+                account.state[0].scale(2.0) + account.state[1].scale(0.5),
+                velocity,
+                1e-12,
+            );
+            near(
+                account.state[0].scale(0.5) + account.state[1],
+                velocity.scale(-0.5),
+                1e-12,
+            );
             assert_eq!(account.average_storage_j, 0.0);
-            close(account.average_dissipation_w, 0.5 * (8.0 / 7.0) * velocity.norm_sq(), 1e-25);
+            close(
+                account.average_dissipation_w,
+                0.5 * (8.0 / 7.0) * velocity.norm_sq(),
+                1e-25,
+            );
             close(
                 r.average_material_heat_w,
                 0.5 * (0.2 * velocity.norm_sq() + (6.5 / 0.25) * q.norm_sq()),
@@ -327,12 +358,21 @@ fn descriptor_with_no_algebraic_coordinates_preserves_existing_ode_response_exac
         let g = vec![1.0, -0.6, 0.0, 0.0];
         let q = vec![2.0, 0.0, 0.0, 1.0];
         let ode = PortHamiltonian::new(
-            2, 2, j.clone(), r.clone(), g.clone(),
+            2,
+            2,
+            j.clone(),
+            r.clone(),
+            g.clone(),
             Box::new(QuadraticStorage::new(q.clone(), 2).unwrap()),
         )
         .unwrap();
         let descriptor = DescriptorPortHamiltonian::new(
-            2, 2, 2, j, r, g,
+            2,
+            2,
+            2,
+            j,
+            r,
+            g,
             Box::new(QuadraticStorage::new(q, 2).unwrap()),
         )
         .unwrap();
@@ -362,10 +402,16 @@ fn descriptor_with_no_algebraic_coordinates_preserves_existing_ode_response_exac
         assert_eq!(original.dynamic_load_algebraic_range(), Some(9..9));
         for omega in [0.2, 2.0, 12.0] {
             let force = [C64::new(1.2e-4, -0.9e-4)];
-            let a = original.harmonic_factor(omega, response_budget(), cx).unwrap()
-                .solve(&force, cx).unwrap();
-            let b = constrained.harmonic_factor(omega, response_budget(), cx).unwrap()
-                .solve(&force, cx).unwrap();
+            let a = original
+                .harmonic_factor(omega, response_budget(), cx)
+                .unwrap()
+                .solve(&force, cx)
+                .unwrap();
+            let b = constrained
+                .harmonic_factor(omega, response_budget(), cx)
+                .unwrap()
+                .solve(&force, cx)
+                .unwrap();
             assert_eq!(a.physical_vector, b.physical_vector);
             assert_eq!(a.average_total_storage_j, b.average_total_storage_j);
             assert_eq!(a.average_material_heat_w, b.average_material_heat_w);
@@ -384,55 +430,112 @@ fn original_constraints_capacity_band_singularity_and_cancellation_refuse_withou
         let load = inertance(2.0, 0.3);
         let attach = spec(&load, &[0.75]);
         for limited in [
-            ViscoPoleDynamicBudget { maximum_states: 1, ..dynamic_budget() },
-            ViscoPoleDynamicBudget { maximum_ports: 0, ..dynamic_budget() },
-            ViscoPoleDynamicBudget { maximum_payload_bytes: 0, ..dynamic_budget() },
-            ViscoPoleDynamicBudget { maximum_preparation_work: 0, ..dynamic_budget() },
+            ViscoPoleDynamicBudget {
+                maximum_states: 1,
+                ..dynamic_budget()
+            },
+            ViscoPoleDynamicBudget {
+                maximum_ports: 0,
+                ..dynamic_budget()
+            },
+            ViscoPoleDynamicBudget {
+                maximum_payload_bytes: 0,
+                ..dynamic_budget()
+            },
+            ViscoPoleDynamicBudget {
+                maximum_preparation_work: 0,
+                ..dynamic_budget()
+            },
         ] {
-            assert!(body.prepare_resonance_poles_with_descriptor_load(
-                attach, preparation(), limited, cx,
-            ).is_err());
+            assert!(
+                body.prepare_resonance_poles_with_descriptor_load(
+                    attach,
+                    preparation(),
+                    limited,
+                    cx,
+                )
+                .is_err()
+            );
         }
-        assert!(body.prepare_resonance_poles_with_descriptor_load(
-            attach,
-            ViscoPoleBudget { maximum_coordinates: 8, ..preparation() },
-            dynamic_budget(),
-            cx,
-        ).is_err());
-        assert!(body.prepare_resonance_poles_with_descriptor_load(
-            spec(&load, &[]), preparation(), dynamic_budget(), cx,
-        ).is_err());
+        assert!(
+            body.prepare_resonance_poles_with_descriptor_load(
+                attach,
+                ViscoPoleBudget {
+                    maximum_coordinates: 8,
+                    ..preparation()
+                },
+                dynamic_budget(),
+                cx,
+            )
+            .is_err()
+        );
+        assert!(
+            body.prepare_resonance_poles_with_descriptor_load(
+                spec(&load, &[]),
+                preparation(),
+                dynamic_budget(),
+                cx,
+            )
+            .is_err()
+        );
         let mut limited = attach;
         limited.band_rad_s = (0.0, 1.0);
-        let image = body.prepare_resonance_poles_with_descriptor_load(
-            limited, preparation(), dynamic_budget(), cx,
-        ).unwrap();
+        let image = body
+            .prepare_resonance_poles_with_descriptor_load(
+                limited,
+                preparation(),
+                dynamic_budget(),
+                cx,
+            )
+            .unwrap();
         assert!(image.harmonic_factor(2.0, response_budget(), cx).is_err());
         let factor = image.harmonic_factor(0.5, response_budget(), cx).unwrap();
         let force = [C64::new(1e-4, 2e-4)];
         let before = factor.solve(&force, cx).unwrap();
         assert!(factor.solve(&[C64::from_re(100.0)], cx).is_err());
         assert!(factor.solve(&[], cx).is_err());
-        assert_eq!(before.physical_vector, factor.solve(&force, cx).unwrap().physical_vector);
+        assert_eq!(
+            before.physical_vector,
+            factor.solve(&force, cx).unwrap().physical_vector
+        );
 
         // Both original algebraic equations demand the same zero velocity;
         // the two reactions are indeterminate. They must stay singular.
         let redundant = DescriptorPortHamiltonian::new(
-            2, 0, 1, vec![0.0; 4], vec![0.0; 4], vec![1.0, 1.0],
+            2,
+            0,
+            1,
+            vec![0.0; 4],
+            vec![0.0; 4],
+            vec![1.0, 1.0],
             Box::new(QuadraticStorage::new(vec![], 0).unwrap()),
-        ).unwrap();
+        )
+        .unwrap();
         match body.prepare_resonance_poles_with_descriptor_load(
-            spec(&redundant, &[1.0]), preparation(), dynamic_budget(), cx,
+            spec(&redundant, &[1.0]),
+            preparation(),
+            dynamic_budget(),
+            cx,
         ) {
-            Ok(singular) => assert!(singular.harmonic_factor(0.5, response_budget(), cx).is_err()),
+            Ok(singular) => assert!(
+                singular
+                    .harmonic_factor(0.5, response_budget(), cx)
+                    .is_err()
+            ),
             Err(ViscoPoleError::Invalid(_)) => {}
             Err(other) => panic!("unexpected refusal: {other:?}"),
         }
         gate.request();
         assert!(factor.solve(&force, cx).is_err());
         assert!(image.harmonic_factor(0.5, response_budget(), cx).is_err());
-        assert!(body.prepare_resonance_poles_with_descriptor_load(
-            attach, preparation(), dynamic_budget(), cx,
-        ).is_err());
+        assert!(
+            body.prepare_resonance_poles_with_descriptor_load(
+                attach,
+                preparation(),
+                dynamic_budget(),
+                cx,
+            )
+            .is_err()
+        );
     });
 }

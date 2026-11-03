@@ -60,6 +60,19 @@ pub struct ViscoJointHarmonicLoad {
     pub power_balance_residual_w: f64,
 }
 
+/// Original linear boundary amplitudes and cycle-mean signed port exchange.
+/// Storage and heat cannot be inferred from the rational coefficients alone.
+#[derive(Clone, Debug)]
+pub struct ViscoJointHarmonicStateSpaceLoad {
+    pub state: Vec<C64>,
+    pub displacement: Vec<C64>,
+    pub flow: Vec<C64>,
+    pub effort: Vec<C64>,
+    /// Re(conj(flow_p)*effort_p)/2; negative mutual exchanges remain signed.
+    pub average_absorbed_port_power_w: Vec<f64>,
+    pub average_absorbed_power_w: f64,
+}
+
 /// Peak exp(-i*omega*t) state and cycle-averaged physical accounts.
 #[derive(Clone, Debug)]
 pub struct ViscoJointHarmonicResponse {
@@ -75,16 +88,21 @@ pub struct ViscoJointHarmonicResponse {
     pub dynamic_load_residual: f64,
     /// Original equilibrium, consistent inertia and Maxwell strain storage.
     pub average_body_storage_j: f64,
-    pub average_total_storage_j: f64,
+    /// Complete physical body+load mean storage, when every boundary supplies
+    /// a physical storage witness. None for a generic state-space boundary.
+    pub average_total_storage_j: Option<f64>,
     /// Original Kelvin viscosity and every Maxwell branch, counted once.
     pub average_material_heat_w: f64,
     pub average_input_power_w: f64,
     pub port_load: Option<ViscoJointHarmonicLoad>,
     pub dynamic_load: Option<ViscoJointHarmonicLoad>,
+    pub state_space_load: Option<ViscoJointHarmonicStateSpaceLoad>,
     /// Applied power - material heat - actual power into the attached loads.
     pub body_power_balance_residual_w: f64,
     /// Applied power - material heat - each load's independent dissipation.
-    pub total_power_balance_residual_w: f64,
+    /// None when a boundary has no physical storage/dissipation witness;
+    /// its actual exchange is still included in the body balance above.
+    pub total_power_balance_residual_w: Option<f64>,
 }
 
 /// One LU at one physical frequency, reusable across forcing columns/phases.
@@ -117,7 +135,8 @@ impl<'s> PreparedViscoPoles<'s> {
         let n = self.dimension;
         let d = n as u128;
         let p = (self.port_load.as_ref().map_or(0, |l| l.port_count())
-            + self.dynamic_load.as_ref().map_or(0, |l| l.port_count())) as u128;
+            + self.dynamic_load.as_ref().map_or(0, |l| l.port_count())
+            + self.state_space_load.as_ref().map_or(0, |l| l.port_count())) as u128;
         let quadrature_work: u128 = self
             .source
             .elements
@@ -280,6 +299,26 @@ impl ViscoJointHarmonicFactor<'_, '_> {
                 })
             })
             .transpose()?;
+        let state_space_load = model
+            .state_space_load
+            .as_ref()
+            .map(|load| {
+                let p = load.observe(model, s, &state, &mut cancelled)?;
+                body = Some((p.body_storage_j, p.body_dissipation_w));
+                Ok::<_, ViscoPoleError>(ViscoJointHarmonicStateSpaceLoad {
+                    state: p.state,
+                    displacement: p.displacement,
+                    flow: p.flow,
+                    effort: p.effort,
+                    average_absorbed_port_power_w: p
+                        .absorbed_port_power_w
+                        .into_iter()
+                        .map(|x| 0.5 * x)
+                        .collect(),
+                    average_absorbed_power_w: 0.5 * p.absorbed_power_w,
+                })
+            })
+            .transpose()?;
         let (body_storage, body_heat) = match body {
             Some(x) => x,
             None => super::dynamic::body_energy(model, s, &state, &mut cancelled)?,
@@ -323,23 +362,37 @@ impl ViscoJointHarmonicFactor<'_, '_> {
             load_error = load_error.max(ratio(load.power_balance_residual_w.abs(), denom));
             scale += denom;
         }
+        if let Some(load) = &state_space_load {
+            absorbed += load.average_absorbed_power_w;
+            scale += 0.5
+                * load
+                    .flow
+                    .iter()
+                    .zip(&load.effort)
+                    .map(|(v, e)| v.abs() * e.abs())
+                    .sum::<f64>();
+        }
         let average_body_storage_j = 0.5 * body_storage;
-        let average_total_storage_j = average_body_storage_j + load_storage;
+        let average_total_storage_j = state_space_load
+            .is_none()
+            .then_some(average_body_storage_j + load_storage);
         let average_material_heat_w = 0.5 * body_heat;
         let body_defect = input - average_material_heat_w - absorbed;
-        let total_defect = input - average_material_heat_w - load_heat;
+        let total_defect = state_space_load
+            .is_none()
+            .then_some(input - average_material_heat_w - load_heat);
         scale +=
             average_material_heat_w.abs() + 2.0 * self.omega_rad_s * average_body_storage_j.abs();
         let relative = load_error
             .max(ratio(body_defect.abs(), scale))
-            .max(ratio(total_defect.abs(), scale));
+            .max(total_defect.map_or(0.0, |d| ratio(d.abs(), scale)));
         if [
             input,
             average_body_storage_j,
-            average_total_storage_j,
+            average_total_storage_j.unwrap_or(0.0),
             average_material_heat_w,
             body_defect,
-            total_defect,
+            total_defect.unwrap_or(0.0),
             scale,
             relative,
         ]
@@ -369,6 +422,7 @@ impl ViscoJointHarmonicFactor<'_, '_> {
             average_input_power_w: input,
             port_load,
             dynamic_load,
+            state_space_load,
             body_power_balance_residual_w: body_defect,
             total_power_balance_residual_w: total_defect,
         })
@@ -388,7 +442,7 @@ impl ViscoJointHarmonicFactor<'_, '_> {
         }
         let mut numerators = [0.0_f64; 3];
         let mut denominators = [0.0_f64; 3];
-        let algebraic_start = model.dynamic_load_algebraic_range().map_or(n, |r| r.start);
+        let algebraic_start = model.individually_checked_load_rows();
         let mut algebraic_residual = 0.0_f64;
         let mut correction = vec![C64::ZERO; n];
         for i in 0..n {

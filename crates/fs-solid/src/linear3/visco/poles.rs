@@ -22,14 +22,17 @@ pub use load::{ViscoPolePortBudget, ViscoPolePortLoad, ViscoPolePortResponse};
 mod dynamic;
 use dynamic::{DynamicLoadSource, PreparedDynamicLoad};
 pub use dynamic::{
-    ViscoPoleDescriptorLoad, ViscoPoleDynamicBudget, ViscoPoleDynamicLoad,
-    ViscoPoleDynamicResponse,
+    ViscoPoleDescriptorLoad, ViscoPoleDynamicBudget, ViscoPoleDynamicLoad, ViscoPoleDynamicResponse,
 };
+
+mod state_space;
+use state_space::PreparedStateSpaceLoad;
+pub use state_space::{ViscoPoleStateSpaceLoad, ViscoPoleStateSpaceResponse};
 
 mod response;
 pub use response::{
     ViscoJointHarmonicBudget, ViscoJointHarmonicError, ViscoJointHarmonicFactor,
-    ViscoJointHarmonicLoad, ViscoJointHarmonicResponse,
+    ViscoJointHarmonicLoad, ViscoJointHarmonicResponse, ViscoJointHarmonicStateSpaceLoad,
 };
 
 /// Source-owned preparation and callback resources, separate from fs-la's
@@ -85,6 +88,9 @@ pub struct ViscoPole {
     pub port_load: Option<ViscoPolePortResponse>,
     /// Independent load coordinates, physical work, storage and dissipation.
     pub dynamic_load: Option<ViscoPoleDynamicResponse>,
+    /// Original unqualified linear boundary states and signed exchange; no
+    /// storage or heat is invented from its rational transfer coefficients.
+    pub state_space_load: Option<ViscoPoleStateSpaceResponse>,
     /// Shared solver's scaled final Newton correction.
     pub relative_step: f64,
     /// Number of shared Newton evaluations.
@@ -198,6 +204,7 @@ pub struct PreparedViscoPoles<'a> {
     budget: ViscoPoleBudget,
     port_load: Option<PreparedPortLoad>,
     dynamic_load: Option<PreparedDynamicLoad>,
+    state_space_load: Option<PreparedStateSpaceLoad>,
 }
 
 impl ViscoElements {
@@ -215,7 +222,7 @@ impl ViscoElements {
         budget: ViscoPoleBudget,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
-        self.prepare_poles(budget, None, None, cx)
+        self.prepare_poles(budget, None, None, None, cx)
     }
 
     /// Include a physical passive boundary in the ORIGINAL hereditary pencil.
@@ -236,7 +243,7 @@ impl ViscoElements {
         load_budget: ViscoPolePortBudget,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
-        self.prepare_poles(budget, Some((load, load_budget)), None, cx)
+        self.prepare_poles(budget, Some((load, load_budget)), None, None, cx)
     }
 
     /// Couple every state of an admitted exact quadratic pHS impedance load.
@@ -251,7 +258,13 @@ impl ViscoElements {
         load_budget: ViscoPoleDynamicBudget,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
-        self.prepare_poles(budget, None, Some((DynamicLoadSource::Ode(load), load_budget)), cx)
+        self.prepare_poles(
+            budget,
+            None,
+            Some((DynamicLoadSource::Ode(load), load_budget)),
+            None,
+            cx,
+        )
     }
 
     /// Couple an original constrained quadratic impedance without solving away
@@ -272,8 +285,31 @@ impl ViscoElements {
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
         self.prepare_poles(
-            budget, None, Some((DynamicLoadSource::Descriptor(load), load_budget)), cx,
+            budget,
+            None,
+            Some((DynamicLoadSource::Descriptor(load), load_budget)),
+            None,
+            cx,
         )
+    }
+
+    /// Attach every original real state of a selected continuous boundary law.
+    /// z'=A*z+B*v and effort=C*z+D*v+E*v', with v=force_map^T*u'.
+    /// Full mutual/direct/derivative terms enter the same hereditary polynomial;
+    /// no isolated boundary impedance or pole resolvent is evaluated.
+    ///
+    /// This does not turn a rational fit into a physical storage witness or
+    /// certify its passivity/stability. Responses report signed boundary work,
+    /// original body energy/heat and no complete total storage or heat balance
+    /// for this uncertified boundary. The declared source band still applies.
+    pub fn prepare_resonance_poles_with_state_space_load(
+        &self,
+        load: ViscoPoleStateSpaceLoad<'_>,
+        budget: ViscoPoleBudget,
+        load_budget: ViscoPoleDynamicBudget,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
+        self.prepare_poles(budget, None, None, Some((load, load_budget)), cx)
     }
 
     fn prepare_poles(
@@ -281,6 +317,7 @@ impl ViscoElements {
         budget: ViscoPoleBudget,
         load: Option<(ViscoPolePortLoad<'_>, ViscoPolePortBudget)>,
         dynamic: Option<(DynamicLoadSource<'_>, ViscoPoleDynamicBudget)>,
+        state_space: Option<(ViscoPoleStateSpaceLoad<'_>, ViscoPoleDynamicBudget)>,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
         checkpoint(cx)?;
@@ -311,11 +348,8 @@ impl ViscoElements {
             .and_then(|q| q.checked_add(m))
             .ok_or_else(|| invalid("complete hereditary dimension overflow"))?;
         let n = body_n
-            .checked_add(
-                dynamic
-                    .as_ref()
-                    .map_or(0, |(load, _)| load.state_dim()),
-            )
+            .checked_add(dynamic.as_ref().map_or(0, |(load, _)| load.state_dim()))
+            .and_then(|v| v.checked_add(state_space.as_ref().map_or(0, |(load, _)| load.states)))
             .ok_or_else(|| invalid("joint hereditary/load dimension overflow"))?;
         if m == 0
             || budget.maximum_coordinates > MAX_NONLINEAR_POLE_DIMENSION
@@ -355,6 +389,18 @@ impl ViscoElements {
         let dynamic_load = dynamic
             .map(|(load, budget)| PreparedDynamicLoad::new(m, load, budget, cx))
             .transpose()?;
+        let state_space_load = state_space
+            .map(|(load, budget)| PreparedStateSpaceLoad::new(m, load, budget, cx))
+            .transpose()?;
+        if let Some(load) = &state_space_load {
+            band.0 = band.0.max(load.band_rad_s.0);
+            band.1 = band.1.min(load.band_rad_s.1);
+            if band.0 > band.1 {
+                return Err(invalid(
+                    "material and state-space boundary bands do not intersect",
+                ));
+            }
+        }
         if let Some(load) = &port_load {
             band.0 = band.0.max(load.band_rad_s.0);
             band.1 = band.1.min(load.band_rad_s.1);
@@ -442,6 +488,9 @@ impl ViscoElements {
         if let Some(load) = &dynamic_load {
             load.add_to_pencil(&mut a, n, body_n, cx)?;
         }
+        if let Some(load) = &state_space_load {
+            load.add_to_pencil(&mut a, n, body_n, cx)?;
+        }
         if a.iter().flatten().any(|x| !x.is_finite()) {
             return Err(invalid(
                 "original hereditary coefficient is not representable",
@@ -458,6 +507,7 @@ impl ViscoElements {
             budget,
             port_load,
             dynamic_load,
+            state_space_load,
         };
         let rate = budget.reference_rate_per_s;
         for i in 0..n {
@@ -522,16 +572,34 @@ impl PreparedViscoPoles<'_> {
     /// Original differential load coordinates; empty for a purely algebraic
     /// impedance. The following reaction coordinates carry no stored energy.
     pub fn dynamic_load_differential_range(&self) -> Option<core::ops::Range<usize>> {
-        self.dynamic_load.as_ref().map(|load| {
-            self.body_dimension()..self.body_dimension() + load.differential_dim()
-        })
+        self.dynamic_load
+            .as_ref()
+            .map(|load| self.body_dimension()..self.body_dimension() + load.differential_dim())
     }
 
     /// Original algebraic load reactions; empty for an ordinary ODE load.
     pub fn dynamic_load_algebraic_range(&self) -> Option<core::ops::Range<usize>> {
-        self.dynamic_load.as_ref().map(|load| {
-            self.body_dimension() + load.differential_dim()..self.dimension
-        })
+        self.dynamic_load
+            .as_ref()
+            .map(|load| self.body_dimension() + load.differential_dim()..self.dimension)
+    }
+
+    /// Complete original linear boundary suffix, empty for a static D/E law.
+    pub fn state_space_load_range(&self) -> Option<core::ops::Range<usize>> {
+        self.state_space_load
+            .as_ref()
+            .map(|_| self.body_dimension()..self.dimension)
+    }
+
+    // Each descriptor constraint and each generic boundary state has its own
+    // residual check; physically different row units cannot mask one another.
+    fn individually_checked_load_rows(&self) -> usize {
+        self.dynamic_load_algebraic_range()
+            .map_or(self.dimension, |r| r.start)
+            .min(
+                self.state_space_load_range()
+                    .map_or(self.dimension, |r| r.start),
+            )
     }
 
     fn body_dimension(&self) -> usize {
@@ -628,7 +696,7 @@ impl PreparedViscoPoles<'_> {
         }
         let mut numerators = [0.0_f64; 3];
         let mut denominators = [0.0_f64; 3];
-        let algebraic_start = self.dynamic_load_algebraic_range().map_or(n, |r| r.start);
+        let algebraic_start = self.individually_checked_load_rows();
         let mut algebraic_residual = 0.0_f64;
         for i in 0..n {
             poll(cancelled)?;
@@ -698,6 +766,11 @@ impl PreparedViscoPoles<'_> {
                 .transpose()?,
             dynamic_load: self
                 .dynamic_load
+                .as_ref()
+                .map(|load| load.observe(self, s, &vector, cancelled))
+                .transpose()?,
+            state_space_load: self
+                .state_space_load
                 .as_ref()
                 .map(|load| load.observe(self, s, &vector, cancelled))
                 .transpose()?,
