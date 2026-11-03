@@ -479,17 +479,28 @@ pub fn solve_lumped_enthalpy_spectrum_from_clock_dd_cancellable<'a>(
         let source_j = finite(body, source.integral_dd(), "integrated source energy")?;
         let mut residual = |specific_enthalpy: f64| -> Result<f64, ConductionError> {
             poll(&mut cancelled, attempts)?;
-            let state = phase_state(body, specific_enthalpy)?;
-            let energy = step_energy(body, config, previous_h, state, dt_s, source_j)?;
+            let values = body
+                .phase_curve
+                .values_at_specific_enthalpy(specific_enthalpy)
+                .map_err(|error| lumped_error(&body.name, error.to_string()))?;
+            let energy = step_energy_at(
+                body,
+                config,
+                previous_h,
+                specific_enthalpy,
+                values.temperature_k,
+                dt_s,
+                source_j,
+            )?;
             Ok(energy.residual_j.to_f64())
         };
-        // Preserve exact dark/equilibrium states instead of injecting a root
-        // bisection interval's rounding into an already exact zero balance.
-        let next_h = if residual(previous_h)? == 0.0 {
-            previous_h
-        } else {
-            bisect_enthalpy_step(body, config.enthalpy_tolerance_j_kg, &mut residual)?
-        };
+        let next_h = bisect_enthalpy_step(
+            body,
+            previous_h,
+            config.enthalpy_tolerance_j_kg,
+            controls.maximum_step_energy_residual_j,
+            &mut residual,
+        )?;
         let state = phase_state(body, next_h)?;
         let (convection, radiation) = boundary_power(body, config, state.temperature_k())?;
         let energy = step_energy(body, config, previous_h, state, dt_s, source_j)?;
@@ -612,7 +623,27 @@ fn step_energy(
     dt_s: f64,
     source_j: Dd,
 ) -> Result<LumpedEnthalpySpectrumEnergy, ConductionError> {
-    let (convection, radiation) = boundary_power(body, config, state.temperature_k())?;
+    step_energy_at(
+        body,
+        config,
+        previous_h,
+        state.specific_enthalpy_j_kg(),
+        state.temperature_k(),
+        dt_s,
+        source_j,
+    )
+}
+
+fn step_energy_at(
+    body: &LumpedEnthalpyBody<'_>,
+    config: LumpedEnthalpyMarchConfig,
+    previous_h: f64,
+    specific_enthalpy_j_kg: f64,
+    temperature_k: f64,
+    dt_s: f64,
+    source_j: Dd,
+) -> Result<LumpedEnthalpySpectrumEnergy, ConductionError> {
+    let (convection, radiation) = boundary_power(body, config, temperature_k)?;
     let duration = Dd::from_f64(dt_s);
     let mut energy = LumpedEnthalpySpectrumEnergy {
         source_input_j: source_j,
@@ -629,7 +660,7 @@ fn step_energy(
         stored_energy_change_j: finite(
             body,
             Dd::from_f64(body.mass_kg)
-                * (Dd::from_f64(state.specific_enthalpy_j_kg()) - Dd::from_f64(previous_h)),
+                * (Dd::from_f64(specific_enthalpy_j_kg) - Dd::from_f64(previous_h)),
             "stored energy change",
         )?,
         residual_j: Dd::ZERO,

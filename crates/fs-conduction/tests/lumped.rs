@@ -1020,6 +1020,156 @@ fn g1_enthalpy_march_conserves_energy_through_the_latent_heat_plateau() {
 }
 
 #[test]
+fn g1_stiff_enthalpy_cooling_closes_the_actual_energy_balance() {
+    let curve = phase_curve();
+    let body = LumpedEnthalpyBody::try_new(
+        "stiff cooling",
+        2.0,
+        0.01,
+        1_000.0,
+        0.0,
+        0.001,
+        35.0,
+        &curve,
+    )
+    .unwrap();
+    let config = LumpedEnthalpyMarchConfig {
+        ambient_temperature_k: 400.0 + 1.0 / 7.0,
+        internal_power_w: 0.0,
+        duration_s: 100_000.0,
+        maximum_step_s: 100_000.0,
+        maximum_steps: 1,
+        enthalpy_tolerance_j_kg: 1e-4,
+        ..enthalpy_config()
+    };
+    let march =
+        with_cx(|cx| solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config).unwrap());
+    let sample = march.samples().last().unwrap();
+    // In this sensible branch h = cp*(T-300), cp = 100 J/(kg K).
+    // Solve the linear backward-Euler balance independently. A narrow h
+    // bracket alone magnifies its error by 1 + dt*G/(m*cp) in the heat balance.
+    let mass = 2.0;
+    let conductance = 10.0;
+    let cp = 100.0;
+    let expected_h = (mass * config.initial_specific_enthalpy_j_kg
+        + config.duration_s * conductance * (config.ambient_temperature_k - 300.0))
+        / (mass + config.duration_s * conductance / cp);
+    let h = sample.phase_state.specific_enthalpy_j_kg();
+    let temperature = sample.phase_state.temperature_k();
+    let residual = mass * (h - config.initial_specific_enthalpy_j_kg)
+        - config.duration_s * conductance * (config.ambient_temperature_k - temperature);
+    assert!((h - expected_h).abs() <= config.enthalpy_tolerance_j_kg);
+    assert!(residual.abs() <= mass * config.enthalpy_tolerance_j_kg);
+    assert!(sample.step_energy_residual_j.abs() <= mass * config.enthalpy_tolerance_j_kg);
+    assert!(temperature >= config.ambient_temperature_k && temperature <= 500.0);
+}
+
+#[test]
+fn g0_adiabatic_enthalpy_is_exact_even_with_an_inactive_extreme_reservoir() {
+    let curve = phase_curve();
+    let body = enthalpy_body(&curve);
+    for h in [12_345.678_9, 45_000.0] {
+        let config = LumpedEnthalpyMarchConfig {
+            initial_specific_enthalpy_j_kg: h,
+            radiation_temperature_k: 1e100,
+            internal_power_w: 0.0,
+            ..enthalpy_config()
+        };
+        let march = with_cx(|cx| {
+            solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config).unwrap()
+        });
+        for sample in march.samples() {
+            assert_eq!(
+                sample.phase_state.specific_enthalpy_j_kg().to_bits(),
+                h.to_bits()
+            );
+            assert_eq!(sample.net_power_into_body_w, 0.0);
+            assert_eq!(sample.step_energy_residual_j, 0.0);
+        }
+        assert_eq!(march.cumulative_absolute_energy_residual_j(), 0.0);
+    }
+}
+
+#[test]
+fn g1_near_equilibrium_radiation_retains_the_physical_temperature_difference() {
+    let curve = phase_curve();
+    let body = LumpedEnthalpyBody::try_new(
+        "near radiative equilibrium",
+        2.0,
+        0.01,
+        0.0,
+        0.8,
+        0.001,
+        35.0,
+        &curve,
+    )
+    .unwrap();
+    let temperature = 500.0_f64;
+    let enclosure = temperature.next_up();
+    let config = LumpedEnthalpyMarchConfig {
+        radiation_temperature_k: enclosure,
+        internal_power_w: 0.0,
+        duration_s: 0.0,
+        ..enthalpy_config()
+    };
+    let march =
+        with_cx(|cx| solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config).unwrap());
+    // For one-ULP separation the analytical derivative is accurate to f64
+    // roundoff; subtracting rounded T^4 values loses substantial relative flux.
+    let expected =
+        4.0 * 0.8 * 5.670_374_419e-8 * 0.01 * temperature.powi(3) * (enclosure - temperature);
+    let radiation = march.samples()[0].radiation_into_body_w;
+    assert!(radiation > 0.0);
+    assert!((radiation / expected - 1.0).abs() <= 4.0 * f64::EPSILON);
+}
+
+#[test]
+fn g0_enthalpy_refuses_unrepresentable_energy_instead_of_publishing_it() {
+    let curve = phase_curve();
+    let body = enthalpy_body(&curve);
+    let config = LumpedEnthalpyMarchConfig {
+        internal_power_w: 1e-12,
+        duration_s: 1.0,
+        maximum_step_s: 1.0,
+        maximum_steps: 1,
+        enthalpy_tolerance_j_kg: 1e-16,
+        ..enthalpy_config()
+    };
+    // The deposited energy lies below one ULP of this phase coordinate, but
+    // above the explicitly admitted joule defect. No f64 endpoint can pass.
+    let error = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config).unwrap_err()
+    });
+    assert!(error.to_string().contains("representable enthalpy states"));
+
+    let overflowing = LumpedEnthalpyBody::try_new(
+        "unrepresentable radiation",
+        2.0,
+        1e307,
+        0.0,
+        0.5,
+        0.001,
+        35.0,
+        &curve,
+    )
+    .unwrap();
+    let error = with_cx(|cx| {
+        solve_lumped_enthalpy(
+            cx,
+            &overflowing,
+            BiotGate::corpus_default(),
+            LumpedEnthalpyMarchConfig {
+                radiation_temperature_k: 1_000.0,
+                duration_s: 0.0,
+                ..config
+            },
+        )
+        .unwrap_err()
+    });
+    assert!(error.to_string().contains("power is not representable"));
+}
+
+#[test]
 fn g1_distinct_fluid_and_radiation_reservoirs_hold_analytical_equilibrium() {
     let curve = phase_curve();
     let equilibrium = 500.0_f64;

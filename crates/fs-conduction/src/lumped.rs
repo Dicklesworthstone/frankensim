@@ -582,6 +582,11 @@ pub struct LumpedEnthalpyMarchConfig {
     /// Maximum accepted step count.
     pub maximum_steps: usize,
     /// Absolute bisection interval tolerance in specific enthalpy [J/kg].
+    /// The constant-power march also requires the actual discrete energy
+    /// residual to be at most `mass_kg * enthalpy_tolerance_j_kg` joules.
+    /// Spectrum-driven callers retain their separately declared joule budget.
+    /// Adjacent representable enthalpies may terminate interval refinement
+    /// only when that energy budget still passes. This is not a time-error bound.
     pub enthalpy_tolerance_j_kg: f64,
 }
 
@@ -664,7 +669,7 @@ pub fn solve_lumped_enthalpy(
 ) -> Result<LumpedEnthalpyMarch, ConductionError> {
     validate_enthalpy_config(body, config)?;
     let maximum_biot = body.maximum_biot(config.radiation_temperature_k);
-    if maximum_biot > gate.ceiling() {
+    if !maximum_biot.is_finite() || maximum_biot > gate.ceiling() {
         return Err(lumped_error(
             &body.name,
             format!(
@@ -717,6 +722,12 @@ pub fn solve_lumped_enthalpy(
         let (convection, radiation, net) = enthalpy_power(body, config, state.temperature_k())?;
         let residual = body.mass_kg * (next - specific_enthalpy) - dt_s * net;
         cumulative_absolute_energy_residual_j += residual.abs();
+        if !residual.is_finite() || !cumulative_absolute_energy_residual_j.is_finite() {
+            return Err(lumped_error(
+                &body.name,
+                "enthalpy energy accounting is not representable".to_owned(),
+            ));
+        }
         time_s += dt_s;
         specific_enthalpy = next;
         samples.push(LumpedEnthalpySample {
@@ -1122,25 +1133,73 @@ fn solve_enthalpy_step(
     dt_s: f64,
 ) -> Result<f64, ConductionError> {
     let residual = |specific_enthalpy: f64| -> Result<f64, ConductionError> {
-        let state = phase_state(body, specific_enthalpy)?;
-        let (_, _, power) = enthalpy_power(body, config, state.temperature_k())?;
+        // Trial states use the same chart admission without hashing an
+        // identity; only accepted samples construct a published phase state.
+        let values = body
+            .phase_curve
+            .values_at_specific_enthalpy(specific_enthalpy)
+            .map_err(|error| lumped_error(&body.name, error.to_string()))?;
+        let (_, _, power) = enthalpy_power(body, config, values.temperature_k)?;
         Ok(body.mass_kg * (specific_enthalpy - previous_h) - dt_s * power)
     };
-    bisect_enthalpy_step(body, config.enthalpy_tolerance_j_kg, residual)
+    bisect_enthalpy_step(
+        body,
+        previous_h,
+        config.enthalpy_tolerance_j_kg,
+        body.mass_kg * config.enthalpy_tolerance_j_kg,
+        residual,
+    )
 }
 
 /// Shared native bounded bisection; callers supply their original energy
-/// residual without introducing another constitutive or thermal solver.
+/// residual and joule allowance. A narrow enthalpy bracket alone cannot bound
+/// energy error for a stiff boundary law. Exact roots return immediately;
+/// otherwise both interval refinement and actual energy closure are required.
 fn bisect_enthalpy_step(
     body: &LumpedEnthalpyBody<'_>,
+    previous_h: f64,
     enthalpy_tolerance_j_kg: f64,
+    energy_tolerance_j: f64,
     mut residual: impl FnMut(f64) -> Result<f64, ConductionError>,
 ) -> Result<f64, ConductionError> {
+    if !energy_tolerance_j.is_finite() || energy_tolerance_j < 0.0 {
+        return Err(lumped_error(
+            &body.name,
+            "enthalpy energy tolerance must be finite and nonnegative".to_owned(),
+        ));
+    }
+    let mut evaluate = |h| {
+        let value = residual(h)?;
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(lumped_error(
+                &body.name,
+                "enthalpy energy residual is not representable".to_owned(),
+            ))
+        }
+    };
+    let previous_residual = evaluate(previous_h)?;
+    if previous_residual == 0.0 {
+        return Ok(previous_h);
+    }
     let knots = body.phase_curve.knots();
     let mut lower = knots[0].specific_enthalpy_j_kg;
     let mut upper = knots[knots.len() - 1].specific_enthalpy_j_kg;
-    let lower_residual = residual(lower)?;
-    let upper_residual = residual(upper)?;
+    // The previous state anchors the sign bracket, retaining the physically
+    // selected heating/cooling direction even for a loose requested tolerance.
+    let mut lower_residual = if previous_residual < 0.0 {
+        lower = previous_h;
+        previous_residual
+    } else {
+        evaluate(lower)?
+    };
+    let mut upper_residual = if previous_residual > 0.0 {
+        upper = previous_h;
+        previous_residual
+    } else {
+        evaluate(upper)?
+    };
     if lower_residual > 0.0 || upper_residual < 0.0 {
         return Err(lumped_error(
             &body.name,
@@ -1149,22 +1208,49 @@ fn bisect_enthalpy_step(
             ),
         ));
     }
+    if lower_residual == 0.0 {
+        return Ok(lower);
+    }
+    if upper_residual == 0.0 {
+        return Ok(upper);
+    }
     for _ in 0..LUMPED_ENTHALPY_BISECTION_ITERATIONS {
-        let midpoint = lower + 0.5 * (upper - lower);
-        if midpoint.to_bits() == lower.to_bits() || midpoint.to_bits() == upper.to_bits() {
-            break;
+        let midpoint = 0.5 * lower + 0.5 * upper;
+        if midpoint == lower || midpoint == upper {
+            let (candidate, error) = if lower_residual.abs() <= upper_residual.abs() {
+                (lower, lower_residual)
+            } else {
+                (upper, upper_residual)
+            };
+            if error.abs() <= energy_tolerance_j {
+                return Ok(candidate);
+            }
+            return Err(lumped_error(
+                &body.name,
+                format!(
+                    "representable enthalpy states cannot close the energy residual {error} J within {energy_tolerance_j} J; reduce the step or revise the numerical budget"
+                ),
+            ));
         }
-        let midpoint_residual = residual(midpoint)?;
-        if midpoint_residual <= 0.0 {
+        let midpoint_residual = evaluate(midpoint)?;
+        if midpoint_residual == 0.0
+            || (upper - lower <= enthalpy_tolerance_j_kg
+                && midpoint_residual.abs() <= energy_tolerance_j)
+        {
+            return Ok(midpoint);
+        }
+        if midpoint_residual < 0.0 {
             lower = midpoint;
+            lower_residual = midpoint_residual;
         } else {
             upper = midpoint;
-        }
-        if upper - lower <= enthalpy_tolerance_j_kg {
-            break;
+            upper_residual = midpoint_residual;
         }
     }
-    Ok(lower + 0.5 * (upper - lower))
+    Err(lumped_error(
+        &body.name,
+        "enthalpy solve exhausted its bounded iterations before interval and energy closure; reduce the step or revise the numerical budget".to_owned(),
+    ))
 }
 
 fn phase_state(
@@ -1184,17 +1270,30 @@ fn enthalpy_power(
     let convection = body.convection_w_per_m2_k
         * body.surface_area_m2
         * (config.ambient_temperature_k - body_temperature_k);
-    let radiation = body.transport.emissivity_at(body_temperature_k)?
-        * STEFAN_BOLTZMANN_W_M2_K4
-        * body.surface_area_m2
-        * (fourth_power(config.radiation_temperature_k) - fourth_power(body_temperature_k));
+    let emissivity = body.transport.emissivity_at(body_temperature_k)?;
+    let radiation = if emissivity == 0.0 {
+        // A disabled reservoir must not introduce 0*infinity or NaN through
+        // an irrelevant fourth power of its otherwise finite temperature.
+        0.0
+    } else {
+        let enclosure = config.radiation_temperature_k;
+        // Factor the fourth-power difference to retain near-equilibrium flux
+        // rather than subtracting two large, nearly equal rounded powers.
+        emissivity
+            * STEFAN_BOLTZMANN_W_M2_K4
+            * body.surface_area_m2
+            * (enclosure - body_temperature_k)
+            * (enclosure + body_temperature_k)
+            * (enclosure * enclosure + body_temperature_k * body_temperature_k)
+    };
     let net = config.internal_power_w + convection + radiation;
+    if ![convection, radiation, net].into_iter().all(f64::is_finite) {
+        return Err(lumped_error(
+            &body.name,
+            "enthalpy boundary or source power is not representable".to_owned(),
+        ));
+    }
     Ok((convection, radiation, net))
-}
-
-fn fourth_power(value: f64) -> f64 {
-    let square = value * value;
-    square * square
 }
 
 /// Finite support coupled to a uniform specimen through a fixed thermal path.

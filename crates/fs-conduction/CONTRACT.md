@@ -2713,6 +2713,16 @@ authority.
   latent carry, storage-density and shared radiation-reservoir derivatives.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
+  Its shared bounded implicit solve requires both enthalpy interval refinement
+  and the actual discrete energy residual. The constant-power allowance is
+  `mass * enthalpy_tolerance_j_kg` joules; spectrum callers retain their explicit
+  joule allowance. Exact roots, including adiabatic latent states, are preserved.
+  At adjacent representable enthalpies only an endpoint within that allowance
+  may be accepted; otherwise the step refuses rather than publishing an
+  unclosed balance. These numerical tolerances do not bound time-discretization
+  error. Nonfinite boundary/source power and residual arithmetic are refused.
+  Disabled radiation does not evaluate an irrelevant fourth power, and active
+  radiation factors the fourth-power difference to retain near-equilibrium flux.
   It couples constant internal power with convection and surface radiation and
   returns temperature, density, and phase fraction without material-name
   branches. `LumpedThermalTransport` may retain temperature-sampled
@@ -3367,8 +3377,9 @@ spectrum. Original mass, equilibrium phase curve, latent fractions,
 temperature-dependent transport receipts, fluid/enclosure temperatures and
 convection-plus-radiation Biot gate remain authoritative. Its backward-Euler
 residual calls the original phase and boundary-power helpers and the same
-bounded native bisection implementation. The existing constant-power caller
-retains its original residual and behavior.
+bounded native bisection implementation. Both callers retain their original
+physical residual; the shared solver refines until each caller's actual joule
+budget passes instead of treating a narrow enthalpy interval as energy closure.
 
 Every accepted substep consumes the full shared spectrum's analytic interval
 integral in DD joules, with an explicit positive W-per-input-unit scale and

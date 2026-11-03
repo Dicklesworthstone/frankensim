@@ -586,6 +586,36 @@ fn late_substeps_keep_their_absolute_source_clock_and_partition_input_exactly() 
 }
 
 #[test]
+fn zero_energy_budget_preserves_exact_dark_and_latent_steps() {
+    let curve = phase_curve(ContentHash([0xb1; 32]));
+    let body = body(&curve);
+    for (initial_h, power) in [(20_000.0, 0.0), (40_000.0, 0.0), (40_000.0, 1_000.0)] {
+        let source = constant(power);
+        let march = run(
+            binding(&body, &source),
+            LumpedEnthalpyMarchConfig {
+                initial_specific_enthalpy_j_kg: initial_h,
+                ..config()
+            },
+            LumpedEnthalpySpectrumControls {
+                maximum_step_energy_residual_j: 0.0,
+                ..controls()
+            },
+        );
+        assert_eq!(march.energy().residual_j_dd(), Dd::ZERO);
+        assert_eq!(
+            march
+                .samples()
+                .last()
+                .unwrap()
+                .phase_state()
+                .specific_enthalpy_j_kg(),
+            initial_h + power,
+        );
+    }
+}
+
+#[test]
 fn original_biot_phase_domains_and_nonduplicated_sources_remain_mandatory() {
     let curve = phase_curve(ContentHash([0x98; 32]));
     let body = body(&curve);
@@ -692,21 +722,20 @@ fn alias_resolution_work_output_and_energy_tolerances_fail_atomically() {
         )
         .is_err()
     );
-    assert!(
-        solve_lumped_enthalpy_spectrum(
-            binding(&body, &one),
-            BiotGate::corpus_default(),
-            LumpedEnthalpyMarchConfig {
-                enthalpy_tolerance_j_kg: 100.0,
-                ..config()
-            },
-            LumpedEnthalpySpectrumControls {
-                maximum_step_energy_residual_j: 1e-12,
-                ..controls()
-            },
-        )
-        .is_err()
-    );
+    let refined = solve_lumped_enthalpy_spectrum(
+        binding(&body, &one),
+        BiotGate::corpus_default(),
+        LumpedEnthalpyMarchConfig {
+            enthalpy_tolerance_j_kg: 100.0,
+            ..config()
+        },
+        LumpedEnthalpySpectrumControls {
+            maximum_step_energy_residual_j: 1e-12,
+            ..controls()
+        },
+    )
+    .expect("the shared solver refines beyond the h tolerance to close the joule budget");
+    assert!(refined.energy().residual_j_dd().to_f64().abs() <= 1e-12);
     assert_eq!(body.identity(), original_identity);
     assert!(
         solve_lumped_enthalpy_spectrum(
