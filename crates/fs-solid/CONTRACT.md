@@ -3235,6 +3235,45 @@ appear in a free modal coordinate. This flag adds no mass, stiffness or damping
 law. The original operator still rejects massless free-coordinate condensation
 and retains its complete reference geometry, source sections and native ports.
 
+## Forced resonance on the native linear frame
+
+`Frame2d::prepare_harmonic_response` connects the original reference mass,
+elastic stiffness, full section viscosity and explicitly authored Rayleigh
+matrix to `fs_modal::harmonic::PreparedHarmonicResponse`. The prepared factor
+is reusable for force cases at one frequency. Its `free_dofs()` map preserves
+node-major translations/rotations and their conjugate forces/moments; no mode
+or off-diagonal inertia/loss term is discarded. The source frame is borrowed
+immutably, including its accepted displacement and retained Rayleigh reference.
+
+Peak phasors use `exp(-i omega t)`. Responses contain physical amplitude,
+phase, velocity, numerical backward residual and independent cycle-averaged
+input/viscous powers. Source viscosity and Rayleigh damping appear once in the
+total loss; this is not automatic thermal deposition. Original source bands
+admit the actual queried frequency, including explicit DC when supported.
+Singular lossless poles refuse without a damping floor or artificial mass.
+
+The scope is fixed linear geometry, elastic sections, stationary homogeneous
+supports and positive inertia on every free coordinate. Consistent member mass
+or source-derived section spin supplies physical rotational inertia. Original
+rigid modes remain intact at positive forcing frequency. Source viscosity
+assembly is shared with the native transient owner, without repeating its
+natural-mode eigensolve or inventing a Nyquist clock for a harmonic query. The
+public transient operator retains its complete-spectrum/timestep admission.
+Massless viscous coordinates, moving supports, support reactions,
+nonlinear periodic orbits and startup transients are not supplied by this API.
+Roundoff-sized native stiffness asymmetry is admitted in diagonal-scaled
+coordinates and averaged in scratch; larger skew refuses. Source coefficients
+and accepted frame state are not rewritten.
+
+Controls bound the full coordinate count and conservative numerical payload
+before dense assembly. Cancellation polls surround native bounded preparations,
+per-member stiffness assembly and the shared factorization/solve; an interrupted
+native mass/material call finishes before its next checkpoint. G1/G3 tests in
+`tests/frame2d_harmonic.rs` and `tests/frame2d_viscosity.rs` cover analytic axial
+resonance, full consistent bending inertia, heterogeneous nonproportional loss,
+rotational covariance, reciprocity, source-band boundaries, physical power,
+singular limits, budgets, cancellation and unchanged accepted state.
+
 ## Original material strain domains on frozen modal solid trajectories
 
 `ViscoElements::validate_displacement` evaluates the existing element Mandel

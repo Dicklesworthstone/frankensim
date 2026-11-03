@@ -45,7 +45,9 @@ pub struct FrameMaterialDamping {
     free_dofs: Vec<usize>,
     sections: Vec<(usize, FrameViscousSection)>,
     band: (f64, f64),
-    maximum_omega_rad_s: f64,
+    // Frequency-only assembly has no timestep claim. Only the public transient
+    // preparation fills this after the complete native spectrum is admitted.
+    maximum_omega_rad_s: Option<f64>,
     covers_all_members: bool,
 }
 
@@ -89,6 +91,9 @@ impl FrameMaterialDamping {
     /// sampled Nyquist band, and that whole band must fit the source domain.
     /// This is not a time-discretization error estimate or anti-aliasing filter.
     pub fn admit_timestep(&self, dt: f64) -> Result<(), SolidError> {
+        let maximum_omega_rad_s = self.maximum_omega_rad_s.ok_or_else(|| {
+            invalid("transient frame damping requires complete natural-spectrum admission")
+        })?;
         let nyquist = core::f64::consts::PI / dt;
         if !dt.is_finite()
             || dt <= 0.0
@@ -100,7 +105,7 @@ impl FrameMaterialDamping {
                 "frame viscosity must support DC through the actual sampled Nyquist band",
             ));
         }
-        if self.maximum_omega_rad_s >= nyquist {
+        if maximum_omega_rad_s >= nyquist {
             return Err(invalid(
                 "complete frame spectrum must lie below the sampled Nyquist limit",
             ));
@@ -248,6 +253,24 @@ impl Frame2d {
     /// it must preserve off-diagonal terms or explicitly bound their removal.
     /// Purely elastic frames return None without changing their existing model.
     pub fn material_damping_operator(&self) -> Result<Option<FrameMaterialDamping>, SolidError> {
+        let Some(mut operator) = self.assemble_material_damping()? else {
+            return Ok(None);
+        };
+        let mut maximum_omega_rad_s = 0.0_f64;
+        for mode in self.modal_analysis()?.modes {
+            let omega = mode.angular_frequency().ok_or_else(|| {
+                invalid("complete material-damped frame spectrum must be positive and resolved")
+            })?;
+            maximum_omega_rad_s = maximum_omega_rad_s.max(omega);
+        }
+        operator.maximum_omega_rad_s = Some(maximum_omega_rad_s);
+        Ok(Some(operator))
+    }
+
+    // One source-owned C assembly for both native transients and harmonic
+    // queries. A single forcing frequency needs neither a Nyquist clock nor
+    // a complete positive modal spectrum: real rigid motion remains admissible.
+    pub(super) fn assemble_material_damping(&self) -> Result<Option<FrameMaterialDamping>, SolidError> {
         if self
             .elements
             .iter()
@@ -273,13 +296,6 @@ impl Frame2d {
             return Err(invalid(
                 "material damping requires inertia on every free coordinate; use consistent member mass",
             ));
-        }
-        let mut maximum_omega_rad_s = 0.0_f64;
-        for mode in self.modal_analysis()?.modes {
-            let omega = mode.angular_frequency().ok_or_else(|| {
-                invalid("complete material-damped frame spectrum must be positive and resolved")
-            })?;
-            maximum_omega_rad_s = maximum_omega_rad_s.max(omega);
         }
         let n = self.ndof();
         let entries = n
@@ -355,7 +371,7 @@ impl Frame2d {
             free_dofs: (0..n).filter(|&dof| !self.fixed[dof]).collect(),
             sections,
             band,
-            maximum_omega_rad_s,
+            maximum_omega_rad_s: None,
             covers_all_members: self.elements.iter().all(|e| e.viscous_section.is_some()),
         }))
     }

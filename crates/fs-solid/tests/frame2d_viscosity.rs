@@ -496,3 +496,138 @@ fn source_loss_never_bypasses_linear_inertial_or_frequency_admission() {
         .unwrap();
     assert!(mixed.newmark(&[0.0; 2], 1e-5, (0.0, 0.0), none).is_err());
 }
+
+fn with_harmonic_cx(f: impl FnOnce(&fs_exec::Cx<'_>)) {
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+    let gate = CancelGate::new();
+    ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+        f(&Cx::new(&gate, arena,
+            StreamKey { seed: 17, kernel_id: 5, tile: 0, iteration: 0 },
+            Budget::INFINITE, ExecMode::Deterministic));
+    });
+}
+
+/// G1: the source's full heterogeneous loss matrix acts on the native forced
+/// frame, including mutual inertia, phase and independently computed heat.
+#[test]
+fn harmonic_response_retains_nonproportional_source_loss_and_consistent_mass() {
+    use fs_math::c64::C64;
+    use fs_modal::harmonic::HarmonicResponseControls;
+    with_harmonic_cx(|cx| {
+        let frame = axial_chain();
+        let accepted = frame.displacements().to_vec();
+        let controls = HarmonicResponseControls {
+            maximum_coordinates: 9,
+            maximum_payload_bytes: 1 << 20,
+            maximum_relative_residual: 1e-12,
+        };
+        let area = core::f64::consts::PI * RADIUS.powi(2);
+        let member_mass = RHO * area * 0.5;
+        let stiffness = YOUNG * area / 0.5;
+        let (c1, c2) = (2e4 * area / 0.5, 1.6e5 * area / 0.5);
+        let force = [C64::new(0.7, -0.2), C64::new(-0.3, 0.5)];
+        for omega in [0.0, 1000.0, 2300.0, 5000.0] {
+            let prepared = frame.prepare_harmonic_response(omega,
+                Rayleigh { a0: 0.0, a1: 0.0 }, controls, cx).unwrap();
+            assert_eq!(prepared.free_dofs(), &[3, 6]);
+            let entry = |k: f64, m: f64, c: f64| C64::new(k - omega * omega * m, -omega * c);
+            let a = entry(2.0 * stiffness, 2.0 * member_mass / 3.0, c1 + c2);
+            let b = entry(-stiffness, member_mass / 6.0, -c2);
+            let d = entry(stiffness, member_mass / 3.0, c2);
+            let determinant = a * d - b * b;
+            let expected = [(d * force[0] - b * force[1]) / determinant,
+                (a * force[1] - b * force[0]) / determinant];
+            let response = prepared.solve(&force, cx).unwrap();
+            for (actual, reference) in response.displacement.iter().zip(expected) {
+                assert!((*actual - reference).abs() < 3e-12 * reference.abs());
+            }
+            let v = expected.map(|q| C64::new(q.im, -q.re).scale(omega));
+            // Original axial strain-rate ports: eta*A/L * |v_j-v_i|^2 / 2.
+            let heat = 0.5 * (c1 * v[0].norm_sq() + c2 * (v[1] - v[0]).norm_sq());
+            near(response.average_viscous_power_w, heat, 5e-12 * heat.max(1e-30));
+            near(response.average_input_power_w, heat, 5e-12 * heat.max(1e-30));
+        }
+        assert_eq!(frame.displacements(), accepted);
+    });
+}
+
+/// G0/G1: a harmonic query admits its actual source frequency, not a guessed
+/// time grid; the original source band and viscosity remain authoritative.
+#[test]
+fn harmonic_viscosity_checks_original_frequency_band_and_counts_rayleigh_once() {
+    use fs_math::c64::C64;
+    use fs_modal::harmonic::HarmonicResponseControls;
+    with_harmonic_cx(|cx| {
+        let controls = HarmonicResponseControls {
+            maximum_coordinates: 6,
+            maximum_payload_bytes: 1 << 20,
+            maximum_relative_residual: 1e-12,
+        };
+        let frame = guided(source(2e5, 4e6, (100.0, 5000.0)), 0);
+        let rayleigh = Rayleigh { a0: 0.7, a1: 1e-7 };
+        for omega in [0.0, 99.0, 5001.0] {
+            assert!(frame.prepare_harmonic_response(omega, rayleigh, controls, cx).is_err());
+        }
+        let area = core::f64::consts::PI * RADIUS.powi(2);
+        let mass = RHO * area / 3.0;
+        let stiffness = YOUNG * area;
+        let damping = 2e5 * area + rayleigh.a0 * mass + rayleigh.a1 * stiffness;
+        for omega in [100.0, 2500.0, 5000.0] {
+            let response = frame.prepare_harmonic_response(omega, rayleigh, controls, cx).unwrap()
+                .solve(&[C64::ONE], cx).unwrap();
+            let q = C64::ONE / C64::new(stiffness - omega * omega * mass, -omega * damping);
+            assert!((response.displacement[0] - q).abs() < 3e-12 * q.abs());
+            let heat = 0.5 * damping * omega * omega * q.norm_sq();
+            near(response.average_viscous_power_w, heat, 5e-12 * heat);
+            near(response.average_input_power_w, heat, 5e-12 * heat);
+        }
+        assert_eq!(frame.material_viscous_section(0).unwrap().omega_band_rad_s(), (100.0, 5000.0));
+    });
+}
+
+/// G1: free translation and the elastic resonance coexist in the same source
+/// frame. A positive harmonic frequency does not require removal of rigid modes.
+#[test]
+fn harmonic_source_frame_keeps_rigid_motion_and_its_elastic_resonance() {
+    use fs_math::c64::C64;
+    use fs_modal::harmonic::HarmonicResponseControls;
+    with_harmonic_cx(|cx| {
+        let mut frame = Frame2d::with_mass_formulation(
+            Geometry::Linear, FrameMassFormulation::ConsistentReference);
+        frame.add_node(0.0, 0.0);
+        frame.add_node(1.0, 0.0);
+        frame.fix(0, [false, true, true]);
+        frame.fix(1, [false, true, true]);
+        frame.add_material_viscous_element(0, 1, 5, source(2e5, 4e6, BAND)).unwrap();
+        // Preserve the existing public transient owner's unresolved-mode rule.
+        assert!(frame.material_damping_operator().is_err());
+        let controls = HarmonicResponseControls {
+            maximum_coordinates: 6, maximum_payload_bytes: 1 << 20,
+            maximum_relative_residual: 1e-12,
+        };
+        let area = core::f64::consts::PI * RADIUS.powi(2);
+        let mass = RHO * area;
+        let stiffness = YOUNG * area;
+        let damping = 2e5 * area;
+        for omega in [1000.0, (12.0 * stiffness / mass).sqrt()] {
+            let prepared = frame.prepare_harmonic_response(omega,
+                Rayleigh { a0: 0.0, a1: 0.0 }, controls, cx).unwrap();
+            assert_eq!(prepared.free_dofs(), &[0, 3]);
+            let rigid = prepared.solve(&[C64::ONE, C64::ONE], cx).unwrap();
+            let translation = -2.0 / (mass * omega * omega);
+            for q in &rigid.displacement {
+                assert!((*q - C64::from_re(translation)).abs() < 2e-12 * translation.abs());
+            }
+            assert!(rigid.average_viscous_power_w.abs() < 1e-22);
+            let differential = prepared.solve(&[C64::ONE, C64::from_re(-1.0)], cx).unwrap();
+            let extension = C64::ONE / C64::new(2.0 * stiffness - omega * omega * mass / 6.0,
+                -2.0 * omega * damping);
+            assert!((differential.displacement[0] - extension).abs() < 3e-12 * extension.abs());
+            assert!((differential.displacement[1] + extension).abs() < 3e-12 * extension.abs());
+            let heat = 2.0 * damping * omega * omega * extension.norm_sq();
+            near(differential.average_viscous_power_w, heat, 5e-12 * heat);
+            near(differential.average_input_power_w, heat, 5e-12 * heat);
+        }
+    });
+}

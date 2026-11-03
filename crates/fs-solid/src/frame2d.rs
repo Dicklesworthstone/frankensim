@@ -51,6 +51,9 @@ use fs_material::section::ConcentricElasticSection;
 /// Physical-time permanent creep on the original fiber-section frame solver.
 pub mod creep;
 
+/// Full forced resonance of the original elastic frame and its material losses.
+pub mod harmonic;
+
 mod mass;
 pub use mass::FrameMassFormulation;
 mod modes;
