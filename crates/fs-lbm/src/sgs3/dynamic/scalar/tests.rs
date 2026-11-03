@@ -1,6 +1,6 @@
 use super::*;
 
-fn settings(averaging: DynamicAveraging) -> (DynamicSgsConfig, DynamicScalarConfig) {
+pub(super) fn settings(averaging: DynamicAveraging) -> (DynamicSgsConfig, DynamicScalarConfig) {
     (
         DynamicSgsConfig {
             averaging,
@@ -21,7 +21,7 @@ fn field(n: usize) -> (Vec<f64>, Vec<[f64; 3]>, Vec<f64>) {
     cartesian_field([n; 3])
 }
 
-fn cartesian_field(shape: [usize; 3]) -> (Vec<f64>, Vec<[f64; 3]>, Vec<f64>) {
+pub(super) fn cartesian_field(shape: [usize; 3]) -> (Vec<f64>, Vec<[f64; 3]>, Vec<f64>) {
     let mut rho = Vec::new();
     let mut u = Vec::new();
     let mut phi = Vec::new();
@@ -49,7 +49,7 @@ fn cartesian_field(shape: [usize; 3]) -> (Vec<f64>, Vec<[f64; 3]>, Vec<f64>) {
 // Independent full physical-unit reference: raw first/second moments, explicit
 // modulo indexing, all nine strain entries, no production filter helpers or
 // normalization. Delta^2 and the test-width factor are present in the model.
-fn reference(
+pub(super) fn reference(
     shape: [usize; 3],
     spacing: [f64; 3],
     rho: &[f64],

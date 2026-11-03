@@ -1863,7 +1863,30 @@ The reusable scalar workspace adds 64 nominal numerical bytes per cell,
 with actual capacity admission and bounded cancellation. Constant scalars
 and uniform velocity use zero diffusivity without consuming stale scratch.
 This exploratory gradient-diffusion model supplies no wall or shock model,
-dynamic multicomponent diffusion, SGS energy equation, or DNS qualification.
+SGS energy equation, or DNS qualification.
+
+`scalar::components::PeriodicDynamicComponents` fits one common diffusivity
+to a bank of same-unit scalars, including every species mass fraction. It
+minimizes the sum of the scalar Germano residuals: numerator and denominator
+are summed across components before spatial averaging and division. One
+shared normalization preserves their physical relative weight; independently
+normalizing each species would give trace species artificial influence.
+Constant and absent components contribute zero. Species permutations and
+orthogonal same-unit component transformations preserve the exact-arithmetic
+fit, with floating reductions following the declared component order.
+
+`prepare_with_scalar_and_components` fits momentum, heat and common species
+diffusivity from one preparation of the current flow. Its immutable snapshot
+accessor reads the existing composition layout without a transposed copy.
+All three transports are independent; positive species diffusivity remains
+possible when momentum viscosity and heat diffusivity are zero. The component
+workspace adds 80 nominal numerical bytes per cell, independent of species
+count, with no allocation during preparation and bounded cancellation.
+The native consumer must enforce physical diffusivity limits and preserve
+discrete zero-sum mass flux and partial-enthalpy transport. This constrained
+vector extension of the scalar fit does not replace molecular differential
+diffusion, model unresolved reaction rates, or establish reacting-flow/DNS
+accuracy. The existing periodic, grid-aspect and exploratory-use limits apply.
 
 ### Moving/open D3Q19 boundaries and turbulent wall loads
 

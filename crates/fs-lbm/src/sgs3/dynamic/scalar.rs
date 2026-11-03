@@ -20,6 +20,10 @@
 
 use super::*;
 
+/// One common diffusivity fitted to several same-unit scalar components.
+#[path = "scalar/components.rs"]
+pub mod components;
+
 /// Explicit scalar-fit controls. The consuming transport owner enforces the
 /// diffusivity/molecular bound using its actual material and face coefficients.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -207,6 +211,20 @@ impl PeriodicDynamicScalar {
                 ..DynamicScalarReport::default()
             });
         }
+        let domain = self.prepare_contractions(flow, density, scales, cancelled)?;
+        self.fit_from(flow, config, scales, domain, cancelled)
+    }
+
+    // Both the single-scalar and common-component fits use this exact kernel.
+    // `scalar` has already been centered and normalized by the caller.
+    fn prepare_contractions(
+        &mut self,
+        flow: &PeriodicDynamicSgs,
+        density: &[f64],
+        scales: InputScales,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[f64; 2], DynamicSgsError> {
+        let n = self.scalar.len();
         for cell in 0..n {
             poll(cancelled, cell)?;
             let g = gradient(self.shape, flow.derivative_metric, cell, &self.scalar)?;
@@ -263,7 +281,18 @@ impl PeriodicDynamicScalar {
             numerator.add(pair[0]);
             denominator.add(pair[1]);
         }
-        let domain = [numerator.value, denominator.value];
+        Ok([numerator.value, denominator.value])
+    }
+
+    fn fit_from(
+        &mut self,
+        flow: &PeriodicDynamicSgs,
+        config: DynamicScalarConfig,
+        scales: InputScales,
+        domain: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DynamicScalarReport, DynamicSgsError> {
+        let n = self.scalar.len();
         let mut report = DynamicScalarReport {
             minimum_raw_coefficient: f64::INFINITY,
             ..DynamicScalarReport::default()
