@@ -1,6 +1,8 @@
 //! Rigid carriers with internal axial rotor momentum.
 //!
-//! The state momentum is the **total** body-frame momentum `L = I omega + h`.
+//! The total-momentum API carries `L = I omega + h`. The carrier API and
+//! angular-velocity-driven path retain `k = I omega` separately from `h` so
+//! a large stored rotor cannot erase a smaller, physically active carrier.
 //! `I` is the reduced inertia: retain the rotor transverse inertia but exclude
 //! its axial spin inertia. Each component of `h` is built from an absolute
 //! rotor axial momentum `p = J (relative_spin + axis.dot(omega))`, not from
@@ -30,6 +32,10 @@ pub use tensor::InertiaTensor3;
 
 #[path = "gyrostat/symmetric.rs"]
 mod symmetric;
+
+#[path = "gyrostat/carrier.rs"]
+mod carrier;
+pub use carrier::momentum_step as carrier_momentum_step;
 
 /// Finite shaft actuation, carrier recoil and relative rotor phase.
 #[path = "gyrostat/rotors.rs"]
@@ -135,7 +141,8 @@ pub fn momentum_step(
 ///
 /// Half of the rotor momentum change precedes the gyrostat drift, half
 /// follows it. These internal transfers leave total momentum untouched;
-/// carrier recoil follows from `omega = I^-1 (L - h)`. External torque
+/// carrier recoil is applied directly to `k = I omega`, without forming
+/// a large total `k + h` and then subtracting `h`. External torque
 /// half-kicks are evaluated in their declared endpoint frames. For a
 /// spatially held torque, `R1 (I omega1 + h1) - R0 (I omega0 + h0)` equals
 /// `dt * torque` to roundoff. A body-held torque has the trapezoidal spatial
@@ -160,19 +167,39 @@ pub fn driven_step(
 ) -> Result<(So3, Vec3), LieStepError> {
     admit_rotor(rotor_before)?;
     admit_rotor(rotor_after)?;
+    if rotor_before == Vec3::default() && rotor_after == Vec3::default() {
+        let midpoint_rotor = rotor_before.scale(0.5) + rotor_after.scale(0.5);
+        let initial_momentum = momentum_from_velocity(omega_body, inertia)? + rotor_before;
+        let torque_at = |orientation: So3| -> Result<Vec3, LieStepError> {
+            match torque {
+                HeldTorque::Body(value) => Ok(value),
+                HeldTorque::Space(value) => Ok(orientation.inverse().rotate(value)?),
+            }
+        };
+        let kicked = torque_kick(initial_momentum, torque_at(rotation)?, h * 0.5)?;
+        let (next_rotation, drifted) = momentum_step(rotation, kicked, inertia, midpoint_rotor, h)?;
+        let accepted = torque_kick(drifted, torque_at(next_rotation)?, h * 0.5)?;
+        return Ok((
+            next_rotation,
+            velocity_from_momentum(accepted - rotor_after, inertia)?,
+        ));
+    }
     let midpoint_rotor = rotor_before.scale(0.5) + rotor_after.scale(0.5);
-    let initial_momentum = momentum_from_velocity(omega_body, inertia)? + rotor_before;
-    let torque_at = |orientation: So3| -> Result<Vec3, LieStepError> {
-        match torque {
-            HeldTorque::Body(value) => Ok(value),
-            HeldTorque::Space(value) => Ok(orientation.inverse().rotate(value)?),
-        }
-    };
-    let kicked = torque_kick(initial_momentum, torque_at(rotation)?, h * 0.5)?;
-    let (next_rotation, drifted) = momentum_step(rotation, kicked, inertia, midpoint_rotor, h)?;
-    let accepted = torque_kick(drifted, torque_at(next_rotation)?, h * 0.5)?;
-    Ok((
-        next_rotation,
-        velocity_from_momentum(accepted - rotor_after, inertia)?,
-    ))
+    let half_transfer = carrier::half_transfer(rotor_before, rotor_after);
+    let initial_carrier = momentum_from_velocity(omega_body, inertia)?;
+    let kicked = carrier::kick(
+        initial_carrier,
+        carrier::torque_at(torque, rotation)?,
+        h * 0.5,
+        half_transfer,
+    )?;
+    let (next_rotation, drifted) =
+        carrier_momentum_step(rotation, kicked, inertia, midpoint_rotor, h)?;
+    let accepted = carrier::kick(
+        drifted,
+        carrier::torque_at(torque, next_rotation)?,
+        h * 0.5,
+        half_transfer,
+    )?;
+    Ok((next_rotation, velocity_from_momentum(accepted, inertia)?))
 }

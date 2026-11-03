@@ -250,6 +250,60 @@ impl InertiaTensor3 {
         ))
     }
 
+    /// Free motion retaining carrier momentum `k = I omega` separately.
+    ///
+    /// Applies the same admitted principal-frame gyrostat flow as
+    /// [`super::carrier_momentum_step`]. Both momenta are transformed
+    /// separately; the original body's carrier receives the principal-frame
+    /// change, avoiding a basis roundtrip when its momentum is unchanged.
+    /// No large total `k+h` is formed. Zero stored spin uses the existing
+    /// tensor rigid-body map exactly.
+    ///
+    /// # Errors
+    /// The refusals of [`super::carrier_momentum_step`] and group transforms.
+    pub fn carrier_momentum_step(
+        self,
+        rotation: So3,
+        carrier_body: Vec3,
+        rotor_momentum_body: Vec3,
+        dt: f64,
+    ) -> Result<(So3, Vec3), LieStepError> {
+        if rotor_momentum_body == Vec3::default() {
+            return self.momentum_step(rotation, carrier_body, rotor_momentum_body, dt);
+        }
+        if self.principal_to_body == So3::identity() {
+            return super::carrier_momentum_step(
+                rotation,
+                carrier_body,
+                self.principal,
+                rotor_momentum_body,
+                dt,
+            );
+        }
+        let basis = self.principal_to_body;
+        let inverse = basis.inverse();
+        let principal_carrier = inverse.rotate(carrier_body)?;
+        let (increment, next_principal_carrier) = super::carrier_momentum_step(
+            So3::identity(),
+            principal_carrier,
+            self.principal,
+            inverse.rotate(rotor_momentum_body)?,
+            dt,
+        )?;
+        let q = increment.as_quat();
+        let v = basis.rotate(Vec3::new(q.x, q.y, q.z))?;
+        let body_increment = So3::try_from_quat(Quat {
+            w: q.w,
+            x: v.x,
+            y: v.y,
+            z: v.z,
+        })?;
+        let next_carrier =
+            carrier_body + basis.rotate(next_principal_carrier - principal_carrier)?;
+        finite_vector(next_carrier, "gyrostat carrier momentum")?;
+        Ok((rotation.compose(body_increment)?, next_carrier))
+    }
+
     /// Held external torque and linear internal-momentum transfer in the
     /// caller's body frame. `HeldTorque::Space` remains in the inertial frame.
     ///
@@ -278,18 +332,39 @@ impl InertiaTensor3 {
         }
         super::admit_rotor(rotor_before)?;
         super::admit_rotor(rotor_after)?;
+        if rotor_before == Vec3::default() && rotor_after == Vec3::default() {
+            let midpoint_rotor = rotor_before.scale(0.5) + rotor_after.scale(0.5);
+            let torque_at = |orientation: So3| -> Result<Vec3, LieStepError> {
+                match torque {
+                    HeldTorque::Body(value) => Ok(value),
+                    HeldTorque::Space(value) => Ok(orientation.inverse().rotate(value)?),
+                }
+            };
+            let initial = self.momentum(omega_body)? + rotor_before;
+            let kicked = super::super::torque_kick(initial, torque_at(rotation)?, dt * 0.5)?;
+            let (next_rotation, drifted) =
+                self.momentum_step(rotation, kicked, midpoint_rotor, dt)?;
+            let accepted = super::super::torque_kick(drifted, torque_at(next_rotation)?, dt * 0.5)?;
+            return Ok((next_rotation, self.velocity(accepted - rotor_after)?));
+        }
         let midpoint_rotor = rotor_before.scale(0.5) + rotor_after.scale(0.5);
-        let torque_at = |orientation: So3| -> Result<Vec3, LieStepError> {
-            match torque {
-                HeldTorque::Body(value) => Ok(value),
-                HeldTorque::Space(value) => Ok(orientation.inverse().rotate(value)?),
-            }
-        };
-        let initial = self.momentum(omega_body)? + rotor_before;
-        let kicked = super::super::torque_kick(initial, torque_at(rotation)?, dt * 0.5)?;
-        let (next_rotation, drifted) = self.momentum_step(rotation, kicked, midpoint_rotor, dt)?;
-        let accepted = super::super::torque_kick(drifted, torque_at(next_rotation)?, dt * 0.5)?;
-        Ok((next_rotation, self.velocity(accepted - rotor_after)?))
+        let half_transfer = super::carrier::half_transfer(rotor_before, rotor_after);
+        let initial_carrier = self.momentum(omega_body)?;
+        let kicked = super::carrier::kick(
+            initial_carrier,
+            super::carrier::torque_at(torque, rotation)?,
+            dt * 0.5,
+            half_transfer,
+        )?;
+        let (next_rotation, drifted) =
+            self.carrier_momentum_step(rotation, kicked, midpoint_rotor, dt)?;
+        let accepted = super::carrier::kick(
+            drifted,
+            super::carrier::torque_at(torque, next_rotation)?,
+            dt * 0.5,
+            half_transfer,
+        )?;
+        Ok((next_rotation, self.velocity(accepted)?))
     }
 }
 

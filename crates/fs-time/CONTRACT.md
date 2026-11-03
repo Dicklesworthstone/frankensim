@@ -55,9 +55,12 @@ where claimed below.
   not claim an adjoint or second-order coupled accuracy when a changing
   torque is frozen once per step. Such consumers must evaluate their force
   law at the required stages.
-- `lie::gyrostat::{momentum_step, driven_step, HeldTorque}` advances a
-  carrier with internal rotor momentum `h`, using total body momentum
-  `L = I omega + h`. `I` is the reduced principal inertia (rotor transverse
+- `lie::gyrostat::{momentum_step, carrier_momentum_step, driven_step,
+  HeldTorque}` advances a carrier with internal rotor momentum `h`.
+  `momentum_step` retains total body momentum `L = I omega + h`;
+  `carrier_momentum_step` and the angular-velocity-driven path retain
+  `k = I omega` separately so a larger stored rotor cannot round away
+  carrier motion. `I` is the reduced principal inertia (rotor transverse
   inertia retained, axial spin inertia excluded); rotor momenta are absolute
   axial momenta, including the carrier's axial angular velocity. A symmetric
   composition of exact axis Hamiltonian flows preserves `R L` to roundoff
@@ -65,7 +68,7 @@ where claimed below.
   exactly to the rigid-body drift; a stationary carrier remains stationary
   for any stored rotor momentum. Spherical carriers and exactly axisymmetric
   carriers with rotor momentum on their symmetry axis use commuting exact
-  Hamiltonian flows: at most two exponentials preserve their continuous free
+  Hamiltonian flows that preserve their continuous free
   trajectory and kinetic energy to roundoff. Only exact stored inertia/axis
   equalities select that specialization; near symmetry keeps the original
   general model. Pure axial motion avoids cancellation between large rotor
@@ -74,11 +77,25 @@ where claimed below.
   `driven_step` composes internal
   rotor transfers with the drift and endpoint external torque half-kicks;
   motor reaction changes carrier momentum without creating external impulse.
+  The separate-carrier drift evaluates each rotor transport as
+  `(F^-1-Id)h` using the projective quaternion action without subtracting
+  two large rotated momenta. Symmetric flows retain the small attitude phase
+  separately from the rotor phase and rotate carrier momentum directly.
+  Endpoint kicks combine external impulse and internal transfer before
+  adding them to `k`, retaining the rotor endpoint subtraction in fixed-size
+  double-double arithmetic as well. The public
+  total-momentum drift and zero-rotor driven arithmetic are unchanged.
+  This cannot recover carrier information already lost in a total-`L`
+  input, nor repair a physically misaligned finite-precision input frame.
   Body-held versus spatially held torques are explicit. This map is second
   order for linear rotor momentum change and the declared held torque;
   changing load laws need a coupled stage. `tests/gyrostat.rs` checks analytic
   precession/refinement, rotor spin-up recoil, spatial impulse, frame
   covariance, reversibility, replay, rest, rigid reduction and admission.
+  `tests/gyrostat_carrier.rs` additionally checks high-spin carrier motion,
+  external acceleration and internal recoil, opposing impulses, exact signed
+  symmetric trajectories including zero total momentum, retained small
+  attitude phases, and principal/full-tensor coordinate consistency.
   General asymmetric or misaligned gyrostats retain the finite-step splitting
   and its measured kinetic defect; exact-energy or arbitrary-step trajectory
   accuracy is not claimed for that general case. Gimbaled rotors, flexibility,
@@ -91,7 +108,10 @@ where claimed below.
   integration then have constant work and no allocation or factorization.
   The free map conjugates the native rotation increment and transports the
   original body momentum by its inverse, avoiding repeated full-state basis
-  roundtrips. Body/spatial external torque conventions and internal rotor
+  roundtrips. Its separate-carrier map conjugates the same attitude
+  increment and applies the principal carrier change to the original body
+  carrier; it never transports a large rotor by an approximate basis
+  roundtrip. Body/spatial external torque conventions and internal rotor
   momentum remain explicit; strictly diagonal input retains the original
   map's arithmetic. `tests/gyrostat_tensor.rs` checks independent dense Euler
   dynamics (second-order refinement), 10,000-step spatial momentum balance,
