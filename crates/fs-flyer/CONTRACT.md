@@ -735,6 +735,34 @@ midpoint rollback/retry. Wing and mutual-disk wash remain the original axial
 actuator-disk field; no dynamic swirl, helical wake transport, or whole-fluid
 energy closure is added.
 
+### Dynamic wakes through independent compliant shafts
+
+`propulsion::passive::dynamic::DynamicShaftPropulsion` composes the same prepared
+`ShaftMotion` with the existing constant-density uniform axial dynamic-inflow
+owner. One private `DynamicWake` owns the original wing-at-induction, blade,
+mutual-wash and implicit wake-flux calculations for geared and independent-shaft
+consumers; existing harmonic consumers route through that same implementation.
+Each mounted propeller receives its absolute `p/J`. Internal motor and external
+shaft torque, carrier wrench, spring storage, bearing heat and retained
+canonical momentum keep their original mechanical owners.
+
+`DynamicShaftState` supplies controls with the actual joint stage. Initial loads
+predict mechanics and both wakes; midpoint loads advance the original full
+interval. Both wake trials finish inside the mechanical load callbacks, so an
+initial, midpoint, full-wake or final-mechanical refusal leaves canonical motion,
+published state and supplied induction unchanged. Successful publication ends
+with an infallible induction assignment; callback side effects remain caller-owned.
+Optional oblique quadrature and pointwise material-air modes reuse the existing
+native implementations.
+
+Apparent air mass is not aircraft mass. Per-disk axial impulse, storage and work
+are reduced-state accounts, not resolved-wake world momentum or whole-fluid/body
+passivity. Independent-shaft harmonic/skew wake storage and unsteady wing memory
+remain outside this consumer. Six cases in `tests/passive_propulsion/dynamic.rs`
+check shared-owner parity, post-impulse native stage oracles, independent physical
+source accounts, joint second-order refinement, shaft-axis invariance and late
+refusal/retry.
+
 ### Ideal gears and real propeller/airframe motion
 
 `spine::rotors::geared` admits one ideal relative gear coordinate and 1–64

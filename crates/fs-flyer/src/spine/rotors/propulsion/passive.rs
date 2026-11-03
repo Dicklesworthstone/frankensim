@@ -6,13 +6,16 @@
 use super::super::passive::{ShaftMotion, ShaftStep};
 use super::super::{RotorAssembly, RotorState, RotorTorques};
 use super::{
-    AerodynamicSolution, AerodynamicStage, CoupledStep, DiskAxes, OpenLoopDesign,
-    PropellerMount, PropulsionGeometry, Refusal, StageEnvironment, TICK_HZ, reject,
-    surfaces::LiftingSurfaces,
+    AerodynamicSolution, AerodynamicStage, CoupledStep, DiskAxes, OpenLoopDesign, PropellerMount,
+    PropulsionGeometry, Refusal, StageEnvironment, TICK_HZ, reject, surfaces::LiftingSurfaces,
 };
 use crate::propcoupling::swirl::{CoupledSwirlStep, WarmStart};
 use crate::spine::{Loads, admitted_state_and_rotation};
 use fs_airscrew::swirl::Controls;
+
+/// Independent compliant shafts coupled to physical dynamic-inflow memory.
+#[path = "passive/dynamic.rs"]
+pub mod dynamic;
 
 /// Actual environment and independent motor ports at an aerodynamic stage.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -270,11 +273,9 @@ impl<'a, const N: usize> ShaftPropulsion<'a, N> {
         let mut initial = None;
         let mut midpoint = None;
         let accepted = motion.advance_with(t_s, angular_origin_world, |time, state| {
-            let evaluation = evaluate(
-                state,
-                inputs(time, state)?,
-                &|point| wind_world(time, point),
-            )?;
+            let evaluation = evaluate(state, inputs(time, state)?, &|point| {
+                wind_world(time, point)
+            })?;
             let loads = (evaluation.carrier, evaluation.torques);
             if initial.is_none() {
                 initial = Some(evaluation);

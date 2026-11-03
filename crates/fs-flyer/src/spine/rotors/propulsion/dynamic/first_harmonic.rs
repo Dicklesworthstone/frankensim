@@ -167,6 +167,7 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
     #[must_use]
     pub fn disk_frames(&self) -> [DiskFrame; 2] {
         self.base
+            .wake
             .oblique
             .as_ref()
             .expect("prepared harmonic frames")
@@ -184,7 +185,7 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
         induction: [HarmonicInduction; 2],
         continuation: Option<(ContinuationControls, Option<&WingContinuation>)>,
     ) -> Result<HarmonicAerodynamics, Refusal> {
-        let wing = self.base.solve_wing(
+        let wing = self.base.wake.solve_wing(
             &stage,
             induction.map(|u| u.mean_mps),
             Some(&induction),
@@ -192,10 +193,11 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
         )?;
         let (_, frames) = self
             .base
+            .wake
             .oblique
             .as_ref()
             .expect("prepared harmonic frames");
-        let blade = |k| self.base.blade_loads(&stage, &wing, induction, k);
+        let blade = |k| self.base.wake.blade_loads(&stage, &wing, induction, k);
         let propellers = [blade(0)?, blade(1)?];
         let force = |k: usize| {
             frames[k]

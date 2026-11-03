@@ -19,6 +19,10 @@ use fs_ga::{Mat3, Quat, So3, Vec3};
 
 const ZERO: [f64; 3] = [0.0; 3];
 const AXIAL: [[f64; 3]; 2] = [[1.0, 0.0, 0.0]; 2];
+
+#[path = "passive_propulsion/dynamic.rs"]
+mod dynamic;
+
 fn v(a: [f64; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
@@ -655,12 +659,7 @@ fn g1_swirl_drives_independent_springs_with_physical_momentum_and_work_after_imp
     assert_eq!(
         result.midpoint,
         model
-            .evaluate(
-                &stages[1].1,
-                inputs(&a, &stages[1].1),
-                &wind,
-                Some(&seed),
-            )
+            .evaluate(&stages[1].1, inputs(&a, &stages[1].1), &wind, Some(&seed),)
             .unwrap()
     );
     assert_ne!(
@@ -828,6 +827,7 @@ fn g0_swirl_budget_and_midpoint_refusals_preserve_both_states_and_retry() {
     let model = SwirlShaftPropulsion::new(&base, Controls::default());
     let start = initial(&a, [35.0, -35.0]);
     let mut motion = a.shaft_motion(&start, properties(), 0.002).unwrap();
+    let prepared = *motion.state();
     let canonical = *motion.native_state();
     let bounded = SwirlShaftPropulsion::new(
         &base,
@@ -850,7 +850,7 @@ fn g0_swirl_budget_and_midpoint_refusals_preserve_both_states_and_retry() {
             .code,
         "swirl-nonconvergence"
     );
-    assert_eq!(motion.state(), &start);
+    assert_eq!(motion.state(), &prepared);
     assert_eq!(motion.native_state(), &canonical);
     let seed = model
         .evaluate(&start, inputs(&a, &start), &|_| Ok(ZERO), None)
@@ -884,7 +884,7 @@ fn g0_swirl_budget_and_midpoint_refusals_preserve_both_states_and_retry() {
         .unwrap_err();
     assert_eq!(error.code, "wind-domain");
     assert_eq!(calls, 2);
-    assert_eq!(motion.state(), &start);
+    assert_eq!(motion.state(), &prepared);
     assert_eq!(motion.native_state(), &canonical);
     assert_eq!(seed, saved_seed);
     let mut fresh = a.shaft_motion(&start, properties(), 0.002).unwrap();

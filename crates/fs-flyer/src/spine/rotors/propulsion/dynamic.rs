@@ -17,8 +17,8 @@
 
 use super::{
     AerodynamicFields, AerodynamicSolution, AerodynamicStage, DiskAxes, GearedLoads,
-    GearedPropulsion, GearedState, GearedStep, PropulsionInputs, Refusal, geared, reject,
-    wing_error,
+    GearedPropulsion, GearedState, GearedStep, PropulsionGeometry, PropulsionInputs, Refusal,
+    geared, reject, wing_error,
 };
 use crate::propcoupling::disk_wash::DiskWash;
 use fs_airscrew::dynamic_inflow::first_harmonic::HarmonicInduction;
@@ -127,6 +127,13 @@ pub struct DynamicStep<const N: usize> {
 /// Explicit dynamic-wake model choice over an existing physical gear assembly.
 pub struct DynamicPropulsion<'p, 'a, const N: usize> {
     propulsion: &'p GearedPropulsion<'a, N>,
+    wake: DynamicWake<'a>,
+}
+
+// One prepared wing/blade/wake owner, independent of the mechanical constraint.
+// Geared and compliant shafts supply the same physical aerodynamic stage.
+pub(super) struct DynamicWake<'a> {
+    rotor: &'a fs_airscrew::Rotor,
     inflow: UniformAxialInflow,
     axes: DiskAxes,
     disk_wash: [[DiskWash; 2]; 2],
@@ -169,18 +176,9 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         propulsion: &'p GearedPropulsion<'a, N>,
         density_kg_m3: f64,
     ) -> Result<Self, Refusal> {
-        let axes = DiskAxes::new(propulsion.mounts.map(|mount| mount.thrust_direction_body))?;
-        let disk_wash =
-            axes.disk_wash_map(&propulsion.design.disks, propulsion.design.rotor.radius_m)?;
         Ok(Self {
             propulsion,
-            inflow: UniformAxialInflow::new(propulsion.design.rotor.radius_m, density_kg_m3)
-                .map_err(air_error)?,
-            axes,
-            disk_wash,
-            oblique: None,
-            blade_wash: None,
-            blade_incident: BladeIncident::Hub,
+            wake: DynamicWake::new(propulsion.geometry(), density_kg_m3)?,
         })
     }
 
@@ -198,42 +196,18 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         density_kg_m3: f64,
         azimuth_points: usize,
     ) -> Result<Self, Refusal> {
-        let mut result = Self::new(propulsion, density_kg_m3)?;
-        let rule = AzimuthQuadrature::new(azimuth_points).map_err(air_error)?;
-        let frame = |k: usize| {
-            let mount = propulsion.mounts[k];
-            let axis = mount.thrust_direction_body;
-            // The least-aligned coordinate yields a well-conditioned material
-            // reference, fixed in the carrier rather than chosen from airflow.
-            let reference = (0..3)
-                .min_by(|&i, &j| axis[i].abs().total_cmp(&axis[j].abs()))
-                .expect("three coordinates");
-            let mut radial = axis.map(|x| -axis[reference] * x);
-            radial[reference] += 1.0;
-            let length =
-                (radial[0] * radial[0] + radial[1] * radial[1] + radial[2] * radial[2]).sqrt();
-            radial = radial.map(|x| x / length);
-            let rotor_axis = propulsion.assembly.rotors()[mount.rotor_index].axis_body;
-            let alignment =
-                axis[0] * rotor_axis[0] + axis[1] * rotor_axis[1] + axis[2] * rotor_axis[2];
-            let spin = if mount.handedness.sign() * alignment > 0.0 {
-                SpinDirection::AlongThrust
-            } else {
-                SpinDirection::AgainstThrust
-            };
-            DiskFrame::new(axis, radial, spin).map_err(air_error)
-        };
-        let frames = [frame(0)?, frame(1)?];
-        result.blade_wash = Some(BladeWash::new(
-            result.axes,
-            &propulsion.design.disks,
-            &propulsion.design.rotor,
-            &rule,
-            frames,
-            &result.disk_wash,
-        )?);
-        result.oblique = Some((rule, frames));
-        Ok(result)
+        let rotor_axes = propulsion
+            .mounts
+            .map(|mount| propulsion.assembly.rotors()[mount.rotor_index].axis_body);
+        Ok(Self {
+            propulsion,
+            wake: DynamicWake::new_oblique(
+                propulsion.geometry(),
+                rotor_axes,
+                density_kg_m3,
+                azimuth_points,
+            )?,
+        })
     }
 
     /// Select pointwise wind or wind/wing loading for an admitted oblique model.
@@ -249,6 +223,88 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
     /// native oblique blade quadrature. Stage callback/domain refusals remain
     /// atomic and propagate through `evaluate`, `step` and harmonic consumers.
     pub fn with_blade_incident(mut self, incident: BladeIncident) -> Result<Self, Refusal> {
+        self.wake = self.wake.with_blade_incident(incident)?;
+        Ok(self)
+    }
+
+    /// Selected external incident-air resolution. Construction defaults to hub sampling.
+    #[must_use]
+    pub fn blade_incident(&self) -> BladeIncident {
+        self.wake.blade_incident()
+    }
+
+    /// The explicit per-disk apparent-air-mass model.
+    #[must_use]
+    pub fn inflow_model(&self) -> UniformAxialInflow {
+        self.wake.inflow_model()
+    }
+}
+
+impl<'a> DynamicWake<'a> {
+    pub(super) fn new(
+        geometry: PropulsionGeometry<'a>,
+        density_kg_m3: f64,
+    ) -> Result<Self, Refusal> {
+        let axes = DiskAxes::new(geometry.mounts.map(|mount| mount.thrust_direction_body))?;
+        let disk_wash =
+            axes.disk_wash_map(&geometry.design.disks, geometry.design.rotor.radius_m)?;
+        Ok(Self {
+            rotor: &geometry.design.rotor,
+            inflow: UniformAxialInflow::new(geometry.design.rotor.radius_m, density_kg_m3)
+                .map_err(air_error)?,
+            axes,
+            disk_wash,
+            oblique: None,
+            blade_wash: None,
+            blade_incident: BladeIncident::Hub,
+        })
+    }
+
+    pub(super) fn new_oblique(
+        geometry: PropulsionGeometry<'a>,
+        rotor_axes: [[f64; 3]; 2],
+        density_kg_m3: f64,
+        azimuth_points: usize,
+    ) -> Result<Self, Refusal> {
+        let mut result = Self::new(geometry, density_kg_m3)?;
+        let rule = AzimuthQuadrature::new(azimuth_points).map_err(air_error)?;
+        let frame = |k: usize| {
+            let mount = geometry.mounts[k];
+            let axis = mount.thrust_direction_body;
+            // The least-aligned coordinate yields a well-conditioned material
+            // reference, fixed in the carrier rather than chosen from airflow.
+            let reference = (0..3)
+                .min_by(|&i, &j| axis[i].abs().total_cmp(&axis[j].abs()))
+                .expect("three coordinates");
+            let mut radial = axis.map(|x| -axis[reference] * x);
+            radial[reference] += 1.0;
+            let length =
+                (radial[0] * radial[0] + radial[1] * radial[1] + radial[2] * radial[2]).sqrt();
+            radial = radial.map(|x| x / length);
+            let rotor_axis = rotor_axes[k];
+            let alignment =
+                axis[0] * rotor_axis[0] + axis[1] * rotor_axis[1] + axis[2] * rotor_axis[2];
+            let spin = if mount.handedness.sign() * alignment > 0.0 {
+                SpinDirection::AlongThrust
+            } else {
+                SpinDirection::AgainstThrust
+            };
+            DiskFrame::new(axis, radial, spin).map_err(air_error)
+        };
+        let frames = [frame(0)?, frame(1)?];
+        result.blade_wash = Some(BladeWash::new(
+            result.axes,
+            &geometry.design.disks,
+            &geometry.design.rotor,
+            &rule,
+            frames,
+            &result.disk_wash,
+        )?);
+        result.oblique = Some((rule, frames));
+        Ok(result)
+    }
+
+    pub(super) fn with_blade_incident(mut self, incident: BladeIncident) -> Result<Self, Refusal> {
         if incident != BladeIncident::Hub && self.oblique.is_none() {
             return Err(reject(
                 "dynamic-propulsion-invalid",
@@ -259,15 +315,11 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         Ok(self)
     }
 
-    /// Selected external incident-air resolution. Construction defaults to hub sampling.
-    #[must_use]
-    pub fn blade_incident(&self) -> BladeIncident {
+    pub(super) fn blade_incident(&self) -> BladeIncident {
         self.blade_incident
     }
 
-    /// The explicit per-disk apparent-air-mass model.
-    #[must_use]
-    pub fn inflow_model(&self) -> UniformAxialInflow {
+    pub(super) fn inflow_model(&self) -> UniformAxialInflow {
         self.inflow
     }
 
@@ -278,12 +330,9 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         harmonics: Option<&[HarmonicInduction; 2]>,
         continuation: Option<(ContinuationControls, Option<&WingContinuation>)>,
     ) -> Result<WingAtInduction, Refusal> {
-        let wash = self.axes.wash_map(
-            stage.strips,
-            stage.panels,
-            stage.disks,
-            self.propulsion.design.rotor.radius_m,
-        )?;
+        let wash =
+            self.axes
+                .wash_map(stage.strips, stage.panels, stage.disks, self.rotor.radius_m)?;
         let strip_velocity_mps: Vec<_> = stage
             .incident
             .strip_velocity_mps
@@ -304,7 +353,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
                         if factors[k] != 0.0 {
                             let offset: [f64; 3] = core::array::from_fn(|j| {
                                 (0.5 * panel.a[j] + 0.5 * panel.b[j] - stage.disks[k].center_m[j])
-                                    / self.propulsion.design.rotor.radius_m
+                                    / self.rotor.radius_m
                             });
                             let dot = |direction: [f64; 3]| {
                                 (offset[0] * direction[0] + offset[1] * direction[1])
@@ -432,7 +481,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         })
     }
 
-    fn solve(
+    pub(super) fn solve(
         &self,
         stage: AerodynamicStage<'_>,
         induced_mps: [f64; 2],
@@ -462,7 +511,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             }
             self.inflow
                 .evaluate(
-                    &self.propulsion.design.rotor,
+                    self.rotor,
                     disk_axial_mps[k],
                     induced_mps[k],
                     stage.disks[k].omega_rad_s,
@@ -502,7 +551,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         if varying_wake || self.blade_incident != BladeIncident::Hub {
             return rule
                 .evaluate_with_incident_variation(
-                    &self.propulsion.design.rotor,
+                    self.rotor,
                     stage.rho,
                     frames[k],
                     wing.disk_velocity_mps[k],
@@ -549,7 +598,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
                 .map_err(air_error);
         }
         rule.evaluate_first_harmonic(
-            &self.propulsion.design.rotor,
+            self.rotor,
             stage.rho,
             frames[k],
             wing.disk_velocity_mps[k],
@@ -560,40 +609,23 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         .map_err(air_error)
     }
 
-    /// Evaluate wing, blades and all shaft/body forces at the actual stored
-    /// induction. Density must equal the admitted constant wake density.
-    ///
-    /// # Errors
-    /// Native force/wake refusals, or `dynamic-propulsion-invalid` for a
-    /// nonfinite wake state or changing density.
-    pub fn evaluate(
+    pub(super) fn admit_state(
         &self,
-        state: &DynamicState,
-        inputs: PropulsionInputs,
-        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
-    ) -> Result<DynamicEvaluation<N>, Refusal> {
-        if inputs.density_kg_m3 != self.inflow.density_kg_m3()
-            || !state.induced_mps.iter().all(|x| x.is_finite())
+        density_kg_m3: f64,
+        induced_mps: [f64; 2],
+    ) -> Result<(), Refusal> {
+        if density_kg_m3 != self.inflow.density_kg_m3()
+            || !induced_mps.iter().all(|x| x.is_finite())
         {
             return Err(reject(
                 "dynamic-propulsion-invalid",
                 "wake state must be finite and density must remain fixed",
             ));
         }
-        let result = self
-            .propulsion
-            .evaluate_with(&state.motion, inputs, wind_world, |stage| {
-                self.solve(stage, state.induced_mps)
-            })?;
-        Ok(DynamicEvaluation {
-            loads: result.loads,
-            aerodynamic_force_body_n: result.aerodynamic_force_body_n,
-            propeller_absolute_speed_rad_s: result.propeller_absolute_speed_rad_s,
-            aerodynamics: result.aerodynamics,
-        })
+        Ok(())
     }
 
-    fn advance_wakes(
+    pub(super) fn advance_wakes(
         &self,
         before: [f64; 2],
         stage: &DynamicAerodynamics,
@@ -610,6 +642,35 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
                 .map_err(air_error)
         };
         Ok([step(0)?, step(1)?])
+    }
+}
+
+impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
+    /// Evaluate wing, blades and all shaft/body forces at the actual stored
+    /// induction. Density must equal the admitted constant wake density.
+    ///
+    /// # Errors
+    /// Native force/wake refusals, or `dynamic-propulsion-invalid` for a
+    /// nonfinite wake state or changing density.
+    pub fn evaluate(
+        &self,
+        state: &DynamicState,
+        inputs: PropulsionInputs,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+    ) -> Result<DynamicEvaluation<N>, Refusal> {
+        self.wake
+            .admit_state(inputs.density_kg_m3, state.induced_mps)?;
+        let result = self
+            .propulsion
+            .evaluate_with(&state.motion, inputs, wind_world, |stage| {
+                self.wake.solve(stage, state.induced_mps)
+            })?;
+        Ok(DynamicEvaluation {
+            loads: result.loads,
+            aerodynamic_force_body_n: result.aerodynamic_force_body_n,
+            propeller_absolute_speed_rad_s: result.propeller_absolute_speed_rad_s,
+            aerodynamics: result.aerodynamics,
+        })
     }
 
     /// Advance the joint body, shaft and wake with two real load evaluations.
@@ -658,6 +719,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
                 let loads = evaluation.loads;
                 if initial.is_none() {
                     stage_induction = self
+                        .wake
                         .advance_wakes(state.induced_mps, &evaluation.aerodynamics, 0.5 * dt_s)?
                         .map(|wake| wake.induced_mps);
                     initial = Some(evaluation);
@@ -671,7 +733,9 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             initial.ok_or_else(|| reject("dynamic-propulsion-invalid", "missing initial stage"))?;
         let midpoint = midpoint
             .ok_or_else(|| reject("dynamic-propulsion-invalid", "missing midpoint stage"))?;
-        let inflow = self.advance_wakes(state.induced_mps, &midpoint.aerodynamics, dt_s)?;
+        let inflow = self
+            .wake
+            .advance_wakes(state.induced_mps, &midpoint.aerodynamics, dt_s)?;
         Ok(DynamicStep {
             state: DynamicState {
                 motion: motion.state,
