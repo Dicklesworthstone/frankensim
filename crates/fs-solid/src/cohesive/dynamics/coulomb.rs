@@ -366,9 +366,7 @@ impl CoulombBinding {
             && v1[0].hypot(v1[1]) > tol
             && v0[0] * v1[0] + v0[1] * v1[1] < -tol * tol
         {
-            return Err(Error::Invalid(
-                "Coulomb path crosses unresolved stopping/reversal; refine the mechanical step",
-            ));
+            return Err(Error::UnresolvedFrictionReversal { patch: patch.id });
         }
         // A resolved moving path still dissipates when dt makes its increment
         // smaller than the displacement resolution. Refinement cannot turn
@@ -424,6 +422,32 @@ impl CoulombBinding {
             states: states.into(),
             ..self.clone()
         }
+    }
+    /// Refinement may finish well inside the ORIGINAL velocity-resolution band.
+    /// This tests an already audited native candidate; it changes no velocity,
+    /// friction coefficient, history, reaction or physical acceptance tolerance.
+    pub(super) fn resolved_stop(
+        &self,
+        before: &CohesiveMotion<'_, '_>,
+        after: &CohesiveMotion<'_, '_>,
+        dt: f64,
+        patch_id: u64,
+    ) -> Result<bool, Error> {
+        let p = before
+            .state
+            .system
+            .patches
+            .iter()
+            .position(|p| p.id == patch_id)
+            .ok_or(Error::Invalid("reversal patch outside original system"))?;
+        let free = before.state.system.patches[p].jump(&after.state.displacements, [0.0; 3])?;
+        let jump = after.state.points[p].jump_m();
+        let offset = [jump[0] - free[0], jump[1] - free[1], jump[2] - free[2]];
+        let v = local_velocity(before, p, offset, dt, &after.velocity_m_s)?;
+        // Leave a numerical margin from the native capture threshold so an
+        // unresolved residual velocity does not flip branch from roundoff on
+        // the next implicit step. Its actual kinetic energy remains accounted.
+        Ok(v[0].hypot(v[1]) <= 0.25 * self.config.velocity_tolerance_m_s)
     }
     pub(super) fn temperature_successor(
         &self,

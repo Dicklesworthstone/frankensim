@@ -2,6 +2,9 @@
 use super::*;
 use fs_solid::cohesive::dynamics::coulomb::{CoulombActivation, CoulombConfig, CoulombRegime};
 
+#[path = "interval.rs"]
+mod interval;
+
 fn sourced(
     static_mu: [f64; 2],
     kinetic_mu: [f64; 2],
@@ -554,7 +557,7 @@ fn zero_capacity_matches_original_and_refusals_preserve_complete_motion() {
                 .unwrap();
             assert!(
                 matches!(stopping.advance_controlled(&[0.0], &[[-COMPRESSION, 0.0, 0.0]], 0.01, &mut || false),
-                Err(DynamicsError::Model(Error::Invalid(reason))) if reason.contains("stopping"))
+                Err(DynamicsError::Model(Error::UnresolvedFrictionReversal { patch: 7 })))
             );
             assert_eq!(stopping.velocity_m_s(), &[initial_velocity]);
         }

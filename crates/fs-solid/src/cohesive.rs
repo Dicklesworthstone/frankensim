@@ -193,6 +193,8 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub enum Error {
     Invalid(&'static str),
+    /// A resolved Coulomb direction reversal cannot use one straight path.
+    UnresolvedFrictionReversal { patch: u64 },
     Budget(&'static str),
     Material { patch: u64, error: CohesiveError },
     Source { patch: u64, error: MaterialStatePointError },

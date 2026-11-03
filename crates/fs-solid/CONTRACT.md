@@ -3954,6 +3954,44 @@ parity, source/budget/cancellation refusal and both
 zero- and nonzero-net-slip stopping refusals. Source data are manufactured;
 these tests do not establish specimen calibration.
 
+### Native cohesive intervals across Coulomb stopping and resticking
+
+`CohesiveMotion::advance_interval` completes a requested duration under constant
+external force and affine prescribed jumps using the original mechanical owner.
+Each substep retains the original maximum step, constitutive laws, histories,
+momentum equation and physical acceptance tolerances. Only the typed
+`UnresolvedFrictionReversal { patch }` refusal triggers bracketing: shorter
+candidates are solved from the same accepted predecessor until an admitted
+candidate stops inside the original velocity-resolution band or resolves the
+declared time bracket, then the remaining interval is advanced. Other refusals
+propagate unchanged. A rejected trial's damage, motion
+and losses are never adopted. No velocity projection, stopping impulse, extra
+friction spring or numerical heating is introduced.
+
+The original endpoint velocity tolerance determines static capture. Residual
+kinetic energy stays in the actual native state and first-law account. This is
+bounded continuation of the discrete straight-path model, not an exact stopping
+time, earliest-event certificate, monotone-guard proof or unique softening-path
+claim. Source conditions stay fixed over the interval; affine prescribed motion
+and constant force are explicit restrictions. Native time resolution, conditioning,
+source domains and unresolved events can still refuse.
+
+Independent caps bound attempted solves, accepted substeps, cumulative physical
+residual evaluations and nonlinear iterations. Each attempt reserves its native
+allowance; successful work refunds unused counts while a refused solve charges
+the whole reserved allowance. Per-residual material work retains the original
+patch bound. Cancellation or exhaustion returns no partially accepted interval.
+Memory retains only the current motion and best bracket candidate, not an entire
+state trajectory. Original fracture, bond viscosity, friction and prescribed
+work are accumulated separately, including per-patch totals. The interval's
+endpoint first law is checked against the sum of original accepted tolerances.
+
+`tests/cohesive_dynamics_friction/interval.rs` compares an unaligned scalar stop
+with independent constant-friction stopping distance and kinetic-energy loss,
+then holds above kinetic capacity and breaks away above static capacity. It
+also checks accumulated original fracture/viscosity/friction on prescribed
+paths, native replay, work bounds, late cancellation and immutable rollback.
+
 ### Temperature-dependent adhesion in deformable equilibrium and dynamics
 
 `CohesiveSystem::with_temperature_sources` prepares temperature successors on
