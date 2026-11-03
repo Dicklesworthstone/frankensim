@@ -1028,7 +1028,9 @@ export class LivePianoSection {
     set('clipped', String(stats.clippedSamples));
     set('forced', String(stats.forcedRetirements));
     set('quality', `${stats.quality.maxDynamicModes.toLocaleString('en-US')}<small>modes</small> ${stats.quality.courseModeBudget}<small>per key</small>`);
-    if (previous) {
+    if ((stats.stretchOutOfDomain ?? 0) > 0 && (previous?.stretchOutOfDomain ?? 0) === 0) {
+      this.announce('String motion exceeded the supplied slope/strain bounds or lost positive tension. Playback has included motion outside the selected extension model\'s valid range.', true);
+    } else if (previous) {
       const now = performance.now();
       if (stats.governorSteps > previous.governorSteps) {
         this.announce(`Rendering ran close to real time on this device, so newly struck keys now get at most ${stats.quality.courseModeBudget} string modes (${stats.quality.maxDynamicModes} in total).`, true);

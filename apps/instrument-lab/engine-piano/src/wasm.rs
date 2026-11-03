@@ -382,8 +382,9 @@ impl PianoEngine {
     }
 
     /// `[outputFrames, soundingKeys, dynamicModes, dynamicStrings, outputPeakPa, clippedOutputFrames,`
-    /// ` forcedRetirements, retirements, contactFailures, rebuilds, noteOns, refusedNoteOns]`.
-    /// The array layout is unchanged; acoustic quantities use the host clock.
+    /// ` forcedRetirements, retirements, contactFailures, rebuilds, noteOns, refusedNoteOns, stretchOutOfDomain]`.
+    /// The first twelve slots are unchanged; acoustic quantities use the host clock.
+    /// Extension-domain excursions count sounding-string mechanical steps.
     pub fn stats(&self) -> Vec<f64> {
         let p = self.piano.piano();
         let c = p.counters;
@@ -391,7 +392,8 @@ impl PianoEngine {
         vec![frames as f64, p.sounding_keys() as f64, p.dynamic_modes() as f64,
             p.dynamic_strings() as f64, peak, clipped as f64,
             c.forced_retirements as f64, c.retirements as f64, c.contact_failures as f64,
-            c.rebuilds as f64, c.note_ons as f64, c.refused_note_ons as f64]
+            c.rebuilds as f64, c.note_ons as f64, c.refused_note_ons as f64,
+            c.stretch_out_of_domain as f64]
     }
     #[wasm_bindgen(js_name = lastError)]
     pub fn last_error(&mut self) -> Option<String> { self.piano.take_error() }

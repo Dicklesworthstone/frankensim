@@ -11,7 +11,8 @@ fn fixture() -> (Description, Config) {
         bridge, volume: 0.02 }];
     let desc = Description {
         courses: vec![Course { duplex_length_m: 0.0, ..course }], board,
-        bridge_axial_rows: Default::default(),
+        // Independent signed axial motion of this manufactured one-mode board.
+        bridge_axial_rows: [(69, vec![-0.07])].into(),
         damping: None, surface: vec![SurfaceSample {
             position_m: [0.0, 0.0, 0.0], area_m2: 0.02, mode_shape: vec![1.0],
         }], board_provenance: "manufactured test board, source string and felt".into(),
@@ -24,6 +25,12 @@ fn fixture() -> (Description, Config) {
     cfg.partial_band_hz = 6_000.0;
     cfg.duplex = false;
     (desc, cfg)
+}
+
+fn extension_spec(waves: bool, band_hz: f64) -> String {
+    let row = if waves { format!("waves,69,166505,0.2,{band_hz},8,0.01,0.01") }
+        else { "stretch,69,166505,0.2".into() };
+    format!("frankensim-piano-string-stretching-v1\n{row}\n")
 }
 
 #[test]
@@ -45,56 +52,79 @@ fn factor_one_retains_the_original_pressure_and_float_bits() {
 #[test]
 fn every_high_rate_physical_pressure_sample_reaches_the_shared_filter() {
     let (desc, cfg) = fixture();
-    for ratio in [2, 4] {
-        let mut high_cfg = cfg.clone(); high_cfg.sample_rate *= ratio as u32;
-        let mut direct = LivePiano::new(&desc, high_cfg).unwrap();
-        let gas = direct.acoustic_gas();
-        let mut output = PianoAudio::new_with_gas(&desc, cfg.clone(), ratio, gas).unwrap();
-        let mut filter = Decimator::new(ratio, 1).unwrap();
-        let mut packet = vec![0.0; ratio];
-        let mut endpoint_diff = 0.0_f64;
-        direct.note_on(69, 1.2).unwrap(); output.note_on(69, 1.2).unwrap();
-        for frame in 0..2048 {
-            if frame == 700 {
-                direct.set_sustain(0.7).unwrap(); output.set_sustain(0.7).unwrap();
-                direct.note_off(69); output.note_off(69);
+    for selection in [None, Some(extension_spec(false, 10_000.0)), Some(extension_spec(true, 10_000.0))] {
+        let mut cfg = cfg.clone(); cfg.string_stretching = selection;
+        for ratio in [2, 4] {
+            let mut high_cfg = cfg.clone(); high_cfg.sample_rate *= ratio as u32;
+            let mut direct = LivePiano::new(&desc, high_cfg).unwrap();
+            let gas = direct.acoustic_gas();
+            let mut output = PianoAudio::new_with_gas(&desc, cfg.clone(), ratio, gas).unwrap();
+            let mut filter = Decimator::new(ratio, 1).unwrap();
+            let mut packet = vec![0.0; ratio];
+            let mut endpoint_diff = 0.0_f64;
+            direct.note_on(69, 1.2).unwrap(); output.note_on(69, 1.2).unwrap();
+            for frame in 0..2048 {
+                if frame == 700 {
+                    direct.set_sustain(0.7).unwrap(); output.set_sustain(0.7).unwrap();
+                    direct.note_off(69); output.note_off(69);
+                }
+                for x in &mut packet { *x = direct.step(); }
+                assert!(direct.take_error().is_none());
+                let expected = filter.preview(&packet).unwrap()[0]; filter.commit();
+                let actual = output.step_pressure().unwrap();
+                assert_eq!(actual.to_bits(), expected.to_bits(), "ratio {ratio}, frame {frame}");
+                endpoint_diff = endpoint_diff.max((actual-packet[ratio-1]).abs());
             }
-            for x in &mut packet { *x = direct.step(); }
-            assert!(direct.take_error().is_none());
-            let expected = filter.preview(&packet).unwrap()[0]; filter.commit();
-            let actual = output.step_pressure().unwrap();
-            assert_eq!(actual.to_bits(), expected.to_bits(), "ratio {ratio}, frame {frame}");
-            endpoint_diff = endpoint_diff.max((actual-packet[ratio-1]).abs());
+            assert!(endpoint_diff > 1e-10, "endpoint-only downsampling was not distinguished");
+            assert_eq!(output.frames(), 2048);
+            assert_eq!(output.piano().counters.samples, 2048 * ratio as u64);
+            assert_eq!(output.mechanical_rate(), 48_000 * ratio as u32);
+            assert_eq!(output.piano().acoustic_gas().sound_speed.to_bits(), gas.sound_speed.to_bits());
+            assert_eq!(direct.partials_hz(69), output.piano().partials_hz(69));
+            assert_eq!(direct.counters.stretch_out_of_domain, output.piano().counters.stretch_out_of_domain);
+            assert_eq!(format!("{:?}", direct.close_ledger()), format!("{:?}", output.close_ledger()));
+            let (travel, delay) = direct.microphone_delay_samples();
+            assert_eq!(output.microphone_delay_frames(),
+                (travel as f64 / ratio as f64, delay / ratio as f64 + filter.delay_output_frames()));
         }
-        assert!(endpoint_diff > 1e-10, "endpoint-only downsampling was not distinguished");
-        assert_eq!(output.frames(), 2048);
-        assert_eq!(output.piano().counters.samples, 2048 * ratio as u64);
-        assert_eq!(output.mechanical_rate(), 48_000 * ratio as u32);
-        assert_eq!(output.piano().acoustic_gas().sound_speed.to_bits(), gas.sound_speed.to_bits());
-        assert_eq!(direct.partials_hz(69), output.piano().partials_hz(69));
-        assert_eq!(format!("{:?}", direct.close_ledger()), format!("{:?}", output.close_ledger()));
-        let (travel, delay) = direct.microphone_delay_samples();
-        assert_eq!(output.microphone_delay_frames(),
-            (travel as f64 / ratio as f64, delay / ratio as f64 + filter.delay_output_frames()));
     }
 }
 
 #[test]
 fn callbacks_and_mid_decay_clones_preserve_both_histories() {
     let (desc, cfg) = fixture();
-    let mut start = PianoAudio::new(&desc, cfg, 4).unwrap();
-    start.note_on(69, 0.9).unwrap();
-    start.render(&mut [0.0; 777]).unwrap(); // clone a nonempty FIR and live felt history
-    let mut whole = start.clone();
-    let mut expected = vec![0.0; 2048]; whole.render(&mut expected).unwrap();
-    for block in [1, 37, 128, 1024] {
-        let mut split = start.clone();
-        let mut actual = vec![0.0; expected.len()];
-        for chunk in actual.chunks_mut(block) { split.render(chunk).unwrap(); }
-        assert_eq!(actual, expected, "callback {block}");
-        assert_eq!(split.frames(), whole.frames());
-        assert_eq!(split.piano().counters.samples, whole.piano().counters.samples);
-        assert_eq!(format!("{:?}", split.close_ledger()), format!("{:?}", whole.close_ledger()));
+    for selection in [None, Some(extension_spec(true, 10_000.0))] {
+        let mut cfg = cfg.clone(); cfg.string_stretching = selection;
+        let mut start = PianoAudio::new(&desc, cfg, 4).unwrap();
+        start.note_on(69, 0.9).unwrap();
+        start.render(&mut [0.0; 777]).unwrap(); // clone a nonempty FIR and live felt history
+        let mut whole = start.clone();
+        let mut expected = vec![0.0; 2048]; whole.render(&mut expected).unwrap();
+        for block in [1, 37, 128, 1024] {
+            let mut split = start.clone();
+            let mut actual = vec![0.0; expected.len()];
+            for chunk in actual.chunks_mut(block) { split.render(chunk).unwrap(); }
+            assert_eq!(actual, expected, "callback {block}");
+            assert_eq!(split.frames(), whole.frames());
+            assert_eq!(split.piano().counters.samples, whole.piano().counters.samples);
+            assert_eq!(split.piano().counters.stretch_out_of_domain, whole.piano().counters.stretch_out_of_domain);
+            assert_eq!(format!("{:?}", split.close_ledger()), format!("{:?}", whole.close_ledger()));
+        }
+    }
+}
+
+#[test]
+fn longitudinal_band_is_admitted_at_the_mechanical_clock_without_expanding_output_partials() {
+    let (desc, mut cfg) = fixture();
+    cfg.string_stretching = Some(extension_spec(true, 30_000.0));
+    let error = PianoAudio::new(&desc, cfg.clone(), 1).err().unwrap();
+    assert!(error.contains("mechanics clock"), "{error}");
+    for ratio in [2, 4] {
+        let piano = PianoAudio::new(&desc, cfg.clone(), ratio).unwrap();
+        assert_eq!(piano.output_rate(), cfg.sample_rate);
+        assert_eq!(piano.mechanical_rate(), cfg.sample_rate * ratio as u32);
+        assert_eq!(piano.piano().config().partial_band_hz, cfg.partial_band_hz);
+        assert!(fs_live_piano::describe_audio(&piano).contains("\"stringStretchingSelected\":true"));
     }
 }
 

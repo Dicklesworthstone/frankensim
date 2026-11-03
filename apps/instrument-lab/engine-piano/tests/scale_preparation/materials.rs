@@ -211,6 +211,38 @@ fn gas() -> GasState {
 }
 
 #[test]
+fn selected_extension_retains_source_section_gas_and_changes_the_rendered_motion() {
+    let mut desc = small_description();
+    let source = load(&desc.courses, &pack(CORE), &pack(COATING));
+    preparation::prepare_with_materials(&mut desc, None, None, Some(&source)).unwrap();
+    let atmosphere = preparation::resolve_atmosphere("mixture 293.15 100000 mole 1 CO2 1").unwrap();
+    let text = format!("frankensim-piano-string-stretching-v1\n{}",
+        desc.courses.iter().map(|c| format!("stretch,{},section,0.2\n", c.midi)).collect::<String>());
+    let mut selected = config(); selected.string_stretching = Some(text.clone());
+    let mut conflicting = selected.clone();
+    conflicting.string_stretching = Some(text.replace("section", "166505"));
+    let error = PianoAudio::new_with_materials(&desc, conflicting, 2, atmosphere, source.clone()).err().unwrap();
+    assert!(error.contains("use section for EA"), "{error}");
+    for ratio in [1, 2, 4] {
+        let mut nonlinear = PianoAudio::new_with_materials(&desc, selected.clone(), ratio, atmosphere, source.clone()).unwrap();
+        let mut linear = PianoAudio::new_with_materials(&desc, config(), ratio, atmosphere, source.clone()).unwrap();
+        assert_eq!(nonlinear.piano().acoustic_gas(), atmosphere);
+        assert_eq!(nonlinear.piano().courses(), desc.courses.as_slice());
+        assert!(std::ptr::eq(nonlinear.piano().string_materials().unwrap(), source.as_ref()));
+        nonlinear.note_on(69, 1.0).unwrap(); linear.note_on(69, 1.0).unwrap();
+        let mut a = [0.0_f32; 2048]; let mut b = [0.0_f32; 2048];
+        nonlinear.render(&mut a).unwrap(); linear.render(&mut b).unwrap();
+        assert!(a.iter().any(|x| *x != 0.0));
+        assert_ne!(a, b, "extension must reach the receiver at {ratio}x");
+        let mut copy = nonlinear.clone();
+        nonlinear.render(&mut a).unwrap();
+        for block in b.chunks_mut(37) { copy.render(block).unwrap(); }
+        assert_eq!(a, b);
+        assert_eq!(format!("{:?}", nonlinear.close_ledger()), format!("{:?}", copy.close_ledger()));
+    }
+}
+
+#[test]
 fn material_geometry_and_the_same_atmosphere_determine_live_cylinder_drag() {
     let mut desc = small_description();
     let source = load(&desc.courses, &pack(CORE), &pack(COATING));

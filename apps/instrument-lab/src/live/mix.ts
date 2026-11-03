@@ -250,6 +250,8 @@ export interface LaneWorkerStats {
   dynamicModes?: number;
   noteOns?: number;
   refusedNoteOns?: number;
+  /** Piano: sounding-string mechanical steps exceeding slope/strain bounds or losing positive tension. */
+  stretchOutOfDomain?: number;
   forcedRetirements?: number;
   /** Piano: the dynamic string mode cap the load governor grants now, and the one asked for. */
   modeCap?: number;

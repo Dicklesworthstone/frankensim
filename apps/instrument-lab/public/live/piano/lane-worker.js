@@ -34,7 +34,7 @@
 //       realtime  the probe's speed at the chosen board and cap (measured, or estimated from the
 //                 probes when the cap was set without a timing of its own); modeCap  the starting mode cap
 //   {type:'stats', realtime, renderedFrames, skippedFrames, lateEvents, voices, peakPa,
-//    dynamicModes, noteOns, refusedNoteOns, forcedRetirements,
+//    dynamicModes, noteOns, refusedNoteOns, forcedRetirements, stretchOutOfDomain,
 //    modeCap, fullModeCap, courseModeBudget, governorDown, governorUp}
 //       modeCap  the dynamic string mode cap the governor grants now (fullModeCap = the asked one)
 //   {type:'snapshot', frame, epoch, data}   engine.snapshot() for the state at context frame `frame`
@@ -224,6 +224,7 @@ self.onmessage = async (event) => {
             const s = lane.stats;
             const st = engine.stats();
             post({ type: 'stats', realtime: s.wallMs > 0 ? s.audioMs / s.wallMs : 0, renderedFrames: s.renderedFrames, skippedFrames: s.skippedFrames, lateEvents: s.lateEvents, voices: st[1], peakPa: st[4], dynamicModes: st[2], noteOns: st[10], refusedNoteOns: st[11], forcedRetirements: st[6],
+              stretchOutOfDomain: st[12] ?? 0,
               modeCap: gov ? gov.cap : full.maxDynamicModes, fullModeCap: full.maxDynamicModes, courseModeBudget: gov ? gov.budget : full.courseModeBudget, governorDown: gov ? gov.down : 0, governorUp: gov ? gov.up : 0 });
           }
           return out;

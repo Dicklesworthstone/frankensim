@@ -213,6 +213,8 @@ export interface PianoStats {
   rebuilds: number;
   noteOns: number;
   refusedNoteOns: number;
+  /** Sounding-string mechanical steps exceeding slope/strain bounds or losing positive tension. */
+  stretchOutOfDomain?: number;
   renderedFrames: number;
   playedFrames: number;
   /** What the load governor currently grants (equals the requested quality unless it stepped down). */

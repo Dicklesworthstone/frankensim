@@ -57,7 +57,10 @@ high-rate preparation and existing table caps.
 
 Source counters and energy books remain mechanical; the adapter separately
 counts emitted pressure frames, output peak Pa and output full-scale exceedances.
-WASM `stats()` keeps its array layout with acoustic values on the host clock.
+WASM `stats()` preserves its first twelve slots, with acoustic values on the host
+clock. The appended slot 12 reports `stretchOutOfDomain`: sounding-string
+mechanical steps exceeding the selected slope/strain bounds or losing positive
+tension. Both playback workers expose that count in their statistics.
 `info()` reports both clocks, total numerical latency in output frames and
 microphone work per output frame. The physical display snapshot still comes
 from the source, not a second downsampled mechanical state.
@@ -91,10 +94,10 @@ cargo test --manifest-path apps/instrument-lab/engine-piano/Cargo.toml --test au
 node --test apps/instrument-lab/tests/piano-oversampling.test.mjs
 ```
 
-Six Rust tests exercise original 1x bit parity, direct high-rate source/filter
+Rust tests exercise original 1x bit parity, direct high-rate source/filter
 equivalence, gas, pedal events, cloned histories, callback splits, clock/band
-admission, partial-failure refusal and output-clock descriptions; all six pass
-(macOS, release). The Node selection tests use a recording mock constructor and
+admission, partial-failure refusal and output-clock descriptions, including
+selected stretching and longitudinal waves. The Node selection tests use a recording mock constructor and
 do not execute WASM or piano physics. An independent convolution reference of
 the shared FIR passed 15 frequency cases; its 30 kHz rejection before 48 kHz
 output is approximately 117 dB, a filter-only figure, not a rendered-piano alias

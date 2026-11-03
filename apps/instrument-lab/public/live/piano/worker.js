@@ -36,7 +36,7 @@
 //   {type:'snapshot', data:Float32Array, renderedFrames, aheadMs}   (layout: see parseSnapshot in client.js)
 //   {type:'stats', realtimeFactor, load, worstChunkMs, queuedMs, targetMs, underruns, underrunFrames,
 //    voices, dynamicModes, dynamicStrings, peakPa, clippedSamples, forcedRetirements, retirements,
-//    contactFailures, refusedNoteOns, rebuilds, renderedFrames, playedFrames, quality, governorSteps}
+//    contactFailures, refusedNoteOns, stretchOutOfDomain, rebuilds, renderedFrames, playedFrames, quality, governorSteps}
 //   {type:'reply', id, name, value} | {type:'bench', id, results}
 //   {type:'error', code:'refused'|'engine'|'worker_error', message, id?, command?}
 import init, { PianoEngine } from './engine.js';
@@ -158,6 +158,7 @@ function pump() {
       rebuilds: s[9],
       noteOns: s[10],
       refusedNoteOns: s[11],
+      stretchOutOfDomain: s[12] ?? 0,
       renderedFrames: rendered,
       playedFrames: level.playedFrames,
       quality: { ...granted },
