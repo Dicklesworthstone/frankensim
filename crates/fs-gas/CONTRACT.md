@@ -1356,6 +1356,39 @@ Generally advecting unequal-caloric material contacts retain the original
 conservative scheme's pressure-oscillation limitation; no exact general
 pressure-equilibrium or entropy-stability claim follows from this extension.
 
+### Simultaneous inertia of both resolved gas end walls
+
+`Euler1d::step_with_inertial_walls` advances a closed constant-area field and
+two finite `Piston` masses together. Both wall velocities use the increasing
+axial coordinate. Each `InertialWallLoad` holds exterior pressure and an
+additional signed force: exterior pressure pushes the left wall rightward and
+the right wall leftward. Gas momentum remains in the original resolved field.
+
+A bounded two-variable Newton solve selects both midpoint wall speeds.
+Every trial runs the original moving-volume RK2 operator from the same
+accepted state and duration. Each wall receives the negative of its actual
+gas-side pressure impulse; the identical boundary work enters its kinetic
+balance. Both wall momentum/work residuals and combined gas-plus-walls
+momentum/energy are admitted independently, using represented mesh
+displacements for exterior/load work. No fixed support, reduced wall mass,
+uniform cavity pressure or posterior energy correction replaces an owner.
+
+Both velocity intervals bound relative-wave and contraction CFL. Row-scaled
+finite differences and bounded backtracking reuse the native candidate and
+geometry buffers. An exhausted solve retries the complete interval under
+the original gas halving budget. Only the last evaluated native candidate
+can publish; gas, mesh, clock and both wall velocities commit after the
+final cancellation check. No field or source table is cloned per trial.
+
+Six regressions cover balanced outside pressure, symmetric vacuum recoil,
+unequal walls with nonuniform pressure and signed loads, a common velocity
+boost through the original first-order ALE route, the massive-left-wall
+limit of the original one-piston owner, and cancellation/refusal rollback.
+They are authored but unexecuted under the session's worker resource limit.
+This frozen-composition adiabatic lane does not yet compose the two moving
+walls with mixture chemistry, heat transfer, gravity, contact stops or
+transverse dynamics; it establishes no general FSI stability theorem.
+
 ### Pressure-driven inertia of a resolved gas end wall
 
 `Euler1d::step_with_piston` couples the existing spatial Euler field to

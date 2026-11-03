@@ -20,6 +20,8 @@ pub(crate) use moving::MovingWorkspace;
 pub mod network;
 /// Resolved pressure waves driving an inertial end wall with common work accounting.
 pub mod piston;
+/// Resolved pressure waves exchanging momentum with two finite moving end walls.
+pub mod inertial_walls;
 pub(crate) mod wall;
 
 pub use characteristic::EndWave;
