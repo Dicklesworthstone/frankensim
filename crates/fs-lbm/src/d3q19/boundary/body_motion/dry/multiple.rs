@@ -141,7 +141,9 @@ impl BoundaryGrid3 {
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    pub(in crate::d3q19::boundary::body_motion) fn step_with_dry_partial_saturation_resistance<const N: usize>(
+    pub(in crate::d3q19::boundary::body_motion) fn step_with_dry_partial_saturation_resistance<
+        const N: usize,
+    >(
         &mut self,
         samplers: &mut [BodyFrameSampler3; N],
         shapes: [&dyn BodyFrameShape3; N],
@@ -177,10 +179,7 @@ impl BoundaryGrid3 {
                     motion: singleton(single),
                     planes: Vec::new(),
                 },
-                surfaces.map(|_| SurfaceCandidate {
-                    states: Vec::new(),
-                    reports: Vec::new(),
-                }),
+                surfaces.map(PreparedSurfaces::empty_candidate),
             ));
         }
         let initial = *bodies;

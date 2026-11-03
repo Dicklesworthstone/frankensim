@@ -2,6 +2,89 @@
 
 use super::*;
 
+/// Geometry and missing-resistance scales, without an independent rigid state.
+///
+/// Points and normals use world axes in the frozen entry point and body axes
+/// when attached by a moving owner. A patch does not infer a finite face extent,
+/// resolved wall, carrier shape, displaced volume or thermal destination.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LubricationPlanePatch3 {
+    geometry: LubricationPlane3,
+}
+
+impl LubricationPlanePatch3 {
+    /// Admit a point, nonzero normal and original positive film scales.
+    ///
+    /// # Errors
+    /// Inherits the original plane geometry and normal-gap admission.
+    pub fn new(
+        point: [f64; 3],
+        normal: [f64; 3],
+        cutoff_gap: f64,
+        roughness_gap: f64,
+    ) -> Result<Self> {
+        Ok(Self {
+            geometry: LubricationPlane3::new(point, normal, [0.0; 3], cutoff_gap, roughness_gap)?,
+        })
+    }
+
+    /// Enable the original reciprocal tangent/parallel-spin missing resistance.
+    ///
+    /// # Errors
+    /// Inherits the original tangent-gap scale admission.
+    pub fn with_tangential(mut self, cutoff_gap: f64, roughness_gap: f64) -> Result<Self> {
+        self.geometry = self.geometry.with_tangential(cutoff_gap, roughness_gap)?;
+        Ok(self)
+    }
+
+    /// Point in the coordinate frame declared by the enclosing owner.
+    pub fn point(self) -> [f64; 3] {
+        self.geometry.point()
+    }
+    /// Unit normal into the spheres' permitted half-space.
+    pub fn normal(self) -> [f64; 3] {
+        self.geometry.normal()
+    }
+    /// Original normal-film cutoff in lattice lengths.
+    pub fn cutoff_gap(self) -> f64 {
+        self.geometry.cutoff_gap
+    }
+    /// Original positive normal-gap regularization in lattice lengths.
+    pub fn roughness_gap(self) -> f64 {
+        self.geometry.roughness_gap
+    }
+    /// Optional tangent/parallel-spin cutoff and roughness in lattice lengths.
+    pub fn tangential_gaps(self) -> Option<(f64, f64)> {
+        self.geometry.tangential
+    }
+
+    pub(in crate::d3q19::boundary) fn from_plane(plane: LubricationPlane3) -> Self {
+        Self {
+            geometry: LubricationPlane3 {
+                velocity: [0.0; 3],
+                axial_spin: 0.0,
+                recoil: None,
+                ..plane
+            },
+        }
+    }
+
+    pub(in crate::d3q19::boundary) fn at(self, point: [f64; 3], normal: [f64; 3]) -> Result<Self> {
+        let mut patch = Self::new(point, normal, self.cutoff_gap(), self.roughness_gap())?;
+        if let Some((cutoff, roughness)) = self.tangential_gaps() {
+            patch = patch.with_tangential(cutoff, roughness)?;
+        }
+        Ok(patch)
+    }
+
+    pub(in crate::d3q19::boundary) fn carried(self, carrier: usize) -> SharedLubricationSurface3 {
+        SharedLubricationSurface3::Carried(CarrierLubricationFace3 {
+            carrier,
+            geometry: self.geometry,
+        })
+    }
+}
+
 /// A frozen planar film face referring to one entry of a carrier array.
 /// It owns geometry and film scales, but no additional mass or inertia.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -179,7 +262,7 @@ impl BoundaryGrid3 {
     }
 }
 
-fn prepare(
+pub(in crate::d3q19::boundary) fn prepare(
     surfaces: &[SharedLubricationSurface3],
     carriers: &[PartialSaturationBody3],
     external: &[[f64; 6]],
@@ -238,7 +321,7 @@ fn prepare(
     Ok(native)
 }
 
-fn collect(
+pub(in crate::d3q19::boundary) fn collect(
     surfaces: &[SharedLubricationSurface3],
     carriers: &[PartialSaturationBody3],
     reports: &[PlaneLubricationExchange3],

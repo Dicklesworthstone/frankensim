@@ -31,21 +31,24 @@ pub use rotor::{WallRotor3, WallRotorError3, WallRotorExchange3};
 mod partial_saturation;
 pub use partial_saturation::{
     CarrierFaceExchange3, CarrierLubricationExchange3, CarrierLubricationFace3,
-    SharedCarrierLubricationExchange3, SharedLubricationSurface3,
-    FiniteLubricationPlane3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3, LubricationSurface3,
-    OpenBoundaryMomentumTransport3, PartialSaturationBodiesExchange3, PartialSaturationBody3,
-    PartialSaturationBodyExchange3, PartialSaturationBodyResponse3, PartialSaturationError3,
-    PartialSaturationExchange3, PartialSaturationForcing3, PeriodicMomentumTransport3,
-    PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,
+    FiniteLubricationPlane3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3,
+    LubricationPlanePatch3, LubricationSurface3, OpenBoundaryMomentumTransport3,
+    PartialSaturationBodiesExchange3, PartialSaturationBody3, PartialSaturationBodyExchange3,
+    PartialSaturationBodyResponse3, PartialSaturationError3, PartialSaturationExchange3,
+    PartialSaturationForcing3, PeriodicMomentumTransport3, PlaneLubricationExchange3,
+    SharedCarrierLubricationExchange3, SharedLubricationSurface3, SphereLubrication3,
+    SphereLubricationExchange3,
 };
 mod body_motion;
 pub use body_motion::{
-    DryLubricatedSurfacesExchange3, MovingFiniteLubricationPlane3, MovingFinitePlaneExchange3,
-    MovingLubricatedSurfacesExchange3, MovingLubricationSurface3, MovingSurfaceExchange3,
     BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, DryBodiesExchange3,
-    DryBodyCouplingConfig3, DryBodyExchange3, DryLubricatedPlanesExchange3, ImmersedMomentum3,
-    MovingLubricatedPlanesExchange3, MovingPartialSaturationBodiesExchange3,
-    MovingPartialSaturationBody3, MovingPartialSaturationExchange3,
+    DryBodyCouplingConfig3, DryBodyExchange3, DryLubricatedCarriersExchange3,
+    DryLubricatedPlanesExchange3, DryLubricatedSurfacesExchange3, ImmersedMomentum3,
+    MovingCarrierExchange3, MovingCarrierSurface3, MovingFiniteLubricationPlane3,
+    MovingFinitePlaneExchange3, MovingLubricatedCarriersExchange3, MovingLubricatedPlanesExchange3,
+    MovingLubricatedSurfacesExchange3, MovingLubricationSurface3,
+    MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3,
+    MovingPartialSaturationExchange3, MovingSurfaceExchange3,
 };
 
 /// Bit-semantics version for the D3Q19 boundary surface.
@@ -286,7 +289,9 @@ impl BoundarySpec3 {
                 FaceBoundary3::Periodic => {}
                 FaceBoundary3::Wall { velocity } => {
                     if !velocity.iter().all(|component| component.is_finite()) {
-                        return Err(BoundaryForcingError3::Invalid("wall velocity must be finite"));
+                        return Err(BoundaryForcingError3::Invalid(
+                            "wall velocity must be finite",
+                        ));
                     }
                     let normal = face.normal();
                     let normal_velocity = velocity
@@ -295,26 +300,36 @@ impl BoundarySpec3 {
                         .map(|(u, n)| *u * f64::from(n))
                         .sum::<f64>();
                     if normal_velocity.abs() > 16.0 * f64::EPSILON {
-                        return Err(BoundaryForcingError3::Invalid("wall velocity must be tangential"));
+                        return Err(BoundaryForcingError3::Invalid(
+                            "wall velocity must be tangential",
+                        ));
                     }
                     let speed_sq = velocity.iter().map(|u| u * u).sum::<f64>();
                     if speed_sq >= 0.03 {
-                        return Err(BoundaryForcingError3::Invalid("wall velocity exceeds the low-Mach admission envelope"));
+                        return Err(BoundaryForcingError3::Invalid(
+                            "wall velocity exceeds the low-Mach admission envelope",
+                        ));
                     }
                 }
                 FaceBoundary3::Velocity { velocity } => {
                     if !velocity.iter().all(|component| component.is_finite()) {
-                        return Err(BoundaryForcingError3::Invalid("velocity boundary must be finite"));
+                        return Err(BoundaryForcingError3::Invalid(
+                            "velocity boundary must be finite",
+                        ));
                     }
                     let speed_sq = velocity.iter().map(|u| u * u).sum::<f64>();
                     if speed_sq >= 0.03 {
-                        return Err(BoundaryForcingError3::Invalid("velocity boundary exceeds the low-Mach admission envelope"));
+                        return Err(BoundaryForcingError3::Invalid(
+                            "velocity boundary exceeds the low-Mach admission envelope",
+                        ));
                     }
                     open_axes[face.axis()] = true;
                 }
                 FaceBoundary3::Pressure { density } => {
                     if !density.is_finite() || density <= 0.0 {
-                        return Err(BoundaryForcingError3::Invalid("pressure-boundary density must be positive and finite"));
+                        return Err(BoundaryForcingError3::Invalid(
+                            "pressure-boundary density must be positive and finite",
+                        ));
                     }
                     open_axes[face.axis()] = true;
                 }
@@ -329,7 +344,8 @@ impl BoundarySpec3 {
     }
 
     fn validate(self) {
-        self.try_validate().expect("invalid D3Q19 boundary specification");
+        self.try_validate()
+            .expect("invalid D3Q19 boundary specification");
     }
 }
 
@@ -2593,7 +2609,11 @@ fn same_velocity(left: [f64; 3], right: [f64; 3]) -> bool {
     })
 }
 
-pub(crate) fn regularized_populations(rho: f64, velocity: [f64; 3], stress: [[f64; 3]; 3]) -> [f64; Q3] {
+pub(crate) fn regularized_populations(
+    rho: f64,
+    velocity: [f64; 3],
+    stress: [[f64; 3]; 3],
+) -> [f64; Q3] {
     let mut populations = equilibrium3(rho, velocity);
     let coefficient = 1.0 / (2.0 * CS2 * CS2);
     for q in 0..Q3 {

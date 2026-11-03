@@ -244,6 +244,7 @@ mod tests {
     const fn collision_error_kind(error: &CollisionError3) -> &'static str {
         match error {
             CollisionError3::InvalidRelaxationTime { .. } => "invalid_relaxation_time",
+            CollisionError3::InvalidTrtMagic { .. } => "invalid_trt_magic",
             CollisionError3::InvalidMomentRelaxationRate { .. } => "invalid_moment_relaxation_rate",
             CollisionError3::NonFiniteForce { .. } => "non_finite_force",
             CollisionError3::NonFinitePopulation { .. } => "non_finite_population",

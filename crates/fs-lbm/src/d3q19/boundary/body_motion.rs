@@ -21,8 +21,10 @@ mod quadrature;
 mod surfaces;
 pub use multiple::{MovingLubricatedPlanesExchange3, MovingPartialSaturationBodiesExchange3};
 pub use surfaces::{
-    DryLubricatedSurfacesExchange3, MovingFiniteLubricationPlane3, MovingFinitePlaneExchange3,
-    MovingLubricatedSurfacesExchange3, MovingLubricationSurface3, MovingSurfaceExchange3,
+    DryLubricatedCarriersExchange3, DryLubricatedSurfacesExchange3, MovingCarrierExchange3,
+    MovingCarrierSurface3, MovingFiniteLubricationPlane3, MovingFinitePlaneExchange3,
+    MovingLubricatedCarriersExchange3, MovingLubricatedSurfacesExchange3,
+    MovingLubricationSurface3, MovingSurfaceExchange3,
 };
 mod dry;
 pub use dry::{

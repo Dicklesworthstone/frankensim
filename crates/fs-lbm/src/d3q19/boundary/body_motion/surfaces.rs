@@ -6,6 +6,12 @@ use super::super::{
 };
 use super::*;
 
+mod shared;
+pub use shared::{
+    DryLubricatedCarriersExchange3, MovingCarrierExchange3, MovingCarrierSurface3,
+    MovingLubricatedCarriersExchange3,
+};
+
 /// One body-fixed planar film patch carried by finite rigid inertia.
 ///
 /// This is only the existing missing-film port. The carrier has no sampled
@@ -294,10 +300,12 @@ pub(super) struct PreparedSurfaces {
     external: Vec<[f64; 6]>,
     pub initial_planes: Vec<LubricationPlane3>,
     pub midpoint_planes: Vec<LubricationPlane3>,
+    shared: Option<shared::PreparedSharedSurfaces>,
 }
 pub(super) struct SurfaceCandidate {
     pub states: Vec<MovingLubricationSurface3>,
     pub reports: Vec<MovingSurfaceExchange3>,
+    shared: Option<shared::SharedSurfaceCandidate>,
 }
 
 impl PreparedSurfaces {
@@ -353,7 +361,20 @@ impl PreparedSurfaces {
             external: loads,
             initial_planes,
             midpoint_planes,
+            shared: None,
         })
+    }
+
+    pub fn empty_candidate(&self) -> SurfaceCandidate {
+        debug_assert!(self.initial_planes.is_empty());
+        SurfaceCandidate {
+            states: Vec::new(),
+            reports: Vec::new(),
+            shared: self
+                .shared
+                .as_ref()
+                .map(|_| shared::SharedSurfaceCandidate::empty()),
+        }
     }
 
     pub fn admit_first_half<const N: usize>(
@@ -376,6 +397,9 @@ impl PreparedSurfaces {
         origin: [f64; 3],
         gate: &CancelGate,
     ) -> Result<SurfaceCandidate> {
+        if let Some(shared) = &self.shared {
+            return shared.finish(exchanges, before, after, radii, origin, gate);
+        }
         if exchanges.len() != self.initial.len() {
             return Err(invalid("missing moving surface response"));
         }
@@ -401,79 +425,14 @@ impl PreparedSurfaces {
                     )
                 }
                 (MovingLubricationSurface3::Finite(p), MovingLubricationSurface3::Finite(mid)) => {
-                    let response = film
-                        .finite_body
-                        .ok_or_else(|| invalid("missing finite surface response"))?;
-                    // The original resistance owner accumulates the film spin
-                    // impulse about this carrier's own COM. Retain that direct
-                    // momentum increment rather than reconstructing it by
-                    // subtracting close endpoint angular velocities.
-                    let impulse = core::array::from_fn(|i| {
-                        response.spin_impulse[i] + self.external[index][i + 3]
-                    });
-                    let mut kicked = mid.body;
-                    kicked.velocity = response.body_after.velocity;
-                    kicked.angular_momentum_body = mid.body.angular_momentum_body
-                        + native(mid.body.orientation.inverse().rotate(vector(impulse)))?;
-                    let accepted = drift(kicked, 0.5)?;
+                    let (kicked, accepted, account) =
+                        finish_carrier(p.body, mid.body, film, self.external[index], origin)?;
                     let end = mid.at_body(accepted)?;
                     let start = mid.at_body(kicked)?;
-                    let external = at_origin(
-                        self.external[index],
-                        core::array::from_fn(|i| mid.body.center[i] - origin[i]),
-                    );
-                    let old_l = total_angular_momentum(p.body, origin)?;
-                    let new_l = total_angular_momentum(accepted, origin)?;
-                    let change = core::array::from_fn(|i| {
-                        if i < 3 {
-                            p.body.mass * (accepted.velocity[i] - p.body.velocity[i])
-                        } else {
-                            new_l[i - 3] - old_l[i - 3]
-                        }
-                    });
-                    let residual = core::array::from_fn(|i| {
-                        change[i]
-                            - external[i]
-                            - if i < 3 {
-                                film.impulse[i]
-                            } else {
-                                film.angular_impulse[i - 3]
-                            }
-                    });
-                    let e0 = rotational_energy(p.body.inertia, p.body.angular_momentum_body)?;
-                    let em = rotational_energy(mid.body.inertia, mid.body.angular_momentum_body)?;
-                    let ek = rotational_energy(kicked.inertia, kicked.angular_momentum_body)?;
-                    let e1 = rotational_energy(accepted.inertia, accepted.angular_momentum_body)?;
-                    let free = (em - e0) + (e1 - ek);
-                    let kinetic = 0.5
-                        * p.body.mass
-                        * (dot(accepted.velocity, accepted.velocity)
-                            - dot(p.body.velocity, p.body.velocity))
-                        + e1
-                        - e0;
-                    let work = kinetic - response.external_work - film.work - free;
-                    if !external
-                        .into_iter()
-                        .chain(change)
-                        .chain(residual)
-                        .chain([free, kinetic, work])
-                        .all(f64::is_finite)
-                    {
-                        return Err(invalid("moving finite surface momentum/work overflowed"));
-                    }
                     (
                         MovingLubricationSurface3::Finite(start),
                         MovingLubricationSurface3::Finite(end),
-                        Some(MovingFinitePlaneExchange3 {
-                            midpoint_center: mid.body.center,
-                            midpoint_orientation: mid.body.orientation,
-                            external_impulse: external,
-                            momentum_change: change,
-                            momentum_residual: residual,
-                            kinetic_energy_change: kinetic,
-                            free_rotation_energy_change: free,
-                            work_residual: work,
-                        }),
+                        Some(account),
                     )
                 }
                 _ => return Err(invalid("moving surface kind changed during a trial")),
@@ -485,8 +444,94 @@ impl PreparedSurfaces {
         admit_spheres(&exchanged, &states, before, after, radii, gate)?;
         admit_distinct_sweep(&exchanged, &states, gate)?;
         checkpoint(gate)?;
-        Ok(SurfaceCandidate { states, reports })
+        Ok(SurfaceCandidate {
+            states,
+            reports,
+            shared: None,
+        })
     }
+}
+
+// One rigid momentum update and trajectory account, whether the carrier owns
+// one face or receives an aggregate wrench from several attached patches.
+fn finish_carrier(
+    initial: MovingPartialSaturationBody3,
+    midpoint: MovingPartialSaturationBody3,
+    film: PlaneLubricationExchange3,
+    load: [f64; 6],
+    origin: [f64; 3],
+) -> Result<(
+    MovingPartialSaturationBody3,
+    MovingPartialSaturationBody3,
+    MovingFinitePlaneExchange3,
+)> {
+    let response = film
+        .finite_body
+        .ok_or_else(|| invalid("missing finite surface response"))?;
+    // Use the original directly accumulated COM spin impulse, avoiding
+    // subtraction of close endpoint angular velocities.
+    let impulse = core::array::from_fn(|i| response.spin_impulse[i] + load[i + 3]);
+    let mut kicked = midpoint;
+    kicked.velocity = response.body_after.velocity;
+    kicked.angular_momentum_body = midpoint.angular_momentum_body
+        + native(midpoint.orientation.inverse().rotate(vector(impulse)))?;
+    let accepted = drift(kicked, 0.5)?;
+    let external = at_origin(
+        load,
+        core::array::from_fn(|i| midpoint.center[i] - origin[i]),
+    );
+    let old_l = total_angular_momentum(initial, origin)?;
+    let new_l = total_angular_momentum(accepted, origin)?;
+    let change = core::array::from_fn(|i| {
+        if i < 3 {
+            initial.mass * (accepted.velocity[i] - initial.velocity[i])
+        } else {
+            new_l[i - 3] - old_l[i - 3]
+        }
+    });
+    let residual = core::array::from_fn(|i| {
+        change[i]
+            - external[i]
+            - if i < 3 {
+                film.impulse[i]
+            } else {
+                film.angular_impulse[i - 3]
+            }
+    });
+    let e0 = rotational_energy(initial.inertia, initial.angular_momentum_body)?;
+    let em = rotational_energy(midpoint.inertia, midpoint.angular_momentum_body)?;
+    let ek = rotational_energy(kicked.inertia, kicked.angular_momentum_body)?;
+    let e1 = rotational_energy(accepted.inertia, accepted.angular_momentum_body)?;
+    let free = (em - e0) + (e1 - ek);
+    let kinetic = 0.5
+        * initial.mass
+        * (dot(accepted.velocity, accepted.velocity) - dot(initial.velocity, initial.velocity))
+        + e1
+        - e0;
+    let work = kinetic - response.external_work - film.work - free;
+    if !external
+        .into_iter()
+        .chain(change)
+        .chain(residual)
+        .chain([free, kinetic, work])
+        .all(f64::is_finite)
+    {
+        return Err(invalid("moving finite surface momentum/work overflowed"));
+    }
+    Ok((
+        kicked,
+        accepted,
+        MovingFinitePlaneExchange3 {
+            midpoint_center: midpoint.center,
+            midpoint_orientation: midpoint.orientation,
+            external_impulse: external,
+            momentum_change: change,
+            momentum_residual: residual,
+            kinetic_energy_change: kinetic,
+            free_rotation_energy_change: free,
+            work_residual: work,
+        },
+    ))
 }
 
 fn reserved<T>(count: usize) -> Result<Vec<T>> {

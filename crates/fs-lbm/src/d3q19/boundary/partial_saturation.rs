@@ -37,8 +37,12 @@ use open::OpenTransport;
 mod multiple;
 pub use multiple::{PartialSaturationBodiesExchange3, PartialSaturationBodyResponse3};
 pub(super) mod lubrication;
+pub(in crate::d3q19::boundary) use lubrication::{
+    collect_carrier_surfaces, prepare_carrier_surfaces,
+};
 pub use lubrication::{
     CarrierFaceExchange3, CarrierLubricationExchange3, CarrierLubricationFace3,
+    LubricationPlanePatch3,
     SharedCarrierLubricationExchange3, SharedLubricationSurface3,
     FiniteLubricationPlane3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3, LubricationSurface3,
     PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,

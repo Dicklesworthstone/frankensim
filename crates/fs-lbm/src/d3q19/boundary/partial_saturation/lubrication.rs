@@ -11,8 +11,12 @@ pub use finite_planes::{FiniteLubricationPlane3, FinitePlaneResponse3};
 mod surfaces;
 pub use surfaces::LubricationSurface3;
 mod carriers;
+pub(in crate::d3q19::boundary) use carriers::{
+    collect as collect_carrier_surfaces, prepare as prepare_carrier_surfaces,
+};
 pub use carriers::{
     CarrierFaceExchange3, CarrierLubricationExchange3, CarrierLubricationFace3,
+    LubricationPlanePatch3,
     SharedCarrierLubricationExchange3, SharedLubricationSurface3,
 };
 mod pairs;

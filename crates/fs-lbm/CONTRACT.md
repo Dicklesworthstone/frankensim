@@ -1,5 +1,42 @@
 # CONTRACT: fs-lbm
 
+## Moving shared film carriers through one fluid/body step
+
+`MovingCarrierSurface3::Attached` binds body-coordinate `LubricationPlanePatch3`
+geometry to an explicit carrier registry index. Several faces share one physical
+mass, complete inertia, accepted pose and external center load. Equal body values
+at different registry indices remain independent. Each registry entry must own
+at least one patch; at most 64 carriers and 64 patches are admitted.
+
+`step_with_lubricated_spheres_and_carriers` and
+`step_with_dry_lubricated_spheres_and_carriers` reuse the original moving-sphere,
+fluid and dry-interior correction owners. The existing shared-carrier resistance
+solver sees all faces at their actual common midpoint pose and includes their
+cross-face mobility. Each carrier receives one free half-drift, the sum of its
+patch spin impulses plus one authored center couple, and one final half-drift.
+The solved linear response already includes its one external impulse. Prescribed
+surfaces retain their original translated geometry, axial spin and work port.
+
+Per-patch reports retain separate reaction, couple, work and active-film counts.
+One carrier report owns their aggregate transfer, actual trajectory momentum and
+kinetic change, external work, free-rotation energy defect and work residual.
+Carrier storage must be counted once regardless of the number of attached faces.
+The independent moving-surface path uses the same rigid momentum/trajectory helper.
+
+Every dry-correction probe starts from the same accepted carrier registry. The
+chosen carrier candidate remains paired with the accepted sphere/fluid candidate.
+Endpoint construction, report allocation and both conservative swept-gap checks
+finish before fluid publication; subsequent carrier/patch publication is infallible.
+Invalid associations, native budgets, inadmissible sweeps and cancellation preserve
+all accepted owners. The empty registry retains the original singleton fast path.
+
+This remains the original local planar missing-film model: geometry does not
+certify a finite face extent or introduce a resolved wall, contact, sampled carrier
+fluid interior, displaced volume, inferred gravity/buoyancy or thermal destination.
+Full-grid regressions check an independent three-mass midpoint oracle, coupled
+full-inertia wrench/work, unique moving storage and actual population momentum,
+legacy single-face/empty equivalence, rejected trials and exact retry.
+
 ## Pressure-aware dense liquid initialization
 
 `MaterialFreeSurfaceScaling::free_surface2_with_pressure` initializes the
