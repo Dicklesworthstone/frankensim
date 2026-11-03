@@ -445,6 +445,31 @@ impl<'a> DielectricInterface<'a> {
         super::evaluate_rough_with_interface(normal, wo, wi, eta_i, eta_t, alpha, Some(self))
     }
 
+    /// Evaluate the native proposal and retain its single coherent Mueller
+    /// solve. Unsupported directions can return before any optical solve;
+    /// their optional response is then absent and their scalar value is zero.
+    pub(crate) fn evaluate_rough_polarized(
+        self,
+        normal: Vec3,
+        wo: Vec3,
+        wi: Vec3,
+        eta_i: f64,
+        eta_t: f64,
+        alpha: f64,
+    ) -> Result<(RoughDielectricEvaluation, Option<PolarizedFresnel>), DielectricError> {
+        let mut response = None;
+        let evaluation = super::evaluate_rough_with_fresnel(
+            normal, wo, wi, eta_i, eta_t, alpha, Some(self),
+            |cosine| {
+                let polarized = self.fresnel_polarized(cosine, eta_i, eta_t)?;
+                let scalar = polarized.scalar;
+                response = Some(polarized);
+                Ok(scalar)
+            },
+        )?;
+        Ok((evaluation, response))
+    }
+
     /// Native GGX sample. A nonzero coating between exactly equal bulk indices
     /// explicitly refuses the unsupported continuous/delta mixture; a smooth
     /// coated equal-index interface and an uncoated rough null remain supported.

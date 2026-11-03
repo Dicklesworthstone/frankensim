@@ -43,6 +43,9 @@ pub mod bundle;
 /// Cosine-sampled diffuse power transport in the retained local medium.
 pub mod diffuse;
 
+/// Direction-conditioned polarized radiance response and native surface proposals.
+pub mod connection;
+
 /// Admission or representability refusal. Failed operations leave the beam unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BeamError {

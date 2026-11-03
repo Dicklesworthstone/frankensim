@@ -165,31 +165,44 @@ impl PolarizedBeam {
         radiance: bool,
     ) -> Result<Option<BeamSample>, ConductorBeamError> {
         admit_samples(samples)?;
-        admit_detail(detail)?;
-        if ![local_point.x, local_point.y, local_point.z].iter().all(|v| v.is_finite()) {
-            return Err(BeamError::InvalidPosition.into());
-        }
-        let mut normal = unit(world_normal)?;
-        if normal.dot(self.ray().dir) > 0.0 { normal = normal.scale(-1.0); }
-        let fallback = || self.sample_rough_conductor(
-            world_normal, optics, ConductorSurface::try_rough(detail.alpha_pair().0)?, samples,
-        );
-        if detail.is_zero_detail() { return fallback(); }
-        let inverse = transform.inverse().map_err(|_| BeamError::InvalidFrame)?;
-        let local_frame = match shading_frame(detail, local_point, inverse.transform_vector(normal)) {
-            Ok(frame) => frame,
-            Err(SurfaceDetailError::PoleTangentUndefined) => return fallback(),
-            Err(_) => return Err(BeamError::InvalidFrame.into()),
-        };
-        let frame = ShadingFrame {
-            geometric_normal: normal,
-            shading_normal: transform.transform_vector(local_frame.shading_normal),
-            tangent: transform.transform_vector(local_frame.tangent),
-            bitangent: transform.transform_vector(local_frame.bitangent),
-            mark_covered: local_frame.mark_covered,
+        let Some(frame) = instanced_frame(self, detail, transform, local_point, world_normal)? else {
+            return self.sample_rough_conductor(
+                world_normal, optics, ConductorSurface::try_rough(detail.alpha_pair().0)?, samples,
+            );
         };
         self.sample_brushed_conductor_for_transport(optics, detail, &frame, samples, radiance)
     }
+}
+
+// Shared with direction-conditioned connections: retain the exact native
+// body chart, placement, face-forwarding, mark and pole/zero-detail fallback.
+pub(super) fn instanced_frame(
+    beam: PolarizedBeam,
+    detail: &SurfaceDetail,
+    transform: RigidTransform,
+    local_point: Point3,
+    world_normal: Vec3,
+) -> Result<Option<ShadingFrame>, ConductorBeamError> {
+    admit_detail(detail)?;
+    if ![local_point.x, local_point.y, local_point.z].iter().all(|v| v.is_finite()) {
+        return Err(BeamError::InvalidPosition.into());
+    }
+    let mut normal = unit(world_normal)?;
+    if normal.dot(beam.ray().dir) > 0.0 { normal = normal.scale(-1.0); }
+    if detail.is_zero_detail() { return Ok(None); }
+    let inverse = transform.inverse().map_err(|_| BeamError::InvalidFrame)?;
+    let local_frame = match shading_frame(detail, local_point, inverse.transform_vector(normal)) {
+        Ok(frame) => frame,
+        Err(SurfaceDetailError::PoleTangentUndefined) => return Ok(None),
+        Err(_) => return Err(BeamError::InvalidFrame.into()),
+    };
+    Ok(Some(ShadingFrame {
+        geometric_normal: normal,
+        shading_normal: transform.transform_vector(local_frame.shading_normal),
+        tangent: transform.transform_vector(local_frame.tangent),
+        bitangent: transform.transform_vector(local_frame.bitangent),
+        mark_covered: local_frame.mark_covered,
+    }))
 }
 
 fn admit_samples(samples: [f64; 2]) -> Result<(), ConductorBeamError> {
@@ -208,7 +221,7 @@ fn admit_detail(detail: &SurfaceDetail) -> Result<(), ConductorBeamError> {
     Ok(())
 }
 
-fn admit_frame(frame: &ShadingFrame) -> Result<(), BeamError> {
+pub(super) fn admit_frame(frame: &ShadingFrame) -> Result<(), BeamError> {
     let n = frame.geometric_normal;
     let s = frame.shading_normal;
     let t = frame.tangent;
@@ -227,7 +240,7 @@ fn admit_frame(frame: &ShadingFrame) -> Result<(), BeamError> {
     Ok(())
 }
 
-fn unit(v: Vec3) -> Result<Vec3, BeamError> {
+pub(super) fn unit(v: Vec3) -> Result<Vec3, BeamError> {
     if ![v.x, v.y, v.z].iter().all(|x| x.is_finite()) { return Err(BeamError::InvalidFrame); }
     let scale = v.x.abs().max(v.y.abs()).max(v.z.abs());
     if scale == 0.0 { return Err(BeamError::InvalidFrame); }

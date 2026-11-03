@@ -7,6 +7,7 @@
 //! it deliberately contains no scene- or Euler-specific policy.
 
 mod polarized_brushed_conductor;
+mod polarized_connection;
 
 /// Direction in which a scattering function transports throughput.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

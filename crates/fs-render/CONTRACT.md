@@ -669,6 +669,28 @@ differentiable lift). Pure Rust throughout.
   transport and complementary directional weights. Rust execution remains
   unavailable in the implementation environment.
 
+- `transport::connection::SurfaceConnectionResponse` evaluates the original
+  continuous dielectric, rough-metal or body-locked brushed-metal response at
+  a fixed source direction. It retains the scalar native proposal separately
+  from the full reciprocal Stokes contraction, including Q/U/V and coherent
+  coating phase. A dielectric connection reuses one original coherent solve
+  for its BSDF and proposal; no direction or branch is resampled. The other
+  original dielectric medium determines Fresnel contrast even on reflection.
+  The radiance response already includes the local transmission eta factor.
+  Consumers multiply camera-prefix intensity, actual receiving irradiance and
+  `(n_camera/n_camera_arrival)^2` exactly once. Light-side etendue belongs to
+  the proposal conversion, not another physical index factor. The brushed
+  response uses the native camera radiance law and geometric receiving cosine,
+  retaining instance-local detail, marks and the original pole/zero fallback.
+  A positive coherency overlap preserves crossed-polarization extinction with
+  a positive scalar PDF. Smooth/null delta transport remains outside continuous
+  densities; coated equal-index rough mixtures retain native refusal. These
+  evaluations allocate nothing and consume no random draws. Nine authored
+  regressions compare native samples, scalar laws, both glass sides, coherent
+  coatings, polarization/frame changes and brushed radiance/adjoint behavior.
+  Independent numerical coherency and index-composition checks passed; Rust
+  regressions remain unexecuted without a toolchain/build runner.
+
 - `camera::area_lights::camera::CurvedAreaLightCameraScene` composes
   original panel area samples with the native surface camera at declared
   depolarizing diffuse receivers. Each regular refractive image receives its
