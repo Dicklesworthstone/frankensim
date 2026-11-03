@@ -129,6 +129,8 @@ pub mod magnetostrictive;
 pub mod plate_viscosity;
 /// Reciprocal point impacts between a spatial plate and a finite rigid body.
 pub mod plate_impact;
+/// Sustained normal forces on two original linear plate trajectories.
+pub mod plate_sustained;
 /// Accepted-step port schemas and physical accounting adapters.
 pub mod port_adoption;
 pub mod reed_bore;

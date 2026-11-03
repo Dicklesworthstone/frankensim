@@ -23051,6 +23051,91 @@ original-source native build passes all 104 tests: 32 plate/contact tests,
 including all five rod/plate groups, and 72 original rod tests. This selected
 native closure is not a full workspace Cargo or DSR verification claim.
 
+## Native sustained normal contact between two spatial plates
+
+`fs_couple::plate_sustained::PlateSustainedPair` advances two continuing native
+linear `PlateDynamics` states through one finite contact interval. It connects
+the original `fs_contact::sustained::solve` force/displacement natural map to
+the actual endpoint gaps produced by the original operator generalized-alpha
+integrator with `rho_inf = 1`. Trial contact forces act through the original
+point transpose rows, positively on the positive plate and negatively on the
+negative plate. Consistent mass, linear stiffness and both Rayleigh damping
+terms retain their original native owners. The force response does not use an
+impact impulse divided by a timestep, a penalty spring, a virtual contact mass
+or a reduced surrogate trajectory.
+
+The lane has one fixed world +z normal, common world xy contact points and
+explicit undeformed face heights. Both native states must start at the same
+finite time, with every declared gap closed and every relative normal speed
+zero within the caller's dimensional tolerances. Initially open contact,
+penetration and impact activation are refused. Contact forces are held during
+the interval. The actual native endpoint q/v values define the declared
+quadratic midpoint gap interpolant; its analytical extrema must remain
+nonpenetrating, and a contact with force above the numerical force tolerance
+must remain closed with zero endpoint normal speed. Zero-force detachment is
+allowed. An open endpoint requires detached dynamics or an independently
+located subsequent activation before another call to this lane. This does not
+claim continuous-event detection, moving normals, tangential mechanics or
+contact-force uniqueness.
+
+Every original mechanical response starts again from the same accepted q/v and
+recomputes its initial acceleration under that trial's held contact forces.
+Thus a previous active set cannot silently supply the wrong initial force.
+Complete external generalized loads are supplied at start, midpoint and end,
+including all fixed rows; every retained row must match the original load
+callback exactly at its corresponding time. A held-load constructor repeats one
+sample. Final accepted accelerations are independently restarted under the end
+source and accepted contact force. The source and Rayleigh work receipts are
+explicitly midpoint quadratures; no exact continuous forcing or damping
+integral is asserted between samples.
+
+Original complete mass and stiffness matrices must be finite and symmetric and
+match every retained entry of the native reduced operators. The independent
+final audit uses the actual stored q/v changes to check midpoint kinematics and
+each free generalized equation. It recovers stationary-support impulses from
+the complete rows of M, C and K, including constrained-row cross inertia and
+the complete source/contact loads. The current step's internal elastic force
+and moment must have zero resultant within tolerance; foundation forces are
+not silently treated as internal. Transverse Pz and bending Lx/Ly are the world
+momenta represented by this plate model.
+
+The reported balance is native momentum change plus modeled damping impulse,
+less external and support impulses. In particular, mass-proportional Rayleigh
+damping exchanges momentum with the modeled environment; it is not advertised
+as internally momentum-conserving friction. Kinetic and elastic energy changes
+are formed directly from actual increments and mean states. Each plate must
+separately satisfy its midpoint work identity, damping quadrature must be
+nonnegative within tolerance, reciprocal contact work must agree with the
+actual gap change and ideal normal-contact work must vanish. Raw double-double
+quantities are retained through the combined momentum/work gates. The receipt
+separates damping quadrature, source quadrature, contact work and numerical
+energy residual. None is automatically deposited as heat, and no numerical
+damping parameter below `rho_inf = 1` is admitted by this lane.
+
+Contact count and natural-map workspace/response limits belong to the original
+force solver. Point/mass preparation, complete stiffness, native solver
+iterations/scratch and trajectory histories are separately bounded here. Trial
+states contain one native step receipt rather than a copy of the accepted
+history. The original law's mandatory final mechanical replay supplies the
+candidate; no extra unbudgeted force response is inserted after convergence.
+Both native trajectories publish together only after the path, individual and
+combined mechanical checks, physical endpoint restarts, history reservation
+and final cancellation check. On refusal the accepted q/v/a, time, step count
+and history entries remain unchanged; reservation may change Vec capacity.
+
+Four new focused native integration tests pass: repeated loaded closed contact
+against the analytic consistent-mass acceleration and force, including stale
+initial acceleration and continuing histories; common-motion Rayleigh decay
+against the midpoint factor with approximately fourfold endpoint-error reduction
+under timestep halving; an independent dense 13-by-13 supported elastic
+midpoint saddle system with both Rayleigh terms and complete reactions; and
+mode/source/workspace/history/cancellation refusals, zero-force detachment,
+native detached continuation and guaranteed late endpoint-restart rollback.
+The focused native runs cover 108 distinct integration tests in total (104
+impact/rod tests plus these four sustained tests), compiled against the
+original selected source owners. This is scoped native validation, not a full
+workspace Cargo test claim.
+
 ## Simultaneous normal contact graphs on native rods and finite bodies
 
 `rod_motion::RodMotion::apply_rigid_normal_contact_graph` resolves authored

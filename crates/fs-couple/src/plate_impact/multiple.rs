@@ -417,7 +417,7 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpactSet<'a, L> {
         Ok(report)
     }
 
-    pub(super) fn row(&self, i: usize) -> (&PlatePointStencil, &[f64], &[f64]) {
+    pub(crate) fn row(&self, i: usize) -> (&PlatePointStencil, &[f64], &[f64]) {
         if i == 0 {
             (
                 &self.first.point,
