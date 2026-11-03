@@ -7,9 +7,10 @@
 
 use super::molecular::{DissipationControl, MolecularReport, MolecularTransport2d, TransportLaw};
 use super::{
-    BoundaryImpulse, BoundarySide, MAX_MIXTURE_WORKSPACE_BYTES, MixtureEuler2d, StepControl,
-    StepReport as TransportStepReport, Totals, WIDTH_LIMIT, allocated, boundary_view, cell,
-    checked_totals, copy_values, sum, sum_rows,
+    BodyForce2d, BoundaryImpulse, BoundarySide, ForceChange2d, ForceControl2d, ForcingWorkspace2d,
+    MAX_MIXTURE_WORKSPACE_BYTES, MixtureEuler2d, StepControl, StepReport as TransportStepReport,
+    Totals, WIDTH_LIMIT, allocated, boundary_view, cell, checked_totals, copy_values, forcing, sum,
+    sum_rows,
 };
 use fs_gas::multicomponent::dissipation::ConstantTransport;
 pub use fs_gas::multicomponent::reactive::{CellChemistry, ChemistryReport, ReactiveError};
@@ -52,12 +53,14 @@ pub struct ReactiveStepReport {
     pub after: Totals,
     /// Inward physical boundary transfer; chemistry adds no boundary flux.
     pub boundary_change: Totals,
-    /// `after-before-boundary-chemistry` for each conserved component. Chemistry
-    /// changes species and the referenced energy, but neither momentum component.
+    /// Applied body impulse and mechanical work, separate from chemistry and walls.
+    pub source_change: ForceChange2d,
+    /// `after-before-boundary-chemistry-source` for each conserved component.
+    /// Chemistry changes species and referenced energy, but neither momentum.
     pub conservation_residual: Totals,
     /// Total mass change minus boundary mass transfer [kg].
     pub mass_residual_kg: f64,
-    /// Full chemical/thermal/kinetic energy change minus boundary transfer [J].
+    /// Full chemical/thermal/kinetic energy change minus boundary and body work [J].
     /// Uses differences plus original species references, avoiding subtraction
     /// of two large absolute formation-energy totals.
     pub absolute_energy_residual_j: f64,
@@ -249,6 +252,7 @@ impl ReactingEuler2d {
             None,
             DissipationControl::default(),
             MAX_MIXTURE_WORKSPACE_BYTES,
+            None,
             cancelled,
         )
     }
@@ -278,6 +282,60 @@ impl ReactingEuler2d {
             Some(operator),
             dissipation_controls,
             maximum_workspace_bytes,
+            None,
+            cancelled,
+        )
+    }
+
+    /// Compose held mechanical forcing with both original chemistry halves.
+    /// Acceleration uses each source stage's current species mass. The original
+    /// conservative kick owns signed kinetic work, without a second heat source.
+    /// Zero forcing follows the unforced numerical path exactly after admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        force: BodyForce2d<'_>,
+        force_controls: ForceControl2d,
+        workspace: &mut ForcingWorkspace2d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration,
+            controls,
+            None,
+            DissipationControl::default(),
+            MAX_MIXTURE_WORKSPACE_BYTES,
+            Some((force, force_controls, workspace)),
+            cancelled,
+        )
+    }
+
+    /// Compose D/C half steps around the original force/advection/force map.
+    /// The explicit total byte budget includes both fields, chemistry, the
+    /// molecular operator and the forcing scratch. A refused complete trial
+    /// publishes none of their cells, time, reports or boundary loads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation_and_forcing<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport2d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        maximum_workspace_bytes: usize,
+        force: BodyForce2d<'_>,
+        force_controls: ForceControl2d,
+        workspace: &mut ForcingWorkspace2d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            maximum_workspace_bytes,
+            Some((force, force_controls, workspace)),
             cancelled,
         )
     }
@@ -290,12 +348,29 @@ impl ReactingEuler2d {
         mut operator: Option<&mut MolecularTransport2d<L>>,
         dissipation_controls: DissipationControl,
         maximum_workspace_bytes: usize,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport, ReactiveError> {
         poll(&mut cancelled)?;
+        // Count the actual scratch even for a zero force; its allocation remains
+        // live although its numerical path is identical to the unforced step.
+        let forcing_bytes = forcing
+            .as_ref()
+            .map_or(0, |(_, _, work)| work.workspace_bytes());
+        let active_force = if let Some((force, control, workspace)) = forcing.as_mut() {
+            control.admit::<super::Error>()?;
+            workspace.admit(&self.accepted)?;
+            force.admit::<super::Error>(self.accepted.cell_count(), &mut cancelled)?
+        } else {
+            false
+        };
+        if !active_force {
+            forcing = None;
+        }
         let bytes = self
             .workspace_bytes()
             .checked_add(operator.as_ref().map_or(0, |op| op.workspace_bytes()))
+            .and_then(|bytes| bytes.checked_add(forcing_bytes))
             .ok_or(ReactiveError::Invalid(
                 "reacting molecular workspace size overflow",
             ))?;
@@ -327,6 +402,9 @@ impl ReactingEuler2d {
         let mut rate: f64 = 0.0;
         for row in self.accepted.states.chunks_exact(n + 3) {
             let p = cell(row, n).primitive(&self.accepted.gas, &mut cancelled)?;
+            if let Some((_, control, _)) = forcing.as_ref() {
+                control.admit_velocity::<super::Error>(p.velocity, p.sound_speed)?;
+            }
             rate = rate.max(
                 (p.velocity[0].abs() + p.sound_speed) / self.accepted.grid.spacing[0]
                     + (p.velocity[1].abs() + p.sound_speed) / self.accepted.grid.spacing[1],
@@ -378,9 +456,19 @@ impl ReactingEuler2d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
-                let transport =
+                let transport = if let Some((force, control, workspace)) = forcing.as_mut() {
+                    self.trial.step_with_forcing(
+                        Time::new(dt),
+                        controls.transport,
+                        *force,
+                        *control,
+                        &mut **workspace,
+                        &mut cancelled,
+                    )?
+                } else {
                     self.trial
-                        .step(Time::new(dt), controls.transport, &mut cancelled)?;
+                        .step(Time::new(dt), controls.transport, &mut cancelled)?
+                };
                 if transport.elapsed.value() != dt {
                     shortened = Some(transport.elapsed.value());
                     return Err(ReactiveError::Invalid(
@@ -442,6 +530,20 @@ impl ReactingEuler2d {
                 let dissipation = first
                     .zip(second)
                     .map(|(first, second)| SplitDissipationReport { first, second });
+                if let Some((_, control, _)) = forcing.as_ref() {
+                    // Chemistry and viscous heating follow the central kick.
+                    // Admit their final sound speed and velocity as part of this
+                    // same transaction, including complete-interval CFL retries.
+                    let rate = forcing::admit_field(
+                        &self.trial.gas,
+                        &self.trial.grid,
+                        &self.trial.states,
+                        *control,
+                        &mut cancelled,
+                    )?;
+                    super::cartesian::check_cfl::<super::Error>(rate * dt, controls.transport.cfl)?;
+                }
+                let source_change = transport.source_change;
                 let after =
                     checked_totals(&self.trial.states, &self.trial.grid, n, &mut cancelled)?;
                 let outward = sum_rows(&self.boundary_trial, n + 3, 1.0, &mut cancelled)?;
@@ -462,20 +564,29 @@ impl ReactingEuler2d {
                     - before.energy
                     - boundary_change.energy
                     - chemistry.referenced_energy_change_j;
+                if forcing.is_some() {
+                    for axis in 0..2 {
+                        residual[n + axis] -= source_change.impulse[axis];
+                    }
+                    residual[n + 2] -= source_change.work;
+                }
                 let mass_residual_kg = sum((0..n).map(|k| {
                     after.species_masses[k]
                         - before.species_masses[k]
                         - boundary_change.species_masses[k]
                 }));
-                let absolute_energy_residual_j = sum(std::iter::once(
-                    after.energy - before.energy - boundary_change.energy,
-                )
-                .chain((0..n).map(|k| {
-                    (after.species_masses[k]
-                        - before.species_masses[k]
-                        - boundary_change.species_masses[k])
-                        * self.trial.gas.energy_references()[k]
-                })));
+                let mut physical_energy_change =
+                    after.energy - before.energy - boundary_change.energy;
+                if forcing.is_some() {
+                    physical_energy_change -= source_change.work;
+                }
+                let absolute_energy_residual_j = sum(std::iter::once(physical_energy_change)
+                    .chain((0..n).map(|k| {
+                        (after.species_masses[k]
+                            - before.species_masses[k]
+                            - boundary_change.species_masses[k])
+                            * self.trial.gas.energy_references()[k]
+                    })));
                 if !residual[..n + 3].iter().all(|value| value.is_finite())
                     || !mass_residual_kg.is_finite()
                     || !absolute_energy_residual_j.is_finite()
@@ -495,6 +606,7 @@ impl ReactingEuler2d {
                     before,
                     after,
                     boundary_change,
+                    source_change,
                     conservation_residual: Totals::from_row(&residual[..n + 3], n),
                     mass_residual_kg,
                     absolute_energy_residual_j,

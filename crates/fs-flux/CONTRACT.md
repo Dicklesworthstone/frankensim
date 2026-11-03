@@ -1730,6 +1730,37 @@ the explicit molecular extension below supplies viscous/thermal/species
 transport. Flame-speed/thickness calibration, turbulence, moving boundaries
 and experimental validation remain separate work.
 
+### Mechanical forcing of reacting planar gas
+
+`mixture::reactive::ReactingEuler2d` accepts `step_with_forcing` and
+`step_with_dissipation_and_forcing` using the original `BodyForce2d`,
+`ForceControl2d` and prepared `ForcingWorkspace2d`. The same conservative
+K/2-A-K/2 map replaces only the central advection phase of C/2-A-C/2 or
+D/2-C/2-A-C/2-D/2. Every kick uses its current compensated species mass and
+represented momentum increment; signed mechanical work never becomes a
+second chemical or heat source. Original calorics, reactions, molecular
+species diffusion, viscous stress, reservoirs and face-load owners remain
+authoritative.
+
+The complete report exposes `source_change: ForceChange2d`. Momentum,
+referenced-energy and physical-energy balances subtract that accepted source
+separately from boundary transfer and chemical changes. The final physical
+state after chemistry and molecular heating must also satisfy the authored
+Mach bound and complete-interval acoustic CFL. Any shortening repeats every
+phase from accepted state, and rejected trials contribute no source or loads.
+Cells, clock, both owners' reports and boundary impulses publish together.
+
+The supplied force workspace is reused without per-step allocation and is
+included in the complete numerical byte cap even for an exactly zero field.
+After input/workspace admission, zero forcing retains the unforced numerical
+route. Four regression groups cover signed work with unchanged source-owned
+chemistry, exothermic retries and zero parity, an accelerating oblique reacting
+contact against its analytic phase on three grids, and molecular wall/source
+impulse balance with late cancellation and deterministic replay. This remains
+prescribed forcing on the stationary Cartesian discretization; no hydrostatic
+well-balanced scheme, implicit velocity-dependent force law or general
+coupled temporal-order theorem is asserted.
+
 ### Evolving-species molecular transport and reacting diffusion in two dimensions
 
 `compressible::mixture::molecular::MolecularTransport2d` prepares the original

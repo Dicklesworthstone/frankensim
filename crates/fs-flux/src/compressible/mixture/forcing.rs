@@ -159,6 +159,29 @@ pub(super) fn acoustic_rate(p: Primitive, grid: &CartesianGrid) -> Result<f64, E
     Ok(rate)
 }
 
+/// Admit the complete physical state after an enclosing chemistry/molecular
+/// composition; the central Euler endpoint alone cannot bound later heating.
+pub(super) fn admit_field(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    states: &[f64],
+    control: ForceControl2d,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error> {
+    let n = gas.species_count();
+    let mut rate: f64 = 0.0;
+    for (i, row) in states.chunks_exact(n + 3).enumerate() {
+        if i % 64 == 0 {
+            cartesian::poll::<Error>(cancelled)?;
+        }
+        let p = cell(row, n).primitive(gas, &mut *cancelled)?;
+        control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+        rate = rate.max(acoustic_rate(p, grid)?);
+    }
+    cartesian::poll::<Error>(cancelled)?;
+    Ok(rate)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn kick_field(
     gas: &MixtureGas,
