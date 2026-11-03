@@ -15,8 +15,8 @@
 use super::super::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, Kinematics,
     forward_dynamics, forward_kinematics, inverse_dynamics, momentum_from_kinematics,
-    validate_external_wrenches, validate_forward_dynamics_header, validate_slice,
-    validate_twist, validate_wrench,
+    validate_external_wrenches, validate_forward_dynamics_header, validate_slice, validate_twist,
+    validate_wrench,
 };
 use super::{FreeFloatingMotionError, FreeFloatingMotionLoads, MAX_FREE_FLOATING_STEP_LINKS};
 use fs_ga::{GaError, Se3, Vec3, Wrench};
@@ -230,9 +230,8 @@ pub fn step_prescribed_base_with_effort(
     .step)
 }
 
-pub(super) type EffortLaw<'a> =
-    dyn FnMut(f64, &PrescribedBaseMotionState, &mut [f64]) -> Result<(), PrescribedBaseMotionError>
-        + 'a;
+pub(super) type EffortLaw<'a> = dyn FnMut(f64, &PrescribedBaseMotionState, &mut [f64]) -> Result<(), PrescribedBaseMotionError>
+    + 'a;
 
 pub(super) struct PrescribedStage<'a> {
     pub(super) body_wrench: Cow<'a, [Wrench]>,
@@ -296,7 +295,10 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
     validate_external_wrenches(loads.external_body_wrench)?;
     for base in [state.base, path.midpoint, path.endpoint] {
         validate_twist(base.twist_body, "prescribed_motion.base_twist")?;
-        validate_twist(base.acceleration_body, "prescribed_motion.base_acceleration")?;
+        validate_twist(
+            base.acceleration_body,
+            "prescribed_motion.base_acceleration",
+        )?;
     }
     let before = forward_kinematics(
         model,
@@ -346,7 +348,9 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
     admit_stage(&midpoint_load)?;
     if let Some(law) = effort.as_deref_mut() {
         poll(cancelled)?;
-        stage_effort.to_mut().copy_from_slice(loads.generalized_force);
+        stage_effort
+            .to_mut()
+            .copy_from_slice(loads.generalized_force);
         law(half, &midpoint, stage_effort.to_mut())?;
         poll(cancelled)?;
     }
@@ -374,24 +378,21 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
     // could erase its arm under a large common translation. The root wrench
     // already includes actuator transmission; adding it again double-counts work.
     let root = &model.links()[0];
-    let root_coordinate = model.dof_index(0).map_or(0.0, |i| midpoint.joint_position[i]);
+    let root_coordinate = model
+        .dof_index(0)
+        .map_or(0.0, |i| midpoint.joint_position[i]);
     let base_from_root = root
         .parent_from_child_zero()
         .compose(root.joint().motion(root_coordinate)?)?;
     let support_wrench_body = inverse.body_wrench[0].transform_by(&base_from_root);
-    let support_wrench_world =
-        support_wrench_body.transform_by(&midpoint.base.world_from_base);
+    let support_wrench_world = support_wrench_body.transform_by(&midpoint.base.world_from_base);
     validate_wrench(support_wrench_body, "prescribed_motion.support_body")?;
     validate_wrench(support_wrench_world, "prescribed_motion.support_world")?;
 
     let state_after = PrescribedBaseMotionState {
         time_s: endpoint_time,
         base: path.endpoint,
-        joint_position: advance(
-            &state.joint_position,
-            &midpoint.joint_velocity,
-            duration,
-        )?,
+        joint_position: advance(&state.joint_position, &midpoint.joint_velocity, duration)?,
         joint_velocity: advance(
             &state.joint_velocity,
             &midpoint_dynamics.generalized_acceleration,
@@ -535,10 +536,7 @@ fn advance(
         .collect()
 }
 
-fn sum_products(
-    a: impl IntoIterator<Item = f64>,
-    b: impl IntoIterator<Item = f64>,
-) -> Dd {
+fn sum_products(a: impl IntoIterator<Item = f64>, b: impl IntoIterator<Item = f64>) -> Dd {
     a.into_iter().zip(b).fold(Dd::ZERO, |sum, (a, b)| {
         sum + Dd::from_f64(a) * Dd::from_f64(b)
     })
@@ -593,8 +591,12 @@ fn increments(
         let pose1 = after.world_from_link[i];
         // Translational polarization in world axes prevents changing body frames
         // from manufacturing work from a large common inertial translation.
-        let v0 = pose0.rotation().rotate(old.linear + old.angular.cross(center))?;
-        let v1 = pose1.rotation().rotate(new.linear + new.angular.cross(center))?;
+        let v0 = pose0
+            .rotation()
+            .rotate(old.linear + old.angular.cross(center))?;
+        let v1 = pose1
+            .rotation()
+            .rotate(new.linear + new.angular.cross(center))?;
         let delta_v = v1 - v0;
         let mean_v = v0.scale(0.5) + v1.scale(0.5);
         let delta_w = new.angular - old.angular;
@@ -627,9 +629,7 @@ fn increments(
     Ok((kinetic, gravitational))
 }
 
-pub(super) fn poll(
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), PrescribedBaseMotionError> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PrescribedBaseMotionError> {
     if cancelled() {
         Err(PrescribedBaseMotionError::Cancelled)
     } else {

@@ -1,5 +1,22 @@
 # CONTRACT: fs-mbd
 
+## Supported finite rotational and translational attachments
+
+The supported spatial-motion entries also accept the original `SpatialBushing`
+law. Its anisotropic translational and principal-log rotational strains,
+SO(3) force/couple transformation, stiffness, damping, coefficient admission
+and chart boundary remain owned by the existing bushing module. The same
+initial/midpoint geometry and effort evaluations feed supported dynamics;
+both axial connections and bushings contribute to the returned spring storage,
+internal work and damping accounts.
+
+The endpoint must remain inside the native active rotational chart. Rejected
+chart crossings or cancellation publish no partial motion. Empty bushing
+slices retain the ordinary supported spatial path. This extension uses the
+explicit supported stepper and does not introduce stiff or implicit bushing
+integration. Its focused regression entry is
+`cargo test -p fs-mbd --test articulated_prescribed_bushings`.
+
 ## Shared spatial loads on prescribed supports
 
 `articulated::motion::spatial_loads::prescribed` connects the original

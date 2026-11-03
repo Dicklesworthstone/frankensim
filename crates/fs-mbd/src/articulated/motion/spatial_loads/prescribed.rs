@@ -1,4 +1,4 @@
-//! Original spatial loads and finite axial connections on a prescribed base.
+//! Original spatial loads and finite attachments on a prescribed base.
 //!
 //! The force, attachment, storage and loss laws are shared with the free-flight
 //! path. Only the mechanical boundary changes: native prescribed-base ABA and
@@ -9,7 +9,8 @@ use super::super::prescribed::{
     PrescribedBaseMotionStep, PrescribedBasePath, PrescribedStage, step_evaluated,
 };
 use super::super::{FreeFloatingBaseState, MomentumMap, poll, validate_slice};
-use super::{SpatialMotionLoads, admit, evaluate, separation, storage};
+use super::bushing::{self, BushingLaw, SpatialBushing};
+use super::{SpatialMotionLoads, separation, storage};
 use crate::articulated::ArticulatedModel;
 
 /// Accepted supported motion and original finite-attachment energy accounts.
@@ -18,7 +19,7 @@ pub struct PrescribedSpatialMotionStep {
     /// Native supported trajectory, including actuator, external, internal and
     /// support work. Connection forces enter both dynamics and support recovery.
     pub motion: PrescribedBaseMotionStep,
-    /// Original axial spring storage at the supplied state, in joules.
+    /// Original axial and bushing spring storage at the supplied state, in joules.
     pub stored_energy_before: f64,
     /// The same storage at the accepted endpoint, in joules.
     pub stored_energy_after: f64,
@@ -52,21 +53,9 @@ pub fn step_prescribed_base_spatial(
     path: PrescribedBasePath,
     loads: SpatialMotionLoads<'_>,
     duration: f64,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
-    poll(&mut cancelled)?;
-    admit(model, loads, &mut cancelled)?;
-    let evaluated = step_evaluated(
-        model,
-        state,
-        path,
-        loads.held,
-        duration,
-        &mut cancelled,
-        |stage, _, cancelled| evaluate_shared(model, stage, loads, cancelled),
-        None,
-    )?;
-    finish(model, evaluated, loads, &mut cancelled)
+    step_prescribed_base_bushings(model, state, path, loads, &[], duration, cancelled)
 }
 
 /// Advance original spatial loads with joint efforts evaluated at both stages.
@@ -85,6 +74,77 @@ pub fn step_prescribed_base_spatial_with_effort(
     path: PrescribedBasePath,
     loads: SpatialMotionLoads<'_>,
     duration: f64,
+    effort: impl FnMut(
+        f64,
+        &PrescribedBaseMotionState,
+        &mut [f64],
+    ) -> Result<(), PrescribedBaseMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
+    step_prescribed_base_bushings_with_effort(
+        model,
+        state,
+        path,
+        loads,
+        &[],
+        duration,
+        effort,
+        cancelled,
+    )
+}
+
+/// Advance original spatial loads and finite six-axis bushings on a support.
+///
+/// The existing diagonal anisotropic law owns translational and principal-log
+/// rotational strain, the exact SO(3) force pullback, stored energy and damping.
+/// All internal wrenches enter the same native dynamics and support reaction;
+/// their work, storage and loss remain separate from external and support work.
+/// Empty bushings retain the ordinary supported-spatial trajectory exactly.
+///
+/// The explicit midpoint step must resolve the fastest attachment mode. Active
+/// rotational chart admission is checked at start, midpoint and endpoint; these
+/// sampled checks do not enclose the continuous path or permit crossing pi.
+/// No rigid constraint, implicit solve or thermal destination is introduced.
+#[allow(clippy::too_many_arguments)]
+pub fn step_prescribed_base_bushings(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[SpatialBushing],
+    duration: f64,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
+    poll(&mut cancelled)?;
+    bushing::admit(model, loads, bushings, &mut cancelled)?;
+    let evaluated = step_evaluated(
+        model,
+        state,
+        path,
+        loads.held,
+        duration,
+        &mut cancelled,
+        |stage, _, cancelled| evaluate_shared(model, stage, loads, bushings, cancelled),
+        None,
+    )?;
+    finish(model, evaluated, loads, bushings, &mut cancelled)
+}
+
+/// Advance the same supported bushings with stage-dependent joint effort.
+///
+/// The callback sees the actual complete stage and its clock, with its output
+/// reset to held effort. Actuation and all attachment laws use the same stage;
+/// each retains its own work/storage/loss account. The original coefficient, effort,
+/// geometry, chart and cancellation refusals precede endpoint publication.
+/// Callback-owned side effects cannot be rolled back.
+#[allow(clippy::too_many_arguments)]
+pub fn step_prescribed_base_bushings_with_effort(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[SpatialBushing],
+    duration: f64,
     mut effort: impl FnMut(
         f64,
         &PrescribedBaseMotionState,
@@ -93,7 +153,7 @@ pub fn step_prescribed_base_spatial_with_effort(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
     poll(&mut cancelled)?;
-    admit(model, loads, &mut cancelled)?;
+    bushing::admit(model, loads, bushings, &mut cancelled)?;
     let evaluated = step_evaluated(
         model,
         state,
@@ -101,16 +161,17 @@ pub fn step_prescribed_base_spatial_with_effort(
         loads.held,
         duration,
         &mut cancelled,
-        |stage, _, cancelled| evaluate_shared(model, stage, loads, cancelled),
+        |stage, _, cancelled| evaluate_shared(model, stage, loads, bushings, cancelled),
         Some(&mut effort),
     )?;
-    finish(model, evaluated, loads, &mut cancelled)
+    finish(model, evaluated, loads, bushings, &mut cancelled)
 }
 
-fn evaluate_shared<'a>(
+fn evaluate_shared<'a, B: BushingLaw>(
     model: &ArticulatedModel,
     stage: &PrescribedBaseMotionState,
     loads: SpatialMotionLoads<'a>,
+    bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PrescribedStage<'a>, PrescribedBaseMotionError> {
     // Only the original FK-based geometry map is needed. Do not reconstruct a
@@ -122,7 +183,7 @@ fn evaluate_shared<'a>(
         cancelled,
     )?;
     let base = FreeFloatingBaseState::new(stage.base.world_from_base, stage.base.twist_body);
-    let evaluated = evaluate(&map, base, loads, cancelled)?;
+    let evaluated = bushing::evaluate(&map, base, loads, bushings, cancelled)?;
     Ok(PrescribedStage {
         body_wrench: evaluated.body_wrench,
         external_power: evaluated.load.body_wrench_power,
@@ -132,14 +193,15 @@ fn evaluate_shared<'a>(
     })
 }
 
-fn finish(
+fn finish<B: BushingLaw>(
     model: &ArticulatedModel,
     evaluated: EvaluatedPrescribedStep,
     loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
     let mut stored_energy_after = 0.0;
-    if !loads.connections.is_empty() {
+    if !loads.connections.is_empty() || !bushings.is_empty() {
         let state = &evaluated.step.state_after;
         let map = MomentumMap::from_joint_state(
             model,
@@ -154,6 +216,7 @@ fn finish(
             let (_, length) = separation(&map, *connection)?;
             stored_energy_after += storage(*connection, length);
         }
+        stored_energy_after += bushing::stored_energy(&map, bushings, cancelled)?;
     }
     let connection_work_residual = evaluated.step.internal_body_work + stored_energy_after
         - evaluated.stored_energy_before

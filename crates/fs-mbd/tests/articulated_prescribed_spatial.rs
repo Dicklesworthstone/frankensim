@@ -3,8 +3,7 @@
 use fs_ga::{Mat3, Se3, So3, So3Tangent, Twist, Vec3, Wrench};
 use fs_mbd::articulated::motion::FreeFloatingMotionLoads;
 use fs_mbd::articulated::motion::prescribed::{
-    PrescribedBaseMotionError, PrescribedBaseMotionState, PrescribedBasePath,
-    step_prescribed_base,
+    PrescribedBaseMotionError, PrescribedBaseMotionState, PrescribedBasePath, step_prescribed_base,
 };
 use fs_mbd::articulated::motion::spatial_loads::prescribed::{
     step_prescribed_base_spatial, step_prescribed_base_spatial_with_effort,
@@ -170,7 +169,12 @@ fn supported_axial_damping_converges_to_the_physical_mass_and_closes_storage() {
         let mut final_energy = initial_energy;
         for _ in 0..count {
             let step = step_prescribed_base_spatial(
-                &model, &state, path(state.time_s, dt, 0.0, 0.0), loads, dt, || false,
+                &model,
+                &state,
+                path(state.time_s, dt, 0.0, 0.0),
+                loads,
+                dt,
+                || false,
             )
             .unwrap();
             close(step.motion.support_work, 0.0, 0.0);
@@ -209,15 +213,33 @@ fn moving_support_retains_connection_reaction_work_without_double_counting_it() 
     let stationary = initial(0.0, 0.0);
     let moving = initial(speed, 0.0);
     let a = step_prescribed_base_spatial(
-        &model, &stationary, path(0.0, dt, 0.0, 0.0), loads, dt, || false,
+        &model,
+        &stationary,
+        path(0.0, dt, 0.0, 0.0),
+        loads,
+        dt,
+        || false,
     )
     .unwrap();
     let b = step_prescribed_base_spatial(
-        &model, &moving, path(0.0, dt, speed, 0.0), loads, dt, || false,
+        &model,
+        &moving,
+        path(0.0, dt, speed, 0.0),
+        loads,
+        dt,
+        || false,
     )
     .unwrap();
-    close(a.motion.state_after.joint_position[0], b.motion.state_after.joint_position[0], 1e-14);
-    close(a.motion.state_after.joint_velocity[0], b.motion.state_after.joint_velocity[0], 1e-14);
+    close(
+        a.motion.state_after.joint_position[0],
+        b.motion.state_after.joint_position[0],
+        1e-14,
+    );
+    close(
+        a.motion.state_after.joint_velocity[0],
+        b.motion.state_after.joint_velocity[0],
+        1e-14,
+    );
     close(a.dissipated_energy, b.dissipated_energy, 1e-14);
     close(a.stored_energy_after, b.stored_energy_after, 1e-14);
     let q0 = stationary.joint_position[0];
@@ -229,7 +251,11 @@ fn moving_support_retains_connection_reaction_work_without_double_counting_it() 
     close(b.motion.support_work, -dt * force * speed, 2e-13);
     close(b.motion.internal_body_work, -dt * force * vh, 2e-13);
     close(b.motion.external_work, 0.0, 0.0);
-    close(a.mechanical_work_residual, b.mechanical_work_residual, 2e-12);
+    close(
+        a.mechanical_work_residual,
+        b.mechanical_work_residual,
+        2e-12,
+    );
 }
 
 #[test]
@@ -299,11 +325,23 @@ fn inertial_point_force_is_rebuilt_on_a_rotating_support_with_a_scalar_root() {
     let vh = state.joint_velocity[0] + 0.5 * dt * a0;
     let angle_h = initial_angle + 0.5 * dt * omega;
     let ah = 5.0 * angle_h.sin() / mass + omega * omega * qh;
-    close(step.motion.state_after.joint_position[0], state.joint_position[0] + dt * vh, 2e-14);
-    close(step.motion.state_after.joint_velocity[0], state.joint_velocity[0] + dt * ah, 2e-14);
-    let point_velocity_y = angle_h.sin() * (vh - omega * applied.point.point_body.y)
-        + angle_h.cos() * omega * qh;
-    close(step.motion.external_work, dt * (5.0 * point_velocity_y + 0.2 * omega), 3e-13);
+    close(
+        step.motion.state_after.joint_position[0],
+        state.joint_position[0] + dt * vh,
+        2e-14,
+    );
+    close(
+        step.motion.state_after.joint_velocity[0],
+        state.joint_velocity[0] + dt * ah,
+        2e-14,
+    );
+    let point_velocity_y =
+        angle_h.sin() * (vh - omega * applied.point.point_body.y) + angle_h.cos() * omega * qh;
+    close(
+        step.motion.external_work,
+        dt * (5.0 * point_velocity_y + 0.2 * omega),
+        3e-13,
+    );
 }
 
 #[test]
@@ -319,7 +357,9 @@ fn controlled_supported_connections_share_stage_rates_and_the_original_clock() {
     let damping = 0.4;
     let mut calls = Vec::new();
     let result = step_prescribed_base_spatial_with_effort(
-        &model, &state, path(0.0, dt, 0.0, 0.0),
+        &model,
+        &state,
+        path(0.0, dt, 0.0, 0.0),
         SpatialMotionLoads {
             held,
             world_points: &[],
@@ -337,15 +377,29 @@ fn controlled_supported_connections_share_stage_rates_and_the_original_clock() {
     .unwrap();
     let q0 = state.joint_position[0];
     let v0 = state.joint_velocity[0];
-    let a0 = (0.7 - connection.stiffness_n_per_m * q0
-        - (connection.damping_ns_per_m + damping) * v0) / 2.0;
+    let a0 =
+        (0.7 - connection.stiffness_n_per_m * q0 - (connection.damping_ns_per_m + damping) * v0)
+            / 2.0;
     let qh = q0 + 0.5 * dt * v0;
     let vh = v0 + 0.5 * dt * a0;
-    let ah = (0.7 - connection.stiffness_n_per_m * qh
-        - (connection.damping_ns_per_m + damping) * vh) / 2.0;
-    close(result.motion.state_after.joint_position[0], q0 + dt * vh, 2e-14);
-    close(result.motion.state_after.joint_velocity[0], v0 + dt * ah, 2e-14);
-    close(result.motion.actuator_work, dt * (0.7 - damping * vh) * vh, 2e-14);
+    let ah =
+        (0.7 - connection.stiffness_n_per_m * qh - (connection.damping_ns_per_m + damping) * vh)
+            / 2.0;
+    close(
+        result.motion.state_after.joint_position[0],
+        q0 + dt * vh,
+        2e-14,
+    );
+    close(
+        result.motion.state_after.joint_velocity[0],
+        v0 + dt * ah,
+        2e-14,
+    );
+    close(
+        result.motion.actuator_work,
+        dt * (0.7 - damping * vh) * vh,
+        2e-14,
+    );
     assert_eq!(calls.len(), 2);
     close(calls[1].0, 0.5 * dt, 0.0);
     close(calls[1].1, 0.5 * dt, 0.0);
@@ -373,29 +427,26 @@ fn endpoint_geometry_and_late_cancellation_refuse_without_publishing_motion() {
     };
     // The start and midpoint are valid; both original attachment points
     // coincide only at the accepted candidate endpoint.
-    assert!(step_prescribed_base_spatial(
-        &model, &state, path(0.0, 1.0, 0.0, 0.0), loads, 1.0, || false,
-    )
-    .is_err());
+    assert!(
+        step_prescribed_base_spatial(&model, &state, path(0.0, 1.0, 0.0, 0.0), loads, 1.0, || {
+            false
+        },)
+        .is_err()
+    );
     assert_eq!(state, before);
     let dt = 0.1;
     let mut polls = 0;
-    step_prescribed_base_spatial(
-        &model, &state, path(0.0, dt, 0.0, 0.0), loads, dt,
-        || {
-            polls += 1;
-            false
-        },
-    )
+    step_prescribed_base_spatial(&model, &state, path(0.0, dt, 0.0, 0.0), loads, dt, || {
+        polls += 1;
+        false
+    })
     .unwrap();
     let mut seen = 0;
-    let refusal = step_prescribed_base_spatial(
-        &model, &state, path(0.0, dt, 0.0, 0.0), loads, dt,
-        || {
+    let refusal =
+        step_prescribed_base_spatial(&model, &state, path(0.0, dt, 0.0, 0.0), loads, dt, || {
             seen += 1;
             seen == polls
-        },
-    );
+        });
     assert_eq!(refusal, Err(PrescribedBaseMotionError::Cancelled));
     assert_eq!(state, before);
 }
