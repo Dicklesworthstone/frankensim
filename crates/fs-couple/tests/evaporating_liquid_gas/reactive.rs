@@ -1,5 +1,7 @@
 //! Manufactured chemistry drives phase transfer on the original native clock.
 
+#[path = "reactive/conduction.rs"]
+mod conduction;
 #[path = "reactive/pressure.rs"]
 mod pressure;
 

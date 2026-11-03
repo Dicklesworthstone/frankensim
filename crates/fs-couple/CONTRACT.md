@@ -2314,6 +2314,13 @@ deposited in those solids contributes once to the enclosing external supply.
 Gas/solid and solid/liquid transfers remain internal. The finite-wall regression
 checks both direct and wall-only gas paths with sourced wall radiation.
 
+The enclosing gas storage change is the sum of the original chemistry energy
+increment and the original finite-atmosphere thermal increment. It is not
+recomputed by subtracting absolute formation-referenced endpoint energies.
+The frozen-composition thermal path therefore retains the native owner's
+reference-invariant heat account, including large common energy-datum shifts.
+This does not extend the changed-composition reaction owner's numerical scope.
+
 ### Finite-rate condensation and evaporation on native moving liquid
 
 `liquid_gas::evaporation::advance_liquid_with_gas` joins the original
@@ -2403,6 +2410,47 @@ oracle, opposing surface transfers, canonical order, conservation and exact
 retry after late pressure rejection. These routes retain the same fixed-volume
 and first-order physical limits; numerical regressions require native execution
 and do not establish empirical constitutive validation.
+
+### Native phase transfer through full finite-gas conduction
+
+`liquid_gas::evaporation::conduction::advance_liquid_surfaces_with_gas_and_conduction`
+connects the original shared-gas phase transaction to the complete native
+thermal/flow owner. The represented phase mass first updates the same native
+liquid caloric field; the exact post-phase closed parcel then enters its
+original isochoric finite-gas owner without reconstruction. Bulk liquid
+conduction, finite solid storage and contacts, gas films, wall radiation,
+attached electrical current, and optional physical viscous heat all remain
+on that original timeline. There is no duplicate sensible-film coefficient
+or second native flow step.
+
+The candidate retains liquid, gas, finite solids, original catalog and both
+original reports. The phase report already contains the native thermal/flow
+defect; the complete energy account adds only the original gas caloric defect.
+Absolute local defects share the whole interval budget. The thermal stage
+preserves gas mass, composition sources and physical volume. Optional pressure
+uses the actual post-thermal EOS; its receipt starts after phase transfer.
+Every late source, work, thermal, pressure, budget or cancellation refusal
+discards all candidate owners together.
+
+`GasReaction::conducting_evaporating_liquid_candidate` adds the existing
+chemical transaction to that same connection. Chemical formation energy stays
+with its original owner, chemical production of vapor remains distinct from
+phase transfer, and native flow advances once over the retained interval.
+The enclosing chemical account consumes the lower complete mass/energy
+defects. Chemical, post-phase and final gas temperatures each obey the declared
+departure bound. Finite walls publish in the same reactive candidate.
+
+These are first-order phase/conduction/flow and
+chemistry/phase/conduction/flow splits requiring complete-timestep refinement.
+The original fixed-volume atmosphere, stationary geometry, source, donor,
+caloric, pressure-reference and attached-history restrictions remain binding.
+This connection supplies no compression work, sealed-vessel displacement,
+dry-out/remap closure or complete mechanical-energy/entropy theorem.
+Regressions in `tests/evaporating_liquid_gas/conduction.rs` and
+`reactive/conduction.rs` cover opposing phase streams, finite wall/gas/radiant
+accounts, a real attached electrical core, post-thermal pressure, original-owner
+agreement, independent whole inventories, one clock and late refusal/retry.
+They require native execution before any numerical validation claim.
 
 ## Assembled shell adhesive dissipation
 

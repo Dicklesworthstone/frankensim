@@ -3,11 +3,23 @@
 //! The existing reaction owner first changes composition at conserved total
 //! internal energy. The existing phase owner then exchanges that actual gas
 //! with native liquid, optionally including reciprocal sensible heat, and
-//! advances the original VOF flow exactly once. Species formation energy is
-//! retained by its original owner and is never applied again as a heat source.
+//! advances the original VOF flow exactly once. The complete conduction entry
+//! also retains finite walls, attached electrical heating and gas heat transfer.
+//! Species formation energy stays with its original owner and is never applied
+//! again as a heat source.
 
+use super::conduction::{
+    ConductingLiquidGasReport, advance_liquid_surfaces_with_gas_and_conduction,
+};
 use crate::cavity_phs::piston::reactive::{
     GasReaction, GasReactionError, GasReactionSolve, GasReactionStep,
+};
+use fs_lbm::material::free_surface::enthalpy::{
+    FreeSurfaceCellHeat,
+    conduction::{
+        FreeSurfaceBodyContact, FreeSurfaceBodyInterface, FreeSurfaceConductionControls,
+        FreeSurfaceConductionFace, FreeSurfaceGasFace, FreeSurfaceThermalBody,
+    },
 };
 use fs_material::evaporation::gas::chamber::heat::GasLiquidChamberHeatSolve;
 
@@ -30,7 +42,7 @@ use super::{
 #[derive(Clone, Copy, Debug)]
 pub struct ReactiveLiquidPhaseSolve {
     pub reaction: GasReactionSolve,
-    /// Both chemical intermediate and final gas departures from initial T [K].
+    /// Chemical/post-phase intermediates and final gas departures from initial T [K].
     pub maximum_gas_temperature_increment_k: f64,
     pub mass_tolerance_kg: f64,
     pub energy_tolerance_j: f64,
@@ -81,7 +93,7 @@ pub struct ReactiveLiquidPhaseReport<R> {
     /// One retained native timestep, also used by chemistry and phase transfer.
     pub duration_s: f64,
     pub reaction: GasReactionStep,
-    /// Single- or multiple-surface report, beginning AFTER the reaction stage.
+    /// Original phase/flow or phase/conduction/flow report, AFTER chemistry.
     pub phase: R,
     /// Original chemical mass defect plus actual phase/native transport defect.
     pub mass_residual_kg: f64,
@@ -123,6 +135,42 @@ impl<'s, 'm, 'catalog, R> ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R> {
         ReactiveLiquidPhaseReport<R>,
     ) {
         (self.liquid, self.gas, self.catalog, self.report)
+    }
+}
+
+/// Chemical, phase and full native thermal/flow candidate with every finite
+/// wall retained. All original owners publish together through this value.
+pub struct ReactiveConductingLiquidGasCandidate<'s, 'm, 'catalog, 'b> {
+    phase: ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, ConductingLiquidGasReport>,
+    bodies: Vec<FreeSurfaceThermalBody<'b>>,
+}
+impl<'s, 'm, 'catalog, 'b> ReactiveConductingLiquidGasCandidate<'s, 'm, 'catalog, 'b> {
+    pub fn liquid(&self) -> &MaterialFreeSurfaceEnthalpy3<'s, 'm> {
+        self.phase.liquid()
+    }
+    pub fn gas(&self) -> &ClosedGasParcel {
+        self.phase.gas()
+    }
+    pub fn catalog(&self) -> &'catalog ThermochemicalGasModel {
+        self.phase.catalog()
+    }
+    pub fn bodies(&self) -> &[FreeSurfaceThermalBody<'b>] {
+        &self.bodies
+    }
+    pub fn report(&self) -> &ReactiveLiquidPhaseReport<ConductingLiquidGasReport> {
+        self.phase.report()
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        ClosedGasParcel,
+        &'catalog ThermochemicalGasModel,
+        Vec<FreeSurfaceThermalBody<'b>>,
+        ReactiveLiquidPhaseReport<ConductingLiquidGasReport>,
+    ) {
+        let (liquid, gas, catalog, report) = self.phase.into_parts();
+        (liquid, gas, catalog, self.bodies, report)
     }
 }
 
@@ -172,6 +220,24 @@ impl PhaseAccount for DistributedLiquidGasReport {
     }
     fn absolute_mass_defect_kg(&self) -> f64 {
         self.absolute_mass_defect_kg
+    }
+    fn energy_residual_j(&self) -> f64 {
+        self.energy_residual_j
+    }
+    fn absolute_energy_defect_j(&self) -> f64 {
+        self.absolute_energy_defect_j
+    }
+}
+
+impl PhaseAccount for ConductingLiquidGasReport {
+    fn duration_s(&self) -> f64 {
+        self.phase.duration_s
+    }
+    fn mass_residual_kg(&self) -> f64 {
+        self.phase.mass_residual_kg
+    }
+    fn absolute_mass_defect_kg(&self) -> f64 {
+        self.phase.absolute_mass_defect_kg
     }
     fn energy_residual_j(&self) -> f64 {
         self.energy_residual_j
@@ -446,6 +512,80 @@ impl GasReaction {
             )
             .map(|candidate| candidate.into_parts())
         })
+    }
+
+    /// React the original gas, exchange phase mass with all native patches,
+    /// then run the original gas/liquid/wall conduction and native flow once.
+    ///
+    /// The full thermal owner retains wall radiation, attached electrical
+    /// heating, optional molecular heat and optional post-thermal gas pressure.
+    /// Those sources are not synthesized or applied by this composition layer.
+    /// Chemistry, phase and thermal exchange use the SAME retained interval;
+    /// the existing shared reaction account checks the complete candidate.
+    ///
+    /// Chemical and post-phase intermediate temperatures, plus the final gas
+    /// temperature, obey the declared departure bound. Source, pressure,
+    /// geometry, donor, caloric and attached-owner admission remain with their
+    /// original implementations. Failures preserve liquid, gas and all walls.
+    /// This is a first-order chemistry/phase/conduction/flow split with fixed
+    /// gas volume; it does not infer gas compression work or volume displacement.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conducting_evaporating_liquid_candidate<'s, 'm, 'b>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &ClosedGasParcel,
+        surfaces: &[LiquidGasEvaporationSurface<'_>],
+        bodies: &[FreeSurfaceThermalBody<'b>],
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        exposed: &[FreeSurfaceGasFace],
+        phase_controls: DistributedLiquidGasSolve,
+        thermal_controls: FreeSurfaceConductionControls,
+        maximum_density_excursion: Option<f64>,
+        with_viscous_heating: bool,
+        controls: ReactiveLiquidPhaseSolve,
+        gate: &CancelGate,
+    ) -> Result<ReactiveConductingLiquidGasCandidate<'s, 'm, '_, 'b>, ReactiveLiquidPhaseError>
+    {
+        let mut accepted_bodies = None;
+        let phase = self.native_phase_candidate(liquid, gas, controls, gate, |reacted| {
+            let candidate = advance_liquid_surfaces_with_gas_and_conduction(
+                liquid,
+                reacted,
+                self.catalog(),
+                surfaces,
+                bodies,
+                faces,
+                heat,
+                contacts,
+                interfaces,
+                exposed,
+                phase_controls,
+                thermal_controls,
+                controls.reaction.gas,
+                maximum_density_excursion,
+                with_viscous_heating,
+                gate,
+            )?;
+            let (liquid, next_gas, catalog, next_bodies, report) = candidate.into_parts();
+            let intermediate =
+                report.thermal_gas_temperature_k[0] - gas.state().state().temperature;
+            if !intermediate.is_finite()
+                || intermediate.abs() > controls.maximum_gas_temperature_increment_k
+            {
+                return Err(EvaporatingLiquidGasError::Invalid(
+                    "post-phase gas exceeds the reactive temperature-departure allowance",
+                ));
+            }
+            accepted_bodies = Some(next_bodies);
+            Ok((liquid, next_gas, catalog, report))
+        })?;
+        let bodies = accepted_bodies.ok_or(ReactiveLiquidPhaseError::Invalid(
+            "complete reactive phase/conduction candidate lost its finite walls",
+        ))?;
+        Ok(ReactiveConductingLiquidGasCandidate { phase, bodies })
     }
 
     fn native_phase_candidate<'s, 'm, 'catalog, R: PhaseAccount>(

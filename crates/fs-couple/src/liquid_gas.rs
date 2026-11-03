@@ -412,9 +412,19 @@ impl GasReaction {
         let mut next_liquid = liquid.clone();
         let mut next_bodies = bodies.to_vec();
         let thermal = exchange(&mut next_liquid, &mut next_gas, &mut next_bodies)?;
-        let gas_internal_energy_change_j = gas.mass_kg()
-            * (next_gas.state().specific_internal_energy_j_kg()
-                - gas.state().specific_internal_energy_j_kg());
+        // Join the original source-relative energy increments. Subtracting
+        // absolute formation-referenced endpoint energies here can erase real
+        // thermal transfer even when both original owners satisfy their budgets.
+        let finite_gas =
+            thermal
+                .conduction
+                .finite_gas
+                .as_ref()
+                .ok_or(ReactiveLiquidGasError::Invalid(
+                    "reactive thermal interval lost its original finite-gas energy account",
+                ))?;
+        let gas_internal_energy_change_j =
+            reaction.stored_energy_change_j + finite_gas.internal_energy_change_j;
         let liquid_enthalpy_change_j = next_liquid.total_enthalpy_j()? - initial_liquid_h;
         let wall_enthalpy_change_j = next_bodies
             .iter()

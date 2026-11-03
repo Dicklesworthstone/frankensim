@@ -270,7 +270,24 @@ fn g1_opposing_phase_streams_share_original_conduction_wall_and_finite_gas_stora
                 assert!(thermal.body_environment.as_ref().unwrap().heat_to_solids_j < 0.0);
                 let radiant = thermal.body_radiation.as_ref().unwrap().heat_to_solids_j;
                 assert!(radiant > 0.0);
-                assert!(thermal.flow.viscous_heat_j > 0.0);
+                // Initial populations are equilibrium: the original stress
+                // estimator may return zero despite the spatial velocity gradient.
+                // Check that its actual molecular receipts enter the flow once.
+                assert!(!report.thermal.applied.is_empty());
+                assert!(
+                    report
+                        .thermal
+                        .applied
+                        .iter()
+                        .all(|sample| sample.heat_j.is_finite() && sample.heat_j >= 0.0)
+                );
+                let molecular_j = report
+                    .thermal
+                    .applied
+                    .iter()
+                    .map(|sample| sample.heat_j)
+                    .sum::<f64>();
+                near(thermal.flow.viscous_heat_j, molecular_j, 1e-24);
                 assert_eq!(
                     report.thermal_gas_temperature_k[0],
                     report.phase.exchange.gas_temperature_k[1]

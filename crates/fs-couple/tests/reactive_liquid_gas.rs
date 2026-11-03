@@ -57,8 +57,17 @@ fn quantity(kind: QuantityKind) -> QuantitySpec {
 }
 
 fn reaction(rate: f64, release: f64, conductivity_factor: f64) -> GasReaction {
-    let (a, ta) = gas_data::component("A", 0.028, 0.0);
-    let (b, mut tb) = gas_data::component("B", 0.028, -release);
+    reaction_with_reference(rate, release, conductivity_factor, 0.0)
+}
+
+fn reaction_with_reference(
+    rate: f64,
+    release: f64,
+    conductivity_factor: f64,
+    reference_j_mol: f64,
+) -> GasReaction {
+    let (a, ta) = gas_data::component("A", 0.028, reference_j_mol);
+    let (b, mut tb) = gas_data::component("B", 0.028, reference_j_mol - release);
     let mut claims = ClaimSet::new();
     for (_, original) in tb.material.claims().claims_ordered() {
         let mut claim = original.clone();
@@ -771,5 +780,68 @@ fn g4_late_energy_geometry_and_cancellation_refusals_preserve_every_original() {
             Err(ReactiveLiquidGasError::Cancelled)
         ));
         assert_eq!(liquid.flow().lattice().grid().state_bits(), bits);
+    });
+}
+
+#[test]
+fn g3_native_thermal_exchange_keeps_its_original_energy_increment_under_formation_shifts() {
+    with_liquid(false, |liquid, gate| {
+        let run = |reference| {
+            // Freeze chemistry to isolate the existing finite-atmosphere heat
+            // owner. A common species energy datum cannot alter this transfer.
+            let law = reaction_with_reference(0.0, 0.0, 1.0, reference);
+            let initial = gas(&law);
+            let next = law
+                .liquid_candidate(
+                    liquid,
+                    &initial,
+                    &[],
+                    &[],
+                    &[FreeSurfaceCellHeat {
+                        coordinates: EXPOSED,
+                        energy_j: 0.01,
+                    }],
+                    &[],
+                    &[],
+                    &[face()],
+                    controls(),
+                    gate,
+                )
+                .unwrap();
+            let report = next.report();
+            let native = report.thermal.conduction.finite_gas.as_ref().unwrap();
+            assert_eq!(report.reaction.extent_mol, 0.0);
+            assert_eq!(report.reaction.stored_energy_change_j, 0.0);
+            assert_eq!(
+                report.gas_internal_energy_change_j,
+                native.internal_energy_change_j
+            );
+            assert!(report.gas_internal_energy_change_j > 1e-9);
+            let expected = initial.mass_kg()
+                * (2.5 * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.028)
+                * (next.gas().state().state().temperature - initial.state().state().temperature);
+            near(report.gas_internal_energy_change_j, expected, 1e-14);
+            near(
+                report.gas_internal_energy_change_j + report.liquid_enthalpy_change_j,
+                report.supplied_thermal_energy_j,
+                controls().total_energy_tolerance_j,
+            );
+            assert_eq!(next.liquid().accepted_steps(), liquid.accepted_steps() + 1);
+            (
+                next.gas().state().state().temperature,
+                next.liquid().total_enthalpy_j().unwrap(),
+                report.gas_internal_energy_change_j,
+                report.combined_energy_residual_j,
+            )
+        };
+        let base = run(0.0);
+        for reference in [-1e20, 1e20] {
+            let shifted = run(reference);
+            near(shifted.0, base.0, 1e-10);
+            near(shifted.1, base.1, 1e-12);
+            near(shifted.2, base.2, 1e-14);
+            near(shifted.3, base.3, 1e-12);
+        }
+        assert_eq!(liquid.accepted_steps(), 0);
     });
 }
