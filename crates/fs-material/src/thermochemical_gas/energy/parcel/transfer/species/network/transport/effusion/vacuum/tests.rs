@@ -20,6 +20,8 @@ const M: f64 = 0.028;
 const VOLUME: f64 = 0.001;
 const AREA: f64 = 1e-7;
 
+mod reservoir;
+
 fn model(rows: &[(&str, f64, f64)], fractions: Vec<f64>, datum: f64) -> ThermochemicalGasModel {
     ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(

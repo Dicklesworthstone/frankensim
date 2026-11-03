@@ -11925,3 +11925,39 @@ formation datums, reciprocal equilibrium stress, accepted finite withdrawals,
 source identity, closed paths, cancellation and binary scale extremes. Native
 execution remains unverified with the current missing constellation siblings.
 
+### Prescribed molecular reservoirs with simultaneous vacuum escape
+
+`thermochemical_gas::energy::parcel::transfer::species::network::transport::effusion::reservoir`
+advances original internal paths, vacuum outlets and prescribed molecular
+reservoir ports in one finite species/energy transaction. The external source
+retains its original thermochemical and aperture qualification; its nominal
+volume is not a finite donor budget. Its owner must accept the opposite
+exported species and energy accounts. This scalar owner assumes a common rest
+frame; a moving composition must supply the corresponding momentum and
+inertial energy receipts.
+
+Each reservoir aperture retains both sampled molecular beams, including at
+zero net mass flow. Incoming species may extend the finite gas's original
+catalog through the existing source-identity join. All gross outgoing species
+spend the original finite inventory across every internal and external path;
+simultaneous supply cannot fund an otherwise excessive withdrawal. All accepted
+rows enter one original caloric reconstruction. Vacuum sampling and endpoint
+qualification are shared with the existing vacuum-only owner.
+
+The boundary energy is evaluated relative to each original species enthalpy
+at the finite gas's initial temperature. A source-owned enthalpy increment and
+the molecular `-R*T/(2*M_i)` correction preserve counterflow heat beside large
+formation-energy datums. Incoming molecular energy includes its complete
+relative kinetic and internal energy exactly once. No additional
+thermalization heat, continuum pressure work, source depletion or closed-gas
+entropy condition is invented. Actual endpoints are re-admitted against every
+active original source and transmission; refusal and cancellation are atomic.
+
+Five focused fixture groups cover reciprocal equilibrium, hot counterflow and
+formation-datum independence, simultaneous supply/vacuum with shared gross
+withdrawal, introduction of an original species, vacuum-only parity and
+source/endpoint/identity/cancellation refusal. These are numerical checks with
+synthetic source coefficients, not empirical validation. Native compilation
+and execution remain unverified while required constellation siblings are
+absent.
+

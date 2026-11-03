@@ -11,6 +11,8 @@
 //! Do not add another gas law for the same aperture or use this interface as a
 //! long accommodating pore without a separate wall-energy/transport owner.
 
+/// Prescribed molecular reservoirs and vacuum outlets in one open transaction.
+pub mod reservoir;
 /// Finite gas networks with explicitly open, zero-return-beam vacuum outlets.
 pub mod vacuum;
 

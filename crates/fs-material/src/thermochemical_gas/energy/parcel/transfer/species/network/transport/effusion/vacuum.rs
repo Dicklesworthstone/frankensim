@@ -71,21 +71,29 @@ impl VacuumEffusionStep {
     ) -> Result<(), GasTransportError> {
         self.transport
             .admit_endpoint_driving_forces(parcels, &mut cancelled)?;
-        for row in &self.outlets {
-            check(&mut cancelled)?;
-            let gas = parcels.get(&row.parcel).ok_or(GasTransportError::Invalid(
-                "vacuum endpoint admission lost its original gas identity",
-            ))?;
-            if !row.flux.species.is_empty() {
-                row.flux
-                    .interface
-                    .admit_parcel(gas, &mut cancelled)
-                    .map_err(|error| face_error(row.id, error))?;
-            }
-        }
-        check(&mut cancelled)?;
-        Ok(())
+        admit_outlets(&self.outlets, parcels, &mut cancelled)
     }
+}
+
+pub(super) fn admit_outlets(
+    outlets: &[VacuumEffusionOutletStep],
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), GasTransportError> {
+    for row in outlets {
+        check(cancelled)?;
+        let gas = parcels.get(&row.parcel).ok_or(GasTransportError::Invalid(
+            "vacuum endpoint admission lost its original gas identity",
+        ))?;
+        if !row.flux.species.is_empty() {
+            row.flux
+                .interface
+                .admit_parcel(gas, &mut *cancelled)
+                .map_err(|error| face_error(row.id, error))?;
+        }
+    }
+    check(cancelled)?;
+    Ok(())
 }
 
 /// All finite endpoints or none. Inputs are never mutated by an attempted step.
@@ -152,19 +160,6 @@ pub fn step_candidate(
             "vacuum transport needs a bounded nonempty graph and positive duration",
         ));
     }
-    let mut ordered = BTreeMap::new();
-    for link in vacuum {
-        check(&mut cancelled)?;
-        if !parcels.contains_key(&link.parcel)
-            || !link.area_m2.is_finite()
-            || link.area_m2 < 0.0
-            || ordered.insert(link.id, link).is_some()
-        {
-            return Err(GasTransportError::Invalid(
-                "vacuum outlets need unique IDs, existing gases and nonnegative areas",
-            ));
-        }
-    }
     let sampled = transport::sample_transfers(
         parcels,
         paths,
@@ -174,52 +169,8 @@ pub fn step_candidate(
         &mut cancelled,
     )?;
     let mut work = sampled.transfers.len() + sampled.heat.len();
-    let mut outlets = Vec::with_capacity(vacuum.len());
-    let mut species_rows = Vec::with_capacity(vacuum.len());
-    for (id, link) in ordered {
-        check(&mut cancelled)?;
-        let flux = parcels[&link.parcel]
-            .effusive_flux_to_vacuum(link.interface, link.area_m2, &mut cancelled)
-            .map_err(|error| face_error(id, error))?;
-        let mut rows = Vec::with_capacity(flux.species.len());
-        for species in &flux.species {
-            check(&mut cancelled)?;
-            let beam = &species.outward;
-            if beam.mass_rate_kg_s == 0.0 {
-                continue;
-            }
-            // The correction uses the actual integrated mass spent below,
-            // never a separately rounded energy-rate-times-duration product.
-            let mass = positive_product_ratio(&[beam.mass_rate_kg_s, duration_s], &[])
-                .map_err(|error| face_error(id, error))?;
-            let specific =
-                beam.additional_specific_energy_j_kg
-                    .ok_or(GasTransportError::Invalid(
-                        "vacuum beam lost its molecular energy convention",
-                    ))?;
-            let relative = positive_product_ratio(&[mass, -specific], &[])
-                .map_err(|error| face_error(id, error))?;
-            work += 1 + usize::from(rows.is_empty());
-            if work > MAX_SNAPSHOT_TRANSFERS {
-                return Err(GasTransportError::Invalid(
-                    "vacuum and internal species streams exceed the shared work bound",
-                ));
-            }
-            rows.push(BoundarySpeciesTransfer {
-                species: species.species.clone(),
-                incoming_mass_kg: 0.0,
-                outgoing_mass_kg: mass,
-                net_mass_into_gas_kg: -mass,
-                relative_energy_into_gas_j: relative,
-            });
-        }
-        outlets.push(VacuumEffusionOutletStep {
-            id,
-            parcel: link.parcel,
-            flux,
-        });
-        species_rows.push(rows);
-    }
+    let (outlets, species_rows) =
+        sample_outlets(parcels, vacuum, duration_s, &mut work, &mut cancelled)?;
     let boundaries: Vec<_> = outlets
         .iter()
         .zip(&species_rows)
@@ -254,6 +205,84 @@ pub fn step_candidate(
     step.admit_endpoint_driving_forces(&parcels, &mut cancelled)?;
     check(&mut cancelled)?;
     Ok(VacuumEffusionCandidate { parcels, step })
+}
+
+// Shared lowering for both open-network entry points. All outlets still sample
+// the unchanged original gases and spend the same aggregate species allowance.
+pub(super) fn sample_outlets(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    vacuum: &[VacuumEffusionLink<'_>],
+    duration_s: f64,
+    work: &mut usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<
+    (
+        Vec<VacuumEffusionOutletStep>,
+        Vec<Vec<BoundarySpeciesTransfer>>,
+    ),
+    GasTransportError,
+> {
+    let mut ordered = BTreeMap::new();
+    for link in vacuum {
+        check(cancelled)?;
+        if !parcels.contains_key(&link.parcel)
+            || !link.area_m2.is_finite()
+            || link.area_m2 < 0.0
+            || ordered.insert(link.id, link).is_some()
+        {
+            return Err(GasTransportError::Invalid(
+                "vacuum outlets need unique IDs, existing gases and nonnegative areas",
+            ));
+        }
+    }
+    let mut outlets = Vec::with_capacity(vacuum.len());
+    let mut species_rows = Vec::with_capacity(vacuum.len());
+    for (id, link) in ordered {
+        check(cancelled)?;
+        let flux = parcels[&link.parcel]
+            .effusive_flux_to_vacuum(link.interface, link.area_m2, &mut *cancelled)
+            .map_err(|error| face_error(id, error))?;
+        let mut rows = Vec::with_capacity(flux.species.len());
+        for species in &flux.species {
+            check(cancelled)?;
+            let beam = &species.outward;
+            if beam.mass_rate_kg_s == 0.0 {
+                continue;
+            }
+            // The correction uses the actual integrated mass spent below,
+            // never a separately rounded energy-rate-times-duration product.
+            let mass = positive_product_ratio(&[beam.mass_rate_kg_s, duration_s], &[])
+                .map_err(|error| face_error(id, error))?;
+            let specific =
+                beam.additional_specific_energy_j_kg
+                    .ok_or(GasTransportError::Invalid(
+                        "vacuum beam lost its molecular energy convention",
+                    ))?;
+            let relative = positive_product_ratio(&[mass, -specific], &[])
+                .map_err(|error| face_error(id, error))?;
+            *work += 1 + usize::from(rows.is_empty());
+            if *work > MAX_SNAPSHOT_TRANSFERS {
+                return Err(GasTransportError::Invalid(
+                    "vacuum and internal species streams exceed the shared work bound",
+                ));
+            }
+            rows.push(BoundarySpeciesTransfer {
+                species: species.species.clone(),
+                incoming_mass_kg: 0.0,
+                outgoing_mass_kg: mass,
+                net_mass_into_gas_kg: -mass,
+                relative_energy_into_gas_j: relative,
+            });
+        }
+        outlets.push(VacuumEffusionOutletStep {
+            id,
+            parcel: link.parcel,
+            flux,
+        });
+        species_rows.push(rows);
+    }
+    check(cancelled)?;
+    Ok((outlets, species_rows))
 }
 
 #[cfg(test)]
