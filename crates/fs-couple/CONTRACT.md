@@ -1,5 +1,30 @@
 # CONTRACT: fs-couple
 
+## Native rigid-body acoustic histories
+
+`pcm_wav::observation::moving::rigid` observes original `fs-mbd` prepared
+rigid-point motion at explicitly supplied physical timestamps. Body-fixed source
+and ideal microphone attachments retain native position, velocity and full-inertia
+acceleration, including tangential and centripetal terms. The mechanical world
+frame must be the fluid rest frame. Observation does not advance either owner.
+
+`BodyFrameCompactSourceStrength` carries physical volume injection and force ON
+THE FLUID. Force transport uses `F_world = R F_body` and
+`Fdot_world = R(Fdot_body + omega_body cross F_body)`; the supplied derivative is
+of body-coordinate components. Scalars remain unchanged. Total body wrench,
+gravity, support loads and net torque do not infer acoustic source strengths.
+Declared source bandwidth must include the exported force's rotational variation.
+
+`RigidAcousticHistory` reserves bounded paired motion/strength arrays once and
+commits both only after validation and the final cancellation poll. Append neither
+allocates nor advances mechanics; capacity, source, clock and cancellation refusals
+leave both arrays unchanged. Borrowed accepted slices feed the original C2
+trajectory, moving-microphone and coherent physical-pressure renderer owners.
+The caller retains body identity, physical clock, smooth load resolution and
+finite-source validity; this does not smooth impacts, model deformation or supply
+radiation reaction. Native accepted-rotor and attached-microphone regressions
+exercise the complete pressure path and independent physical reference limits.
+
 ## Moving microphones on accepted physical trajectories
 
 `pcm_wav::observation::moving::MovingCompactRenderer::with_moving_receiver`
