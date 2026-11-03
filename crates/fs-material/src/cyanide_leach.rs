@@ -60,6 +60,9 @@ pub mod aeration;
 /// Metered dissolved NaCN/NaOH additions with retained original charge and clock.
 pub mod dosing;
 
+/// Simultaneous finite gold dissolution and neutral ion-pair capture on carbon.
+pub mod cil;
+
 /// Explicit empirical coefficient in m6/(mol2 s).
 pub type CyanidationRateConstant = Qty<6, 0, -1, 0, 0, -2>;
 /// Accessible gold dissolution rate in mol Au/s.
@@ -818,6 +821,23 @@ fn evaluate_with_oxygen(
     oxygen_stock: Option<f64>,
     work: &mut Work<'_, impl FnMut() -> bool>,
 ) -> Result<CyanidationState> {
+    evaluate_with_partition(layout, elapsed, x, oxygen_stock, None, None, work)
+}
+
+// CIL retains the original leach and equilibrium owners while transferring an
+// intact Au(CN)2-/counterion pair out of the aqueous inventory. The ligand pool
+// outside gold still follows the original dissolution extent; adsorption does
+// not return its two ligands to the free HCN/CN pool.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_with_partition(
+    layout: &Layout,
+    elapsed: f64,
+    x: f64,
+    oxygen_stock: Option<f64>,
+    complex_stock: Option<f64>,
+    spectator_stock: Option<&[SpectatorIon]>,
+    work: &mut Work<'_, impl FnMut() -> bool>,
+) -> Result<CyanidationState> {
     work.tick()?;
     let amounts = layout
         .model
@@ -830,8 +850,14 @@ fn evaluate_with_oxygen(
         Some(value) => positive_or_zero(value, "integrated dissolved oxygen loses range")?,
         None => remainder(c.dissolved_oxygen.value(), amount(&amounts, OXYGEN), x)?,
     };
-    let complex = sum([c.gold_complex.value(), amount(&amounts, COMPLEX)].into_iter())?;
-    let mut spectators = dosing::spectators(layout)?;
+    let complex = match complex_stock {
+        Some(value) => positive_or_zero(value, "integrated dissolved gold complex loses range")?,
+        None => sum([c.gold_complex.value(), amount(&amounts, COMPLEX)].into_iter())?,
+    };
+    let mut spectators = match spectator_stock {
+        Some(values) => values.to_vec(),
+        None => dosing::spectators(layout)?,
+    };
     spectators.push(SpectatorIon {
         species: SpeciesId::new(COMPLEX).expect("fixed species identity"),
         charge: -1,

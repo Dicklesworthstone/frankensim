@@ -1,5 +1,15 @@
 # CONTRACT: fs-thermochem
 
+## Immutable admitted species definitions
+
+`ConservedReaction::species_charge` and `species_elements` expose the exact
+charge and nonzero elemental counts retained from the original admitted
+matrices for an active participant. Absent and zero-coefficient species
+return `None`; neither method parses a label or infers a formula.
+The immutable accessors let coupled process owners verify specific transfer
+models, including the neutral monovalent-counterion/gold-cyanide pair, while
+retaining the original reaction conservation certificate.
+
 ## Coupled finite metal/ligand competition and aqueous pH
 
 `acid_base::complexation::IdealLigandSystem` couples one original neutral

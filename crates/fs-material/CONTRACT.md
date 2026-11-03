@@ -1,5 +1,91 @@
 # fs-material — CONTRACT
 
+## Simultaneous carbon-in-leach and explicit preg-robbing inventories
+
+`cyanide_leach::cil::CarbonInLeachBatch` advances accessible-gold dissolution
+and reversible capture by independently declared retained carbon populations
+during the same finite-bath time interval. Each `CarbonPopulation` retains
+its original analytical-Au Langmuir isotherm, local linear-driving-force
+source, dry mass, initial loading, identity and extra source conditions.
+`ProductCarbon` and `PregRobbing` are explicit recovery destinations; neither
+label supplies a capacity, affinity or kinetic coefficient. Reports retain
+both destinations separately and use signed net interval capture, including
+desorption from preloaded carbon.
+
+Attachment takes a fresh original `GoldCyanidationBatch` with zero clock and
+zero gold progress. Accepted initial NaCN/NaOH doses and optional competing
+metal families survive attachment. Original accessible gold, solution volume,
+temperature, acid/base sources, activity-reference amount and finite dissolved
+oxygen remain authoritative. Every stage reuses the original live pH/free-CN
+and finite metal/ligand solve. The current leach law has no product-inhibition
+factor: neutral ion-pair capture must not invent a pH benefit or faster gold
+dissolution by returning bound cyanide to the free ligand pool.
+
+`IonPairTransfer` explicitly declares
+`Au(CN)2- + monovalent countercation -> neutral adsorbed pair`.
+The sodium constructor selects `Na[+](aq)` and `NaAu(CN)2(ads)`.
+Generic declarations require exactly three distinct participants with written
+coefficients -1, -1 and +1; their admitted charges must be -1, +1 and zero.
+The countercation cannot contain gold, and the gold-complex formula must
+agree with the original conserved Elsner equation. Element and charge
+definitions are retained from exact reaction artifacts, never inferred
+from labels. The CIL owner also refuses overlapping solution-family
+ownership and requires an explicit aqueous countercation spectator.
+
+Adsorption moves one gold atom, two intact cyanide ligands and one
+countercation together; desorption returns the same pair. Preloaded carbon
+brings these inventories with it. The initial aqueous countercation must
+cover all initially dissolved and potentially dissolvable gold. This finite
+reserve restriction avoids inventing a counterion-limited kinetic law.
+The supported neutral-pair equation is an explicit bookkeeping/model choice,
+not a universal microscopic adsorption mechanism or an adsorbed formation
+thermochemistry claim.
+
+At every rate stage and endpoint the actual dissolved-gold concentration,
+loading, solution volume and semantic absolute temperature are admitted by
+the original isotherm/local-rate owners. CIL additionally supplies actual
+`pH`, `free-cyanide-concentration`, elapsed time, dissolved O2 and the
+original leach inventory/activity-reference coordinates, plus
+`ion-pair-counterion-concentration`, to both sources. Caller overrides of
+any coordinate owned by the original leach or adsorption models are refused. Source validity is checked at the actual
+state; no extrapolation or clipping is permitted.
+
+The bounded full/two-half RK4 controller retains separate dissolution
+progress, dissolved complex, aqueous countercation, dissolved oxygen,
+adsorbed amounts and vacant capacities. It recomputes Au, analytical cyanide,
+countercation, oxygen and per-population site balances independently.
+The cyanide report retains the original explicitly bounded metal/ligand
+equilibrium residual. Numerical full/two-half differences divided by 15
+estimate local inventory error; the time-weighted allowance and accumulated
+estimate are not certified bounds or experimental uncertainty. Nested
+speciation shares the same cancellation/work budget. A source exit,
+cancellation, exhausted budget or unrepresentable inventory leaves the
+complete accepted state and clock unchanged.
+
+This owner is isothermal with fixed liquid volume and retained dry masses.
+It has finite initial dissolved O2, with no gas replenishment, further dosing,
+flow-through residence-time model, carbon movement or regeneration. Those
+require explicit additional owners. The runnable
+`simultaneous_gold_carbon_in_leach` example and
+`data/matdb/seed-v1/MINING_CARBON_IN_LEACH.md` combine original NBS aqueous
+chemistry with clearly marked authored adsorption/leach coefficients; they
+do not claim calibrated ore or carbon performance.
+
+## Source-admitted instantaneous aqueous adsorption
+
+`AqueousLangmuir::loading_at` evaluates the original isotherm at actual
+dissolved analytical-element concentration and absolute temperature. The
+report retains its original model and admitted source point, together with
+independently evaluated occupied and vacant equilibrium loading.
+`LocalLangmuirTransfer::rate_at` evaluates the signed local loading
+derivative at actual concentration, loading, volume and temperature.
+Equilibrium and kinetic sources remain independently admitted. Near
+saturation the derivative uses the difference of vacancies to preserve
+representable trace desorption. Caller-supplied extra conditions cannot
+override coordinates owned by these methods. These operations expose the
+original constitutive responses for coupled solvers; they do not impose
+finite-batch equilibrium or add measured kinetic coefficients.
+
 ## Dissolved cyanide and caustic additions during leaching
 
 The closed, finite-headspace and prescribed-pressure cyanidation owners expose

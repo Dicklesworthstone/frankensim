@@ -194,6 +194,30 @@ impl ConservedReaction {
     pub fn terms(&self) -> &[ReactionTerm] {
         &self.terms
     }
+    /// Admitted integer charge of an active participant, independent of its label.
+    ///
+    /// Zero-coefficient spectators are absent. The definition is retained from
+    /// the original charge vector, not inferred from a species-name suffix.
+    #[must_use]
+    pub fn species_charge(&self, species: &SpeciesId) -> Option<i128> {
+        self.terms
+            .binary_search_by(|term| term.species.cmp(species))
+            .ok()
+            .map(|index| self.definitions[index].charge)
+    }
+
+    /// Nonzero elemental counts admitted for an active participant.
+    ///
+    /// Counts are in canonical element order and retain the original exact
+    /// integer bookkeeping; this does not parse or infer a chemical formula.
+    #[must_use]
+    pub fn species_elements(&self, species: &SpeciesId) -> Option<&[(crate::ElementId, i128)]> {
+        self.terms
+            .binary_search_by(|term| term.species.cmp(species))
+            .ok()
+            .map(|index| self.definitions[index].elements.as_slice())
+    }
+
     /// Exact element/charge certificate for the supplied matrix artifacts.
     #[must_use]
     pub fn conservation(&self) -> &ConservationCertificate {
