@@ -148,6 +148,48 @@ cost/poll refusal without partial publication.
   and the BEM+VPM hybrid are NOT scheduled; the promise is preserved in deferred
   epic frankensim-rc-root-q61wp.43 and un-parks only behind a consumer journey.
 
+## Momentum-preserving 2-D inviscid advection
+
+`pairwise::advance_pair([a, b], dt, core)` solves an isolated pair of the existing
+algebraic-core Biot–Savart model without allocation. Both vortices use the
+same declared core. Their separation is invariant, giving constant angular
+rate `(Gamma_a + Gamma_b)/(2 pi (d² + core²))`. Equal and opposite strengths
+produce exact dipole translation. A sinc/cosc displacement form remains
+continuous as the total circulation approaches zero; no circulation floor or
+division by the cloud's net circulation is used. Strict `fs_math::det` trig,
+normalized lengths and an exponent-based exceptional-range fallback avoid
+platform-libm variation and spurious overflow of squared lengths or summed
+like-signed strengths. Invalid or nonrepresentable pairs refuse.
+
+`conservative::simulate_with_cx` composes a lexicographic forward half sweep
+with its exact reverse half sweep. The result is an explicit second-order,
+time-reversible alternative to the unchanged fourth-order RK4 owner. It
+preserves each circulation, the first moments `sum Gamma*x` and
+`sum Gamma*y`, and the quadratic moment `sum Gamma*|x|²`, to floating-point
+roundoff. This remains valid for signed clouds with zero total circulation.
+These vortex impulse invariants do not assert the momentum of fluid in an
+arbitrary finite control volume or a body/wall reaction force. Many-vortex
+energy and finite-step relabeling invariance are not exact; trajectory and
+energy accuracy still need time refinement. Zero-core coincident vortices
+retain the existing zero-induction convention, not a resolved collision model.
+
+Each nonzero step costs `N(N-1)` pair visits plus one step unit; input admission
+costs `N`. Zero time skips pair visits. Only one particle vector is owned,
+with no per-step allocations. The same `VpmBudget`/`Cx` caps, cancellation
+checkpoints and final publication checkpoint apply; failures return no partial
+state. A lower pair count is not a measured wall-clock speed guarantee.
+
+The exact pair-Hamiltonian construction and symmetric composition follow
+J. Frank, *Symplectic and energy conserving discretizations of Hamiltonian
+PDEs*, pp. 11–12,
+<https://webspace.science.uu.nl/~zegel101/NUMpde2025/Lecture8Extra2.pdf>.
+The radial pair flow here is derived for this crate's shared regularized core.
+`tests/pairwise.rs` checks analytic rotations/dipoles, signed impulse closure,
+reversibility, dimensional/frame covariance, independent RK4 references and
+second-order three-vortex refinement (G0/G1/G3).
+`tests/conservative.rs` exercises the checked transaction, one-buffer/work
+receipts, identity/refusal cases and long-time signed-cloud impulse.
+
 ## Conservative 2-D viscous diffusion
 
 The diffusion-focused implementation adds `diffusion::PseDiffusion` and two

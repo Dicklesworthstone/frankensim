@@ -15,16 +15,22 @@
 //! before allocation, then polls cancellation inside every all-pairs sweep.
 //! The optional [`diffusion`] owner adds constant-viscosity particle-strength
 //! exchange to this same checked advection path, with explicit quadrature areas.
+//! [`conservative`] supplies an alternative exact-pair composition that retains
+//! linear and angular vortex impulse to roundoff with one live particle buffer.
 
 use core::f64::consts::PI;
 use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};
 
 pub mod coarsen3d;
+/// Momentum-preserving inviscid advection by symmetric exact-pair splitting.
+pub mod conservative;
 /// Conservative viscous diffusion and its composition with checked advection.
 pub mod diffusion;
 pub mod farfield3d;
 pub mod filament3d;
 pub mod images3d;
+/// Allocation-free exact flow for a pair sharing the algebraic velocity core.
+pub mod pairwise;
 
 /// Maximum completed logical work units between production-path checkpoints.
 ///
@@ -61,8 +67,8 @@ pub struct VpmBudget {
     /// Maximum time steps, including the zero-particle case where pair work is
     /// zero but step overhead is not.
     pub max_steps: usize,
-    /// Maximum pair visits. Advection uses `4 * particles^2 * steps`;
-    /// the diffusion entry points also charge their unordered pair sweeps.
+    /// Maximum pair visits. RK4 uses `4 * particles^2 * steps`; conservative
+    /// advection and diffusion charge their explicit unordered pair sweeps.
     pub max_pair_evaluations: u64,
     /// Maximum logical peak bytes owned by the run's particle/velocity
     /// payload buffers. Allocator metadata and capacity rounding are not
@@ -137,7 +143,7 @@ pub enum VpmError {
     /// Finite admitted inputs produced a non-finite intermediate, so no state
     /// was published.
     NonFiniteResult {
-        /// RK4 phase that lost the finite domain.
+        /// Numerical phase that lost the finite domain.
         phase: &'static str,
         /// Particle whose result was non-finite.
         particle: usize,
@@ -228,10 +234,10 @@ pub struct VpmRun {
     /// Completed time steps of the selected advection/diffusion path.
     pub steps_completed: usize,
     /// Exact pair visits charged by the run: ordered source-target visits for
-    /// advection and unordered pair visits for diffusion.
+    /// RK4 and unordered pair visits for conservative advection/diffusion.
     pub pair_evaluations: u64,
     /// Exact logical work charged to the ambient `Cx`: input validation and
-    /// copy, pair contributions, RK4 displacement/combine work, and one
+    /// copy, pair flows/contributions, any RK4 displacement/combine work, and one
     /// boundary unit per completed step.
     pub work_units: u64,
     /// Checked logical peak payload bytes admitted before allocation.
