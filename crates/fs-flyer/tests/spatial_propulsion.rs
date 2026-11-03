@@ -2,7 +2,7 @@
 use fs_flyer::aircraft::wright_openloop_v1;
 use fs_flyer::propcoupling::spatial::{self, DiskAxes};
 use fs_flyer::propcoupling::{
-    CANDIDATE_B, IncidentInflow, PropCouplingSolverSpec, PropDisk,
+    CANDIDATE_B, CoupledStep, IncidentInflow, PropCouplingSolverSpec, PropDisk,
     coupled_prop_airframe_step_with_incident, wash_factor,
 };
 use fs_flyer::spine::SixDofState;
@@ -10,9 +10,10 @@ use fs_flyer::spine::rotors::geared::{GearedAssembly, GearedRotor, GearedState};
 use fs_flyer::spine::rotors::propulsion::{
     GearedPropulsion, PropellerHandedness, PropellerMount, PropulsionInputs,
 };
-use fs_ga::{Mat3, Quat, So3, So3Tangent, Vec3};
-use fs_wing::nonlinear::{InfluenceOperator, StripRegime, StripSpec};
-use fs_wing::{SurfaceId, flat_surface, induced_velocity_free};
+use fs_ga::{Mat3, Quat, So3, So3Tangent, Vec3, Wrench};
+use fs_wing::nonlinear::{InfluenceOperator, SectionFrame, StripRegime, StripSpec};
+use fs_wing::wrench::CirculatoryWrenchAccumulator;
+use fs_wing::{Panel, SurfaceId, flat_surface, induced_velocity_free};
 
 const ZERO: [f64; 3] = [0.0; 3];
 fn v(a: [f64; 3]) -> Vec3 {
@@ -56,6 +57,256 @@ fn precise() -> PropCouplingSolverSpec {
         tol: 1e-11,
         cap: 64,
         ..CANDIDATE_B
+    }
+}
+
+// A whole physical scene rotated together: neither the incident samples,
+// section planes, disk axes nor trailing-vortex direction stay in body xz.
+struct FramedScene {
+    panels: Vec<Panel>,
+    strips: Vec<StripSpec>,
+    frames: Vec<SectionFrame>,
+    disks: [PropDisk; 2],
+    axes: DiskAxes,
+    velocity: [f64; 3],
+    local: Vec<[f64; 3]>,
+    disk_flow: [[f64; 3]; 2],
+    op: InfluenceOperator,
+}
+impl FramedScene {
+    fn new(rotation: So3) -> Self {
+        let rotate = |value| a(rotation.rotate(v(value)).unwrap());
+        let (mut panels, strips, mut disks) = setup();
+        for panel in &mut panels {
+            panel.a = rotate(panel.a);
+            panel.b = rotate(panel.b);
+            panel.ctrl = rotate(panel.ctrl);
+            panel.normal = rotate(panel.normal);
+        }
+        for (k, disk) in disks.iter_mut().enumerate() {
+            disk.center_m[2] = [-0.3, 0.2][k];
+            disk.center_m = rotate(disk.center_m);
+        }
+        let frames = strips
+            .iter()
+            .map(|strip| SectionFrame::from_panel(&panels[strip.panel_indices[0]]).unwrap())
+            .collect();
+        let axes = DiskAxes::new([unit([1.0, 0.08, 0.12]), unit([1.0, -0.04, -0.06])].map(rotate))
+            .unwrap();
+        let velocity = rotate([12.0, 0.1, 0.8]);
+        let local = (0..strips.len())
+            .map(|i| rotate([12.0 + 0.03 * i as f64, 0.1, 0.7 + 0.02 * i as f64]))
+            .collect();
+        let disk_flow = [[12.2, 0.3, 0.7], [11.8, -0.2, 0.9]].map(rotate);
+        let op = InfluenceOperator::build(&panels, velocity, 1.225).unwrap();
+        Self {
+            panels,
+            strips,
+            frames,
+            disks,
+            axes,
+            velocity,
+            local,
+            disk_flow,
+            op,
+        }
+    }
+
+    fn incident(&self) -> IncidentInflow<'_> {
+        IncidentInflow {
+            strip_velocity_mps: &self.local,
+            disk_velocity_mps: self.disk_flow,
+        }
+    }
+
+    fn wrench<P>(&self, result: &CoupledStep<P>) -> Wrench {
+        let mut owner = CirculatoryWrenchAccumulator::new(1.225, ZERO).unwrap();
+        for (i, strip) in self.strips.iter().enumerate() {
+            for &j in &strip.panel_indices {
+                owner
+                    .add_panel(
+                        &self.panels[j],
+                        result.gamma[j],
+                        result.strip_velocity_mps.as_ref().unwrap()[i],
+                    )
+                    .unwrap();
+            }
+        }
+        owner.total()
+    }
+}
+
+fn assert_framed_rotation<P, Q>(
+    scene: &FramedScene,
+    result: &CoupledStep<P>,
+    base: &FramedScene,
+    reference: &CoupledStep<Q>,
+    rotation: So3,
+) {
+    for (x, y) in result.gamma.iter().zip(&reference.gamma) {
+        assert!((x - y).abs() < 3e-9, "circulation {x:e} != {y:e}");
+    }
+    for (x, y) in result
+        .strip_alpha_eff_rad
+        .iter()
+        .zip(&reference.strip_alpha_eff_rad)
+    {
+        assert!((x - y).abs() < 2e-10);
+    }
+    for k in 0..2 {
+        assert!((result.thrust_n[k] - reference.thrust_n[k]).abs() < 1e-7);
+        assert!((result.torque_nm[k] - reference.torque_nm[k]).abs() < 1e-8);
+        assert!((result.w_slip[k] - reference.w_slip[k]).abs() < 1e-9);
+    }
+    for (actual, original) in result
+        .strip_velocity_mps
+        .as_ref()
+        .unwrap()
+        .iter()
+        .zip(reference.strip_velocity_mps.as_ref().unwrap())
+    {
+        assert!((v(*actual) - rotation.rotate(v(*original)).unwrap()).norm() < 2e-9);
+    }
+    let actual = scene.wrench(result);
+    let expected = base.wrench(reference);
+    assert!((actual.force - rotation.rotate(expected.force).unwrap()).norm() < 2e-7);
+    assert!((actual.torque - rotation.rotate(expected.torque).unwrap()).norm() < 2e-7);
+}
+
+#[test]
+fn framed_two_way_coupling_rotates_lift_into_sideforce_and_keeps_disk_momentum() {
+    let rotor = wright_openloop_v1().rotor;
+    let solve = |scene: &FramedScene| {
+        spatial::coupled_step_with_section_frames(
+            &scene.axes,
+            &scene.op,
+            &scene.panels,
+            &scene.strips,
+            &closure,
+            &scene.frames,
+            &rotor,
+            &scene.disks,
+            scene.velocity,
+            1.225,
+            &precise(),
+            None,
+            scene.incident(),
+        )
+        .unwrap()
+    };
+    let base = FramedScene::new(So3::identity());
+    let reference = solve(&base);
+    let old = spatial::coupled_step(
+        &base.axes,
+        &base.op,
+        &base.panels,
+        &base.strips,
+        &closure,
+        &rotor,
+        &base.disks,
+        base.velocity,
+        1.225,
+        &precise(),
+        None,
+        base.incident(),
+    )
+    .unwrap();
+    assert_ne!(reference.spec_digest, old.spec_digest);
+    let roll = So3::exp(So3Tangent::new(Vec3::new(
+        core::f64::consts::FRAC_PI_2,
+        0.0,
+        0.0,
+    )))
+    .unwrap();
+    let general = So3::exp(So3Tangent::new(Vec3::new(0.3, -0.2, 0.4))).unwrap();
+    for rotation in [roll, general] {
+        let scene = FramedScene::new(rotation);
+        let result = solve(&scene);
+        assert_framed_rotation(&scene, &result, &base, &reference, rotation);
+        if rotation == roll {
+            let force = scene.wrench(&result).force;
+            assert!(
+                force.y.abs() > 100.0,
+                "vertical surface must generate sideforce"
+            );
+            assert!(force.z.abs() < 1e-10);
+        }
+        for k in 0..2 {
+            let wing = induced_velocity_free(
+                scene.disks[k].center_m,
+                &scene.panels,
+                &result.gamma,
+                scene.velocity,
+            );
+            let axial = (v(wing) + v(scene.disk_flow[k])).dot(v(scene.axes.directions()[k]));
+            let independent =
+                fs_airscrew::bemt_solve(&rotor, 1.225, axial, scene.disks[k].omega_rad_s).unwrap();
+            assert!((independent.thrust_n - result.thrust_n[k]).abs() < 1e-8);
+            let vi = result.w_slip[k];
+            let area = core::f64::consts::PI * rotor.radius_m * rotor.radius_m;
+            assert!((2.0 * 1.225 * area * vi * (axial + vi) - result.thrust_n[k]).abs() < 1e-8);
+        }
+    }
+    let invalid = spatial::coupled_step_with_section_frames(
+        &base.axes,
+        &base.op,
+        &base.panels,
+        &base.strips,
+        &closure,
+        &base.frames[..7],
+        &rotor,
+        &base.disks,
+        base.velocity,
+        1.225,
+        &precise(),
+        None,
+        base.incident(),
+    )
+    .unwrap_err();
+    assert_eq!(invalid.code, "section-frame-invalid");
+}
+
+#[test]
+fn framed_swirl_coupling_preserves_native_annular_power_under_rigid_rotation() {
+    let rotor = wright_openloop_v1().rotor;
+    let controls = fs_airscrew::swirl::Controls::default();
+    let solve = |scene: &FramedScene| {
+        fs_flyer::propcoupling::swirl::coupled_step_with_section_frames(
+            &scene.axes,
+            &scene.op,
+            &scene.panels,
+            &scene.strips,
+            &closure,
+            &scene.frames,
+            &rotor,
+            &scene.disks,
+            scene.velocity,
+            1.225,
+            &precise(),
+            controls,
+            None,
+            scene.incident(),
+        )
+        .unwrap()
+    };
+    let base = FramedScene::new(So3::identity());
+    let reference = solve(&base);
+    let rotation = So3::exp(So3Tangent::new(Vec3::new(
+        core::f64::consts::FRAC_PI_2,
+        0.0,
+        0.0,
+    )))
+    .unwrap();
+    let scene = FramedScene::new(rotation);
+    let result = solve(&scene);
+    assert_framed_rotation(&scene, &result.coupled, &base, &reference.coupled, rotation);
+    assert!(scene.wrench(&result.coupled).force.y.abs() > 100.0);
+    for k in 0..2 {
+        let actual = result.rotors[k].power;
+        let expected = reference.rotors[k].power;
+        assert!((actual.shaft_w - expected.shaft_w).abs() < 1e-6);
+        assert!((actual.swirl_w - expected.swirl_w).abs() < 1e-6);
+        assert!(actual.swirl_w > 0.0);
     }
 }
 

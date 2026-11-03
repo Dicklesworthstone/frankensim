@@ -8,7 +8,7 @@
 use super::spatial::DiskAxes;
 use super::{
     CoupledStep, IncidentInflow, InfluenceOperator, Panel, PropCouplingSolverSpec, PropDisk,
-    Refusal, Rotor, RotorLoads, SectionClosure, StripSpec, coupled_step_with_rotors,
+    Refusal, Rotor, RotorLoads, SectionClosure, SectionFrame, StripSpec, coupled_step_with_rotors,
 };
 use fs_airscrew::swirl::{self as rotor_swirl, Controls, Induction, Power, Solution};
 use fs_blake3::hash_domain;
@@ -79,6 +79,74 @@ pub fn coupled_step(
     warm: Option<&WarmStart>,
     incident: IncidentInflow<'_>,
 ) -> Result<CoupledSwirlStep, Refusal> {
+    coupled_impl(
+        axes, op, panels, strips, closure, None, rotor, disks, freestream, rho, spec, controls,
+        warm, incident,
+    )
+}
+
+/// Native axial/angular rotor momentum coupled to explicit local wing frames.
+///
+/// Spatial axes are mandatory: the complete vector wash reaches each section
+/// before incidence/induction projection, including vertical and canted
+/// surfaces. The same accepted circulation drives the actual swirling rotor
+/// solves and the returned force velocities. Station warm starts and signed
+/// shaft torque retain the original owner in [`coupled_step`].
+///
+/// # Errors
+/// The refusals of [`coupled_step`] and the framed nonlinear wing model.
+#[allow(clippy::too_many_arguments)]
+pub fn coupled_step_with_section_frames(
+    axes: &DiskAxes,
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    closure: SectionClosure<'_>,
+    frames: &[SectionFrame],
+    rotor: &Rotor,
+    disks: &[PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    spec: &PropCouplingSolverSpec,
+    controls: Controls,
+    warm: Option<&WarmStart>,
+    incident: IncidentInflow<'_>,
+) -> Result<CoupledSwirlStep, Refusal> {
+    coupled_impl(
+        Some(*axes),
+        op,
+        panels,
+        strips,
+        closure,
+        Some(frames),
+        rotor,
+        disks,
+        freestream,
+        rho,
+        spec,
+        controls,
+        warm,
+        incident,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coupled_impl(
+    axes: Option<DiskAxes>,
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    closure: SectionClosure<'_>,
+    frames: Option<&[SectionFrame]>,
+    rotor: &Rotor,
+    disks: &[PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    spec: &PropCouplingSolverSpec,
+    controls: Controls,
+    warm: Option<&WarmStart>,
+    incident: IncidentInflow<'_>,
+) -> Result<CoupledSwirlStep, Refusal> {
     if warm.is_some_and(|w| !w.w_slip.into_iter().all(f64::is_finite)) {
         return Err(Refusal {
             code: "swirl-coupling-invalid",
@@ -100,6 +168,7 @@ pub fn coupled_step(
         warm.map(|w| w.w_slip),
         Some(incident),
         axes,
+        frames,
         |k, axial, omega| {
             let solution = rotor_swirl::bemt_solve(
                 rotor,

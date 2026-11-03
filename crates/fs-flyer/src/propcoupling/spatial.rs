@@ -8,7 +8,8 @@
 use super::disk_wash::{self, DiskWash};
 use super::{
     CoupledStep, IncidentInflow, InfluenceOperator, Panel, PropCouplingSolverSpec, PropDisk,
-    Refusal, Rotor, SectionClosure, StripSpec, coupled_step_impl, hash_domain, wash_factor,
+    Refusal, Rotor, SectionClosure, SectionFrame, StripSpec, coupled_step_impl, hash_domain,
+    wash_factor,
 };
 
 /// Prepared positive-thrust directions in the same frame as the panels/disks.
@@ -203,5 +204,55 @@ pub fn coupled_step(
         warm,
         Some(incident),
         Some(*axes),
+        None,
+    )
+}
+
+/// Two-way spatial disk/wing solve with explicit local section planes.
+///
+/// Each strip receives its complete incident velocity plus the current vector
+/// prop wash before the nonlinear section law evaluates incidence and speed.
+/// The frame's normal-plane chord is supplied by `StripSpec::chord_m`;
+/// spanwise velocity does not inflate the two-dimensional section speed.
+/// All physical velocity components remain in the returned accepted force
+/// field and in the wing-induced flow seen by both disks.
+///
+/// This enables canted/vertical lifting surfaces in the actual two-way
+/// coupling. The old `coupled_step` retains its body-xz section model and
+/// arithmetic. This model choice and its ordered frames enter `spec_digest`.
+///
+/// # Errors
+/// Existing spatial/wing/coupling refusals, including invalid section frames,
+/// incompatible owned panels or reversed section chordwise flow.
+#[allow(clippy::too_many_arguments)]
+pub fn coupled_step_with_section_frames(
+    axes: &DiskAxes,
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    closure: SectionClosure<'_>,
+    frames: &[SectionFrame],
+    rotor: &Rotor,
+    disks: &[PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    spec: &PropCouplingSolverSpec,
+    warm: Option<[f64; 2]>,
+    incident: IncidentInflow<'_>,
+) -> Result<CoupledStep, Refusal> {
+    coupled_step_impl(
+        op,
+        panels,
+        strips,
+        closure,
+        rotor,
+        disks,
+        freestream,
+        rho,
+        spec,
+        warm,
+        Some(incident),
+        Some(*axes),
+        Some(frames),
     )
 }

@@ -22,7 +22,8 @@ use crate::Refusal;
 use fs_airscrew::{BemtPower, Rotor, bemt_solve};
 use fs_blake3::hash_domain;
 use fs_wing::nonlinear::{
-    InfluenceOperator, SectionClosure, StripSpec, solve_nonlinear, solve_nonlinear_with_incident,
+    InfluenceOperator, SectionClosure, SectionFrame, StripSpec, solve_nonlinear,
+    solve_nonlinear_with_incident, solve_nonlinear_with_section_frames,
 };
 use fs_wing::{Panel, induced_velocity_free};
 
@@ -242,7 +243,7 @@ pub fn coupled_prop_airframe_step(
     warm: Option<[f64; 2]>,
 ) -> Result<CoupledStep, Refusal> {
     coupled_step_impl(
-        op, panels, strips, closure, rotor, disks, freestream, rho, spec, warm, None, None,
+        op, panels, strips, closure, rotor, disks, freestream, rho, spec, warm, None, None, None,
     )
 }
 
@@ -287,6 +288,7 @@ pub fn coupled_prop_airframe_step_with_incident(
         warm,
         Some(incident),
         None,
+        None,
     )
 }
 
@@ -304,6 +306,7 @@ fn coupled_step_impl(
     warm: Option<[f64; 2]>,
     incident: Option<IncidentInflow<'_>>,
     spatial: Option<spatial::DiskAxes>,
+    section_frames: Option<&[SectionFrame]>,
 ) -> Result<CoupledStep, Refusal> {
     let map_err_a = |e: fs_airscrew::Refusal| Refusal {
         code: e.code,
@@ -323,6 +326,7 @@ fn coupled_step_impl(
         warm,
         incident,
         spatial,
+        section_frames,
         |_, axial, omega| {
             let sol = bemt_solve(rotor, rho, axial, omega).map_err(map_err_a)?;
             Ok(RotorLoads {
@@ -356,6 +360,7 @@ fn coupled_step_with_rotors<P: Copy>(
     warm: Option<[f64; 2]>,
     incident: Option<IncidentInflow<'_>>,
     spatial: Option<spatial::DiskAxes>,
+    section_frames: Option<&[SectionFrame]>,
     mut rotor_solve: impl FnMut(usize, f64, f64) -> Result<RotorLoads<P>, Refusal>,
 ) -> Result<CoupledStep<P>, Refusal> {
     let map_err = |e: fs_wing::Refusal| Refusal {
@@ -387,6 +392,18 @@ fn coupled_step_with_rotors<P: Copy>(
             code: "disk-inflow-invalid",
             message: "non-finite incident disk velocity".into(),
             ranked_repairs: vec!["sample both disks from the admitted physical atmosphere".into()],
+        });
+    }
+    if section_frames.is_some_and(|frames| {
+        frames.len() != strips.len()
+            || incident.is_none_or(|flow| flow.strip_velocity_mps.len() != strips.len())
+    }) {
+        return Err(Refusal {
+            code: "section-frame-invalid",
+            message: "provide one section frame and incident velocity per strip".into(),
+            ranked_repairs: vec![
+                "retain the admitted frames with the supplied strip layout".into(),
+            ],
         });
     }
     let wash = match spatial {
@@ -426,39 +443,60 @@ fn coupled_step_with_rotors<P: Copy>(
         } else {
             Vec::new()
         };
-        let wing = match (incident, spatial) {
-            (Some(flow), Some(axes)) => {
-                let velocity: Vec<_> = flow
-                    .strip_velocity_mps
-                    .iter()
-                    .zip(&wash)
-                    .map(|(&v, &factors)| axes.velocity(v, factors, *x))
-                    .collect();
-                solve_nonlinear_with_incident(
-                    op, panels, strips, freestream, rho, closure, &velocity, None, None,
-                )
+        let wing = if let Some(frames) = section_frames {
+            let flow = incident.expect("framed coupling requires incident samples");
+            let velocity: Vec<_> = flow
+                .strip_velocity_mps
+                .iter()
+                .zip(&wash)
+                .map(|(&v, &factors)| {
+                    if let Some(axes) = spatial {
+                        axes.velocity(v, factors, *x)
+                    } else {
+                        [v[0] + strip_wash(factors, *x), v[1], v[2]]
+                    }
+                })
+                .collect();
+            // Compose actual spatial prop wash before the section projection.
+            // The same accepted vectors are returned with gamma below.
+            solve_nonlinear_with_section_frames(
+                op, panels, strips, freestream, rho, closure, frames, &velocity, None,
+            )
+        } else {
+            match (incident, spatial) {
+                (Some(flow), Some(axes)) => {
+                    let velocity: Vec<_> = flow
+                        .strip_velocity_mps
+                        .iter()
+                        .zip(&wash)
+                        .map(|(&v, &factors)| axes.velocity(v, factors, *x))
+                        .collect();
+                    solve_nonlinear_with_incident(
+                        op, panels, strips, freestream, rho, closure, &velocity, None, None,
+                    )
+                }
+                (Some(flow), None) => solve_nonlinear_with_incident(
+                    op,
+                    panels,
+                    strips,
+                    freestream,
+                    rho,
+                    closure,
+                    flow.strip_velocity_mps,
+                    Some(&du),
+                    None,
+                ),
+                (None, _) => solve_nonlinear(
+                    op,
+                    panels,
+                    strips,
+                    freestream,
+                    rho,
+                    closure,
+                    Some(&du),
+                    None,
+                ),
             }
-            (Some(flow), None) => solve_nonlinear_with_incident(
-                op,
-                panels,
-                strips,
-                freestream,
-                rho,
-                closure,
-                flow.strip_velocity_mps,
-                Some(&du),
-                None,
-            ),
-            (None, _) => solve_nonlinear(
-                op,
-                panels,
-                strips,
-                freestream,
-                rho,
-                closure,
-                Some(&du),
-                None,
-            ),
         }
         .map_err(map_err)?;
         let mut g = [0.0f64; 2];
@@ -550,7 +588,30 @@ fn coupled_step_with_rotors<P: Copy>(
                 }),
                 corrections,
                 residual: res,
-                spec_digest: spatial.map_or_else(|| spec.digest(), |axes| axes.digest(spec)),
+                spec_digest: {
+                    let base = spatial.map_or_else(|| spec.digest(), |axes| axes.digest(spec));
+                    match section_frames {
+                        None => base,
+                        Some(frames) => {
+                            let mut identity = base.into_bytes();
+                            identity.extend_from_slice(&(frames.len() as u64).to_le_bytes());
+                            for frame in frames {
+                                for value in frame
+                                    .chord_direction()
+                                    .into_iter()
+                                    .chain(frame.span_direction())
+                                {
+                                    identity.extend_from_slice(&value.to_bits().to_le_bytes());
+                                }
+                            }
+                            hash_domain(
+                                "org.frankensim.fs-flyer.section-frame-coupling.v1",
+                                &identity,
+                            )
+                            .to_hex()
+                        }
+                    }
+                },
             });
         }
         if !unrelaxed_done {
