@@ -33,6 +33,12 @@ use fs_math::det;
 mod forced;
 pub use forced::ExhaustEnvironment;
 
+#[path = "exhaust/exchange.rs"]
+mod exchange;
+pub use exchange::{
+    ParticleExchangeForcing, ParticleExchangeStep, ParticleStreamIntegral, ParticleStreamMoments,
+};
+
 /// Physical comoving exhaust moments, held during the powered interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExhaustForcing {

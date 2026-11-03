@@ -4458,3 +4458,45 @@ thermal destination remain separate owners. Independent tests cover fixed and
 moving support catches, mobile roots, branched response, full off-centre inertia,
 world-frame and inertial-boost covariance, loaded gravity continuation and
 atomic refusal.
+
+## Continuous bidirectional particle momentum on the native translating body
+
+`RocketState::advance_with_particle_exchange` admits simultaneous held incoming
+and outgoing `ParticleStreamMoments` on the original native state. The signed
+mass rate changes its transferable inventory, while both gross streams retain
+their original relative momentum and complete energy. Equal incoming and
+outgoing mass rates can therefore accelerate the body, exchange energy and
+thermalize incoming relative kinetic energy without changing retained mass.
+
+The method integrates `M*v'=F+Pi-Po+M*g` over the complete declared interval.
+Inventory below the dry-mass floor refuses; no intake shutdown, outflow switch
+or post-exhaustion policy is inferred. The original native loss integrals and
+positive velocity-variance calculation also cover gain by time reversal, with
+the gain mean coefficient `A-C`. Zero net mass has its analytic constant-mass
+limit. Small-fraction series preserve opposing force/gravity increments and
+work, and normalization avoids division by a vanishing signed mass rate.
+
+Each `ParticleStreamIntegral` retains gross mass, relative momentum/energy,
+inertial momentum/energy, and the separate inertial kinetic correction. Both
+streams use the same velocity mean and second moment. External force and
+gravity return their complete impulse and correlated mechanical work. Native
+residuals use the actual endpoint velocity and separately stored dry and
+transferable inventories in an initial-velocity chart. Their signs are retained
+change plus outgoing minus incoming minus external input; gross-versus-net
+inventory rounding and unrepresented endpoint recoil are exposed.
+
+`retained_relative_energy_j` is the caloric credit required of the composing
+material owner: incoming minus outgoing complete relative energy. Incoming
+relative kinetic energy is already included once. No second caloric state,
+pressure-flow work, source qualification or species budget is invented here.
+Held relative intake is an explicitly supplied source moving with the body;
+a stationary ambient distribution has changing relative moments and needs a
+different source closure. Rotation, COM shifts and finite sticking events stay
+with their existing owners, including `assembly::capture` and `release`.
+
+Six focused groups in `rocket/exhaust/exchange/tests.rs` cover independent
+physical-flux quadrature for gain/loss/throughflow, constant-mass force and
+thermalization, one-way parity and split continuation, closed/zero/cancelled
+intervals and depletion refusal, Galilean/datum transforms, and tiny-fraction
+and endpoint-rounding limits. Source files were parsed with Rustfmt; these new
+native regressions have not been executed in this dependency-limited session.
