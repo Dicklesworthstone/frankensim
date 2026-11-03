@@ -102,11 +102,17 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 pub(in crate::compressible::spatial::mixture::molecular::sgs) struct DynamicThermalTransport {
     pub(in crate::compressible::spatial::mixture::molecular::sgs) config:
         MixtureDynamicThermalSubgridConfig,
-    momentum: PeriodicDynamicSgs,
-    heat: PeriodicDynamicScalar,
-    density: Vec<f64>,
-    velocity: Vec<[f64; 3]>,
-    temperature: Vec<f64>,
+    work: ThermalWorkspace,
+}
+
+/// Same-stage momentum/heat arrays shared by fixed-Schmidt and fitted-species
+/// consumers. Neither consumer owns a second thermodynamic or flux operator.
+pub(super) struct ThermalWorkspace {
+    pub(super) momentum: PeriodicDynamicSgs,
+    pub(super) heat: PeriodicDynamicScalar,
+    pub(super) density: Vec<f64>,
+    pub(super) velocity: Vec<[f64; 3]>,
+    pub(super) temperature: Vec<f64>,
     rho_diffusivity: Vec<f64>,
 }
 
@@ -115,12 +121,67 @@ impl DynamicThermalTransport {
         grid: &CartesianGrid,
         config: MixtureDynamicThermalSubgridConfig,
     ) -> Result<Self, DissipationError> {
+        Ok(Self {
+            config,
+            work: ThermalWorkspace::new(grid)?,
+        })
+    }
+
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn workspace_bytes(
+        &self,
+    ) -> usize {
+        self.work.workspace_bytes()
+    }
+
+    /// True if either independently fitted coefficient is active. A pure heat
+    /// fit must still refresh the parent's source Cv and energy coefficients.
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn prepare(
+        &mut self,
+        primitive: &[Primitive],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, DissipationError> {
+        self.work.load(primitive, cancelled)?;
+        let (momentum, heat) = self
+            .work
+            .momentum
+            .prepare_with_scalar(
+                self.config.transport.momentum,
+                self.config.transport.heat,
+                &self.work.density,
+                &self.work.velocity,
+                &self.work.temperature,
+                &mut self.work.heat,
+                &mut *cancelled,
+            )
+            .map_err(dynamic_error)?;
+        self.work.collect_heat(cancelled)?;
+        Ok(momentum.maximum_eddy_viscosity != 0.0 || heat.maximum_diffusivity != 0.0)
+    }
+
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn viscosities(&self) -> &[f64] {
+        self.work.momentum.viscosities()
+    }
+
+    /// Density-weighted thermal diffusivity and its molecular ratio bound.
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_heat(
+        &self,
+        left: usize,
+        right: usize,
+    ) -> (f64, f64) {
+        (
+            self.work.face_heat(left, right),
+            self.config.transport.heat.maximum_diffusivity_to_molecular,
+        )
+    }
+}
+
+impl ThermalWorkspace {
+    pub(super) fn new(grid: &CartesianGrid) -> Result<Self, DissipationError> {
         let momentum_bytes =
             PeriodicDynamicSgs::required_bytes(grid.len()).map_err(dynamic_error)?;
         let heat_bytes =
             PeriodicDynamicScalar::required_bytes(grid.len()).map_err(dynamic_error)?;
         Ok(Self {
-            config,
             momentum: PeriodicDynamicSgs::new_cartesian(grid.shape, grid.spacing, momentum_bytes)
                 .map_err(dynamic_error)?,
             heat: PeriodicDynamicScalar::new(grid.shape, heat_bytes).map_err(dynamic_error)?,
@@ -131,9 +192,7 @@ impl DynamicThermalTransport {
         })
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn workspace_bytes(
-        &self,
-    ) -> usize {
+    pub(super) fn workspace_bytes(&self) -> usize {
         self.momentum.workspace_bytes()
             + self.heat.workspace_bytes()
             + (self.density.capacity()
@@ -143,13 +202,11 @@ impl DynamicThermalTransport {
             + self.velocity.capacity() * size_of::<[f64; 3]>()
     }
 
-    /// True if either independently fitted coefficient is active. A pure heat
-    /// fit must still refresh the parent's source Cv and energy coefficients.
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn prepare(
+    pub(super) fn load(
         &mut self,
         primitive: &[Primitive],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<bool, DissipationError> {
+    ) -> Result<(), DissipationError> {
         for (i, p) in primitive.iter().enumerate() {
             if i % 64 == 0 {
                 poll(cancelled)?;
@@ -158,18 +215,13 @@ impl DynamicThermalTransport {
             self.velocity[i] = p.velocity;
             self.temperature[i] = p.temperature;
         }
-        let (momentum, heat) = self
-            .momentum
-            .prepare_with_scalar(
-                self.config.transport.momentum,
-                self.config.transport.heat,
-                &self.density,
-                &self.velocity,
-                &self.temperature,
-                &mut self.heat,
-                &mut *cancelled,
-            )
-            .map_err(dynamic_error)?;
+        poll(cancelled)
+    }
+
+    pub(super) fn collect_heat(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
         for (i, (weight, &alpha)) in self
             .rho_diffusivity
             .iter_mut()
@@ -186,23 +238,10 @@ impl DynamicThermalTransport {
                 ));
             }
         }
-        poll(cancelled)?;
-        Ok(momentum.maximum_eddy_viscosity != 0.0 || heat.maximum_diffusivity != 0.0)
+        poll(cancelled)
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn viscosities(&self) -> &[f64] {
-        self.momentum.viscosities()
-    }
-
-    /// Density-weighted thermal diffusivity and its molecular ratio bound.
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_heat(
-        &self,
-        left: usize,
-        right: usize,
-    ) -> (f64, f64) {
-        (
-            0.5 * self.rho_diffusivity[left] + 0.5 * self.rho_diffusivity[right],
-            self.config.transport.heat.maximum_diffusivity_to_molecular,
-        )
+    pub(super) fn face_heat(&self, left: usize, right: usize) -> f64 {
+        0.5 * self.rho_diffusivity[left] + 0.5 * self.rho_diffusivity[right]
     }
 }

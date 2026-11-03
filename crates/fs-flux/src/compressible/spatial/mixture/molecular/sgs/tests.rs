@@ -209,7 +209,11 @@ fn sgs_mixture_faces_match_full_deviatoric_stress_heat_species_and_enthalpy() {
             inverse_mass
                 * ((c - 1.0) * (t - 0.001) + 0.5 * linear * (t * t - 0.001_f64.powi(2)) + t)
         };
-        let mut energy = -mu * cp / cfg.transport.turbulent_prandtl * 0.1
+        // The conservative caloric inversion admits its actual temperatures
+        // within a finite tolerance. Fourier transport uses those same source
+        // states, not the nominal analytic temperature used to initialize them.
+        let temperature_gradient = (pr.temperature - pl.temperature) / flow.grid.spacing[axis];
+        let mut energy = -mu * cp / cfg.transport.turbulent_prandtl * temperature_gradient
             + j * (h(3.5, 0.2, 1.0) - h(4.5, 0.3, 0.5));
         for component in 0..3 {
             let stress = mu
@@ -421,7 +425,8 @@ fn sgs_mixture_no_slip_walls_keep_molecular_heat_stress_and_impermeability() {
         "no fictitious normal traction from interior tangential divergence"
     );
     close(lower_z[3], -0.02 * 0.2 * x[0], 2e-15);
-    close(lower_z[6], -0.03 * (1.0 + 0.1 * x[2] - 0.8) / x[2], 2e-15);
+    let temperature = modeled.work.primitive[flow.grid.index(c)].temperature;
+    close(lower_z[6], -0.03 * (temperature - 0.8) / x[2], 2e-15);
     assert_ne!(
         modeled.work.flux, molecular.work.flux,
         "interior SGS remains active"

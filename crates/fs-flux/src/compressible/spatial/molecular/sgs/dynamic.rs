@@ -174,6 +174,7 @@ impl DynamicTransport {
                 ));
             }
         }
-        poll(cancelled)
+        poll(cancelled)?;
+        Ok(())
     }
 }

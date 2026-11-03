@@ -6,6 +6,9 @@
 //! `j_i^t = -(mu_t/Sc_t) grad(Y_i)`. The same original referenced partial
 //! enthalpies accompany those species fluxes in conservative total energy.
 //! There is no separate viscous or chemical heating source.
+//! An optional joint Germano fit supplies a common species diffusivity directly,
+//! independently of stress and heat; it retains this same mass-frame and
+//! referenced-enthalpy flux rather than prescribing a turbulent Schmidt number.
 //!
 //! Physical wall faces retain the original molecular law: modeled wall stress,
 //! heat and species flux are zero. Wall-resolved grids are required; no wall
@@ -33,7 +36,10 @@ use fs_qty::Temperature;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod dynamic;
-pub use dynamic::{MixtureDynamicSubgridConfig, MixtureDynamicThermalSubgridConfig};
+pub use dynamic::{
+    DynamicComponentsConfig, MixtureDynamicSpeciesSubgridConfig, MixtureDynamicSubgridConfig,
+    MixtureDynamicThermalSubgridConfig,
+};
 
 /// Explicit stress/heat controls shared with frozen gas, plus species mixing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -101,7 +107,9 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     pub fn subgrid_config(&self) -> Option<MixtureSubgridConfig> {
         match &self.sgs.as_ref()?.closure {
             ViscosityClosure::Local { config, .. } => Some(*config),
-            ViscosityClosure::Dynamic(_) | ViscosityClosure::DynamicThermal(_) => None,
+            ViscosityClosure::Dynamic(_)
+            | ViscosityClosure::DynamicThermal(_)
+            | ViscosityClosure::DynamicSpecies(_) => None,
         }
     }
 }
@@ -114,6 +122,7 @@ enum ViscosityClosure {
     },
     Dynamic(dynamic::DynamicTransport),
     DynamicThermal(dynamic::DynamicThermalTransport),
+    DynamicSpecies(dynamic::DynamicSpeciesTransport),
 }
 
 pub(super) struct SubgridTransport {
@@ -151,6 +160,7 @@ impl SubgridTransport {
                 ViscosityClosure::Local { .. } => 0,
                 ViscosityClosure::Dynamic(dynamic) => dynamic.workspace_bytes(),
                 ViscosityClosure::DynamicThermal(dynamic) => dynamic.workspace_bytes(),
+                ViscosityClosure::DynamicSpecies(dynamic) => dynamic.workspace_bytes(),
             }
     }
 
@@ -181,6 +191,15 @@ impl SubgridTransport {
             }
             ViscosityClosure::DynamicThermal(dynamic) => {
                 if !dynamic.prepare(primitive, cancelled)? {
+                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                        poll(cancelled)?;
+                        values.fill(0.0);
+                    }
+                    return Ok(());
+                }
+            }
+            ViscosityClosure::DynamicSpecies(dynamic) => {
+                if !dynamic.prepare(states, primitive, cancelled)? {
                     for values in self.dynamic_viscosity.chunks_mut(64) {
                         poll(cancelled)?;
                         values.fill(0.0);
@@ -220,6 +239,7 @@ impl SubgridTransport {
                 }
                 ViscosityClosure::Dynamic(dynamic) => dynamic.viscosities()[i],
                 ViscosityClosure::DynamicThermal(dynamic) => dynamic.viscosities()[i],
+                ViscosityClosure::DynamicSpecies(dynamic) => dynamic.viscosities()[i],
             };
             let mut cv = [0.0; MAX_SPECIES];
             for (k, model) in gas.source().models().iter().enumerate() {
@@ -269,27 +289,40 @@ impl SubgridTransport {
         let mu = 0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right];
         let dynamic_heat = match &self.closure {
             ViscosityClosure::DynamicThermal(dynamic) => Some(dynamic.face_heat(left, right)),
+            ViscosityClosure::DynamicSpecies(dynamic) => Some(dynamic.face_heat(left, right)),
+            _ => None,
+        };
+        let dynamic_species = match &self.closure {
+            ViscosityClosure::DynamicSpecies(dynamic) => Some(dynamic.face_species(left, right)),
             _ => None,
         };
         // An exactly disabled model makes no extra caloric calls/arithmetic.
-        if mu == 0.0 && dynamic_heat.is_none_or(|(weight, _)| weight == 0.0) {
+        if mu == 0.0
+            && dynamic_heat.is_none_or(|(weight, _)| weight == 0.0)
+            && dynamic_species.is_none_or(|weight| weight == 0.0)
+        {
             return Ok(receipt);
         }
         poll(cancelled)?;
         let (prandtl, schmidt, maximum_ratio) = match &self.closure {
             ViscosityClosure::Local { config, .. } => (
                 Some(config.transport.turbulent_prandtl),
-                config.turbulent_schmidt,
+                Some(config.turbulent_schmidt),
                 config.transport.maximum_eddy_to_molecular,
             ),
             ViscosityClosure::Dynamic(dynamic) => (
                 Some(dynamic.config.transport.turbulent_prandtl),
-                dynamic.config.turbulent_schmidt,
+                Some(dynamic.config.turbulent_schmidt),
                 dynamic.config.transport.model.maximum_eddy_to_molecular,
             ),
             ViscosityClosure::DynamicThermal(dynamic) => (
                 None,
-                dynamic.config.turbulent_schmidt,
+                Some(dynamic.config.turbulent_schmidt),
+                dynamic.config.transport.momentum.maximum_eddy_to_molecular,
+            ),
+            ViscosityClosure::DynamicSpecies(dynamic) => (
+                None,
+                None,
                 dynamic.config.transport.momentum.maximum_eddy_to_molecular,
             ),
         };
@@ -308,7 +341,8 @@ impl SubgridTransport {
         let temperature = receipt.enthalpy_temperature_k;
         let mut y = [0.0; MAX_SPECIES];
         let mut species_flux = [0.0; MAX_SPECIES];
-        let mass_diffusion = mu / schmidt;
+        let mass_diffusion =
+            dynamic_species.unwrap_or_else(|| mu / schmidt.expect("fixed-Schmidt species closure"));
         for k in 0..n {
             let yl = states[left * width + k] / pl.density;
             let yr = states[right * width + k] / pr.density;
@@ -341,7 +375,7 @@ impl SubgridTransport {
                     .value();
             // Evaluate changes within each original caloric source. Subtracting
             // two large formation enthalpies would destroy gauge invariance.
-            if mu != 0.0 {
+            if mass_diffusion != 0.0 {
                 enthalpy[k] = inverse_mass
                     * (model
                         .molar_internal_energy_change(
@@ -372,10 +406,12 @@ impl SubgridTransport {
         };
         let heat = -conductivity * ((pr.temperature - pl.temperature) / distance);
         let mut energy = heat + sum((0..n).map(|k| enthalpy[k] * species_flux[k]));
-        if mu != 0.0 {
+        if mass_diffusion != 0.0 {
             for k in 0..n {
                 out[k] += species_flux[k];
             }
+        }
+        if mu != 0.0 {
             let [a, b] = tangents(axis);
             let divergence = (pr.velocity[axis] - pl.velocity[axis]) / distance
                 + 0.5 * gradient[left][a][a]

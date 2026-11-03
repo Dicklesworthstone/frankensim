@@ -25,6 +25,9 @@ use fs_lbm::sgs3::dynamic::{DynamicSgsError, PeriodicDynamicSgs};
 mod thermal;
 pub(super) use thermal::DynamicThermalTransport;
 pub use thermal::MixtureDynamicThermalSubgridConfig;
+mod species;
+pub(super) use species::DynamicSpeciesTransport;
+pub use species::{DynamicComponentsConfig, MixtureDynamicSpeciesSubgridConfig};
 
 /// Dynamic momentum closure plus explicitly authored heat/species diffusivity.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,7 +111,9 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     pub fn dynamic_subgrid_config(&self) -> Option<MixtureDynamicSubgridConfig> {
         match &self.sgs.as_ref()?.closure {
             ViscosityClosure::Dynamic(dynamic) => Some(dynamic.config),
-            ViscosityClosure::Local { .. } | ViscosityClosure::DynamicThermal(_) => None,
+            ViscosityClosure::Local { .. }
+            | ViscosityClosure::DynamicThermal(_)
+            | ViscosityClosure::DynamicSpecies(_) => None,
         }
     }
 }

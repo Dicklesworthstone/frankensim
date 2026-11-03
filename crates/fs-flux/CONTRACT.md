@@ -1715,12 +1715,35 @@ Total energy, referenced species enthalpies, Maxwell--Stefan diffusion and the
 reactive splitter retain their existing owners. The combined field/operator
 budget includes 264 nominal additional numerical bytes/cell. This independent
 heat closure has the same periodic, uniform Cartesian and low-Mach
-applicability as the frozen-gas dynamic thermal model. Both mixture dynamic
+applicability as the frozen-gas dynamic thermal model. The fixed-Schmidt dynamic
 constructors pass all three physical cell widths to the shared fit; the
 original directional face distances and combined species/heat stability
 estimate remain in force. Rectangular cells add no per-cell storage. This
 does not establish accuracy at arbitrary aspect ratios, dynamic species or
 chemistry closure, or complete compressible SGS-energy qualification.
+
+`with_dynamic_species_sgs` and `MixtureDynamicSpeciesSubgridConfig` also fit
+one common species diffusivity from every resolved mass fraction. The fit
+minimizes the sum of all species' Germano residuals using a shared variation
+scale; independent normalization would incorrectly increase trace-species
+weight. Momentum, temperature and species coefficients are independent and
+use one preparation of the same SSP-stage Favre fields. No turbulent Schmidt
+number or marker species is chosen. The face adds
+`j_i = -mean(rho*D_t)*grad(Y_i)` with the existing present-species pivot,
+exact absent species, referenced partial enthalpies and combined stability
+estimate. Species transport and its enthalpy flux remain active at zero eddy
+viscosity. Original Maxwell--Stefan differential diffusion is retained.
+
+The species fit has an explicit coefficient bound and a physical admission
+bound `maximum_species_diffusivity_m2_s`. The molecular owner is a coupled
+Maxwell--Stefan operator, so its combined viscous/thermal/species stability
+envelope is not misrepresented as a scalar molecular diffusivity for a ratio.
+The complete field/operator capacity budget includes 352 nominal additional
+bytes/cell over molecular-only flow, independent of species count; the fit
+visits original mass fractions without allocating a transposed species field.
+Refusals retain accepted fields, reports and boundary exchanges. Applicability
+remains fully periodic, uniform Cartesian, low-Mach exploratory mixing; there
+is no SGS reaction-rate, wall, shock-interaction or DNS-accuracy qualification.
 
 With `experimental-sgs`, the existing spatial mixture molecular owner admits
 `sgs::MixtureSubgridConfig { transport: SubgridConfig, turbulent_schmidt }`

@@ -176,7 +176,8 @@ impl DynamicThermalTransport {
                 ));
             }
         }
-        poll(cancelled)
+        poll(cancelled)?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
