@@ -10,6 +10,8 @@
 //! reference data, with bicarbonate retained in solution.
 //! Ferric hydrolysis, goethite precipitation with hydrated lime, and hydrated-
 //! lime neutralization use compatible USGS goethite/portlandite source phases.
+//! Gold cyanidation uses six matched historical NBS/1989-errata references,
+//! including the individual aqueous CN-, Au(CN)2- and OH- ions.
 //! `--help` lists every supported reaction and required pack order.
 //! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
 //! entropy and derive Gibbs energy and log equilibrium constants from enthalpy
@@ -17,7 +19,7 @@
 //! `--gibbs` additionally requires a formation-Gibbs claim for every participant.
 //! Repeated `--activity 'SPECIES=VALUE'` arguments imply `--gibbs` and evaluate
 //! the local reaction Gibbs energy only when every active activity is supplied.
-//! Both routes can be requested; independently rounded source values can differ.
+//! Both routes can be requested; independently tabulated source values can differ.
 //! Copper electrowinning also reports its signed reversible cell potential from
 //! the direct Gibbs route; this does not supply an operating cell voltage.
 //! Or explicit malachite inventory accounting, with all four inputs in moles:
@@ -46,6 +48,7 @@ use fs_thermochem::{
 
 const REFERENCE: &str = "source-elemental-reference-janaf";
 const USGS_REFERENCE: &str = "source-elemental-reference-usgs-b2131";
+const NBS_REFERENCE: &str = "source-elemental-reference-nbs1989";
 
 struct ReactionCase {
     reaction: MineralReaction,
@@ -56,7 +59,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 26] = [
+const REACTIONS: [&str; 27] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
@@ -66,6 +69,7 @@ const REACTIONS: [&str; 26] = [
     "cupric-oxide-acid-leach",
     "cuprous-oxide-reduction",
     "copper-electrowinning",
+    "gold-cyanidation",
     "pyrite-roasting",
     "pyrite-oxidation-ferrous",
     "ferrous-oxidation-ferric",
@@ -223,6 +227,35 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-gas",
             ],
             equation: "Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g)",
+        },
+        "gold-cyanidation" => ReactionCase {
+            reaction: MineralReaction::GoldCyanidation,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "gold-solid-nbs1989-thermochemistry",
+                "cyanide-ion-aqueous-nbs1989",
+                "oxygen-gas-nbs1989-thermochemistry",
+                "water-liquid-nbs1989-thermochemistry",
+                "dicyanoaurate-ion-aqueous-nbs1989",
+                "hydroxide-ion-aqueous-nbs1989",
+            ],
+            species: &[
+                "Au(s)",
+                "CN[-](aq)",
+                "O2(g)",
+                "H2O(l)",
+                "Au(CN)2[-](aq)",
+                "OH[-](aq)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-gas",
+                "source-phase-liquid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "4 Au(s) + 8 CN[-](aq) + O2(g) + 2 H2O(l) -> 4 Au(CN)2[-](aq) + 4 OH[-](aq), historical NBS/1989-errata Elsner reference",
         },
         "copper-electrowinning" => ReactionCase {
             reaction: MineralReaction::CopperElectrowinning,
@@ -874,7 +907,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "--gibbs requires a direct standard-molar-formation-gibbs-energy claim in every supplied pack; unsupported source sets refuse."
         );
         println!(
-            "The two routes are reported separately when both are requested; independently rounded source values can differ. Activities always use the direct formation-Gibbs route."
+            "The two routes are reported separately when both are requested; independently tabulated source values can differ. Activities always use the direct formation-Gibbs route."
         );
         println!(
             "Supply one --activity 'SPECIES=VALUE' for every active species, including solids and water. Values are dimensionless relative activities under the retained standard states, not molarity."

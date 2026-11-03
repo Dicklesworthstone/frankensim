@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	water-liquid-nbs1989-thermochemistry
+redistribution	permitted	Attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Wagman et al. (1982), The NBS Tables of Chemical Thermodynamic Properties, Journal of Physical and Chemical Reference Data 11 Supplement 2, Table 2:H (prepared 1963), printed page 2-38, H2O state l; conventions pp. 2-20 to 2-22. NIST digitization with 1989 errata: https://doi.org/10.18434/M32124; https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv; original tables https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf; digitization methods https://doi.org/10.6028/jres.125.007; accessed 2026-11-03
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	nbs1989-standard-reference	properties.tsv	material-tsv-v1
+property	mass	molar-mass	dimensional
+property	hf	standard-molar-formation-enthalpy	dimensional
+property	gf	standard-molar-formation-gibbs-energy	dimensional
+property	s0	standard-molar-entropy	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	standard	source-standard-state	dimensional
+axis	convention	source-elemental-reference-nbs1989	dimensional
+axis	phase	source-phase-liquid	dimensional
+axis	pure	source-pure-species	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional

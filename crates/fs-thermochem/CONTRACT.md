@@ -1,5 +1,28 @@
 # CONTRACT: fs-thermochem
 
+### Source-complete gold cyanidation
+
+The existing conserved Elsner endpoint now has a complete six-pack NBS source
+set, exposed as `mineral_processing --reaction gold-cyanidation`. Gold,
+cyanide, oxygen, liquid water, dicyanoaurate and hydroxide retain their own
+molar mass, H/G/S claims, original source receipts and 298.15 K / 100000 Pa
+domain under `source-elemental-reference-nbs1989`. Individual-ion entropy
+remains conventional under the H+(aq)-zero reference. No aqueous cyanide
+species is substituted for solid commercial NaCN or total cyanide.
+
+The actual source compiler and original reaction/thermodynamic owners give
+−583916 J/mol equation extent for H, −642.358 J/(mol extent K) for S and
+−390718 J/mol extent from directly tabulated G. The independent H−TΔS route
+differs by 1678.9623 J/mol; both are retained. NBS's historical Au(CN)2− value
+is not silently combined with the later USBM evaluation. Four source-backed
+integration tests cover all 24 claims, receipts, both thermodynamic routes,
+activity response, cyanide/oxygen inventory limits and reference-state refusal.
+The endpoint does not supply dissolution rate, pH/speciation, oxygen transfer,
+preg-robbing, adsorption or actual gold recovery. The complete source guide
+and runnable commands are in `data/matdb/seed-v1/MINING_GOLD_CYANIDATION.md`.
+
+
+
 ## Mixed-phase stoichiometric and standard-enthalpy balances
 
 `stoichiometry::ConservedReaction` admits one equation through the existing
