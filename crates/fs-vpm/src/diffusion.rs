@@ -23,6 +23,8 @@
 //!
 //! Direct pair sweeps use O(N²) work and O(N) live storage; there is no dense
 //! diffusion matrix or per-step allocation. Gaussian tails are not cut off.
+//! Gaussian, relaxation and logarithmic fallback evaluations use the strict
+//! deterministic elementary functions from `fs-math`, with no platform libm.
 //! Continuum consistency requires a well-resolved, overlapping quadrature
 //! cloud and domain padding. A finite cloud cannot diffuse beyond its supplied
 //! sites. No wall condition, remeshing, particle insertion, distorted-cloud
@@ -32,6 +34,7 @@
 //! advection model, not a Gaussian heat-kernel solution.
 
 use super::*;
+use fs_math::det;
 
 /// Immutable, explicitly declared constant-viscosity Gaussian PSE law.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -301,8 +304,11 @@ impl PairKernel {
             width: law.width,
             width2,
             rate_time: (4.0 / PI) * (law.viscosity / width2) * dt * fraction,
-            log_rate_time: (4.0 / PI).ln() + law.viscosity.ln() + dt.ln() + fraction.ln()
-                - 4.0 * law.width.ln(),
+            log_rate_time: det::ln(4.0 / PI)
+                + det::ln(law.viscosity)
+                + det::ln(dt)
+                + det::ln(fraction)
+                - 4.0 * det::ln(law.width),
         }
     }
 
@@ -321,17 +327,17 @@ impl PairKernel {
             return 0.0;
         }
         let mut exponent =
-            self.rate_time * (areas[0] / self.width2 + areas[1] / self.width2) * (-r2).exp();
+            self.rate_time * (areas[0] / self.width2 + areas[1] / self.width2) * det::exp(-r2);
         if !exponent.is_normal() {
             // Avoid inf*0, lost narrow-kernel factors, and underflowed Gaussian
             // tails times large rates. The usual physical-scale path uses no logs.
             let scale = areas[0].max(areas[1]);
-            let log_area = scale.ln() + (areas[0] / scale + areas[1] / scale).ln();
-            exponent = (self.log_rate_time + log_area - r2).exp();
+            let log_area = det::ln(scale) + det::ln(areas[0] / scale + areas[1] / scale);
+            exponent = det::exp(self.log_rate_time + log_area - r2);
         }
         // expm1 retains weak diffusion and tends to exact equilibration at
         // unrepresentably large rates; it never introduces a negative weight.
-        -(-exponent).exp_m1()
+        -det::expm1(-exponent)
     }
 }
 
@@ -383,8 +389,6 @@ fn small_area_share(small: f64, large: f64, circulation: f64) -> f64 {
     if vorticity.is_normal() {
         small * vorticity
     } else {
-        (circulation.abs().ln() + small.ln() - large.ln())
-            .exp()
-            .copysign(circulation)
+        det::exp(det::ln(circulation.abs()) + det::ln(small) - det::ln(large)).copysign(circulation)
     }
 }

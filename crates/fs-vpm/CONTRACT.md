@@ -189,6 +189,10 @@ up to floating-point roundoff. `expm1` retains small exchanges; scaled area
 weights and a logarithmic fallback avoid spurious overflow/underflow in stiff
 or rescaled inputs. This is an integrator property, not permission to skip time
 refinement. Zero viscosity recovers the original advection bits and work counts.
+The Gaussian, exact relaxation and logarithmic fallback use the strict
+`fs_math::det::{exp, expm1, ln}` functions, avoiding platform-libm variation.
+The finite-step splitting error depends on particle order and converges at
+second order; relabeling particles is not an exact discrete symmetry.
 
 Successful pure-diffusion runs use `S N(N-1)` unordered pair visits; the moving
 entry adds `2 S N(N-1)` visits to the existing `4 S N²` advection visits. Identity
@@ -204,6 +208,15 @@ maximum principle and weighted enstrophy, Gaussian/Lamb–Oseen spatial
 refinement, independent three-site temporal modes, dimensional rescaling, and
 zero/positive-viscosity coupled trajectories. These are G0/G1/G3 implementation
 checks, not measured-fluid validation or a machine-performance claim.
+`tests/viscosity2d.rs` additionally exercises the complete moving-cloud
+advection/diffusion transaction against Gaussian spreading, unequal-area
+analytical relaxation, translation and dimensional scaling, permutation-error
+time refinement, subnormal zero-time identity, exact costs and atomic refusals.
+`cargo run -p fs-vpm --example viscous_vortex` runs an illustrative vortex with
+declared SI kinematic viscosity and reports circulation, mean-square radius,
+the Lamb–Oseen continuum width, enstrophy, and admitted work/memory consumption.
+Callers starting from dynamic viscosity must divide by their actual fluid
+density; this example does not infer a material specification or remesh areas.
 
 Scope: constant-viscosity 2-D bulk diffusion on an explicitly supplied finite
 cloud. Continuum accuracy requires overlapping, sufficiently regular quadrature
@@ -387,3 +400,4 @@ mixed-core convergence and fallback, chronology through conversion, continued
 diffusion and transactional refusals. These checks do not establish free-wake
 stretching, a viscous particle solver, cross-ISA bit stability, or a wall-clock
 performance guarantee.
+

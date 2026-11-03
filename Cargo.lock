@@ -3121,6 +3121,7 @@ dependencies = [
  "fs-alloc",
  "fs-blake3",
  "fs-exec",
+ "fs-math",
  "fs-wakeref",
 ]
 
