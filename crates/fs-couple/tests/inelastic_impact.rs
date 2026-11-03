@@ -24,6 +24,8 @@ use fs_solid::hyper3::{
 use fs_solid::linear3::TetAssemblyBudget;
 use fs_solver::CheckedCgConfig;
 
+mod mixed;
+
 #[path = "inelastic_impact/elliptic.rs"]
 mod elliptic;
 

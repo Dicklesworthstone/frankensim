@@ -29,7 +29,10 @@ use crate::inertia::{BackwardEulerInertia, ReferenceMass};
 
 pub use crate::hyper3::mixed::impulse::{MixedImpulseControls, MixedImpulseReport};
 pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
-pub use crate::inertia::{InertialEnergy, SolidImpulseControls, SolidImpulseReport};
+pub use crate::inertia::{
+    InertialEnergy, SolidImpulseControls, SolidImpulseReport, SolidPointKinematics,
+    SolidPointMobility, Tet10ImpulsePoint,
+};
 
 mod impulse;
 pub use impulse::{MixedViscoConstrainedImpulse, MixedViscoMotionImpulse};

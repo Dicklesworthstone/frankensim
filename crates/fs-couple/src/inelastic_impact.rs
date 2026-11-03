@@ -21,6 +21,10 @@ use fs_material::plastic::finite::FiniteJ2Material;
 use fs_mbd::{
     DynamicsError, MassProperties, MomentumImpulseReceipt, PointKinematics, RigidBodyState, Vec3,
 };
+use fs_solid::hyper3::mixed::visco::{
+    MixedViscoTetError,
+    dynamics::{MixedViscoTetMotion, Tet10ImpulsePoint},
+};
 use fs_solid::hyper3::plastic::{FinitePlasticTetError, dynamics::FinitePlasticTetMotion};
 use fs_solid::hyper3::visco::dynamics::{
     SolidImpulseControls, SolidImpulseReport, SolidPointKinematics, SolidPointMobility,
@@ -31,8 +35,9 @@ use fs_solver::SolveReport;
 
 /// Original material witnesses; the normal points from solid toward rigid.
 #[derive(Clone, Copy, Debug)]
-pub struct InelasticRigidContact {
-    pub solid_point: TetImpulsePoint,
+pub struct InelasticRigidContact<P = TetImpulsePoint> {
+    /// Original material coordinates, with the solid owner's native order.
+    pub solid_point: P,
     /// Rigid COM-relative material arm [m].
     pub rigid_arm_body_m: Vec3,
     /// Nonzero world direction; the native rigid owner normalizes it once.
@@ -205,20 +210,78 @@ pub fn visco_rigid_impact_candidate<'a>(
     )
 }
 
+/// Couple a rigid body to the original quadratic mixed viscoelastic solid.
+///
+/// All ten signed P2 weights trace the current witness and velocity, distribute
+/// the opposite impulse and determine supported consistent-mass mobility.
+/// Continuous pressure and every Maxwell history survive the event unchanged.
+/// The finite-compliance formulation is required: exact incompressibility needs
+/// constrained point mobility and refuses through its original typed error.
+/// The same normal law, rigid response and physical audits as the P1 entries
+/// apply; no contact detection, time advance or heat partition is added.
+#[allow(clippy::too_many_arguments)]
+pub fn mixed_visco_rigid_impact_candidate<'a>(
+    solid: &MixedViscoTetMotion<'a>,
+    held_velocity_dofs: &[usize],
+    rigid: RigidBodyState,
+    properties: MassProperties,
+    contact: InelasticRigidContact<Tet10ImpulsePoint>,
+    origin_m: [f64; 3],
+    controls: InelasticImpactControls,
+    cx: &Cx<'_>,
+) -> Result<
+    InelasticImpactCandidate<MixedViscoTetMotion<'a>>,
+    InelasticImpactError<MixedViscoTetError>,
+> {
+    let prepared = prepare(rigid, properties, contact, origin_m, controls, cx)?;
+    let before = solid
+        .point_kinematics(contact.solid_point, cx)
+        .map_err(InelasticImpactError::Solid)?;
+    let mobility = solid
+        .point_directional_inverse_mass_per_kg(
+            held_velocity_dofs,
+            contact.solid_point,
+            array(prepared.normal),
+            controls.solid_impulse,
+            cx,
+        )
+        .map_err(InelasticImpactError::Solid)?;
+    finish(
+        prepared,
+        before,
+        mobility,
+        |impulse| {
+            let event = solid.point_impulse_candidate(
+                held_velocity_dofs,
+                contact.solid_point,
+                impulse,
+                origin_m,
+                controls.solid_impulse,
+                cx,
+            )?;
+            let after = event.motion.point_kinematics(contact.solid_point, cx)?;
+            Ok((event.motion, event.impulse, after))
+        },
+        cx,
+    )
+}
+
 struct Prepared {
     rigid: RigidBodyState,
     properties: MassProperties,
-    contact: InelasticRigidContact,
+    rigid_arm_body_m: Vec3,
+    activation_tolerance_m: f64,
+    restitution: f64,
     origin: Vec3,
     controls: InelasticImpactControls,
     normal: Vec3,
     rigid_point: PointKinematics,
     rigid_inverse_mass: f64,
 }
-fn prepare<E>(
+fn prepare<P, E>(
     rigid: RigidBodyState,
     properties: MassProperties,
-    contact: InelasticRigidContact,
+    contact: InelasticRigidContact<P>,
     origin: [f64; 3],
     controls: InelasticImpactControls,
     cx: &Cx<'_>,
@@ -248,7 +311,9 @@ fn prepare<E>(
     Ok(Prepared {
         rigid,
         properties,
-        contact,
+        rigid_arm_body_m: contact.rigid_arm_body_m,
+        activation_tolerance_m: contact.activation_tolerance_m,
+        restitution: contact.restitution,
         origin: vector(origin),
         controls,
         normal: response.unit_direction_world,
@@ -280,10 +345,10 @@ fn finish<M, E>(
     let inverse_mass = p.rigid_inverse_mass + mobility.inverse_mass_per_kg;
     let contact = solve_normal_impact(NormalImpactInput {
         gap,
-        activation_tolerance: p.contact.activation_tolerance_m,
+        activation_tolerance: p.activation_tolerance_m,
         relative_normal_speed: relative_before,
         inverse_effective_mass: inverse_mass,
-        restitution: p.contact.restitution,
+        restitution: p.restitution,
     })
     .map_err(InelasticImpactError::Contact)?;
     let impulse = p.normal.scale(contact.normal_impulse);
@@ -295,12 +360,12 @@ fn finish<M, E>(
         .apply_momentum_impulse(
             p.properties,
             impulse,
-            p.contact.rigid_arm_body_m.cross(impulse_body),
+            p.rigid_arm_body_m.cross(impulse_body),
         )
         .map_err(InelasticImpactError::Rigid)?;
     let rigid_after = rigid_impulse
         .state_after
-        .point_kinematics(p.properties, p.contact.rigid_arm_body_m)
+        .point_kinematics(p.properties, p.rigid_arm_body_m)
         .map_err(InelasticImpactError::Rigid)?;
     let relative_after = rigid_after
         .point_velocity_world

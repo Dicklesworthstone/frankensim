@@ -1,0 +1,86 @@
+//! Signed quadratic material traces sharing the original mass response.
+
+use super::{
+    Cx, InertiaError, ReferenceMass, SolidImpulseControls, SolidPointKinematics,
+    SolidPointMobility, barycentric, checkpoint, invalid, response_mobility, traced_kinematics,
+    unit_direction,
+};
+use crate::linear3::tet10::tet10_shapes;
+
+/// A material point in an original quadratic tetrahedron, including its boundary.
+/// These are four nonnegative, unit-sum natural coordinates, not the ten signed
+/// displacement shape weights. All corner and midside nodes contribute to the
+/// current isoparametric position, velocity and work-conjugate impulse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tet10ImpulsePoint {
+    pub tetrahedron: usize,
+    pub barycentric: [f64; 4],
+}
+
+fn validate(
+    point: Tet10ImpulsePoint,
+    tetrahedra: &[[usize; 10]],
+    node_count: usize,
+) -> Result<([usize; 10], [f64; 10]), InertiaError> {
+    let lambda = barycentric(point.barycentric)?;
+    let nodes = *tetrahedra
+        .get(point.tetrahedron)
+        .ok_or_else(|| invalid("material point tetrahedron is outside the original mesh"))?;
+    if nodes.iter().any(|&node| node >= node_count) {
+        return Err(invalid("material point node is outside the original mesh"));
+    }
+    Ok((nodes, tet10_shapes(lambda).0))
+}
+
+pub(crate) fn kinematics(
+    point: Tet10ImpulsePoint,
+    tetrahedra: &[[usize; 10]],
+    nodes_m: &[[f64; 3]],
+    displacement_m: &[[f64; 3]],
+    velocity_mps: &[[f64; 3]],
+    cx: &Cx<'_>,
+) -> Result<SolidPointKinematics, InertiaError> {
+    checkpoint(cx)?;
+    let trace = validate(point, tetrahedra, nodes_m.len())?;
+    traced_kinematics(trace, nodes_m, displacement_m, velocity_mps, cx)
+}
+
+/// B^T J retains negative corner weights and the complete curved position map.
+pub(crate) fn distribution(
+    point: Tet10ImpulsePoint,
+    tetrahedra: &[[usize; 10]],
+    node_count: usize,
+    impulse_world: [f64; 3],
+    cx: &Cx<'_>,
+) -> Result<[(usize, f64); 30], InertiaError> {
+    checkpoint(cx)?;
+    if impulse_world.iter().any(|value| !value.is_finite()) {
+        return Err(invalid("finite world material-point impulse required"));
+    }
+    let (nodes, weights) = validate(point, tetrahedra, node_count)?;
+    Ok(std::array::from_fn(|i| {
+        (
+            3 * nodes[i / 3] + i % 3,
+            weights[i / 3] * impulse_world[i % 3],
+        )
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn directional_mobility(
+    mass: &ReferenceMass,
+    tetrahedra: &[[usize; 10]],
+    held: &[usize],
+    point: Tet10ImpulsePoint,
+    direction: [f64; 3],
+    controls: SolidImpulseControls,
+    cx: &Cx<'_>,
+) -> Result<SolidPointMobility, InertiaError> {
+    checkpoint(cx)?;
+    unit_direction(direction)?;
+    let impulse = distribution(point, tetrahedra, mass.ndofs() / 3, direction, cx)?;
+    response_mobility(mass, held, &impulse, controls, cx)
+}
+
+#[cfg(test)]
+mod tests;

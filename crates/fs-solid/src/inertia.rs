@@ -15,7 +15,7 @@ pub(crate) use impulse::moments as impulse_moments;
 pub use impulse::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
 pub use point::{
     HexImpulsePoint, SolidPointKinematics, SolidPointMobility, SolidPointMobilityMatrix,
-    TetImpulsePoint,
+    Tet10ImpulsePoint, TetImpulsePoint,
 };
 
 /// Inertia's contribution to the complete mechanical/thermal work balance.

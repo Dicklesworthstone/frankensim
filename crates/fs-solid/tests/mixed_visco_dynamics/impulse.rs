@@ -790,3 +790,134 @@ fn constrained_impulse_keeps_moving_support_work_and_a_true_pressure_gauge() {
         assert_eq!(motion.velocity_mps(), vec![old_velocity; nodes.len()]);
     });
 }
+
+#[test]
+fn quadratic_point_uses_curved_trace_signed_corner_mobility_and_original_impulse_work() {
+    use fs_solid::hyper3::mixed::visco::dynamics::Tet10ImpulsePoint;
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(10.0 * MU, true);
+        let velocity: Vec<_> = nodes
+            .iter()
+            .map(|x| {
+                [
+                    0.04 + 0.2 * x[0] * x[1],
+                    -0.02 + 0.1 * x[1] * x[2],
+                    0.03 - 0.15 * x[0] * x[2],
+                ]
+            })
+            .collect();
+        let motion = MixedViscoTetMotion::try_new(
+            relaxed(&nodes, &elements, &material, cx),
+            &[DENSITY],
+            &velocity,
+            MASS_BYTES,
+            cx,
+        )
+        .unwrap();
+        let point = Tet10ImpulsePoint {
+            tetrahedron: 0,
+            barycentric: [0.25; 4],
+        };
+        let before = motion.point_kinematics(point, cx).unwrap();
+        // Analytic current quadratic geometry and velocity at the centroid.
+        // Corner-only interpolation loses both nonzero y*z and x*y terms.
+        let position = [
+            0.25 + 0.002 * 0.25 + 0.002 * 0.0625,
+            0.25 - 0.001 * 0.25,
+            0.25 + 0.001 * 0.25,
+        ];
+        let point_velocity = [
+            0.04 + 0.2 * 0.0625,
+            -0.02 + 0.1 * 0.0625,
+            0.03 - 0.15 * 0.0625,
+        ];
+        for c in 0..3 {
+            near(before.position_m[c], position[c], 2e-14);
+            near(before.velocity_mps[c], point_velocity[c], 2e-14);
+        }
+        let free = 3 * elements[0][0];
+        let held: Vec<_> = (0..3 * nodes.len()).filter(|&d| d != free).collect();
+        let mobility = motion
+            .point_directional_inverse_mass_per_kg(
+                &held,
+                point,
+                [1.0, 0.0, 0.0],
+                impulse_controls(),
+                cx,
+            )
+            .unwrap();
+        // N_corner(centroid)=-1/8, M_corner,corner=rho*V/70.
+        let expected_mobility = (1.0 / 64.0) / mass(0, 0);
+        near(mobility.inverse_mass_per_kg, expected_mobility, 2e-12);
+        assert!(mobility.solve.converged_euclidean());
+        let applied = [0.001, -0.0003, 0.0002];
+        let origin = [-0.2, 0.1, 0.05];
+        let event = motion
+            .point_impulse_candidate(&held, point, applied, origin, impulse_controls(), cx)
+            .unwrap();
+        retained(&motion, &event.motion);
+        let after = event.motion.point_kinematics(point, cx).unwrap();
+        near(
+            event.motion.velocity_mps()[free / 3][0] - velocity[free / 3][0],
+            -applied[0] / (8.0 * mass(0, 0)),
+            2e-12,
+        );
+        near(
+            after.velocity_mps[0] - before.velocity_mps[0],
+            expected_mobility * applied[0],
+            2e-13,
+        );
+        let work = (0..3)
+            .map(|c| applied[c] * 0.5 * (before.velocity_mps[c] + after.velocity_mps[c]))
+            .sum::<f64>();
+        near(event.impulse.applied_work_j, work, 2e-13);
+        near(
+            event.impulse.kinetic_change_j,
+            work + event.impulse.support_work_j,
+            2e-13,
+        );
+        let arm: [f64; 3] = std::array::from_fn(|c| position[c] - origin[c]);
+        for c in 0..3 {
+            let (j, k) = ((c + 1) % 3, (c + 2) % 3);
+            near(event.impulse.applied.linear_kg_m_s[c], applied[c], 2e-13);
+            near(
+                event.impulse.applied.angular_kg_m2_s[c],
+                arm[j] * applied[k] - arm[k] * applied[j],
+                2e-13,
+            );
+        }
+        assert_eq!(motion.velocity_mps(), velocity);
+
+        let exact = MixedViscoTetMotion::try_new(
+            solid(
+                &nodes,
+                &elements,
+                &material,
+                VolumetricTreatment::ExactIncompressible,
+                cx,
+            ),
+            &[DENSITY],
+            &velocity,
+            MASS_BYTES,
+            cx,
+        )
+        .unwrap();
+        assert!(exact.point_kinematics(point, cx).is_ok());
+        assert!(matches!(
+            exact.point_directional_inverse_mass_per_kg(
+                &held,
+                point,
+                [1.0, 0.0, 0.0],
+                impulse_controls(),
+                cx,
+            ),
+            Err(MixedViscoTetError::ExactIncompressibleImpulse)
+        ));
+        assert!(matches!(
+            exact.point_impulse_candidate(&held, point, applied, origin, impulse_controls(), cx,),
+            Err(MixedViscoTetError::ExactIncompressibleImpulse)
+        ));
+        assert_eq!(exact.velocity_mps(), velocity);
+    });
+}

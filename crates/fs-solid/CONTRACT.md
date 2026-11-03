@@ -4121,6 +4121,18 @@ admitted only for a true connected constant null mode. Shared pressure and
 mass accounting gate the actual rounded successor before the same atomic
 complete-history transfer used by the finite-compliance entry.
 
+`Tet10ImpulsePoint` names a point by its original cell and four barycentric
+coordinates. The native quadratic shape owner supplies all ten signed weights
+for current isoparametric position, velocity and transpose impulse distribution;
+negative corner weights are retained. `point_kinematics` samples either pressure
+formulation. `point_directional_inverse_mass_per_kg` uses the original supported
+consistent mass response without a material trial or history clone, while
+`point_impulse_candidate` delegates the complete-history nodal event. These two
+mass-only operations explicitly refuse exact incompressibility. The shared P1
+and P2 trace helpers retain conjugate point work and torque on curved geometry;
+they do not replace the original mass by a point mass. The finite-compliance
+entry is connected to the existing rigid impact owner in `fs-couple`.
+
 The focused `mixed_visco_dynamics/impulse.rs` regressions use independent
 rational P2 integrals and signed corner loads, deformed angular impulse,
 moving-support work, nonzero retained pressure and relaxed Maxwell histories,
@@ -4130,6 +4142,10 @@ on an already stretched, relaxed body, retained translation and Maxwell
 continuation, and incompatible velocity/gauge/factor-budget refusals. A genuine
 pressure-gauge regression also checks cancelling applied and moving-support
 work with unchanged kinetic energy and retained relaxation history.
+The material-point extension checks signed quadratic interpolation and loads,
+supported mobility against independent P2 integrals, torque, work and retained
+history. The point owner's polynomial fixture also checks curved reference
+geometry and virtual work independently of the finite-element solve.
 Native execution remains pending the existing dependency-build blocker; this
 addition is not a completed Cargo or DSR gate.
 

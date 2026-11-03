@@ -7,9 +7,11 @@ use fs_material::hyper::mixed::VolumetricTreatment;
 
 use super::{
     MixedImpulseControls, MixedImpulseReport, MixedViscoTetError, MixedViscoTetMotion,
-    MixedViscoTetSolid, SolidImpulseControls, SolidImpulseReport, checkpoint, inertia_error,
+    MixedViscoTetSolid, SolidImpulseControls, SolidImpulseReport, SolidPointKinematics,
+    SolidPointMobility, Tet10ImpulsePoint, checkpoint, inertia_error,
 };
 use crate::hyper3::mixed::impulse::constrained_impulse;
+use crate::inertia::point::tet10;
 
 /// Complete candidate retaining continuous pressure and every Maxwell history.
 #[derive(Debug)]
@@ -28,6 +30,83 @@ pub struct MixedViscoConstrainedImpulse<'a> {
 }
 
 impl<'a> MixedViscoTetMotion<'a> {
+    /// Current material-point position and work-conjugate quadratic velocity.
+    /// Uses all ten signed shape weights and the actual deformed geometry.
+    /// Sampling is available for both original finite-compliance and exact
+    /// pressure formulations; it changes no material state.
+    pub fn point_kinematics(
+        &self,
+        point: Tet10ImpulsePoint,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointKinematics, MixedViscoTetError> {
+        tet10::kinematics(
+            point,
+            self.solid.elements,
+            self.solid.nodes_m,
+            &self.solid.displacement_m,
+            &self.velocity_mps,
+            cx,
+        )
+        .map_err(|error| MixedViscoTetError::from(inertia_error(error)))
+    }
+
+    /// Supported directional inverse mass at an original quadratic material point.
+    /// The direction must be unit length in world axes. The original consistent
+    /// P2 mass supplies the response without a history clone or material trial.
+    /// Exact incompressibility refuses: its pressure constraint must participate
+    /// in mobility, and the mass-only value would give a different impact law.
+    pub fn point_directional_inverse_mass_per_kg(
+        &self,
+        held: &[usize],
+        point: Tet10ImpulsePoint,
+        direction: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobility, MixedViscoTetError> {
+        checkpoint(cx)?;
+        if self.solid.volumetric == VolumetricTreatment::ExactIncompressible {
+            return Err(MixedViscoTetError::ExactIncompressibleImpulse);
+        }
+        tet10::directional_mobility(
+            &self.mass,
+            self.solid.elements,
+            held,
+            point,
+            direction,
+            controls,
+            cx,
+        )
+        .map_err(|error| MixedViscoTetError::from(inertia_error(error)))
+    }
+
+    /// Apply a world impulse through the transpose of the same quadratic trace.
+    /// Original signed weights preserve point torque and work at the actual
+    /// curved geometry; the native nodal owner retains pressure and all memory.
+    /// Exact incompressibility refuses this mass-only entry before distribution.
+    pub fn point_impulse_candidate(
+        &self,
+        held: &[usize],
+        point: Tet10ImpulsePoint,
+        impulse_world: [f64; 3],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<MixedViscoMotionImpulse<'a>, MixedViscoTetError> {
+        checkpoint(cx)?;
+        if self.solid.volumetric == VolumetricTreatment::ExactIncompressible {
+            return Err(MixedViscoTetError::ExactIncompressibleImpulse);
+        }
+        let entries = tet10::distribution(
+            point,
+            self.solid.elements,
+            self.velocity_mps.len(),
+            impulse_world,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
+    }
+
     /// Apply instantaneous nodal impulses through the original consistent P2 mass.
     ///
     /// Only the finite-compliance `OriginalMaterial` formulation is admitted.

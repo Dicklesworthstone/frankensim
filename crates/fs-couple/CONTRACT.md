@@ -199,6 +199,19 @@ and retained plastic/Maxwell histories. This is a bounded single-contact event;
 collision detection, event-time localization, simultaneous manifolds, friction
 and persistent-contact evolution retain their existing owners.
 
+`mixed_visco_rigid_impact_candidate` connects the same impact law and coupled
+momentum/work audit to finite-compliance P2/P1 viscoelastic motion. Its
+`InelasticRigidContact<Tet10ImpulsePoint>` uses all ten signed quadratic shape
+weights for the curved witness, velocity, supported mobility and opposite
+impulse. The default contact payload remains the original P1 material point.
+Continuous pressure, all Maxwell histories, physical storage and time survive
+unchanged. Exact incompressibility refuses this mass-only contact path; the
+separate constrained nodal impulse does not imply constrained point mobility.
+`tests/inelastic_impact/mixed.rs` couples a curved, relaxed quadratic solid to
+off-diagonal rigid inertia. Independent P2 reference integrals determine its
+restitution impulse, moving-support work and kinetic change; the existing audit
+checks actual linear/angular momentum and conjugate work at both witnesses.
+
 `inelastic_impact::multiple` extends this to simultaneous circular Coulomb
 contact for native plastic, viscoelastic, thermal Tet4 and thermal Hex8 owners.
 It shares the existing mixed rigid/solid mechanical core: original paired

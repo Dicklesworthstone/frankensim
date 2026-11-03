@@ -3,6 +3,9 @@ use fs_solver::SolveReport;
 
 use super::{Cx, InertiaError, ReferenceMass, SolidImpulseControls, checkpoint, finite, invalid};
 
+pub(crate) mod tet10;
+pub use tet10::Tet10ImpulsePoint;
+
 /// A material point in an original P1 tetrahedron, including faces and vertices.
 /// Each use checks the cell index and nonnegative unit-sum weights. A sum defect
 /// within 64 machine epsilons is normalized identically for every trace/load.
@@ -54,9 +57,19 @@ fn validate(
     tetrahedra: &[[usize; 4]],
     node_count: usize,
 ) -> Result<([usize; 4], [f64; 4]), InertiaError> {
-    let sum: f64 = point.weights.iter().sum();
-    if point
-        .weights
+    let weights = barycentric(point.weights)?;
+    let nodes = *tetrahedra
+        .get(point.tetrahedron)
+        .ok_or_else(|| invalid("material point tetrahedron is outside the original mesh"))?;
+    if nodes.iter().any(|&node| node >= node_count) {
+        return Err(invalid("material point node is outside the original mesh"));
+    }
+    Ok((nodes, weights))
+}
+
+fn barycentric(weights: [f64; 4]) -> Result<[f64; 4], InertiaError> {
+    let sum: f64 = weights.iter().sum();
+    if weights
         .iter()
         .any(|w| !w.is_finite() || !(0.0..=1.0).contains(w))
         || !sum.is_finite()
@@ -66,13 +79,7 @@ fn validate(
             "material point requires nonnegative unit-sum barycentric weights",
         ));
     }
-    let nodes = *tetrahedra
-        .get(point.tetrahedron)
-        .ok_or_else(|| invalid("material point tetrahedron is outside the original mesh"))?;
-    if nodes.iter().any(|&node| node >= node_count) {
-        return Err(invalid("material point node is outside the original mesh"));
-    }
-    Ok((nodes, point.weights.map(|w| w / sum)))
+    Ok(weights.map(|w| w / sum))
 }
 
 pub(crate) fn kinematics(
