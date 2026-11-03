@@ -141,6 +141,17 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         config: ChannelDynamicSgsConfig,
         molecular: Option<&[L::Collision]>,
         workspace: &mut ChannelDynamicSgsWorkspace3<L::Collision>,
+        checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<DynamicSgsStepReport, SgsStepError<L::Error>> {
+        self.prepare_channel_dynamic_sgs_with_forces(config, molecular, workspace, None, checkpoint)
+    }
+
+    pub(super) fn prepare_channel_dynamic_sgs_with_forces(
+        &self,
+        config: ChannelDynamicSgsConfig,
+        molecular: Option<&[L::Collision]>,
+        workspace: &mut ChannelDynamicSgsWorkspace3<L::Collision>,
+        forces: Option<&[[f64; 3]]>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<DynamicSgsStepReport, SgsStepError<L::Error>> {
         checkpoint()?;
@@ -154,6 +165,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             || workspace.filter.shape() != self.dims
             || workspace.filter.normal_axis() != normal
             || molecular.is_some_and(|field| field.len() != cells)
+            || forces.is_some_and(|field| field.len() != cells)
         {
             return Err(
                 GridError3::Input("channel SGS workspace or molecular field mismatch").into(),
@@ -163,8 +175,9 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             if cell % 64 == 0 {
                 checkpoint()?;
             }
+            let force = forces.map_or(self.force, |field| field[cell]);
             let (density, velocity) =
-                macro_cell::<L, Q>(&self.f[cell], self.force, cell, self.budget.maximum_mach)?;
+                macro_cell::<L, Q>(&self.f[cell], force, cell, self.budget.maximum_mach)?;
             local.density[cell] = density;
             local.velocity[cell] = velocity;
         }

@@ -1779,8 +1779,9 @@ the quadratic through the actual zero wall value and two fluid centres.
 Solid/exterior walls use the same rule; a one-cell gap uses the symmetric
 zero derivative. Grid topology supplies these boundary semantics explicitly.
 WALE cannot be reconstructed from symmetric nonequilibrium stress alone.
-Moving/open walls and independently supplied force fields are outside this
-SGS step surface; their owners are not silently rerouted.
+Moving/open walls and independently supplied force fields are outside these
+`Grid3` entry points. The force-history owner below supplies its separate SGS
+methods without rerouting the original owner.
 
 An optional molecular collision field composes with existing per-cell material
 viscosity. The original equilibrium and independent bulk/higher rates survive:
@@ -1959,8 +1960,8 @@ connects this closure to the original isothermal lattice collision/streaming
 owner, including D3Q27 cumulant collision. It infers the unique nonperiodic
 wall axis, requires an all-fluid rectangle and passes the original stationary
 halfway wall values. The two remaining axes must be periodic. The existing
-uniform body force enters through the same Guo-centered macroscopic velocity;
-spatially varying or time-dependent `ForcedGrid3` force history is not implied.
+uniform body force enters through the same Guo-centered macroscopic velocity.
+Spatially varying or time-dependent forces use the `ForcedGrid3` methods below.
 
 The channel and periodic native adapters share molecular-ratio admission,
 collision conversion and dissipation reporting. Every preparation starts from
@@ -1978,6 +1979,33 @@ wall/body-force transport, nonshear rates, local molecular fields, prepared
 collision equivalence, serial/pooled identity and failed-trial retry. This
 adds a native resolved-channel route for the cumulant solver, without claiming
 a developed-turbulence accuracy/stability envelope or calibrated wall law.
+
+### SGS with spatial and time-dependent force history
+
+`ForcedGrid3` supplies local Smagorinsky/WALE/Vreman, periodic dynamic and
+planar-channel dynamic preparation and stepping. Each family offers serial
+and pooled steps that hold the accepted force, plus advances that accept the
+next force endpoint. They reuse `SgsWorkspace3`, `DynamicSgsWorkspace3` and
+`ChannelDynamicSgsWorkspace3`, their existing reports and the original or
+explicitly supplied molecular collision field; previously augmented rates
+must not be resubmitted as molecular transport.
+
+Every closure reconstructs incoming physical velocity as
+`u_n = (j_n + F_n/2)/rho_n` using the accepted per-cell force. The supplied
+`F_(n+1)` never reinterprets that incoming field or its strain. Collision uses
+`F_n`; endpoint admission and velocity readback use `F_(n+1)` through the
+original force transaction. On a periodic domain the physical momentum
+increment remains `sum_cells((F_n + F_(n+1))/2)`. Populations, accepted force
+history and step count publish together only after successful completion;
+closure/native refusal or cancellation retains all three accepted values.
+
+Preparation adds no arrays or force-history snapshot and retains the existing
+bounded workspaces and cancellation checkpoints. Ordinary `Grid3` paths keep
+their original uniform-force arithmetic. Local solid/stationary-halfway-wall
+stencils, all-fluid periodic/channel dynamic topology, independent nonshear
+rates, molecular-ratio limits, byte limits and exploratory-use admission stay
+in force. This adds no moving/open wall model, material-wrapper API, thermal
+energy owner or turbulent-DNS qualification.
 
 ### Moving/open D3Q19 boundaries and turbulent wall loads
 

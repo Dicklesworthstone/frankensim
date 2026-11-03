@@ -8,6 +8,7 @@ use fs_exec::{CancelGate, Cx, KernelRunner};
 
 mod channel;
 mod dynamic;
+mod forced;
 
 impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
     /// Allocate once for repeated SGS steps. Allocation failure is returned;
@@ -107,6 +108,19 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         config: SgsConfig,
         molecular: Option<&[L::Collision]>,
         workspace: &mut SgsWorkspace3<L::Collision>,
+        checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<SgsReport, SgsStepError<L::Error>> {
+        self.prepare_sgs_with_forces(config, molecular, workspace, None, checkpoint)
+    }
+
+    // A spatial force slice always belongs to the SAME accepted epoch as f.
+    // None preserves the original uniform-force path and arithmetic.
+    fn prepare_sgs_with_forces(
+        &self,
+        config: SgsConfig,
+        molecular: Option<&[L::Collision]>,
+        workspace: &mut SgsWorkspace3<L::Collision>,
+        forces: Option<&[[f64; 3]]>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<SgsReport, SgsStepError<L::Error>> {
         checkpoint()?;
@@ -116,6 +130,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             || workspace.density.len() != cells
             || workspace.collisions.len() != cells
             || molecular.is_some_and(|field| field.len() != cells)
+            || forces.is_some_and(|field| field.len() != cells)
         {
             return Err(GridError3::Input("SGS workspace or molecular field length").into());
         }
@@ -127,8 +142,9 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
                 workspace.velocity[cell] = [0.0; 3];
                 workspace.density[cell] = 0.0;
             } else {
+                let force = forces.map_or(self.force, |field| field[cell]);
                 let (rho, u) =
-                    macro_cell::<L, Q>(&self.f[cell], self.force, cell, self.budget.maximum_mach)?;
+                    macro_cell::<L, Q>(&self.f[cell], force, cell, self.budget.maximum_mach)?;
                 workspace.velocity[cell] = u;
                 workspace.density[cell] = rho;
             }
