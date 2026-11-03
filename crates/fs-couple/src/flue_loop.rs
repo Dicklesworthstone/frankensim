@@ -67,8 +67,10 @@
 //!   `eta_n = sum_k g_k v_(n-k)` of the exit transverse velocity, with its
 //!   delay, growth and high-Strouhal fall-off from the linearised jet and
 //!   `g_0` in the same-sample mouth solve. The published Nolle/Price
-//!   transfer ([`nolle_jet`]) is the other opt-in; the two exclude each
-//!   other;
+//!   transfer ([`nolle_jet`]) and Auvray's jet drive ([`auvray_jet`]: in-phase
+//!   receptivity, flat growth `exp(beta W/h)`, delay `W/(gamma U)`, Bickley
+//!   `b = 2h/5`, Verge's source length) are the other opt-ins; all three
+//!   exclude each other;
 //! - the jet is cut by the labium: the volume flow entering the pipe is
 //!   `Q_j = Q_max * (1 + tanh((eta - y0) / b)) / 2`, the card's
 //!   smoothed top-hat profile integrated, `b` its half-width scaled to
@@ -129,6 +131,9 @@ pub mod nolle_jet;
 
 /// Opt-in forced Bickley jet's causal response in place of the island's band chain.
 pub mod forced_jet;
+
+/// Opt-in jet drive of Auvray et al. (2012, 2014) in place of the island's band chain.
+pub mod auvray_jet;
 
 /// Philox kernel id of the flue onset seed stream (logical identity;
 /// never a scheduling artifact).
@@ -361,8 +366,8 @@ struct JetTrial {
 }
 
 /// The labium displacement one accepted sample's cut used: the jet flow was
-/// `0.5 q_max (1 + tanh((eta_m - offset_m)/b))` with b half the flue height,
-/// whichever voice (relay chain, forced jet or published transfer) set eta.
+/// `0.5 q_max (1 + tanh((eta_m - offset_m)/b))` with b half the flue height (the Bickley 2h/5
+/// behind the Auvray jet), whichever voice (relay chain, forced jet or published transfer) set eta.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LabiumSample {
     pub(crate) eta_m: f64,
@@ -734,6 +739,9 @@ pub struct FlueVoice {
     // Opt-in forced-jet kernel (see `forced_jet`): the labium displacement from the retained exit
     // velocities. None = the island's own chain.
     forced: Option<forced_jet::ForcedJetKernel>,
+    // Opt-in Auvray jet drive (see `auvray_jet`): in-phase receptivity, flat growth, pure convection,
+    // Bickley cut and Verge source length. None = the island's own chain.
+    auvray: Option<auvray_jet::AuvrayJet>,
     // Opt-in breath noise in series in the mouth (see `JetNoiseSpec`); None = the original, byte-identical loop.
     jet_noise: Option<JetNoise>,
     // Declared minimum bulk jet speed, which sizes the retained history, and most retained
@@ -863,6 +871,7 @@ impl FlueVoice {
             displacement_state: 0.0,
             nolle: None,
             forced: None,
+            auvray: None,
             jet_noise: None,
             minimum_jet_speed_m_s: minimum_jet_speed,
             max_jet_history_samples: max_history,
@@ -1047,7 +1056,7 @@ impl FlueVoice {
         if self.poisoned || self.samples != 0 || self.card_centreline.is_some() {
             return Err(FlueError::Invalid { what: "card centreline speed requires one cold attachment" });
         }
-        if self.forced.is_some() || self.nolle.is_some() {
+        if self.forced.is_some() || self.nolle.is_some() || self.auvray.is_some() {
             return Err(FlueError::Invalid { what: "card centreline speed refuses the jet transfers, which own their exit speed" });
         }
         if !(held_pressure_pa > 0.0 && held_pressure_pa.is_finite()) {
@@ -1116,6 +1125,9 @@ impl FlueVoice {
             || self.developing_windway.is_some() || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "viscous windway requires one cold attachment" });
         }
+        if self.auvray.is_some() {
+            return Err(FlueError::Invalid { what: auvray_jet::WINDWAY_REFUSAL });
+        }
         if self.forced.is_some() {
             return Err(FlueError::Invalid { what: "viscous windway must be attached before the forced jet, whose exit it sets" });
         }
@@ -1159,6 +1171,9 @@ impl FlueVoice {
         if self.poisoned || self.samples != 0 || self.viscous_windway.is_some()
             || self.developing_windway.is_some() || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "developing windway requires one cold attachment and no other windway" });
+        }
+        if self.auvray.is_some() {
+            return Err(FlueError::Invalid { what: auvray_jet::WINDWAY_REFUSAL });
         }
         if self.nolle.is_some() {
             return Err(FlueError::Invalid { what: "developing windway must be attached before the Nolle/Price transfer, whose exit it sets" });
@@ -1257,6 +1272,9 @@ impl FlueVoice {
             || self.developing_windway.is_some() || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "unsteady windway requires one cold source-channel attachment" });
         }
+        if self.auvray.is_some() {
+            return Err(FlueError::Invalid { what: auvray_jet::WINDWAY_REFUSAL });
+        }
         if self.forced.is_some() {
             return Err(FlueError::Invalid { what: "the forced jet refuses the unsteady windway" });
         }
@@ -1297,6 +1315,9 @@ impl FlueVoice {
         }
         if self.forced.is_some() {
             return Err(FlueError::Invalid { what: "nolle jet and forced jet exclude each other" });
+        }
+        if self.auvray.is_some() {
+            return Err(FlueError::Invalid { what: "nolle jet and Auvray jet exclude each other" });
         }
         if self.card_centreline.is_some() {
             return Err(FlueError::Invalid { what: "card centreline speed refuses the jet transfers, which own their exit speed" });
@@ -1356,7 +1377,7 @@ impl FlueVoice {
         exit_law: forced_jet::JetExitLaw, reference_pressure_pa: f64) -> Result<Self, FlueError>
     {
         if self.poisoned || self.samples != 0 || self.nolle.is_some() || self.forced.is_some()
-            || self.unsteady_windway.is_some() {
+            || self.auvray.is_some() || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid {
                 what: "forced jet requires one cold attachment and no other jet transfer or unsteady windway",
             });
@@ -1407,6 +1428,79 @@ impl FlueVoice {
         self.forced.as_ref()
     }
 
+    /// Replace the island's receptivity chain (band IIR, high-pass, leak and the authored
+    /// displacement gain) by the jet drive of Auvray et al. ([`auvray_jet`]) before any accepted
+    /// sample. The labium displacement becomes `h exp(beta W/h) (v + seed) / U` of the mouth
+    /// velocity retarded by `W / (gamma U)` alone (no band lag); the cut's half-width becomes the
+    /// Bickley `2h/5` with the swing `2 b H U`; the source coefficient becomes `rho delta_d / S_m`
+    /// with Verge's `delta_d = (4/pi) sqrt(2 h W)` in place of the mouth end correction. The mouth
+    /// inertance and loss, any card `mouth_loss` and the wind line are unchanged. `U = sqrt(2P/rho)`,
+    /// so every windway law and the card centreline speed are refused. The onset seed enters as
+    /// exit velocity at the current sample, undelayed: it is an input from outside the loop, and a
+    /// delay does not change its statistics. While the voice is cold, the retained history grows to
+    /// cover `W / (gamma U_min)`.
+    ///
+    /// # Errors
+    /// Late or repeated attachment, a poisoned voice, another jet transfer, any windway law, the
+    /// card centreline speed, the kernel's own refusal, or a history beyond the budget at `U_min`.
+    pub fn with_auvray_jet(mut self, spec: auvray_jet::AuvraySpec) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.auvray.is_some() {
+            return Err(FlueError::Invalid { what: "Auvray jet requires one cold attachment" });
+        }
+        if self.nolle.is_some() || self.forced.is_some() {
+            return Err(FlueError::Invalid { what: "the Auvray jet excludes the other jet transfers" });
+        }
+        if self.card_centreline.is_some() {
+            return Err(FlueError::Invalid { what: "card centreline speed refuses the jet transfers, which own their exit speed" });
+        }
+        if self.viscous_windway.is_some() || self.developing_windway.is_some()
+            || self.unsteady_windway.is_some() {
+            return Err(FlueError::Invalid { what: auvray_jet::WINDWAY_REFUSAL });
+        }
+        let jet = auvray_jet::AuvrayJet::new(spec, self.geometry.flue_height_m, self.geometry.cut_up_m)
+            .map_err(|what| FlueError::Invalid { what })?;
+        let history_samples = (jet.transit_s(self.minimum_jet_speed_m_s) / self.dt).ceil().max(2.0);
+        if !history_samples.is_finite()
+            || history_samples > self.max_jet_history_samples.saturating_sub(2) as f64 {
+            return Err(FlueError::Invalid {
+                what: "Auvray jet convection at the declared minimum speed exceeds the retained history budget",
+            });
+        }
+        let needed = history_samples as usize + 2;
+        if needed > self.history.len() {
+            // Cold: every entry is the rest state, so a longer ring changes no lookup.
+            self.history = vec![0.0; needed];
+            self.head = 0;
+        }
+        let source_coeff = self.rho * jet.source_length_m() / self.geometry.mouth_area_m2();
+        if !(source_coeff.is_finite() && source_coeff > 0.0) {
+            return Err(FlueError::Invalid { what: "Auvray jet source coefficient is not finite" });
+        }
+        self.island.provenance.push_str(&format!(
+            "; jet transfer: Auvray et al. 2012/2014 jet drive (beta {}, gamma {}, source {}, at W/h {:.3}) in place of the band chain and displacement gain: in-phase receptivity h exp(beta W/h) / U (growth {:.4}), delay W / (gamma U), Bickley b = 2h/5 = {:.4e} m with swing 2bHU, Verge delta_d = (4/pi) sqrt(2hW) = {:.4e} m, U = sqrt(2P/rho)",
+            jet.spec().beta, jet.spec().gamma, jet.spec().source, jet.cut_up_over_height(),
+            jet.growth(), jet.half_width_m(), jet.source_length_m()));
+        self.source_coeff = source_coeff;
+        self.auvray = Some(jet);
+        Ok(self)
+    }
+
+    /// The attached Auvray jet drive, if any.
+    #[must_use]
+    pub const fn auvray_jet(&self) -> Option<&auvray_jet::AuvrayJet> {
+        self.auvray.as_ref()
+    }
+
+    /// Half-width `b` of the labium cut `Q_j = (q_max / 2)(1 + tanh((eta - y0) / b))`: half the
+    /// flue height, or the Bickley `2h/5` behind the Auvray jet.
+    #[must_use]
+    pub fn cut_half_width_m(&self) -> f64 {
+        match &self.auvray {
+            Some(jet) => jet.half_width_m(),
+            None => 0.5 * self.geometry.flue_height_m,
+        }
+    }
+
     /// Actual source field, material state, energy and both supplied resolutions.
     #[must_use]
     pub const fn unsteady_windway(&self) -> Option<&windway::UnsteadyWindway> {
@@ -1450,6 +1544,9 @@ impl FlueVoice {
         if let Some(jet) = &self.nolle {
             return jet.transit_s(jet.centre_over_bulk() * self.jet_speed_m_s());
         }
+        if let Some(jet) = &self.auvray {
+            return jet.transit_s(self.jet_speed_m_s());
+        }
         self.geometry.cut_up_m / (self.island.convection_ratio * self.card_speed_m_s())
     }
 
@@ -1469,7 +1566,13 @@ impl FlueVoice {
             (Some(eta), _) => eta,
             // The forced jet's prepared known part plus g_0 times this trial's exit velocity.
             (None, Some(kernel)) => kernel.current().0 + kernel.current().1*velocity,
-            (None, None) => self.island.displacement_gain*displacement_m,
+            // The Auvray drive: in-phase receptivity of this trial's retarded velocity plus the
+            // onset seed as exit velocity. Its U is the accepted jet speed: it refuses the
+            // unsteady windway, the only owner of a different per-sample speed.
+            (None, None) => match &self.auvray {
+                Some(jet) => jet.receptivity_s(self.jet_speed_m_s)*(velocity+seed),
+                None => self.island.displacement_gain*displacement_m,
+            },
         };
         let flow_m3_s = if c.q_max > 0.0 {
             0.5*c.q_max*(1.0+((eta_m-c.offset_m)/c.half_width_m).tanh())
@@ -1656,9 +1759,10 @@ impl FlueVoice {
         let direct = boundary.direct_reflection;
         let denominator = (l/dt+r)*(1.0-direct)+zc*(1.0+direct);
         let compliance = (1.0-direct)/denominator;
-        let eta_slope = match &self.forced {
-            Some(kernel) => kernel.current().1*delayed.current_weight/area,
-            None => self.island.displacement_gain*dt*c.hp_alpha*c.band_alpha*c.band_alpha
+        let eta_slope = match (&self.forced, &self.auvray) {
+            (Some(kernel), _) => kernel.current().1*delayed.current_weight/area,
+            (None, Some(jet)) => jet.receptivity_s(self.jet_speed_m_s)*delayed.current_weight/area,
+            (None, None) => self.island.displacement_gain*dt*c.hp_alpha*c.band_alpha*c.band_alpha
                 *delayed.current_weight/area,
         };
         let feedback = compliance*(self.source_coeff/dt)*(0.5*c.q_max)*eta_slope/c.half_width_m;
@@ -1777,7 +1881,7 @@ impl FlueVoice {
         mut observe: impl FnMut(&FlueResonator, LabiumSample) -> Result<(), FlueError>,
     ) -> Result<(), FlueError> {
         let dt = self.dt;
-        let b = 0.5 * self.geometry.flue_height_m;
+        let b = self.cut_half_width_m();
         let s_m = self.geometry.mouth_area_m2();
         let y0 = self.geometry.effective_offset_m();
         let (l, r) = (self.inertance, self.resistance);
@@ -1827,7 +1931,12 @@ impl FlueVoice {
             // The same candidate centre speed controls transport, instability
             // and Mach admission before any source or bore state is published.
             self.line.validate_jet_speed(card_u)?;
-            let q_max = u * self.geometry.flue_height_m * self.geometry.flue_width_m;
+            // The Auvray drive's Bickley jet swings Q_in = H b U (1 + tanh) over 2 b H U.
+            let q_max = if self.auvray.is_some() {
+                2.0 * b * self.geometry.flue_width_m * u
+            } else {
+                u * self.geometry.flue_height_m * self.geometry.flue_width_m
+            };
             let transit = if card_u == 0.0 { f64::INFINITY } else if windway_trial.is_some() {
                 self.geometry.cut_up_m / (self.island.convection_ratio * card_u)
             } else { self.transit_s() };
@@ -1853,7 +1962,8 @@ impl FlueVoice {
             // mouth-velocity history early by that lag so the low-frequency loop delay is the
             // convective transit. A transit already under one sample, or one that would fall
             // under one sample, keeps its sub-sample current-feedback treatment unchanged.
-            let band_lag_s = if u > 0.0 { 2.0 / omega_c + 1.0 / omega_h } else { 0.0 };
+            // The Auvray drive has no band filter: its loop delay is the convection W / (gamma U) alone.
+            let band_lag_s = if u > 0.0 && self.auvray.is_none() { 2.0 / omega_c + 1.0 / omega_h } else { 0.0 };
             let delay_samples = if transit.is_finite() {
                 let transit_samples = transit / dt;
                 if transit_samples >= 1.0 {

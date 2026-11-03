@@ -401,4 +401,77 @@ fn measured_exit_negative_current_feedback_keeps_the_jet_mouth_residual_increasi
     println!("D4 measured exit, 300 Pa: {SAMPLES} samples, current feedback {lowest:e} to {highest:e}");
 }
 
+// The example card with a short output, a held 300 Pa gesture (its own events fall outside a short
+// output, as in `material_observer_input`) and the given rows after `jet`. The Auvray row states its
+// own exit speed U = sqrt(2P/rho), so `bare` drops the example's slit windway.
+fn auvray_input(rows: &str, bare: bool) -> String {
+    let source = include_str!("../../../../examples/flue-network.performance")
+        .split_once("\ngesture\n")
+        .unwrap()
+        .0
+        .replace("output 24000", "output 1024")
+        .replace("jet 90 1e-6 3 0\n", &format!("jet 90 1e-6 3 0\n{rows}"));
+    let source = if bare { source.replace("windway slit 0.015\n", "") } else { source };
+    format!(
+        "{source}\ngesture\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t1000\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t3e2\nevents\t0\n"
+    )
+}
+
+#[test]
+fn auvray_jet_transfer_is_opt_in_by_name_changes_the_render_and_refuses_beside_another_jet_row() {
+    use file::FlueFilePerformance;
+    use fs_exec::CancelGate;
+    let gate = CancelGate::new_clock_free();
+    let parse = |text: &str| FlueFilePerformance::from_bytes(text.as_bytes(), 256, &gate);
+    let row = "jet_transfer auvray-2014 0.3 0.4 numerical-fixture\n";
+    let mut bare = parse(&auvray_input("", true)).unwrap().into_renderer();
+    let mut named = parse(&auvray_input(row, true)).unwrap().into_renderer();
+    assert!(bare.voice().auvray_jet().is_none());
+    let jet = named.voice().auvray_jet().expect("the named row attaches");
+    assert_eq!((jet.spec().beta, jet.spec().gamma, jet.spec().source.as_str()),
+        (0.3, 0.4, "numerical-fixture"));
+    assert!(named.voice().forced_jet().is_none() && named.voice().nolle_jet().is_none());
+    let mut plain = vec![0.0; 1024];
+    let mut driven = vec![0.0; 1024];
+    for chunk in plain.chunks_mut(256) { bare.block(chunk).unwrap(); }
+    for chunk in driven.chunks_mut(256) { named.block(chunk).unwrap(); }
+    let energy: f64 = plain.iter().map(|p| p * p).sum();
+    let difference: f64 = driven.iter().zip(&plain).map(|(a, b)| (a - b).powi(2)).sum();
+    assert!(energy > 0.0);
+    assert!(difference > 1e-10 * energy, "naming the row must change the render");
+    // Refused, each with its own text: behind the slit windway, beside the forced jet or another transfer
+    // in either order, and as a malformed or non-positive row.
+    let refusal = |text: &str| match parse(text) {
+        Ok(_) => panic!("accepted:\n{text}"),
+        Err(e) => e.to_string(),
+    };
+    let windway = refusal(&auvray_input(row, false));
+    assert!(windway.contains("refuses every windway law"), "{windway}");
+    let one_row = "one jet_transfer or jet_response row at most: the jet transfers exclude each other";
+    let beta = "Auvray jet growth coefficient beta must be finite and positive";
+    let gamma = "Auvray jet convection ratio gamma must lie in (0, 1]";
+    for (refused, text) in [
+        (format!("{row}jet_response forced-bickley 0.1 90\n"), "jet_transfer and jet_response exclude each other"),
+        (format!("jet_response forced-bickley 0.1 90\n{row}"), one_row),
+        (format!("{row}jet_transfer nolle-price-2015 long-channel 0\n"), one_row),
+        (format!("jet_transfer nolle-price-2015 long-channel 0\n{row}"), one_row),
+        (format!("{row}{row}"), one_row),
+        ("jet_transfer auvray-2014 0.3 0.4\n".to_owned(),
+            "jet_transfer auvray-2014 needs an explicit source tag after BETA GAMMA"),
+        ("jet_transfer auvray-2014 0.3\n".to_owned(), "missing or invalid numeric field"),
+        ("jet_transfer auvray-2014 0.3 0.4 tag extra\n".to_owned(), "unexpected trailing fields"),
+        ("jet_transfer auvray-2014 0 0.4 tag\n".to_owned(), beta),
+        ("jet_transfer auvray-2014 -0.3 0.4 tag\n".to_owned(), beta),
+        ("jet_transfer auvray-2014 0.3 0 tag\n".to_owned(), gamma),
+        ("jet_transfer auvray-2014 0.3 -0.4 tag\n".to_owned(), gamma),
+        ("jet_transfer auvray-2014 0.3 1.5 tag\n".to_owned(), gamma),
+        ("jet_transfer auvray-2014 NaN 0.4 tag\n".to_owned(), "physical scalars must be finite"),
+        ("jet_transfer auvray 0.3 0.4 tag\n".to_owned(),
+            "jet_transfer requires nolle-price-2015 CHANNEL CHAMFER_DEPTH_M or auvray-2014 BETA GAMMA SOURCE_TAG"),
+    ] {
+        let got = refusal(&auvray_input(&refused, true));
+        assert!(got.contains(text), "{refused}: refused as `{got}`, expected `{text}`");
+    }
+}
+
 mod gas;

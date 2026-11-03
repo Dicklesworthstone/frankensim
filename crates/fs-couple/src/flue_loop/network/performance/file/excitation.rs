@@ -6,6 +6,7 @@
 
 use super::{FlueInputError, Rows, bad, poll};
 use crate::bernoulli_aperture::contraction::ContractionSpec;
+use crate::flue_loop::auvray_jet::AuvraySpec;
 use crate::flue_loop::forced_jet::{ForcedJetSpec, JetExitLaw};
 use crate::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
 use crate::flue_loop::{FlueError, FlueVoice};
@@ -121,10 +122,16 @@ impl FlueFlowInput {
     }
 }
 
+/// One `jet_transfer` row: the Nolle/Price transfer or Auvray's jet drive.
+enum JetTransferInput {
+    Nolle(NolleSpec),
+    Auvray(AuvraySpec),
+}
+
 /// Optional source selections after `jet`, before `jet_limits`.
 pub(crate) struct FlueJetInput {
     card_centreline: bool,
-    transfer: Option<NolleSpec>,
+    transfer: Option<JetTransferInput>,
     response: Option<(ForcedJetSpec, JetExitLaw)>,
 }
 
@@ -142,28 +149,45 @@ impl FlueJetInput {
         };
         let transfer = if rows.next_is("jet_transfer") {
             let mut row = rows.row("jet_transfer")?;
-            if row.fields.next() != Some("nolle-price-2015") {
-                return Err(bad(
-                    row.line,
-                    "jet_transfer requires nolle-price-2015 CHANNEL CHAMFER_DEPTH_M",
-                ));
-            }
-            let channel = match row.fields.next() {
-                Some("long-channel") => ChannelClass::Long,
-                Some("short-channel") => ChannelClass::Short,
+            match row.fields.next() {
+                Some("nolle-price-2015") => {
+                    let channel = match row.fields.next() {
+                        Some("long-channel") => ChannelClass::Long,
+                        Some("short-channel") => ChannelClass::Short,
+                        _ => {
+                            return Err(bad(
+                                row.line,
+                                "jet_transfer channel must be long-channel or short-channel",
+                            ));
+                        }
+                    };
+                    let chamfer_depth_m = row.scalar()?;
+                    row.end()?;
+                    Some(JetTransferInput::Nolle(
+                        NolleSpec::price_2015(channel, chamfer_depth_m)
+                            .map_err(|what| FlueInputError::Physics(FlueError::Invalid { what }))?,
+                    ))
+                }
+                Some("auvray-2014") => {
+                    // `jet_transfer auvray-2014 BETA GAMMA SOURCE_TAG`: every field required, none defaulted.
+                    let beta = row.scalar()?;
+                    let gamma = row.scalar()?;
+                    let source = row.fields.next().ok_or_else(|| {
+                        bad(row.line, "jet_transfer auvray-2014 needs an explicit source tag after BETA GAMMA")
+                    })?;
+                    row.end()?;
+                    Some(JetTransferInput::Auvray(
+                        AuvraySpec::new(beta, gamma, source)
+                            .map_err(|what| FlueInputError::Physics(FlueError::Invalid { what }))?,
+                    ))
+                }
                 _ => {
                     return Err(bad(
                         row.line,
-                        "jet_transfer channel must be long-channel or short-channel",
+                        "jet_transfer requires nolle-price-2015 CHANNEL CHAMFER_DEPTH_M or auvray-2014 BETA GAMMA SOURCE_TAG",
                     ));
                 }
-            };
-            let chamfer_depth_m = row.scalar()?;
-            row.end()?;
-            Some(
-                NolleSpec::price_2015(channel, chamfer_depth_m)
-                    .map_err(|what| FlueInputError::Physics(FlueError::Invalid { what }))?,
-            )
+            }
         } else {
             None
         };
@@ -209,6 +233,13 @@ impl FlueJetInput {
                 "jet_transfer and jet_response exclude each other",
             ));
         }
+        // A second jet row in either place would otherwise surface as a missing `jet_limits`.
+        if rows.next_is("jet_transfer") || rows.next_is("jet_response") {
+            return Err(bad(
+                rows.line + 1,
+                "one jet_transfer or jet_response row at most: the jet transfers exclude each other",
+            ));
+        }
         Ok(Self {
             card_centreline,
             transfer,
@@ -230,10 +261,18 @@ impl FlueJetInput {
             voice
         };
         let voice = match self.transfer {
-            Some(spec) => {
+            Some(JetTransferInput::Nolle(spec)) => {
                 poll(gate)?;
                 let voice = voice
                     .with_nolle_jet(spec)
+                    .map_err(FlueInputError::Physics)?;
+                poll(gate)?;
+                voice
+            }
+            Some(JetTransferInput::Auvray(spec)) => {
+                poll(gate)?;
+                let voice = voice
+                    .with_auvray_jet(spec)
                     .map_err(FlueInputError::Physics)?;
                 poll(gate)?;
                 voice

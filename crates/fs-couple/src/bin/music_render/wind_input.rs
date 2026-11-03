@@ -1070,8 +1070,12 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
     let exterior = renderer.radiation_input().expect("file binds exterior explicitly").exterior;
     let geometry = p.geometry();
     let island = renderer.voice().island();
-    // Named only when the opt-in forced jet replaces the authored-gain chain.
-    let jet_json = renderer.voice().forced_jet().map_or_else(String::new, |jet| format!(
+    // Named only when the opt-in forced jet or the Auvray jet drive replaces the authored-gain chain.
+    let auvray_json = || renderer.voice().auvray_jet().map_or_else(String::new, |jet| format!(
+        ",\"jet_transfer\":{{\"kind\":\"auvray-2014\",\"beta\":{:e},\"gamma\":{:e},\"source\":{},\"cut_up_over_height\":{:e},\"growth\":{:e},\"half_width_m\":{:e},\"source_length_m\":{:e},\"law\":\"eta = h exp(beta W/h) v(t - W/(gamma U)) / U, in phase; Bickley b = 2h/5, swing 2bHU; Verge delta_d = (4/pi) sqrt(2hW); U = sqrt(2P/rho)\"}}",
+        jet.spec().beta, jet.spec().gamma, json_string(&jet.spec().source), jet.cut_up_over_height(),
+        jet.growth(), jet.half_width_m(), jet.source_length_m()));
+    let jet_json = renderer.voice().forced_jet().map_or_else(auvray_json, |jet| format!(
         ",\"jet_response\":{{\"kind\":\"forced-bickley\",\"spacing_b\":{:e},\"window_b_over_u0\":{:e},\"half_width_m\":{:e},\"centre_over_bulk\":{:e},\"reynolds\":{:e}}}",
         jet.spec().spacing, jet.spec().window, jet.half_width_m(), jet.centre_over_bulk(), jet.reynolds()));
     // Named only when the opt-in feeds the card the exit's centre speed instead of the bulk speed.

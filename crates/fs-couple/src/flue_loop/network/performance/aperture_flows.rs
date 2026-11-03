@@ -161,7 +161,7 @@ impl FlueOutletPerformance {
                 || "none".to_owned(),
                 |jet| format!("{:e}", jet.half_width_m()),
             );
-            let cut_half_width_m = 0.5 * self.voice.geometry.flue_height_m;
+            let cut_half_width_m = self.voice.cut_half_width_m();
             header += "labium values eta_m offset_m f64le after_apertures_per_mechanical_frame\n";
             header += &format!("labium cut_half_width_m {cut_half_width_m:e}\n");
             header += &format!("labium forced_jet_half_width_m {forced}\n");
