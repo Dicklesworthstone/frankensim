@@ -700,11 +700,13 @@ fn g1_inactive_tiny_diffusivity_does_not_erase_a_representable_response() {
         &pair,
     );
     // Species 2 has no driving force and remains absent. D12 therefore cannot
-    // change the independent binary result j0=-D01*grad x0, j1=-j0. Yet it sets
-    // the matrix normalization: c*D_min*drive=1e-330 rounds to zero while the
-    // dimensionless solved amplitudes are +/-1e300. Their final flux is normal.
+    // change the independent binary result j0=-D01*grad x0, j1=-j0. Version 2
+    // survived the underflowed common scale with balanced binary exponents;
+    // version 3 additionally excludes absent/absent pairs from normalization.
     assert!((mass[0] / -gradient - 1.0).abs() < 3e-14);
     assert!((mass[1] / gradient - 1.0).abs() < 3e-14);
     assert_eq!(mass[2], 0.0);
     assert!(residual < 1e-43);
 }
+
+mod composition;

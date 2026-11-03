@@ -63,6 +63,8 @@ pub struct AdaptiveRun {
     pub attempts: usize,
     /// Actual pair visits, including rejected candidates.
     pub pair_evaluations: u64,
+    /// Actual pair-kernel evaluations; two per edge when the trial dt changes.
+    pub fraction_evaluations: u64,
     /// Actual charged logical work.
     pub work_units: u64,
     /// Peak owned vector payload, excluding allocator metadata/rounding.
@@ -151,9 +153,11 @@ impl PreparedPse {
     /// No Richardson correction, clipping, negative diffusion time or
     /// postprocessing of the conserved circulation is performed.
     ///
-    /// Each trial charges 6 E pair visits and 2 N + 7 E + 1 logical units:
-    /// N copies, E paired coefficient evaluations, 6 E exchanges, N error
-    /// estimates and one trial boundary. Initial validation costs N. Peak
+    /// Each trial charges 6 E pair visits and 2 N + 6 E + 1 logical units:
+    /// N copies, 6 E exchanges, N error estimates and one trial boundary.
+    /// When the trial dt changes, E additional work units prepare both pair
+    /// fractions (2 E kernel evaluations); unchanged dt reuses the cache.
+    /// Initial validation costs N. Peak
     /// owned payload is 3 N particles + 2 E f64 values. Identity windows
     /// (zero duration, zero viscosity or no edges) own only N particles and
     /// charge N validation units, while still checking every input and cap.
@@ -190,9 +194,9 @@ impl PreparedPse {
         let n64 = count(n, "adaptive particles")?;
         let e64 = count(e, "adaptive edges")?;
         let pairs_per_trial = e64.checked_mul(6).ok_or(overflow("adaptive pair work"))?;
-        let trial_work = n64
+        let base_trial_work = n64
             .checked_mul(2)
-            .and_then(|v| e64.checked_mul(7).and_then(|edges| v.checked_add(edges)))
+            .and_then(|v| e64.checked_mul(6).and_then(|edges| v.checked_add(edges)))
             .and_then(|v| v.checked_add(1))
             .ok_or(overflow("adaptive trial work"))?;
         admit_count("adaptive work", n64, budget.max_work_units)?;
@@ -242,6 +246,8 @@ impl PreparedPse {
         let mut accepted = 0_usize;
         let mut rejected = 0_usize;
         let mut pair_evaluations = 0_u64;
+        let mut fraction_evaluations = 0_u64;
+        let mut cached_dt_bits = None;
         let mut expected_work = n64;
         let mut max_accepted_error_ratio = 0.0_f64;
 
@@ -254,12 +260,16 @@ impl PreparedPse {
                 .checked_add(pairs_per_trial)
                 .ok_or(overflow("adaptive accumulated pair work"))?;
             admit_count("pair evaluations", next_pairs, budget.max_pair_evaluations)?;
+            let remaining = duration_s - elapsed;
+            let h = dt.min(remaining);
+            let refresh_fractions = cached_dt_bits != Some(h.to_bits());
+            let trial_work = base_trial_work
+                .checked_add(if refresh_fractions { e64 } else { 0 })
+                .ok_or(overflow("adaptive trial work"))?;
             let next_work = expected_work
                 .checked_add(trial_work)
                 .ok_or(overflow("adaptive accumulated work"))?;
             admit_count("adaptive work", next_work, budget.max_work_units)?;
-            let remaining = duration_s - elapsed;
-            let h = dt.min(remaining);
             let endpoint = if h == remaining {
                 duration_s
             } else {
@@ -274,7 +284,6 @@ impl PreparedPse {
             // Buffers retain their reserved capacity between all trials.
             coarse.clear();
             fine.clear();
-            fractions.clear();
             for &particle in &state {
                 meter.unit(&mut accountant, cx, "fs-vpm.pse-adaptive-copy", || {
                     coarse.push(particle);
@@ -282,33 +291,40 @@ impl PreparedPse {
                     Ok(())
                 })?;
             }
-            let full = PairKernel::new(self.law(), h, 0.5);
-            let half = PairKernel::new(self.law(), h, 0.25);
-            for &[i, j] in self.edges() {
-                meter.unit(&mut accountant, cx, "fs-vpm.pse-adaptive-fraction", || {
-                    let areas = [self.areas_m2()[i], self.areas_m2()[j]];
-                    let pair = [
-                        full.fraction(state[i], state[j], areas),
-                        half.fraction(state[i], state[j], areas),
-                    ];
-                    if pair
-                        .iter()
-                        .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
-                    {
-                        return Err(VpmError::NonFiniteResult {
-                            phase: "fs-vpm.pse-adaptive-fraction",
-                            particle: i,
-                        });
-                    }
-                    fractions.push(pair);
-                    Ok(())
-                })?;
+            if refresh_fractions {
+                fractions.clear();
+                let full = PairKernel::new(self.law(), h, 0.5);
+                let half = PairKernel::new(self.law(), h, 0.25);
+                for &[i, j] in self.edges() {
+                    meter.unit(&mut accountant, cx, "fs-vpm.pse-adaptive-fraction", || {
+                        let areas = [self.areas_m2()[i], self.areas_m2()[j]];
+                        let pair = [
+                            full.fraction(state[i], state[j], areas),
+                            half.fraction(state[i], state[j], areas),
+                        ];
+                        if pair
+                            .iter()
+                            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+                        {
+                            return Err(VpmError::NonFiniteResult {
+                                phase: "fs-vpm.pse-adaptive-fraction",
+                                particle: i,
+                            });
+                        }
+                        fractions.push(pair);
+                        Ok(())
+                    })?;
+                }
+                meter.boundary(
+                    &mut accountant,
+                    cx,
+                    "fs-vpm.pse-adaptive-fractions-complete",
+                )?;
+                cached_dt_bits = Some(h.to_bits());
+                fraction_evaluations = fraction_evaluations
+                    .checked_add(e64 * 2)
+                    .ok_or(overflow("adaptive fraction evaluations"))?;
             }
-            meter.boundary(
-                &mut accountant,
-                cx,
-                "fs-vpm.pse-adaptive-fractions-complete",
-            )?;
             sweep(
                 self,
                 &mut coarse,
@@ -400,6 +416,7 @@ impl PreparedPse {
             rejected_steps: rejected,
             attempts,
             pair_evaluations,
+            fraction_evaluations,
             work_units: expected_work,
             peak_live_bytes,
             max_accepted_error_ratio,

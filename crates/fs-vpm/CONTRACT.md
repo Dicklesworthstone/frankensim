@@ -411,9 +411,11 @@ graph. Exact zero-time, zero-viscosity and edgeless identities still validate
 the input and preserve its bits.
 
 Three particle buffers and two fractions per supported edge are reserved once.
-An active trial has six E pair visits and 2 N + 7 E + 1 logical work units;
-initial validation costs N. Rejected trials are included in both counts.
-No trial allocates. The ambient accountant admits the explicit work ceiling
+An active trial has six E pair visits and 2 N + 6 E + 1 logical work units;
+initial validation costs N. Both fractions are cached while the exact trial
+step is unchanged. Each changed step adds E logical units and two E actual
+kernel evaluations, retained in `fraction_evaluations`. Rejected trials are
+included in these counts. No trial allocates. The ambient accountant admits the explicit work ceiling
 and reports actual consumption; inactive runs admit only N units. The final
 result includes exact requested elapsed time, accepted/rejected counts and the
 largest accepted local estimate.

@@ -15,13 +15,15 @@
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.chem/chem_ug_chemsptrans.08.257.html>.
 //! This L1 module owns constitutive algebra and scratch storage, never evolution.
 
+mod composition;
+
 use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use fs_qty::{AmountConcentration, MolarMass, Pressure, Temperature};
 
-/// Hard species/work bound for the dense constitutive solve.
+/// Hard species/work bound for the constitutive solve.
 pub const MAX_MAXWELL_STEFAN_SPECIES_V1: usize = 128;
 /// Fixed operation-tree version of the barycentric friction solve.
-pub const MAXWELL_STEFAN_EVALUATOR_VERSION_V1: u32 = 2;
+pub const MAXWELL_STEFAN_EVALUATOR_VERSION_V1: u32 = 3;
 
 /// Explicit checks on original constitutive equations and the mass frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -201,6 +203,11 @@ impl MaxwellStefanV1 {
     /// replaced by the barycentric constraint, is checked before return.
     /// Naturally rounded subnormal or zero fluxes must pass those same checks;
     /// a small driving force alone is never grounds to suppress a response.
+    /// Exact-zero species are solved without numerical concentration floors;
+    /// their entering fluxes still force the coupled positive-composition block.
+    /// Its solve costs O(k³) for k positive fractions, while complete source-data
+    /// validation and original-row checks remain O(n²). A binary mixture uses
+    /// its analytical two-species solution. No species or driving force is dropped.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate<'a>(
         &self,
@@ -448,7 +455,13 @@ impl MaxwellStefanV1 {
                         "binary diffusion is not positive symmetric",
                     ));
                 }
-                minimum_diffusion = minimum_diffusion.min(value);
+                // An absent/absent pair contributes identically zero to every
+                // friction row, even if one of those species has an entering
+                // flux. Admit its data above, but do not let it rescale a
+                // physically independent active response into underflow.
+                if mole_fractions[i] > 0.0 || mole_fractions[j] > 0.0 {
+                    minimum_diffusion = minimum_diffusion.min(value);
+                }
             }
         }
         let mut drive_scale = 0.0_f64;
@@ -494,12 +507,11 @@ impl MaxwellStefanV1 {
                 drag_entropy_production_w_m3_k: Some(0.0),
             });
         }
-        workspace.matrix.fill(0.0);
         workspace.ratios.fill(0.0);
         for i in 0..n {
             poll(&mut cancelled)?;
-            for j in 0..n {
-                if i == j {
+            for j in i + 1..n {
+                if mole_fractions[i] == 0.0 && mole_fractions[j] == 0.0 {
                     continue;
                 }
                 let ratio = minimum_diffusion / binary_diffusivities_m2_s[i * n + j];
@@ -507,23 +519,16 @@ impl MaxwellStefanV1 {
                     return Err(MaxwellStefanErrorV1::Arithmetic("binary-diffusivity ratio"));
                 }
                 workspace.ratios[i * n + j] = ratio;
-                workspace.matrix[i * n + i] += mole_fractions[j] * ratio;
-                workspace.matrix[i * n + j] = -mole_fractions[i] * ratio;
+                workspace.ratios[j * n + i] = ratio;
             }
-            workspace.right[i] = -workspace.driving[i] / drive_scale;
         }
-        match controls.frame {
-            Frame::MassAveraged => {
-                workspace.matrix[gauge * n..(gauge + 1) * n].copy_from_slice(&self.scaled_masses)
-            }
-            Frame::MolarAveraged => workspace.matrix[gauge * n..(gauge + 1) * n].fill(1.0),
-        }
-        workspace.right[gauge] = 0.0;
-        solve(
-            &mut workspace.matrix,
-            &mut workspace.right,
-            &mut workspace.row_scales,
-            n,
+        composition::evaluate(
+            mole_fractions,
+            &self.scaled_masses,
+            gauge,
+            controls.frame,
+            drive_scale,
+            workspace,
             &mut cancelled,
         )?;
         for i in 0..n {

@@ -1862,6 +1862,41 @@ Primary formulation:
 <https://doc.comsol.com/6.4/doc/com.comsol.help.chem/chem_ug_chemsptrans.08.257.html>.
 
 
+
+### Exact composition reduction for sparse species populations
+
+Evaluator version 3 solves an original two-species system analytically. For a
+larger species bank, each exact-zero-composition row is diagonal and is solved
+first. Its potentially nonzero entering flux remains in the positive-composition
+rows and in the chosen mass- or molar-frame constraint. Only the k species with
+positive fractions enter the coupled elimination. A single carrier closes the
+frame directly. There is no concentration floor, deleted species, zero-force
+assumption for absent species, or approximation to their effect on the carriers.
+
+Every supplied pair still must be finite, positive and exactly symmetric.
+Absent/absent pairs multiply identically zero friction terms, so they no longer
+set the internal diffusivity scale. Their source data remain required and become
+active immediately when the corresponding composition changes. This also avoids
+an irrelevant tiny pair coefficient forcing an otherwise representable response
+outside the numerical scaling range. Version 3 retains version 2's balanced
+binary-exponent flux reconstruction and all original-row/frame residual checks.
+
+Assembly, full-data validation and final equation checks remain O(n²); coupled
+elimination becomes O(k³). Existing O(n²) heap workspaces are reused, with bounded
+fixed-size stack scratch and no successful-call allocation. These are operation
+and storage bounds, not a measured speedup. Existing gas, material and liquid
+consumers inherit this exact algebra through the original constitutive owner.
+
+Six added G0/G1/G3 groups cover independently manufactured one-, two- and
+many-carrier mixtures through 128 source species in both frames; nonzero entering
+flux for absent species; irrelevant pair scales down to the smallest subnormal;
+positive traces whose friction remains finite; pure/binary extreme mass ratios;
+composition changes, source-data refusals and cancellation/workspace reuse.
+The exact production module and its genuine fs-qty/fs-blake3 dependencies passed
+all 22 native leaf tests. This focused result is not a workspace/DSR result or
+experimental transport qualification.
+
+
 ## Source-bound dilute-gas collision transport
 
 `transport::kinetic::KineticGasTransportV1` retains the exact original NASA
@@ -1966,7 +2001,7 @@ unsupported regions or a full-workspace Cargo/DSR build.
 
 ## Maxwell--Stefan scaling across trace gradients
 
-Fixed operation-tree evaluator version 2 forms each mass flux with its solved
+Fixed operation-tree evaluator version 2 introduced forming each mass flux with its solved
 amplitude before rounding a scale. Normal intermediates retain an ordinary
 arithmetic path; otherwise finite products and quotients balance exact binary
 exponents and round only the final normal/subnormal magnitude. This avoids

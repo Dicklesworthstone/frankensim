@@ -128,19 +128,27 @@ fn g1_tolerance_refinement_resolves_two_independent_diffusion_eigenmodes() {
                     .all(|p| (-1.0..=2.0).contains(&p.circulation))
             );
             assert_eq!(run.pair_evaluations, 12 * run.attempts as u64);
-            assert_eq!(run.work_units, 3 + 21 * run.attempts as u64);
+            assert_eq!(run.fraction_evaluations % 4, 0);
+            assert!(run.fraction_evaluations <= 4 * run.attempts as u64);
+            assert_eq!(
+                run.work_units,
+                3 + 19 * run.attempts as u64 + run.fraction_evaluations / 2,
+            );
             assert_eq!(run.budget.cost_charged, run.work_units);
             assert_eq!(
                 run.peak_live_bytes,
                 9 * size_of::<VortexParticle>() + 4 * size_of::<f64>()
             );
         }
+        // A stable accepted step size reuses both edge relaxation fractions.
+        assert!(tight.fraction_evaluations < 4 * tight.attempts as u64);
         let replay = graph
             .advance_adaptive_with_cx(cx, &initial, 2.5, options(1e-6), budget(3))
             .unwrap();
         assert_bits(&tight.particles, &replay.particles);
         assert_eq!(tight.attempts, replay.attempts);
         assert_eq!(tight.work_units, replay.work_units);
+        assert_eq!(tight.fraction_evaluations, replay.fraction_evaluations);
     });
 }
 
@@ -193,6 +201,7 @@ fn g0_inactive_diffusion_preserves_bits_without_trials() {
             assert_eq!(actual.elapsed_s.to_bits(), duration.to_bits());
             assert_eq!(actual.attempts, 0);
             assert_eq!(actual.pair_evaluations, 0);
+            assert_eq!(actual.fraction_evaluations, 0);
             assert_eq!(actual.work_units, n as u64);
             assert_eq!(actual.peak_live_bytes, n * size_of::<VortexParticle>());
         }
