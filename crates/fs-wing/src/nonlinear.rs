@@ -526,7 +526,14 @@ fn solve_nonlinear_impl(
                 // no extrapolation, cold restart, or search for another branch.
                 continue;
             }
-            if worst > residual * 1.25 {
+            // Judge divergence using the physical circulation mismatch, not
+            // its state-dependent acceptance denominator. A strip crossing
+            // zero can make |target-Gamma|/(|Gamma|+1e-9) grow even while every
+            // physical mode contracts. Repeatedly damping that crossing can
+            // exhaust the budget on a well-resolved attached solution. The
+            // shared scaling above preserves the norm ratio without overflow;
+            // the original componentwise tolerance below remains unchanged.
+            if previous_norm_sq > 0.0 && current_norm_sq > 1.25 * 1.25 * previous_norm_sq {
                 growth_streak += 1;
                 if growth_streak >= 2 {
                     // Two CONSECUTIVE growths: halve the relaxation and RETRY

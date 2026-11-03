@@ -325,15 +325,14 @@ fn rail_phase_produces_receipted_transition() {
 }
 
 #[test]
-fn member3_assisted_fixture_preserves_its_numerical_refusal() {
-    // Registered gains are unchanged. This explicit catapult fixture yields
-    // 7.51 s airborne, three undulations and 29.19 m before the unchanged
-    // nonlinear wing solver reaches its iteration cap at tick 974. These are
-    // observed values before a numerical refusal, not physical endurance or
-    // historical calibration guarantees. The earlier eight-second gate already
-    // failed (7.97 s) with accepted local flow before transverse lift was fixed.
-    // Exact event ticks retain that regression without retuning the plant.
-    // The original unaided reference is checked separately below.
+fn member3_assisted_fixture_reaches_physical_ground_contact() {
+    // Registered gains are unchanged. The wing mismatch contracts while some
+    // strips pass through zero circulation; judging that contraction before
+    // relative normalization resolves the former tick-974 iteration cap.
+    // This explicit catapult fixture now reaches physical contact after 8.575 s
+    // airborne and three undulations, without retuning the plant or relaxing
+    // its solver budgets. The original unaided reference is checked below;
+    // this assisted flight is not a historical calibration guarantee.
     let run = || {
         let mut sim = SimLoop::init(assisted_launch_scenario(PilotMode::Historical(3))).unwrap();
         let mut liftoff = None;
@@ -378,13 +377,13 @@ fn member3_assisted_fixture_preserves_its_numerical_refusal() {
     let (liftoff, undulations, (terminal, end_tick, x_end), digest, refusal) = run();
     assert_eq!(
         terminal,
-        TerminalEvent::EnvelopeExceeded,
-        "the explicit assisted fixture has a measured numerical solver refusal"
+        TerminalEvent::GroundContact,
+        "the resolved wing equations must let the physical trajectory reach contact"
     );
-    assert_eq!(refusal, Some("nonlinear-did-not-converge"));
+    assert_eq!(refusal, None, "contact must not hide a numerical refusal");
     assert_eq!(liftoff, 73);
     assert_eq!(
-        end_tick, 974,
+        end_tick, 1102,
         "registered controls and the corrected plant must reproduce the terminal tick"
     );
     let airborne_s = (end_tick - liftoff) as f64 / 120.0;
@@ -629,8 +628,11 @@ fn golden_digest() {
     // Golden bump 2026-11-03: accepted local flow and transverse circulatory
     // lift move the unchanged fixed-control fixture to residual-growth refusal
     // at tick 553. The actual refusal reason and travel gate remain checked.
+    // Golden bump 2026-11-03: the wing divergence guard now measures the
+    // dimensional mismatch before normalization at zero circulation. Changed
+    // convergence paths shift final ulps; the outer refusal remains tick 553.
     assert_eq!(
-        digest, "fa43fcd7be93a100d4ff5741af3fd4ea66b2a55b45d057efa793393f33d7e8de",
+        digest, "15b2ec100caa3cb4d7332f67829665b9ea441ffc42ede68d70ea3f4e7588ba5e",
         "lifecycle golden moved — determinism regression or an \
          intentional physics change requiring the golden-bump protocol"
     );

@@ -133,7 +133,7 @@ an allowance of 64 machine epsilons recognizes a roundoff-level plateau. This
 allowance is exclusively a safeguard diagnostic and never changes the acceptance
 tolerance. The scalar relative residual alone cannot identify this defect: a
 two-cycle may alternate between large and small denominators, while a gradually
-growing negative mode may stay below the existing 25% scalar-growth threshold.
+growing negative mode may stay below the existing 25% growth threshold.
 
 On detection, the solver halves its current relaxation and reevaluates the same
 state. It uses the existing `OMEGA_MIN=0.02`, `MAX_ITERATIONS=600` (including
@@ -155,6 +155,28 @@ respectively, both below the unchanged tolerance. Replay and warm continuation
 retain that branch. These are discrete nonlinear-solver checks, not evidence of
 global uniqueness, aerodynamic validity outside the section model, or full
 flight calibration.
+
+### Circulation sign changes and divergence detection
+
+The two-consecutive-growth guard compares the Euclidean norm of the dimensional
+circulation mismatch, using the same overflow-safe scaled squared norms as the
+oscillation guard. Its 25% growth threshold, relaxation bounds, iteration budget
+and final componentwise relative tolerance are unchanged. The convergence
+denominator `|Gamma|+1e-9` is state dependent: a strip approaching zero circulation
+can increase the relative residual even while its actual equation mismatch
+contracts. Such a crossing must not trigger progressively smaller relaxation.
+
+The third `nonlinear_oscillation` fixture freezes the real distributed wing and
+canard flow from assisted Historical(3) flight at tick 974. The old guard made
+five unnecessary cuts to `omega=0.021875` and exhausted 600 evaluations at
+`9.460544473899003e-7`. The corrected guard solves the same attached branch in
+162 evaluations; independent public-field reconstruction measures final relative
+mismatch `7.657e-11`, below the original `1e-10` gate. Signed opposing wing loads,
+bitwise replay and warm continuation are checked. The existing nonlinear golden
+and both low-speed alternating-mode fixtures remain unchanged. In the actual
+native SimLoop, the assisted flight now reaches physical ground contact at tick
+1102 (8.575 seconds airborne, three undulations); the fixed-control fixture's
+outer prop/airframe coupling refusal at tick 553 remains explicit.
 
 ## Invariants
 

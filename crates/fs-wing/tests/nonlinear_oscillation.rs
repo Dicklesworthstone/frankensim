@@ -1,9 +1,9 @@
-//! G0/G3: frozen native Huffman launch inputs that exposed an undamped
-//! alternating strip mode. Geometry, closure, wash and tolerance are unchanged.
+//! G0/G3: frozen native flight inputs that exposed an undamped alternating
+//! strip mode or excessive damping at zero circulation. Physics is unchanged.
 use fs_math::det;
 use fs_wing::nonlinear::{
     GAMMA_TOL, InfluenceOperator, MAX_ITERATIONS, NonlinearReport, StripRegime, StripSpec,
-    solve_nonlinear,
+    solve_nonlinear, solve_nonlinear_with_incident,
 };
 use fs_wing::{Panel, SurfaceId, flat_surface, induced_velocity_free};
 
@@ -181,4 +181,88 @@ fn alternating_residual_plateau_converges_on_the_attached_branch() {
         [3.0759286923386306, 0.0, -0.02640662086636544],
         0.7534899483164144,
     );
+}
+
+#[test]
+fn sign_changing_wing_circulation_does_not_mistake_normalization_for_divergence() {
+    // Actual assisted Historical(3) flight at tick 974. The upper inner wing
+    // passes through zero circulation while the dimensional mismatch contracts.
+    // The old relative-growth guard halved omega five times to .021875 and
+    // exhausted 600 evaluations at 9.460544473899003e-7. No aircraft control,
+    // section law, residual tolerance, or iteration budget is changed here.
+    let (panels, mut strips) = layout();
+    for strip in &mut strips[16..] {
+        strip.twist_rad = -0.22515074957833842;
+    }
+    let freestream = [12.522663350147573, 0.0, -1.9512321004310316];
+    let incident: Vec<_> = (0..24)
+        .map(|s| match s {
+            2..=5 => [11.770859874399594, 0.0, -1.4076438498700594],
+            0..=7 => [11.581045305148415, 0.0, -1.4076438498700594],
+            10..=13 => [14.736956716146942, 0.0, -1.4076438498700594],
+            8..=15 => [14.547142146895762, 0.0, -1.4076438498700594],
+            16..=19 => [9.933213726399888, 0.0, 3.2927957285101117],
+            _ => [11.031768112232239, 0.0, 3.2927957285101117],
+        })
+        .collect();
+    let op = InfluenceOperator::build(&panels, freestream, 1.17).unwrap();
+    let run = |warm| {
+        solve_nonlinear_with_incident(
+            &op, &panels, &strips, freestream, 1.17, &closure, &incident, None, warm,
+        )
+        .unwrap()
+    };
+    let check_physics = |result: &NonlinearReport| {
+        let mut worst = 0.0f64;
+        for (s, strip) in strips.iter().enumerate() {
+            let front = panels[strip.panel_indices[0]];
+            let point = core::array::from_fn(|i| 0.5 * (front.a[i] + front.b[i]));
+            let complete = induced_velocity_free(point, &panels, &result.gamma, freestream)[2];
+            let bound: f64 = panels
+                .iter()
+                .zip(&result.gamma)
+                .map(|(&panel, &gamma)| gamma * bound_vertical(point, panel))
+                .sum();
+            let v = incident[s];
+            let speed = det::sqrt(v[0] * v[0] + v[2] * v[2]);
+            let alpha = det::atan2(v[2], v[0]) + strip.twist_rad + (complete - bound) / speed;
+            let (cl, regime) = closure(s, alpha);
+            assert_eq!(regime, StripRegime::Attached);
+            assert_eq!(result.regimes[s], regime);
+            let target = -0.5 * speed * strip.chord_m * cl;
+            let actual: f64 = strip.panel_indices.iter().map(|&j| result.gamma[j]).sum();
+            worst = worst.max((target - actual).abs() / (actual.abs() + 1e-9));
+        }
+        assert!(
+            worst < GAMMA_TOL,
+            "independently reconstructed final physical mismatch {worst:e}"
+        );
+        worst
+    };
+    let solved = run(None);
+    let recomputed = check_physics(&solved);
+    println!(
+        "frozen sign crossing: evaluations={} returned={} independently_recomputed={}",
+        solved.iterations, solved.residual, recomputed
+    );
+    assert!(solved.iterations < MAX_ITERATIONS);
+    assert!(solved.residual < GAMMA_TOL);
+    assert_eq!(solved, run(None), "same input and branch replay bitwise");
+    let continued = run(Some(&solved.gamma));
+    check_physics(&continued);
+    assert_eq!(continued.branch_id, solved.branch_id);
+    for (cold, warm) in solved.gamma.iter().zip(&continued.gamma) {
+        assert!((cold - warm).abs() < 1e-9);
+    }
+    // These opposing surface loads are physical: do not avoid the zero
+    // crossing by clipping circulation or replacing it with an unsigned value.
+    let total = |s: usize| {
+        strips[s]
+            .panel_indices
+            .iter()
+            .map(|&j| solved.gamma[j])
+            .sum::<f64>()
+    };
+    assert!(total(0) > 0.0 && total(8) < 0.0);
+    assert!(total(11) < 0.0 && total(11).abs() < 0.01 * total(8).abs());
 }
