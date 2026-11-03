@@ -1850,6 +1850,37 @@ a fixed-plane bilateral law, including tensile reactions. It does not claim
 exact energy conservation, symplecticity, global root uniqueness, unilateral
 contact, friction or moving supports.
 
+### Prescribed translating supports
+
+`PointPlaneRattle::advance_translating_plane` composes the same native impulse,
+free step and endpoint impulse with prescribed normal translation. A
+`step::PlaneTranslation` supplies initial normal speed and held normal
+acceleration; the plane point in the original constraint is the initial point.
+The position solve targets `p+n*(v*dt+a*dt²/2)` and the endpoint speed constraint
+targets `v+a*dt`. Full-inertia, off-center coupling and the original local
+impulse/angular-travel/backtracking controls remain shared with the fixed law.
+
+The receipt returns the advanced plane and speed for continuation, both native
+impulse events, their reciprocal support impulse, and signed boundary work.
+Each reaction is paired with the prescribed support speed at its own event.
+The independently computed relative-frame work defect stays numerical; it is
+not heat or an energy correction. Prescribed supports supply external momentum
+and power; no finite support mass or inertia is inferred.
+
+Endpoint velocity and displacement are accumulated in double-double arithmetic
+before rounding. Their representability residuals and combined endpoint errors
+must fit the original physical tolerances. A small acceleration hidden beside a
+large carrier speed therefore refuses when it cannot be represented. No heap
+storage or partial state is published. The stationary motion recovers the
+original native result exactly. Plane rotation, friction, unilateral contact
+and finite-support recoil remain outside this entry.
+
+`tests/rigid_translating_plane.rs` checks analytical accelerating COM support
+and signed work, oblique normals, full-tensor offset-point boost covariance,
+reversal and second-order refinement, continuation, momentum symmetries,
+stationary identity, unresolved prescribed acceleration and all cancellation
+checkpoints.
+
 ## Distance between independent finite rigid bodies
 
 `rigid_rattle::distance::RigidDistanceConstraint::advance` evolves two independent
