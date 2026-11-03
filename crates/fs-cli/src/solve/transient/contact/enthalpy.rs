@@ -1,9 +1,11 @@
 //! Total enthalpy uses the native complete contact Newton or physical fixed point.
 
-use fs_conduction::interface::temperature::{ContactIterationConfig, TemperatureContacts};
+use fs_conduction::interface::temperature::{
+    ContactIterationConfig, TemperatureContactEvaluation, TemperatureContacts,
+};
 use fs_conduction::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig;
 use fs_conduction::transient::enthalpy::{
-    EnthalpyStepConfig, EnthalpyStepSolution,
+    EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
     EnthalpyEndpointEvaluation,
     heterogeneous::HeterogeneousEnthalpyBackwardEuler,
 };
@@ -13,7 +15,7 @@ use std::time::Instant;
 
 use crate::solve::{SolveRefusal, json_string, radiation};
 use crate::solve::transient::{bad, number, poll, lower, enthalpy::{
-    failed, advance_pointwise_contact, pointwise_contact_receipt,
+    failed, advance_pointwise_contact, evaluate_pointwise_endpoint, pointwise_contact_receipt,
 }};
 use super::{face_states, residual_tolerance_j};
 
@@ -45,7 +47,7 @@ impl Config {
     }
 }
 
-pub(in crate::solve::transient) const NO_CLAIM: &str = "Source-backed matching contact resistance from scalar or continuous linear source curves and primary specific enthalpy are solved in one native Newton/FGMRES system with the complete contact-temperature tangent and each regional phase chart's temperature response. Temperature-source surfaces instead use the existing bounded relaxed contact fixed point; every inner enthalpy solve keeps the original old state, and acceptance re-queries the source at the unchanged endpoint and checks the complete physical residual and energy balance. Response, Newton and Krylov counts include discarded contact trials. A successful fixed point does not establish arbitrary-law convergence or uniqueness. Every residual and rejected trial retains the same accepted old enthalpy. The unchanged accepted field passes a freshly queried full nodal joule-residual gate and a separate storage/heat energy gate. Contact flux is internal transfer; prescribed reservoir reactions include boundary-node storage once. All retained contact rows describe accepted physical endpoints under the originally pinned material claims. Both time grids retain every workload and prescribed-boundary switch. Explicit pointwise ambient, closed-enclosure and open-enclosure radiation use the original local-emission and reflected-irradiation owners inside that same Newton residual and tangent. Their actual endpoint heat shares the independent physical acceptance gates; closed exchange is internal and open-environment heat is counted once. Pressure, geometry, source support, view factors and reference mass are fixed. Surface-law contacts combined with radiation, patch-mean radiation, derived natural/airflow feedback, phase-dependent contact resistance, contact trajectory derivatives, arbitrary-law convergence and continuum bounds are not inferred.";
+pub(in crate::solve::transient) const NO_CLAIM: &str = "Source-backed matching contact resistance from scalar or continuous linear source curves and primary specific enthalpy are solved in one native Newton/FGMRES system with the complete contact-temperature tangent and each regional phase chart's temperature response. Temperature-source surfaces instead use the existing bounded relaxed contact fixed point; every inner enthalpy solve keeps the original old state, and acceptance re-queries the source at the unchanged endpoint and checks the complete physical residual and energy balance. Response, Newton and Krylov counts include discarded contact trials. A successful fixed point does not establish arbitrary-law convergence or uniqueness. Every residual and rejected trial retains the same accepted old enthalpy. The unchanged accepted field passes a freshly queried full nodal joule-residual gate and a separate storage/heat energy gate. Contact flux is internal transfer; prescribed reservoir reactions include boundary-node storage once. All retained contact rows describe accepted physical endpoints under the originally pinned material claims. Both time grids retain every workload and prescribed-boundary switch. Explicit pointwise ambient, closed-enclosure and open-enclosure radiation use the original local-emission and reflected-irradiation owners inside that same Newton residual and tangent. Their actual endpoint heat shares the independent physical acceptance gates; closed exchange is internal and open-environment heat is counted once. Natural convection encloses these contact-aware enthalpy responses, re-queries the original card at the candidate wall temperature, and rechecks the unchanged endpoint with both its fresh contact law and updated physical convection coefficient. All nested response, Newton and Krylov work is counted. Pressure, geometry, source support, view factors and reference mass are fixed. Surface-law contacts combined with radiation, patch-mean radiation, transported-air feedback, phase-dependent contact resistance, contact trajectory derivatives, arbitrary-law convergence and continuum bounds are not inferred.";
 
 pub(in crate::solve::transient) struct Step {
     pub(in crate::solve::transient) conduction: EnthalpyStepSolution,
@@ -97,6 +99,92 @@ pub(in crate::solve::transient) fn config(
     })
 }
 
+/// Re-query the original contact laws at an unchanged primary enthalpy field,
+/// then audit it under the caller's actual physical boundary. The original
+/// per-vertex charts resolve temperature directly, including latent plateaus;
+/// no temperature-to-enthalpy inversion or replacement PDE solve occurs.
+/// The returned contact rows belong to this exact physical evaluation.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::solve::transient) fn evaluate(
+    cx: &Cx<'_>,
+    engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+    problem: ConductionProblem<'_>,
+    contacts: &TemperatureContacts<'_, '_>,
+    old_h: &[f64],
+    candidate_h: &[f64],
+    dt_s: f64,
+    config: EnthalpyStepConfig,
+    radiation: Option<&radiation::LoweredRadiation>,
+    enclosure: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
+    deadline: Option<(Instant, f64)>,
+) -> Result<(EnthalpyEndpointEvaluation, TemperatureContactEvaluation), SolveRefusal> {
+    poll(cx, deadline)?;
+    let vertices = problem.mesh.vertex_count();
+    if old_h.len() != vertices || candidate_h.len() != vertices {
+        return Err(bad("contact enthalpy audit needs complete old and candidate fields on the original mesh"));
+    }
+    if radiation.is_none() && enclosure.is_some() {
+        return Err(bad("contact enthalpy audit lost its declared pointwise radiation model"));
+    }
+    let mut temperature = Vec::new();
+    temperature.try_reserve_exact(vertices)
+        .map_err(|_| bad("contact enthalpy audit temperature allocation refused"))?;
+    for (vertex, &enthalpy) in candidate_h.iter().enumerate() {
+        if vertex % 256 == 0 { poll(cx, deadline)?; }
+        let chart = engine.phase_curve_at(vertex)
+            .ok_or_else(|| bad("contact enthalpy audit lost an original vertex phase chart"))?;
+        let state = chart.state_at_specific_enthalpy(enthalpy)
+            .map_err(|source| failed(EnthalpyError::Phase { vertex, source }))?;
+        temperature.push(state.temperature_k());
+    }
+    poll(cx, deadline)?;
+    let actual = contacts.evaluate(cx, problem.boundary, &temperature).map_err(lower)?;
+    poll(cx, deadline)?;
+    let physical = match radiation {
+        Some(lowering) => evaluate_pointwise_endpoint(
+            cx, engine, problem, Some(actual.frozen_interfaces()), old_h, candidate_h,
+            dt_s, config, lowering, enclosure,
+        )?,
+        None => engine.evaluate_endpoint(
+            cx, problem, Some(actual.frozen_interfaces()), old_h, candidate_h,
+            dt_s, config, None,
+        ).map_err(failed)?,
+    };
+    poll(cx, deadline)?;
+    Ok((physical, actual))
+}
+
+/// Serialize the same audited physical field and contact queries, with the
+/// caller's complete counted work. Outer boundary iteration may replace the
+/// applied-boundary audit without losing its accepted source-state evidence.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::solve::transient) fn step_receipt(
+    cx: &Cx<'_>,
+    config: Config,
+    physical: &EnthalpyEndpointEvaluation,
+    contacts: &TemperatureContactEvaluation,
+    responses: usize,
+    nonlinear_updates: usize,
+    krylov_iterations: usize,
+    deadline: Option<(Instant, f64)>,
+) -> Result<String, SolveRefusal> {
+    poll(cx, deadline)?;
+    let states = face_states(cx, contacts, deadline)?;
+    let receipt = format!(concat!(
+        "{{\"method\":{},\"thermal_responses\":{},",
+        "\"krylov_iterations\":{},\"nonlinear_updates\":{},",
+        "\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},",
+        "\"physical_energy_residual_j\":{},\"energy_tolerance_j\":{},\"face_states\":[{}]}}"
+    ),
+        json_string(config.method()), responses, krylov_iterations, nonlinear_updates,
+        number(physical.residual_norm_j)?, number(config.native.residual_tolerance_j)?,
+        number(physical.energy_residual_j)?, number(config.native.step.energy_tolerance_j)?,
+        states,
+    );
+    poll(cx, deadline)?;
+    Ok(receipt)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::solve::transient) fn advance(
     cx: &Cx<'_>,
@@ -131,19 +219,11 @@ pub(in crate::solve::transient) fn advance(
         )),
     };
     poll(cx, deadline)?;
-    let states = face_states(cx, &accepted.physical_contacts, deadline)?;
-    let receipt = format!(concat!(
-        "{{\"method\":{},\"thermal_responses\":{},",
-        "\"krylov_iterations\":{},\"nonlinear_updates\":{},",
-        "\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},",
-        "\"physical_energy_residual_j\":{},\"energy_tolerance_j\":{},\"face_states\":[{}]}}"
-    ),
-        json_string(config.method()), accepted.iterations,
-        accepted.krylov_iterations, accepted.nonlinear_iterations,
-        number(accepted.physical.residual_norm_j)?, number(config.native.residual_tolerance_j)?,
-        number(accepted.physical.energy_residual_j)?, number(config.native.step.energy_tolerance_j)?,
-        states,
-    );
+    let receipt = step_receipt(
+        cx, config, &accepted.physical, &accepted.physical_contacts,
+        accepted.iterations, accepted.nonlinear_iterations, accepted.krylov_iterations,
+        deadline,
+    )?;
     let radiation_receipt = radiation.map(|lowering| pointwise_contact_receipt(
         &accepted.conduction, &accepted.physical, lowering, config.native.residual_tolerance_j,
     )).transpose()?;
@@ -170,11 +250,17 @@ pub(in crate::solve::transient) fn advance(
 
 pub(in crate::solve::transient) fn receipt(
     config: Config,
+    boundary_responses: usize,
     coarse_responses: usize,
     fine_responses: usize,
     nonlinear_updates: usize,
     krylov_iterations: usize,
 ) -> Result<String, SolveRefusal> {
+    let max_responses = config.max_responses().checked_mul(boundary_responses)
+        .ok_or_else(|| bad("coupled contact enthalpy response allowance overflows"))?;
+    let max_residual_evaluations = config.max_residual_evaluations()?
+        .checked_mul(boundary_responses)
+        .ok_or_else(|| bad("coupled contact enthalpy residual allowance overflows"))?;
     Ok(format!(concat!(
         ",\"temperature_contact\":{{\"method\":{},",
         "\"face_pairs\":{},\"max_thermal_responses_per_step\":{},\"max_residual_evaluations_per_step\":{},",
@@ -183,8 +269,8 @@ pub(in crate::solve::transient) fn receipt(
         "\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-contact-and-newton-trial\",",
         "\"scope\":{}}}"
     ),
-        json_string(config.method()), config.native.max_face_pairs, config.max_responses(),
-        config.max_residual_evaluations()?, coarse_responses, fine_responses,
+        json_string(config.method()), config.native.max_face_pairs, max_responses,
+        max_residual_evaluations, coarse_responses, fine_responses,
         coarse_responses.checked_add(fine_responses)
             .ok_or_else(|| bad("contact enthalpy response count overflows"))?,
         nonlinear_updates, krylov_iterations,

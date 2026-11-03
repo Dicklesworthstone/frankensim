@@ -3275,7 +3275,7 @@ The declared response factor expands the existing work budgets before marching;
 retained numerical histories still describe the final inner solve per endpoint.
 Latent heat remains in specific enthalpy, and contact heat remains internal.
 Pointwise radiation continues to require the admitted scalar/continuous-curve
-Newton tangent. Surface-law radiation, natural/airflow feedback and trajectory
+Newton tangent. Surface-law radiation, airflow feedback and trajectory
 derivatives remain explicitly unsupported by this CLI composition.
 
 The actual CLI regression cases cover source-surface latent-plateau exchange,
@@ -3284,3 +3284,28 @@ work counts. Their constant-Cp fixtures carry an explicit unused terminal latent
 interval so they satisfy the shared phase-chart domain without changing the
 simulated storage law. These CLI cases are authored; runtime execution is not
 claimed by this change.
+
+### Live contact with total enthalpy and natural convection — driver 103
+
+The existing natural-convection loop now uses the same source-backed contact
+responses as prescribed-boundary enthalpy trajectories. Scalar and continuous
+curve resistance uses complete contact Newton; temperature-source surfaces use
+the existing bounded contact fixed point. Every nested response retains the
+original old specific enthalpy. After updating the natural coefficient from the
+candidate wall temperature, the driver re-queries contact at that unchanged
+candidate and checks its complete nodal joule residual and storage/heat balance
+under the updated physical boundary. Optional pointwise radiation retains its
+existing scalar/curve contact Newton owner and independent heat account.
+
+Contact heat stays internal, natural-reservoir heat leaves storage once, and
+latent fraction comes from primary specific enthalpy. Per-step contact evidence
+describes the final physical audit; response, Newton and Krylov totals include
+every discarded natural/contact trial. Admission expands the corresponding work
+caps before marching. Exact ambient equilibrium and out-of-domain natural cards
+retain their explicit refusals. Transported-air contact feedback, capacity-only
+natural/contact trajectories and contact history derivatives remain unsupported.
+
+Native regression cases cover curve/surface agreement, evolving latent fraction,
+independent natural heat and original-history energy accounting, source-domain
+refusal and a widened-source retry. Syntax parsing and whitespace checks were
+performed; these native cases require the full dependency build to execute.

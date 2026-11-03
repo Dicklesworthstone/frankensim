@@ -330,7 +330,7 @@ pub(super) fn advance(
             // allowances for the remaining air-reference discrepancy.
             natural_config.energy_tolerance_j = finite(config.energy_tolerance_j * 0.125)?;
             let solved = natural::advance(
-                cx, engine, trial_problem, interfaces, old, dt_s, natural_config,
+                cx, engine, trial_problem, interfaces, None, None, old, dt_s, natural_config,
                 radiation, enclosure, laws, pressure_pa, deadline,
             )?;
             natural_evidence = natural_step_row(&solved)?;

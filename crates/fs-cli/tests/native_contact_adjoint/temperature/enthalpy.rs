@@ -2,6 +2,8 @@
 //! temperature-derived replacement history or a frozen interface resistance.
 
 use super::*;
+#[path = "enthalpy/convection.rs"]
+mod convection;
 use fs_project::{
     ConductionEnclosure, ConductionTransient, EnclosureRadiatingSurface,
     EnclosureViewFactorEvidence, RadiationSpatialModel, ThermalBoundaryCondition,
