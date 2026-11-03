@@ -70,6 +70,45 @@ fn inventories() -> [DissolvedGasInventory; 2] {
 }
 
 #[test]
+fn unequal_opposing_films_refuse_an_interior_mixture_concentration_peak_atomically() {
+    let catalog = model(vec![0.6, 0.4], 0.0);
+    let laws = laws(&catalog);
+    let mut gas = gas(&catalog);
+    let before_gas = gas.clone();
+    let mut liquid = inventories();
+    let before_liquid = liquid;
+    let films = [
+        DissolutionFilm {
+            area_m2: 0.01,
+            thickness_m: 1e-3,
+        },
+        DissolutionFilm {
+            area_m2: 0.01,
+            thickness_m: 1e-5,
+        },
+    ];
+    let mut limits = controls();
+    limits.maximum_concentration_mol_m3 = 3.1;
+    let bulk = [0.0, 3.0];
+    let interface = [H * 60_000.0, 0.5 * H * 40_000.0];
+    assert!(bulk.iter().sum::<f64>() < limits.maximum_concentration_mol_m3);
+    assert!(interface.iter().sum::<f64>() < limits.maximum_concentration_mol_m3);
+    // At B's film edge, B has reached bulk concentration while A is still
+    // near its high interfacial value. This independently evaluates the
+    // declared linear film profiles, not the implementation's envelope.
+    let x = films[1].thickness_m;
+    let interior_a = interface[0] + (bulk[0] - interface[0]) * x / films[0].thickness_m;
+    near(interior_a + bulk[1], 4.188, 1e-12);
+    assert!(interior_a + bulk[1] > limits.maximum_concentration_mol_m3);
+    assert!(matches!(
+        advance_mixture(&laws, &mut gas, &mut liquid, &films, 0.01, limits, || false),
+        Err(DissolvedGasError::Concentration { .. })
+    ));
+    assert_eq!(gas, before_gas);
+    assert_eq!(liquid, before_liquid);
+}
+
+#[test]
 fn opposite_species_exchange_matches_finite_pair_oracles_and_one_heat_account() {
     let catalog = model(vec![0.6, 0.4], 0.0);
     let laws = laws(&catalog);

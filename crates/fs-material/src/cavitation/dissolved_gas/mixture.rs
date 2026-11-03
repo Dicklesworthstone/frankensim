@@ -51,9 +51,12 @@ fn total(values: impl Iterator<Item = f64>) -> Result<f64> {
 /// same original gas catalog and temperature. Each species appears once.
 /// Different diffusivities and physical films are allowed, including zero area.
 ///
-/// `maximum_concentration_mol_m3` bounds the SUM of exchanging solutes in both
-/// liquid bulk and liquid-side interface. The per-species source domains also
-/// apply. A conservative envelope of each monotone partial-pressure change
+/// `maximum_concentration_mol_m3` bounds the SUM of exchanging solutes across
+/// the liquid bulk, liquid-side interface and admitted quasi-steady films.
+/// Each species contributes its maximum across both locations and times, so
+/// unequal film thicknesses and opposing transfer cannot hide an interior
+/// concentration peak. The per-species source domains also apply.
+/// A conservative envelope of each monotone partial-pressure change
 /// admits the complete interval's total pressure; if that envelope is too wide
 /// for a source, shorten the interval. No trajectory is clipped or rescaled.
 /// All histories remain unchanged on any refusal or cancellation.
@@ -179,23 +182,24 @@ pub fn advance_mixture(
             }
         }
     }
-    for interface in [false, true] {
-        let concentration = total(exchanges.iter().map(|exchange| {
-            let concentration = |sample: &DissolutionSample| {
-                if interface {
-                    sample.equilibrium_concentration_mol_m3
-                } else {
-                    sample.concentration_mol_m3
-                }
-            };
-            concentration(&exchange.sources[0]).max(concentration(&exchange.sources[1]))
-        }))?;
-        if concentration > controls.maximum_concentration_mol_m3 {
-            return Err(DissolvedGasError::Concentration {
-                actual_mol_m3: concentration,
-                maximum_mol_m3: controls.maximum_concentration_mol_m3,
-            });
-        }
+    // A species' linear quasi-steady film is bounded by its own bulk and
+    // interface concentrations. With unequal film thicknesses, opposing
+    // species gradients can create a mixture peak inside those films even
+    // when the total bulk and interface concentrations are both admissible.
+    // Sum maxima across BOTH locations and times for each species; checking
+    // the two mixture totals separately does not bound that interior peak.
+    let concentration = total(exchanges.iter().map(|exchange| {
+        exchange.sources.iter().fold(0.0_f64, |maximum, sample| {
+            maximum
+                .max(sample.concentration_mol_m3)
+                .max(sample.equilibrium_concentration_mol_m3)
+        })
+    }))?;
+    if concentration > controls.maximum_concentration_mol_m3 {
+        return Err(DissolvedGasError::Concentration {
+            actual_mol_m3: concentration,
+            maximum_mol_m3: controls.maximum_concentration_mol_m3,
+        });
     }
     let dissolved_change = total(
         exchanges
