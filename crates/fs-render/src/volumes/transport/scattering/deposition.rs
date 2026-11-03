@@ -26,6 +26,13 @@ use fs_math::det;
 use fs_rand::StreamKey;
 use std::collections::HashMap;
 
+mod momentum;
+pub use momentum::{
+    CellRadiationForce, MomentumRateEstimate, RadiationMomentumBalance,
+    ScatteringMomentumDeposition,
+};
+use momentum::{HistoryMomentum, MomentumTallies};
+
 /// Caller-owned sampling, work and retained spatial-output limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScatteringDepositionConfig {
@@ -38,6 +45,7 @@ pub struct ScatteringDepositionConfig {
     /// Exhaustion refuses the complete operation, without a partial result.
     pub max_total_segments: u64,
     /// Maximum distinct absorbing grid cells retained, across all lanes.
+    /// Momentum queries also apply this limit to cells receiving radiation force.
     /// Accumulator storage is O(this limit times the wavelength packet width).
     pub max_deposition_cells: usize,
     /// Study seed for the native counter-based generator.
@@ -120,17 +128,40 @@ impl ScatteringGrid<'_> {
         incident_power_w: &[f64; N],
         config: ScatteringDepositionConfig,
     ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
+        self.deposit_observed(
+            cx,
+            origin,
+            unit_direction,
+            wavelengths_nm,
+            incident_power_w,
+            config,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deposit_observed<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        wavelengths_nm: &[f64; N],
+        incident_power_w: &[f64; N],
+        config: ScatteringDepositionConfig,
+        momentum: Option<&mut MomentumTallies<N>>,
+    ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
         checkpoint(cx)?;
         validate_ray(origin, unit_direction, f64::INFINITY)?;
         if self.absorption.absorption_palette().is_some() || self.scattering_palette().is_some() {
             let medium = PaletteOptics::try_new(self, *wavelengths_nm, &mut || checkpoint(cx))?;
-            return deposit_prepared(
+            return deposit_prepared_observed(
                 &medium,
                 &mut || checkpoint(cx),
                 origin,
                 unit_direction,
                 incident_power_w,
                 config,
+                momentum,
             );
         }
         let (absorption, scattering, extinction) = self.coefficients(wavelengths_nm)?;
@@ -141,13 +172,14 @@ impl ScatteringGrid<'_> {
             scattering,
             extinction,
         };
-        deposit_prepared(
+        deposit_prepared_observed(
             &medium,
             &mut || checkpoint(cx),
             origin,
             unit_direction,
             incident_power_w,
             config,
+            momentum,
         )
     }
 }
@@ -160,6 +192,27 @@ pub(super) fn deposit_prepared<const N: usize>(
     unit_direction: Vec3,
     incident_power_w: &[f64; N],
     config: ScatteringDepositionConfig,
+) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
+    deposit_prepared_observed(
+        medium,
+        check,
+        origin,
+        unit_direction,
+        incident_power_w,
+        config,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deposit_prepared_observed<const N: usize>(
+    medium: &impl PreparedOptics<N>,
+    check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    origin: Point3,
+    unit_direction: Vec3,
+    incident_power_w: &[f64; N],
+    config: ScatteringDepositionConfig,
+    mut momentum: Option<&mut MomentumTallies<N>>,
 ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
     let wavelengths_nm = medium.wavelengths();
     check()?;
@@ -222,8 +275,11 @@ pub(super) fn deposit_prepared<const N: usize>(
             )?;
             result.ballistic_escape.mean_w[lane] = exact.transmitted_power_w[0];
             result.absorbed.mean_w[lane] = exact.absorbed_power_w[0];
+            if let Some(tallies) = momentum.as_deref_mut() {
+                tallies.exact(lane, unit_direction, &exact)?;
+            }
             for cell in exact.cells {
-                spatial.cell(cell.cell_index)?.lanes[lane]
+                spatial.cell(cell.cell_index)?.lanes[lane][0]
                     .moments
                     .observe(cell.absorbed_power_w[0])?;
             }
@@ -240,15 +296,22 @@ pub(super) fn deposit_prepared<const N: usize>(
                 tile: history,
             }
             .stream();
-            let history_result = trace_history(
+            let mut history_momentum = momentum
+                .as_deref_mut()
+                .map(|tallies| HistoryMomentum::new(tallies, lane, history));
+            let history_result = trace_history_observed(
                 &monochromatic,
                 check,
                 (origin, unit_direction, source_w),
                 (config.max_collisions_per_history, config.max_total_segments),
                 &mut result.traced_segments,
                 &mut || random.next_f64(),
-                &mut |cell, heat| spatial.cell(cell)?.lanes[lane].capture(history, heat),
+                &mut |cell, heat| spatial.cell(cell)?.lanes[lane][0].capture(history, heat),
+                history_momentum.as_mut(),
             )?;
+            if let Some(tally) = history_momentum {
+                tally.finish()?;
+            }
             result.precision_limited_histories[lane] += u32::from(history_result.precision_limited);
             let outcome = history_result.values;
             for (moment, value) in totals.iter_mut().zip(outcome) {
@@ -290,6 +353,29 @@ pub(super) fn trace_history(
     random: &mut impl FnMut() -> f64,
     capture: &mut impl FnMut(usize, f64) -> Result<(), VolumeTransportError>,
 ) -> Result<HistoryOutcome, VolumeTransportError> {
+    trace_history_observed::<0>(
+        medium,
+        check,
+        source,
+        limits,
+        traced_segments,
+        random,
+        capture,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_history_observed<const N: usize>(
+    medium: &impl PreparedOptics<1>,
+    check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    source: (Point3, Vec3, f64),
+    limits: (u32, u64),
+    traced_segments: &mut u64,
+    random: &mut impl FnMut() -> f64,
+    capture: &mut impl FnMut(usize, f64) -> Result<(), VolumeTransportError>,
+    mut momentum: Option<&mut HistoryMomentum<'_, N>>,
+) -> Result<HistoryOutcome, VolumeTransportError> {
     let mut precision_limited = false;
     let (mut position, mut direction, source_w) = source;
     let mut power = source_w;
@@ -312,7 +398,11 @@ pub(super) fn trace_history(
             false,
         )?;
         let Some(event) = flight.event else {
-            outcome[usize::from(collision != 0)] = power;
+            let escape = usize::from(collision != 0);
+            outcome[escape] = power;
+            if let Some(tally) = momentum.as_deref_mut() {
+                tally.leave(escape, power, direction)?;
+            }
             break;
         };
         let (a, s, t) = medium.coefficient(event.cell_index, 0)?;
@@ -323,6 +413,9 @@ pub(super) fn trace_history(
             // partial capture, including the below-resolution tail.
             outcome[3] = power;
             precision_limited = true;
+            if let Some(tally) = momentum.as_deref_mut() {
+                tally.leave(2, power, direction)?;
+            }
             break;
         };
         let roundoff = 32.0 * f64::EPSILON * power + 8.0 * f64::from_bits(1);
@@ -336,18 +429,33 @@ pub(super) fn trace_history(
         survival.continue_after_capture(heat, continuation)?;
         power = survival.value();
         if power == 0.0 {
+            if let Some(tally) = momentum.as_deref_mut() {
+                tally.capture(event.cell_index, heat, 0.0, direction, direction)?;
+            }
             break;
         }
-        if collision + 1 == limits.0 {
+        let capped = collision + 1 == limits.0;
+        if capped && momentum.is_none() {
             outcome[3] = power;
             break;
         }
         // A monochromatic matched phase sample has physical/PDF
         // weight one, including interpolated spectral phase tables.
-        direction = medium
+        let outgoing = medium
             .phase(event.cell_index)
             .sample_packet(medium.wavelengths(), direction, random(), random())?
             .direction;
+        if let Some(tally) = momentum.as_deref_mut() {
+            tally.capture(event.cell_index, heat, power, direction, outgoing)?;
+            if capped {
+                tally.leave(2, power, outgoing)?;
+            }
+        }
+        if capped {
+            outcome[3] = power;
+            break;
+        }
+        direction = outgoing;
         position = event.position;
     }
     outcome[2] = captured.value();
@@ -446,14 +554,20 @@ pub(super) struct Moments {
 }
 impl Moments {
     pub(super) fn observe(&mut self, value: f64) -> Result<(), VolumeTransportError> {
-        if !value.is_finite() || value < 0.0 {
+        if value < 0.0 {
             return Err(VolumeTransportError::Unrepresentable);
         }
-        if value > self.scale {
-            let factor = self.scale / value;
+        self.observe_signed(value)
+    }
+    fn observe_signed(&mut self, value: f64) -> Result<(), VolumeTransportError> {
+        if !value.is_finite() {
+            return Err(VolumeTransportError::Unrepresentable);
+        }
+        if value.abs() > self.scale {
+            let factor = self.scale / value.abs();
             self.mean *= factor;
             self.m2 *= factor * factor;
-            self.scale = value;
+            self.scale = value.abs();
         }
         let normalized = if self.scale == 0.0 {
             0.0
@@ -509,19 +623,19 @@ impl CellStatistics {
     fn flush(&mut self) -> Result<(), VolumeTransportError> {
         if let Some(history) = self.history.take() {
             self.moments.zeroes_until(history);
-            self.moments.observe(self.power.value())?;
+            self.moments.observe_signed(self.power.value())?;
             self.power = PowerSum::default();
         }
         Ok(())
     }
 }
 
-struct CellTally<const N: usize> {
+struct CellTally<const N: usize, const D: usize> {
     index: usize,
-    lanes: [CellStatistics; N],
+    lanes: [[CellStatistics; D]; N],
 }
-pub(super) struct SpatialTallies<const N: usize> {
-    cells: Vec<CellTally<N>>,
+pub(super) struct SpatialTallies<const N: usize, const D: usize = 1> {
+    cells: Vec<CellTally<N, D>>,
     // Lookup only: randomized hash iteration never controls reduction order.
     indices: HashMap<usize, usize>,
     limit: usize,
@@ -534,8 +648,23 @@ impl<const N: usize> SpatialTallies<N> {
         history: u32,
         value: f64,
     ) -> Result<(), VolumeTransportError> {
-        self.cell(cell)?.lanes[lane].capture(history, value)
+        self.cell(cell)?.lanes[lane][0].capture(history, value)
     }
+    pub(super) fn finish(
+        self,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+        samples: &[u32; N],
+    ) -> Result<Vec<CellAbsorbedPower<N>>, VolumeTransportError> {
+        self.finish_map(check, samples, |index, components| CellAbsorbedPower {
+            cell_index: index,
+            absorbed: PowerEstimate {
+                mean_w: components.map(|lane| lane[0].0),
+                standard_error_w: components.map(|lane| lane[0].1),
+            },
+        })
+    }
+}
+impl<const N: usize, const D: usize> SpatialTallies<N, D> {
     pub(super) fn new(limit: usize) -> Self {
         Self {
             cells: Vec::new(),
@@ -543,7 +672,7 @@ impl<const N: usize> SpatialTallies<N> {
             limit,
         }
     }
-    fn cell(&mut self, index: usize) -> Result<&mut CellTally<N>, VolumeTransportError> {
+    fn cell(&mut self, index: usize) -> Result<&mut CellTally<N, D>, VolumeTransportError> {
         if let Some(&slot) = self.indices.get(&index) {
             return Ok(&mut self.cells[slot]);
         }
@@ -566,16 +695,17 @@ impl<const N: usize> SpatialTallies<N> {
         let slot = self.cells.len();
         self.cells.push(CellTally {
             index,
-            lanes: [CellStatistics::default(); N],
+            lanes: [[CellStatistics::default(); D]; N],
         });
         self.indices.insert(index, slot);
         Ok(&mut self.cells[slot])
     }
-    pub(super) fn finish(
+    fn finish_map<O>(
         mut self,
         check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
         samples: &[u32; N],
-    ) -> Result<Vec<CellAbsorbedPower<N>>, VolumeTransportError> {
+        mut map: impl FnMut(usize, [[(f64, f64); D]; N]) -> O,
+    ) -> Result<Vec<O>, VolumeTransportError> {
         check()?;
         self.cells.sort_unstable_by_key(|cell| cell.index);
         let mut output = Vec::new();
@@ -584,17 +714,15 @@ impl<const N: usize> SpatialTallies<N> {
             .map_err(|_| VolumeTransportError::Budget)?;
         for mut cell in self.cells {
             check()?;
-            let mut absorbed = PowerEstimate::zero();
+            let mut components = [[(0.0, 0.0); D]; N];
             for lane in 0..N {
-                cell.lanes[lane].flush()?;
-                cell.lanes[lane].moments.zeroes_until(samples[lane]);
-                (absorbed.mean_w[lane], absorbed.standard_error_w[lane]) =
-                    cell.lanes[lane].moments.estimate()?;
+                for (statistic, value) in cell.lanes[lane].iter_mut().zip(&mut components[lane]) {
+                    statistic.flush()?;
+                    statistic.moments.zeroes_until(samples[lane]);
+                    *value = statistic.moments.estimate()?;
+                }
             }
-            output.push(CellAbsorbedPower {
-                cell_index: cell.index,
-                absorbed,
-            });
+            output.push(map(cell.index, components));
         }
         Ok(output)
     }

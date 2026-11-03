@@ -2498,6 +2498,33 @@ closed-form nonlinear Beer-heating trajectory and its refinement order, dynamic
 two-cell shielding, native latent/event/split behavior, infrared source support,
 initially transparent cells and transactional refusal.
 
+### Photon momentum on native volume histories
+
+`ScatteringGrid::deposit_multiple_scattering_momentum` and the corresponding
+`CellScatteringGrid` methods return the original power report together with
+per-cell radiation force and ballistic, diffuse and unresolved photon momentum
+rates. The same native free flights and wavelength/cell phase samples transfer
+`[P_abs d_in + P_continue (d_in - d_out)] / c`; elastic scattering exerts force
+without creating heat. Absorption-only lanes retain exact spatial Beer transport.
+The force query samples the final capped collision's outgoing direction and
+retains that packet as unresolved. It introduces no subsequent force or heat
+from that unresolved continuation.
+
+Signed cell/history reductions and the mean momentum residual use compensated
+sums. Total-force statistics retain correlations between cells; component
+standard errors are fixed-sample estimates, not confidence bounds. One bounded
+cell lookup handles three components. Heating-only calls allocate no force
+tallies, and independent history streams preserve their original power results.
+Cancellation and force-storage refusal publish neither account.
+
+The physical domain is stationary, open, index-one scalar transport with
+quadrature-weighted incident watts. Refractive-host stress, moving-medium Doppler
+work, thermal-emission recoil, spin/orbital angular momentum and mechanical time
+integration are outside this API. Seven focused regressions cover exact
+absorption, elastic isotropy, forward/backward scattering, individual-history
+momentum closure, local spectral phases, diffuse escape, repeatability and
+transactional refusal.
+
 ### Multiple-scattering absorbed power
 
 `ScatteringGrid::deposit_multiple_scattering_power` follows the same native
