@@ -825,6 +825,31 @@ reproduce the canonical elastic stiffness bitwise. Positive quadrature weights
 propagate pointwise relative quadratic-form bounds to the assembled forms;
 this alone is not a frequency-dependent modal-eigenvalue certificate.
 
+
+`ViscoElements::prepare_harmonic_response` connects the complete material
+spectrum and the original consistent mass to the shared `fs-modal` harmonic
+owner. At each positive requested frequency it solves
+`(K'(omega) - omega^2 M - i K''(omega)) u = f` under `exp(-i omega t)`;
+the exact single-frequency identity `C_eff = K''/omega` does not replace
+hereditary histories with memoryless damping. The full coupled tensor entries
+remain present, and every element law must admit the frequency. Preparation
+reuses one dense factor for multiple force phasors: O(n^3) factorization,
+O(n^2) retained storage and solves, plus original quadrature strain checks.
+Before publication, the scaled 2x2 Gram problem of real/imaginary Mandel
+strain admits the maximum norm over the complete cycle at each source point.
+Outputs retain displacement/velocity phasors, numerical backward error,
+independent mean input work and constitutive heat, and their signed defect.
+No dispersive stored-energy formula is inferred from storage stiffness.
+Budgets include the three dense input matrices and shared harmonic payload;
+source sparse assembly retains its existing limits. Unrepresentable effective
+loss, source-domain violations, cancellation and singular pencils refuse.
+This bounded dense route does not claim spatial convergence, unsampled strain
+extrema, transient response, moving supports or experimental validation.
+`tests/visco_harmonic.rs` specifies analytic Prony/Kelvin response and heat,
+nonproportional coupled tensor/consistent-mass phasors, complete-cycle strain
+refusal, deterministic factor reuse, lossless response, budget/band and
+cancellation checks (G0/G1/G3/G4).
+
 `SolidMeshRef::Hex` retains the original hexahedral connectivity and positive
 tensor-product quadrature (at least three points per axis). The original
 `HexElasticProblem` admits topology and sampled Jacobians and assembles the

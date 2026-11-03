@@ -37,6 +37,8 @@ mod quasistatic;
 pub use quasistatic::{ViscoQuasistaticOperator, ViscoQuasistaticStep};
 mod dynamics;
 pub use dynamics::{ViscoDynamicConfig, ViscoDynamicOperator, ViscoDynamicState, ViscoDynamicStep};
+mod harmonic;
+pub use harmonic::{ViscoHarmonicError, ViscoHarmonicOperator, ViscoHarmonicResponse};
 
 /// Geometry and explicit quadrature; material frames must already be resolved.
 #[derive(Clone, Copy)]
