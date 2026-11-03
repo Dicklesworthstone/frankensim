@@ -249,8 +249,8 @@ impl ResistiveFilm {
     /// The original Cholesky solve therefore remains valid. If `alpha*psi>=1`,
     /// the requested flow has no finite pressure in this model and refuses.
     /// Zero alpha restores the original constant-viscosity arithmetic exactly.
-    /// Gas-storage and cavitating owners require their own derivation and refuse
-    /// this pressure-dependent image.
+    /// The cavitating owner transforms its pressure/content balance separately;
+    /// the compressible gas-storage owner still refuses this image.
     pub fn with_barus_viscosity(
         &self,
         pressure_viscosity_coefficient_per_pa: f64,

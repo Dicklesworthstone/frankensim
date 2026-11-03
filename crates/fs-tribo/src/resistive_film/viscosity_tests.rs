@@ -373,7 +373,7 @@ fn zero_barus_is_bitwise_newtonian_and_pressure_barriers_refuse_atomically() {
 }
 
 #[test]
-fn barus_pressure_law_cannot_be_silently_used_by_other_film_storage_models() {
+fn barus_pressure_law_has_liquid_cavitation_support_but_no_gas_storage_model() {
     use super::cavitation::{CavitatingFilm, CavitationLiquid, CavitationSolveConfig};
     use super::isothermal::{AmbientGas, IsothermalFilm};
     let law = film().with_barus_viscosity(2e-4).unwrap();
@@ -394,7 +394,7 @@ fn barus_pressure_law_cannot_be_silently_used_by_other_film_storage_models() {
         relative_mass_tolerance: 1e-10,
     };
     assert!(IsothermalFilm::at_ambient(law.clone(), &[0.0; 2], gas).is_err());
-    assert!(CavitatingFilm::new(law.clone(), liquid, solve).is_err());
+    assert!(CavitatingFilm::new(law.clone(), liquid, solve).is_ok());
     let constant = law.with_barus_viscosity(0.0).unwrap();
     assert!(IsothermalFilm::at_ambient(constant.clone(), &[0.0; 2], gas).is_ok());
     assert!(CavitatingFilm::new(constant, liquid, solve).is_ok());

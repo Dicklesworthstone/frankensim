@@ -6,6 +6,15 @@
 //! shared Poiseuille fluxes and upwinded, caller-supplied Couette entrainment.
 //! Rupture and reformation therefore change liquid content, not just pressure.
 //!
+//! An optional common Barus law retains the reference viscosity at the absolute
+//! reservoir pressure. The pressure unknown becomes
+//! `chi=(1-exp(-alpha*(p-p_c)))/alpha`, and the reference conductances are
+//! multiplied by `exp(alpha*(p_ambient-p_c))`. Thus `chi=0` is exactly rupture,
+//! the same linear active-set solve conserves liquid, and actual pressure is
+//! recovered before projecting forces. No viscosity lag or pressure clipping
+//! is used. This remains the classical Reynolds approximation with negligible
+//! cross-gap pressure variation, not a full high-pressure EHL model.
+//!
 //! This is the isothermal, incompressible-liquid, negligible-void-mass thin-film
 //! approximation. `theta` is retained lubricant content, not vapor mass. Bubble
 //! inertia, finite vapor density, latent heat, dissolved-gas transport, elastic
@@ -16,8 +25,11 @@
 //! Technology 103 (1981), 350--354, DOI 10.1115/1.3251669. This implementation
 //! uses pressure/content complementarity on the existing finite-volume graph;
 //! it does not infer a physical cavitation pressure from a fluid name.
+//! For the Barus/Elrod--Adams equations see Durany, Garcia and Vazquez (1996),
+//! equations (2.5)--(2.8), DOI 10.1017/S0013091500022860.
 
 use super::{FilmError, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm, dot, fail};
+use fs_math::det;
 use std::sync::Arc;
 
 /// Explicit frozen liquid and reservoir data, all in SI units.
@@ -123,6 +135,82 @@ pub struct CavitatingFilm {
     geometry: ResistiveFilm,
     liquid: CavitationLiquid,
     solve: CavitationSolveConfig,
+    pressure_law: PressureTransform,
+}
+
+/// Fluidity is normalized at rupture, while the supplied viscosities remain
+/// referenced to the reservoir. Keeping the zero at rupture preserves the
+/// original pressure/content complementarity and its active-set scaling.
+#[derive(Clone, Copy, Debug)]
+struct PressureTransform {
+    alpha: f64,
+    fluidity_scale: f64,
+    ambient_potential: f64,
+}
+
+impl PressureTransform {
+    fn new(geometry: &ResistiveFilm, liquid: CavitationLiquid) -> Result<Self, FilmError> {
+        let alpha = geometry.pressure_viscosity_coefficient_per_pa();
+        let excess = liquid.ambient_pressure_pa - liquid.cavitation_pressure_pa;
+        let scaled = alpha * excess;
+        let fluidity_scale = if alpha == 0.0 { 1.0 } else { det::exp(scaled) };
+        let ambient_potential = if scaled == 0.0 {
+            excess
+        } else {
+            excess * (-det::expm1(-scaled) / scaled)
+        };
+        if !fluidity_scale.is_finite()
+            || !ambient_potential.is_finite()
+            || alpha * ambient_potential >= 1.0
+        {
+            return fail("unrepresentable cavitating-film Barus reference pressure");
+        }
+        let result = Self {
+            alpha,
+            fluidity_scale,
+            ambient_potential,
+        };
+        result.validate_viscosities(geometry)?;
+        Ok(result)
+    }
+
+    fn validate_viscosities(self, geometry: &ResistiveFilm) -> Result<(), FilmError> {
+        if geometry.channel_viscosities_pa_s().iter().any(|mu| {
+            let at_rupture = mu / self.fluidity_scale;
+            !at_rupture.is_finite() || at_rupture <= 0.0
+        }) {
+            return fail("unrepresentable cavitating-film viscosity at rupture");
+        }
+        Ok(())
+    }
+
+    fn relative_fluidity(self, potential: f64) -> Result<f64, FilmError> {
+        let scaled = self.alpha * potential;
+        if !scaled.is_finite() || scaled >= 1.0 {
+            return fail("cavitating Barus film flow exceeds its finite-pressure limit");
+        }
+        Ok(1.0 - scaled)
+    }
+
+    fn pressure_excess(self, potential: f64) -> Result<f64, FilmError> {
+        if self.alpha == 0.0 || potential == 0.0 {
+            return Ok(potential);
+        }
+        let fluidity = self.relative_fluidity(potential)?;
+        let decrement = 1.0 - fluidity;
+        // Compensated log1p ratio: dividing by the ROUNDED decrement retains
+        // weak pressure dependence without subtracting nearly equal logarithms.
+        // If alpha*chi vanished in 1-alpha*chi, its correction also vanishes.
+        let pressure = if decrement == 0.0 {
+            potential
+        } else {
+            potential * (-det::ln(fluidity) / decrement)
+        };
+        if !pressure.is_finite() {
+            return fail("cavitating Barus film pressure is unrepresentable");
+        }
+        Ok(pressure)
+    }
 }
 
 impl CavitatingFilm {
@@ -133,9 +221,6 @@ impl CavitatingFilm {
         liquid: CavitationLiquid,
         solve: CavitationSolveConfig,
     ) -> Result<Self, FilmError> {
-        if geometry.pressure_viscosity_coefficient_per_pa() != 0.0 {
-            return fail("cavitating film requires pressure-independent viscosity");
-        }
         if !liquid.density_kg_m3.is_finite()
             || liquid.density_kg_m3 <= 0.0
             || !liquid.cavitation_pressure_pa.is_finite()
@@ -159,11 +244,13 @@ impl CavitatingFilm {
                 "invalid cavitating liquid, absolute reservoir pressure, filling or solve budget",
             );
         }
+        let pressure_law = PressureTransform::new(&geometry, liquid)?;
         Ok(Self {
             owner: Arc::new(()),
             geometry,
             liquid,
             solve,
+            pressure_law,
         })
     }
 
@@ -180,11 +267,14 @@ impl CavitatingFilm {
     /// This mass-only owner makes no coefficient-work or thermal-energy claim.
     /// Failure leaves the original owner and every accepted state untouched.
     pub fn with_viscosity(&self, viscosity_pa_s: f64) -> Result<Self, FilmError> {
+        let geometry = self.geometry.with_viscosity(viscosity_pa_s)?;
+        self.pressure_law.validate_viscosities(&geometry)?;
         Ok(Self {
             owner: Arc::clone(&self.owner),
-            geometry: self.geometry.with_viscosity(viscosity_pa_s)?,
+            geometry,
             liquid: self.liquid,
             solve: self.solve,
+            pressure_law: self.pressure_law,
         })
     }
 
@@ -195,11 +285,14 @@ impl CavitatingFilm {
     /// solve consumes these coefficients without resetting existing cavities.
     /// This transport update does not evolve temperature or infer thermal work.
     pub fn with_channel_viscosities(&self, viscosities_pa_s: &[f64]) -> Result<Self, FilmError> {
+        let geometry = self.geometry.with_channel_viscosities(viscosities_pa_s)?;
+        self.pressure_law.validate_viscosities(&geometry)?;
         Ok(Self {
             owner: Arc::clone(&self.owner),
-            geometry: self.geometry.with_channel_viscosities(viscosities_pa_s)?,
+            geometry,
             liquid: self.liquid,
             solve: self.solve,
+            pressure_law: self.pressure_law,
         })
     }
 
@@ -352,7 +445,7 @@ impl CavitatingFilm {
                 || (old_liquid_volume[i] == volume[i]
                     && state.pressure_pa[i] > self.liquid.cavitation_pressure_pa);
         }
-        let boundary_excess = self.liquid.ambient_pressure_pa - self.liquid.cavitation_pressure_pa;
+        let boundary_potential = self.pressure_law.ambient_potential;
         for (k, (edge, factor)) in self
             .geometry
             .channels
@@ -361,7 +454,11 @@ impl CavitatingFilm {
             .enumerate()
         {
             let h = edge.gap.reference_m - dot(&edge.gap.closure, q_next);
-            let g = if h > 0.0 { factor * h * h * h } else { 0.0 };
+            let g = if h > 0.0 {
+                (factor * h * h * h) * self.pressure_law.fluidity_scale
+            } else {
+                0.0
+            };
             if !g.is_finite() || (h > 0.0 && g == 0.0) || (h <= 0.0 && entrainment_m3_s[k] != 0.0) {
                 return fail(
                     "invalid cavitating-film conductance or entrainment through a closed channel",
@@ -380,7 +477,7 @@ impl CavitatingFilm {
                 b[i * n + donor] += e;
                 b[j * n + donor] -= e;
             } else {
-                rhs[i] += ag * boundary_excess;
+                rhs[i] += ag * boundary_potential;
                 if e >= 0.0 {
                     b[i * n + i] += e;
                 } else {
@@ -396,7 +493,7 @@ impl CavitatingFilm {
         {
             return fail("cavitating-film transport assembly overflow");
         }
-        let mut pressure_excess = [0.0; MAX_CELLS];
+        let mut potential = [0.0; MAX_CELLS];
         let mut theta = [0.0; MAX_CELLS];
         for iteration in 1..=self.solve.maximum_iterations {
             poll(cancelled)?;
@@ -435,7 +532,7 @@ impl CavitatingFilm {
                         full[i] = false;
                         changed = true;
                     }
-                    pressure_excess[i] = x[i].max(0.0) * pressure_scale[i];
+                    potential[i] = x[i].max(0.0) * pressure_scale[i];
                     theta[i] = 1.0;
                 } else {
                     if x[i] > 1.0 + roundoff {
@@ -444,7 +541,7 @@ impl CavitatingFilm {
                     }
                     negative_mass |= x[i] < -roundoff;
                     theta[i] = x[i].clamp(0.0, 1.0);
-                    pressure_excess[i] = 0.0;
+                    potential[i] = 0.0;
                 }
             }
             if changed {
@@ -462,7 +559,7 @@ impl CavitatingFilm {
                 &old_liquid_volume,
                 &conductance,
                 &theta,
-                &pressure_excess,
+                &mut potential,
                 cancelled,
             );
         }
@@ -480,7 +577,7 @@ impl CavitatingFilm {
         old_volume: &[f64; MAX_CELLS],
         conductance: &[f64; MAX_CHANNELS],
         theta: &[f64; MAX_CELLS],
-        excess: &[f64; MAX_CELLS],
+        potential: &mut [f64; MAX_CELLS],
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<CavitationStep, FilmError> {
         let n = self.cell_count();
@@ -500,6 +597,7 @@ impl CavitatingFilm {
             after += volume[i] * theta[i];
         }
         let boundary_excess = self.liquid.ambient_pressure_pa - self.liquid.cavitation_pressure_pa;
+        let boundary_potential = self.pressure_law.ambient_potential;
         for (k, edge) in self.geometry.channels.iter().enumerate() {
             let donor = if entrainment[k] >= 0.0 {
                 theta[edge.from]
@@ -507,8 +605,21 @@ impl CavitatingFilm {
                 edge.to
                     .map_or(self.liquid.ambient_liquid_fraction, |j| theta[j])
             };
+            if self.pressure_law.alpha != 0.0 {
+                for chi in [
+                    potential[edge.from],
+                    edge.to.map_or(boundary_potential, |j| potential[j]),
+                ] {
+                    let relative = self.pressure_law.relative_fluidity(chi)?;
+                    let viscosity = self.geometry.channel_viscosities_pa_s()[k]
+                        / (self.pressure_law.fluidity_scale * relative);
+                    if !viscosity.is_finite() || viscosity <= 0.0 {
+                        return fail("cavitating Barus film viscosity is unrepresentable");
+                    }
+                }
+            }
             let flux = conductance[k]
-                * (excess[edge.from] - edge.to.map_or(boundary_excess, |j| excess[j]))
+                * (potential[edge.from] - edge.to.map_or(boundary_potential, |j| potential[j]))
                 + entrainment[k] * donor;
             flows[k] = flux;
             let amount = dt * flux;
@@ -522,6 +633,9 @@ impl CavitatingFilm {
                 boundary_scale += amount.abs();
             }
         }
+        // Fluxes have consumed the potential; reuse its storage for actual
+        // pressure excess. Force, domain checks and retained pressure use p.
+        let excess = potential;
         let mut max_residual = 0.0_f64;
         for i in 0..n {
             let r = rho * residual[i];
@@ -531,6 +645,7 @@ impl CavitatingFilm {
                 return fail("cavitating-film cell liquid-mass balance exceeds tolerance");
             }
             max_residual = max_residual.max(r.abs());
+            excess[i] = self.pressure_law.pressure_excess(excess[i])?;
             let gauge = excess[i] - boundary_excess;
             if !gauge.is_finite() || gauge.abs() > self.geometry.limits.maximum_pressure_pa {
                 return fail("cavitating-film pressure exceeds declared validity domain");

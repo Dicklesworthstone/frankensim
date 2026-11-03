@@ -902,8 +902,9 @@ pressure or viscosity, and existing domain limits refuse atomically. The
 coefficient and its supported pressure interval are caller declarations for the
 classical incompressible isothermal Reynolds reduction, with no general
 high-pressure or elastohydrodynamic accuracy or sourced-material claim.
-Gas-storage and cavitating owners explicitly refuse nonzero `alpha`. Four
-new test groups check integrated fluidity, positive and suction branches,
+The gas-storage owner still refuses nonzero `alpha`; the cavitating owner uses
+the pressure/content transform described below. Four original test groups
+check integrated fluidity, positive and suction branches,
 volume/force/work balance, the finite-difference nonsymmetric tangent,
 coefficient continuation, zero-alpha identity, barriers and incompatible
 storage owners.
@@ -993,6 +994,16 @@ same flux. Reservoir pressure and incoming liquid content are explicit; partial
 reservoir filling is admissible only at cavitation pressure. No material name,
 pressure floor, artificial leakage or replacement gap supplies missing physics.
 
+A common Barus law now uses `chi=(1-exp(-alpha*(p-p_c)))/alpha`, with channel
+conductances multiplied by `exp(alpha*(p_ambient-p_c))`; supplied viscosities
+remain referenced to the reservoir pressure. Zero potential is exactly rupture,
+so the same bounded linear active-set solve retains mass and complementarity.
+The inverse transform supplies actual absolute pressure for forces and domain
+checks. Unrepresentable viscosity and the finite-pressure barrier refuse before
+publication. Zero `alpha` preserves the original arithmetic, and uniform or
+per-channel viscosity refreshes continue accepted liquid content without reset.
+No extra nonlinear solve or iteration buffer is introduced.
+
 Rupture, starvation and reformation change retained liquid content, preserving
 mass under wall motion and refill. Each candidate reports cell and global liquid
 mass residuals, signed boundary mass, absolute pressures, face fluxes and the
@@ -1013,8 +1024,11 @@ vapor density, bubble inertia, dissolved gas, EHL, thermal evolution and sealed
 full-liquid compression require additional owners. Focused G0/G1/G3/G5 tests
 cover the original full-film pressure limit, analytical rupture/refill, sealed
 liquid conservation, bidirectional starved Couette transport, positivity,
-transactional refusals and deterministic replay. No experimental accuracy or
-cross-ISA execution claim follows from these tests.
+transactional refusals and deterministic replay. Barus regressions additionally
+compare the native full-film solution, reconstruct heterogeneous face fluxes and
+cell mass, exercise rupture/refill/reformation and viscosity continuation, and
+check absolute-pressure shifts, the zero-alpha history, and atomic refusals.
+No experimental accuracy or cross-ISA execution claim follows from these tests.
 
 ## Error model
 
