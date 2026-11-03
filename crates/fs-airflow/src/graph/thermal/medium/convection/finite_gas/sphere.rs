@@ -28,8 +28,8 @@ impl<M: FilmGasSource> Clone for ForcedSphereGasSurface<'_, M> {
 
 /// Actual coupled gas/body states and the separate fluid-at-surface query.
 #[derive(Debug)]
-pub struct SphereGasConvectionSample<S = ResolvedThermochemicalGasState> {
-    pub interface: FiniteGasConvectionSample<S>,
+pub struct SphereGasConvectionSample<S = ResolvedThermochemicalGasState, W = EquilibriumPhaseState> {
+    pub interface: FiniteGasConvectionSample<S, W>,
     /// None only for an explicitly insulated zero-area patch.
     pub surface_gas: Option<S>,
 }
@@ -68,8 +68,17 @@ impl<M: FilmGasSource> ForcedSphereGasSurface<'_, M> {
         body: EquilibriumPhaseState,
     ) -> Result<ConductanceSample<SphereGasConvectionSample<M::State>>, MaterialConvectionError>
     {
+        self.resolve_at_temperature(gas, body.temperature_k(), body)
+    }
+
+    fn resolve_at_temperature<W>(
+        self,
+        gas: &M::State,
+        wall: f64,
+        body: W,
+    ) -> Result<ConductanceSample<SphereGasConvectionSample<M::State, W>>, MaterialConvectionError>
+    {
         self.validate()?;
-        let wall = body.temperature_k();
         if !wall.is_finite() || wall <= 0.0 {
             return Err(invalid(
                 "sphere convection needs a positive body temperature",
@@ -154,5 +163,44 @@ impl<M: FilmGasSource> ForcedSphereGasSurface<'_, M> {
             |gas, wall| self.resolve(gas, wall),
             cancelled,
         )
+    }
+
+    /// Resolve source-pinned surface viscosity at the coupled wall endpoint
+    /// while the original fixed-volume gas retains its bulk transport and
+    /// internal energy. The original wall-feedback/reciprocal-heat solve owns
+    /// both thermal endpoints, radiation, body enthalpy and Biot admission.
+    ///
+    /// A positive patch must cover the complete exposed body surface. The
+    /// entire heat and wall-temperature brackets must admit Whitaker's source
+    /// bounds, including mu_bulk/mu_surface; no ratio or heat is clipped.
+    pub fn isochoric_body_candidate<G: IsochoricGasStorage<State = M::State>>(
+        self,
+        cx: &Cx<'_>,
+        environment: &FiniteGasThermalEnvironment<'_, G>,
+        body: UniformEnthalpyStepInput<'_>,
+        wall: WallConvectionSolve,
+    ) -> Result<
+        UniformEnthalpyStep<
+            FiniteGasThermalReport<WallConvectionSample<SphereGasConvectionSample<M::State, Temperature>>, G>,
+        >,
+        ConvectionError<WallConvectionError<MaterialConvectionError>>,
+    > {
+        cx.checkpoint().map_err(|_| ConvectionError::Thermal(ThermalPistonError::Cancelled))?;
+        self.validate().map_err(|error| {
+            ConvectionError::Convection(WallConvectionError::Source(error))
+        })?;
+        if !body.surface_area_m2.is_finite() || body.surface_area_m2 <= 0.0
+            || (self.area_m2 != 0.0 && self.area_m2 != body.surface_area_m2)
+        {
+            return Err(ConvectionError::Thermal(ThermalPistonError::Invalid(
+                "isochoric sphere convection must cover the complete body surface or be explicitly insulated",
+            )));
+        }
+        environment.advance_with_wall_convection(cx, body, wall, |gas, temperature_k| {
+            let sample = self.resolve_at_temperature(gas, temperature_k, Temperature::new(temperature_k))?;
+            let coefficient_w_per_m2_k = sample.source.interface.evaluation.as_ref()
+                .map_or(0.0, |value| value.coefficient.value.value());
+            Ok(ConvectionCoefficient { coefficient_w_per_m2_k, source: sample.source })
+        })
     }
 }

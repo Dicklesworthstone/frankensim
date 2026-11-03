@@ -26,6 +26,7 @@ use fs_couple::cavity_phs::piston::thermal::{
 };
 use fs_couple::finite_gas_thermal::{
     ConvectionCoefficient, ConvectionError, FiniteGasThermalEnvironment, FiniteGasThermalReport,
+    WallConvectionError, WallConvectionSample, WallConvectionSolve,
 };
 use fs_evidence::Evidence;
 use fs_exec::Cx;
@@ -61,11 +62,13 @@ pub struct GasConvectionEvaluation {
 }
 
 /// Complete accepted interface sample; gas sources are not reduced to a tuple.
-/// The body source identity remains in its canonical phase state/enthalpy chart.
+/// Piston callbacks retain the canonical phase state. Isochoric property
+/// queries retain a typed wall temperature; their accepted phase state remains
+/// with the original uniform-body enthalpy report.
 #[derive(Debug)]
-pub struct FiniteGasConvectionSample<S = ResolvedThermochemicalGasState> {
+pub struct FiniteGasConvectionSample<S = ResolvedThermochemicalGasState, W = EquilibriumPhaseState> {
     pub gas: S,
-    pub body: EquilibriumPhaseState,
+    pub body: W,
     pub area_m2: f64,
     /// None for an explicitly isolated zero-area patch or the natural law's
     /// exact thermal equilibrium. Neither case extrapolates a correlation.

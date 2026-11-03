@@ -13,6 +13,8 @@ mod natural;
 mod natural_network;
 #[path = "finite_gas_convection/sphere.rs"]
 mod sphere;
+#[path = "finite_gas_convection/isochoric_wall.rs"]
+mod isochoric_wall;
 use fs_airflow::graph::thermal::medium::convection::{
     ForcedConvectionSettings, evaluate_forced_from_material, finite_gas::*,
 };

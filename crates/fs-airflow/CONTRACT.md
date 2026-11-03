@@ -996,8 +996,8 @@ Prandtl and the live coefficient; the accepted parcel retains its real pressure,
 caloric storage, entropy and acoustic state. No ideal-reference density enters
 that transfer. `tests/finite_gas_convection/real_gas.rs` covers dense-gas heating
 and cooling, reciprocal energy/entropy accounting, wall feedback, formation
-reference invariance and transactional source/cancellation refusals. The film
-adapter retains its dilute ideal-gas source assumption.
+reference invariance and transactional source/cancellation refusals. Film
+queries use the explicitly selected ideal or homogeneous Peng--Robinson source.
 A positive patch must cover the whole body surface; zero area explicitly
 insulates it. Bulk-gas property evaluation and prescribed relative flow retain
 their correlation limits. Dittus-Boelter selects its heating/cooling branch
@@ -1100,6 +1100,25 @@ source/pressure/composition retention, trial-dependent viscosity, melting and
 gas/body/motion energy closure, deterministic replay, insulation and atomic
 source/geometry/cancellation refusal. They do not establish experimental
 accuracy or support outside the original isolated-sphere model.
+
+### Wall-dependent fixed-volume gas/body coupling
+
+`FilmGasSurface::isochoric_body_candidate` and
+`ForcedSphereGasSurface::isochoric_body_candidate` connect these same laws to
+the original fixed-volume `advance_with_wall_convection` transaction. Forced,
+oriented natural and aiding mixed films use the current wall and bulk
+temperatures; forced spheres retain bulk transport and separately query
+wall-temperature viscosity. Property samples retain typed wall temperatures;
+the original enthalpy owner retains the actual phase and latent fraction.
+The existing wall solve bounds both temperature mismatch and boundary-work
+mismatch before the original reciprocal heat, energy and entropy accounts
+accept. Positive area must equal the body's complete exposed area, preserving
+local Biot admission; zero area explicitly insulates. Constant-heat-flux duct
+cards are refused for this isothermal-body boundary. The full heat and wall
+brackets retain all original source, correlation and cancellation refusals.
+Focused `isochoric_wall` regressions cover the coupled property states, full
+Rayleigh contrast, energy closure, melting, partial-area/Biot refusal and
+cancellation.
 
 ### Natural convection in finite gas and coupled surface networks
 

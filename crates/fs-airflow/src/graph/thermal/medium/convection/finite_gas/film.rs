@@ -62,8 +62,8 @@ impl<M: FilmGasSource> Clone for FilmGasSurface<'_, M> {
 /// The actual bulk gas/body states and the separate property evaluation.
 /// Bulk gas remains the thermodynamic/acoustic state; film never replaces it.
 #[derive(Debug)]
-pub struct FilmGasConvectionSample<S = ResolvedThermochemicalGasState> {
-    pub interface: FiniteGasConvectionSample<S>,
+pub struct FilmGasConvectionSample<S = ResolvedThermochemicalGasState, W = EquilibriumPhaseState> {
+    pub interface: FiniteGasConvectionSample<S, W>,
     /// None only for an explicitly isolated zero-area patch.
     pub property_gas: Option<S>,
 }
@@ -104,8 +104,16 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
         gas: &M::State,
         body: EquilibriumPhaseState,
     ) -> Result<ConductanceSample<FilmGasConvectionSample<M::State>>, MaterialConvectionError> {
+        self.resolve_at_temperature(gas, body.temperature_k(), body)
+    }
+
+    fn resolve_at_temperature<W>(
+        self,
+        gas: &M::State,
+        wall: f64,
+        body: W,
+    ) -> Result<ConductanceSample<FilmGasConvectionSample<M::State, W>>, MaterialConvectionError> {
         let area_m2 = self.law.area()?;
-        let wall = body.temperature_k();
         let bulk = gas.temperature_k();
         if !wall.is_finite() || wall <= 0.0 {
             return Err(invalid("film convection needs a positive body temperature"));
@@ -253,5 +261,54 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             |gas, wall| self.resolve(gas, wall),
             cancelled,
         )
+    }
+
+    /// Resolve film properties at the coupled wall and fixed-volume gas
+    /// endpoints through the original reciprocal heat and wall-feedback solve.
+    /// The retained wall query is a temperature, not an inferred phase fraction;
+    /// the body owner retains its actual enthalpy, latent heat and phase state.
+    ///
+    /// Positive area must cover the complete exposed body surface so its local
+    /// coefficient reaches the original Biot check without area averaging.
+    /// Radiation remains external. All gas/heat and wall-temperature brackets
+    /// must stay within the source and correlation domains, including mixed
+    /// convection's aiding-flow and density-departure limits.
+    pub fn isochoric_body_candidate<G: IsochoricGasStorage<State = M::State>>(
+        self,
+        cx: &Cx<'_>,
+        environment: &FiniteGasThermalEnvironment<'_, G>,
+        body: UniformEnthalpyStepInput<'_>,
+        wall: WallConvectionSolve,
+    ) -> Result<
+        UniformEnthalpyStep<
+            FiniteGasThermalReport<WallConvectionSample<FilmGasConvectionSample<M::State, Temperature>>, G>,
+        >,
+        ConvectionError<WallConvectionError<MaterialConvectionError>>,
+    > {
+        cx.checkpoint().map_err(|_| ConvectionError::Thermal(ThermalPistonError::Cancelled))?;
+        let area = self.law.area().map_err(|error| {
+            ConvectionError::Convection(WallConvectionError::Source(error))
+        })?;
+        if !body.surface_area_m2.is_finite() || body.surface_area_m2 <= 0.0
+            || (area != 0.0 && area != body.surface_area_m2)
+        {
+            return Err(ConvectionError::Thermal(ThermalPistonError::Invalid(
+                "isochoric film convection must cover the complete body surface or be explicitly insulated",
+            )));
+        }
+        if area > 0.0 && matches!(self.law, FilmGasHeatLaw::Forced(ForcedGasSurface {
+            correlation: CorrelationId::CircularDuctLaminarChf | CorrelationId::RectangularDuctLaminarChf,
+            ..
+        })) {
+            return Err(ConvectionError::Convection(WallConvectionError::Source(invalid(
+                "an isothermal finite body cannot impose a constant-heat-flux duct correlation",
+            ))));
+        }
+        environment.advance_with_wall_convection(cx, body, wall, |gas, temperature_k| {
+            let sample = self.resolve_at_temperature(gas, temperature_k, Temperature::new(temperature_k))?;
+            let coefficient_w_per_m2_k = sample.source.interface.evaluation.as_ref()
+                .map_or(0.0, |value| value.coefficient.value.value());
+            Ok(ConvectionCoefficient { coefficient_w_per_m2_k, source: sample.source })
+        })
     }
 }
