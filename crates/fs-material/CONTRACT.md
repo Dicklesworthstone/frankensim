@@ -1,5 +1,52 @@
 # fs-material — CONTRACT
 
+## Continuous speciated gold leaching
+
+`cyanide_leach::flow::CyanidationCstr` advances one full, fixed-volume,
+isothermal mixed tank. Incoming and outgoing solution volumes are equal.
+Accessible solid Au, dissolved Au complex, analytical cyanide, dissolved O2,
+background acid families, spectator ions and competing-metal totals all share
+the declared hydraulic residence. Feed concentrations and Q use the same
+physical solution-volume basis; solids displacement and ore tonnage are not
+inferred. The caller's original initial charge remains retained separately
+from the canonical internal component layout.
+
+The distinct `LocalGoldCyanidation` source declares
+`local-speciated-gold-cyanidation` and the original empirical form
+`r_Au=k*n_Au*c_free_CN*c_O2`. Its card is retained unchanged. Batch-age and
+residence-time coordinates cannot provide local kinetic authority. Required
+typed source coordinates use actual pH, free CN, DO, accessible Au, temperature
+and volume. Original water, cyanide and optional metal-family sources own
+the shared equilibrium calculation at every evaluated stage.
+
+Transport acts on analytical totals: `dn/dt=Q*C_in-Q*n/V+nu*r_Au`.
+The cyanide component includes ligand bound to competing metals and excludes
+ligands in the separately tracked Au complex. Metal and background inventories
+can enter and leave; their actual partition is re-solved after transport and
+reaction. Every initial family, spectator identity/charge and metal total
+must have exactly one feed entry, including explicit zeros.
+
+Exact positive transport, bounded RK4 reaction and exact transport form a
+second-order split. Full/two-half differences divided by three estimate local
+error in the L1 norm over inventories, independently accumulated exports and
+Au reaction progress. Time-weighted allowances bound the sum of accepted
+estimates in each call. These are numerical estimates, not certified global
+bounds or equilibrium/source uncertainty. Source admission covers numerical
+split endpoints and reaction stages, not an enclosure of the unsplit path.
+
+Interval and cumulative inlet/outlet accounts remain separate from reaction
+progress and final tank inventory. Independent component, Au, cyanide, O2 and
+Na balances retain the original ligand-equilibrium residual. A flow stop
+preserves inlet/outlet accounts while chemical dissolution can continue.
+Invalid feeds, source refusal, depletion, unresolved numerical updates,
+work exhaustion and cancellation publish no partial state or stream account.
+
+Oxygen is supplied only by initial liquid and explicit feed. Gas transfer,
+carbon adsorption, solids slip, mineral liberation, competing-metal redox,
+precipitation, variable volume, heat feedback and finite solvent H/O closure
+remain outside this owner. The source-backed example and input conventions
+are in `data/matdb/seed-v1/MINING_CONTINUOUS_CYANIDE_LEACH.md`.
+
 ## Simultaneous carbon-in-leach and explicit preg-robbing inventories
 
 `cyanide_leach::cil::CarbonInLeachBatch` advances accessible-gold dissolution

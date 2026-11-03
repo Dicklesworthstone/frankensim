@@ -63,6 +63,9 @@ pub mod dosing;
 /// Simultaneous finite gold dissolution and neutral ion-pair capture on carbon.
 pub mod cil;
 
+/// Continuous ideally mixed slurry flow with independently declared local kinetics.
+pub mod flow;
+
 /// Explicit empirical coefficient in m6/(mol2 s).
 pub type CyanidationRateConstant = Qty<6, 0, -1, 0, 0, -2>;
 /// Accessible gold dissolution rate in mol Au/s.
@@ -239,47 +242,7 @@ impl GoldCyanidation {
             )?;
         }
         let cyanide_family = cyanide_family.into();
-        let family = chemistry
-            .families()
-            .iter()
-            .find(|f| f.id() == cyanide_family)
-            .ok_or(CyanidationError::Invalid(
-                "unknown uncomplexed-cyanide family",
-            ))?;
-        require(
-            family.steps().len() == 1
-                && family.species().len() == 2
-                && family.species()[0].as_str() == HCN
-                && family.species()[1].as_str() == CN
-                && chemistry.water().proton().as_str() == "H+(aq)"
-                && chemistry.water().water().as_str() == "H2O(l)"
-                && chemistry.water().hydroxide().as_str() == HYDROXIDE,
-            "requires the explicit HCN/CN family and original water/proton/hydroxide roles",
-        )?;
-        let reaction = MineralReaction::GoldCyanidationDissolvedOxygen.build()?;
-        let participants: BTreeSet<_> = reaction.terms().iter().map(|term| &term.species).collect();
-        require(
-            chemistry
-                .families()
-                .iter()
-                .filter(|family| family.id() != cyanide_family)
-                .all(|family| {
-                    family
-                        .species()
-                        .iter()
-                        .all(|species| !participants.contains(species))
-                }),
-            "other acid families cannot own a cyanidation reactant or product",
-        )?;
-        ReactionNetwork::new(
-            chemistry
-                .reaction_network()
-                .reactions()
-                .iter()
-                .cloned()
-                .chain(std::iter::once(reaction.clone()))
-                .collect(),
-        )?;
+        let reaction = cyanidation_reaction(&chemistry, &cyanide_family)?;
         let temperature = chemistry.water().standard().temperature().value();
         let (low, high) = source
             .validity
@@ -317,6 +280,142 @@ impl GoldCyanidation {
     pub const fn rate_constant(&self) -> CyanidationRateConstant {
         self.rate
     }
+}
+
+// The chemistry identity/stoichiometry is shared, not the batch kinetic authority.
+fn cyanidation_reaction(
+    chemistry: &IdealAcidBaseSystem,
+    cyanide_family: &str,
+) -> Result<ConservedReaction> {
+    let family = chemistry
+        .families()
+        .iter()
+        .find(|f| f.id() == cyanide_family)
+        .ok_or(CyanidationError::Invalid(
+            "unknown uncomplexed-cyanide family",
+        ))?;
+    require(
+        family.steps().len() == 1
+            && family.species().len() == 2
+            && family.species()[0].as_str() == HCN
+            && family.species()[1].as_str() == CN
+            && chemistry.water().proton().as_str() == "H+(aq)"
+            && chemistry.water().water().as_str() == "H2O(l)"
+            && chemistry.water().hydroxide().as_str() == HYDROXIDE,
+        "requires the explicit HCN/CN family and original water/proton/hydroxide roles",
+    )?;
+    let reaction = MineralReaction::GoldCyanidationDissolvedOxygen.build()?;
+    let participants: BTreeSet<_> = reaction.terms().iter().map(|term| &term.species).collect();
+    require(
+        chemistry
+            .families()
+            .iter()
+            .filter(|family| family.id() != cyanide_family)
+            .all(|family| {
+                family
+                    .species()
+                    .iter()
+                    .all(|species| !participants.contains(species))
+            }),
+        "other acid families cannot own a cyanidation reactant or product",
+    )?;
+    ReactionNetwork::new(
+        chemistry
+            .reaction_network()
+            .reactions()
+            .iter()
+            .cloned()
+            .chain(std::iter::once(reaction.clone()))
+            .collect(),
+    )?;
+    Ok(reaction)
+}
+
+// Explicit current analytical stocks let flow reuse the equilibrium owner without
+// relabeling transported material as a new initial charge or resetting a clock.
+struct CurrentSolution<'a> {
+    cyanide: Amount,
+    gold_complex: Amount,
+    other_families: &'a [(String, Amount)],
+    spectators: &'a [SpectatorIon],
+    metal_totals: &'a [(String, Amount)],
+    amount_at_unit_activity: Amount,
+}
+struct EquilibratedSolution {
+    speciation: AcidBaseSpeciation,
+    competition: Option<LigandSpeciation>,
+    uncomplexed_cyanide: Amount,
+    free_cyanide: Amount,
+}
+fn speciate_current(
+    chemistry: &IdealAcidBaseSystem,
+    cyanide_family: &str,
+    metals: Option<&competition::BoundCompetition>,
+    current: CurrentSolution<'_>,
+    options: SpeciationOptions,
+    work: &mut Work<'_, impl FnMut() -> bool>,
+) -> Result<EquilibratedSolution> {
+    let mut spectators = current.spectators.to_vec();
+    spectators.push(SpectatorIon {
+        species: SpeciesId::new(COMPLEX).expect("fixed species identity"),
+        charge: -1,
+        amount: current.gold_complex,
+    });
+    let equilibrium = match metals {
+        Some(metals) => metals
+            .model
+            .speciate(
+                current.cyanide,
+                current.metal_totals,
+                current.other_families,
+                &spectators,
+                current.amount_at_unit_activity,
+                metals.numerics,
+                || work.interrupted(),
+            )
+            .map(|result| {
+                (
+                    result.aqueous.clone(),
+                    result.uncomplexed_ligand,
+                    Some(result),
+                )
+            })
+            .map_err(CyanidationError::from),
+        None => {
+            let mut totals = current.other_families.to_vec();
+            totals.push((cyanide_family.to_owned(), current.cyanide));
+            chemistry
+                .speciate(
+                    &totals,
+                    &spectators,
+                    current.amount_at_unit_activity,
+                    options,
+                    || work.interrupted(),
+                )
+                .map(|result| (result, current.cyanide, None))
+                .map_err(CyanidationError::from)
+        }
+    };
+    if let Some(error) = work.stopped.take() {
+        return Err(error);
+    }
+    let (speciation, uncomplexed_cyanide, competition) = equilibrium?;
+    let free_cyanide = speciation
+        .families
+        .iter()
+        .find(|f| f.id == cyanide_family)
+        .expect("original family retained")
+        .forms
+        .iter()
+        .find(|f| f.species.as_str() == CN)
+        .expect("original CN member retained")
+        .amount;
+    Ok(EquilibratedSolution {
+        speciation,
+        competition,
+        uncomplexed_cyanide,
+        free_cyanide,
+    })
 }
 
 /// Original accessible reactants and explicitly declared fixed solution basis.
@@ -854,67 +953,35 @@ fn evaluate_with_partition(
         Some(value) => positive_or_zero(value, "integrated dissolved gold complex loses range")?,
         None => sum([c.gold_complex.value(), amount(&amounts, COMPLEX)].into_iter())?,
     };
-    let mut spectators = match spectator_stock {
+    let spectators = match spectator_stock {
         Some(values) => values.to_vec(),
         None => dosing::spectators(layout)?,
     };
-    spectators.push(SpectatorIon {
-        species: SpeciesId::new(COMPLEX).expect("fixed species identity"),
-        charge: -1,
-        amount: Amount::new(complex),
-    });
-    let equilibrium = match &layout.competition {
-        Some(metals) => metals
-            .model
-            .speciate(
-                Amount::new(cyanide),
-                &metals.totals,
-                &c.other_families,
-                &spectators,
-                c.amount_at_unit_activity,
-                metals.numerics,
-                || work.interrupted(),
-            )
-            .map(|result| {
-                (
-                    result.aqueous.clone(),
-                    result.uncomplexed_ligand.value(),
-                    Some(result),
-                )
-            })
-            .map_err(CyanidationError::from),
-        None => {
-            let mut totals = c.other_families.clone();
-            totals.push((layout.model.cyanide_family.clone(), Amount::new(cyanide)));
-            layout
-                .model
-                .chemistry
-                .speciate(
-                    &totals,
-                    &spectators,
-                    c.amount_at_unit_activity,
-                    layout.speciation,
-                    || work.interrupted(),
-                )
-                .map(|result| (result, cyanide, None))
-                .map_err(CyanidationError::from)
-        }
-    };
-    if let Some(error) = work.stopped.take() {
-        return Err(error);
-    }
-    let (speciation, cyanide, competition) = equilibrium?;
-    let family = speciation
-        .families
-        .iter()
-        .find(|f| f.id == layout.model.cyanide_family)
-        .expect("original family retained");
-    let free_cyanide = family
-        .forms
-        .iter()
-        .find(|f| f.species.as_str() == CN)
-        .expect("original CN member retained")
-        .amount;
+    let equilibrium = speciate_current(
+        &layout.model.chemistry,
+        &layout.model.cyanide_family,
+        layout.competition.as_ref(),
+        CurrentSolution {
+            cyanide: Amount::new(cyanide),
+            gold_complex: Amount::new(complex),
+            other_families: &c.other_families,
+            spectators: &spectators,
+            metal_totals: layout
+                .competition
+                .as_ref()
+                .map_or(&[], |m| m.totals.as_slice()),
+            amount_at_unit_activity: c.amount_at_unit_activity,
+        },
+        layout.speciation,
+        work,
+    )?;
+    let EquilibratedSolution {
+        speciation,
+        competition,
+        uncomplexed_cyanide,
+        free_cyanide,
+    } = equilibrium;
+    let cyanide = uncomplexed_cyanide.value();
     let free_concentration = quotient(free_cyanide.value(), c.solution_volume.value())?;
     let oxygen_concentration = quotient(oxygen, c.solution_volume.value())?;
     let values = [
