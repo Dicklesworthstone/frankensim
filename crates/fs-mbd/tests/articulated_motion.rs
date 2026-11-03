@@ -48,13 +48,23 @@ fn attitude(a: So3, b: So3, tolerance: f64) {
 }
 fn impulse_balance(step: &FreeFloatingMotionStep, tolerance: f64) {
     vector(
-        step.momentum_after.linear_momentum_world - step.momentum_before.linear_momentum_world,
+        step.linear_momentum_change_world,
         step.external_linear_impulse_world,
         tolerance,
     );
     vector(
-        step.momentum_after.angular_momentum_world - step.momentum_before.angular_momentum_world,
+        step.angular_momentum_change_world,
         step.external_angular_impulse_world,
+        tolerance,
+    );
+    vector(
+        step.linear_momentum_residual_world,
+        Vec3::default(),
+        tolerance,
+    );
+    vector(
+        step.angular_momentum_residual_world,
+        Vec3::default(),
         tolerance,
     );
 }
@@ -926,6 +936,13 @@ fn spin_work_survives_a_large_unchanged_translation_energy() {
     )
     .unwrap();
     close(step.state_after.base.twist_body.angular.z, 0.25, 1e-15);
+    close(step.kinetic_energy_change, 0.03125, 1e-15);
+    // The global totals have already rounded away this retained spin work.
+    close(
+        step.momentum_after.kinetic_energy - step.momentum_before.kinetic_energy,
+        0.0,
+        0.0,
+    );
     close(step.external_work, 0.03125, 1e-15);
     close(step.kinetic_work_residual, 0.0, 1e-15);
 }
@@ -967,4 +984,153 @@ fn gravity_work_retains_small_com_increments_far_from_the_origin() {
         close(step.external_work, 2.0_f64.powi(-18), 0.0);
         close(step.kinetic_work_residual, 0.0, 0.0);
     }
+}
+
+/// G1: independent source quadrature must expose a representational defect.
+/// The existing native update admits this finite step; its velocity increment
+/// rounds away, so recording the requested impulse as actual momentum is false.
+#[test]
+fn free_receipts_distinguish_supplied_impulses_from_swallowed_state_updates() {
+    let model = ArticulatedModel::new(vec![Link::new(
+        "body",
+        None,
+        Se3::identity(),
+        JointModel::FIXED,
+        sphere(1.0, 1.0),
+    )])
+    .unwrap();
+    let boost = 2.0_f64.powi(55);
+    let mut state = still(vec![], vec![]);
+    state.base.twist_body.linear = Vec3::new(boost, 0.0, 0.0);
+    for force in [-1.0, 1.0] {
+        let step = step_free_floating(
+            &model,
+            &state,
+            FreeFloatingMotionLoads {
+                generalized_force: &[],
+                external_body_wrench: &[Wrench::new(Vec3::default(), Vec3::new(force, 0.0, 0.0))],
+                gravity_world: Vec3::default(),
+            },
+            1.0,
+            || false,
+        )
+        .unwrap();
+        close(step.state_after.base.twist_body.linear.x, boost, 0.0);
+        vector(step.linear_momentum_change_world, Vec3::default(), 0.0);
+        vector(
+            step.external_linear_impulse_world,
+            Vec3::new(force, 0.0, 0.0),
+            0.0,
+        );
+        vector(
+            step.linear_momentum_residual_world,
+            Vec3::new(-force, 0.0, 0.0),
+            0.0,
+        );
+        close(step.kinetic_energy_change, 0.0, 0.0);
+        close(step.kinetic_work_residual, -force * boost, 0.0);
+    }
+}
+
+/// G1/G3: the force moment and applied couple cancel exactly about a distant
+/// world origin, but a swallowed linear kick leaves a real spin defect. Rounded
+/// whole-tree endpoint momenta both equal 2^55 and would incorrectly report zero.
+#[test]
+fn distant_orbital_momentum_cannot_hide_a_small_actual_spin_defect() {
+    let model = ArticulatedModel::new(vec![Link::new(
+        "body",
+        None,
+        Se3::identity(),
+        JointModel::FIXED,
+        sphere(1.0, 1.0),
+    )])
+    .unwrap();
+    let origin = 2.0_f64.powi(55);
+    let duration = 1.0 / origin;
+    let mut state = still(vec![], vec![]);
+    state.base = FreeFloatingBaseState::new(
+        Se3::from_parts(So3::identity(), Vec3::new(origin, 0.0, 0.0)).unwrap(),
+        Twist::new(Vec3::default(), Vec3::new(0.0, 1.0, 0.0)),
+    );
+    let step = step_free_floating(
+        &model,
+        &state,
+        FreeFloatingMotionLoads {
+            generalized_force: &[],
+            external_body_wrench: &[Wrench::new(
+                Vec3::new(0.0, 0.0, -origin),
+                Vec3::new(0.0, 1.0, 0.0),
+            )],
+            gravity_world: Vec3::default(),
+        },
+        duration,
+        || false,
+    )
+    .unwrap();
+    close(
+        step.momentum_after.angular_momentum_world.z
+            - step.momentum_before.angular_momentum_world.z,
+        0.0,
+        0.0,
+    );
+    vector(step.external_angular_impulse_world, Vec3::default(), 0.0);
+    vector(
+        step.angular_momentum_change_world,
+        Vec3::new(0.0, 0.0, -1.0),
+        1e-15,
+    );
+    vector(
+        step.angular_momentum_residual_world,
+        Vec3::new(0.0, 0.0, -1.0),
+        1e-15,
+    );
+    // Rotation transport can leave components at the arithmetic roundoff scale;
+    // this bound is still far below the independently supplied linear impulse.
+    let linear_roundoff = 8.0 * f64::EPSILON * duration;
+    vector(
+        step.linear_momentum_change_world,
+        Vec3::default(),
+        linear_roundoff,
+    );
+    vector(
+        step.linear_momentum_residual_world,
+        Vec3::new(0.0, -duration, 0.0),
+        linear_roundoff,
+    );
+    close(step.kinetic_energy_change, 0.5, 1e-15);
+}
+
+/// G1/G3: internal rotor work survives a large unchanged translational energy
+/// reservoir, while the original two links exchange equal and opposite spin.
+#[test]
+fn internal_actuation_receipts_retain_work_below_the_total_energy_ulp() {
+    let model = wheel(None);
+    let mut state = still(vec![0.0], vec![0.0]);
+    state.base.twist_body.linear = Vec3::new(0.0, 0.0, 2.0_f64.powi(30));
+    // Keep the motor's translation/rotation well within its native admission;
+    // shrinking the step makes the retained spin work still smaller than an ulp.
+    let duration = 2.0_f64.powi(-20);
+    let step = step_free_floating(
+        &model,
+        &state,
+        FreeFloatingMotionLoads {
+            generalized_force: &[3.0],
+            external_body_wrench: &[Wrench::default(); 2],
+            gravity_world: Vec3::default(),
+        },
+        duration,
+        || false,
+    )
+    .unwrap();
+    close(
+        step.momentum_after.kinetic_energy - step.momentum_before.kinetic_energy,
+        0.0,
+        0.0,
+    );
+    let work = 6.75 * duration * duration;
+    let roundoff = 3e-14 * duration * duration;
+    close(step.kinetic_energy_change, work, roundoff);
+    close(step.actuator_work, work, roundoff);
+    close(step.kinetic_work_residual, 0.0, roundoff);
+    impulse_balance(&step, 1e-14 * duration);
 }

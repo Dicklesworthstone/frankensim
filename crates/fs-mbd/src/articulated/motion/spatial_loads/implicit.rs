@@ -19,15 +19,17 @@
 pub mod distance;
 
 use super::super::{
-    ArticulatedModel, EffortLaw, EvaluatedStep, FreeFloatingBaseState, FreeFloatingMotionError,
-    FreeFloatingMotionState, FreeFloatingMotionStep, MAX_FREE_FLOATING_STEP_LINKS,
-    MomentumCoordinates, MomentumMap, Se3, StageLoad, Vec3, advance,
-    free_floating_forward_dynamics, free_floating_momentum, poll, rotate,
+    ArticulatedModel, BaseState, EffortLaw, EvaluatedStep, FreeFloatingBaseState,
+    FreeFloatingMotionError, FreeFloatingMotionState, FreeFloatingMotionStep,
+    MAX_FREE_FLOATING_STEP_LINKS, MomentumCoordinates, MomentumFrame, MomentumMap, Se3, StageLoad,
+    Twist, Vec3, advance, forward_kinematics, free_floating_forward_dynamics,
+    free_floating_momentum, momentum_from_kinematics, physical_increments, poll, rotate,
     validate_external_wrenches, validate_forward_dynamics_header, validate_slice, validate_vec3,
 };
 use super::{SpatialMotionLoads, SpatialMotionStep, bushing, evaluate, finish_with_bushings};
 use crate::articulated::{ArticulatedError, JointKind};
 use fs_ga::GaError;
+use fs_math::dd::Dd;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::nonlinear::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport};
 use std::cell::{Cell, RefCell};
@@ -168,7 +170,13 @@ pub fn step_free_floating_spatial_implicit(
     cancelled: impl FnMut() -> bool,
 ) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
     step_with_bushings::<bushing::SpatialBushing>(
-        model, state, loads, &[], duration, config, cancelled,
+        model,
+        state,
+        loads,
+        &[],
+        duration,
+        config,
+        cancelled,
     )
 }
 
@@ -452,13 +460,15 @@ fn finish_midpoint<B: bushing::BushingLaw>(
     } = initial;
     let load = midpoint.load;
     let linear_impulse = load.force_world.scale(duration);
-    let angular_impulse = (load.torque_com_world
-        + midpoint.coordinates.center_world.cross(load.force_world))
-    .scale(duration);
+    let external_impulse = load.external_impulse(
+        midpoint.state.base.world_from_base,
+        midpoint.center_base,
+        duration,
+    )?;
+    let center_displacement =
+        (initial.linear_world + linear_impulse.scale(0.5)).scale(duration / initial_map.mass());
     let final_coordinates = MomentumCoordinates {
-        center_world: initial.center_world
-            + (initial.linear_world + linear_impulse.scale(0.5))
-                .scale(duration / initial_map.mass()),
+        center_world: initial.center_world + center_displacement,
         linear_world: initial.linear_world + linear_impulse,
         angular_com_world: initial.angular_com_world + load.torque_com_world.scale(duration),
     };
@@ -485,29 +495,60 @@ fn finish_midpoint<B: bushing::BushingLaw>(
     let final_map = MomentumMap::new(model, &state_after, cancelled)?;
     state_after.base = final_map.reconstruct(final_rotation, final_coordinates)?;
     poll(cancelled)?;
-    let momentum_after = free_floating_momentum(
+    let before = forward_kinematics(
         model,
-        state_after.base,
+        BaseState::prescribed(
+            state.base.world_from_base,
+            state.base.twist_body,
+            Twist::zero(),
+        ),
+        &state.joint_position,
+        &state.joint_velocity,
+    )?;
+    poll(cancelled)?;
+    let after = forward_kinematics(
+        model,
+        BaseState::prescribed(
+            state_after.base.world_from_base,
+            state_after.base.twist_body,
+            Twist::zero(),
+        ),
         &state_after.joint_position,
         &state_after.joint_velocity,
     )?;
+    let momentum_after = momentum_from_kinematics(model, &after)?;
+    let (kinetic_change, _, momentum_change) = physical_increments(
+        model,
+        MomentumFrame {
+            world: &before,
+            relative: &initial_map.shape,
+            world_from_base: state.base.world_from_base,
+        },
+        MomentumFrame {
+            world: &after,
+            relative: &final_map.shape,
+            world_from_base: state_after.base.world_from_base,
+        },
+        Vec3::default(),
+        cancelled,
+    )?;
+    let momentum_residual = momentum_change.subtract(external_impulse);
+    let external_impulse = external_impulse.checked_wrench("implicit_spatial.impulse")?;
+    let momentum_change = momentum_change.checked_wrench("implicit_spatial.change")?;
+    let momentum_residual = momentum_residual.checked_wrench("implicit_spatial.residual")?;
     let actuator_work = duration * midpoint.actuator_power;
     let external_work = duration * load.body_wrench_power
-        + initial_map.mass()
-            * loads
-                .held
-                .gravity_world
-                .dot(final_coordinates.center_world - initial.center_world);
+        + initial_map.mass() * loads.held.gravity_world.dot(center_displacement);
     let internal_body_work = duration * load.internal_body_power;
-    let kinetic_work_residual = momentum_after.kinetic_energy
-        - momentum_before.kinetic_energy
-        - actuator_work
-        - external_work
-        - internal_body_work;
+    let kinetic_work_residual = (kinetic_change
+        - Dd::from_f64(actuator_work)
+        - Dd::from_f64(external_work)
+        - Dd::from_f64(internal_body_work))
+    .to_f64();
     validate_vec3(linear_impulse, "implicit_spatial.linear_impulse")?;
-    validate_vec3(angular_impulse, "implicit_spatial.angular_impulse")?;
     validate_slice(
         &[
+            kinetic_change.to_f64(),
             actuator_work,
             external_work,
             internal_body_work,
@@ -527,8 +568,13 @@ fn finish_midpoint<B: bushing::BushingLaw>(
                 center_of_mass_world_after: final_coordinates.center_world,
                 momentum_before,
                 momentum_after,
-                external_linear_impulse_world: linear_impulse,
-                external_angular_impulse_world: angular_impulse,
+                kinetic_energy_change: kinetic_change.to_f64(),
+                linear_momentum_change_world: momentum_change.force,
+                angular_momentum_change_world: momentum_change.torque,
+                external_linear_impulse_world: external_impulse.force,
+                external_angular_impulse_world: external_impulse.torque,
+                linear_momentum_residual_world: momentum_residual.force,
+                angular_momentum_residual_world: momentum_residual.torque,
                 actuator_work,
                 external_work,
                 internal_body_work,
@@ -556,7 +602,7 @@ struct MidpointEquations<'a, B: bushing::BushingLaw> {
 
 struct MidpointEvaluation {
     state: FreeFloatingMotionState,
-    coordinates: MomentumCoordinates,
+    center_base: Vec3,
     trial_angular: Vec3,
     load: StageLoad,
     actuator_power: f64,
@@ -662,7 +708,7 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
         poll(cancelled)?;
         Ok(MidpointEvaluation {
             state,
-            coordinates,
+            center_base: map.center_base,
             trial_angular: omega,
             load: stage.load,
             actuator_power,
