@@ -6,6 +6,7 @@
 //! scheme cannot fake.
 
 pub mod sources;
+pub mod tensor;
 pub(crate) mod advection;
 pub(crate) mod forcing;
 pub use forcing::ThermalForcingError;
@@ -154,7 +155,7 @@ impl ThermalLbm {
     /// at the input physical velocity, then advance flow under the frozen
     /// force. Fixed-temperature walls use anti-bounce-back.
     pub fn step(&mut self) {
-        self.step_with_forces_inner(None, None);
+        self.step_with_forces_inner(None, None, None);
     }
 
     /// Advance with a separate external force-density field in lattice units.
@@ -168,7 +169,7 @@ impl ThermalLbm {
     /// mutation; ordinary solver-state and stability requirements still apply.
     pub fn step_with_external_forces(&mut self, forces: &[[f64; 2]]) -> Result<(), ThermalForcingError> {
         forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref)?;
-        self.step_with_forces_inner(Some(forces), None);
+        self.step_with_forces_inner(Some(forces), None, None);
         Ok(())
     }
 
@@ -177,7 +178,15 @@ impl ThermalLbm {
         &mut self, forces: &[[f64; 2]], thermal_tau: &[f64],
     ) -> Result<(), ThermalForcingError> {
         forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref)?;
-        self.step_with_forces_inner(Some(forces), Some(thermal_tau));
+        self.step_with_forces_inner(Some(forces), Some(thermal_tau), None);
+        Ok(())
+    }
+
+    pub(crate) fn step_with_tensor_diffusion(
+        &mut self, forces: &[[f64; 2]], diffusion: tensor::DiffusivityField<'_, 2>,
+    ) -> Result<(), ThermalForcingError> {
+        forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref)?;
+        self.step_with_forces_inner(Some(forces), None, Some(diffusion));
         Ok(())
     }
 
@@ -185,6 +194,7 @@ impl ThermalLbm {
         &mut self,
         external: Option<&[[f64; 2]]>,
         thermal_tau: Option<&[f64]>,
+        diffusion: Option<tensor::DiffusivityField<'_, 2>>,
     ) {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         // Boussinesq: per-cell force via the external-force field.
@@ -211,15 +221,23 @@ impl ThermalLbm {
         let cells = self.gpop.len();
         self.scratch.resize(cells, [0.0; Q]);
         let grid = &self.grid;
-        advection::D2Q5.collide(
-            &self.gpop,
-            self.scratch.as_flattened_mut(),
-            nx..cells - nx,
-            self.tau_g,
-            thermal_tau,
-            &mut self.advection_history,
-            |cell| grid.moments(cell).u,
-        );
+        if let Some(field) = diffusion {
+            advection::D2Q5.collide_tensor(
+                &self.gpop, self.scratch.as_flattened_mut(), nx..cells - nx,
+                self.tau_g, field, &mut self.advection_history,
+                |cell| grid.moments(cell).u,
+            );
+        } else {
+            advection::D2Q5.collide(
+                &self.gpop,
+                self.scratch.as_flattened_mut(),
+                nx..cells - nx,
+                self.tau_g,
+                thermal_tau,
+                &mut self.advection_history,
+                |cell| grid.moments(cell).u,
+            );
+        }
         advection::D2Q5.stream(
             &mut self.gpop,
             self.scratch.as_flattened(),

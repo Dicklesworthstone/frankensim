@@ -116,6 +116,59 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
         history.ready = true;
     }
 
+    /// Tensor counterpart of the scalar collision. The zero-mass pair
+    /// correction replaces only the first-moment relaxation block. It is
+    /// Eq. (5), with K2=k0, and Eq. (13) of Zhao et al. (2020):
+    /// <https://arxiv.org/abs/1902.09813>.
+    /// Existing scalar calls keep their original arithmetic path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn collide_tensor(
+        &self,
+        populations: &[[f64; Q]],
+        post: &mut [f64],
+        active: Range<usize>,
+        background_tau: f64,
+        diffusion: super::tensor::DiffusivityField<'_, D>,
+        history: &mut FluxHistory<D>,
+        velocity: impl Fn(usize) -> [f64; D],
+    ) {
+        history.prepare(populations.len());
+        let even_rate = 1.0 / background_tau;
+        for cell in active {
+            let before = &populations[cell];
+            let temperature: f64 = before.iter().sum();
+            let u = velocity(cell);
+            let flux: [f64; D] = core::array::from_fn(|axis| temperature * u[axis]);
+            let nonequilibrium: [f64; D] = core::array::from_fn(|axis| {
+                before[self.positive[axis]] - before[self.negative[axis]] - flux[axis]
+            });
+            let derivative: [f64; D] = core::array::from_fn(|axis| {
+                if history.ready { flux[axis] - history.flux[cell][axis] } else { 0.0 }
+            });
+            let relaxation = &diffusion.at(cell).relaxation;
+            let out = &mut post[Q * cell..Q * (cell + 1)];
+            out[0] = before[0] + (self.weights[0] * temperature - before[0]) / background_tau;
+            for axis in 0..D {
+                let mut correction = even_rate * nonequilibrium[axis] + derivative[axis];
+                for other in 0..D {
+                    correction -= relaxation[axis][other]
+                        * (nonequilibrium[other] + 0.5 * derivative[other]);
+                }
+                correction *= 0.5;
+                let positive = self.positive[axis];
+                let negative = self.negative[axis];
+                let mean = self.weights[positive] * temperature;
+                let advective = 0.5 * flux[axis];
+                out[positive] = before[positive]
+                    + (mean + advective - before[positive]) / background_tau + correction;
+                out[negative] = before[negative]
+                    + (mean - advective - before[negative]) / background_tau - correction;
+            }
+            history.flux[cell] = flux;
+        }
+        history.ready = true;
+    }
+
     /// Pull streaming, periodic in the in-plane coordinates. If walls are
     /// supplied, the first/last planes are fixed halfway-temperature walls;
     /// otherwise all axes wrap. The same pair operations serve both cases.
@@ -212,3 +265,7 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
 #[cfg(test)]
 #[path = "advection/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "advection/tensor_tests.rs"]
+mod tensor_tests;

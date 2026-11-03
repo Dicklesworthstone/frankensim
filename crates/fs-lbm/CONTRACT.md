@@ -3308,6 +3308,45 @@ ordinary solver. Existing low-Mach and lattice-stability limits remain;
 no unconditional stability or temporal-order guarantee for the complete
 partitioned buoyancy/source solver is added.
 
+### Full tensor diffusion in the original thermal slabs
+
+`thermal::tensor::DiffusivityTensor<D>` prepares the full symmetric positive
+definite Cartesian diffusivity for the existing D2Q5/D3Q7 temperature owners.
+Its units are lattice-cell squared per lattice-step. The physical conversion
+is `alpha = K/(rho Cp) * dt/dx^2` for a square/cubic grid and common volumetric
+heat capacity. This conversion supplies neither a material source nor
+variable-capacity storage. Exact input symmetry, positive diffusivity,
+representable inversion, and both `S > 0` and `2I-S > 0` are checked without
+clipping. Existing fs-la Cholesky solves prepare
+`S=(I/2+alpha/c_T^2)^(-1)`, with `c_T^2=1/3` in 2-D and `1/4` in 3-D.
+
+`step_with_sources_and_tensor_diffusion` uses the original force frame,
+scalar equilibrium, source kicks, retained advective-flux history, streaming,
+wall measurements and transactional acceptance. Only the vector flux
+relaxation becomes a matrix; even kinetic moments retain the original
+`tau_g`. The correction applies `I-S/2` to the existing time difference of
+`T u`, preserving the intended diffusion tensor during advection.
+The matrix form follows Zhao et al. (2020), equations (5) and (13),
+<https://arxiv.org/abs/1902.09813>; the D3Q7 tensor construction follows
+Yoshida and Nagaoka (2010), <https://doi.org/10.1016/j.jcp.2010.06.037>.
+
+A uniform field reuses one prepared tensor; a per-cell field retains the
+supplied axes and spatial variation. No factorization, lattice allocation or
+tensor re-preparation is added to the collision loop. The existing checked
+source owner still allocates its transactional candidate. Tensor fields are
+borrowed for one interval and do not replace background scalar coefficients.
+Malformed fields and rejected endpoints retain the original populations,
+forces and derivative history.
+
+The focused tests exercise rotated Fourier decay against `k^T alpha k`,
+spatial refinement with nonzero advection, reflected axes, nonpassive and
+unrepresentable tensor refusal, per-cell/uniform parity, source and wall heat
+balance, failed-candidate retry and subsequent scalar evolution. SPD
+admission is not a population-positivity or coupled-buoyancy stability theorem.
+The original low-Mach, startup-history, uniform-storage and wall-model
+limitations remain; sharp material interfaces, variable heat capacity and
+unrestricted high-anisotropy accuracy require their own physical treatment.
+
 ### Independently fitted dynamic transport on the thermal slab
 
 `ThermalLbm3::{thermal_channel_sgs_workspace, prepare_thermal_channel_sgs,

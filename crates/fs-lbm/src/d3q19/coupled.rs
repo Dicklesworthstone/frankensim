@@ -632,7 +632,7 @@ impl ThermalLbm3 {
     /// physical velocity, then advance flow under the frozen force.
     /// Temperature uses fixed halfway plates and periodic x/y streaming.
     pub fn step(&mut self) {
-        self.step_with_forces_inner(None, None);
+        self.step_with_forces_inner(None, None, None);
     }
 
     /// Advance with external lattice force densities added to thermal buoyancy.
@@ -653,7 +653,7 @@ impl ThermalLbm3 {
             .checked_mul(self.grid.ny)
             .ok_or(ThermalForcingError::Layout)?;
         validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
-        self.step_with_forces_inner(Some(forces), None);
+        self.step_with_forces_inner(Some(forces), None, None);
         Ok(())
     }
 
@@ -669,7 +669,18 @@ impl ThermalLbm3 {
             .checked_mul(self.grid.ny)
             .ok_or(ThermalForcingError::Layout)?;
         validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
-        self.step_with_forces_inner(Some(forces), Some(thermal_tau));
+        self.step_with_forces_inner(Some(forces), Some(thermal_tau), None);
+        Ok(())
+    }
+
+    pub(crate) fn step_with_tensor_diffusion(
+        &mut self,
+        forces: &[[f64; 3]],
+        diffusion: crate::thermal::tensor::DiffusivityField<'_, 3>,
+    ) -> Result<(), ThermalForcingError> {
+        let plane = self.grid.nx.checked_mul(self.grid.ny).ok_or(ThermalForcingError::Layout)?;
+        validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
+        self.step_with_forces_inner(Some(forces), None, Some(diffusion));
         Ok(())
     }
 
@@ -677,6 +688,7 @@ impl ThermalLbm3 {
         &mut self,
         external: Option<&[[f64; 3]]>,
         thermal_tau: Option<&[f64]>,
+        diffusion: Option<crate::thermal::tensor::DiffusivityField<'_, 3>>,
     ) {
         let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
         for z in 1..nz - 1 {
@@ -710,15 +722,23 @@ impl ThermalLbm3 {
         let cells = self.gpop.len();
         let plane = nx * ny;
         let grid = &self.grid;
-        advection::D3Q7.collide(
-            &self.gpop,
-            post.as_flattened_mut(),
-            plane..cells - plane,
-            self.tau_g,
-            thermal_tau,
-            &mut self.advection_history,
-            |cell| grid.moments3(cell).1,
-        );
+        if let Some(field) = diffusion {
+            advection::D3Q7.collide_tensor(
+                &self.gpop, post.as_flattened_mut(), plane..cells - plane,
+                self.tau_g, field, &mut self.advection_history,
+                |cell| grid.moments3(cell).1,
+            );
+        } else {
+            advection::D3Q7.collide(
+                &self.gpop,
+                post.as_flattened_mut(),
+                plane..cells - plane,
+                self.tau_g,
+                thermal_tau,
+                &mut self.advection_history,
+                |cell| grid.moments3(cell).1,
+            );
+        }
         advection::D3Q7.stream(
             &mut self.gpop,
             post.as_flattened(),

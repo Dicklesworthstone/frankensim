@@ -133,6 +133,7 @@ pub(crate) trait Slab<const D: usize, const Q: usize>: Sized {
     fn momentum_relaxation(&self) -> &[f64];
     fn momentum_relaxation_mut(&mut self) -> &mut [f64];
     fn advance_local(&mut self, forces: &[[f64; D]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError>;
+    fn advance_tensor(&mut self, forces: &[[f64; D]], diffusion: super::tensor::DiffusivityField<'_, D>) -> Result<(), ThermalForcingError>;
 }
 
 fn invalid(what: &'static str) -> ThermalSourceError { ThermalSourceError::Invalid(what) }
@@ -161,6 +162,23 @@ pub(crate) fn source_step_transport_mapped<S: Slab<D, Q>, const D: usize, const 
     transport: Option<transport::RelaxationField<'_>>,
     finish: impl FnOnce(&S, ThermalSourceBalance) -> Result<R, ThermalSourceError>,
 ) -> Result<R, ThermalSourceError> {
+    source_step_impl::<S, D, Q, R>(state, heat, forces, limits, transport, None, finish)
+}
+
+pub(crate) fn source_step_tensor_mapped<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
+    state: &mut S, heat: &[f64], forces: &[[f64; D]], limits: ThermalSourceLimits,
+    diffusion: super::tensor::DiffusivityField<'_, D>,
+    finish: impl FnOnce(&S, ThermalSourceBalance) -> Result<R, ThermalSourceError>,
+) -> Result<R, ThermalSourceError> {
+    source_step_impl::<S, D, Q, R>(state, heat, forces, limits, None, Some(diffusion), finish)
+}
+
+fn source_step_impl<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
+    state: &mut S, heat: &[f64], forces: &[[f64; D]], limits: ThermalSourceLimits,
+    transport: Option<transport::RelaxationField<'_>>,
+    diffusion: Option<super::tensor::DiffusivityField<'_, D>>,
+    finish: impl FnOnce(&S, ThermalSourceBalance) -> Result<R, ThermalSourceError>,
+) -> Result<R, ThermalSourceError> {
     let (cells, plane) = state.layout()?;
     if cells > limits.max_cells || !limits.balance_tolerance.is_finite() || limits.balance_tolerance < 0.0
         || !limits.temperature_range.iter().all(|x| x.is_finite())
@@ -184,15 +202,20 @@ pub(crate) fn source_step_transport_mapped<S: Slab<D, Q>, const D: usize, const 
     let source: f64 = heat[plane..cells-plane].iter().sum();
     if !source.is_finite() { return Err(invalid("summed source is not representable")); }
     if let Some(field) = transport { field.admit(cells)?; }
+    if let Some(field) = diffusion { field.admit(cells)?; }
     let (mut candidate, weights) = state.snapshot();
     if let Some(field) = transport {
         candidate.momentum_relaxation_mut().copy_from_slice(field.momentum);
     }
     candidate.source_half_kick(heat, plane);
     check_temperatures(candidate.populations(), limits.temperature_range)?;
-    match transport {
-        Some(field) => candidate.advance_local(forces, field.thermal)?,
-        None => candidate.advance(forces)?,
+    if let Some(field) = diffusion {
+        candidate.advance_tensor(forces, field)?;
+    } else {
+        match transport {
+            Some(field) => candidate.advance_local(forces, field.thermal)?,
+            None => candidate.advance(forces)?,
+        }
     }
     if !candidate.flow_valid() { return Err(invalid("transport produced an inadmissible flow state")); }
     check_temperatures(candidate.populations(), limits.temperature_range)?;
@@ -275,6 +298,9 @@ impl Slab<2, 5> for ThermalLbm {
     fn advance_local(&mut self, forces: &[[f64; 2]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError> {
         self.step_with_local_thermal_relaxation(forces, thermal_tau)
     }
+    fn advance_tensor(&mut self, forces: &[[f64; 2]], diffusion: super::tensor::DiffusivityField<'_, 2>) -> Result<(), ThermalForcingError> {
+        self.step_with_tensor_diffusion(forces, diffusion)
+    }
 }
 impl Slab<3, 7> for ThermalLbm3 {
     fn layout(&self) -> Result<(usize, usize), ThermalSourceError> {
@@ -315,6 +341,9 @@ impl Slab<3, 7> for ThermalLbm3 {
     fn momentum_relaxation_mut(&mut self) -> &mut [f64] { &mut self.grid.tau }
     fn advance_local(&mut self, forces: &[[f64; 3]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError> {
         self.step_with_local_thermal_relaxation(forces, thermal_tau)
+    }
+    fn advance_tensor(&mut self, forces: &[[f64; 3]], diffusion: super::tensor::DiffusivityField<'_, 3>) -> Result<(), ThermalForcingError> {
+        self.step_with_tensor_diffusion(forces, diffusion)
     }
 }
 
