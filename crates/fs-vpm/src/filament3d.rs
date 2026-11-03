@@ -330,6 +330,10 @@ pub fn segment_velocity(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     segment_velocity_with_core(p, a, b, 0.0)
 }
 
+#[path = "filament3d/kinematics.rs"]
+mod kinematics;
+pub use kinematics::{SegmentKinematics, segment_kinematics_with_core};
+
 /// Analytic finite-segment integral of the Rosenhead–Moore kernel
 /// `dl × r / (4π (|r|² + core2_m2)^(3/2))`, for unit circulation.
 ///
