@@ -1,6 +1,6 @@
 //! Finite-area source irradiance through original native refractive images.
 //!
-//! A prepared source borrows an original surface emitter and its native panel.
+//! A prepared source borrows an original surface emitter and native mesh faces.
 //! It samples area without tessellating charts or constructing surrogate lamps.
 //! For one area sample, Le*cos(source)/pdf_area is a differential radiant
 //! intensity. The native polarized bundle applies Fresnel transfer, absorption,
@@ -12,7 +12,10 @@
 //! Finite authored image seeds do not establish global image completeness.
 
 use super::{CameraRadianceError, CurvedCameraScene, EmissionSides, SurfaceEmitter};
-use crate::charts::{Ray, TriMesh};
+use crate::charts::Ray;
+#[cfg(test)]
+use crate::charts::TriMesh;
+use crate::charts::area_source::MeshAreaError;
 use crate::gradient_index::bundle::ProjectionOptions;
 use crate::gradient_index::event::BoundarySide;
 use crate::instances::{GeometryInstance, SharedGeometry};
@@ -55,9 +58,9 @@ pub mod participating;
 pub enum AreaEmitterError {
     InvalidEmitter { object_id: u64 },
     UnsupportedGeometry,
-    UnsupportedPanel,
     TriangleBudget { required: usize, limit: usize },
     InvalidTriangle { triangle: usize },
+    Mesh(MeshAreaError),
     AllocationFailure,
     InvalidSample,
     SampleOwnerMismatch,
@@ -81,6 +84,9 @@ impl From<fs_exec::Cancelled> for AreaEmitterError {
         Self::Cancelled
     }
 }
+impl From<MeshAreaError> for AreaEmitterError {
+    fn from(error: MeshAreaError) -> Self { Self::Mesh(error) }
+}
 impl core::fmt::Display for AreaEmitterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native finite-area emitter: {self:?}")
@@ -88,22 +94,45 @@ impl core::fmt::Display for AreaEmitterError {
 }
 impl core::error::Error for AreaEmitterError {}
 
+/// Bounds the original mesh, preparation and each native hit lookup. Subsets
+/// still inspect excluded original faces for overlapping source support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AreaEmitterLimits {
+    /// Whole original mesh bound, also bounding selected CDF construction.
+    pub max_triangles: usize,
+    /// Native BVH visits, candidate pairs and source faces during admission.
+    pub max_preparation_work: u64,
+    /// Native BVH visits and candidate faces in one contact membership query.
+    pub max_lookup_work: u64,
+}
+
+impl Default for AreaEmitterLimits {
+    fn default() -> Self {
+        Self { max_triangles: 65_536, max_preparation_work: 4_194_304, max_lookup_work: 65_536 }
+    }
+}
+
+#[derive(Debug)]
 struct TriangleArea {
+    original_triangle: usize,
     area_m2: f64,
     cumulative_m2: f64,
 }
 
 /// Original source geometry and radiance, with bounded sampling metadata.
-/// Supported sources are one original triangle or a consistently wound planar
-/// two-triangle panel sharing an oppositely oriented edge. Their interiors
-/// must be unambiguously disjoint. Arbitrary mesh-union area is not inferred.
-/// The original mesh is borrowed, never copied or converted.
+/// All original mesh faces or an explicit sorted subset may emit. Selected
+/// faces have disjoint interiors from every coplanar original face; no mesh
+/// union or multiplicity correction is inferred. Faces need not be connected
+/// or coplanar. Their original windings and per-side radiance are retained.
+/// The mesh is borrowed, never copied or converted. Image seeds remain world
+/// directions and must support the selected face's emitting hemisphere.
 pub struct CurvedAreaEmitter<'s, 'm, 'e> {
     scene: &'s CurvedPolarizedScene<'m>,
     emitter: &'e SurfaceEmitter,
     instance: &'m GeometryInstance,
     triangles: Vec<TriangleArea>,
     total_area_m2: f64,
+    limits: AreaEmitterLimits,
 }
 
 /// A sealed area sample from the original emitter and geometry instance.
@@ -113,6 +142,8 @@ pub struct CurvedAreaEmitter<'s, 'm, 'e> {
 pub struct AreaEmitterSample<'a> {
     emitter: &'a SurfaceEmitter,
     instance: &'a GeometryInstance,
+    // This exact preparation owns the conditional subset PDF.
+    support: &'a [TriangleArea],
     triangle: usize,
     position_m: Point3,
     normal: Vec3,
@@ -161,6 +192,33 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
         emitter: &'e SurfaceEmitter,
         max_triangles: usize,
     ) -> Result<Self, AreaEmitterError> {
+        Self::try_new_with_limits(cx, scene, emitter,
+            AreaEmitterLimits { max_triangles, ..AreaEmitterLimits::default() })
+    }
+
+    /// Prepare all original faces with explicit geometry and work limits.
+    pub fn try_new_with_limits(
+        cx: &Cx<'_>, scene: &'s CurvedPolarizedScene<'m>, emitter: &'e SurfaceEmitter,
+        limits: AreaEmitterLimits,
+    ) -> Result<Self, AreaEmitterError> {
+        Self::prepare(cx, scene, emitter, None, limits)
+    }
+
+    /// Prepare a strictly increasing, nonempty subset of original triangle
+    /// indices. Area density is conditional on this support; another disjoint
+    /// source preparation can use its own world-space image seeds. Every
+    /// selected face is checked against excluded faces for coplanar overlap.
+    pub fn try_new_faces(
+        cx: &Cx<'_>, scene: &'s CurvedPolarizedScene<'m>, emitter: &'e SurfaceEmitter,
+        faces: &[usize], limits: AreaEmitterLimits,
+    ) -> Result<Self, AreaEmitterError> {
+        Self::prepare(cx, scene, emitter, Some(faces), limits)
+    }
+
+    fn prepare(
+        cx: &Cx<'_>, scene: &'s CurvedPolarizedScene<'m>, emitter: &'e SurfaceEmitter,
+        faces: Option<&[usize]>, limits: AreaEmitterLimits,
+    ) -> Result<Self, AreaEmitterError> {
         cx.checkpoint()?;
         let object_id = emitter.object_id();
         let invalid = || AreaEmitterError::InvalidEmitter { object_id };
@@ -178,21 +236,29 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
         let SharedGeometry::Mesh(mesh) = instance.geometry() else {
             return Err(AreaEmitterError::UnsupportedGeometry);
         };
-        if mesh.triangles.is_empty() || max_triangles == 0 || mesh.triangles.len() > max_triangles {
+        if mesh.triangles.is_empty() || limits.max_triangles == 0
+            || mesh.triangles.len() > limits.max_triangles {
             return Err(AreaEmitterError::TriangleBudget {
-                required: mesh.triangles.len(), limit: max_triangles,
+                required: mesh.triangles.len(), limit: limits.max_triangles,
             });
         }
-        if mesh.triangles.len() > 2 {
-            return Err(AreaEmitterError::UnsupportedPanel);
+        let count = faces.map_or(mesh.triangles.len(), <[usize]>::len);
+        if count == 0 || count > mesh.triangles.len() {
+            return Err(MeshAreaError::InvalidSupport.into());
         }
+        let mut selected = Vec::new();
+        selected.try_reserve_exact(count).map_err(|_| AreaEmitterError::AllocationFailure)?;
+        if let Some(faces) = faces { selected.extend_from_slice(faces); }
+        else { selected.extend(0..mesh.triangles.len()); }
+        mesh.validate_area_source_faces(cx, &selected, limits.max_preparation_work)?;
         let mut triangles = Vec::new();
-        triangles.try_reserve_exact(mesh.triangles.len())
+        triangles.try_reserve_exact(count)
             .map_err(|_| AreaEmitterError::AllocationFailure)?;
         let mut sum = Sum::default();
         let mut previous = 0.0;
-        for (triangle, indices) in mesh.triangles.iter().enumerate() {
+        for triangle in selected {
             cx.checkpoint()?;
+            let indices = mesh.triangles[triangle];
             let points = indices.map(|index| mesh.vertices.get(index as usize).copied());
             let [Some(a), Some(b), Some(c)] = points else {
                 return Err(AreaEmitterError::InvalidTriangle { triangle });
@@ -210,17 +276,32 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             if !cumulative.is_finite() || cumulative <= previous {
                 return Err(AreaEmitterError::NumericalRange);
             }
-            triangles.push(TriangleArea { area_m2: area, cumulative_m2: cumulative });
+            triangles.push(TriangleArea { original_triangle: triangle,
+                area_m2: area, cumulative_m2: cumulative });
             previous = cumulative;
         }
-        validate_panel(mesh)?;
         cx.checkpoint()?;
-        Ok(Self { scene, emitter, instance, triangles, total_area_m2: previous })
+        Ok(Self { scene, emitter, instance, triangles, total_area_m2: previous, limits })
     }
 
     pub const fn source_emitter(&self) -> &'e SurfaceEmitter { self.emitter }
     pub const fn source_instance(&self) -> &'m GeometryInstance { self.instance }
     pub const fn total_area_m2(&self) -> f64 { self.total_area_m2 }
+
+    /// Disjoint conditional source supports can share one original emitter.
+    /// Preparation already excludes positive-area overlap between distinct
+    /// original faces, so sorted native face identity determines overlap here.
+    pub(super) fn support_overlaps(&self, other: &Self) -> bool {
+        if !core::ptr::eq(self.instance, other.instance) { return false; }
+        let (mut a, mut b) = (0, 0);
+        while a < self.triangles.len() && b < other.triangles.len() {
+            let left = self.triangles[a].original_triangle;
+            let right = other.triangles[b].original_triangle;
+            if left == right { return true; }
+            if left < right { a += 1; } else { b += 1; }
+        }
+        false
+    }
 
     /// Sample the original mesh with two variates in [0,1). An exact triangle
     /// edge/vertex is unresolved for the source departure and refuses, without
@@ -230,9 +311,10 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             return Err(AreaEmitterError::InvalidSample);
         }
         let target = samples[0] * self.total_area_m2;
-        let triangle = self.triangles.partition_point(|entry| entry.cumulative_m2 <= target);
-        let entry = self.triangles.get(triangle).ok_or(AreaEmitterError::InvalidSample)?;
-        let lower = if triangle == 0 { 0.0 } else { self.triangles[triangle - 1].cumulative_m2 };
+        let slot = self.triangles.partition_point(|entry| entry.cumulative_m2 <= target);
+        let entry = self.triangles.get(slot).ok_or(AreaEmitterError::InvalidSample)?;
+        let triangle = entry.original_triangle;
+        let lower = if slot == 0 { 0.0 } else { self.triangles[slot - 1].cumulative_m2 };
         let interval = entry.cumulative_m2 - lower;
         let u = (target - lower) / interval;
         let root = det::sqrt(u);
@@ -262,7 +344,8 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             pdf_area_per_m2].into_iter().all(f64::is_finite) || pdf_area_per_m2 <= 0.0 {
             return Err(AreaEmitterError::NumericalRange);
         }
-        Ok(AreaEmitterSample { emitter: self.emitter, instance: self.instance, triangle,
+        Ok(AreaEmitterSample { emitter: self.emitter, instance: self.instance,
+            support: self.triangles.as_slice(), triangle,
             position_m, normal, pdf_area_per_m2 })
     }
 
@@ -334,7 +417,8 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
         transverse_axis: Vec3, wavelength_nm: f64, seeds: &[BundleImageSeed<'_>],
     ) -> Result<(BundleConnectionLaunch, BundleSurfaceSource, f64), AreaEmitterError> {
         if !core::ptr::eq(sample.emitter, self.emitter)
-            || !core::ptr::eq(sample.instance, self.instance) {
+            || !core::ptr::eq(sample.instance, self.instance)
+            || !core::ptr::eq(sample.support, self.triangles.as_slice()) {
             return Err(AreaEmitterError::SampleOwnerMismatch);
         }
         if side == BoundarySide::OnSurface
@@ -417,48 +501,19 @@ impl<'s, 'm> CurvedAreaEmitter<'s, 'm, 's> {
         let emitter = camera.emitters.get(slot).and_then(|entry| *entry).ok_or_else(invalid)?;
         Self::try_new(cx, camera.scene, emitter, max_triangles)
     }
-}
 
-// Admission is intentionally bounded to two original faces. An oppositely
-// oriented shared edge and unambiguously matching normals put their third
-// vertices on opposite sides of that edge; projected interiors cannot overlap.
-// The planarity tolerance covers floating evaluation of the original vertices,
-// not an allowance for general mesh self-overlap or a mesh-union certificate.
-fn validate_panel(mesh: &TriMesh) -> Result<(), AreaEmitterError> {
-    if mesh.triangles.len() == 1 { return Ok(()); }
-    let first = mesh.triangles[0];
-    let second = mesh.triangles[1];
-    for edge in 0..3 {
-        let a = first[edge];
-        let b = first[(edge + 1) % 3];
-        for opposite in 0..3 {
-            if second[opposite] != b || second[(opposite + 1) % 3] != a { continue; }
-            let c = first[(edge + 2) % 3];
-            let d = second[(opposite + 2) % 3];
-            if c == d { continue; }
-            let a = mesh.vertices[a as usize];
-            let edge_vector = delta(mesh.vertices[b as usize], a);
-            let first_vector = delta(mesh.vertices[c as usize], a);
-            let second_vector = delta(mesh.vertices[d as usize], a);
-            let first_normal = cross(edge_vector, first_vector);
-            let opposite_normal = cross(edge_vector, second_vector);
-            let first_length = norm(first_normal);
-            let second_length = norm(opposite_normal);
-            let first_unit = Vec3::new(first_normal.x / first_length,
-                first_normal.y / first_length, first_normal.z / first_length);
-            let opposite_unit = Vec3::new(opposite_normal.x / second_length,
-                opposite_normal.y / second_length, opposite_normal.z / second_length);
-            let scale = norm(edge_vector).max(norm(first_vector)).max(norm(second_vector));
-            let coplanar_error = first_unit.dot(second_vector).abs();
-            let opposite_sides = first_unit.dot(opposite_unit);
-            if scale.is_finite() && coplanar_error.is_finite()
-                && opposite_sides.is_finite() && opposite_sides < -1.0 + 1e-12
-                && coplanar_error <= 256.0 * f64::EPSILON * scale {
-                return Ok(());
-            }
-        }
+    /// Conditional original-face support of an already admitted camera source.
+    pub fn from_camera_faces(
+        cx: &Cx<'_>, camera: &CurvedCameraScene<'s, 'm>, object_id: u64,
+        faces: &[usize], limits: AreaEmitterLimits,
+    ) -> Result<Self, AreaEmitterError> {
+        let invalid = || AreaEmitterError::InvalidEmitter { object_id };
+        let slot = camera.scene.bindings
+            .binary_search_by_key(&object_id, |binding| binding.object_id)
+            .map_err(|_| invalid())?;
+        let emitter = camera.emitters.get(slot).and_then(|entry| *entry).ok_or_else(invalid)?;
+        Self::try_new_faces(cx, camera.scene, emitter, faces, limits)
     }
-    Err(AreaEmitterError::UnsupportedPanel)
 }
 
 fn complete(catalog: &BundleImageCatalog) -> Result<(), AreaEmitterError> {

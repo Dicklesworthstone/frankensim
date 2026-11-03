@@ -10,12 +10,13 @@
 //!
 //! All numerical image membership uses the native angular-resolution,
 //! duplicate/separation and parity rules. Local solves are not global image
-//! completeness or path-accuracy certificates. A failed or ambiguous required
-//! evaluation refuses the complete sample. Molecular scattering is outside
+//! completeness or path-accuracy certificates. Resolved local geometric misses
+//! define absent proposal support; unresolved numerical or ambiguous required
+//! evaluations refuse the complete sample. Molecular scattering is outside
 //! this surface-only consumer.
 
 use super::{
-    AreaEmitterError, CurvedAreaEmitter, Sum, complete, weighted_irradiance,
+    AreaEmitterError, AreaEmitterSample, CurvedAreaEmitter, Sum, weighted_irradiance,
 };
 use super::super::emission::SurfaceEmission;
 use super::super::{
@@ -61,6 +62,9 @@ pub const MAX_AREA_LIGHT_DELTA_EVENTS: usize = 64;
 /// native proposals. Every seed is
 /// evaluated at the actual sampled source point, in authored order. The side
 /// has its original per-side radiance; no side-selection probability is added.
+/// Disjoint face selections of the same native emitter may have independent
+/// bindings and seeds. Each selection is sampled once, with its own area PDF;
+/// no selection-count divisor or replacement source object is introduced.
 #[derive(Clone, Copy)]
 pub struct AreaLightBinding<'a, 's, 'm> {
     pub source: &'a CurvedAreaEmitter<'s, 'm, 's>,
@@ -234,7 +238,7 @@ impl AreaLightCameraSample {
     pub const fn query_work(&self) -> u64 { self.work.geometry }
 }
 
-/// Borrow prepared original source panels and the original camera. Native
+/// Borrow prepared original source face selections and the original camera. Native
 /// camera geometry, materials, continuation draws and source spectra stay in
 /// their owners; no replacement scene or per-ray allocation is introduced.
 pub struct CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
@@ -271,7 +275,8 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
             for (first, earlier) in bindings[..index].iter().enumerate() {
                 if earlier.source.emitter.object_id() == source_id
                     && earlier.receiver_object_id == binding.receiver_object_id
-                    && earlier.source_side == binding.source_side {
+                    && earlier.source_side == binding.source_side
+                    && earlier.source.support_overlaps(binding.source) {
                     return Err(AreaLightCameraError::DuplicateBinding { first, second: index });
                 }
             }
@@ -389,7 +394,9 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                 cx, launch, source, target, settings.connection, binding.seeds,
                 image_options, &mut workspace.images,
             ).map_err(|error| image_error(index, error))?;
-            complete(catalog).map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
+            catalog.validate_proposal_support().map_err(|error| AreaLightCameraError::Source {
+                binding: index, error: AreaEmitterError::Images(error),
+            })?;
             work.add(catalog.trace_evaluations(), catalog.field_evaluations(), catalog.query_work())?;
             for image in catalog.images() {
                 cx.checkpoint()?;
@@ -520,13 +527,22 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         if !cosine.is_finite() { return Err(AreaLightCameraError::NumericalRange); }
         if cosine == 0.0 { return Ok(1.0); }
         let side = if cosine > 0.0 { BoundarySide::Positive } else { BoundarySide::Negative };
-        let Some((index, binding)) = self.bindings.iter().enumerate().find(|(_, binding)| {
-            binding.receiver_object_id == receiver_id
+        for (index, binding) in self.bindings.iter().enumerate() {
+            if binding.receiver_object_id == receiver_id
                 && binding.source.emitter.object_id() == contact.object_id
-                && binding.source_side == side
-        }) else { return Ok(1.0); };
-        emitter_weight_for_source(self.camera, cx, path, settings, work,
-            workspace, state, index, binding.source_binding())
+                && binding.source_side == side {
+                let sample = binding.source.sample_at_contact_if_supported(
+                    cx, &contact, path.beam().ray().origin,
+                ).map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
+                if let Some(sample) = sample {
+                    return emitter_weight_for_source(self.camera, cx, path, settings, work,
+                        workspace, state, index, binding.source_binding(), sample);
+                }
+            }
+        }
+        // An original emitter face outside every declared source selection
+        // has no competing area technique and keeps its complete emission.
+        Ok(1.0)
     }
 }
 
@@ -589,6 +605,7 @@ pub(super) fn emitter_weight_for_source(
     state: &PathState,
     index: usize,
     binding: SourceBinding<'_, '_, '_>,
+    sample: AreaEmitterSample<'_>,
 ) -> Result<f64, AreaLightCameraError> {
         let Some(anchor) = state.anchor else { return Ok(1.0); };
         let contact = *path.last_contact().ok_or(AreaLightCameraError::NumericalRange)?;
@@ -606,8 +623,6 @@ pub(super) fn emitter_weight_for_source(
         let wavelength = path.beam().wavelength_nm();
         if binding.source.emitter.spectrum().evaluate(wavelength)? == 0.0 { return Ok(1.0); }
         cx.checkpoint()?;
-        let sample = binding.source.sample_at_contact(&contact, path.beam().ray().origin)
-            .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
         let target = anchor.target(sample.position_m(), binding.position_tolerance_m)
             .map_err(|error| connection_error(index, error))?;
         workspace.reverse_events.clear();
@@ -716,7 +731,9 @@ pub(super) fn emitter_weight_for_source(
             cx, BundleConnectionLaunch { ray: Ray { dir: binding.seeds[0].initial_direction, ..launch.ray }, ..launch },
             source, target, settings.connection, binding.seeds, image_options, &mut workspace.images,
         ).map_err(|error| image_error(index, error))?;
-        complete(catalog).map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
+        catalog.validate_proposal_support().map_err(|error| AreaLightCameraError::Source {
+            binding: index, error: AreaEmitterError::Images(error),
+        })?;
         work.add(catalog.trace_evaluations(), catalog.field_evaluations(), catalog.query_work())?;
         let mut weight = None;
         for image in catalog.images() {

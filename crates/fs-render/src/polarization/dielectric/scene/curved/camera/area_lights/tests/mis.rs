@@ -63,9 +63,9 @@ fn g1_reciprocal_area_pdf_cancels_receiver_obliquity_and_common_host_index() {
             near(weights.light_weight() + weights.continuation_weight(), 1.0, 1e-15);
             // Reverse lookup keeps the same represented area density and
             // actual integrated launch point, independently of patch numbering.
-            let recovered = panel.sample_at_contact(
-                connected.path().source_contact().unwrap(), sample.position_m(),
-            ).unwrap();
+            let recovered = panel.sample_at_contact_if_supported(
+                cx, connected.path().source_contact().unwrap(), sample.position_m(),
+            ).unwrap().unwrap();
             assert_eq!(recovered.position_m(), sample.position_m());
             assert_eq!(recovered.triangle_index(), sample.triangle_index());
             assert_eq!(recovered.pdf_area_per_m2(), sample.pdf_area_per_m2());
@@ -226,4 +226,88 @@ fn g1_rough_curved_receiver_uses_native_area_on_both_material_sides() {
 }
 
 const AREA_FOR_TEST: f64 = 0.27;
+
+#[test]
+fn g1_native_nonplanar_emitter_hits_recover_only_their_selected_face_density() {
+    use crate::polarization::dielectric::scene::curved::camera::{CurvedCameraScene, RadianceSpectrum};
+
+    with_cx(|cx| {
+        // The first two triangles have exactly the same projected XY support
+        // but occupy different physical planes. The third faces another axis.
+        // Place the original mesh in world space so hit membership must also
+        // survive inverse-transform roundoff without changing its area PDF.
+        let half = 0.5_f64.sqrt();
+        let placement = RigidTransform::try_new([0.0, half, 0.0, half],
+            [100.0, -200.0, 300.0]).unwrap();
+        let geometry = InstanceScene::try_new(vec![mesh(2,
+            vec![
+                [-0.3, -0.3, 0.0], [0.3, -0.3, 0.0], [0.0, 0.6, 0.0],
+                [-0.3, -0.3, 2.0], [0.3, -0.3, 2.0], [0.0, 0.6, 2.0],
+                [2.0, -0.3, 0.7], [2.0, 0.3, 0.7], [2.0, 0.0, 1.6],
+            ],
+            vec![[0, 1, 2], [3, 4, 5], [6, 7, 8]], placement,
+        )]).unwrap();
+        let material = glass(1.3, 0.2);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media,
+            vec![SurfaceBinding { object_id: 2, interaction: Interaction::Opaque }],
+            100_000).unwrap();
+        let emitters = [SurfaceEmitter::new(2, RadianceSpectrum::try_constant(4.0).unwrap(),
+            EmissionSides::Both)];
+        let camera = CurvedCameraScene::try_new(cx, &scene, &emitters, None).unwrap();
+        let whole = CurvedAreaEmitter::from_camera(cx, &camera, 2, 3).unwrap();
+        let limits = AreaEmitterLimits { max_triangles: 3, ..AreaEmitterLimits::default() };
+        let lower = CurvedAreaEmitter::from_camera_faces(cx, &camera, 2, &[0], limits).unwrap();
+        let upper = CurvedAreaEmitter::from_camera_faces(cx, &camera, 2, &[1], limits).unwrap();
+        assert!(whole.support_overlaps(&lower));
+        assert!(!lower.support_overlaps(&upper));
+        near(whole.total_area_m2(), 0.81, 1e-14);
+        for (triangle, origin, direction, normal) in [
+            (0, Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0)),
+            (1, Point3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0)),
+            (2, Point3::new(3.0, 0.0, 1.0), Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
+        ] {
+            let ray = Ray { origin: placement.transform_point(origin),
+                dir: placement.transform_vector(direction) };
+            let hit = camera.sample_ray_with_samples(cx, ray, 550.0, 0,
+                options().scene.trace, |_| panic!("opaque emitter consumes no surface draw")).unwrap();
+            let contact = hit.path().last_contact().unwrap();
+            let position = hit.path().beam().ray().origin;
+            let sample = whole.sample_at_contact_if_supported(cx, contact, position).unwrap().unwrap();
+            assert_eq!(sample.triangle_index(), triangle);
+            assert_eq!(sample.position_m(), position);
+            near(sample.normal().dot(placement.transform_vector(normal)), 1.0, 1e-14);
+            near(sample.pdf_area_per_m2(), 1.0 / 0.81, 1e-14);
+            let selected = lower.sample_at_contact_if_supported(cx, contact, position).unwrap();
+            if triangle == 0 {
+                let selected = selected.unwrap();
+                near(selected.pdf_area_per_m2(), 1.0 / 0.27, 1e-14);
+                let target = BundleConnectionTarget::try_volume_receiver(0,
+                    placement.transform_point(Point3::new(0.0, 0.0, -1.0)),
+                    placement.transform_vector(Vec3::new(0.0, 0.0, 1.0)), 2e-7).unwrap();
+                let connected = scene.connect_bundle_from_surface_with_policy(cx,
+                    BundleConnectionLaunch {
+                        ray: Ray { origin: position,
+                            dir: placement.transform_vector(Vec3::new(0.0, 0.0, -1.0)) },
+                        transverse_axis: placement.transform_vector(Vec3::new(0.0, 1.0, 0.0)),
+                        wavelength_nm: 550.0,
+                        normalized_source_stokes: Stokes::unpolarized(1.0), initial_medium: 0,
+                    }, BundleSurfaceSource::try_new(2, BoundarySide::Negative).unwrap(),
+                    target, options(), BundleBranchPolicy::Sequence(&[])).unwrap();
+                let all_weights = whole.volume_mis_weights(sample, &connected, target,
+                    options().projection, 0.2).unwrap();
+                let selected_weights = lower.volume_mis_weights(selected, &connected, target,
+                    options().projection, 0.2).unwrap();
+                near(selected_weights.light_log_pdf_solid_angle().exp(),
+                    3.0 * all_weights.light_log_pdf_solid_angle().exp(), 1e-13);
+                assert!(matches!(lower.volume_mis_weights(sample, &connected, target,
+                    options().projection, 0.2), Err(AreaEmitterError::SampleOwnerMismatch)));
+                assert!(matches!(whole.volume_mis_weights(selected, &connected, target,
+                    options().projection, 0.2), Err(AreaEmitterError::SampleOwnerMismatch)));
+            } else {
+                assert!(selected.is_none());
+            }
+        }
+    });
+}
 

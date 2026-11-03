@@ -122,7 +122,91 @@ fn g0_original_panel_area_pdf_and_winding_survive_rigid_placement() {
         let overlapping = TriMesh::new(
             vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.5, 0.0]],
             vec![[0, 1, 2], [1, 0, 3]]);
-        assert!(matches!(validate_panel(&overlapping), Err(AreaEmitterError::UnsupportedPanel)));
+        assert!(matches!(overlapping.validate_area_source_faces(cx, &[0, 1], 100),
+            Err(MeshAreaError::OverlappingFaces { .. })));
+    });
+}
+
+#[test]
+fn g1_closed_native_mesh_and_conditional_faces_keep_original_area_and_transport() {
+    with_cx(|cx| {
+        // A tetrahedron with four noncoplanar original faces of areas
+        // 1, 3, 1.5, 3.5 m². Each face retains its original outward winding.
+        let tetrahedron = mesh(2,
+            vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 3.0]],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], RigidTransform::identity());
+        let point = Point3::new(2.0 / 3.0, 1.0 / 3.0, -4.0);
+        let geometry = InstanceScene::try_new(vec![tetrahedron, detector(point)]).unwrap();
+        let material = glass(1.3, 0.2);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media,
+            vec![SurfaceBinding { object_id: 2, interaction: Interaction::Opaque }, detector_binding()],
+            100_000).unwrap();
+        let emitter = SurfaceEmitter::new(2, super::super::RadianceSpectrum::try_constant(4.0).unwrap(),
+            EmissionSides::Front);
+        let whole = CurvedAreaEmitter::try_new(cx, &scene, &emitter, 4).unwrap();
+        near(whole.total_area_m2(), 9.0, 1e-14);
+        let normals = [Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0), Vec3::new(3.0 / 7.0, 6.0 / 7.0, 2.0 / 7.0)];
+        let mut lower = 0.0;
+        for (face, area) in [1.0, 3.0, 1.5, 3.5].into_iter().enumerate() {
+            let sample = whole.sample_area([(lower + area * 4.0 / 9.0) / 9.0, 0.5]).unwrap();
+            assert_eq!(sample.triangle_index(), face);
+            near(sample.pdf_area_per_m2(), 1.0 / 9.0, 1e-14);
+            assert!(sample.normal().dot(normals[face]) > 1.0 - 1e-14);
+            lower += area;
+        }
+        let limits = AreaEmitterLimits { max_triangles: 4, max_preparation_work: 1000, max_lookup_work: 100 };
+        let even = CurvedAreaEmitter::try_new_faces(cx, &scene, &emitter, &[0, 2], limits).unwrap();
+        let odd = CurvedAreaEmitter::try_new_faces(cx, &scene, &emitter, &[1, 3], limits).unwrap();
+        assert!(!even.support_overlaps(&odd));
+        assert!(whole.support_overlaps(&odd));
+        near(odd.total_area_m2(), 6.5, 1e-14);
+        let selected = odd.sample_area([0.8, 0.5]).unwrap();
+        assert_eq!(selected.triangle_index(), 3);
+        near(selected.pdf_area_per_m2(), 1.0 / 6.5, 1e-14);
+        assert!(matches!(CurvedAreaEmitter::try_new_faces(cx, &scene, &emitter, &[0],
+            AreaEmitterLimits { max_triangles: 3, ..limits }),
+            Err(AreaEmitterError::TriangleBudget { required: 4, limit: 3 })));
+        for faces in [&[][..], &[1, 0][..], &[0, 0][..], &[4][..]] {
+            assert!(matches!(CurvedAreaEmitter::try_new_faces(cx, &scene, &emitter, faces, limits),
+                Err(AreaEmitterError::Mesh(MeshAreaError::InvalidSupport))));
+        }
+        let front = CurvedAreaEmitter::try_new_faces(cx, &scene, &emitter, &[0], limits).unwrap();
+        let seeds = [BundleImageSeed { initial_direction: Vec3::new(0.0, 0.0, -1.0),
+            policy: BundleBranchPolicy::Sequence(&[]) }];
+        assert!(matches!(front.launch(whole.sample_area([4.0 / 81.0, 0.5]).unwrap(),
+            BoundarySide::Positive, 0, Vec3::new(0.0, 1.0, 0.0), 550.0, &seeds),
+            Err(AreaEmitterError::SampleOwnerMismatch)));
+        let mut workspace = BundleImageWorkspace::try_new(1, 1).unwrap();
+        let target = BundleConnectionTarget::try_new(9, point, Vec3::new(0.0, 0.0, 1.0), 2e-7).unwrap();
+        let result = front.incident_irradiance(cx, front.sample_area([4.0 / 9.0, 0.5]).unwrap(),
+            BoundarySide::Positive, 0, Vec3::new(0.0, 1.0, 0.0), 550.0, target, options(), &seeds,
+            BundleImageOptions { max_images: 1, ..BundleImageOptions::default() }, &mut workspace).unwrap();
+        near(result.spectral_irradiance_w_m2_nm(), 4.0 / 16.0 * (-0.8_f64).exp(), 2e-6);
+        assert_eq!(result.image_count(), 1);
+    });
+}
+
+#[test]
+fn g0_mesh_source_refuses_excluded_coplanar_overlap_and_preparation_exhaustion() {
+    with_cx(|cx| {
+        let geometry = InstanceScene::try_new(vec![mesh(2,
+            vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0],
+                [0.25, 0.25, 0.0], [2.25, 0.25, 0.0], [0.25, 2.25, 0.0]],
+            vec![[0, 1, 2], [3, 4, 5]], RigidTransform::identity())]).unwrap();
+        let material = glass(1.0, 0.0);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media,
+            vec![SurfaceBinding { object_id: 2, interaction: Interaction::Opaque }], 100_000).unwrap();
+        let emitter = SurfaceEmitter::new(2, super::super::RadianceSpectrum::try_constant(1.0).unwrap(),
+            EmissionSides::Front);
+        let limits = AreaEmitterLimits { max_triangles: 2, max_preparation_work: 100, max_lookup_work: 100 };
+        assert!(matches!(CurvedAreaEmitter::try_new_faces(cx, &scene, &emitter, &[0], limits),
+            Err(AreaEmitterError::Mesh(MeshAreaError::OverlappingFaces { first: 0, second: 1 }))));
+        assert!(matches!(CurvedAreaEmitter::try_new_faces(cx, &scene, &emitter, &[0],
+            AreaEmitterLimits { max_preparation_work: 1, ..limits }),
+            Err(AreaEmitterError::Mesh(MeshAreaError::WorkLimit { limit: 1 }))));
     });
 }
 
@@ -247,3 +331,4 @@ fn g1_area_lens_images_sum_original_branch_power_with_independent_source_surviva
 }
 
 mod mis;
+

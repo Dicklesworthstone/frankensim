@@ -15,6 +15,7 @@ use crate::polarization::dielectric::scene::curved::camera::{
     EmissionSides, RadianceSpectrum, SurfaceEmitter,
 };
 use crate::polarization::dielectric::scene::curved::camera::area_lights::camera::AreaLightBinding;
+use crate::polarization::dielectric::scene::curved::camera::area_lights::AreaEmitterLimits;
 use crate::polarization::dielectric::scene::curved::participating::{
     CurvedDensityField, CurvedRayleighMedium, CurvedRayleighScene,
 };
@@ -158,6 +159,108 @@ fn g1_molecular_area_and_emitter_terms_use_complementary_angular_weights() {
             assert_eq!((result.source_free_flight_draws(), result.source_candidates()), (0, 0));
             assert!(result.trace_evaluations() >= 4);
         }
+    });
+}
+
+#[test]
+fn g1_molecular_native_face_selections_keep_survival_and_hit_support_separate() {
+    with_cx(|cx| {
+        let source_geometry = GeometryInstance::try_new(
+            9, hash_domain("molecular-area-disjoint-native-faces", b"original"),
+            SharedGeometry::mesh(TriMesh::new(
+                vec![
+                    [1.0, -0.3, 0.2], [1.0, 0.3, 0.2], [1.0, 0.0, 1.1],
+                    [1.0, 0.7, 0.2], [1.0, 1.3, 0.2], [1.0, 1.0, 1.1],
+                ], vec![[0, 2, 1], [3, 5, 4]],
+            )), RigidTransform::identity(),
+        ).unwrap();
+        let geometry = InstanceScene::try_new(vec![source_geometry]).unwrap();
+        let material = glass();
+        let media = [SceneMedium::Homogeneous(&material)];
+        let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media,
+            vec![SurfaceBinding { object_id: 9, interaction: Interaction::Opaque }], 100_000).unwrap();
+        let emitters = [SurfaceEmitter::new(9, RadianceSpectrum::try_constant(LE).unwrap(), EmissionSides::Front)];
+        let camera = CurvedCameraScene::try_new(cx, &scene, &emitters, None).unwrap();
+        let limits = AreaEmitterLimits {
+            max_triangles: 2, max_preparation_work: 10_000, max_lookup_work: 10_000,
+        };
+        let on_axis = CurvedAreaEmitter::from_camera_faces(cx, &camera, 9, &[0], limits).unwrap();
+        let off_axis = CurvedAreaEmitter::from_camera_faces(cx, &camera, 9, &[1], limits).unwrap();
+        let whole = CurvedAreaEmitter::from_camera_faces(cx, &camera, 9, &[0, 1], limits).unwrap();
+        let surface = CurvedAreaLightCameraScene::try_new(cx, &camera, &[]).unwrap();
+        let on_seeds = seeds(Vec3::new(-1.0, 0.0, 0.0));
+        let inverse_root2 = 1.0 / 2.0_f64.sqrt();
+        let off_seeds = seeds(Vec3::new(-inverse_root2, -inverse_root2, 0.0));
+        let on_binding = binding(&on_axis, &on_seeds);
+        let off_binding = binding(&off_axis, &off_seeds);
+        let spectrum = MassScatteringSpectrum::constant(0.7).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let laws = [Some(CurvedRayleighMedium::try_new(&spectrum, 1.0, &phase).unwrap())];
+        let transport = CurvedRayleighScene::try_new(cx, &scene, &laws).unwrap();
+        let molecular = CurvedRayleighCameraScene::try_new(cx, &camera, &transport).unwrap();
+        let flight = |draw| match draw {
+            0 => [1.0 - (-0.35_f64).exp(), 0.5 + f64::EPSILON, 0.0, 0.0],
+            1 => [1.0 - 1e-12, 0.5, 0.0, 0.0],
+            _ => panic!("source must precede a second molecular collision"),
+        };
+        let baseline = molecular.sample_ray_with_tracking_samples(cx, camera_ray(), 550.0, 0,
+            CurvedRayleighTraceSettings { surfaces: settings().area_lights.surfaces, max_volume_events: 8 },
+            |_| panic!("opaque emitter"), flight).unwrap();
+        let bindings = [off_binding, on_binding];
+        let owner = CurvedRayleighAreaLightCameraScene::try_new_with_volume_bindings(
+            cx, &molecular, &surface, &bindings).unwrap();
+        let mut workspace = RayleighAreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
+        let mut draws = [0; 2];
+        let result = owner.sample_ray_with_tracking_samples(cx, camera_ray(), 550.0, 0,
+            settings(), &mut workspace, |_| panic!("opaque emitter"), flight,
+            |_, _| panic!("no surface receiver"), |event, index| {
+                assert_eq!(event, 0);
+                draws[index] += 1;
+                [4.0 / 9.0, 0.5]
+            }, |_, _, _| panic!("uniform source survival is analytic"),
+        ).unwrap();
+        let phase_pdf = 3.0 / (16.0 * core::f64::consts::PI);
+        let mut expected_area = 0.0;
+        let mut off_area = 0.0;
+        let mut on_hit_weight = 0.0;
+        for y in [0.0_f64, 1.0] {
+            let distance2 = 1.0 + y * y;
+            let distance = distance2.sqrt();
+            let source_cosine = 1.0 / distance;
+            let (light_weight, hit_weight) = partition(distance2 / (AREA * source_cosine), phase_pdf);
+            // Both incoming directions are perpendicular to the original
+            // camera direction. Absorption and scattering survival belong to
+            // the source radiometry, not to either angular proposal density.
+            let term = LE * AREA * source_cosine / distance2 * phase_pdf
+                * (-0.1 - 0.9 * distance).exp() * light_weight;
+            expected_area += term;
+            if y == 0.0 { on_hit_weight = hit_weight; } else { off_area = term; }
+        }
+        let raw_hit = LE * (-0.3_f64).exp();
+        near(result.area_radiance_w_m2_sr_nm(), expected_area);
+        near(result.radiance_sample().radiance_w_m2_sr_nm(), expected_area + raw_hit * on_hit_weight);
+        assert_eq!(draws, [1, 1]);
+        assert_eq!((result.volume_events(), result.free_flight_draws()), (1, 2));
+        assert_eq!((result.area_samples(), result.images()), (2, 2));
+        assert_eq!((result.source_free_flight_draws(), result.source_candidates()), (0, 0));
+        assert_eq!(result.radiance_sample().path(), baseline.radiance_sample().path());
+
+        let uncovered_bindings = [off_binding];
+        let uncovered = CurvedRayleighAreaLightCameraScene::try_new_with_volume_bindings(
+            cx, &molecular, &surface, &uncovered_bindings).unwrap();
+        let result = uncovered.sample_ray_with_tracking_samples(cx, camera_ray(), 550.0, 0,
+            settings(), &mut workspace, |_| panic!("opaque emitter"), flight,
+            |_, _| panic!("no surface receiver"), |_, _| [4.0 / 9.0, 0.5],
+            |_, _, _| panic!("uniform source survival is analytic"),
+        ).unwrap();
+        near(result.area_radiance_w_m2_sr_nm(), off_area);
+        near(result.radiance_sample().radiance_w_m2_sr_nm(), off_area + raw_hit);
+        assert_eq!(result.radiance_sample().path(), baseline.radiance_sample().path());
+
+        let overlap = [on_binding, binding(&whole, &off_seeds)];
+        assert!(matches!(CurvedRayleighAreaLightCameraScene::try_new_with_volume_bindings(
+            cx, &molecular, &surface, &overlap),
+            Err(AreaLightCameraError::DuplicateBinding { first: 0, second: 1 })));
     });
 }
 

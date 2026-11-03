@@ -31,6 +31,7 @@ use crate::polarization::dielectric::scene::curved::CurvedContact;
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleConnection, BundleConnectionTarget,
 };
+use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
@@ -202,6 +203,7 @@ impl CurvedAreaEmitter<'_, '_, '_> {
     ) -> Result<(f64, f64), AreaEmitterError> {
         if !core::ptr::eq(sample.emitter, self.emitter)
             || !core::ptr::eq(sample.instance, self.instance)
+            || !core::ptr::eq(sample.support, self.triangles.as_slice())
         {
             return Err(AreaEmitterError::SampleOwnerMismatch);
         }
@@ -241,15 +243,19 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         Ok((light_log_pdf, reverse_log_probability))
     }
 
-    /// Recover the original represented area density at an actual native
-    /// emitter hit. The witness locates its original face; the returned launch
-    /// position stays on the integrated camera ray and is never snapped.
-    /// Triangle edges and ambiguous membership refuse, matching sample_area.
-    pub(super) fn sample_at_contact(
+    /// Recover a selected face's represented area density at a native emitter
+    /// hit. The original mesh BVH resolves full three-dimensional membership;
+    /// the native witness's feature ID identifies a coplanar patch, not a face.
+    /// The launch position stays on the integrated camera ray and is unsnapped.
+    /// An original face outside this source's declared support returns `None`;
+    /// edges, unresolved membership and work limits still refuse.
+    pub(super) fn sample_at_contact_if_supported(
         &self,
+        cx: &Cx<'_>,
         contact: &CurvedContact,
         position_m: Point3,
-    ) -> Result<AreaEmitterSample<'_>, AreaEmitterError> {
+    ) -> Result<Option<AreaEmitterSample<'_>>, AreaEmitterError> {
+        cx.checkpoint()?;
         if contact.object_id != self.emitter.object_id()
             || contact.geometry_identity != self.instance.geometry_identity()
             || contact.frame_identity != self.instance.frame_identity()
@@ -263,84 +269,44 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         let local = self.instance.transform().inverse()
             .map_err(|_| AreaEmitterError::NumericalRange)?
             .transform_point(contact.witness.surface_point);
-        let p = [local.x, local.y, local.z];
-        let mut found = None;
-        for (triangle, indices) in mesh.triangles.iter().enumerate() {
-            let [a, b, c] = indices.map(|index| mesh.vertices[index as usize]);
-            if !interior_barycentric(p, a, b, c)? {
-                continue;
-            }
-            if found.is_some() {
-                return Err(AreaEmitterError::SourceContactMismatch);
-            }
-            let raw = self.instance.transform().transform_vector(cross(delta(b, a), delta(c, a)));
-            let length = norm(raw);
-            let normal = Vec3::new(raw.x / length, raw.y / length, raw.z / length);
-            if !normal.dot(contact.witness.normal).is_finite()
-                || normal.dot(contact.witness.normal) < 1.0 - 1e-8
-            {
-                return Err(AreaEmitterError::SourceContactMismatch);
-            }
-            let entry = &self.triangles[triangle];
-            let lower = if triangle == 0 { 0.0 } else { self.triangles[triangle - 1].cumulative_m2 };
-            let pdf_area_per_m2 = ((entry.cumulative_m2 - lower) / self.total_area_m2) / entry.area_m2;
-            if !pdf_area_per_m2.is_finite() || pdf_area_per_m2 <= 0.0 {
-                return Err(AreaEmitterError::NumericalRange);
-            }
-            found = Some(AreaEmitterSample {
-                emitter: self.emitter,
-                instance: self.instance,
-                triangle,
-                position_m,
-                normal,
-                pdf_area_per_m2,
-            });
+        // The native witness is in world coordinates. Its inverse placement
+        // adds roundoff even when the original contact distance was zero.
+        // Include that allowance in the BVH query as well as the plane test.
+        let point = contact.witness.surface_point;
+        let coordinate_scale = [point.x, point.y, point.z, local.x, local.y, local.z]
+            .into_iter().fold(0.0_f64, |scale, x| scale.max(x.abs()));
+        let tolerance = (contact.resolution_m + 64.0 * f64::EPSILON * coordinate_scale).next_up();
+        let triangle = mesh.area_source_face_at(cx, local, tolerance,
+            self.limits.max_lookup_work).map_err(AreaEmitterError::Mesh)?
+            .ok_or(AreaEmitterError::SourceContactMismatch)?;
+        let Ok(slot) = self.triangles.binary_search_by_key(&triangle, |entry| entry.original_triangle)
+            else { return Ok(None); };
+        let [a, b, c] = mesh.triangles[triangle].map(|index| mesh.vertices[index as usize]);
+        let raw = self.instance.transform().transform_vector(cross(delta(b, a), delta(c, a)));
+        let length = norm(raw);
+        let normal = Vec3::new(raw.x / length, raw.y / length, raw.z / length);
+        if !normal.dot(contact.witness.normal).is_finite()
+            || normal.dot(contact.witness.normal) < 1.0 - 1e-8
+        {
+            return Err(AreaEmitterError::SourceContactMismatch);
         }
-        found.ok_or(AreaEmitterError::SourceContactMismatch)
+        let entry = &self.triangles[slot];
+        let lower = if slot == 0 { 0.0 } else { self.triangles[slot - 1].cumulative_m2 };
+        let pdf_area_per_m2 = ((entry.cumulative_m2 - lower) / self.total_area_m2) / entry.area_m2;
+        if !pdf_area_per_m2.is_finite() || pdf_area_per_m2 <= 0.0 {
+            return Err(AreaEmitterError::NumericalRange);
+        }
+        Ok(Some(AreaEmitterSample {
+            emitter: self.emitter,
+            instance: self.instance,
+            support: self.triangles.as_slice(),
+            triangle,
+            position_m,
+            normal,
+            pdf_area_per_m2,
+        }))
     }
-}
 
-// Work in the dominant coordinate plane and normalize local differences
-// before products. The original native witness supplies the surface point;
-// this lookup identifies its original triangle, not a prepared patch ID.
-fn interior_barycentric(
-    point: [f64; 3],
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-) -> Result<bool, AreaEmitterError> {
-    let e = delta(b, a);
-    let f = delta(c, a);
-    let v = delta(point, a);
-    let n = cross(e, f);
-    let (u, w) = if n.x.abs() >= n.y.abs() && n.x.abs() >= n.z.abs() {
-        (1, 2)
-    } else if n.y.abs() >= n.z.abs() {
-        (0, 2)
-    } else {
-        (0, 1)
-    };
-    let e = [e.x, e.y, e.z];
-    let f = [f.x, f.y, f.z];
-    let v = [v.x, v.y, v.z];
-    let scale = e[u].abs().max(e[w].abs()).max(f[u].abs()).max(f[w].abs());
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err(AreaEmitterError::NumericalRange);
-    }
-    let ex = e[u] / scale;
-    let ey = e[w] / scale;
-    let fx = f[u] / scale;
-    let fy = f[w] / scale;
-    let vx = v[u] / scale;
-    let vy = v[w] / scale;
-    let determinant = ex * fy - ey * fx;
-    let first = (vx * fy - vy * fx) / determinant;
-    let second = (ex * vy - ey * vx) / determinant;
-    let third = 1.0 - first - second;
-    if ![first, second, third].into_iter().all(f64::is_finite) {
-        return Err(AreaEmitterError::NumericalRange);
-    }
-    Ok(first > 0.0 && second > 0.0 && third > 0.0)
 }
 
 fn power_weights(

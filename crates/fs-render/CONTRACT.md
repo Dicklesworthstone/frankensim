@@ -619,7 +619,7 @@ differentiable lift). Pure Rust throughout.
   The source area density uses the reciprocal native footprint and actual
   endpoint phase indices; the competitor is the native cosine PDF times the
   reverse discrete branch proposals. Per-image enumeration adds no image-count
-  divisor. Original-panel hit lookup retains the represented area density and
+  divisor. Original-face hit lookup retains the represented area density and
   unsnapped camera point, refusing edge or owner ambiguity. These local weights
   do not establish membership of a separate camera path in a finite seed
   catalog. G1/G3 cases cover oblique receiving area, common refractive host,
@@ -645,23 +645,34 @@ differentiable lift). Pure Rust throughout.
   regressions are authored but unexecuted in the implementation environment.
 
 - `camera::area_lights::CurvedAreaEmitter` prepares area sampling on an
-  original native panel and its exact `SurfaceEmitter`, directly from the
-  surface scene or from an admitted camera emitter. Sources are one original
-  triangle or a consistently wound coplanar two-triangle panel with a shared
-  opposite edge and disjoint interiors; arbitrary mesh-union area is not
-  inferred. The bounded triangle-area distribution retains original geometry,
-  frame, winding, calibrated spectral radiance and emitting sides. Samples
-  retain their owner and physical area PDF; proper-rigid placement preserves
-  area. Sampling introduces no per-call allocation, chart conversion or
-  surrogate point fixture. Native surface-source discovery supplies each
+  original native triangle mesh and its exact `SurfaceEmitter`, directly from
+  the surface scene or an admitted camera emitter. Sources may include all
+  original faces or an explicit strictly increasing face selection through
+  `try_new_faces` / `from_camera_faces`; disconnected, noncoplanar and closed
+  meshes retain original face winding and per-side radiance. `AreaEmitterLimits`
+  bounds the whole mesh, preparation work and each hit-membership query.
+  Admission reuses the original BVH and exact coplanarity/orientation
+  predicates to reject positive-area coplanar overlap, including overlap with
+  excluded faces. Shared edges and vertices remain zero-area contacts; no
+  mesh-union or multiplicity correction is inferred. The triangle-area CDF
+  retains original geometry, frame and calibrated spectral radiance. Samples
+  retain the exact prepared support, original face index and represented
+  conditional area PDF; proper-rigid placement preserves area. Native camera
+  hit lookup reuses the original BVH, checks actual three-dimensional plane
+  membership and strict triangle interior, and keeps the unsnapped camera
+  point. Edges, multiple memberships, numerical range and exhausted bounds
+  refuse. Sampling and hit lookup introduce no per-call allocation, chart
+  conversion or surrogate point fixture. Image seeds remain original world
+  directions. Native surface-source discovery supplies each
   distinct regular image. Its sampled differential intensity is
   `Le * emitting_cosine / area_pdf`; the original polarized bundle supplies
   Fresnel power, absorption, focusing and receiver obliquity exactly once.
   Volume targets use the actual arriving ray's transverse area. Optional
   molecular survival applies independently to each image on the same scene.
   Aggregate work includes all authored seed searches and retained replays.
-  Unresolved or ambiguous searches refuse; finite seeds do not establish
-  image completeness. This incident-irradiance consumer does not add a second
+  This standalone irradiance consumer still requires every authored seed to
+  resolve a retained image; an excluded seed or empty catalog refuses. Finite
+  seeds do not establish image completeness. It does not add a second
   emission term to camera continuation. Singular caustic integration and
   coherent interference remain outside it.
 
@@ -709,7 +720,7 @@ differentiable lift). Pure Rust throughout.
   regressions remain unexecuted without a toolchain/build runner.
 
 - `camera::area_lights::camera::CurvedAreaLightCameraScene` composes
-  original panel area samples with the native surface camera at declared
+  original mesh-face area samples with the native surface camera at declared
   continuous receivers: diffuse, GGX glass, rough metal and body-locked brushed
   metal. Each regular refractive image receives its own power-heuristic weight
   before physical irradiance, the original polarized radiance BSDF and the
@@ -725,7 +736,15 @@ differentiable lift). Pure Rust throughout.
   catalog is reevaluated at that source point without adding the known camera
   direction as a light seed. Native angular-resolution, separation and parity
   rules decide overlap; an unrepresented image keeps full emitter-hit weight.
-  Ambiguous or failed correspondence refuses the complete sample. Direct
+  Resolved geometric exclusions use `validate_proposal_support` in both
+  next-event and emitter-hit evaluation; an empty light catalog contributes no
+  next-event term while the native continuation keeps its full emission.
+  Disjoint face selections may share an emitter/receiver/side binding; each
+  retains its own conditional area PDF and authored seeds and is sampled once,
+  without a selection-count divisor. Overlapping selections refuse. Emitter
+  hits select the containing original face group, independently of binding
+  order; uncovered faces retain full native emission. Ambiguous or numerical
+  failures still refuse the complete sample. Direct
   emitter visibility and unsupported nondelta suffixes keep original emission.
   One caller-owned bounded workspace retains source images and up to 64 delta
   events; at most 64 source/receiver/side bindings are admitted. Cumulative
@@ -749,8 +768,8 @@ differentiable lift). Pure Rust throughout.
 
 - With `volumes`,
   `camera::area_lights::participating::CurvedRayleighAreaLightCameraScene`
-  adds finite-panel next-event sampling at original continuous surfaces and
-  real molecular collisions. It borrows the exact admitted camera, source panels
+  adds native mesh-face next-event sampling at original continuous surfaces and
+  real molecular collisions. It borrows the exact admitted camera, face selections
   and molecular scene. Each retained refractive image reuses its differentiated
   native geometry and independently tracked scattering survival. Molecular
   radiometry contracts both subpaths' full normalized Stokes states with the
@@ -762,7 +781,10 @@ differentiable lift). Pure Rust throughout.
   camera. Surface and molecular paths share original-source validation and
   reverse native history/image-membership implementation. Real collisions
   replace the angular anchor, including in unbound media; null candidates
-  preserve it. Full emitter weight remains for unrepresented optical images.
+  preserve it. Full emitter weight remains for unrepresented optical images
+  and uncovered source faces. Disjoint selections of one emitter may bind the
+  same molecular medium with their own conditional area PDFs and image seeds;
+  the same geometric proposal-support rules apply to clear and molecular paths.
   Source tracking and area draws use independent streams and cumulative work
   limits. Caller-owned bounded image/history storage is reused without per-ray
   allocation. The deterministic angular partition deliberately omits survival
@@ -776,8 +798,13 @@ differentiable lift). Pure Rust throughout.
   source ratios, cumulative area/trace limits, unchanged native pixels and
   independently evaluated spectral source loss. Rust execution is unavailable
   in the implementation environment; these regressions remain unexecuted.
-  Rough receiving BSDFs, arbitrary emitter meshes, singular caustic integration,
-  volume emission and global optical-image completeness remain outside scope.
+  Additional authored regressions cover nonplanar/closed mesh sources, exact
+  support ownership, conditional face densities, disjoint bindings on surface
+  and molecular paths, excluded source sides and partial occlusion. Independent
+  numerical references and 3,000 exact planar-overlap comparisons passed; Rust
+  compilation and regressions remain unexecuted without Rust/DSR/RCH. Analytic
+  chart emitters, singular caustic integration, volume emission and global
+  optical-image completeness remain outside scope.
 
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original

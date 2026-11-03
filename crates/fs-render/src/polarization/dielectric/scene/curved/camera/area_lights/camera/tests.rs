@@ -1,5 +1,7 @@
 //! Area-light camera radiometry and complementary emitter-hit regressions.
 
+mod support;
+
 use super::*;
 use crate::charts::{Ray, TriMesh};
 use crate::conductor::{
@@ -26,7 +28,9 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::images::
 use crate::polarization::dielectric::scene::curved::camera::{
     CurvedCameraScene, EmissionSides, RadianceSpectrum, SurfaceEmitter,
 };
-use crate::polarization::dielectric::scene::curved::camera::area_lights::CurvedAreaEmitter;
+use crate::polarization::dielectric::scene::curved::camera::area_lights::{
+    AreaEmitterLimits, CurvedAreaEmitter,
+};
 use crate::spectral::SpectralReflectance;
 use crate::surface_detail::{BrushingPattern, SurfaceDetail};
 use fs_blake3::hash_domain;
@@ -523,6 +527,104 @@ fn g1_area_camera_unbound_emitters_keep_full_weight_and_area_budget_is_cumulativ
         );
         assert!(matches!(error, Err(AreaLightCameraError::AreaSampleLimit)));
         assert_eq!(draws, 1, "budget failure precedes a second source sample");
+    });
+}
+
+#[test]
+fn g1_disjoint_native_source_faces_keep_conditional_densities_and_uncovered_emission() {
+    with_cx(|cx| {
+        let source_geometry = GeometryInstance::try_new(
+            9, hash_domain("native-area-camera-disjoint-faces", b"original"),
+            SharedGeometry::mesh(TriMesh::new(
+                vec![
+                    [-0.3, -0.3, -1.0], [0.3, -0.3, -1.0], [0.0, 0.6, -1.0],
+                    [0.7, -0.3, -1.0], [1.3, -0.3, -1.0], [1.0, 0.6, -1.0],
+                ],
+                vec![[0, 1, 2], [3, 4, 5]],
+            )), RigidTransform::identity(),
+        ).unwrap();
+        let geometry = InstanceScene::try_new(vec![panel(1, 0.0, 1.0, 10.0), source_geometry]).unwrap();
+        let material = glass(1.3, 0.2);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let reflectances = [SpectralReflectance::constant(RHO).unwrap()];
+        let scene = CurvedPolarizedScene::try_new_with_materials(
+            cx, &geometry, &media, &[], &[], &reflectances,
+            vec![diffuse(1, 0), opaque(9)], 100_000,
+        ).unwrap();
+        let emitters = [emitter(9)];
+        let camera = CurvedCameraScene::try_new(cx, &scene, &emitters, None).unwrap();
+        let limits = AreaEmitterLimits {
+            max_triangles: 2, max_preparation_work: 10_000, max_lookup_work: 10_000,
+        };
+        let on_axis = CurvedAreaEmitter::from_camera_faces(cx, &camera, 9, &[0], limits).unwrap();
+        let off_axis = CurvedAreaEmitter::from_camera_faces(cx, &camera, 9, &[1], limits).unwrap();
+        let duplicate = CurvedAreaEmitter::from_camera_faces(cx, &camera, 9, &[0], limits).unwrap();
+        let whole = CurvedAreaEmitter::from_camera_faces(cx, &camera, 9, &[0, 1], limits).unwrap();
+        let on_seeds = [seed(Vec3::new(0.0, 0.0, 1.0))];
+        let off_seeds = [seed(Vec3::new(-1.0, 0.0, 2.0))];
+        let on_binding = AreaLightBinding {
+            source: &on_axis, receiver_object_id: 1, source_side: BoundarySide::Positive,
+            initial_medium: 0, source_transverse_axis: Vec3::new(0.0, 1.0, 0.0),
+            seeds: &on_seeds, image_options: image_options(1), position_tolerance_m: 2e-7,
+        };
+        let off_binding = AreaLightBinding { source: &off_axis, seeds: &off_seeds, ..on_binding };
+        // The continuation reaches the SECOND binding. Looking up by emitter
+        // object alone would choose the wrong conditional area distribution.
+        let bindings = [off_binding, on_binding];
+        let owner = CurvedAreaLightCameraScene::try_new(cx, &camera, &bindings).unwrap();
+        let baseline = camera.sample_ray_with_samples(cx, camera_ray(), 550.0, 0,
+            settings().surfaces, |_| [0.0; 3]).unwrap();
+        let mut workspace = AreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
+        let mut draws = [0; 2];
+        let result = owner.sample_ray_with_samples(cx, camera_ray(), 550.0, 0,
+            settings(), &mut workspace, |_| [0.0; 3], |event, binding| {
+                assert_eq!(event, 0);
+                draws[binding] += 1;
+                [4.0 / 9.0, 0.5]
+            }).unwrap();
+        let mut expected_area = 0.0;
+        let mut off_area = 0.0;
+        let mut on_hit_weight = 0.0;
+        for x in [0.0_f64, 1.0] {
+            let distance2 = 4.0 + x * x;
+            let distance = distance2.sqrt();
+            let cosine = 2.0 / distance;
+            let light_pdf = distance2 / (AREA * cosine);
+            let bsdf_pdf = cosine / core::f64::consts::PI;
+            let denominator = light_pdf * light_pdf + bsdf_pdf * bsdf_pdf;
+            let light_weight = light_pdf * light_pdf / denominator;
+            let irradiance = LE * AREA * cosine * cosine / distance2 * (-0.2 * distance).exp();
+            let term = RHO / core::f64::consts::PI * (-0.2_f64).exp() * irradiance * light_weight;
+            expected_area += term;
+            if x == 0.0 { on_hit_weight = bsdf_pdf * bsdf_pdf / denominator; }
+            else { off_area = term; }
+        }
+        let raw_hit = RHO * LE * (-0.6_f64).exp();
+        near(result.area_radiance_w_m2_sr_nm(), expected_area, 4e-6);
+        near(result.radiance_sample().radiance_w_m2_sr_nm(),
+            expected_area + raw_hit * on_hit_weight, 4e-6);
+        near(baseline.radiance_w_m2_sr_nm(), raw_hit, 2e-6);
+        assert_eq!(draws, [1, 1]);
+        assert_eq!((result.area_samples(), result.images()), (2, 2));
+        assert_eq!(result.radiance_sample().path(), baseline.path());
+
+        // A bound emitter object can contain unbound original faces. The
+        // complementary technique has zero support there, so emission is whole.
+        let uncovered_bindings = [off_binding];
+        let uncovered = CurvedAreaLightCameraScene::try_new(cx, &camera, &uncovered_bindings).unwrap();
+        let result = uncovered.sample_ray_with_samples(cx, camera_ray(), 550.0, 0,
+            settings(), &mut workspace, |_| [0.0; 3], |_, _| [4.0 / 9.0, 0.5]).unwrap();
+        near(result.area_radiance_w_m2_sr_nm(), off_area, 4e-6);
+        near(result.radiance_sample().radiance_w_m2_sr_nm(), off_area + raw_hit, 4e-6);
+        assert_eq!(result.radiance_sample().path(), baseline.path());
+
+        // Separate prepared owners do not make overlapping physical support
+        // independent. Reject both an identical face and a containing selection.
+        for source in [&duplicate, &whole] {
+            let overlap = [on_binding, AreaLightBinding { source, ..off_binding }];
+            assert!(matches!(CurvedAreaLightCameraScene::try_new(cx, &camera, &overlap),
+                Err(AreaLightCameraError::DuplicateBinding { first: 0, second: 1 })));
+        }
     });
 }
 

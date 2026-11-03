@@ -22,6 +22,9 @@ use fs_rep_nurbs::{NurbsError, NurbsSurface};
 
 pub mod proximity;
 
+/// Bounded native mesh support for finite-area emission.
+pub mod area_source;
+
 /// Bit-affecting semantics of certified sphere tracing and scalar-BVH
 /// traversal. Downstream image goldens pin this surface separately from the
 /// spectral estimator so geometry changes cannot silently move image bytes.
@@ -3052,3 +3055,4 @@ mod tests {
         assert!(guarded_distance <= safe_radius);
     }
 }
+

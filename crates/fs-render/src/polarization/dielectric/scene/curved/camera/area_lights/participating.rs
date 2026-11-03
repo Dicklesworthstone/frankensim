@@ -22,7 +22,7 @@
 //! images retain full emission. Ambiguous correspondence and exhausted work
 //! refuse the complete sample instead of silently dropping light.
 
-use super::{AreaEmitterError, CurvedAreaEmitter, Sum, complete, weighted_irradiance};
+use super::{AreaEmitterError, CurvedAreaEmitter, Sum, weighted_irradiance};
 use super::camera::{
     AreaLightCameraError, AreaLightCameraSample, AreaLightCameraSettings,
     AreaLightCameraWorkspace, ContinuationAnchor, CurvedAreaLightCameraScene,
@@ -55,6 +55,8 @@ use fs_geom::Vec3;
 
 /// One original emitting side and receiving molecular medium. The same seeds
 /// are evaluated at each actual sampled source point and accepted collision.
+/// Disjoint original face selections may bind the same emitter and medium;
+/// each retains its own area density, draw identity and optical-image seeds.
 #[derive(Clone, Copy)]
 pub struct MolecularAreaLightBinding<'a, 's, 'm> {
     pub source: &'a CurvedAreaEmitter<'s, 'm, 's>,
@@ -184,7 +186,8 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
             for (first, earlier) in volume_bindings[..slot].iter().enumerate() {
                 if earlier.receiver_medium == binding.receiver_medium
                     && earlier.source.emitter.object_id() == binding.source.emitter.object_id()
-                    && earlier.source_side == binding.source_side {
+                    && earlier.source_side == binding.source_side
+                    && earlier.source.support_overlaps(binding.source) {
                     return Err(AreaLightCameraError::DuplicateBinding {
                         first: area_lights.bindings.len() + first, second: index,
                     });
@@ -385,8 +388,10 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
             ).map_err(|error| AreaLightCameraError::Source {
                 binding: index, error: AreaEmitterError::Survival(error),
             })?;
-        complete(catalog.geometric_catalog())
-            .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
+        catalog.geometric_catalog().validate_proposal_support()
+            .map_err(|error| AreaLightCameraError::Source {
+                binding: index, error: AreaEmitterError::Images(error),
+            })?;
         work.add(catalog.trace_evaluations(), catalog.field_evaluations(), catalog.query_work())?;
         tracking.draws = tracking.draws.checked_add(catalog.free_flight_draws())
             .ok_or(AreaLightCameraError::NumericalRange)?;
@@ -478,8 +483,14 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         for (slot, binding) in self.volume_bindings.iter().enumerate() {
             if binding.receiver_medium == anchor.medium
                 && binding.source.emitter.object_id() == contact.object_id && binding.source_side == side {
-                return emitter_weight_for_source(self.surface_camera(), cx, path, settings, work,
-                    workspace, state, self.area_lights.bindings.len() + slot, binding.source_binding());
+                let index = self.area_lights.bindings.len() + slot;
+                let sample = binding.source.sample_at_contact_if_supported(
+                    cx, &contact, path.beam().ray().origin,
+                ).map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
+                if let Some(sample) = sample {
+                    return emitter_weight_for_source(self.surface_camera(), cx, path, settings, work,
+                        workspace, state, index, binding.source_binding(), sample);
+                }
             }
         }
         Ok(1.0)
