@@ -4991,3 +4991,39 @@ point-loop constraints remain separate models.
 
 Focused native validation passes 72 cases across 12 integration targets,
 including ten new physical/refusal cases and 62 original regressions.
+
+## Supported payload capture with existing gears and locks
+
+`articulated::motion::inventory::supported::constraints::capture_payload`
+connects finite rigid-payload capture to the original constant affine joint
+rows. It uses the original loaded full inertia and incoming momentum mismatch,
+prepares the native prescribed-base row mobility, and solves all row reactions
+together. One final native impulse event applies the capture mismatch and
+`A^T lambda` simultaneously. The actual endpoint retains the original speed
+and representability admission; an inadmissible unconstrained intermediate
+cannot reject a valid constrained result. Passive impulses do not consume
+motor force/torque ratings.
+
+The result wraps the original capture with row impulses, multipliers, initial
+and final row residuals, conditioning, and independently bounded midpoint
+reaction work. The native support impulse and signed support work remain
+external. Actual world linear/angular momentum and RNEA-projected joint momentum
+are checked against the support and declared ideal reactions respectively.
+The same private lifecycle serves the original unconstrained API, and empty
+rows reproduce that capture exactly.
+
+Capture retains its nonnegative complete relative-motion quadratic Q. Its
+identity is `delta_K = W_support + J_constraint dot v_final - Q`.
+For exactly tangent motion the last pairing vanishes. For finite admitted row
+defects, the final-rate pairing remains visible in the existing energy residual,
+while actual midpoint constraint work has its own cap. Neither term is silently
+subtracted from Q, double-counted as loss, or assigned to a thermal body.
+
+Seven focused tests use independent COM/spin and reduced-inertia calculations
+for geared finite recoil, positive/negative moving-support work, a scalar-root
+lock, full-tensor branched motion, frame and inertial-boost covariance, finite
+tangency work, row scaling, actual endpoint limits, budget refusal and cancellation.
+The continuation case captures a payload, advances the loaded geared mechanism
+through the actual supported implicit path, and releases its exact inventory.
+This admits existing constant affine gears/locks, not constraint activation,
+backlash, varying ratios or nonlinear point loops.

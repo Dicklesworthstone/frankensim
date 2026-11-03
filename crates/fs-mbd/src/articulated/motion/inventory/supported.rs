@@ -8,8 +8,13 @@
 //! never a raw decrease of lab-frame kinetic energy.
 //!
 //! This is a perfectly inelastic rigid attachment at the actual supplied pose.
-//! It does not discover contact, impose extra gear/loop rows, resolve a finite
-//! grasp duration, or assign the removed mechanical energy to a thermal body.
+//! The constraints child composes existing ideal affine gear/lock rows with
+//! the same lifecycle. Contact discovery, nonlinear loops, finite grasp duration
+//! and a thermal destination for removed mechanical energy remain separate.
+
+/// Existing affine gear and lock reactions during supported payload capture.
+#[path = "supported/constraints.rs"]
+pub mod constraints;
 
 /// Passive or internally driven release of an exact captured inventory.
 #[path = "supported/release.rs"]
@@ -25,10 +30,14 @@ use super::{
     energy_in_frame, finite, payload_at_link, poll, replace_link_inertia, twist_in_frame,
 };
 use crate::articulated::{
-    ArticulatedModel, ArticulatedMomentum, BaseState, apply_prescribed_base_impulses,
+    ArticulatedModel, ArticulatedMomentum, BaseState,
     forward_kinematics, inverse_dynamics, momentum_from_kinematics, validate_twist,
     validate_wrench,
 };
+use self::constraints::{
+    ConstrainedSupportedPayloadCapture, SupportedPayloadConstraintControls, capture_response,
+};
+use crate::articulated::motion::reconfigure::constraints::JointConstraint;
 use fs_ga::{Vec3, Wrench};
 use fs_math::dd::Dd;
 
@@ -69,7 +78,9 @@ pub struct SupportedPayloadBalance {
     /// Actual world-origin angular increment minus support impulse, N m s.
     pub angular_momentum_residual_world: Vec3,
     /// Native RNEA projection of actual body increments or release decomposition.
-    /// Capture and equal/opposite separation have no external relative-joint impulse.
+    /// Unconstrained capture and equal/opposite separation have no external
+    /// relative-joint impulse. Constrained capture subtracts the declared
+    /// A^T lambda retained in its surrounding constraint-reaction receipt.
     pub joint_momentum_residual: Vec<f64>,
     /// Largest absolute residual divided by its declared allowance, at most one.
     pub maximum_normalized_momentum_residual: f64,
@@ -104,6 +115,8 @@ pub struct SupportedPayloadCapture {
     /// Actual attached payload pose and velocity in the returned state.
     pub payload_after: PayloadState,
     /// Sum of nonnegative old-body and payload relative-motion quadratics, J.
+    /// With finite admitted ideal-row defects this is the complete projection
+    /// quadratic, not an inferred thermal deposit.
     pub removed_relative_energy_j: f64,
     /// Independent impulse, generalized momentum and support-work audits.
     pub balance: SupportedPayloadBalance,
@@ -136,8 +149,22 @@ pub fn capture_payload(
     target_link: usize,
     payload: PayloadState,
     controls: SupportedPayloadControls<'_>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<SupportedPayloadCapture, PayloadError> {
+    capture_evaluated(model, state, target_link, payload, controls, None, cancelled)
+        .map(|result| result.capture)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_evaluated(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    target_link: usize,
+    payload: PayloadState,
+    controls: SupportedPayloadControls<'_>,
+    constraints: Option<(&[JointConstraint], SupportedPayloadConstraintControls)>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ConstrainedSupportedPayloadCapture, PayloadError> {
     poll(&mut cancelled)?;
     admit(model, state, target_link, controls)?;
     let before = forward_kinematics(
@@ -168,13 +195,13 @@ pub fn capture_payload(
     body_impulses[target_link] = mismatch;
     let zero = vec![0.0; model.dof_count()];
     poll(&mut cancelled)?;
-    let response = apply_prescribed_base_impulses(
+    let (response, reaction) = capture_response(
         &model_after,
-        state.base,
-        &state.joint_position,
-        &state.joint_velocity,
+        state,
         &zero,
         &body_impulses,
+        constraints,
+        &mut cancelled,
     )?;
     poll(&mut cancelled)?;
     let state_after = PrescribedBaseMotionState {
@@ -282,7 +309,7 @@ pub fn capture_payload(
         )?;
     removed = removed + Dd::from_f64(payload.inertia.kinetic_energy(payload_delta)?);
     poll(&mut cancelled)?;
-    let joint_momentum_residual = inverse_dynamics(
+    let mut joint_momentum_residual = inverse_dynamics(
         model,
         BaseState::stationary(state.base.world_from_base),
         &state.joint_position,
@@ -292,6 +319,17 @@ pub fn capture_payload(
         &projected,
     )?
     .generalized_force;
+    for (index, (residual, &applied)) in joint_momentum_residual.iter_mut()
+        .zip(&reaction.joint_impulse).enumerate()
+    {
+        if index % 64 == 0 {
+            poll(&mut cancelled)?;
+        }
+        *residual = finite(
+            (Dd::from_f64(*residual) - Dd::from_f64(applied)).to_f64(),
+            "supported_payload.constraint_momentum_residual",
+        )?;
+    }
     poll(&mut cancelled)?;
     let mut support = SpatialSum::default();
     support.add_world_wrench(
@@ -327,6 +365,9 @@ pub fn capture_payload(
             maximum_j: controls.maximum_removed_relative_energy_j,
         });
     }
+    // For constrained capture, this projection identity retains the finite
+    // final-rate pairing J_constraint dot qdot_after as an admitted defect.
+    // Its separately bounded midpoint work is not subtracted from this Q.
     let energy_residual_j = finite(
         (centered_change - support_work + removed).to_f64(),
         "supported_payload.energy_residual",
@@ -369,7 +410,8 @@ pub fn capture_payload(
         energy_residual_j,
     };
     poll(&mut cancelled)?;
-    Ok(SupportedPayloadCapture {
+    Ok(ConstrainedSupportedPayloadCapture {
+        capture: SupportedPayloadCapture {
         model_after,
         state_after,
         attachment: PayloadAttachment {
@@ -382,6 +424,8 @@ pub fn capture_payload(
         payload_after,
         removed_relative_energy_j,
         balance,
+        },
+        reaction,
     })
 }
 
