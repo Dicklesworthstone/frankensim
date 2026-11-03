@@ -671,7 +671,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     ///
     /// The native momentum step uses local source mu(T) plus rho*nu_t and its
     /// original local eddy/molecular cap. Each caloric trial converts that
-    /// immutable accepted nu_t to k_t=rho0*Cp_source(T_trial)*nu_t/0.9 using
+    /// immutable accepted nu_t to k_t=rho0*Cp_source(T_trial)*nu_t/Pr_t using
+    /// the original `flow.turbulent_prandtl` and
     /// the same original h(T) derivative that supplies advection. Native face
     /// and cell/junction diffusive defects must meet the caloric flux tolerance
     /// at the accepted endpoint, including boundary/thermostat heat correction.
@@ -744,7 +745,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// BE/BDF2 history. The original SGS owner recomputes nu_t from that trial's
     /// resolved/projected velocity and admits its ratio to local molecular nu.
     /// On those same fluxes, each caloric trial evaluates the original source
-    /// Cp(T) and forms `rho0*Cp_source(T)*nu_t/0.9` separately from molecular k.
+    /// Cp(T) and forms `rho0*Cp_source(T)*nu_t/flow.turbulent_prandtl`
+    /// separately from molecular k.
     /// Actual endpoint-minus-applied diffusive face and cell heat defects,
     /// source h(T) storage/advection defects and physical heat closure retain
     /// their original caloric gates. Neither preceding material-trial SGS

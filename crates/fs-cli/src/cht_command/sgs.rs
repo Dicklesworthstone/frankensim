@@ -1,6 +1,6 @@
 //! Explicit transient SGS admission and output for the cooling scene reader.
 
-use fs_lbm::conjugate::{FvSgsConfig, turbulence::TURBULENT_PRANDTL};
+use fs_lbm::conjugate::FvSgsConfig;
 use fs_lbm::sgs3::{SgsModel, SgsUse};
 
 use super::{
@@ -8,7 +8,7 @@ use super::{
 };
 use std::fmt::Write as _;
 
-pub(super) const HELP: &str = "\nExploratory transient SGS: solver.sgs requires model (\"smagorinsky\",\n\"wale\" or \"vreman\"), coefficient, filter_width_factor,\nmaximum_eddy_to_molecular and usage: \"exploration\". It requires\ntransient.flow: \"unsteady\" and marched energy. Smagorinsky/WALE use\nfactor * cell_volume^(1/3); Vreman uses factor * EACH directional cell\nwidth and its coefficient is linear (not squared). The ratio cap refuses\nrather than clips. Do not combine with solver.turbulence: \"lvel\",\nsteady-on-mean-flow energy or evolving fluid material properties. The same\nclosure drives momentum and heat (Pr_t=0.9). Results report the model,\nfilter range and final eddy-viscosity/conductivity diagnostics; no turbulent\nDNS or acceptance-render qualification is implied. Example:\n  frankensim --json cooling-cht examples/cooling-cht/sgs-heated-obstacle.json\n";
+pub(super) const HELP: &str = "\nExploratory transient SGS: solver.sgs requires model (\"smagorinsky\",\n\"wale\" or \"vreman\"), coefficient, filter_width_factor,\nmaximum_eddy_to_molecular and usage: \"exploration\". It requires\ntransient.flow: \"unsteady\" and marched energy. Smagorinsky/WALE use\nfactor * cell_volume^(1/3); Vreman uses factor * EACH directional cell\nwidth and its coefficient is linear (not squared). The ratio cap refuses\nrather than clips. Do not combine with solver.turbulence: \"lvel\",\nsteady-on-mean-flow energy or evolving fluid material properties. The same\neddy viscosity drives momentum and heat. For either LVEL or SGS, positive\nsolver.turbulent_prandtl sets k_t = rho cp nu_t / Pr_t (default 0.9).\nIt changes heat diffusion independently of the momentum coefficient;\nchoose it for the modeled flow, not as a molecular material property.\nResults report its actual value, the model, filter range and final\neddy-viscosity/conductivity diagnostics; no turbulent DNS or\nacceptance-render qualification is implied. Example:\n  frankensim --json cooling-cht examples/cooling-cht/sgs-heated-obstacle.json\n";
 
 pub(super) fn parse(
     value: Option<&J>,
@@ -100,6 +100,7 @@ pub(super) struct Summary {
     max_ratio: f64,
     mean_ratio: f64,
     max_conductivity: f64,
+    turbulent_prandtl: f64,
 }
 
 impl Summary {
@@ -144,7 +145,8 @@ impl Summary {
             max_ratio: max_eddy / nu,
             mean_ratio: weighted_eddy / volume / nu,
             max_conductivity: scene.fluid.volumetric_heat_capacity() * max_heat_eddy
-                / TURBULENT_PRANDTL,
+                / flow.turbulent_prandtl,
+            turbulent_prandtl: flow.turbulent_prandtl,
         })
     }
 
@@ -161,7 +163,7 @@ impl Summary {
             num(coefficient)?,
             num(self.config.filter_width_factor)?,
             num(self.config.maximum_eddy_to_molecular)?,
-            num(TURBULENT_PRANDTL)?,
+            num(self.turbulent_prandtl)?,
             num(self.min_filter_m)?,
             num(self.max_filter_m)?,
             num(self.max_eddy)?,
@@ -183,11 +185,12 @@ impl Summary {
         let (name, coefficient) = model(self.config);
         let _ = writeln!(
             out,
-            "turbulence={name}\nsgs_usage=exploration\nsgs_coefficient={coefficient}\nsgs_filter_width_factor={}\nsgs_maximum_eddy_to_molecular={}\nsgs_min_filter_width_m={}\nsgs_max_filter_width_m={}\nsgs_thermal_prandtl={TURBULENT_PRANDTL}\nfinal_max_eddy_viscosity_m2_s={}\nmax_eddy_viscosity_ratio={}\nfinal_volume_mean_eddy_viscosity_ratio={}\nfinal_max_turbulent_conductivity_w_m_k={}",
+            "turbulence={name}\nsgs_usage=exploration\nsgs_coefficient={coefficient}\nsgs_filter_width_factor={}\nsgs_maximum_eddy_to_molecular={}\nsgs_min_filter_width_m={}\nsgs_max_filter_width_m={}\nsgs_thermal_prandtl={}\nfinal_max_eddy_viscosity_m2_s={}\nmax_eddy_viscosity_ratio={}\nfinal_volume_mean_eddy_viscosity_ratio={}\nfinal_max_turbulent_conductivity_w_m_k={}",
             self.config.filter_width_factor,
             self.config.maximum_eddy_to_molecular,
             self.min_filter_m,
             self.max_filter_m,
+            self.turbulent_prandtl,
             self.max_eddy,
             self.max_ratio,
             self.mean_ratio,

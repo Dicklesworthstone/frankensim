@@ -27,7 +27,7 @@
 //! (using the tangent there over-predicts the friction: measured +61 % at
 //! Re_Dh = 2e4 before this distinction). Both degrade to laminar flow as
 //! `Re_L -> 0`. The energy equation takes the turbulent conductivity
-//! `rho c_p nu_t / Pr_t` (`Pr_t = 0.9`).
+//! `rho c_p nu_t / Pr_t`, with `SimpleConfig::turbulent_prandtl` (default 0.9).
 //!
 //! The wall distance runs from each fluid voxel centre to the box of the
 //! nearest solid voxel or wall-type domain face (exact for axis-aligned
@@ -52,7 +52,8 @@ pub mod thermal_wall;
 pub const KAPPA: f64 = 0.41;
 /// Log-law constant `E` of Spalding's profile.
 pub const SPALDING_E: f64 = 8.6;
-/// Turbulent Prandtl number of the energy equation.
+/// Default turbulent Prandtl number for [`super::SimpleConfig`]. The heat
+/// closure is independently configurable; this is not a material constant.
 pub const TURBULENT_PRANDTL: f64 = 0.9;
 
 /// Spalding's `y+(u+)`.
@@ -260,8 +261,7 @@ fn wall_features(domain: &VoxelDomain, wall: [bool; 6], mut emit: impl FnMut(f64
                     domain.face_coord(a, n[a]) + domain.width(a, n[a] - 1)
                 } else {
                     domain.face_coord(a, i - 1)
-                }
-            })
+                })
             .collect()
     });
     let position: [Vec<f64>; 3] =

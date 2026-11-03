@@ -30,7 +30,8 @@ fn shear_flow() -> SimpleConfig {
 #[test]
 fn implicit_live_sgs_heat_uses_exactly_the_final_projected_flow_epoch() {
     let domain = VoxelDomain::new(4, 4, 1, 0.25).unwrap();
-    let flow = shear_flow();
+    let mut flow = shear_flow();
+    flow.turbulent_prandtl = 0.63;
     let mut thermal = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
     thermal.power_w = vec![0.01; domain.cell_count()];
     let saved = thermal.clone();
@@ -144,9 +145,9 @@ fn implicit_live_sgs_heat_uses_exactly_the_final_projected_flow_epoch() {
         setup.eddy_conductivity_w_m_k = march
             .flow
             .flow
-            .eddy_conductivity(bound.properties())
-            .into_iter()
-            .map(|k| scale * k)
+            .heat_eddy_viscosity_m2_s
+            .iter()
+            .map(|nu_t| scale * 2.0 * nu_t / 0.63)
             .collect();
         march_energy(
             &domain,

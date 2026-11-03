@@ -30,6 +30,7 @@
     "x+": {"type": "opening", "ambient_k": 300.0}
   },
   "solver": {
+    "turbulent_prandtl": 0.9,
     "sgs": {
       "model": "wale",
       "coefficient": 0.5,

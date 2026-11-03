@@ -64,7 +64,6 @@ use super::transient::{
     TransientRecord, energy_step_with_conductivity, heat_capacity, junction_stored_energy_change_j,
     record_energy_step, scale_power, solve_step_with_fields, storage_record,
 };
-use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
 #[cfg(feature = "enthalpy-coupling")]
 use super::{UnsteadyHeatingAudit, UnsteadyMechanicalStep, ViscousHeatControls};
@@ -522,7 +521,7 @@ fn simple_unsteady_inner(
 /// The refusals of [`simple_unsteady`] and [`super::march_energy`]
 /// (including ordinary solids or compact junctions without heat capacity), or
 /// [`ChtError::Cancelled`].
-#[allow(clippy::too_many_arguments)] // physics inputs + both controls
+#[allow(clippy::too_many_arguments)]// physics inputs + both controls
 pub fn march_conjugate(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -560,7 +559,8 @@ pub fn march_conjugate(
 /// March flow and heat with explicit transient Smagorinsky/WALE transport.
 ///
 /// The same SGS viscosity enters complete symmetric momentum stress and
-/// fluid thermal conductivity `rho * cp * nu_t / Pr_t`, with `Pr_t = 0.9`.
+/// fluid thermal conductivity `rho * cp * nu_t / Pr_t`, with the positive
+/// `Pr_t` declared in [`SimpleConfig::turbulent_prandtl`] (default 0.9).
 /// Conductivity is refreshed from the projected flow before every energy
 /// solve. This gradient-diffusion model adds neither SGS dissipation heating
 /// nor an equilibrium wall heat-transfer law. Caller-authored additional
@@ -570,7 +570,7 @@ pub fn march_conjugate(
 /// # Errors
 /// The refusals of [`march_conjugate`] and [`simple_unsteady_with_sgs`], or a
 /// supplied nonzero eddy-conductivity field.
-#[allow(clippy::too_many_arguments)] // same physics inputs + explicit closure
+#[allow(clippy::too_many_arguments)]// same physics inputs + explicit closure
 pub fn march_conjugate_with_sgs(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -1194,7 +1194,7 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
                     .solver
                     .heat_eddy_viscosity()
                     .iter()
-                    .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL)
+                    .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / config.turbulent_prandtl)
                     .collect();
             }
             // One projected flux image is shared with wall preparation and energy.

@@ -1894,7 +1894,7 @@ fn lvel_turbulence_adds_eddy_viscosity_and_cools_the_chip() {
     let fast = DUCT.replace("[0.1, 0.0, 0.0]", "[4.0, 0.0, 0.0]");
     let lvel = fast.replace(
         "\"solver\": {\"tolerance\": 1e-8}",
-        "\"solver\": {\"tolerance\": 1e-8, \"turbulence\": \"lvel\"}",
+        "\"solver\": {\"tolerance\": 1e-8, \"turbulence\": \"lvel\", \"turbulent_prandtl\": 0.6}",
     );
     assert_ne!(fast, DUCT);
     assert_ne!(lvel, fast);
@@ -1911,6 +1911,7 @@ fn lvel_turbulence_adds_eddy_viscosity_and_cools_the_chip() {
         Some("lvel")
     );
     let ratio = f(&turbulent, &["flow", "max_eddy_viscosity_ratio"]);
+    assert_eq!(f(&turbulent, &["flow", "turbulent_prandtl"]), 0.6);
     assert!(ratio > 0.0, "{ratio}");
     assert!(f(&turbulent, &["energy", "balance_relative_residual"]) < 1e-9);
     let (cold, hot) = (

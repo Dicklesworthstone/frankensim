@@ -14,7 +14,17 @@ fn close(a: f64, b: f64) {
 // reflection). Uniform tangential advection enters/leaves the fluid at 300 K.
 // Only the accepted tangential velocity and the Spalding eddy trace are
 // manufactured; the energy solve and solid-to-fluid observer are production.
-fn fixture(face: Face3, speed: f64) -> (VoxelDomain, FluidProperties, FvFlow, ThermalSetup, WallHeatFace, usize) {
+fn fixture(
+    face: Face3,
+    speed: f64,
+) -> (
+    VoxelDomain,
+    FluidProperties,
+    FvFlow,
+    ThermalSetup,
+    WallHeatFace,
+    usize,
+) {
     let f = face as usize;
     let axis = f / 2;
     let positive = f % 2 == 1;
@@ -46,6 +56,7 @@ fn fixture(face: Face3, speed: f64) -> (VoxelDomain, FluidProperties, FvFlow, Th
     old_heat[cell] = (secant - 1.0) * fluid.kinematic_viscosity_m2_s;
     let flow = FvFlow { field, velocity_m_s: velocity, pressure_pa: vec![0.0; domain.cell_count()],
         eddy_viscosity_m2_s: eddy, heat_eddy_viscosity_m2_s: old_heat,
+        turbulent_prandtl: config().turbulent_prandtl,
         report: SimpleReport { iterations: 0, mass_residual: 0.0, momentum_residual: 0.0,
             max_divergence_m3_s: 0.0, inflow_m3_s: 0.0, outflow_m3_s: 0.0,
             max_cell_reynolds: 0.0, momentum_krylov_iterations: 0, pressure_krylov_iterations: 0,

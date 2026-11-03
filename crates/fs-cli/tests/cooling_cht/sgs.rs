@@ -67,6 +67,53 @@ fn declared_models_run_coupled_cooling_and_export_the_final_closure() {
 }
 
 #[test]
+fn authored_heat_prandtl_reaches_the_solver_reports_and_heat_balance() {
+    let scene = short_scene("sgs-prandtl-base", "smagorinsky", 0.17);
+    let (code, base, error) = run(&scratch("sgs-prandtl-base.json", &scene));
+    assert_eq!(code, 0, "{error}");
+    let changed = scene
+        .replace("\"turbulent_prandtl\": 0.9", "\"turbulent_prandtl\": 0.45")
+        .replace("sgs-prandtl-base.vtr", "sgs-prandtl-changed.vtr");
+    let (code, changed, error) = run(&scratch("sgs-prandtl-changed.json", &changed));
+    assert_eq!(code, 0, "{error}");
+    let base_sgs = base.path(&["flow", "sgs"]).unwrap();
+    let changed_sgs = changed.path(&["flow", "sgs"]).unwrap();
+    assert_eq!(f(changed_sgs, &["thermal_prandtl"]), 0.45);
+    assert_eq!(
+        f(base_sgs, &["final_max_eddy_viscosity_m2_s"]),
+        f(changed_sgs, &["final_max_eddy_viscosity_m2_s"])
+    );
+    assert_eq!(
+        f(changed_sgs, &["final_max_turbulent_conductivity_w_m_k"]),
+        2.0 * f(base_sgs, &["final_max_turbulent_conductivity_w_m_k"])
+    );
+    assert_ne!(
+        base.get("probes"),
+        changed.get("probes"),
+        "authored heat transport must reach the actual temperature field"
+    );
+    assert!(f(&changed, &["transient", "worst_step_closure_j"]) < 1e-8);
+}
+
+#[test]
+fn invalid_or_unowned_turbulent_heat_controls_refuse() {
+    let base = short_scene("sgs-prandtl-refusal", "wale", 0.5);
+    for (i, value) in ["0.0", "-0.2", "null", "\"0.7\""].into_iter().enumerate() {
+        let scene = base.replace(
+            "\"turbulent_prandtl\": 0.9",
+            &format!("\"turbulent_prandtl\": {value}"),
+        );
+        let (code, _, error) = run(&scratch(&format!("sgs-prandtl-refusal-{i}.json"), &scene));
+        assert_ne!(code, 0);
+        assert!(error.contains("turbulent_prandtl"), "{error}");
+    }
+    let unowned = DUCT.replace("\"solver\": {", "\"solver\": {\"turbulent_prandtl\": 0.7,");
+    let (code, _, error) = run(&scratch("laminar-prandtl-refusal.json", &unowned));
+    assert_ne!(code, 0);
+    assert!(error.contains("requires solver.turbulence"), "{error}");
+}
+
+#[test]
 fn vreman_graded_scene_reports_actual_directional_filter_widths() {
     let scene = VREMAN.replace("\"steps\": 40", "\"steps\": 2");
     let (code, result, error) = run(&scratch("vreman-graded.json", &scene));

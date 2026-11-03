@@ -9,7 +9,6 @@ use super::{
     MaterialHeatStep, RadiationConfig, Radiators, SolidMaterial, ThermalSetup, TransientRecord,
     UnsteadyConfig, finite, poll,
 };
-use crate::conjugate::turbulence::TURBULENT_PRANDTL;
 #[cfg(feature = "enthalpy-coupling")]
 use super::MaterialViscousHeat;
 use core::cell::Cell;
@@ -243,7 +242,8 @@ impl MaterialEndpointCoupling {
                     if cell.is_multiple_of(256) {
                         poll(gate)?;
                     }
-                    *conductivity = fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL;
+                    *conductivity = fluid.volumetric_heat_capacity() * nu_t
+                        / marcher.solver.turbulent_prandtl();
                     finite("thermal.sgs_conductivity_w_m_k", *conductivity)?;
                 }
             }

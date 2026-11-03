@@ -26,6 +26,61 @@ fn config(model: SgsModel) -> FvSgsConfig {
     }
 }
 
+#[test]
+fn turbulent_prandtl_is_admitted_before_any_flow_or_heat_work() {
+    let domain = VoxelDomain::new(2, 2, 1, 0.1).unwrap();
+    let mut controls = SimpleConfig::new([FvBoundary::wall(); 6]);
+    for value in [0.0, -0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        controls.turbulent_prandtl = value;
+        assert!(matches!(
+            super::super::admit(&domain, &fluid(), &controls),
+            Err(ChtError::InvalidInput {
+                field: "simple.turbulent_prandtl",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn independent_heat_prandtl_preserves_momentum_and_scales_heat_diffusion() {
+    let domain = VoxelDomain::new(3, 4, 1, 0.25).unwrap();
+    let fluid = fluid();
+    let gate = CancelGate::new();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    faces[2] = FvBoundary::wall();
+    faces[3] = FvBoundary::Wall {
+        velocity: [1.0, 0.0, 0.0],
+    };
+    let mut previous: Option<crate::conjugate::FvFlow> = None;
+    for prandtl in [0.45, 0.9, 1.8] {
+        let mut controls = SimpleConfig::new(faces);
+        controls.turbulent_prandtl = prandtl;
+        let mut solver = Solver::new(&domain, &fluid, &controls);
+        fill_faces(&mut solver, |p| [p[1], 0.0, 0.0]);
+        solver.start_time(0.01, TimeScheme::BackwardEuler);
+        solver
+            .enable_sgs(config(SgsModel::Smagorinsky { cs: 0.2 }), &gate)
+            .unwrap();
+        solver.update_sgs(&gate).unwrap();
+        let flow = solver.finish_projected(&fluid, 0, (0.0, 0.0));
+        assert_eq!(flow.turbulent_prandtl, prandtl);
+        // Affine shear |S|=1 gives nu_t=(Cs*dx)^2 independently of heat.
+        for conductivity in flow.eddy_conductivity(&fluid) {
+            let expected = 2.0 * (0.2_f64 * 0.25).powi(2) / prandtl;
+            assert!((conductivity / expected - 1.0).abs() < 2e-13);
+        }
+        if let Some(before) = previous {
+            assert_eq!(flow.velocity_m_s, before.velocity_m_s);
+            assert_eq!(flow.field, before.field);
+            assert_eq!(flow.eddy_viscosity_m2_s, before.eddy_viscosity_m2_s);
+        }
+        previous = Some(flow);
+    }
+}
+
 fn fill_faces(solver: &mut Solver<'_>, field: impl Fn([f64; 3]) -> [f64; 3]) {
     for a in 0..3 {
         for f in 0..solver.vel[a].len() {
@@ -321,6 +376,7 @@ fn transient_sgs_drives_heat_and_zero_coefficient_recovers_the_existing_march() 
     faces[4] = FvBoundary::Symmetry;
     faces[5] = FvBoundary::Symmetry;
     let mut controls = SimpleConfig::new(faces);
+    controls.turbulent_prandtl = 0.6;
     controls.pressure_tolerance = 1e-11;
     let mut unsteady = UnsteadyConfig::new(0.01, 1);
     unsteady.inner_iterations = 400;
@@ -375,7 +431,15 @@ fn transient_sgs_drives_heat_and_zero_coefficient_recovers_the_existing_march() 
         "SGS must enter momentum"
     );
     let mut explicit = setup.clone();
-    explicit.eddy_conductivity_w_m_k = coupled.flow.flow.eddy_conductivity(&fluid);
+    assert_eq!(coupled.flow.flow.turbulent_prandtl, 0.6);
+    // Reconstruct independently so a shared fallback to 0.9 cannot pass.
+    explicit.eddy_conductivity_w_m_k = coupled
+        .flow
+        .flow
+        .heat_eddy_viscosity_m2_s
+        .iter()
+        .map(|nu_t| 2.0 * nu_t / 0.6)
+        .collect();
     let thermal = TransientConfig {
         time_step_s: unsteady.time_step_s,
         steps: 1,

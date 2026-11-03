@@ -34,7 +34,6 @@ use super::energy::{EnergyConfig, EnergySolution, ThermalFace, ThermalSetup, sol
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, RadiationEndpoint, Radiators};
 use super::simple::{FvFlow, SimpleConfig, Solver, Turbulence, admit};
-use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
 
 /// Boussinesq coupling controls.
@@ -186,7 +185,7 @@ pub fn fv_natural_convection(
         if config.flow.turbulence != Turbulence::Laminar {
             step.eddy_conductivity_w_m_k = eddy_viscosity
                 .iter()
-                .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL)
+                .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / config.flow.turbulent_prandtl)
                 .collect();
         }
         step

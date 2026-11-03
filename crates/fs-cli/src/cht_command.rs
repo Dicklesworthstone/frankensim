@@ -693,6 +693,8 @@ struct Scene {
     reference: Option<f64>,
     tolerance: f64,
     turbulence: Turbulence,
+    /// One gradient-diffusion heat law shared by flow, heat, exports and studies.
+    turbulent_prandtl: f64,
     /// Explicit transient resolved-gradient closure; never a steady default.
     sgs: Option<FvSgsConfig>,
     /// Named fans inside the domain.
@@ -1332,6 +1334,14 @@ impl Scene {
                 )));
             }
         };
+        let turbulent_prandtl = match solver {
+            Some(s) => optional_number(s, "turbulent_prandtl", "solver")?
+                .unwrap_or(fs_lbm::conjugate::turbulence::TURBULENT_PRANDTL),
+            None => fs_lbm::conjugate::turbulence::TURBULENT_PRANDTL,
+        };
+        if !turbulent_prandtl.is_finite() || turbulent_prandtl <= 0.0 {
+            return Err(bad("solver.turbulent_prandtl must be finite and positive"));
+        }
         let mut internal_fans = Vec::new();
         for (i, item) in array_of(&root, "internal_fans")?.iter().enumerate() {
             let at = format!("internal_fans[{i}]");
@@ -1540,6 +1550,14 @@ impl Scene {
             transient.as_ref(),
             evolving,
         )?;
+        if solver.is_some_and(|s| s.get("turbulent_prandtl").is_some())
+            && turbulence == Turbulence::Laminar
+            && sgs.is_none()
+        {
+            return Err(bad(
+                "solver.turbulent_prandtl requires solver.turbulence: lvel or solver.sgs",
+            ));
+        }
         let fluid_enthalpy = material::enthalpy::parse(
             root.get("fluid_enthalpy"), fluid_source.as_ref(), transient.is_some(),
         )?;
@@ -1560,6 +1578,7 @@ impl Scene {
             reference,
             tolerance,
             turbulence,
+            turbulent_prandtl,
             sgs,
             internal_fans,
             resistances,
@@ -1753,7 +1772,7 @@ fn probes_json(readings: &[(String, f64, [f64; 3], bool)]) -> Result<String> {
 /// The unsteady march (`transient.flow: "unsteady"`): flow and energy
 /// advance together, so there is no steady solution to report; the result
 /// carries the march's closure, peak and final temperatures instead.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // solve and one linear report
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]// solve and one linear report
 fn execute_unsteady(
     scene: &Scene,
     domain: &VoxelDomain,
@@ -2134,6 +2153,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     let mut flow_config = SimpleConfig::new(flow_faces);
     flow_config.tolerance = scene.tolerance;
     flow_config.turbulence = scene.turbulence;
+    flow_config.turbulent_prandtl = scene.turbulent_prandtl;
     flow_config.max_iterations = scene.max_iterations;
     flow_config.internal_fans = scene.internal_fans.iter().map(|(_, fan)| *fan).collect();
     flow_config.resistances.clone_from(&scene.resistances);
@@ -2442,8 +2462,9 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         if scene.turbulence != Turbulence::Laminar {
             let _ = write!(
                 out,
-                ",\"max_eddy_viscosity_ratio\":{}",
-                num(max_eddy_ratio)?
+                ",\"max_eddy_viscosity_ratio\":{},\"turbulent_prandtl\":{}",
+                num(max_eddy_ratio)?,
+                num(flow.turbulent_prandtl)?
             );
         }
         if let Some(couplings) = couplings {
@@ -2621,7 +2642,8 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         if scene.turbulence != Turbulence::Laminar {
             let _ = writeln!(
                 out,
-                "turbulence={turbulence_name}\nmax_eddy_viscosity_ratio={max_eddy_ratio}"
+                "turbulence={turbulence_name}\nmax_eddy_viscosity_ratio={max_eddy_ratio}\nturbulent_prandtl={}",
+                flow.turbulent_prandtl
             );
         }
         if let Some((q, dp, _)) = r.fan {

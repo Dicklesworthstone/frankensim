@@ -670,7 +670,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     ///
     /// Source mu(T) and the independently recomputed nu_t drive the same
     /// reciprocal momentum stress. Each joint trial converts the immutable
-    /// accepted nu_t into k_t=rho0*Cp_source(T_trial)*nu_t/0.9, once and only
+    /// accepted nu_t into k_t=rho0*Cp_source(T_trial)*nu_t/Pr_t with the
+    /// original `flow.turbulent_prandtl`, once and only
     /// in fluid cells. Native face and cell/junction flux defects must satisfy
     /// the caloric tolerance at the endpoint; boundary and thermostat heat
     /// corrections enter the same ledger. Original fluid h(T), solid integral Cp(T), solid k(T),

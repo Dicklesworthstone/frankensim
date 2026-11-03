@@ -410,6 +410,12 @@ pub struct SimpleConfig {
     pub pressure_solver: PressureSolver,
     /// Turbulence closure.
     pub turbulence: Turbulence,
+    /// Positive finite turbulent Prandtl number for gradient heat diffusion,
+    /// `k_t = rho cp nu_t / Pr_t`, for either LVEL or explicit transient SGS.
+    /// Independent of molecular Prandtl and the momentum-model coefficient.
+    /// The default is 0.9; it is a modeling choice, not a universal material law.
+    /// An explicit equilibrium thermal-wall owner uses its own `WallHeatConfig`.
+    pub turbulent_prandtl: f64,
     /// Flow resistances (grilles, porous blocks).
     pub resistances: Vec<FlowResistance>,
     /// Fans inside the domain.
@@ -445,6 +451,7 @@ impl SimpleConfig {
             fan: None,
             pressure_solver: PressureSolver::AmgCg,
             turbulence: Turbulence::Laminar,
+            turbulent_prandtl: TURBULENT_PRANDTL,
             resistances: Vec::new(),
             internal_fans: Vec::new(),
         }
@@ -502,6 +509,9 @@ pub struct FvFlow {
     /// LVEL uses its wall-law secant value in wall-adjacent cells. Explicit
     /// transient SGS uses its resolved-gradient value (zeros when laminar).
     pub heat_eddy_viscosity_m2_s: Vec<f64>,
+    /// Gradient-diffusion heat closure retained from the original flow controls.
+    /// Used by [`Self::eddy_conductivity`]; changing it does not change momentum.
+    pub turbulent_prandtl: f64,
     /// Run evidence.
     pub report: SimpleReport,
 }
@@ -516,6 +526,7 @@ impl FvFlow {
             pressure_pa: vec![0.0; domain.cell_count()],
             eddy_viscosity_m2_s: vec![0.0; domain.cell_count()],
             heat_eddy_viscosity_m2_s: vec![0.0; domain.cell_count()],
+            turbulent_prandtl: TURBULENT_PRANDTL,
             report: SimpleReport {
                 iterations: 0,
                 mass_residual: 0.0,
@@ -538,7 +549,7 @@ impl FvFlow {
     pub fn eddy_conductivity(&self, fluid: &FluidProperties) -> Vec<f64> {
         self.heat_eddy_viscosity_m2_s
             .iter()
-            .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL)
+            .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / self.turbulent_prandtl)
             .collect()
     }
 
@@ -2218,6 +2229,7 @@ pub(super) fn admit(
     config: &SimpleConfig,
 ) -> Result<(), ChtError> {
     fluid.validate()?;
+    finite_positive("simple.turbulent_prandtl", config.turbulent_prandtl)?;
     if config.scheme == ConvectionScheme::EnthalpyMinmod {
         return Err(ChtError::InvalidInput {
             field: "simple.scheme",
@@ -2473,6 +2485,7 @@ impl Solver<'_> {
             pressure_pa: self.pressure,
             eddy_viscosity_m2_s,
             heat_eddy_viscosity_m2_s,
+            turbulent_prandtl: self.config.turbulent_prandtl,
             report,
         }
     }

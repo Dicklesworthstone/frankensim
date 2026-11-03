@@ -231,7 +231,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// as `march_natural_convection_with_material_solids`. Local source mu(T)
     /// and the separately recomputed nu_t supply momentum; the accepted nu_t
     /// supplies one fluid gradient heat flux with reference rho*Cp/Pr_t,
-    /// Pr_t=0.9. That flux is held fixed during solid nonlinear trials and is
+    /// the original `flow.turbulent_prandtl`. That flux is held fixed during solid nonlinear trials and is
     /// never added to solid conductivity, source snapshots or stored energy.
     /// A zero SGS coefficient recovers the original march exactly.
     ///

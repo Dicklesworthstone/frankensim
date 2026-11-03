@@ -2,7 +2,8 @@
 //!
 //! This is a resolved-velocity closure, separate from equilibrium LVEL.
 //! Momentum consumes the existing complete symmetric effective-viscosity
-//! stress. Heat uses gradient diffusion with Pr_t=0.9; neither dissipation
+//! stress. Heat uses gradient diffusion with the independently declared
+//! `SimpleConfig::turbulent_prandtl` (default 0.9); neither dissipation
 //! heating nor a turbulent-DNS or thermal-wall-resolution claim is inferred.
 
 use super::{FvBoundary, Solver, Turbulence};
@@ -116,6 +117,12 @@ fn derivative(center: f64, minus: (f64, Sample), plus: (f64, Sample)) -> f64 {
 }
 
 impl Solver<'_> {
+    /// The heat law belongs to the original flow controls, including material
+    /// endpoint retries. Momentum closure refreshes never replace this value.
+    pub(in crate::conjugate) fn turbulent_prandtl(&self) -> f64 {
+        self.config.turbulent_prandtl
+    }
+
     /// Borrow the accepted tangent closure, without LVEL's legacy thermal
     /// secant substitution. Empty is the exact laminar representation. This
     /// is read-only: a thermal coupler must not recompute or accumulate nu_t.

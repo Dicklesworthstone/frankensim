@@ -192,7 +192,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// traction still uses the molecular half-cell viscosity.
     ///
     /// Projected nu_t adds one gradient heat flux with the original reference
-    /// rho*Cp and Pr_t=0.9, separately from source molecular conductivity.
+    /// rho*Cp and the original `flow.turbulent_prandtl`, separately from source
+    /// molecular conductivity.
     /// Storage, advection and the density/Cp departure bounds are those of
     /// `march_natural_convection`. The source feedback is first order in time;
     /// refinement must resolve both material gradients and the wall layer.
@@ -249,7 +250,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// from the same accepted time levels. Its selected native SGS field is
     /// recomputed from the resolved velocity, including the final pressure
     /// projection, with the original local eddy/molecular viscosity cap.
-    /// That current trial supplies `rho0*Cp0*nu_t/0.9` to the native heat
+    /// That current trial supplies `rho0*Cp0*nu_t/flow.turbulent_prandtl` to the native heat
     /// operator exactly once, separately from the original molecular k(T).
     /// Neither old SGS conductivity nor a compounded material coefficient is
     /// carried into a new trial. Unrelaxed endpoint temperature, mu/k and

@@ -27,7 +27,7 @@ fn flow(domain: &VoxelDomain, face: Face3, speed: f64) -> FvFlow {
     }
     FvFlow { field: FlowField::quiescent(domain), velocity_m_s: velocity,
         pressure_pa: vec![0.0; domain.cell_count()], heat_eddy_viscosity_m2_s: eddy.clone(),
-        eddy_viscosity_m2_s: eddy,
+        eddy_viscosity_m2_s: eddy, turbulent_prandtl: controls().turbulent_prandtl,
         report: SimpleReport { iterations: 0, mass_residual: 0.0, momentum_residual: 0.0,
             max_divergence_m3_s: 0.0, inflow_m3_s: 0.0, outflow_m3_s: 0.0,
             max_cell_reynolds: 0.0, momentum_krylov_iterations: 0, pressure_krylov_iterations: 0,
