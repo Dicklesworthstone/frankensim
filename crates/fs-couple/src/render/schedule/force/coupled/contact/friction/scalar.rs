@@ -71,7 +71,7 @@ pub(super) fn solve(law: &FrictionLaw, config: ModalFrictionConfig, compliance: 
         let expected = finite(mu*normal)?;
         Ok((finite(magnitude-expected)?, force_tolerance(config, magnitude, expected)?))
     };
-    if let Some(force) = law.affine_sliding_traction_n(normal, free_slip.abs(), compliance, dt)? {
+    if let Some(force) = law.direct_sliding_traction_n(normal, free_slip.abs(), compliance, dt)? {
         limit("friction traction", force, config.maximum_force_n)?;
         if force < required.abs() {
             let (residual, tolerance) = evaluate(force)?;

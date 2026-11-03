@@ -56,12 +56,99 @@ fn g1_implicit_sliding_matches_independent_quadratic_and_actual_work() {
                     let step = law.advance(&initial, &input(sign*distance,compliance,normal,dt)).unwrap();
                     assert_eq!(initial, law.initial_state(), "advance returns a candidate");
                     assert_eq!(step.regime, FrictionRegime::Sliding);
+                    assert_eq!(step.iterations, 0, "quadratic sliding needs no bisection");
                     close(step.traction_n[0], sign*reference, 5e-11);
                     close(step.slip_increment_m[0], sign*distance-compliance*step.traction_n[0], 1e-20);
                     assert_eq!(step.dissipated_j, step.traction_n[0]*step.slip_increment_m[0]);
                     assert!(step.dissipated_j >= 0.0);
                     assert_eq!(step.closure_residual_j, 0.0);
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_direct_hyperbolic_root_preserves_the_static_selection_and_force_budget() {
+    let law = law();
+    // Both equality and strict static feasibility must remain with the owner's
+    // static test, even when the weakening load line has another sliding root.
+    for distance in [0.1, 0.5, 0.8] {
+        assert_eq!(
+            law.direct_sliding_traction_n(1.0, distance, 1.0, 0.01).unwrap(),
+            None,
+        );
+        let step = law.advance(&law.initial_state(), &input(distance, 1.0, 1.0, 0.01)).unwrap();
+        assert_eq!(step.regime, FrictionRegime::Sticking);
+        assert_eq!(step.dissipated_j, 0.0);
+    }
+    let mut x = input(0.001, 0.001, 1.0, 0.001);
+    x.solve.max_iterations = 1;
+    let initial = law.initial_state();
+    let step = law.advance(&initial, &x).unwrap();
+    assert_eq!(step.regime, FrictionRegime::Sliding);
+    assert_eq!(step.iterations, 0);
+    x.solve.maximum_force_n = 0.2;
+    assert!(law.advance(&initial, &x).is_err());
+    assert_eq!(initial, law.initial_state());
+}
+
+#[test]
+fn g3_direct_hyperbolic_root_survives_dimensional_scaling_and_near_stick() {
+    let law = law();
+    // The raw quadratic squares lengths and multiplies length by load. Its
+    // coefficients overflow/underflow on these otherwise representable cases.
+    for distance_scale in [1e-200, 1.0, 1e200] {
+        for force_scale in [1e-100, 1.0, 1e100] {
+            let distance = 0.003 * distance_scale;
+            let compliance = 0.001 * distance_scale / force_scale;
+            let dt = 0.001 * distance_scale;
+            let reference = law.direct_sliding_traction_n(1.0, 0.003, 0.001, 0.001)
+                .unwrap().unwrap();
+            let force = law.direct_sliding_traction_n(force_scale, distance, compliance, dt)
+                .unwrap().unwrap();
+            close(force / force_scale, reference, 3e-15);
+            let slip = distance - compliance * force;
+            assert!(slip > 0.0);
+            let expected = force_scale * law.kinetic_coefficient(slip / dt).unwrap();
+            close(force / force_scale, expected / force_scale, 3e-15);
+        }
+    }
+    // At the limiting static state the slip quadratic has a double root when
+    // d/dt=0.064 m/s. Nearby roots must satisfy the original law without a
+    // negative discriminant from subtracting nearly equal squared terms.
+    for excess in [1e-12, 1e-9, 1e-6] {
+        for released_speed in [0.0064, 0.064, 0.64] {
+            let distance = 0.8 * (1.0 + excess);
+            let dt = distance / released_speed;
+            let force = law.direct_sliding_traction_n(1.0, distance, 1.0, dt)
+                .unwrap().unwrap();
+            assert!(force < distance);
+            let expected = law.kinetic_coefficient((distance - force) / dt).unwrap();
+            close(force, expected, 5e-15);
+        }
+    }
+}
+
+#[test]
+fn g1_direct_hyperbolic_root_matches_an_independent_bisection() {
+    let law = law();
+    for normal in [0.01, 0.7, 3.0] {
+        for compliance in [1e-8, 1e-4, 0.1] {
+            for speed in [1e-5, 0.04, 10.0] {
+                let dt = 1.0 / 48_000.0;
+                let distance = compliance * normal * 0.8 * 1.01 + dt * speed;
+                let mut lo = 0.0;
+                let mut hi = normal * 0.8;
+                for _ in 0..100 {
+                    let mid = f64::midpoint(lo, hi);
+                    let actual_speed = (distance - compliance * mid) / dt;
+                    let expected = normal * (0.3 + 0.02 / (actual_speed + 0.04));
+                    if mid < expected { lo = mid; } else { hi = mid; }
+                }
+                let force = law.direct_sliding_traction_n(normal, distance, compliance, dt)
+                    .unwrap().unwrap();
+                close(force, f64::midpoint(lo, hi), 5e-15 * normal);
             }
         }
     }

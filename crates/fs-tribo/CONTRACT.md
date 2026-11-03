@@ -202,7 +202,16 @@ reactions, and residual embedding.
   brake pad, and a fault are the same law.
 - `TangentialLaw` is the stateful, solver-independent pHS constitutive seam.
   `FrictionLaw` and `DryInterfaceSystemCard` implement it with an implicit static
-  reaction followed by deterministic sliding bisection, never an ODE ramp.
+  reaction followed by a checked direct solution or deterministic sliding
+  bisection, never an ODE ramp. `direct_sliding_traction_n` supplies Coulomb
+  and linear-velocity affine roots and the hyperbolic law's smaller quadratic
+  root. The latter is attempted only after static infeasibility, where the
+  admissible sliding root is unique. Its normalized discriminant is a sum of
+  nonnegative terms; neither dimensional squares nor a difference of nearly
+  equal roots is needed. Every candidate still faces the original force budget
+  and constitutive residual; unresolved arithmetic falls back to bisection.
+  The modal friction owner consumes the same direct solution. Stribeck branch
+  selection and static-capacity selection are unchanged.
   Input motion is the released driver-minus-body increment and the explicit
   isotropic body compliance gives `du = du_free - C F`. Returned traction is
   effort entering the interface, conjugate to the **solved** increment, so

@@ -62,7 +62,7 @@ impl AdhesiveTangentialContact {
             return self
                 .law
                 .pressure_law
-                .affine_sliding_traction_n(normal, distance, compliance, dt);
+                .direct_sliding_traction_n(normal, distance, compliance, dt);
         }
         match self.law.pressure_law {
             FrictionLaw::Coulomb { kinetic_mu, .. } => Ok(Some(capacity(

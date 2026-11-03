@@ -224,7 +224,7 @@ impl TangentialLaw for FrictionLaw {
                 checked_mul(mu, x.normal_n, "traction_n")
             },
             |distance, compliance, dt| {
-                self.affine_sliding_traction_n(x.normal_n, distance, compliance, dt)
+                self.direct_sliding_traction_n(x.normal_n, distance, compliance, dt)
             },
         )
     }
@@ -238,7 +238,7 @@ pub(crate) fn advance_with_capacity(
     released: bool,
     static_capacity_n: f64,
     kinetic_capacity_n: impl Fn(f64) -> Result<f64, TriboError>,
-    affine_capacity_n: impl Fn(f64, f64, f64) -> Result<Option<f64>, TriboError>,
+    direct_capacity_n: impl Fn(f64, f64, f64) -> Result<Option<f64>, TriboError>,
 ) -> Result<TangentialStep<DryTangentialState>, TriboError> {
     x.solve.validate()?;
     nonnegative_finite(x.normal_n, "normal_force")?;
@@ -267,7 +267,7 @@ pub(crate) fn advance_with_capacity(
         released,
         static_capacity_n,
         &kinetic_capacity_n,
-        &affine_capacity_n,
+        &direct_capacity_n,
     )?;
     let direction = if distance == 0.0 {
         [0.0; 2]
@@ -384,10 +384,16 @@ impl FrictionLaw {
     /// `F = N * max(0, mu_0 + slope * (du_free - compliance * F) / dt)`
     /// gives the positive affine root, or zero on the clamped branch.
     ///
-    /// Returns `None` for nonlinear laws or an ill-conditioned affine formula;
-    /// callers retain their safeguarded root solver in those cases. A candidate
-    /// is not a static reaction and does not change nonlinear branch selection.
-    pub fn affine_sliding_traction_n(
+    /// The hyperbolic law has a quadratic solution. It is used only when the
+    /// static capacity cannot hold the released motion: there is then exactly
+    /// one sliding root before arrest. A scaled, rationalized expression avoids
+    /// subtracting nearly equal roots or squaring dimensional force/lengths.
+    ///
+    /// Returns `None` for Stribeck, a statically feasible hyperbolic load line,
+    /// or unresolved arithmetic; callers retain their safeguarded root solver.
+    /// A candidate is not a static reaction and must still pass the original
+    /// actual-slip constitutive residual and force budget.
+    pub fn direct_sliding_traction_n(
         &self,
         normal_n: f64,
         free_slip_m: f64,
@@ -421,7 +427,57 @@ impl FrictionLaw {
                 let force = released_force / denominator;
                 Ok(force.is_finite().then_some(force))
             }
-            Self::Stribeck { .. } | Self::Hyperbolic { .. } => Ok(None),
+            Self::Hyperbolic {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed,
+            } => {
+                let speed = free_slip_m / dt_s;
+                let static_force = static_mu * normal_n;
+                let kinetic_force = kinetic_mu * normal_n;
+                if !speed.is_finite()
+                    || speed <= 0.0
+                    || !static_force.is_finite()
+                    || !kinetic_force.is_finite()
+                {
+                    return Ok(None);
+                }
+                if compliance_m_per_n == 0.0 {
+                    return Ok(Some(self.kinetic_mu(speed)? * normal_n)
+                        .filter(|force| force.is_finite()));
+                }
+                let arrest_force = free_slip_m / compliance_m_per_n;
+                if !arrest_force.is_finite() || arrest_force <= static_force {
+                    return Ok(None);
+                }
+
+                // Write q=d/C, r=F_d/q, s=F_s/q<1, w=d/(d+dt*v0),
+                // t=1-w. For y=F/q, w*y²-(1+w*r)*y+w*r+t*s=0.
+                // Its discriminant is [t-w*(1-r)]²+4*w*t*(1-s), a
+                // nonnegative sum even near the double root at incipient slip.
+                // Compute both weights by bounded speed ratios so dt*v0,
+                // d+dt*v0 and their squares need never be representable.
+                let (w, t) = if speed >= characteristic_speed {
+                    let ratio = characteristic_speed / speed;
+                    (1.0 / (1.0 + ratio), ratio / (1.0 + ratio))
+                } else {
+                    let ratio = speed / characteristic_speed;
+                    (ratio / (1.0 + ratio), 1.0 / (1.0 + ratio))
+                };
+                let r = kinetic_force / arrest_force;
+                let s = static_force / arrest_force;
+                let b = t - w * (1.0 - r);
+                let discriminant = b * b + 4.0 * w * t * (1.0 - s);
+                // Rationalize the smaller force root. Keeping the weighted
+                // forces dimensional avoids losing a small F when F/q
+                // underflows; divide by half the denominator, never form 2F.
+                let numerator = w * kinetic_force + t * static_force;
+                let denominator = 0.5 * (1.0 + w * r + det::sqrt(discriminant));
+                let force = numerator / denominator;
+                Ok((force.is_finite() && force >= 0.0 && force <= static_force)
+                    .then_some(force))
+            }
+            Self::Stribeck { .. } => Ok(None),
         }
     }
 }
@@ -435,7 +491,7 @@ fn solve_magnitude(
     released: bool,
     cap: f64,
     kinetic_capacity_n: &impl Fn(f64) -> Result<f64, TriboError>,
-    affine_capacity_n: &impl Fn(f64, f64, f64) -> Result<Option<f64>, TriboError>,
+    direct_capacity_n: &impl Fn(f64, f64, f64) -> Result<Option<f64>, TriboError>,
 ) -> Result<(f64, FrictionRegime, usize), TriboError> {
     if released {
         return Ok((0.0, FrictionRegime::Sliding, 0));
@@ -462,7 +518,7 @@ fn solve_magnitude(
             x.solve.tolerance(magnitude, expected)?,
         ))
     };
-    if let Some(force) = affine_capacity_n(distance, compliance, x.dt_s)? {
+    if let Some(force) = direct_capacity_n(distance, compliance, x.dt_s)? {
         require_force_budget(force, x.solve)?;
         if force < required {
             let (residual, tolerance) = evaluate(force)?;
