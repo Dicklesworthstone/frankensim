@@ -42,11 +42,11 @@ fn source(rate: f64) -> ConstitutiveModelCard {
         },
     }
 }
-fn model(rate: f64, buffer: bool) -> LocalGoldCyanidation {
+pub(super) fn model(rate: f64, buffer: bool) -> LocalGoldCyanidation {
     LocalGoldCyanidation::from_card(fixture::system(buffer), "uncomplexed-cyanide", source(rate))
         .unwrap()
 }
-fn numerics() -> FlowNumerics {
+pub(super) fn numerics() -> FlowNumerics {
     FlowNumerics {
         maximum_step: Time::new(0.125),
         absolute_amount_error: Amount::new(1e-9),
@@ -55,7 +55,7 @@ fn numerics() -> FlowNumerics {
         ..FlowNumerics::default()
     }
 }
-fn feed(charge: &CyanidationCharge) -> CyanidationFeed {
+pub(super) fn feed(charge: &CyanidationCharge) -> CyanidationFeed {
     let concentration =
         |n: Amount| AmountConcentration::new(n.value() / charge.solution_volume.value());
     CyanidationFeed {
@@ -90,7 +90,7 @@ fn metals(total: f64) -> competition::CompetingMetals {
         numerics: original.numerics,
     }
 }
-fn close(a: f64, b: f64, tolerance: f64) {
+pub(super) fn close(a: f64, b: f64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance,
         "{a:e} != {b:e}; tolerance={tolerance:e}"
