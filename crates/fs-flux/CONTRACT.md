@@ -3502,3 +3502,68 @@ or normal flux. A coupled regression closes an actual translating body's
 impulse/work and separate slip loss against an independent affine-flow oracle.
 Pinned nightly rustfmt parsed all changed Rust in this session. Native Cargo
 execution was unavailable; these added regressions are not claimed passing.
+
+## Native nonlinear flow on rigid rotating and translating domains
+
+`ale::rigid::RigidAleFlow` advances the SAME material BDM1/P0 Navier-Stokes
+owner on x = X + R(y-c), with one fixed reference pivot c. Reference metrics,
+basis functions, topology and physical area are retained under the isometry.
+The velocity unknown a = R^T u_world is absolute fluid velocity in current mesh
+axes. Its native advector is a - R^T V - omega J(y-c); the transported velocity
+is a. World normal continuity remains the original Piola/BDM normal continuity.
+
+The native BDF1 mass load integrates R_new^T R_old a_old from the ORIGINAL old
+cell field at the original quadrature points. Rotating global edge moments
+would mix a discontinuous tangential trace into a normal one and is not used.
+Only six rotated load entries are accumulated per cell; the existing mass
+matrix, symmetric stress, pressure/gauges, nonlinear Picard acceptance, removed
+normal reaction rows and sign-split upwind quadrature keep their original
+owners. One relative-advection workspace is reused throughout the nonlinear
+solve and its independent endpoint residual reconstruction. The ordinary
+stationary/translating entries retain their original history arithmetic.
+
+`RigidAleMotion` supplies physical pivot velocity and angular rate.
+`kinematics` previews the exact represented pivot, unit planar rotation,
+signed rotation increment and rates used by `candidate`. Pivot displacement
+uses backward Euler. Rotation uses exp(dt*omega); each increment is strictly
+inside (-pi,pi), and both represented rates must satisfy authored absolute
+tolerances. Larger turns require substeps. A coupled mechanical owner can
+author its wall callback from this SAME admitted pivot/rate before the fluid
+solve. Candidate ownership and commit mirror the original translating path:
+geometry, flow history and time publish together only after complete admission.
+Cancellation polls the coordinate/storage passes and surrounds the synchronous
+native solver; it does not interrupt that solver's current internals.
+
+Physical force density, velocity, traction points and normals all transform
+through the admitted endpoint pose. One retained material density scales mass,
+viscosity, force, pressure, boundary effort and storage. Navier-slip resistance
+is unchanged; OpenReservoir retains its independently authored incoming
+absolute momentum. The existing fixed-frame DissipativeBackflow law refuses.
+Impermeable wall velocity is the admitted rigid mesh velocity at that point,
+so native relative normal flux is zero. No artificial rotational inertia,
+Coriolis force proxy, remapping solve or replacement flow discretization is
+introduced.
+
+The result exposes actual world mass, linear momentum, angular momentum about
+the moving pivot or any authored world origin, and native physical kinetic
+energy. World boundary queries rotate native force vectors and transform the
+moment origin; planar torque, slip loss and carried kinetic power are rotation
+invariant. The retained normal flux is relative to the moving surface while
+its carried velocity is already absolute. Mesh momentum, stress and kinetic
+transport are not counted twice. These are physical storage/flux queries, not
+a complete StreamPort or whole-system energy/passivity certificate.
+
+This is covariant first-order time integration on a prescribed global rigid
+mesh. Finite-step angular conservation across changing geometry is NOT an
+exact theorem of this backward-Euler map; its actual angular inventory and
+boundary torque must be distinguished from temporal truncation. Six authored
+G0/G1/G3/G4 regressions cover free-stream preservation and independent world
+transport, discontinuous tangential history with linear-momentum closure,
+parity with the original translating owner, rotating finite-slip Couette
+stress/torque/source scaling, first-order physical rotation refinement, and
+preview/drop/late-cancel ownership. Pinned nightly rustfmt parsed all changed
+Rust. Native compilation and tests were unavailable and are not claimed passing.
+
+Independent moving obstacles, mesh deformation/topology change, coupled body
+dynamics, variable density, rotating-domain rheology, nonlinear adjoints and
+automatic thermodynamic deposition remain outside this bounded owner.

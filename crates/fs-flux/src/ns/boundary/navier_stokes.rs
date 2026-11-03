@@ -324,6 +324,71 @@ impl<'m> FluxSystem<'m> {
         )
     }
 
+    // Rigid ALE transports ABSOLUTE velocity in current mesh axes with the
+    // relative advector u-w_mesh. Q rotates the original history field into
+    // those axes under its original mass quadrature. This is a native endpoint
+    // solve: the same relative advection is rebuilt for endpoint acceptance and
+    // retained for reactions/transport, never reconstructed from a stale guess.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf1_navier_stokes_mixed_rigid_ale_step(
+        &self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        history_rotation: [f64; 2],
+        mesh_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        if !params.nu.is_finite()
+            || params.nu <= 0.0
+            || mesh_velocity.len() != self.n_u
+            || mesh_velocity.iter().any(|v| !v.is_finite())
+            || history_rotation.iter().any(|v| !v.is_finite())
+            || (history_rotation[0].hypot(history_rotation[1]) - 1.0).abs() > 32.0 * f64::EPSILON
+        {
+            return Err(StokesBoundaryError::InvalidInput(
+                "finite rigid ALE advection, proper history rotation and positive viscosity required",
+            ));
+        }
+        // Reuse one normal-continuous advection workspace across all frozen
+        // solves and the independent nonlinear endpoint reassembly.
+        let relative = std::cell::RefCell::new(vec![0.0; self.n_u]);
+        self.solve_navier_stokes_mixed_bdf1(
+            params,
+            boundaries,
+            previous_velocity,
+            timestep_s,
+            controls,
+            absolute_velocity_tolerance_m_s,
+            &|admitted, velocity| {
+                let mut advection = relative.borrow_mut();
+                for ((a, u), w) in advection.iter_mut().zip(velocity).zip(mesh_velocity) {
+                    *a = *u - *w;
+                }
+                if advection.iter().any(|v| !v.is_finite()) {
+                    return Err(StokesBoundaryError::InvalidInput(
+                        "rigid ALE relative advection overflow",
+                    ));
+                }
+                self.assemble_stokes_admitted_rotated_history(
+                    params,
+                    &|_, _| params.nu,
+                    force,
+                    admitted,
+                    None,
+                    timestep_s.recip(),
+                    Some(previous_velocity),
+                    Some(advection.as_slice()),
+                    Some(history_rotation),
+                )
+            },
+            &|| true,
+        )
+    }
+
     /// Advance pressure-driven generalized-Newtonian Navier–Stokes with both
     /// convection and `nu(cell, point, gamma)` implicit at the new time level.
     /// Here `gamma = sqrt(2 D(u):D(u))` [1/s] is computed from each cell's

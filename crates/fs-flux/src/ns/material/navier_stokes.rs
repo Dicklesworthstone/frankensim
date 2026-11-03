@@ -165,6 +165,41 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         self.material_navier_stokes_step(endpoint)
     }
 
+    // The rigid moving-domain owner retains this SAME physical source density
+    // for mass, viscosity, history, force, traction and output conversion.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf1_navier_stokes_mixed_rigid_ale_step(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        history_rotation: [f64; 2],
+        mesh_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+    ) -> Result<MaterialNavierStokesStep, MaterialFluxError> {
+        let density = self.transport.density_kg_m3();
+        let endpoint = with_kinematic_boundaries(density, boundaries, |native| {
+            self.system.bdf1_navier_stokes_mixed_rigid_ale_step(
+                self.params,
+                &|point| {
+                    let f = force_density(point);
+                    [f[0] / density, f[1] / density]
+                },
+                native,
+                previous_velocity,
+                history_rotation,
+                mesh_velocity,
+                timestep_s,
+                controls,
+                absolute_velocity_tolerance_m_s,
+            )
+        })
+        .map_err(MaterialFluxError::Boundary)?;
+        self.material_navier_stokes_step(endpoint)
+    }
+
     /// Advance pressure-driven generalized-Newtonian BDF1 with the original
     /// material law resolved at each candidate's actual cell strain [1/s].
     /// The returned velocity must satisfy BOTH implicit convection and the

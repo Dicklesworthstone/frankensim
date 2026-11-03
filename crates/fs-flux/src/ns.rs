@@ -378,7 +378,9 @@ impl<'m> FluxSystem<'m> {
         inv_dt: f64,
         uprev: Option<&[f64]>,
     ) -> (Csr, Vec<f64>) {
-        self.assemble_operator(params, None, f, g, advect, inv_dt, uprev, None, None, None)
+        self.assemble_operator(
+            params, None, f, g, advect, inv_dt, uprev, None, None, None, None,
+        )
     }
 
     /// Assemble `-div(2 nu D(u)) + grad(p) = f`, with
@@ -443,6 +445,7 @@ impl<'m> FluxSystem<'m> {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -456,6 +459,7 @@ impl<'m> FluxSystem<'m> {
         advect: Option<&[f64]>,
         inv_dt: f64,
         uprev: Option<&[f64]>,
+        history_rotation: Option<[f64; 2]>,
         boundary: Option<&boundary::AdmittedBoundary>,
         darcy: Option<&[porous::DarcyDrag]>,
         mut reactions: Option<&mut ReactionAssembly>,
@@ -511,6 +515,33 @@ impl<'m> FluxSystem<'m> {
                     .sum::<f64>()
             });
             let drag_matrix = darcy.map(|cells| cells[t].local_matrix(basis, p, area));
+            // A rigid moving chart changes vector axes between time levels.
+            // Integrate Q*u_old from its ORIGINAL cell field; rotating edge
+            // coefficients would mix discontinuous tangential traces into
+            // normal moments and is not an H(div) history transformation.
+            // Six loads per cell reuse the original mass quadrature, with no
+            // remap, global projection or second matrix.
+            let rotated_history = history_rotation.zip(uprev).map(|([c, s], previous)| {
+                let mut load = [0.0; 6];
+                for (q, weight) in tri_quad(p, area) {
+                    let mut old = [0.0; 2];
+                    let values: [[f64; 2]; 6] = core::array::from_fn(|j| eval_basis(basis, j, q));
+                    for (j, value) in values.iter().enumerate() {
+                        let coefficient = previous[self.dof(t, j)];
+                        old[0] += coefficient * value[0];
+                        old[1] += coefficient * value[1];
+                    }
+                    let rotated = [
+                        c.mul_add(old[0], -s * old[1]),
+                        s.mul_add(old[0], c * old[1]),
+                    ];
+                    for (i, value) in values.iter().enumerate() {
+                        load[i] +=
+                            inv_dt * weight * (value[0] * rotated[0] + value[1] * rotated[1]);
+                    }
+                }
+                load
+            });
             for i in 0..6 {
                 let gi = self.dof(t, i);
                 // Load.
@@ -570,9 +601,14 @@ impl<'m> FluxSystem<'m> {
                             mij += w * (bi[0] * bj[0] + bi[1] * bj[1]);
                         }
                         momentum_entry(&mut coo, &mut reactions, &con, gi, gj, inv_dt * mij);
-                        if let Some(up) = uprev {
-                            rhs[gi] += inv_dt * mij * up[gj];
+                        if history_rotation.is_none() {
+                            if let Some(up) = uprev {
+                                rhs[gi] += inv_dt * mij * up[gj];
+                            }
                         }
+                    }
+                    if let Some(load) = &rotated_history {
+                        rhs[gi] += load[i];
                     }
                 }
             }

@@ -411,6 +411,35 @@ impl<'m> FluxSystem<'m> {
         previous_velocity: Option<&[f64]>,
         advecting_velocity: Option<&[f64]>,
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        self.assemble_stokes_admitted_rotated_history(
+            params,
+            viscosity,
+            force,
+            admitted,
+            darcy,
+            inv_dt,
+            previous_velocity,
+            advecting_velocity,
+            None,
+        )
+    }
+
+    // The ordinary path passes None and retains its original mass/history
+    // arithmetic. Rigid ALE supplies only the old-to-current vector rotation;
+    // stress, pressure, constraints and reaction rows stay with this owner.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_stokes_admitted_rotated_history<'a>(
+        &'a self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        admitted: &AdmittedBoundary,
+        darcy: Option<&[super::porous::DarcyDrag]>,
+        inv_dt: f64,
+        previous_velocity: Option<&[f64]>,
+        advecting_velocity: Option<&[f64]>,
+        history_rotation: Option<[f64; 2]>,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
         let bad_viscosity = Cell::new(None);
         let checked_viscosity = |cell, point| {
             if bad_viscosity.get().is_some() {
@@ -445,6 +474,7 @@ impl<'m> FluxSystem<'m> {
             advecting_velocity,
             inv_dt,
             previous_velocity,
+            history_rotation,
             Some(admitted),
             darcy,
             Some(&mut reactions),

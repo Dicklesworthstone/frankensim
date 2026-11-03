@@ -1,13 +1,16 @@
-//! ALE geometry audits and exact translating-domain nonlinear flow.
+//! ALE geometry audits and native flow on rigidly moving domains.
 //!
 //! The affine-triangle audit measures the geometric-conservation-law identity
 //! for linearly moving vertices. Its receipt alone does not advance or remap
-//! a field. The translating module advances the original nonlinear physical
-//! flow on exactly translating domains, with relative convection, consistent
-//! frame inertia and world pressure/momentum reporting.
+//! a field. The translating and rigid modules advance original nonlinear
+//! physical flow under admitted translation or rotation, retaining native
+//! relative convection, physical history and world pressure/momentum reporting.
 
 /// Nonlinear incompressible flow in an accelerating translating domain.
 pub mod translating;
+
+/// Native nonlinear flow on globally translating and rotating rigid domains.
+pub mod rigid;
 
 use crate::TriMesh;
 use core::fmt;
