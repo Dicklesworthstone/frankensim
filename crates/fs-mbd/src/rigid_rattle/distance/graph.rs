@@ -1,11 +1,13 @@
-//! Simultaneous rigid rods between independently moving native bodies.
+//! Simultaneous material-point closures between independently moving native bodies.
 //!
-//! The original pair constraint supplies geometry and physical impulses. All
-//! scalar reactions are solved together with the full shared-body mobility
+//! The original pair constraint supplies positive-distance geometry. Spherical
+//! joints add three Cartesian closure rows through [`advance_joint_graph`]. All
+//! scalar reactions share the full native body-point impulse owner and mobility
 //! `J M^-1 J^T`; a chain is never approximated by independent pair solves.
-//! Initial central impulses, native free steps and final central impulses
-//! retain total linear and angular momentum under internal reactions. As in
-//! the pair owner, finite constraint work is reported and poses are not repaired.
+//! Central rod reactions conserve internal angular momentum; spherical rows
+//! retain and report the small couple from accepted finite closure residuals.
+//! Native free steps, actual impulses and finite constraint work remain visible,
+//! and poses are not repaired.
 
 use super::{
     DistanceStepControls, DistanceStepError, Geometry, RigidDistanceConstraint, norm, poll,
@@ -24,6 +26,10 @@ pub use driven::{
     DistanceDrive, DrivenDistanceGraphStep, DrivenDistanceLinkStep, advance_driven_distance_graph,
 };
 
+#[path = "graph/joints.rs"]
+mod joints;
+pub use joints::{GraphJoint, JointGraphStep, JointRows, SphericalJoint, advance_joint_graph};
+
 /// Maximum simultaneous independent scalar rows in the bounded dense solve.
 pub const MAX_DISTANCE_ROWS: usize = 32;
 
@@ -38,21 +44,134 @@ pub struct DistanceLink {
     pub length_m: f64,
 }
 
+// Typed scalar rows feed one numerical owner. Existing distance slices are
+// borrowed without flattening or allocation; only mixed joints need a bounded
+// stack bank of rows. A Cartesian row never masquerades as a zero-length rod.
+#[derive(Clone, Copy)]
+enum RowKind {
+    Distance(f64),
+    Cartesian(usize),
+}
+#[derive(Clone, Copy)]
+struct Row {
+    bodies: [usize; 2],
+    points_body_m: [Vec3; 2],
+    kind: RowKind,
+}
+impl Row {
+    const EMPTY: Self = Self {
+        bodies: [0; 2],
+        points_body_m: [Vec3::ZERO; 2],
+        kind: RowKind::Distance(1.0),
+    };
+    fn distance(link: DistanceLink) -> Self {
+        Self {
+            bodies: link.bodies,
+            points_body_m: link.points_body_m,
+            kind: RowKind::Distance(link.length_m),
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum Rows<'a> {
+    Distances(&'a [DistanceLink]),
+    Mixed(&'a [Row]),
+}
+impl<'a> Rows<'a> {
+    fn len(self) -> usize {
+        match self {
+            Self::Distances(links) => links.len(),
+            Self::Mixed(rows) => rows.len(),
+        }
+    }
+    fn get(self, index: usize) -> Row {
+        match self {
+            Self::Distances(links) => Row::distance(links[index]),
+            Self::Mixed(rows) => rows[index],
+        }
+    }
+    fn iter(self) -> impl ExactSizeIterator<Item = Row> + 'a {
+        (0..self.len()).map(move |i| self.get(i))
+    }
+    fn admits_impulses(self, impulses: &[f64], maximum: f64) -> bool {
+        let mut i = 0;
+        while i < self.len() {
+            let (magnitude, width) = if matches!(self.get(i).kind, RowKind::Cartesian(0)) {
+                (impulses[i].hypot(impulses[i + 1]).hypot(impulses[i + 2]), 3)
+            } else {
+                (impulses[i].abs(), 1)
+            };
+            if !magnitude.is_finite() || magnitude > maximum {
+                return false;
+            }
+            i += width;
+        }
+        true
+    }
+    fn error(self, geometry: &[Geometry]) -> f64 {
+        let mut i = 0;
+        let mut error: f64 = 0.0;
+        while i < self.len() {
+            let (magnitude, width) = if matches!(self.get(i).kind, RowKind::Cartesian(0)) {
+                (
+                    geometry[i]
+                        .gap
+                        .hypot(geometry[i + 1].gap)
+                        .hypot(geometry[i + 2].gap),
+                    3,
+                )
+            } else {
+                (geometry[i].gap.abs(), 1)
+            };
+            error = error.max(magnitude);
+            i += width;
+        }
+        error
+    }
+    fn spherical_violation(
+        self,
+        geometry: &[Geometry],
+        position: f64,
+        velocity: f64,
+    ) -> Option<usize> {
+        for (i, row) in self.iter().enumerate() {
+            if matches!(row.kind, RowKind::Cartesian(0))
+                && (geometry[i]
+                    .gap
+                    .hypot(geometry[i + 1].gap)
+                    .hypot(geometry[i + 2].gap)
+                    > position
+                    || geometry[i]
+                        .rate
+                        .hypot(geometry[i + 1].rate)
+                        .hypot(geometry[i + 2].rate)
+                        > velocity)
+            {
+                return Some(i);
+            }
+        }
+        None
+    }
+}
+
 /// Local physical and resource bounds, admitted before transaction allocation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DistanceGraphControls {
     /// Original impulse, angular-travel, nonlinear-iteration and backtrack caps.
     pub step: DistanceStepControls,
-    /// Absolute initial/final length tolerance [m], below every rod length.
+    /// Absolute initial/final closure tolerance [m], below every rod length.
+    /// Spherical joints use their complete Euclidean separation norm.
     pub position_tolerance_m: f64,
-    /// Absolute initial/final range-rate tolerance [m/s].
+    /// Absolute initial/final range-rate tolerance [m/s], or the Euclidean
+    /// relative point-speed tolerance for a spherical joint.
     pub velocity_tolerance_mps: f64,
     /// Squared Cholesky-pivot floor after unit-diagonal scaling, in
     /// `[4096*EPSILON, 1)`. This admits regular rows, not a certified condition bound.
     pub minimum_scaled_pivot: f64,
     /// Maximum borrowed bodies, including unconstrained bodies.
     pub maximum_bodies: usize,
-    /// Maximum simultaneous rods, at most [`MAX_DISTANCE_ROWS`].
+    /// Maximum simultaneous scalar rows, at most [`MAX_DISTANCE_ROWS`]. A rod
+    /// consumes one row; a spherical joint in [`advance_joint_graph`] consumes three.
     pub maximum_constraints: usize,
     /// Maximum complete nonlinear trial evaluations, including the initial one.
     pub maximum_trial_evaluations: u32,
@@ -62,12 +181,14 @@ pub struct DistanceGraphControls {
     pub maximum_live_bytes: usize,
 }
 
-/// Actual accepted geometric and hidden-constraint residual of one original rod.
+/// Actual accepted geometric and hidden-constraint residual of one scalar row.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DistanceResidual {
-    /// Endpoint length minus the authored distance [m].
+    /// Endpoint length minus the authored distance [m], or the selected world
+    /// Cartesian separation component of a spherical-joint row.
     pub gap_m: f64,
-    /// Endpoint range rate minus its prescribed value [m/s], zero for a fixed rod.
+    /// Endpoint range rate minus its prescribed value [m/s], or the selected
+    /// relative point-velocity component of a spherical-joint row.
     pub range_rate_mps: f64,
 }
 
@@ -76,16 +197,16 @@ pub struct DistanceResidual {
 pub struct DistanceGraphStep {
     /// Accepted bodies in original body-slice order.
     pub states_after: Vec<RigidBodyState>,
-    /// Initial central pair impulses in original link order.
+    /// Initial native pair impulses in original scalar-row order.
     pub position_impulses: Vec<ActionReactionImpulseReceipt>,
     /// Original unconstrained native steps between the two impulse stages.
     pub free_steps: Vec<StepReceipt>,
-    /// Endpoint central pair impulses in original link order.
+    /// Endpoint native pair impulses in original scalar-row order.
     pub velocity_impulses: Vec<ActionReactionImpulseReceipt>,
     /// Sum of actual initial and endpoint pair work [J], including all cross
     /// terms on shared bodies. Individual pair works use the reported order.
     pub constraint_work_j: f64,
-    /// Actual endpoint residuals in original link order.
+    /// Actual endpoint residuals in original scalar-row order.
     pub residuals: Vec<DistanceResidual>,
     /// Accepted coupled position corrections.
     pub position_iterations: u32,
@@ -165,7 +286,15 @@ pub fn advance_distance_graph(
     cancelled: impl FnMut() -> bool,
 ) -> Result<DistanceGraphStep, DistanceGraphError> {
     advance_between(
-        states, properties, links, integrator, wrenches, duration_s, controls, None, cancelled,
+        states,
+        properties,
+        Rows::Distances(links),
+        integrator,
+        wrenches,
+        duration_s,
+        controls,
+        None,
+        cancelled,
     )
     .map(|(step, _)| step)
 }
@@ -174,7 +303,7 @@ pub fn advance_distance_graph(
 fn advance_between(
     states: &[RigidBodyState],
     properties: &[MassProperties],
-    links: &[DistanceLink],
+    links: Rows<'_>,
     integrator: RigidBodyIntegrator,
     wrenches: &[Wrench],
     duration_s: f64,
@@ -235,9 +364,7 @@ fn advance_between(
                 DistanceStepError::Invalid("rod endpoints need distinct existing bodies").into(),
             );
         }
-        let mut g = problem
-            .constraint(link)?
-            .geometry(link.bodies.map(|b| states[b]))?;
+        let mut g = problem.geometry(link, link.bodies.map(|b| states[b]))?;
         if let Some(targets) = targets {
             g.rate = (driven::range_rate(
                 link.bodies.map(|b| states[b]),
@@ -255,6 +382,13 @@ fn advance_between(
         }
         initial.push(g);
     }
+    if let Some(constraint) = links.spherical_violation(
+        &initial,
+        controls.position_tolerance_m,
+        controls.velocity_tolerance_mps,
+    ) {
+        return Err(DistanceGraphError::InitialConstraint { constraint });
+    }
     let mut mobility = Mobility::new(&problem, states, &initial, &mut cancelled)?;
     let mut impulse = zeros(links.len())?;
     let mut correction = zeros(links.len())?;
@@ -270,7 +404,7 @@ fn advance_between(
         &mut cancelled,
     )?;
     let mut iterations = 0;
-    while accepted.error() > controls.position_tolerance_m {
+    while links.error(&accepted.geometry) > controls.position_tolerance_m {
         if iterations == local.maximum_position_iterations {
             return Err(DistanceStepError::NotConverged.into());
         }
@@ -288,10 +422,7 @@ fn advance_between(
             if next.iter().zip(&impulse).all(|(a, b)| a == b) {
                 break;
             }
-            if next
-                .iter()
-                .all(|j| j.is_finite() && j.abs() <= local.maximum_impulse_ns)
-            {
+            if links.admits_impulses(&next, local.maximum_impulse_ns) {
                 match problem.evaluate(
                     &next,
                     &initial,
@@ -299,7 +430,9 @@ fn advance_between(
                     &mut evaluations,
                     &mut cancelled,
                 ) {
-                    Ok(()) if candidate.error() < accepted.error() => {
+                    Ok(())
+                        if links.error(&candidate.geometry) < links.error(&accepted.geometry) =>
+                    {
                         core::mem::swap(&mut accepted, &mut candidate);
                         impulse.copy_from_slice(&next);
                         improved = true;
@@ -330,7 +463,7 @@ fn advance_between(
         *value = -g.rate;
     }
     mobility.solve(&mut impulse)?;
-    if impulse.iter().any(|j| j.abs() > local.maximum_impulse_ns) {
+    if !links.admits_impulses(&impulse, local.maximum_impulse_ns) {
         return Err(DistanceStepError::LocalBranch.into());
     }
     problem.apply(
@@ -367,6 +500,17 @@ fn advance_between(
             gap_m: g.gap,
             range_rate_mps: g.rate,
         });
+        accepted.geometry[i] = g;
+    }
+    if links
+        .spherical_violation(
+            &accepted.geometry,
+            controls.position_tolerance_m,
+            controls.velocity_tolerance_mps,
+        )
+        .is_some()
+    {
+        return Err(DistanceStepError::NotConverged.into());
     }
     let mut work = fs_math::dd::Dd::ZERO;
     for event in accepted.impulses.iter().chain(&candidate.impulses) {
@@ -396,7 +540,7 @@ fn advance_between(
 struct Problem<'a> {
     states: &'a [RigidBodyState],
     properties: &'a [MassProperties],
-    links: &'a [DistanceLink],
+    links: Rows<'a>,
     integrator: RigidBodyIntegrator,
     wrenches: &'a [Wrench],
     duration_s: f64,
@@ -409,17 +553,17 @@ impl Problem<'_> {
         index: usize,
         states: [RigidBodyState; 2],
     ) -> Result<Geometry, DistanceStepError> {
-        let mut constraint = self.constraint(&self.links[index])?;
+        let mut link = self.links.get(index);
         if let Some(targets) = self.targets {
-            constraint.length_m = targets[index].length;
+            link.kind = RowKind::Distance(targets[index].length);
         }
-        let mut g = constraint.geometry(states)?;
+        let mut g = self.geometry(link, states)?;
         if let Some(targets) = self.targets {
             let target = targets[index];
             // Solve against the original polynomial, retaining the part lost
             // when the endpoint length/rate are rounded for continuation.
             g.gap = (Dd::from_f64(g.gap) + target.length_residual).to_f64();
-            let link = self.links[index];
+            let link = self.links.get(index);
             g.rate = (driven::range_rate(
                 states,
                 link.bodies.map(|b| self.properties[b]),
@@ -433,17 +577,34 @@ impl Problem<'_> {
         }
         Ok(g)
     }
-    fn constraint(
-        &self,
-        link: &DistanceLink,
-    ) -> Result<RigidDistanceConstraint, DistanceStepError> {
+    fn constraint(&self, link: Row) -> Result<RigidDistanceConstraint, DistanceStepError> {
+        let RowKind::Distance(length_m) = link.kind else {
+            return Err(DistanceStepError::Invalid(
+                "a Cartesian closure is not a radial rod",
+            ));
+        };
         RigidDistanceConstraint::new(
             link.bodies.map(|b| self.properties[b]),
             link.points_body_m,
-            link.length_m,
+            length_m,
             self.controls.position_tolerance_m,
             self.controls.velocity_tolerance_mps,
         )
+    }
+    fn geometry(
+        &self,
+        link: Row,
+        states: [RigidBodyState; 2],
+    ) -> Result<Geometry, DistanceStepError> {
+        match link.kind {
+            RowKind::Distance(_) => self.constraint(link)?.geometry(states),
+            RowKind::Cartesian(axis) => joints::geometry(
+                states,
+                link.bodies.map(|b| self.properties[b]),
+                link.points_body_m,
+                axis,
+            ),
+        }
     }
     fn apply(
         &self,
@@ -456,9 +617,20 @@ impl Problem<'_> {
         events.clear();
         for ((link, &j), g) in self.links.iter().zip(impulses).zip(geometry) {
             poll(cancelled)?;
-            let event = self
-                .constraint(link)?
-                .pair_impulse(link.bodies.map(|b| states[b]), g.normal.scale(j))?;
+            let event = match link.kind {
+                RowKind::Distance(_) => self
+                    .constraint(link)?
+                    .pair_impulse(link.bodies.map(|b| states[b]), g.normal.scale(j))?,
+                RowKind::Cartesian(_) => crate::apply_equal_and_opposite_impulse_at_body_points(
+                    states[link.bodies[0]],
+                    self.properties[link.bodies[0]],
+                    link.points_body_m[0],
+                    states[link.bodies[1]],
+                    self.properties[link.bodies[1]],
+                    link.points_body_m[1],
+                    g.normal.scale(j),
+                )?,
+            };
             states[link.bodies[0]] = event.first.state_after;
             states[link.bodies[1]] = event.second.state_after;
             events.push(event);
@@ -537,9 +709,6 @@ impl Trial {
             geometry: reserved(rows)?,
         })
     }
-    fn error(&self) -> f64 {
-        self.geometry.iter().fold(0.0, |s, g| s.max(g.gap.abs()))
-    }
 }
 
 struct AngularRow {
@@ -585,8 +754,8 @@ impl Mobility {
                 let mut value = 0.0;
                 for a in 0..2 {
                     for b in 0..2 {
-                        let body = problem.links[i].bodies[a];
-                        if body == problem.links[j].bodies[b] {
+                        let body = problem.links.get(i).bodies[a];
+                        if body == problem.links.get(j).bodies[b] {
                             let entry = geometry[i].normal.dot(geometry[j].normal)
                                 / problem.properties[body].mass()
                                 + angular[i].torque[a].dot(angular[j].response[b]);

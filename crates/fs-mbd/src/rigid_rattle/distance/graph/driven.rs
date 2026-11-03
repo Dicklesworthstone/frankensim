@@ -3,7 +3,7 @@
 use super::{
     ActionReactionImpulseReceipt, Dd, DistanceGraphControls, DistanceGraphError, DistanceGraphStep,
     DistanceLink, DistanceStepError, MAX_DISTANCE_ROWS, MassProperties, RigidBodyIntegrator,
-    RigidBodyState, Wrench, advance_between, limit, planned_bytes, poll, positive, reserved,
+    RigidBodyState, Rows, Wrench, advance_between, limit, planned_bytes, poll, positive, reserved,
 };
 use crate::{PointKinematics, Vec3};
 
@@ -117,7 +117,7 @@ pub fn advance_driven_distance_graph(
     let (step, work) = advance_between(
         states,
         properties,
-        links,
+        Rows::Distances(links),
         integrator,
         wrenches,
         duration_s,
@@ -298,7 +298,7 @@ impl Work {
 // Cancel common translation before adding local rotational motion. Subtracting
 // the convenience point velocities would already have discarded small spin
 // beside a large common boost, before any double-double pairing could save it.
-fn relative_velocity(first: PointKinematics, second: PointKinematics) -> [Dd; 3] {
+pub(super) fn relative_velocity(first: PointKinematics, second: PointKinematics) -> [Dd; 3] {
     let components = |v: Vec3| [v.x, v.y, v.z].map(Dd::from_f64);
     let a = components(first.center_of_mass_velocity_world);
     let b = components(second.center_of_mass_velocity_world);

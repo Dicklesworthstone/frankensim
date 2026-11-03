@@ -2076,8 +2076,9 @@ closed-triangle collective rotation and second-order phase, 300 full-inertia
 off-axis steps with momentum/work balance, reversibility, frame/boost and
 body/row permutations, pair/free/disconnected equivalence, a real 32-row
 connected framework, rank/resource/local-branch refusals and cancellation
-at every observed checkpoint. This supplies smooth regular bilateral distance
-graphs; spherical/weld graphs, redundant constraints, unilateral cables,
+at every observed checkpoint. This entry supplies smooth regular bilateral
+distance graphs; the same owner also supports spherical joints through the
+mixed graph entry below. Weld graphs, redundant constraints, unilateral cables,
 contact/impact coupling, exact energy conservation,
 symplecticity and validated whole-path enclosures remain separate work.
 
@@ -2126,6 +2127,58 @@ collapse/representation/resource refusals and every cancellation checkpoint.
 This is an ideal bilateral length source: finite motor/storage/efficiency laws,
 unilateral cables, contact/impact coupling, exact energy preservation,
 symplecticity and validated whole-path state enclosures remain outside this API.
+
+### Spherical and mixed closures between independent native bodies
+
+`rigid_rattle::distance::graph::advance_joint_graph` accepts `GraphJoint::Spherical`
+and `GraphJoint::Distance` in one coupled graph. A `SphericalJoint` makes two
+body-fixed material points coincide while leaving relative attitude free.
+It contributes three Cartesian closure rows, never a zero-length radial rod
+with an undefined normal. Each body keeps its finite mass and full inertia;
+shared-body responses couple all three axes and every attached rod through the
+same scaled mobility, fs-la factorization, local correction/backtracking and
+native impulse/free-step/impulse engine used by the static and driven entries.
+Existing distance-only and driven APIs retain their original numerical path.
+
+`JointGraphStep` contains the original native graph receipt and an authored-joint
+to scalar-row map. Both reaction inventories preserve actual equal-and-opposite
+body-point impulse events in x/y/z order for each ball joint, including every
+shared-body work cross term. No positions, velocities or energy are repaired.
+The mixed receipt separately pairs signed constraint work from double-double
+relative COM and spin components before their point velocities are rounded.
+It also returns the total requested angular impulse: exact coincident endpoints
+have no internal couple, but finite admitted closure residuals can leave a small
+couple that must stay visible. Original native actual momentum changes and work
+residuals remain available; a small closure residual is not an exact angular
+momentum or energy guarantee.
+
+Initial and final spherical gap/speed admission uses the whole Euclidean vector
+norm, as does the per-event spherical impulse cap. These physical bounds are
+independent of the selected world axes. Cartesian gaps retain
+`(COM_second-COM_first)+arm_second-arm_first` and rates retain relative COM
+velocity plus both native spin terms, so a distant origin or common boost cannot
+hide local geometry or velocity before admission. The state still uses native
+binary64 coordinates and momenta, with their original representability limits.
+
+The existing maximum of 32 independent scalar rows admits, for example, ten
+ball joints plus two rods. Rank, body count, trial, physical branch and byte
+limits remain authoritative. One fixed-size stack row bank and one fallibly
+reserved joint map extend the original reused buffers; there is no new numerical
+engine or per-trial allocation. The reported logical payload includes the map.
+Every late refusal or cancellation publishes no body or partial joint account.
+This bounded entry supports smooth regular bilateral spherical/static-distance
+graphs. Driven spherical anchors, mixed actuator commands, welds, redundant
+rows, contact/impact/friction coupling, exact energy preservation, symplecticity
+and global or validated whole-path certificates remain outside it.
+
+`tests/rigid_joint_graph.rs` checks an independent three-axis unequal-mass
+ball-chain load-sharing solution without welding spins; a rotating finite-body
+ball-pair continuous solution with second-order refinement and reversal;
+200 full-tensor mixed-graph steps with native P/L/work accounts; frame, boost,
+body/joint order and endpoint covariance; exact distance-only/free-path parity;
+local geometry and hidden-spin admission at a `2^54` origin or common boost;
+whole-vector caps, actual connected 32-row admission and rank/resource refusals;
+and cancellation at every observed successful transaction checkpoint.
 
 ## Articulated point/plane impact response
 
