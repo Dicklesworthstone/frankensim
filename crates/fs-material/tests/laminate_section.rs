@@ -218,6 +218,129 @@ fn g0_transverse_shear_from_layers() {
     assert_eq!(section.shear_pa_m()[2], 0.0);
 }
 
+fn coupled_shear_layers(rotation: f64) -> Vec<LaminaLayer> {
+    // Equal and opposite rotated raw shear tensors cancel their raw cross
+    // term. Different in-plane elastic laws produce different traction fields.
+    let other = OrthotropicElastic::new(
+        [3e9, 6e9, 2e9], [0.15, 0.1, 0.1], [0.7e9, 0.65e9, 0.04e9], 0.01,
+    ).unwrap();
+    vec![layer(spruce(), 0.002, 0.4+rotation, 420.0),
+        layer(other, 0.002, -0.4+rotation, 650.0)]
+}
+
+fn close_shear(actual: &[f64; 4], expected: &[f64; 4], tolerance: f64) {
+    let scale = expected.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+    for i in 0..4 {
+        assert!((actual[i]-expected[i]).abs() <= tolerance*scale,
+            "shear[{i}] = {}, expected {}", actual[i], expected[i]);
+    }
+}
+
+#[test]
+fn g1_equilibrated_homogeneous_shear_is_five_sixths_for_every_probe_frame() {
+    let h = 0.003;
+    let rotation = 0.37_f64;
+    let (s,c) = rotation.sin_cos();
+    for law in [spruce(), OrthotropicElastic::new([8e9;3], [0.25;3], [3.2e9;3], 0.01).unwrap()] {
+        let (gx,gy) = (law.g[2],law.g[1]);
+        let expected = [gx*c*c+gy*s*s, (gx-gy)*s*c,
+            (gx-gy)*s*c, gx*s*s+gy*c*c].map(|g| (5.0/6.0)*h*g);
+        for axis in [0.0, 0.29, 1.15] {
+            let section = LaminateSection::try_new_equilibrated_shear(
+                vec![layer(law.clone(),h,rotation,420.0)], ReferenceSurface::Midsurface, axis,
+            ).unwrap();
+            close_shear(section.shear_pa_m(), &expected, 2e-12);
+        }
+    }
+}
+
+#[test]
+fn g1_equilibrated_aligned_common_poisson_reduces_to_whitney() {
+    // All Q matrices are proportional, so full A^-1 B is the scalar neutral
+    // axis. The two-probe equilibrium reduces to independent scalar Whitney
+    // integrals even in this asymmetric three-material section.
+    let layers: Vec<_> = [(2e9,0.002),(7e9,0.001),(1e9,0.004)].into_iter().map(|(e,h)| {
+        layer(OrthotropicElastic::new([e;3],[0.2;3],[e/2.4;3],0.01).unwrap(),h,0.0,500.0)
+    }).collect();
+    let old = LaminateSection::try_new(layers.clone(),ReferenceSurface::Midsurface).unwrap();
+    let coupled = LaminateSection::try_new_equilibrated_shear(layers,ReferenceSurface::Midsurface,0.0).unwrap();
+    close_shear(coupled.shear_pa_m(),old.shear_pa_m(),2e-12);
+    assert_eq!(coupled.a_pa_m(),old.a_pa_m());
+    assert_eq!(coupled.b_pa_m2(),old.b_pa_m2());
+    assert_eq!(coupled.d_pa_m3(),old.d_pa_m3());
+    assert_ne!(coupled.b_pa_m2()[0],0.0);
+}
+
+#[test]
+fn g1_equilibrated_two_ply_cross_energy_matches_exact_rational_integrals() {
+    // Half-metre plies at +/-45 degrees give exactly rational rotated Q/G.
+    // Independently integrate the quadratic equilibrium tractions as polynomial
+    // products with rational arithmetic, rather than the owner's Gauss rule.
+    // V = [[2069,634],[634,2069]]/5184; both face tractions vanish exactly.
+    let layers = [(10.0,2.0,3.0,1.0),(3.0,7.0,1.0,-1.0)].into_iter().map(|(a,b,g,sign)| {
+        LaminaLayer {
+            thickness_m:0.5, orientation_rad:sign*core::f64::consts::FRAC_PI_4,
+            density_kg_m3:1.0, material:None,
+            law:LayerLaw::PlaneStress {
+                stiffness_pa:[a,1.0,0.0,1.0,b,0.0,0.0,0.0,g],
+                transverse_shear_pa:[2.0,5.0],
+            },
+        }
+    }).collect();
+    let section = LaminateSection::try_new_equilibrated_shear(layers,ReferenceSurface::Midsurface,0.0).unwrap();
+    let diagonal = 79043930991093.0/33138104148464.0;
+    let cross = -3981858822657.0/33138104148464.0;
+    close_shear(section.shear_pa_m(),&[diagonal,cross,cross,diagonal],2e-12);
+}
+
+#[test]
+fn g3_equilibrated_off_axis_shear_keeps_cross_work_and_corotates() {
+    let axis = 0.17;
+    let old = LaminateSection::try_new(coupled_shear_layers(0.0),ReferenceSurface::Midsurface).unwrap();
+    let coupled = LaminateSection::try_new_equilibrated_shear(
+        coupled_shear_layers(0.0),ReferenceSurface::Midsurface,axis).unwrap();
+    // Raw Gxy cancels, but the distinct equilibrium tractions have nonzero
+    // cross-energy. A diagonal correction of integral(G) necessarily misses it.
+    assert_eq!(old.shear_pa_m()[1],0.0);
+    assert!(coupled.shear_pa_m()[1].abs() > 1e-3*coupled.shear_pa_m()[0]);
+    for rotation in [0.31_f64,-0.72,core::f64::consts::FRAC_PI_2] {
+        let rotated = LaminateSection::try_new_equilibrated_shear(
+            coupled_shear_layers(rotation),ReferenceSurface::Midsurface,axis+rotation).unwrap();
+        let (s,c) = rotation.sin_cos();
+        let h = coupled.shear_pa_m();
+        let cross = (h[0]-h[3])*s*c+h[1]*(c*c-s*s);
+        let expected = [h[0]*c*c-2.0*h[1]*s*c+h[3]*s*s,cross,cross,
+            h[0]*s*s+2.0*h[1]*s*c+h[3]*c*c];
+        close_shear(rotated.shear_pa_m(),&expected,4e-11);
+    }
+}
+
+#[test]
+fn g3_equilibrated_shear_is_reference_and_layer_reversal_invariant() {
+    let layers = coupled_shear_layers(0.0);
+    let base = LaminateSection::try_new_equilibrated_shear(layers.clone(),ReferenceSurface::Midsurface,0.17).unwrap();
+    for offset in [0.0,0.003,0.01] {
+        let shifted = LaminateSection::try_new_equilibrated_shear(layers.clone(),ReferenceSurface::Offset(offset),0.17).unwrap();
+        assert_eq!(base.shear_pa_m(),shifted.shear_pa_m());
+    }
+    let reverse = LaminateSection::try_new_equilibrated_shear(layers.into_iter().rev().collect(),
+        ReferenceSurface::Midsurface,0.17).unwrap();
+    close_shear(base.shear_pa_m(),reverse.shear_pa_m(),2e-11);
+    for i in 0..9 {
+        assert!((base.b_pa_m2()[i]+reverse.b_pa_m2()[i]).abs()<1e-10);
+    }
+}
+
+#[test]
+fn g0_equilibrated_shear_refuses_unowned_frequency_and_invalid_axes() {
+    for bad in [f64::NAN,f64::INFINITY] {
+        assert!(LaminateSection::try_new_equilibrated_shear(coupled_shear_layers(0.0),
+            ReferenceSurface::Midsurface,bad).is_err());
+    }
+    assert!(LaminateSection::try_new_equilibrated_shear(vec![prony_layer(prony(1.0),0.003,0.0,420.0)],
+        ReferenceSurface::Midsurface,0.0).is_err());
+}
+
 #[test]
 fn g0_layer_cap_128_and_129() {
     // Exactly MAX_LAMINA_LAYERS is accepted; one more refuses by type.

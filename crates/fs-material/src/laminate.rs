@@ -5,7 +5,8 @@
 //! (tensor-Prony) plane-stress law. The section integrates, about one declared
 //! reference surface, the membrane/coupling/bending stiffness
 //! `A`, `B`, `D` (3×3 each, engineering-shear `[ε_x, ε_y, γ_xy]`), the
-//! energy-consistent transverse shear stiffness `H` (2×2, Whitney 1973), and the
+//! energy-consistent transverse shear stiffness `H` (2×2, directional Whitney
+//! or explicitly selected coupled cylindrical-bending probes), and the
 //! translational/coupling/rotary inertia `I0`, `I1`, `I2`.
 //!
 //! Each layer is integrated in declaration order between its bottom and top
@@ -32,6 +33,21 @@ use fs_math::c64::C64;
 
 /// Layer-resolved thermal loading, stored energy and stress recovery.
 pub mod thermal;
+
+mod shear;
+
+/// Declared closure used for the section's cached transverse shear stiffness.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LaminateShearModel {
+    /// Existing directional Whitney factors and positive diagonal congruence.
+    DirectionalWhitney,
+    /// Energy-equivalent full shear tensor for two orthogonal physical
+    /// cylindrical-bending probes; the first axis is measured from mesh x.
+    EquilibratedCylindrical {
+        /// First physical bending direction, counterclockwise from mesh x [rad].
+        bending_axis_rad: f64,
+    },
+}
 
 /// Largest laminate the section admits, matching the rod precedent
 /// [`crate::section::MAX_CONCENTRIC_LAYERS`].
@@ -175,6 +191,7 @@ pub struct LaminateSection {
     d_pa_m3: [f64; 9],
     shear_pa_m: [f64; 4],
     shear_factor: [f64; 2],
+    shear_model: LaminateShearModel,
     i0_kg_m2: f64,
     i1_kg_m: f64,
     i2_kg: f64,
@@ -418,6 +435,7 @@ impl LaminateSection {
             d_pa_m3: d,
             shear_pa_m: shear,
             shear_factor: [kappa_x, kappa_y],
+            shear_model: LaminateShearModel::DirectionalWhitney,
             i0_kg_m2: i0,
             i1_kg_m: i1,
             i2_kg: i2,
@@ -465,12 +483,18 @@ impl LaminateSection {
     pub const fn shear_pa_m(&self) -> &[f64; 4] {
         &self.shear_pa_m
     }
-    /// Directional Whitney shear correction factors `[κ_x, κ_y]`
+    /// Ratios of corrected to uncorrected diagonal shear stiffness `[κ_x, κ_y]`
     /// (`5/6` for one homogeneous layer). Cross shear uses their geometric
-    /// mean; off-axis multilayers do not claim a coupled 3-D warping solution.
+    /// mean only for [`LaminateShearModel::DirectionalWhitney`]. The equilibrated
+    /// closure computes cross shear from the actual traction cross-energy.
     #[must_use]
     pub const fn shear_factor(&self) -> &[f64; 2] {
         &self.shear_factor
+    }
+    /// Original transverse-shear closure, including its physical probe axes.
+    #[must_use]
+    pub const fn shear_model(&self) -> LaminateShearModel {
+        self.shear_model
     }
     /// Translational inertia `I0 = ∫ρ dz` [kg/m²].
     #[must_use]

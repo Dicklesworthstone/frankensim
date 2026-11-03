@@ -82,6 +82,34 @@ fn g0_single_layer_flat_shell_matches_homogeneous_owner() {
 }
 
 #[test]
+fn g1_equilibrated_laminate_cross_shear_reaches_actual_shell_work() {
+    let mut first = layer(2.0e8,0.002,400.0);
+    first.orientation_rad = 0.4;
+    first.law = LayerLaw::Elastic(OrthotropicElastic::new(
+        [11e9,0.9e9,0.5e9],[0.37,0.42,0.47],[0.7e9,0.65e9,0.04e9],0.01).unwrap());
+    let mut second = layer(8.0e8,0.002,1200.0);
+    second.orientation_rad = -0.4;
+    second.law = LayerLaw::Elastic(OrthotropicElastic::new(
+        [3e9,6e9,2e9],[0.15,0.1,0.1],[0.7e9,0.65e9,0.04e9],0.01).unwrap());
+    let source = LaminateSection::try_new_equilibrated_shear(vec![first,second],
+        ReferenceSurface::Midsurface,0.17).unwrap();
+    let (mesh,directors) = mesh(2,0.4);
+    let model = assemble(&mesh,&directors,ShearShellSection::from_laminate(&source,0.0).unwrap(),
+        &[],ShellMass::Consistent);
+    let h = source.shear_pa_m();
+    assert!(h[1].abs()>1e-3*h[0]);
+    for gamma in [[0.002,0.003],[0.002,-0.003]] {
+        // Linear w with zero rotation is constant transverse shear; membrane,
+        // curvature and drilling strain all vanish on this planar shell.
+        let field: Vec<_> = mesh.nodes.iter().flat_map(|p|
+            [0.0,0.0,gamma[0]*p[0]+gamma[1]*p[1],0.0,0.0,0.0]).collect();
+        let expected = 0.5*0.4*(h[0]*gamma[0]*gamma[0]
+            +2.0*h[1]*gamma[0]*gamma[1]+h[3]*gamma[1]*gamma[1]);
+        near(model.strain_energy(&field).unwrap(),expected,2e-11);
+    }
+}
+
+#[test]
 fn g1_constant_strain_curvature_keeps_signed_b_work() {
     let (mesh,directors) = mesh(3,0.4);
     let strain = [0.001,-0.0002,0.0003];
