@@ -459,7 +459,10 @@ impl CarbonInLeachBatch {
         if reagent == dosing::DissolvedSodiumReagent::SodiumCyanide {
             next.total_cyanide = sum([next.total_cyanide, amount.value()].into_iter())?;
         }
-        next.total_counterion = sum([next.total_counterion, amount.value()].into_iter())?;
+        let doses_pair_counterion = next.pair.counterion().as_str() == dosing::SODIUM;
+        if doses_pair_counterion {
+            next.total_counterion = sum([next.total_counterion, amount.value()].into_iter())?;
+        }
 
         // Recheck the same no-hidden-counterion-limitation condition against the
         // possibly expanded NaCN-driven cumulative gold ceiling. Preloaded carbon
@@ -482,7 +485,9 @@ impl CarbonInLeachBatch {
         )?;
 
         let mut stocks = Stocks::from_state(&self.state);
-        stocks.counterion = sum([stocks.counterion, amount.value()].into_iter())?;
+        if doses_pair_counterion {
+            stocks.counterion = sum([stocks.counterion, amount.value()].into_iter())?;
+        }
         let layout = Arc::new(next);
         let state = evaluate_cil(
             &layout,
