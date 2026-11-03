@@ -19,7 +19,7 @@ fn build(spec: &Spec, level: u8, control: &mut QuadratureControl3<'_>)
     let domain = PhysicalDomain { bounds: spec.bounds, height: spec.height, curvature: spec.curvature };
     let tree = Octree3::uniform(level, 5, spec.leaves).unwrap();
     build_operator(spec, HexCell::try_new(spec.bounds.0, spec.bounds.1).unwrap(), &tree, &domain,
-        &IsotropicElastic::new(spec.youngs, spec.poisson, 1.0).unwrap(), control)
+        &material(spec).unwrap(), control)
 }
 fn near(actual: f64, expected: f64, scale: f64) {
     assert!((actual - expected).abs() <= 2e-8 * scale.max(1e-20), "{actual:e} != {expected:e}");
@@ -161,4 +161,121 @@ fn pressure_and_shear_studies_refine_check_gradients_and_resume_exact_physical_f
     let fields = design.get("displacements_m").and_then(JsonValue::as_array).unwrap();
     assert_eq!(fields.len(), 2);
     assert_ne!(fields[0], fields[1]);
+}
+
+fn with_acceleration(source: &str) -> String {
+    format!("{}\n  (material-acceleration :density-kg-m3 2.0 :acceleration-m-s2 (0.0 0.0 -0.5) :max-stencil-terms 100000))",
+        source.trim_end().strip_suffix(')').unwrap())
+}
+
+#[test]
+fn material_acceleration_is_explicit_identity_bound_and_admitted_before_work() {
+    let source = with_acceleration(&unit_source());
+    let spec = spec::parse(&source).unwrap();
+    let law = spec.material_acceleration.unwrap();
+    assert_eq!(law.density_kg_m3, 2.0);
+    assert_eq!(law.acceleration_m_s2, [0.0, 0.0, -0.5]);
+    assert_eq!(spec::parse(&spec.canonical).unwrap().id, spec.id);
+    assert_ne!(spec::parse(&source.replace(":density-kg-m3 2.0", ":density-kg-m3 3.0")).unwrap().id, spec.id);
+    assert_ne!(spec::parse(&source.replace("(0.0 0.0 -0.5)", "(0.0 0.0 -0.6)")).unwrap().id, spec.id);
+    for source in [
+        source.replace(":density-kg-m3 2.0", ":density-kg-m3 0.0"),
+        source.replace("(0.0 0.0 -0.5)", "(0.0 0.0 0.0)"),
+        source.replace(":acceleration-m-s2", ":body-force-n-m3"),
+        source.replace(":max-stencil-terms 100000", ":max-stencil-terms 0"),
+        source.replace(":max-stencil-terms 100000", ":max-stencil-terms 4000001"),
+        with_acceleration(&source),
+    ] { assert!(spec::parse(&source).is_err()); }
+
+    let gravity_only = source
+        .replace("(pressure :pa 1.0 :x-fraction (0.5 1.0))", "none")
+        .replace("(traction :pa (0.0 1.0 0.0) :x-fraction (0.5 1.0))", "none");
+    let gravity_only = spec::parse(&gravity_only).unwrap();
+    assert!(gravity_only.loads.iter().all(|(f, _)| *f == [0.0; 3]));
+    assert!(gravity_only.surfaces.iter().all(Option::is_none));
+
+    let load_space = include_str!("../../../../../examples/marquee/bracket-3d-load-space.fsim");
+    let error = spec::parse(&with_acceleration(load_space)).unwrap_err();
+    assert!(error.message.contains("zero-centered"));
+}
+
+#[test]
+fn material_acceleration_uses_native_mass_occupancy_and_full_compliance_gradient() {
+    use fs_solver::op::LinearOp;
+    use fs_topopt::pipeline::LoadCase;
+
+    let source = unit_source();
+    let source = format!("{}\n (design-regions :solid (((0.0 0.0 0.0) (0.5 0.5 0.5))) :void (((0.0 0.5 0.5) (0.5 1.0 1.0)))))",
+        source.trim_end().strip_suffix(')').unwrap());
+    let spec = spec::parse(&with_acceleration(&source)).unwrap();
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut q = QuadratureControl3::new(QuadratureOptions3::default(), &mut poll).unwrap();
+    let op = build(&spec, 1, &mut q).unwrap();
+    for (mass, volume) in op.reference_cell_masses_kg().unwrap().iter().zip(op.volumes()) {
+        near(*mass, 2.0 * volume, *mass);
+    }
+    let native = op.prepare_material_body_load(&|_| [0.0, 0.0, -0.5], 100000,
+        || ControlFlow::Continue(())).unwrap();
+    let study = regions::bind(CutDensityStudy3::new(op, spec.radius, spec.schedule[0]), &spec).unwrap();
+    let mut study = bind_material_acceleration(study, &spec, &CancelGate::new(),
+        || ControlFlow::Continue(())).unwrap();
+    assert!(study.has_material_body_load());
+    assert!(study.can_refine_material_body_load());
+    assert_eq!(study.material_body_load_fingerprint(), Some(native.fingerprint()));
+    let map = study.material_body_load().unwrap();
+    let full = map.load(&vec![1.0; study.cells()], || ControlFlow::Continue(())).unwrap();
+    let half = map.load(&vec![0.5; study.cells()], || ControlFlow::Continue(())).unwrap();
+    let empty = map.load(&vec![0.0; study.cells()], || ControlFlow::Continue(())).unwrap();
+    assert!(full.iter().any(|f| f.abs() > 1e-4));
+    for ((full, half), empty) in full.iter().zip(half).zip(empty) {
+        assert_eq!(*full * 0.5, half);
+        assert_eq!(empty, 0.0);
+    }
+    let n = study.operator().n();
+    let zero = vec![0.0; n];
+    let cases = [LoadCase { force: &zero, weight: 1.0 }];
+    let raw: Vec<_> = (0..study.cells()).map(|i| 0.45 + 0.02 * i as f64).collect();
+    let mut checkpoint = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut checkpoint);
+    let value = study.evaluate(&raw, &cases, &mut control).unwrap();
+    assert!(value.objective.compliance > 0.0);
+    assert!(value.projected_rho.contains(&0.0));
+    assert!(value.projected_rho.contains(&1.0));
+    let physical_force = study.material_body_load().unwrap().load(&value.projected_rho,
+        || ControlFlow::Continue(())).unwrap();
+    let defect = study.operator().field_residual(&value.objective.displacements[0], &physical_force,
+        || ControlFlow::Continue(())).unwrap();
+    assert!(defect < 1e-8, "equilibrium must include the actual projected mass");
+    let epsilon = 1e-5;
+    let direction: Vec<_> = (0..raw.len()).map(|i| 0.2 + 0.03 * i as f64).collect();
+    let shifted = |sign: f64| raw.iter().zip(&direction).map(|(r, d)| r + sign * epsilon * d).collect::<Vec<_>>();
+    let high = study.evaluate(&shifted(1.0), &cases, &mut control).unwrap().objective.compliance;
+    let low = study.evaluate(&shifted(-1.0), &cases, &mut control).unwrap().objective.compliance;
+    let actual = (high - low) / (2.0 * epsilon);
+    let analytic: f64 = value.objective.gradient.iter().zip(&direction).map(|(g, d)| g * d).sum();
+    assert!((actual - analytic).abs() < 2e-5 * actual.abs().max(1e-8),
+        "material force derivative must pass through the shared filter/projection: {actual} vs {analytic}");
+}
+
+#[test]
+fn material_acceleration_preparation_preserves_cancellation_and_stencil_limits() {
+    let mut spec = spec::parse(&with_acceleration(&unit_source())).unwrap();
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut q = QuadratureControl3::new(QuadratureOptions3::default(), &mut poll).unwrap();
+    let op = build(&spec, 1, &mut q).unwrap();
+    let study = CutDensityStudy3::new(op, spec.radius, spec.schedule[0]);
+    let gate = CancelGate::new();
+    gate.request();
+    let error = match bind_material_acceleration(study, &spec, &gate, || ControlFlow::Break(())) {
+        Ok(_) => panic!("cancelled preparation must not publish a study"), Err(e) => e,
+    };
+    assert_eq!(error.exit, exit::CANCELLED);
+    let op = build(&spec, 1, &mut q).unwrap();
+    let study = CutDensityStudy3::new(op, spec.radius, spec.schedule[0]);
+    spec.material_acceleration.as_mut().unwrap().max_terms = 1;
+    let error = match bind_material_acceleration(study, &spec, &CancelGate::new(),
+        || ControlFlow::Continue(())) {
+        Ok(_) => panic!("bounded stencil preparation must refuse"), Err(e) => e,
+    };
+    assert_eq!(error.exit, exit::BUDGET);
 }

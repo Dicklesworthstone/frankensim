@@ -1,5 +1,36 @@
 # Native design studies
 
+## Self-weight in 3-D compliance and stress studies
+
+The `fsim-sdf3-study` compliance and stress modes accept a common fixed
+acceleration such as gravity. Append this section after any `design-regions`
+and `linear-solver` sections, inside the study:
+
+```lisp
+(material-acceleration
+  :density-kg-m3 2700.0
+  :acceleration-m-s2 (0.0 0.0 -9.81)
+  :max-stencil-terms 100000)
+```
+
+The declared density is full-material reference mass per cubic metre. Actual
+self-weight follows filtered/projected material occupancy: protected solids
+retain full weight and protected voids have none, including on refined grids.
+Each independent load case includes this common acceleration in addition to
+its existing body/pressure/traction dead loads. Zero dead-load vectors are
+valid for a pure self-weight study. The native compliance and stress adjoints
+differentiate the changing force as well as stiffness. Stress resume checks
+the rebuilt material-load identity before restoring optimizer state.
+
+The acceleration stays fixed in the reference configuration; this does not
+add follower loads or inertial dynamics. `max-stencil-terms` bounds each grid's
+prepared sparse load map and contributes to memory admission. The compliance
+OC optimizer still requires nonpositive sensitivities; self-weight with low
+SIMP penalization can violate that condition and is refused by its existing
+gradient gate. The stress optimizer has no such sign restriction. The
+zero-centered `load-space-limited-simp` mode explicitly refuses this common
+offset because its force-ellipsoid model does not include affine loading.
+
 ## Robust 3-D minimum-material design
 
 `bracket-3d-load-space.fsim` uses the existing 3-D CutFEM, density filter,

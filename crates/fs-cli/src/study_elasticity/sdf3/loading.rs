@@ -4,6 +4,61 @@
 use super::*;
 use fs_cutfem::elastic3::surface::SurfaceForce3;
 use fs_cutfem::elastic3::dirichlet::EmbeddedDirichletOptions3;
+use fs_topopt::sdf3::Sdf3Elasticity;
+
+/// A fixed reference acceleration, shared by every independent load case.
+/// Material occupancy supplies the changing mass; the SIMP stiffness floor
+/// never creates weight in a prescribed void.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct MaterialAcceleration {
+    pub density_kg_m3: f64,
+    pub acceleration_m_s2: [f64; 3],
+    pub max_terms: usize,
+}
+
+impl MaterialAcceleration {
+    pub(super) fn validate(self) -> Result<()> {
+        if !(1e-9..=1e8).contains(&self.density_kg_m3)
+            || self.acceleration_m_s2.iter().any(|a| !a.is_finite() || a.abs() > 1e6)
+            || self.acceleration_m_s2.iter().all(|a| *a == 0.0)
+            || !(1..=4_000_000).contains(&self.max_terms)
+        {
+            return Err(fail("cli-study-sdf3-input",
+                "material acceleration needs positive density in kg/m3, a finite nonzero vector in m/s2, and 1..=4000000 stencil terms"));
+        }
+        Ok(())
+    }
+
+    /// Covers simultaneous coarse/fine maps and sparse preparation workspace.
+    /// This is a structural admission envelope, not measured peak RSS.
+    pub(super) fn memory_envelope(self) -> usize { 128 * self.max_terms }
+}
+
+pub(super) fn material(spec: &Spec) -> Result<IsotropicElastic> {
+    IsotropicElastic::new(spec.youngs, spec.poisson,
+        spec.material_acceleration.map_or(1.0, |law| law.density_kg_m3))
+        .map_err(|e| fail("cli-study-sdf3-material", e.to_string()))
+}
+
+/// Bind once on the actual native operator, before any solve or gradient gate.
+/// Retaining the acceleration recipe lets the existing adaptive owner rebuild
+/// its map on every enriched/refitted grid with the same reference law.
+pub(super) fn bind_material_acceleration<O: Sdf3Elasticity>(
+    study: CutDensityStudy3<O>, spec: &Spec, gate: &CancelGate,
+    mut checkpoint: impl FnMut() -> ControlFlow<()>,
+) -> Result<CutDensityStudy3<O>> {
+    let Some(law) = spec.material_acceleration else { return Ok(study); };
+    study.with_material_acceleration(move |_| law.acceleration_m_s2,
+        law.max_terms, &mut checkpoint).map_err(|e| Failure {
+            code: "cli-study-sdf3-material-acceleration",
+            message: e.to_string(),
+            exit: if gate.is_requested() { exit::CANCELLED }
+                else if checkpoint().is_break() || matches!(e,
+                    ElasticityError3::Invalid("material body-load term allowance exhausted")) {
+                    exit::BUDGET
+                } else { exit::REFUSED },
+        })
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Force {

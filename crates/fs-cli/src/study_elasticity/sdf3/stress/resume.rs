@@ -46,14 +46,26 @@ pub(super) fn encode(spec: &Spec, state: &State, producer: ContentHash,
     let a = &c.optimizer;
     let previous = a.previous_violation.map_or_else(|| "null".into(), |v| format!("{v:.17e}"));
     let best = c.best_feasible_density.as_ref().map_or_else(|| "null".into(), |v| format!("{v:?}"));
+    let body = c.material_body_load_fingerprint.map_or_else(|| "null".into(),
+        |hash| format!("{:?}", hash.to_hex()));
     Some(format!(
-        "{{\"schema\":{SCHEMA:?},\"study_id\":{:?},\"producer\":{:?},\"design\":{:?},\"iterations\":{:?},\"restoration_evaluations\":{},\"point\":{:?},\"best_feasible_density\":{best},\"sample\":{{\"objective\":{:.17e},\"constraint\":{:.17e},\"gradient\":{:?},\"constraint_gradient\":{:?}}},\"work\":{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{}}},\"multiplier\":{:.17e},\"penalty\":{:.17e},\"spectral_step\":{:.17e},\"inner_tolerance\":{:.17e},\"previous_violation\":{previous}}}",
+        "{{\"schema\":{SCHEMA:?},\"study_id\":{:?},\"producer\":{:?},\"design\":{:?},\"iterations\":{:?},\"restoration_evaluations\":{},\"point\":{:?},\"material_body_load_fingerprint\":{body},\"best_feasible_density\":{best},\"sample\":{{\"objective\":{:.17e},\"constraint\":{:.17e},\"gradient\":{:?},\"constraint_gradient\":{:?}}},\"work\":{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{}}},\"multiplier\":{:.17e},\"penalty\":{:.17e},\"spectral_step\":{:.17e},\"inner_tolerance\":{:.17e},\"previous_violation\":{previous}}}",
         spec.id.to_hex(), producer.to_hex(), hash_bytes(design.as_bytes()).to_hex(),
         hash_bytes(iterations.as_bytes()).to_hex(), c.restoration_evaluations, a.point,
         a.sample.objective, a.sample.constraint, a.sample.gradient, a.sample.constraint_gradient,
         a.work.iterations, a.work.evaluations, a.work.multiplier_updates, a.work.rejected_trials,
         a.multiplier, a.penalty, a.spectral_step, a.inner_tolerance,
     ))
+}
+
+fn material_body_fingerprint(data: &JsonValue, required: bool) -> Result<Option<ContentHash>> {
+    match data.get("material_body_load_fingerprint") {
+        // Historical no-self-weight sources are explicitly the empty map.
+        None | Some(JsonValue::Null) if !required => Ok(None),
+        Some(JsonValue::Str(value)) if required => ContentHash::from_hex(value)
+            .map(Some).ok_or_else(|| invalid("invalid material body-load fingerprint")),
+        _ => Err(invalid("checkpoint material body load disagrees with its declared source")),
+    }
 }
 
 fn audit(report: &JsonValue, max_evaluations: usize) -> Result<Audit> {
@@ -156,6 +168,8 @@ fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) ->
     }).collect::<Result<Vec<_>>>()?;
     let checkpoint = StressDesignCheckpoint3 {
         optimizer, history, restoration_evaluations: integer(&data, "restoration_evaluations")?,
+        material_body_load_fingerprint: material_body_fingerprint(&data,
+            spec.material_acceleration.is_some())?,
         best_feasible_density: match field(&data, "best_feasible_density")? {
             JsonValue::Null => None, value => Some(vector(value, n)?),
         },
@@ -163,6 +177,28 @@ fn recover(spec: &Spec, ledger: &Ledger, old: &Loaded, producer: ContentHash) ->
     let spent = Spent::read(receipt)?;
     spent.validate(spec)?;
     Ok(Recovery { checkpoint, audit, spent })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn material_body_restart_cannot_drop_or_invent_the_prepared_map() {
+        let old = JsonValue::parse("{}").unwrap();
+        assert_eq!(material_body_fingerprint(&old, false).unwrap(), None);
+        assert!(material_body_fingerprint(&old, true).is_err());
+        let empty = JsonValue::parse("{\"material_body_load_fingerprint\":null}").unwrap();
+        assert_eq!(material_body_fingerprint(&empty, false).unwrap(), None);
+        assert!(material_body_fingerprint(&empty, true).is_err());
+        let hash = hash_bytes(b"native material body map");
+        let bound = JsonValue::parse(&format!("{{\"material_body_load_fingerprint\":{:?}}}",
+            hash.to_hex())).unwrap();
+        assert_eq!(material_body_fingerprint(&bound, true).unwrap(), Some(hash));
+        assert!(material_body_fingerprint(&bound, false).is_err());
+        let malformed = JsonValue::parse("{\"material_body_load_fingerprint\":\"bad\"}").unwrap();
+        assert!(material_body_fingerprint(&malformed, true).is_err());
+    }
 }
 
 pub(super) fn drive(spec: &Spec, ledger: &Ledger, cap: Option<usize>, gate: &CancelGate,

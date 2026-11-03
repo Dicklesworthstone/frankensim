@@ -4,6 +4,39 @@ use super::*;
 const STRESS: &str = include_str!("../../../../examples/marquee/bracket-3d-stress.fsim");
 
 #[test]
+fn g1_g5_stress_self_weight_cli_restarts_the_same_material_load_and_design() {
+    let dir = scratch("stress-self-weight");
+    let source = with_material_acceleration(
+        &STRESS.replace(":max-updates 80", ":max-updates 2"), 1.0,
+    );
+    let (reference_ledger, reference) = run(&dir, "reference", &source, 6);
+    let report = data(&reference_ledger, &reference, "report_json");
+    assert_eq!(report.path(&["gradient_check", "passed"]), Some(&J::Bool(true)));
+
+    let split_ledger = dir.join("split.db");
+    let prefix = document(&command("study").arg(dir.join("reference.fsim"))
+        .arg(&split_ledger).args(["--budget", "1"]).output().unwrap(), 6);
+    let resumed = document(&command("study").args(["--resume", prefix.str_field("run_id").unwrap()])
+        .arg(&split_ledger).args(["--budget", "1"]).output().unwrap(), 6);
+    assert_eq!(resumed.path(&["receipt", "iterations_completed"]).and_then(J::as_f64), Some(2.0));
+    for artifact in ["design", "iterations"] {
+        assert_eq!(retained(&reference_ledger, &reference, artifact),
+            retained(&split_ledger, &resumed, artifact));
+    }
+
+    // Replaying a valid checkpoint must restore its material body-force map,
+    // not merely its old displacement vector. A different physical mass must
+    // produce a different solved stress for the unchanged initial geometry.
+    let (heavy_ledger, heavy_result) = run(&dir, "heavy",
+        &with_material_acceleration(&STRESS.replace(":max-updates 80", ":max-updates 2"), 2.0), 6);
+    let ordinary = data(&reference_ledger, &reference, "iterations");
+    let heavy = data(&heavy_ledger, &heavy_result, "iterations");
+    let ordinary = ordinary.get("history").and_then(J::as_array).unwrap();
+    let heavy = heavy.get("history").and_then(J::as_array).unwrap();
+    assert!(number(&heavy[0], "stress_aggregate_pa") > number(&ordinary[0], "stress_aggregate_pa"));
+}
+
+#[test]
 fn g1_g5_stress_cli_reduces_volume_keeps_independent_fields_and_exports_sealed_results() {
     let dir = scratch("stress");
     let source = STRESS.replace(":max-updates 80", ":max-updates 4");

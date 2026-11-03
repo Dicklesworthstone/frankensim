@@ -290,8 +290,7 @@ fn compute_observed(
     let domain: &dyn CutSdf3 = if spec.physical { &physical } else { &legacy };
     let bounds = HexCell::try_new(spec.bounds.0, spec.bounds.1)
         .map_err(|e| fail("cli-study-sdf3-domain", e.to_string()))?;
-    let material = IsotropicElastic::new(spec.youngs, spec.poisson, 1.0)
-        .map_err(|e| fail("cli-study-sdf3-material", e.to_string()))?;
+    let material = loading::material(spec)?;
     let mut cp = |_| poll();
     let mut quadrature = QuadratureControl3::new(
         QuadratureOptions3 {
@@ -326,10 +325,11 @@ fn compute_observed(
     let geometry = quadrature.work();
     // Bind the physical map before gradient admission, every candidate solve,
     // and accepted/incumbent endpoint re-evaluation on optimizer restoration.
-    let mut study = regions::bind(
+    let study = regions::bind(
         CutDensityStudy3::new(operator, spec.radius, spec.schedule[0]),
         spec,
     )?;
+    let mut study = loading::bind_material_acceleration(study, spec, gate, || poll())?;
     let raw = vec![spec.density; study.cells()];
     let mut cp = |_| poll();
     let mut control = SolveControl::new(

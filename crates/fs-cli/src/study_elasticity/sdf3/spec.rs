@@ -35,6 +35,7 @@ pub(super) struct Spec {
     pub poisson: f64,
     pub loads: Vec<([f64; 3], f64)>,
     pub surfaces: Vec<Option<loading::SurfaceSpec>>,
+    pub material_acceleration: Option<loading::MaterialAcceleration>,
     pub density: f64,
     pub volume: f64,
     pub radius: f64,
@@ -149,7 +150,7 @@ fn linear_solver(node: &Node) -> Result<solver::Policy> {
 pub(super) fn parse(source: &str) -> Result<Spec> {
     let root = fs_ir::sexpr::parse(source).map_err(|e| invalid(e.to_string()))?;
     let items = super::super::list(&root, "3-D study")?;
-    if !(13..=15).contains(&items.len())
+    if !(13..=16).contains(&items.len())
         || !matches!(&items[0].kind, NodeKind::Symbol(s) if s == "fsim-sdf3-study")
         || !matches!(&items[1].kind, NodeKind::Keyword(s) if s == "version")
         || !matches!(items[2].kind, NodeKind::Int(1))
@@ -311,18 +312,31 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         };
     let mut solver = solver::Policy::Legacy;
     let mut region_node = None;
+    let mut material_acceleration = None;
     for node in &items[13..] {
         let section = super::super::list(node, "optional 3-D study section")?;
         match section.first().map(|n| &n.kind) {
             Some(NodeKind::Symbol(name)) if name == "design-regions"
-                && region_node.is_none() && matches!(solver, solver::Policy::Legacy) => {
+                && region_node.is_none() && matches!(solver, solver::Policy::Legacy)
+                && material_acceleration.is_none() => {
                 region_node = Some(node);
             }
             Some(NodeKind::Symbol(name)) if name == "linear-solver"
-                && matches!(solver, solver::Policy::Legacy) => {
+                && matches!(solver, solver::Policy::Legacy) && material_acceleration.is_none() => {
                 solver = linear_solver(node)?;
             }
-            _ => return Err(invalid("optional sections must be design-regions then linear-solver, without duplicates or unknown fields")),
+            Some(NodeKind::Symbol(name)) if name == "material-acceleration"
+                && material_acceleration.is_none() => {
+                let values = fields(node, "material-acceleration", &[
+                    "density-kg-m3", "acceleration-m-s2", "max-stencil-terms",
+                ])?;
+                material_acceleration = Some(loading::MaterialAcceleration {
+                    density_kg_m3: scalar(values[0])?,
+                    acceleration_m_s2: vector(values[1])?,
+                    max_terms: count(values[2])?,
+                });
+            }
+            _ => return Err(invalid("optional sections must be design-regions, linear-solver, then material-acceleration, without duplicates or unknown fields")),
         }
     }
     let canonical = fs_ir::sexpr::print(&root).map_err(|e| invalid(e.to_string()))?;
@@ -341,7 +355,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         level: u32::try_from(count(physics[1])?).map_err(|_| invalid("initial-level overflow"))?,
         max_level: u32::try_from(count(physics[2])?).map_err(|_| invalid("maximum-level overflow"))?,
         leaves: count(physics[3])?, youngs: scalar(physics[4])?, poisson: scalar(physics[5])?,
-        loads, surfaces, density, volume, radius, updates, move_limit, marking, max_marks,
+        loads, surfaces, material_acceleration, density, volume, radius, updates, move_limit, marking, max_marks,
         schedule, regions: Vec::new(), solver, stress, stress_measure, load_space,
     };
     // Validate the physical frame and grid envelope before deriving any indices.
@@ -377,12 +391,19 @@ impl Spec {
             return Err(invalid("initial octree level must be 1..=2, maximum 5, at most 2048 leaves and 1..=8 marks"));
         }
         self.solver.validate(self.level)?;
+        if let Some(law) = self.material_acceleration {
+            law.validate()?;
+            if self.load_space.is_some() {
+                return Err(invalid("load-space-limited-simp models a zero-centered force ellipsoid and cannot include a common material-acceleration offset"));
+            }
+        }
         // Admission envelope, not a measured or certified peak-RSS bound.
         let stress_memory = self.stress.map_or(0, |s| 1024usize.saturating_mul(s.stress.max_points));
         let admitted_memory = (64 * 1024 * 1024 + 256 * self.points + 65_536 * self.leaves)
             .saturating_add(stress_memory)
             .saturating_add(if self.load_space.is_some() { 64 * self.leaves * self.leaves } else { 0 })
             .saturating_add(self.sampled.as_ref().map_or(0, |s| s.memory_envelope))
+            .saturating_add(self.material_acceleration.map_or(0, |law| law.memory_envelope()))
             .saturating_add(self.solver.memory_envelope(self.level));
         if admitted_memory > self.memory {
             return Err(invalid("declared memory is too small for the requested geometry/field/solver envelope"));
@@ -403,7 +424,8 @@ impl Spec {
             }
             if !(0.0 <= *w && *w <= 1.0) || (!peak && *w == 0.0)
                 || f.iter().any(|v| !v.is_finite() || v.abs() > 1e12)
-                || (f.iter().all(|v| *v == 0.0) && surface.is_none())
+                || (f.iter().all(|v| *v == 0.0) && surface.is_none()
+                    && self.material_acceleration.is_none())
             {
                 return Err(invalid("each case needs a nonzero reference load and weight in (0,1]; only sampled-peak-limited-simp admits zero weights, and still constrains those cases"));
             }
