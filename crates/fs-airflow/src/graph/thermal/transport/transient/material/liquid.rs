@@ -3,6 +3,7 @@
 use super::conduction::{GraphConductionError, GraphConductiveLink, ResolvedGraphConduction};
 use super::convection::{GraphConvectionError, GraphConvectiveLink, GraphSourceHeat};
 use super::heating::{GraphHeatingError, LiquidGraphHeating};
+use super::convection::reservoir::{GraphConvectiveReservoir, GraphReservoirConvectionError, GraphReservoirHeat};
 use super::*;
 use crate::graph::thermal::medium::series::enthalpy::admit_liquid_caloric_source;
 use fs_material::liquid::ResolvedLiquidState;
@@ -208,4 +209,73 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
             convection,
         })
     }
+    /// Convective heat from already-declared prescribed wall reservoirs at the
+    /// actual native inertial endpoint. The original wall temperatures, areas,
+    /// fluid source, caloric identity and physical flow limits remain authoritative.
+    /// Apply the returned boundary conductances once inside the thermal residual;
+    /// the diagnostic heat powers are not additional cell sources.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_reservoirs(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        report: &InertialGraphReport,
+        bindings: &[GraphConvectiveReservoir],
+        maximum_reservoirs: usize,
+    ) -> Result<GraphReservoirHeat<ResolvedLiquidState>, GraphReservoirConvectionError> {
+        self.evaluate_reservoir_flow(
+            cx, thermal, sources, GraphFlow::Inertial(report), bindings, maximum_reservoirs,
+        )
+    }
+
+    /// Original prescribed-wall convection with the solved quasi-steady flow.
+    /// The duration is the actual native thermal interval for source work limits.
+    /// Reservoir temperature is held by its original boundary event, while
+    /// film/bulk properties and conductance are recomputed at each thermal trial.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_quasi_steady_reservoirs(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+        bindings: &[GraphConvectiveReservoir],
+        maximum_reservoirs: usize,
+    ) -> Result<GraphReservoirHeat<ResolvedLiquidState>, GraphReservoirConvectionError> {
+        self.evaluate_reservoir_flow(
+            cx,
+            thermal,
+            sources,
+            GraphFlow::QuasiSteady { hydraulics, duration_s },
+            bindings,
+            maximum_reservoirs,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_reservoir_flow(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        flow: GraphFlow<'_>,
+        bindings: &[GraphConvectiveReservoir],
+        maximum_reservoirs: usize,
+    ) -> Result<GraphReservoirHeat<ResolvedLiquidState>, GraphReservoirConvectionError> {
+        let admission = self.core.admit_flow(cx, thermal, sources, flow)
+            .map_err(GraphReservoirConvectionError::Source)?;
+        let convection = convection::reservoir::evaluate(
+            &self.core,
+            cx,
+            thermal,
+            flow,
+            bindings,
+            maximum_reservoirs,
+            |t| self.law.at_temperature(t).map_err(SourceGraphError::Liquid),
+        )?;
+        Ok(GraphReservoirHeat { admission, convection })
+    }
+
 }

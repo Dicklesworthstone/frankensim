@@ -49,7 +49,7 @@ pub enum SourceCellConvectionLaw {
 }
 
 impl SourceCellConvectionLaw {
-    fn admit_property_temperature(
+    pub(crate) fn admit_property_temperature(
         self,
         convention: ConvectionPropertyTemperature,
     ) -> Result<(), ConvectionSourceError> {
@@ -73,7 +73,7 @@ impl SourceCellConvectionLaw {
 
     // Reservoir boundaries and reciprocal finite links retain one law mapping
     // and one source-expansion requirement.
-    fn resolve(
+    pub(crate) fn resolve(
         self,
         source: &ThermalFluidTransportState,
     ) -> Result<CellConvectionLaw, ConvectionSourceError> {

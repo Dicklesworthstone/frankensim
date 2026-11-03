@@ -2978,3 +2978,54 @@ flow reversal; an unforced closed loop's coupled kinetic-to-thermal transfer;
 and source-density, stale-epoch, duplicate-owner, native-debit and work-limit
 refusal. Compilation and native numerical execution were unavailable in the
 delivery environment.
+
+## Prescribed-wall convection on original graph fluid storage
+
+`material::convection::reservoir` supplies source-backed conductance for an
+already-present native reservoir on a bound liquid or gas cell. Both source
+owners expose `evaluate_reservoirs` for an actual inertial report and
+`evaluate_quasi_steady_reservoirs` for a solved graph and its thermal interval.
+The reservoir retains its declared covered area and prescribed temperature.
+Its authored conductance must be zero; missing reservoirs, duplicate bindings
+and competing conductance owners refuse without changing native state.
+
+Bulk sampling uses the actual finite fluid temperature; mean-film sampling
+uses that temperature and the actual wall temperature. The full wall-to-fluid
+temperature difference drives heat and buoyancy. Original liquid source laws
+or fixed-pressure/composition gas sources retain their transport properties,
+thermal expansion, support and registered caloric identity. Source samples,
+native geometry, candidate temperatures, density limits and original mechanical
+work gates remain admitted. Gas evaluation retains actual endpoint Mach limits.
+
+Finite-wall and prescribed-wall convection share the original flow-law
+admission. Forced cards use actual signed reference-volume flow and pipe area;
+old/new/average rates and any zero crossing retain original regime support.
+Pure natural cards require a quiescent original flow envelope. Aiding mixed
+plates retain original local tangent, gravity orientation, film properties and
+density-departure restrictions. No new correlation, empirical blend, velocity
+floor or substitute material tuple is introduced.
+
+`ResolvedReservoirConvection::apply_to` supplies total W/K values to the native
+`BoundaryConductances::reservoir_w_k` map. It checks all ownership conflicts and
+cancellation before mutation. The existing thermal boundary owner accounts for
+heat, external energy and entropy once; diagnostic sample watts must not also
+be added as cell sources. Existing ambient patches, authored sources, finite
+contacts, native enthalpy storage and scheduled boundary events keep their
+owners. Re-evaluate conductance at each coupled thermal trial and apply it to
+that trial's coefficient map. No second thermal integrator is introduced.
+
+Explicit reservoir counts bound work and storage; samples are ordered by native
+cell identity. Nonfinite or unrepresentable transfer refuses. Four regression
+sources cover independent forced conductance and full wall/bulk temperature
+drop under heating/cooling and signed reversal; a native coupled natural-
+convection endpoint against an independent caloric balance; boundary ownership,
+stale source and zero-crossing refusal; and original gas film EOS, NASA calorics
+and endpoint Mach admission. Source/API review was completed. Rust parsing,
+compilation and native numerical execution were unavailable in the delivery
+environment, so these regression sources are not reported as executed.
+
+This is exchange with a prescribed external wall temperature. Finite wall/body
+storage remains on original reciprocal links. Original material/correlation
+applicability, low-Mach/Boussinesq assumptions and time/spatial resolution remain
+caller responsibilities; no new experimental calibration or throughput claim
+is made.
