@@ -33,11 +33,13 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
       RUSTFLAGS: '-Z threads=1'
-      CARGO_TARGET_DIR: ${{ runner.temp }}/mining-target
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Select the runner-local build directory
+        shell: bash
+        run: printf 'CARGO_TARGET_DIR=%s/mining-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Materialize pinned dependencies
         shell: bash
         run: |
