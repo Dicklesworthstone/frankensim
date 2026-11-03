@@ -20,6 +20,8 @@
 //! including the individual aqueous CN-, Au(CN)2- and OH- ions.
 //! Separate NBS cases resolve molecular HCN dissociation, water dissociation,
 //! and an Elsner endpoint consuming a finite dissolved-O2 inventory.
+//! Sodium hydroxide and cubic sodium cyanide dissolution resolve reacted solid
+//! mass to explicit sodium counterions and hydroxide/cyanide equivalents.
 //! `--help` lists every supported reaction and required pack order.
 //! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
 //! entropy and derive Gibbs energy and log equilibrium constants from enthalpy
@@ -67,7 +69,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 41] = [
+const REACTIONS: [&str; 43] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
@@ -90,6 +92,8 @@ const REACTIONS: [&str; 41] = [
     "oxygen-dissolution",
     "hydrogen-cyanide-dissociation",
     "water-dissociation",
+    "sodium-hydroxide-dissolution",
+    "sodium-cyanide-dissolution",
     "carbonic-component-dissociation",
     "bicarbonate-dissociation",
     "pyrite-roasting",
@@ -249,6 +253,38 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-gas",
             ],
             equation: "Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g)",
+        },
+        "sodium-hydroxide-dissolution" => ReactionCase {
+            reaction: MineralReaction::SodiumHydroxideDissolution,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "sodium-hydroxide-solid-nbs1989-thermochemistry",
+                "sodium-ion-aqueous-nbs1989",
+                "hydroxide-ion-aqueous-nbs1989",
+            ],
+            species: &["NaOH(s)", "Na[+](aq)", "OH[-](aq)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "NaOH(s) -> Na[+](aq) + OH[-](aq), declared dissolved pure-reagent amount on the NBS reference",
+        },
+        "sodium-cyanide-dissolution" => ReactionCase {
+            reaction: MineralReaction::SodiumCyanideDissolution,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "sodium-cyanide-cubic-solid-nbs1989-thermochemistry",
+                "sodium-ion-aqueous-nbs1989",
+                "cyanide-ion-aqueous-nbs1989",
+            ],
+            species: &["NaCN(s)", "Na[+](aq)", "CN[-](aq)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "NaCN(s, cubic cr I) -> Na[+](aq) + CN[-](aq), declared dissolved pure-reagent amount on the NBS reference",
         },
         "gold-cyanidation" => ReactionCase {
             reaction: MineralReaction::GoldCyanidation,
@@ -1056,6 +1092,9 @@ fn reference_point(
         "zincite-solid-usgs-b2131-thermochemistry" => Some("source-phase-zincite"),
         "franklinite-solid-usgs-b2131-thermochemistry" => Some("source-phase-franklinite"),
         "hematite-solid-usgs-b2131-thermochemistry" => Some("source-phase-hematite"),
+        "sodium-cyanide-cubic-solid-nbs1989-thermochemistry" => {
+            Some("source-phase-sodium-cyanide-cubic")
+        }
         "sulfur-orthorhombic-solid-usgs-b2131" => Some("source-phase-sulfur-orthorhombic"),
         _ => None,
     };

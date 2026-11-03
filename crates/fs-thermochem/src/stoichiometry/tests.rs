@@ -90,6 +90,8 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         ZincFerriteFormation,
         ZincFerriteAcidLeach,
         ZincFerriteToGoethiteLeach,
+        SodiumHydroxideDissolution,
+        SodiumCyanideDissolution,
     ] {
         let first = recipe.build().unwrap();
         let second = recipe.build().unwrap();

@@ -122,6 +122,14 @@
 //! existing goethite-hydrolysis extents gives the separate net endpoint with
 //! two protons consumed. That aggregate does not permit a staged calculation
 //! to borrow acid regenerated later, nor select the precipitating iron phase.
+//! Sodium-reagent dissolution retains the sodium counterion together with
+//! hydroxide or cyanide. The compatible NBS reference uses Table 99:Na,
+//! Na+(ao), NaOH(cr) and NaCN(cr I, cubic), plus the original NBS OH-/CN- rows:
+//! <https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv>.
+//! These are declared dissolved extents. A source enthalpy or equilibrium
+//! constant does not establish commercial purity, dissolution completion,
+//! dissolution rate or a plant dose. Subsequent protonation and shared pH
+//! remain the coupled acid/base owner's responsibility.
 
 use super::{ConservedReaction, ReactionBalanceError};
 use crate::{
@@ -274,6 +282,12 @@ pub enum MineralReaction {
     /// ZnFe2O4(s) + 2 H+(aq) -> Zn2+(aq) + 2 FeO(OH)(s, goethite).
     /// Aggregate of ferrite dissolution and two goethite-hydrolysis extents.
     ZincFerriteToGoethiteLeach,
+    /// NaOH(s, anhydrous crystalline) -> Na+(aq) + OH-(aq).
+    /// One sodium counterion and one base equivalent per declared dissolved mole.
+    SodiumHydroxideDissolution,
+    /// NaCN(s, cubic cr I) -> Na+(aq) + CN-(aq).
+    /// The dissolved cyanide pool remains subject to protonation and complexation.
+    SodiumCyanideDissolution,
 }
 
 // One species: stable phase/charge id, element counts, charge, signed coefficient.
@@ -732,6 +746,24 @@ impl MineralReaction {
                     ("H+(aq)", &[0, 0, 0, 1], 1, -2),
                     ("Zn[2+](aq)", &[1, 0, 0, 0], 2, 1),
                     ("FeO(OH)(s)", &[0, 1, 2, 1], 0, 2),
+                ],
+            ),
+            Self::SodiumHydroxideDissolution => (
+                "sodium-hydroxide-dissolution",
+                &["Na", "O", "H"],
+                &[
+                    ("NaOH(s)", &[1, 1, 1], 0, -1),
+                    ("Na[+](aq)", &[1, 0, 0], 1, 1),
+                    ("OH[-](aq)", &[0, 1, 1], -1, 1),
+                ],
+            ),
+            Self::SodiumCyanideDissolution => (
+                "sodium-cyanide-dissolution",
+                &["Na", "C", "N"],
+                &[
+                    ("NaCN(s)", &[1, 1, 1], 0, -1),
+                    ("Na[+](aq)", &[1, 0, 0], 1, 1),
+                    ("CN[-](aq)", &[0, 1, 1], -1, 1),
                 ],
             ),
             Self::CopperCementationWithZinc => (
