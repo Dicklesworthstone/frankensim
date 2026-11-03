@@ -16831,6 +16831,25 @@ tank-volume/inertia geometry, prescribed valve schedule, source validity and
 model boundaries. The final gas inventory is unchanged throughout closed-valve
 coast while native motion, gravity and drag continue.
 
+### Rotating aerodynamic attachments in native momentum evolution
+
+`GasRigidRocketState::{advance_spatial,coast_spatial}` carry the original
+`PreparedSpatialLoads` through the complete finite-gas/native-mechanics
+transaction. Atmospheric flight prepares each sampled aerodynamic force as a
+world-held force at its declared body attachment. Every native torque kick
+reevaluates the rotating arm's moment; the sample's reported body torque
+remains an observation at that pose. Additional free body couples retain their
+own frame, and the force resultant enters translation once.
+
+Both powered flight and closed-valve coast use this path, including the original
+full-tensor inertia model. Propellant, nozzle impulse and rotational exhaust
+retain their existing owners. The independent outer drag-timescale admission
+and atmosphere/source refusals remain in force; resolving attachment rotation
+does not resolve an otherwise frozen drag or environment law. Focused tests in
+`rocket_blowdown::flight::tests` compare spinning coast against an independent
+planar RK4 moment reference and verify the powered path against the original
+native propellant/spatial-load composition (G0/G1).
+
 ## Native retained multi-contact caloric feedback
 
 `tribothermal::partial_slip::rigid::network::step_rigid_caloric_network` resolves all original shear/spin impulses, finite-cell energy increments and one massless common temperature per original interface in one Newton system. Contacts may share native bodies and thermal cells. Canonical original link order fixes evaluation and reduction order. Every trial applies all impulses before evaluating any midpoint contact motion; the transport callback sees the whole endpoint once per trial. Generic fs-solver Newton/Krylov and finite-difference actions own the numerical algorithm. No replacement inertia or thermal store is introduced.

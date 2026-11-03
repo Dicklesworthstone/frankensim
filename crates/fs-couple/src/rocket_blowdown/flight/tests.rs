@@ -133,6 +133,185 @@ fn vector_near(a: Vec3, b: Vec3, tolerance: f64) {
 }
 
 #[test]
+fn off_center_aerodynamic_force_drives_the_actual_rotating_momentum() {
+    let source = atmosphere(false);
+    let original = state(1000.0, Vec3::new(0.0, 20.0, 0.0), 20.0);
+    let geometry = RocketFlightGeometry {
+        aerodynamic_application_arm_body_m: Vec3::new(0.08, 0.0, 0.0),
+        aerodynamic_reference_area_m2: 0.001,
+        ..geometry()
+    };
+    let mut solve = controls();
+    solve.mechanics.maximum_substep_s = 0.0002;
+    let duration = 0.2;
+    let candidate = advance_atmospheric_rocket(
+        &original,
+        &source,
+        geometry,
+        coast(),
+        duration,
+        solve,
+        |_| Ok(0.5),
+        || false,
+    )
+    .unwrap();
+    let sample = candidate.midpoint_environment();
+    let force = sample.aerodynamic_load.force_world_n;
+    let inertia = original.vehicle().mass_properties().unwrap();
+    let iz = inertia.principal_inertia_body().z;
+    let initial_spin = original.vehicle().angular_momentum_body_kg_m2_s().z;
+
+    // Independently integrate the held WORLD force at the rotating arm. This
+    // is the force declared by the accepted outer stage, not a second drag
+    // sample. Planar mechanics gives H'=r(F_y cos(theta)-F_x sin(theta)).
+    let torque = |angle: f64| 0.08 * (force.y * angle.cos() - force.x * angle.sin());
+    let (mut angle, mut spin) = (0.0, initial_spin);
+    let h = duration / 20_000.0;
+    for _ in 0..20_000 {
+        let a = spin / iz;
+        let b = torque(angle);
+        let c = (spin + 0.5 * h * b) / iz;
+        let d = torque(angle + 0.5 * h * a);
+        let e = (spin + 0.5 * h * d) / iz;
+        let f = torque(angle + 0.5 * h * c);
+        let g = (spin + h * f) / iz;
+        let k = torque(angle + h * e);
+        angle += h * (a + 2.0 * c + 2.0 * e + g) / 6.0;
+        spin += h * (b + 2.0 * d + 2.0 * f + k) / 6.0;
+    }
+    let endpoint = candidate.endpoint().vehicle();
+    let axis = endpoint
+        .orientation()
+        .rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0));
+    near(endpoint.angular_momentum_body_kg_m2_s().z, spin, 3e-8);
+    vector_near(axis, Vec3::new(angle.cos(), angle.sin(), 0.0), 1e-6);
+    let frozen_spin = initial_spin + duration * sample.aerodynamic_load.torque_body_n_m.z;
+    assert!(
+        (frozen_spin - spin).abs() > 1e-4,
+        "a body-frozen aerodynamic moment must fail this rotating-arm reference"
+    );
+    vector_near(
+        endpoint.translation().velocity_m_s,
+        original.vehicle().translation().velocity_m_s.add(
+            sample
+                .gravity_world_m_s2
+                .add(force.scale(1.0 / inertia.mass()))
+                .scale(duration),
+        ),
+        3e-11,
+    );
+    vector_near(
+        candidate
+            .step()
+            .mechanics()
+            .angular_momentum_residual_world_kg_m2_s,
+        Vec3::ZERO,
+        3e-12,
+    );
+    assert_eq!(candidate.endpoint().reservoir(), original.reservoir());
+}
+
+#[test]
+fn powered_atmospheric_point_force_uses_the_same_native_propellant_and_load_owners() {
+    let source = atmosphere(false);
+    let original = state(1000.0, Vec3::new(0.0, 40.0, 0.0), 20.0);
+    let geometry = RocketFlightGeometry {
+        aerodynamic_application_arm_body_m: Vec3::new(0.08, 0.0, 0.0),
+        ..geometry()
+    };
+    let forcing = powered();
+    let solve = controls();
+    let duration = 0.02;
+    let candidate = advance_atmospheric_rocket(
+        &original,
+        &source,
+        geometry,
+        forcing,
+        duration,
+        solve,
+        |_| Ok(0.5),
+        || false,
+    )
+    .unwrap();
+    let RocketFlightStep::Powered(report) = candidate.step() else {
+        panic!("powered step required")
+    };
+    let RocketFlightPropulsion::Powered {
+        thrust_direction_body,
+        thrust_application_arm_body_m,
+        co_rotating_exhaust_specific_inertia_m2,
+        exhaust_swirl_specific_angular_momentum_body_m2_s,
+        ..
+    } = forcing.propulsion
+    else {
+        unreachable!()
+    };
+    let sample = candidate.midpoint_environment();
+    let loads = PreparedSpatialLoads::new(
+        Wrench::ZERO,
+        Vec3::ZERO,
+        &[WorldPointForce {
+            arm_body: geometry.aerodynamic_application_arm_body_m,
+            force_world: sample.aerodynamic_load.force_world_n,
+        }],
+        || false,
+    )
+    .unwrap();
+    let expelled = report.gas.expelled_mass_kg;
+    let native = original
+        .vehicle()
+        .advance_spatial(
+            fs_mbd::rocket::rigid::RigidRocketForcing {
+                mass_flow_kg_s: expelled / duration,
+                effective_exhaust_velocity_body_m_s: thrust_direction_body
+                    .scale(report.mechanics.axial_thrust_impulse_n_s / expelled),
+                thrust_application_arm_body_m,
+                co_rotating_exhaust_specific_inertia_m2,
+                exhaust_swirl_specific_angular_momentum_body_m2_s,
+                gravity_world_m_s2: sample.gravity_world_m_s2,
+                external_force_world_n: forcing.additional_force_world_n,
+                external_torque_body_n_m: forcing.additional_torque_body_n_m,
+            },
+            &loads,
+            duration,
+            solve.mechanics,
+            || false,
+        )
+        .unwrap();
+    vector_near(
+        native.state_after.translation().velocity_m_s,
+        candidate.endpoint().vehicle().translation().velocity_m_s,
+        1e-12,
+    );
+    vector_near(
+        native.state_after.angular_momentum_body_kg_m2_s(),
+        candidate
+            .endpoint()
+            .vehicle()
+            .angular_momentum_body_kg_m2_s(),
+        1e-13,
+    );
+    vector_near(
+        native
+            .state_after
+            .orientation()
+            .rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0)),
+        candidate
+            .endpoint()
+            .vehicle()
+            .orientation()
+            .rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0)),
+        1e-13,
+    );
+    assert!(report.consumed_mass_residual_kg.abs() <= solve.gas.reservoir.mass_tolerance_kg);
+    vector_near(
+        report.mechanics.angular_momentum_residual_world_kg_m2_s,
+        Vec3::ZERO,
+        3e-12,
+    );
+}
+
+#[test]
 fn midpoint_atmosphere_drag_and_central_gravity_refine_coast_at_second_order() {
     let source = atmosphere(true);
     let original = state(1000.0, Vec3::new(0.0, 120.0, 0.0), 0.0);

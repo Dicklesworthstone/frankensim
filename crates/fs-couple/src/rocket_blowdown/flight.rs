@@ -18,8 +18,9 @@ use super::rigid::{
 };
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::rocket::RocketNozzle;
 use fs_mbd::{
-    Vec3,
+    Vec3, Wrench,
     rocket::rigid::{RigidRocketError, RigidRocketInertia, RigidRocketStep, RocketInertiaModel},
+    spatial_loads::{PreparedSpatialLoads, SpatialLoadError, WorldPointForce},
 };
 
 /// Source sampling and aerodynamic reference geometry, in the body frame.
@@ -120,6 +121,8 @@ pub enum AtmosphericFlightError {
     Coupling(GasRigidRocketError),
     /// Original native mass or body-point kinematics refused.
     Mechanics(RigidRocketError),
+    /// The original prepared spatial-load owner refused force/arm arithmetic.
+    SpatialLoads(SpatialLoadError),
     /// The outer explicit interval does not resolve the sampled quadratic drag.
     /// Reduce the outer interval; smaller frozen-load mechanics substeps do not
     /// resolve this atmosphere/drag update.
@@ -153,6 +156,14 @@ impl From<GasRigidRocketError> for AtmosphericFlightError {
 impl From<RigidRocketError> for AtmosphericFlightError {
     fn from(value: RigidRocketError) -> Self {
         Self::Mechanics(value)
+    }
+}
+impl From<SpatialLoadError> for AtmosphericFlightError {
+    fn from(value: SpatialLoadError) -> Self {
+        match value {
+            SpatialLoadError::Cancelled => Self::Cancelled,
+            other => Self::SpatialLoads(other),
+        }
     }
 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AtmosphericFlightError> {
@@ -313,28 +324,34 @@ fn admit_drag_interval<I: RocketInertiaModel>(
 fn advance_under_sample<I: RocketInertiaModel>(
     state: &GasRigidRocketState<I>,
     sample: RocketFlightEnvironmentSample,
+    geometry: RocketFlightGeometry,
     forcing: RocketFlightForcing<I::ExhaustInertia>,
     duration_s: f64,
     controls: GasRigidRocketSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(GasRigidRocketState<I>, RocketFlightStep<I>), AtmosphericFlightError> {
-    let force = sample
-        .aerodynamic_load
-        .force_world_n
-        .add(forcing.additional_force_world_n);
-    let torque = sample
-        .aerodynamic_load
-        .torque_body_n_m
-        .add(forcing.additional_torque_body_n_m);
+    // The sampled force is held in WORLD axes during this outer stage. Its
+    // moment therefore follows the actual rotating attachment at each native
+    // kick, rather than becoming a frozen body-frame follower torque.
+    let loads = PreparedSpatialLoads::new(
+        Wrench::ZERO,
+        Vec3::ZERO,
+        &[WorldPointForce {
+            arm_body: geometry.aerodynamic_application_arm_body_m,
+            force_world: sample.aerodynamic_load.force_world_n,
+        }],
+        &mut *cancelled,
+    )?;
     match forcing.propulsion {
         RocketFlightPropulsion::ClosedValve => {
-            let candidate = state.coast(
+            let candidate = state.coast_spatial(
                 GasRigidRocketCoastEnvironment {
                     inertial_frame: state.inertial_frame(),
                     gravity_world_m_s2: sample.gravity_world_m_s2,
-                    external_force_world_n: force,
-                    external_torque_body_n_m: torque,
+                    external_force_world_n: forcing.additional_force_world_n,
+                    external_torque_body_n_m: forcing.additional_torque_body_n_m,
                 },
+                &loads,
                 duration_s,
                 controls.mechanics,
                 cancelled,
@@ -349,7 +366,7 @@ fn advance_under_sample<I: RocketInertiaModel>(
             co_rotating_exhaust_specific_inertia_m2,
             exhaust_swirl_specific_angular_momentum_body_m2_s,
         } => {
-            let candidate = state.advance(
+            let candidate = state.advance_spatial(
                 GasRigidRocketEnvironment {
                     inertial_frame: state.inertial_frame(),
                     ambient_pressure_pa: sample.ambient_pressure_pa,
@@ -358,10 +375,11 @@ fn advance_under_sample<I: RocketInertiaModel>(
                     co_rotating_exhaust_specific_inertia_m2,
                     exhaust_swirl_specific_angular_momentum_body_m2_s,
                     gravity_world_m_s2: sample.gravity_world_m_s2,
-                    external_force_world_n: force,
-                    external_torque_body_n_m: torque,
+                    external_force_world_n: forcing.additional_force_world_n,
+                    external_torque_body_n_m: forcing.additional_torque_body_n_m,
                 },
                 nozzle,
+                &loads,
                 duration_s,
                 controls,
                 cancelled,
@@ -379,6 +397,10 @@ fn advance_under_sample<I: RocketInertiaModel>(
 /// predictor and final admission state, and its external side effects cannot be
 /// rolled back. Mach, Reynolds and body-relative flow are the actual local values;
 /// no empirical coefficient, lift law or extrapolation is invented here.
+/// Each stage holds the sampled aerodynamic force in world axes while its
+/// material attachment rotates under the original native dynamics. Every native
+/// torque kick reevaluates the arm's moment; the sampled torque remains an
+/// observation at that sampled pose, not a body-fixed torque for the interval.
 ///
 /// The unaccepted half-step predictor is discarded. The full gas/rigid candidate
 /// restarts from the original state, and final atmosphere/coefficient admission
@@ -432,6 +454,7 @@ pub fn advance_atmospheric_rocket<I: RocketInertiaModel>(
     let (predictor, _) = advance_under_sample(
         state,
         initial,
+        geometry,
         forcing,
         0.5 * duration_s,
         controls,
@@ -448,6 +471,7 @@ pub fn advance_atmospheric_rocket<I: RocketInertiaModel>(
     let (endpoint, step) = advance_under_sample(
         state,
         midpoint,
+        geometry,
         forcing,
         duration_s,
         controls,

@@ -22,6 +22,7 @@
 //! See Eke, NASA/CR-1998-208246, https://ntrs.nasa.gov/citations/19980210404.
 
 use super::{RocketError, RocketForcing, RocketState};
+use crate::spatial_loads::PreparedSpatialLoads;
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
 /// Instantaneous two-body separation with conserved mass and momenta.
@@ -142,7 +143,8 @@ pub struct RigidRocketForcing<E = Vec3> {
     pub gravity_world_m_s2: Vec3,
     /// Other world-frame force at the COM [N], excluding gravity and propulsion.
     pub external_force_world_n: Vec3,
-    /// Other body-frame torque about the COM [N m], including any aerodynamic arm.
+    /// Other torque held in body axes about the COM [N m]. A world-held force
+    /// at a rotating attachment instead belongs on [`RigidRocketState::advance_spatial`].
     pub external_torque_body_n_m: Vec3,
 }
 
@@ -376,6 +378,36 @@ impl<I: RocketInertiaModel> RigidRocketState<I> {
         forcing: RigidRocketForcing<I::ExhaustInertia>,
         duration_s: f64,
         controls: RigidRocketSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RigidRocketStep<I>, RigidRocketError> {
+        self.advance_spatial(
+            forcing,
+            &PreparedSpatialLoads::ZERO,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Advance propulsion with additional held spatial loads at material attachments.
+    ///
+    /// The original prepared load owner evaluates each world-held force's
+    /// `r_body cross R^-1 F_world` at BOTH native torque kicks. Free world and
+    /// body couples retain their distinct frames. The prepared resultant enters
+    /// the original analytic variable-mass translation exactly once; do not
+    /// duplicate these loads in `forcing`'s external force or torque.
+    ///
+    /// Preparation is independent of the current mass/inertia, so both diagonal
+    /// and full-tensor depletion retain their original thrust and exhaust-spin
+    /// accounting. Evaluation has constant storage/work per substep regardless
+    /// of attachment count. This refines held forces, not drag coefficients or
+    /// other state-dependent physics; those require outer-stage evaluation.
+    pub fn advance_spatial(
+        &self,
+        forcing: RigidRocketForcing<I::ExhaustInertia>,
+        loads: &PreparedSpatialLoads,
+        duration_s: f64,
+        controls: RigidRocketSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RigidRocketStep<I>, RigidRocketError> {
         poll(&mut cancelled)?;
@@ -389,12 +421,15 @@ impl<I: RocketInertiaModel> RigidRocketState<I> {
                 "finite nonnegative duration, positive substep and nonzero work budget required",
             ));
         }
+        let external_force = forcing.external_force_world_n.add(loads.force_world());
+        // Admit the initial load even for a zero-duration validation call.
+        loads.wrench_at(self.orientation)?;
         self.translation.advance(
             RocketForcing {
                 mass_flow_kg_s: forcing.mass_flow_kg_s,
                 effective_exhaust_velocity_m_s: forcing.effective_exhaust_velocity_body_m_s,
                 gravity_m_s2: forcing.gravity_world_m_s2,
-                external_force_n: forcing.external_force_world_n,
+                external_force_n: external_force,
             },
             0.0,
             &mut cancelled,
@@ -478,7 +513,9 @@ impl<I: RocketInertiaModel> RigidRocketState<I> {
             let swirl = forcing
                 .exhaust_swirl_specific_angular_momentum_body_m2_s
                 .scale(0.5 * burned);
-            let half_torque = torque.scale(0.5 * h);
+            let half_torque = torque
+                .add(loads.wrench_at(current.orientation)?.torque_body)
+                .scale(0.5 * h);
             if !half_torque.is_finite() || !swirl.is_finite() {
                 return Err(RigidRocketError::Invalid(
                     "torque or swirl impulse overflow",
@@ -518,6 +555,14 @@ impl<I: RocketInertiaModel> RigidRocketState<I> {
                 forcing.co_rotating_exhaust_specific_inertia_m2,
                 0.5 * burned,
             )?;
+            let half_torque = torque
+                .add(loads.wrench_at(orientation)?.torque_body)
+                .scale(0.5 * h);
+            if !half_torque.is_finite() {
+                return Err(RigidRocketError::Invalid(
+                    "endpoint spatial torque impulse overflow",
+                ));
+            }
             let momentum = momentum.add(half_torque).sub(swirl);
             exported.add(orientation.rotate_body_to_world(loss.add(swirl)));
             applied.add(orientation.rotate_body_to_world(half_torque));
@@ -528,7 +573,7 @@ impl<I: RocketInertiaModel> RigidRocketState<I> {
                     effective_exhaust_velocity_m_s: midpoint_orientation
                         .rotate_body_to_world(forcing.effective_exhaust_velocity_body_m_s),
                     gravity_m_s2: forcing.gravity_world_m_s2,
-                    external_force_n: forcing.external_force_world_n,
+                    external_force_n: external_force,
                 },
                 h,
                 &mut cancelled,

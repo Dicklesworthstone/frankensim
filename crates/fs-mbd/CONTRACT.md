@@ -3991,3 +3991,22 @@ second-order 8/16/32-step refinement against an independent coupled Hertz ODE,
 full-inertia/frame/common-acceleration invariance, canonical body/contact indices,
 growing footprints, genuine cross-block and late unmodeled recoil, source/budget
 refusal and cancellation. The finest ODE indentation error is below 1e-10 m.
+
+## Spatial forces during variable-mass rigid motion
+
+`RigidRocketState::advance_spatial` applies additional `PreparedSpatialLoads`
+through the original common-axis and full-tensor depletion map. A world-held
+force at a rotating material attachment uses `r_body cross R^-1 F_world` at
+both actual native torque-kick attitudes. Held body and world free couples
+retain their distinct frames. The prepared resultant enters the original
+analytic changing-mass translation exactly once; callers must not duplicate
+these forces or moments in the separate propulsion/external forcing inputs.
+
+Thrust, rotational exhaust, burnout, cancellation and substep work limits retain
+their original owners. Prepared load evaluation uses constant storage/work per
+substep independent of attachment count. Changing drag, gravity or other
+state-dependent laws still require outer-stage evaluation and refinement.
+The original `advance` entry selects zero additional spatial loads. Focused
+regressions in `rocket::rigid::tests` compare rotating-arm momentum against an
+independent planar RK4 solution and check world-couple impulse during mass
+and rotational-exhaust depletion (G0/G1).

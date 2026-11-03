@@ -1,4 +1,5 @@
 use super::*;
+use crate::spatial_loads::{PreparedSpatialLoads, WorldPointForce};
 use staging::RocketStage;
 
 fn inertia() -> RigidRocketInertia {
@@ -47,6 +48,161 @@ fn vector_close(a: Vec3, b: Vec3, absolute: f64) {
     close(a.x, b.x, absolute);
     close(a.y, b.y, absolute);
     close(a.z, b.z, absolute);
+}
+
+#[test]
+fn g1_spatial_force_tracks_the_rotating_arm_and_refines_planar_momentum() {
+    let duration = 0.8;
+    let initial_angle = 0.3;
+    let body = RigidRocketState::new(
+        RocketState {
+            dry_mass_kg: 2.0,
+            propellant_mass_kg: 0.0,
+            ..point()
+        },
+        UnitQuaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), initial_angle).unwrap(),
+        Vec3::new(0.0, 0.0, 2.0),
+        RigidRocketInertia {
+            dry_principal_kg_m2: Vec3::new(2.0, 2.0, 2.0),
+            propellant_specific_principal_m2: Vec3::ZERO,
+        },
+    )
+    .unwrap();
+    let point = WorldPointForce {
+        arm_body: Vec3::new(0.75, 0.0, 0.0),
+        force_world: Vec3::new(0.0, 4.0, 0.0),
+    };
+    let loads =
+        PreparedSpatialLoads::new(crate::Wrench::ZERO, Vec3::ZERO, &[point], || false).unwrap();
+    let input = RigidRocketForcing {
+        mass_flow_kg_s: 0.0,
+        ..forcing()
+    };
+
+    // Independent planar ODE: theta'=H/2, H'=3*cos(theta). A fixed body
+    // torque would instead give constant H', despite the rotating attachment.
+    let (mut angle, mut spin) = (initial_angle, 2.0);
+    let reference_h = duration / 20_000.0;
+    for _ in 0..20_000 {
+        let a = spin / 2.0;
+        let b = 3.0 * angle.cos();
+        let c = (spin + 0.5 * reference_h * b) / 2.0;
+        let d = 3.0 * (angle + 0.5 * reference_h * a).cos();
+        let e = (spin + 0.5 * reference_h * d) / 2.0;
+        let f = 3.0 * (angle + 0.5 * reference_h * c).cos();
+        let g = (spin + reference_h * f) / 2.0;
+        let k = 3.0 * (angle + reference_h * e).cos();
+        angle += reference_h * (a + 2.0 * c + 2.0 * e + g) / 6.0;
+        spin += reference_h * (b + 2.0 * d + 2.0 * f + k) / 6.0;
+    }
+    let mut errors = Vec::new();
+    for count in [16, 32, 64] {
+        let report = body
+            .advance_spatial(
+                input,
+                &loads,
+                duration,
+                controls(duration / f64::from(count)),
+                || false,
+            )
+            .unwrap();
+        let next = report.state_after;
+        let axis = next
+            .orientation
+            .rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0));
+        let error = (axis.x - angle.cos()).abs()
+            + (axis.y - angle.sin()).abs()
+            + (next.angular_momentum_body_kg_m2_s.z - spin).abs();
+        errors.push(error);
+        vector_close(
+            next.translation.velocity_m_s,
+            Vec3::new(0.0, 1.6, 0.0),
+            2e-12,
+        );
+        vector_close(
+            next.translation.position_m,
+            Vec3::new(0.0, 0.64, 0.0),
+            2e-12,
+        );
+        vector_close(
+            report.angular_momentum_residual_world_kg_m2_s,
+            Vec3::ZERO,
+            2e-11,
+        );
+        close(
+            report.applied_angular_impulse_world_kg_m2_s.z,
+            next.angular_momentum_body_kg_m2_s.z - 2.0,
+            2e-11,
+        );
+    }
+    assert!(errors[0] / errors[1] > 3.7 && errors[1] / errors[2] > 3.7);
+    assert!(errors[2] < 1.5e-4);
+    let frozen = body
+        .advance(
+            RigidRocketForcing {
+                external_force_world_n: point.force_world,
+                external_torque_body_n_m: Vec3::new(0.0, 0.0, 3.0 * initial_angle.cos()),
+                ..input
+            },
+            duration,
+            controls(duration / 64.0),
+            || false,
+        )
+        .unwrap();
+    assert!((frozen.state_after.angular_momentum_body_kg_m2_s.z - spin).abs() > 0.7);
+}
+
+#[test]
+fn g0_spatial_world_couple_and_mass_depletion_share_the_original_spin_account() {
+    let body = RigidRocketState::new(
+        point(),
+        UnitQuaternion::from_axis_angle(Vec3::new(1.0, 2.0, 3.0), 0.7).unwrap(),
+        Vec3::new(0.3, -0.2, 0.5),
+        inertia(),
+    )
+    .unwrap();
+    let world_torque = Vec3::new(0.4, -0.7, 0.2);
+    let loads =
+        PreparedSpatialLoads::new(crate::Wrench::ZERO, world_torque, &[], || false).unwrap();
+    let input = RigidRocketForcing {
+        co_rotating_exhaust_specific_inertia_m2: Vec3::new(0.2, 0.3, 0.4),
+        ..forcing()
+    };
+    let report = body
+        .advance_spatial(input, &loads, 0.5, controls(0.01), || false)
+        .unwrap();
+    close(report.burned_propellant_mass_kg, 0.5, 1e-13);
+    vector_close(
+        report.applied_angular_impulse_world_kg_m2_s,
+        world_torque.scale(0.5),
+        3e-13,
+    );
+    vector_close(
+        report.angular_momentum_residual_world_kg_m2_s,
+        Vec3::ZERO,
+        3e-12,
+    );
+    assert!(
+        report
+            .exported_angular_momentum_world_kg_m2_s
+            .norm_squared()
+            > 0.0
+    );
+    assert_eq!(
+        body.advance(input, 0.5, controls(0.01), || false).unwrap(),
+        body.advance_spatial(
+            input,
+            &PreparedSpatialLoads::ZERO,
+            0.5,
+            controls(0.01),
+            || false
+        )
+        .unwrap()
+    );
+    assert!(matches!(
+        body.advance_spatial(input, &loads, 0.5, controls(0.01), || true),
+        Err(RigidRocketError::Cancelled)
+    ));
 }
 
 #[test]

@@ -25,6 +25,7 @@ use fs_mbd::rocket::rigid::{
     RigidRocketError, RigidRocketForcing, RigidRocketInertia, RigidRocketSolve, RigidRocketState,
     RigidRocketStep, RocketInertiaModel,
 };
+use fs_mbd::spatial_loads::PreparedSpatialLoads;
 use fs_mbd::{UnitQuaternion, Vec3};
 
 /// Forcing in one caller-declared inertial frame and the vehicle body frame.
@@ -45,9 +46,9 @@ pub struct GasRigidRocketEnvironment<E = Vec3> {
     pub exhaust_swirl_specific_angular_momentum_body_m2_s: Vec3,
     /// Gravitational acceleration in the matching world frame [m/s²].
     pub gravity_world_m_s2: Vec3,
-    /// Other world-frame force [N], excluding gravity and net nozzle thrust.
+    /// Other world-frame force at the COM [N], excluding gravity and net nozzle thrust.
     pub external_force_world_n: Vec3,
-    /// Other body-frame torque about the COM [N m].
+    /// Other free torque held in body axes about the COM [N m].
     pub external_torque_body_n_m: Vec3,
 }
 
@@ -67,7 +68,7 @@ pub struct GasRigidRocketCoastEnvironment {
     pub inertial_frame: u64,
     /// World gravitational acceleration [m/s²].
     pub gravity_world_m_s2: Vec3,
-    /// Other world force [N], excluding gravity and any engine thrust.
+    /// Other world force at the COM [N], excluding gravity and any engine thrust.
     pub external_force_world_n: Vec3,
     /// Body-frame torque about the COM [N m].
     pub external_torque_body_n_m: Vec3,
@@ -254,6 +255,27 @@ impl<I: RocketInertiaModel> GasRigidRocketState<I> {
         environment: GasRigidRocketCoastEnvironment,
         duration_s: f64,
         controls: RigidRocketSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GasRigidRocketCoastCandidate<I>, GasRigidRocketError> {
+        self.coast_spatial(
+            environment,
+            &PreparedSpatialLoads::ZERO,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Closed-valve coast with additional prepared spatial loads. World-held
+    /// point forces retain their rotating arms at each native torque kick.
+    /// The loads are additional to the environment's COM force/body couple;
+    /// the unchanged reservoir and complete native endpoint publish together.
+    pub fn coast_spatial(
+        &self,
+        environment: GasRigidRocketCoastEnvironment,
+        loads: &PreparedSpatialLoads,
+        duration_s: f64,
+        controls: RigidRocketSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasRigidRocketCoastCandidate<I>, GasRigidRocketError> {
         poll(&mut cancelled)?;
@@ -262,7 +284,7 @@ impl<I: RocketInertiaModel> GasRigidRocketState<I> {
                 "rigid coast state and loads must share the declared inertial frame",
             ));
         }
-        let mechanics = self.vehicle.advance(
+        let mechanics = self.vehicle.advance_spatial(
             RigidRocketForcing {
                 mass_flow_kg_s: 0.0,
                 effective_exhaust_velocity_body_m_s: Vec3::ZERO,
@@ -273,6 +295,7 @@ impl<I: RocketInertiaModel> GasRigidRocketState<I> {
                 external_force_world_n: environment.external_force_world_n,
                 external_torque_body_n_m: environment.external_torque_body_n_m,
             },
+            loads,
             duration_s,
             controls,
             &mut cancelled,
@@ -312,6 +335,30 @@ impl<I: RocketInertiaModel> GasRigidRocketState<I> {
         nozzle: RocketNozzle,
         duration_s: f64,
         controls: GasRigidRocketSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GasRigidRocketCandidate<I>, GasRigidRocketError> {
+        self.advance_spatial(
+            environment,
+            nozzle,
+            &PreparedSpatialLoads::ZERO,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Advance the same finite gas and native vehicle with additional spatial
+    /// loads. Prepared point-force arms and free world couples are reevaluated
+    /// at actual native attitudes, including during changing mass/inertia.
+    /// The environment's additional force/torque must not duplicate these loads.
+    /// Gas, propellant, thrust and exhaust-spin accounting retain one owner each.
+    pub fn advance_spatial(
+        &self,
+        environment: GasRigidRocketEnvironment<I::ExhaustInertia>,
+        nozzle: RocketNozzle,
+        loads: &PreparedSpatialLoads,
+        duration_s: f64,
+        controls: GasRigidRocketSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasRigidRocketCandidate<I>, GasRigidRocketError> {
         poll(&mut cancelled)?;
@@ -344,7 +391,7 @@ impl<I: RocketInertiaModel> GasRigidRocketState<I> {
         };
         // Validate native controls and finite forcing before the expensive gas solve.
         self.vehicle
-            .advance(forcing, 0.0, controls.mechanics, &mut cancelled)?;
+            .advance_spatial(forcing, loads, 0.0, controls.mechanics, &mut cancelled)?;
         let gas = self.reservoir.rocket_blowdown(
             environment.ambient_pressure_pa,
             nozzle,
@@ -363,9 +410,13 @@ impl<I: RocketInertiaModel> GasRigidRocketState<I> {
         }
         forcing.mass_flow_kg_s = rate;
         forcing.effective_exhaust_velocity_body_m_s = direction.scale(exhaust);
-        let mechanics =
-            self.vehicle
-                .advance(forcing, duration_s, controls.mechanics, &mut cancelled)?;
+        let mechanics = self.vehicle.advance_spatial(
+            forcing,
+            loads,
+            duration_s,
+            controls.mechanics,
+            &mut cancelled,
+        )?;
         let remaining_residual = mechanics.state_after.translation().propellant_mass_kg
             - gas.reservoir().endpoint().mass_kg();
         let consumed_residual = mechanics.burned_propellant_mass_kg - expelled;
