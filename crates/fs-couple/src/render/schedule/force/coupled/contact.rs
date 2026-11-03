@@ -430,19 +430,46 @@ fn solve_contact(law: &SlitContactStep, x0: f64, free: f64, compliance: f64, dt:
     solve_reaction(evaluate, config)
 }
 
+/// How a bracket search for a contact reaction ended without a refusal of its own.
+pub(super) enum Bracket {
+    /// Some evaluated reaction met its tolerance test after `iterations` midpoints.
+    Root { reaction: f64, iterations: usize },
+    /// Floating-point bisection ran out of representable midpoints (`lo`, `hi` adjacent) before any evaluated
+    /// reaction met its tolerance test. The root is only known to the resolution of the inputs of `evaluate`
+    /// (a closure that is a difference of two nearly equal numbers has a force resolution of ulp * dF/dx).
+    /// `best` is the evaluated reaction with the smallest residual/tolerance ratio; `residual_n`, `tolerance_n` and
+    /// `iterations` are the last midpoint's, exactly as the refusal in [`solve_reaction`] reports them.
+    Exhausted { best: f64, residual_n: f64, tolerance_n: f64, iterations: usize },
+}
+
 // One bracket owner for dynamic discrete forces and stationary potentials.
+// Refuses unless some evaluated reaction meets its tolerance test.
 pub(super) fn solve_reaction(
     evaluate: impl Fn(f64) -> Result<(f64, f64), ModalCouplingError>,
     config: ModalContactConfig,
 ) -> Result<(f64, usize), ModalCouplingError> {
+    match bracket_reaction(evaluate, config)? {
+        Bracket::Root { reaction, iterations } => Ok((reaction, iterations)),
+        Bracket::Exhausted { residual_n, tolerance_n, iterations, .. } =>
+            Err(ModalCouplingError::ContactSolve { residual_n, tolerance_n, iterations }),
+    }
+}
+
+// The bracket search behind `solve_reaction`. Exhausted floating-point bisection is reported as data
+// (`Bracket::Exhausted`), so a caller that owns a later admission check can carry the best iterate to it.
+// Spent `max_iterations`, the force ceiling and every evaluation error are still errors, unchanged.
+pub(super) fn bracket_reaction(
+    evaluate: impl Fn(f64) -> Result<(f64, f64), ModalCouplingError>,
+    config: ModalContactConfig,
+) -> Result<Bracket, ModalCouplingError> {
     let (at_zero,_) = evaluate(0.0)?;
-    if at_zero == 0.0 { return Ok((0.0,0)); }
+    if at_zero == 0.0 { return Ok(Bracket::Root { reaction: 0.0, iterations: 0 }); }
     let mut lo = 0.0;
     // The convex potential secant and nonadhesive loss are monotone in closure.
     // Thus R(0) bounds the root; the physical force ceiling is never increased.
     let mut hi = (-at_zero).min(config.maximum_force_n);
     let (at_hi,tol_hi) = evaluate(hi)?;
-    if at_hi.abs() <= tol_hi { return Ok((hi,0)); }
+    if at_hi.abs() <= tol_hi { return Ok(Bracket::Root { reaction: hi, iterations: 0 }); }
     if at_hi < 0.0 {
         return Err(ModalCouplingError::Budget { what: "contact normal force", value: hi-at_hi,
             limit: config.maximum_force_n });
@@ -450,13 +477,18 @@ pub(super) fn solve_reaction(
     let mut residual = at_hi;
     let mut tolerance = tol_hi;
     let mut used = 0;
+    // (reaction, residual, tolerance) with the smallest |residual|/tolerance among the evaluations.
+    let mut best = (hi, at_hi, tol_hi);
     for iteration in 1..=config.max_iterations {
         used = iteration;
         let mid = f64::midpoint(lo,hi);
         let (r,t) = evaluate(mid)?;
         residual=r; tolerance=t;
-        if r.abs() <= t { return Ok((mid,iteration)); }
-        if mid == lo || mid == hi { break; }
+        if r.abs() <= t { return Ok(Bracket::Root { reaction: mid, iterations: iteration }); }
+        if r.abs()*best.2 < best.1.abs()*t { best = (mid, r, t); }
+        if mid == lo || mid == hi {
+            return Ok(Bracket::Exhausted { best: best.0, residual_n: r, tolerance_n: t, iterations: iteration });
+        }
         if r < 0.0 { lo=mid; } else { hi=mid; }
     }
     Err(ModalCouplingError::ContactSolve { residual_n: residual, tolerance_n: tolerance, iterations: used })

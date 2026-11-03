@@ -137,3 +137,87 @@ fn multiple_preloaded_contacts_continue_without_a_startup_impact() {
     let mut peak=0.0_f64;for _ in 0..128 {peak=peak.max(dynamic.step(&[0.0;3]).unwrap().observer_pressure_pa.abs());}
     assert!(peak>0.01);
 }
+
+// A stopped string pressed by a finger (violin B3, G string; MB 15784): a 3.5 N press whose free, unstopped deflection is
+// `free_m`, carried by an authored rigid stop, K = 1e13 N/m^alpha, alpha = 1.5, tolerances 1e-11 N + 1e-9 * force (the
+// material_strings stop rows). At the solution the stop closes by about 5 nm, so its closure `free - C*r` is a
+// difference of two numbers of the size of `free_m`: its resolution is ulp(free_m), and its force resolution
+// ulp(free_m) * dF/dx, about 1e9 N/m, is a few 1e-10 N once `free_m` passes a few mm. The scratch root solve tightens
+// the tolerances to 1/16 (2.19e-10 N here), which such a press cannot always represent; B3's real preload was refused
+// with residual -3.40e-10 N against 2.1937474e-10 N after 56 iterations, the unmodified admission tolerance being 3.51e-9 N.
+// Gauntlet tiers: G1 (closed-form stored energy of the power-law stop at R = 3.5 N), G0 (the caller's unmodified
+// tolerance alone decides admission; spent iterations still refuse), G5 (bit-stable energies for presses the strict
+// scratch solve already resolved). Not proven here: B3's real 127-mode network, where the later restored-state check
+// in preload.rs (unchanged) also has to pass.
+const PRESS_N: f64 = 3.5;
+fn press_limits() -> ModalContactConfig { ModalContactConfig { max_iterations:96,maximum_force_n:50.0,
+    maximum_penetration_m:1e-3,force_absolute_tolerance_n:1e-11,force_relative_tolerance:1e-9 } }
+fn finger_press(free_m:f64,c:ModalContactConfig) -> (CoupledModalSystem,(ModalContact,ModalContactConfig),[f64;1]) {
+    let omega=1000.0;
+    // One mode; the stop and the press act through the same shape, so the static compliance is shape^2/omega^2.
+    let shape=(free_m/PRESS_N*omega*omega).sqrt();
+    let s=network(48000,&[omega]);
+    let law=Obstacle::new(vec![-1.0],1,1,vec![0.0],vec![1.0],1e13,1.5,"authored B3-like finger stop, not measured contact data".into()).unwrap();
+    let point=ModalContact {left:ModalAttachment {component:0,shapes:vec![shape]},right:ModalAttachment {component:0,shapes:vec![0.0]},law};
+    (s,(point,c),[shape*PRESS_N])
+}
+fn press_outcome(free_m:f64) -> Result<f64,ModalCouplingError> {
+    let (mut s,contact,load)=finger_press(free_m,press_limits());
+    s.initialize_contact_equilibrium(&load,&[contact],set(),&CancelGate::new())
+}
+
+#[test]
+fn presses_whose_free_deflection_passes_the_resolution_of_the_tightened_scratch_target_are_admitted() {
+    // The unmodified solver refused every one of these (4.0, 4.3, 5.0, 6.0 and 7.8 mm) in its scratch solve.
+    // The stop carries the press to within (R/K)^(2/3)/C, a few uN, so R = 3.5 N and its stored energy is K x^(alpha+1)/(alpha+1).
+    let x=(PRESS_N/1e13_f64).powf(1.0/1.5);let expected=1e13*x.powf(2.5)/2.5;
+    for free_mm in [4.0,4.3,5.0,6.0,7.8] {
+        let (mut s,contact,load)=finger_press(free_mm*1e-3,press_limits());
+        let energy=s.initialize_contact_equilibrium(&load,&[contact],set(),&CancelGate::new())
+            .unwrap_or_else(|e|panic!("{free_mm} mm: {e:?}"));
+        assert!((energy-expected).abs()<1e-4*expected,"{free_mm} mm: {energy:e} vs {expected:e}");
+        let q=states(&s)[0];assert_eq!(q.velocity_m_sqrt_kg_per_s,0.0);
+        assert_eq!(s.samples_rendered(),0);assert!(s.last_frame().is_none());
+    }
+}
+
+#[test]
+fn a_press_the_scratch_solve_cannot_resolve_still_refuses_on_the_callers_unmodified_tolerance() {
+    // 1e-13 N is far below the force resolution of a 4.3 mm free deflection, so no iterate can meet it: the refusal must
+    // come from the final check, which names the caller's tolerance (1e-13 N), not the scratch solve's tightened one (6.25e-15 N).
+    let mut c=press_limits();c.force_absolute_tolerance_n=1e-13;c.force_relative_tolerance=1e-30;
+    let (mut s,contact,load)=finger_press(4.3e-3,c);let before=states(&s);
+    match s.initialize_contact_equilibrium(&load,&[contact],set(),&CancelGate::new()) {
+        Err(ModalCouplingError::ContactSolve {residual_n,tolerance_n,..}) => {
+            assert!(tolerance_n>5e-14 && tolerance_n<2e-13,"tolerance {tolerance_n:e}");
+            assert!(residual_n.abs()>tolerance_n);
+        }
+        other => panic!("expected the unmodified-tolerance refusal, got {other:?}"),
+    }
+    assert_eq!(states(&s),before);assert_eq!(s.samples_rendered(),0);assert!(s.last_frame().is_none());
+}
+
+#[test]
+fn spent_iterations_still_refuse_in_the_scratch_solve() {
+    // Only exhausted floating-point bisection hands its best iterate on; a search that runs out of iterations is unconverged.
+    let mut c=press_limits();c.max_iterations=8;
+    let (mut s,contact,load)=finger_press(4.3e-3,c);
+    assert!(matches!(s.initialize_contact_equilibrium(&load,&[contact],set(),&CancelGate::new()),
+        Err(ModalCouplingError::ContactSolve {iterations:8,..})));
+    assert_eq!(s.samples_rendered(),0);
+}
+
+// Recorded from the unmodified solver (origin/main 47e46d255ce3; contact.rs and normal.rs are byte-identical at the R5C pin):
+// the stored energy [J] of every press in this list that it admitted (free deflection [m], f64 bits). A press the strict
+// scratch solve already resolved must keep its bits.
+const RESOLVED_AT_ORIGIN:[(f64,u64);10]=[
+    (0.25e-3,0x3e3ddcdc950387fc),(0.5e-3,0x3e3ddce4ae910ee6),(1.0e-3,0x3e3ddce8bb5d26d5),(1.5e-3,0x3e3ddcea14f8f20a),
+    (2.0e-3,0x3e3ddceac1ca6492),(2.5e-3,0x3e3ddceb2979f2d4),(3.0e-3,0x3e3ddceb6e9ffb84),(3.6e-3,0x3e3ddceba8262cb9),
+    (3.9e-3,0x3e3ddcebbe6b9b3f),(7.0e-3,0x3e3ddcec33d74deb)];
+
+#[test]
+fn presses_the_strict_scratch_solve_already_resolved_keep_their_bits() {
+    for (free_m,bits) in RESOLVED_AT_ORIGIN {
+        assert_eq!(press_outcome(free_m).unwrap().to_bits(),bits,"free deflection {free_m:e} m");
+    }
+}

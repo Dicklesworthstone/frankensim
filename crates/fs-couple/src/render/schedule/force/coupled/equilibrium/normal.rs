@@ -2,7 +2,7 @@
 //! Dynamics retain their existing joint normal/friction sweep; this stationary
 //! solve has no time-dependent loss or tangential sliding state.
 use super::*;
-use super::super::contact::{ModalContactConfig, force_tolerance, solve_reaction};
+use super::super::contact::{Bracket, ModalContactConfig, bracket_reaction, force_tolerance};
 use super::super::contact::multiple::MultiContactConfig;
 
 pub(super) fn admit_setup(
@@ -45,6 +45,12 @@ pub(super) fn solve_joint(
             // Leave room for the later check on restored, rounded modal states.
             // This tightens only the scratch root solve; admission still uses
             // the caller's unmodified force tolerances below and in preload.
+            // The tightened target can lie below what the inputs can represent:
+            // the closure is `free - C*r`, a difference of two numbers of the
+            // size of the free deflection, so its resolution is ulp(free) and the
+            // force resolution is ulp(free)*dF/dx. If floating-point bisection is
+            // exhausted before the tightened target is met, the best iterate goes
+            // on to the final joint check below; it is not refused here.
             if local.force_absolute_tolerance_n*0.0625 > 0.0 { local.force_absolute_tolerance_n *= 0.0625; }
             if local.force_relative_tolerance*0.0625 > 0.0 { local.force_relative_tolerance *= 0.0625; }
             let evaluate = |reaction: f64| -> Result<(f64, f64), ModalCouplingError> {
@@ -53,8 +59,11 @@ pub(super) fn solve_joint(
                 let expected = law_at(i, x)?;
                 Ok((finite(reaction - expected)?, force_tolerance(reaction, expected, local)?))
             };
-            reactions[i] = match solve_reaction(evaluate, local) {
-                Ok((r, _)) => r,
+            reactions[i] = match bracket_reaction(evaluate, local) {
+                Ok(Bracket::Root { reaction, .. }) => reaction,
+                // Exhausted floating-point bisection: the best iterate is NOT accepted
+                // unless the final joint equations pass at the caller's tolerances.
+                Ok(Bracket::Exhausted { best, .. }) => best,
                 // Another contact may relieve this bounded scratch iterate.
                 // It is NOT accepted unless the final joint equations pass.
                 Err(ModalCouplingError::Budget { what: "contact normal force", .. }) => local.maximum_force_n,
