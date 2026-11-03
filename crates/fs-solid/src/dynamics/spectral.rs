@@ -430,6 +430,26 @@ impl CompleteSpectralSolid {
         Ok(self.accept_momentum_impulse(candidate))
     }
 
+    /// The same complete basis used by native impulses, without publishing a
+    /// state or changing modal coordinates. Contact-space mobility uses every
+    /// column, including rigid modes; the final impulse still receives the
+    /// original-M and actual-velocity audit before acceptance.
+    pub(crate) fn momentum_response(
+        &self,
+        impulse_kg_m_s: &[f64],
+        cx: &Cx<'_>,
+    ) -> core::result::Result<Vec<f64>, LinearSolidImpulseError> {
+        impulse::admit(impulse_kg_m_s, self.free_dofs.len(), 0.0, cx)?;
+        let map_error = |error| match error {
+            CompleteSpectralSolidError::Cancelled => LinearSolidImpulseError::Cancelled,
+            _ => {
+                LinearSolidImpulseError::Invalid("unrepresentable complete-basis impulse response")
+            }
+        };
+        let modal = project(&self.basis, impulse_kg_m_s, cx).map_err(map_error)?;
+        reconstruct(&self.basis, &modal, cx).map_err(map_error)
+    }
+
     pub(crate) fn trial_momentum_impulse(
         &self,
         impulse_kg_m_s: &[f64],

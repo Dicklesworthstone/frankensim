@@ -34,6 +34,9 @@ use fs_sparse::Csr;
 pub mod spectral;
 pub mod supported;
 
+/// Simultaneous normal impacts on the original complete-coordinate trajectory.
+pub mod impact;
+
 mod impulse;
 pub use impulse::{LinearSolidImpulseError, LinearSolidImpulseReport};
 

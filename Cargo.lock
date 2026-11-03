@@ -2770,6 +2770,7 @@ dependencies = [
  "fs-ad",
  "fs-alloc",
  "fs-blake3",
+ "fs-contact",
  "fs-cutfem",
  "fs-evidence",
  "fs-exec",

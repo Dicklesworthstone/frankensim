@@ -118,6 +118,15 @@ pub(super) struct Candidate {
     pub work_correction_j: f64,
 }
 
+/// Unpublished velocity/work state for an outer contact audit. The prepared
+/// mass, propagator, viscosity and force maps remain borrowed throughout.
+pub(super) struct ExactImpulseCandidate {
+    pub(super) velocity_mps: Vec<f64>,
+    pub(super) report: LinearSolidImpulseReport,
+    cumulative_work_j: f64,
+    work_correction_j: f64,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn audit(
     mass: &[f64],
@@ -217,6 +226,17 @@ impl ExactLinearSolid {
         maximum_impulse_error_kg_m_s: f64,
         cx: &Cx<'_>,
     ) -> Result<LinearSolidImpulseReport> {
+        let candidate =
+            self.trial_momentum_impulse(impulse_kg_m_s, maximum_impulse_error_kg_m_s, cx)?;
+        Ok(self.accept_momentum_impulse(candidate))
+    }
+
+    pub(super) fn trial_momentum_impulse(
+        &self,
+        impulse_kg_m_s: &[f64],
+        maximum_impulse_error_kg_m_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ExactImpulseCandidate> {
         let n = self.free_dofs.len();
         admit(impulse_kg_m_s, n, maximum_impulse_error_kg_m_s, cx)?;
         let mut velocity = action(&self.inverse_mass, impulse_kg_m_s, cx)?;
@@ -246,9 +266,22 @@ impl ExactLinearSolid {
             },
             cx,
         )?;
-        self.state[n..].copy_from_slice(&velocity);
+        Ok(ExactImpulseCandidate {
+            velocity_mps: velocity,
+            report: candidate.report,
+            cumulative_work_j: candidate.cumulative_work_j,
+            work_correction_j: candidate.work_correction_j,
+        })
+    }
+
+    pub(super) fn accept_momentum_impulse(
+        &mut self,
+        candidate: ExactImpulseCandidate,
+    ) -> LinearSolidImpulseReport {
+        let n = self.free_dofs.len();
+        self.state[n..].copy_from_slice(&candidate.velocity_mps);
         self.cumulative_work_j = candidate.cumulative_work_j;
         self.work_correction_j = candidate.work_correction_j;
-        Ok(candidate.report)
+        candidate.report
     }
 }

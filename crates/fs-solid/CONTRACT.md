@@ -5383,3 +5383,31 @@ full-row refusal/cancellation followed by an unchanged native continuation.
 This API prescribes resolved impulses/support velocities; it does not choose
 contact, restitution, event timing or a compliant actuator law. Native test
 execution remains outstanding.
+
+### Simultaneous normal impacts on complete solid trajectories
+
+`ExactLinearSolid::apply_normal_impacts` and
+`CompleteSpectralSolid::apply_normal_impacts` resolve a declared simultaneous
+frictionless contact set through the existing `fs-contact` owner. Dimensionless
+normal covectors use the original free-coordinate order. The prepared inverse
+or complete basis supplies the full Delassus matrix; every rigid and elastic
+mode remains represented. Restitution, complementarity, PSD/rank admission and
+relative-work limits remain owned by the shared contact law.
+
+One native impulse candidate checks the actual original-mass momentum change.
+Actual endpoint normal speeds, complementarity, prescribed-surface work,
+relative work and applied-work closure must pass before physical or modal
+state commits. Contact loss is reported separately and is not added again to
+native dissipation or assigned to heat. Displacements, clocks, prepared
+operators and material history stay fixed. Explicit adapter scratch and
+response-assembly limits accompany the contact solver's bounded iterations;
+there is no prepared-matrix clone or refactorization.
+
+A redundant result retains the native impulse-representative qualification:
+unique velocity/relative work does not grant authority to individual contact
+loads or source-work allocations. Geometry/event discovery, friction,
+sustained contact and thermal loss partition remain separate owners.
+Focused regression definitions cover simultaneous cross-contact response,
+moving surfaces, rigid/elastic continuation, redundant contacts and boosts,
+independent linear/angular impulse of a barycentric P1 tetrahedral point load,
+and late endpoint refusal with unchanged-state retry and cancellation/budgets.
