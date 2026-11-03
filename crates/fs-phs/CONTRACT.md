@@ -1759,3 +1759,11 @@ cancellation refusal with unchanged AC replay. The full actual fs-phs library an
 these tests were compiled through the available native Rust compiler; all five
 new tests and five existing `harmonic_scattering` regressions passed. This narrow
 validation does not claim the unavailable DSR/full-workspace gate.
+
+### Complete harmonic response at exact component antiresonances
+
+`fs-phs::harmonic::HarmonicFactor::response` retains its one complete physical LU and original componentwise backward-error gate. If the first solve misses that gate, at most four deterministic iterative corrections solve the original residual with that same LU. Every candidate is rechecked against the original equations; no small state is clipped, no component impedance is inverted, and no tolerance is enlarged. A genuinely singular factorization or a still-unresolved original residual continues to refuse. Cancellation publishes no partial response and leaves the factor reusable.
+
+`HarmonicBudget::max_dense_work` admits `n^2 * (max(n,16) + ports + 8)` work for preparation, factorization or one response, covering all four possible corrections. The existing conservative payload bound includes the additional length-n residual workspace. An already accurate first solve performs no corrections. Physical efforts, energy and heat are evaluated from the admitted final original-coordinate state.
+
+The focused `harmonic_antiresonance` regression uses a real damped hereditary host coupled to an undamped physical mass/spring at the latter's exact bare resonance. It checks a vanishing host, finite load storage, the unchanged original componentwise tolerance, resource admission, cancellation and factor replay. The antiresonance case fails against the previous one-solve owner and passes with bounded residual refinement.

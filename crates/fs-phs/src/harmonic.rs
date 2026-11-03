@@ -30,6 +30,10 @@ pub use poles::{HarmonicPole, HarmonicPoleError, PoleOptions};
 /// Hard ceiling of this explicitly dense frequency-domain path.
 pub const MAX_HARMONIC_DIMENSION: usize = 1024;
 
+// Fixed, bounded corrections reuse the same physical factorization. This is
+// not a tolerance relaxation or a replacement of nearly cancelling states.
+const MAX_RESPONSE_REFINEMENTS: usize = 4;
+
 /// Caller-specified capacity and algebraic accuracy. No default drops states.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HarmonicBudget {
@@ -37,7 +41,8 @@ pub struct HarmonicBudget {
     pub max_dimension: usize,
     /// Conservative peak internal numerical payload (not process RSS).
     pub max_dense_bytes: usize,
-    /// Bound `n^3 + n^2 * (ports + 8)` for preparation or one factorization.
+    /// Bound `n^2 * (max(n, 16) + ports + 8)` for preparation, factorization or
+    /// one response, including at most four same-factor residual corrections.
     pub max_dense_work: u64,
     /// Maximum componentwise backward residual of the original equations.
     pub relative_residual_tolerance: f64,
@@ -221,6 +226,7 @@ impl HarmonicModel {
         let work = (square as u64)
             .checked_mul(
                 (n as u64)
+                    .max(4 * MAX_RESPONSE_REFINEMENTS as u64)
                     .checked_add(m as u64)
                     .and_then(|v| v.checked_add(8))
                     .ok_or_else(|| invalid("work bound overflow"))?,
@@ -405,33 +411,64 @@ impl HarmonicFactor<'_> {
             return Err(invalid("response is not representable"));
         }
         // Componentwise backward error preserves small algebraic constraints
-        // alongside much larger dimensional differential rows.
+        // alongside much larger dimensional differential rows. At an exact
+        // antiresonance some states vanish while coupled states remain finite;
+        // one LU solve can leave roundoff large relative to these small rows.
+        // Correct the ORIGINAL residual using the existing factor, preserving
+        // the requested gate, physical coordinates and genuine singularities.
+        let mut correction = vec![C64::ZERO; n];
         let mut relative: f64 = 0.0;
-        for i in 0..n {
-            poll(&mut cancelled)?;
-            let mut residual = -rhs[i];
-            let mut denominator = rhs[i].abs();
-            for k in 0..n {
-                let a = C64::new(
-                    -model.generator[i * n + k],
-                    if i == k && i < model.n_diff {
-                        -self.omega
-                    } else {
-                        0.0
-                    },
+        for pass in 0..=MAX_RESPONSE_REFINEMENTS {
+            relative = 0.0;
+            for i in 0..n {
+                poll(&mut cancelled)?;
+                let mut residual = -rhs[i];
+                let mut denominator = rhs[i].abs();
+                for k in 0..n {
+                    let a = C64::new(
+                        -model.generator[i * n + k],
+                        if i == k && i < model.n_diff {
+                            -self.omega
+                        } else {
+                            0.0
+                        },
+                    );
+                    residual = residual + a * state[k];
+                    denominator += a.abs() * state[k].abs();
+                }
+                if !finite(residual) || !denominator.is_finite() {
+                    return Err(invalid("original-equation residual overflow"));
+                }
+                let row_error = if denominator == 0.0 {
+                    0.0
+                } else {
+                    residual.abs() / denominator
+                };
+                relative = relative.max(row_error);
+                correction[i] = C64::new(
+                    -residual.re / self.row_scales[i],
+                    -residual.im / self.row_scales[i],
                 );
-                residual = residual + a * state[k];
-                denominator += a.abs() * state[k].abs();
             }
-            if !finite(residual) || !denominator.is_finite() {
-                return Err(invalid("original-equation residual overflow"));
+            if relative <= model.budget.relative_residual_tolerance
+                || pass == MAX_RESPONSE_REFINEMENTS
+            {
+                break;
             }
-            let row_error = if denominator == 0.0 {
-                0.0
-            } else {
-                residual.abs() / denominator
-            };
-            relative = relative.max(row_error);
+            if correction.iter().any(|&v| !finite(v)) {
+                return Err(invalid("scaled residual correction overflow"));
+            }
+            self.lu.solve_with_cancel(&mut correction, &mut cancelled)?;
+            for i in 0..n {
+                state[i] = state[i]
+                    + C64::new(
+                        correction[i].re / self.column_scales[i],
+                        correction[i].im / self.column_scales[i],
+                    );
+            }
+            if state.iter().any(|&v| !finite(v)) {
+                return Err(invalid("refined response is not representable"));
+            }
         }
         if relative > model.budget.relative_residual_tolerance {
             return Err(HarmonicError::Residual {
