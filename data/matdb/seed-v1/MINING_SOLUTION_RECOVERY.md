@@ -1,4 +1,4 @@
-# Solution recovery: finite solvent extraction and stripping
+# Solution recovery: solvent extraction and carbon adsorption
 
 FrankenMining's comprehensive plan §17.3 calls for source-specific extraction
 and stripping isotherms between copper leaching and electrowinning. The
@@ -59,3 +59,45 @@ proton and extractant consumption, heat, contact kinetics, phase entrainment,
 stage efficiency, volume changes and multistage countercurrent convergence
 need their own admitted models. Binary64 balance residuals are numerical
 diagnostics, not experimental uncertainty bounds or certificates.
+
+## Finite solution/carbon adsorption and desorption
+
+`fs_material::aqueous_adsorption::AqueousLangmuir` supplies the missing aqueous
+counterpart to the separate gas/solid adsorption owner. Its original card
+declares saturation loading in mol metal/kg dry adsorbent, half-saturation
+concentration in mol metal/m³ solution, source hashes, temperature support
+and every additional chemical condition. The isotherm is
+`q = q_max*c/(c_half+c)`, following
+[USGS PHREEQC example 19, equation 35](https://water.usgs.gov/water-resources/software/PHREEQC/documentation/phreeqc3-html/phreeqc3-81.htm).
+
+Each contact solves that relation together with
+`V*c + m*q = initial_dissolved + initial_adsorbed`. The result retains the
+original model, both phase inventories, final concentration/loading, independently
+evaluated vacant capacity, signed uptake or release, and the metal-balance
+residual. A stable scaled quadratic avoids subtracting nearly equal positive
+roots. Unrepresentable positive inventories refuse instead of becoming zeros.
+Source concentration support is checked at the solved equilibrium. Initially
+loaded carbon can desorb; its stock must not exceed the supplied dry-carbon
+capacity. Zero carbon preserves the dissolved stock and leaves loading undefined.
+
+```bash
+cargo run -p fs-material --example mineral_carbon_adsorption
+cargo run -p fs-material --example mineral_carbon_adsorption -- 0
+cargo test -p fs-material aqueous_adsorption::tests
+```
+
+The explicitly synthetic example starts with 10 mol analytical gold in 100 m³
+solution and 100 kg dry carbon. With `q_max=0.2 mol/kg` and
+`c_half=0.05 mol/m³`, equilibrium leaves 2.807764064 mol in solution and
+7.192235936 mol on carbon. Separating the original liquid and contacting that
+loaded carbon with 100 m³ of clean liquid releases 1.831121225 mol into the
+new bath under the same isotherm. These values demonstrate the finite balance;
+they are not measured gold/carbon performance or an elution-process prediction.
+
+The owner conserves one analytical element at fixed solution volume and dry
+adsorbent mass. It does not infer cyanide consumption, charge/speciation,
+competitive adsorption, preg-robbing, kinetic contact time or CIL/CIP recovery.
+Measured chemical support and separate kinetic/transport models remain needed
+for those process claims. Six focused tests check independent equilibrium
+answers and a bisection oracle, source admission, scaling, loaded-carbon release,
+zero inventories and retained small vacant-site amounts.

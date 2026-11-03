@@ -19,6 +19,8 @@
 pub mod active_tissue;
 /// Finite gas/solid adsorption with sourced equilibrium, kinetics and calorics.
 pub mod adsorption;
+/// Finite solution/adsorbent equilibria with original capacity and source support.
+pub mod aqueous_adsorption;
 /// Source-bound monotonic axial comparisons from reported tensile/compression moduli.
 pub mod axial_reference;
 /// Bounded compression references from original nominal stress/strain observations.
@@ -272,4 +274,3 @@ impl fmt::Display for MaterialError {
 }
 
 impl std::error::Error for MaterialError {}
-
