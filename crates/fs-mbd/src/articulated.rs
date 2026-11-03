@@ -1439,7 +1439,7 @@ pub fn free_floating_momentum(
     momentum_from_kinematics(model, &kinematics)
 }
 
-fn momentum_from_kinematics(
+pub(crate) fn momentum_from_kinematics(
     model: &ArticulatedModel,
     kinematics: &Kinematics,
 ) -> Result<ArticulatedMomentum, ArticulatedError> {

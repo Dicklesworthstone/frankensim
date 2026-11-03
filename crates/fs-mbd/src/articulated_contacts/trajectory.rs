@@ -9,6 +9,9 @@
 /// Automatic ballistic plane encounters for spherical carriers with balanced rotors.
 pub mod sphere_planes;
 
+/// Caller-located impacts between free trees and smoothly prescribed mechanisms.
+pub mod mixed;
+
 use super::friction::{
     ArticulatedFrictionalContact, ArticulatedFrictionalContactResult,
     resolve_articulated_frictional_contacts,
@@ -21,6 +24,7 @@ use crate::articulated::motion::{
 use crate::articulated::{ArticulatedModel, ArticulatedMomentum, free_floating_momentum};
 use fs_contact::frictional_multicontact::FrictionalContactConfig;
 use fs_ga::{Se3, Vec3};
+use fs_math::dd::Dd;
 
 /// Immutable initial state and loads of one independently free articulated tree.
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +143,15 @@ pub enum ArticulatedTrajectoryError {
         time: f64,
         /// Unmodified original dynamics error.
         error: FreeFloatingMotionError,
+    },
+    /// Original prescribed-support path or smooth-step admission refused.
+    PrescribedSmooth {
+        /// Original system index.
+        system_index: usize,
+        /// Attempted stage endpoint time from the window start, in seconds.
+        time: f64,
+        /// Unmodified support-path or native dynamics error.
+        error: crate::articulated::motion::prescribed::PrescribedBaseMotionError,
     },
     /// A native simultaneous contact event refused.
     Contact {
@@ -352,20 +365,7 @@ fn admission(
     events: &[ArticulatedTrajectoryEvent<'_>],
     config: ArticulatedTrajectoryConfig,
 ) -> Result<Vec<usize>, ArticulatedTrajectoryError> {
-    if systems.is_empty()
-        || systems.len() > 128
-        || events.len() > 64
-        || !(1..=4096).contains(&config.maximum_smooth_intervals)
-        || !config.duration.is_finite()
-        || config.duration <= 0.0
-        || !config.maximum_smooth_step.is_finite()
-        || config.maximum_smooth_step <= 0.0
-        || !finite_vector(config.angular_origin_world)
-    {
-        return Err(ArticulatedTrajectoryError::Invalid(
-            "invalid trajectory bounds",
-        ));
-    }
+    let counts = event_schedule(systems.len(), events, config)?;
     let mut links = 0usize;
     for system in systems {
         if system.state.joint_position.len() != system.model.dof_count()
@@ -383,6 +383,28 @@ fn admission(
                 "trajectory exceeds total link cap",
             ));
         }
+    }
+    Ok(counts)
+}
+
+fn event_schedule(
+    system_count: usize,
+    events: &[ArticulatedTrajectoryEvent<'_>],
+    config: ArticulatedTrajectoryConfig,
+) -> Result<Vec<usize>, ArticulatedTrajectoryError> {
+    if system_count == 0
+        || system_count > 128
+        || events.len() > 64
+        || !(1..=4096).contains(&config.maximum_smooth_intervals)
+        || !config.duration.is_finite()
+        || config.duration <= 0.0
+        || !config.maximum_smooth_step.is_finite()
+        || config.maximum_smooth_step <= 0.0
+        || !finite_vector(config.angular_origin_world)
+    {
+        return Err(ArticulatedTrajectoryError::Invalid(
+            "invalid trajectory bounds",
+        ));
     }
     let mut counts = Vec::with_capacity(events.len() + 1);
     let mut previous = 0.0;
@@ -479,11 +501,37 @@ fn momentum(
 struct Impulses {
     linear: Vec3,
     angular: Vec3,
+    linear_sum: [Dd; 3],
+    angular_sum: [Dd; 3],
 }
 impl Impulses {
     fn add(&mut self, linear: Vec3, angular: Vec3, origin: Vec3) {
-        self.linear = self.linear + linear;
-        self.angular = self.angular + (angular - origin.cross(linear));
+        let p = [linear.x, linear.y, linear.z].map(Dd::from_f64);
+        let l = [angular.x, angular.y, angular.z].map(Dd::from_f64);
+        let x = [origin.x, origin.y, origin.z].map(Dd::from_f64);
+        for (i, j, k) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)] {
+            self.linear_sum[i] = self.linear_sum[i] + p[i];
+            // Retain the original angular source and each origin-shift term;
+            // their cancellation must not erase an independent small couple.
+            self.angular_sum[i] = self.angular_sum[i] + l[i] - x[j] * p[k] + x[k] * p[j];
+        }
+        self.linear = Self::vector(self.linear_sum);
+        self.angular = Self::vector(self.angular_sum);
+    }
+
+    fn difference(&self, other: &Self) -> (Vec3, Vec3) {
+        (
+            Self::vector(core::array::from_fn(|i| {
+                self.linear_sum[i] - other.linear_sum[i]
+            })),
+            Self::vector(core::array::from_fn(|i| {
+                self.angular_sum[i] - other.angular_sum[i]
+            })),
+        )
+    }
+
+    fn vector(value: [Dd; 3]) -> Vec3 {
+        Vec3::new(value[0].to_f64(), value[1].to_f64(), value[2].to_f64())
     }
 }
 fn finite_vector(value: Vec3) -> bool {
