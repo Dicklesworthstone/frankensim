@@ -435,6 +435,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     &mut self.work.stage,
                     dt,
                     false,
+                    None,
                     cancelled,
                 )?;
                 capture(
@@ -470,6 +471,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     &mut self.work.candidate,
                     dt,
                     true,
+                    None,
                     cancelled,
                 )?;
                 capture(

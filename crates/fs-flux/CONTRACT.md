@@ -1919,6 +1919,44 @@ model, SGS kinetic-energy equation or shock/pressure-dilatation closure.
 Acceptance renders refuse; no turbulent DNS or arbitrary-aspect-ratio accuracy
 is established.
 
+### Body forcing with evolving species and finite-rate reactions
+
+`MixtureEuler3d::step_with_forcing` consumes the shared `BodyForce3d` and
+`ForceControl3d` within its original advection, retry and publication owner.
+The same midpoint kinetic-work map surrounds SSP RK2 transport. Source kicks
+retain every species density, including exact zeros, and derive current total
+density from the original compensated species sum. Acceleration and force
+density therefore remain distinct in a heterogeneous mixture. The first
+kicked state's caloric admission uses the native spatial primitive sweep;
+there is no duplicate source-only EOS recovery. Native RK states and the
+final kicked state retain Mach and combined acoustic admission.
+
+`mixture::forcing::ForcingWorkspace3d` reuses one flat original-state row per
+cell, requiring `8*(species_count+4)` nominal bytes per cell. The explicit
+additional-byte cap, actual capacity, geometry/species layout and original
+total mixture memory ceiling are checked. Added source sweeps reuse this
+storage and accumulate impulse/work in fixed compensated order.
+
+The existing reactive owner adds `step_with_forcing` and
+`step_with_dissipation_and_forcing`. The latter keeps its original
+D/2-C/2-A-C/2-D/2 composition with K/2-A-K/2 in the central transport interval.
+Both molecular halves still prepare their current molecular and optional SGS
+stress, heat and species fluxes. Source, chemistry, molecular and final
+Mach/acoustic refusals retry the whole physical interval before publishing
+any accepted field, load or report. Its explicit total numerical budget
+includes the supplied force workspace.
+
+Both Euler and reactive reports expose `source_change: ForceChange3d`.
+Referenced-energy and original physical-energy residuals subtract body work
+separately from boundary exchange and chemical changes. Mechanical forcing
+adds no species source, formation-energy subtraction or duplicate heating.
+An exactly zero force preserves the ordinary numerical route after input and
+workspace admission. Six focused regressions cover all force representations,
+source-only calorics/reference invariance, heterogeneous density, retries,
+rollback and a reacting molecular/SGS channel. All six pass in the native
+debug build alongside the shared/frozen forcing tests. This supplies a
+conservative drive; it does not calibrate turbulent mixing or reaction rates.
+
 ### Finite-rate reactions coupled to three-dimensional compressive waves
 
 `spatial::mixture::reactive::ReactingEuler3d` composes the original volumetric

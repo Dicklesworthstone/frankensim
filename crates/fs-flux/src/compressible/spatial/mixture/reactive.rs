@@ -10,6 +10,8 @@
 
 use super::super::{BoundarySide, StepControl};
 use super::molecular::{DissipationControl, MolecularReport, MolecularTransport3d, TransportLaw};
+use super::forcing::{self, ForcingWorkspace3d};
+use super::{BodyForce3d, ForceChange3d, ForceControl3d};
 use super::{
     BoundaryImpulse, MixtureEuler3d, StepReport, Totals, allocated, boundary_view, cell,
     checked_totals, sum_rows,
@@ -59,11 +61,13 @@ pub struct ReactiveStepReport3d {
     /// Inward boundary transfer for the complete physical interval.
     /// Chemistry is local and contributes no face flux.
     pub boundary_change: Totals,
+    /// Applied body impulse/work over the central forced transport interval.
+    pub source_change: ForceChange3d,
     /// Species, momentum and referenced-energy residual after source and boundary terms.
     pub conservation_residual: Totals,
     /// Total mass change minus boundary mass transfer [kg].
     pub mass_residual_kg: f64,
-    /// Chemical-plus-kinetic energy change minus boundary energy transfer [J].
+    /// Chemical-plus-kinetic energy change minus boundary transfer and body work [J].
     /// Differences are formed before applying the original species references.
     pub absolute_energy_residual_j: f64,
 }
@@ -279,6 +283,7 @@ impl ReactingEuler3d {
             None,
             DissipationControl::default(),
             super::MAX_MIXTURE_WORKSPACE_BYTES,
+            None,
             cancelled,
         )
     }
@@ -307,7 +312,49 @@ impl ReactingEuler3d {
             Some(operator),
             dissipation_controls,
             maximum_workspace_bytes,
+            None,
             cancelled,
+        )
+    }
+
+    /// Compose held mechanical forcing with both original chemistry halves.
+    /// The original source, clock and whole-interval retry remain authoritative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport3d, ReactiveError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration, controls, None, DissipationControl::default(),
+            super::MAX_MIXTURE_WORKSPACE_BYTES,
+            Some((force, force_controls, workspace)), cancelled,
+        )
+    }
+
+    /// D/chemistry half steps enclose the force/advection/force transaction.
+    /// The total byte budget includes this owner, the molecular operator and
+    /// the supplied forcing workspace. Failure publishes none of their loads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation_and_forcing<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport3d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        maximum_workspace_bytes: usize,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport3d, ReactiveError> {
+        self.step_impl(
+            maximum_duration, controls, Some(operator), dissipation_controls,
+            maximum_workspace_bytes, Some((force, force_controls, workspace)), cancelled,
         )
     }
 
@@ -319,12 +366,25 @@ impl ReactingEuler3d {
         mut operator: Option<&mut MolecularTransport3d<L>>,
         dissipation_controls: DissipationControl,
         maximum_workspace_bytes: usize,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport3d, ReactiveError> {
         poll(&mut cancelled)?;
+        let forcing_bytes = forcing.as_ref().map_or(0, |(_, _, work)| work.workspace_bytes());
+        let active_force = if let Some((force, control, workspace)) = forcing.as_mut() {
+            control.admit::<super::Error>()?;
+            workspace.admit(&self.accepted)?;
+            force.admit::<super::Error>(self.accepted.cell_count(), &mut cancelled)?
+        } else {
+            false
+        };
+        if !active_force {
+            forcing = None;
+        }
         let bytes = self
             .workspace_bytes()
             .checked_add(operator.as_ref().map_or(0, |op| op.workspace_bytes()))
+            .and_then(|bytes| bytes.checked_add(forcing_bytes))
             .ok_or(ReactiveError::Invalid(
                 "reacting spatial molecular workspace size overflow",
             ))?;
@@ -358,6 +418,9 @@ impl ReactingEuler3d {
         let mut rate: f64 = 0.0;
         for q in self.accepted.states.chunks_exact(width) {
             let p = cell(q, n).primitive(&self.accepted.gas, &mut cancelled)?;
+            if let Some((_, control, _)) = forcing.as_ref() {
+                control.admit_velocity::<super::Error>(p.velocity, p.sound_speed)?;
+            }
             let local = (0..3)
                 .map(|axis| (p.velocity[axis].abs() + p.sound_speed) / spacing[axis])
                 .sum::<f64>();
@@ -407,9 +470,14 @@ impl ReactingEuler3d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
-                let transport =
-                    self.trial
-                        .step(Time::new(dt), controls.transport, &mut cancelled)?;
+                let transport = if let Some((force, control, workspace)) = forcing.as_mut() {
+                    self.trial.step_with_forcing(
+                        Time::new(dt), controls.transport, *force, *control,
+                        &mut **workspace, &mut cancelled,
+                    )?
+                } else {
+                    self.trial.step(Time::new(dt), controls.transport, &mut cancelled)?
+                };
                 if transport.elapsed.value() != dt {
                     shortened = Some(transport.elapsed.value());
                     return Err(ReactiveError::Invalid(
@@ -470,6 +538,15 @@ impl ReactingEuler3d {
                 let dissipation = first
                     .zip(second)
                     .map(|(first, second)| SplitDissipationReport3d { first, second });
+                if let Some((_, control, _)) = forcing.as_ref() {
+                    let rate = forcing::admit_field(
+                        &self.trial.gas, &self.trial.grid, &self.trial.states,
+                        *control, &mut cancelled,
+                    )?;
+                    super::stepping::check_cfl::<super::Error>(
+                        rate * dt, controls.transport.cfl,
+                    )?;
+                }
                 let after =
                     checked_totals(&self.trial.states, &self.trial.grid, n, &mut cancelled)?;
                 let chemistry = chemistry.report;
@@ -479,6 +556,13 @@ impl ReactingEuler3d {
                 for d in 0..width {
                     delta[d] =
                         after.component(d) - before.component(d) - boundary_change.component(d);
+                }
+                let source_change = transport.source_change;
+                if forcing.is_some() {
+                    for axis in 0..3 {
+                        delta[n + axis] -= source_change.impulse[axis];
+                    }
+                    delta[n + 3] -= source_change.work;
                 }
                 let mass_residual_kg = sum(delta[..n].iter().copied());
                 let absolute_energy_residual_j = sum(std::iter::once(delta[n + 3])
@@ -505,6 +589,7 @@ impl ReactingEuler3d {
                     before,
                     after,
                     boundary_change,
+                    source_change,
                     conservation_residual: Totals::from_row(&delta[..width], n),
                     mass_residual_kg,
                     absolute_energy_residual_j,
