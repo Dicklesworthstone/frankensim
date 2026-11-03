@@ -24,7 +24,9 @@ use fs_exec::Cx;
 use fs_sparse::{Coo, Csr};
 
 mod admission;
+mod impact;
 mod impulse;
+pub use impact::{SupportedSolidNormalImpactError, SupportedSolidNormalImpactReport};
 pub use impulse::SupportedSolidImpulse;
 
 /// Whole-system limits in addition to the free spectral owner's limits.

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::dynamics::LinearSolidImpulseReport;
+use crate::dynamics::spectral::SpectralImpulseCandidate;
 use fs_math::dd::Dd;
 
 /// An instantaneous event at the existing accepted time. Full vectors use
@@ -23,6 +24,22 @@ pub struct SupportedSolidImpulse {
     /// belongs to the partitioned free problem; full physical work is below.
     pub free: LinearSolidImpulseReport,
     pub energy: SupportedSolidEnergy,
+}
+
+/// The full original-coordinate response remains private until surrounding
+/// contact laws admit the actual represented endpoint. Prepared operators and
+/// the accepted free trajectory are borrowed, not cloned.
+pub(super) struct SupportedImpulseCandidate {
+    pub(super) velocity_mps: Vec<f64>,
+    pub(super) energy: SupportedSolidEnergy,
+    free: SpectralImpulseCandidate,
+    momentum_change_kg_m_s: Vec<f64>,
+    support_reaction_kg_m_s: Vec<f64>,
+    impulse_residual_kg_m_s: Vec<f64>,
+    maximum_impulse_residual_kg_m_s: f64,
+    kinetic_change_j: f64,
+    applied_correction_j: f64,
+    support_correction_j: f64,
 }
 
 fn represented(value: Dd) -> Result<f64> {
@@ -65,6 +82,23 @@ impl SupportedSpectralSolid {
         maximum_impulse_error_kg_m_s: f64,
         cx: &Cx<'_>,
     ) -> Result<SupportedSolidImpulse> {
+        let trial = self.trial_momentum_impulse(
+            applied_impulse_kg_m_s,
+            support_velocity_after_mps,
+            maximum_impulse_error_kg_m_s,
+            cx,
+        )?;
+        poll(cx)?;
+        Ok(self.accept_momentum_impulse(trial))
+    }
+
+    pub(super) fn trial_momentum_impulse(
+        &self,
+        applied_impulse_kg_m_s: &[f64],
+        support_velocity_after_mps: &[f64],
+        maximum_impulse_error_kg_m_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<SupportedImpulseCandidate> {
         poll(cx)?;
         let n = self.coordinates.len();
         if applied_impulse_kg_m_s.len() != n
@@ -212,22 +246,40 @@ impl SupportedSpectralSolid {
             }
         }
         poll(cx)?;
-        let free = self.free.accept_momentum_impulse(trial);
-        self.velocity = velocity;
-        self.kinetic_j = kinetic_after_j;
-        self.applied_work_j = cumulative_applied_work_j;
-        self.applied_correction_j = applied_correction_j;
-        self.support_work_j = cumulative_support_work_j;
-        self.support_correction_j = support_correction_j;
-        Ok(SupportedSolidImpulse {
-            time_s: free.time_s,
+        Ok(SupportedImpulseCandidate {
+            velocity_mps: velocity,
+            energy,
+            free: trial,
             momentum_change_kg_m_s,
             support_reaction_kg_m_s,
             impulse_residual_kg_m_s,
             maximum_impulse_residual_kg_m_s,
             kinetic_change_j,
-            free,
-            energy,
+            applied_correction_j,
+            support_correction_j,
         })
+    }
+
+    pub(super) fn accept_momentum_impulse(
+        &mut self,
+        trial: SupportedImpulseCandidate,
+    ) -> SupportedSolidImpulse {
+        let free = self.free.accept_momentum_impulse(trial.free);
+        self.velocity = trial.velocity_mps;
+        self.kinetic_j = trial.energy.kinetic_after_j;
+        self.applied_work_j = trial.energy.cumulative_applied_work_j;
+        self.applied_correction_j = trial.applied_correction_j;
+        self.support_work_j = trial.energy.cumulative_support_work_j;
+        self.support_correction_j = trial.support_correction_j;
+        SupportedSolidImpulse {
+            time_s: free.time_s,
+            momentum_change_kg_m_s: trial.momentum_change_kg_m_s,
+            support_reaction_kg_m_s: trial.support_reaction_kg_m_s,
+            impulse_residual_kg_m_s: trial.impulse_residual_kg_m_s,
+            maximum_impulse_residual_kg_m_s: trial.maximum_impulse_residual_kg_m_s,
+            kinetic_change_j: trial.kinetic_change_j,
+            free,
+            energy: trial.energy,
+        }
     }
 }

@@ -5451,3 +5451,37 @@ Focused regression definitions cover simultaneous cross-contact response,
 moving surfaces, rigid/elastic continuation, redundant contacts and boosts,
 independent linear/angular impulse of a barycentric P1 tetrahedral point load,
 and late endpoint refusal with unchanged-state retry and cancellation/budgets.
+
+### Simultaneous normal impacts with prescribed solid supports
+
+`SupportedSpectralSolid::apply_normal_impacts` composes the same complete
+normal-contact owner with the original supported solid. Contact covectors use
+all `represented_dofs()`, including prescribed coordinates. The accepted
+support velocities remain fixed during the instantaneous event. Their real
+velocities enter contact approach and work while their incremental mobility is
+zero; the free block uses every original spectral mode, not a lumped mass or
+sequential contact kick.
+
+The original consistent mass then supplies each support reaction as
+`M_cf Delta-v_f - J_c`. Cross mass, applied contact work, prescribed-obstacle
+work and support-actuator work remain separate. A passive relative impact may
+increase the solid's kinetic energy through physical work by a moving support.
+The shared law's rank/determinacy classification remains authoritative:
+redundant contact impulses and their source-work allocations are checked
+representatives, not unique local loads or heat partitions.
+
+The original support impulse implementation now exposes a private trial/accept
+seam. Contact endpoint, complementarity and relative-work checks and the full
+original momentum/energy gates precede publication of either the supported
+state or its free spectral trajectory. Preparation, material history,
+positions, support accelerations and clocks are retained; continuous motion
+resumes from the accepted velocities. Scratch and response products use the
+explicit shared contact limits; original impulse and native-solver budgets
+retain their separate scopes. No prepared operator is cloned or refactored.
+
+Focused regression definitions cover analytic cross-mass reactions and moving
+support work followed by exact continuation, a moving opposing surface under a
+common velocity boost, redundant/locked contact sets, cancellation/resource
+refusal, and a late full-system work refusal with unchanged accepted state.
+Geometry/event discovery, friction, sustained-contact integration and conversion
+of contact loss to physical heat remain outside this instantaneous normal law.

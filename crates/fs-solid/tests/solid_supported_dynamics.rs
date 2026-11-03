@@ -9,6 +9,9 @@ use fs_solid::dynamics::supported::{SupportedSolidControls, SupportedSpectralSol
 use fs_solid::linear3::TetElasticAssembly;
 use fs_sparse::Coo;
 
+#[path = "solid_supported_dynamics/normal_impacts.rs"]
+mod normal_impacts;
+
 fn with_cx(cancelled: bool, run: impl FnOnce(&Cx<'_>)) {
     let gate = CancelGate::new_clock_free();
     if cancelled {
