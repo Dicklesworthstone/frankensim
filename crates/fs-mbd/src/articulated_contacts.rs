@@ -25,7 +25,12 @@ use fs_contact::multicontact::{
     solve_normal_impacts,
 };
 use fs_ga::{GaError, Twist, Vec3, Wrench};
+use fs_math::dd::Dd;
 use fs_tribo::TriboError;
+use std::collections::BTreeMap;
+
+#[cfg(test)]
+mod momentum_tests;
 
 use crate::articulated::contact_geometry::{self, ContactGeometryError, PointDirection as Term};
 pub use crate::articulated::contact_geometry::{
@@ -469,18 +474,22 @@ impl EventWorkspace {
         law: EventResponse<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<EventResult, ArticulatedContactError> {
-        let mut plane_work = 0.0;
-        let mut external_linear = Vec3::default();
-        let mut external_angular = Vec3::default();
+        let mut plane_work_sum = Dd::ZERO;
+        let mut external_linear = VectorSum::default();
+        let mut external_angular = VectorSum::default();
+        // Scratch grows with touched links, not with every link in every tree.
+        // A contact law solves all rows at the original common state; retain
+        // their resultant before rounding each native link wrench once.
+        let mut resultants = BTreeMap::<(usize, usize), WrenchSum>::new();
         let mut linear_impulse_scale = 0.0;
         let mut angular_impulse_scale = 0.0;
         for (contact, &impulse) in prepared.iter().zip(law.impulses) {
+            poll(cancelled)?;
             for term in contact.terms() {
-                add_load(
-                    &mut self.loads[term.point.system_index][term.point.link_index],
-                    term.direction,
-                    impulse,
-                )?;
+                resultants
+                    .entry((term.point.system_index, term.point.link_index))
+                    .or_default()
+                    .add(term.direction, impulse)?;
                 // Retain the magnitudes before cancellation: equal/opposite
                 // contacts and spin/orbital terms can sum to exactly zero.
                 let pose =
@@ -497,22 +506,25 @@ impl EventWorkspace {
             }
             if contact.second.is_none() {
                 let linear = contact.axis_world.scale(impulse);
-                external_linear = external_linear + linear;
-                external_angular = external_angular + contact.world_point.cross(linear);
-                plane_work = finite(plane_work + impulse * contact.plane_speed)?;
+                external_linear.add(linear)?;
+                external_angular.add(contact.world_point.cross(linear))?;
+                plane_work_sum =
+                    plane_work_sum + Dd::from_f64(finite(impulse * contact.plane_speed)?);
             }
         }
-        vector(external_linear)?;
-        vector(external_angular)?;
+        for ((system, link), resultant) in resultants {
+            self.loads[system][link] = resultant.value()?;
+        }
+        let plane_work = finite(plane_work_sum.to_f64())?;
         let mut responses = Vec::with_capacity(systems.len());
         let mut after = Vec::with_capacity(systems.len());
-        let mut energy_change = 0.0;
+        let mut energy_change_sum = Dd::ZERO;
         let mut energy_scale =
             plane_work.abs() + law.dissipated_energy.abs() + law.stored_energy_change.abs();
-        let mut linear_change = Vec3::default();
-        let mut angular_change = Vec3::default();
-        let mut linear_scale = linear_impulse_scale + magnitude(external_linear);
-        let mut angular_scale = angular_impulse_scale + magnitude(external_angular);
+        let mut linear_change = VectorSum::default();
+        let mut angular_change = VectorSum::default();
+        let mut linear_scale = linear_impulse_scale + magnitude(external_linear.value()?);
+        let mut angular_scale = angular_impulse_scale + magnitude(external_angular.value()?);
         for (index, system) in systems.iter().enumerate() {
             poll(cancelled)?;
             let response = dynamics(
@@ -541,12 +553,12 @@ impl EventWorkspace {
             )?);
             let initial = response.momentum_before;
             let final_state = response.momentum_after;
-            energy_change = finite(energy_change + response.kinetic_energy_change)?;
+            energy_change_sum = energy_change_sum + Dd::from_f64(response.kinetic_energy_change);
             energy_scale = finite(
                 energy_scale + initial.kinetic_energy.abs() + final_state.kinetic_energy.abs(),
             )?;
-            linear_change = linear_change + response.linear_momentum_change_world;
-            angular_change = angular_change + response.angular_momentum_change_world;
+            linear_change.add(response.linear_momentum_change_world)?;
+            angular_change.add(response.angular_momentum_change_world)?;
             linear_scale = finite(
                 linear_scale
                     + magnitude(initial.linear_momentum_world)
@@ -610,9 +622,12 @@ impl EventWorkspace {
             endpoint_velocity_residual = endpoint_velocity_residual.max((actual - predicted).abs());
             speeds_after.push(actual);
         }
-        let relative_work = finite(energy_change - plane_work)?;
-        let stored_and_mechanical_work = finite(relative_work + law.stored_energy_change)?;
-        let energy_balance_residual = finite(stored_and_mechanical_work + law.dissipated_energy)?;
+        let energy_change = finite(energy_change_sum.to_f64())?;
+        let stored_and_mechanical_sum =
+            energy_change_sum - plane_work_sum + Dd::from_f64(law.stored_energy_change);
+        let stored_and_mechanical_work = finite(stored_and_mechanical_sum.to_f64())?;
+        let energy_balance_residual =
+            finite((stored_and_mechanical_sum + Dd::from_f64(law.dissipated_energy)).to_f64())?;
         let energy_allowance = finite(law.energy_tolerance + roundoff * energy_scale)?;
         if stored_and_mechanical_work > energy_allowance
             || energy_balance_residual.abs() > energy_allowance
@@ -621,10 +636,8 @@ impl EventWorkspace {
                 "actual global kinetic and contact energy failed admission",
             ));
         }
-        let linear_momentum_residual = linear_change - external_linear;
-        let angular_momentum_residual = angular_change - external_angular;
-        vector(linear_momentum_residual)?;
-        vector(angular_momentum_residual)?;
+        let linear_momentum_residual = linear_change.difference(external_linear)?;
+        let angular_momentum_residual = angular_change.difference(external_angular)?;
         if magnitude(linear_momentum_residual) > roundoff * linear_scale
             || magnitude(angular_momentum_residual) > roundoff * angular_scale
         {
@@ -643,6 +656,47 @@ impl EventWorkspace {
             angular_momentum_residual,
             endpoint_velocity_residual,
         })
+    }
+}
+
+/// Contact resultants and endpoint balances retain cancellation before their
+/// one rounding to the native f64 state/receipt. In particular, a small impulse
+/// between opposing large impulses must survive an arbitrary contact order.
+#[derive(Clone, Copy, Default)]
+struct VectorSum([Dd; 3]);
+impl VectorSum {
+    fn add(&mut self, value: Vec3) -> Result<(), ArticulatedContactError> {
+        vector(value)?;
+        for (sum, component) in self.0.iter_mut().zip([value.x, value.y, value.z]) {
+            *sum = *sum + Dd::from_f64(component);
+        }
+        Ok(())
+    }
+
+    fn value(self) -> Result<Vec3, ArticulatedContactError> {
+        let value = Vec3::new(self.0[0].to_f64(), self.0[1].to_f64(), self.0[2].to_f64());
+        vector(value)?;
+        Ok(value)
+    }
+
+    fn difference(self, other: Self) -> Result<Vec3, ArticulatedContactError> {
+        Self(core::array::from_fn(|axis| self.0[axis] - other.0[axis])).value()
+    }
+}
+
+#[derive(Default)]
+struct WrenchSum {
+    force: VectorSum,
+    torque: VectorSum,
+}
+impl WrenchSum {
+    fn add(&mut self, direction: Wrench, impulse: f64) -> Result<(), ArticulatedContactError> {
+        self.force.add(direction.force.scale(impulse))?;
+        self.torque.add(direction.torque.scale(impulse))
+    }
+
+    fn value(self) -> Result<Wrench, ArticulatedContactError> {
+        Ok(Wrench::new(self.torque.value()?, self.force.value()?))
     }
 }
 

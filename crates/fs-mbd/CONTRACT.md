@@ -174,6 +174,20 @@ separate from junction heat. Common-normal-velocity regressions cover Hertz
 sliding, sourced adhesive spin and the real-source normal thermal refresh with
 unchanged physical controls.
 
+The shared articulated contact event owner also accumulates all incident
+point-force and moment covectors with the existing `fs-math` double-double
+arithmetic before rounding one spatial impulse per touched link. Sparse scratch
+is bounded by the event's touched links; the original articulated inverse-mass
+operator, contact geometry, constitutive laws and native endpoint update remain
+authoritative. Signed prescribed-support work and actual native momentum/kinetic
+increments retain compensation through balance subtraction. Opposing large
+transfers therefore retain small physical resultants and support work
+independently of contact/system order or unrelated common translation. Existing
+feasibility and balance tolerances remain unchanged, and cancellation before
+final admission publishes no endpoint. Analytic regressions specify force/torque
+cancellation, boosted native balances, moving-support work cancellation through
+a real normal-contact solve, and early/late transactional refusal.
+
 ## Linear rotor-bearing operating points
 
 The public `fs_mbd::rotordynamics` module exposes the original operating-point,
