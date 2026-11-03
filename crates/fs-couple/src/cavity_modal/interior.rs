@@ -16,6 +16,9 @@ pub mod thermoviscous;
 /// Source gas and duct composition for hybrid pressure/resolved acoustic regions.
 pub mod hybrid;
 
+/// Original spatial gas sources in variable-density three-dimensional acoustics.
+pub mod heterogeneous;
+
 use fs_feec::acoustics::helmholtz::boundary_layer::thermal_wall::{
     ConductiveThermalWall, ThermalWall, ThermalWallDepth, WallThermalTransport,
 };

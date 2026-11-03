@@ -1,5 +1,28 @@
 # CONTRACT: fs-couple
 
+## Original spatial gas sources in three-dimensional pressure acoustics
+
+`cavity_modal::interior::heterogeneous::AxialGasInterior` binds the original
+`AxialGasField` to the original tetrahedral pressure space through a physical
+axis in metres. At each volume quadrature point the material owner reevaluates
+temperature and mole fractions together, preserving its pressure, thermochemical
+cards and phase policy. The FE owner assembles `1/rho` stiffness and
+`1/(rho*c*c)` mass from that one coherent state. It does not reuse the geometry
+owner's uniform reference medium or interpolate derived density and sound speed.
+Prepared sparse operators serve full harmonic pressure solves and rigid-wall
+modes without resampling material data during frequency/drive solves.
+
+The mesh must lie inside the supplied source interval. True cellwise jumps must
+conform to tetrahedron faces; unresolved jumps refuse instead of depending on
+which side a quadrature point happens to sample. Continuous primitive gradients
+retain explicit quadrature and mesh refinement requirements. This binding is a
+frozen stationary, isotropic, lossless bulk fluid without mean flow. Local passive
+boundary admittance and imposed inward velocity use the FE owner's original
+pressure traces and work balance. It adds no heterogeneous thermoviscous closure
+or thermal evolution. The `heterogeneous_acoustics` example accepts original
+gas source packs, drives a spatial pressure field, and exports pressure and
+boundary work; its local outlet impedance is not exact multimode radiation.
+
 ## Actual curved TET10 contact through native momentum owners
 
 `inelastic_impact::surface::quadratic::QuadraticSolidContactSurface` binds the

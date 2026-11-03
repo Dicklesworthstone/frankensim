@@ -1543,3 +1543,55 @@ outward-interval tensor SPD admission to original matrix-free consumers. It
 rejects unsupported form degrees and preserves the same coefficient checks as
 assembled Hodge operators. Admission proves neither mesh validity nor a global
 boundary/gauge condition; those remain with each original field owner.
+
+## Heterogeneous resolved pressure acoustics
+
+`acoustics::helmholtz::heterogeneous::HeterogeneousHelmholtzFe` borrows the
+original hierarchical H1 tetrahedral geometry/trace owner and leaves its
+homogeneous medium and geometric stiffness/mass unchanged. It evaluates one
+coherent density/sound-speed pair per physical volume quadrature point and
+assembles both physical operators together:
+`K_rho = integral((1/rho) grad(phi_i).grad(phi_j))` and
+`M_beta = integral(phi_i phi_j/(rho c^2))`. Density stays inside the pressure
+divergence, preserving the weak pressure/normal-velocity interface conditions.
+The lower FE layer imports no material model: the caller retains original
+source identity, interpolates primitive fields through that source, and
+supplies checked coherent samples. Original source errors propagate unchanged.
+True coefficient jumps require conforming tetrahedron faces; continuous fields
+retain separate geometry, h/p and quadrature error axes.
+
+Rigid modes use the original sparse modal owner with explicitly named
+`omega_squared_rad2_s2` eigenvalues and the physical compressibility mass.
+The prepared harmonic owner factors the FULL original pressure space with
+`fs_la::eigen_complex::lu_complex_with_cancel`. Physical outward specific
+admittance and spatial inward velocity enter
+`(K_rho - omega^2 M_beta + i omega C_Y) p = i omega b_v` in `exp(+i omega t)`;
+there is no reference-medium or port-area factor. Velocity traces retain their
+caller-specified face/vertex order. Passive admittance groups require
+nonnegative real part and disjoint boundary faces. Sources may share an
+admittance face, with `v_out = Y p - v_imposed`.
+
+One factor serves subsequent drives without new source queries. Symmetric
+diagonal equilibration and at most two corrections through that same factor
+use residuals of the original separate sparse physical terms in double-double
+arithmetic. Preparation has explicit DOF/dense-storage limits (hard cap 1536
+pressure DOFs; defaults 1024 DOFs and 64 MiB for the two scalar dense matrices).
+The reported backward error is algebraic and is not a field-accuracy bound.
+Input work, passive boundary dissipation, kinetic energy and compression
+energy retain their physical forms; the signed power-balance residual is
+reported rather than set to zero. Only negative quadratic-form residues
+bounded by assembly roundoff are zeroed. Evanescent propagation introduces
+no bulk heat.
+
+Focused regressions cover homogeneous mode recovery, a matched traveling
+wave and its energy/work, same-speed density-interface reflection, analytic
+continuous sound-speed travel time, subcritical and evanescent Snell fields
+on conforming three-dimensional meshes, an independent continuous-coefficient
+quadrature axis, reciprocal spatial traces, and source/limit/cancellation
+refusals. These fixtures use analytic coefficients rather than claiming a
+new material dataset. The model remains stationary, linear, isotropic,
+lossless in the bulk and without mean flow or thermal/species evolution.
+Homogeneous thermoviscous and molecular wall/volume models are not silently
+reused for these spatially varying fluids. Assembly and harmonic operations
+poll cancellation; modal cancellation brackets the existing single-window
+modal owner, which has no internal callback.

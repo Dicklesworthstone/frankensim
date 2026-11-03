@@ -45,6 +45,9 @@ pub mod multiport;
 /// Joint molecular calorics and resolved gas heat conduction on this FE space.
 pub mod molecular;
 
+/// Full pressure waves in spatially varying, stationary fluids.
+pub mod heterogeneous;
+
 /// Highest element order accepted; `MAX_ORDER + 1` refuses.
 pub const MAX_ORDER: usize = 4;
 /// Most Neumann modes a window may hold; more refuses (the window is never truncated).
