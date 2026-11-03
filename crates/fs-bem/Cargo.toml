@@ -24,6 +24,7 @@ fs-material = { path = "../fs-material" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
 fs-vfit = { path = "../fs-vfit" }
+fs-vpm = { path = "../fs-vpm" }
 
 [dev-dependencies]
 fs-duct = { path = "../fs-duct" }

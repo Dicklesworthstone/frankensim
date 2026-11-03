@@ -15,12 +15,18 @@
 use crate::BemError;
 use crate::panel2d::{Airfoil2d, solve_with_lift_slope};
 
+mod convection;
+#[cfg(test)]
+mod convection_tests;
+
 /// Largest admitted number of wake steps/vortices in one v1 state.
 pub const MAX_WAKE_STEPS: usize = 1_000_000;
 /// Direct v1 convection ceiling; larger wakes require the future FMM path.
 pub const MAX_DIRECT_WAKE_VORTICES: usize = 1_024;
-/// Largest admitted all-pairs induced-velocity pass per step.
-pub const MAX_DIRECT_WAKE_PAIR_WORK: usize = MAX_DIRECT_WAKE_VORTICES * MAX_DIRECT_WAKE_VORTICES;
+/// Maximum mutual pair visits: N² for the speed diagnostic and N(N-1)
+/// for symmetric convection. Uniform and fixed-bound subflows add O(N) work.
+pub const MAX_DIRECT_WAKE_PAIR_WORK: usize =
+    2 * MAX_DIRECT_WAKE_VORTICES * MAX_DIRECT_WAKE_VORTICES - MAX_DIRECT_WAKE_VORTICES;
 const MAX_ABS_WAKE_ALPHA: f64 = std::f64::consts::FRAC_PI_2;
 const MAX_WAKE_DT: f64 = 1.0;
 const MIN_WAKE_CORE: f64 = 1.0e-6;
@@ -58,7 +64,8 @@ pub struct WakeStep {
     pub bound: f64,
     /// Wake vortex count.
     pub vortices: usize,
-    /// Peak induced speed among wake vortices.
+    /// Peak total speed among wake vortices at the start of convection,
+    /// including freestream, bound circulation and mutual induction.
     pub peak_speed: f64,
 }
 
@@ -179,7 +186,10 @@ impl WakeSim {
     /// Advance one step: quasi-steady bound circulation ramps toward
     /// the Kutta value against the wake's downwash; the DEFICIT is
     /// shed at the trailing edge (Kelvin), and the wake convects with
-    /// the induced flow (forward Euler at fixture scale).
+    /// the induced flow. Exact mutual-pair, fixed-bound-vortex and freestream
+    /// subflows are composed symmetrically; convection is second order for
+    /// the bound circulation held fixed during this step. The empirical
+    /// bound-circulation relaxation and shedding closure remain unchanged.
     #[allow(clippy::too_many_lines)] // one transactional wake update, including all refusal checks
     pub fn step(&mut self) -> Result<(), BemError> {
         self.validate_state()?;
@@ -254,13 +264,10 @@ impl WakeSim {
             });
         }
 
-        // Build the whole next state before committing any mutation.
-        let mut snapshot = Vec::new();
-        snapshot
-            .try_reserve_exact(next_count)
-            .map_err(|_| BemError::AllocationFailed {
-                operation: "wake velocity snapshot",
-            })?;
+        // Preserve the original start-of-convection speed diagnostic without
+        // retaining a second O(N) velocity buffer. All evolution is staged in
+        // the candidate, so a failed pair flow cannot publish a partial wake.
+        let mut peak = 0.0f64;
         for vortex in &candidate {
             let velocity = self.induced(&candidate, vortex.pos, bound, quarter);
             if velocity.iter().any(|component| !component.is_finite()) {
@@ -268,19 +275,21 @@ impl WakeSim {
                     operation: "wake induced velocity",
                 });
             }
-            snapshot.push(velocity);
+            peak = peak.max(fs_math::det::sqrt(
+                velocity[0].mul_add(velocity[0], velocity[1] * velocity[1]),
+            ));
         }
-        let mut peak = 0.0f64;
-        for (w, v) in candidate.iter_mut().zip(&snapshot) {
-            w.pos[0] += self.dt * v[0];
-            w.pos[1] += self.dt * v[1];
-            if w.pos.iter().any(|component| !component.is_finite()) {
-                return Err(BemError::NonFiniteResult {
-                    operation: "wake convection",
-                });
-            }
-            peak = peak.max(fs_math::det::sqrt(v[0].mul_add(v[0], v[1] * v[1])));
-        }
+        convection::advance(
+            &mut candidate,
+            [fs_math::det::cos(self.alpha), fs_math::det::sin(self.alpha)],
+            bound,
+            quarter,
+            self.dt,
+            fs_math::det::sqrt(self.core2),
+        )
+        .map_err(|_| BemError::NonFiniteResult {
+            operation: "wake convection",
+        })?;
         #[allow(clippy::cast_precision_loss)]
         let t = self.history.len() as f64 * self.dt + self.dt;
         if !t.is_finite() || !peak.is_finite() {
@@ -429,14 +438,16 @@ fn validate_direct_wake_work(vortices: usize) -> Result<usize, BemError> {
     }
     let pair_work = vortices
         .checked_mul(vortices)
+        .and_then(|square| square.checked_mul(2))
+        .and_then(|twice_square| twice_square.checked_sub(vortices))
         .ok_or(BemError::WorkEnvelopeExceeded {
-            operation: "direct wake induced-velocity pairs",
+            operation: "direct wake mutual pair visits",
             requested: usize::MAX,
             max: MAX_DIRECT_WAKE_PAIR_WORK,
         })?;
     if pair_work > MAX_DIRECT_WAKE_PAIR_WORK {
         return Err(BemError::WorkEnvelopeExceeded {
-            operation: "direct wake induced-velocity pairs",
+            operation: "direct wake mutual pair visits",
             requested: pair_work,
             max: MAX_DIRECT_WAKE_PAIR_WORK,
         });

@@ -1096,6 +1096,7 @@ dependencies = [
  "fs-rep-mesh",
  "fs-solver",
  "fs-vfit",
+ "fs-vpm",
 ]
 
 [[package]]

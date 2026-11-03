@@ -270,6 +270,17 @@ everywhere: this is screening, not a viscous truth source.
   symmetric/cambered sections at signed angles, bitwise joint/ordinary
   steady equality, and rigid-frame/scale invariance. The wake-history
   similarity tolerance is tightened from 2e-7 to 2e-10.
+  Convection uses the original `fs-vpm::pairwise::advance_pair` with the
+  BEM clockwise sign converted explicitly. Forward and reversed exact pair
+  half sweeps are composed symmetrically with uniform translation and exact
+  fixed-bound-vortex rotation. Mutual convection preserves first and quadratic
+  circulation moments to roundoff; the supported bound source can exchange
+  impulse with the wake. Convection is second order with frozen bound strength;
+  this does not promote the empirical shedding closure to second-order unsteady
+  aerodynamics. `peak_speed` remains the initial total velocity diagnostic.
+  The transactional candidate is the only O(N) stepping buffer; the former
+  velocity snapshot is no longer allocated. Native kernel tests cover signed
+  rotation/dipoles, impulse closure, reversal and independent RK4 refinement.
 
 ### `helmholtz` (bead frankensim-fsim-helmholtz-bem-k1ryv)
 
@@ -1047,8 +1058,10 @@ NASA marks it as U.S. Government work with public use permitted.
   pre-stall lift-slope envelope; it makes no drag, transition, boundary-layer,
   maximum-lift, or stall-onset claim.
 - FMM-accelerated 2D wake convection. The shipped path is a direct all-pairs
-  screening kernel with an explicit 1,024-vortex / 1,048,576-pair per-step
-  admission ceiling.
+  screening kernel with an explicit 1,024-vortex / 2,096,128-mutual-pair-visit
+  per-step admission ceiling (`2N²-N` visits for convection plus the initial
+  speed diagnostic). Fixed-bound and uniform-flow substeps add O(N) work.
+  This is a numerical accuracy improvement, not a measured speedup claim.
 - Helmholtz (`helmholtz` module): the original BurtonMiller centroid scheme
   produced negative low-frequency resistance (measured -9.4 vs +1.03 Pa s/m
   at ka = 0.05 on 320 panels). The static compatibility correction above
