@@ -11,6 +11,9 @@ use fs_matdb::{
 };
 use fs_thermochem::{Composition, CompositionBasis};
 
+#[path = "tests/mixture.rs"]
+mod mixture;
+
 const T: f64 = 300.0;
 const H: f64 = 2e-5;
 const D: f64 = 2e-9;

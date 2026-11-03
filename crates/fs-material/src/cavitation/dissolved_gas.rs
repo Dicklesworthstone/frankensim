@@ -29,6 +29,9 @@
 //! MIT 1.85, gas transfer through a water-side film,
 //! https://ocw.mit.edu/courses/1-85-water-and-wastewater-treatment-engineering-spring-2006/ef48e6d3cd622b8fc2c0adcc652a0817_midterm_review.pdf .
 
+/// Simultaneous absorption/exsolution of independent dilute species into one liquid.
+pub mod mixture;
+
 use crate::phase::{PhaseStateError, ResolvedHeatCapacityCurve};
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
@@ -396,8 +399,59 @@ impl HenryDissolution {
         controls: DissolvedGasControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DissolutionStep> {
+        let prepared = self.prepare(gas, *liquid, film, end_time_s, controls, &mut cancelled)?;
+        let candidate = gas.exchange_species_boundary_relative(
+            &self.catalog,
+            &[prepared.transfer(self)],
+            controls.gas,
+            &mut cancelled,
+        )?;
+        let exchange = self.finish(prepared, candidate.gas(), controls)?;
+        let energy_residual = finite(
+            (candidate.step().stored_energy_change_j + exchange.dissolved_internal_energy_change_j)
+                - exchange.thermostat_heat_into_system_j,
+        )?;
+        budget(
+            "combined internal energy",
+            energy_residual,
+            controls.gas.energy_tolerance_j,
+        )?;
+        let (next_gas, _, gas_step) = candidate.into_parts();
+        let step = DissolutionStep {
+            initial: exchange.initial,
+            state: exchange.state,
+            gas: gas_step,
+            sources: exchange.sources,
+            dissolved_moles_change: exchange.dissolved_moles_change,
+            relaxation_rate_per_s: exchange.relaxation_rate_per_s,
+            film_relaxation_ratio: exchange.film_relaxation_ratio,
+            partial_enthalpy_into_liquid_j: exchange.partial_enthalpy_into_liquid_j,
+            dissolved_internal_energy_change_j: exchange.dissolved_internal_energy_change_j,
+            thermostat_heat_into_gas_j: exchange.thermostat_heat_into_gas_j,
+            thermostat_heat_into_liquid_j: exchange.thermostat_heat_into_liquid_j,
+            thermostat_heat_into_system_j: exchange.thermostat_heat_into_system_j,
+            mass_residual_kg: exchange.mass_residual_kg,
+            energy_residual_j: energy_residual,
+        };
         poll(&mut cancelled)?;
-        let dt = end_time_s - liquid.time_s;
+        *gas = next_gas;
+        *liquid = step.state;
+        Ok(step)
+    }
+
+    // Both the scalar and simultaneous owners prepare from the unchanged gas.
+    // No intermediate composition, clock, source resolve or energy can publish.
+    fn prepare(
+        &self,
+        gas: &ClosedGasParcel,
+        initial: DissolvedGasInventory,
+        film: DissolutionFilm,
+        end_time_s: f64,
+        controls: DissolvedGasControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedDissolution> {
+        poll(cancelled)?;
+        let dt = end_time_s - initial.time_s;
         controls.gas.gas.validate()?;
         if !positive(dt)
             || !end_time_s.is_finite()
@@ -415,7 +469,6 @@ impl HenryDissolution {
                 "positive bounded time, dilute/film limits, budgets and physical film geometry required",
             ));
         }
-        let initial = *liquid;
         let before = self.sample(gas, initial, controls)?;
         let initial_mass = gas.species_mass_kg(&self.species)?;
         let capacity = finite(
@@ -471,24 +524,6 @@ impl HenryDissolution {
         // Match the original boundary owner's exact operation order for
         // h_i-u_i=R*T/M_i. Their sum is zero sensible heat, so T is unchanged.
         let gas_bath_heat = finite(dm * (R * self.temperature_k / self.molar_mass_kg_mol))?;
-        let candidate = gas.exchange_species_boundary_relative(
-            &self.catalog,
-            &[SpeciesBoundaryRelativeTransfer {
-                species: self.species.clone(),
-                mass_into_gas_kg: -dm,
-                relative_energy_into_gas_j: gas_bath_heat,
-            }],
-            controls.gas,
-            &mut cancelled,
-        )?;
-        let after = self.sample(candidate.gas(), next_liquid, controls)?;
-        let next_mass = candidate.gas().species_mass_kg(&self.species)?;
-        let mass_residual = finite((next_mass - initial_mass) + dm)?;
-        budget(
-            "combined selected-species mass",
-            mass_residual,
-            controls.gas.mass_tolerance_kg,
-        )?;
         let hg = self
             .catalog
             .species_specific_enthalpy_j_kg(&self.species, self.temperature_k)?;
@@ -496,44 +531,95 @@ impl HenryDissolution {
         let dissolved_change = finite(dm * self.dissolved_enthalpy_j_kg)?;
         let liquid_bath_heat = finite(dm * (self.dissolved_enthalpy_j_kg - hg))?;
         let bath_heat = finite(gas_bath_heat + liquid_bath_heat)?;
-        let energy_residual =
-            finite((candidate.step().stored_energy_change_j + dissolved_change) - bath_heat)?;
+        Ok(PreparedDissolution {
+            initial_gas_mass_kg: initial_mass,
+            mass_into_liquid_kg: dm,
+            capacity,
+            drive,
+            exchange: DissolutionExchange {
+                species: self.species.clone(),
+                initial,
+                state: next_liquid,
+                sources: [before.clone(), before],
+                dissolved_moles_change: dn,
+                relaxation_rate_per_s: rate,
+                film_relaxation_ratio: ratio,
+                partial_enthalpy_into_liquid_j: stream_h,
+                dissolved_internal_energy_change_j: dissolved_change,
+                thermostat_heat_into_gas_j: gas_bath_heat,
+                thermostat_heat_into_liquid_j: liquid_bath_heat,
+                thermostat_heat_into_system_j: bath_heat,
+                mass_residual_kg: 0.0,
+            },
+        })
+    }
+
+    fn finish(
+        &self,
+        mut prepared: PreparedDissolution,
+        gas: &ClosedGasParcel,
+        controls: DissolvedGasControls,
+    ) -> Result<DissolutionExchange> {
+        let after = self.sample(gas, prepared.exchange.state, controls)?;
+        let next_mass = gas.species_mass_kg(&self.species)?;
+        let mass_residual =
+            finite((next_mass - prepared.initial_gas_mass_kg) + prepared.mass_into_liquid_kg)?;
         budget(
-            "combined internal energy",
-            energy_residual,
-            controls.gas.energy_tolerance_j,
+            "combined selected-species mass",
+            mass_residual,
+            controls.gas.mass_tolerance_kg,
         )?;
         let final_drive = after.equilibrium_concentration_mol_m3 - after.concentration_mol_m3;
         // A direction reversal larger than admitted inventory roundoff is not
         // accepted as an exact relaxation; no pressure or loading is clipped.
-        let drive_roundoff = capacity * controls.gas.mass_tolerance_kg / self.molar_mass_kg_mol;
-        if (drive > 0.0 && final_drive < -drive_roundoff)
-            || (drive < 0.0 && final_drive > drive_roundoff)
+        let drive_roundoff =
+            prepared.capacity * controls.gas.mass_tolerance_kg / self.molar_mass_kg_mol;
+        if (prepared.drive > 0.0 && final_drive < -drive_roundoff)
+            || (prepared.drive < 0.0 && final_drive > drive_roundoff)
         {
             return Err(invalid("finite Henry relaxation crossed its equilibrium"));
         }
-        let (next_gas, _, gas_step) = candidate.into_parts();
-        let step = DissolutionStep {
-            initial,
-            state: next_liquid,
-            gas: gas_step,
-            sources: [before, after],
-            dissolved_moles_change: dn,
-            relaxation_rate_per_s: rate,
-            film_relaxation_ratio: ratio,
-            partial_enthalpy_into_liquid_j: stream_h,
-            dissolved_internal_energy_change_j: dissolved_change,
-            thermostat_heat_into_gas_j: gas_bath_heat,
-            thermostat_heat_into_liquid_j: liquid_bath_heat,
-            thermostat_heat_into_system_j: bath_heat,
-            mass_residual_kg: mass_residual,
-            energy_residual_j: energy_residual,
-        };
-        poll(&mut cancelled)?;
-        *gas = next_gas;
-        *liquid = next_liquid;
-        Ok(step)
+        prepared.exchange.sources[1] = after;
+        prepared.exchange.mass_residual_kg = mass_residual;
+        Ok(prepared.exchange)
     }
+}
+
+struct PreparedDissolution {
+    exchange: DissolutionExchange,
+    initial_gas_mass_kg: f64,
+    mass_into_liquid_kg: f64,
+    capacity: f64,
+    drive: f64,
+}
+impl PreparedDissolution {
+    fn transfer(&self, law: &HenryDissolution) -> SpeciesBoundaryRelativeTransfer {
+        SpeciesBoundaryRelativeTransfer {
+            species: law.species.clone(),
+            mass_into_gas_kg: -self.mass_into_liquid_kg,
+            relative_energy_into_gas_j: self.exchange.thermostat_heat_into_gas_j,
+        }
+    }
+}
+
+/// One species' original finite-film exchange within a shared gas reconstruction.
+/// Gas storage and the combined energy residual belong to the enclosing step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DissolutionExchange {
+    pub species: SpeciesId,
+    pub initial: DissolvedGasInventory,
+    pub state: DissolvedGasInventory,
+    pub sources: [DissolutionSample; 2],
+    /// Positive for absorption into the liquid, negative for exsolution.
+    pub dissolved_moles_change: f64,
+    pub relaxation_rate_per_s: f64,
+    pub film_relaxation_ratio: f64,
+    pub partial_enthalpy_into_liquid_j: f64,
+    pub dissolved_internal_energy_change_j: f64,
+    pub thermostat_heat_into_gas_j: f64,
+    pub thermostat_heat_into_liquid_j: f64,
+    pub thermostat_heat_into_system_j: f64,
+    pub mass_residual_kg: f64,
 }
 
 /// Only dissolved solute is stored here; the original finite gas remains its

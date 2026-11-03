@@ -10566,6 +10566,28 @@ tests cover independent finite equilibrium/relaxation and thermostat energy,
 carrier-preserving exsolution, small-step/partition identities, and atomic
 source/dilution/film/cancellation refusals.
 
+`dissolved_gas::mixture::advance_mixture` composes up to 64 independently
+sourced dilute species into the same finite liquid and gas. The unchanged
+scalar film solve prepares all transfers from one original gas snapshot; one
+native species-boundary solve reconstructs the mixture. The liquid volume and
+clock must agree exactly across species, and the volume is counted once.
+Absorption and exsolution may occur simultaneously. The global energy account
+includes the gas storage once, all dissolved partial-enthalpy changes, and both
+explicit thermostat inputs. Species ordering is canonical, and all gas/liquid
+histories publish together after final cancellation admission.
+
+The summed solute concentrations must fit the declared dilute bound. Because
+opposite species transfers can make total pressure nonmonotone, the complete
+interval uses a conservative envelope of the monotone partial pressures for
+both Henry and original gas-source admission. A source may therefore require
+a shorter interval even when its final state fits. Six G0/G3 regressions cover
+independent finite-inventory oracles, opposite transfers and heat, input-order
+invariance, time subdivision, exact scalar reduction, combined dilution and
+layout refusal, final cancellation/retry, and an unsupported interior pressure
+excursion with supported endpoints. These are synthetic equation checks;
+cross-solute interactions, reaction, moving bubbles and adiabatic temperature
+feedback remain outside this fixed-temperature dilute model.
+
 
 ## Thermal Voce with physical overstress kinetics
 
