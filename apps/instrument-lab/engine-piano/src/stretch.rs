@@ -17,13 +17,16 @@
 //! velocity kick per step, evaluated where the step left the coordinates. The
 //! axial modes are linear oscillators forced by the strings; with the strings'
 //! start and end of the step both known, they take the exact response to that
-//! force varying linearly over the step. Earlier timestep comparisons used the
-//! former scalar bridge port; that convergence measurement must be repeated with
-//! the geometry-derived rows. The two integration methods do not promise bitwise
-//! parity. The method's numerical work is booked in `Ledger::coupling_j`.
+//! force varying linearly over the step. The shared `fs-modal` owner also
+//! integrates their physical viscous heat along that same trajectory. Earlier
+//! timestep comparisons used the former scalar bridge port; that convergence
+//! measurement must be repeated with the geometry-derived rows. The two
+//! integration methods do not promise bitwise parity. The method's numerical
+//! work is booked in `Ledger::coupling_j`.
 
 use crate::refmods::linear::string_stretching::{Material, WaveMaterial};
 use fs_math::det;
+use fs_modal::time::{LinearForceTransition, ModalAcousticState};
 use fs_nlmodal::{KcStringParams, kirchhoff_carrier_string, longitudinal::LongitudinalString};
 
 /// Exact transition of y'' + c y' + w2 y = 0 over `dt` for (y, y'), underdamped.
@@ -82,13 +85,17 @@ pub(crate) struct Stretch {
     /// Axial coordinate per unit axial bridge displacement (static correction).
     betas: Vec<f64>,
     omega2: Vec<f64>,
-    /// Axial damping coefficient 2 zeta w [1/s] and the exact free transition per step.
-    damping: Vec<f64>,
-    flow: Vec<[f64; 4]>,
+    /// Shared exact linearly forced transitions, including independent viscous heat.
+    flow: Vec<LinearForceTransition>,
+    step_s: f64,
     u: Vec<f64>,
     w: Vec<f64>,
     /// Axial force of the strings and bridge where the last step left them.
     force: Vec<f64>,
+    /// Rejected axial trials must not advance any accepted coordinate or force history.
+    next_u: Vec<f64>,
+    next_w: Vec<f64>,
+    next_force: Vec<f64>,
     /// Extension potential less the axial oscillators' own, where the last kick left it [J].
     potential: f64,
     slopes: Vec<f64>,
@@ -117,8 +124,8 @@ pub(crate) struct Kick {
 impl Stretch {
     /// `n` retained transverse modes of a segment of `length`, `density` and installed
     /// `tension`, at the mechanical `rate`. Refuses as the reference does (band above the
-    /// 0.45 rate guard, a mode cap that cannot cover the band); a damping ratio of one or
-    /// more is refused because the axial flow is the underdamped exact transition.
+    /// 0.45 rate guard, a mode cap that cannot cover the band). The file owner's
+    /// complete damping domain [0, 1], including critical damping, is retained.
     pub fn new(material: Material, waves: Option<WaveMaterial>, length: f64, density: f64, tension: f64,
         n: usize, rate: u32) -> Result<Self, String> {
         let params = KcStringParams { length, tension, lin_density: density, ea: material.axial_rigidity_n };
@@ -139,8 +146,8 @@ impl Stretch {
             if w.bandwidth_hz > 0.45 * f64::from(rate) {
                 return Err("longitudinal band exceeds the mechanics clock's 0.45*rate guard".into());
             }
-            if !(0.0..1.0).contains(&w.damping_ratio) {
-                return Err("live longitudinal waves need an axial damping ratio in [0, 1)".into());
+            if !(0.0..=1.0).contains(&w.damping_ratio) {
+                return Err("live longitudinal waves need an axial damping ratio in [0, 1]".into());
             }
             let fundamental = 0.5 * det::sqrt(material.axial_rigidity_n / density) / length;
             for mode in 1..=w.mode_cap + 1 {
@@ -158,8 +165,9 @@ impl Stretch {
         let model = LongitudinalString::new(params, n, 1, &indices).map_err(|e| e.to_string())?;
         let dt = 1.0 / f64::from(rate);
         let omega2: Vec<f64> = model.axial_omegas().iter().map(|w| w * w).collect();
-        let coefficients: Vec<f64> = model.axial_omegas().iter().map(|&w| 2.0 * damping * w).collect();
-        let flow = omega2.iter().zip(&coefficients).map(|(&w2, &c)| damped_transition(w2, c, dt)).collect();
+        let flow = model.axial_omegas().iter().map(|&omega|
+            LinearForceTransition::try_new(omega, damping, dt).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
         let betas = model.axial_modes().iter().zip(model.axial_slope_scales())
             .map(|(&mode, &scale)| 2.0 * if mode % 2 == 0 { -1.0 } else { 1.0 } / (length * scale)).collect();
         let axial = indices.len();
@@ -167,8 +175,9 @@ impl Stretch {
             slopes: vec![0.0; n + 1], slope_gradient: vec![0.0; n + 1],
             relative: vec![0.0; axial], harmonics: vec![0.0; axial], strain: vec![0.0; axial], weights: vec![0.0; axial],
             u: vec![0.0; axial], w: vec![0.0; axial], force: vec![0.0; axial],
+            next_u: vec![0.0; axial], next_w: vec![0.0; axial], next_force: vec![0.0; axial],
             model, length, ea: material.axial_rigidity_n, rest_tension: tension, material, maximum_strain,
-            axial_port, scales, betas, omega2, damping: coefficients, flow, potential: 0.0,
+            axial_port, scales, betas, omega2, flow, step_s: dt, potential: 0.0,
         })
     }
 
@@ -221,28 +230,36 @@ impl Stretch {
     /// of the step both known, they take the exact response to that force varying linearly
     /// over the step (a first-order hold): an impulse would sample oscillators of up to
     /// `w dt` ~ 1.3 at 48 kHz too coarsely.
-    pub fn step(&mut self, q: &[f64], beta: &[f64], b: f64, axial_bridge: f64, dt: f64, v: &mut [f64]) -> Kick {
+    /// On an axial-transition refusal, no axial coordinate, force history,
+    /// extension potential or supplied transverse velocity is published.
+    pub fn step(&mut self, q: &[f64], beta: &[f64], b: f64, axial_bridge: f64, dt: f64, v: &mut [f64]) -> Result<Kick, String> {
+        if dt != self.step_s {
+            return Err("longitudinal step must use its prepared mechanics clock".into());
+        }
         let axial_bridge = if self.axial_port { axial_bridge } else { 0.0 };
         self.fill_slopes(q, beta, b);
         let mean = self.model.geometric_strain(&self.slopes, &mut self.harmonics).unwrap_or(f64::NAN);
         let c = self.model.strain_energy_coefficient();
         let (mut loss, mut axial_change) = (0.0, 0.0);
         for j in 0..self.u.len() {
-            let (w2, damping, p) = (self.omega2[j], self.damping[j], self.flow[j]);
+            let w2 = self.omega2[j];
             let d = self.model.axial_slope_scales()[j];
             let g1 = w2 * self.betas[j] * axial_bridge - c * d * self.harmonics[j];
-            let g0 = std::mem::replace(&mut self.force[j], g1);
             let (u0, w0) = (self.u[j], self.w[j]);
-            // Particular response to g0 + (g1 - g0) t/dt: u_p = a + rate t.
-            let rate = (g1 - g0) / (dt * w2);
-            let a = (g0 - damping * rate) / w2;
-            let (du, dw) = (u0 - a, w0 - rate);
-            let (u1, w1) = (a + rate * dt + p[0] * du + p[1] * dw, rate + p[2] * du + p[3] * dw);
-            self.u[j] = u1;
-            self.w[j] = w1;
-            loss += 0.5 * damping * dt * (w0 * w0 + w1 * w1);
+            let frame = self.flow[j].advance_with_energy(ModalAcousticState {
+                displacement_m_sqrt_kg: u0,
+                velocity_m_sqrt_kg_per_s: w0,
+            }, self.force[j], g1).map_err(|e| e.to_string())?;
+            let (u1, w1) = (frame.state.displacement_m_sqrt_kg, frame.state.velocity_m_sqrt_kg_per_s);
+            self.next_u[j] = u1;
+            self.next_w[j] = w1;
+            self.next_force[j] = g1;
+            loss += frame.viscous_dissipation_j;
             axial_change += 0.5 * (w1 * w1 - w0 * w0 + w2 * (u1 * u1 - u0 * u0));
         }
+        std::mem::swap(&mut self.u, &mut self.next_u);
+        std::mem::swap(&mut self.w, &mut self.next_w);
+        std::mem::swap(&mut self.force, &mut self.next_force);
         self.fill_relative(axial_bridge);
         let (total, mean_total, spread) = self.storage(mean, axial_bridge);
         let axial_own: f64 = self.u.iter().zip(&self.omega2).map(|(u, w2)| 0.5 * w2 * u * u).sum();
@@ -277,6 +294,135 @@ impl Stretch {
         // Exact dynamics would trade these against each other; what is left is the method's.
         let work = kinetic + axial_change + loss + potential - self.potential;
         self.potential = potential;
-        Kick { reaction, axial_reaction: if self.axial_port { axial_reaction } else { 0.0 }, work, loss, out_of_domain }
+        Ok(Kick { reaction, axial_reaction: if self.axial_port { axial_reaction } else { 0.0 }, work, loss, out_of_domain })
+    }
+}
+
+#[cfg(test)]
+mod axial_transition_tests {
+    use super::*;
+
+    fn fixture(fundamental: f64, damping: f64, rate: u32, axial_modes: usize) -> Stretch {
+        let density = 0.006;
+        Stretch::new(
+            Material { axial_rigidity_n: density * (2.0 * fundamental).powi(2), maximum_slope: 0.2 },
+            Some(WaveMaterial {
+                bandwidth_hz: (axial_modes as f64 + 0.01) * fundamental,
+                mode_cap: axial_modes,
+                damping_ratio: damping,
+                maximum_strain: 0.01,
+            }),
+            1.0, density, 500.0, 0, rate,
+        ).unwrap()
+    }
+
+    // Independent closed form, including the coalesced critical poles.
+    fn free_motion(omega: f64, zeta: f64, q0: f64, v0: f64, t: f64) -> (f64, f64) {
+        let a = zeta * omega;
+        let decay = (-a * t).exp();
+        if zeta == 1.0 {
+            let slope = v0 + omega * q0;
+            (decay * (q0 + slope * t), decay * (v0 - omega * slope * t))
+        } else {
+            let wd = omega * (1.0 - zeta * zeta).sqrt();
+            let (s, c) = (wd * t).sin_cos();
+            (decay * (q0 * c + (v0 + a * q0) * s / wd),
+             decay * (v0 * c - (a * v0 + omega * omega * q0) * s / wd))
+        }
+    }
+
+    /// G1: high-frequency axial motion and physical heat, independently
+    /// integrated from the continuous viscous power. Endpoint trapezoids do
+    /// not pass this test, including at the small material-loss limit.
+    #[test]
+    fn free_axial_ringdown_and_heat_follow_the_continuous_oscillator() {
+        let rate = 48_000;
+        let dt = 1.0 / f64::from(rate);
+        for zeta in [0.0, 1e-10, 0.01, 0.8, 1.0] {
+            let mut model = fixture(20_000.0, zeta, rate, 1);
+            let omega = model.model.axial_omegas()[0];
+            let (q0, v0) = (2e-8, 0.01);
+            model.u[0] = q0;
+            model.w[0] = v0;
+            let kick = model.step(&[], &[], 0.0, 0.0, dt, &mut []).unwrap();
+            let (q, v) = free_motion(omega, zeta, q0, v0, dt);
+            let scale = (v0 * v0 + (omega * q0).powi(2)).sqrt();
+            assert!(((model.u[0] - q) * omega).abs() < 2e-12 * scale);
+            assert!((model.w[0] - v).abs() < 2e-12 * scale);
+
+            // Composite Simpson integrates only the independent analytic v(t).
+            let intervals = 4096;
+            let integral = (0..=intervals).map(|i| {
+                let weight = if i == 0 || i == intervals { 1.0 } else if i % 2 == 0 { 2.0 } else { 4.0 };
+                let velocity = free_motion(omega, zeta, q0, v0, dt * i as f64 / intervals as f64).1;
+                weight * 2.0 * zeta * omega * velocity * velocity
+            }).sum::<f64>() * dt / (3.0 * intervals as f64);
+            if zeta == 0.0 {
+                assert_eq!(kick.loss, 0.0);
+            } else {
+                assert!(kick.loss > 0.0);
+                assert!((kick.loss - integral).abs() < 3e-11 * integral,
+                    "zeta={zeta}: heat {}, independent viscous integral {integral}", kick.loss);
+            }
+            let e0 = 0.5 * scale * scale;
+            assert!(kick.work.abs() < 5e-13 * e0,
+                "free axial motion must not acquire coupling work: {}", kick.work);
+        }
+    }
+
+    /// G1: the actual axial bridge force builds the lossless resonant secular
+    /// response. Only interpolation of the sine remains, with second-order
+    /// convergence as the existing mechanics clock is refined.
+    #[test]
+    fn axial_bridge_resonance_converges_without_a_numerical_frequency_shift() {
+        let mut errors = Vec::new();
+        for rate in [32_000, 64_000, 128_000] {
+            let mut model = fixture(2000.0, 0.0, rate, 1);
+            let omega = model.model.axial_omegas()[0];
+            let amplitude = 1e-6;
+            let steps = 8 * rate / 2000;
+            let dt = 1.0 / f64::from(rate);
+            for i in 1..=steps {
+                let b = amplitude * (omega * f64::from(i) * dt).sin();
+                let kick = model.step(&[], &[], 0.0, b, dt, &mut []).unwrap();
+                assert_eq!(kick.loss, 0.0);
+                assert!(!kick.out_of_domain);
+            }
+            let t = f64::from(steps) * dt;
+            let scale = model.betas[0] * amplitude * 0.5;
+            let q = scale * ((omega * t).sin() - omega * t * (omega * t).cos());
+            let v = scale * omega * omega * t * (omega * t).sin();
+            let error = ((model.u[0] - q).powi(2) + ((model.w[0] - v) / omega).powi(2)).sqrt() / q.abs();
+            errors.push(error);
+        }
+        assert!(errors[0] / errors[1] > 3.9 && errors[1] / errors[2] > 3.9, "{errors:?}");
+        assert!(errors[2] < 0.001, "{errors:?}");
+    }
+
+    /// G0/G4: a later axial refusal cannot consume earlier coordinates or the
+    /// endpoint-force history; the next admitted step exactly matches a retry.
+    #[test]
+    fn axial_transition_refusal_preserves_state_and_force_history() {
+        let mut model = fixture(2000.0, 0.01, 48_000, 2);
+        let dt = 1.0 / 48_000.0;
+        model.step(&[], &[], 0.0, 1e-6, dt, &mut []).unwrap();
+        let mut reference = model.clone();
+        let beta = model.betas[1];
+        // Fault the second mode only, after the first has completed its trial.
+        model.betas[1] = f64::MAX;
+        assert!(model.step(&[], &[], 0.0, 1.0, dt, &mut []).is_err());
+        assert_eq!(model.u, reference.u);
+        assert_eq!(model.w, reference.w);
+        assert_eq!(model.force, reference.force);
+        assert_eq!(model.potential.to_bits(), reference.potential.to_bits());
+        model.betas[1] = beta;
+        assert!(model.step(&[], &[], 0.0, 2e-6, 2.0 * dt, &mut []).is_err());
+        let got = model.step(&[], &[], 0.0, 2e-6, dt, &mut []).unwrap();
+        let expected = reference.step(&[], &[], 0.0, 2e-6, dt, &mut []).unwrap();
+        assert_eq!(model.u, reference.u);
+        assert_eq!(model.w, reference.w);
+        assert_eq!(model.force, reference.force);
+        assert_eq!(got.loss.to_bits(), expected.loss.to_bits());
+        assert_eq!(got.work.to_bits(), expected.work.to_bits());
     }
 }

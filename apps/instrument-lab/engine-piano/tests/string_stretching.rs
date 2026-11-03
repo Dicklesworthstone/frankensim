@@ -27,7 +27,7 @@ fn independent_transverse_and_axial_reactions_match_stored_energy_gradients() {
         assert_eq!(model.axial_modes() > 0, band > 100.0);
         let (q, beta) = ([2e-5, -1e-5, 4e-6, 3e-6], [0.02, -0.01, 0.006, -0.004]);
         let (b, axial, h) = (3e-6, -2e-6, 1e-9);
-        let kick = model.step(&q, &beta, b, axial, 1.0 / f64::from(RATE), &mut [0.0; 4]);
+        let kick = model.step(&q, &beta, b, axial, 1.0 / f64::from(RATE), &mut [0.0; 4]).unwrap();
         let transverse = (model.stored(&q, &beta, b + h, axial) - model.stored(&q, &beta, b - h, axial)) / (2.0 * h);
         let longitudinal = (model.stored(&q, &beta, b, axial + h) - model.stored(&q, &beta, b, axial - h)) / (2.0 * h);
         for (got, want) in [(kick.reaction, transverse), (kick.axial_reaction, longitudinal)] {
@@ -53,8 +53,8 @@ fn stretch_without_waves_ignores_an_axial_port_exactly() {
     let mut b = a.clone();
     let (q, beta) = ([2e-5, -1e-5, 4e-6, 3e-6], [0.02, -0.01, 0.006, -0.004]);
     let (mut va, mut vb) = ([0.0; 4], [0.0; 4]);
-    let ka = a.step(&q, &beta, 3e-6, 0.0, 1.0 / f64::from(RATE), &mut va);
-    let kb = b.step(&q, &beta, 3e-6, 0.25, 1.0 / f64::from(RATE), &mut vb);
+    let ka = a.step(&q, &beta, 3e-6, 0.0, 1.0 / f64::from(RATE), &mut va).unwrap();
+    let kb = b.step(&q, &beta, 3e-6, 0.25, 1.0 / f64::from(RATE), &mut vb).unwrap();
     assert_eq!(va.map(f64::to_bits), vb.map(f64::to_bits));
     assert_eq!(ka.reaction.to_bits(), kb.reaction.to_bits());
     assert_eq!(ka.axial_reaction, 0.0);
@@ -117,6 +117,23 @@ fn an_all_linear_file_keeps_the_linear_strings_bit_for_bit() {
     for _ in 0..4800 {
         assert_eq!(plain.step().to_bits(), linear.step().to_bits());
     }
+}
+
+/// G0: the shared file already admits critical damping; live preparation and
+/// sounding playback must preserve that physical domain without a singular flow.
+#[test]
+fn a_critically_damped_axial_file_prepares_and_renders() {
+    let (course, desc) = single(57);
+    let text = plain_steel_waves_spec(&[course], 10_000.0, 1.0, 0.05);
+    let mut piano = struck(&desc, Some(text), 57, 2.0);
+    for _ in 0..1200 {
+        assert!(piano.step().is_finite());
+    }
+    assert!(piano.take_error().is_none());
+    assert_eq!(piano.counters.stretch_out_of_domain, 0);
+    let ledger = piano.close_ledger();
+    assert!(ledger.string_loss_j > 0.0);
+    assert!(ledger.residual_j.abs() < 1e-11 * ledger.input_j, "{ledger:?}");
 }
 
 #[test]

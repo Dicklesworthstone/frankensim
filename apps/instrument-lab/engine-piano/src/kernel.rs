@@ -3811,7 +3811,13 @@ impl LivePiano {
                     s.owed = false;
                 }
                 if let Some(st) = s.stretch.as_deref_mut() {
-                    let kick = st.step(&self.q[range.clone()], &self.m.beta[range.clone()], b, axial_bridge, dt, &mut self.v[range]);
+                    let kick = match st.step(&self.q[range.clone()], &self.m.beta[range.clone()], b, axial_bridge, dt, &mut self.v[range]) {
+                        Ok(kick) => kick,
+                        Err(error) => {
+                            self.last_error = Some(format!("key {}: {error}", self.keys[ac.ci].midi));
+                            continue;
+                        }
+                    };
                     reaction += kick.reaction;
                     axial_reaction += kick.axial_reaction;
                     work += kick.work;

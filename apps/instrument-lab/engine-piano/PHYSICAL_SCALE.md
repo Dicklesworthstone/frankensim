@@ -111,6 +111,15 @@ rows for its keys; a board without that data refuses the request. No axial
 projection is inferred from the vertical bridge row. The model remains the
 declared live reduction, with its numerical work in the physical ledger.
 
+The axial coordinates consume the shared exact linear-force transition from
+`fs-modal`. Their viscous heat is integrated along the same continuous motion,
+including during resonant buildup, rather than estimated from endpoint powers.
+The live path accepts the file's complete damping-ratio range `[0, 1]`, including
+critical damping. Transitions and heat coefficients are prepared before playback;
+the axial update allocates nothing. A refused axial trial preserves that segment's
+accepted coordinates and force history and is reported by `take_error()`.
+This segment-level refusal does not roll back the complete piano timestep.
+
 The optional final argument on the WASM preparation constructors carries the
 unchanged text. The factory checks `supportsStringStretching()` first, so older
 WASM cannot silently ignore the selection. Rebuild using
