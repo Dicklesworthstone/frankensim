@@ -175,20 +175,27 @@ fn near(a: f64, b: f64, absolute: f64, relative: f64) {
 fn apply<const R: usize, const C: usize>(m: &[[f64; C]; R], x: &[f64; C]) -> [f64; R] {
     core::array::from_fn(|i| m[i].iter().zip(x).map(|(a, b)| a * b).sum())
 }
-fn top_traction(cube: &Cube, stress: f64) -> Vec<[f64; 3]> {
+fn axial_traction(cube: &Cube, stress: f64) -> Vec<[f64; 3]> {
+    // Uniform axial stress needs equal/opposite tractions on both end faces.
+    // The six point supports remove rigid modes; they are not a clamped face
+    // that could supply the missing distributed bottom traction.
     let mut force = vec![[0.0; 3]; cube.nodes.len()];
     for tet in &cube.tets {
         for omit in 0..4 {
             let face: Vec<_> = (0..4).filter(|&i| i != omit).map(|i| tet[i]).collect();
-            if face.iter().all(|&i| cube.nodes[i][2] == LENGTH) {
-                let a = cube.nodes[face[0]];
-                let b = cube.nodes[face[1]];
-                let c = cube.nodes[face[2]];
-                let area =
-                    0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs();
-                for node in face {
-                    force[node][2] += stress * area / 3.0;
-                }
+            let sign = if face.iter().all(|&i| cube.nodes[i][2] == LENGTH) {
+                1.0
+            } else if face.iter().all(|&i| cube.nodes[i][2] == 0.0) {
+                -1.0
+            } else {
+                continue;
+            };
+            let a = cube.nodes[face[0]];
+            let b = cube.nodes[face[1]];
+            let c = cube.nodes[face[2]];
+            let area = 0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs();
+            for node in face {
+                force[node][2] += sign * stress * area / 3.0;
             }
         }
     }
@@ -284,7 +291,7 @@ fn g1_loaded_open_electrodes_stiffen_the_solid_and_generate_voltage() {
         let materials = [material([0.0, 0.0, e, 0.0, 0.0, 0.0])];
         let model =
             Model::assemble(&cube.nodes, &cube.tets, &materials, FRAME, budget(), cx).unwrap();
-        let force = top_traction(&cube, stress);
+        let force = axial_traction(&cube, stress);
         let charge = vec![0.0; n];
         let short = model
             .solve(
