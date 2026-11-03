@@ -47,6 +47,10 @@
 use super::*;
 use fs_math::det;
 
+/// Reusable spatial graphs for fixed-site compact-support diffusion.
+pub mod sparse;
+pub use sparse::{PreparationBudget, PreparationReport, PreparedPse};
+
 /// Spatial kernel with unit-coordinate second moment 2 in each direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PseKernel {

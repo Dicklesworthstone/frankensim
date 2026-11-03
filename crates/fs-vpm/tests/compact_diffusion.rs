@@ -310,3 +310,262 @@ fn g0_support_edge_keeps_resolvable_weak_exchange_and_exactly_zero_exterior_flux
         assert_particles_bitwise_equal(&unchanged.particles, &disconnected);
     }
 }
+
+fn preparation_budget(particles: usize) -> fs_vpm::diffusion::sparse::PreparationBudget {
+    fs_vpm::diffusion::sparse::PreparationBudget {
+        max_particles: particles,
+        max_edges: usize::MAX,
+        max_candidate_visits: u64::MAX,
+        max_work_units: u64::MAX,
+        max_live_bytes: usize::MAX,
+    }
+}
+
+#[test]
+fn g0_prepared_compact_graph_matches_independent_membership_and_dense_bits() {
+    use fs_vpm::diffusion::sparse::PreparedPse;
+
+    // Input order is deliberately unrelated to spatial bins. Include negative
+    // coordinates, coincident sites, an exact support boundary, and an isolated
+    // negative-zero circulation whose bits must survive omitted zero exchanges.
+    let positions = [
+        [1.1, 0.02],
+        [-0.1, 0.0],
+        [0.0, 0.0],
+        [0.75, -0.3],
+        [-0.75, 0.2],
+        [2.5, 0.0],
+        [0.1, 0.85],
+        [0.2, 0.3],
+        [1.0, 0.0],
+        [0.0, 0.0],
+    ];
+    let strengths = [1.0, -0.3, 0.7, 0.2, -0.2, -0.0, 0.9, -1.1, 0.15, 0.65];
+    let areas = [0.25, 0.5, 0.125, 0.2, 0.4, 1.0, 0.35, 0.3, 0.45, 0.15];
+    let particles: Vec<_> = positions
+        .iter()
+        .zip(strengths)
+        .map(|(position, strength)| VortexParticle::new(*position, strength))
+        .collect();
+    let law = PseDiffusion::compact_wendland(0.03, 1.0).unwrap();
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, Budget::INFINITE, |cx| {
+        let prepared = PreparedPse::prepare_with_cx(
+            cx, &particles, &areas, law, preparation_budget(particles.len()),
+        )
+        .unwrap();
+        let mut expected_edges = Vec::new();
+        for i in 0..particles.len() {
+            for j in i + 1..particles.len() {
+                let dx = particles[i].pos[0] - particles[j].pos[0];
+                let dy = particles[i].pos[1] - particles[j].pos[1];
+                if dx.hypot(dy) < 1.0 {
+                    expected_edges.push([i, j]);
+                }
+            }
+        }
+        assert_eq!(prepared.edges(), expected_edges.as_slice());
+        assert_eq!(prepared.areas_m2(), &areas);
+        assert_eq!(prepared.law().kernel(), law.kernel());
+        assert_eq!(prepared.law().support_radius_m(), law.support_radius_m());
+        assert_eq!(
+            prepared.law().kinematic_viscosity_m2_s(), law.kinematic_viscosity_m2_s(),
+        );
+        for (expected, actual) in positions.iter().zip(prepared.positions()) {
+            assert_eq!(expected.map(f64::to_bits), actual.map(f64::to_bits));
+        }
+        assert_eq!(
+            prepared.preparation().budget.cost_charged,
+            prepared.preparation().work_units,
+        );
+
+        for (case, dt, steps) in [(0, 0.025, 7), (1, 0.4, 3)] {
+            let mut state = particles.clone();
+            if case == 1 {
+                for (i, particle) in state.iter_mut().enumerate() {
+                    particle.circulation = if i == 5 { -0.0 } else { 0.15 * i as f64 - 1.0 };
+                }
+            }
+            let dense = diffuse_with_cx(
+                cx, &state, &areas, dt, steps, law, roomy_budget(state.len(), steps),
+            )
+            .unwrap();
+            let sparse = prepared
+                .diffuse_with_cx(cx, &state, dt, steps, roomy_budget(state.len(), steps))
+                .unwrap();
+            assert_particles_bitwise_equal(&sparse.particles, &dense.particles);
+            assert_eq!(sparse.particles[5].circulation.to_bits(), (-0.0_f64).to_bits());
+            let edges = prepared.edges().len() as u64;
+            assert_eq!(sparse.pair_evaluations, 2 * edges * steps as u64);
+            assert!(sparse.pair_evaluations < dense.pair_evaluations);
+            assert_eq!(
+                sparse.work_units,
+                state.len() as u64 + edges + steps as u64 * (2 * edges + 1),
+            );
+            assert_eq!(sparse.budget.cost_charged, sparse.work_units);
+        }
+    });
+}
+
+#[test]
+fn g4_prepared_geometry_caps_and_cancellation_refuse_without_poisoning_reuse() {
+    use fs_exec::BudgetRefusal;
+    use fs_vpm::VpmError;
+    use fs_vpm::diffusion::sparse::{PreparationBudget, PreparedPse};
+
+    let particles = [
+        VortexParticle::new([0.0, 0.0], 1.0),
+        VortexParticle::new([0.4, 0.0], -0.3),
+        VortexParticle::new([0.8, 0.0], 0.7),
+        VortexParticle::new([2.0, 0.0], -0.2),
+    ];
+    let original = particles;
+    let areas = [0.2, 0.4, 0.3, 0.1];
+    let law = PseDiffusion::compact_wendland(0.03, 1.0).unwrap();
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, Budget::INFINITE, |cx| {
+        assert!(matches!(
+            PreparedPse::prepare_with_cx(
+                cx, &particles, &areas,
+                PseDiffusion::new(0.03, 1.0).unwrap(), preparation_budget(4),
+            ),
+            Err(VpmError::InvalidScalar {
+                field: "prepared diffusion requires compact support", ..
+            }),
+        ));
+        let prepared = PreparedPse::prepare_with_cx(
+            cx, &particles, &areas, law, preparation_budget(4),
+        )
+        .unwrap();
+        for (budget, resource) in [
+            (
+                PreparationBudget {
+                    max_edges: prepared.edges().len() - 1,
+                    ..preparation_budget(4)
+                },
+                "prepared edges",
+            ),
+            (
+                PreparationBudget {
+                    max_candidate_visits: prepared.preparation().candidate_visits - 1,
+                    ..preparation_budget(4)
+                },
+                "preparation candidate visits",
+            ),
+            (
+                PreparationBudget {
+                    max_work_units: prepared.preparation().work_units - 1,
+                    ..preparation_budget(4)
+                },
+                "preparation work",
+            ),
+        ] {
+            assert!(matches!(
+                PreparedPse::prepare_with_cx(cx, &particles, &areas, law, budget),
+                Err(VpmError::CapExceeded { resource: observed, .. }) if observed == resource,
+            ));
+        }
+
+        let mut moved = particles;
+        moved[0].pos[0] = -0.0;
+        assert!(matches!(
+            prepared.diffuse_with_cx(cx, &moved, 0.1, 1, roomy_budget(4, 1)),
+            Err(VpmError::InvalidScalar {
+                field: "prepared position.x", particle: Some(0), ..
+            }),
+        ));
+        assert!(matches!(
+            prepared.diffuse_with_cx(cx, &particles[..3], 0.1, 1, roomy_budget(4, 1)),
+            Err(VpmError::LengthMismatch {
+                field: "prepared particles", expected: 4, actual: 3,
+            }),
+        ));
+        let mut invalid = particles;
+        invalid[1].circulation = f64::NAN;
+        assert!(matches!(
+            prepared.diffuse_with_cx(cx, &invalid, 0.1, 1, roomy_budget(4, 1)),
+            Err(VpmError::InvalidScalar { field: "circulation", particle: Some(1), .. }),
+        ));
+
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        with_cx(&cancelled, Budget::INFINITE, |cancelled_cx| {
+            assert!(matches!(
+                PreparedPse::prepare_with_cx(
+                    cancelled_cx, &particles, &areas, law, preparation_budget(4),
+                ),
+                Err(VpmError::ExecutionBudget(BudgetRefusal::Cancelled { .. })),
+            ));
+            assert!(matches!(
+                prepared.diffuse_with_cx(
+                    cancelled_cx, &particles, 0.1, 1, roomy_budget(4, 1),
+                ),
+                Err(VpmError::ExecutionBudget(BudgetRefusal::Cancelled { .. })),
+            ));
+        });
+
+        let retry = prepared
+            .diffuse_with_cx(cx, &particles, 0.1, 2, roomy_budget(4, 2))
+            .unwrap();
+        let dense = diffuse_with_cx(
+            cx, &particles, &areas, 0.1, 2, law, roomy_budget(4, 2),
+        )
+        .unwrap();
+        assert_particles_bitwise_equal(&retry.particles, &dense.particles);
+        assert_particles_bitwise_equal(&particles, &original);
+        assert_eq!(prepared.positions()[0][0].to_bits(), 0.0_f64.to_bits());
+        assert_eq!(prepared.areas_m2(), &areas);
+    });
+}
+
+#[test]
+fn g3_sparse_exchange_work_and_storage_follow_neighbors_instead_of_all_pairs() {
+    use fs_vpm::diffusion::sparse::PreparedPse;
+    use std::mem::size_of;
+
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, Budget::INFINITE, |cx| {
+        let mut previous_work = None;
+        for n in [64, 256] {
+            // An embedded chain isolates graph complexity: only adjacent
+            // particles are inside the support radius as the domain grows.
+            let particles: Vec<_> = (0..n)
+                .map(|i| {
+                    VortexParticle::new([i as f64, 0.0], (i % 7) as f64 - 2.75)
+                })
+                .collect();
+            let areas = vec![1.0; n];
+            let law = PseDiffusion::compact_wendland(0.03, 1.25).unwrap();
+            let prepared = PreparedPse::prepare_with_cx(
+                cx, &particles, &areas, law, preparation_budget(n),
+            )
+            .unwrap();
+            assert_eq!(prepared.edges().len(), n - 1);
+            assert!(prepared.preparation().candidate_visits <= 8 * n as u64);
+            assert!(prepared.preparation().peak_live_bytes <= 80 * n);
+            assert_eq!(
+                prepared.preparation().budget.cost_charged,
+                prepared.preparation().work_units,
+            );
+            let steps = 5;
+            let actual = prepared
+                .diffuse_with_cx(cx, &particles, 0.1, steps, roomy_budget(n, steps))
+                .unwrap();
+            assert_eq!(actual.pair_evaluations, 2 * (n - 1) as u64 * steps as u64);
+            assert!(actual.pair_evaluations < (n * (n - 1) * steps / 16) as u64);
+            assert_eq!(
+                actual.peak_live_bytes,
+                n * size_of::<VortexParticle>() + (n - 1) * size_of::<f64>(),
+            );
+            assert_eq!(actual.budget.cost_charged, actual.work_units);
+            if let Some(previous) = previous_work {
+                assert!(actual.work_units < 5 * previous);
+            }
+            previous_work = Some(actual.work_units);
+            assert!(
+                (total_circulation(&actual.particles) - total_circulation(&particles)).abs()
+                    < 2e-12,
+            );
+        }
+    });
+}

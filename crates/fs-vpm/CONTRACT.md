@@ -348,6 +348,46 @@ on arbitrary finite clouds. The velocity core remains algebraic, not a Gaussian
 heat kernel. This bounded 2-D addition does not close the deferred 3-D/FMM/BEM
 epic or change the existing inviscid thrust-screening consumer.
 
+## Prepared compact diffusion on fixed sites
+
+`diffusion::sparse::PreparedPse::prepare_with_cx` binds the original particle
+positions, positive quadrature areas and compact law into an immutable neighbor
+graph. Radius-sized cells are sorted deterministically; bounded searches over a
+two-cell halo identify candidates, and the original dense support metric admits
+edges. Accepted unordered edges are sorted by original particle indices, so
+forward/reverse evolution retains exactly the dense compact pair composition.
+Gaussian laws refuse; no Gaussian tails are truncated.
+
+`PreparationBudget` independently limits input particles, edges, actual
+candidate visits, preparation work and live payload. Coordinates divided by
+support radius must be finite and within +/-2^50; this keeps the rounding-safe
+cell halo valid. Two passes count then reserve the exact edge inventory, and
+cancellable in-place heap sorting requires no auxiliary sorting allocation.
+Preparation uses O(N log N + C + E log E) work, where C counts candidates and E
+is the actual edge count. Dense clusters can still require quadratic C and E;
+the caps refuse that case rather than promising linear work for every cloud.
+Peak logical preparation payload on 64-bit targets is 48N+16E bytes, with
+24N+16E retained. Allocation metadata and capacity rounding remain excluded.
+
+`PreparedPse::diffuse_with_cx` accepts arbitrary finite circulation on the
+same bitwise-pinned geometry. It computes each half-step relaxation fraction
+once and reuses those values for all steps. The existing equal-and-opposite
+transfer, exceptional-range arithmetic and execution accountant remain the
+owners. Active runs use 2ES pair visits, N+E+S(2E+1) logical work units and
+N particle values plus E scalar fractions. There is no per-step allocation or
+repeated pair-kernel evaluation. Identity runs skip fraction/pair work and
+charge N+S. The immutable prepared graph is borrowed during a run and has its
+own preparation receipt; moved/remeshed clouds require new preparation.
+
+The remaining compact regressions compare independent exhaustive edge
+membership, bitwise dense/sparse evolution, reused geometry after refusals,
+cancellation, and 64/256-particle neighbor-work scaling.
+`cargo run -p fs-vpm --example sparse_diffusion` prepares one Gaussian-vortex
+cloud, reuses its graph for two successive runs, compares the heat field with
+the analytical continuum solution and reports actual sparse/dense pair counts.
+These counts establish algorithmic work, not measured machine speed. The
+finite-cloud, support-resolution and splitting-error limits still apply.
+
 ## Viscous evolution with conservative advection
 
 `conservative::simulate_viscous_with_cx` composes the original PSE diffusion
