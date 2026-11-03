@@ -2536,11 +2536,40 @@ Cancellation and force-storage refusal publish neither account.
 
 The physical domain is stationary, open, index-one scalar transport with
 quadrature-weighted incident watts. Refractive-host stress, moving-medium Doppler
-work, thermal-emission recoil, spin/orbital angular momentum and mechanical time
+work, thermal-emission recoil, spin angular momentum and mechanical time
 integration are outside this API. Seven focused regressions cover exact
 absorption, elastic isotropy, forward/backward scattering, individual-history
 momentum closure, local spectral phases, diffuse escape, repeatability and
 transactional refusal.
+
+### Orbital torque on native volume histories
+
+`deposit_multiple_scattering_wrench` on both `ScatteringGrid` and
+`CellScatteringGrid` adds orbital angular momentum to the same native power and
+linear-momentum reports. Its explicit finite world-coordinate reference point
+is in meters. Actual collision locations transfer
+`(r_collision - r_reference) × F_collision`; every original cell receives the
+sum of its physical event moments, not its center crossed with net force.
+Absorption-only lanes retain exact Beer power and the source line of action:
+free-flight displacement is parallel to momentum, so its cross product
+vanishes and no absorption-position approximation is needed.
+
+Ballistic escape, diffuse escape and directed unresolved packets each retain
+orbital momentum flux. The incident-minus-outgoing-minus-torque account closes
+about the same reference. Capped radiation never contributes untraced torque.
+FMA-compensated cross products and signed history/cell sums retain small
+moments under cancellation; total standard errors combine each history before
+averaging. Original force/power queries allocate no orbital cell storage, and
+the wrench query uses the existing work and spatial budgets without additional
+phase draws. Invalid references, unrepresentable moments, cancellation or
+budget refusal publish no partial account.
+
+This resolves extrinsic orbital torque of scalar packets and off-axis beams,
+not polarization/spin torque, phase-resolved optical vortices, moving-medium
+work or mechanical time integration. Six additional regressions cover exact
+off-axis absorption, actual collision locations and individual-history closure,
+reference translation across escape/unresolved channels, local spectral cells,
+small cross-product cancellation residuals and transactional refusal.
 
 ### Multiple-scattering absorbed power
 

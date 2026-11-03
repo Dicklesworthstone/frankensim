@@ -28,8 +28,9 @@ use std::collections::HashMap;
 
 mod momentum;
 pub use momentum::{
-    CellRadiationForce, MomentumRateEstimate, RadiationMomentumBalance,
-    ScatteringMomentumDeposition,
+    AngularMomentumRateEstimate, CellRadiationForce, CellRadiationTorque, MomentumRateEstimate,
+    RadiationAngularMomentumBalance, RadiationMomentumBalance, ScatteringMomentumDeposition,
+    ScatteringWrenchDeposition,
 };
 use momentum::{HistoryMomentum, MomentumTallies};
 
@@ -276,7 +277,7 @@ fn deposit_prepared_observed<const N: usize>(
             result.ballistic_escape.mean_w[lane] = exact.transmitted_power_w[0];
             result.absorbed.mean_w[lane] = exact.absorbed_power_w[0];
             if let Some(tallies) = momentum.as_deref_mut() {
-                tallies.exact(lane, unit_direction, &exact)?;
+                tallies.exact(lane, origin, unit_direction, &exact)?;
             }
             for cell in exact.cells {
                 spatial.cell(cell.cell_index)?.lanes[lane][0]
@@ -401,7 +402,7 @@ fn trace_history_observed<const N: usize>(
             let escape = usize::from(collision != 0);
             outcome[escape] = power;
             if let Some(tally) = momentum.as_deref_mut() {
-                tally.leave(escape, power, direction)?;
+                tally.leave(escape, power, position, direction)?;
             }
             break;
         };
@@ -414,7 +415,7 @@ fn trace_history_observed<const N: usize>(
             outcome[3] = power;
             precision_limited = true;
             if let Some(tally) = momentum.as_deref_mut() {
-                tally.leave(2, power, direction)?;
+                tally.leave(2, power, position, direction)?;
             }
             break;
         };
@@ -430,7 +431,14 @@ fn trace_history_observed<const N: usize>(
         power = survival.value();
         if power == 0.0 {
             if let Some(tally) = momentum.as_deref_mut() {
-                tally.capture(event.cell_index, heat, 0.0, direction, direction)?;
+                tally.capture(
+                    event.cell_index,
+                    event.position,
+                    heat,
+                    0.0,
+                    direction,
+                    direction,
+                )?;
             }
             break;
         }
@@ -446,9 +454,16 @@ fn trace_history_observed<const N: usize>(
             .sample_packet(medium.wavelengths(), direction, random(), random())?
             .direction;
         if let Some(tally) = momentum.as_deref_mut() {
-            tally.capture(event.cell_index, heat, power, direction, outgoing)?;
+            tally.capture(
+                event.cell_index,
+                event.position,
+                heat,
+                power,
+                direction,
+                outgoing,
+            )?;
             if capped {
-                tally.leave(2, power, outgoing)?;
+                tally.leave(2, power, event.position, outgoing)?;
             }
         }
         if capped {

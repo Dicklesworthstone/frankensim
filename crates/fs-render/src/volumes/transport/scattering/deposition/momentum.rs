@@ -4,12 +4,21 @@
 //! scattering. The native phase sampler supplies the outgoing direction; no
 //! averaged asymmetry or absorption-only pressure replaces it. This is the
 //! force on stationary matter in vacuum/index-one transport. Refractive-host
-//! stress, moving-medium Doppler work, thermal emission recoil, polarization
-//! and angular momentum are not inferred by these scalar intensity histories.
+//! stress, moving-medium Doppler work, thermal emission recoil and polarization
+//! are not inferred by these scalar intensity histories. The optional wrench
+//! query also resolves orbital torque at the native interaction positions;
+//! polarization-dependent spin angular momentum remains outside this model.
 
 use super::*;
 use crate::volumes::transport::deposition::BeamPowerDeposition;
 use crate::volumes::transport::scattering::field::CellScatteringGrid;
+
+mod orbital;
+pub use orbital::{
+    AngularMomentumRateEstimate, CellRadiationTorque, RadiationAngularMomentumBalance,
+    ScatteringWrenchDeposition,
+};
+use orbital::{HistoryOrbital, OrbitalTallies};
 
 const LIGHT_M_S: f64 = 299_792_458.0;
 
@@ -170,6 +179,7 @@ pub(super) struct MomentumTallies<const N: usize> {
     force: [[Moments; 3]; N],
     escape: [[[Moments; 3]; N]; 3],
     spatial: SpatialTallies<N, 3>,
+    orbital: Option<OrbitalTallies<N>>,
 }
 impl<const N: usize> MomentumTallies<N> {
     fn new(limit: usize) -> Self {
@@ -177,11 +187,13 @@ impl<const N: usize> MomentumTallies<N> {
             force: [[Moments::default(); 3]; N],
             escape: [[[Moments::default(); 3]; N]; 3],
             spatial: SpatialTallies::new(limit),
+            orbital: None,
         }
     }
     pub(super) fn exact(
         &mut self,
         lane: usize,
+        origin: Point3,
         direction: Vec3,
         power: &BeamPowerDeposition<1>,
     ) -> Result<(), VolumeTransportError> {
@@ -189,13 +201,14 @@ impl<const N: usize> MomentumTallies<N> {
         for cell in &power.cells {
             history.capture(
                 cell.cell_index,
+                origin,
                 cell.absorbed_power_w[0],
                 0.0,
                 direction,
                 direction,
             )?;
         }
-        history.leave(0, power.transmitted_power_w[0], direction)?;
+        history.leave(0, power.transmitted_power_w[0], origin, direction)?;
         history.finish()
     }
     fn finish(
@@ -258,20 +271,27 @@ pub(super) struct HistoryMomentum<'a, const N: usize> {
     history: u32,
     force: [PowerSum; 3],
     escape: [[f64; 3]; 3],
+    orbital: Option<HistoryOrbital>,
 }
 impl<'a, const N: usize> HistoryMomentum<'a, N> {
     pub(super) fn new(tallies: &'a mut MomentumTallies<N>, lane: usize, history: u32) -> Self {
+        let orbital = tallies
+            .orbital
+            .as_ref()
+            .map(|tally| HistoryOrbital::new(tally.reference));
         Self {
             tallies,
             lane,
             history,
             force: [PowerSum::default(); 3],
             escape: [[0.0; 3]; 3],
+            orbital,
         }
     }
     pub(super) fn capture(
         &mut self,
         cell: usize,
+        position: Point3,
         heat: f64,
         continuation: f64,
         incoming: Vec3,
@@ -291,6 +311,17 @@ impl<'a, const N: usize> HistoryMomentum<'a, N> {
                 self.force[axis].add(force[axis])?;
                 statistics[axis].capture(self.history, force[axis])?;
             }
+            if let Some(orbital) = &mut self.orbital {
+                orbital.capture(
+                    self.tallies
+                        .orbital
+                        .as_mut()
+                        .ok_or(VolumeTransportError::Unrepresentable)?,
+                    (self.lane, self.history, cell),
+                    position,
+                    force,
+                )?;
+            }
         }
         Ok(())
     }
@@ -298,10 +329,14 @@ impl<'a, const N: usize> HistoryMomentum<'a, N> {
         &mut self,
         channel: usize,
         power: f64,
+        position: Point3,
         direction: Vec3,
     ) -> Result<(), VolumeTransportError> {
         let rate = photon_rate(power)?;
         self.escape[channel] = components(direction).map(|d| rate * d);
+        if let Some(orbital) = &mut self.orbital {
+            orbital.leave(channel, position, self.escape[channel])?;
+        }
         Ok(())
     }
     pub(super) fn finish(self) -> Result<(), VolumeTransportError> {
@@ -311,6 +346,15 @@ impl<'a, const N: usize> HistoryMomentum<'a, N> {
                 self.tallies.escape[channel][self.lane][axis]
                     .observe_signed(self.escape[channel][axis])?;
             }
+        }
+        if let Some(orbital) = self.orbital {
+            orbital.finish(
+                self.tallies
+                    .orbital
+                    .as_mut()
+                    .ok_or(VolumeTransportError::Unrepresentable)?,
+                self.lane,
+            )?;
         }
         Ok(())
     }
