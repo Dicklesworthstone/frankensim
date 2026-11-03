@@ -119,6 +119,30 @@ pub struct WakeSegment {
     pub core2_m2: f64,
 }
 
+/// Velocity and spatial derivatives of the represented physical wake sources.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WakeKinematics {
+    /// Induced velocity [m/s], including signed source circulations.
+    pub velocity: [f64; 3],
+    /// `gradient[i][j] = ∂velocity[i]/∂position[j]` [1/s].
+    pub gradient: [[f64; 3]; 3],
+}
+
+impl WakeKinematics {
+    /// Physical vorticity `curl(velocity)` [1/s].
+    #[must_use]
+    pub fn vorticity(&self) -> [f64; 3] {
+        let g = &self.gradient;
+        [g[2][1] - g[1][2], g[0][2] - g[2][0], g[1][0] - g[0][1]]
+    }
+
+    /// Velocity divergence [1/s]; analytically zero for these source fields.
+    #[must_use]
+    pub fn divergence(&self) -> f64 {
+        self.gradient[0][0] + self.gradient[1][1] + self.gradient[2][2]
+    }
+}
+
 /// The connected near-wake.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FilamentWake {
@@ -172,7 +196,9 @@ impl FilamentWake {
     /// tier; free-wake self-induction is not implemented).
     ///
     /// # Errors
-    /// `filament-shed-invalid` (gamma count/finiteness); the row cap
+    /// `filament-shed-invalid` (gamma count/finiteness),
+    /// `filament-convection-invalid` (non-finite geometry/displacement or
+    /// translated coordinate overflow); the row cap
     /// DROPS the oldest row only through the caller's coarsener —
     /// here it refuses (`filament-rows-exhausted`), never silently.
     pub fn shed(&mut self, gamma: &[f64], convect: [f64; 3]) -> Result<(), Refusal> {
@@ -213,6 +239,20 @@ impl FilamentWake {
                 ranked_repairs: vec![
                     "retain finite nonnegative ages with adequate time resolution".into(),
                 ],
+            });
+        }
+        if convect.iter().any(|v| !v.is_finite())
+            || self.line_nodes.iter().flatten().any(|v| !v.is_finite())
+            || self
+                .rows
+                .iter()
+                .flat_map(|r| &r.nodes)
+                .any(|p| (0..3).any(|i| !(p[i] + convect[i]).is_finite()))
+        {
+            return Err(Refusal {
+                code: "filament-convection-invalid",
+                message: "prescribed convection must retain finite wake coordinates".into(),
+                ranked_repairs: vec!["use finite geometry and a representable displacement".into()],
             });
         }
         for row in &mut self.rows {
@@ -275,13 +315,14 @@ impl FilamentWake {
         let incoming_trailing = if row > 0 {
             trailing_circulation(&self.rows[row - 1].gamma, edge)
         } else {
-            self.downstream_gamma.as_ref().map_or(0.0, |gamma| {
-                trailing_circulation(gamma, edge)
-            })
+            self.downstream_gamma
+                .as_ref()
+                .map_or(0.0, |gamma| trailing_circulation(gamma, edge))
         };
-        let outgoing_trailing = self.rows.get(row).map_or(0.0, |r| {
-            trailing_circulation(&r.gamma, edge)
-        });
+        let outgoing_trailing = self
+            .rows
+            .get(row)
+            .map_or(0.0, |r| trailing_circulation(&r.gamma, edge));
         Some((incoming_span - outgoing_span) + (incoming_trailing - outgoing_trailing))
     }
 
@@ -349,7 +390,10 @@ impl FilamentWake {
                 });
             }
         }
-        let next_nodes = self.rows.get(row_index + 1).map_or(&self.line_nodes, |r| &r.nodes);
+        let next_nodes = self
+            .rows
+            .get(row_index + 1)
+            .map_or(&self.line_nodes, |r| &r.nodes);
         for edge in 0..=self.cert.n_stations {
             let circulation = trailing_circulation(&row.gamma, edge);
             if circulation != 0.0 {
@@ -381,14 +425,62 @@ impl FilamentWake {
     ) -> [f64; 3] {
         let mut v = [0.0f64; 3];
         self.visit_segments_with_core_growth(growth_per_tick_m2, |segment| {
-            let sv = segment_velocity_with_core(
-                p, segment.start, segment.end, segment.core2_m2,
-            );
+            let sv = segment_velocity_with_core(p, segment.start, segment.end, segment.core2_m2);
             for i in 0..3 {
                 v[i] += segment.circulation * sv[i];
             }
         });
         v
+    }
+
+    /// Evaluate physical velocity and its analytic spatial Jacobian using
+    /// exactly the same assembled edges and cores as the velocity-only path.
+    /// No finite-difference length, source allocation, or extra probe sweeps
+    /// are needed. At a finite-core axis the curl remains resolved even when
+    /// that segment's velocity is zero.
+    ///
+    /// `None` denotes an invalid probe/growth, a singular zero-core source at
+    /// the probe, or an unrepresentable sampled field. The stored lattice must
+    /// already be admitted, as for the velocity-only helpers. After aggregation
+    /// this samples retained near sources; it does not differentiate far cells.
+    #[must_use]
+    pub fn induced_kinematics_with_core_growth(
+        &self,
+        p: [f64; 3],
+        growth_per_tick_m2: f64,
+    ) -> Option<WakeKinematics> {
+        if !growth_per_tick_m2.is_finite()
+            || growth_per_tick_m2 < 0.0
+            || p.iter().any(|v| !v.is_finite())
+        {
+            return None;
+        }
+        let mut result = WakeKinematics::default();
+        let mut regular = true;
+        self.visit_segments_with_core_growth(growth_per_tick_m2, |s| {
+            if !regular {
+                return;
+            }
+            let Some(value) = segment_kinematics_with_core(p, s.start, s.end, s.core2_m2) else {
+                regular = false;
+                return;
+            };
+            for i in 0..3 {
+                result.velocity[i] += s.circulation * value.velocity[i];
+                for j in 0..3 {
+                    result.gradient[i][j] += s.circulation * value.gradient[i][j];
+                }
+            }
+        });
+        (regular
+            && result
+                .velocity
+                .iter()
+                .chain(result.gradient.iter().flatten())
+                .chain(result.vorticity().iter())
+                .all(|x| x.is_finite())
+            && result.divergence().is_finite())
+        .then_some(result)
     }
 
     /// Content digest over physical sheet geometry, quad strengths, ages,

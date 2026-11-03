@@ -215,6 +215,16 @@ transverse vorticity for steady circulation. A shared span uses the newer row's
 core and age, and trailing edges use their emitting row. This is a declared
 reduced edge-core model, not a resolved viscous vortex sheet.
 
+`induced_kinematics_with_core_growth` sums the analytic finite-segment velocity
+Jacobians through this same traversal. `WakeKinematics` carries physical velocity
+in m/s, the spatial Jacobian in 1/s, and exposes its curl (vorticity) and trace
+(divergence). There is no probe-spacing parameter or finite-difference stencil.
+Invalid probes/growth, singular zero-core encounters, or unrepresentable outputs
+return `None`. A positive-core axis has finite nonzero vorticity even when its
+segment velocity vanishes. G2 tests compare derivatives to the independently
+differenced whole field and check zero off-source curl for a closed inviscid
+sheet. This exact near-source API does not differentiate multipole far cells.
+
 `node_circulation_residual` measures incoming minus outgoing circulation on the
 actual assembled edge strengths, including starting, tip, and closing-line
 nodes. The older `cell_net_circulation` entry point now reports this incident-edge
@@ -232,7 +242,11 @@ preserves the exact combined field, including mixed cores and image reflection.
 Coarsening an already attached oldest row refuses with
 `coarsen-interface-attached`: moving it alone would disconnect the retained far
 segments. Coarsen before aggregation. As before, conversion is a snapshot;
-subsequent near/far geometry motion must be kept consistent by the caller.
+continued prescribed convection uses `FarField::shed_prescribed` to keep the
+near/far interface connected. It translates existing near and far sources by
+the same displacement, advances old cores over `shed_dt_s`, and adds a zero-age
+row at the current lifting line. Geometry, age, and diffusion are preflighted;
+a refusal leaves both input states unchanged without cloning the wake.
 
 `segment_kinematics_with_core` returns the finite-segment velocity and its
 exact spatial Jacobian, with no finite-difference step or allocation. The
@@ -295,7 +309,12 @@ finite checks; zero time, Frozen, and zero viscosity preserve state exactly.
 The method does not convect geometry. Callers keep near shedding and far
 diffusion on the same elapsed-time schedule, and advance existing far cells
 before appending newly aggregated cells to avoid aging those new cells twice.
-Images are evaluation snapshots and must be rebuilt after geometry, diffusion,
+`FarField::translate(displacement_m)` moves cell centers and retained exact
+endpoints transactionally, preserving relative multipole moments and source
+cores. Its cost is linear in retained sources, with no reconstruction or
+allocation. The coupled `shed_prescribed` operation performs this translation
+and diffusion on the same interval as near shedding; it does not model
+free-wake self-induction. Images are evaluation snapshots and must be rebuilt after geometry, diffusion,
 or mode changes. Mirroring preserves source cores, diffusion offsets and the
 axial-vector core moment.
 

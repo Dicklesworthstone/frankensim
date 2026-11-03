@@ -382,6 +382,12 @@ impl FarField {
     /// Invalid elapsed time/mode, invalid cached core state, or any width
     /// overflow. Every refusal leaves all cells unchanged.
     pub fn advance_core(&mut self, dt_s: f64) -> Result<(), Refusal> {
+        let growth = self.admit_core_advance(dt_s)?;
+        self.apply_core_growth(growth);
+        Ok(())
+    }
+
+    fn admit_core_advance(&self, dt_s: f64) -> Result<f64, Refusal> {
         if !dt_s.is_finite() || dt_s < 0.0 {
             return Err(Refusal {
                 code: "core-advance-invalid",
@@ -399,7 +405,7 @@ impl FarField {
             });
         }
         if growth == 0.0 {
-            return Ok(());
+            return Ok(0.0);
         }
         for (ci, cell) in self.cells.iter().enumerate() {
             let next_core = cell.core2_m2 + growth;
@@ -427,10 +433,109 @@ impl FarField {
                 });
             }
         }
-        for cell in &mut self.cells {
-            cell.core2_m2 += growth;
-            cell.diffusion_offset_m2 += growth;
+        Ok(growth)
+    }
+
+    fn apply_core_growth(&mut self, growth: f64) {
+        if growth != 0.0 {
+            for cell in &mut self.cells {
+                cell.core2_m2 += growth;
+                cell.diffusion_offset_m2 += growth;
+            }
         }
+    }
+
+    /// Translate cell centers and all retained exact source endpoints by one
+    /// uniform displacement [m]. Relative multipole moments, radii and cores
+    /// stay unchanged; no cell reconstruction or source allocation is needed.
+    /// Zero displacement is an exact identity. Rebuild cached images afterward.
+    ///
+    /// # Errors
+    /// `farfield-translation-invalid` for non-finite displacement/geometry or
+    /// coordinate overflow. Every cell is checked before any mutation.
+    pub fn translate(&mut self, displacement_m: [f64; 3]) -> Result<(), Refusal> {
+        self.admit_translation(displacement_m)?;
+        self.apply_translation(displacement_m);
+        Ok(())
+    }
+
+    fn admit_translation(&self, delta: [f64; 3]) -> Result<(), Refusal> {
+        let representable = delta.iter().all(|v| v.is_finite())
+            && self.cells.iter().all(|cell| {
+                std::iter::once(&cell.centroid)
+                    .chain(cell.segs.iter().flat_map(|(a, b, _)| [a, b]))
+                    .all(|p| (0..3).all(|i| (p[i] + delta[i]).is_finite()))
+            });
+        if !representable {
+            return Err(Refusal {
+                code: "farfield-translation-invalid",
+                message: "uniform translation must retain finite cell/source coordinates".into(),
+                ranked_repairs: vec!["use finite geometry and a representable displacement".into()],
+            });
+        }
+        Ok(())
+    }
+
+    fn apply_translation(&mut self, delta: [f64; 3]) {
+        if delta.iter().all(|v| *v == 0.0) {
+            return;
+        }
+        for cell in &mut self.cells {
+            for p in std::iter::once(&mut cell.centroid)
+                .chain(cell.segs.iter_mut().flat_map(|(a, b, _)| [a, b]))
+            {
+                for i in 0..3 {
+                    if delta[i] != 0.0 {
+                        p[i] += delta[i];
+                    }
+                }
+            }
+        }
+    }
+
+    /// Advance one prescribed shedding interval as one near/far transaction.
+    /// Existing sources translate by `displacement_m` [m]; existing far cores
+    /// diffuse over `shed_dt_s`, while near-row ages advance one tick. The new
+    /// row stays at the lifting line with zero age. This preserves the shared
+    /// interface endpoints and elapsed-time schedule without cloning the wake.
+    /// Call this instead of separate near shedding and far diffusion; aggregate
+    /// additional rows only afterward, and rebuild any image snapshots.
+    /// This is uniform prescribed convection, not free-wake self-induction.
+    ///
+    /// # Errors
+    /// Invalid shedding interval, any core/translation refusal, or any near
+    /// shedding refusal. Both input states are unchanged on every refusal.
+    pub fn shed_prescribed(
+        &mut self,
+        near: &mut FilamentWake,
+        gamma: &[f64],
+        displacement_m: [f64; 3],
+    ) -> Result<(), Refusal> {
+        if !self.shed_dt_s.is_finite() || self.shed_dt_s <= 0.0 {
+            return Err(Refusal {
+                code: "farfield-shed-invalid",
+                message: "prescribed shedding needs a finite positive interval".into(),
+                ranked_repairs: vec!["retain the interval used for near/far aggregation".into()],
+            });
+        }
+        let growth = self.admit_core_advance(self.shed_dt_s)?;
+        if near.rows.iter().any(|row| {
+            !row.core2_m2.is_finite()
+                || row.core2_m2 < 0.0
+                || (growth != 0.0 && !(row.core2_m2 + growth * (row.age_ticks + 1.0)).is_finite())
+        }) {
+            return Err(Refusal {
+                code: "core-advance-overflow",
+                message: "the next shedding age would give an invalid near-source core".into(),
+                ranked_repairs: vec!["use finite cores and representable viscosity × age".into()],
+            });
+        }
+        self.admit_translation(displacement_m)?;
+        // Every far refusal precedes the near transaction. Once it succeeds,
+        // the remaining far updates are checked arithmetic with no allocation.
+        near.shed(gamma, displacement_m)?;
+        self.apply_translation(displacement_m);
+        self.apply_core_growth(growth);
         Ok(())
     }
 
