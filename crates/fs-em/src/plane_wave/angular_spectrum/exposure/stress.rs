@@ -250,7 +250,10 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
     }
 }
 
-fn stress_workspace(points: usize, original: usize) -> Result<usize, AngularSpectrumError> {
+pub(super) fn stress_workspace(
+    points: usize,
+    original: usize,
+) -> Result<usize, AngularSpectrumError> {
     points
         .checked_mul(
             core::mem::size_of::<[Dd; 6]>()
@@ -333,9 +336,20 @@ where
             )?;
         }
     }
+    finish_stress_field(anchor.grid(), sums, integrated_dyad, cancelled)
+}
+
+// Preserve the original DD accumulation and trace subtraction for individual
+// and joint observations. A partial result is never published on failure.
+pub(super) fn finish_stress_field(
+    grid: AngularSpectrumGrid,
+    sums: Vec<[Dd; 6]>,
+    integrated_dyad: [Dd; 6],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<AngularSpectrumExposureStressField, AngularSpectrumError> {
     let mut points = Vec::new();
     points
-        .try_reserve_exact(n)
+        .try_reserve_exact(sums.len())
         .map_err(|_| bad("exposure stress result allocation failed"))?;
     for (i, dyad) in sums.into_iter().enumerate() {
         if i % 64 == 0 {
@@ -350,7 +364,6 @@ where
             maxwell_stress_pa: symmetric(value),
         });
     }
-    let grid = anchor.grid();
     let integrated_stress = stress_from_dyad(integrated_dyad);
     if integrated_stress.iter().any(|s| !s.to_f64().is_finite()) {
         return Err(bad("integrated exposure stress is unrepresentable"));
@@ -380,30 +393,12 @@ fn accumulate_stress_bank<P: Copy>(
     if f == 0 {
         return Ok(());
     }
-    let mut kernels = Vec::new();
-    kernels
-        .try_reserve_exact(f * f)
-        .map_err(|_| bad("exposure stress kernel allocation failed"))?;
-    for &a in &bank.frequencies {
-        for &b in &bank.frequencies {
-            poll(cancelled)?;
-            kernels.push(
-                kernel(a, b)
-                    .map_err(|_| bad("exposure stress temporal kernel is unrepresentable"))?,
-            );
-        }
-    }
-    let mut fields = Vec::new();
-    fields
-        .try_reserve_exact(f)
-        .map_err(|_| bad("exposure stress field allocation failed"))?;
-    for group in 0..f {
-        fields.push(bank.frequency_modal_field(group, side, distance, cancelled)?);
-    }
+    let mut observation =
+        ExposureObservationBank::prepare(bank, side, distance, kernel, cancelled)?;
     let cell = integrate_cell_dyad(
         bank.anchor.grid(),
-        &fields,
-        &kernels,
+        &observation.fields,
+        &observation.kernels,
         epsilon,
         mu,
         product_parts,
@@ -412,15 +407,13 @@ fn accumulate_stress_bank<P: Copy>(
     for (sum, value) in integrated.iter_mut().zip(cell) {
         *sum = *sum + value;
     }
-    for (group, field) in fields.iter_mut().enumerate() {
-        bank.synthesize_frequency_field(group, field, cancelled)?;
-    }
+    observation.synthesize(bank, cancelled)?;
     for (point, sum) in sums.iter_mut().enumerate() {
         poll(cancelled)?;
         let value = integrate_dyad(
             f,
-            &kernels,
-            |i| fields[i][point],
+            &observation.kernels,
+            |i| observation.fields[i][point],
             epsilon,
             mu,
             &product,
@@ -438,7 +431,7 @@ fn accumulate_stress_bank<P: Copy>(
 // mode, use the SAME spatial quadratures as exact cell power. These DD parts
 // are already conjugated to the temporal kernel's negative-time convention.
 // Integrate before synthesis; no sampled quadratic or second field bank.
-fn integrate_cell_dyad<P: Copy>(
+pub(super) fn integrate_cell_dyad<P: Copy>(
     grid: AngularSpectrumGrid,
     fields: &[Vec<[C64; 6]>],
     kernels: &[P],
@@ -487,7 +480,7 @@ fn integrate_cell_dyad<P: Copy>(
     Ok(integrated)
 }
 
-fn dyad_error(error: MomentError) -> AngularSpectrumError {
+pub(super) fn dyad_error(error: MomentError) -> AngularSpectrumError {
     match error {
         MomentError::Cancelled => AngularSpectrumError::Cancelled,
         MomentError::Product(_) => bad("exposure stress product is unrepresentable"),
@@ -498,7 +491,7 @@ fn dyad_error(error: MomentError) -> AngularSpectrumError {
 // Six independent components; symmetry is imposed only AFTER the complete
 // ordered frequency-pair contraction, never on an individual cross term.
 // Point samples use C64; continuous spatial quadratures keep their DD parts.
-fn integrate_dyad<P: Copy, A: Copy>(
+pub(super) fn integrate_dyad<P: Copy, A: Copy>(
     frequencies: usize,
     kernels: &[P],
     field_at: impl Fn(usize) -> [A; 6],

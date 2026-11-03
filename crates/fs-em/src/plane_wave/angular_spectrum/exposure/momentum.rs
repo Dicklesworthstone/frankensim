@@ -136,7 +136,11 @@ impl AngularSpectrumExposure<'_, '_, '_> {
 
 impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
     pub fn momentum_workspace_bytes(&self) -> Result<usize, AngularSpectrumError> {
-        let frequencies = self.banks().map(|(bank, _)| bank.frequency_count()).max().unwrap_or(0);
+        let frequencies = self
+            .banks()
+            .map(|(bank, _)| bank.frequency_count())
+            .max()
+            .unwrap_or(0);
         momentum_workspace(self.anchor.modes.len(), self.workspace_bytes(), frequencies)
     }
 
@@ -185,13 +189,24 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
 }
 
 #[derive(Clone, Copy)]
-struct MomentumKernel<P> {
-    product: P,
+pub(super) struct MomentumKernel<P> {
+    pub(super) product: P,
     mean_frequency: Dd,
     half_difference: Dd,
 }
 
-fn momentum_workspace(
+impl<P> MomentumKernel<P> {
+    pub(super) fn new(a: f64, b: f64, product: P) -> Self {
+        let half = Dd::from_f64(0.5);
+        Self {
+            product,
+            mean_frequency: Dd::from_f64(a) * half + Dd::from_f64(b) * half,
+            half_difference: (Dd::from_f64(a) - Dd::from_f64(b)) * half,
+        }
+    }
+}
+
+pub(super) fn momentum_workspace(
     points: usize,
     original: usize,
     frequencies: usize,
@@ -235,7 +250,9 @@ where
         return Err(bad("exposure momentum exceeds its workspace budget"));
     }
     if !distance.is_finite() || distance < 0.0 {
-        return Err(bad("momentum field distance must be finite and nonnegative"));
+        return Err(bad(
+            "momentum field distance must be finite and nonnegative",
+        ));
     }
     let medium = side.momentum_material(anchor.source())?;
     let epsilon = linear_electric_permittivity(medium).map_err(ReflectionError::from)?;
@@ -245,7 +262,9 @@ where
     sums.try_reserve_exact(n)
         .map_err(|_| bad("exposure momentum accumulation allocation failed"))?;
     for i in 0..n {
-        if i % 64 == 0 { poll(cancelled)?; }
+        if i % 64 == 0 {
+            poll(cancelled)?;
+        }
         sums.push([Dd::ZERO; 6]);
     }
     let mut integrated = [Dd::ZERO; 6];
@@ -253,26 +272,54 @@ where
         poll(cancelled)?;
         let cell = if proper {
             accumulate_bank(
-                bank, side, distance, true,
+                bank,
+                side,
+                distance,
+                true,
                 |a, b| window.proper_product_kernel(a, b),
-                proper_product, ProperHarmonicProduct::mean_real_product_parts_dd,
-                &mut sums, cancelled,
+                proper_product,
+                ProperHarmonicProduct::mean_real_product_parts_dd,
+                &mut sums,
+                cancelled,
             )?
         } else {
             accumulate_bank(
-                bank, side, distance, false,
+                bank,
+                side,
+                distance,
+                false,
                 |a, b| window.product_kernel(a, b),
-                product, HarmonicProduct::mean_real_product_parts_dd,
-                &mut sums, cancelled,
+                product,
+                HarmonicProduct::mean_real_product_parts_dd,
+                &mut sums,
+                cancelled,
             )?
         };
-        for c in 0..6 { integrated[c] = integrated[c] + cell[c]; }
+        for c in 0..6 {
+            integrated[c] = integrated[c] + cell[c];
+        }
     }
+    finish_momentum_field(anchor.grid(), sums, integrated, epsilon, mu, cancelled)
+}
+
+// The same constitutive scaling and publication checks serve individual and
+// joint observations, after all real/proper banks have accumulated in DD.
+pub(super) fn finish_momentum_field(
+    grid: AngularSpectrumGrid,
+    sums: Vec<[Dd; 6]>,
+    mut integrated: [Dd; 6],
+    epsilon: f64,
+    mu: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<AngularSpectrumExposureMomentumField, AngularSpectrumError> {
     let mut points = Vec::new();
-    points.try_reserve_exact(n)
+    points
+        .try_reserve_exact(sums.len())
         .map_err(|_| bad("exposure momentum result allocation failed"))?;
     for (i, sum) in sums.into_iter().enumerate() {
-        if i % 64 == 0 { poll(cancelled)?; }
+        if i % 64 == 0 {
+            poll(cancelled)?;
+        }
         let mut scaled = [Dd::ZERO; 6];
         for c in 0..6 {
             scaled[c] = scale_momentum(sum[c], epsilon, mu)?;
@@ -285,9 +332,12 @@ where
     for value in &mut integrated {
         *value = scale_momentum(*value, epsilon, mu)?;
     }
-    let grid = anchor.grid();
     poll(cancelled)?;
-    Ok(AngularSpectrumExposureMomentumField { grid, points, integrated })
+    Ok(AngularSpectrumExposureMomentumField {
+        grid,
+        points,
+        integrated,
+    })
 }
 
 // Avoid creating an underflowed epsilon*mu before multiplying a resolved
@@ -312,56 +362,55 @@ fn accumulate_bank<P: Copy>(
     proper: bool,
     kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
-    product_parts: impl Fn(P, [Dd; 2], [Dd; 2])
-        -> Result<Dd, fs_fft::harmonic_window::WindowError>,
+    product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
     sums: &mut [[Dd; 6]],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<[Dd; 6], AngularSpectrumError> {
     let f = bank.frequency_count();
-    if f == 0 { return Ok([Dd::ZERO; 6]); }
-    let mut kernels = Vec::new();
-    kernels.try_reserve_exact(f * f)
-        .map_err(|_| bad("exposure momentum kernel allocation failed"))?;
-    let half = Dd::from_f64(0.5);
-    for &a in &bank.frequencies {
-        for &b in &bank.frequencies {
-            poll(cancelled)?;
-            kernels.push(MomentumKernel {
-                product: kernel(a, b)
-                    .map_err(|_| bad("exposure momentum temporal kernel is unrepresentable"))?,
-                mean_frequency: Dd::from_f64(a) * half + Dd::from_f64(b) * half,
-                half_difference: (Dd::from_f64(a) - Dd::from_f64(b)) * half,
-            });
-        }
+    if f == 0 {
+        return Ok([Dd::ZERO; 6]);
     }
-    let mut fields = Vec::new();
-    fields.try_reserve_exact(f)
-        .map_err(|_| bad("exposure momentum field allocation failed"))?;
-    for group in 0..f {
-        fields.push(bank.frequency_modal_field(group, side, distance, cancelled)?);
-    }
-    let cell = integrate_cell_momentum(
-        bank.anchor.grid(), &fields, &kernels, proper, product_parts, cancelled,
+    let mut observation = ExposureObservationBank::prepare(
+        bank,
+        side,
+        distance,
+        |a, b| kernel(a, b).map(|product| MomentumKernel::new(a, b, product)),
+        cancelled,
     )?;
-    // The same retained modal bank becomes the original sample bank in place.
-    for (group, field) in fields.iter_mut().enumerate() {
-        bank.synthesize_frequency_field(group, field, cancelled)?;
-    }
+    let cell = integrate_cell_momentum(
+        bank.anchor.grid(),
+        &observation.fields,
+        &observation.kernels,
+        proper,
+        product_parts,
+        cancelled,
+    )?;
+    observation.synthesize(bank, cancelled)?;
     for (point, sum) in sums.iter_mut().enumerate() {
         poll(cancelled)?;
         let value = integrate_momentum(
-            f, &kernels, |i| fields[i][point], proper, rotate_i, &product, cancelled,
-        ).map_err(momentum_error)?;
-        for c in 0..6 { sum[c] = sum[c] + value[c]; }
+            f,
+            &observation.kernels,
+            |i| observation.fields[i][point],
+            proper,
+            rotate_i,
+            &product,
+            cancelled,
+        )
+        .map_err(momentum_error)?;
+        for c in 0..6 {
+            sum[c] = sum[c] + value[c];
+        }
     }
     Ok(cell)
 }
 
-fn momentum_error(error: MomentError) -> AngularSpectrumError {
+pub(super) fn momentum_error(error: MomentError) -> AngularSpectrumError {
     match error {
         MomentError::Cancelled => AngularSpectrumError::Cancelled,
-        MomentError::Product(_) | MomentError::Unrepresentable =>
-            bad("exposure momentum product is unrepresentable"),
+        MomentError::Product(_) | MomentError::Unrepresentable => {
+            bad("exposure momentum product is unrepresentable")
+        }
     }
 }
 
@@ -371,30 +420,33 @@ fn momentum_error(error: MomentError) -> AngularSpectrumError {
 // must instead retain the half-weighted sine AND cosine components.
 // The spatial product is contracted in DD before carrier/beat differentiation,
 // so stationary spatial sums cancel before multiplying a large frequency.
-fn integrate_cell_momentum<P: Copy>(
+pub(super) fn integrate_cell_momentum<P: Copy>(
     grid: AngularSpectrumGrid,
     fields: &[Vec<[C64; 6]>],
     kernels: &[MomentumKernel<P>],
     proper: bool,
-    product: impl Fn(P, [Dd; 2], [Dd; 2])
-        -> Result<Dd, fs_fft::harmonic_window::WindowError>,
+    product: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<[Dd; 6], AngularSpectrumError> {
     let mut sum = [Dd::ZERO; 6];
     for mode in 0..grid.width * grid.height {
-        if mode % 32 == 0 { poll(cancelled)?; }
+        if mode % 32 == 0 {
+            poll(cancelled)?;
+        }
         let opposite = opposite_mode(grid, mode);
-        if opposite.is_some_and(|other| other < mode) { continue; }
+        if opposite.is_some_and(|other| other < mode) {
+            continue;
+        }
         let constant = opposite == Some(mode);
         let partner = opposite.filter(|_| !constant);
         let quadratures = if constant { 1 } else { 2 };
         let weight = Dd::from_f64(if constant { 1.0 } else { 0.5 });
         let value = integrate_momentum(
-            fields.len(), kernels,
+            fields.len(),
+            kernels,
             |i| {
-                let parts = spatial_quadratures(
-                    fields[i][mode], partner.map(|other| fields[i][other]),
-                );
+                let parts =
+                    spatial_quadratures(fields[i][mode], partner.map(|other| fields[i][other]));
                 core::array::from_fn(|c| [parts[0][c], parts[1][c]])
             },
             proper,
@@ -406,30 +458,35 @@ fn integrate_cell_momentum<P: Copy>(
             |kernel, a: [[Dd; 2]; 2], b: [[Dd; 2]; 2]| {
                 let mut value = Dd::ZERO;
                 for q in 0..quadratures {
-                    value = value + product(kernel, a[q], b[q])
-                        .map_err(MomentError::Product)?;
+                    value = value + product(kernel, a[q], b[q]).map_err(MomentError::Product)?;
                 }
                 Ok(value * weight)
             },
             cancelled,
-        ).map_err(momentum_error)?;
-        for c in 0..6 { sum[c] = sum[c] + value[c]; }
+        )
+        .map_err(momentum_error)?;
+        for c in 0..6 {
+            sum[c] = sum[c] + value[c];
+        }
     }
     let area = Dd::from_f64(grid.width as f64 * grid.spacing_m[0])
         * Dd::from_f64(grid.height as f64 * grid.spacing_m[1]);
     let integrated = sum.map(|v| v * area);
-    if integrated.iter().any(|v| !v.hi.is_finite() || !v.lo.is_finite()) {
+    if integrated
+        .iter()
+        .any(|v| !v.hi.is_finite() || !v.lo.is_finite())
+    {
         return Err(bad("integrated exposure momentum is unrepresentable"));
     }
     poll(cancelled)?;
     Ok(integrated)
 }
 
-fn rotate_i(value: C64) -> C64 {
+pub(super) fn rotate_i(value: C64) -> C64 {
     C64::new(-value.im, value.re)
 }
 
-fn integrate_momentum<P: Copy, A: Copy>(
+pub(super) fn integrate_momentum<P: Copy, A: Copy>(
     frequencies: usize,
     kernels: &[MomentumKernel<P>],
     field_at: impl Fn(usize) -> [A; 6],
@@ -442,7 +499,9 @@ fn integrate_momentum<P: Copy, A: Copy>(
     for i in 0..frequencies {
         let a = field_at(i);
         for j in 0..frequencies {
-            if j % 64 == 0 && cancelled() { return Err(MomentError::Cancelled); }
+            if j % 64 == 0 && cancelled() {
+                return Err(MomentError::Cancelled);
+            }
             let b = field_at(j);
             let kernel = kernels[i * frequencies + j];
             for c in 0..3 {
@@ -491,25 +550,49 @@ mod tests {
     ) -> [f64; 6] {
         let half = Dd::from_f64(0.5);
         if proper {
-            let kernels = frequencies.iter().flat_map(|&a| {
-                frequencies.iter().map(move |&b| MomentumKernel {
-                    product: window.proper_product_kernel(a, b).unwrap(),
-                    mean_frequency: Dd::from_f64(a) * half + Dd::from_f64(b) * half,
-                    half_difference: (Dd::from_f64(a) - Dd::from_f64(b)) * half,
+            let kernels = frequencies
+                .iter()
+                .flat_map(|&a| {
+                    frequencies.iter().map(move |&b| MomentumKernel {
+                        product: window.proper_product_kernel(a, b).unwrap(),
+                        mean_frequency: Dd::from_f64(a) * half + Dd::from_f64(b) * half,
+                        half_difference: (Dd::from_f64(a) - Dd::from_f64(b)) * half,
+                    })
                 })
-            }).collect::<Vec<_>>();
-            integrate_momentum(frequencies.len(), &kernels, |i| fields[i],
-                true, rotate_i, proper_product, &mut || false).unwrap().map(Dd::to_f64)
+                .collect::<Vec<_>>();
+            integrate_momentum(
+                frequencies.len(),
+                &kernels,
+                |i| fields[i],
+                true,
+                rotate_i,
+                proper_product,
+                &mut || false,
+            )
+            .unwrap()
+            .map(Dd::to_f64)
         } else {
-            let kernels = frequencies.iter().flat_map(|&a| {
-                frequencies.iter().map(move |&b| MomentumKernel {
-                    product: window.product_kernel(a, b).unwrap(),
-                    mean_frequency: Dd::from_f64(a) * half + Dd::from_f64(b) * half,
-                    half_difference: (Dd::from_f64(a) - Dd::from_f64(b)) * half,
+            let kernels = frequencies
+                .iter()
+                .flat_map(|&a| {
+                    frequencies.iter().map(move |&b| MomentumKernel {
+                        product: window.product_kernel(a, b).unwrap(),
+                        mean_frequency: Dd::from_f64(a) * half + Dd::from_f64(b) * half,
+                        half_difference: (Dd::from_f64(a) - Dd::from_f64(b)) * half,
+                    })
                 })
-            }).collect::<Vec<_>>();
-            integrate_momentum(frequencies.len(), &kernels, |i| fields[i],
-                false, rotate_i, product, &mut || false).unwrap().map(Dd::to_f64)
+                .collect::<Vec<_>>();
+            integrate_momentum(
+                frequencies.len(),
+                &kernels,
+                |i| fields[i],
+                false,
+                rotate_i,
+                product,
+                &mut || false,
+            )
+            .unwrap()
+            .map(Dd::to_f64)
         }
     }
 
@@ -518,18 +601,35 @@ mod tests {
         // Arbitrary Cartesian phasors isolate the vector/temporal contraction.
         // The source-backed integration tests separately exercise Maxwell fields.
         let fields = [
-            [C64::new(0.8, 0.2), C64::new(-0.2, 0.5), C64::new(0.3, -0.4),
-             C64::new(-0.5, 0.1), C64::new(0.6, 0.2), C64::new(-0.1, 0.3)],
-            [C64::new(-0.4, 0.7), C64::new(0.2, 0.3), C64::new(-0.6, 0.1),
-             C64::new(0.3, -0.2), C64::new(0.4, -0.1), C64::new(0.5, 0.6)],
+            [
+                C64::new(0.8, 0.2),
+                C64::new(-0.2, 0.5),
+                C64::new(0.3, -0.4),
+                C64::new(-0.5, 0.1),
+                C64::new(0.6, 0.2),
+                C64::new(-0.1, 0.3),
+            ],
+            [
+                C64::new(-0.4, 0.7),
+                C64::new(0.2, 0.3),
+                C64::new(-0.6, 0.1),
+                C64::new(0.3, -0.2),
+                C64::new(0.4, -0.1),
+                C64::new(0.5, 0.6),
+            ],
         ];
         let frequencies = [2.0, 2.3];
-        for profile in [HarmonicWindowProfile::Uniform, HarmonicWindowProfile::Triangular] {
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
             let window = HarmonicWindow::with_profile(0.17, 0.31, profile).unwrap();
             for proper in [false, true] {
                 let phases = if proper {
                     [C64::ONE, -C64::ONE, C64::new(0.0, 1.0), C64::new(0.0, -1.0)]
-                } else { [C64::ONE; 4] };
+                } else {
+                    [C64::ONE; 4]
+                };
                 let mut reference = [0.0; 6];
                 let steps = 2048;
                 for phase in phases {
@@ -546,27 +646,40 @@ mod tests {
                                 rate[k] += -omega * (a.re * s + a.im * c);
                             }
                         }
-                        let simpson = if step == 0 || step == steps { 1.0 }
-                            else if step % 2 == 0 { 2.0 } else { 4.0 };
+                        let simpson = if step == 0 || step == steps {
+                            1.0
+                        } else if step % 2 == 0 {
+                            2.0
+                        } else {
+                            4.0
+                        };
                         let shutter = match profile {
                             HarmonicWindowProfile::Uniform => 1.0,
-                            HarmonicWindowProfile::Triangular => 2.0 * (1.0 - (2.0*u-1.0).abs()),
+                            HarmonicWindowProfile::Triangular => {
+                                2.0 * (1.0 - (2.0 * u - 1.0).abs())
+                            }
                         };
                         for k in 0..3 {
                             let (a, b) = ((k + 1) % 3, (k + 2) % 3);
-                            reference[k] += simpson * shutter
-                                * (value[a]*value[b+3] - value[b]*value[a+3]);
-                            reference[k+3] += simpson * shutter
-                                * (rate[a]*value[b+3] + value[a]*rate[b+3]
-                                    - rate[b]*value[a+3] - value[b]*rate[a+3]);
+                            reference[k] += simpson
+                                * shutter
+                                * (value[a] * value[b + 3] - value[b] * value[a + 3]);
+                            reference[k + 3] += simpson
+                                * shutter
+                                * (rate[a] * value[b + 3] + value[a] * rate[b + 3]
+                                    - rate[b] * value[a + 3]
+                                    - value[b] * rate[a + 3]);
                         }
                     }
                 }
                 let actual = evaluate(&fields, &frequencies, window, proper);
                 for k in 0..6 {
                     let expected = reference[k] / (12.0 * steps as f64);
-                    assert!((actual[k]-expected).abs() < 3e-12,
-                        "component {k}: {} != {expected}", actual[k]);
+                    assert!(
+                        (actual[k] - expected).abs() < 3e-12,
+                        "component {k}: {} != {expected}",
+                        actual[k]
+                    );
                 }
             }
         }
@@ -577,34 +690,70 @@ mod tests {
         // Two co-propagating unit-admittance waves, amplitudes 1 and 2i.
         // Proper mean Sz = 2.5 - 2 sin(delta*t); its derivative is a slow beat.
         let fields = [
-            [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO, C64::ONE, C64::ZERO],
-            [C64::new(0.0, 2.0), C64::ZERO, C64::ZERO,
-             C64::ZERO, C64::new(0.0, 2.0), C64::ZERO],
+            [
+                C64::ONE,
+                C64::ZERO,
+                C64::ZERO,
+                C64::ZERO,
+                C64::ONE,
+                C64::ZERO,
+            ],
+            [
+                C64::new(0.0, 2.0),
+                C64::ZERO,
+                C64::ZERO,
+                C64::ZERO,
+                C64::new(0.0, 2.0),
+                C64::ZERO,
+            ],
         ];
         let delta = 0.25;
         let window = HarmonicWindow::new(0.17, 0.12).unwrap();
         let half_width = delta * window.duration_s() * 0.5;
         let sinc = half_width.sin() / half_width;
         let center = delta * (window.start_s() + window.duration_s() * 0.5);
-        let expected = [2.5 - 2.0*sinc*center.sin(), -2.0*delta*sinc*center.cos()];
+        let expected = [
+            2.5 - 2.0 * sinc * center.sin(),
+            -2.0 * delta * sinc * center.cos(),
+        ];
         let mut previous = None;
         for carrier in [0.0, 1e9, 1e12, 2_f64.powi(49)] {
             let actual = evaluate(&fields, &[carrier, carrier + delta], window, true);
             assert!((actual[2] - expected[0]).abs() < 2e-15);
             assert!((actual[5] - expected[1]).abs() < 2e-15);
-            if let Some(prior) = previous { assert_eq!(actual, prior); }
+            if let Some(prior) = previous {
+                assert_eq!(actual, prior);
+            }
             previous = Some(actual);
         }
         let monochromatic = evaluate(&fields[..1], &[1e15], window, true);
         assert_eq!(&monochromatic[3..], &[0.0; 3]);
-        assert!((scale_momentum(Dd::from_f64(1e200), 1e-200, 1e-200)
-            .unwrap().to_f64() / 1e-200 - 1.0).abs() < 2e-15);
+        assert!(
+            (scale_momentum(Dd::from_f64(1e200), 1e-200, 1e-200)
+                .unwrap()
+                .to_f64()
+                / 1e-200
+                - 1.0)
+                .abs()
+                < 2e-15
+        );
         assert!(scale_momentum(Dd::from_f64(1e300), 1e100, 1e100).is_err());
         let kernels = [MomentumKernel {
             product: window.product_kernel(2.0, 2.0).unwrap(),
-            mean_frequency: Dd::from_f64(2.0), half_difference: Dd::ZERO,
+            mean_frequency: Dd::from_f64(2.0),
+            half_difference: Dd::ZERO,
         }];
-        assert!(matches!(integrate_momentum(1, &kernels, |_| fields[0],
-            false, rotate_i, product, &mut || true), Err(MomentError::Cancelled)));
+        assert!(matches!(
+            integrate_momentum(
+                1,
+                &kernels,
+                |_| fields[0],
+                false,
+                rotate_i,
+                product,
+                &mut || true
+            ),
+            Err(MomentError::Cancelled)
+        ));
     }
 }

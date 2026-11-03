@@ -4,6 +4,7 @@ mod heat_spectrum;
 mod integrated_heat;
 mod statistics;
 mod stress;
+mod stress_momentum;
 mod two_sided;
 use super::*;
 use fs_em::plane_wave::{

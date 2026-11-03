@@ -3259,3 +3259,44 @@ The changed Rust was parsed with the pinned rustfmt, and the new regression
 module was formatted; independent analytic checks were evaluated. Native compilation and tests remain unexecuted
 because the shared build disk is full and memory is under pressure. This extends
 field observations, not a material mechanical-force or striction law.
+
+### Joint finite-window stress and momentum observation
+
+The original exposure and real/proper ensemble owners expose
+`stress_momentum_field` and `illumination_stress_momentum_field`.
+One query returns the existing stress and momentum result owners together:
+local Maxwell stress/traction, explicitly named Minkowski D cross B density,
+its shutter-weighted instantaneous time derivative, and their continuous
+periodic-cell integrals. Each observed exterior retains its own original
+scalar nondispersive lossless material. The original field, surface/volume
+integration, material-momentum and striction no-claims still apply.
+
+A private native frequency-bank owner now serves the separate and joint
+queries. The joint path reconstructs each coherent frequency field once,
+prepares one temporal kernel cache and synthesizes each retained field once.
+Stress projects the original product from the momentum kernel cache.
+Both exact modal contractions run before in-place synthesis; original
+point samples follow. The original dyad and momentum contractions and
+publication/scaling functions remain shared numerical owners, preserving
+real/proper factors, coherent sum/beat terms, both-face interference, DD
+frequency differentiation and signed Nyquist integration.
+
+The joint workspace cap includes both DD accumulation planes and outputs,
+one original reconstruction/FFT workspace, the momentum frequency coefficients
+and conservative modal scratch. It equals the two individual workspace
+bounds less one original workspace bound. Preparation's N*F² pair-work
+admission remains authoritative; at most ninety real or seventy-two proper
+scalar temporal products occur per admitted pair unit across point and
+modal observations. Work remains O(sum_r(L_r*N + F_r*N*log N + F_r²*N)).
+Avoiding a duplicate field reconstruction/cache/FFT is a source-level work
+reduction, not a measured wall-clock speedup claim. Cancellation or a failure
+in either observable returns no partial pair.
+
+Three source-bound G1/G3/G4 regressions cover equivalence to the individual
+owners on all physical faces and one-sided entry points, mixed mean/real/proper
+statistics, unequal exterior media, analytical Nyquist cell stress and
+momentum/storage, complete-workspace refusal, mid-query/final cancellation,
+darkness and deterministic retry. The new inputs pass pinned-nightly
+rustfmt parsing/formatting. The Rust regressions remain unexecuted; no native
+typecheck, runtime performance benchmark or broader quality gate is claimed.
+

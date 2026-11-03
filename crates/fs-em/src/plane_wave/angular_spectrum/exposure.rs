@@ -32,6 +32,11 @@ pub use momentum::{
     AngularSpectrumExposureMomentumPoint,
 };
 
+mod stress_momentum;
+pub use stress_momentum::{
+    AngularSpectrumExposureStressMomentumField, AngularSpectrumExposureStressMomentumLimits,
+};
+
 mod ensemble;
 pub use ensemble::{
     AngularSpectrumExposureEnsemble, AngularSpectrumExposureEnsembleLimits,
@@ -544,6 +549,60 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
                 poll(cancelled)?;
             }
             *value = [e[0], e[1], e[2], h[0], h[1], h[2]];
+        }
+        Ok(())
+    }
+}
+
+// One cached temporal kernel and one retained original six-component field
+// per frequency. Stress, momentum and their joint observer share this owner.
+// Modal contractions must precede synthesize(): the same storage then holds
+// original grid samples, with exactly one FFT synthesis per frequency.
+struct ExposureObservationBank<P> {
+    kernels: Vec<P>,
+    fields: Vec<Vec<[C64; 6]>>,
+}
+
+impl<P> ExposureObservationBank<P> {
+    fn prepare(
+        bank: &AngularSpectrumExposure<'_, '_, '_>,
+        side: ExposureSide,
+        distance: f64,
+        kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        let f = bank.frequency_count();
+        let mut kernels = Vec::new();
+        kernels
+            .try_reserve_exact(f * f)
+            .map_err(|_| bad("exposure observation kernel allocation failed"))?;
+        for &a in &bank.frequencies {
+            for &b in &bank.frequencies {
+                poll(cancelled)?;
+                kernels.push(
+                    kernel(a, b).map_err(|_| {
+                        bad("exposure observation temporal kernel is unrepresentable")
+                    })?,
+                );
+            }
+        }
+        let mut fields = Vec::new();
+        fields
+            .try_reserve_exact(f)
+            .map_err(|_| bad("exposure observation field allocation failed"))?;
+        for group in 0..f {
+            fields.push(bank.frequency_modal_field(group, side, distance, cancelled)?);
+        }
+        Ok(Self { kernels, fields })
+    }
+
+    fn synthesize(
+        &mut self,
+        bank: &AngularSpectrumExposure<'_, '_, '_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AngularSpectrumError> {
+        for (group, field) in self.fields.iter_mut().enumerate() {
+            bank.synthesize_frequency_field(group, field, cancelled)?;
         }
         Ok(())
     }
