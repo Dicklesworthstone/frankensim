@@ -668,13 +668,24 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
         // A radiative reservoir is independent of the ambient-fluid envelope.
         // Change only its explicit temperature, never emissivity, card query,
         // convection ambient, surface ownership, or a derived effective Robin row.
-        let radiation = project.cooling.as_mut().and_then(|c| c.conduction.as_mut())
-            .and_then(|c| c.radiation.as_mut()).ok_or_else(|| error("declared radiation is required"))?;
-        for surface in &mut radiation.surfaces {
-            if surface.name == parameter.entity {
-                surface.reservoir_temperature.value = value;
+        let setup = project.cooling.as_mut().and_then(|c| c.conduction.as_mut())
+            .ok_or_else(|| error("declared radiation is required"))?;
+        match (&mut setup.radiation, &mut setup.enclosure_radiation) {
+            (Some(radiation), None) => for surface in &mut radiation.surfaces {
+                if surface.name == parameter.entity {
+                    surface.reservoir_temperature.value = value;
+                    matches += 1;
+                }
+            },
+            (None, Some(enclosure)) if parameter.entity == "enclosure-environment" => {
+                let bath = enclosure.ambient_temperature.as_mut()
+                    .ok_or_else(|| error("a closed enclosure has no radiative reservoir temperature"))?;
+                bath.value = value;
                 matches += 1;
-            }
+            },
+            (Some(_), Some(_)) => return Err(error("radiative reservoir has ambiguous ambient/enclosure ownership")),
+            (None, None) => return Err(error("declared radiation is required")),
+            (None, Some(_)) => {},
         }
     } else {
         let setup = project.cooling.as_mut().and_then(|c| c.conduction.as_mut())

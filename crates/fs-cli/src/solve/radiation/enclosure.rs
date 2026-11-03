@@ -89,11 +89,6 @@ pub(super) fn lower(
         ));
     }
     if declaration.ambient_temperature.is_some() {
-        if setup.transient.is_none()
-            && spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint"))
-        {
-            return Err(bad("native steady open-enclosure adjoints are not yet wired; select a pointwise total-enthalpy trajectory for the complete black-bath transpose"));
-        }
         if setup.transient.is_some()
             && declaration.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise)
         {
@@ -368,6 +363,13 @@ impl EnclosureResult {
         match self {
             Self::Closed(result) => Some(&result.model),
             Self::Open(_) => None,
+        }
+    }
+
+    pub(super) fn open_model(&self) -> Option<(&fs_conduction::radiation::OpenDiffuseEnclosure, f64)> {
+        match self {
+            Self::Closed(_) => None,
+            Self::Open(result) => Some(result.model()),
         }
     }
 

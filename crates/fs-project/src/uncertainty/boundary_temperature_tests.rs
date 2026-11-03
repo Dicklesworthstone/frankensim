@@ -89,3 +89,67 @@ fn boundary_temperature_inputs_require_units_domains_and_exact_law_ownership() {
     assert_eq!(study.mean_control().unwrap().probe_count(study.parameters()), 0);
     assert!(study.bind(&original).is_ok());
 }
+
+fn open_base() -> ProjectSpec {
+    let mut project = crate::parse_sexpr_migrating(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project/cooling-enclosure.fsim"
+    ))).unwrap().decoded.spec;
+    let enclosure = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .enclosure_radiation.as_mut().unwrap();
+    enclosure.ambient_temperature = Some(QtyAny::new(285.0, dims::TEMPERATURE));
+    enclosure.view_factors = vec![vec![0.0, 0.35], vec![0.35, 0.0]];
+    assert!(project.validate().is_empty());
+    project
+}
+
+fn open_study() -> String {
+    STUDY.replace("natural-convection-ambient :entity \"air\" :low 294K :high 300K",
+        "power :entity \"body\" :low 4W :high 6W")
+        .replace("\"radiator\"", "\"enclosure-environment\"")
+}
+
+#[test]
+fn open_enclosure_samples_change_one_bath_without_rebinding_sources_or_convection() {
+    let original = open_base();
+    let study = UncertaintyStudy::parse(&open_study()).unwrap();
+    assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
+    let bound = study.bind(&original).unwrap();
+    let source = crate::print_sexpr(&original).unwrap();
+    for values in [[4.5, 280.0], [5.5, 288.0], [4.5, 280.0]] {
+        let mut expected = original.clone();
+        expected.power.as_mut().unwrap()[0].watts.value = values[0];
+        expected.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .enclosure_radiation.as_mut().unwrap().ambient_temperature.as_mut().unwrap().value = values[1];
+        let sample = bound.sample_project(&values).unwrap();
+        assert_eq!(sample, expected, "all surface cards, queries, views and fluid temperatures stay fixed");
+        let bytes = crate::print_sexpr(&sample).unwrap();
+        assert_ne!(bytes, source, "sample identity includes its physical bath");
+        assert_eq!(crate::parse_sexpr(&bytes).unwrap().spec, sample);
+    }
+    assert_eq!(bound.base(), &original);
+    assert!(bound.sample_project(&[5.0, 279.0]).is_err());
+    assert!(bound.sample_project(&[5.0, f64::NAN]).is_err());
+    assert!(UncertaintyStudy::parse(&open_study().replace("280K", "0K")).is_err());
+}
+
+#[test]
+fn open_enclosure_bath_binding_refuses_missing_closed_and_ambiguous_owners() {
+    let original = open_base();
+    let bind = |project: &ProjectSpec| UncertaintyStudy::parse(&open_study()).unwrap().bind(project);
+    let mut closed = original.clone();
+    let enclosure = closed.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .enclosure_radiation.as_mut().unwrap();
+    enclosure.ambient_temperature = None;
+    enclosure.view_factors = vec![vec![0.0, 1.0], vec![1.0, 0.0]];
+    assert!(closed.validate().is_empty());
+    assert!(bind(&closed).is_err());
+    let mut absent = original.clone();
+    absent.cooling.as_mut().unwrap().conduction.as_mut().unwrap().enclosure_radiation = None;
+    assert!(bind(&absent).is_err());
+    let mut ambiguous = original.clone();
+    ambiguous.cooling.as_mut().unwrap().conduction.as_mut().unwrap().radiation =
+        base().cooling.unwrap().conduction.unwrap().radiation;
+    assert!(bind(&ambiguous).is_err());
+    assert!(UncertaintyStudy::parse(&open_study().replace("enclosure-environment", "cold-patch"))
+        .unwrap().bind(&original).is_err(), "a physical patch is not an independent enclosure bath");
+}

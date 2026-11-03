@@ -5,6 +5,7 @@ use fs_conduction::radiation::{OpenDiffuseEnclosure, solve_with_open_gray_diffus
 
 pub(in crate::solve::radiation) struct OpenResult {
     model: OpenDiffuseEnclosure,
+    ambient_temperature_k: f64,
     report: CoupledRadiationReport,
     decomposition_residual_w: f64,
 }
@@ -127,6 +128,7 @@ pub(super) fn solve(
         combined_boundary: Some(solved.combined_boundary),
         enclosure: Some(EnclosureResult::Open(OpenResult {
             model,
+            ambient_temperature_k: ambient_k,
             report: solved.radiation,
             decomposition_residual_w: decomposition,
         })),
@@ -134,6 +136,10 @@ pub(super) fn solve(
 }
 
 impl OpenResult {
+    pub(super) fn model(&self) -> (&OpenDiffuseEnclosure, f64) {
+        (&self.model, self.ambient_temperature_k)
+    }
+
     pub(super) fn receipt(
         &self,
         lowering: &LoweredRadiation,
@@ -222,4 +228,4 @@ impl OpenResult {
     }
 }
 
-const SCOPE: &str = "Opaque diffuse gray physical surfaces exchange reflected radiation and see a single prescribed black environment through their exact row deficits. Actual mesh areas admit reciprocity; supplied factors are not geometrically certified. The black environment has no solid degree of freedom. Its power is independently evaluated and stays outside air convection. This steady path uses patch-mean fourth-power emission, frozen source-backed emissivity and the shared complete nonlinear residual gate; initialization needs a conductive or convective thermal anchor. Use explicit pointwise total-enthalpy storage for vacuum cooling histories. Native open-bath adjoint controls, moving visibility, participating media, spectral or directional surfaces, continuum error bounds and experimental validation are not claimed.";
+const SCOPE: &str = "Opaque diffuse gray physical surfaces exchange reflected radiation and see a single prescribed black environment through their exact row deficits. Actual mesh areas admit reciprocity; supplied factors are not geometrically certified. The black environment has no solid degree of freedom. Its power is independently evaluated and stays outside air convection. This steady path uses patch-mean fourth-power emission, frozen source-backed emissivity and the shared complete nonlinear residual gate; initialization needs a conductive or convective thermal anchor. Use explicit pointwise total-enthalpy storage for vacuum cooling histories. Requested steady nominal derivatives include complete reflected exchange, each physical emissivity and one shared bath temperature through the same thermal dual. Moving visibility, participating media, spectral or directional surfaces, continuum error bounds and experimental validation are not claimed.";

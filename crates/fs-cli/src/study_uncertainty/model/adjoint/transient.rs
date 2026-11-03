@@ -153,6 +153,34 @@ fn family<'a>(report: &'a J, name: &str) -> Result<&'a J> {
         .ok_or_else(|| invalid(format!("transient nominal adjoint lacks {name} controls")))
 }
 
+fn radiation_reservoir(
+    report: &J, spec: &ProjectSpec, entity: &str, prefix_steps: usize,
+) -> Result<f64> {
+    let controls = family(report, "radiation")?;
+    let setup = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+        .ok_or_else(|| invalid("missing sampled radiation setup"))?;
+    if let Some(enclosure) = &setup.enclosure_radiation {
+        let temperature = enclosure.ambient_temperature
+            .ok_or_else(|| invalid("closed enclosure has no shared radiative bath control"))?;
+        if setup.radiation.is_some() || entity != "enclosure-environment"
+            || enclosure.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise)
+            || !setup.transient.as_ref().is_some_and(|time| time.enthalpy.is_some())
+            || controls.str_field("method") != Some("complete-pointwise-p1-open-gray-diffuse-enthalpy-tangent")
+            || controls.f64_field("control_steps") != Some(prefix_steps as f64)
+        {
+            return Err(invalid("shared enclosure bath requires its complete pointwise enthalpy control over the selected prefix"));
+        }
+        let bath = family(controls, "black_environment")?;
+        if number(bath, "temperature_k")?.to_bits() != temperature.value.to_bits() {
+            return Err(invalid("shared radiation bath differs from its sampled physical temperature"));
+        }
+        number(bath, "dtemperature_dambient_temperature_k_per_k")
+    } else {
+        number(named(controls, "surfaces", "name", entity)?,
+            "dtemperature_dreservoir_temperature_k_per_k")
+    }
+}
+
 /// Total-enthalpy controls are absolute original-boundary derivatives. Their
 /// physical point and selected prefix must agree with this calibration, rather
 /// than a frozen radiative Robin row or an unrelated same-unit temperature.
@@ -394,8 +422,8 @@ pub(super) fn coefficients_with_reference(
             }
             Target::FixedTemperature | Target::HeatFlux =>
                 prescribed_boundary(report, spec, entity, parameter.target, prefix_steps)?,
-            Target::RadiationReservoirTemperature => number(named(family(report, "radiation")?,
-                "surfaces", "name", entity)?, "dtemperature_dreservoir_temperature_k_per_k")?,
+            Target::RadiationReservoirTemperature => radiation_reservoir(
+                report, spec, entity, prefix_steps)?,
             Target::ContactPressure | Target::ContactThickness | Target::ContactGap
             | Target::ContactTorque => super::contact::transient_coefficient(report, entity)?,
         };

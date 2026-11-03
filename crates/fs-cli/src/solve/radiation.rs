@@ -318,6 +318,10 @@ impl SolidSolution {
         self.enclosure.as_ref().and_then(enclosure::EnclosureResult::model)
     }
 
+    pub(super) fn open_enclosure_model(&self) -> Option<(&fs_conduction::radiation::OpenDiffuseEnclosure, f64)> {
+        self.enclosure.as_ref().and_then(enclosure::EnclosureResult::open_model)
+    }
+
     /// Retain the producer's immutable laws, never infer emissivity from a
     /// rounded receipt or a difference of combined coefficients.
     pub(super) fn radiation_patches(&self) -> Vec<AmbientRadiationPatch> {

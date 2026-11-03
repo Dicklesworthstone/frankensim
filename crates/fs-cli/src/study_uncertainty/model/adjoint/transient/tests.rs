@@ -199,6 +199,36 @@ fn g0_history_controls_use_physical_reservoir_branch_bank_and_surface_identities
 }
 
 #[test]
+fn g0_open_enclosure_history_control_uses_the_shared_bath_and_exact_selected_prefix() {
+    let mut spec = base();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    let source = fs_project::parse_sexpr_migrating(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../data/reference-project/cooling-enclosure.fsim"))).unwrap().decoded.spec;
+    setup.enclosure_radiation = source.cooling.unwrap().conduction.unwrap().enclosure_radiation;
+    let enclosure = setup.enclosure_radiation.as_mut().unwrap();
+    enclosure.ambient_temperature = Some(QtyAny::new(285.0, dims::TEMPERATURE));
+    enclosure.view_factors = vec![vec![0.0, 0.35], vec![0.35, 0.0]];
+    enclosure.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+    setup.transient.as_mut().unwrap().enthalpy = Some(TransientEnthalpy {
+        materials: Vec::new(), max_newton_iterations: 20, max_backtracks: 12,
+    });
+    let p = parameter(Target::RadiationReservoirTemperature, "enclosure-environment");
+    let controls = r#", "radiation":{"method":"complete-pointwise-p1-open-gray-diffuse-enthalpy-tangent","control_steps":8,"black_environment":{"temperature_k":285,"dtemperature_dambient_temperature_k_per_k":0.25},"surfaces":[{"name":"enclosure-environment","dtemperature_dreservoir_temperature_k_per_k":99}]}"#;
+    assert_eq!(coefficients(&receipt(true, controls), &spec, std::slice::from_ref(&p),
+        301.0, "solid").unwrap(), [0.25], "the bath cannot alias a same-named surface control");
+    for invalid in [controls.replace("\"control_steps\":8", "\"control_steps\":7"),
+        controls.replace("\"temperature_k\":285", "\"temperature_k\":284"),
+        controls.replace("open-gray", "closed-gray"), controls.replace("0.25", "null")]
+    {
+        assert!(coefficients(&receipt(true, &invalid), &spec, std::slice::from_ref(&p),
+            301.0, "solid").is_err());
+    }
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .enclosure_radiation.as_mut().unwrap().ambient_temperature = None;
+    assert!(coefficients(&receipt(true, controls), &spec, &[p], 301.0, "solid").is_err());
+}
+
+#[test]
 fn g0_calibration_cannot_consume_another_time_grid_objective_or_storage_law() {
     let spec = base();
     let parameters = [parameter(Target::Power, "solid")];

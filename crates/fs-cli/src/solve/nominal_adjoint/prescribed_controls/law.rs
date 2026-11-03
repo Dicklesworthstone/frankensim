@@ -6,7 +6,6 @@ use super::{
     SolveRefusal, ThermalBc, ThermalBoundary, bad, finite, lower, poll, zeros,
 };
 use super::super::{convective_feedback, enclosure_feedback};
-use fs_conduction::radiation::EnclosureRadiationLinearization;
 use fs_conduction::adjoint::MeanFluxFeedback;
 
 pub(super) struct Law {
@@ -34,11 +33,11 @@ pub(super) fn bind(
             mesh: &solved.mesh, boundary: &bound.boundary, material: &data.fallback,
             element_materials: Some(&data.materials), source: &data.source,
         };
-        let radiation = EnclosureRadiationLinearization::bind(
+        let radiation = enclosure.bind(
             cx, problem, data.linear, &solved.solution.temperature, &names,
-            &bound.natural.wall_slopes, &bound.feedback, enclosure,
+            &bound.natural.wall_slopes, &bound.feedback,
             declaration.heat_tolerance.value, max_entries,
-        ).map_err(lower)?;
+        )?;
         // RobinResponse uses these same complete coefficients for J_FD as
         // the selected-goal solve uses for J_FF. Fixed vertices remain in means.
         return Ok(Law {

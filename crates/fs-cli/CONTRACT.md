@@ -2658,8 +2658,19 @@ and source controls. The reverse reuses the prepared open radiosity system,
 revalidates each unchanged accepted endpoint and contracts parameter partials
 without an extra parameter solve. Initial peaks have zero future bath
 sensitivity; later peaks reverse only their selected prefix.
-Steady open-bath adjoints, patch-mean open transients and continuum bounds
-still refuse explicitly.
+Steady nominal maximum/volume-mean adjoints reuse the same complete thermal
+linearization with the retained open model. They expose one
+`radiation-reservoir-temperature` row named `enclosure-environment`, alongside
+independent physical-surface emissivities and the existing source, material,
+contact, natural/air and prescribed-temperature controls. The environment is
+not a FEM node or a convection port. The unchanged final field, original
+convection and authored flux are retained; the bath is an external heat
+account. Solve driver 92 binds this added behavior into run identity.
+Native uncertainty studies bind that same `radiation-reservoir-temperature`
+coordinate through `enclosure-environment`, changing only the explicit open
+bath. Transient calibration consumes the matching pointwise enthalpy bath
+control over the selected prefix; absent, closed or ambiguous owners refuse.
+Patch-mean open transients and continuum bounds still refuse explicitly.
 The existing native tests exercise independent reflected heat equations in
 both directions and real pointwise vacuum histories with original enthalpy
 storage. Native adjoint regressions compare fresh complete trajectories under

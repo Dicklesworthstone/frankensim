@@ -202,6 +202,47 @@ fn g3_g5_native_enclosure_rebinds_refined_traces_and_replays_exact_fields() {
 }
 
 #[test]
+fn g1_native_open_enclosure_adjoint_differentiates_each_original_emissivity_card() {
+    let (cards, card) = emissivity_cards(&fixture_cards(), 0.7);
+    let mut spec = enclosure_project(&card);
+    let declaration = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .enclosure_radiation.as_mut().unwrap();
+    declaration.ambient_temperature = Some(QtyAny::new(280.0, fs_project::spec::dims::TEMPERATURE));
+    declaration.view_factors = vec![vec![0.0, 0.35], vec![0.35, 0.0]];
+    declaration.temperature_tolerance.value = 1e-11;
+    declaration.heat_tolerance.value = 1e-10;
+    let (forward, original_field, _) = run_enclosure(&spec, &cards);
+    let mut requested = spec.clone();
+    requested.outputs.as_mut().unwrap().push(fs_project::spec::OutputRequest {
+        name: "temperature-max-adjoint".into(), kind: "report".into(), region: None,
+    });
+    let (receipt, actual_field, html) = run_enclosure(&requested, &cards);
+    assert_eq!(actual_field.get("temperature"), original_field.get("temperature"));
+    assert_eq!(receipt.get("energy"), forward.get("energy"));
+    assert!(html.contains("open-gray-diffuse-enclosure"));
+    let gradient = receipt.get("nominal_adjoint").unwrap();
+    let vertex = n(gradient, "selected_vertex") as usize;
+    let controls: Vec<_> = gradient.get("parameters").unwrap().as_array().unwrap().iter()
+        .filter(|row| row.str_field("target") == Some("radiation-emissivity")).collect();
+    assert_eq!(controls.len(), 2, "shared source identity must not merge independent surfaces");
+    for (surface, control) in controls.iter().enumerate() {
+        let probe = |epsilon| {
+            let (changed_cards, changed_card) = emissivity_cards(&cards, epsilon);
+            let mut changed = spec.clone();
+            changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                .enclosure_radiation.as_mut().unwrap().surfaces[surface].card = changed_card;
+            let (_, field, _) = run_enclosure(&changed, &changed_cards);
+            field.get("temperature").unwrap().as_array().unwrap()[vertex].as_f64().unwrap()
+        };
+        let difference = (probe(0.7001)-probe(0.6999))/0.0002;
+        let actual = n(control, "derivative");
+        assert!(actual.abs() > 1e-6);
+        assert!((actual-difference).abs() < 2e-4*difference.abs().max(1e-4),
+            "surface {surface}: source-card derivative {actual:e} versus complete physical change {difference:e}");
+    }
+}
+
+#[test]
 fn g0_native_enclosure_refuses_unsupported_bounds_and_bad_mesh_reciprocity() {
     let (cards, card) = emissivity_cards(&fixture_cards(), 0.85);
     for kind in ["mean-bound", "adaptive", "unequal-area"] {

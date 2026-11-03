@@ -153,7 +153,8 @@ pub(super) fn extract(
     let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| bad("missing conduction setup"))?;
     if data.radiating_boundary.is_some() != (setup.radiation.is_some() || setup.enclosure_radiation.is_some())
-        || data.enclosure.is_some() != setup.enclosure_radiation.is_some()
+        || (data.enclosure.is_some() || data.open_enclosure.is_some()) != setup.enclosure_radiation.is_some()
+        || (data.enclosure.is_some() && data.open_enclosure.is_some())
     {
         return Err(bad("radiation intent differs from the retained native operator"));
     }
@@ -234,8 +235,10 @@ pub(super) fn extract(
         inlet_rows = result.air_rows;
         natural_ambient = result.natural_ambient;
         radiation_rows = result.radiation_rows;
+        let mode = if data.open_enclosure.is_some() { "open-enclosure-full-radiosity-feedback" }
+            else { "enclosure-full-radiosity-feedback" };
         (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
-            None, None, "enclosure-full-radiosity-feedback")
+            None, None, mode)
     } else if !data.air_paths.is_empty()
         && (has_natural || setup.radiation.is_some() || nonlinear_solid::needed(cx, problem)?) {
         let result = coupled_thermal::pullback(cx, spec, solved, &weights)?;

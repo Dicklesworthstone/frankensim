@@ -193,6 +193,107 @@ fn at_vertex(fixture: &Fixture, receipt: &JsonValue, vertex: usize) -> f64 {
     field(fixture, receipt).as_array().unwrap()[vertex].as_f64().unwrap()
 }
 
+fn open_environment(project: &mut fs_project::ProjectSpec, temperature_k: f64) {
+    let declaration = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .enclosure_radiation.as_mut().unwrap();
+    declaration.ambient_temperature = Some(fs_qty::QtyAny::new(
+        temperature_k, fs_project::spec::dims::TEMPERATURE));
+    declaration.view_factors = vec![vec![0.0, 0.35], vec![0.35, 0.0]];
+}
+
+#[test]
+fn native_open_enclosure_adjoint_keeps_physical_field_and_one_shared_bath_control() {
+    let mut f = fixture();
+    open_environment(&mut f.project, 280.0);
+    f.project.power.as_mut().unwrap()[0].duty = 0.37;
+    let bath_study = fs_project::uncertainty::UncertaintyStudy::parse(r#"(fsim-uncertainty-study
+        :version 3 :project "cooling-reference.fsim" :samples 4 :seed 29
+        :wall-time 120s :method monte-carlo :correlation independent :qoi "temperature-max"
+        :geometry ((mesh :role "enclosure" :path "plate.stl" :unit "m" :max-hole-edges 0))
+        :materials ("aa6061.fsmcdpk" "gray-surface.fsmcdpk") :interfaces ()
+        :mean-control (nominal-adjoint :max-solves 1)
+        :parameters ((uniform :name "bath" :target radiation-reservoir-temperature
+            :entity "enclosure-environment" :low 279K :high 281K)))"#)
+        .unwrap().bind(&f.project).unwrap();
+    assert_eq!(bath_study.sample_project(&[280.0]).unwrap(), f.project);
+    let baseline = native(&f, &f.project, 130);
+    let mut requested = f.project.clone();
+    request(&mut requested);
+    let receipt = native(&f, &requested, 131);
+    assert_eq!(field(&f, &baseline), field(&f, &receipt));
+    assert_eq!(baseline.get("energy"), receipt.get("energy"));
+    assert_eq!(baseline.get("radiation"), receipt.get("radiation"));
+    let report = receipt.get("nominal_adjoint").unwrap();
+    assert_eq!(report.str_field("mode"), Some("open-enclosure-full-radiosity-feedback"));
+    assert_eq!(report.str_field("authority"), Some("Estimated"));
+    let parameters = report.get("parameters").unwrap().as_array().unwrap();
+    let baths: Vec<_> = parameters.iter().filter(|row|
+        row.str_field("target") == Some("radiation-reservoir-temperature")).collect();
+    assert_eq!(baths.len(), 1, "one environment illuminates all physical patches");
+    assert_eq!(baths[0].str_field("entity"), Some("enclosure-environment"));
+    assert!(baths[0].f64_field("derivative").unwrap() > 0.0);
+    assert_eq!(parameters.iter().filter(|row|
+        row.str_field("target") == Some("radiation-emissivity")).count(), 2);
+    let vertex = report.f64_field("selected_vertex").unwrap() as usize;
+    for (case, target, step) in [(0, "power", 0.02),
+        (1, "radiation-reservoir-temperature", 0.01), (2, "convection-temperature", 0.01)]
+    {
+        let mut values = Vec::new();
+        for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+            let mut changed = f.project.clone();
+            if case == 0 {
+                changed.power.as_mut().unwrap()[0].watts.value += sign*step;
+            } else if case == 1 {
+                changed = bath_study.sample_project(&[280.0 + sign*step]).unwrap();
+            } else {
+                let setup = changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+                let fs_project::ThermalBoundaryCondition::Convection { reference_temperature, .. }
+                    = &mut setup.boundaries[0].condition else { panic!("convection fixture"); };
+                reference_temperature.value += sign*step;
+            }
+            values.push(at_vertex(&f, &native(&f, &changed, 132+case*2+side), vertex));
+        }
+        close_control(coefficient(&receipt, target), (values[1]-values[0])/(2.0*step), target);
+    }
+}
+
+#[test]
+fn native_open_enclosure_flux_patches_retain_the_complete_prescribed_temperature_lift() {
+    let mut f = fixture();
+    open_environment(&mut f.project, 310.0);
+    f.project.solver.as_mut().unwrap().fidelity = "ladder".into();
+    for boundary in &mut f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries {
+        boundary.condition = fs_project::ThermalBoundaryCondition::HeatFlux {
+            outward_flux: fs_qty::QtyAny::new(0.0, fs_project::spec::dims::HEAT_FLUX),
+        };
+    }
+    extra_y_face(&mut f.project, "controlled-wall",
+        fs_project::ThermalBoundaryCondition::FixedTemperature {
+            temperature: fs_qty::QtyAny::new(280.0, fs_project::spec::dims::TEMPERATURE),
+        });
+    let mut requested = f.project.clone();
+    requested.outputs.as_mut().unwrap().push(fs_project::spec::OutputRequest {
+        name: "temperature-max-boundary-adjoint".into(), kind: "report".into(), region: None,
+    });
+    let receipt = native(&f, &requested, 140);
+    let report = receipt.get("nominal_adjoint").unwrap();
+    assert!(!report.get("parameters").unwrap().as_array().unwrap().iter().any(|row|
+        matches!(row.str_field("target"), Some("convection-coefficient" | "convection-temperature"))),
+        "an external radiative bath must not invent convective control ports");
+    let vertex = report.f64_field("selected_vertex").unwrap() as usize;
+    let mut values = Vec::new();
+    for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+        let mut changed = f.project.clone();
+        let fs_project::ThermalBoundaryCondition::FixedTemperature { temperature }
+            = &mut changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                .boundaries.last_mut().unwrap().condition else { panic!("prescribed bath fixture"); };
+        temperature.value += sign*0.01;
+        values.push(at_vertex(&f, &native(&f, &changed, 141+side), vertex));
+    }
+    close_control(coefficient(&receipt, "fixed-temperature"), (values[1]-values[0])/0.02,
+        "open-enclosure prescribed-temperature lift");
+}
+
 fn close_control(actual: f64, expected: f64, target: &str) {
     assert!((actual-expected).abs() < 2e-3*expected.abs().max(1e-4),
         "{target}: complete enclosure derivative {actual:e}, physical re-solve {expected:e}");
