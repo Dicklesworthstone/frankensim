@@ -2,8 +2,10 @@
 //!
 //! A mean velocity alone loses kinetic energy. Retain the mass-weighted
 //! central second moment `q = sum(m_i |v_i-v_mean|²)/(2 sum(m_i))` alongside
-//! mean enthalpy and velocity. Complete local mixing turns `dm*q` into heat,
-//! while the same term remains part of the incoming kinetic-energy account.
+//! mean enthalpy and velocity. Use positive mass magnitudes for either stream
+//! direction. Complete inflow mixing turns `dm*q` into heat; powered outflow
+//! requires `r*q` actuator work for removed mass `r`. Both retain the same
+//! term in their signed carried kinetic-energy account.
 //! Pairwise central-moment combination avoids subtracting large kinetic
 //! energies and is covariant under a common velocity or caloric-datum shift.
 

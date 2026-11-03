@@ -80,6 +80,93 @@ fn g1_powered_outflow_drains_actual_liquid_and_recoils_without_inventing_heat() 
 }
 
 #[test]
+fn g1_opposing_same_cell_outlets_keep_carried_energy_and_authorize_work_once() {
+    for datum in [0.0, 1e9] {
+        for prepared in [false, true] {
+            with_liquid(datum, |liquid, gate| {
+                let before = liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+                let bits = liquid.flow().lattice().grid().state_bits();
+                let h = liquid.specific_enthalpy_at(INTERFACE).unwrap();
+                let mass = before.density_kg_m3 * before.fill_fraction * 1e-9;
+                let relative = [0.04, -0.03, 0.02];
+                let inputs = [1.0, -1.0].map(|sign| FreeSurfaceMassOutflow {
+                    exchange: FreeSurfaceMassExchange {
+                        specific_enthalpy_j_kg: h + sign * 10_000.0,
+                        ..outflow(datum).exchange
+                    },
+                    velocity_m_s: core::array::from_fn(|d| {
+                        before.velocity_m_s[d] + sign * relative[d]
+                    }),
+                });
+                // Zero mean relative velocity cannot hide the work needed to
+                // create two finite opposing exhaust velocities.
+                assert!(
+                    liquid
+                        .prepare_interface_outflow(&inputs, 0.0, controls(), gate)
+                        .is_err()
+                );
+                assert_eq!(liquid.flow().lattice().grid().state_bits(), bits);
+                assert_eq!(liquid.specific_enthalpy_at(INTERFACE).unwrap(), h);
+                let report = if prepared {
+                    let proposal = liquid
+                        .prepare_interface_outflow(&inputs, 1e-8, controls(), gate)
+                        .unwrap();
+                    assert_eq!(proposal.report().exchange.samples.len(), 1);
+                    proposal.publish()
+                } else {
+                    liquid
+                        .eject_interface_outflow(&inputs, 1e-8, controls(), gate)
+                        .unwrap()
+                };
+                let after = liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+                assert_eq!(report.exchange.samples.len(), 1);
+                let sample = &report.exchange.samples[0];
+                assert_eq!(sample.requested_mass_kg, -2e-7);
+                let dm = sample.mass_change_kg;
+                let fraction = dm / sample.requested_mass_kg;
+                let remaining = mass + dm;
+                let carried: f64 = inputs
+                    .iter()
+                    .map(|input| {
+                        0.5 * fraction
+                            * input.exchange.mass_kg
+                            * input.velocity_m_s.iter().map(|u| u * u).sum::<f64>()
+                    })
+                    .sum();
+                let expected_work = -0.5 * dm * relative.iter().map(|u| u * u).sum::<f64>();
+                for d in 0..3 {
+                    let carried_momentum: f64 = inputs
+                        .iter()
+                        .map(|input| fraction * input.exchange.mass_kg * input.velocity_m_s[d])
+                        .sum();
+                    assert!((after.velocity_m_s[d] - before.velocity_m_s[d]).abs() < 3e-14);
+                    assert!(
+                        (remaining * after.velocity_m_s[d]
+                            - mass * before.velocity_m_s[d]
+                            - carried_momentum)
+                            .abs()
+                            < 1e-20
+                    );
+                }
+                assert!((report.carried_kinetic_energy_j - carried).abs() < 1e-20);
+                assert!((report.mechanical_work_j - expected_work).abs() < 1e-20);
+                assert!((report.kinetic_energy_change_j - carried - expected_work).abs() < 1e-20);
+                assert!(report.mechanical_work_j > 0.0);
+                assert_eq!(report.exchange.heat_j, 0.0);
+                assert_eq!(liquid.specific_enthalpy_at(INTERFACE).unwrap(), h);
+                assert_eq!(before.density_kg_m3, after.density_kg_m3);
+                assert_eq!(
+                    before.pressure_perturbation_pa,
+                    after.pressure_perturbation_pa
+                );
+                near(after.fill_fraction, 0.2, 2e-14);
+                assert_eq!(liquid.physical_time_s(), 0.0);
+            });
+        }
+    }
+}
+
+#[test]
 fn g3_comoving_outflow_preserves_original_signed_exchange_exactly_without_work() {
     let original = with_liquid(0.0, |liquid, gate| {
         let report = liquid
@@ -153,11 +240,23 @@ fn g4_outflow_work_speed_capacity_and_source_refusals_preserve_all_accepted_stat
                     .is_err()
             );
         }
-        assert!(
-            liquid
-                .eject_interface_outflow(&[valid, valid], 1.0, controls(), gate)
-                .is_err()
-        );
+        let mut exhausted = [valid; 2];
+        exhausted
+            .iter_mut()
+            .for_each(|input| input.exchange.mass_kg = -2.1e-7);
+        let mut invalid_average = [valid; 2];
+        invalid_average[0].exchange.specific_enthalpy_j_kg = -1.0;
+        invalid_average[1].exchange.specific_enthalpy_j_kg = 400_001.0;
+        let mut invalid_velocity = [valid; 2];
+        invalid_velocity[0].velocity_m_s = [1e6, 0.0, 0.0];
+        invalid_velocity[1].velocity_m_s = [-1e6, 0.0, 0.0];
+        for inputs in [exhausted, invalid_average, invalid_velocity] {
+            assert!(
+                liquid
+                    .eject_interface_outflow(&inputs, 1.0, controls(), gate)
+                    .is_err()
+            );
+        }
         let cancelled = CancelGate::new_clock_free();
         cancelled.request();
         assert!(

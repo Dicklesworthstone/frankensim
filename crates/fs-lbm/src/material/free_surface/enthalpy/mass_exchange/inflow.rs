@@ -323,9 +323,8 @@ mod tests {
             TransferMomentum::Mixing(&mixtures).state(&location, 0.4, 0.1, 0.5, velocity),
             Some((original.0, original.1, 0.0))
         );
-        let velocities = BTreeMap::from([(location, carried)]);
         let outgoing = TransferMomentum::Ejection {
-            velocities: &velocities,
+            mixtures: &mixtures,
             maximum_work_j: 1.0,
         };
         let original = outflow::ejection_state(0.4, -0.1, 0.3, velocity, carried).unwrap();

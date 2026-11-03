@@ -966,6 +966,27 @@ mass, coupled contact/surface restrictions and source-domain exits still refuse.
 This boundary does not infer evaporation recoil, nozzle pressure work, gas-volume
 displacement or thermodynamic phase expansion, and it does not advance time.
 
+Several outlets may remove mass from the same interface in one native update.
+The shared stream reducer uses positive removed-mass magnitudes to retain mean
+velocity, mean liquid enthalpy and central specific kinetic variance `q`.
+The combined signed transfer is still negative. Its carried kinetic energy
+includes `dm*q`, while actuator work includes `r*q` for `r=-dm`; this energy
+leaves with the streams and never becomes heat in the remaining liquid.
+Opposing outlet velocities therefore require work even when their mean causes
+no recoil. Work admission covers the sum across every cell and every outlet.
+
+Each outlet independently satisfies the original liquid caloric and speed
+domains before reduction. The native owner projects the total removal once
+and returns one sample per cell. Its common represented/requested mass ratio
+applies to each outlet's credited mass, momentum and carried energy. Authored
+heat sums without mass scaling. Positive remaining inventory and accepted
+recoil limits remain binding, and every refusal leaves the accepted owner
+unchanged. The original single-outlet arithmetic is retained; co-moving
+exchange and inflow use their existing laws. Focused tests check opposing
+outlets, all three-source permutations, frame/datum/density covariance,
+represented fractions, dispersion-work overflow and single-stream identity;
+public fixtures cover immediate/prepared publication and shared-cell refusals.
+
 ### Prepared interface mass transfers
 
 `prepare_interface_inflow` and `prepare_interface_outflow` return typed handles

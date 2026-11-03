@@ -16,7 +16,8 @@ pub struct FreeSurfaceMassOutflow {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreeSurfaceMassOutflowReport {
     pub exchange: FreeSurfaceMassExchangeReport,
-    /// Signed kinetic energy carried into the liquid [J]; negative on exit.
+    /// Signed kinetic energy carried into the liquid [J]; negative on exit,
+    /// including the velocity dispersion of co-located outgoing streams.
     pub carried_kinetic_energy_j: f64,
     /// Actual endpoint change of resolved liquid kinetic energy [J].
     pub kinetic_energy_change_j: f64,
@@ -68,6 +69,16 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// material scenario. Native pressure density and physical nonequilibrium
     /// stress are retained through the original Guo force-frame owner.
     ///
+    /// Co-located outlets share one recoil based on their total removed mass
+    /// and mass-weighted velocity. Their central specific kinetic variance
+    /// `q = sum(r_i*|v_i-v_mean|²)/(2*sum(r_i))` adds `r*q` to both outgoing
+    /// kinetic energy and required actuator work, including opposing outlets
+    /// with zero mean relative velocity. Each stream independently passes the
+    /// original caloric and speed admission. One sample per cell supplies the
+    /// common represented/requested ratio for every external stream's credit;
+    /// separately supplied heat is summed without mass scaling. Reduction uses
+    /// authored order, with permutation agreement to floating-point roundoff.
+    ///
     /// This is an instantaneous, local ideal actuator law. It does not infer
     /// evaporation recoil, nozzle pressure work, or resolved jet dynamics.
     /// Positive remaining interface mass, original liquid phase/density and
@@ -105,8 +116,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             ));
         }
         let scale = self.flow.scaling.velocity_si(1.0)?;
-        let mut velocities = BTreeMap::new();
-        let mut exchanges = Vec::with_capacity(outflows.len());
+        let mut mixtures = BTreeMap::<_, inflow::IncomingMixture>::new();
         for outflow in outflows {
             poll(gate)?;
             if !outflow.exchange.mass_kg.is_finite() || outflow.exchange.mass_kg >= 0.0 {
@@ -126,15 +136,37 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             let location = self
                 .location_at(outflow.exchange.coordinates)
                 .ok_or(Error::Invalid("outflow needs an existing liquid interface"))?;
-            if velocities.insert(location, outflow.velocity_m_s).is_some() {
-                return Err(Error::Invalid("outflow interfaces must be unique"));
+            // The shared central-moment reducer uses positive stream mass;
+            // signed removal is restored only at the native transfer boundary.
+            let stream = inflow::IncomingMixture::new(
+                -outflow.exchange.mass_kg,
+                outflow.velocity_m_s,
+                outflow.exchange.specific_enthalpy_j_kg,
+                outflow.exchange.heat_j,
+            )
+            .ok_or(Error::Invalid("outgoing stream is unrepresentable"))?;
+            if let Some(mixture) = mixtures.get_mut(&location) {
+                mixture.combine(stream).ok_or(Error::Invalid(
+                    "combined outgoing streams are unrepresentable",
+                ))?;
+            } else {
+                mixtures.insert(location, stream);
             }
-            exchanges.push(outflow.exchange);
         }
+        let exchanges: Vec<_> = mixtures
+            .iter()
+            .map(|(&location, mixture)| FreeSurfaceMassExchange {
+                coordinates: FreeSurface3::transport_coordinates(location)
+                    .expect("admitted native interface"),
+                mass_kg: -mixture.mass_kg,
+                specific_enthalpy_j_kg: mixture.specific_enthalpy_j_kg,
+                heat_j: mixture.heat_j,
+            })
+            .collect();
         let (candidate, exchange, balance) = self.prepare_interface_mass_model(
             &exchanges,
             Some(TransferMomentum::Ejection {
-                velocities: &velocities,
+                mixtures: &mixtures,
                 maximum_work_j: maximum_mechanical_work_j,
             }),
             controls,
@@ -187,6 +219,167 @@ pub(super) fn ejection_state(
             .map(|d| relative[d] * (relative[d] - delta[d]))
             .sum::<f64>();
     (work.is_finite() && work >= 0.0 && next.iter().all(|v| v.is_finite())).then_some((next, work))
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use inflow::IncomingMixture;
+
+    #[test]
+    fn g1_simultaneous_outlets_close_each_stream_momentum_and_energy_under_changes_of_frame() {
+        let location = MassLocation3::Cell(0, 0);
+        let orders = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        for scale in [1e-10, 0.4, 1.0, 1e10] {
+            for boost in [[0.0; 3], [0.4, -0.3, 0.2]] {
+                for datum in [0.0, -1e8, 1e8] {
+                    let sources = [
+                        (0.07, [0.08, -0.04, 0.02], 120_000.0, 2e-6),
+                        (0.03, [-0.06, 0.03, -0.01], 240_000.0, -1e-6),
+                        (0.10, [0.02, 0.05, -0.04], 180_000.0, 0.5e-6),
+                    ]
+                    .map(|(m, v, h, heat)| {
+                        IncomingMixture::new(
+                            scale * m,
+                            core::array::from_fn(|d| v[d] + boost[d]),
+                            h + datum,
+                            scale * heat,
+                        )
+                        .unwrap()
+                    });
+                    let old = 0.5 * scale;
+                    let velocity = core::array::from_fn(|d| [0.02, -0.01, 0.03][d] + boost[d]);
+                    for order in orders {
+                        let mut mixed = sources[order[0]];
+                        for index in order.into_iter().skip(1) {
+                            mixed.combine(sources[index]).unwrap();
+                        }
+                        let mixtures = BTreeMap::from([(location, mixed)]);
+                        let model = TransferMomentum::Ejection {
+                            mixtures: &mixtures,
+                            maximum_work_j: f64::MAX,
+                        };
+                        for fraction in [0.37, 1.0, 1.0 + 2.0 * f64::EPSILON] {
+                            let dm = -mixed.mass_kg * fraction;
+                            let new = old + dm;
+                            let (next, heat, work) =
+                                model.state(&location, old, dm, new, velocity).unwrap();
+                            for d in 0..3 {
+                                let removed: f64 = sources
+                                    .iter()
+                                    .map(|s| fraction * s.mass_kg * s.velocity_m_s[d])
+                                    .sum();
+                                assert!(
+                                    (new * next[d] - old * velocity[d] + removed).abs()
+                                        < 3e-15 * scale
+                                );
+                            }
+                            let removed_kinetic: f64 = sources
+                                .iter()
+                                .map(|s| {
+                                    0.5 * fraction
+                                        * s.mass_kg
+                                        * s.velocity_m_s.iter().map(|u| u * u).sum::<f64>()
+                                })
+                                .sum();
+                            let carried = dm
+                                * (0.5 * mixed.velocity_m_s.iter().map(|u| u * u).sum::<f64>()
+                                    + model.kinetic_variance_at(&location));
+                            let delta = core::array::from_fn(|d| next[d] - velocity[d]);
+                            let kinetic = inflow::kinetic_change(dm, new, velocity, delta);
+                            assert!((carried + removed_kinetic).abs() < 3e-15 * scale);
+                            assert!((kinetic + removed_kinetic - work).abs() < 3e-15 * scale);
+                            assert!(work > -dm * mixed.specific_kinetic_variance_j_kg);
+                            assert_eq!(heat, 0.0);
+                            let removed_enthalpy: f64 = sources
+                                .iter()
+                                .map(|s| fraction * s.mass_kg * (s.specific_enthalpy_j_kg - datum))
+                                .sum();
+                            assert!(
+                                (-dm * (mixed.specific_enthalpy_j_kg - datum) - removed_enthalpy)
+                                    .abs()
+                                    < 2e-8 * scale
+                            );
+                        }
+                        assert!((mixed.heat_j - 1.5e-6 * scale).abs() < 1e-21 * scale);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_opposing_outlets_require_work_with_no_recoil_or_heat() {
+        let location = MassLocation3::Cell(0, 0);
+        let velocity = [0.03, -0.02, 0.01];
+        let relative = [0.04, -0.03, 0.02];
+        let mut mixed = IncomingMixture::new(
+            0.1,
+            core::array::from_fn(|d| velocity[d] + relative[d]),
+            200_000.0,
+            0.0,
+        )
+        .unwrap();
+        mixed
+            .combine(
+                IncomingMixture::new(
+                    0.1,
+                    core::array::from_fn(|d| velocity[d] - relative[d]),
+                    200_000.0,
+                    0.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mixtures = BTreeMap::from([(location, mixed)]);
+        let model = TransferMomentum::Ejection {
+            mixtures: &mixtures,
+            maximum_work_j: 1.0,
+        };
+        let (next, heat, work) = model.state(&location, 0.5, -0.2, 0.3, velocity).unwrap();
+        for d in 0..3 {
+            assert!((next[d] - velocity[d]).abs() < 1e-17);
+        }
+        let expected = 0.1 * relative.iter().map(|u| u * u).sum::<f64>();
+        assert!((work - expected).abs() < 1e-18);
+        assert!(work > 0.0);
+        assert_eq!(heat, 0.0);
+        assert_eq!(
+            ejection_state(0.5, -0.2, 0.3, velocity, velocity)
+                .unwrap()
+                .1,
+            0.0
+        );
+    }
+
+    #[test]
+    fn g4_unrepresentable_outlet_dispersion_work_returns_no_state() {
+        let location = MassLocation3::Cell(0, 0);
+        let mut mixed = IncomingMixture::new(5e307, [2.0, 0.0, 0.0], 0.0, 0.0).unwrap();
+        mixed
+            .combine(IncomingMixture::new(5e307, [-2.0, 0.0, 0.0], 0.0, 0.0).unwrap())
+            .unwrap();
+        assert_eq!(mixed.velocity_m_s, [0.0; 3]);
+        assert_eq!(mixed.specific_kinetic_variance_j_kg, 2.0);
+        let mixtures = BTreeMap::from([(location, mixed)]);
+        let model = TransferMomentum::Ejection {
+            mixtures: &mixtures,
+            maximum_work_j: f64::MAX,
+        };
+        assert!(
+            model
+                .state(&location, f64::MAX, -1e308, f64::MAX - 1e308, [0.0; 3])
+                .is_none()
+        );
+        assert_eq!(mixtures[&location], mixed);
+    }
 }
 
 #[cfg(test)]

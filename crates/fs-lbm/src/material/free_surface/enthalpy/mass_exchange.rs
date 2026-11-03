@@ -40,7 +40,7 @@ enum TransferMomentum<'a> {
     Comoving,
     Mixing(&'a BTreeMap<MassLocation3, inflow::IncomingMixture>),
     Ejection {
-        velocities: &'a BTreeMap<MassLocation3, [f64; 3]>,
+        mixtures: &'a BTreeMap<MassLocation3, inflow::IncomingMixture>,
         maximum_work_j: f64,
     },
 }
@@ -49,17 +49,18 @@ impl TransferMomentum<'_> {
     fn velocity_at(&self, location: &MassLocation3) -> Option<[f64; 3]> {
         match self {
             Self::Comoving => None,
-            Self::Mixing(mixtures) => mixtures.get(location).map(|m| m.velocity_m_s),
-            Self::Ejection { velocities, .. } => velocities.get(location).copied(),
+            Self::Mixing(mixtures) | Self::Ejection { mixtures, .. } => {
+                mixtures.get(location).map(|m| m.velocity_m_s)
+            }
         }
     }
 
     fn kinetic_variance_at(&self, location: &MassLocation3) -> f64 {
         match self {
-            Self::Mixing(mixtures) => mixtures
+            Self::Mixing(mixtures) | Self::Ejection { mixtures, .. } => mixtures
                 .get(location)
                 .map_or(0.0, |m| m.specific_kinetic_variance_j_kg),
-            Self::Comoving | Self::Ejection { .. } => 0.0,
+            Self::Comoving => 0.0,
         }
     }
 
@@ -89,8 +90,16 @@ impl TransferMomentum<'_> {
                 heat.is_finite().then_some((next, heat, 0.0))
             }
             Self::Ejection { .. } => {
-                outflow::ejection_state(old_mass, dm, new_mass, velocity, carried)
-                    .map(|(next, work)| (next, 0.0, work))
+                let (next, mut work) =
+                    outflow::ejection_state(old_mass, dm, new_mass, velocity, carried)?;
+                let variance = self.kinetic_variance_at(location);
+                if variance != 0.0 {
+                    // Distinct outlet velocities require actuator work even
+                    // when their mean produces no recoil. This energy leaves
+                    // in the streams; it never heats the remaining liquid.
+                    work += -dm * variance;
+                }
+                (work.is_finite() && work >= 0.0).then_some((next, 0.0, work))
             }
         }
     }
