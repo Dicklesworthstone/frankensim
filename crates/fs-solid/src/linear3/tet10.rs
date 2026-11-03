@@ -69,7 +69,7 @@ pub struct QuadraticTetProblem<'a> {
 /// Shared topology admission for quadratic displacement consumers. Returns the
 /// canonical set of corner vertices, also the nodes of a continuous P1 field.
 /// Coordinate, quadrature and allocation budgets remain with the caller.
-pub(crate) fn validate_tet10_topology(
+pub fn validate_tet10_topology(
     nodes_count: usize,
     elements: &[[usize; 10]],
     cx: &Cx<'_>,

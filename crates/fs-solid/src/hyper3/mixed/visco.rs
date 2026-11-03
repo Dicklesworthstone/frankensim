@@ -269,6 +269,16 @@ impl<'a> MixedViscoTetSolid<'a> {
     pub fn displacement_m(&self) -> &[[f64; 3]] {
         &self.displacement_m
     }
+    /// Borrow the complete original geometry without copying material history.
+    pub fn reference_nodes_m(&self) -> &[[f64; 3]] {
+        self.nodes_m
+    }
+    pub fn reference_tetrahedra(&self) -> &[[usize; 10]] {
+        self.elements
+    }
+    pub fn assembly_budget(&self) -> TetAssemblyBudget {
+        self.budget
+    }
     pub fn pressure_nodes(&self) -> &[usize] {
         &self.mesh.pressure_nodes
     }

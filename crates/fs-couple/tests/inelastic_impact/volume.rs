@@ -14,7 +14,7 @@ use fs_solid::hyper3::mixed::visco::{
 };
 use fs_solid::linear3::tet10::promote_p1_to_p2;
 
-fn volume_controls() -> VolumeContactControls {
+pub(super) fn volume_controls() -> VolumeContactControls {
     let base = mixed_controls();
     let mut balance = base.solid_impulse;
     balance.maximum_workspace_components = 8192;

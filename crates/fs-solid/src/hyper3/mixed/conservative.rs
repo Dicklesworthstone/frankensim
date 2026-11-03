@@ -813,6 +813,16 @@ impl<'a> ConservativeTetSolid<'a> {
     pub fn displacement_m(&self) -> &[[f64; 3]] {
         &self.displacement_m
     }
+    /// Borrow the complete original geometry without copying material history.
+    pub fn reference_nodes_m(&self) -> &[[f64; 3]] {
+        self.definition.nodes_m
+    }
+    pub fn reference_tetrahedra(&self) -> &[[usize; 10]] {
+        self.definition.elements
+    }
+    pub fn assembly_budget(&self) -> TetAssemblyBudget {
+        self.definition.budget
+    }
     pub fn velocity_mps(&self) -> &[[f64; 3]] {
         &self.velocity_mps
     }

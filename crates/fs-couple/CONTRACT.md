@@ -1,5 +1,41 @@
 # CONTRACT: fs-couple
 
+## Actual curved TET10 contact through native momentum owners
+
+`inelastic_impact::surface::quadratic::QuadraticSolidContactSurface` binds the
+complete original reference coordinates and TET10 incidence. The existing solid
+topology owner admits shared midsides; the original closed-tetrahedron owner
+supplies exterior incidence. Actual six-node quadratic patches, rather than
+corner planes, supply current distance, outward-side bounds and material points.
+The prepared query BVH is refitted once per coordinate image and reused across
+spheres. Sphere IDs, shared vertex/edge features and contact ordering are canonical.
+
+Distance and witness-localization enclosures must resolve nonpenetration and the
+authored activation band before mechanical admission. A potentially active patch
+is never silently dropped because its enclosure straddles the threshold. Distinct
+unresolved minimizers, backside ambiguity, native point Jacobian failure and
+aggregate geometry-work exhaustion refuse. Raw negative gaps remain negative for
+an external event locator. Signed native TET10 shapes reconstruct the real solid
+point, and the radial rigid material arm retains its actual torque and rounding
+error; neither witness is moved to manufacture coincident contact.
+
+The native Maxwell and conservative-solid helpers borrow reference geometry and
+accepted displacement without copying constitutive history. Detected material
+points feed the existing simultaneous circular-friction contact owner and its
+original mass response. Exact-incompressible Maxwell and conservative formulations
+reuse the existing pressure-constrained response and complete physical impulse,
+angular-momentum, support-work and energy accounts. Successful impulses retain
+physical pressure, Maxwell memory, displacement and time through the original
+complete-state candidate. No replacement mass, constitutive or contact law is
+introduced.
+
+The input solid must be a consistently oriented, conforming nonoverlapping mesh.
+Positive native Jacobians at selected points are local admission checks; they do
+not prove global injectivity or a valid material trajectory between states.
+Focused native regressions specify a quadratic isochoric shear with unchanged
+corners but a displaced contact patch, actual off-center rigid torque, conservative
+pressure closure, retained relaxed Maxwell memory and atomic overlap refusal.
+
 ## Finite gas species and momentum in an explicit energy frame
 
 `MovingGasParcel::exchange_species_momentum_relative` retains the original

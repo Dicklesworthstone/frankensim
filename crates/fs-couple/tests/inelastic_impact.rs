@@ -39,6 +39,9 @@ mod directional;
 #[path = "inelastic_impact/surface.rs"]
 mod surface;
 
+#[path = "inelastic_impact/quadratic_surface.rs"]
+mod quadratic_surface;
+
 #[path = "inelastic_impact/scene.rs"]
 mod scene;
 
