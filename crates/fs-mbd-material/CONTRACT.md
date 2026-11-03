@@ -1508,3 +1508,38 @@ and caloric comparisons, heat-capacity substitution, continuation, deterministic
 replay and source/work/budget/cancellation rollback. Syntax and whitespace checks
 pass; native compilation and execution remain unverified because the existing
 dependency build is resource-blocked.
+
+
+## Partitioning original tetrahedral material without changing its mass model
+
+`TetrahedralDensityBody::partition_cells` separates a nonempty selected cell
+set and its nonempty retained complement. Both compact outputs preserve the
+original resolved vertex source receipts, cached per-cell mass, full inertia,
+density weights and orientation determinant. There is no material requery or
+new cell integration. Original cell indices and ascending original vertex
+indices accompany both outputs, allowing existing nodal and cell fields to
+follow their actual material. Shared interface vertices are copied; every
+mass-bearing cell belongs to exactly one output.
+
+Native inertia merging supplies each resulting body. Monotone local vertex
+renumbering retains canonical topology and its density/determinant convention,
+so either result continues through the existing deformation, principal-frame
+and native motion APIs. Selection order cannot change the output. Unused
+reference vertices are omitted rather than assigned artificial mass.
+
+The original hard cell/vertex ceilings remain binding. An explicit complete
+source-cell ceiling and combined output-vertex ceiling are checked before
+cloning material payloads; the latter includes interface copies in both parts.
+Index scratch and copied topology are linear in source size, with bounded
+O(cells log cells) source-index sorting and cancellation around every sort and
+per cell/vertex. Failure publishes no partial result or source mutation.
+
+This partitions geometry and density state. It does not authorize bond
+separation, fracture, phase change, stored-history deletion or a momentum
+reset. The physical transition owner must retain motion, energy and any
+constitutive histories through the supplied maps. Four focused G1/G3/G4
+regression definitions cover independent graded-density moments, exact source
+retention, original native twist with full world momentum/kinetic accounting,
+continued affine deformation, selection order, resource limits and late
+cancellation/retry. Targeted Rust syntax/format and whitespace checks passed;
+native compilation and test execution remain outstanding.

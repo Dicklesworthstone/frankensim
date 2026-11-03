@@ -26,6 +26,9 @@ use crate::{
 #[path = "density_field/motion.rs"]
 pub mod motion;
 
+mod partition;
+pub use partition::{TetrahedralDensityPart, TetrahedralDensitySplit};
+
 /// Maximum reference vertices; the original body-region budget caps cells.
 pub const MAX_DENSITY_VERTICES: usize = 4 * MAX_BODY_REGIONS;
 

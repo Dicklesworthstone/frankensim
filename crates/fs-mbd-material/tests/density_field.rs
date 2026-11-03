@@ -4,6 +4,9 @@ mod common;
 #[path = "density_field/motion.rs"]
 mod motion;
 
+#[path = "density_field/partition.rs"]
+mod partition;
+
 use common::{close, density_card, point};
 use fs_ga::{Mat3, Se3, So3, Twist, Vec3};
 use fs_material::fluid_transport::FluidTransportState;
