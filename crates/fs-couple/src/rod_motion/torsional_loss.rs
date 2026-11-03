@@ -15,8 +15,10 @@
 //! stability restriction. Heat is reported, not deposited in an unnamed store.
 
 use fs_exec::CancelGate;
-use fs_ga::{So3, Vec3, so3_left_jacobian_inverse, so3_right_jacobian_inverse};
-use fs_material::section::{ConcentricShearSection, torsion::ConcentricTorsionalSection};
+use fs_ga::{Mat3, So3, Vec3, so3_left_jacobian_inverse, so3_right_jacobian_inverse};
+use fs_material::section::{
+    ConcentricElasticSection, ConcentricShearSection, torsion::ConcentricTorsionalSection,
+};
 use fs_solid::rod::MAX_MATERIAL_ROD_SEGMENTS;
 
 use super::{
@@ -160,27 +162,7 @@ impl PreparedRodTorsionalLoss {
             if self.resistance_nm_s[segment] == 0.0 {
                 continue;
             }
-            let directions =
-                twist_gradients(state.pose.frames[segment], state.pose.frames[segment + 1])?;
-            let mut mobility = 0.0;
-            let mut free = false;
-            for (side, gradient) in directions.iter().enumerate() {
-                let node = segment + side;
-                if !state.model.fixed_frames()[node] {
-                    free = true;
-                    mobility += dot(*gradient, state.kinetics[node].omega(*gradient)?);
-                }
-            }
-            finite(&[mobility])?;
-            if mobility < 0.0 || (free && mobility == 0.0) {
-                return Err(RodMotionError::Invalid(
-                    "unrepresentable positive torsional mobility",
-                ));
-            }
-            *mode = TwistMode {
-                directions,
-                mobility,
-            };
+            *mode = angular_modes(state, segment, [0])?[0];
         }
         for segment in 0..n - 1 {
             self.relax(
@@ -219,55 +201,8 @@ impl PreparedRodTorsionalLoss {
         heat: &mut RodTorsionalHeat,
         gate: &CancelGate,
     ) -> Result<(), RodMotionError> {
-        checkpoint(gate)?;
         let coefficient = self.resistance_nm_s[segment];
-        if coefficient == 0.0 || mode.mobility == 0.0 {
-            return Ok(());
-        }
-        let mut rate = 0.0;
-        for side in 0..2 {
-            let node = segment + side;
-            rate += dot(
-                mode.directions[side],
-                state.kinetics[node].omega(state.spin[node])?,
-            );
-        }
-        finite(&[rate])?;
-        if rate == 0.0 {
-            return Ok(());
-        }
-        let exposure = (coefficient * dt) * mode.mobility;
-        if !exposure.is_finite() || exposure <= 0.0 {
-            return Err(RodMotionError::Invalid(
-                "unrepresentable torsional relaxation interval",
-            ));
-        }
-        let fraction = -fs_math::det::expm1(-exposure);
-        let impulse = rate * (fraction / mode.mobility);
-        // Positive product form avoids subtracting nearly equal kinetic energies.
-        let dissipated = (0.5 * impulse) * rate * (2.0 - fraction);
-        finite(&[impulse, dissipated])?;
-        if dissipated <= 0.0 || impulse == 0.0 {
-            return Err(RodMotionError::Invalid(
-                "unrepresentable positive torsional material heat",
-            ));
-        }
-        for side in 0..2 {
-            let node = segment + side;
-            let gradient = mode.directions[side];
-            if state.model.fixed_frames()[node] {
-                let reaction = rotate(state.pose.frames[node], gradient.map(|g| impulse * g))?;
-                accounts.angular = add(accounts.angular, reaction);
-                accounts.supports[node].angular_nm_s =
-                    add(accounts.supports[node].angular_nm_s, reaction);
-                finite(&accounts.supports[node].angular_nm_s)?;
-            } else {
-                for c in 0..3 {
-                    state.spin[node][c] = (-impulse).mul_add(gradient[c], state.spin[node][c]);
-                }
-                finite(&state.spin[node])?;
-            }
-        }
+        let dissipated = relax_angular(state, segment, mode, coefficient, dt, accounts, gate)?;
         heat.segment_heat_j[segment] += dissipated;
         heat.total_heat_j += dissipated;
         finite(&[heat.segment_heat_j[segment], heat.total_heat_j])?;
@@ -306,34 +241,139 @@ impl<I: RodMotionInertia> RodMotion<I> {
 }
 
 #[derive(Clone, Copy)]
-struct TwistMode {
+pub(super) struct TwistMode {
     directions: [[f64; 3]; 2],
     mobility: f64,
 }
 impl TwistMode {
-    const ZERO: Self = Self {
+    pub(super) const ZERO: Self = Self {
         directions: [[0.0; 3]; 2],
         mobility: 0.0,
     };
 }
 
-fn twist_gradients(left: So3, right: So3) -> Result<[[f64; 3]; 2], RodMotionError> {
+pub(super) fn angular_modes<I: RodMotionInertia, const N: usize>(
+    state: &RodMotion<I>,
+    segment: usize,
+    axes: [usize; N],
+) -> Result<[TwistMode; N], RodMotionError> {
+    let matrices =
+        angular_gradient_matrices(state.pose.frames[segment], state.pose.frames[segment + 1])?;
+    let mut modes = [TwistMode::ZERO; N];
+    for (mode, axis) in modes.iter_mut().zip(axes) {
+        let directions = gradients(matrices, axis);
+        let mut mobility = 0.0;
+        let mut free = false;
+        for (side, gradient) in directions.iter().enumerate() {
+            let node = segment + side;
+            if !state.model.fixed_frames()[node] {
+                free = true;
+                mobility += dot(*gradient, state.kinetics[node].omega(*gradient)?);
+            }
+        }
+        finite(&[mobility])?;
+        if mobility < 0.0 || (free && mobility == 0.0) {
+            return Err(RodMotionError::Invalid(
+                "unrepresentable positive angular-strain mobility",
+            ));
+        }
+        *mode = TwistMode {
+            directions,
+            mobility,
+        };
+    }
+    Ok(modes)
+}
+
+/// One work-conjugate log-strain loss flow, shared by torsion and bending.
+/// Its return value is physical heat from the actual angular impulse, not a
+/// subtraction of nearly equal endpoint kinetic energies.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn relax_angular<I: RodMotionInertia>(
+    state: &mut RodMotion<I>,
+    segment: usize,
+    mode: TwistMode,
+    coefficient: f64,
+    dt: f64,
+    accounts: &mut KickAccounts,
+    gate: &CancelGate,
+) -> Result<f64, RodMotionError> {
+    checkpoint(gate)?;
+    if coefficient == 0.0 || mode.mobility == 0.0 {
+        return Ok(0.0);
+    }
+    let mut rate = 0.0;
+    for side in 0..2 {
+        let node = segment + side;
+        rate += dot(
+            mode.directions[side],
+            state.kinetics[node].omega(state.spin[node])?,
+        );
+    }
+    finite(&[rate])?;
+    if rate == 0.0 {
+        return Ok(0.0);
+    }
+    let exposure = (coefficient * dt) * mode.mobility;
+    if !exposure.is_finite() || exposure <= 0.0 {
+        return Err(RodMotionError::Invalid(
+            "unrepresentable angular-strain relaxation interval",
+        ));
+    }
+    let fraction = -fs_math::det::expm1(-exposure);
+    let impulse = rate * (fraction / mode.mobility);
+    let dissipated = (0.5 * impulse) * rate * (2.0 - fraction);
+    finite(&[impulse, dissipated])?;
+    if dissipated <= 0.0 || impulse == 0.0 {
+        return Err(RodMotionError::Invalid(
+            "unrepresentable positive angular-strain material heat",
+        ));
+    }
+    for side in 0..2 {
+        let node = segment + side;
+        let gradient = mode.directions[side];
+        if state.model.fixed_frames()[node] {
+            let reaction = rotate(state.pose.frames[node], gradient.map(|g| impulse * g))?;
+            accounts.angular = add(accounts.angular, reaction);
+            accounts.supports[node].angular_nm_s =
+                add(accounts.supports[node].angular_nm_s, reaction);
+            finite(&accounts.supports[node].angular_nm_s)?;
+        } else {
+            for c in 0..3 {
+                state.spin[node][c] = (-impulse).mul_add(gradient[c], state.spin[node][c]);
+            }
+            finite(&state.spin[node])?;
+        }
+    }
+    Ok(dissipated)
+}
+
+fn angular_gradient_matrices(left: So3, right: So3) -> Result<[Mat3; 2], RodMotionError> {
     let relative = right.body_minus(left).map_err(LieStepError::from)?;
     if relative.angular.norm() >= core::f64::consts::PI * (1.0 - 64.0 * f64::EPSILON) {
         return Err(RodMotionError::Invalid(
-            "torsional strain lies on the SO(3) logarithm cut",
+            "angular strain lies on the SO(3) logarithm cut",
         ));
     }
-    let axis = Vec3::new(1.0, 0.0, 0.0);
     let left = so3_left_jacobian_inverse(relative)
         .map_err(LieStepError::from)?
-        .transpose()
-        .apply(axis);
+        .transpose();
     let right = so3_right_jacobian_inverse(relative)
         .map_err(LieStepError::from)?
-        .transpose()
-        .apply(axis);
-    Ok([a(left.scale(-1.0)), a(right)])
+        .transpose();
+    Ok([left, right])
+}
+
+fn gradients(matrices: [Mat3; 2], axis: usize) -> [[f64; 3]; 2] {
+    let axis = Vec3::new(
+        if axis == 0 { 1.0 } else { 0.0 },
+        if axis == 1 { 1.0 } else { 0.0 },
+        if axis == 2 { 1.0 } else { 0.0 },
+    );
+    [
+        a(matrices[0].apply(axis).scale(-1.0)),
+        a(matrices[1].apply(axis)),
+    ]
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -345,13 +385,19 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 fn same_mechanics(original: &ConcentricShearSection, enriched: &ConcentricShearSection) -> bool {
     original.shear_property() == enriched.shear_property()
         && original.shear_correction() == enriched.shear_correction()
-        && original.elastic().inner_radius_m() == enriched.elastic().inner_radius_m()
-        && original.elastic().layers().len() == enriched.elastic().layers().len()
+        && same_elastic_source(original.elastic(), enriched.elastic())
+}
+
+pub(super) fn same_elastic_source(
+    original: &ConcentricElasticSection,
+    enriched: &ConcentricElasticSection,
+) -> bool {
+    original.inner_radius_m() == enriched.inner_radius_m()
+        && original.layers().len() == enriched.layers().len()
         && original
-            .elastic()
             .layers()
             .iter()
-            .zip(enriched.elastic().layers())
+            .zip(enriched.layers())
             .all(|(a, b)| {
                 a.outer_radius_m == b.outer_radius_m
                     && a.material.card_identity() == b.material.card_identity()
@@ -376,34 +422,36 @@ mod geometry_tests {
             .compose(So3::exp(So3Tangent::new(Vec3::new(0.3, 0.5, -0.4))).unwrap())
             .unwrap();
         let frames = [left, right];
-        let gradients = twist_gradients(left, right).unwrap();
         let h = 2e-6;
-        for side in 0..2 {
-            for axis in 0..3 {
-                let mut plus = frames;
-                let mut minus = frames;
-                let mut direction = [0.0; 3];
-                direction[axis] = h;
-                let tangent = So3Tangent::new(super::super::v(direction));
-                plus[side] = frames[side].body_plus(tangent).unwrap();
-                minus[side] = frames[side].body_plus(tangent.scale(-1.0)).unwrap();
-                let derivative = (plus[1].body_minus(plus[0]).unwrap().angular.x
-                    - minus[1].body_minus(minus[0]).unwrap().angular.x)
-                    / (2.0 * h);
-                assert!((derivative - gradients[side][axis]).abs() < 2e-9);
+        for strain_axis in 0..3 {
+            let gradients = gradients(angular_gradient_matrices(left, right).unwrap(), strain_axis);
+            for side in 0..2 {
+                for axis in 0..3 {
+                    let mut plus = frames;
+                    let mut minus = frames;
+                    let mut direction = [0.0; 3];
+                    direction[axis] = h;
+                    let tangent = So3Tangent::new(super::super::v(direction));
+                    plus[side] = frames[side].body_plus(tangent).unwrap();
+                    minus[side] = frames[side].body_plus(tangent.scale(-1.0)).unwrap();
+                    let derivative = (a(plus[1].body_minus(plus[0]).unwrap().angular)[strain_axis]
+                        - a(minus[1].body_minus(minus[0]).unwrap().angular)[strain_axis])
+                        / (2.0 * h);
+                    assert!((derivative - gradients[side][axis]).abs() < 2e-9);
+                }
             }
+            let world_sum = add(
+                rotate(left, gradients[0]).unwrap(),
+                rotate(right, gradients[1]).unwrap(),
+            );
+            assert!(world_sum.iter().all(|v| v.abs() < 2e-14));
+            let world_spin = [0.3, -0.7, 0.2];
+            let rate = dot(gradients[0], rotate(left.inverse(), world_spin).unwrap())
+                + dot(gradients[1], rotate(right.inverse(), world_spin).unwrap());
+            assert!(
+                rate.abs() < 2e-14,
+                "a common rigid spin must not become material loss"
+            );
         }
-        let world_sum = add(
-            rotate(left, gradients[0]).unwrap(),
-            rotate(right, gradients[1]).unwrap(),
-        );
-        assert!(world_sum.iter().all(|v| v.abs() < 2e-14));
-        let world_spin = [0.3, -0.7, 0.2];
-        let rate = dot(gradients[0], rotate(left.inverse(), world_spin).unwrap())
-            + dot(gradients[1], rotate(right.inverse(), world_spin).unwrap());
-        assert!(
-            rate.abs() < 2e-14,
-            "a common rigid spin must not become material loss"
-        );
     }
 }

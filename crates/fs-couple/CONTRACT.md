@@ -21208,6 +21208,39 @@ heat refinement, finite-bend gradient probes, collective spin, full-tensor
 eccentric/frame momentum balance, source mismatch, thermal refresh and atomic
 refusal. They do not establish experimental material validity.
 
+## Intrinsic bending loss on native rods
+
+`rod_motion::PreparedRodBendingLoss` binds the existing material-owned
+`ConcentricKelvinVoigtSection` to each original rod segment. It retains the
+source geometry, card identity, complete query and original mechanical-property
+selections, requires explicit broadband fixed-state support, and uses
+`C_b/L = sum(eta I)/L` for both bending directions. Missing viscosity is not an
+explicit zero. An updated physical source requires a newly admitted loss law.
+
+`RodMotion::step_damped_candidate` and `step_spatial_damped_candidate` accept
+`RodAngularLosses` with independently optional bending and torsional laws.
+For `phi = Log(R_i^-1 R_j)`, their respective rate components are
+`(phi_dot_y, phi_dot_z)` and `phi_dot_x`. They share the exact left/right SO(3)
+Jacobian pullback, original central inertia, exponential scalar relaxation and
+support-reaction owner. No finite-rotation spin-difference approximation or
+second damping implementation is introduced. Bending's two directions and
+adjacent segments form a bounded palindromic sweep; simultaneous torsion and
+bending compose symmetrically. The original torsional-only API/flow remains.
+
+The native step reports positive bending and torsional heat separately in
+original segment order. Its signed numerical defect includes each physical
+loss once. Frozen-pose loss is passive for stiff viscosity; second-order
+composition still requires elastic-wave stability and temporal refinement.
+No dense damping matrix, per-edge heap allocation, inferred axial/shear loss,
+bending memory, thermal deposition or thermal bending feedback is supplied.
+
+Focused synthetic regressions cover independently differentiated finite-angle
+elastic motion and exact pair heat in both bending planes, strong viscosity,
+small-angle analytic damped-motion and heat refinement, explicit-zero and
+pure-twist isolation, finite-rotation frame objectivity with eccentric inertia,
+simultaneous separate loss accounts, and atomic source/band/step refusals.
+They do not establish measured material calibration or spatial convergence.
+
 ## Finite-cell heating from intrinsic shaft viscosity
 
 `RodThermoelasticSystem::step_torsional` and `step_spatial_torsional` connect

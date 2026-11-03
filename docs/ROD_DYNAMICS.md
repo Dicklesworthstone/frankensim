@@ -123,8 +123,9 @@ remain necessary. Swept-angle limits do not certify self-contact avoidance or
 rotation-logarithm branch avoidance between samples.
 
 Material frequency restrictions, fixed thermal/source states, 64-segment and
-link budgets remain enforced. There is no damping, plasticity, contact, moving
-support, live material replacement or distributed cable-inertia claim. Failed
+link budgets remain enforced. Explicit angular material damping is described
+below; plasticity, contact, moving supports, live material replacement and
+distributed cable inertia remain outside this path. Failed
 or cancelled steps preserve the complete accepted state; clones retain in-process
 restart state. Principal-axis selection is not differentiated through repeated
 eigenvalues.
@@ -139,3 +140,51 @@ rustc/Cargo. Independent Python equation checks covered 1,000 inventory tensors,
 An independently differenced nonlinear rod showed fourfold endpoint energy-drift
 reduction per timestep halving. Those checks are not native Rust build proof,
 spatial-convergence evidence or calibrated material validation.
+
+## Source-bound bending and torsional damping
+
+`PreparedRodBendingLoss` connects each original circular section's explicit
+`ConcentricKelvinVoigtSection` to the native trajectory. The material owner
+integrates the layer viscosities as `C_b = sum(eta I)`, with no averaged material
+or fitted damping ratio. Its two bending resistances are `C_b/L0`.
+`PreparedRodTorsionalLoss` independently supplies `sum(eta_s J)/L0`; bending
+viscosity does not authorize torsional viscosity. Both source bundles must retain
+the actual rod's geometry, original material cards, full physical query and
+mechanical-property selections. Transient loss requires explicit broadband
+support at the held state. After a material/temperature refresh, prepare new
+matching loss sections before stepping.
+
+```rust,ignore
+use fs_couple::rod_motion::{PreparedRodBendingLoss, RodAngularLosses};
+
+let bending = PreparedRodBendingLoss::new(state.model(), bending_sections, &gate)?;
+let losses = RodAngularLosses { bending: Some(&bending), torsional: None };
+let (candidate, receipt) = state.step_damped_candidate(
+    dt, losses, &world_wrenches, controls, &gate,
+)?;
+let physical_bending_heat = receipt.bending_heat.as_ref().unwrap().total_heat_j;
+```
+
+`step_spatial_damped_candidate` accepts the existing `PreparedRodLoads` for
+rotating material-point forces. Either inertia view admits the same loss API.
+The existing torsional-only step APIs retain their original flow.
+
+For `phi = Log(R_i^-1 R_j)`, bending uses `d(phi_y)/dt` and `d(phi_z)/dt`.
+Exact SO(3) Jacobian pullbacks make those rates work-conjugate to the nodal
+moments under finite rotations; a common rigid spin produces no material loss.
+Each frozen-pose scalar flow relaxes exponentially through the original central
+inertia and reports its positive integrated work. Supported frames receive
+the corresponding reaction. Palindromic sweeps and the surrounding symmetric
+loss/elastic/loss split retain second-order temporal convergence. Strong
+viscosity adds no explicit damping stability restriction; elastic wave resolution
+and timestep refinement still matter.
+
+`RodMotionStep::bending_heat` and `torsional_heat` report separate total and
+original-segment physical heat. The signed integration defect includes both
+exactly once. This fixed-state mechanical path reports heat without depositing
+it into a thermal reservoir. It supplies no axial/shear strain viscosity,
+hereditary bending spectrum or thermoelastic bending feedback. An omitted law
+is unmodeled, and an explicit zero-viscosity law leaves the native trajectory
+unchanged. Focused regressions exercise independent damped-oscillator and heat
+refinement, both bending planes, stiff viscosity, fixed supports, finite-rotation
+objectivity with eccentric full inertia, and atomic source/refusal behavior.
