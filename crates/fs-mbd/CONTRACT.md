@@ -5687,3 +5687,58 @@ reactions. Additional cases check diagonal/empty parity and atomic refusal.
 All 21 existing distance, point-loop, bilateral-effort and coupled-effort cases
 also pass with the original native owners. Full Cargo/DSR qualification and the
 broader multibody bead remain outstanding.
+
+## Joint gears and material loops in one free-floating solve
+
+`articulated::motion::spatial_loads::implicit::distance::joint` composes the
+existing constant affine `JointConstraint` rows with distance and spherical
+material-point closures. Its diagonal/full-matrix bushing entry points, each
+with optional repeatable joint feedback, use the same original midpoint and
+native impulse owners. A single row mobility retains body/body, body/joint and
+joint/joint responses, including complete link inertias and carrier recoil.
+The initial impulses and midpoint rates solve together; one final native
+tangent event enforces all rows together.
+
+The combined bound is 32 scalar rows: a distance consumes one, a spherical
+closure three, and a joint relation one. Only this bounded row matrix is
+factored. Joint covectors enter the original native inverse-mass action; no
+dense generalized mass matrix, separate trajectory solve or artificial mass is
+introduced. Body rows retain their free-endpoint regularity test, and the
+combined normalized reciprocal mobility must have resolved positive pivots.
+A gear redundant with a geometric closure refuses instead of acquiring an
+arbitrary reaction.
+
+Initial and accepted endpoint joint positions/rates satisfy each row's original
+Angle/Length units and absolute tolerances. Row coefficients scale against the
+native angular/prismatic rate scales, so a consistent row rescaling also
+rescales its nonlinear coordinates. Numerical trial states may leave the
+manifold. The actual summed body and joint impulse events retain native
+representability and physical state admission; passive reactions do not consume
+motor effort ratings, while actual caller commands retain those limits.
+Cancellation preserves the original loop error semantics.
+
+`MixedBilateralLoopStep.bilateral` retains body-loop vectors in their existing
+metre/N s coordinates, and both complete native impulse responses. Additional
+fields expose joint multipliers, compact joint impulses, before/after row
+residuals, and signed joint event work paired with actual mean pre/post rates.
+That work is already included in the original total constraint impulse work,
+including body/joint cross terms. A finite admitted tangent defect can do real
+signed work; it is neither discarded nor counted again as damping heat.
+World linear and orbital-plus-spin angular momentum remain independently
+audited against external smooth impulses and actual reaction resultants.
+
+Six focused native groups exercise an independent coupled row mobility with a
+nonzero body/joint cross block, finite carrier recoil, both event-work
+accounts and the joint-only boundary; a metre/radian geared mode with full passive matrices and feedback;
+finite tangency work; a spherical closure plus angular lock against an
+independently assembled full inertia tensor; empty-row parity, cross-family
+rank refusal and cancellation; and passive reactions beyond motor ratings
+with actual over-limit commands refused. All 25 existing affected loop/effort
+cases also pass.
+
+This is the original RATTLE-style bounded composition with measured finite-step
+work, distinct from the continuous affine-reaction midpoint lane. It adds no
+constraint activation, changing ratios, backlash, nonholonomic rolling,
+arbitrary redundancy resolution, continuous-path enclosure, symplecticity or
+energy-exactness claim. Full Cargo/DSR qualification and the broader multibody
+bead remain outstanding.

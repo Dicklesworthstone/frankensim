@@ -24,6 +24,10 @@ use super::{
     SpatialMotionStep, Vec3, advance, finish_midpoint, poll, validate_config,
     validate_external_wrenches, validate_forward_dynamics_header, validate_slice,
 };
+use crate::articulated::motion::reconfigure::constraints::{
+    ConstraintError, JointConstraint, admit_constraints, apply_rows,
+};
+use crate::articulated::motion::sum_products;
 use crate::articulated::{
     ArticulatedError, BaseState, FreeFloatingImpulseResponse, JointKind, Kinematics,
     apply_free_floating_impulses, forward_kinematics, free_floating_impulse_delta,
@@ -31,6 +35,7 @@ use crate::articulated::{
 };
 use fs_ga::{GaError, Se3, Twist, Wrench};
 use fs_la::factor::{Cholesky, cholesky};
+use fs_math::dd::Dd;
 
 /// Bound on simultaneous independent scalar rows: a point closure consumes three.
 pub const MAX_BILATERAL_ROWS: usize = 32;
@@ -208,6 +213,36 @@ pub struct BilateralLoopStep {
     pub angular_momentum_balance_residual_world: Vec3,
 }
 
+/// One simultaneous body-loop/constant-joint step.
+///
+/// Body-loop vectors retain their original metre/N s coordinates. These extra
+/// vectors follow the supplied joint-row order and its declared Angle/Length
+/// units. Both native impulse receipts and their total work in `bilateral`
+/// already include the joint reactions and every body/joint cross term.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MixedBilateralLoopStep {
+    pub bilateral: BilateralLoopStep,
+    /// Initial A^T multiplier coordinates: N m s for Angle, N s for Length.
+    pub initial_joint_multipliers: Vec<f64>,
+    /// Corresponding final multipliers at the actual endpoint configuration.
+    pub final_joint_multipliers: Vec<f64>,
+    /// Actual summed initial A^T lambda in compact native joint order.
+    pub initial_joint_impulse: Vec<f64>,
+    /// Actual summed final A^T lambda in compact native joint order.
+    pub final_joint_impulse: Vec<f64>,
+    /// Actual A q - b at the two independently admitted configurations.
+    pub joint_position_residuals_before: Vec<f64>,
+    pub joint_position_residuals_after: Vec<f64>,
+    /// Actual A qdot at the two independently admitted physical states.
+    pub joint_velocity_residuals_before: Vec<f64>,
+    pub joint_velocity_residuals_after: Vec<f64>,
+    /// Joint impulse paired with the actual mean pre/post event rates, J.
+    /// This is INCLUDED in bilateral.constraint_impulse_work, not extra work.
+    pub initial_joint_reaction_work_j: f64,
+    /// Corresponding endpoint joint work, also included in the total.
+    pub final_joint_reaction_work_j: f64,
+}
+
 /// Result of the distance-only specialization; point-specific vectors are empty.
 pub type DistanceLoopStep = BilateralLoopStep;
 
@@ -281,6 +316,14 @@ impl From<ArticulatedError> for DistanceLoopError {
         Self::Motion(value.into())
     }
 }
+impl From<ConstraintError> for DistanceLoopError {
+    fn from(value: ConstraintError) -> Self {
+        match value {
+            ConstraintError::Cancelled => FreeFloatingMotionError::Cancelled.into(),
+            other => Self::Motion(other.into()),
+        }
+    }
+}
 impl From<GaError> for DistanceLoopError {
     fn from(value: GaError) -> Self {
         Self::Motion(value.into())
@@ -305,7 +348,7 @@ impl From<GaError> for DistanceLoopError {
 ///
 /// Returned endpoint residuals are floating observations, not a state enclosure.
 /// Intermediate drift states need not lie on the manifold. There is no collision
-/// detection, general joint/gear loop, nonholonomic rolling, automatic assembly,
+/// detection, general nonlinear joint/gear loops, nonholonomic rolling, automatic assembly,
 /// redundancy resolution, branch certificate or adjoint. Numerical constraint
 /// work remains visible; no general symplecticity or energy-exactness is claimed.
 pub fn step_free_floating_distance_loops(
@@ -421,8 +464,18 @@ pub fn step_free_floating_bilateral_loops_with_bushings(
     cancelled: impl FnMut() -> bool,
 ) -> Result<BilateralLoopStep, BilateralLoopError> {
     step_bilateral_evaluated(
-        model, state, loads, loops, bushings, duration, config, None, cancelled,
+        model,
+        state,
+        loads,
+        loops,
+        &[],
+        bushings,
+        duration,
+        config,
+        None,
+        cancelled,
     )
+    .map(|step| step.bilateral)
 }
 
 /// Advance rigid bilateral loops, finite bushings and state-dependent internal
@@ -478,12 +531,14 @@ pub fn step_free_floating_bilateral_loops_with_effort(
         state,
         loads,
         loops,
+        &[],
         bushings,
         duration,
         config,
         Some(&mut effort),
         cancelled,
     )
+    .map(|step| step.bilateral)
 }
 
 /// Advance rigid loops with the original full passive stiffness and damping laws.
@@ -507,8 +562,18 @@ pub fn step_free_floating_bilateral_loops_with_coupled_bushings(
     cancelled: impl FnMut() -> bool,
 ) -> Result<BilateralLoopStep, BilateralLoopError> {
     step_bilateral_evaluated(
-        model, state, loads, loops, bushings, duration, config, None, cancelled,
+        model,
+        state,
+        loads,
+        loops,
+        &[],
+        bushings,
+        duration,
+        config,
+        None,
+        cancelled,
     )
+    .map(|step| step.bilateral)
 }
 
 /// Simultaneously solve rigid closures, full passive bushings and joint feedback.
@@ -540,12 +605,139 @@ pub fn step_free_floating_bilateral_loops_with_coupled_bushings_and_effort(
         state,
         loads,
         loops,
+        &[],
         bushings,
         duration,
         config,
         Some(&mut effort),
         cancelled,
     )
+    .map(|step| step.bilateral)
+}
+
+/// Constant ideal gears/locks combined with distance and spherical closures.
+///
+/// All rows participate in one native free-floating impulse mobility, including
+/// their cross responses. The initial impulses and midpoint are solved
+/// simultaneously; the endpoint tangent impulse enforces all rows together.
+/// Each joint row retains its own units and absolute tolerances. Trial probes
+/// may leave the manifold; accepted positions and rates are independently
+/// admitted. No gear is enforced by a sequential velocity projection.
+///
+/// The combined system admits at most 32 scalar rows; each spherical closure
+/// consumes three. Mobility refusal indices list the flattened body-loop rows
+/// first, then the joint rows in caller order. Body-specific metre/N s receipt
+/// vectors remain separate from the original-unit joint vectors.
+///
+/// Both impulse events retain their actual work, including cross terms. This
+/// RATTLE-style composition is distinct from the continuous affine-reaction
+/// midpoint lane: intermediate kicked rates need not be tangent, and finite
+/// impulse work is not presumed zero. Activation, changing ratios, backlash,
+/// nonholonomic relations and arbitrary redundant reactions are not modeled.
+pub mod joint {
+    use super::*;
+
+    /// Advance body loops and ideal joint rows with diagonal passive bushings.
+    /// An empty bushing slice gives the plain mixed-constraint operation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_bushings(
+        model: &ArticulatedModel,
+        state: &FreeFloatingMotionState,
+        loads: SpatialMotionLoads<'_>,
+        loops: &[BilateralLoop],
+        rows: &[JointConstraint],
+        bushings: &[SpatialBushing],
+        duration: f64,
+        config: BilateralLoopConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MixedBilateralLoopStep, BilateralLoopError> {
+        step_bilateral_evaluated(
+            model, state, loads, loops, rows, bushings, duration, config, None, cancelled,
+        )
+    }
+
+    /// The same solve with smooth, repeatable trial actuator feedback.
+    /// The parent bilateral callback contract and physical effort limits apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_bushings_and_effort(
+        model: &ArticulatedModel,
+        state: &FreeFloatingMotionState,
+        loads: SpatialMotionLoads<'_>,
+        loops: &[BilateralLoop],
+        rows: &[JointConstraint],
+        bushings: &[SpatialBushing],
+        duration: f64,
+        config: BilateralLoopConfig,
+        mut effort: impl FnMut(
+            f64,
+            &FreeFloatingMotionState,
+            &mut [f64],
+        ) -> Result<(), FreeFloatingMotionError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MixedBilateralLoopStep, BilateralLoopError> {
+        step_bilateral_evaluated(
+            model,
+            state,
+            loads,
+            loops,
+            rows,
+            bushings,
+            duration,
+            config,
+            Some(&mut effort),
+            cancelled,
+        )
+    }
+
+    /// The same simultaneous rows with complete passive six-coordinate matrices.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_coupled_bushings(
+        model: &ArticulatedModel,
+        state: &FreeFloatingMotionState,
+        loads: SpatialMotionLoads<'_>,
+        loops: &[BilateralLoop],
+        rows: &[JointConstraint],
+        bushings: &[CoupledSpatialBushing],
+        duration: f64,
+        config: BilateralLoopConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MixedBilateralLoopStep, BilateralLoopError> {
+        step_bilateral_evaluated(
+            model, state, loads, loops, rows, bushings, duration, config, None, cancelled,
+        )
+    }
+
+    /// Jointly solve all rigid rows, full passive matrices and actuator feedback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_coupled_bushings_and_effort(
+        model: &ArticulatedModel,
+        state: &FreeFloatingMotionState,
+        loads: SpatialMotionLoads<'_>,
+        loops: &[BilateralLoop],
+        rows: &[JointConstraint],
+        bushings: &[CoupledSpatialBushing],
+        duration: f64,
+        config: BilateralLoopConfig,
+        mut effort: impl FnMut(
+            f64,
+            &FreeFloatingMotionState,
+            &mut [f64],
+        ) -> Result<(), FreeFloatingMotionError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MixedBilateralLoopStep, BilateralLoopError> {
+        step_bilateral_evaluated(
+            model,
+            state,
+            loads,
+            loops,
+            rows,
+            bushings,
+            duration,
+            config,
+            Some(&mut effort),
+            cancelled,
+        )
+    }
 }
 
 fn step_bilateral_evaluated<B: BushingLaw>(
@@ -553,20 +745,22 @@ fn step_bilateral_evaluated<B: BushingLaw>(
     state: &FreeFloatingMotionState,
     loads: SpatialMotionLoads<'_>,
     loops: &[BilateralLoop],
+    joint_rows: &[JointConstraint],
     bushings: &[B],
     duration: f64,
     config: BilateralLoopConfig,
     effort: Option<&mut EffortLaw<'_>>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<BilateralLoopStep, BilateralLoopError> {
+) -> Result<MixedBilateralLoopStep, BilateralLoopError> {
     poll(&mut cancelled)?;
     validate_config(config.nonlinear)?;
     if !duration.is_finite() || duration <= 0.0 {
         return Err(FreeFloatingMotionError::InvalidDuration.into());
     }
-    if loops.is_empty()
+    if loops.is_empty() && joint_rows.is_empty()
         || loops.len() > MAX_BILATERAL_ROWS
-        || loops.iter().map(|c| c.rows()).sum::<usize>() > MAX_BILATERAL_ROWS
+        || joint_rows.len() > MAX_BILATERAL_ROWS
+        || loops.iter().map(|c| c.rows()).sum::<usize>() + joint_rows.len() > MAX_BILATERAL_ROWS
     {
         return Err(DistanceLoopError::Invalid(
             "independent bilateral row count must be in 1..=32",
@@ -606,6 +800,12 @@ fn step_bilateral_evaluated<B: BushingLaw>(
     validate_external_wrenches(loads.held.external_body_wrench)?;
     bushing::admit(model, loads, bushings, &mut cancelled)?;
     admit_loops(model, loops)?;
+    let joint_before = admit_constraints(
+        joint_rows,
+        &state.joint_position,
+        &state.joint_velocity,
+        &mut cancelled,
+    )?;
     let initial_map = MomentumMap::new(model, state, &mut cancelled)?;
     let initial_coordinates = initial_map.coordinates(state.base)?;
     let initial_load =
@@ -618,13 +818,15 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         state,
         &initial_map,
         &before,
+        joint_rows,
         config,
         "initial",
         true,
         &mut cancelled,
     )?;
     let n = model.dof_count();
-    let count = before.gaps.len();
+    let loop_count = before.gaps.len();
+    let count = loop_count + joint_rows.len();
     let mut scales = vec![config.nonlinear.angular_velocity_scale; n + 3];
     for (link, part) in model.links().iter().enumerate() {
         if part.joint.kind() == JointKind::Prismatic
@@ -633,18 +835,36 @@ fn step_bilateral_evaluated<B: BushingLaw>(
             scales[dof] = config.nonlinear.linear_velocity_scale;
         }
     }
+    // A coefficient carries row-units / joint-units. Scaling by the native
+    // coordinate rates preserves these units and row-rescaling covariance.
+    let mut row_scales = vec![config.nonlinear.linear_velocity_scale; loop_count];
+    for row in joint_rows {
+        let mut scale = 0.0_f64;
+        for (&a, &v) in row.coefficients.iter().zip(&scales) {
+            let term = a.abs() * v;
+            if !term.is_finite() {
+                return Err(DistanceLoopError::Invalid(
+                    "unrepresentable joint row scaling",
+                ));
+            }
+            scale = scale.max(term);
+        }
+        row_scales.push(scale);
+    }
     let impulse_scales: Vec<_> = initial_mobility
         .diagonal
         .iter()
-        .map(|d| config.nonlinear.linear_velocity_scale / (d * d))
+        .zip(&row_scales)
+        .map(|(d, scale)| scale / (d * d))
         .collect();
-    let gap_scale = duration * config.nonlinear.linear_velocity_scale;
-    let target = config
-        .nonlinear
-        .residual_tolerance
-        .min(config.position_tolerance_m / gap_scale);
-    if !gap_scale.is_finite()
-        || gap_scale <= 0.0
+    let gap_scales: Vec<_> = row_scales.iter().map(|v| duration * v).collect();
+    let mut tolerances = vec![config.position_tolerance_m; loop_count];
+    tolerances.extend(joint_rows.iter().map(|row| row.position_tolerance));
+    let target = tolerances.iter().zip(&gap_scales).fold(
+        config.nonlinear.residual_tolerance,
+        |target, (tolerance, scale)| target.min(tolerance / scale),
+    );
+    if gap_scales.iter().any(|s| !s.is_finite() || *s <= 0.0)
         || !target.is_finite()
         || target <= 0.0
         || impulse_scales.iter().any(|s| !s.is_finite() || *s <= 0.0)
@@ -743,7 +963,9 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         )?;
         let end = geometry(&shape, state.base, loops)?;
         let mut residual = midpoint.residual;
-        residual.extend(end.gaps.iter().map(|g| g / gap_scale));
+        let mut gaps = end.gaps;
+        gaps.extend(joint_gaps(joint_rows, &q, &mut *cancel)?);
+        residual.extend(gaps.iter().zip(&gap_scales).map(|(g, s)| g / s));
         validate_slice(&residual, "distance_loop.equations")?;
         poll(&mut *cancel)?;
         Ok(residual)
@@ -789,7 +1011,14 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         .collect();
     let mut cancel = cancelled.borrow_mut();
     poll(&mut *cancel)?;
-    let initial_reaction = apply(model, state, &before, &initial_impulse)?;
+    let (initial_reaction, initial_joint_impulse) = apply(
+        model,
+        state,
+        &before,
+        joint_rows,
+        &initial_impulse,
+        &mut *cancel,
+    )?;
     let kicked = FreeFloatingMotionState {
         base: initial_reaction.base_after,
         joint_position: state.joint_position.clone(),
@@ -837,7 +1066,9 @@ fn step_bilateral_evaluated<B: BushingLaw>(
     )?;
     let final_geometry = geometry(&shape, state.base, loops)?;
     let mut actual_residual = actual_midpoint.residual.clone();
-    actual_residual.extend(final_geometry.gaps.iter().map(|g| g / gap_scale));
+    let mut final_gaps = final_geometry.gaps;
+    final_gaps.extend(joint_gaps(joint_rows, &final_q, &mut *cancel)?);
+    actual_residual.extend(final_gaps.iter().zip(&gap_scales).map(|(g, s)| g / s));
     report.residual_norm = fs_solver::norm2(&actual_residual);
     if !report.residual_norm.is_finite() || report.residual_norm > target {
         report.converged = false;
@@ -869,14 +1100,28 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         endpoint,
         &final_map,
         &end,
+        joint_rows,
         config,
         "endpoint",
         false,
         &mut *cancel,
     )?;
-    let final_impulse = final_mobility.cancel_rates(&end.rates)?;
+    let mut end_rates = end.rates.clone();
+    end_rates.extend(apply_rows(
+        joint_rows,
+        &endpoint.joint_velocity,
+        &mut *cancel,
+    )?);
+    let final_impulse = final_mobility.cancel_rates(&end_rates)?;
     poll(&mut *cancel)?;
-    let final_reaction = apply(model, endpoint, &end, &final_impulse)?;
+    let (final_reaction, final_joint_impulse) = apply(
+        model,
+        endpoint,
+        &end,
+        joint_rows,
+        &final_impulse,
+        &mut *cancel,
+    )?;
     let state_after = FreeFloatingMotionState {
         base: final_reaction.base_after,
         joint_position: endpoint.joint_position.clone(),
@@ -891,6 +1136,22 @@ fn step_bilateral_evaluated<B: BushingLaw>(
     let actual = geometry(&final_shape, state_after.base, loops)?;
     check_position(&actual, config, "endpoint")?;
     check_velocity(&actual, config, "endpoint")?;
+    let joint_after = admit_constraints(
+        joint_rows,
+        &state_after.joint_position,
+        &state_after.joint_velocity,
+        &mut *cancel,
+    )?;
+    let initial_joint_reaction_work_j = joint_work(
+        &initial_joint_impulse,
+        &state.joint_velocity,
+        &kicked.joint_velocity,
+    )?;
+    let final_joint_reaction_work_j = joint_work(
+        &final_joint_impulse,
+        &endpoint.joint_velocity,
+        &state_after.joint_velocity,
+    )?;
     let (final_geometric_couple_impulse_world, final_geometric_couple_work) =
         geometric_work(&end, &final_shape, state_after.base, &final_impulse)?;
     let initial_momentum = initial_reaction.momentum_before;
@@ -942,37 +1203,71 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         super::validate_vec3(value, "bilateral_loop.reaction_momentum")?;
     }
     poll(&mut *cancel)?;
-    Ok(DistanceLoopStep {
-        state_after,
-        midpoint,
-        initial_reaction,
-        final_reaction,
-        rows: before.rows,
-        initial_impulse_ns: initial_impulse,
-        final_impulse_ns: final_impulse,
-        position_residual_before_m: before.gaps,
-        position_residual_after_m: actual.gaps,
-        velocity_residual_before_mps: before.rates,
-        velocity_residual_after_mps: actual.rates,
-        point_residual_before: before.points.iter().map(|p| p.residual).collect(),
-        point_residual_after: actual.points.iter().map(|p| p.residual).collect(),
-        initial_geometric_couple_impulse_world,
-        final_geometric_couple_impulse_world,
-        initial_geometric_couple_work,
-        final_geometric_couple_work,
-        initial_scaled_pivot: initial_mobility.minimum_pivot,
-        final_scaled_pivot: final_mobility.minimum_pivot,
-        nonlinear: report,
-        residual_evaluations: evaluations.get(),
-        constraint_impulse_work,
-        mechanical_work_residual,
-        linear_momentum_residual_world,
-        angular_momentum_residual_world,
-        reaction_linear_impulse_world,
-        reaction_angular_impulse_world,
-        linear_momentum_balance_residual_world,
-        angular_momentum_balance_residual_world,
+    Ok(MixedBilateralLoopStep {
+        initial_joint_multipliers: initial_impulse[loop_count..].to_vec(),
+        final_joint_multipliers: final_impulse[loop_count..].to_vec(),
+        initial_joint_impulse,
+        final_joint_impulse,
+        joint_position_residuals_before: joint_before.position,
+        joint_position_residuals_after: joint_after.position,
+        joint_velocity_residuals_before: joint_before.velocity,
+        joint_velocity_residuals_after: joint_after.velocity,
+        initial_joint_reaction_work_j,
+        final_joint_reaction_work_j,
+        bilateral: DistanceLoopStep {
+            state_after,
+            midpoint,
+            initial_reaction,
+            final_reaction,
+            rows: before.rows,
+            initial_impulse_ns: initial_impulse[..loop_count].to_vec(),
+            final_impulse_ns: final_impulse[..loop_count].to_vec(),
+            position_residual_before_m: before.gaps,
+            position_residual_after_m: actual.gaps,
+            velocity_residual_before_mps: before.rates,
+            velocity_residual_after_mps: actual.rates,
+            point_residual_before: before.points.iter().map(|p| p.residual).collect(),
+            point_residual_after: actual.points.iter().map(|p| p.residual).collect(),
+            initial_geometric_couple_impulse_world,
+            final_geometric_couple_impulse_world,
+            initial_geometric_couple_work,
+            final_geometric_couple_work,
+            initial_scaled_pivot: initial_mobility.minimum_pivot,
+            final_scaled_pivot: final_mobility.minimum_pivot,
+            nonlinear: report,
+            residual_evaluations: evaluations.get(),
+            constraint_impulse_work,
+            mechanical_work_residual,
+            linear_momentum_residual_world,
+            angular_momentum_residual_world,
+            reaction_linear_impulse_world,
+            reaction_angular_impulse_world,
+            linear_momentum_balance_residual_world,
+            angular_momentum_balance_residual_world,
+        },
     })
+}
+
+fn joint_gaps(
+    rows: &[JointConstraint],
+    position: &[f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<f64>, BilateralLoopError> {
+    let mut gaps = apply_rows(rows, position, cancelled)?;
+    for (gap, row) in gaps.iter_mut().zip(rows) {
+        *gap -= row.position;
+    }
+    validate_slice(&gaps, "bilateral_loop.joint_gaps")?;
+    Ok(gaps)
+}
+
+fn joint_work(impulse: &[f64], before: &[f64], after: &[f64]) -> Result<f64, BilateralLoopError> {
+    let work = ((sum_products(impulse.iter().copied(), before.iter().copied())
+        + sum_products(impulse.iter().copied(), after.iter().copied()))
+        * Dd::from_f64(0.5))
+    .to_f64();
+    validate_slice(&[work], "bilateral_loop.joint_work")?;
+    Ok(work)
 }
 
 struct Geometry {
@@ -1180,20 +1475,27 @@ impl Mobility {
         state: &FreeFloatingMotionState,
         map: &MomentumMap,
         geometry: &Geometry,
+        joint_rows: &[JointConstraint],
         config: DistanceLoopConfig,
         stage: &'static str,
         retain_columns: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, DistanceLoopError> {
-        let k = geometry.terms.len();
+        let loop_count = geometry.terms.len();
+        let k = loop_count + joint_rows.len();
         let mut matrix = vec![0.; k * k];
         let mut columns = Vec::with_capacity(if retain_columns { k } else { 0 });
-        let joints = vec![0.; model.dof_count()];
+        let mut joints = vec![0.; model.dof_count()];
         let mut body = vec![Wrench::default(); model.link_count()];
-        for (column, terms) in geometry.terms.iter().enumerate() {
+        for column in 0..k {
             poll(cancelled)?;
-            for (link, wrench) in terms {
-                body[*link] = *wrench;
+            let terms = geometry.terms.get(column);
+            if let Some(terms) = terms {
+                for (link, wrench) in terms {
+                    body[*link] = *wrench;
+                }
+            } else {
+                joints.copy_from_slice(&joint_rows[column - loop_count].coefficients);
             }
             let response =
                 free_floating_impulse_delta(model, &state.joint_position, &joints, &body)?;
@@ -1203,17 +1505,26 @@ impl Mobility {
                     .map(|(link, w)| w.pairing(response.body[*link]))
                     .sum();
             }
+            for (row, value) in apply_rows(joint_rows, &response.joint, cancelled)?
+                .into_iter()
+                .enumerate()
+            {
+                matrix[(loop_count + row) * k + column] = value;
+            }
             if retain_columns {
                 let mut force_base = Vec3::default();
                 let mut torque_com_base = Vec3::default();
-                for (link, wrench) in terms {
-                    let pose = map.shape.world_from_link[*link];
-                    let force = pose.rotation().rotate(wrench.force)?;
-                    force_base = force_base + force;
-                    torque_com_base = torque_com_base
-                        + pose.rotation().rotate(wrench.torque)?
-                        + (pose.translation() - map.center_base).cross(force);
+                if let Some(terms) = terms {
+                    for (link, wrench) in terms {
+                        let pose = map.shape.world_from_link[*link];
+                        let force = pose.rotation().rotate(wrench.force)?;
+                        force_base = force_base + force;
+                        torque_com_base = torque_com_base
+                            + pose.rotation().rotate(wrench.torque)?
+                            + (pose.translation() - map.center_base).cross(force);
+                    }
                 }
+                // Joint covectors are internal and have no external resultant.
                 let rotation = state.base.world_from_base.rotation();
                 let linear_world = rotation.rotate(force_base)?;
                 let angular_com_world = rotation.rotate(torque_com_base)?;
@@ -1226,31 +1537,42 @@ impl Mobility {
                     angular_com_world,
                 });
             }
-            for (link, _) in terms {
-                body[*link] = Wrench::default();
+            if let Some(terms) = terms {
+                for (link, _) in terms {
+                    body[*link] = Wrench::default();
+                }
+            } else {
+                joints.fill(0.0);
             }
         }
         validate_slice(&matrix, "distance_loop.mobility")?;
         let mut diagonal = Vec::with_capacity(k);
         for i in 0..k {
             let d = matrix[i * k + i];
-            let mut free_mobility = 0.;
-            for (link, wrench) in geometry.terms[i] {
-                let response =
-                    solve_floating_base_system(&model.links()[link].inertia.matrix()?, wrench)?;
-                free_mobility += wrench.pairing(response);
-            }
-            if d <= 0.
-                || !d.is_finite()
-                || !free_mobility.is_finite()
-                || free_mobility <= 0.
-                || d / free_mobility < config.minimum_scaled_pivot
-            {
+            if d <= 0. || !d.is_finite() {
                 return Err(DistanceLoopError::Mobility {
                     stage,
                     constraint: i,
-                    reason: "constraint mobility vanishes relative to free endpoint bodies",
+                    reason: "constraint mobility is not finite and positive",
                 });
+            }
+            if let Some(terms) = geometry.terms.get(i) {
+                let mut free_mobility = 0.;
+                for &(link, wrench) in terms {
+                    let response =
+                        solve_floating_base_system(&model.links()[link].inertia.matrix()?, wrench)?;
+                    free_mobility += wrench.pairing(response);
+                }
+                if !free_mobility.is_finite()
+                    || free_mobility <= 0.
+                    || d / free_mobility < config.minimum_scaled_pivot
+                {
+                    return Err(DistanceLoopError::Mobility {
+                        stage,
+                        constraint: i,
+                        reason: "constraint mobility vanishes relative to free endpoint bodies",
+                    });
+                }
             }
             diagonal.push(d.sqrt());
         }
@@ -1318,8 +1640,10 @@ fn apply(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
     geometry: &Geometry,
+    joint_rows: &[JointConstraint],
     magnitude: &[f64],
-) -> Result<FreeFloatingImpulseResponse, DistanceLoopError> {
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(FreeFloatingImpulseResponse, Vec<f64>), DistanceLoopError> {
     let mut body = vec![Wrench::default(); model.link_count()];
     for (terms, scale) in geometry.terms.iter().zip(magnitude) {
         for (link, w) in terms {
@@ -1329,14 +1653,28 @@ fn apply(
             );
         }
     }
-    Ok(apply_free_floating_impulses(
+    let mut joint_impulse = vec![0.0; model.dof_count()];
+    let multipliers = &magnitude[geometry.terms.len()..];
+    for (joint, impulse) in joint_impulse.iter_mut().enumerate() {
+        if joint % 64 == 0 {
+            poll(cancelled)?;
+        }
+        *impulse = sum_products(
+            joint_rows.iter().map(|row| row.coefficients[joint]),
+            multipliers.iter().copied(),
+        )
+        .to_f64();
+    }
+    validate_slice(&joint_impulse, "bilateral_loop.joint_impulse")?;
+    let response = apply_free_floating_impulses(
         model,
         state.base,
         &state.joint_position,
         &state.joint_velocity,
-        &vec![0.; model.dof_count()],
+        &joint_impulse,
         &body,
-    )?)
+    )?;
+    Ok((response, joint_impulse))
 }
 fn check_position(
     geometry: &Geometry,
