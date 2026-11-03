@@ -25158,3 +25158,26 @@ not turn that discretization into an energy-conserving thermal fluid. Five
 integration regressions cover independent D3Q19/finite-inertia momentum and
 work oracles, bitwise native replay and continuation, pressure-datum shifts,
 bounded geometry/work/trials, cancellation and late native liquid refusal.
+
+## Finite native liquid-to-liquid momentum transfer
+
+`liquid_transfer::transfer_interface_mass` atomically moves a finite packet
+between two original `MaterialFreeSurfaceEnthalpy3` interface inventories at the
+same accepted physical time. Explicit Cartesian grid origins must map both
+cell centers to one point, and both trajectories must retain the same borrowed
+surface source, liquid temperature law and caloric curve. Native withdrawal
+carries the actual donor velocity with zero actuator work; native receiver
+mixing changes its populations and deposits the physical relative kinetic loss
+as enthalpy once. Receiver credit uses the donor's represented withdrawal.
+Actual two-owner mass, linear momentum and enthalpy-plus-kinetic residuals must
+fit the supplied native budgets before either owner publishes. Cancellation,
+source/clock/geometry mismatch, capacity or speed refusal preserves both states.
+The original timelines continue from the accepted fills, motion and enthalpy.
+
+This is coincident-interface transfer between overlapping representations, not
+a resolved connector, pipe, jet, phase change or pressure-work model. It adds no
+compressible internal-energy, capillary-energy or whole-flow energy theorem.
+G1/G3/G4 integration tests independently read complete native mass, linear and
+angular momentum, and enthalpy-plus-kinetic inventories, and exercise unequal
+velocities, mixing heat, datum/boost covariance, chained continuation and atomic
+refusals. These are synthetic conservation tests, not experimental validation.

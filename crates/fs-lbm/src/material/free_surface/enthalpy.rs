@@ -497,6 +497,18 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         &self.flow
     }
 
+    /// Whether matter can retain its original source and enthalpy datum when
+    /// transferred between these owners. This requires the very same borrowed
+    /// surface source, temperature law and caloric curve, not equal sampled
+    /// coefficients or merely the same material name. Geometry, physical
+    /// clocks, representable mass and momentum remain the coupling's checks.
+    #[must_use]
+    pub fn shares_mass_transfer_source(&self, other: &MaterialFreeSurfaceEnthalpy3<'_, '_>) -> bool {
+        core::ptr::eq(self.flow.scaling.material(), other.flow.scaling.material())
+            && core::ptr::eq(self.law, other.law)
+            && core::ptr::eq(self.caloric, other.caloric)
+    }
+
     /// Select conversion on this original thermal trajectory, including an
     /// already bound planar, height-graph or local thermocapillary surface.
     ///

@@ -88,6 +88,8 @@ pub mod iqn_ils;
 pub mod stokes_motion;
 /// Declared gas chemistry, finite atmospheric heat and native moving liquid.
 pub mod liquid_gas;
+/// Conservative matter and momentum transfer between original finite liquid owners.
+pub mod liquid_transfer;
 pub mod material_assembly;
 /// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
 pub mod material_circuit;
