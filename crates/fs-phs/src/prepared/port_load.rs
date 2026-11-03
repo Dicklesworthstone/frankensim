@@ -1,5 +1,5 @@
 //! Parallel impedance loading through the existing lossless port interconnection.
-use crate::{PhsError, PortHamiltonian, Storage, interconnect};
+use crate::{DescriptorPortHamiltonian, PhsError, PortHamiltonian, Storage, interconnect};
 
 // Constitutive callbacks are immutable. All evolving memory stays in x.
 struct SharedStorage(std::rc::Rc<dyn Storage>);
@@ -184,9 +184,51 @@ impl PortHamiltonian {
         }
         // Extra columns expose physical ports, not new states or storage.
         // Consuming them leaves every original external drive untouched.
-        let host = Self::new(self.n, expanded, self.j, self.r, g, self.storage)?;
+        let mut host = Self::new(self.n, expanded, self.j, self.r, g, self.storage)?;
+        host.resistance_witness = self.resistance_witness;
         let pairs: Vec<_> = (0..load.m).map(|j| (external+j,j)).collect();
         interconnect(host, load, &pairs)
+    }
+
+    /// Attach an original constrained impedance at physical flow columns.
+    ///
+    /// The host receives `-B G_load^T e_load` and the load receives
+    /// `B^T grad H_host`, where `e_load=[grad H_diff, lambda]` includes every
+    /// algebraic reaction. Internal power therefore cancels for the same signed,
+    /// repeated or nonorthogonal columns as [Self::with_parallel_load_columns].
+    ///
+    /// State order is unchanged host coordinates, original load differential
+    /// coordinates, then original load multipliers. The result retains
+    /// `E=diag(I_host,I_load_diff,0)`; multipliers acquire no storage or dynamics.
+    /// Every immutable constitutive callback and original resistance witness is
+    /// composed through the existing interconnection owner. No storage law is
+    /// linearized, constraint inverted, state removed or integration performed.
+    /// Callers own complete state/work budgets and consistent initial conditions.
+    ///
+    /// # Errors
+    /// The same port, dimension and structure refusals as the ordinary parallel
+    /// load. This does not classify descriptor index or prove unique dynamics.
+    pub fn with_parallel_descriptor_load_columns(
+        self,
+        load: DescriptorPortHamiltonian,
+        load_columns: &[f64],
+    ) -> Result<DescriptorPortHamiltonian, PhsError> {
+        let n_diff = self.n.checked_add(load.n_diff).ok_or(PhsError::Dimension {
+            what: "parallel descriptor differential dimensions",
+        })?;
+        // Reuse only the original structural composition. This temporary
+        // container is never stepped or exposed as an ODE: the descriptor
+        // partition is restored before returning the composed physical owner.
+        let structure = Self {
+            n: load.n, m: load.m, j: load.j, r: load.r, g: load.g,
+            storage: load.storage, resistance_witness: load.resistance_witness,
+        };
+        let joint = self.with_parallel_load_columns(structure, load_columns)?;
+        Ok(DescriptorPortHamiltonian {
+            n: joint.n, n_diff, m: joint.m,
+            j: joint.j, r: joint.r, g: joint.g, storage: joint.storage,
+            resistance_witness: joint.resistance_witness,
+        })
     }
 }
 

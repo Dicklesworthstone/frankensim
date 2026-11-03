@@ -1227,11 +1227,13 @@ impl DescriptorPortHamiltonian {
         self.storage.hamiltonian(x)
     }
 
-    /// Port output `y = G^T grad H`.
+    /// Port output `y = G^T [grad H_diff, lambda]`, including original
+    /// algebraic reactions even though those multipliers store no energy.
     #[must_use]
     pub fn output(&self, x: &[f64]) -> Vec<f64> {
         let mut e = vec![0.0; self.n];
         self.storage.gradient(x, &mut e);
+        e[self.n_diff..].copy_from_slice(&x[self.n_diff..]);
         let mut y = vec![0.0; self.m];
         for p in 0..self.m {
             let mut acc = 0.0;
