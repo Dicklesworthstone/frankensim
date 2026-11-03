@@ -5735,3 +5735,36 @@ focused checks cover transparent throughput, two-face coverage and contact
 events, original ambient events, split continuation, fixed-optics reuse, shared
 enthalpy laws on a latent plateau, canonical pairs and atomic refusal.
 <!-- native-coating-transmitting-pair:end -->
+
+<!-- coating-radiative-stack:start -->
+### Mutual screening and exchange across multiple coated bodies
+
+`CoatingRadiativeStackResponse` prepares one through sixteen ordered,
+vacuum/vacuum, internally isothermal reciprocal coating bodies. Every selected
+emitter port faces LEFT. Each body retains its original coherent film optics;
+inter-body gaps carry phase-averaged far-field powers. Two original coherent
+face solves per body/wavelength/cosine serve all `N*(N-1)/2` body pairs, `2*N`
+body/bath channels and one exterior-throughput channel. Angular and polarization
+modes are matched before integration, not combined from independent averages.
+
+A positive normalized prefix-source elimination and backward sweep carry escape
+independently of rounded unit reflection, retain representable weak coupling,
+verify reciprocity and handle source-free trapped gaps without inventing fields.
+Optical preparation costs O(N^2) per matched mode, with bounded scratch storage.
+Only common source-band midpoint spectral/angular integrals are retained in
+shared immutable storage. Temperature queries allocate nothing and use the
+original stable Planck differences and secants. Canonical i<j transfers apply
+equal/opposite watts; direct bath throughput heats no body. Equal temperatures
+give exact zero exchange, including for near-trapped modes.
+
+Preparation enforces hard and caller body bounds, retained-channel and optical
+solve budgets, full-band vacuum/isothermal/common-band admission and bounded
+cancellation. No partial response is published. Six G1/G3/G4 groups check
+independent dense directional-intensity balances for 1, 2, 3, 5 and 16 bodies,
+original coherent three-body spectra and conservation, reversal, single/two-body
+reductions, opaque shielding, transparent limits, sub-roundoff positive loss,
+stable weak Planck work and admission/cancellation. Model scope follows Byrnes,
+arXiv:1603.02720v5 section 6, and the existing local Kirchhoff emission owner.
+The caller must justify phase averaging; no finite-edge, rough, near-field,
+coherent-gap, internal-nonisothermal or bolometric extrapolation is implied.
+<!-- coating-radiative-stack:end -->

@@ -61,6 +61,12 @@ pub use coating_transmitting_pair::{
     CoatingTransmittingPairBudget, CoatingTransmittingPairRates, CoatingTransmittingPairResponse,
 };
 
+mod coating_radiative_stack;
+pub use coating_radiative_stack::{
+    CoatingRadiativePairRate, CoatingRadiativeStackBudget, CoatingRadiativeStackRates,
+    CoatingRadiativeStackResponse, MAX_RADIATIVE_STACK_BODIES,
+};
+
 /// Physical incident surface absorption on the original native thermal clock.
 #[cfg(feature = "optical-heating")]
 pub mod heating;
