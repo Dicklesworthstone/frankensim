@@ -32,36 +32,17 @@ use super::{CollisionModel3, E3, OPP3, Q3, collision_kernel3, equilibrium3};
 use crate::rheology::{
     PreparedRheology, Rheology, RheologyField, RheologyFieldError, RheologyStats,
 };
-use crate::thermal::{ThermalForcingError, forcing::validate_external_forces};
+use crate::thermal::{ThermalForcingError, advection, forcing::validate_external_forces};
 
 /// Flow-lattice sound speed squared (D3Q19).
 const CS2_F: f64 = 1.0 / 3.0;
 
-/// D3Q7 temperature-lattice velocities: rest + six axis directions.
-const E7: [(i32, i32, i32); 7] = [
-    (0, 0, 0),
-    (1, 0, 0),
-    (-1, 0, 0),
-    (0, 1, 0),
-    (0, -1, 0),
-    (0, 0, 1),
-    (0, 0, -1),
-];
-/// D3Q7 weights (rest 1/4, axes 1/8): c_s² = 1/4.
-const W7: [f64; 7] = [0.25, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125];
-/// D3Q7 opposite table.
-const OPP7: [usize; 7] = [0, 2, 1, 4, 3, 6, 5];
 /// D3Q7 sound speed squared.
-const CS2_T7: f64 = 0.25;
+const CS2_T7: f64 = advection::D3Q7.cs2;
 
 /// D3Q7 advection-diffusion equilibrium.
 fn geq3(t: f64, u: [f64; 3]) -> [f64; 7] {
-    let mut g = [0.0f64; 7];
-    for q in 0..7 {
-        let eu = f64::from(E7[q].0) * u[0] + f64::from(E7[q].1) * u[1] + f64::from(E7[q].2) * u[2];
-        g[q] = W7[q] * t * (1.0 + eu / CS2_T7);
-    }
-    g
+    advection::D3Q7.equilibrium(t, u)
 }
 
 /// A plain-storage D3Q19 grid between two rigid z-plates: wall layers at
@@ -538,6 +519,7 @@ pub struct ThermalLbm3 {
     pub gbeta: f64,
     /// Reference temperature.
     pub t_ref: f64,
+    pub(crate) advection_history: advection::FluxHistory<3>,
 }
 
 impl ThermalLbm3 {
@@ -588,6 +570,7 @@ impl ThermalLbm3 {
             t_top,
             gbeta,
             t_ref: 0.5,
+            advection_history: advection::FluxHistory::default(),
         }
     }
 
@@ -601,6 +584,13 @@ impl ThermalLbm3 {
     #[must_use]
     pub fn diffusivity(&self) -> f64 {
         CS2_T7 * (self.tau_g - 0.5)
+    }
+
+    /// Restart the thermal derivative after directly replacing populations
+    /// or prescribing a discontinuous velocity field. One startup step uses
+    /// zero correction. Ordinary forcing/source steps retain their history.
+    pub fn reset_advection_history(&mut self) {
+        self.advection_history.reset();
     }
 
     /// Seed a sinusoidal vertical-velocity roll (onset mode) spanning x,
@@ -635,11 +625,12 @@ impl ThermalLbm3 {
                 }
             }
         }
+        self.reset_advection_history();
     }
 
-    /// One coupled step: Boussinesq force from T, flow step, then
-    /// temperature collide + stream (anti-bounce-back at the fixed-T
-    /// plates, periodic x/y).
+    /// Freeze buoyancy from T, collide/stream temperature at the input
+    /// physical velocity, then advance flow under the frozen force.
+    /// Temperature uses fixed halfway plates and periodic x/y streaming.
     pub fn step(&mut self) {
         self.step_with_forces_inner(None, None);
     }
@@ -713,49 +704,29 @@ impl ThermalLbm3 {
                 }
             }
         }
+        // Move only the Vec handle to borrow the original scratch separately
+        // from the physical velocity field. There is no per-step allocation.
+        let mut post = core::mem::take(&mut self.grid.post);
+        let cells = self.gpop.len();
+        let plane = nx * ny;
+        let grid = &self.grid;
+        advection::D3Q7.collide(
+            &self.gpop,
+            post.as_flattened_mut(),
+            plane..cells - plane,
+            self.tau_g,
+            thermal_tau,
+            &mut self.advection_history,
+            |cell| grid.moments3(cell).1,
+        );
+        advection::D3Q7.stream(
+            &mut self.gpop,
+            post.as_flattened(),
+            [nx, ny, nz],
+            Some([self.t_bottom, self.t_top]),
+        );
+        self.grid.post = post;
         self.grid.step();
-        // Flow streaming has consumed grid.post. Its first 7*N scalars now
-        // hold tightly packed thermal collision; the next flow collision
-        // overwrites them before use. No full-grid allocation per step.
-        for z in 1..nz - 1 {
-            for y in 0..ny {
-                for x in 0..nx {
-                    let i = self.grid.idx(x, y, z);
-                    let (_, u) = self.grid.moments3(i);
-                    let t: f64 = self.gpop[i].iter().sum();
-                    let eq = geq3(t, u);
-                    let tau_g = thermal_tau.map_or(self.tau_g, |field| field[i]);
-                    for q in 0..7 {
-                        self.grid.post.as_flattened_mut()[7 * i + q] =
-                            self.gpop[i][q] + (eq[q] - self.gpop[i][q]) / tau_g;
-                    }
-                }
-            }
-        }
-        // Temperature pull-stream, anti-bounce-back at the plates.
-        for z in 1..nz - 1 {
-            for y in 0..ny {
-                for x in 0..nx {
-                    let i = self.grid.idx(x, y, z);
-                    for q in 0..7 {
-                        let (ex, ey, ez) = E7[q];
-                        let sx = (x as i64 - i64::from(ex)).rem_euclid(nx as i64) as usize;
-                        let sy = (y as i64 - i64::from(ey)).rem_euclid(ny as i64) as usize;
-                        let sz = (z as i64 - i64::from(ez)) as usize;
-                        self.gpop[i][q] = if self.grid.is_wall_layer(sz) {
-                            let tw = if sz == 0 { self.t_bottom } else { self.t_top };
-                            // Anti-bounce-back: fixed halfway temperature.
-                            2.0f64.mul_add(
-                                W7[q] * tw,
-                                -self.grid.post.as_flattened()[7 * i + OPP7[q]],
-                            )
-                        } else {
-                            self.grid.post.as_flattened()[7 * self.grid.idx(sx, sy, sz) + q]
-                        };
-                    }
-                }
-            }
-        }
     }
 
     /// Total kinetic energy of the fluid.

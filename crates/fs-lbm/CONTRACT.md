@@ -1245,8 +1245,9 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   Onset perturbations shift the equilibrium velocity in the physical source
   frame and retain the existing nonequilibrium stress, density and transverse
   velocity; zero amplitude leaves population bits unchanged. Thermal collision
-  reuses the consumed momentum buffer as tightly packed scalar scratch, without
-  a separate full-grid allocation on each step or a changed public state layout.
+  uses the input physical velocity and the original momentum scratch buffer,
+  before the ensuing flow advance overwrites that scratch. Each slab retains
+  one advective-flux vector per cell for the scalar correction described below.
 - `MaterialSlab::step_with_material_rheology` (2-D and 3-D) resolves shared
   material transport at actual temperature and local physical shear rate.
   The existing non-equilibrium stress estimators include the Guo half-force
@@ -3260,6 +3261,39 @@ onset bracket (decay at Ra = 1200, growth at Ra = 2500, Nu > 1), n ∈
 {0.5, 1.0, 1.5} profiles to the 2-D 3% bar, 1e-11 mass ledger, exact
 plate temperatures, linear conduction, ledger honesty, and a
 replay-stable seeded determinism CANDIDATE.
+
+### Corrected convection in both thermal slabs
+
+`ThermalLbm` and `ThermalLbm3` share the D2Q5/D3Q7 scalar collision and
+streaming operator. Linear equilibrium retains the zero-mass correction
+`w_i*(1-1/(2*tau_g))*e_i dot delta(T*u)/c_T^2` from
+[Chopard, Falcone and Latt (2009), equation (14)](https://doi.org/10.1140/epjst/e2009-01035-5).
+The actual local thermal relaxation sets both BGK relaxation and its correction;
+the diffusivities remain `(tau_g-1/2)/3` and `(tau_g-1/2)/4`, respectively.
+Temperature collision samples the input physical velocity after force rebinding
+and before flow advances under the frozen buoyancy/external load.
+
+Each retained state stores one previous advective-flux vector per cell.
+Transactional source snapshots copy that history. Fresh history, an explicit
+`reset_advection_history`, or a nonzero onset perturbation uses one startup
+step with zero correction. Direct population or discontinuous velocity
+replacement requires that explicit restart.
+
+Prescribed heat uses equilibrium half-kicks at the current physical velocity,
+with the same `delta_T*u` shift in history. This preserves kinetic
+nonequilibrium and the transport derivative through each source substep;
+heating is not mistaken for advective-flux evolution. Opposite correction
+sources cancel locally, and wall exchange remains independently measured from
+anti-bounce-back links.
+
+Six focused G0/G1 tests execute the production operator: axial/oblique Fourier
+decay and phase at several relaxation times, time-varying velocity,
+source-maintained diffusion, source/history invariants, local-rate wall heat
+balance and startup. The full slab regression additionally targets late
+rejection followed by accepted continuation against an independently warmed
+ordinary solver. Existing low-Mach and lattice-stability limits remain;
+no unconditional stability or temporal-order guarantee for the complete
+partitioned buoyancy/source solver is added.
 
 ### Independently fitted dynamic transport on the thermal slab
 

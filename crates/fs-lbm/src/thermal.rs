@@ -6,27 +6,19 @@
 //! scheme cannot fake.
 
 pub mod sources;
+pub(crate) mod advection;
 pub(crate) mod forcing;
 pub use forcing::ThermalForcingError;
 
 use crate::core2::{Cell, Grid};
 use crate::{CS2, Q};
 
-/// D2Q5 velocities (rest + 4 axis directions).
-const E5: [(i32, i32); 5] = [(0, 0), (1, 0), (0, 1), (-1, 0), (0, -1)];
 /// D2Q5 weights.
-const W5: [f64; 5] = [1.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0];
-/// D2Q5 opposites.
-const OPP5: [usize; 5] = [0, 3, 4, 1, 2];
+const W5: [f64; 5] = advection::D2Q5.weights;
 
 /// D2Q5 advection-diffusion equilibrium.
 fn geq(t: f64, ux: f64, uy: f64) -> [f64; 5] {
-    let mut g = [0.0f64; 5];
-    for q in 0..5 {
-        let eu = f64::from(E5[q].0) * ux + f64::from(E5[q].1) * uy;
-        g[q] = W5[q] * t * (1.0 + eu / CS2);
-    }
-    g
+    advection::D2Q5.equilibrium(t, [ux, uy])
 }
 
 /// Double-population thermal lattice: rigid walls top/bottom at fixed
@@ -46,6 +38,7 @@ pub struct ThermalLbm {
     pub gbeta: f64,
     /// Reference temperature.
     pub t_ref: f64,
+    advection_history: advection::FluxHistory<2>,
     scratch: Vec<[f64; Q]>,
 }
 
@@ -93,6 +86,7 @@ impl ThermalLbm {
             t_top,
             gbeta,
             t_ref: 0.5,
+            advection_history: advection::FluxHistory::default(),
             scratch: Vec::new(),
         }
     }
@@ -107,6 +101,14 @@ impl ThermalLbm {
     #[must_use]
     pub fn diffusivity(&self) -> f64 {
         CS2 * (self.tau_g - 0.5)
+    }
+
+    /// Restart the thermal derivative after directly replacing temperature
+    /// populations or prescribing a discontinuous velocity field. The next
+    /// step records the new advective flux and uses zero startup correction.
+    /// Ordinary forcing, source and transport steps retain their history.
+    pub fn reset_advection_history(&mut self) {
+        self.advection_history.reset();
     }
 
     /// Seed a sinusoidal vertical-velocity perturbation (onset mode), preserving
@@ -145,10 +147,12 @@ impl ThermalLbm {
                 forcing::reframe2(&mut self.grid.f[i], next, [0.0; 2], force);
             }
         }
+        self.reset_advection_history();
     }
 
-    /// One coupled step: buoyancy from T, flow step, then temperature
-    /// collide + stream (anti-bounce-back at the fixed-T walls).
+    /// One coupled step: freeze buoyancy from T, collide/stream temperature
+    /// at the input physical velocity, then advance flow under the frozen
+    /// force. Fixed-temperature walls use anti-bounce-back.
     pub fn step(&mut self) {
         self.step_with_forces_inner(None, None);
     }
@@ -202,56 +206,27 @@ impl ThermalLbm {
                 }
             }
         }
+        // The scalar equilibrium and its retained derivative both use u^n.
+        // Reuse the original flow scratch; its next collision overwrites it.
+        let cells = self.gpop.len();
+        self.scratch.resize(cells, [0.0; Q]);
+        let grid = &self.grid;
+        advection::D2Q5.collide(
+            &self.gpop,
+            self.scratch.as_flattened_mut(),
+            nx..cells - nx,
+            self.tau_g,
+            thermal_tau,
+            &mut self.advection_history,
+            |cell| grid.moments(cell).u,
+        );
+        advection::D2Q5.stream(
+            &mut self.gpop,
+            self.scratch.as_flattened(),
+            [nx, ny],
+            Some([self.t_bottom, self.t_top]),
+        );
         self.grid.step(&mut self.scratch);
-        // Momentum streaming has consumed its post-collision buffer. Reuse
-        // its first 5*N scalars as a tightly packed temperature buffer; the
-        // next flow collision overwrites it before use. No thermal allocation.
-        for y in 1..ny - 1 {
-            for x in 0..nx {
-                let i = self.grid.idx(x, y);
-                let mm = self.grid.moments(i);
-                let t: f64 = self.gpop[i].iter().sum();
-                let eq = geq(t, mm.u[0], mm.u[1]);
-                let tau_g = thermal_tau.map_or(self.tau_g, |field| field[i]);
-                for q in 0..5 {
-                    self.scratch.as_flattened_mut()[5 * i + q] =
-                        self.gpop[i][q] + (eq[q] - self.gpop[i][q]) / tau_g;
-                }
-            }
-        }
-        // Temperature stream with anti-bounce-back walls.
-        for y in 1..ny - 1 {
-            for x in 0..nx {
-                let i = self.grid.idx(x, y);
-                for q in 0..5 {
-                    let (ex, ey) = E5[q];
-                    let sx = match ex {
-                        1 => (x + nx - 1) % nx,
-                        -1 => (x + 1) % nx,
-                        _ => x,
-                    };
-                    let sy_opt = match ey {
-                        1 => Some(y - 1),
-                        -1 => Some(y + 1),
-                        _ => Some(y),
-                    };
-                    let s = sy_opt.map(|sy| self.grid.idx(sx, sy));
-                    self.gpop[i][q] = match s {
-                        Some(si) if self.grid.flags[si] == Cell::Wall => {
-                            let tw = if y == 1 && ey == 1 {
-                                self.t_bottom
-                            } else {
-                                self.t_top
-                            };
-                            // Anti-bounce-back: fixed halfway temperature.
-                            2.0f64.mul_add(W5[q] * tw, -self.scratch.as_flattened()[5 * i + OPP5[q]])
-                        }
-                        Some(si) => self.scratch.as_flattened()[5 * si + q],
-                        None => self.scratch.as_flattened()[5 * i + OPP5[q]],
-                    };
-                }
-            }
-        }
     }
 
     /// Total kinetic energy of the fluid.

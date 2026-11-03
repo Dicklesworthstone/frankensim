@@ -2,10 +2,12 @@
 //! wall exchange on the existing thermal slabs. No second transport solver.
 //!
 //! A source is a signed temperature increment over ONE lattice step. Two
-//! isotropic half-kicks surround the existing flow/heat step; the first kick
-//! therefore participates in buoyancy immediately. Sources are frozen over the
-//! step, not an implicit reaction law. Symmetric source splitting alone does
-//! not establish second-order accuracy of the partitioned flow/heat solver.
+//! equilibrium half-kicks surround the existing flow/heat step; the first
+//! kick therefore participates in buoyancy immediately. Each kick preserves
+//! thermal nonequilibrium and rebinds the advective-flux history at the current
+//! velocity. Sources are frozen over the step, not an implicit reaction law.
+//! Symmetric source splitting alone does not establish second-order accuracy
+//! of the partitioned flow/heat solver.
 
 pub mod sgs3;
 pub mod transport;
@@ -122,7 +124,7 @@ impl From<crate::material::MaterialLbmError> for ThermalSourceError {
 pub(crate) trait Slab<const D: usize, const Q: usize>: Sized {
     fn layout(&self) -> Result<(usize, usize), ThermalSourceError>;
     fn populations(&self) -> &[[f64; Q]];
-    fn populations_mut(&mut self) -> &mut [[f64; Q]];
+    fn source_half_kick(&mut self, heat: &[f64], plane: usize);
     fn snapshot(&self) -> (Self, [f64; Q]);
     fn walls(&self) -> (f64, f64);
     fn incoming() -> (usize, usize);
@@ -143,18 +145,6 @@ fn check_temperatures<const Q: usize>(pops: &[[f64; Q]], range: [f64; 2]) -> Res
         }
     }
     Ok(())
-}
-
-fn kick<const Q: usize>(pops: &mut [[f64; Q]], heat: &[f64], weights: &[f64; Q], plane: usize) {
-    let end = pops.len() - plane;
-    for (pop, &source) in pops[plane..end].iter_mut().zip(&heat[plane..end]) {
-        // Preserve the exact old path for zero sources, including signed zero.
-        if source != 0.0 {
-            for (value, &weight) in pop.iter_mut().zip(weights) {
-                *value += weight * (0.5 * source);
-            }
-        }
-    }
 }
 
 pub(crate) fn source_step_mapped<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
@@ -198,7 +188,7 @@ pub(crate) fn source_step_transport_mapped<S: Slab<D, Q>, const D: usize, const 
     if let Some(field) = transport {
         candidate.momentum_relaxation_mut().copy_from_slice(field.momentum);
     }
-    kick(candidate.populations_mut(), heat, &weights, plane);
+    candidate.source_half_kick(heat, plane);
     check_temperatures(candidate.populations(), limits.temperature_range)?;
     match transport {
         Some(field) => candidate.advance_local(forces, field.thermal)?,
@@ -214,7 +204,7 @@ pub(crate) fn source_step_transport_mapped<S: Slab<D, Q>, const D: usize, const 
         .map(|p| 2.0 * (p[qb] - weights[qb] * bottom)).sum();
     let top_wall: f64 = candidate.populations()[cells-2*plane..cells-plane].iter()
         .map(|p| 2.0 * (p[qt] - weights[qt] * top)).sum();
-    kick(candidate.populations_mut(), heat, &weights, plane);
+    candidate.source_half_kick(heat, plane);
     check_temperatures(candidate.populations(), limits.temperature_range)?;
     let stored_change: f64 = candidate.populations()[plane..cells-plane].iter()
         .zip(&state.populations()[plane..cells-plane])
@@ -254,12 +244,20 @@ impl Slab<2, 5> for ThermalLbm {
         Ok((n, g.nx))
     }
     fn populations(&self) -> &[[f64; 5]] { &self.gpop }
-    fn populations_mut(&mut self) -> &mut [[f64; 5]] { &mut self.gpop }
+    fn source_half_kick(&mut self, heat: &[f64], plane: usize) {
+        let end = self.gpop.len() - plane;
+        let grid = &self.grid;
+        super::advection::D2Q5.source_half_kick(
+            &mut self.gpop, heat, plane..end, &mut self.advection_history,
+            |cell| grid.moments(cell).u,
+        );
+    }
     fn snapshot(&self) -> (Self, [f64; 5]) {
         (Self {
             grid: self.grid.clone(), gpop: self.gpop.clone(), tau_g: self.tau_g,
             t_bottom: self.t_bottom, t_top: self.t_top, gbeta: self.gbeta,
             t_ref: self.t_ref, scratch: Vec::new(),
+            advection_history: self.advection_history.clone(),
         }, super::W5)
     }
     fn walls(&self) -> (f64, f64) { (self.t_bottom, self.t_top) }
@@ -289,13 +287,21 @@ impl Slab<3, 7> for ThermalLbm3 {
         Ok((n, plane))
     }
     fn populations(&self) -> &[[f64; 7]] { &self.gpop }
-    fn populations_mut(&mut self) -> &mut [[f64; 7]] { &mut self.gpop }
+    fn source_half_kick(&mut self, heat: &[f64], plane: usize) {
+        let end = self.gpop.len() - plane;
+        let grid = &self.grid;
+        super::advection::D3Q7.source_half_kick(
+            &mut self.gpop, heat, plane..end, &mut self.advection_history,
+            |cell| grid.moments3(cell).1,
+        );
+    }
     fn snapshot(&self) -> (Self, [f64; 7]) {
         let g = &self.grid;
         let mut s = Self::slab(g.nx, g.ny, g.nz-2, 1.0, self.tau_g, self.gbeta);
         let weights = s.gpop[0];
         s.grid.f.clone_from(&g.f); s.grid.tau.clone_from(&g.tau); s.grid.fext.clone_from(&g.fext);
         s.gpop.clone_from(&self.gpop);
+        s.advection_history.clone_from(&self.advection_history);
         s.t_bottom = self.t_bottom; s.t_top = self.t_top; s.t_ref = self.t_ref;
         (s, weights)
     }
@@ -329,5 +335,69 @@ impl ThermalLbm3 {
     /// balance implementation. Source rates are prescribed, not reaction laws.
     pub fn step_with_sources(&mut self, heat_per_step: &[f64], forces: &[[f64; 3]], limits: ThermalSourceLimits) -> Result<ThermalSourceBalance, ThermalSourceError> {
         source_step_mapped::<Self, 3, 7, _>(self, heat_per_step, forces, limits, Ok)
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    fn reject_then_advance<S: Slab<D, Q>, const D: usize, const Q: usize>(
+        mut actual: S, mut reference: S, force: [f64; D],
+    ) {
+        let (cells, plane) = actual.layout().unwrap();
+        let forces = vec![force; cells];
+        let zeros = vec![0.0; cells];
+        let limits = ThermalSourceLimits {
+            max_cells: cells,
+            temperature_range: [-2.0, 2.0],
+            balance_tolerance: 1e-10,
+        };
+        // Warm two independently constructed states through the ordinary
+        // transport path. Using snapshot() to construct the oracle would
+        // hide a missing history copy in the very operation being tested.
+        for _ in 0..5 {
+            actual.advance(&forces).unwrap();
+            reference.advance(&forces).unwrap();
+        }
+        let before = actual.populations().to_vec();
+        let mut heat = vec![0.0; cells];
+        for cell in plane..cells - plane {
+            heat[cell] = 0.0002 * ((cell % 7) as f64 - 3.0);
+        }
+        // Reject only after BOTH source kicks, thermal/flow advancement and
+        // the independent balance have succeeded. The candidate has already
+        // changed its history as well as its visible populations.
+        let rejected = source_step_transport_mapped::<S, D, Q, ()>(
+            &mut actual, &heat, &forces, limits, None,
+            |_, _| Err(invalid("test endpoint rejection")),
+        );
+        assert_eq!(rejected, Err(invalid("test endpoint rejection")));
+        assert_eq!(actual.populations(), before.as_slice());
+        // The next accepted source steps must retain the same warmed
+        // derivative as the ordinary solver, not restart it in each clone.
+        // This catches both rollback leaks and omission from snapshot().
+        for _ in 0..4 {
+            reference.advance(&forces).unwrap();
+            source_step_mapped::<S, D, Q, ()>(
+                &mut actual, &zeros, &forces, limits, |_| Ok(()),
+            ).unwrap();
+            assert_eq!(actual.populations(), reference.populations());
+        }
+    }
+
+    #[test]
+    fn g0_rejected_slab_candidate_preserves_history_for_next_accepted_step() {
+        let mut two = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);
+        let mut two_reference = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);
+        two.perturb(0.012);
+        two_reference.perturb(0.012);
+        reject_then_advance::<_, 2, 5>(two, two_reference, [1e-5, -2e-6]);
+
+        let mut three = ThermalLbm3::slab(5, 3, 10, 0.9, 0.8, 1e-5);
+        let mut three_reference = ThermalLbm3::slab(5, 3, 10, 0.9, 0.8, 1e-5);
+        three.perturb(0.012);
+        three_reference.perturb(0.012);
+        reject_then_advance::<_, 3, 7>(three, three_reference, [1e-5, -2e-6, 3e-6]);
     }
 }
