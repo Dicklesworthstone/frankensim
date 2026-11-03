@@ -8,6 +8,8 @@
 //! neutralization modes take four packs; dolomite bicarbonate neutralization
 //! takes five. The carbonate endpoints use compatible USGS aqueous-ion
 //! reference data, with bicarbonate retained in solution.
+//! Ferric hydrolysis, goethite precipitation with hydrated lime, and hydrated-
+//! lime neutralization use compatible USGS goethite/portlandite source phases.
 //! `--help` lists every supported reaction and required pack order.
 //! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
 //! entropy and derive Gibbs energy and log equilibrium constants from enthalpy
@@ -54,8 +56,9 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 16] = [
+const REACTIONS: [&str; 19] = [
     "lime-hydration",
+    "hydrated-lime-neutralization",
     "magnesite-calcination",
     "magnetite-oxidation",
     "cuprous-oxide-oxidation",
@@ -66,6 +69,8 @@ const REACTIONS: [&str; 16] = [
     "pyrite-oxidation-ferrous",
     "ferrous-oxidation-ferric",
     "ferric-pyrite-oxidation",
+    "ferric-hydrolysis-goethite",
+    "ferric-goethite-precipitation-with-hydrated-lime",
     "sulfur-dioxide-oxidation",
     "sulfur-trioxide-hydration",
     "pyrite-to-acid",
@@ -91,6 +96,24 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-solid",
             ],
             equation: "CaO(s) + H2O(l) -> Ca(OH)2(s)",
+        },
+        "hydrated-lime-neutralization" => ReactionCase {
+            reaction: MineralReaction::HydratedLimeNeutralization,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "portlandite-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "calcium-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+            ],
+            species: &["Ca(OH)2(s)", "H+(aq)", "Ca[2+](aq)", "H2O(l)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+            ],
+            equation: "Ca(OH)2(portlandite) + 2 H+(aq) -> Ca[2+](aq) + 2 H2O(l), hydrated-lime neutralization",
         },
         "magnesite-calcination" => ReactionCase {
             reaction: MineralReaction::MagnesiteCalcination,
@@ -292,6 +315,50 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
             ],
             equation: "FeS2(s) + 14 Fe[3+](aq) + 8 H2O(l) -> 15 Fe[2+](aq) + 2 SO4[2-](aq) + 16 H+(aq), ferric attack on pyrite",
         },
+        "ferric-hydrolysis-goethite" => ReactionCase {
+            reaction: MineralReaction::FerricHydrolysisGoethite,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+                "goethite-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+            ],
+            species: &["Fe[3+](aq)", "H2O(l)", "FeO(OH)(s)", "H+(aq)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-liquid",
+                "source-phase-solid",
+                "source-phase-aqueous",
+            ],
+            equation: "Fe[3+](aq) + 2 H2O(l) -> FeO(OH)(goethite) + 3 H+(aq), ferric hydrolysis endpoint",
+        },
+        "ferric-goethite-precipitation-with-hydrated-lime" => ReactionCase {
+            reaction: MineralReaction::FerricGoethitePrecipitationWithHydratedLime,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "portlandite-solid-usgs-b2131-thermochemistry",
+                "goethite-solid-usgs-b2131-thermochemistry",
+                "calcium-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+            ],
+            species: &[
+                "Fe[3+](aq)",
+                "Ca(OH)2(s)",
+                "FeO(OH)(s)",
+                "Ca[2+](aq)",
+                "H2O(l)",
+            ],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-solid",
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+            ],
+            equation: "2 Fe[3+](aq) + 3 Ca(OH)2(portlandite) -> 2 FeO(OH)(goethite) + 3 Ca[2+](aq) + 2 H2O(l), ferric precipitation with hydrated lime",
+        },
         "sulfur-dioxide-oxidation" => ReactionCase {
             reaction: MineralReaction::SulfurDioxideOxidation,
             reference: REFERENCE,
@@ -455,6 +522,20 @@ fn reference_point(
     if pack_id == "dolomite-solid-usgs-b2131-thermochemistry" {
         point = point.with_quantity(
             "source-phase-dolomite",
+            QuantitySpec::dimensional(Dims::NONE),
+            1.0,
+        )?;
+    }
+    if pack_id == "goethite-solid-usgs-b2131-thermochemistry" {
+        point = point.with_quantity(
+            "source-phase-goethite",
+            QuantitySpec::dimensional(Dims::NONE),
+            1.0,
+        )?;
+    }
+    if pack_id == "portlandite-solid-usgs-b2131-thermochemistry" {
+        point = point.with_quantity(
+            "source-phase-portlandite",
             QuantitySpec::dimensional(Dims::NONE),
             1.0,
         )?;

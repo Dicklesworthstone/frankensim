@@ -5,13 +5,28 @@ and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and
 `matdb-catalog` discovery. No separate material registry or schema is required.
 
-The physical consumers are `fs_material::comminution`, `fs_material::separation`,
-`fs_material::slurry`, `fs_material::recovery` and `fs_thermochem::stoichiometry`.
+The physical consumers include `fs_material::comminution`, `fs_material::separation`,
+`fs_material::slurry`, `fs_material::recovery`, `fs_material::solvent_extraction`,
+`fs_material::aqueous_adsorption` and `fs_thermochem::stoichiometry`.
 These are upstream building blocks: they do
 not implement a FrankenMining flowsheet or complete its site-calibration
 beads. In particular, FrankenMining's plan §13.10 keeps located ore tests
 separate from public non-spatial material references, and §17.3 requires
 declared validity for processing correlations.
+
+## Solution recovery and ferric treatment
+
+The [solution-recovery guide](MINING_SOLUTION_RECOVERY.md) exposes finite
+solvent extraction and stripping from original equilibrium isotherms, a runnable
+extraction-to-electrowinning chain, and finite-bath aqueous Langmuir adsorption
+with explicit carbon capacity and loaded-carbon desorption. The examples label
+their authored parameters; measured process cards keep their own source support.
+
+The [iron-precipitation guide](MINING_IRON_PRECIPITATION.md) adds compatible
+USGS goethite and portlandite profiles. Their source heat and exact conserved
+endpoints connect ferric hydrolysis, proton generation and hydrated-lime
+neutralization. The processing CLI runs each endpoint from the actual compiled
+packs, including source-matched enthalpy/entropy equilibrium diagnostics.
 
 ## Ore and gangue constituents
 

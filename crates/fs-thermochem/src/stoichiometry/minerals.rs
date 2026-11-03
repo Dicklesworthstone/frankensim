@@ -18,6 +18,11 @@
 //! are supplied separately. Hydrated-lime neutralization follows the EPA acid
 //! mine drainage design manual:
 //! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=20007H0I.TXT>.
+//! Ferric hydrolysis to goethite follows USGS Open-File Report 2005-1148:
+//! <https://pubs.usgs.gov/of/2005/1148/of2005-1148.pdf>. Combining two
+//! hydrolysis extents with three hydrated-lime neutralizations gives the
+//! declared goethite precipitation endpoint. FeO(OH)(s) here means goethite,
+//! not a generic Fe(OH)3 precipitate or a prediction of the stable solid.
 //! Malachite's net ionic acid balance is equation 10 in
 //! <https://doi.org/10.3390/met10060833>; the pathway here retains dissolved CO2.
 //! Separate carbonic-acid endpoints retain the literal un-ionized H2CO3(aq)
@@ -89,6 +94,12 @@ pub enum MineralReaction {
     /// FeS2(s) + 14 Fe3+(aq) + 8 H2O(l) -> 15 Fe2+(aq) + 2 SO4(2-)(aq) + 16 H+(aq).
     /// Ferric iron is an explicit consumed inventory, not an unlimited catalyst.
     FerricPyriteOxidation,
+    /// Fe3+(aq) + 2 H2O(l) -> FeO(OH)(s, goethite) + 3 H+(aq).
+    /// Phase-specific hydrolysis releases three protons per ferric ion.
+    FerricHydrolysisGoethite,
+    /// 2 Fe3+(aq) + 3 Ca(OH)2(s) -> 2 FeO(OH)(s, goethite) + 3 Ca2+(aq) + 2 H2O(l).
+    /// Combined hydrolysis and portlandite neutralization; extent is explicit.
+    FerricGoethitePrecipitationWithHydratedLime,
     /// 4 FeS2(s) + 15 O2(g) + 14 H2O(l) -> 4 Fe(OH)3(s) + 8 SO4(2-) + 16 H+.
     /// Ideal ferric-hydroxide endpoint; no claim that a particular solid precipitates.
     PyriteOxidationFerricHydroxide,
@@ -272,6 +283,27 @@ impl MineralReaction {
                     ("Fe[2+](aq)", &[1, 0, 0, 0], 2, 15),
                     ("SO4[2-](aq)", &[0, 1, 4, 0], -2, 2),
                     ("H+(aq)", &[0, 0, 0, 1], 1, 16),
+                ],
+            ),
+            Self::FerricHydrolysisGoethite => (
+                "ferric-hydrolysis-goethite",
+                &["Fe", "O", "H"],
+                &[
+                    ("Fe[3+](aq)", &[1, 0, 0], 3, -1),
+                    ("H2O(l)", &[0, 1, 2], 0, -2),
+                    ("FeO(OH)(s)", &[1, 2, 1], 0, 1),
+                    ("H+(aq)", &[0, 0, 1], 1, 3),
+                ],
+            ),
+            Self::FerricGoethitePrecipitationWithHydratedLime => (
+                "ferric-goethite-precipitation-with-hydrated-lime",
+                &["Fe", "Ca", "O", "H"],
+                &[
+                    ("Fe[3+](aq)", &[1, 0, 0, 0], 3, -2),
+                    ("Ca(OH)2(s)", &[0, 1, 2, 2], 0, -3),
+                    ("FeO(OH)(s)", &[1, 0, 2, 1], 0, 2),
+                    ("Ca[2+](aq)", &[0, 1, 0, 0], 2, 3),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, 2),
                 ],
             ),
             Self::PyriteOxidationFerricHydroxide => (
