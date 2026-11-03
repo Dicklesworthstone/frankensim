@@ -18,6 +18,17 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   `sin_cos` shares one range reduction and returns components bit-identical to
   separate `sin` and `cos` calls; it adds no new numeric semantics to the
   retained strict-core golden.
+- `det::sin_cos_dd(Dd)` is an additive extended-precision path for coherent
+  physical contractions. It keeps the original integer Payne--Hanek remainder
+  in DD, reduces each finite input component independently, and evaluates
+  bounded reduced sine/cosine series in DD. Small angles retain their cosine
+  decrements and independently evaluated neighboring phases retain low bits.
+  Work is fixed and allocation-free; scalar strict-core outputs and FFT
+  twiddles remain unchanged. Focused tests cover independent decimal landmarks,
+  low-component clock shifts, tiny angles, large finite phases and symmetry.
+  Accuracy is limited by the original reduction and DD arithmetic: no correct
+  rounding, interval, arbitrary-null relative bound, or new two-ISA empirical
+  qualification is claimed.
 - Declared ULP budgets (measured maxima in parentheses, vs platform-libm
   oracle, 200k samples + edges): exp 3 (1), expm1 3 (2), ln 3 (1),
   sin 3 (2), cos 3 (2), tanh 5 (3). sqrt is 0 ULP (IEEE-correctly-rounded

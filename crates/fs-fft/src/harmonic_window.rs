@@ -347,10 +347,9 @@ fn rectangular_gram(a: Dd, b: Dd) -> Result<(Dd, Dd), WindowError> {
         let ratio = small / large;
         let ss = if ratio.hi.abs() < 1e-4 {
             // Stable divided difference when one frequency tends to DC.
-            let ca = phase(small).re;
-            let cb = phase(large).re;
-            ratio * (sinc(large) * Dd::from_f64(ca) - sinc(small) * Dd::from_f64(cb))
-                / (Dd::ONE - ratio * ratio)
+            let ca = det::sin_cos_dd(small).1;
+            let cb = det::sin_cos_dd(large).1;
+            ratio * (sinc(large) * ca - sinc(small) * cb) / (Dd::ONE - ratio * ratio)
         } else {
             half * (d - s)
         };
@@ -381,7 +380,7 @@ impl HarmonicProduct {
     /// Retain the double-double product until a whole field's interference
     /// sum is complete. Rounding each large pair to f64 before cancellation
     /// can discard a small beat signal even with an accurate outer sum.
-    /// Cached trigonometry remains f64; no relative error bound near an
+    /// Cached trigonometry remains DD; no relative error bound near an
     /// arbitrary null is implied by this extended-precision accumulator.
     pub fn mean_real_product_dd(self, a: C64, b: C64) -> Result<Dd, WindowError> {
         self.mean_real_product_parts_dd(
@@ -478,40 +477,20 @@ fn rotate(a: [Dd; 2], r: [Dd; 2]) -> Result<(Dd, Dd), WindowError> {
     Ok((checked(ar * rr - ai * ri)?, checked(ar * ri + ai * rr)?))
 }
 
-fn phase(x: Dd) -> C64 {
-    let (sh, ch) = det::sin_cos(x.hi);
-    let (sl, cl) = det::sin_cos(x.lo);
-    C64::new(ch.mul_add(cl, -sh * sl), -sh.mul_add(cl, ch * sl))
-}
-
 // Exp(-i*x), retaining the small real decrement near ±1 instead of rounding
-// cos(x) to a unit value before a destructive-interference sum. The half-angle
-// form also retains this decrement near full turns. Trig leaves remain the
-// existing deterministic f64 implementation, not a new transcendental owner.
+// independently evaluated sinc/carrier terms to f64 before interference.
+// The shared fs-math owner also preserves low sine components: DD products
+// alone cannot repair a Gram matrix whose inputs were already rounded.
 fn proper_phase(x: Dd) -> (Dd, Dd) {
-    fn component(x: f64) -> (Dd, Dd) {
-        let (s, c) = det::sin_cos(x);
-        let cosine = if c > 0.5 {
-            let sine_half = Dd::from_f64(det::sin(0.5 * x));
-            Dd::ONE - Dd::from_f64(2.0) * sine_half * sine_half
-        } else if c < -0.5 {
-            let cosine_half = Dd::from_f64(det::cos(0.5 * x));
-            -Dd::ONE + Dd::from_f64(2.0) * cosine_half * cosine_half
-        } else {
-            Dd::from_f64(c)
-        };
-        (cosine, Dd::from_f64(-s))
-    }
-    let (hr, hi) = component(x.hi);
-    let (lr, li) = component(x.lo);
-    (hr * lr - hi * li, hr * li + hi * lr)
+    let (sine, cosine) = det::sin_cos_dd(x);
+    (cosine, -sine)
 }
 
 fn sinc(x: Dd) -> Dd {
     if x.hi.abs() <= 0.5 {
         Dd::ONE + sinc_minus_one(x)
     } else {
-        Dd::from_f64(-phase(x).im) / x
+        det::sin_cos_dd(x).0 / x
     }
 }
 
@@ -648,6 +627,65 @@ mod tests {
         let expected = small * (large.sin() - large * large.cos()) / (large * large);
         let got = window.mean_real_product(a, small, a, large).unwrap();
         close(got, expected, expected.abs() * 1e-14);
+    }
+
+    #[test]
+    fn g1_nearby_coherent_tones_retain_positive_sub_ulp_beat_energy() {
+        // Integrate the REAL difference signal through the stable identity
+        // cos(a)-cos(b) = 2*sin((a+b)/2)*sin((b-a)/2). This oracle never
+        // subtracts squared carrier powers or calls the moment kernels.
+        for (start, duration, separation) in [
+            (0.0, 0.0001, 2.0_f64.powi(-20)),
+            (0.0, 0.0011, 2.0_f64.powi(-30)),
+            (0.2345, 0.0011, 2.0_f64.powi(-30)),
+        ] {
+            let frequencies = [1000.0, 1000.0 + separation];
+            for profile in [
+                HarmonicWindowProfile::Uniform,
+                HarmonicWindowProfile::Triangular,
+            ] {
+                let window = HarmonicWindow::with_profile(start, duration, profile).unwrap();
+                let mut actual = Dd::ZERO;
+                for i in 0..2 {
+                    for j in 0..2 {
+                        let amplitude = |index| if index == 0 { C64::ONE } else { -C64::ONE };
+                        actual = actual
+                            + window
+                                .product_kernel_hz(frequencies[i], frequencies[j])
+                                .unwrap()
+                                .mean_real_product_dd(amplitude(i), amplitude(j))
+                                .unwrap();
+                    }
+                }
+                let mut expected = 0.0;
+                let intervals = 20_000;
+                for i in 0..=intervals {
+                    let u = f64::from(i) / f64::from(intervals);
+                    let time = start + duration * u;
+                    let difference = 2.0
+                        * (TAU * (1000.0 + 0.5 * separation) * time).sin()
+                        * (PI * separation * time).sin();
+                    let sensitivity = match profile {
+                        HarmonicWindowProfile::Uniform => 1.0,
+                        HarmonicWindowProfile::Triangular => 2.0 * (1.0 - (2.0 * u - 1.0).abs()),
+                    };
+                    let weight = if i == 0 || i == intervals {
+                        1.0
+                    } else if i % 2 == 0 {
+                        2.0
+                    } else {
+                        4.0
+                    };
+                    expected += weight * sensitivity * difference * difference;
+                }
+                expected /= 3.0 * f64::from(intervals);
+                assert!(
+                    actual.to_f64() > 0.0,
+                    "negative coherent energy: {actual:?}"
+                );
+                close(actual.to_f64(), expected, expected * 2e-8);
+            }
+        }
     }
 
     #[test]

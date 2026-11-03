@@ -223,6 +223,13 @@ pub fn generate_two_over_pi(out_limbs: usize) -> Vec<u64> {
 /// On non-finite input (callers gate NaN/∞ first — det.rs contract).
 #[must_use]
 pub fn reduce_pio2_large(x: f64) -> (f64, u8) {
+    let (remainder, quadrant) = reduce_pio2_large_dd(x);
+    (remainder.to_f64(), quadrant)
+}
+
+// Retain the existing reduction's low component for extended-precision
+// trigonometry. The f64 entry point above rounds at exactly its old boundary.
+pub(crate) fn reduce_pio2_large_dd(x: f64) -> (Dd, u8) {
     assert!(x.is_finite(), "Payne-Hanek requires finite input");
     let neg = x < 0.0;
     let bits = x.abs().to_bits();
@@ -276,7 +283,7 @@ pub fn reduce_pio2_large(x: f64) -> (f64, u8) {
         (b as f64) * 2.0f64.powi(-106), // det-ok: base 2, exact (4xnt)
     );
     let r = fd * PIO2_DD;
-    let r_signed = if negate { -r.to_f64() } else { r.to_f64() };
+    let r_signed = if negate { -r } else { r };
     if neg {
         // Odd symmetry of the reduction: −x·(2/π) = −(4k + q + φ),
         // so the quadrant mirrors mod 4 and the remainder negates.

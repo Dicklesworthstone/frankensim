@@ -18,6 +18,14 @@ energy is evaluated with a `sinc-1` series rather than subtracting rounded
 numbers near one. Strict trigonometry and double-double phase/products retain
 small physical terms without changing any FFT transform bits.
 
+Carrier rotations and the sine/cosine inputs of centered Gram weights use
+`fs_math::det::sin_cos_dd` without an intermediate f64 rounding. Independently
+rounded sinc values can otherwise make the mean-square pressure of two nearly
+equal opposite-phase tones negative, even when the final sum uses DD. The
+focused beat regression integrates the real difference waveform through its
+stable sine-product identity, with uniform and triangular shutters. No negative
+result is clipped and no relative guarantee at arbitrary nulls is added.
+
 G0/G1/G3 in-module tests compare real-signal quadrature, complete-cycle peak
 normalization, subperiod energy/flux, near-DC products, clock offsets and typed
 refusals. Input clocks, amplitude units, geometry, and source coherence remain

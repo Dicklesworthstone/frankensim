@@ -21,6 +21,9 @@
 //!   hold for ALL finite arguments.
 //! - `tanh`: expm1(2x)/(expm1(2x)+2) (odd symmetry; saturates for |x| > 20).
 
+mod extended;
+pub use extended::sin_cos_dd;
+
 /// ULP budget for [`exp`] (measured max observed: see tests).
 pub const EXP_ULP_BUDGET: u64 = 3;
 /// ULP budget for [`expm1`].
