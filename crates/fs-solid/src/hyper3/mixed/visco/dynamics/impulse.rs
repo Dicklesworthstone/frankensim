@@ -10,8 +10,10 @@ use super::{
     MixedViscoTetSolid, SolidImpulseControls, SolidImpulseReport, SolidPointKinematics,
     SolidPointMobility, SolidPointMobilityMatrix, Tet10ImpulsePoint, checkpoint, inertia_error,
 };
-use crate::hyper3::mixed::impulse::constrained_impulse;
 use crate::inertia::point::tet10;
+
+mod constrained;
+pub use constrained::MixedViscoConstrainedResponse;
 
 /// Complete candidate retaining continuous pressure and every Maxwell history.
 #[derive(Debug)]
@@ -242,38 +244,8 @@ impl<'a> MixedViscoTetMotion<'a> {
         controls: MixedImpulseControls,
         cx: &Cx<'_>,
     ) -> Result<MixedViscoConstrainedImpulse<'a>, MixedViscoTetError> {
-        checkpoint(cx)?;
-        if self.solid.volumetric != VolumetricTreatment::ExactIncompressible {
-            return Err(MixedViscoTetError::FiniteCompliancePressureImpulse);
-        }
-        let positions = self.impulse_positions(cx)?;
-        let (velocity_mps, impulse) = constrained_impulse(
-            &self.solid.mesh,
-            &self.mass,
-            &positions,
-            &self.velocity_mps,
-            held_velocity_dofs,
-            nodal_impulses_kg_m_s,
-            pressure_gauge_node,
-            origin_m,
-            controls,
-            |e, q| {
-                let f = &self.solid.states[e * self.solid.mesh.points_per_element + q]
-                    .deformation_gradient;
-                // Exact endpoint derivative of det(F), in original material
-                // coordinates. No new material trial or relaxation is needed.
-                Ok(core::array::from_fn(|ij| {
-                    let (i, j) = (ij / 3, ij % 3);
-                    let (a, b, c, d) = ((i + 1) % 3, (i + 2) % 3, (j + 1) % 3, (j + 2) % 3);
-                    f[3 * a + c] * f[3 * b + d] - f[3 * a + d] * f[3 * b + c]
-                }))
-            },
-            cx,
-        )?;
-        Ok(MixedViscoConstrainedImpulse {
-            motion: self.with_impulse_velocity(velocity_mps, cx)?,
-            impulse,
-        })
+        self.constrained_impulse_response(held_velocity_dofs, pressure_gauge_node, controls, cx)?
+            .nodal_impulse_candidate(nodal_impulses_kg_m_s, origin_m, cx)
     }
 
     fn impulse_positions(&self, cx: &Cx<'_>) -> Result<Vec<[f64; 3]>, MixedViscoTetError> {

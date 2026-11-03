@@ -37,11 +37,14 @@ use crate::inertia::{MidpointInertia, ReferenceMass};
 use crate::linear3::TetAssemblyBudget;
 use crate::linear3::tet10::TET10_EDGES;
 
-pub use crate::inertia::InertialEnergy;
+pub use crate::inertia::{
+    InertialEnergy, SolidPointKinematics, SolidPointMobility, SolidPointMobilityMatrix,
+    Tet10ImpulsePoint,
+};
 
 mod assembly;
 mod impulse;
-pub use impulse::ConservativeTetImpulse;
+pub use impulse::{ConservativePointImpulseResponse, ConservativeTetImpulse};
 
 /// Explicit material/spatial formulation; no inferred bulk penalty or defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]

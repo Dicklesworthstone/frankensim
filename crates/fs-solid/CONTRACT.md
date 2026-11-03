@@ -3231,6 +3231,23 @@ gauge reactions and continuation. The exact-incompressible branch uses this
 pressure solve; finite-compliance conservative formulations retain their
 original mass-only response and supply no pressure impulse.
 
+The shared native impulse owner now retains a prepared mass/pressure response.
+It assembles the endpoint gradient and its transpose and factors the scaled KKT
+system once. Every subsequent mobility column solves `B delta-v = 0` directly;
+it never estimates an increment by subtracting large background velocities.
+The original free-row residual, weak rate and pressure zero-work checks apply
+to each response. The final event retains the original incoming-rate correction,
+actual rounded endpoint checks and complete pressure/support account. One
+factor may be reused only while its borrowed accepted geometry and supports
+remain unchanged. No constitutive trial or history copy occurs for mobility.
+
+Independent rational P2/P1 elimination fixtures check cross-point and cross-axis
+responses, annihilation of pure pressure loads, retained factor reuse and the
+pressure multipliers recovered by the original event. For a unit-mass affine
+tetrahedron, centroid xx mobility is `17735/6528`, distinct from the mass-only
+`95/32`; this difference participates in the contact law rather than being
+deferred to a post-impact projection.
+
 ### Reference-aware finite-deformation response
 
 `hyper3` evaluates energy, Piola force and tangent through the original
@@ -4214,6 +4231,14 @@ admitted only for a true connected constant null mode. Shared pressure and
 mass accounting gate the actual rounded successor before the same atomic
 complete-history transfer used by the finite-compliance entry.
 
+`MixedViscoTetMotion::constrained_impulse_response` exposes that prepared
+exact-volume response at material points. Its directional and complete matrix
+queries use the same ten signed quadratic trace weights as its single and
+simultaneous point-impulse candidates. All response columns and the final native
+event share one KKT factor. Construction checks the accepted weak velocity rate;
+finite-compliance motion retains its separate typed mass-only entries. The
+prepared borrow prevents a stale factor from following a changed accepted state.
+
 `Tet10ImpulsePoint` names a point by its original cell and four barycentric
 coordinates. The native quadratic shape owner supplies all ten signed weights
 for current isoparametric position, velocity and transpose impulse distribution;
@@ -4251,6 +4276,9 @@ geometry and virtual work independently of the finite-element solve.
 The simultaneous-point regression independently inverts a rational P2 corner/
 edge mass block, including negative cross mobility and rotated directions,
 and checks summed point work, torque, moving supports and retained histories.
+The exact prepared-point fixture additionally checks a relaxed, pressure-loaded
+body against independently tabulated centroid/corner impulse distributions,
+matrix-predicted velocities and the original nodal constrained event.
 Native execution remains pending the existing dependency-build blocker; this
 addition is not a completed Cargo or DSR gate.
 
@@ -4580,6 +4608,18 @@ The caller owns restitution/contact physics and any opposite body's impulse.
 G1/G3 fixtures in `tests/mixed_conservative_bulk/impulse.rs` compare independent
 quadratic-simplex momentum and kinetic integrals, signed support impulses,
 moving-support work, retained state, native continuation and refusal behavior.
+
+`ConservativeTetSolid::point_kinematics` and `point_impulse_response` connect
+all three formulations to the same native signed quadratic point owner. The
+prepared response returns full cross-point/direction mobility and one summed
+point-impulse candidate. Finite-compliance modes use their original mass solves;
+exact mode reuses one pressure factor for all columns and the event. Both nodal
+and point events share a single complete-state transfer and the original
+compensated cumulative-work gate. Focused fixtures compare the three modes
+against exact simplex responses, curved point torque, moving-support work,
+retained pressure/bulk storage and subsequent conservative time evolution.
+Native execution of these additions remains pending the existing dependency/
+resource blocker; formatting and independent algebra are not Cargo validation.
 
 Each interval uses centered kinematics, `v_after = 2 Delta u / dt - v_before`,
 and force `2 M (Delta u - dt v_before) / dt^2`. The native consistent P2 mass

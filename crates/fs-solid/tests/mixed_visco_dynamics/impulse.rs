@@ -1070,3 +1070,161 @@ fn simultaneous_quadratic_points_retain_negative_cross_mobility_and_native_suppo
         assert_eq!(motion.velocity_mps(), velocity);
     });
 }
+
+#[test]
+fn prepared_exact_point_response_retains_loaded_memory_and_matches_summed_nodal_event() {
+    use fs_solid::hyper3::mixed::visco::dynamics::Tet10ImpulsePoint;
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(1e300, true);
+        let velocity = vec![[0.1, -0.04, 0.02]; nodes.len()];
+        let motion = MixedViscoTetMotion::try_new(
+            relaxed_exact(&nodes, &elements, &material, cx),
+            &[DENSITY],
+            &velocity,
+            MASS_BYTES,
+            cx,
+        )
+        .unwrap();
+        let controls = constrained_controls();
+        let response = motion
+            .constrained_impulse_response(&[], None, controls, cx)
+            .unwrap();
+        assert_eq!(response.kkt_inertia().positive, 30);
+        assert_eq!(response.kkt_inertia().negative, 4);
+        let center = Tet10ImpulsePoint {
+            tetrahedron: 0,
+            barycentric: [0.25; 4],
+        };
+        let corner = Tet10ImpulsePoint {
+            tetrahedron: 0,
+            barycentric: [1.0, 0.0, 0.0, 0.0],
+        };
+        let rows = [
+            (center, [1.0, 0.0, 0.0]),
+            (corner, [0.6, 0.8, 0.0]),
+            (center, [0.0, 0.0, 1.0]),
+        ];
+        let matrix = response.point_mobility_matrix_per_kg(&rows, 3, cx).unwrap();
+        assert_eq!(matrix.dimension, 3);
+        assert!(matrix.solves.iter().all(|s| s.converged_euclidean()));
+        let strengths = [0.001, -0.0003, 0.0002];
+        let impulses: Vec<_> = rows
+            .iter()
+            .zip(strengths)
+            .map(|(&(point, direction), j)| (point, direction.map(|d| d * j)))
+            .collect();
+        let origin = [-0.2, 0.1, 0.05];
+        let event = response
+            .point_impulses_candidate(&impulses, origin, cx)
+            .unwrap();
+        retained(&motion, &event.motion);
+        assert_eq!(event.impulse.kkt_inertia, Some(response.kkt_inertia()));
+        for (i, &(point, direction)) in rows.iter().enumerate() {
+            let before = motion.point_kinematics(point, cx).unwrap();
+            let after = event.motion.point_kinematics(point, cx).unwrap();
+            let actual: f64 = (0..3)
+                .map(|c| direction[c] * (after.velocity_mps[c] - before.velocity_mps[c]))
+                .sum();
+            let predicted: f64 = (0..3)
+                .map(|j| matrix.matrix_per_kg[3 * i + j] * strengths[j])
+                .sum();
+            near(actual, predicted, 2e-10);
+        }
+        assert!(
+            event
+                .impulse
+                .pressure_impulses_pa_s
+                .iter()
+                .any(|p| p.abs() > 1e-8)
+        );
+        near(event.impulse.pressure_work_j, 0.0, 1e-11);
+        for rate in event
+            .impulse
+            .volume_rate_before_m3_s
+            .iter()
+            .chain(&event.impulse.volume_rate_after_m3_s)
+        {
+            near(
+                *rate,
+                0.0,
+                controls.maximum_relative_volume_rate_per_s * VOLUME,
+            );
+        }
+        near(
+            event.impulse.momentum.kinetic_change_j,
+            event.impulse.external_work_j,
+            1e-11,
+        );
+
+        // Hand-tabulated centroid/corner traces: every corner of the centroid
+        // contributes -1/8 and every edge +1/4. No production shape helper is
+        // used to construct the independent original nodal event.
+        let mut nodal = Vec::new();
+        for (i, &(_, impulse)) in impulses.iter().enumerate() {
+            for (a, &node) in elements[0].iter().enumerate() {
+                let weight = if i == 1 {
+                    if a == 0 { 1.0 } else { 0.0 }
+                } else if a < 4 {
+                    -0.125
+                } else {
+                    0.25
+                };
+                for (c, component) in impulse.into_iter().enumerate() {
+                    nodal.push((3 * node + c, weight * component));
+                }
+            }
+        }
+        let native = motion
+            .constrained_impulse_candidate(&[], &nodal, None, origin, controls, cx)
+            .unwrap();
+        retained(&motion, &native.motion);
+        for (point, nodal) in event
+            .motion
+            .velocity_mps()
+            .iter()
+            .flatten()
+            .zip(native.motion.velocity_mps().iter().flatten())
+        {
+            near(*point, *nodal, 2e-12);
+        }
+        for (point, nodal) in event
+            .impulse
+            .pressure_impulses_pa_s
+            .iter()
+            .zip(&native.impulse.pressure_impulses_pa_s)
+        {
+            near(*point, *nodal, 2e-12);
+        }
+
+        assert!(response.point_mobility_matrix_per_kg(&rows, 2, cx).is_err());
+        let invalid = Tet10ImpulsePoint {
+            tetrahedron: elements.len(),
+            ..center
+        };
+        assert!(
+            response
+                .point_impulse_candidate(invalid, [0.001, 0.0, 0.0], origin, cx)
+                .is_err()
+        );
+        let mut limited = controls;
+        limited.maximum_factor_bytes = 1;
+        assert!(
+            motion
+                .constrained_impulse_response(&[], None, limited, cx)
+                .is_err()
+        );
+        // Refused queries leave the prepared factor usable and the original
+        // accepted velocity, pressure and relaxed material histories unchanged.
+        let direction = response
+            .point_directional_inverse_mass_per_kg(center, rows[0].1, cx)
+            .unwrap();
+        near(
+            direction.inverse_mass_per_kg,
+            matrix.matrix_per_kg[0],
+            2e-12,
+        );
+        assert_eq!(motion.velocity_mps(), velocity);
+        retained(&motion, &event.motion);
+    });
+}

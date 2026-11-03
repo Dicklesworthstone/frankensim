@@ -327,14 +327,48 @@ fn mapped_mobility<P: Copy, const N: usize>(
     map: impl Fn(P) -> Result<([usize; N], [f64; N]), InertiaError>,
     cx: &Cx<'_>,
 ) -> Result<SolidPointMobilityMatrix, InertiaError> {
-    checkpoint(cx)?;
+    let result = mapped_mobility_with(
+        mass.ndofs(),
+        rows,
+        maximum_rows,
+        controls,
+        map,
+        |load| mass.free_velocity_response(held, load, controls, cx),
+        |error| error,
+        cx,
+    )?;
+    if rows.is_empty() {
+        // There was no response column to admit the original held components.
+        super::admit_reference_impulses(mass.ndofs(), held, &[], controls, cx)?;
+    }
+    Ok(result)
+}
+
+/// The original point rows and transpose are shared by mass-only and constrained
+/// response owners. Each callback returns an incremental velocity, independent
+/// of any background velocity; no material state is copied or advanced here.
+/// Empty rows invoke no response, so its owner must admit supports separately.
+#[allow(clippy::too_many_arguments)]
+fn mapped_mobility_with<P: Copy, const N: usize, E>(
+    ndofs: usize,
+    rows: &[(P, [f64; 3])],
+    maximum_rows: usize,
+    controls: SolidImpulseControls,
+    map: impl Fn(P) -> Result<([usize; N], [f64; N]), InertiaError>,
+    mut respond: impl FnMut(&[(usize, f64)]) -> Result<(Vec<[f64; 3]>, SolveReport), E>,
+    map_error: impl Fn(InertiaError) -> E,
+    cx: &Cx<'_>,
+) -> Result<SolidPointMobilityMatrix, E> {
+    checkpoint(cx).map_err(&map_error)?;
     let dimension = rows.len();
     if dimension > maximum_rows {
-        return Err(invalid("material-point mobility exceeds its row cap"));
+        return Err(map_error(invalid(
+            "material-point mobility exceeds its row cap",
+        )));
     }
     let entries = dimension
         .checked_mul(dimension)
-        .ok_or_else(|| invalid("material-point mobility size overflow"))?;
+        .ok_or_else(|| map_error(invalid("material-point mobility size overflow")))?;
     let extra = controls
         .solve
         .max_iterations
@@ -343,10 +377,9 @@ fn mapped_mobility<P: Copy, const N: usize>(
         .and_then(|h| h.checked_add(6 * N + 64))
         .and_then(|per_row| per_row.checked_mul(dimension))
         .and_then(|rows| rows.checked_add(entries))
-        .ok_or_else(|| invalid("material-point mobility workspace overflow"))?;
-    admit_point_workspace(mass.ndofs(), extra, controls)?;
+        .ok_or_else(|| map_error(invalid("material-point mobility workspace overflow")))?;
+    admit_point_workspace(ndofs, extra, controls).map_err(&map_error)?;
     if dimension == 0 {
-        super::admit_reference_impulses(mass.ndofs(), held, &[], controls, cx)?;
         return Ok(SolidPointMobilityMatrix {
             dimension,
             matrix_per_kg: Vec::new(),
@@ -355,13 +388,16 @@ fn mapped_mobility<P: Copy, const N: usize>(
     }
     let mut loads = Vec::with_capacity(dimension);
     for &(point, direction) in rows {
-        checkpoint(cx)?;
-        unit_direction(direction)?;
-        let (nodes, weights) = map(point)?;
+        checkpoint(cx).map_err(&map_error)?;
+        unit_direction(direction).map_err(&map_error)?;
+        let (nodes, weights) = map(point).map_err(&map_error)?;
         let mut load = Vec::with_capacity(3 * N);
         for (&node, &weight) in nodes.iter().zip(&weights) {
             for (axis, &component) in direction.iter().enumerate() {
-                load.push((3 * node + axis, finite(weight * component)?));
+                load.push((
+                    3 * node + axis,
+                    finite(weight * component).map_err(&map_error)?,
+                ));
             }
         }
         loads.push(load);
@@ -369,23 +405,31 @@ fn mapped_mobility<P: Copy, const N: usize>(
     let mut matrix_per_kg = vec![0.0; entries];
     let mut solves = Vec::with_capacity(dimension);
     for (column, load) in loads.iter().enumerate() {
-        checkpoint(cx)?;
-        let (response, solve) = mass.free_velocity_response(held, load, controls, cx)?;
+        checkpoint(cx).map_err(&map_error)?;
+        let (response, solve) = respond(load)?;
+        if response.len() != ndofs / 3 {
+            return Err(map_error(invalid(
+                "material-point response must contain every original node",
+            )));
+        }
         for (row, trace) in loads.iter().enumerate() {
             if row % 256 == 0 {
-                checkpoint(cx)?;
+                checkpoint(cx).map_err(&map_error)?;
             }
             let value = finite(trace.iter().fold(0.0, |sum, &(dof, weight)| {
                 weight.mul_add(response[dof / 3][dof % 3], sum)
-            }))?;
+            }))
+            .map_err(&map_error)?;
             if row == column && value < 0.0 {
-                return Err(invalid("negative material-point diagonal mobility"));
+                return Err(map_error(invalid(
+                    "negative material-point diagonal mobility",
+                )));
             }
             matrix_per_kg[row * dimension + column] = value;
         }
         solves.push(solve);
     }
-    checkpoint(cx)?;
+    checkpoint(cx).map_err(&map_error)?;
     Ok(SolidPointMobilityMatrix {
         dimension,
         matrix_per_kg,

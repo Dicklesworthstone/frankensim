@@ -35,7 +35,9 @@ pub use crate::inertia::{
 };
 
 mod impulse;
-pub use impulse::{MixedViscoConstrainedImpulse, MixedViscoMotionImpulse};
+pub use impulse::{
+    MixedViscoConstrainedImpulse, MixedViscoConstrainedResponse, MixedViscoMotionImpulse,
+};
 
 /// Immutable accepted displacement, continuous pressure, memory and velocity.
 #[derive(Debug)]

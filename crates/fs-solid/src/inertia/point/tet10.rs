@@ -2,8 +2,9 @@
 
 use super::{
     Cx, InertiaError, ReferenceMass, SolidImpulseControls, SolidPointKinematics,
-    SolidPointMobility, SolidPointMobilityMatrix, barycentric, checkpoint, invalid,
-    mapped_distributions, mapped_mobility, response_mobility, traced_kinematics, unit_direction,
+    SolidPointMobility, SolidPointMobilityMatrix, SolveReport, barycentric, checkpoint, invalid,
+    mapped_distributions, mapped_mobility, mapped_mobility_with, response_mobility,
+    traced_kinematics, unit_direction,
 };
 use crate::linear3::tet10::tet10_shapes;
 
@@ -101,6 +102,33 @@ pub(crate) fn mobility_matrix(
         maximum_rows,
         controls,
         |point| validate(point, tetrahedra, mass.ndofs() / 3),
+        cx,
+    )
+}
+
+/// Share the original quadratic traces with a prepared constrained response.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mobility_matrix_with<E>(
+    node_count: usize,
+    tetrahedra: &[[usize; 10]],
+    rows: &[(Tet10ImpulsePoint, [f64; 3])],
+    maximum_rows: usize,
+    controls: SolidImpulseControls,
+    respond: impl FnMut(&[(usize, f64)]) -> Result<(Vec<[f64; 3]>, SolveReport), E>,
+    map_error: impl Fn(InertiaError) -> E,
+    cx: &Cx<'_>,
+) -> Result<SolidPointMobilityMatrix, E> {
+    let ndofs = node_count
+        .checked_mul(3)
+        .ok_or_else(|| map_error(invalid("material-point DOF count overflow")))?;
+    mapped_mobility_with(
+        ndofs,
+        rows,
+        maximum_rows,
+        controls,
+        |point| validate(point, tetrahedra, node_count),
+        respond,
+        map_error,
         cx,
     )
 }
