@@ -850,3 +850,41 @@ diffusion and transactional refusals. These checks do not establish free-wake
 stretching, a viscous particle solver, cross-ISA bit stability, or a wall-clock
 performance guarantee.
 
+## Absolute three-dimensional expansion error
+
+`FarCell::expansion_error_bound(p)` bounds the Euclidean velocity error of the
+stored Cartesian Taylor polynomial, in m/s. It returns infinity inside the
+existing geometry/core fallback domains, for invalid caches or probes, and
+when the polynomial's arithmetic cannot be represented safely. The existing
+`eval` and source-moment construction retain their arithmetic and fallback
+behavior. Both now share a fixed-size expansion cache with no owned source
+vectors; its source-iterator constructor includes the exact continuous-line
+quadrupole `dl_l * dl_m / 12`.
+
+Write `R=|p-centroid|`, `a=radius`, `d=R-a>0`, `c=mean core²`,
+`Delta=max|source core²-c|`, and `W=sum |Gamma|*|dl|`. For
+`F(x,c)=x/(|x|²+c)^(3/2)`, the retained polynomial is
+`F - DxF*delta + DxxF[delta,delta]/2 + DcF*eta`. Its full real-arithmetic
+remainder is bounded by
+
+```text
+W/(4*pi) * [(4*a³ + 6*a*Delta)/(d²+c)^(5/2)
+           + (15/8)*Delta²/(d²+max(0,c-Delta))³].
+```
+
+The terms cover spatial order three, omitted space/core coupling, and core
+order two, respectively. The implementation tightens the first two terms by
+also integrating their derivative bounds along the Taylor path and taking the
+smaller independently valid bound. With `rho=sqrt(R²+c)` and `theta=a/rho`,
+the integrated spatial factor is
+`theta³*(4-3*theta)/(rho²*(1-theta)²)` and the mixed factor is
+`(3/2)*Delta/rho⁴*((1-theta)^(-4)-1)`. Cancellation cannot reduce `W`.
+
+A separate conservative floating-point allowance includes source-count
+accumulation and world-coordinate conditioning. This is not a directed-rounding
+enclosure, a temporal integration-error certificate, or an audit of arbitrary
+external edits to public cached moments. Continued common core spreading is
+included through the evolved mean core and unchanged core deviations.
+`tests/expansion_bound3d.rs` checks heterogeneous cores, continued diffusion,
+signed cancellation, an independent analytic long-line oracle, scale and
+far-distance behavior, and mandatory exact-fallback domains.

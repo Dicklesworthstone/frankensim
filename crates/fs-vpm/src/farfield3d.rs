@@ -24,6 +24,9 @@ use fs_blake3::hash_domain;
 #[path = "farfield3d/advection.rs"]
 mod advection;
 
+#[path = "farfield3d/expansion.rs"]
+pub(crate) mod expansion;
+
 #[path = "farfield3d/topology.rs"]
 mod topology;
 
@@ -165,50 +168,47 @@ impl FarCell {
         if self.max_abs_core_delta_m2 > rho2 / 16.0 {
             return self.exact(p);
         }
-        let rho = rho2.sqrt();
-        if rho == 0.0 {
-            return [0.0; 3];
+        self.expansion().velocity(p)
+    }
+
+    /// Absolute Euclidean velocity-error bound [m/s] for this cell's Taylor
+    /// expansion. Infinity requires exact evaluation or a smaller source cell;
+    /// in particular, both existing exact-fallback domains return infinity.
+    ///
+    /// The bound covers the full spatial third-order remainder, omitted mixed
+    /// space/core terms, and second-order core variation of the continuous
+    /// filament integrals. An additional floating-point allowance accounts for
+    /// unsigned accumulation and coordinate conditioning. This is not a
+    /// directed-rounding certificate or a time-integration error bound.
+    ///
+    /// Retained sources and cached moments must be mutually consistent, as
+    /// produced by the constructors and supported cell evolution methods.
+    /// Arbitrary external edits to these public caches are not audited here.
+    #[must_use]
+    pub fn expansion_error_bound(&self, p: [f64; 3]) -> f64 {
+        if self.segs.len() != self.source_core2_m2.len()
+            || !self.diffusion_offset_m2.is_finite()
+            || self.diffusion_offset_m2 < 0.0
+        {
+            return f64::INFINITY;
         }
-        let rho3 = rho2 * rho;
-        let rho5 = rho3 * rho2;
-        let rho7 = rho5 * rho2;
-        // f(r) = r/(|r|² + core²)^(3/2) and its spatial derivatives.
-        let f0 = [r[0] / rho3, r[1] / rho3, r[2] / rho3];
-        let kd = |i: usize, j: usize| -> f64 { if i == j { 1.0 } else { 0.0 } };
-        let jmat = |k: usize, l: usize| -> f64 { kd(k, l) / rho3 - 3.0 * r[k] * r[l] / rho5 };
-        let hmat = |i: usize, j: usize, k: usize| -> f64 {
-            -3.0 * (kd(i, j) * r[k] + kd(i, k) * r[j] + kd(j, k) * r[i]) / rho5
-                + 15.0 * r[i] * r[j] * r[k] / rho7
-        };
-        // Monopole: W × f(r0).
-        let mut v = cross(self.w_sum, f0);
-        // Dipole: −Σ w × (J δ)  →  −ε_ijk D[j][l] J[k][l].
-        for i in 0..3 {
-            let (j1, k1, j2, k2) = eps_pairs(i);
-            let mut acc = 0.0;
-            for l in 0..3 {
-                acc += self.dip[j1][l] * jmat(k1, l) - self.dip[j2][l] * jmat(k2, l);
-            }
-            v[i] -= acc;
+        self.expansion().error_bound(p)
+    }
+
+    fn expansion(&self) -> expansion::Expansion {
+        expansion::Expansion {
+            centroid: self.centroid,
+            radius_m: self.radius_m,
+            w_sum: self.w_sum,
+            w_abs_sum: self.w_abs_sum,
+            dip: self.dip,
+            quad: self.quad,
+            core2_m2: self.core2_m2,
+            core_moment: self.core_moment,
+            max_abs_core_delta_m2: self.max_abs_core_delta_m2,
+            max_source_core2_m2: self.max_source_core2_m2 + self.diffusion_offset_m2,
+            source_count: self.segs.len(),
         }
-        // Quadrupole: ½ Σ w × (H:δδ)  →  ½ ε_ijk Q[j][l][m] H[k][l][m].
-        for i in 0..3 {
-            let (j1, k1, j2, k2) = eps_pairs(i);
-            let mut acc = 0.0;
-            for l in 0..3 {
-                for m in 0..3 {
-                    acc +=
-                        self.quad[j1][l][m] * hmat(k1, l, m) - self.quad[j2][l][m] * hmat(k2, l, m);
-                }
-            }
-            v[i] += 0.5 * acc;
-        }
-        let core_correction = cross(self.core_moment, r);
-        for i in 0..3 {
-            v[i] -= 1.5 * core_correction[i] / rho5;
-        }
-        let k = 1.0 / (4.0 * core::f64::consts::PI);
-        [k * v[0], k * v[1], k * v[2]]
     }
 
     /// EXACT contribution at `p` from the retained source segments
@@ -841,93 +841,27 @@ pub fn cell_from_segs_with_cores(
         source_core2_m2.len(),
         "one core per source segment"
     );
-    assert!(
-        source_core2_m2.iter().all(|c| c.is_finite() && *c >= 0.0),
-        "finite nonnegative source cores"
-    );
-    let weight_scale = segs
-        .iter()
-        .map(|(a, b, g)| g.abs() * dist(*a, *b))
-        .fold(0.0_f64, f64::max);
-    let core_scale = source_core2_m2.iter().copied().fold(0.0_f64, f64::max);
-    let minimum_core = source_core2_m2.iter().copied().fold(core_scale, f64::min);
-    let normalized_weight = |a: [f64; 3], b: [f64; 3], g: f64| {
-        if weight_scale == 0.0 {
-            0.0
-        } else {
-            (g.abs() * dist(a, b)) / weight_scale
-        }
-    };
-    let weight_sum: f64 = segs
-        .iter()
-        .map(|(a, b, g)| normalized_weight(*a, *b, *g))
-        .sum();
-    let mut centroid = [0.0; 3];
-    let mut scaled_core_sum = 0.0;
-    if weight_sum > 0.0 {
-        for ((a, b, g), core2) in segs.iter().zip(&source_core2_m2) {
-            let weight = normalized_weight(*a, *b, *g) / weight_sum;
-            for k in 0..3 {
-                centroid[k] += weight * (0.5 * a[k] + 0.5 * b[k]);
-            }
-            if core_scale > 0.0 {
-                scaled_core_sum += weight * (*core2 / core_scale);
-            }
-        }
-    }
-    let core2_m2 = if minimum_core == core_scale {
-        // A common source core remains exact, without a roundoff-only spread.
-        core_scale
-    } else if weight_sum == 0.0 {
-        source_core2_m2.first().copied().unwrap_or(0.0)
-    } else {
-        // The exact normalized sum is in [0,1]; cap roundoff at its endpoint.
-        core_scale * scaled_core_sum.min(1.0)
-    };
-    let mut w_sum = [0.0; 3];
-    let mut w_abs_sum = 0.0;
-    let mut dip = [[0.0; 3]; 3];
-    let mut quad = [[[0.0; 3]; 3]; 3];
-    let mut core_moment = [0.0; 3];
-    let mut max_abs_core_delta_m2 = 0.0_f64;
-    let mut radius = 0.0_f64;
-    for ((a, b, g), source_core2) in segs.iter().zip(&source_core2_m2) {
-        let dl = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let w = [g * dl[0], g * dl[1], g * dl[2]];
-        let d = [
-            0.5 * a[0] + 0.5 * b[0] - centroid[0],
-            0.5 * a[1] + 0.5 * b[1] - centroid[1],
-            0.5 * a[2] + 0.5 * b[2] - centroid[2],
-        ];
-        let delta_core = *source_core2 - core2_m2;
-        max_abs_core_delta_m2 = max_abs_core_delta_m2.max(delta_core.abs());
-        w_abs_sum += g.abs() * dist(*a, *b);
-        for j in 0..3 {
-            w_sum[j] += w[j];
-            core_moment[j] += w[j] * delta_core;
-            for l in 0..3 {
-                dip[j][l] += w[j] * d[l];
-                for m in 0..3 {
-                    // Exact line moment: mean(s²)=1/12 for s∈[-1/2,1/2].
-                    quad[j][l][m] += w[j] * (d[l] * d[m] + dl[l] * dl[m] / 12.0);
-                }
-            }
-        }
-        radius = radius.max(dist(*a, centroid)).max(dist(*b, centroid));
-    }
+    let expansion = expansion::Expansion::from_sources(segs.iter().zip(&source_core2_m2).map(
+        |((a, b, gamma), core2)| crate::filament3d::WakeSegment {
+            start: *a,
+            end: *b,
+            circulation: *gamma,
+            core2_m2: *core2,
+        },
+    ));
     FarCell {
-        centroid,
-        radius_m: radius,
-        w_sum,
-        w_abs_sum,
-        dip,
-        quad,
-        core2_m2,
+        centroid: expansion.centroid,
+        radius_m: expansion.radius_m,
+        w_sum: expansion.w_sum,
+        w_abs_sum: expansion.w_abs_sum,
+        dip: expansion.dip,
+        quad: expansion.quad,
+        core2_m2: expansion.core2_m2,
         source_core2_m2,
-        core_moment,
-        max_abs_core_delta_m2,
+        core_moment: expansion.core_moment,
+        max_abs_core_delta_m2: expansion.max_abs_core_delta_m2,
         diffusion_offset_m2: 0.0,
-        max_source_core2_m2: core_scale,
+        max_source_core2_m2: expansion.max_source_core2_m2,
         segs,
     }
 }
