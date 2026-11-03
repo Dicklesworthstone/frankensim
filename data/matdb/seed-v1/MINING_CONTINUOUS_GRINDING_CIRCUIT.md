@@ -56,12 +56,36 @@ Overflow alone does not equal fresh feed when purge also leaves. Copper and
 water close separately. The example prints the reported closure residuals
 alongside these streams, so the purge cannot disappear from the accounting.
 
-This API controls residence and reports the resulting hold-up. It does not
-solve residence from fixed hold-up, infer mill power or equipment capacity,
-calibrate selection/daughter data from a Bond work index, predict liberation,
-or attach a generic ore name to an unsupported classifier card. Those inputs
+`at_residence_time` controls residence and reports the resulting hold-up.
+`at_dry_holdup` instead takes a positive target dry mass and solves residence
+inside an explicit time bracket. Every trial passes through the same original
+continuous circuit, including its source and balance checks. The caller
+declares mass tolerances and a finite iteration budget. An unbracketed target,
+exhausted budget, unresolved numerical interval or unsupported operating state
+refuses; the solver does not expand the bracket or relax the source domain.
+
+A fully returned breakable class can impose a positive minimum inventory even
+as residence approaches zero. Positive target mass alone does not guarantee
+a feasible steady circuit; the evaluated bracket must actually contain it.
+
+Holding dry inventory fixed makes throughput affect residence. For the full
+return example above, the exact two-class relation is
+`H/f = tau*(0.4 + 0.1*tau)/(0.4*(0.05 + 0.1*tau))`.
+With all fresh solids in the coarse class, H = 1000/3 kg and fresh feed
+10 kg/s give 10 s residence. Doubling fresh feed
+to 20 kg/s reduces the solved residence to about 3.5941 s. The returned circuit
+still reports its actual circulating flow, product size distribution, assays
+and water; fresh throughput is not substituted for circulating throughput.
+
+Neither API infers mill power or equipment capacity, calibrates
+selection/daughter data from a Bond work index, predicts liberation, or
+attaches a generic ore name to an unsupported classifier card. These inputs
 remain explicit and source-qualified.
 
 Seven focused regressions cover independent two-/three-class answers, mixed
 assays, purge and no-return identity, source and circulation limits, fed and
 unforced traps, water trapping, permutation invariance and residence response.
+Seven additional fixed-hold-up regressions check independent residence and
+product-size answers, carrier-water exclusion from dry inventory, purge and
+no-recycle limits, source admission, infeasible targets, iteration exhaustion,
+overflowed tolerance and unresolved floating-point intervals.

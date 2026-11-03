@@ -2,8 +2,9 @@
 //!
 //! Authored continuous mill/classifier example, not measured ore or plant data.
 //! Selection frequencies, daughters, classifier coefficients and applicability
-//! ranges are explicitly synthetic. Residence is prescribed; the model reports
-//! its resulting hold-up instead of inferring residence from a Bond work index.
+//! ranges are explicitly synthetic. Prescribed residence reports its resulting
+//! inventory; prescribed dry hold-up solves residence against circulating feed
+//! within an explicit valid bracket. Neither is inferred from a Bond work index.
 
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
@@ -16,7 +17,8 @@ use fs_material::{
         circuit::CircuitSettings,
         population_balance::{
             ContinuousPopulationBalanceMill, MEAN_RESIDENCE_TIME_AXIS, MILL_DRY_FLOW_AXIS,
-            SelectionBreakageClass, circuit::ContinuousGrindingCircuit,
+            SelectionBreakageClass,
+            circuit::{ContinuousGrindingCircuit, holdup::HoldupSolveSettings},
         },
     },
     separation::{
@@ -25,7 +27,7 @@ use fs_material::{
     },
 };
 use fs_qty::{
-    Dimensionless, Dims, Frequency, Length, MassFlowRate, Pressure, QuantitySpec, Time,
+    Dimensionless, Dims, Frequency, Length, Mass, MassFlowRate, Pressure, QuantitySpec, Time,
     chemistry::ElementId,
 };
 use std::{collections::BTreeMap, error::Error};
@@ -152,17 +154,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!("Fresh feed: 10 kg/s coarse dry solids, 2 kg/s assayed Cu, 12 kg/s water.");
     println!("The same continuous selection/daughter law is used at every prescribed residence.");
+    let balance_settings = CircuitSettings {
+        absolute_balance_tolerance: MassFlowRate::new(1e-10),
+        relative_balance_tolerance: Dimensionless::new(1e-12),
+        maximum_circulating_load: Dimensionless::new(100.0),
+    };
     for (seconds, returned) in [(5.0, 1.0), (10.0, 1.0), (20.0, 1.0), (10.0, 0.75)] {
         let solution = circuit.at_residence_time(
             &fresh,
             Time::new(seconds),
             &QueryPoint::new(),
             &classifier_conditions,
-            CircuitSettings {
-                absolute_balance_tolerance: MassFlowRate::new(1e-10),
-                relative_balance_tolerance: Dimensionless::new(1e-12),
-                maximum_circulating_load: Dimensionless::new(100.0),
-            },
+            balance_settings,
             Partition::from_product(Dimensionless::new(returned))?,
         )?;
         let flows = &solution.circuit;
@@ -204,6 +207,48 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!(
             "  Maximum checked account residual {:.3e} kg/s",
             flows.closure.maximum_absolute_error.value()
+        );
+    }
+    println!(
+        "\nFixed dry hold-up 333.333333333 kg; full underflow recycle; residence bracket 1..20 s:"
+    );
+    let doubled = ParticleStream::mix(&[&fresh, &fresh])?;
+    for feed in [&fresh, &doubled] {
+        let fixed = circuit.at_dry_holdup(
+            feed,
+            Mass::new(333.333333333),
+            &QueryPoint::new(),
+            &classifier_conditions,
+            balance_settings,
+            Partition::from_product(Dimensionless::new(1.0))?,
+            HoldupSolveSettings {
+                minimum_residence: Time::new(1.0),
+                maximum_residence: Time::new(20.0),
+                absolute_mass_tolerance: Mass::new(1e-9),
+                relative_mass_tolerance: Dimensionless::new(1e-12),
+                maximum_iterations: 80,
+            },
+        )?;
+        let flows = &fixed.solution.circuit;
+        let fine = flows
+            .product
+            .classes()
+            .iter()
+            .find(|class| class.id() == "fine")
+            .expect("declared fine class");
+        println!(
+            "  Fresh {:.1} kg/s dry -> residence {:.9} s, mill dry feed {:.9} kg/s, overflow {:.6}% fine",
+            feed.dry_solids()?.value(),
+            fixed.solution.mill.mean_residence_time.value(),
+            flows.mill_feed.dry_solids()?.value(),
+            100.0 * fine.dry_solids().value() / flows.product.dry_solids()?.value(),
+        );
+        println!(
+            "    Original dry hold-up {:.9} kg; water hold-up {:.9} kg; dry residual {:.3e} kg after {} midpoint trials",
+            fixed.solution.mill.dry_solids_holdup.value(),
+            fixed.solution.mill.water_holdup.value(),
+            fixed.mass_residual.value(),
+            fixed.iterations,
         );
     }
     println!(

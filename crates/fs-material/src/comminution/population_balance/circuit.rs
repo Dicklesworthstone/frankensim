@@ -20,9 +20,15 @@
 //! No rates, daughter fractions, assays or partitions are normalized to close
 //! a balance. Source rounding and binary64 residuals are not certificates.
 //!
-//! Residence is explicitly controlled. The returned hold-up is its consequence;
-//! no residence, power draw, equipment capacity, liberation, or plant calibration
-//! is inferred from a fresh-feed rate, Bond index or equipment name.
+//! The primitive takes an explicitly controlled residence. The [`holdup`]
+//! adapter instead solves residence for a prescribed dry hold-up and an explicit
+//! admitted bracket, using the actual circulating feed at every trial. Neither
+//! path infers residence from fresh feed alone, or infers power draw, equipment
+//! capacity, liberation or plant calibration from a Bond index or equipment name.
+
+/// Fixed dry-hold-up closure using the original continuous circuit at every trial.
+#[path = "circuit/holdup.rs"]
+pub mod holdup;
 
 use super::{
     ContinuousMillSolution, ContinuousPopulationBalanceMill, MEAN_RESIDENCE_TIME_AXIS,

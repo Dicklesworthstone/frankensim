@@ -106,10 +106,19 @@ or caller coordinates substituted to force admission.
 
 `ContinuousCircuitSolution` retains the complete original model, existing
 `CircuitSolution`, and original `ContinuousMillSolution` with class/water
-hold-up and source query. No fixed-hold-up residence solve, selection-rate
-calibration, power draw, capacity, liberation or plant recovery is inferred.
+hold-up and source query. The additional `at_dry_holdup` solve requires a
+positive target dry inventory, explicit residence bracket, mass tolerances
+and bounded iteration budget. It evaluates the original admitted circuit at
+every trial and returns an actual converged circuit with residual diagnostics.
+Unbracketed targets, exhausted work, unresolved numerical intervals and
+original source/circuit refusals produce no accepted result; the solver does
+not widen brackets or relax source support. No selection-rate calibration,
+power draw, capacity, liberation or plant recovery is inferred.
 Seven focused regressions and `continuous_grinding_circuit` exercise analytical
 answers, assays, water, purge, traps, applicability, limits and residence.
+Seven additional hold-up regressions independently check the inferred
+residence and product distribution, water exclusion, purge/no-recycle limits,
+source admission, infeasible targets, work exhaustion and numerical refusal.
 
 ## Finite gas/liquid oxygen supply during cyanidation
 
