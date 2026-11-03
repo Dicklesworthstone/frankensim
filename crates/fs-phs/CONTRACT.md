@@ -898,6 +898,25 @@ whole-window constitutive energy increment is also checked independently against
 the compensated sum of native increments; a supplied nonadditive remainder cannot
 hide merely because each individual update closes its own equation.
 
+`step_subcycled_sources` and its cancellable variant additionally accept one
+held external-input row per native substep, independently on each clock.
+Discontinuities must align with those clocks. Work is integrated from each
+source row and that interval's actual conjugate output, including negative
+work returned to the source; multiplying the two window averages is never used.
+The held internal connection still closes against the complete window averages.
+Zero-mean switched forces can therefore transfer finite work without being
+erased by input averaging. No interpolation or observation-rate conversion is
+implied. Source histories reuse the prepared quadratic interface LU and the
+original native integrators. Native state/output buffers and exact-step scratch
+are reused across all substeps, without per-substep solver-buffer allocation.
+Incomplete or nonfinite histories refuse before evolution; any later refusal
+or cancellation preserves accepted state and the preceding interface guess.
+
+The native source regressions independently solve two force-driven inertias
+on 2:4 clocks (including regeneration with zero mean forces), check bitwise
+held/repeated-history equivalence with multiple ports, close nonlinear
+storage/heat/work, and exercise malformed-history and cancellation retry.
+
 Quadratic pairs prepare the complete affine interface response and its LU once.
 Nonlinear pairs retain the original Gonzalez `StepWorkspace`, with bounded
 interface Newton updates and at most 32 paired ports. Caller-declared local pole

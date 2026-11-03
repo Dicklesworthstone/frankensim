@@ -136,6 +136,35 @@ fn native(side: &'static str, error: PreparedStepError) -> MultirateError {
 }
 
 enum Evolution<'a> { Exact(PreparedExactZoh<'a>), Gonzalez(StepWorkspace) }
+
+#[derive(Clone, Copy)]
+enum Inputs<'a> {
+    Held(&'a [f64]),
+    Substeps(&'a [f64]),
+}
+impl<'a> Inputs<'a> {
+    fn valid(self, ports: usize, substeps: usize) -> bool {
+        let (values, count) = match self {
+            Self::Held(values) => (values, Some(ports)),
+            Self::Substeps(values) => (values, ports.checked_mul(substeps)),
+        };
+        count == Some(values.len()) && finite(values)
+    }
+
+    fn at(self, step: usize, ports: usize) -> &'a [f64] {
+        match self {
+            Self::Held(values) => values,
+            Self::Substeps(values) => &values[step*ports..(step+1)*ports],
+        }
+    }
+}
+
+struct LocalStep {
+    result: SubsystemStep,
+    external_work_j: f64,
+    exchange_work_j: f64,
+}
+
 struct LocalClock<'a> {
     system: &'a PortHamiltonian,
     clock: Clock,
@@ -172,33 +201,42 @@ impl<'a> LocalClock<'a> {
         Ok(Self { system, clock, dt, evolution, side })
     }
 
-    fn evolve(&mut self, initial: &[f64], input: &[f64],
-        cancelled: &mut impl FnMut() -> bool) -> Result<SubsystemStep, MultirateError> {
+    fn evolve(&mut self, initial: &[f64], external: Inputs<'_>, exchange: &[f64],
+        cancelled: &mut impl FnMut() -> bool) -> Result<LocalStep, MultirateError> {
         check(cancelled)?;
         let sys = self.system;
-        if initial.len()!=sys.n || input.len()!=sys.m || !finite(initial) || !finite(input) {
+        if initial.len()!=sys.n || !external.valid(sys.m,self.clock.substeps)
+            || exchange.len()!=sys.m || !finite(initial) || !finite(exchange) {
             return Err(MultirateError::Invalid("complete finite subsystem state and input required"));
         }
         let mut state = initial.to_vec();
+        let mut next = vec![0.0;sys.n];
+        let mut y = vec![0.0;sys.m];
+        let mut input = vec![0.0;sys.m];
         let mut output = vec![Sum::default(); sys.m];
         let (mut change, mut heat, mut work) = (Sum::default(),Sum::default(),Sum::default());
-        for _ in 0..self.clock.substeps {
+        let (mut external_work,mut exchange_work) = (Sum::default(),Sum::default());
+        for step in 0..self.clock.substeps {
             check(cancelled)?;
-            let (next, y, dh, loss, supplied) = match &mut self.evolution {
-                Evolution::Exact(flow) => {
-                    let r = flow.step(&state, input)
-                        .map_err(|error| MultirateError::Subsystem { side: self.side, error })?;
-                    (r.x,r.y,r.delta_h,r.dissipated,r.supplied)
-                }
-                Evolution::Gonzalez(workspace) => {
-                    let (mut next, mut y) = (vec![0.0;sys.n],vec![0.0;sys.m]);
-                    let r = workspace.step_into_controlled(sys,&state,input,self.dt,
-                        &mut next,&mut y,&mut *cancelled).map_err(|e| native(self.side,e))?;
-                    (next,y,r.delta_h,r.dissipated,r.supplied)
-                }
+            let source = external.at(step,sys.m);
+            for ((u,&value),&coupled) in input.iter_mut().zip(source).zip(exchange) {
+                *u=value+coupled;
+            }
+            let r = match &mut self.evolution {
+                Evolution::Exact(flow) => flow.step_into(&state,&input,&mut next,&mut y)
+                    .map_err(|error| MultirateError::Subsystem { side: self.side, error })?,
+                Evolution::Gonzalez(workspace) => workspace.step_into_controlled(sys,
+                    &state,&input,self.dt,&mut next,&mut y,&mut *cancelled)
+                    .map_err(|e| native(self.side,e))?,
             };
-            for (total,value) in output.iter_mut().zip(y) { total.add(value/self.clock.substeps as f64); }
-            change.add(dh); heat.add(loss); work.add(supplied); state = next;
+            // Source work must use each native interval's actual conjugate
+            // output. Averaging a switched source before multiplying by the
+            // window-average output discards their correlation and its work.
+            external_work.add(self.dt*sum(source.iter().zip(&y).map(|(u,y)|u*y)));
+            exchange_work.add(self.dt*sum(exchange.iter().zip(&y).map(|(u,y)|u*y)));
+            for (total,&value) in output.iter_mut().zip(&y) { total.add(value/self.clock.substeps as f64); }
+            change.add(r.delta_h); heat.add(r.dissipated); work.add(r.supplied);
+            core::mem::swap(&mut state,&mut next);
         }
         let result = SubsystemStep { stored_before_j: sys.hamiltonian(initial),
             stored_after_j: sys.hamiltonian(&state), state,
@@ -207,15 +245,18 @@ impl<'a> LocalClock<'a> {
             substeps: self.clock.substeps };
         if !finite(&result.state) || !finite(&result.average_output) || !finite(&[
             result.stored_before_j,result.stored_after_j,result.stored_change_j,
-            result.dissipated_j,result.supplied_j]) {
+            result.dissipated_j,result.supplied_j,external_work.value(),exchange_work.value()]) {
             return Err(MultirateError::Invalid("nonfinite original subsystem trajectory"));
         }
         check(cancelled)?;
-        Ok(result)
+        Ok(LocalStep {result,external_work_j:external_work.value(),exchange_work_j:exchange_work.value()})
     }
 }
 
-struct Trial { left: SubsystemStep, right: SubsystemStep, residual: Vec<f64>, norm: f64 }
+struct Trial {
+    left: SubsystemStep, right: SubsystemStep, residual: Vec<f64>, norm: f64,
+    external_work_j: [f64;2], exchange_work_j: [f64;2],
+}
 
 /// Prepared two-clock coupling. It borrows immutable physical owners and retains
 /// only numerical scratch/last accepted input guess. Caller state is published
@@ -225,7 +266,6 @@ pub struct MultiratePair<'a> {
     left: LocalClock<'a>,
     right: LocalClock<'a>,
     pairs: Vec<PortPair>,
-    window: f64,
     solve: SolveConfig,
     affine: Option<Lu>,
     guess: Vec<f64>,
@@ -249,7 +289,7 @@ impl<'a> MultiratePair<'a> {
         }
         let mut result = Self { left:LocalClock::new(left,left_clock,duration_s,"left")?,
             right:LocalClock::new(right,right_clock,duration_s,"right")?, pairs:pairs.to_vec(),
-            window:duration_s, solve, affine:None, guess:vec![0.0;pairs.len()] };
+            solve, affine:None, guess:vec![0.0;pairs.len()] };
         if left_clock.method==IntegrationMethod::ExactQuadratic
             && right_clock.method==IntegrationMethod::ExactQuadratic {
             let k = pairs.len();
@@ -257,7 +297,7 @@ impl<'a> MultiratePair<'a> {
             let mut jac = vec![0.0;k*k];
             for col in 0..k {
                 let mut z = vec![0.0;k]; z[col]=1.0;
-                let trial = result.evaluate(&xl,&xr,&ul,&ur,&z,&mut || false)?;
+                let trial = result.evaluate(&xl,&xr,Inputs::Held(&ul),Inputs::Held(&ur),&z,&mut || false)?;
                 for row in 0..k { jac[row*k+col]=trial.residual[row]; }
             }
             if !finite(&jac) { return Err(MultirateError::Invalid("nonfinite affine interface response")); }
@@ -266,15 +306,18 @@ impl<'a> MultiratePair<'a> {
         Ok(result)
     }
 
-    fn evaluate(&mut self, xl:&[f64], xr:&[f64], external_l:&[f64], external_r:&[f64],
+    fn evaluate(&mut self, xl:&[f64], xr:&[f64], external_l:Inputs<'_>, external_r:Inputs<'_>,
         z:&[f64], cancelled:&mut impl FnMut()->bool) -> Result<Trial,MultirateError> {
         check(cancelled)?;
-        let mut ul=external_l.to_vec();
-        for (pair,&value) in self.pairs.iter().zip(z) { ul[pair.left]+=pair.input_scale*value; }
-        let left=self.left.evolve(xl,&ul,cancelled)?;
-        let mut ur=external_r.to_vec();
-        for pair in &self.pairs { ur[pair.right]+=left.average_output[pair.left]; }
-        let right=self.right.evolve(xr,&ur,cancelled)?;
+        let mut ul=vec![0.0;self.left.system.m];
+        for (pair,&value) in self.pairs.iter().zip(z) { ul[pair.left]=pair.input_scale*value; }
+        let l=self.left.evolve(xl,external_l,&ul,cancelled)?;
+        let mut ur=vec![0.0;self.right.system.m];
+        for pair in &self.pairs { ur[pair.right]=l.result.average_output[pair.left]; }
+        let r=self.right.evolve(xr,external_r,&ur,cancelled)?;
+        let external_work_j=[l.external_work_j,r.external_work_j];
+        let exchange_work_j=[l.exchange_work_j,r.exchange_work_j];
+        let (left,right)=(l.result,r.result);
         let residual:Vec<f64>=self.pairs.iter().zip(z).map(|(pair,&value)|
             value+right.average_output[pair.right]/pair.input_scale).collect();
         let scale=self.pairs.iter().zip(z).fold(1.0_f64,|s,(pair,&value)|
@@ -283,7 +326,7 @@ impl<'a> MultiratePair<'a> {
         if !finite(&residual) || !norm.is_finite() || !scale.is_finite() {
             return Err(MultirateError::Invalid("nonfinite interface equation"));
         }
-        Ok(Trial {left,right,residual,norm})
+        Ok(Trial {left,right,residual,norm,external_work_j,exchange_work_j})
     }
 
     pub fn step(&mut self, left:&[f64], right:&[f64], left_external:&[f64],
@@ -296,10 +339,47 @@ impl<'a> MultiratePair<'a> {
     /// bounded by their owners but not preemptible. No hard latency is promised.
     pub fn step_controlled(&mut self, left:&[f64], right:&[f64], left_external:&[f64],
         right_external:&[f64], mut cancelled:impl FnMut()->bool) -> Result<CoupledStep,MultirateError> {
+        self.step_inputs(left,right,Inputs::Held(left_external),Inputs::Held(right_external),&mut cancelled)
+    }
+
+    /// Advance with independent piecewise-constant sources on each native clock.
+    /// Each flat source slice contains `clock.substeps * number_of_ports` values,
+    /// ordered by substep, then port. Each row is held over that physical native
+    /// interval; no interpolation, smoothing or averaging of the input is applied.
+    /// Source discontinuities must align with that side's declared clock.
+    ///
+    /// External work is the sum of source times ACTUAL native output integrals,
+    /// including negative work (regeneration). The held coupling inputs still
+    /// solve against complete window-average outputs and exchange equal/opposite
+    /// work. A changed source schedule reuses the original quadratic interface LU.
+    /// Macro-window refinement remains necessary to resolve coupled dynamics.
+    ///
+    /// # Errors
+    /// Incomplete/nonfinite schedules or any native solve, energy, or interface
+    /// refusal. Accepted state and the previous interface guess remain unchanged.
+    pub fn step_subcycled_sources(&mut self, left:&[f64], right:&[f64],
+        left_external:&[f64], right_external:&[f64]) -> Result<CoupledStep,MultirateError> {
+        self.step_subcycled_sources_controlled(left,right,left_external,right_external,||false)
+    }
+
+    /// Cancellable variant of [`Self::step_subcycled_sources`], with the same
+    /// bounded native-step/Newton polling and atomic publication as held inputs.
+    ///
+    /// # Errors
+    /// The same source/solver refusals, plus [`MultirateError::Cancelled`].
+    pub fn step_subcycled_sources_controlled(&mut self, left:&[f64], right:&[f64],
+        left_external:&[f64], right_external:&[f64], mut cancelled:impl FnMut()->bool)
+        -> Result<CoupledStep,MultirateError> {
+        self.step_inputs(left,right,Inputs::Substeps(left_external),Inputs::Substeps(right_external),&mut cancelled)
+    }
+
+    fn step_inputs(&mut self, left:&[f64], right:&[f64], left_external:Inputs<'_>,
+        right_external:Inputs<'_>, mut cancelled:impl FnMut()->bool) -> Result<CoupledStep,MultirateError> {
         check(&mut cancelled)?;
         if left.len()!=self.left.system.n || right.len()!=self.right.system.n
-            || left_external.len()!=self.left.system.m || right_external.len()!=self.right.system.m
-            || !finite(left) || !finite(right) || !finite(left_external) || !finite(right_external) {
+            || !left_external.valid(self.left.system.m,self.left.clock.substeps)
+            || !right_external.valid(self.right.system.m,self.right.clock.substeps)
+            || !finite(left) || !finite(right) {
             return Err(MultirateError::Invalid("complete finite paired state and external input required"));
         }
         let mut z=self.guess.clone();
@@ -307,7 +387,7 @@ impl<'a> MultiratePair<'a> {
         for iteration in 0..=self.solve.max_iterations {
             let trial=self.evaluate(left,right,left_external,right_external,&z,&mut cancelled)?;
             if trial.norm<=self.solve.relative_tolerance {
-                let result=self.finish(left,right,left_external,right_external,&z,trial,iteration)?;
+                let result=self.finish(left,right,trial,iteration)?;
                 check(&mut cancelled)?;
                 self.guess=z;
                 return Ok(result);
@@ -347,9 +427,8 @@ impl<'a> MultiratePair<'a> {
         } else { Ok(()) }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn finish(&self, left_initial:&[f64], right_initial:&[f64], ul:&[f64], ur:&[f64],
-        z:&[f64], trial:Trial, iterations:usize) -> Result<CoupledStep,MultirateError> {
+    fn finish(&self, left_initial:&[f64], right_initial:&[f64],
+        trial:Trial, iterations:usize) -> Result<CoupledStep,MultirateError> {
         let mut scales=[0.0;2];
         for (index,(owner,initial,result)) in [(&self.left,left_initial,&trial.left),
             (&self.right,right_initial,&trial.right)].into_iter().enumerate() {
@@ -363,12 +442,8 @@ impl<'a> MultiratePair<'a> {
             if result.dissipated_j<0.0 { self.gate(owner.side,result.dissipated_j,scale)?; }
             scales[index]=scale;
         }
-        let external=[self.window*sum(ul.iter().zip(&trial.left.average_output).map(|(u,y)|u*y)),
-            self.window*sum(ur.iter().zip(&trial.right.average_output).map(|(u,y)|u*y))];
-        let exchange=[self.window*sum(self.pairs.iter().zip(z).map(|(pair,value)|
-            value*pair.input_scale*trial.left.average_output[pair.left])),
-            self.window*sum(self.pairs.iter().map(|pair|
-                trial.left.average_output[pair.left]*trial.right.average_output[pair.right]))];
+        let external=trial.external_work_j;
+        let exchange=trial.exchange_work_j;
         for i in 0..2 { scales[i]=scales[i].max(external[i].abs()).max(exchange[i].abs()); }
         self.gate("left work split",sum([external[0],exchange[0],-trial.left.supplied_j]),scales[0])?;
         self.gate("right work split",sum([external[1],exchange[1],-trial.right.supplied_j]),scales[1])?;

@@ -58,6 +58,101 @@ fn source_work_and_physical_damping_are_separate_from_interface_exchange() {
     close(left.hamiltonian(&a)+right.hamiltonian(&b)-initial+heat-work,0.0,2e-11);
 }
 
+fn free_mass(mass: f64) -> PortHamiltonian {
+    // Momentum is the state; force is input and physical velocity is output.
+    PortHamiltonian::new(1,1,vec![0.0],vec![0.0],vec![1.0],
+        Box::new(QuadraticStorage::new(vec![1.0/mass],1).unwrap())).unwrap()
+}
+
+#[test]
+fn switched_native_forces_keep_their_work_even_when_both_mean_forces_vanish() {
+    // G1: two inertias, exact constant-acceleration segments. Solving the
+    // held interface independently gives cL=0.36 N, cR=1.59 N and mean
+    // velocities 1.59 and -0.36 m/s. Source work is sum F_k * delta_x_k;
+    // both average sources are zero, but their actual work is not.
+    let (left,right)=(free_mass(2.0),free_mass(3.0));
+    let mut coupling=MultiratePair::new(&left,&right,&pair(),1.0,
+        exact(2),exact(4),SolveConfig::default()).unwrap();
+    let r=coupling.step_subcycled_sources(&[2.0],&[-1.5],
+        &[4.0,-4.0],&[-3.0,0.0,3.0,0.0]).unwrap();
+    close(r.left.state[0],2.36,3e-14);
+    close(r.right.state[0],0.09,3e-14);
+    close(r.left.average_output[0],1.59,3e-14);
+    close(r.right.average_output[0],-0.36,3e-14);
+    close(r.external_work_j[0],-0.18,3e-14);
+    close(r.external_work_j[1],0.19875,3e-14);
+    close(r.exchange_work_j[0],0.5724,3e-14);
+    close(r.exchange_work_j[1],-0.5724,3e-14);
+    close(r.left.stored_change_j+r.right.stored_change_j,0.01875,3e-14);
+    close(r.balance_residual_j,0.0,3e-14);
+    assert_eq!(r.left.dissipated_j,0.0);
+    assert_eq!(r.right.dissipated_j,0.0);
+}
+
+#[test]
+fn repeated_native_sources_match_held_sources_bitwise_with_multiple_ports() {
+    // G3: repeating a held input does not change its meaning, state or work.
+    let (left,right)=(two_modes(),two_modes());
+    let ports=[PortPair{left:0,right:1,input_scale:0.1},
+        PortPair{left:1,right:0,input_scale:10.0}];
+    let make=||MultiratePair::new(&left,&right,&ports,0.03,
+        exact(2),exact(8),SolveConfig::default()).unwrap();
+    let (a,b)=([0.3,0.4,-0.2,0.1],[-0.1,0.2,0.7,-0.3]);
+    let (ul,ur)=([0.4,-0.1,0.2],[-0.2,0.3,-0.1]);
+    let held=make().step(&a,&b,&ul,&ur).unwrap();
+    let scheduled=make().step_subcycled_sources(&a,&b,&ul.repeat(2),&ur.repeat(8)).unwrap();
+    assert_eq!(held,scheduled);
+}
+
+#[test]
+fn nonlinear_subcycled_sources_close_physical_heat_and_regenerative_work() {
+    // G0: varying source histories use the original nonlinear storage and
+    // resistance at every native step; no work is fabricated from the balance.
+    let left=duffing_oscillator(1.0,1.0,0.8,0.05).unwrap();
+    let right=duffing_oscillator(1.2,1.3,0.6,0.02).unwrap();
+    let mut coupling=MultiratePair::new(&left,&right,&pair(),0.02,
+        nonlinear(2),nonlinear(4),SolveConfig::default()).unwrap();
+    let (mut a,mut b)=(vec![0.6,0.2],vec![-0.4,0.1]);
+    let initial=left.hamiltonian(&a)+right.hamiltonian(&b);
+    let (mut work,mut heat)=(0.0,0.0);
+    for _ in 0..50 {
+        let r=coupling.step_subcycled_sources(&a,&b,&[0.1,-0.2],
+            &[-0.05,0.2,0.0,0.1]).unwrap();
+        close(r.exchange_work_j.iter().sum(),0.0,2e-13);
+        close(r.balance_residual_j,0.0,2e-13);
+        assert!(r.left.dissipated_j>=0.0 && r.right.dissipated_j>=0.0);
+        work+=r.external_work_j.iter().sum::<f64>();
+        heat+=r.left.dissipated_j+r.right.dissipated_j;
+        a=r.left.state; b=r.right.state;
+    }
+    assert!(heat>0.001);
+    close(left.hamiltonian(&a)+right.hamiltonian(&b)-initial+heat-work,0.0,2e-11);
+}
+
+#[test]
+fn invalid_and_cancelled_source_histories_leave_the_interface_guess_reusable() {
+    // G4: even cancellation after native substeps cannot publish partial state
+    // or contaminate the next interface solve with a tentative source history.
+    let (left,right)=(free_mass(2.0),free_mass(3.0));
+    let make=||MultiratePair::new(&left,&right,&pair(),1.0,
+        exact(2),exact(4),SolveConfig::default()).unwrap();
+    let mut coupling=make();
+    let (a,b)=([2.0],[-1.5]);
+    let (ul,ur)=([4.0,-4.0],[-3.0,0.0,3.0,0.0]);
+    for bad in [&[4.0][..],&[4.0,-4.0,0.0][..],&[4.0,f64::NAN][..]] {
+        assert!(matches!(coupling.step_subcycled_sources(&a,&b,bad,&ur),
+            Err(MultirateError::Invalid(_))));
+    }
+    assert!(matches!(coupling.step_subcycled_sources(&a,&b,&ul,&ur[..3]),
+        Err(MultirateError::Invalid(_))));
+    let mut calls=0;
+    assert!(matches!(coupling.step_subcycled_sources_controlled(&a,&b,&ul,&ur,||{
+        calls+=1;calls>=7
+    }),Err(MultirateError::Cancelled)));
+    assert_eq!(coupling.step_subcycled_sources(&a,&b,&ul,&ur).unwrap(),
+        make().step_subcycled_sources(&a,&b,&ul,&ur).unwrap());
+}
+
 fn monolithic() -> PortHamiltonian {
     // Original states [qL,pL,qR,pR], including the full reciprocal reaction.
     PortHamiltonian::new(4,0,
