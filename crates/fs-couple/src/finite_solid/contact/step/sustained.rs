@@ -24,7 +24,8 @@ pub mod elliptic;
 /// Original source-dependent histories on admitted material-contact paths.
 pub mod source;
 
-use super::free::{rotation_difference, rotational_change};
+pub(crate) mod rigid;
+
 use super::{
     FiniteSolidSpherePathRefusal, FiniteSolidSpherePathReport, FiniteSolidSphereScene,
     FiniteSolidSphereSceneKey, FiniteSolidSphereTrajectoryControls,
@@ -42,10 +43,11 @@ use crate::finite_solid::{FiniteSolidBody, FiniteSolidError};
 use fs_contact::frictional_multicontact::{FrictionalContactResult, NormalVelocityLaw};
 use fs_exec::Cx;
 use fs_mbd::{
-    DynamicsError, Gravity, MassProperties, MomentumImpulseReceipt, RigidBodyIntegrator,
-    RigidBodyState, StepReceipt, Vec3, Wrench,
+    DynamicsError, Gravity, MassProperties, MomentumImpulseReceipt, RigidBodyState, StepReceipt,
+    Vec3, Wrench,
 };
 use fs_solid::hyper3::HyperTetError;
+use rigid::{rigid_contact_drift, rigid_force_kick};
 
 /// Compact kick receipt; private continuation vectors are not retained per step.
 #[derive(Clone, Debug)]
@@ -802,11 +804,7 @@ fn interval<'a, R: ImpactResponse, E, S: Clone, A>(
     let mut kicked_rigid = Vec::with_capacity(bodies.len());
     for ((&body, &property), &wrench) in bodies.iter().zip(properties).zip(wrenches) {
         super::poll(cx)?;
-        let force = wrench
-            .force_world
-            .add(gravity.acceleration_world().scale(property.mass()));
-        let kick =
-            body.apply_momentum_impulse(property, force.scale(dt), wrench.torque_body.scale(dt))?;
+        let kick = rigid_force_kick(body, property, wrench, gravity, dt)?;
         kicked_rigid.push(kick.state_after);
         kicks.push(kick);
     }
@@ -862,7 +860,6 @@ fn interval<'a, R: ImpactResponse, E, S: Clone, A>(
     let origin = vector(origin_m);
     let mut next_rigid = Vec::with_capacity(bodies.len());
     let mut rigid = Vec::with_capacity(bodies.len());
-    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
     let mut absolute_defect = solid_drift.absolute_integration_defect_j;
     for (index, (((&contacted, &property), &wrench), kick)) in contacted_rigid
         .iter()
@@ -872,109 +869,25 @@ fn interval<'a, R: ImpactResponse, E, S: Clone, A>(
         .enumerate()
     {
         super::poll(cx)?;
-        let drift = match integrator.step(contacted, property, Wrench::ZERO, dt) {
-            Ok(drift) => drift,
-            Err(DynamicsError::RotationalSolveFailed) => {
-                return Ok(Err(FiniteSolidSustainedRefusal::RotationalSolve {
-                    rigid_body: index,
-                }));
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let next = drift.state_after;
-        let dp = next
-            .linear_momentum_world()
-            .sub(contacted.linear_momentum_world());
-        let p_average = contacted
-            .linear_momentum_world()
-            .scale(0.5)
-            .add(next.linear_momentum_world().scale(0.5));
-        let dx = next
-            .pose()
-            .position_world()
-            .sub(contacted.pose().position_world());
-        let r_average = contacted
-            .pose()
-            .position_world()
-            .sub(origin)
-            .scale(0.5)
-            .add(next.pose().position_world().sub(origin).scale(0.5));
-        let dl = next
-            .angular_momentum_body()
-            .sub(contacted.angular_momentum_body());
-        let drift_orbital = r_average.cross(dp).add(dx.cross(p_average));
-        let drift_spin =
-            contacted
-                .pose()
-                .orientation()
-                .rotate_body_to_world(dl)
-                .add(rotation_difference(
-                    contacted.pose().orientation(),
-                    next.pose().orientation(),
-                    next.angular_momentum_body(),
-                ));
-        let drift_angular = drift_orbital.add(drift_spin);
-        let kinetic_drift_defect = p_average.scale(property.mass().recip()).dot(dp)
-            + rotational_change(
-                property,
-                contacted.angular_momentum_body(),
-                next.angular_momentum_body(),
-            )?;
-        let force = wrench
-            .force_world
-            .add(gravity.acceleration_world().scale(property.mass()));
-        let force_displacement_work = force.dot(
-            next.pose()
-                .position_world()
-                .sub(kick.state_before.pose().position_world()),
-        );
-        let velocity_average = kick
-            .state_before
-            .center_of_mass_velocity_world(property)?
-            .scale(0.5)
-            .add(
-                kick.state_after
-                    .center_of_mass_velocity_world(property)?
-                    .scale(0.5),
-            );
-        let omega_average = property
-            .angular_velocity_body_checked(kick.state_before.angular_momentum_body())?
-            .scale(0.5)
-            .add(
-                property
-                    .angular_velocity_body_checked(kick.state_after.angular_momentum_body())?
-                    .scale(0.5),
-            );
-        let force_kick_work = kick.linear_impulse_world.dot(velocity_average);
-        let torque_kick_work = kick.angular_impulse_body.dot(omega_average);
-        let force_splitting = force_kick_work - force_displacement_work;
-        let kick_orbital_residual = kick
-            .state_before
-            .pose()
-            .position_world()
-            .sub(origin)
-            .cross(kick.linear_residual_world);
-        let kick_spin_residual = kick
-            .state_before
-            .pose()
-            .orientation()
-            .rotate_body_to_world(kick.angular_residual_body);
-        let kick_angular_residual = kick_orbital_residual.add(kick_spin_residual);
-        let linear_residual = norm(kick.linear_residual_world) + norm(dp);
-        let angular_residual = norm(kick_orbital_residual)
-            + norm(kick_spin_residual)
-            + norm(drift_orbital)
-            + norm(drift_spin);
-        let energy_residual = kick.work.work_energy_residual_j.abs()
-            + (kick.work.impulse_work_j - (force_kick_work + torque_kick_work)).abs();
+        let phase =
+            match rigid_contact_drift(kick, contacted, property, wrench, gravity, dt, origin) {
+                Ok(phase) => phase,
+                Err(DynamicsError::RotationalSolveFailed) => {
+                    return Ok(Err(FiniteSolidSustainedRefusal::RotationalSolve {
+                        rigid_body: index,
+                    }));
+                }
+                Err(error) => return Err(error.into()),
+            };
+        let (linear_residual, angular_residual, energy_residual) = phase.phase_residuals();
         if [
             linear_residual,
             angular_residual,
             energy_residual,
-            kinetic_drift_defect,
-            force_displacement_work,
-            force_splitting,
-            torque_kick_work,
+            phase.kinetic_drift_defect_j,
+            phase.force_displacement_work_j,
+            phase.force_splitting_work_j,
+            phase.torque_impulse_work_j,
         ]
         .iter()
         .any(|x| !x.is_finite())
@@ -989,21 +902,9 @@ fn interval<'a, R: ImpactResponse, E, S: Clone, A>(
                 energy_residual_j: energy_residual,
             });
         }
-        absolute_defect += force_splitting.abs() + kinetic_drift_defect.abs();
-        next_rigid.push(next);
-        rigid.push(FiniteSolidSustainedRigidStep {
-            kick,
-            drift,
-            force_impulse_work_j: force_kick_work,
-            torque_impulse_work_j: torque_kick_work,
-            force_displacement_work_j: force_displacement_work,
-            force_splitting_work_j: force_splitting,
-            kinetic_drift_defect_j: kinetic_drift_defect,
-            drift_linear_increment_kg_m_s: dp,
-            drift_angular_increment_kg_m2_s: drift_angular,
-            kick_angular_residual_kg_m2_s: kick_angular_residual,
-            absolute_angular_residual_kg_m2_s: angular_residual,
-        });
+        absolute_defect += phase.force_splitting_work_j.abs() + phase.kinetic_drift_defect_j.abs();
+        next_rigid.push(phase.drift.state_after);
+        rigid.push(phase);
     }
     if !absolute_defect.is_finite() {
         return Err(FiniteSolidSustainedTrajectoryError::Invalid(

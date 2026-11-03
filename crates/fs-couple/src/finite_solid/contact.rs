@@ -835,7 +835,7 @@ fn unit(v: Vec3) -> Result<Vec3, &'static str> {
     }
     Ok(Vec3::new(v.x / norm, v.y / norm, v.z / norm))
 }
-fn contact_frame(normal: Vec3, tangent: Vec3) -> Result<[Vec3; 3], &'static str> {
+pub(crate) fn contact_frame(normal: Vec3, tangent: Vec3) -> Result<[Vec3; 3], &'static str> {
     let n = unit(normal)?;
     let hint = unit(tangent)?;
     let cross = n.cross(hint);

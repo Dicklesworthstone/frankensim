@@ -375,6 +375,44 @@ continuation and late rollback. These new tests share the execution limitation
 stated above; formatting and bounded source review do not establish runtime
 convergence or a performance benchmark.
 
+`inelastic_impact::trajectory::sustained::visco_sustained_sphere_trajectory_candidate`
+continues loaded resting/sliding contact through the original native Maxwell
+body and a complete prepared sphere scene. The native accepted Piola field and
+held loads supply a force kick, one simultaneous native contact solve couples
+every active solid/sphere and sphere/sphere row, and the original constitutive
+endpoint map continues Maxwell history during kinetic drift. Rigid kick/drift
+arithmetic and phase gates are shared with the existing elastic trajectory.
+Newton targets come from accepted PRE-FORCE normal velocity, so a held load at
+rest does not acquire a fresh restitution bounce at every interval.
+
+Each shortened trial recomputes all phases from the same accepted material,
+velocity, geometry and time. Rejected trials contribute no accepted relaxation,
+contact loss, source transfer or clock advance. Shared interval sweeps admit
+the complete declared affine numerical path, including every sphere pair and
+tetrahedron orientation. Endpoint queries carry forward without repeating the
+BVH work. Exact accepted durations and original canonical contact keys remain
+in the report. Final-endpoint activation resolves on the next continuation.
+
+The whole account distinguishes native physical relaxation, unallocated contact
+map loss, source displacement work, signed support work, material endpoint error,
+solid force/source splitting and rigid force/drift defects. In particular, the
+normal loss produced by supporting a resting load in this first-order split is
+not automatically physical heat. It accompanies an explicitly bounded force
+splitting term and must decrease under timestep refinement. Each trial receives
+its duration fraction of the whole-call absolute splitting allowance; native
+phase momentum/work gates and accumulated residual-magnitude gates also apply.
+Opposing errors cannot cancel their way through admission.
+
+The scope is fixed-temperature native Tet4 material with stationary held DOFs
+and COM-centred spheres. This explicit first-order split is not a general
+Moreau-Jean existence theorem or an exact-flow collision certificate. Source
+friction histories, moving supports and contact heat partition require their
+corresponding continuing owners. Focused regressions specify a two-sphere loaded
+chain with restitution one and no spurious bounce, independent contact impulses
+and support torque, halved numerical support loss under timestep halving, exact
+accepted-duration Maxwell replay and late whole-call refusal. Native execution
+remains unverified while the required constellation siblings are unavailable.
+
 ## Physical pressure from an explicitly selected lumped duct
 
 `acoustic_realize::duct_observer::BaffledDuctObserver` also admits the existing

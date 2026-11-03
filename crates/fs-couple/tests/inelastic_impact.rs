@@ -42,6 +42,9 @@ mod scene;
 #[path = "inelastic_impact/trajectory.rs"]
 mod trajectory;
 
+#[path = "inelastic_impact/sustained.rs"]
+mod sustained;
+
 const NODES: [[f64; 3]; 4] = [
     [0.0, 0.0, 0.0],
     [1.0, 0.0, 0.0],

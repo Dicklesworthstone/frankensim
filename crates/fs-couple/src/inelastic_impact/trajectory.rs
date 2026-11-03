@@ -6,6 +6,9 @@
 //! from the same accepted history and recomputes the original material interval.
 //! Positions, velocities and Maxwell states are never repaired or interpolated.
 
+/// Loaded sustained contact through native force, contact and material drift phases.
+pub mod sustained;
+
 use super::multiple::{
     InelasticMixedContactControls, InelasticMixedContactError, InelasticMixedContactReport,
     visco_mixed_contact_candidate,
