@@ -330,6 +330,21 @@ differentiable lift). Pure Rust throughout.
   refusal before interface sampling. Their receiving geometry and optical
   lengths use independent analytic references.
 
+- `curved::bundle::BundleSurfaceSource` admits emission from a named original
+  surface on an explicit geometric side. Every connection trial and molecular
+  survival replay queries the unchanged native boundary oracle at the actual
+  launch point, validates the source object and adjacent medium, and enters
+  its existing departure neighborhood. The source is not removed from later
+  visibility and the launch point is not offset. Emission already belongs to
+  the selected side, so departure adds no source Fresnel/BSDF factor or surface
+  event. Native source contact and source-side branch identity remain in the
+  result; source admission consumes the original geometry/query budgets.
+  Surface-source connection and image APIs share the original differentiated
+  shooting, deduplication and survival owners. Duplicate seeds retain one
+  source replay, including exact ratio-tracking zeros that still resolve the
+  receiver. Invalid source roles, side/medium mismatches, unresolved contacts,
+  unsupported departure neighborhoods and work failures refuse explicitly.
+
 - `curved::bundle::connection::BundleConnectionTarget::try_diffuse_receiver`
   selects an original native planar depolarizing diffuse surface as an incident
   power receiver. The same differentiated scene walk and bounded local Newton

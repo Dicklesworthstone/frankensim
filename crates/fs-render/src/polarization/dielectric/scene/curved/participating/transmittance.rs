@@ -20,7 +20,7 @@ use crate::dielectric::DielectricEvent;
 use crate::polarization::dielectric::scene::curved::bundle::CurvedBundleSceneError;
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleBranchPolicy, BundleConnection, BundleConnectionError, BundleConnectionLaunch,
-    BundleConnectionOptions, BundleConnectionTarget,
+    BundleConnectionOptions, BundleConnectionTarget, BundleSurfaceSource,
 };
 use core::cell::RefCell;
 
@@ -178,6 +178,45 @@ impl CurvedRayleighScene<'_, '_, '_> {
         tracking: CurvedTransmittanceOptions,
         samples: impl FnMut(u32) -> f64,
     ) -> Result<CurvedTransmittanceConnection, CurvedTransmittanceError> {
+        self.connect_bundle_with_source_transmittance_samples(
+            cx, launch, None, target, options, policy, tracking, samples,
+        )
+    }
+
+    /// Connect from a named original emitting surface and independently track
+    /// scattering survival. Each solve and replay admits the source through
+    /// the same native boundary oracle and departure neighborhood. The source
+    /// radiance is already defined on the selected side; no source-interface
+    /// Fresnel or BSDF factor is applied at launch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_bundle_from_surface_with_transmittance_samples(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        source: BundleSurfaceSource,
+        target: BundleConnectionTarget,
+        options: BundleConnectionOptions,
+        policy: BundleBranchPolicy<'_>,
+        tracking: CurvedTransmittanceOptions,
+        samples: impl FnMut(u32) -> f64,
+    ) -> Result<CurvedTransmittanceConnection, CurvedTransmittanceError> {
+        self.connect_bundle_with_source_transmittance_samples(
+            cx, launch, Some(source), target, options, policy, tracking, samples,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_bundle_with_source_transmittance_samples(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        source: Option<BundleSurfaceSource>,
+        target: BundleConnectionTarget,
+        options: BundleConnectionOptions,
+        policy: BundleBranchPolicy<'_>,
+        tracking: CurvedTransmittanceOptions,
+        samples: impl FnMut(u32) -> f64,
+    ) -> Result<CurvedTransmittanceConnection, CurvedTransmittanceError> {
         cx.checkpoint()?;
         options.validate()?;
         let clear = self.scattering_known_clear(cx, launch.wavelength_nm)?;
@@ -188,11 +227,21 @@ impl CurvedRayleighScene<'_, '_, '_> {
             max_trace_evaluations: options.max_trace_evaluations - u32::from(!clear),
             ..options
         };
-        let connection =
-            self.scene
-                .connect_bundle_with_policy(cx, launch, target, solve_options, policy)?;
+        let connection = match source {
+            Some(source) => self.scene.connect_bundle_from_surface_with_policy(
+                cx,
+                launch,
+                source,
+                target,
+                solve_options,
+                policy,
+            )?,
+            None => self
+                .scene
+                .connect_bundle_with_policy(cx, launch, target, solve_options, policy)?,
+        };
         self.replay_connected_bundle_with_transmittance(
-            cx, launch, target, options, policy, tracking, connection, clear, samples,
+            cx, launch, source, target, options, policy, tracking, connection, clear, samples,
         )
     }
 
@@ -231,6 +280,7 @@ impl CurvedRayleighScene<'_, '_, '_> {
         &self,
         cx: &Cx<'_>,
         launch: BundleConnectionLaunch,
+        source: Option<BundleSurfaceSource>,
         target: BundleConnectionTarget,
         options: BundleConnectionOptions,
         policy: BundleBranchPolicy<'_>,
@@ -263,12 +313,13 @@ impl CurvedRayleighScene<'_, '_, '_> {
         )?;
         let state = RefCell::new(Tracking::new(self.media, tracking, samples));
         let mut consumed = 0_usize;
-        let replay = self.scene.trace_bundle_with_receiver_flights(
+        let replay = self.scene.trace_bundle_with_source_receiver_flights(
             cx,
             bundle,
             launch.initial_medium,
             options.scene,
             true,
+            source,
             target.native_receiver(),
             |_, context| match policy {
                 BundleBranchPolicy::TransmitOrReflectTir => {

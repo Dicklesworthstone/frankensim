@@ -11,7 +11,8 @@
 //! into certified darkness. This finite authored search is not image-complete.
 
 use super::{
-    BundleConnectionLaunch, BundleConnectionOptions, BundleConnectionTarget, CurvedRayleighScene,
+    BundleConnectionLaunch, BundleConnectionOptions, BundleConnectionTarget, BundleSurfaceSource,
+    CurvedRayleighScene,
     CurvedTransmittanceConnection, CurvedTransmittanceError, CurvedTransmittanceOptions,
 };
 use crate::polarization::dielectric::scene::curved::bundle::connection::images::{
@@ -146,6 +147,68 @@ impl CurvedRayleighScene<'_, '_, '_> {
         image_options: BundleImageOptions,
         tracking: CurvedTransmittanceOptions,
         workspace: &'w mut CurvedTransmittanceImageWorkspace,
+        samples: impl FnMut(u32, u32) -> f64,
+    ) -> Result<CurvedTransmittanceImageCatalog<'w>, CurvedTransmittanceImageError> {
+        self.discover_bundle_images_with_source_transmittance_samples(
+            cx,
+            launch,
+            None,
+            target,
+            connection,
+            seeds,
+            image_options,
+            tracking,
+            workspace,
+            samples,
+        )
+    }
+
+    /// Discover images launched from one original surface and track each
+    /// distinct image's survival. The native source admission and departure
+    /// side are repeated in every shooting trial and survival replay. The
+    /// source is never removed from visibility and its point is never offset.
+    /// All image/workspace and aggregate tracking limits retain their original
+    /// semantics, including zero-weight paths that still validate the receiver.
+    #[allow(clippy::too_many_arguments)]
+    pub fn discover_bundle_images_from_surface_with_transmittance_samples<'w>(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        source: BundleSurfaceSource,
+        target: BundleConnectionTarget,
+        connection: BundleConnectionOptions,
+        seeds: &[BundleImageSeed<'_>],
+        image_options: BundleImageOptions,
+        tracking: CurvedTransmittanceOptions,
+        workspace: &'w mut CurvedTransmittanceImageWorkspace,
+        samples: impl FnMut(u32, u32) -> f64,
+    ) -> Result<CurvedTransmittanceImageCatalog<'w>, CurvedTransmittanceImageError> {
+        self.discover_bundle_images_with_source_transmittance_samples(
+            cx,
+            launch,
+            Some(source),
+            target,
+            connection,
+            seeds,
+            image_options,
+            tracking,
+            workspace,
+            samples,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn discover_bundle_images_with_source_transmittance_samples<'w>(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        source: Option<BundleSurfaceSource>,
+        target: BundleConnectionTarget,
+        connection: BundleConnectionOptions,
+        seeds: &[BundleImageSeed<'_>],
+        image_options: BundleImageOptions,
+        tracking: CurvedTransmittanceOptions,
+        workspace: &'w mut CurvedTransmittanceImageWorkspace,
         mut samples: impl FnMut(u32, u32) -> f64,
     ) -> Result<CurvedTransmittanceImageCatalog<'w>, CurvedTransmittanceImageError> {
         cx.checkpoint()?;
@@ -153,15 +216,27 @@ impl CurvedRayleighScene<'_, '_, '_> {
         let clear = self
             .scattering_known_clear(cx, launch.wavelength_nm)
             .map_err(CurvedTransmittanceImageError::Preparation)?;
-        let geometric = self.scene.discover_bundle_images_with_workspace(
-            cx,
-            launch,
-            target,
-            connection,
-            seeds,
-            image_options,
-            &mut workspace.geometric,
-        )?;
+        let geometric = match source {
+            Some(source) => self.scene.discover_bundle_images_from_surface_with_workspace(
+                cx,
+                launch,
+                source,
+                target,
+                connection,
+                seeds,
+                image_options,
+                &mut workspace.geometric,
+            )?,
+            None => self.scene.discover_bundle_images_with_workspace(
+                cx,
+                launch,
+                target,
+                connection,
+                seeds,
+                image_options,
+                &mut workspace.geometric,
+            )?,
+        };
         if geometric.images().len() > workspace.paths.capacity() {
             return Err(CurvedTransmittanceImageError::NumericalRange);
         }
@@ -197,6 +272,7 @@ impl CurvedRayleighScene<'_, '_, '_> {
                 .replay_connected_bundle_with_transmittance(
                     cx,
                     launch,
+                    source,
                     target,
                     connection,
                     seed.policy,

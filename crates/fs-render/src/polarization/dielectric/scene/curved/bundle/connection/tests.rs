@@ -929,3 +929,5 @@ fn g1_dark_brewster_connection_keeps_zero_power_through_later_interfaces() {
         }
     });
 }
+
+mod surface_sources;

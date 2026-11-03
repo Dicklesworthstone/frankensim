@@ -33,6 +33,36 @@ use crate::polarization::dielectric::transport::bundle::{
 /// Bounded local source-to-receiver connections through these native paths.
 pub mod connection;
 
+/// An explicit emission/departure intent at one original native surface.
+/// This descriptor contains no caller-supplied geometric witness. The native
+/// walk queries the unchanged scene at the actual launch point for every
+/// trial and replay before admitting its selected geometric side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BundleSurfaceSource {
+    object_id: u64,
+    side: BoundarySide,
+}
+
+impl BundleSurfaceSource {
+    pub fn try_new(
+        object_id: u64,
+        side: BoundarySide,
+    ) -> Result<Self, CurvedBundleSceneError> {
+        if side == BoundarySide::OnSurface {
+            return Err(CurvedBundleSceneError::InvalidSurfaceSource { object_id });
+        }
+        Ok(Self { object_id, side })
+    }
+
+    pub const fn object_id(self) -> u64 {
+        self.object_id
+    }
+
+    pub const fn side(self) -> BoundarySide {
+        self.side
+    }
+}
+
 /// A numerical stopping section is not a scene boundary or optical interaction.
 /// Its medium is always an index into this exact immutable native scene.
 #[derive(Clone, Copy, Debug)]
@@ -126,6 +156,7 @@ pub struct CurvedBundlePathResult {
     volume_receiver: bool,
     surface_events: u32,
     last_contact: Option<CurvedContact>,
+    source_contact: Option<CurvedContact>,
     detector_reference_axis: Option<Vec3>,
     max_contact_resolution_m: f64,
     boundary_evaluations: u64,
@@ -163,6 +194,11 @@ impl CurvedBundlePathResult {
     }
     pub const fn last_contact(&self) -> Option<&CurvedContact> {
         self.last_contact.as_ref()
+    }
+    /// Original native source admission, when emission begins on a surface.
+    /// This records geometry/side resolution only; it is not a resume token.
+    pub const fn source_contact(&self) -> Option<&CurvedContact> {
+        self.source_contact.as_ref()
     }
     /// Authored receiver axis; it does not replace the bundle's transported
     /// frame or its immutable two launch coordinates.
@@ -213,6 +249,11 @@ pub enum CurvedBundleSceneError {
     /// Tracing starts at an original, zero-distance launch, not a partial path
     /// whose geometry identity and interface departure have been discarded.
     InvalidInitialBundle,
+    /// The selected original surface, outgoing side or emission role was not
+    /// admitted at the unsnapped launch point.
+    InvalidSurfaceSource {
+        object_id: u64,
+    },
     NumericalRange,
 }
 impl From<CurvedSceneError> for CurvedBundleSceneError {
@@ -413,6 +454,46 @@ impl CurvedPolarizedScene<'_> {
         settings: CurvedBundleSettings,
         continue_extinguished: bool,
         receiver: Option<BundleReceiver>,
+        branches: impl FnMut(
+            &CurvedContact,
+            &CurvedBundleBranchContext,
+        ) -> Result<DielectricEvent, CurvedBundleSceneError>,
+        flight: impl FnMut(usize, f64) -> Result<Option<f64>, CurvedBundleSceneError>,
+        observe_segment: impl FnMut(
+            usize,
+            f64,
+            f64,
+            Point3,
+            bool,
+        ) -> Result<(), CurvedBundleSceneError>,
+    ) -> Result<CurvedBundlePathResult, CurvedBundleSceneError> {
+        self.trace_bundle_with_source_receiver_flights(
+            cx,
+            bundle,
+            initial_medium,
+            settings,
+            continue_extinguished,
+            None,
+            receiver,
+            branches,
+            flight,
+            observe_segment,
+        )
+    }
+
+    // Surface emission and ordinary point launches share the entire native
+    // event owner. Source admission seeds its original departure neighborhood;
+    // it applies no source-surface optical interaction and invents no offset.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_bundle_with_source_receiver_flights(
+        &self,
+        cx: &Cx<'_>,
+        bundle: PolarizedRayBundle,
+        initial_medium: usize,
+        settings: CurvedBundleSettings,
+        continue_extinguished: bool,
+        source: Option<BundleSurfaceSource>,
+        receiver: Option<BundleReceiver>,
         mut branches: impl FnMut(
             &CurvedContact,
             &CurvedBundleBranchContext,
@@ -455,6 +536,7 @@ impl CurvedPolarizedScene<'_> {
             volume_receiver: false,
             surface_events: 0,
             last_contact: None,
+            source_contact: None,
             detector_reference_axis: None,
             max_contact_resolution_m: 0.0,
             boundary_evaluations: 0,
@@ -467,7 +549,92 @@ impl CurvedPolarizedScene<'_> {
             settings.trace.max_query_work,
             settings.trace.event.surface_tolerance_m,
         );
-        let mut departure = None;
+        let mut departure = if let Some(source) = source {
+            // Query with THIS oracle: smooth departure admission depends on
+            // its original last-contact identity and competing-surface bounds.
+            let ray = result.bundle.propagation().initial_ray();
+            let witness = oracle
+                .query(ray.origin)
+                .map_err(|error| {
+                    oracle.last_error().map_or_else(
+                        || CurvedBundleSceneError::from(error),
+                        CurvedBundleSceneError::from,
+                    )
+                })?
+                .witness
+                .ok_or(CurvedBundleSceneError::InvalidSurfaceSource {
+                    object_id: source.object_id,
+                })?;
+            result.boundary_evaluations = 1;
+            let instance = self
+                .geometry
+                .instances()
+                .get(witness.boundary_id)
+                .ok_or(CurvedSceneError::InvalidContact)?;
+            let binding = self
+                .bindings
+                .get(witness.boundary_id)
+                .ok_or(CurvedSceneError::InvalidContact)?;
+            let invalid = || CurvedBundleSceneError::InvalidSurfaceSource {
+                object_id: source.object_id,
+            };
+            if instance.object_id() != source.object_id
+                || binding.object_id != source.object_id
+                || !matches!(source.side, BoundarySide::Positive | BoundarySide::Negative)
+            {
+                return Err(invalid());
+            }
+            let cosine = witness.normal.dot(ray.dir);
+            let positive = source.side == BoundarySide::Positive;
+            if !cosine.is_finite()
+                || (positive && cosine <= 0.0)
+                || (!positive && cosine >= 0.0)
+            {
+                return Err(invalid());
+            }
+            match binding.interaction {
+                Interaction::Detector { .. } => return Err(invalid()),
+                Interaction::Opaque => {}
+                Interaction::DepolarizingDiffuse { medium, .. }
+                | Interaction::SmoothConductor { medium, .. }
+                | Interaction::RoughConductor { medium, .. }
+                | Interaction::BrushedConductor { medium, .. } => {
+                    require_medium(source.object_id, initial_medium, medium)?;
+                }
+                Interaction::Dielectric { outside, inside, .. }
+                | Interaction::CoatedDielectric { outside, inside, .. } => {
+                    require_medium(
+                        source.object_id,
+                        initial_medium,
+                        if positive { outside } else { inside },
+                    )?;
+                }
+            }
+            let contact = CurvedContact {
+                object_id: instance.object_id(),
+                geometry_identity: instance.geometry_identity(),
+                frame_identity: instance.frame_identity(),
+                witness,
+                resolution_m: witness.distance_upper_m / cosine.abs(),
+            };
+            result.max_contact_resolution_m = contact.resolution_m;
+            result.source_contact = Some(contact);
+            signature.update(b"surface-source");
+            append_contact(
+                &mut signature,
+                contact,
+                initial_medium,
+                initial_medium,
+                positive,
+                6,
+            );
+            Some(GradientDeparture {
+                witness,
+                side: source.side,
+            })
+        } else {
+            None
+        };
         let mut remaining_steps = settings.trace.max_total_steps;
         let mut first_segment = true;
         while result.surface_events < settings.trace.max_surface_events {
@@ -493,6 +660,15 @@ impl CurvedPolarizedScene<'_> {
             let candidate_due =
                 tracking_flight.is_some_and(|distance| distance < remaining_distance);
             let mut boundary = settings.trace.event;
+            if first_segment && source.is_some() {
+                // The source query is part of this first segment's oracle
+                // allowance, as well as the scene's cumulative geometry work.
+                boundary.max_boundary_queries = boundary
+                    .max_boundary_queries
+                    .checked_sub(1)
+                    .filter(|remaining| *remaining > 0)
+                    .ok_or(GradientIndexError::BoundaryQueryBudgetExceeded)?;
+            }
             boundary.integration.max_steps = boundary.integration.max_steps.min(remaining_steps);
             let options = BundleEventOptions {
                 boundary,

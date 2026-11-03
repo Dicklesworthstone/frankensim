@@ -17,7 +17,8 @@
 
 use super::{
     BundleBranchPolicy, BundleConnection, BundleConnectionError, BundleConnectionLaunch,
-    BundleConnectionOptions, BundleConnectionTarget, CurvedPolarizedScene, Work, cross, norm, unit,
+    BundleConnectionOptions, BundleConnectionTarget, BundleSurfaceSource, CurvedPolarizedScene,
+    Work, cross, norm, unit,
 };
 use crate::charts::Ray;
 use crate::gradient_index::bundle::{BundleError, ProjectionOptions};
@@ -316,6 +317,50 @@ impl CurvedPolarizedScene<'_> {
         options: BundleImageOptions,
         workspace: &'w mut BundleImageWorkspace,
     ) -> Result<&'w BundleImageCatalog, BundleImageError> {
+        self.discover_bundle_images_from_source_with_workspace(
+            cx, launch, None, target, connection, seeds, options, workspace,
+        )
+    }
+
+    /// Discover finite-seed images emitted from one original native surface.
+    /// Each trial re-admits that surface through its actual departure oracle;
+    /// the source's original geometry remains active for all later encounters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn discover_bundle_images_from_surface_with_workspace<'w>(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        source: BundleSurfaceSource,
+        target: BundleConnectionTarget,
+        connection: BundleConnectionOptions,
+        seeds: &[BundleImageSeed<'_>],
+        options: BundleImageOptions,
+        workspace: &'w mut BundleImageWorkspace,
+    ) -> Result<&'w BundleImageCatalog, BundleImageError> {
+        self.discover_bundle_images_from_source_with_workspace(
+            cx,
+            launch,
+            Some(source),
+            target,
+            connection,
+            seeds,
+            options,
+            workspace,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn discover_bundle_images_from_source_with_workspace<'w>(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        source: Option<BundleSurfaceSource>,
+        target: BundleConnectionTarget,
+        connection: BundleConnectionOptions,
+        seeds: &[BundleImageSeed<'_>],
+        options: BundleImageOptions,
+        workspace: &'w mut BundleImageWorkspace,
+    ) -> Result<&'w BundleImageCatalog, BundleImageError> {
         workspace.clear();
         validate_discovery_request(connection, seeds, options)?;
         if options.max_images > workspace.image_capacity || seeds.len() > workspace.seed_capacity {
@@ -329,6 +374,7 @@ impl CurvedPolarizedScene<'_> {
         if let Err(error) = self.discover_bundle_images_prepared(
             cx,
             launch,
+            source,
             target,
             connection,
             seeds,
@@ -346,6 +392,7 @@ impl CurvedPolarizedScene<'_> {
         &self,
         cx: &Cx<'_>,
         launch: BundleConnectionLaunch,
+        source: Option<BundleSurfaceSource>,
         target: BundleConnectionTarget,
         connection: BundleConnectionOptions,
         seeds: &[BundleImageSeed<'_>],
@@ -370,7 +417,7 @@ impl CurvedPolarizedScene<'_> {
                 ..connection
             };
             let mut work = Work::default();
-            let result = self.connect_bundle_with_policy_work(
+            let result = self.connect_bundle_from_source_with_policy_work(
                 cx,
                 BundleConnectionLaunch {
                     ray: Ray {
@@ -379,6 +426,7 @@ impl CurvedPolarizedScene<'_> {
                     },
                     ..launch
                 },
+                source,
                 target,
                 local_options,
                 seed.policy,

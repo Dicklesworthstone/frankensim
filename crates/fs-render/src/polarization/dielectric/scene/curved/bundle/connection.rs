@@ -15,6 +15,7 @@
 
 use super::super::CurvedPolarizedScene;
 use super::{CurvedBundlePathResult, CurvedBundleSceneError, CurvedBundleSettings};
+pub use super::BundleSurfaceSource;
 use crate::charts::Ray;
 use crate::dielectric::DielectricEvent;
 use crate::gradient_index::bundle::{BundleError, PlanarBundleProjection, ProjectionOptions};
@@ -417,13 +418,55 @@ impl CurvedPolarizedScene<'_> {
         policy: BundleBranchPolicy<'_>,
         work: &mut Work,
     ) -> Result<BundleConnection, BundleConnectionError> {
+        self.connect_bundle_from_source_with_policy_work(
+            cx, launch, None, target, options, policy, work,
+        )
+    }
+
+    /// Connect emitted radiance/power from one original scene surface. The
+    /// actual source point remains unsnapped, and each Newton trial obtains its
+    /// departure witness from the same native scene oracle as the path walk.
+    /// The source interface contributes no reflection/transmission response;
+    /// subsequent encounters, including the same object, retain normal physics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_bundle_from_surface_with_policy(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        source: BundleSurfaceSource,
+        target: BundleConnectionTarget,
+        options: BundleConnectionOptions,
+        policy: BundleBranchPolicy<'_>,
+    ) -> Result<BundleConnection, BundleConnectionError> {
+        self.connect_bundle_from_source_with_policy_work(
+            cx,
+            launch,
+            Some(source),
+            target,
+            options,
+            policy,
+            &mut Work::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_bundle_from_source_with_policy_work(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        source: Option<BundleSurfaceSource>,
+        target: BundleConnectionTarget,
+        options: BundleConnectionOptions,
+        policy: BundleBranchPolicy<'_>,
+        work: &mut Work,
+    ) -> Result<BundleConnection, BundleConnectionError> {
         options.validate()?;
         if matches!(policy, BundleBranchPolicy::Sequence(events)
             if events.len() > MAX_POLARIZED_PATH_EVENTS as usize)
         {
             return Err(BundleConnectionError::InvalidBranchPlan);
         }
-        let first = self.connection_trial(cx, launch, target, options, policy, work)?;
+        let first = self.connection_trial(cx, launch, source, target, options, policy, work)?;
         let signature = first.branch_signature();
         let mut current = arrival(first, target, options.projection)?;
         for iteration in 0..=options.max_iterations {
@@ -464,6 +507,25 @@ impl CurvedPolarizedScene<'_> {
                     ),
                 ))
                 .ok_or(BundleConnectionError::NumericalRange)?;
+                if let Some(source) = source {
+                    // Reject known hemisphere crossings before tracing. The
+                    // normal belongs to the original admitted source contact;
+                    // no native field/oracle/cancellation error is swallowed.
+                    let contact = current
+                        .path
+                        .source_contact()
+                        .ok_or(BundleConnectionError::NumericalRange)?;
+                    let cosine = contact.witness.normal.dot(direction);
+                    let selected = if source.side() == crate::gradient_index::event::BoundarySide::Positive {
+                        cosine
+                    } else {
+                        -cosine
+                    };
+                    if selected < options.scene.trace.event.min_approach_cosine {
+                        damping *= 0.5;
+                        continue;
+                    }
+                }
                 let trial_launch = BundleConnectionLaunch {
                     ray: Ray {
                         origin: launch.ray.origin,
@@ -471,8 +533,9 @@ impl CurvedPolarizedScene<'_> {
                     },
                     ..launch
                 };
-                let path =
-                    self.connection_trial(cx, trial_launch, target, options, policy, work)?;
+                let path = self.connection_trial(
+                    cx, trial_launch, source, target, options, policy, work,
+                )?;
                 // A changed visibility/topology cannot use the current smooth
                 // Jacobian. Smaller trials may remain in the admitted basin.
                 if path.branch_signature() == signature {
@@ -509,10 +572,12 @@ impl CurvedPolarizedScene<'_> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn connection_trial(
         &self,
         cx: &Cx<'_>,
         launch: BundleConnectionLaunch,
+        source: Option<BundleSurfaceSource>,
         target: BundleConnectionTarget,
         options: BundleConnectionOptions,
         policy: BundleBranchPolicy<'_>,
@@ -533,12 +598,13 @@ impl CurvedPolarizedScene<'_> {
         )?;
         let (path, branch_plan) = match policy {
             BundleBranchPolicy::TransmitOrReflectTir => (
-                self.trace_bundle_with_checked_branches_to_receiver(
+                self.trace_bundle_with_source_receiver_flights(
                     cx,
                     bundle,
                     launch.initial_medium,
                     options.scene,
                     true,
+                    source,
                     target.native_receiver(),
                     |_, context| {
                         Ok(if context.total_internal_reflection {
@@ -547,17 +613,20 @@ impl CurvedPolarizedScene<'_> {
                             DielectricEvent::Transmission
                         })
                     },
+                    |_, _| Ok(None),
+                    |_, _, _, _, _| Ok(()),
                 )?,
                 None,
             ),
             BundleBranchPolicy::Sequence(events) => {
                 let mut consumed = 0;
-                let path = self.trace_bundle_with_checked_branches_to_receiver(
+                let path = self.trace_bundle_with_source_receiver_flights(
                     cx,
                     bundle,
                     launch.initial_medium,
                     options.scene,
                     true,
+                    source,
                     target.native_receiver(),
                     |_, _| {
                         let event = events.get(consumed).copied().ok_or(
@@ -568,6 +637,8 @@ impl CurvedPolarizedScene<'_> {
                         consumed += 1;
                         Ok(event)
                     },
+                    |_, _| Ok(None),
+                    |_, _, _, _, _| Ok(()),
                 )?;
                 (path, Some((events.len(), consumed)))
             }
