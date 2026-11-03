@@ -1,4 +1,8 @@
-//! Continuous free-floating articulated motion with physical base recoil.
+//! Continuous articulated motion with free or prescribed base boundaries.
+//!
+//! The free-floating entries below retain physical base recoil. The
+//! [`prescribed`] module advances fixed or externally driven supports through
+//! the same native articulated dynamics and recovers their force and work.
 //!
 //! A second-order Lie midpoint step evolves total world linear momentum,
 //! angular momentum about the system COM, COM position, base orientation, and
@@ -11,6 +15,9 @@
 //! It preserves the discrete spatial impulse balance, but is neither an
 //! energy-exact nor a variational/symplectic integrator. Refine the duration to
 //! resolve fast internal motion. Held link-frame wrenches rotate with the links.
+
+/// Continuous motion with a fixed or externally driven support boundary.
+pub mod prescribed;
 
 /// World-fixed loads and finite axial connections on original material points.
 pub mod spatial_loads;

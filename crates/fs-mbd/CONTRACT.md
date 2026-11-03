@@ -1,5 +1,39 @@
 # CONTRACT: fs-mbd
 
+## Continuous prescribed-base articulated motion
+
+`articulated::motion::prescribed` advances the original compact joint state
+with a fixed or externally driven support. `PrescribedBaseMotionState` retains
+physical time and the complete native `BaseState`; `PrescribedBasePath` supplies
+the midpoint and endpoint of the same smooth support trajectory. The original
+Featherstone spatial-acceleration convention applies. Pose/twist/acceleration
+derivative consistency is an input obligation, not a certified interpolation.
+
+Both `step_prescribed_base` and `step_prescribed_base_with_effort` use native
+linear-time ABA for the explicit midpoint stages. Native FK and midpoint RNEA
+recover the complete support force and couple, including transmission through a
+scalar root actuator. The root transform comes from the original local joint
+geometry. Support work pairs this wrench with base twist; actuator work pairs
+effort with relative joint rate. The shared held-load carrier retains its
+original link-frame wrench and world-gravity conventions.
+
+Endpoint storage, polarized kinetic-energy change, exact uniform-gravity
+displacement work, signed support work, and actuator work remain separate.
+The kinetic-work defect is numerical/path error, not physical dissipation.
+Joint position/rate/effort admissions and bounded cancellation apply before
+publication. Refusal preserves borrowed native state; callback-owned side
+effects cannot be rolled back. The accepted rates from
+`apply_prescribed_base_impulses` continue directly without converting an impulse
+into a finite force or resetting configuration.
+
+This is a smooth explicit second-order lane, requiring time resolution of
+its fastest dynamics. It is not a stiff, symplectic, energy-exact, unilateral
+contact or closed-loop constraint integrator. The targeted regression entry is
+`cargo test -p fs-mbd --test articulated_prescribed_motion`; it covers analytic
+support/actuator work, driven supports, native impulse continuation and refusal.
+This increment advances `frankensim-ext-mbd-core-vqqt`; it does not close the
+bead's broader integrator program.
+
 ## Momentum-consistent fixed-plane candidate projection
 
 `rigid_rattle::PointPlaneRattle::project_candidate` carries world linear

@@ -8,7 +8,7 @@
 //! Spatial coordinates use `[angular, linear]`; dual force coordinates use
 //! `[torque, force]`.
 
-/// Continuous unconstrained articulated motion in total momentum coordinates.
+/// Continuous free-floating and prescribed-base articulated motion.
 pub mod motion;
 
 /// Full free-base mass, inertial bias and shared link motion maps for coupling.
