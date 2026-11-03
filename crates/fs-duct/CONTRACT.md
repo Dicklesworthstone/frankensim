@@ -3211,3 +3211,38 @@ G1/G3 tests in `src/network/scattering/tests.rs` compare exact lossless pipe
 transmission at impedance poles, unequal-reference reciprocal unitary matrices,
 regional three-way junction amplitudes, coherent power with viscothermal and
 exterior losses, canonical reordering, and transactional input refusal.
+
+## Authored superfluid body forces and closed-end momentum
+
+`TwoFluidChannel::step_forced_closed` drives the original two-fluid propagator
+with a common acceleration, uniform component force densities, or N+1 authored
+face values. Component force densities are per total physical mixture volume.
+Common acceleration acts on both components equally and preserves counterflow.
+General component forces evolve barycentric and relative motion through the
+original material densities; no force or friction coefficient is inferred.
+
+Exact finite force kicks surround the original implicit-midpoint wave update;
+exact friction half steps surround that forced-wave block. Source work includes
+the quadratic finite-impulse term and remains separate from frictional heat.
+This ordering preserves discrete hydrostatic and thermomechanical force balance.
+All fields, heat, clock and accounts remain private until physical, energy,
+momentum and cancellation checks succeed. The corresponding `with_heat` method
+prepares an original thermal candidate before the same joint publication.
+
+Both accepted endpoints must already be stationary. Their half dual volumes
+contribute to the full body impulse although their velocity and work are zero.
+The pressure-perturbation wall impulses include those half-cell source reactions:
+J_left=A integral(p_first_cell)−V_half integral(f_left), and
+J_right=−A integral(p_last_cell)−V_half integral(f_right).
+Their negatives are the wall reactions. Full-domain trapezoidal momentum then
+changes by body impulse plus both wall impulses. Roundoff scales retain the
+uncancelled component momenta and impulses, including pure counterflow cases.
+
+`ChannelStep::boundary_pressure_impulse_n_s` separately exposes the adjacent-cell
+numerical port efforts for mechanical composition. They are not absolute wall
+loads: baseline pressure, endpoint inertia and endpoint body-force corrections
+must be supplied by the corresponding boundary owner. The new closed-force
+report provides the latter correction for stationary ends. The frozen-reference
+linear model does not include advective momentum flux, density-dependent
+buoyancy, moving geometry, or arbitrary absolute-pressure loads.
+

@@ -56,3 +56,7 @@ required-features = ["superfluid"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "superfluid_momentum"
+required-features = ["superfluid"]

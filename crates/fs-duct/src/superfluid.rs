@@ -28,8 +28,10 @@ use fs_material::MaterialError;
 use fs_material::superfluid::TwoFluidState;
 
 mod modes;
+mod momentum;
 mod step;
 use modes::Modes;
+pub use momentum::{BodyForce, ComponentForceDensity, ForcedChannelStep};
 
 /// Source admission, caller domain, cancellation or numerical refusal.
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +43,7 @@ pub enum ChannelError {
     Material(MaterialError),
     Solve(TridiagonalError),
     Balance { defect_j: f64, tolerance_j: f64 },
+    MomentumBalance { defect_n_s: f64, tolerance_n_s: f64 },
 }
 impl core::fmt::Display for ChannelError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -156,6 +159,13 @@ pub struct ChannelStep {
     pub wave_energy_before_j: f64,
     pub wave_energy_after_j: f64,
     pub boundary_wave_work_j: f64,
+    /// Signed work supplied by authored body forces; friction heat is separate.
+    pub body_force_work_j: f64,
+    /// Midpoint pressure-perturbation impulses from the adjacent end CELLS,
+    /// signed into the resolved interior: left +A integral(p), right -A integral(p).
+    /// These are conjugate numerical port efforts. Physical end-half-cell
+    /// inertia and body-force corrections belong to the boundary composition.
+    pub boundary_pressure_impulse_n_s: [f64; 2],
     pub mutual_friction_heat_j: f64,
     pub wave_balance_defect_j: f64,
     /// First-order mass imported through the two explicit ports.
@@ -384,7 +394,7 @@ impl TwoFluidChannel {
         friction: MutualFriction,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ChannelStep, ChannelError> {
-        let report = self.stage_step(dt_s, boundary, friction, &mut cancelled)?;
+        let report = self.stage_step(dt_s, boundary, friction, BodyForce::None, &mut cancelled)?;
         self.publish_step(report);
         Ok(report)
     }
@@ -406,7 +416,7 @@ impl TwoFluidChannel {
         prepare_heat: impl FnOnce(&ChannelStep, &[f64]) -> Result<T, E>,
     ) -> Result<(ChannelStep, T), HeatStepError<E>> {
         let report = self
-            .stage_step(dt_s, boundary, friction, &mut cancelled)
+            .stage_step(dt_s, boundary, friction, BodyForce::None, &mut cancelled)
             .map_err(HeatStepError::Channel)?;
         let candidate = prepare_heat(&report, &self.pending_heat_j).map_err(HeatStepError::Heat)?;
         poll(&mut cancelled).map_err(HeatStepError::Channel)?;

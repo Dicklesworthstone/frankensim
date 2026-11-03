@@ -7,6 +7,7 @@ impl TwoFluidChannel {
         dt: f64,
         boundary: BoundaryVelocities,
         friction: MutualFriction,
+        force: BodyForce<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ChannelStep, ChannelError> {
         poll(cancelled)?;
@@ -51,6 +52,7 @@ impl TwoFluidChannel {
                 .face_to_modes(v, end.normal_m_s - end.superfluid_m_s);
         }
         let n = self.cells();
+        force.validate(n + 1, &self.material, cancelled)?;
         let before = energy(&self.accepted, self.cell_volume, cancelled)?;
         for i in 0..=n {
             if i % 128 == 0 {
@@ -71,6 +73,9 @@ impl TwoFluidChannel {
             self.pending[mode].faces[n] = port_modes[1][mode];
         }
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
+        // Keep the exact force kicks adjacent to the wave update. Friction
+        // outside this affine midpoint block preserves static force balance.
+        let mut source_work = self.force_half_step(force, dt / 2.0, cancelled)?;
         let mut work = 0.0;
         let mut residual: f64 = 0.0;
         for mode in 0..2 {
@@ -90,6 +95,10 @@ impl TwoFluidChannel {
                 * (0.5 * (old[0] + new[0]) * port_modes[0][mode]
                     - 0.5 * (old[n - 1] + new[n - 1]) * port_modes[1][mode]);
         }
+        source_work += self.force_half_step(force, dt / 2.0, cancelled)?;
+        if force != BodyForce::None {
+            self.validate_pending(cancelled)?;
+        }
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
         self.validate_pending(cancelled)?;
         let after = energy(&self.pending, self.cell_volume, cancelled)?;
@@ -102,10 +111,10 @@ impl TwoFluidChannel {
             accumulate(&mut heat, &mut correction, value);
         }
         let total_heat = self.total_heat_j + heat;
-        let defect = (after - before) - work + heat;
-        let scale = before + after + work.abs() + heat;
+        let defect = (after - before) - work - source_work + heat;
+        let scale = before + after + work.abs() + source_work.abs() + heat;
         let tolerance = 32768.0 * f64::EPSILON * scale;
-        if ![heat, total_heat, work, defect, tolerance]
+        if ![heat, total_heat, work, source_work, defect, tolerance]
             .into_iter()
             .all(f64::is_finite)
             || heat < 0.0
@@ -128,9 +137,30 @@ impl TwoFluidChannel {
         let boundary_heat = dt
             * self.area_m2
             * (left.counterflow_heat_flux_w_m2 - right.counterflow_heat_flux_w_m2);
-        if ![boundary_mass, boundary_entropy, boundary_heat]
-            .into_iter()
-            .all(f64::is_finite)
+        let mut pressure_impulse = [0.0; 2];
+        for (end, cell) in [0, n - 1].into_iter().enumerate() {
+            let old = self.modes.cell(
+                &self.material,
+                [self.accepted[0].cells[cell], self.accepted[1].cells[cell]],
+            );
+            let new = self.modes.cell(
+                &self.material,
+                [self.pending[0].cells[cell], self.pending[1].cells[cell]],
+            );
+            pressure_impulse[end] = dt
+                * self.area_m2
+                * (0.5 * old.pressure_perturbation_pa + 0.5 * new.pressure_perturbation_pa)
+                * if end == 0 { 1.0 } else { -1.0 };
+        }
+        if ![
+            boundary_mass,
+            boundary_entropy,
+            boundary_heat,
+            pressure_impulse[0],
+            pressure_impulse[1],
+        ]
+        .into_iter()
+        .all(f64::is_finite)
         {
             return Err(ChannelError::Invalid(
                 "boundary transfer is not representable",
@@ -142,6 +172,8 @@ impl TwoFluidChannel {
             wave_energy_before_j: before,
             wave_energy_after_j: after,
             boundary_wave_work_j: work,
+            body_force_work_j: source_work,
+            boundary_pressure_impulse_n_s: pressure_impulse,
             mutual_friction_heat_j: heat,
             wave_balance_defect_j: defect,
             boundary_mass_kg: boundary_mass,
