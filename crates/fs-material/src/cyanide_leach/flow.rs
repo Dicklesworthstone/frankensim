@@ -32,6 +32,8 @@ use std::collections::BTreeMap;
 
 /// Continuous leaching with a source-declared maintained oxygen reservoir.
 pub mod aeration;
+/// Continuous leaching with retained product and preg-robbing sorbents.
+pub mod cil;
 
 /// Independent local authority, distinct from the original batch-age law.
 pub const LOCAL_CYANIDATION_LAW: &str = "local-speciated-gold-cyanidation";
