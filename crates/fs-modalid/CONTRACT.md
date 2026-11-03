@@ -14,14 +14,27 @@ measurement side of the simulate-vs-measure calibration loop.
   load-bearing convention bridge from the vector-fitting bead);
   `new_laplace` skips it; `parse_csv` for the v1 header-free CSV
   table (freq, re, im[, coherence] per channel; comment lines `#`).
+  The grid is finite, positive and strictly increasing; response components
+  are finite and coherence is finite in `[0, 1]`. Constructors and identification
+  re-admit these invariants, including edits to the public data fields.
   No UFF/proprietary formats in v1 (stated).
 - `estimate_snr` — coherence-driven `gamma^2/(1-gamma^2)` when
-  present; otherwise a FOURTH-DIFFERENCE roughness estimator (white
-  noise passes with power gain 70; the median sits at ln2 of the
-  mean — both divided out). The naive lowest-decile magnitude floor
+  present; otherwise a five-point fourth divided-difference roughness
+  estimator on the actual angular-frequency grid. Each stencil annihilates
+  cubic frequency trends without resampling and divides its squared response
+  by its squared weight norm. This is power gain 70 for the usual uniform-grid
+  `[1,-4,6,-4,1]` stencil. The median is then divided by ln2, the calibration
+  for independent, identically distributed circular complex Gaussian noise.
+  Response normalization keeps the dimensionless estimate invariant under
+  physical unit changes. The numerator is median total response power.
+  Local curvature beyond degree three can still be charged as noise; real-only,
+  correlated or heteroscedastic noise is outside that calibration. This is not
+  an uncertainty certificate. The naive lowest-decile magnitude floor
   is WRONG for FRFs (antiresonance valleys are signal — executed
-  failure). Channels under 5 samples vote ZERO (refusal), never
-  infinity.
+  failure). Without coherence, channels under 5 samples or an unrepresentable
+  frequency stencil vote ZERO (refusal), never infinity. Malformed public data
+  returns zero from this scalar diagnostic and a typed shape error from
+  identification.
 - `identify` — the pipeline: SNR gate (typed `SnrTooLow` refusal) ->
   vector-fit stabilization ladder (per-order pole tables) ->
   `stabilization` verdicts (frequency/damping match tolerances,

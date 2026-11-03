@@ -530,6 +530,147 @@ fn snr_refusal_fires() {
     assert!(estimate_snr(&bad) < 2.0);
 }
 
+// Independent original uniform-grid estimator, retained as an arithmetic
+// oracle for the noise calibration rather than using the new stencil owner.
+fn uniform_snr(h: &[C64]) -> f64 {
+    let mut differences: Vec<_> = h
+        .windows(5)
+        .map(|v| (v[4] - v[3].scale(4.0) + v[2].scale(6.0) - v[1].scale(4.0) + v[0]).norm_sq())
+        .collect();
+    let mut powers: Vec<_> = h.iter().map(|v| v.norm_sq()).collect();
+    differences.sort_by(f64::total_cmp);
+    powers.sort_by(f64::total_cmp);
+    powers[powers.len() / 2] * (70.0 * core::f64::consts::LN_2) / differences[differences.len() / 2]
+}
+
+#[test]
+fn snr_nonuniform_frequency_grid_does_not_invent_noise_from_cubic_response() {
+    let omega: Vec<_> = (0..17)
+        .map(|i| 10.0_f64.powf(3.0 * f64::from(i) / 16.0))
+        .collect();
+    let h: Vec<_> = omega
+        .iter()
+        .map(|w| {
+            let x = w / 1000.0;
+            C64::new(x * x * x, 0.25 * x * x * x)
+        })
+        .collect();
+    // The previous index-difference gate called this exactly noiseless cubic
+    // response SNR=3.53, below the default modal-identification floor of 10.
+    assert!(uniform_snr(&h) < IdentifyOptions::default().snr_floor);
+    let data = FrfData::new_laplace(omega, vec![(h, None)]).unwrap();
+    assert!(estimate_snr(&data) > 1.0e20);
+}
+
+#[test]
+fn snr_actual_grid_preserves_uniform_calibration_and_physical_unit_rescaling() {
+    let omega: Vec<_> = (1..=129).map(f64::from).collect();
+    let h: Vec<_> = omega
+        .iter()
+        .map(|w| C64::new(1.0 + 0.03 * (1.31 * w).cos(), 0.02 * (0.71 * w).sin()))
+        .collect();
+    let expected = uniform_snr(&h);
+    for frequency_scale in [1.0e-180, 1.0, TWO_PI, 1.0e180] {
+        for response_scale in [1.0e-180, 1.0, -1.0e180] {
+            let data = FrfData::new_laplace(
+                omega.iter().map(|w| w * frequency_scale).collect(),
+                vec![(h.iter().map(|v| v.scale(response_scale)).collect(), None)],
+            )
+            .unwrap();
+            let actual = estimate_snr(&data);
+            assert!(
+                (actual / expected - 1.0).abs() < 2.0e-11,
+                "frequency scale {frequency_scale:e}, response scale {response_scale:e}: {actual} vs {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn snr_nonuniform_grid_retains_circular_complex_white_noise_calibration() {
+    // Deterministic independent Box-Muller variates: total complex noise power
+    // 0.01 about a unit response, so the existing median-power gate is ~100.
+    let mut seed = 0x41d8_a153_9cce_02f7_u64;
+    let mut uniform = || {
+        seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut x = seed;
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        let bits = (x ^ (x >> 31)) >> 11;
+        (bits as f64 + 0.5) / ((1_u64 << 53) as f64)
+    };
+    let h: Vec<_> = (0..8193)
+        .map(|_| {
+            let radius = (-0.01 * uniform().ln()).sqrt();
+            let phase = TWO_PI * uniform();
+            C64::new(1.0 + radius * phase.cos(), radius * phase.sin())
+        })
+        .collect();
+    for grid in 0..3 {
+        let mut clustered_frequency = 1.0;
+        let omega: Vec<_> = (0..h.len())
+            .map(|i| match grid {
+                0 => (i + 1) as f64,
+                1 => (8.0 * i as f64 / (h.len() - 1) as f64).exp(),
+                _ => {
+                    let frequency = clustered_frequency;
+                    clustered_frequency += [0.05, 0.25, 2.0, 0.7, 1.0][i % 5];
+                    frequency
+                }
+            })
+            .collect();
+        let data = FrfData::new_laplace(omega, vec![(h.clone(), None)]).unwrap();
+        let snr = estimate_snr(&data);
+        assert!((85.0..115.0).contains(&snr), "grid={grid}: SNR {snr}");
+    }
+}
+
+#[test]
+fn snr_frequency_grid_refuses_duplicates_nonfinite_data_and_unresolved_spacing() {
+    for omega in [
+        vec![1.0, 1.0, 2.0],
+        vec![2.0, 1.0, 3.0],
+        vec![0.0, 1.0, 2.0],
+        vec![1.0, f64::NAN, 3.0],
+        vec![1.0, 2.0, f64::INFINITY],
+    ] {
+        assert!(matches!(
+            FrfData::new_laplace(omega, vec![(vec![C64::ONE; 3], None)]),
+            Err(ModalIdError::Shape { .. })
+        ));
+    }
+    let mut data = FrfData::new_laplace(
+        vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        vec![(vec![C64::ONE; 5], None)],
+    )
+    .unwrap();
+    // Public fields can be edited after admission; neither entry point may
+    // panic or silently bypass its SNR gate on the resulting malformed data.
+    data.omega[2] = 2.0;
+    assert_eq!(estimate_snr(&data), 0.0);
+    assert!(matches!(
+        identify(&data, &IdentifyOptions::default()),
+        Err(ModalIdError::Shape { .. })
+    ));
+    data.omega[2] = 3.0;
+    data.channels[0].h[2].re = f64::NAN;
+    assert_eq!(estimate_snr(&data), 0.0);
+    assert!(matches!(
+        identify(&data, &IdentifyOptions::default()),
+        Err(ModalIdError::Shape { .. })
+    ));
+    let unresolved = FrfData::new_laplace(
+        vec![1.0e-300, 2.0e-300, 3.0e-300, 4.0e-300, 1.0e300],
+        vec![(vec![C64::ONE; 5], None)],
+    )
+    .unwrap();
+    assert_eq!(estimate_snr(&unresolved), 0.0);
+    assert!(matches!(
+        identify(&unresolved, &IdentifyOptions::default()),
+        Err(ModalIdError::SnrTooLow { .. })
+    ));
+}
+
 #[test]
 fn rfp_orthogonal_basis_beats_naive_powers() {
     // The conditioning demonstration the bead asks for: identify the

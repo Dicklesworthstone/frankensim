@@ -42,7 +42,7 @@ pub struct FrfChannel {
 /// A measured multi-channel FRF data set on a shared frequency grid.
 #[derive(Debug, Clone)]
 pub struct FrfData {
-    /// Angular frequencies [rad/s], ascending.
+    /// Positive finite angular frequencies [rad/s], strictly ascending.
     pub omega: Vec<f64>,
     /// Channels (e.g. response points of a roving-hammer test).
     pub channels: Vec<FrfChannel>,
@@ -103,7 +103,8 @@ impl FrfData {
     /// bridge from the vector-fitting bead).
     ///
     /// # Errors
-    /// [`ModalIdError::Shape`] on mismatched lengths or empty data.
+    /// [`ModalIdError::Shape`] on invalid frequencies, nonfinite responses,
+    /// coherence outside `[0, 1]`, mismatched lengths or empty data.
     pub fn new(
         omega: Vec<f64>,
         channels_engineering: Vec<(Vec<C64>, Option<Vec<f64>>)>,
@@ -123,28 +124,66 @@ impl FrfData {
         omega: Vec<f64>,
         channels: Vec<(Vec<C64>, Option<Vec<f64>>)>,
     ) -> Result<Self, ModalIdError> {
-        if omega.is_empty() || channels.is_empty() {
+        let data = FrfData {
+            omega,
+            channels: channels
+                .into_iter()
+                .map(|(h, coherence)| FrfChannel { h, coherence })
+                .collect(),
+        };
+        data.validate()?;
+        Ok(data)
+    }
+
+    // Fields remain public for measured-data assembly, so identification must
+    // re-admit them as well as construction. In particular, repeated or reversed
+    // frequencies cannot define a local divided difference.
+    fn validate(&self) -> Result<(), ModalIdError> {
+        if self.omega.is_empty() || self.channels.is_empty() {
             return Err(ModalIdError::Shape { what: "empty data" });
         }
-        let n = omega.len();
-        let mut out = Vec::with_capacity(channels.len());
-        for (h, coherence) in channels {
-            if h.len() != n {
+        if self.omega.iter().any(|w| !w.is_finite() || *w <= 0.0)
+            || self.omega.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ModalIdError::Shape {
+                what: "frequency grid must be finite, positive and strictly increasing",
+            });
+        }
+        for channel in &self.channels {
+            if channel.h.len() != self.omega.len() {
                 return Err(ModalIdError::Shape {
                     what: "channel length vs grid",
                 });
             }
-            if coherence.as_ref().is_some_and(|c| c.len() != n) {
+            if channel
+                .h
+                .iter()
+                .any(|h| !h.re.is_finite() || !h.im.is_finite())
+            {
+                return Err(ModalIdError::Shape {
+                    what: "FRF responses must be finite",
+                });
+            }
+            if channel
+                .coherence
+                .as_ref()
+                .is_some_and(|c| c.len() != self.omega.len())
+            {
                 return Err(ModalIdError::Shape {
                     what: "coherence length vs grid",
                 });
             }
-            out.push(FrfChannel { h, coherence });
+            if channel
+                .coherence
+                .as_ref()
+                .is_some_and(|c| c.iter().any(|g| !g.is_finite() || !(0.0..=1.0).contains(g)))
+            {
+                return Err(ModalIdError::Shape {
+                    what: "coherence must be finite and in [0, 1]",
+                });
+            }
         }
-        Ok(FrfData {
-            omega,
-            channels: out,
-        })
+        Ok(())
     }
 
     /// Parse the v1 CSV FRF table: header-free lines
@@ -195,17 +234,38 @@ impl FrfData {
 }
 
 /// Per-channel SNR estimate (median over channels): with coherence,
-/// `gamma^2/(1-gamma^2)` averaged; without, a SECOND-DIFFERENCE
-/// roughness estimator — white noise passes through `h[i+1] - 2 h[i]
-/// + h[i-1]` amplified by 6 in power while a smooth FRF contributes
-/// only curvature, so `median |d2|^2 / 6` estimates the noise power
-/// and `median |h|^2` the signal power.
+/// `gamma^2/(1-gamma^2)` averaged; otherwise five-point fourth divided
+/// differences on the actual angular-frequency grid remove cubic trends.
+/// Each difference's power is divided by its squared weight norm, then the
+/// median is divided by `ln(2)`. This estimates the mean power of independent,
+/// identically distributed circular complex Gaussian response noise. On a
+/// uniform grid it is the usual `[1,-4,6,-4,1]` difference with power gain 70.
+/// The numerator remains median total response power, as in the original gate.
+///
+/// Nonuniform grids need no resampling. Normalization preserves response-unit
+/// and frequency-unit invariance; it does not flatten physical resonances.
+/// Unresolved resonances or non-cubic local curvature can still be charged as
+/// noise. Real-only, correlated or frequency-dependent noise does not satisfy
+/// the `ln(2)` calibration; this is a diagnostic, not an uncertainty certificate.
+/// Malformed public data, fewer than five samples without coherence, or an
+/// unrepresentable divided-difference stencil vote zero. [`identify`] and
+/// [`identify_multichannel`] report malformed data as a typed shape refusal.
 ///
 /// The naive median-over-lowest-decile magnitude ratio is WRONG for
 /// FRFs: antiresonance valleys are genuine signal, not noise
 /// (executed failure: clean data read as SNR 7).
 #[must_use]
 pub fn estimate_snr(data: &FrfData) -> f64 {
+    if data.validate().is_err() {
+        return 0.0;
+    }
+    // One physical grid serves every response channel. The common scale of
+    // each annihilating stencil cancels against its squared noise gain.
+    let stencils: Option<Vec<_>> = if data.channels.iter().any(|c| c.coherence.is_none()) {
+        data.omega.windows(5).map(noise_stencil).collect()
+    } else {
+        Some(Vec::new())
+    };
     let mut snrs = Vec::new();
     for ch in &data.channels {
         if let Some(coh) = &ch.coherence {
@@ -218,39 +278,73 @@ pub fn estimate_snr(data: &FrfData) -> f64 {
             }
             snrs.push(acc / n as f64);
         } else {
-            let n = ch.h.len();
-            if n < 5 {
+            let Some(stencils) = stencils.as_ref().filter(|s| !s.is_empty()) else {
                 // Too few samples to separate noise from signal:
                 // vote ZERO so the gate refuses (an INFINITY vote
                 // would bypass the gate — review finding).
                 snrs.push(0.0);
                 continue;
+            };
+            let scale =
+                ch.h.iter()
+                    .fold(0.0_f64, |m, h| m.max(h.re.abs()).max(h.im.abs()));
+            if scale == 0.0 {
+                snrs.push(0.0);
+                continue;
             }
-            // FOURTH difference annihilates cubics, so smooth-FRF
-            // curvature leaks far less than through a second
-            // difference (review finding: d2 read a legitimate
-            // coarse survey grid as noise). White noise passes with
-            // power gain 70 = sum of squared binomials, and the
-            // MEDIAN of |d4|^2 under Gaussian-class noise sits at
-            // ln2 of the mean — both divided out.
-            let mut d4: Vec<f64> = (2..n - 2)
-                .map(|i| {
-                    let v = ch.h[i + 2] - ch.h[i + 1].scale(4.0) + ch.h[i].scale(6.0)
-                        - ch.h[i - 1].scale(4.0)
-                        + ch.h[i - 2];
-                    v.norm_sq()
-                })
-                .collect();
+            // Divide components directly, avoiding an overflowing reciprocal
+            // for a perfectly valid small response-unit scale.
+            let normalized = |h: C64| C64::new(h.re / scale, h.im / scale);
+            let mut d4: Vec<f64> =
+                ch.h.windows(5)
+                    .zip(stencils)
+                    .map(|(h, (weights, gain))| {
+                        let center = normalized(h[2]);
+                        let v = h.iter().zip(weights).fold(C64::ZERO, |sum, (&h, &weight)| {
+                            sum + (normalized(h) - center).scale(weight)
+                        });
+                        v.norm_sq() / gain
+                    })
+                    .collect();
             d4.sort_by(f64::total_cmp);
-            let noise =
-                (d4[d4.len() / 2] / (70.0 * core::f64::consts::LN_2)).max(f64::MIN_POSITIVE);
-            let mut mags: Vec<f64> = ch.h.iter().map(|v| v.norm_sq()).collect();
+            let noise = (d4[d4.len() / 2] / core::f64::consts::LN_2).max(f64::MIN_POSITIVE);
+            let mut mags: Vec<f64> = ch.h.iter().map(|&v| normalized(v).norm_sq()).collect();
             mags.sort_by(f64::total_cmp);
             snrs.push(mags[mags.len() / 2] / noise);
         }
     }
     snrs.sort_by(f64::total_cmp);
     snrs[snrs.len() / 2]
+}
+
+// Barycentric weights annihilate every polynomial of degree <= 3 at any five
+// distinct nodes: sum_j p(w_j)/prod_{k!=j}(w_j-w_k) = 0. Use local frequency
+// differences before scaling, so large common frequency offsets do not merge
+// adjacent nodes. Normalize via the SMALLEST denominator rather than forming
+// reciprocals, which can overflow for tightly clustered measurement bins.
+fn noise_stencil(omega: &[f64]) -> Option<([f64; 5], f64)> {
+    let span = omega[4] - omega[0];
+    let mut denominators = [1.0_f64; 5];
+    for (j, denominator) in denominators.iter_mut().enumerate() {
+        for k in 0..5 {
+            if k != j {
+                *denominator *= (omega[j] - omega[k]) / span;
+            }
+        }
+        if !denominator.is_normal() {
+            return None;
+        }
+    }
+    let scale = denominators
+        .iter()
+        .map(|v| v.abs())
+        .fold(f64::INFINITY, f64::min);
+    let weights = denominators.map(|v| scale / v);
+    if weights.iter().any(|w| !w.is_normal()) {
+        return None;
+    }
+    let gain = weights.iter().map(|w| w * w).sum();
+    Some((weights, gain))
 }
 
 // ---------------------------------------------------------------------
@@ -980,6 +1074,7 @@ fn identify_channels(
     opts: &IdentifyOptions,
     multichannel: bool,
 ) -> Result<Identification, ModalIdError> {
+    data.validate()?;
     if opts.order_step == 0 || opts.min_order == 0 || opts.max_order < opts.min_order {
         return Err(ModalIdError::Shape {
             what: "ladder needs min_order >= 1, order_step >= 1, max_order >= min_order",
