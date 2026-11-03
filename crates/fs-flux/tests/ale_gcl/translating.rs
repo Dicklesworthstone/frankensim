@@ -269,3 +269,97 @@ fn final_cancellation_and_unsupported_frame_laws_preserve_continuation() {
     assert!(owner.step(0.01, [f64::MAX, 0.0], 1e-12, &zero, &boundaries, controls(), || false).is_err());
     assert_eq!(owner.state(), &before);
 }
+
+#[test]
+fn reservoir_inflow_and_world_momentum_are_covariant_on_translating_domains() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let material = source();
+    let density = 2.0;
+    let dt = 0.02;
+    let relative = |p: [f64; 2]| [0.2 + 0.1 * p[1], 0.03];
+    let left: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, e)| mesh.is_boundary(*edge) && e.normal[0] < -0.5)
+        .map(|(edge, _)| edge)
+        .collect();
+    let mut relative_solutions = Vec::new();
+    for boost in [[0.0; 2], [0.7, -0.4]] {
+        let translation = boost.map(|v| dt * v);
+        let queries = std::cell::Cell::new(0);
+        let reservoir = |world: [f64; 2]| {
+            queries.set(queries.get() + 1);
+            let u = relative([world[0] - translation[0], world[1] - translation[1]]);
+            [u[0] + boost[0], u[1] + boost[1]]
+        };
+        // grad(u)*u = [.003,0], and div(2 mu D)=0. The original material
+        // density multiplies inertia/advection; the physical pressure is 7+2x-3y.
+        let force = |_: [f64; 2]| [density * 0.003 + 2.0, -3.0];
+        let traction = |world: [f64; 2], n: [f64; 2]| {
+            let p = [world[0] - translation[0], world[1] - translation[1]];
+            let pressure = 7.0 + 2.0 * p[0] - 3.0 * p[1];
+            [
+                -pressure * n[0] + 0.04 * n[1],
+                0.04 * n[0] - pressure * n[1],
+            ]
+        };
+        let initial = history(&mesh, |point| {
+            let u = relative(point);
+            [u[0] + boost[0], u[1] + boost[1]]
+        });
+        let mut owner = TranslatingAleFlow::new(
+            &system,
+            &material,
+            MaterialFluxNumerics::default(),
+            boost,
+            &initial,
+        )
+        .unwrap();
+        let boundaries: Vec<_> = (0..mesh.edges.len())
+            .filter(|&edge| mesh.is_boundary(edge))
+            .map(|edge| MaterialNavierStokesBoundary::OpenReservoir {
+                edge,
+                traction: &traction,
+                velocity: &reservoir,
+            })
+            .collect();
+        let step = owner
+            .step(dt, boost, 1e-12, &force, &boundaries, controls(), || false)
+            .unwrap();
+        assert_eq!(queries.get(), 2 * boundaries.len());
+        let (error, divergence) =
+            system.velocity_error(&step.relative_flow.solution.discrete().x, &relative);
+        assert!(error < 4e-9 && divergence < 4e-9, "{error}, {divergence}");
+        let load = step
+            .boundary_loads_world(&left, translation, &[None])
+            .unwrap();
+        // At x=0, q=.2+.1y crosses inward with speed q. World incoming
+        // velocity is (q+boost_x,.03+boost_y); integrate the physical flux.
+        near(
+            load.outward_momentum.force_n_per_m[0],
+            -density * (19.0 / 300.0 + 0.25 * boost[0]),
+            4e-8,
+        );
+        near(
+            load.outward_momentum.force_n_per_m[1],
+            -density * 0.25 * (0.03 + boost[1]),
+            4e-8,
+        );
+        near(
+            load.outward_momentum.moment_n,
+            density * (43.0 / 1200.0 + 2.0 * boost[0] / 15.0),
+            4e-8,
+        );
+        near(load.stress.force_n_per_m[0], -5.5, 4e-8);
+        near(load.stress.force_n_per_m[1], 0.04, 4e-8);
+        assert_eq!(load.backflow.force_n_per_m, [0.0; 2]);
+        assert_eq!(queries.get(), 2 * boundaries.len());
+        relative_solutions.push(step.relative_flow.solution.velocity_dofs().to_vec());
+        assert!(std::ptr::eq(owner.material(), &material));
+    }
+    for (a, b) in relative_solutions[0].iter().zip(&relative_solutions[1]) {
+        near(*a, *b, 4e-9);
+    }
+}

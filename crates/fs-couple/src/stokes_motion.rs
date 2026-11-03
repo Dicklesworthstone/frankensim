@@ -496,7 +496,9 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedStokesMotion<'s, 'm, 'a, F> {
         self.check_interface(flow.velocity_dofs(), speed)?;
         poll(&mut cancelled)?;
         let dv = speed - old_speed;
-        let inertia_force = mass * dv / dt;
+        // Velocity division can round independently of the stored momentum.
+        // Audit the native increment, including any rounded or lost small kick.
+        let inertia_force = momentum.linear_increment_world.dot(self.axis()) / dt;
         let spring_force = stiffness * q1;
         let damping_force = damping * speed;
         let force_residual =

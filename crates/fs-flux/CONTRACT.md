@@ -661,10 +661,11 @@ fluxes use the existing split quadrature. The separate Oseen assembly entries
 expose this same operator with an explicit frozen advecting velocity; solving
 one such linear system is not claimed to solve the nonlinear endpoint.
 
-Every `NavierStokesBoundary` edge owns prescribed velocity or open traction
-and an explicit `OpenBoundaryPolicy`. `NaturalTraction` imposes the supplied
-total stress literally, using the interior convected velocity on either flow
-sign. Backflow may bring kinetic energy into that domain. In contrast,
+Every `NavierStokesBoundary` edge owns prescribed velocity, open traction
+with an explicit `OpenBoundaryPolicy`, or `OpenReservoir` with literal traction
+and a separately supplied incoming velocity. On the original `Open` variant,
+`NaturalTraction` imposes the supplied total stress literally and uses the
+interior convected velocity on either flow sign. Backflow may bring kinetic energy into that domain. In contrast,
 `DissipativeBackflow` imposes, in kinematic units,
 `(2 nu D(u)-p I)n = t + min(u.n,0)u`. Its added inflow resistance is a declared
 change to the boundary law, not the same physical traction with a hidden
@@ -703,6 +704,43 @@ viscosity. The constitutive extension below closes viscosity at the endpoint;
 all of these entries remain fixed-mesh 2-D incompressible flow, without
 variable-density storage, thermal or turbulent closure, nonlinear adjoints,
 whole-scheme stability, scalable throughput or synchronous cancellation claims.
+
+### Reservoir momentum through pressure openings
+
+`NavierStokesBoundary::OpenReservoir` supplies total traction and the velocity
+carried by incoming fluid. The existing pressure/continuity solve determines
+the normal flow rate; the reservoir's normal velocity is carried momentum,
+not a strong flow-rate constraint. For retained advector w, the conservative
+flux is `(w.n)*u` on outflow and `(w.n)*u_reservoir` on inflow. The original
+symmetric stress is the literal supplied traction, with no added resistance.
+
+Ownership is validated before reservoir callbacks. Two original edge-Gauss
+samples define a fixed affine reservoir trace, reused by every Picard assembly,
+endpoint residual and reaction. Existing sign-split quadrature integrates each
+polynomial branch exactly; it does not resample a nonlinear callback at changing
+split positions. Invalid samples or exhausted native solve budgets publish no
+endpoint and preserve the borrowed velocity history. There is no additional
+solver, per-iteration source query, or new synchronous cancellation guarantee.
+The separate reservoir sample vector is allocated only when this boundary is present.
+
+`BoundaryReactionOwner::OpenReservoir` identifies the returned exchange.
+`outward_momentum` uses the actual admitted incoming trace and retained advector;
+mechanical stress stays separate and backflow resistance is zero. Reported
+open-boundary stress policies remain NaturalTraction for these edges. Both
+Newtonian and implicit rheological material routes retain the original density
+for inertia, momentum flux and SI reaction units, and the actual accepted
+viscosity/source owners. The translating-domain adapter evaluates reservoir
+callbacks at world positions and subtracts its accepted mesh velocity before
+the native solve; world flux recovery uses the existing retained mass moments.
+
+The reservoir test modules under `tests/stokes_boundary` and
+`tests/material_flow`, plus `tests/ale_gcl/translating.rs`, cover independent
+polynomial force/torque integrals on a reversing face, live BDF1 momentum
+injection and volume balances, callback/refusal behavior, actual gas-density
+swaps, coupled endpoint rheology, and translating-frame covariance. These
+tests do not establish a whole-scheme stability guarantee.
+This prescribed infinite-reservoir boundary adds no reservoir inventory,
+variable density, thermal/species transport or whole-scheme stability claim.
 
 ### Coupled rheology and pressure-driven transient inertia
 
@@ -787,7 +825,8 @@ D'Angella et al. (2022), Journal of Mechanics 38, 60–76,
 <https://doi.org/10.1093/jom/ufac006>; their mesh formulation and convergence
 results are not claimed for this BDM1/SIP implementation.
 
-`BoundaryReactionOwner` distinguishes velocity constraints from open traction.
+`BoundaryReactionOwner` distinguishes velocity constraints, open traction and
+open traction with prescribed reservoir momentum.
 A velocity condition may be an inlet/outlet and is never inferred to be an
 impermeable mechanical wall. Open edges retain the supplied total stress and
 any declared backflow resistance separately. `outward_momentum` uses the
@@ -3188,7 +3227,9 @@ mass-flux accessor expose those moments without reassembly or source queries.
 The world receipt adds W times those retained mass moments; it never mixes a
 later endpoint normal trace with an earlier frozen-advector momentum flux.
 
-Velocity and NaturalTraction boundaries are supported. The original
+Velocity, NaturalTraction and OpenReservoir boundaries are supported. Reservoir
+velocities use the same world-to-relative conversion as prescribed velocities;
+world momentum uses the upwind reservoir velocity during inflow. The original
 DissipativeBackflow law is fixed-frame and refuses rather than silently
 changing its reference velocity. This entry supplies prescribed translation,
 not rotating/deforming ALE, a moving-mesh rigid-body solve, topology change,

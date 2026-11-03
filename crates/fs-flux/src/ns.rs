@@ -759,6 +759,7 @@ impl<'m> FluxSystem<'m> {
             let n = edge.normal;
             let (va, vb) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
             let open_policy = boundary.and_then(|data| data.open_policy(edge_id));
+            let reservoir = boundary.and_then(|data| data.reservoir_velocity(edge_id));
             let prescribed = (t1 == usize::MAX && open_policy.is_none()).then(|| {
                 let points = crate::bdm::edge_gauss_pub(va, vb);
                 core::array::from_fn(|q| {
@@ -779,7 +780,7 @@ impl<'m> FluxSystem<'m> {
                         if con[gi].is_some() && reactions.is_none() {
                             continue;
                         }
-                        if wn >= 0.0 || open_policy.is_some() {
+                        if wn >= 0.0 || (open_policy.is_some() && reservoir.is_none()) {
                             // Natural traction uses the interior trace even
                             // during inflow. The explicit dissipative policy
                             // adds -min(w.n,0) u to this conservative flux,
@@ -804,7 +805,7 @@ impl<'m> FluxSystem<'m> {
                             }
                         } else {
                             let gval = convection_boundary_trace(
-                                prescribed.expect("boundary samples"),
+                                reservoir.or(prescribed).expect("admitted inflow samples"),
                                 fraction,
                             );
                             rhs[gi] -= wq * wn * (gval[0] * vi[0] + gval[1] * vi[1]);

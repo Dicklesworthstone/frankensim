@@ -10,9 +10,10 @@ use crate::ns::{FluxParams, FluxSystem};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenBoundaryPolicy {
     /// Impose the supplied physical total traction exactly, including during
-    /// backflow. The conservative flux uses the interior velocity on either
-    /// sign. Inward flow can bring kinetic energy into the domain; no backflow
-    /// stability or externally supplied inflow-velocity model is inferred.
+    /// backflow. On an `Open` boundary the conservative flux uses the interior
+    /// velocity on either sign. `OpenReservoir` retains this literal stress but
+    /// supplies its separately admitted incoming velocity. Inward flow can
+    /// bring kinetic energy; no whole-scheme backflow stability is inferred.
     NaturalTraction,
     /// Add the declared resistance `rho * min(u.n,0) * u` to the supplied
     /// physical traction, using the endpoint velocity. In kinematic units,
@@ -47,6 +48,21 @@ pub enum NavierStokesBoundary<'a> {
         /// Whether the supplied traction is literal or has added resistance.
         backflow: OpenBoundaryPolicy,
     },
+    /// Literal total traction with independently supplied incoming momentum.
+    /// The normal flow rate is solved, not constrained to the reservoir value.
+    /// For the retained advector w, the flux is (w.n)u on outflow and
+    /// (w.n)u_reservoir on inflow. No backflow resistance is added.
+    OpenReservoir {
+        /// Boundary edge in the original mesh.
+        edge: usize,
+        /// Endpoint kinematic total traction [m²/s²], as on `Open`.
+        traction: &'a dyn Fn([f64; 2], [f64; 2]) -> [f64; 2],
+        /// Incoming physical velocity [m/s] in this mesh's fixed frame.
+        /// Two original edge-Gauss samples define one affine trace, retained
+        /// through every Picard iterate and the endpoint reaction. Supply all
+        /// components, including the reservoir's own normal momentum.
+        velocity: &'a dyn Fn([f64; 2]) -> [f64; 2],
+    },
 }
 
 /// Bounded Picard controls shared with the existing mixed constitutive solver.
@@ -63,7 +79,8 @@ pub struct NavierStokesStep {
     pub relative_update: f64,
     /// Maximum original and row-scaled nonlinear endpoint residual.
     pub nonlinear_residual: f64,
-    /// Retained (edge, policy) pairs for the physical interpretation of loads.
+    /// Retained (edge, stress policy) pairs. Reservoir edges use literal
+    /// NaturalTraction and are identified by their boundary reaction owner.
     pub open_boundary_policies: Vec<(usize, OpenBoundaryPolicy)>,
 }
 
@@ -389,7 +406,8 @@ impl<'m> FluxSystem<'m> {
                 NavierStokesBoundary::Velocity { edge, value } => {
                     StokesBoundary::Velocity { edge, value }
                 }
-                NavierStokesBoundary::Open { edge, traction, .. } => {
+                NavierStokesBoundary::Open { edge, traction, .. }
+                | NavierStokesBoundary::OpenReservoir { edge, traction, .. } => {
                     StokesBoundary::TotalTraction {
                         edge,
                         value: traction,
@@ -403,12 +421,39 @@ impl<'m> FluxSystem<'m> {
             &vec![true; self.pressure_roots.len()],
         )?;
         let mut policies = vec![None; self.mesh.edges.len()];
+        let mut reservoirs = boundaries
+            .iter()
+            .any(|boundary| matches!(boundary, NavierStokesBoundary::OpenReservoir { .. }))
+            .then(|| vec![None; self.mesh.edges.len()]);
+        // Edge ownership, geometry and stress admission above precede every
+        // reservoir query. The same original samples own assembly and reporting;
+        // a changing upwind split never queries the source at new positions.
         for boundary in boundaries {
-            if let NavierStokesBoundary::Open { edge, backflow, .. } = *boundary {
-                policies[edge] = Some(backflow);
+            match *boundary {
+                NavierStokesBoundary::Open { edge, backflow, .. } => {
+                    policies[edge] = Some(backflow);
+                }
+                NavierStokesBoundary::OpenReservoir { edge, velocity, .. } => {
+                    policies[edge] = Some(OpenBoundaryPolicy::NaturalTraction);
+                    let geometry = &self.mesh.edges[edge];
+                    let points = crate::bdm::edge_gauss_pub(
+                        self.mesh.verts[geometry.verts.0],
+                        self.mesh.verts[geometry.verts.1],
+                    );
+                    let mut samples = [[0.0; 2]; 2];
+                    for (q, (point, _)) in points.into_iter().enumerate() {
+                        samples[q] = velocity(point);
+                        if samples[q].iter().any(|value| !value.is_finite()) {
+                            return Err(StokesBoundaryError::NonFiniteBoundary { edge });
+                        }
+                    }
+                    reservoirs.as_mut().expect("reservoir storage")[edge] = Some(samples);
+                }
+                NavierStokesBoundary::Velocity { .. } => {}
             }
         }
         admitted.open_policies = Some(policies);
+        admitted.reservoir_velocities = reservoirs;
         Ok(admitted)
     }
 }

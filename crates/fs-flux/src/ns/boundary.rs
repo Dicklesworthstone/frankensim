@@ -140,6 +140,7 @@ pub(super) struct AdmittedBoundary {
     samples: Vec<Option<Samples>>,
     pub(super) has_traction: Vec<bool>,
     open_policies: Option<Vec<Option<OpenBoundaryPolicy>>>,
+    reservoir_velocities: Option<Vec<Option<[[f64; 2]; 2]>>>,
 }
 
 impl AdmittedBoundary {
@@ -147,6 +148,12 @@ impl AdmittedBoundary {
         self.open_policies
             .as_ref()
             .and_then(|policies| policies[edge])
+    }
+
+    pub(super) fn reservoir_velocity(&self, edge: usize) -> Option<[[f64; 2]; 2]> {
+        self.reservoir_velocities
+            .as_ref()
+            .and_then(|velocities| velocities[edge])
     }
 
     pub(super) fn is_traction(&self, edge: usize) -> bool {
@@ -586,6 +593,7 @@ impl<'m> FluxSystem<'m> {
             samples,
             has_traction,
             open_policies: None,
+            reservoir_velocities: None,
         })
     }
 }

@@ -102,7 +102,8 @@ pub struct TranslatingAleStep {
 
 impl TranslatingAleStep {
     /// Physical stress loads and outward WORLD momentum across a MOVING
-    /// control surface. Advective flux is rho*u*((u-W).n), not rho*u*(u.n).
+    /// control surface. Advective flux is rho*u_upwind*((w_world-W).n),
+    /// using reservoir world velocity on incoming OpenReservoir traces.
     /// Origins and offsets are physical world metres and Pascals.
     ///
     /// The native relative-flux load is corrected by W times its SAME retained
@@ -258,7 +259,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
             ))
         {
             return Err(TranslatingAleError::Invalid(
-                "finite representable timestep/motion and natural-traction or velocity boundaries required",
+                "finite representable timestep/motion and literal-traction or velocity boundaries required",
             ));
         }
         let translation: [f64; 2] = core::array::from_fn(|i| {
@@ -298,7 +299,8 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
         // Homogeneous closure vectors avoid a box allocation per boundary.
         let velocities: Vec<_> = boundaries_world.iter().map(|boundary| {
             move |point: [f64; 2]| match boundary {
-                MaterialNavierStokesBoundary::Velocity { value, .. } => {
+                MaterialNavierStokesBoundary::Velocity { value, .. }
+                | MaterialNavierStokesBoundary::OpenReservoir { velocity: value, .. } => {
                     let u = value([point[0] + translation[0], point[1] + translation[1]]);
                     [u[0] - velocity[0], u[1] - velocity[1]]
                 }
@@ -309,7 +311,8 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
         }).collect();
         let tractions: Vec<_> = boundaries_world.iter().map(|boundary| {
             move |point: [f64; 2], normal| match boundary {
-                MaterialNavierStokesBoundary::Open { traction, .. } => {
+                MaterialNavierStokesBoundary::Open { traction, .. }
+                | MaterialNavierStokesBoundary::OpenReservoir { traction, .. } => {
                     traction([point[0] + translation[0], point[1] + translation[1]], normal)
                 }
                 MaterialNavierStokesBoundary::Velocity { .. } => {
@@ -324,6 +327,13 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
                 }
                 MaterialNavierStokesBoundary::Open { edge, backflow, .. } => {
                     MaterialNavierStokesBoundary::Open { edge, traction: &tractions[i], backflow }
+                }
+                MaterialNavierStokesBoundary::OpenReservoir { edge, .. } => {
+                    MaterialNavierStokesBoundary::OpenReservoir {
+                        edge,
+                        traction: &tractions[i],
+                        velocity: &velocities[i],
+                    }
                 }
             }
         }).collect();

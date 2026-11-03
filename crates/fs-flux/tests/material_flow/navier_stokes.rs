@@ -5,6 +5,8 @@ use fs_flux::{MaterialNavierStokesBoundary, NavierStokesControls, OpenBoundaryPo
 
 #[path = "navier_stokes_rheology.rs"]
 mod rheology;
+#[path = "reservoir.rs"]
+mod reservoir;
 
 #[test]
 fn nonlinear_mixed_flow_keeps_shared_gas_density_and_viscous_traction_in_si() {

@@ -19,6 +19,10 @@ pub enum BoundaryReactionOwner {
         /// None for Stokes; otherwise the explicitly admitted backflow policy.
         backflow: Option<OpenBoundaryPolicy>,
     },
+    /// Literal supplied stress with a separately prescribed incoming velocity.
+    /// Advective momentum uses that reservoir trace only on inflow; it does
+    /// not constrain volume flow or add a mechanical backflow resistance.
+    OpenReservoir,
 }
 
 /// Integrated two-dimensional effort, divided by the constant density.
@@ -296,6 +300,7 @@ struct Face {
     edge: usize,
     samples: Samples,
     policy: Option<OpenBoundaryPolicy>,
+    reservoir: Option<[[f64; 2]; 2]>,
     viscosity: [f64; 2],
     penalty: [f64; 2],
     advection: Option<([f64; 2], [f64; 6])>,
@@ -331,6 +336,7 @@ impl ReactionAssembly {
                     edge,
                     samples,
                     policy: boundary.open_policy(edge),
+                    reservoir: boundary.reservoir_velocity(edge),
                     viscosity: [0.0; 2],
                     penalty: [0.0; 2],
                     advection: advection.map(|v| {
@@ -456,8 +462,12 @@ impl ReactionOperator {
                             .sample(point, prescribed[q].map(|t| -weight * t));
                     }
                     load.stress = load.imposed;
-                    BoundaryReactionOwner::OpenTraction {
-                        backflow: face.policy,
+                    if face.reservoir.is_some() {
+                        BoundaryReactionOwner::OpenReservoir
+                    } else {
+                        BoundaryReactionOwner::OpenTraction {
+                            backflow: face.policy,
+                        }
                     }
                 }
             };
@@ -474,11 +484,15 @@ impl ReactionOperator {
                         }
                     }
                     let wn = w[0] * edge.normal[0] + w[1] * edge.normal[1];
-                    let upwind = match face.samples {
-                        Samples::Velocity(prescribed) if wn < 0.0 => {
-                            convection_boundary_trace(prescribed, fraction)
+                    let upwind = if wn < 0.0 {
+                        match (face.reservoir, face.samples) {
+                            (Some(prescribed), _) | (None, Samples::Velocity(prescribed)) => {
+                                convection_boundary_trace(prescribed, fraction)
+                            }
+                            _ => u,
                         }
-                        _ => u,
+                    } else {
+                        u
                     };
                     let volume_flux = weight * wn;
                     outward_volume_flux += volume_flux;

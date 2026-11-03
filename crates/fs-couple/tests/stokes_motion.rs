@@ -93,6 +93,7 @@ fn closed_translating_box_resolves_fluid_added_mass_and_complete_be_work() {
         for _ in 0..4 {
             let expected = (total_mass * v0 + dt * (applied - cfg.stiffness_n_m * q0))
                 / (total_mass + cfg.damping_n_s_m * dt + cfg.stiffness_n_m * dt * dt);
+            let momentum_before = motion.state().body().linear_momentum_world();
             let step = motion
                 .step(
                     dt,
@@ -104,6 +105,20 @@ fn closed_translating_box_resolves_fluid_added_mass_and_complete_be_work() {
                     || false,
                 )
                 .unwrap();
+            // The conservation gate must describe the ACTUALLY stored body
+            // momentum. With nonbinary mass and nonzero initial motion, m*dv
+            // can round differently from this independently observed change.
+            let inertia_force = step
+                .body_after
+                .linear_momentum_world()
+                .sub(momentum_before)
+                .dot(Vec3::new(cfg.direction[0], cfg.direction[1], 0.0))
+                / dt;
+            let force_residual = inertia_force
+                - (step.fluid_force_n + applied
+                    - cfg.stiffness_n_m * motion.state().displacement_m()
+                    - cfg.damping_n_s_m * step.speed_m_s);
+            assert_eq!(step.force_residual_n, force_residual);
             near(step.speed_m_s, expected, 3e-9);
             near(step.fluid_force_n, -fluid_mass * (expected - v0) / dt, 3e-7);
             near(step.fluid_force_slope_n_s_m, -fluid_mass / dt, 3e-6);

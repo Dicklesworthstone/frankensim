@@ -32,6 +32,18 @@ pub enum MaterialNavierStokesBoundary<'a> {
         /// using this SAME immutable source density, rather than changing p.
         backflow: OpenBoundaryPolicy,
     },
+    /// Literal physical stress and the velocity carried by incoming fluid.
+    /// The original material density scales inertia and momentum transport;
+    /// the reservoir velocity does not impose the boundary's volume flow rate.
+    OpenReservoir {
+        /// Original mesh boundary edge.
+        edge: usize,
+        /// Total traction [Pa] at position [m] and outward normal.
+        traction: &'a dyn Fn([f64; 2], [f64; 2]) -> [f64; 2],
+        /// Incoming velocity [m/s], in the same frame as the flow history.
+        /// Its original two edge-Gauss samples define the retained affine trace.
+        velocity: &'a dyn Fn([f64; 2]) -> [f64; 2],
+    },
 }
 
 /// Accepted nonlinear endpoint and its original shared-material snapshot.
@@ -190,7 +202,8 @@ fn with_kinematic_boundaries<T>(
         .iter()
         .map(|boundary| {
             move |point, normal| match boundary {
-                MaterialNavierStokesBoundary::Open { traction, .. } => {
+                MaterialNavierStokesBoundary::Open { traction, .. }
+                | MaterialNavierStokesBoundary::OpenReservoir { traction, .. } => {
                     let t = traction(point, normal);
                     [t[0] / density, t[1] / density]
                 }
@@ -212,6 +225,13 @@ fn with_kinematic_boundaries<T>(
                     edge,
                     traction,
                     backflow,
+                }
+            }
+            MaterialNavierStokesBoundary::OpenReservoir { edge, velocity, .. } => {
+                NavierStokesBoundary::OpenReservoir {
+                    edge,
+                    traction,
+                    velocity,
                 }
             }
         })
