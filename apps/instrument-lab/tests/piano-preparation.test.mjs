@@ -8,6 +8,7 @@ function recording() {
   const calls = [];
   class Engine {
     constructor(...args) { calls.push(['legacy', ...args]); }
+    static supportsStringStretching() { return true; }
     static withBoard(...args) { calls.push(['board', ...args]); return { kind: 'board' }; }
     static withOversampling(...args) { calls.push(['rate', ...args]); return { kind: 'rate' }; }
     static withBoardOversampling(...args) { calls.push(['board-rate', ...args]); return { kind: 'board-rate' }; }
@@ -31,6 +32,64 @@ const gasSources = () => ({ phase: 'frozen', waterSpecies: null, components: [
   { speciesPack: new Uint8Array([99, 1, 2, 99]).subarray(1, 3),
     nasa9Pack: new Uint8Array([3]), transportPack: new Uint8Array([4, 5]) },
 ] });
+
+test('nonlinear string specification reaches every physical preparation at each board and clock', () => {
+  const { Engine, calls } = recording();
+  // Rust alone interprets the reference format and admits all selected keys.
+  const stringStretching = 'frankensim-piano-string-stretching-v1\nstretch,69,160000,0.05\n';
+  const board = new Uint8Array([8, 9]);
+  const preparations = [
+    [{}, 'prepared'],
+    [{ scaleCsv: scale, stretchTuning: { concertAHz: 442 } }, 'prepared'],
+    [{ gas: '293.15 101325 0.65' }, 'atmosphere'],
+    [{ gas: sourceGas, gasSources: gasSources() }, 'source-gas'],
+    [{ stringMaterials: materialInput() }, 'materials'],
+    [{ stringMaterials: materialInput(), gas: sourceGas, gasSources: gasSources() }, 'source-materials'],
+  ];
+  for (const substeps of [1, 2, 4]) {
+    for (const bytes of [null, board]) {
+      for (const [physical, kind] of preparations) {
+        const options = Object.freeze({ ...physical, substeps, boardCoordinates: 16,
+          courseModeBudget: 180, maxDynamicModes: 2100, fullScalePa: 7, stringStretching });
+        assert.equal(createPianoEngine(Engine, 48000, options, bytes).kind, kind);
+        const call = calls.at(-1);
+        assert.deepEqual(call.slice(1, 8), [48000, bytes ?? new Uint8Array(), bytes ? 0 : 16,
+          180, 2100, 7, substeps]);
+        assert.equal(call.at(-1), stringStretching);
+        // Removing only the explicit nonlinear request preserves the complete
+        // earlier call, including material and source packets in their ABI order.
+        const previous = { ...options };
+        delete previous.stringStretching;
+        if (Object.keys(physical).length) {
+          createPianoEngine(Engine, 48000, previous, bytes);
+          assert.deepEqual(call.slice(0, -1), calls.at(-1));
+        }
+      }
+    }
+  }
+});
+
+test('nonlinear strings refuse invalid input, old bindings and owner failures without fallback', () => {
+  const stringStretching = 'frankensim-piano-string-stretching-v1\nlinear,69\n';
+  for (const support of [undefined, () => false, () => 1]) {
+    const { Engine, calls } = recording();
+    Engine.supportsStringStretching = support;
+    assert.throws(() => createPianoEngine(Engine, 48000, { stringStretching }), /rebuilding.*WASM/);
+    assert.equal(calls.length, 0);
+    // No new capability is required when nonlinear physics was not selected.
+    createPianoEngine(Engine, 48000);
+    assert.equal(calls.at(-1)[0], 'legacy');
+  }
+  const { Engine, calls } = recording();
+  for (const value of [null, '', '  \n', 1, {}, 'é'.repeat(32 * 1024 + 1)]) {
+    assert.throws(() => createPianoEngine(Engine, 48000, { stringStretching: value }), /stringStretching/);
+  }
+  assert.equal(calls.length, 0);
+  const refusal = new Error('waves key requires geometry-derived axial bridge rows');
+  Engine.withPreparation = () => { throw refusal; };
+  assert.throws(() => createPianoEngine(Engine, 48000, { stringStretching }), error => error === refusal);
+  assert.equal(calls.length, 0);
+});
 
 test('source gas and solid data reach the same physical constructor at every board and clock', () => {
   const { Engine, calls } = recording();

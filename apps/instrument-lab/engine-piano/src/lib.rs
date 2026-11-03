@@ -87,7 +87,7 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
             "\"microphoneM\":[{},{},{}],\"microphoneTravelSamples\":{},\"microphoneFilterDelaySamples\":{},",
             "\"microphoneLatencyMs\":{:.3},\"microphoneMultipliesPerSample\":{},",
             "\"fullScalePa\":{},\"midiMaxVelocityMS\":{},\"stations\":{},",
-            "\"silentBankHz\":{},\"silentBankModes\":{},",
+            "\"silentBankHz\":{},\"silentBankModes\":{},\"stringStretchingSelected\":{},",
             "\"retireRingingJ\":{:e},\"retireDampedJ\":{:e},\"stringDamping\":\"{}\",\"hammerLaw\":\"{}\",",
             "\"stringGasLoading\":\"{}\",\"stringMaterials\":{},\"atmosphericPropagation\":{}}}"
         ),
@@ -100,7 +100,7 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
         c.microphone_m[0], c.microphone_m[1], c.microphone_m[2], travel, filter,
         (travel + filter) / rate * 1000.0, microphone_work,
         c.full_scale_pa, MIDI_MAXIMUM_VELOCITY_M_S, LivePiano::stations(),
-        c.silent_bank_hz, piano.bank_modes(),
+        c.silent_bank_hz, piano.bank_modes(), c.string_stretching.is_some(),
         c.retire_ringing_j, c.retire_damped_j,
         if let Some(materials) = piano.string_materials() {
             match materials.bending_loss_law() {

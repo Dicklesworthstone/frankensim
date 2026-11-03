@@ -112,6 +112,8 @@ export interface PianoInfo {
   /** Silent strings: partials up to this frequency move (0: rigid chords) [Hz], and how many there are now. */
   silentBankHz?: number;
   silentBankModes?: number;
+  /** True when the complete reference string-stretching file was explicitly selected. */
+  stringStretchingSelected?: boolean;
 }
 
 /** Soundboard drawing data: FE quadrature points and bare mode shapes. */
@@ -280,6 +282,8 @@ export interface PianoEngineOptions {
   /** Original physical SI scale CSV; omitted selects the embedded scale. */
   scaleCsv?: string;
   stretchTuning?: PianoStretchTuning;
+  /** Complete reference linear/stretch/waves specification; waves require geometry-derived axial board rows. */
+  stringStretching?: string;
   /** T[K] P[Pa] RH, mixture T P mole|mass N SPECIES FRACTION…, or thermochemical with gasSources; resolved in Rust. */
   gas?: string;
   /** Canonical source triples for gas's thermochemical record; shared with kit atmosphere ingress. */

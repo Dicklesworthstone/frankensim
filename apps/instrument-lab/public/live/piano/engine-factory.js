@@ -10,8 +10,19 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
   }
   const limits = [Number(options.courseModeBudget) || 0, Number(options.maxDynamicModes) || 0, Number(options.fullScalePa) || 0];
   const coords = Number(options.boardCoordinates) || 0;
+  const stretching = [];
+  if (options.stringStretching !== undefined) {
+    if (typeof options.stringStretching !== 'string' || !options.stringStretching.trim()
+        || new TextEncoder().encode(options.stringStretching).length > 64 * 1024) {
+      throw new RangeError('stringStretching must be nonempty reference specification text of at most 64 KiB');
+    }
+    if (typeof Engine.supportsStringStretching !== 'function' || Engine.supportsStringStretching() !== true) {
+      throw new Error('selected nonlinear strings require rebuilding the piano WASM with stringStretching support');
+    }
+    stretching.push(options.stringStretching);
+  }
   if (options.scaleCsv !== undefined || options.stretchTuning !== undefined || options.gas !== undefined
-      || options.stringMaterials !== undefined || options.gasSources !== undefined) {
+      || options.stringMaterials !== undefined || options.gasSources !== undefined || stretching.length) {
     let scale = '';
     if (options.scaleCsv !== undefined) {
       if (typeof options.scaleCsv !== 'string' || !options.scaleCsv.trim()
@@ -36,7 +47,7 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
       }
       return Engine[method](sampleRate, bytes ?? new Uint8Array(),
         bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning,
-        options.gas ?? '293.15 101325 0', ...materials, ...(sources ?? []));
+        options.gas ?? '293.15 101325 0', ...materials, ...(sources ?? []), ...stretching);
     }
     if (sources) {
       if (typeof Engine.withGasSources !== 'function') {
@@ -44,20 +55,20 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
       }
       return Engine.withGasSources(sampleRate, bytes ?? new Uint8Array(),
         bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning,
-        options.gas, ...sources);
+        options.gas, ...sources, ...stretching);
     }
     if (options.gas !== undefined) {
       if (typeof Engine.withAtmosphere !== 'function') {
         throw new Error('selected atmosphere requires rebuilding the piano WASM with withAtmosphere support');
       }
       return Engine.withAtmosphere(sampleRate, bytes ?? new Uint8Array(),
-        bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning, options.gas);
+        bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning, options.gas, ...stretching);
     }
     if (typeof Engine.withPreparation !== 'function') {
       throw new Error('selected physical scale preparation requires rebuilding the piano WASM with withPreparation support');
     }
     return Engine.withPreparation(sampleRate, bytes ?? new Uint8Array(),
-      bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning);
+      bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning, ...stretching);
   }
   // Preserve the original calls at 1x, including compatibility with deployed
   // WASM. An explicitly higher clock MUST NOT silently fall back on old code.

@@ -111,7 +111,13 @@ fn config(sample_rate: u32, course_mode_budget: usize, max_dynamic_modes: usize,
 fn prepared_engine(sample_rate: u32, board: &[u8], board_coordinates: usize,
     course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
     substeps: usize, scale_csv: &str, tuning: &[f64], atmosphere: GasRecord,
-    materials: Option<Arc<StringMaterials>>) -> Result<PianoEngine, JsError> {
+    materials: Option<Arc<StringMaterials>>, string_stretching: Option<String>)
+    -> Result<PianoEngine, JsError> {
+    if let Some(text) = &string_stretching {
+        if text.trim().is_empty() || text.len() > 64 * 1024 {
+            return Err(JsError::new("stringStretching must be nonempty reference specification text of at most 64 KiB"));
+        }
+    }
     let gas = *atmosphere.state();
     let policy = Tuning::from_values(tuning).map_err(|e| JsError::new(&e))?;
     if !board.is_empty() && board_coordinates != 0 {
@@ -126,6 +132,10 @@ fn prepared_engine(sample_rate: u32, board: &[u8], board_coordinates: usize,
         if scale_csv.is_empty() { None } else { Some(scale_csv) }, policy, materials.as_deref())
         .map_err(|e| JsError::new(&e))?;
     let mut cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
+    // The native owner validates complete key coverage and prepares the same
+    // strain, storage, axial modes and bridge reaction before the first strike.
+    // Timing copies and both playback clocks retain this original specification.
+    cfg.string_stretching = string_stretching;
     // This exact atmosphere also supplies each surface-to-microphone path's
     // viscothermal propagation. Molecular coefficients are never guessed from
     // an arbitrary species name; the receipt explicitly names that omission.
@@ -148,6 +158,12 @@ fn prepared_engine(sample_rate: u32, board: &[u8], board_coordinates: usize,
 
 #[wasm_bindgen]
 impl PianoEngine {
+    /// Older bindings ignore extra JavaScript arguments. The shared browser
+    /// factory checks this before selecting nonlinear string physics, so an
+    /// older binary cannot silently play linear strings for that request.
+    #[wasm_bindgen(js_name = supportsStringStretching)]
+    pub fn supports_string_stretching() -> bool { true }
+
     /// Original single-rate constructor: embedded board or its exact low prefix.
     /// Pass 0 for a numeric quality argument to take the live default.
     #[wasm_bindgen(constructor)]
@@ -201,10 +217,11 @@ impl PianoEngine {
     #[wasm_bindgen(js_name = withPreparation)]
     pub fn with_preparation(sample_rate: u32, board: &[u8], board_coordinates: usize,
         course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
-        substeps: usize, scale_csv: &str, tuning: &[f64]) -> Result<PianoEngine, JsError> {
+        substeps: usize, scale_csv: &str, tuning: &[f64], string_stretching: Option<String>)
+        -> Result<PianoEngine, JsError> {
         Self::with_atmosphere(sample_rate, board, board_coordinates, course_mode_budget,
             max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning,
-            crate::refmods::steinway_d::ENVIRONMENT_RECORD.trim())
+            crate::refmods::steinway_d::ENVIRONMENT_RECORD.trim(), string_stretching)
     }
 
     /// The same physical preparation in an explicit material atmosphere.
@@ -214,10 +231,11 @@ impl PianoEngine {
     #[wasm_bindgen(js_name = withAtmosphere)]
     pub fn with_atmosphere(sample_rate: u32, board: &[u8], board_coordinates: usize,
         course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
-        substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str) -> Result<PianoEngine, JsError> {
+        substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str,
+        string_stretching: Option<String>) -> Result<PianoEngine, JsError> {
         let gas = preparation::resolve_atmosphere_record(gas_record).map_err(|e| JsError::new(&e))?;
         prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
-            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas, None)
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas, None, string_stretching)
     }
 
     /// Source-backed thermochemical atmosphere for the same preparation and
@@ -230,12 +248,13 @@ impl PianoEngine {
     pub fn with_gas_sources(sample_rate: u32, board: &[u8], board_coordinates: usize,
         course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
         substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str,
-        gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str)
+        gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str,
+        string_stretching: Option<String>)
         -> Result<PianoEngine, JsError> {
         let gas = preparation::resolve_atmosphere_sources(gas_record, gas_bytes, gas_lengths,
             water_species, phase).map_err(|e| JsError::new(&e))?;
         prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
-            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas, None)
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas, None, string_stretching)
     }
 
     /// Canonical material packs and explicit concentric geometry determine the
@@ -251,7 +270,8 @@ impl PianoEngine {
         substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str,
         pack_bytes: &[u8], pack_lengths: &[u32], geometry: &str,
         temperature_axis: &str, temperature_k: f64, viscosity_property: &str,
-        frequency_axis: &str, frequency_hz: f64) -> Result<PianoEngine, JsError> {
+        frequency_axis: &str, frequency_hz: f64, string_stretching: Option<String>)
+        -> Result<PianoEngine, JsError> {
         let point = materials::operating_point(temperature_axis, temperature_k,
             frequency_axis, frequency_hz).map_err(|e| JsError::new(&e))?;
         let materials = StringMaterials::from_packed_bytes(pack_bytes, pack_lengths,
@@ -259,7 +279,7 @@ impl PianoEngine {
         let gas = preparation::resolve_atmosphere_record(gas_record).map_err(|e| JsError::new(&e))?;
         prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
             max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas,
-            Some(Arc::new(materials)))
+            Some(Arc::new(materials)), string_stretching)
     }
 
     /// Bind source-backed strings and gas in one cold preparation. Source gas
@@ -274,7 +294,8 @@ impl PianoEngine {
         pack_bytes: &[u8], pack_lengths: &[u32], geometry: &str,
         temperature_axis: &str, temperature_k: f64, viscosity_property: &str,
         frequency_axis: &str, frequency_hz: f64,
-        gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str)
+        gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str,
+        string_stretching: Option<String>)
         -> Result<PianoEngine, JsError> {
         let gas = preparation::resolve_atmosphere_sources(gas_record, gas_bytes, gas_lengths,
             water_species, phase).map_err(|e| JsError::new(&e))?;
@@ -284,7 +305,7 @@ impl PianoEngine {
             geometry, &point, viscosity_property).map_err(|e| JsError::new(&e))?;
         prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
             max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas,
-            Some(Arc::new(materials)))
+            Some(Arc::new(materials)), string_stretching)
     }
 
     /// Copy the physical engine AND pressure-filter history; a timed copy and

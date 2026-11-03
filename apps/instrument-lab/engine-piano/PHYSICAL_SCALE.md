@@ -86,6 +86,38 @@ roughness. Existing key geometry and partial-frequency observations read the
 actual prepared courses. Copies retain the setup report and physical state.
 Original constructors with no preparation retain their previous metadata.
 
+## Nonlinear string motion in browser playback
+
+`options.stringStretching` accepts the complete reference `--string-stretching`
+file as text, bounded to 64 KiB. It selects the existing native `linear`,
+`stretch` and `waves` models per key. This is separate from `stretchTuning`,
+which prepares static string tensions. Rust validates the specification against
+the final imported/tuned courses and constructs its strain storage and forces
+before any note plays. The same selection reaches standalone and scheduled
+workers, board timing probes, playback copies, and the 1×/2×/4× physical clocks.
+When using `stringMaterials`, the specification's axial-rigidity field must be
+`section`, so the existing parser takes EA from the same source-bound section
+used by the other string physics and refuses an independent numeric value.
+
+```js
+const response = await fetch('/physical-string-extension.fspx');
+if (!response.ok) throw new Error(`string specification fetch failed: ${response.status}`);
+const options = { substeps: 4, stringStretching: await response.text() };
+```
+
+Use `stretch` for the existing averaged geometric-extension model. `waves`
+additionally needs board data containing geometry-derived axial participation
+rows for its keys; a board without that data refuses the request. No axial
+projection is inferred from the vertical bridge row. The model remains the
+declared live reduction, with its numerical work in the physical ledger.
+
+The optional final argument on the WASM preparation constructors carries the
+unchanged text. The factory checks `supportsStringStretching()` first, so older
+WASM cannot silently ignore the selection. Rebuild using
+`engine-piano/build-wasm.sh`; omission retains the original constructors and
+physics. `info().stringStretchingSelected` reports the explicit selection,
+including a supplied all-linear file.
+
 ## Native composition
 
 ```rust
