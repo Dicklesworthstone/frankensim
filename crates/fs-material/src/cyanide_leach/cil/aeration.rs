@@ -702,4 +702,4 @@ fn check_clock(source: &ConstitutiveModelCard, end: f64) -> Result<()> {
 
 #[cfg(test)]
 #[path = "aeration/tests.rs"]
-mod tests;
+pub(in crate::cyanide_leach) mod tests;
