@@ -21,7 +21,10 @@ use fs_gas::multicomponent::{MixtureGas, SpatialPrimitive};
 use fs_qty::Time;
 
 mod coupled;
+mod driving;
 pub use coupled::{MolecularEuler3d, MolecularStepControl, MolecularStepReport3d};
+pub use driving::WallAcceleration3d;
+use driving::WallDrive3d;
 
 #[cfg(feature = "experimental-sgs")]
 pub mod sgs;
@@ -318,6 +321,38 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         Ok(report)
     }
 
+    /// Advance with prescribed tangential wall acceleration and native wall work.
+    ///
+    /// Every SSP stage uses the wall velocity at its physical stage time.
+    /// The accepted endpoint wall velocities publish with the complete field
+    /// and molecular loads. Refusal preserves all of them. The Euler clock,
+    /// geometry and wall thermal conditions retain their original semantics.
+    pub fn advance_with_wall_acceleration(
+        &mut self,
+        flow: &mut MixtureEuler3d,
+        duration: Time,
+        controls: DissipationControl,
+        accelerations: &[WallAcceleration3d],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularReport, DissipationError> {
+        poll(&mut cancelled)?;
+        let drive = WallDrive3d::new(self.walls, self.boundaries, accelerations, &mut cancelled)?;
+        let endpoint = drive.as_ref().map(|d| d.at(duration.value())).transpose()?;
+        let report = self.advance_driven_unpublished(
+            flow,
+            duration,
+            controls,
+            self.maximum_workspace_bytes,
+            drive.as_ref().map(|d| (d, 0.0)),
+            &mut cancelled,
+        )?;
+        if let Some(walls) = endpoint {
+            self.walls = walls;
+        }
+        self.publish(report);
+        Ok(report)
+    }
+
     pub(super) fn trial_impulses(&self) -> &[f64] {
         &self.work.boundary_trial
     }
@@ -331,6 +366,26 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         duration: Time,
         controls: DissipationControl,
         maximum_workspace_bytes: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MolecularReport, DissipationError> {
+        self.advance_driven_unpublished(
+            flow,
+            duration,
+            controls,
+            maximum_workspace_bytes,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_driven_unpublished(
+        &mut self,
+        flow: &mut MixtureEuler3d,
+        duration: Time,
+        controls: DissipationControl,
+        maximum_workspace_bytes: usize,
+        drive: Option<(&WallDrive3d, f64)>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MolecularReport, DissipationError> {
         poll(cancelled)?;
@@ -370,14 +425,18 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             duration.value(),
             controls,
             cancelled,
-            |action, cancelled| {
+            |action, elapsed, cancelled| {
+                let first_walls = drive
+                    .map(|(d, offset)| d.at(offset + elapsed))
+                    .transpose()?;
+                let walls = first_walls.as_ref().unwrap_or(&self.walls);
                 let first = match action {
                     Action::First => {
                         return spatial(
                             &mut self.source,
                             &self.grid,
                             self.boundaries,
-                            &self.walls,
+                            walls,
                             &self.work.current,
                             &mut self.work.primitive,
                             &mut self.work.gradient,
@@ -397,7 +456,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut self.source,
                         &self.grid,
                         self.boundaries,
-                        &self.walls,
+                        walls,
                         &self.work.current,
                         &mut self.work.primitive,
                         &mut self.work.gradient,
@@ -433,11 +492,17 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     &mut self.work.boundary_step,
                     cancelled,
                 )?;
+                // SSP RK2 evaluates stage two at the substep endpoint. The
+                // interval controller supplies the same start on every retry.
+                let second_walls = drive
+                    .map(|(d, offset)| d.at(offset + elapsed + dt))
+                    .transpose()?;
+                let walls = second_walls.as_ref().unwrap_or(&self.walls);
                 let second = spatial(
                     &mut self.source,
                     &self.grid,
                     self.boundaries,
-                    &self.walls,
+                    walls,
                     &self.work.stage,
                     &mut self.work.primitive,
                     &mut self.work.gradient,

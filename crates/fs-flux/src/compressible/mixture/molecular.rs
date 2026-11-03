@@ -317,7 +317,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             duration.value(),
             controls,
             cancelled,
-            |action, cancelled| {
+            |action, _elapsed, cancelled| {
                 if matches!(action, Action::First) {
                     return spatial(
                         &mut self.source,

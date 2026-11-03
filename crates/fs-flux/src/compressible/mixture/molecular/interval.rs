@@ -59,7 +59,8 @@ pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
     duration: f64,
     controls: DissipationControl,
     cancelled: &mut C,
-    mut evaluate: impl FnMut(Action, &mut C) -> Result<Stage, DissipationError>,
+    // The callback receives the exact accepted substep start, unchanged on retries.
+    mut evaluate: impl FnMut(Action, f64, &mut C) -> Result<Stage, DissipationError>,
 ) -> Result<Interval, DissipationError> {
     poll(cancelled)?;
     controls.validate()?;
@@ -72,7 +73,7 @@ pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
     while result.elapsed < duration {
         poll(cancelled)?;
         work_limit(result, controls.maximum_steps)?;
-        let first = evaluate(Action::First, cancelled)?;
+        let first = evaluate(Action::First, result.elapsed, cancelled)?;
         if !first.rate.is_finite() || first.rate < 0.0 {
             return Err(DissipationError::Invalid(
                 "molecular parabolic scale overflow",
@@ -101,6 +102,7 @@ pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
                     first,
                     cached: halving == 0,
                 },
+                result.elapsed,
                 cancelled,
             ) {
                 Ok(stage) => {

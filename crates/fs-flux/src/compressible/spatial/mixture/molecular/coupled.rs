@@ -177,7 +177,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         controls: MolecularStepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, DissipationError> {
-        self.step_impl(maximum_duration, controls, None, cancelled)
+        self.step_impl(maximum_duration, controls, None, &[], cancelled)
     }
 
     /// Drive the same original three-dimensional split with held acceleration or
@@ -196,6 +196,42 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             maximum_duration,
             controls,
             Some((force, force_controls, workspace)),
+            &[],
+            cancelled,
+        )
+    }
+
+    /// Drive existing no-slip walls through their stage-resolved tangential
+    /// acceleration history. The endpoint velocities publish only with the
+    /// complete accepted fluid interval, including any shortening retries.
+    pub fn step_with_wall_acceleration(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        accelerations: &[WallAcceleration3d],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, DissipationError> {
+        self.step_impl(maximum_duration, controls, None, accelerations, cancelled)
+    }
+
+    /// Compose held body forcing with accelerating walls. Boundary impulse and
+    /// work retain their own ledger; body impulse and work remain source terms.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing_and_wall_acceleration(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        accelerations: &[WallAcceleration3d],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, DissipationError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            accelerations,
             cancelled,
         )
     }
@@ -205,9 +241,16 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         maximum_duration: Time,
         controls: MolecularStepControl,
         mut forcing: Option<forcing::Context<'_, '_>>,
+        accelerations: &[WallAcceleration3d],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, DissipationError> {
         poll(&mut cancelled)?;
+        let drive = WallDrive3d::new(
+            self.molecular.walls,
+            self.molecular.boundaries,
+            accelerations,
+            &mut cancelled,
+        )?;
         let forcing_bytes = forcing
             .as_ref()
             .map_or(0, |(_, _, work)| work.workspace_bytes());
@@ -274,12 +317,15 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             }
             copy_physical(&self.accepted, &mut self.trial, &mut cancelled)?;
             let mut shortened = None;
+            let mut endpoint_walls = None;
             let attempt = (|| -> Result<MolecularStepReport3d, DissipationError> {
-                let first = self.molecular.advance_unpublished(
+                endpoint_walls = drive.as_ref().map(|d| d.at(dt)).transpose()?;
+                let first = self.molecular.advance_driven_unpublished(
                     &mut self.trial,
                     Time::new(0.5 * dt),
                     controls.molecular,
                     self.maximum_workspace_bytes,
+                    drive.as_ref().map(|d| (d, 0.0)),
                     &mut cancelled,
                 )?;
                 copy_values(
@@ -311,11 +357,14 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     &mut self.boundary_trial,
                     &mut cancelled,
                 )?;
-                let second = self.molecular.advance_unpublished(
+                let second = self.molecular.advance_driven_unpublished(
                     &mut self.trial,
                     Time::new(0.5 * dt),
                     controls.molecular,
                     self.maximum_workspace_bytes,
+                    // The molecular clock covers [0,h/2] then [h/2,h].
+                    // Advection uses the same fixed geometry and no wall work.
+                    drive.as_ref().map(|d| (d, 0.5 * dt)),
                     &mut cancelled,
                 )?;
                 add_impulses(
@@ -374,6 +423,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 Ok(report) => {
                     std::mem::swap(&mut self.accepted, &mut self.trial);
                     std::mem::swap(&mut self.boundary_impulses, &mut self.boundary_trial);
+                    if let Some(walls) = endpoint_walls {
+                        self.molecular.walls = walls;
+                    }
                     self.molecular.publish(report.second);
                     self.last_step = Some(report);
                     return Ok(report);

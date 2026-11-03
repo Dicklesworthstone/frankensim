@@ -2371,6 +2371,48 @@ cancellation, storage/work refusal and the final wall-cooling Mach guard.
 These checks exercise the existing molecular closure; they do not establish
 new SGS calibration, moving geometry or an entropy certificate.
 
+### Accelerating no-slip walls in evolving-species three-dimensional flow
+
+`spatial::mixture::molecular::WallAcceleration3d` authors a constant tangential
+acceleration on an existing reflecting no-slip side for one accepted interval.
+`MolecularTransport3d::advance_with_wall_acceleration` and
+`MolecularEuler3d::step_with_wall_acceleration` use the current accepted wall
+velocity as the initial value. The combined
+`step_with_forcing_and_wall_acceleration` also retains the native body-source
+impulse/work owner. Unlisted walls hold their velocity. Successful calls retain
+the accelerated endpoint wall velocity, so successive calls can author a
+piecewise-constant acceleration history without reconstructing numerical buffers.
+
+The existing requested-duration controller supplies the exact accepted substep
+start to the original SSP RK2 stages. Both wall-gradient ghosts and physical
+half-cell shear/work use `u_wall(t)` at the first stage and `u_wall(t+dt)` at
+the second. The complete molecular split uses wall-time offsets zero and
+`h/2`; advection retains its fixed reflecting geometry. Internal parabolic/
+source retries reuse the same substep start, and whole-interval shortening
+replays both halves from the original wall history. Conservative total energy
+includes the original stage wall work; no extra viscous heating or external
+momentum kick is added.
+
+A fixed six-side stack descriptor adds no numerical heap capacity or per-stage
+allocation. Valid all-zero acceleration uses the held-wall arithmetic unchanged.
+Duplicate sides, nonfinite acceleration, normal acceleration, or a side without
+an existing reflecting no-slip condition refuse. Overflowing stage/end velocities
+also refuse. Endpoint wall velocities publish at the same successful transaction
+boundary as accepted cells, reports and face impulses; work exhaustion, source
+failure and final cancellation preserve all accepted owners. Native transport
+continues to leave the Euler clock unchanged; the coupled owner advances its
+single physical clock.
+
+Focused regressions compare native and coupled evolution with an independent
+exact one-cell semidiscrete accelerating-Couette solution on three time rungs:
+momentum, integrated wall work and internal heating converge at second order.
+They also cover simultaneous three-axis body/wall transfer, shortened-step
+replay, cancellation/work-limit rollback, and zero-acceleration state bits.
+This time-integration check is not continuum shear-profile accuracy on a
+one-cell grid. Geometry, wall temperature and transport law remain unchanged;
+normal motion, moving-volume work, finite wall inertia, time-varying thermal
+data and reacting-owner wall driving are outside this addition.
+
 ## Two-fluid capillary displacement
 
 `capillary::step_newtonian_two_fluid_circular_meniscus` adds the displaced
