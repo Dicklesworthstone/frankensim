@@ -907,3 +907,6 @@ fn g1_near_balanced_finite_torques_retain_the_existing_quantized_trajectory() {
         )
     );
 }
+
+#[path = "rotor_spine/passive.rs"]
+mod passive;

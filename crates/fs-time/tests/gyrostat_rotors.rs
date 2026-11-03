@@ -576,3 +576,48 @@ fn invalid_inertia_and_unresolved_impulses_or_phase_refuse_without_mutation() {
     assert_eq!(huge.axial_momentum_nms, [1e20]);
     assert_eq!(phase.relative_angle_rad, [1e30]);
 }
+
+#[test]
+fn native_boundaries_preserve_original_axes_and_absolute_shaft_momenta() {
+    let axis = Vec3::new(1.0 + 1e-13, 0.0, 0.0);
+    let admitted = AxialRotor::from_unit_axis(axis, 0.17).unwrap();
+    assert_eq!(admitted.axis_body(), axis);
+    assert!(AxialRotor::from_unit_axis(Vec3::new(2.0, 0.0, 0.0), 0.17).is_err());
+    assert!(AxialRotor::from_unit_axis(Vec3::default(), 0.17).is_err());
+    assert!(AxialRotor::from_unit_axis(axis, 0.0).is_err());
+
+    let inertia =
+        InertiaTensor3::from_principal(Vec3::new(1.0, 1.5, 2.0), So3::identity()).unwrap();
+    let rotor = AxialRotor::from_unit_axis(Vec3::new(1.0, 0.0, 0.0), 0.17).unwrap();
+    let bank = RotorBank::from_reduced(inertia, [rotor]).unwrap();
+    let omega = Vec3::new(0.31, 0.0, 0.0);
+    let state = bank
+        .state_from_axial_momenta(So3::identity(), omega, [0.123], [0.37])
+        .unwrap();
+    assert_eq!(state.axial_momentum_nms, [0.123]);
+    assert_eq!(state.relative_angle_rad, [0.37]);
+    let speed_roundtrip = 0.17 * ((0.123 / 0.17 - omega.x) + omega.x);
+    assert_ne!(speed_roundtrip, state.axial_momentum_nms[0]);
+    vector(bank.angular_velocity(&state).unwrap(), omega, 1e-15);
+    assert!(
+        bank.state_from_axial_momenta(
+            So3::identity(),
+            Vec3::new(1.0, 0.0, 0.0),
+            [1e30],
+            [0.0],
+        )
+        .is_err()
+    );
+
+    let full = RotorBank::from_reduced(inertia, [rotor; 64]).unwrap();
+    let stationary = full
+        .state_from_axial_momenta(So3::identity(), Vec3::default(), [0.0; 64], [0.0; 64])
+        .unwrap();
+    assert_eq!(
+        full.step(&stationary, [0.0; 64], zero_torque(), 0.01)
+            .unwrap()
+            .state_after,
+        stationary
+    );
+    assert!(RotorBank::from_reduced(inertia, [rotor; 65]).is_err());
+}

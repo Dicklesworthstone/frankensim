@@ -120,7 +120,7 @@ where claimed below.
   and its reconstruction residual are numerical, not an interval eigenvalue
   certificate or geometric realizability proof. The tensor must remain fixed;
   this does not supply changing-mass, deforming-body or gimbaled-axis transport.
-- `lie::gyrostat::rotors::RotorBank<N>` binds up to 32 balanced axisymmetric
+- `lie::gyrostat::rotors::RotorBank<N>` binds up to 64 balanced axisymmetric
   rotors with fixed body axes and complete reduced inertia. `from_locked`
   removes only `sum_i J_i a_i a_i^T` from the original complete locked tensor;
   transverse rotor inertia remains. Its canonical state stores total body

@@ -647,6 +647,31 @@ contact are outside this owner. No historical calibration, complete rotor
 checkpoint wire format or integration into the reduced longitudinal SimLoop
 is claimed by this additional six-DOF API.
 
+### Native passive shaft springs and bearing drag
+
+`RotorAssembly::shaft_motion` prepares `passive::ShaftMotion` from the original
+Flyer state and fixed `ShaftProperties`. It advances the same six-DOF carrier
+through `fs-time::lie::gyrostat::rotors::TorsionalRotorStepper`, retaining the
+native canonical momentum across accepted steps. Existing axes, absolute
+shaft momenta and phases cross admission without normalization or a relative
+speed round trip. The common inventory bound is 64.
+
+Spring recoil, relative phase, spring storage and viscous heat come from the
+native coupled solver. Zero stiffness selects its viscous path; zero stiffness
+and damping select its held-torque path. Original Flyer translation and impulse
+admission supply the external force response. Motor work uses relative shaft
+motion, while aerodynamic work includes absolute shaft motion exactly once.
+Physical heat, elastic storage and the native gyrostat drift defect remain
+separate in the receipt.
+
+The prepared owner publishes its canonical and Flyer states together after all
+motion and accounting checks succeed. Unresolved carrier momentum, phase or
+impulse, invalid coefficients and native timestep-resolution failures refuse
+without changing the accepted state. This canonical lane has its own precision
+domain; the existing prescribed held-torque and instantaneous-impulse APIs
+retain theirs. The analytical drag/oscillator, full-tensor trajectory, source
+work and late-refusal regressions live in `tests/rotor_spine/passive.rs`.
+
 ### Ideal gears and real propeller/airframe motion
 
 `spine::rotors::geared` admits one ideal relative gear coordinate and 1–64

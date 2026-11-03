@@ -22,9 +22,11 @@ use fs_time::lie::gyrostat::{HeldTorque, InertiaTensor3};
 pub mod geared;
 #[path = "rotors/propulsion.rs"]
 pub mod propulsion;
+#[path = "rotors/passive.rs"]
+pub mod passive;
 
 /// Fixed per-tick rotor-count bound; successful steps allocate no heap storage.
-pub const MAX_ROTORS: usize = 64;
+pub const MAX_ROTORS: usize = fs_time::lie::gyrostat::rotors::MAX_AXIAL_ROTORS;
 
 /// Axisymmetric rotor mounted at a fixed orientation in the body.
 #[derive(Clone, Copy, Debug, PartialEq)]

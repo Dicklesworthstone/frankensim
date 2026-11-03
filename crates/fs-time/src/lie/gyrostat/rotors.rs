@@ -30,7 +30,7 @@ mod locked;
 pub use locked::{LockedRotorDrift, LockedRotorImpulse, RotorLock, RotorLockEngagement};
 
 /// Maximum fixed-axis rotors in this allocation-free stepping lane.
-pub const MAX_AXIAL_ROTORS: usize = 32;
+pub const MAX_AXIAL_ROTORS: usize = 64;
 
 /// Admitted spin axis and polar inertia of one balanced axisymmetric rotor.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -71,6 +71,28 @@ impl AxialRotor {
         })
     }
 
+    /// Admit an already-unit body axis without changing its stored components.
+    ///
+    /// This boundary preserves a physical axis supplied by another native owner.
+    /// Its squared norm must be within 1e-12 of unity; use `new` when explicit
+    /// normalization of a nonzero direction is intended.
+    pub fn from_unit_axis(
+        axis_body: Vec3,
+        axial_inertia_kg_m2: f64,
+    ) -> Result<Self, LieStepError> {
+        vector(axis_body, "rotor unit axis")?;
+        scalar(axial_inertia_kg_m2, "rotor axial inertia")?;
+        if (axis_body.dot(axis_body) - 1.0).abs() > 1e-12
+            || axial_inertia_kg_m2 <= 0.0
+        {
+            return Err(invalid("unit rotor axis and positive axial inertia"));
+        }
+        Ok(Self {
+            axis_body,
+            axial_inertia_kg_m2,
+        })
+    }
+
     /// Unit spin direction in the original fixed body frame.
     pub const fn axis_body(self) -> Vec3 {
         self.axis_body
@@ -101,7 +123,7 @@ pub struct RotorState<const N: usize> {
 ///
 /// Preparation caches the existing principal-frame representation. A step is
 /// O(N), allocation-free, and uses one native gyrostat drift. An empty inventory
-/// reduces to the same rigid-body map; at most 32 rotors are admitted.
+/// reduces to the same rigid-body map; at most 64 rotors are admitted.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RotorBank<const N: usize> {
     inertia: InertiaTensor3,
@@ -160,7 +182,7 @@ impl<const N: usize> RotorBank<N> {
         rotors: [AxialRotor; N],
     ) -> Result<Self, LieStepError> {
         if N > MAX_AXIAL_ROTORS {
-            return Err(invalid("rotor inventory exceeds 32"));
+            return Err(invalid("rotor inventory exceeds 64"));
         }
         Ok(Self { inertia, rotors })
     }
@@ -176,7 +198,7 @@ impl<const N: usize> RotorBank<N> {
         rotors: [AxialRotor; N],
     ) -> Result<Self, LieStepError> {
         if N > MAX_AXIAL_ROTORS {
-            return Err(invalid("rotor inventory exceeds 32"));
+            return Err(invalid("rotor inventory exceeds 64"));
         }
         let locked = InertiaTensor3::new(locked_inertia_body)?.matrix();
         let mut reduced = [0.0; 9];
@@ -225,11 +247,27 @@ impl<const N: usize> RotorBank<N> {
                 "absolute rotor axial momentum",
             )?;
         }
+        self.state_from_axial_momenta(rotation, omega_body, axial, relative_angle_rad)
+    }
+
+    /// Initialize from carrier velocity and already-stored absolute shaft momenta.
+    ///
+    /// Preserves every axial momentum and unwrapped phase exactly, avoiding a
+    /// conversion through relative speed. The canonical total momentum must
+    /// still resolve the supplied carrier rate against the stored rotor spin.
+    pub fn state_from_axial_momenta(
+        &self,
+        rotation: So3,
+        omega_body: Vec3,
+        axial_momentum_nms: [f64; N],
+        relative_angle_rad: [f64; N],
+    ) -> Result<RotorState<N>, LieStepError> {
+        vector(omega_body, "carrier angular velocity")?;
         let state = RotorState {
             rotation,
             total_momentum_body: self.inertia.momentum(omega_body)?
-                + self.rotor_momentum(&axial)?,
-            axial_momentum_nms: axial,
+                + self.rotor_momentum(&axial_momentum_nms)?,
+            axial_momentum_nms,
             relative_angle_rad,
         };
         self.admit_state(&state)?;
@@ -376,7 +414,7 @@ impl<const N: usize> RotorBank<N> {
     /// state, impose speed limits, or silently clamp a torque.
     ///
     /// A finite nonzero signed duration supports reversibility checks. All work
-    /// is bounded by 32 rotors and the native constant-work drift; there are no
+    /// is bounded by 64 rotors and the native constant-work drift; there are no
     /// callbacks, allocations or iterative solves. Inputs are unchanged on error.
     pub fn step(
         &self,
