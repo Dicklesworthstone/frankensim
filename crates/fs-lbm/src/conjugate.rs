@@ -158,7 +158,8 @@ pub use simple::viscous_heat::{
 };
 pub use simple::{
     AMG_REBUILD_SWEEPS, FacePatch, FanCurve, FanInlet, FlowResistance, FvBoundary, FvFlow,
-    InternalFan, PressureSolver, SimpleConfig, SimpleReport, TimeScheme, Turbulence, simple_flow,
+    InternalFan, MomentumReconstruction, PressureSolver, SimpleConfig, SimpleReport, TimeScheme,
+    Turbulence, simple_flow,
     simple_flow_with_material_resistance, simple_flow_with_viscosity,
     simple_flow_with_viscosity_and_force,
 };

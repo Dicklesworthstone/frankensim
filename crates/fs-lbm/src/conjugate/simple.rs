@@ -14,6 +14,12 @@
 //! or upwind coefficients. Faces touching a solid voxel are blocked (zero velocity);
 //! a blocked transverse neighbour is a no-slip wall half a cell away
 //! (staircase geometry).
+//! With upwind coefficients, [`MomentumReconstruction::Minmod`] optionally
+//! reconstructs advected velocity at each interior staggered control-volume
+//! side. Equal-and-opposite deferred fluxes retain the same conservative
+//! momentum operator and are refreshed at every nonlinear sweep. Physical
+//! graded-grid distances define the slopes; unsupported boundary stencils
+//! retain donor transport. Molecular stress and pressure keep their owners.
 //!
 //! Domain faces are [`FvBoundary`]: `Wall` (no-slip, optionally moving
 //! tangentially), `Symmetry` (free slip), `Inlet` (prescribed velocity) and
@@ -69,9 +75,11 @@
 //! [`super::simple_unsteady`]; turbulence only through the algebraic LVEL
 //! closure (a laminar solution above transition is a laminar idealization,
 //! not a prediction); buoyancy only as the body force the natural-convection
-//! drivers set; staircase voxel walls; power-law convection (first order at
-//! high cell Péclet numbers: numerical diffusion is not bounded here). One
-//! run makes no mesh-convergence claim.
+//! drivers set; staircase voxel walls. The original power-law/upwind choices
+//! remain first order at high cell Péclet numbers. Limited reconstruction is
+//! affine-exact on supported smooth interiors, but does not establish a global
+//! multidimensional maximum principle or kinetic-energy stability. Numerical
+//! diffusion and mesh/time convergence require case-specific evidence.
 //!
 //! With spatially varying molecular or eddy viscosity, momentum uses the
 //! complete symmetric stress `div(mu_eff (grad(u) + grad(u)^T))`. The isotropic
@@ -92,6 +100,8 @@ use crate::d3q19::Face3;
 
 pub mod sgs;
 pub mod viscous_heat;
+mod momentum_reconstruction;
+pub use momentum_reconstruction::MomentumReconstruction;
 mod darcy;
 use darcy::DarcyCross;
 pub(in crate::conjugate) mod forchheimer;
@@ -408,6 +418,12 @@ pub struct SimpleConfig {
     pub backflow_tangential_velocity_m_s: [Option<[f64; 3]>; 6],
     /// Convection scheme for momentum.
     pub scheme: ConvectionScheme,
+    /// Optional conservative reconstruction of advected face velocity.
+    /// Minmod requires `scheme = Upwind`; molecular diffusion stays in the
+    /// positive implicit operator while a limited correction is re-evaluated
+    /// by each original nonlinear momentum sweep. Default retains the original
+    /// coefficients. Creeping-flow owners omit momentum advection entirely.
+    pub momentum_reconstruction: MomentumReconstruction,
     /// Momentum under-relaxation in `(0, 1)`.
     pub velocity_relaxation: f64,
     /// Outer iteration budget.
@@ -460,6 +476,7 @@ impl SimpleConfig {
             faces,
             backflow_tangential_velocity_m_s: [None; 6],
             scheme: ConvectionScheme::PowerLaw,
+            momentum_reconstruction: MomentumReconstruction::DonorCell,
             velocity_relaxation: 0.7,
             max_iterations: 3000,
             tolerance: 1e-6,
@@ -1706,6 +1723,8 @@ impl<'a> Solver<'a> {
         let comp = &self.comps[a];
         let alpha = self.config.velocity_relaxation;
         let advective_density = if self.creeping { 0.0 } else { self.rho };
+        let reconstruct = !self.creeping
+            && self.config.momentum_reconstruction == MomentumReconstruction::Minmod;
         let width = |axis: usize, i: usize| self.domain.width(axis, i);
         let mut coo = Coo::new(rows, rows);
         let mut b = vec![0.0f64; rows];
@@ -1795,6 +1814,9 @@ impl<'a> Solver<'a> {
                             Kind::Fixed(v) => rhs = coef.mul_add(v, rhs),
                         }
                         a_p += coef;
+                        if reconstruct {
+                            rhs -= self.momentum_reconstruction_flux(a, d, index, nf, plus, flux);
+                        }
                         continue;
                     }
                     // Transverse side at the edge shared with the next row:
@@ -1920,6 +1942,11 @@ impl<'a> Solver<'a> {
                             coo.push(row, col, -coef);
                             sum_nb += coef;
                             a_p += coef;
+                            if reconstruct {
+                                rhs -= self.momentum_reconstruction_flux(
+                                    a, d, index, nf, plus, edge_flux,
+                                );
+                            }
                         }
                         // A blocked transverse neighbour touches a solid:
                         // no-slip wall half a cell away; any half-face
@@ -2273,6 +2300,14 @@ pub(super) fn admit(
         return Err(ChtError::InvalidInput {
             field: "simple.scheme",
             reason: "limited enthalpy reconstruction belongs to the caloric energy owner".into(),
+        });
+    }
+    if config.momentum_reconstruction == MomentumReconstruction::Minmod
+        && config.scheme != ConvectionScheme::Upwind
+    {
+        return Err(ChtError::InvalidInput {
+            field: "simple.momentum_reconstruction",
+            reason: "limited momentum reconstruction requires the implicit upwind operator".into(),
         });
     }
     if config.turbulence == Turbulence::Lvel

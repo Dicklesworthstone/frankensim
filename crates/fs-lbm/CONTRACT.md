@@ -3626,6 +3626,22 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 - Momentum uses shared power-law, exponential, or upwind coefficients with `a_P / alpha`
   under-relaxation (alpha in (0, 1); SIMPLEC's `d` degenerates at 1). Closed
   components of the pressure correction are pinned.
+- `SimpleConfig::momentum_reconstruction = MomentumReconstruction::Minmod`
+  adds a conservative limited linear correction to the existing upwind momentum
+  operator. It requires `scheme = Upwind`; the default `DonorCell` retains the
+  previous operator. Both steady and transient nonlinear sweeps refresh the
+  correction from actual native face velocities. Each shared side uses one
+  canonical donor and equal-and-opposite correction, with physical staggered
+  distances on graded meshes. Smooth interior affine velocity is reproduced;
+  extrema, walls, pressure openings, solids and incomplete stencils retain
+  donor transport. Molecular stress, pressure and creeping-flow owners are
+  unchanged. No per-face allocation, thermal reconstruction, numerical-heat
+  deposit, global multidimensional maximum principle or unconditional kinetic
+  stability is introduced. Focused regressions cover graded affine recovery,
+  paired conservation, velocity offsets, unsupported stencils, scheme admission
+  and the original momentum operator's manufactured transported-shear residual.
+  These are regression definitions; native execution and mesh/time refinement
+  remain distinct evidence.
 - Convergence is two steady residuals of the same iterate: the largest cell
   mass imbalance before correction over the largest face mass flux, and
   per component `||b - A u||` of the Jacobi-scaled momentum system at the
