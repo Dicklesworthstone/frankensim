@@ -29,15 +29,15 @@ pub struct SupportedSolidImpulse {
 /// The full original-coordinate response remains private until surrounding
 /// contact laws admit the actual represented endpoint. Prepared operators and
 /// the accepted free trajectory are borrowed, not cloned.
-pub(super) struct SupportedImpulseCandidate {
-    pub(super) velocity_mps: Vec<f64>,
-    pub(super) energy: SupportedSolidEnergy,
+pub(in crate::dynamics) struct SupportedImpulseCandidate {
+    pub(in crate::dynamics) velocity_mps: Vec<f64>,
+    pub(in crate::dynamics) energy: SupportedSolidEnergy,
     free: SpectralImpulseCandidate,
     momentum_change_kg_m_s: Vec<f64>,
     support_reaction_kg_m_s: Vec<f64>,
     impulse_residual_kg_m_s: Vec<f64>,
     maximum_impulse_residual_kg_m_s: f64,
-    kinetic_change_j: f64,
+    pub(in crate::dynamics) kinetic_change_j: f64,
     applied_correction_j: f64,
     support_correction_j: f64,
 }
@@ -61,7 +61,7 @@ impl SupportedSpectralSolid {
     /// Full-coordinate incremental mobility with support velocities fixed.
     /// Contact kinematics still include their actual nonzero velocities.
     /// Both normal and frictional laws use this same original free-mass action.
-    pub(super) fn momentum_response(
+    pub(in crate::dynamics) fn momentum_response(
         &self,
         impulse: &[f64],
         cx: &Cx<'_>,
@@ -133,6 +133,29 @@ impl SupportedSpectralSolid {
         )?;
         poll(cx)?;
         Ok(self.accept_momentum_impulse(trial))
+    }
+
+    /// A surrounding simultaneous event retains the accepted support rates.
+    /// The original trial still owns cross-mass reactions and actuator work.
+    pub(in crate::dynamics) fn trial_fixed_support_momentum_impulse(
+        &self,
+        applied_impulse_kg_m_s: &[f64],
+        maximum_impulse_error_kg_m_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<SupportedImpulseCandidate> {
+        let mut support_velocity = zeros(self.support_rows.len())?;
+        for (index, &row) in self.support_rows.iter().enumerate() {
+            if index % 256 == 0 {
+                poll(cx)?;
+            }
+            support_velocity[index] = self.velocity[row];
+        }
+        self.trial_momentum_impulse(
+            applied_impulse_kg_m_s,
+            &support_velocity,
+            maximum_impulse_error_kg_m_s,
+            cx,
+        )
     }
 
     pub(super) fn trial_momentum_impulse(
@@ -303,7 +326,7 @@ impl SupportedSpectralSolid {
         })
     }
 
-    pub(super) fn accept_momentum_impulse(
+    pub(in crate::dynamics) fn accept_momentum_impulse(
         &mut self,
         trial: SupportedImpulseCandidate,
     ) -> SupportedSolidImpulse {

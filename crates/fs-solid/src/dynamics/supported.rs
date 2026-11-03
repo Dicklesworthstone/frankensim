@@ -32,6 +32,7 @@ pub use frictional_impact::{
 };
 pub use impact::{SupportedSolidNormalImpactError, SupportedSolidNormalImpactReport};
 pub use impulse::SupportedSolidImpulse;
+pub(super) use impulse::SupportedImpulseCandidate;
 
 /// Whole-system limits in addition to the free spectral owner's limits.
 #[derive(Clone, Copy, Debug)]

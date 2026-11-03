@@ -5667,3 +5667,12 @@ contact refusal, cancellation/budgets and a late original-energy refusal
 followed by an unchanged-state retry. Native execution remains outstanding.
 Geometry/event discovery, sustained friction and physical loss destinations
 remain separate owners.
+
+
+## Simultaneous reciprocal contact across complete native solid trajectories
+
+`dynamics::contact_network` supplies one bounded, simultaneous Coulomb event across exclusively borrowed complete exact, spectral and supported solid trajectories. Geometry-owned body-local point maps use one common orthonormal contact frame; a finite pair automatically receives reciprocal transpose impulses. Independent original mass blocks feed the existing shared frictional-impact/`fs-contact` law owner, preserving complete cross-contact and normal/shear mobility without cloning or refactorizing prepared operators. All bodies must share the identical accepted event time. Explicit body, total-DOF and additional workspace limits supplement the existing adapter and solver capacities. Zero input blocks skip their native mass action.
+
+Every original native trial, actual endpoint contact-speed and Coulomb-law audit, contact-work identity, whole-network applied-plus-support-work balance, and final cancellation check precedes publication of any body. Original per-body receipts preserve supported cross-mass reactions and prescribed support work separately from opposing-surface work and relative contact loss. No contact loss is silently allocated to heat or native viscosity. Geometry owns complete simultaneous contact discovery, common frames and physically consistent coincident-point interpolation; arbitrary algebraic point maps alone do not certify world linear or angular momentum. Determinacy and total-work witnesses retain the shared law owner's meaning.
+
+Five focused regression groups cover finite-pair transfer and original trajectory continuation, a three-body coupled closure, consistent-mass tetrahedral world momentum at two origins, supported source work under a common velocity shift, and multi-owner refusal/retry. New files passed Rust formatting checks; edited parents passed syntax parsing. Small independent arithmetic checks covered analytic fixture impulses, work and tetrahedral mobility. Native compilation, Rust test execution, convergence and performance benchmarking remain outstanding in this resource-constrained environment.

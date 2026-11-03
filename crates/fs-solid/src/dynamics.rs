@@ -37,6 +37,8 @@ pub mod supported;
 /// Simultaneous normal impacts on the original complete-coordinate trajectory.
 pub mod impact;
 
+/// Reciprocal simultaneous Coulomb events across complete native trajectories.
+pub mod contact_network;
 /// Simultaneous Coulomb impacts through the same original mass and trajectory.
 pub mod frictional_impact;
 
