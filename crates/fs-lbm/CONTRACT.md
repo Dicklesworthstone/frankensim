@@ -8964,3 +8964,36 @@ This does not manufacture sub-ULP population feedback: the measured momentum
 residual remains exposed. `partial_saturation_cancellation3` checks the actual
 single-/multiple-body response to analytically balanced incoming fluid loads;
 the internal `momentum_reduction_tests` checks a weak reaction couple and work.
+
+## Prescribed three-dimensional rigid-frame flow
+
+`d3q19::RigidFrame3::prepare_step` supplies translating and arbitrarily rotating
+co-moving `BoundaryGrid3` domains with the full lattice acceleration
+`g - a_origin - alpha cross r - omega cross (omega cross r) - 2 omega cross u`.
+Native cell centres are `[x+0.5, y+0.5, z+0.5]`, matching geometry and wall torque
+positions. The Coriolis source uses an analytic 3-by-3 midpoint inverse; its
+isolated source step preserves speed and axial velocity without clipping or
+iteration. Physical body acceleration and relative wall/fluid velocities are
+already expressed in the moving frame.
+
+The owner replaces uniform and per-cell forces together. The original Guo
+half-source transform preserves current mass, physical momentum and corrected
+stress, so preparing or switching frame loads introduces no impulse. Existing
+collision scratch and per-cell force storage are reused after first allocation;
+late admission failure or cancellation before publication changes neither
+accepted populations nor forces. Call the original step after preparation and
+refresh the frame load each step. BGK, TRT, central-moment and reduced-cumulant
+collision laws retain their original numerical kernels.
+
+Closed finite domains are supported. A periodic direction requires both spin
+and angular acceleration parallel to that direction; incompatible periodic
+rotations and open pressure/velocity faces refuse. This prescribed-motion
+owner does not solve vessel inertia, transform an inertial initial velocity,
+or assert full-flow energy conservation or engineering validation.
+
+Six focused native regressions exercise independent arbitrary-axis rotation
+and Coriolis work, physical Euler/centrifugal signs, source-frame momentum and
+stress preservation, compatible periodicity, transactional refusals, and the
+actual closed-box collision/stream/wall linear and angular impulse account.
+The runnable
+`rotating_tank3` example supplies a smooth spin-up schedule to this same owner.

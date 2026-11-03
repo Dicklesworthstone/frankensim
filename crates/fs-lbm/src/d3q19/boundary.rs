@@ -25,7 +25,7 @@ pub use sgs::{BoundarySgsError3, BoundarySgsReport3};
 mod profile;
 pub use profile::{BoundaryProfileError3, InletFlux3, VelocityProfileReport3};
 mod forcing;
-pub use forcing::BoundaryForcingError3;
+pub use forcing::{BoundaryForcingError3, RigidFrame3};
 mod partial_saturation;
 pub use partial_saturation::{
     LubricatedPlanesExchange3, LubricationPlane3, PartialSaturationBodiesExchange3,

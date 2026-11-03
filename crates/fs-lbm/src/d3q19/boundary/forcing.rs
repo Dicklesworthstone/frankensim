@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod frame;
+pub use frame::RigidFrame3;
+
 /// Refusal before a uniform flow or force-frame proposal is published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundaryForcingError3 {

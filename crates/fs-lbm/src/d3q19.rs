@@ -41,7 +41,7 @@ pub use boundary::{
     MovingPartialSaturationExchange3, PartialSaturationBodiesExchange3, PartialSaturationBody3,
     PartialSaturationBodyExchange3, PartialSaturationBodyResponse3, PartialSaturationError3,
     PartialSaturationExchange3, PartialSaturationForcing3, PeriodicMomentumTransport3,
-    PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,
+    PlaneLubricationExchange3, RigidFrame3, SphereLubrication3, SphereLubricationExchange3,
     VelocityProfileReport3, WallMomentumExchange3,
 };
 pub use coupled::{
