@@ -20,6 +20,9 @@ use fs_math::det;
 /// isotropic elastic law, retaining the original property-use receipts.
 pub mod sourced;
 
+mod constitutive;
+pub use constitutive::ElasticStrainResponse;
+
 fn invalid(what: &str) -> MaterialError {
     MaterialError::Parameters {
         what: what.to_owned(),
