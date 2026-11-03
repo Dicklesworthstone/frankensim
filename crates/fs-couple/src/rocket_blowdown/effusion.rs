@@ -16,6 +16,9 @@
 /// Bounded adaptive trajectories using the same native half-step transactions.
 pub mod trajectory;
 
+/// Bidirectional exchange with explicit comoving molecular-source ports.
+pub mod exchange;
+
 use super::GasRocketState;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     snapshot::MAX_SNAPSHOT_TRANSFERS,
@@ -55,9 +58,9 @@ pub struct EffusionOutlet<'a> {
 pub struct EffusionRocketEnvironment {
     /// Frame identity, without an inferred coordinate transformation.
     pub inertial_frame: u64,
-    /// Uniform gravitational acceleration [m/s²]; its force follows gas depletion.
+    /// Uniform gravitational acceleration [m/s²]; its force follows gas inventory.
     pub gravity_world_m_s2: Vec3,
-    /// Other held force [N], excluding gravity and the outgoing molecular momentum.
+    /// Other held force [N], excluding gravity and all molecular particle momentum.
     pub external_force_world_n: Vec3,
 }
 
@@ -83,6 +86,11 @@ pub enum EffusionRocketError {
         remaining_residual_kg: f64,
         consumed_residual_kg: f64,
     },
+    StreamInventoryBalance {
+        remaining_residual_kg: f64,
+        incoming_residual_kg: f64,
+        outgoing_residual_kg: f64,
+    },
     MomentumBalance {
         residual_n_s: Vec3,
     },
@@ -100,7 +108,7 @@ pub enum EffusionRocketError {
 }
 impl core::fmt::Display for EffusionRocketError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "coupled effusive vacuum recoil: {self:?}")
+        write!(f, "coupled effusive vessel recoil: {self:?}")
     }
 }
 impl std::error::Error for EffusionRocketError {}

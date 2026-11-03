@@ -25831,3 +25831,51 @@ suite exercises the coupled resistance/work model. Three material integration
 tests cover SI conversion, actuator work and momentum, shared-clock rebind,
 zero-rate continuation and refusal/retry; they parsed but were not executed in
 the delivery environment. No full material/grid integration pass is claimed.
+
+### Bidirectional molecular sources on a finite translating vessel
+
+`GasRocketState::advance_effusion_exchange` composes prescribed molecular-source
+ports and true-vacuum outlets on the SAME original gas inventory, gross species
+withdrawal allowance and single caloric reconstruction. The original reciprocal
+effusion law and explicit uncollimated angular qualification supply each beam;
+the native particle-exchange owner advances the actual vessel with simultaneous
+positive intake and discharge. Transferable mass can grow, shrink or remain
+constant. Incoming mass cannot fund another port's withdrawal during the same
+finite proposal, and complete original species/source admission remains binding.
+
+An `EffusionReservoirPort` supplies a prescribed thermochemical source that
+remains instantaneously comoving with the vessel-mounted aperture throughout
+the held interval. Its declared source volume does not imply a depleted finite
+reservoir. A stationary inertial ambient, two independently moving vessels,
+shifted Maxwellian arrival distributions and particle flight geometry are not
+inferred. Exterior wall-pressure and support loads remain explicit external
+forces. The two opposite molecular beams BOTH contribute to transmitted normal
+stress; equal counterflow does not erase force or imply a pressure-difference
+wall-force model. No additional continuum pressure thrust is added.
+
+Each original accepted species mass carries its original crossing energy and
+qualified directional momentum. Incoming relative kinetic/internal energy
+enters the gas caloric solve exactly once, without a second thermalization heat.
+Canonical per-port receipts and their totals retain separate incoming/outgoing
+mass, relative momentum/energy and inertial momentum/energy. Stable signed net
+mass and energy receipts use original boundary coordinates before gross reports
+are subtracted, preserving heat exchange beside large formation references.
+Both stream directions use the SAME native time-mean velocity and squared speed
+along the changing-mass trajectory, including held gravity and external force.
+
+The gas remains the authoritative inventory. Initial native mass normalization
+reserves its momentum/energy cost; gross source-to-rate differences are bounded
+separately, and final native mass remapping contributes its actual signed
+momentum and kinetic correction. Source-relative gas closure and native kinetic
+closure combine without subtracting formation energies. Conservative gravity
+mass-history reserves consume the remaining physical budgets without claiming
+an unqualified interpolation of gas reconstruction rounding. Refusal or final
+cancellation publishes neither a gas endpoint nor a mechanical endpoint.
+
+Six focused genuine-source fixture groups cover hot-source filling, simultaneous
+vacuum discharge and zero-net-mass thermal counterflow, selective addition of a
+previously absent species, common boosts and loaded full accounts, shared gross
+withdrawal despite replenishment, and source/domain/frame/cancellation rollback.
+Production and fixture files passed Rustfmt parsing and direct source/API review;
+native Cargo execution remains unavailable with the current missing constellation
+sibling manifests. No experimental accuracy or full workspace pass is claimed.
