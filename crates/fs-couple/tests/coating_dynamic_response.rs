@@ -6,23 +6,30 @@ mod fixture;
 
 use fs_couple::shear_shell::{
     CoatingSide, MaterialShellImage, ShellProjectionBudget, ShellReductionOptions,
+    assembly::{
+        MaterialShellAssembly, MaterialShellComponent, ShellAssemblyForcePort,
+        ShellAssemblyReductionOptions,
+    },
     coating::{
         poles::{
             ShellHarmonicPort, ShellResonanceBudget, ShellResonanceError, ShellResonanceLoad,
             response::{ShellForcedBudget, ShellForcedResponse},
         },
         relaxation::CoatingRelaxationOptions,
+        strain::ShellCoatingStrainBudget,
     },
     constant_loss::relaxation::{SubstrateRelaxationOptions, SubstrateStorageReference},
     pressure::ShellPressureSurfaces,
 };
 use fs_exec::CancelGate;
+use fs_material::coating::ResolvedCoating;
 use fs_math::c64::C64;
 use fs_phs::{
     PortHamiltonian, QuadraticStorage,
     harmonic::{HarmonicBudget, HarmonicError, HarmonicModel},
 };
 use fs_plate::shell::{
+    junction::TieBudget,
     mitc::ShellMass,
     pressure::{OrientedShellFacet, ShellFace},
 };
@@ -648,4 +655,298 @@ fn g1_two_shell_coordinates_keep_full_cross_memory_and_nonproportional_loss() {
     }
     assert!(result.original_equation_relative_residual < 1e-10);
     assert!(result.physical_relative_residual < 1e-10);
+}
+
+
+fn strain_budget(evaluations: usize) -> ShellCoatingStrainBudget {
+    ShellCoatingStrainBudget {
+        maximum_bytes: 8_000_000,
+        maximum_work: 100_000_000,
+        evaluations,
+    }
+}
+
+#[test]
+fn g1_actual_forcing_checks_the_whole_cycle_before_publishing_and_reuses_the_factor() {
+    let gate = CancelGate::new_clock_free();
+    let image = image(&gate);
+    let prepared = image
+        .prepare_coating_resonance_with_load(
+            ShellResonanceLoad {
+                system: attachment(1.0, 1_000_000.0, 20.0, &[1.0]),
+                ports: &[ShellHarmonicPort::Force(0)],
+                band_rad_s: (900.0, 1500.0),
+            },
+            budget(),
+            &gate,
+        )
+        .unwrap();
+    let linear = prepared
+        .harmonic_factor(1100.0, forced_budget(), &gate)
+        .unwrap();
+    let unit_input = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
+    let unit = linear.response(&unit_input, &gate).unwrap();
+    let mut observer = image
+        .prepare_coating_strain(strain_budget(5), &gate)
+        .unwrap();
+    let unit_strain = observer.evaluate(&[C64::ONE], &gate).unwrap();
+    let cap = unit_strain.sufficient_common_amplitude_scale.unwrap();
+    // Each quadrature snapshot is inside the source envelope, while the
+    // intermediate phase reaches sqrt(2) times either snapshot's strain.
+    // Determine the actual force from this retained physical coordinate;
+    // never use a free-pole normalization as the forced amplitude.
+    let target = C64::new(0.8 * cap, 0.8 * cap);
+    let input = [
+        target / unit.displacement_m_sqrt_kg[0],
+        C64::ZERO,
+        C64::ZERO,
+        C64::ZERO,
+    ];
+    let raw = linear.response(&input, &gate).unwrap();
+    let q = raw.displacement_m_sqrt_kg[0];
+    near(q, target);
+    for snapshot in [q.re, q.im] {
+        let report = observer.evaluate_snapshot(&[snapshot], &gate).unwrap();
+        assert!(report.within_authored_envelope);
+        near_real(report.films[0].limit_ratio, 0.8);
+    }
+    let intermediate = observer
+        .evaluate_snapshot(&[(q.re + q.im) / 2.0_f64.sqrt()], &gate)
+        .unwrap();
+    assert!(!intermediate.within_authored_envelope);
+    let cycle = observer.evaluate(&[q], &gate).unwrap();
+    assert!(!cycle.within_authored_envelope);
+    near_real(
+        cycle.films[0].frobenius_upper_bound,
+        intermediate.films[0].frobenius_upper_bound,
+    );
+
+    assert!(
+        prepared
+            .harmonic_factor_with_coating_strain(
+                1100.0,
+                forced_budget(),
+                ShellCoatingStrainBudget {
+                    maximum_work: 0,
+                    ..strain_budget(4)
+                },
+                &gate,
+            )
+            .is_err()
+    );
+    let mut factor = prepared
+        .harmonic_factor_with_coating_strain(
+            1100.0,
+            forced_budget(),
+            strain_budget(4),
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(factor.omega_rad_s(), 1100.0);
+    assert_eq!(factor.strain_resources().coated_elements, 18);
+    assert!(factor.response(&input[..3], &gate).is_err());
+    assert!(factor.response(&[C64::new(f64::NAN, 0.0); 4], &gate).is_err());
+    let stopped = CancelGate::new_clock_free();
+    stopped.request();
+    assert!(factor.response(&input, &stopped).is_err());
+    assert_eq!(factor.completed_strain_evaluations(), 0);
+    assert!(matches!(
+        factor.response(&input, &gate),
+        Err(ShellResonanceError::Invalid(
+            "forced shell motion exceeds the sufficient original film strain envelope"
+        ))
+    ));
+    assert_eq!(factor.completed_strain_evaluations(), 1);
+    let safe_input = input.map(|u| u.scale(0.5));
+    let expected = linear.response(&safe_input, &gate).unwrap();
+    let accepted = factor.response(&safe_input, &gate).unwrap();
+    assert_eq!(accepted.shell, expected);
+    assert!(accepted.coating_strain.within_authored_envelope);
+    let film = &accepted.coating_strain.films[0];
+    assert!(std::ptr::eq(film.source, &image.source().coatings()[0]));
+    assert_eq!(film.source.input().material.strain_limit(), 0.0003);
+    near_real(film.limit_ratio, 0.5 * cycle.films[0].limit_ratio);
+    let w = prepared.equilibrium_angular_frequencies_rad_s().next().unwrap();
+    source_channels(&image, &accepted.shell, q.scale(0.5), w);
+    assert!(accepted.shell.load.as_ref().unwrap().mean_stored_energy_j > 0.0);
+    let rotated_input = safe_input.map(|u| C64::new(0.0, 1.0) * u);
+    let rotated = factor.response(&rotated_input, &gate).unwrap();
+    near_real(
+        rotated.coating_strain.films[0].frobenius_upper_bound,
+        film.frobenius_upper_bound,
+    );
+    assert_eq!(factor.response(&safe_input, &gate).unwrap().shell, expected);
+    assert_eq!(factor.completed_strain_evaluations(), 4);
+    assert!(matches!(
+        factor.response(&safe_input, &gate),
+        Err(ShellResonanceError::Invalid(
+            "forced shell coating strain query allowance exhausted"
+        ))
+    ));
+    assert_eq!(linear.response(&unit_input, &gate).unwrap(), unit);
+}
+
+#[test]
+fn g3_assembled_forcing_keeps_every_original_component_film_and_its_own_limit() {
+    let gate = CancelGate::new_clock_free();
+    let limits = [0.0003, 0.000003];
+    let mut components = Vec::new();
+    let mut rows = Vec::new();
+    for (i, &limit) in limits.iter().enumerate() {
+        let (shell, directors, constraints) = fixture::coupon(&gate);
+        let mut film = fixture::layer(CoatingSide::Positive, (20.0 + 5.0 * i as f64) * 1e-6);
+        // Different caller-authored envelopes on the original physical films.
+        // The source fit, its conditioning and its Poisson ratio stay unchanged.
+        film.material = ResolvedCoating::from_material(
+            film.material.source().clone(),
+            film.material.poisson_ratio(),
+            limit,
+        )
+        .unwrap();
+        let shell = shell
+            .with_coatings(vec![film], &gate)
+            .unwrap()
+            .with_coating_relaxation(
+                CoatingRelaxationOptions {
+                    terms: 16,
+                    storage_relative_tolerance: 0.001,
+                    loss_relative_tolerance: 0.001,
+                    max_memory_coordinates: 256,
+                },
+                &gate,
+            )
+            .unwrap()
+            .with_substrate_relaxation(
+                SubstrateRelaxationOptions {
+                    storage_reference: SubstrateStorageReference::Relaxed,
+                    max_memory_coordinates: 256,
+                },
+                &gate,
+            )
+            .unwrap();
+        let facets = |side| {
+            (0..shell.mesh().tris.len())
+                .map(|triangle| OrientedShellFacet { triangle, side })
+                .collect()
+        };
+        let surfaces = ShellPressureSurfaces {
+            exterior: facets(ShellFace::Positive),
+            cavity: facets(ShellFace::Negative),
+        };
+        let shell = shell.with_pressure_surfaces(surfaces, &gate).unwrap();
+        let mut row = vec![0.0; 6 * shell.mesh().nodes.len()];
+        row[6 * 5 + 2] = 1.0;
+        rows.push(row);
+        components.push(MaterialShellComponent {
+            name: format!("coupon-{i}"),
+            assembly_budget: fixture::budget(&shell),
+            specimen: shell,
+            directors,
+            constraints,
+            mass: ShellMass::Consistent,
+            drilling_alpha: 1e-3,
+        });
+    }
+    let ports: Vec<_> = (0..2)
+        .map(|driven| ShellAssemblyForcePort {
+            components: rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    if i == driven {
+                        row.clone()
+                    } else {
+                        vec![0.0; row.len()]
+                    }
+                })
+                .collect(),
+        })
+        .collect();
+    // Two independently clamped components share the original assembled basis.
+    // No seam is authored, so force port 1 excites only component 1.
+    let source = MaterialShellAssembly {
+        components,
+        edge_ties: vec![],
+        face_ties: vec![],
+        tie_budget: TieBudget {
+            max_segments: 32,
+            max_slave_dofs: 24,
+            gap_tolerance_m: 1e-10,
+            angle_tolerance_rad: 1e-10,
+        },
+    };
+    let image = source
+        .reduce(
+            &ShellAssemblyReductionOptions {
+                eigenvalue_window: (0.0, 1e9),
+                n_modes: 2,
+                projection_budget: ShellProjectionBudget {
+                    max_modes: 2,
+                    max_projection_terms: 100_000_000,
+                    reference_resistance_n_s_m: 1.0,
+                },
+                max_total_nodes: 32,
+                max_total_triangles: 36,
+            },
+            &ports,
+            &gate,
+        )
+        .unwrap();
+    let prepared = image.prepare_coating_resonance(budget(), &gate).unwrap();
+    let linear = prepared
+        .harmonic_factor(1100.0, forced_budget(), &gate)
+        .unwrap();
+    let mut observer = image
+        .prepare_coating_strain(strain_budget(2), &gate)
+        .unwrap();
+    let second_only = [C64::ZERO, C64::ONE, C64::ZERO, C64::ZERO];
+    let raw = linear.response(&second_only, &gate).unwrap();
+    let strain = observer.evaluate(&raw.displacement_m_sqrt_kg, &gate).unwrap();
+    assert_eq!(strain.films.len(), 2);
+    assert!(strain.films[1].limit_ratio > 0.0);
+    let over_scale = 1.2 / strain.films[1].limit_ratio;
+    assert!(over_scale * strain.films[0].limit_ratio < 1.0);
+    // A default 0.0003 limit would incorrectly accept the second component.
+    assert!(over_scale * strain.films[1].frobenius_upper_bound < limits[0]);
+    let mut factor = prepared
+        .harmonic_factor_with_coating_strain(
+            1100.0,
+            forced_budget(),
+            strain_budget(3),
+            &gate,
+        )
+        .unwrap();
+    let excessive = second_only.map(|u| u.scale(over_scale));
+    assert!(matches!(
+        factor.response(&excessive, &gate),
+        Err(ShellResonanceError::Invalid(
+            "forced shell motion exceeds the sufficient original film strain envelope"
+        ))
+    ));
+    let safe = excessive.map(|u| u.scale(0.5));
+    let accepted = factor.response(&safe, &gate).unwrap();
+    near_real(accepted.coating_strain.films[1].limit_ratio, 0.6);
+    assert_eq!(accepted.shell, linear.response(&safe, &gate).unwrap());
+    let both = [C64::ONE, C64::new(0.5, -0.5), C64::ZERO, C64::ZERO];
+    let raw = linear.response(&both, &gate).unwrap();
+    let strain = observer.evaluate(&raw.displacement_m_sqrt_kg, &gate).unwrap();
+    let safe_scale = 0.5 * strain.sufficient_common_amplitude_scale.unwrap();
+    let both = both.map(|u| u.scale(safe_scale));
+    let accepted = factor.response(&both, &gate).unwrap();
+    assert_eq!(accepted.shell, linear.response(&both, &gate).unwrap());
+    assert_eq!(accepted.coating_strain.films.len(), 2);
+    for (i, report) in accepted.coating_strain.films.iter().enumerate() {
+        let part = &image.source().components[i];
+        assert_eq!(report.component_index, Some(i));
+        assert_eq!(report.component_name, Some(part.name.as_str()));
+        assert_eq!(report.film_index, 0);
+        assert_eq!(report.covered_elements, part.specimen.mesh().tris.len());
+        assert!(std::ptr::eq(report.source, &part.specimen.coatings()[0]));
+        assert_eq!(report.source.input().material.strain_limit(), limits[i]);
+        assert!(report.frobenius_upper_bound > 0.0);
+        near_real(report.limit_ratio, report.frobenius_upper_bound / limits[i]);
+        assert!(report.limit_ratio <= 1.0);
+    }
+    assert_eq!(factor.completed_strain_evaluations(), 3);
+    assert_eq!(factor.strain_resources().coated_elements, 36);
 }

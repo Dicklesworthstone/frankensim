@@ -8,6 +8,10 @@
 use super::{
     PreparedShellResonance, ShellResonanceError, cap, finite, memories, poll, projection, quadratic,
 };
+use crate::shear_shell::coating::strain::{
+    CoatingStrainSource, PreparedShellCoatingStrain, ShellCoatingStrainBudget,
+    ShellCoatingStrainReport, ShellCoatingStrainResources,
+};
 use fs_exec::CancelGate;
 use fs_math::c64::C64;
 use fs_phs::harmonic::{HarmonicFactor, HarmonicResponse};
@@ -86,6 +90,28 @@ pub struct ShellForcedFactor<'model, 'source> {
     omega_rad_s: f64,
 }
 
+/// Complete forced response admitted against every original coating envelope.
+///
+/// The bounds cover the modeled film field over every original coated triangle,
+/// both film faces and the complete oscillation cycle. They are sufficient
+/// Bernstein bounds, not evidence of material failure or continuum convergence.
+/// Substrate amplitude, unmodeled preload and removed static strain are not
+/// certified: the original shell regions do not author substrate strain limits.
+#[derive(Clone, Debug)]
+pub struct ShellCoatingForcedResponse<'source> {
+    /// The unchanged joint physical response, including all original material
+    /// memory and independent load states, signed work and equation residuals.
+    pub shell: ShellForcedResponse,
+    pub coating_strain: ShellCoatingStrainReport<'source>,
+}
+
+/// One full-state factor and its own original source's bounded strain observer.
+/// The private pairing cannot accept another shell's geometry, modes or limits.
+pub struct ShellCoatingForcedFactor<'model, 'source> {
+    factor: ShellForcedFactor<'model, 'source>,
+    strain: PreparedShellCoatingStrain<'source>,
+}
+
 impl<'source> PreparedShellResonance<'source> {
     /// Original force ports, then exterior and cavity pressure ports. Internal
     /// attachment ports do not become independent external excitation slots.
@@ -100,8 +126,9 @@ impl<'source> PreparedShellResonance<'source> {
     /// This evaluates the already selected causal Prony/substrate continuation;
     /// it does not replace it with a frozen or newly fitted source law. The
     /// original fixed shell basis and source-law approximation limits remain.
-    /// This is a linear image response. Finite-amplitude coating strain
-    /// admission remains the source image's separate physical strain check.
+    /// This is a linear image response. Use
+    /// [Self::harmonic_factor_with_coating_strain] to enforce the original
+    /// finite-amplitude coating envelopes on each returned response.
     /// No accepted time history, sample clock or free-mode normalization is used.
     pub fn harmonic_factor(
         &self,
@@ -139,6 +166,92 @@ impl<'source> PreparedShellResonance<'source> {
             model: self,
             factor,
             omega_rad_s,
+        })
+    }
+
+    /// Factor the same complete causal image and admit every returned motion
+    /// against the original coating limits over the whole spatial field/cycle.
+    ///
+    /// The original MITC strain owner retains the exact source geometry and
+    /// physical mode basis by borrow. It sums complex modal motion coherently
+    /// before bounding each film, preserving the drive's actual relative phases.
+    /// No phase samples, peak normalization or foreign strain observer enter.
+    ///
+    /// The shared factor uses the prepared resonance owner's harmonic limits.
+    /// `budget` admits additional physical observations; `strain_budget` admits
+    /// all strain preparation, storage and planned queries. The owned payload
+    /// allowances are additive. Both owners use `gate`.
+    /// All source frequency/continuation restrictions of [Self::harmonic_factor]
+    /// still apply. An accepted coating report does not certify the substrate's
+    /// strain amplitude, for which this source has no authored limit, or any
+    /// unmodeled static/preload strain.
+    pub fn harmonic_factor_with_coating_strain(
+        &self,
+        omega_rad_s: f64,
+        budget: ShellForcedBudget,
+        strain_budget: ShellCoatingStrainBudget,
+        gate: &CancelGate,
+    ) -> Result<ShellCoatingForcedFactor<'_, 'source>, ShellResonanceError> {
+        let factor = self.harmonic_factor(omega_rad_s, budget, gate)?;
+        let strain = match self.strain_source {
+            CoatingStrainSource::Shell(image) => {
+                image.prepare_coating_strain(strain_budget, gate)?
+            }
+            CoatingStrainSource::Assembly(image) => {
+                image.prepare_coating_strain(strain_budget, gate)?
+            }
+        };
+        poll(gate)?;
+        Ok(ShellCoatingForcedFactor { factor, strain })
+    }
+}
+
+impl<'source> ShellCoatingForcedFactor<'_, 'source> {
+    pub const fn omega_rad_s(&self) -> f64 {
+        self.factor.omega_rad_s()
+    }
+
+    /// Complete original geometry/basis work and query allowance; no film or
+    /// source coordinate is dropped when a budget is insufficient.
+    pub const fn strain_resources(&self) -> &ShellCoatingStrainResources {
+        self.strain.resources()
+    }
+
+    /// Completed original strain queries, including sufficient-envelope refusals.
+    pub const fn completed_strain_evaluations(&self) -> usize {
+        self.strain.completed_evaluations()
+    }
+
+    /// Solve the actual external peak drives and check the resulting complete
+    /// complex displacement before publishing any physical response.
+    ///
+    /// A bound outside an authored film envelope refuses publication and consumes
+    /// one successfully completed strain query; it does not establish actual
+    /// overstrain or material failure. Failed solves and failed strain queries
+    /// consume no strain allowance. Refusals never change the reusable factor,
+    /// original sources or accepted histories. Exhaustion refuses before a solve.
+    pub fn response(
+        &mut self,
+        input: &[C64],
+        gate: &CancelGate,
+    ) -> Result<ShellCoatingForcedResponse<'source>, ShellResonanceError> {
+        poll(gate)?;
+        if self.strain.completed_evaluations() >= self.strain.resources().evaluations {
+            return Err(ShellResonanceError::Invalid(
+                "forced shell coating strain query allowance exhausted",
+            ));
+        }
+        let shell = self.factor.response(input, gate)?;
+        let coating_strain = self.strain.evaluate(&shell.displacement_m_sqrt_kg, gate)?;
+        if !coating_strain.within_authored_envelope {
+            return Err(ShellResonanceError::Invalid(
+                "forced shell motion exceeds the sufficient original film strain envelope",
+            ));
+        }
+        poll(gate)?;
+        Ok(ShellCoatingForcedResponse {
+            shell,
+            coating_strain,
         })
     }
 }

@@ -14,6 +14,7 @@
 //! basis is unchanged, with no new spatial/modal convergence claim.
 
 use super::harmonic::{Image, projection, quadratic};
+use super::strain::CoatingStrainSource;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::shear_shell::{
     MaterialShellImage, ResolvedShearShell, assembly::MaterialShellAssemblyImage, poll,
@@ -199,6 +200,8 @@ fn finite(z: C64) -> bool {
 /// All spectral work delegates to the complete fs-phs continuous model.
 pub struct PreparedShellResonance<'a> {
     image: Image<'a>,
+    // Same immutable original geometry, physical modes and authored film limits.
+    strain_source: CoatingStrainSource<'a>,
     model: HarmonicModel,
     dimension: usize,
     substrate_rows: usize,
@@ -298,7 +301,14 @@ impl MaterialShellImage {
                 "every original coating projection is required",
             ));
         }
-        PreparedShellResonance::new(Image::shell(self), band, load, budget, gate)
+        PreparedShellResonance::new(
+            Image::shell(self),
+            CoatingStrainSource::Shell(self),
+            band,
+            load,
+            budget,
+            gate,
+        )
     }
 }
 impl MaterialShellAssemblyImage {
@@ -342,13 +352,21 @@ impl MaterialShellAssemblyImage {
                 "every component coating projection is required",
             ));
         }
-        PreparedShellResonance::new(Image::assembly(self), band, load, budget, gate)
+        PreparedShellResonance::new(
+            Image::assembly(self),
+            CoatingStrainSource::Assembly(self),
+            band,
+            load,
+            budget,
+            gate,
+        )
     }
 }
 
 impl<'a> PreparedShellResonance<'a> {
     fn new(
         image: Image<'a>,
+        strain_source: CoatingStrainSource<'a>,
         mut band: (f64, f64),
         load: Option<ShellResonanceLoad<'_>>,
         budget: ShellResonanceBudget,
@@ -565,6 +583,7 @@ impl<'a> PreparedShellResonance<'a> {
         poll(gate)?;
         Ok(Self {
             image,
+            strain_source,
             model,
             dimension,
             substrate_rows,
