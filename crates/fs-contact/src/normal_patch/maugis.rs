@@ -26,6 +26,9 @@ pub mod continuation;
 /// Original finite-zone adhesion under finite loading-spring compliance.
 #[path = "maugis/fixture.rs"]
 pub mod fixture;
+/// Explicit attached-branch potential and work-conjugate mechanical efforts.
+#[path = "maugis/mechanical.rs"]
+pub mod mechanical;
 
 /// Explicit small-strain, smooth elastic half-space operating domain.
 #[derive(Clone, Copy, Debug, PartialEq)]

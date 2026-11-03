@@ -1946,3 +1946,28 @@ This is massless axisymmetric quasistatic loading, with numerical work-error
 estimates rather than interval certificates. Inertial snap trajectories,
 nonaxisymmetric stability, frictional peeling, heat partition, evolving material
 conditions and experimental adhesive calibration remain outside this owner.
+
+## Attached Maugis forces in native mechanical evolution
+
+`normal_patch::maugis::mechanical::MaugisAttachedPotential` explicitly selects
+the original stable contacting branch and its detached-reference absolute
+elastic/surface energy. `NormalLawSource::MaugisAttached` preserves its source
+identity, negative indentation, tensile force, real contact area and original
+applicability envelope. It does not automatically select a phase or load the
+quasistatic fixture. A branch endpoint retains energy/force but withholds a
+smooth tangent; an approach outside the branch refuses.
+
+The mechanical path integrates the original force using the existing bounded
+adaptive Simpson owner. Symmetric physical-indentation samples subtract the
+central force before integration, so a short path retains a resolved mean
+effort without dividing nearly equal endpoint energies. Each quadrature sample
+uses at most two bounded original kernel inversions; evaluation is allocation
+free. A separate gate compares integrated work with the original analytic
+endpoint potentials before returning the mean. Work-error estimates remain
+numerical estimates, not interval certificates.
+
+This connects the original source to `fs-couple::BoundNormalStorage` and its
+native `fs-phs` stepping. Local elastic contact remains quasistatic while the
+caller-owned bodies carry inertia. Fold crossing, snap-induced elastic waves,
+interfacial kinetic energy, damping, thermal partition and changing sources
+need additional physical owners. No release is converted to an impulse or heat.

@@ -34,8 +34,8 @@ struct Panel {
     tol: f64,
     depth: u8,
 }
-struct Integrator {
-    lambda: f64,
+struct Integrator<F> {
+    integrand: F,
     count: usize,
     limit: usize,
 }
@@ -53,14 +53,13 @@ fn validate_budget(budget: MaugisWorkBudget) -> Result<(), MaugisError> {
     }
     Ok(())
 }
-impl Integrator {
+impl<F: FnMut(f64) -> Result<f64, MaugisError>> Integrator<F> {
     fn f(&mut self, t: f64) -> Result<f64, MaugisError> {
         if self.count >= self.limit {
             return Err(MaugisError::WorkBudgetExceeded);
         }
         self.count += 1;
-        let s = kernel::state(self.lambda, t)?;
-        let f = s.p * s.dd;
+        let f = (self.integrand)(t)?;
         if !f.is_finite() {
             return Err(MaugisError::Unrepresentable {
                 field: "branch work integrand",
@@ -106,6 +105,45 @@ impl Integrator {
         })?;
         Ok((vl + vr, el + er))
     }
+}
+
+// Shared bounded quadrature for original branch work and mechanical path
+// efforts. The latter integrate in physical indentation to retain a resolved
+// mean force as the two commanded coordinates approach one another.
+pub(super) fn integrate_interval<F: FnMut(f64) -> Result<f64, MaugisError>>(
+    a: f64,
+    b: f64,
+    absolute_tolerance: f64,
+    relative_tolerance: f64,
+    maximum_evaluations: usize,
+    integrand: F,
+) -> Result<(f64, f64, usize), MaugisError> {
+    let mut q = Integrator {
+        integrand,
+        count: 0,
+        limit: maximum_evaluations,
+    };
+    let fa = q.f(a)?;
+    let fm = q.f(0.5 * a + 0.5 * b)?;
+    let fb = q.f(b)?;
+    let s = (b - a) * (fa + 4.0 * fm + fb) / 6.0;
+    let tol = absolute_tolerance + relative_tolerance * s.abs();
+    if !tol.is_finite() || tol <= 0.0 {
+        return Err(MaugisError::Unrepresentable {
+            field: "scaled branch work tolerance",
+        });
+    }
+    let (value, error) = q.integrate(Panel {
+        a,
+        b,
+        fa,
+        fm,
+        fb,
+        s,
+        tol,
+        depth: 0,
+    })?;
+    Ok((value, error, q.count))
 }
 impl SourceMaugisSphereContact {
     /// Integrate the original force over a smooth stable contact branch. This
@@ -169,31 +207,17 @@ impl SourceMaugisSphereContact {
         let sign = if to_t > from_t { 1.0 } else { -1.0 };
         let a = from_t.min(to_t);
         let b = from_t.max(to_t);
-        let mut q = Integrator {
-            lambda: self.lambda,
-            count: 0,
-            limit: budget.maximum_evaluations,
-        };
-        let fa = q.f(a)?;
-        let fm = q.f(0.5 * a + 0.5 * b)?;
-        let fb = q.f(b)?;
-        let s = (b - a) * (fa + 4.0 * fm + fb) / 6.0;
-        let tol = budget.absolute_tolerance_j / scale + budget.relative_tolerance * s.abs();
-        if !tol.is_finite() || tol <= 0.0 {
-            return Err(MaugisError::Unrepresentable {
-                field: "scaled branch work tolerance",
-            });
-        }
-        let (value, error) = q.integrate(Panel {
+        let (value, error, evaluations) = integrate_interval(
             a,
             b,
-            fa,
-            fm,
-            fb,
-            s,
-            tol,
-            depth: 0,
-        })?;
+            budget.absolute_tolerance_j / scale,
+            budget.relative_tolerance,
+            budget.maximum_evaluations,
+            |t| {
+                let s = kernel::state(self.lambda, t)?;
+                Ok(s.p * s.dd)
+            },
+        )?;
         let work_j = sign * value * scale;
         let estimated_absolute_error_j = error * scale;
         if !work_j.is_finite() || !estimated_absolute_error_j.is_finite() {
@@ -204,7 +228,7 @@ impl SourceMaugisSphereContact {
         Ok(MaugisWorkEstimate {
             work_j,
             estimated_absolute_error_j,
-            evaluations: q.count,
+            evaluations,
         })
     }
 }

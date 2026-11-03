@@ -5,6 +5,7 @@ use fs_contact::normal_patch::source::SourcePointContact;
 use fs_contact::normal_patch::{NormalLawSource, NormalLawSourceError};
 use fs_dcontact::{DContactError, Obstacle};
 use fs_phs::Storage;
+mod maugis;
 
 /// Lower an admitted point owner to the original distributed potential.
 /// Point quadrature is exactly one. K/alpha/chi cannot be overridden by a caller.
@@ -133,6 +134,7 @@ pub struct BoundNormalStorage {
     inner: Box<dyn Storage>,
     n_modes: usize,
     contacts: Vec<BoundNormalContact>,
+    component_rule: bool,
 }
 impl BoundNormalStorage {
     /// Compose complete mechanical maps. Every footprint contributes once;
@@ -147,10 +149,12 @@ impl BoundNormalStorage {
                 what: "bound contacts must cover the complete mechanical basis",
             });
         }
+        let component_rule = maugis::admit(inner.as_ref(), &contacts)?;
         Ok(Self {
             inner,
             n_modes,
             contacts,
+            component_rule,
         })
     }
     /// Evaluate stored energy while retaining the original typed source refusal.
@@ -264,6 +268,13 @@ impl BoundNormalStorage {
     }
 }
 impl Storage for BoundNormalStorage {
+    fn discrete_gradient_rule(&self) -> Option<&dyn fs_phs::ConstitutiveDiscreteGradient> {
+        self.component_rule.then_some(self)
+    }
+
+    fn coordinate_scale(&self, coordinate: usize) -> Option<f64> {
+        maugis::coordinate_scale(self, coordinate)
+    }
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         // Storage is infallible; the pHS owner rejects nonfinite trial values.
         // Direct callers use try_hamiltonian to retain the original source error.
@@ -317,7 +328,13 @@ impl Storage for BoundNormalStorage {
             let da = site.approach(a).ok()?;
             let db = site.approach(b).ok()?;
             let dm = site.approach(mid).ok()?;
-            let remainder = site.source.midpoint_energy_remainder(da, db, dm).ok()??;
+            let remainder = match site.source.midpoint_energy_remainder(da, db, dm) {
+                Ok(Some(value)) => value,
+                Ok(None) => return None,
+                // An original quadrature/domain refusal is not missing optional
+                // support: the native step must not bypass it by subtraction.
+                Err(_) => return Some(f64::NAN),
+            };
             let force = site.source.energy_and_force(dm).ok()?.1;
             let mut mapped_dx = 0.0;
             let mut mapped_error = 0.0;

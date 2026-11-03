@@ -15887,6 +15887,37 @@ energy conservation, and coordinate translation. Native finite-difference
 probes include the current residual scale so internal force at a zero state
 remains numerically resolvable; solver tolerances and budgets are unchanged.
 
+### Explicit attached Maugis branch on native mechanical coordinates
+
+`BoundNormalContact` also accepts `MaugisAttachedPotential` through the original
+`NormalLawSource` ingress. The original contacting Maugis equations supply
+negative-indentation tensile forces and absolute elastic/surface storage.
+Body masses, affine contact rows, inner mechanical storage and the native
+`PortHamiltonian`/`StepWorkspace` remain the existing owners.
+
+For this explicit branch, `BoundNormalStorage` supplies a complete native
+`ConstitutiveDiscreteGradient`: the inner owner supplies its own rule or an
+exact quadratic Hamiltonian, and each supported adhesive contact supplies its
+original path-mean force. Each force is projected through the same contact row
+and never used to correct another body's momentum coordinate. Unequal masses
+therefore retain pairwise action/reaction. Attached composites require complete
+inner work and Maugis/DMT contact paths; unsupported mixtures refuse instead of
+silently reverting to a global work correction. Native numerical coordinate
+probes use the retained contact's physical displacement scale. No analytic
+Newton action is claimed for the new path quadrature.
+
+Quadrature and original-source refusals produce nonfinite trial efforts in the
+infallible native interface; the source APIs retain typed errors. A failed work
+evaluation cannot become an optional-numerator fallback. The prepared solver
+publishes no partial endpoint on refusal. No phase switch, snap impulse,
+damping, heat, or evolving material law is inferred. The actual source branch
+and envelope are checked at every endpoint, midpoint and quadrature sample;
+mechanical timestep refinement and the local quasistatic contact assumption
+remain necessary. Focused `adhesive_maugis_storage` tests cover independent
+original-coordinate force work, source identity, tensile motion and reversal,
+unequal-mass energy/momentum, prepared/reference agreement, tiny paths and
+source/work-budget refusal without state mutation.
+
 ## Adhesive junctions on the native modal network
 
 `friction::adhesive::AdhesiveModalBinding` attaches an explicit real area,
