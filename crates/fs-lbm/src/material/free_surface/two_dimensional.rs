@@ -252,53 +252,45 @@ impl<'a> MaterialFreeSurface2<'a> {
     /// The combined gas/capillary density departure must fit the supplied bound
     /// in (0,1); this is not a physical equation of state or error certificate.
     ///
-    /// The original material coefficients, mass-per-depth ledger and conversion
-    /// owner are retained. Pressure/geometry/cancellation refusal publishes
-    /// nothing. Gas storage and pressure-work heating are outside this frozen
-    /// isothermal liquid model, as for the sparse 3-D pressure adapter.
+    /// The same conservative conversion and selected angular policy as
+    /// `step_with_gas_pressure_and_momentum` apply. Native dynamics and the SI
+    /// conversion account must both be admitted before publication; this entry
+    /// discards only the report. Gas storage and pressure-work heating remain
+    /// outside this frozen isothermal liquid model.
     pub fn step_with_gas_pressure(
         &mut self,
         gate: &CancelGate,
         maximum_density_excursion: f64,
         pressure_pa: impl Fn([f64; 2]) -> f64,
     ) -> Result<(), MaterialLbmError> {
-        let reference = self.scaling.reference_pressure_pa.ok_or(MaterialLbmError::Invalid(
-            "absolute gas loading requires an explicit fixed pressure reference",
-        ))?;
-        let dx = self.scaling.cell_size_m;
-        let unit = self.scaling.pressure_unit_pa;
-        self.lattice.step_with_gas_pressure(gate, maximum_density_excursion, |coordinates| {
-            let position = coordinates.map(|c| (c as f64 + 0.5) * dx);
-            pressure_perturbation(reference, unit, pressure_pa(position), coordinates, &position)
-        })?;
+        let (candidate, _) = self.gas_pressure_momentum_candidate::<MaterialLbmError>(
+            gate, maximum_density_excursion, pressure_pa,
+        )?;
+        if gate.is_requested() {
+            return Err(FreeSurfacePressureError2::Cancelled.into());
+        }
+        self.lattice = candidate;
         Ok(())
     }
 
     /// Prescribe distinct absolute gas pressures at the actual missing links.
     /// Uniform loads reproduce `step_with_gas_pressure` exactly. Both centres
     /// and the midpoint are supplied in metres; the source decides its spatial
-    /// sampling. The same source binding, pressure bound and atomicity apply.
+    /// sampling. The same source binding, conservative conversion policy,
+    /// pressure bound, physical-unit admission and atomicity apply.
     pub fn step_with_gas_link_pressure(
         &mut self,
         gate: &CancelGate,
         maximum_density_excursion: f64,
         pressure_pa: impl Fn(MaterialGasPressureLink2) -> f64,
     ) -> Result<(), MaterialLbmError> {
-        let reference = self.scaling.reference_pressure_pa.ok_or(MaterialLbmError::Invalid(
-            "absolute gas loading requires an explicit fixed pressure reference",
-        ))?;
-        let dx = self.scaling.cell_size_m;
-        let unit = self.scaling.pressure_unit_pa;
-        self.lattice.step_with_gas_link_pressure(gate, maximum_density_excursion, |link| {
-            let liquid_center_m = link.liquid_cell.map(|c| (c as f64 + 0.5) * dx);
-            let gas_center_m = link.gas_cell.map(|c| (c as f64 + 0.5) * dx);
-            let midpoint_m = core::array::from_fn(|d| f64::midpoint(liquid_center_m[d], gas_center_m[d]));
-            let physical = MaterialGasPressureLink2 { link, liquid_center_m, gas_center_m, midpoint_m };
-            pressure_perturbation(
-                reference, unit, pressure_pa(physical), link.liquid_cell,
-                &[liquid_center_m[0], liquid_center_m[1], gas_center_m[0], gas_center_m[1], midpoint_m[0], midpoint_m[1]],
-            )
-        })?;
+        let (candidate, _) = self.gas_link_pressure_momentum_candidate::<MaterialLbmError>(
+            gate, maximum_density_excursion, pressure_pa,
+        )?;
+        if gate.is_requested() {
+            return Err(FreeSurfacePressureError2::Cancelled.into());
+        }
+        self.lattice = candidate;
         Ok(())
     }
 

@@ -70,6 +70,22 @@ impl From<FreeSurfacePressureMomentumError2> for MaterialFreeSurfaceMomentumErro
         }
     }
 }
+// Established pressure-only material APIs keep their public error type while
+// admitting the same conservative proposal. Preserve authored pressure errors
+// and cancellation identity; a conversion refusal retains its native reason.
+impl From<FreeSurfacePressureMomentumError2> for MaterialLbmError {
+    fn from(error: FreeSurfacePressureMomentumError2) -> Self {
+        match error {
+            FreeSurfacePressureMomentumError2::Pressure(error) => error.into(),
+            FreeSurfacePressureMomentumError2::Momentum(FreeSurfaceMomentumError2::Cancelled) => {
+                FreeSurfacePressureError2::Cancelled.into()
+            }
+            FreeSurfacePressureMomentumError2::Momentum(FreeSurfaceMomentumError2::Invalid(
+                reason,
+            )) => Self::Invalid(reason),
+        }
+    }
+}
 impl From<MaterialLbmError> for MaterialFreeSurfaceMomentumError2 {
     fn from(error: MaterialLbmError) -> Self {
         Self::Units(error)
@@ -172,8 +188,12 @@ impl MaterialFreeSurface2<'_> {
         maximum_density_excursion: f64,
         pressure_pa: impl Fn([f64; 2]) -> f64,
     ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
-        let (candidate, report) =
-            self.gas_pressure_momentum_candidate(gate, maximum_density_excursion, pressure_pa)?;
+        let (candidate, report) = self
+            .gas_pressure_momentum_candidate::<MaterialFreeSurfaceMomentumError2>(
+                gate,
+                maximum_density_excursion,
+                pressure_pa,
+            )?;
         if gate.is_requested() {
             return Err(FreeSurfaceMomentumError2::Cancelled.into());
         }
@@ -191,11 +211,12 @@ impl MaterialFreeSurface2<'_> {
         maximum_density_excursion: f64,
         pressure_pa: impl Fn(MaterialGasPressureLink2) -> f64,
     ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
-        let (candidate, report) = self.gas_link_pressure_momentum_candidate(
-            gate,
-            maximum_density_excursion,
-            pressure_pa,
-        )?;
+        let (candidate, report) = self
+            .gas_link_pressure_momentum_candidate::<MaterialFreeSurfaceMomentumError2>(
+                gate,
+                maximum_density_excursion,
+                pressure_pa,
+            )?;
         if gate.is_requested() {
             return Err(FreeSurfaceMomentumError2::Cancelled.into());
         }
@@ -203,12 +224,14 @@ impl MaterialFreeSurface2<'_> {
         Ok(report)
     }
 
-    pub(super) fn gas_pressure_momentum_candidate(
+    pub(super) fn gas_pressure_momentum_candidate<Error>(
         &self,
         gate: &CancelGate,
         maximum_density_excursion: f64,
         pressure_pa: impl Fn([f64; 2]) -> f64,
-    ) -> Result<(FreeSurface, MaterialFreeSurfaceMomentumReport2), MaterialFreeSurfaceMomentumError2>
+    ) -> Result<(FreeSurface, MaterialFreeSurfaceMomentumReport2), Error>
+    where
+        Error: From<FreeSurfacePressureMomentumError2> + From<MaterialLbmError>,
     {
         let reference = self
             .scaling
@@ -235,12 +258,14 @@ impl MaterialFreeSurface2<'_> {
         Ok((candidate, self.momentum_report_si(native)?))
     }
 
-    pub(super) fn gas_link_pressure_momentum_candidate(
+    pub(super) fn gas_link_pressure_momentum_candidate<Error>(
         &self,
         gate: &CancelGate,
         maximum_density_excursion: f64,
         pressure_pa: impl Fn(MaterialGasPressureLink2) -> f64,
-    ) -> Result<(FreeSurface, MaterialFreeSurfaceMomentumReport2), MaterialFreeSurfaceMomentumError2>
+    ) -> Result<(FreeSurface, MaterialFreeSurfaceMomentumReport2), Error>
+    where
+        Error: From<FreeSurfacePressureMomentumError2> + From<MaterialLbmError>,
     {
         let reference = self
             .scaling
@@ -347,6 +372,30 @@ impl MaterialFreeSurfaceMomentumReport2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g4_established_pressure_errors_keep_native_reasons_and_cancellation() {
+        let pressure = FreeSurfacePressureError2::Invalid {
+            coordinates: Some([3, 5]),
+            reason: "authored pressure refused",
+        };
+        assert_eq!(
+            MaterialLbmError::from(FreeSurfacePressureMomentumError2::Pressure(pressure.clone())),
+            MaterialLbmError::FreeSurfacePressure2(pressure),
+        );
+        assert_eq!(
+            MaterialLbmError::from(FreeSurfacePressureMomentumError2::Momentum(
+                FreeSurfaceMomentumError2::Cancelled,
+            )),
+            MaterialLbmError::FreeSurfacePressure2(FreeSurfacePressureError2::Cancelled),
+        );
+        assert_eq!(
+            MaterialLbmError::from(FreeSurfacePressureMomentumError2::Momentum(
+                FreeSurfaceMomentumError2::Invalid("local capacity refused"),
+            )),
+            MaterialLbmError::Invalid("local capacity refused"),
+        );
+    }
 
     #[test]
     fn g1_reports_use_mass_momentum_and_signed_energy_per_depth() {

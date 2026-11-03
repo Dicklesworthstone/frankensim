@@ -174,9 +174,10 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
         maximum_density_excursion: f64,
         pressure_pa: impl Fn([f64; 2]) -> f64,
     ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
-        let (lattice, report) = self.flow.gas_pressure_momentum_candidate(
-            gate, maximum_density_excursion, pressure_pa,
-        )?;
+        let (lattice, report) = self.flow
+            .gas_pressure_momentum_candidate::<MaterialFreeSurfaceMomentumError2>(
+                gate, maximum_density_excursion, pressure_pa,
+            )?;
         self.finish_step(lattice, gate)?;
         Ok(report)
     }
@@ -191,9 +192,10 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
         maximum_density_excursion: f64,
         pressure_pa: impl Fn(MaterialGasPressureLink2) -> f64,
     ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
-        let (lattice, report) = self.flow.gas_link_pressure_momentum_candidate(
-            gate, maximum_density_excursion, pressure_pa,
-        )?;
+        let (lattice, report) = self.flow
+            .gas_link_pressure_momentum_candidate::<MaterialFreeSurfaceMomentumError2>(
+                gate, maximum_density_excursion, pressure_pa,
+            )?;
         self.finish_step(lattice, gate)?;
         Ok(report)
     }

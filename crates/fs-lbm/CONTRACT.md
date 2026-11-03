@@ -1,5 +1,17 @@
 # CONTRACT: fs-lbm
 
+## Conservative material pressure defaults in D2Q9
+
+The established `MaterialFreeSurface2::step_with_gas_pressure` and
+`step_with_gas_link_pressure` now admit the same native conservative proposal
+and physical-unit receipt as their `_and_momentum` counterparts. They discard
+only the returned receipt, so both linear and selected angular redistribution
+remain active when existing callers add pressure. One private candidate serves
+pressure, conversion and SI admission before publication. Original authored
+pressure errors and cancellation retain `MaterialLbmError::FreeSurfacePressure2`;
+local conversion refusals retain their native reason. Source and scaling errors
+are unchanged. Native pressure-only APIs retain their documented legacy scope.
+
 ## Prescribed gas traction with conservative D2Q9 conversion
 
 `step_with_gas_pressure_and_momentum` and

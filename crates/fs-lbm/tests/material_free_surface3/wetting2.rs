@@ -647,3 +647,133 @@ fn g4_dense_pressure_momentum_wetting_refuses_atomically_and_retries() {
     same_state(refused.flow().lattice(), &before);
     assert_eq!(refused.samples(), &samples);
 }
+
+#[test]
+fn g3_dense_pressure_defaults_retain_linear_and_angular_policy_through_live_conversion() {
+    use fs_lbm::freesurface::ConversionRedistribution2;
+    let bulk = liquid(0, 300.0, None);
+    let gate = CancelGate::new_clock_free();
+    let make = |policy| {
+        let mut domain = domain2();
+        domain.gravity_m_s2 = [0.0, -9.81];
+        let mut flow = plan_free_surface_from_material(&bulk, 0.001, 0.0004, 0.2)
+            .unwrap()
+            .with_pressure_reference(100_000.0)
+            .unwrap()
+            .free_surface2(domain, |x, y| {
+                (x as f64 - 10.0).powi(2) + (y as f64 - 12.0).powi(2) < 16.0
+            })
+            .unwrap();
+        flow.set_conversion_redistribution(policy).unwrap();
+        flow
+    };
+    for policy in [
+        ConversionRedistribution2::ConservativeLocal,
+        ConversionRedistribution2::ConservativeLocalAngular,
+    ] {
+        for link_loading in [false, true] {
+            let mut ordinary = make(policy);
+            let mut explicit = make(policy);
+            let mut routes = 0;
+            for _ in 0..41 {
+                let report = if link_loading {
+                    ordinary
+                        .step_with_gas_link_pressure(&gate, 0.2, |_| 100_010.0)
+                        .unwrap();
+                    explicit
+                        .step_with_gas_link_pressure_and_momentum(&gate, 0.2, |_| 100_010.0)
+                        .unwrap()
+                } else {
+                    ordinary
+                        .step_with_gas_pressure(&gate, 0.2, |_| 100_010.0)
+                        .unwrap();
+                    explicit
+                        .step_with_gas_pressure_and_momentum(&gate, 0.2, |_| 100_010.0)
+                        .unwrap()
+                };
+                routes += report.native.routes;
+                same_state(ordinary.lattice(), explicit.lattice());
+                assert_eq!(ordinary.conversion_redistribution(), policy);
+                assert_eq!(
+                    report.native.absolute_angular_momentum_defect.is_some(),
+                    policy == ConversionRedistribution2::ConservativeLocalAngular
+                );
+            }
+            assert!(
+                routes > 0,
+                "pressure-default fixture must exercise live momentum conversion"
+            );
+            assert_eq!(ordinary.carry_mass_kg_per_m().unwrap(), 0.0);
+            assert_eq!(
+                ordinary.resolved_linear_momentum_kg_per_s().unwrap(),
+                explicit.resolved_linear_momentum_kg_per_s().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn g4_dense_pressure_defaults_keep_error_identity_and_complete_atomic_state() {
+    use fs_lbm::freesurface::{ConversionRedistribution2, FreeSurfacePressureError2};
+    use fs_lbm::material::MaterialLbmError;
+    let bulk = liquid(0, 300.0, None);
+    let gate = CancelGate::new_clock_free();
+    for link_loading in [false, true] {
+        let mut flow = plan_free_surface_from_material(&bulk, 0.001, 0.0002, 0.1)
+            .unwrap()
+            .with_pressure_reference(100_000.0)
+            .unwrap()
+            .free_surface2(domain2(), |x, y| shape(PlanarWall2::YMin, x, y))
+            .unwrap();
+        flow.set_conversion_redistribution(ConversionRedistribution2::ConservativeLocalAngular)
+            .unwrap();
+        let before = flow.lattice().clone();
+        let visits = std::cell::Cell::new(0);
+        let value = || {
+            visits.set(visits.get() + 1);
+            if visits.get() == 2 {
+                f64::NAN
+            } else {
+                100_000.0
+            }
+        };
+        let failure = if link_loading {
+            flow.step_with_gas_link_pressure(&gate, 0.2, |_| value())
+        } else {
+            flow.step_with_gas_pressure(&gate, 0.2, |_| value())
+        };
+        assert!(matches!(
+            failure,
+            Err(MaterialLbmError::FreeSurfacePressure2(
+                FreeSurfacePressureError2::Invalid {
+                    coordinates: Some(_),
+                    ..
+                }
+            ))
+        ));
+        assert_eq!(visits.get(), 2);
+        same_state(flow.lattice(), &before);
+        assert_eq!(
+            flow.conversion_redistribution(),
+            ConversionRedistribution2::ConservativeLocalAngular
+        );
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        let failure = if link_loading {
+            flow.step_with_gas_link_pressure(&cancelled, 0.2, |_| {
+                panic!("cancelled pressure source queried")
+            })
+        } else {
+            flow.step_with_gas_pressure(&cancelled, 0.2, |_| {
+                panic!("cancelled pressure source queried")
+            })
+        };
+        assert_eq!(
+            failure,
+            Err(MaterialLbmError::FreeSurfacePressure2(
+                FreeSurfacePressureError2::Cancelled
+            ))
+        );
+        same_state(flow.lattice(), &before);
+    }
+}
