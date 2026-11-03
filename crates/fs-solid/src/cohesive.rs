@@ -221,6 +221,11 @@ pub struct EquilibriumStep<'m, 'a> {
 }
 
 impl<'m, 'a> CohesiveState<'m, 'a> {
+    /// Original geometry, ordered patches and immutable source/operator binding.
+    #[must_use]
+    pub fn system(&self) -> &'m CohesiveSystem<'a> {
+        self.system
+    }
     #[must_use]
     pub fn displacements_m(&self) -> &[f64] { &self.displacements }
     /// Same ordering as system.patches(); inspect jump, traction, damage and

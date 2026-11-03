@@ -121,7 +121,10 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         cancelled: &mut C,
     ) -> Result<Self, DynamicsError> {
         poll(cancelled)?;
-        if self.friction.is_some() || speeds_m_s.len() != self.state.points.len() {
+        if self.friction.is_some()
+            || self.coulomb.is_some()
+            || speeds_m_s.len() != self.state.points.len()
+        {
             return Err(
                 Error::Invalid("bind friction once with one choice per original patch").into(),
             );

@@ -642,11 +642,8 @@ impl Context<'_, '_> {
             let cap = finite(self.mu[p] * pressure)?;
             let length = q[0].hypot(q[1]);
             out.projected[p] = length > cap;
-            let projected = if length > cap {
-                q.map(|x| cap * (x / length))
-            } else {
-                q
-            };
+            let projected = fs_material::cohesive::friction::project_tangent_disk(q, cap)
+                .map_err(|error| local_error(p, DamageFrictionError::Material(error)))?;
             out.residual[p] = [
                 out.force[p][0] - material[0],
                 f[0] - projected[0],

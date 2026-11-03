@@ -22,6 +22,9 @@ const AREA: f64 = 0.01;
 const KC: f64 = 2000.0;
 const COMPRESSION: f64 = 0.001;
 
+#[path = "cohesive_dynamics_friction/coulomb.rs"]
+mod coulomb;
+
 fn properties(viscous: bool) -> Vec<(&'static str, Dims, [f64; 2])> {
     let mut rows = vec![
         (

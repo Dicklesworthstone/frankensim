@@ -36,6 +36,10 @@ use super::{CohesiveState, CohesiveSystem, Config, Error, dot, finite, positive}
 pub mod friction;
 use friction::DamagedAreaFriction;
 
+/// Unregularized sourced static/kinetic disks in the original joint solve.
+pub mod coulomb;
+use coulomb::CoulombBinding;
+
 /// Explicit numerical, trajectory and energy controls. These are not material
 /// coefficients or inferred small-strain validity limits.
 #[derive(Debug, Clone, Copy)]
@@ -86,6 +90,17 @@ pub struct CohesiveMotion<'m, 'a> {
     steps: usize,
     config: DynamicsConfig,
     friction: Option<Arc<[Option<DamagedAreaFriction>]>>,
+    coulomb: Option<CoulombBinding>,
+}
+
+/// Actual accepted losses at one original bonded quadrature patch, in joules.
+/// Fracture loss retains its material meaning; no heat partition is inferred.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynamicsPatchDissipation {
+    pub patch_id: u64,
+    pub fracture_j: f64,
+    pub viscous_j: f64,
+    pub friction_j: f64,
 }
 
 /// Complete candidate, published only after momentum, material and total-work
@@ -110,6 +125,9 @@ pub struct DynamicsStep<'m, 'a> {
     /// Nonnegative work of optional damaged-area friction, separate from bond
     /// viscosity and fracture. No thermal partition is inferred.
     pub friction_dissipated_j: f64,
+    /// Same order as the original system patches; computed in the existing
+    /// accepted endpoint replay, without another constitutive trial.
+    pub patch_dissipation: Vec<DynamicsPatchDissipation>,
     /// Mean reduced external force dotted with the actual displacement change.
     pub external_work_j: f64,
     /// Work entering the interface through changes in prescribed jump offsets.
@@ -164,6 +182,7 @@ impl<'m, 'a> CohesiveState<'m, 'a> {
             steps: 0,
             config,
             friction: None,
+            coulomb: None,
         })
     }
 }
@@ -223,6 +242,15 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         )?;
         let friction =
             friction::temperature_successors(self.friction.as_deref(), target, cancelled)?;
+        let coulomb = self
+            .coulomb
+            .as_ref()
+            .map(|binding| {
+                let next = binding.temperature_successor(target, cancelled)?;
+                next.admit_basis(target, self.config)?;
+                Ok::<_, Error>(next)
+            })
+            .transpose()?;
         let mut velocity_m_s = Vec::with_capacity(self.velocity_m_s.len());
         for chunk in self.velocity_m_s.chunks(256) {
             if cancelled() {
@@ -242,6 +270,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
                 steps: self.steps,
                 config: self.config,
                 friction,
+                coulomb,
             },
             energy: transferred.energy,
         })
@@ -299,6 +328,12 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         {
             return Err(Error::Invalid("load or prescribed-jump dimensions differ").into());
         }
+        let coulomb_mu = if let Some(binding) = &self.coulomb {
+            binding.admit_basis(self.state.system, self.config)?;
+            binding.coefficients(self, endpoint_prescribed_jumps_m, dt_s, cancelled)?
+        } else {
+            Vec::new()
+        };
         let problem = StepProblem {
             motion: self,
             force: mean_force_n,
@@ -307,6 +342,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             cancelled: RefCell::new(cancelled),
             cancellation_seen: Cell::new(false),
             evaluations: Cell::new(0),
+            coulomb_mu: RefCell::new(coulomb_mu),
         };
         for chunk in mean_force_n.chunks(256) {
             problem.poll()?;
@@ -333,37 +369,75 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             }
             predictor.push(finite(u + dt_s * v)?);
         }
-        let numerical = FallibleFiniteDifference::new(
-            self.state.system.n,
-            self.config.difference_step_m,
-            |x: &[f64]| problem.evaluate(x, false).map(|e| e.residual),
-        )
-        .map_err(difference_error)?;
-        let solver = NewtonKrylovState::new(&numerical, predictor, self.config.solve.newton);
-        if let Some(error) = numerical.take_failure() {
-            return Err(difference_error(error).into());
+        if let Some(binding) = &self.coulomb {
+            binding.append_predictor(&mut predictor, &mut || problem.poll().is_err())?;
         }
-        problem.poll()?;
-        let mut solver = solver.map_err(|e| Error::Solver(e.to_string()))?;
-        let run = solver.run_controlled(
-            &numerical,
-            self.config.solve.max_newton_iterations,
-            &mut || numerical.has_failed() || problem.poll().is_err(),
-        );
-        if let Some(error) = numerical.take_failure() {
-            return Err(difference_error(error).into());
-        }
-        problem.poll()?;
-        if run.progress != SolverRunProgress::Complete {
-            return Err(Error::Solver(format!("{:?}", run.progress)).into());
-        }
-        if !run.report.converged {
-            return Err(Error::NotConverged(run.report).into());
-        }
+        let mut attempts = 0;
+        let mut history = Vec::new();
+        let (solution, nonlinear) = loop {
+            let numerical = FallibleFiniteDifference::new(
+                predictor.len(),
+                self.config.difference_step_m,
+                |x: &[f64]| problem.evaluate(x, false).map(|e| e.residual),
+            )
+            .map_err(difference_error)?;
+            let solver = NewtonKrylovState::new(&numerical, predictor, self.config.solve.newton);
+            if let Some(error) = numerical.take_failure() {
+                return Err(difference_error(error).into());
+            }
+            problem.poll()?;
+            let mut solver = solver.map_err(|e| Error::Solver(e.to_string()))?;
+            let run = solver.run_controlled(
+                &numerical,
+                self.config.solve.max_newton_iterations - attempts,
+                &mut || numerical.has_failed() || problem.poll().is_err(),
+            );
+            if let Some(error) = numerical.take_failure() {
+                return Err(difference_error(error).into());
+            }
+            problem.poll()?;
+            if run.progress != SolverRunProgress::Complete {
+                return Err(Error::Solver(format!("{:?}", run.progress)).into());
+            }
+            let mut report = run.report;
+            for item in &mut report.history {
+                item.iteration += attempts;
+            }
+            attempts += report.iterations;
+            history.append(&mut report.history);
+            report.iterations = attempts;
+            if !report.converged {
+                report.history = history;
+                return Err(Error::NotConverged(report).into());
+            }
+            // Static capture is tested by the same native solve. A patch with
+            // resolved slip changes to its original kinetic coefficient, then
+            // the complete coupled system is re-solved. Every pass shares the
+            // original Newton and physical residual evaluation allowances.
+            let changed = if let Some(binding) = &self.coulomb {
+                let endpoint_velocity = problem.velocity(&solver.x[..self.state.system.n])?;
+                binding.switch_sliding(
+                    self,
+                    &solver.x[..self.state.system.n],
+                    endpoint_prescribed_jumps_m,
+                    dt_s,
+                    &endpoint_velocity,
+                    &mut problem.coulomb_mu.borrow_mut(),
+                    &mut || problem.poll().is_err(),
+                )?
+            } else {
+                false
+            };
+            if !changed {
+                report.history = history;
+                break (solver.x, report);
+            }
+            predictor = solver.x;
+        };
 
         // Re-evaluate original physical operators and original accepted histories;
         // the numerical stencil never supplies accepted forces or state.
-        let evaluation = problem.evaluate(&solver.x, true)?;
+        let evaluation = problem.evaluate(&solution, true)?;
         let maximum_force_residual_n = evaluation
             .residual
             .iter()
@@ -374,12 +448,13 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         let endpoint = evaluation
             .endpoint
             .ok_or(Error::Invalid("missing final physical replay"))?;
-        let velocity = problem.velocity(&solver.x)?;
+        let body_solution = &solution[..self.state.system.n];
+        let velocity = problem.velocity(body_solution)?;
         let kinetic_before_j = problem.quadratic(self.mass, &self.velocity_m_s)?;
         let kinetic_after_j = problem.quadratic(self.mass, &velocity)?;
         let bulk_stored_before_j =
             problem.quadratic(self.state.system.elastic, &self.state.displacements)?;
-        let bulk_stored_after_j = problem.quadratic(self.state.system.elastic, &solver.x)?;
+        let bulk_stored_after_j = problem.quadratic(self.state.system.elastic, body_solution)?;
         if kinetic_before_j < 0.0 || kinetic_after_j < 0.0 {
             return Err(
                 Error::Invalid("mass operator has negative represented kinetic energy").into(),
@@ -388,7 +463,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         let mut external_work_j = 0.0;
         for (i, ((&force, &u1), &u0)) in mean_force_n
             .iter()
-            .zip(&solver.x)
+            .zip(body_solution)
             .zip(&self.state.displacements)
             .enumerate()
         {
@@ -436,11 +511,13 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             });
         }
         problem.poll()?;
+        let mut displacements = solution;
+        displacements.truncate(self.state.system.n);
         Ok(DynamicsStep {
             motion: Self {
                 state: CohesiveState {
                     system: self.state.system,
-                    displacements: solver.x,
+                    displacements,
                     points: endpoint.points,
                 },
                 mass: self.mass,
@@ -449,8 +526,12 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
                 steps,
                 config: self.config,
                 friction: self.friction.clone(),
+                coulomb: self
+                    .coulomb
+                    .as_ref()
+                    .map(|binding| binding.accepted(endpoint.coulomb_states)),
             },
-            nonlinear: run.report,
+            nonlinear,
             maximum_force_residual_n,
             residual_evaluations: problem.evaluations.get(),
             mean_traction_pa: endpoint.means,
@@ -463,6 +544,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             cohesive_energy_j: endpoint.energy,
             viscous_dissipated_j: endpoint.viscous,
             friction_dissipated_j: endpoint.friction,
+            patch_dissipation: endpoint.patch_dissipation,
             external_work_j,
             prescribed_jump_work_j: endpoint.prescribed_work,
             energy_residual_j,
@@ -479,6 +561,7 @@ struct StepProblem<'p, 'm, 'a> {
     cancelled: RefCell<&'p mut dyn FnMut() -> bool>,
     cancellation_seen: Cell<bool>,
     evaluations: Cell<usize>,
+    coulomb_mu: RefCell<Vec<f64>>,
 }
 struct Evaluation<'a> {
     residual: Vec<f64>,
@@ -493,6 +576,8 @@ struct Endpoint<'a> {
     viscous: f64,
     friction: f64,
     prescribed_work: f64,
+    patch_dissipation: Vec<DynamicsPatchDissipation>,
+    coulomb_states: Vec<coulomb::CoulombState>,
 }
 impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
     fn poll(&self) -> Result<(), Error> {
@@ -557,8 +642,19 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
             return Err(Error::Budget("dynamic residual evaluations"));
         }
         self.evaluations.set(self.evaluations.get() + 1);
-        let velocity = self.velocity(x)?;
         let state = &self.motion.state;
+        let n = state.system.n;
+        let dimension = self
+            .motion
+            .coulomb
+            .as_ref()
+            .map_or(Ok(n), |binding| binding.dimension(n))?;
+        if x.len() != dimension {
+            return Err(Error::Invalid("augmented trial dimension"));
+        }
+        let coordinates = &x[n..];
+        let x = &x[..n];
+        let velocity = self.velocity(x)?;
         let mut acceleration = Vec::with_capacity(x.len());
         let mut midpoint = Vec::with_capacity(x.len());
         let mut delta = if retain {
@@ -591,6 +687,7 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
             }
             *value = finite(*value + k - force)?;
         }
+        residual.resize(dimension, 0.0);
         let mut endpoint = retain.then(|| Endpoint {
             points: Vec::with_capacity(state.points.len()),
             means: Vec::with_capacity(state.points.len()),
@@ -605,6 +702,12 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
             viscous: 0.0,
             friction: 0.0,
             prescribed_work: 0.0,
+            patch_dissipation: Vec::with_capacity(state.points.len()),
+            coulomb_states: Vec::with_capacity(if self.motion.coulomb.is_some() {
+                state.points.len()
+            } else {
+                0
+            }),
         });
         for (index, patch) in state.system.patches.iter().enumerate() {
             self.poll()?;
@@ -616,7 +719,13 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
                 .as_ref()
                 .and_then(|models| models[index]);
             // Zero mu keeps the exact original material path and arithmetic.
-            let (step, mut mean, pressure) = if friction.is_some_and(DamagedAreaFriction::active) {
+            let (step, mut mean, pressure) = if friction.is_some_and(DamagedAreaFriction::active)
+                || self
+                    .motion
+                    .coulomb
+                    .as_ref()
+                    .is_some_and(|binding| binding.needs_pressure(index))
+            {
                 old.trial_over_time_with_damage_weighted_compression(
                     jump,
                     self.dt_s,
@@ -634,7 +743,7 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
                 patch: patch.id,
                 error,
             })?;
-            let friction_work = if let Some(model) = friction.filter(|model| model.active()) {
+            let mut friction_work = if let Some(model) = friction.filter(|model| model.active()) {
                 let previous = old.jump_m();
                 let slip = [
                     finite(jump[1] - previous[1])?,
@@ -647,6 +756,44 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
             } else {
                 0.0
             };
+            if let Some(binding) = &self.motion.coulomb {
+                let previous = old.jump_m();
+                let slip = [
+                    finite(jump[1] - previous[1])?,
+                    finite(jump[2] - previous[2])?,
+                ];
+                let mut traction = [0.0; 2];
+                if let Some(c) = binding.coordinate(index) {
+                    traction = binding.traction(index, coordinates)?;
+                    let cone = binding.residual(
+                        patch.id,
+                        traction,
+                        slip,
+                        pressure,
+                        self.coulomb_mu.borrow()[index],
+                    )?;
+                    for d in 0..2 {
+                        mean[d + 1] = finite(mean[d + 1] + traction[d])?;
+                        residual[n + c + d] = finite(patch.area_m2 * cone[d])?;
+                    }
+                }
+                if let Some(end) = &mut endpoint {
+                    let (loss, next) = binding.audit(
+                        self.motion,
+                        index,
+                        self.offsets[index],
+                        self.dt_s,
+                        &velocity,
+                        step.equilibrium.point,
+                        traction,
+                        slip,
+                        pressure,
+                        self.coulomb_mu.borrow()[index],
+                    )?;
+                    friction_work = loss;
+                    end.coulomb_states.push(next);
+                }
+            }
             patch.scatter(mean, &mut residual)?;
             if let Some(end) = &mut endpoint {
                 let next = step.equilibrium.point;
@@ -665,11 +812,19 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
                     end.energy.stored_change
                         + patch.area_m2 * (next.stored_energy_j_m2() - old.stored_energy_j_m2()),
                 )?;
-                end.energy.dissipated = finite(
-                    end.energy.dissipated + patch.area_m2 * step.equilibrium.energy.dissipated,
-                )?;
-                end.viscous = finite(end.viscous + patch.area_m2 * step.viscous_dissipated_j_m2)?;
-                end.friction = finite(end.friction + patch.area_m2 * friction_work)?;
+                let losses = DynamicsPatchDissipation {
+                    patch_id: patch.id,
+                    fracture_j: finite(patch.area_m2 * step.equilibrium.energy.dissipated)?,
+                    viscous_j: finite(patch.area_m2 * step.viscous_dissipated_j_m2)?,
+                    friction_j: finite(patch.area_m2 * friction_work)?,
+                };
+                if losses.fracture_j < 0.0 || losses.viscous_j < 0.0 || losses.friction_j < 0.0 {
+                    return Err(Error::Invalid("negative physical patch dissipation"));
+                }
+                end.energy.dissipated = finite(end.energy.dissipated + losses.fracture_j)?;
+                end.viscous = finite(end.viscous + losses.viscous_j)?;
+                end.friction = finite(end.friction + losses.friction_j)?;
+                end.patch_dissipation.push(losses);
                 end.points.push(next);
                 end.means.push(mean);
             }

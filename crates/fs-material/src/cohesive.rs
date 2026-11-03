@@ -35,6 +35,9 @@ pub use rate::{CohesiveRateStep, CohesiveViscosity};
 /// Irreversible common-mode history across explicitly supplied temperature states.
 pub mod temperature;
 
+/// Shared rigid damaged-area friction projection used by native body owners.
+pub mod friction;
+
 // Work-conjugate vector averages for native dynamic interface owners.
 mod path;
 

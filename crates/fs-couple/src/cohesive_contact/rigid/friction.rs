@@ -450,11 +450,9 @@ impl<'a> Friction<'a> {
             let q = [forces[p][0] + k * delta[0], forces[p][1] + k * delta[1]];
             let length = q[0].hypot(q[1]);
             finite(length)?;
-            let projected = if length > cap {
-                q.map(|v| cap * (v / length))
-            } else {
-                q
-            };
+            let projected = fs_material::cohesive::friction::project_tangent_disk(q, cap).map_err(
+                crate::cohesive_contact::frictional_damage::DamageFrictionError::Material,
+            )?;
             let old = state.point().jump_m();
             let jump = system.staged_sites[p]
                 .as_ref()

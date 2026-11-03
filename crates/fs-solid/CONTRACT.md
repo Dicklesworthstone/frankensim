@@ -3820,6 +3820,12 @@ physical dissipation or routed to a thermal field. Signed roundoff-scale bulk
 energies are retained rather than clamped, with materially negative values
 refused under the explicit energy allowance.
 
+The accepted endpoint replay also reports `DynamicsPatchDissipation` in original
+patch order, with actual area-integrated fracture, viscosity and friction losses.
+Its sums use the same arithmetic as the global loss accounts. A downstream
+thermal owner can identify the original patch/source through the read-only
+`CohesiveState::system` accessor; these reports alone assign no heat fraction.
+
 Complete failure removes tensile and shear resistance through the original
 material law while retaining mass, velocity, history and clock. Original normal
 compression remains available on reclosure. The default is the existing
@@ -3896,6 +3902,57 @@ compression, rotated prescribed-slip work, zero-mu equivalence, low-speed
 physical-time regularization, source-temperature substitution, missing/invalid
 data and cancellation before final publication. These manufactured-data tests
 establish implementation behavior, not measured adhesive-friction calibration.
+
+### Static sticking and kinetic breakaway of reclosed deformable bonds
+
+`CohesiveMotion::with_damaged_area_coulomb` selects unregularized static/kinetic
+friction on the same original damaged area. It requires both canonical residual
+friction properties in the original source bundle, dimensionless at fixed
+external conditions, with `0 <= mu_kinetic <= mu_static`. Initial closed-contact
+occupancy is explicit; accepted endpoint motion and occupancy determine whether
+the next interval may test static capture. This owner is mutually exclusive
+with the velocity-regularized extension. Neither introduces a second cohesive
+history or changes the original damage, pressure or surviving-bond viscosity.
+
+Two scaled tangential traction coordinates per nonzero-capacity selected patch
+join the existing midpoint Newton/FGMRES system. The natural map is
+`t - project_disk(t + k*delta_g, mu*P) = 0`, using the common `fs-material`
+projection already used by rigid and finite-patch damaged-area owners. `P` is
+the original analytic integral of damage times compressive pressure over the
+actual straight cohesive path, including changing damage and closure. The
+positive numerical `k` conditions the map and scaled unknowns; it is not an
+interface spring and stores no energy. The native body mass, elasticity,
+work-conjugate trace map and full coupling between patches remain in the solve.
+An initially static candidate with resolved slip or endpoint velocity is re-solved at its sourced
+kinetic capacity. All passes share the original nonlinear iteration and
+physical-residual budgets; Krylov admission counts the augmented dimension.
+
+The accepted physical audit checks the static reaction disk or the direction
+and magnitude of kinetic traction. Sticking has exactly zero physical friction
+loss only when slip and both endpoint velocities are unresolved; finite
+tolerance-scale traction times slip remains in the work/energy
+defect. Sliding loss is `A * mu_kinetic * P * |delta_g|`, and the same added
+traction contributes to prescribed-interface work. Original fracture and bond
+viscosity losses remain separate. Temperature transfer refreshes both original
+coefficients while retaining damage, source identity, geometry, inertia,
+velocity, clock and occupancy. Zero coefficients preserve original arithmetic.
+
+This is a bounded straight-path rigid-friction specialization on fixed damaged
+area, without tangential elastic slip storage or newly discovered contact.
+Resolved reversal of tangential endpoint velocities while the pressure path is
+active refuses the whole increment, including nonzero-net-slip reversals;
+time-step/event refinement must resolve stopping before physical heat is
+accepted. Nonlinear convergence does not establish time accuracy or uniqueness
+of redundant static reactions, and singular or exhausted native solves refuse.
+
+The Coulomb cases in `tests/cohesive_dynamics_friction/coulomb.rs` check static
+hold and kinetic breakaway against independent inertial equations for partial
+and complete damage, a rotated two-component reaction disk, changing damage
+and opening-path pressure, actual prescribed work, source-temperature threshold
+changes, physical kinetic heat below the displacement tolerance, zero-coefficient
+parity, source/budget/cancellation refusal and both
+zero- and nonzero-net-slip stopping refusals. Source data are manufactured;
+these tests do not establish specimen calibration.
 
 ### Temperature-dependent adhesion in deformable equilibrium and dynamics
 
