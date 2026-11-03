@@ -87,6 +87,101 @@ rates, decomposition boundaries, equilibrium conversion or plant recovery.
 Reaction heat needs a complete, compatible set of participant formation data;
 an isolated mineral enthalpy is not a heat-of-leaching prediction.
 
+## Copper sulfides and ferric leaching
+
+Five crystalline reference packs complete compatible USGS source sets for
+ferric leaching of chalcopyrite, chalcocite, covellite and bornite. They pair
+with the existing copper(II), ferric and ferrous aqueous-ion packs. The
+elemental sulfur product has its own reference pack; a zero formation energy
+does not remove the need to bind its phase, molar basis and entropy.
+
+| Profile | Molar mass, kg/mol | Formation enthalpy, J/mol | Formation Gibbs energy, J/mol | Standard entropy, J/(mol K) |
+| --- | ---: | ---: | ---: | ---: |
+| `chalcopyrite-solid-usgs-b2131-thermochemistry` | 0.183525 | -194900 | -195100 | 124.9 |
+| `chalcocite-solid-usgs-b2131-thermochemistry` | 0.159158 | -83900 | -89200 | 116.2 |
+| `covellite-solid-usgs-b2131-thermochemistry` | 0.095612 | -54600 | -55300 | 67.4 |
+| `bornite-solid-usgs-b2131-thermochemistry` | 0.501841 | -371600 | -396700 | 398.5 |
+| `sulfur-orthorhombic-solid-usgs-b2131` | 0.032066 | 0 | 0 | 32.05 |
+
+The sulfide rows are transcribed from [USGS Bulletin 2131, printed page 11](https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/17/full/max/0/default.jpg).
+Orthorhombic sulfur follows [printed page 8](https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/14/full/max/0/default.jpg).
+The existing `copper-ii-ion-aqueous-usgs-b2131` profile follows
+[printed page 6](https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/12/full/max/0/default.jpg):
+molar mass 0.063546 kg/mol, formation enthalpy +64900 J/mol, formation Gibbs
+energy +65100 J/mol, and **conventional ionic** entropy -98.0 J/(mol K).
+The report and its reference-state definitions are available from
+[USGS](https://doi.org/10.3133/b2131).
+
+Every new claim is a point at 298.15 K and 100000 Pa, requiring the
+`source-elemental-reference-usgs-b2131` convention and explicit phase
+selectors. Sulfur quantities are per mole of **S atoms**, not S8 molecules.
+The negative aqueous copper entropy retains the H+(aq)-zero convention and
+is not an absolute entropy. Independently tabulated Gibbs energies remain
+independent; no formation-enthalpy-minus-species-entropy shortcut is used.
+Printed uncertainty magnitudes are retained in source notes, while claims
+keep `Unstated` uncertainty. These packs supply no heat-capacity curve,
+temperature extrapolation, work index, kinetic rate or measured recovery.
+
+The conserved reaction catalog exposes four separately declared endpoints:
+
+| CLI reaction | Net ionic equation | Ferric demand, mol/mol mineral | Dissolved copper, mol/mol mineral |
+| --- | --- | ---: | ---: |
+| `ferric-chalcopyrite-leach` | CuFeS2 + 4 Fe3+ -> Cu2+ + 5 Fe2+ + 2 S | 4 | 1 |
+| `ferric-chalcocite-leach` | Cu2S + 4 Fe3+ -> 2 Cu2+ + 4 Fe2+ + S | 4 | 2 |
+| `ferric-covellite-leach` | CuS + 2 Fe3+ -> Cu2+ + 2 Fe2+ + S | 2 | 1 |
+| `ferric-bornite-leach` | Cu5FeS4 + 12 Fe3+ -> 5 Cu2+ + 13 Fe2+ + 4 S | 12 | 5 |
+
+The ferric chalcopyrite/chalcocite pathways and oxidant regeneration are
+described in [Ferron (2003), SGS, equations 1–2](https://www.sgs.com/-/media/sgscorp/documents/corporate/brochures/sgs-min-tp-2003-14-leaching-of-copper-using-ferric-sulphate.cdn.en-CA.pdf).
+The net copper-sulfide oxygen-leach endpoints are also given by Dreisinger
+et al., section 2.1, paper page 3, in the
+[ALTA 2002 copper proceedings](https://d3e2i5nuh73s15.cloudfront.net/wp-content/uploads/2015/04/ALTA-Copper-2002-Proceedings.pdf).
+Combining each declared ferric endpoint with the existing
+`4 Fe2+ + O2 + 4 H+ -> 4 Fe3+ + 2 H2O` equation gives the corresponding
+oxygen/acid endpoint. This net accounting does not select an actual
+mineral-intermediate pathway, sulfur film, passivation mechanism or leach rate.
+
+For each row, pass five compiled packs to `mineral_processing` in this order:
+mineral, ferric ion, copper(II) ion, ferrous ion, orthorhombic sulfur.
+For example, after compiling the five manifests with `xtask matdb-pack`:
+
+```bash
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --reaction ferric-chalcopyrite-leach --gibbs --equilibrium \
+  /tmp/mining-materials/chalcopyrite-solid-usgs-b2131-thermochemistry.fsmatpk \
+  /tmp/mining-materials/iron-iii-ion-aqueous-usgs-b2131.fsmatpk \
+  /tmp/mining-materials/copper-ii-ion-aqueous-usgs-b2131.fsmatpk \
+  /tmp/mining-materials/iron-ii-ion-aqueous-usgs-b2131.fsmatpk \
+  /tmp/mining-materials/sulfur-orthorhombic-solid-usgs-b2131.fsmatpk 0.183525
+cargo test -p xtask --test mining_copper_sulfide_sources
+cargo test -p xtask --test mining_copper_sulfide_reactions
+```
+
+The final argument is actually reacted pure-mineral mass in kg, not feed ore
+mass. This chalcopyrite example therefore represents one mole of mineral.
+The example reports consumed/formed masses, direct standard H/G sums and the
+separate H-TΔS diagnostic. Nonstandard driving force requires explicit
+activities for every participant through the existing `--activity` options.
+
+The source-backed regression fixtures check the following results per mole
+of mineral, at the source state:
+
+| Mineral | Ferric-leach ΔH, kJ/mol | Ferric-leach ΔG, kJ/mol | ΔH with ferric regeneration, kJ/mol | ΔG with ferric regeneration, kJ/mol |
+| --- | ---: | ---: | ---: | ---: |
+| Chalcopyrite | 3.9 | -123.0 | -402.9 | -304.0 |
+| Chalcocite | 48.9 | -73.8 | -357.9 | -254.8 |
+| Covellite | 37.1 | -26.2 | -166.3 | -116.7 |
+| Bornite | 110.6 | -247.4 | -1109.8 | -790.4 |
+
+The tests compile the actual manifests, verify canonical packs and query
+receipts, refuse inappropriate reference states, and exercise sequential
+finite-inventory leaching and iron regeneration. The bornite source row's
+independently tabulated Gibbs result differs from its H-TΔS diagnostic by
+1.98631 kJ/mol of mineral; the consumer preserves and reports that discrepancy.
+It does not silently adjust the source values to force agreement. Standard
+reaction heat and driving force do not establish actual process heat duty,
+solution speciation, kinetics or recovery.
+
 ## Executable checks
 
 ```bash

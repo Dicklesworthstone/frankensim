@@ -56,7 +56,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 22] = [
+const REACTIONS: [&str; 26] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
@@ -79,6 +79,10 @@ const REACTIONS: [&str; 22] = [
     "calcite-carbonic-acid-neutralization",
     "malachite-carbonic-acid-leach",
     "dolomite-bicarbonate-neutralization",
+    "ferric-chalcopyrite-leach",
+    "ferric-chalcocite-leach",
+    "ferric-covellite-leach",
+    "ferric-bornite-leach",
 ];
 const USAGE: &str = "usage: mineral_processing [--reaction NAME] [--equilibrium] [--gibbs] [--activity 'SPECIES=VALUE']... [--] PACK... REACTED_SPECIES_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
 
@@ -516,6 +520,98 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
             ],
             equation: "CaMg(CO3)2(dolomite) + 2 H+(aq) -> Ca[2+](aq) + Mg[2+](aq) + 2 HCO3[-](aq), bicarbonate endpoint",
         },
+        "ferric-chalcopyrite-leach" => ReactionCase {
+            reaction: MineralReaction::FerricChalcopyriteLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "chalcopyrite-solid-usgs-b2131-thermochemistry",
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "copper-ii-ion-aqueous-usgs-b2131",
+                "iron-ii-ion-aqueous-usgs-b2131",
+                "sulfur-orthorhombic-solid-usgs-b2131",
+            ],
+            species: &[
+                "CuFeS2(s)",
+                "Fe[3+](aq)",
+                "Cu[2+](aq)",
+                "Fe[2+](aq)",
+                "S(s)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-solid",
+            ],
+            equation: "CuFeS2(chalcopyrite) + 4 Fe[3+](aq) -> Cu[2+](aq) + 5 Fe[2+](aq) + 2 S(orthorhombic)",
+        },
+        "ferric-chalcocite-leach" => ReactionCase {
+            reaction: MineralReaction::FerricChalcociteLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "chalcocite-solid-usgs-b2131-thermochemistry",
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "copper-ii-ion-aqueous-usgs-b2131",
+                "iron-ii-ion-aqueous-usgs-b2131",
+                "sulfur-orthorhombic-solid-usgs-b2131",
+            ],
+            species: &["Cu2S(s)", "Fe[3+](aq)", "Cu[2+](aq)", "Fe[2+](aq)", "S(s)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-solid",
+            ],
+            equation: "Cu2S(chalcocite) + 4 Fe[3+](aq) -> 2 Cu[2+](aq) + 4 Fe[2+](aq) + S(orthorhombic)",
+        },
+        "ferric-covellite-leach" => ReactionCase {
+            reaction: MineralReaction::FerricCovelliteLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "covellite-solid-usgs-b2131-thermochemistry",
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "copper-ii-ion-aqueous-usgs-b2131",
+                "iron-ii-ion-aqueous-usgs-b2131",
+                "sulfur-orthorhombic-solid-usgs-b2131",
+            ],
+            species: &["CuS(s)", "Fe[3+](aq)", "Cu[2+](aq)", "Fe[2+](aq)", "S(s)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-solid",
+            ],
+            equation: "CuS(covellite) + 2 Fe[3+](aq) -> Cu[2+](aq) + 2 Fe[2+](aq) + S(orthorhombic)",
+        },
+        "ferric-bornite-leach" => ReactionCase {
+            reaction: MineralReaction::FerricBorniteLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "bornite-solid-usgs-b2131-thermochemistry",
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "copper-ii-ion-aqueous-usgs-b2131",
+                "iron-ii-ion-aqueous-usgs-b2131",
+                "sulfur-orthorhombic-solid-usgs-b2131",
+            ],
+            species: &[
+                "Cu5FeS4(s)",
+                "Fe[3+](aq)",
+                "Cu[2+](aq)",
+                "Fe[2+](aq)",
+                "S(s)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-solid",
+            ],
+            equation: "Cu5FeS4(bornite) + 12 Fe[3+](aq) -> 5 Cu[2+](aq) + 13 Fe[2+](aq) + 4 S(orthorhombic)",
+        },
         _ => return Err(format!("unknown reaction {name:?}; use --help for source order").into()),
     })
 }
@@ -633,6 +729,17 @@ fn reference_point(
             QuantitySpec::dimensional(Dims::NONE),
             1.0,
         )?;
+    }
+    let mineral_axis = match pack_id {
+        "chalcopyrite-solid-usgs-b2131-thermochemistry" => Some("source-phase-chalcopyrite"),
+        "chalcocite-solid-usgs-b2131-thermochemistry" => Some("source-phase-chalcocite"),
+        "covellite-solid-usgs-b2131-thermochemistry" => Some("source-phase-covellite"),
+        "bornite-solid-usgs-b2131-thermochemistry" => Some("source-phase-bornite"),
+        "sulfur-orthorhombic-solid-usgs-b2131" => Some("source-phase-sulfur-orthorhombic"),
+        _ => None,
+    };
+    if let Some(axis) = mineral_axis {
+        point = point.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), 1.0)?;
     }
     Ok(point)
 }

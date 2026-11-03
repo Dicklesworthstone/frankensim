@@ -1,0 +1,48 @@
+frankensim.matdb-source.v1
+observation	identity	Bornite Cu5FeS4 crystalline reference	USGS Bulletin 2131 printed page 11, Cu5FeS4 row	The source formula weight is 501.841 g/mol. This is stoichiometric crystalline bornite at the reference temperature, not chalcopyrite, a solid solution with an unspecified composition, a high-temperature polymorph, a copper concentrate or a bulk ore. Its five copper atoms and four sulfur atoms are retained per formula unit.
+observation	standard	Bornite standard formation quantities	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/17/full/max/0/default.jpg	The scanned row gives standard molar formation enthalpy -371.6 kJ/mol, standard molar formation Gibbs energy -396.7 kJ/mol and absolute standard molar entropy 398.5 J/(mol K). The Gibbs value is independently tabulated. The printed uncertainty magnitudes are 2.1 kJ/mol for H and G and 0.8 J/(mol K) for entropy; no distribution, coverage probability or cross-species covariance is assigned.
+observation	scope	USGS bornite standard-state point	USGS Bulletin 2131 printed pages 1, 3 and 11	All four claims apply at 298.15 K and 100000 Pa under the source-elemental-reference-usgs-b2131 convention, including orthorhombic elemental sulfur. They retain Unstated uncertainty. No Cp curve, high-temperature extrapolation, mineral transformation path, ferric-leach kinetics, accessibility or recovery is inferred. A complete compatible reaction sum remains necessary for chemical heat or driving-force calculations.
+scalar	molar-mass	identity,scope	mass	501.841	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	-371.6	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-396.7	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	398.5	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	molar-mass	mineral	1	1	1
+validity	formation-enthalpy	mineral	1	1	1
+validity	formation-gibbs-energy	mineral	1	1	1
+validity	standard-entropy	mineral	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1

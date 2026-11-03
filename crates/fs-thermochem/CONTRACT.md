@@ -19,7 +19,7 @@ inventory resolution refuse rather than clipping or disappearing. The exact
 certificate proves the integer equation; binary64 final amounts are separately
 evaluated, with no claim of exact numerical mass conservation.
 
-`stoichiometry::minerals::MineralReaction` provides twenty-four explicit reference
+`stoichiometry::minerals::MineralReaction` provides explicit reference
 endpoints: lime hydration, calcite/dolomite acid neutralization to dissolved
 CO2 or retained bicarbonate, hydrated-lime neutralization, malachite acid
 leaching to dissolved copper and CO2, separate calcite/malachite pathways to
@@ -83,6 +83,27 @@ authenticate caller species-to-pack associations, solve aqueous speciation,
 predict reaction rates/recovery/current efficiency, or supply heat of dilution.
 Independently rounded source molar masses need not sum bit-exactly even when
 elemental conservation is exact; they are not a new mass-conservation proof.
+
+### Ferric copper-sulfide endpoints
+
+Four additional `MineralReaction` endpoints name chalcopyrite, chalcocite,
+covellite and bornite explicitly. They consume respectively 4, 4, 2 and 12 mol
+Fe3+ per mole of mineral, form 1, 2, 1 and 5 mol Cu2+, and assign all sulfur to
+orthorhombic S on an atomic molar basis. They preserve exact elemental/charge
+certification and the original finite-inventory transaction. These are chosen
+net reaction endpoints, not automatic mineral-pathway or passivation selection.
+
+Five new crystalline USGS B2131 packs pair with the existing conventional
+aqueous Cu2+, Fe3+ and Fe2+ packs at 298.15 K / 100000 Pa. The
+`mineral_processing` example accepts the four `ferric-*-leach` cases, with
+explicit mineral/Fe3+/Cu2+/Fe2+/S pack order and the existing H, G, entropy and
+activity consumers. All participants retain their original source receipts.
+The source tests check literal molar quantities, phase/reference refusal,
+conserved reagent-limited extent and sequential ferric regeneration. Bornite's
+independently tabulated G and H-TΔS differ by 1.98631 kJ/mol mineral; both remain
+visible. No source reconciliation, kinetic rate, extrapolated phase stability,
+heat of dilution or plant recovery is inferred. Details and runnable commands
+are in `data/matdb/seed-v1/MINERAL_THERMOCHEMISTRY.md`.
 
 ### Mixed-phase formation Gibbs energy and explicit activities
 

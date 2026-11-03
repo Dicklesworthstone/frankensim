@@ -55,6 +55,20 @@
 //! an inert oxygen-evolving anode; see Beukes and Badenhorst (2009):
 //! <https://www.saimm.co.za/Journal/v109n06p343.pdf>. Its electron transfer is
 //! four electrons per written equation; side reactions require separate models.
+//! Ferric copper-sulfide leaching retains dissolved Cu(II), Fe(II) and elemental
+//! sulfur endpoints. Chalcocite/covellite equations follow Ferron (2003),
+//! *Leaching of Secondary Copper Minerals Using Regenerated Ferric Sulphate*,
+//! equations 1-2, <https://www.sgs.com/-/media/sgscorp/documents/corporate/brochures/sgs-min-tp-2003-14-leaching-of-copper-using-ferric-sulphate.cdn.en-CA.pdf>.
+//! Chalcopyrite/bornite are the net ionic forms of the oxygen-leach balances
+//! after subtracting one/three ferrous-regeneration extents in Dreisinger et al.,
+//! *The Competitive Position of the Mt Gordon Copper Process in the Copper
+//! Industry*, ALTA Copper 2002, section 2.1, p.3 (PDF p.200):
+//! <https://d3e2i5nuh73s15.cloudfront.net/wp-content/uploads/2015/04/ALTA-Copper-2002-Proceedings.pdf>.
+//! These are complete-dissolution accounting endpoints, not elementary steps:
+//! intermediate sulfides, passivation, sulfate formation and incomplete
+//! extraction remain separate pathways. `S(s)` selects orthorhombic sulfur,
+//! counted per mole of S atoms, not per mole of S8. This reference-state choice
+//! does not predict the form of sulfur produced by an actual leach.
 
 use super::{ConservedReaction, ReactionBalanceError};
 use crate::{
@@ -138,6 +152,18 @@ pub enum MineralReaction {
     /// Net productive pathway with an oxygen-evolving anode: four electrons
     /// transferred per equation, or two per copper atom deposited.
     CopperElectrowinning,
+    /// CuFeS2(s) + 4 Fe3+(aq) -> Cu2+(aq) + 5 Fe2+(aq) + 2 S(s).
+    /// Chalcopyrite dissolution to Cu(II) and orthorhombic sulfur; no sulfate.
+    FerricChalcopyriteLeach,
+    /// Cu2S(s) + 4 Fe3+(aq) -> 2 Cu2+(aq) + 4 Fe2+(aq) + S(s).
+    /// Complete chalcocite endpoint, not the distinct first-stage CuS residue.
+    FerricChalcociteLeach,
+    /// CuS(s) + 2 Fe3+(aq) -> Cu2+(aq) + 2 Fe2+(aq) + S(s).
+    /// Covellite dissolution; source properties must name this mineral phase.
+    FerricCovelliteLeach,
+    /// Cu5FeS4(s) + 12 Fe3+(aq) -> 5 Cu2+(aq) + 13 Fe2+(aq) + 4 S(s).
+    /// Complete bornite endpoint; its one Fe atom remains as additional Fe(II).
+    FerricBorniteLeach,
 }
 
 // One species: stable phase/charge id, element counts, charge, signed coefficient.
@@ -429,6 +455,50 @@ impl MineralReaction {
                     ("Cu(s)", &[1, 0, 0], 0, 2),
                     ("O2(g)", &[0, 0, 2], 0, 1),
                     ("H+(aq)", &[0, 1, 0], 1, 4),
+                ],
+            ),
+            Self::FerricChalcopyriteLeach => (
+                "ferric-chalcopyrite-leach",
+                &["Cu", "Fe", "S"],
+                &[
+                    ("CuFeS2(s)", &[1, 1, 2], 0, -1),
+                    ("Fe[3+](aq)", &[0, 1, 0], 3, -4),
+                    ("Cu[2+](aq)", &[1, 0, 0], 2, 1),
+                    ("Fe[2+](aq)", &[0, 1, 0], 2, 5),
+                    ("S(s)", &[0, 0, 1], 0, 2),
+                ],
+            ),
+            Self::FerricChalcociteLeach => (
+                "ferric-chalcocite-leach",
+                &["Cu", "Fe", "S"],
+                &[
+                    ("Cu2S(s)", &[2, 0, 1], 0, -1),
+                    ("Fe[3+](aq)", &[0, 1, 0], 3, -4),
+                    ("Cu[2+](aq)", &[1, 0, 0], 2, 2),
+                    ("Fe[2+](aq)", &[0, 1, 0], 2, 4),
+                    ("S(s)", &[0, 0, 1], 0, 1),
+                ],
+            ),
+            Self::FerricCovelliteLeach => (
+                "ferric-covellite-leach",
+                &["Cu", "Fe", "S"],
+                &[
+                    ("CuS(s)", &[1, 0, 1], 0, -1),
+                    ("Fe[3+](aq)", &[0, 1, 0], 3, -2),
+                    ("Cu[2+](aq)", &[1, 0, 0], 2, 1),
+                    ("Fe[2+](aq)", &[0, 1, 0], 2, 2),
+                    ("S(s)", &[0, 0, 1], 0, 1),
+                ],
+            ),
+            Self::FerricBorniteLeach => (
+                "ferric-bornite-leach",
+                &["Cu", "Fe", "S"],
+                &[
+                    ("Cu5FeS4(s)", &[5, 1, 4], 0, -1),
+                    ("Fe[3+](aq)", &[0, 1, 0], 3, -12),
+                    ("Cu[2+](aq)", &[1, 0, 0], 2, 5),
+                    ("Fe[2+](aq)", &[0, 1, 0], 2, 13),
+                    ("S(s)", &[0, 0, 1], 0, 4),
                 ],
             ),
         };

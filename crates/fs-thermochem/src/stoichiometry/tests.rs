@@ -67,6 +67,10 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         SulfurTrioxideHydration,
         PyriteToHematiteAndSulfuricAcid,
         CopperElectrowinning,
+        FerricChalcopyriteLeach,
+        FerricChalcociteLeach,
+        FerricCovelliteLeach,
+        FerricBorniteLeach,
     ] {
         let first = recipe.build().unwrap();
         let second = recipe.build().unwrap();
@@ -86,6 +90,50 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
                 .unwrap()
                 .iter()
                 .all(|a| a.amount.value() == 0.0)
+        );
+    }
+}
+
+#[test]
+fn ferric_copper_sulfides_keep_mineral_iron_and_oxidant_stocks_separate() {
+    use MineralReaction::*;
+    for (recipe, mineral, ferric, copper, ferrous, sulfur) in [
+        (FerricChalcopyriteLeach, "CuFeS2(s)", 4.0, 1.0, 5.0, 2.0),
+        (FerricChalcociteLeach, "Cu2S(s)", 4.0, 2.0, 4.0, 1.0),
+        (FerricCovelliteLeach, "CuS(s)", 2.0, 1.0, 2.0, 1.0),
+        (FerricBorniteLeach, "Cu5FeS4(s)", 12.0, 5.0, 13.0, 4.0),
+    ] {
+        let reaction = recipe.build().unwrap();
+        close(amount(&reaction, 1.0, mineral), 1.0);
+        close(amount(&reaction, 1.0, "Fe[3+](aq)"), ferric);
+        close(amount(&reaction, 1.0, "Cu[2+](aq)"), copper);
+        close(amount(&reaction, 1.0, "Fe[2+](aq)"), ferrous);
+        close(amount(&reaction, 1.0, "S(s)"), sulfur);
+        // Enough mineral for three extents but ferric for only two. No
+        // regenerated ferric is borrowed from a hypothetical later stage.
+        let initial = [
+            (id(mineral), Amount::new(3.0)),
+            (id("Fe[3+](aq)"), Amount::new(2.0 * ferric)),
+            (id("Cu[2+](aq)"), Amount::new(0.0)),
+            (id("Fe[2+](aq)"), Amount::new(0.0)),
+            (id("S(s)"), Amount::new(0.0)),
+        ];
+        let extent = reaction.limiting_extent(&initial[..2]).unwrap();
+        close(extent.value(), 2.0);
+        let advanced = reaction.advance_inventory(&initial, extent).unwrap();
+        for ((species, _), expected) in initial
+            .iter()
+            .zip([1.0, 0.0, 2.0 * copper, 2.0 * ferrous, 2.0 * sulfur])
+        {
+            close(
+                advanced.iter().find(|(s, _)| s == species).unwrap().1.value(),
+                expected,
+            );
+        }
+        assert!(
+            reaction
+                .advance_inventory(&initial, Amount::new(2.01))
+                .is_err()
         );
     }
 }
