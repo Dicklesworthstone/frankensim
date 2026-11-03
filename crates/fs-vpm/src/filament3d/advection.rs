@@ -50,6 +50,60 @@ pub struct SelfInducedShed {
     pub max_work: u64,
 }
 
+/// Accuracy and leaf size for deterministic Cartesian Taylor tree evaluation.
+/// The tolerance bounds the summed spatial/core expansion error at each stage
+/// probe, not accumulated trajectory error or the incident-field uncertainty.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WakeTreeSpec {
+    /// Absolute induced-velocity tolerance [m/s]. Zero selects exact source
+    /// order and disables approximation. Cancellation does not weaken this budget.
+    pub absolute_velocity_error_mps: f64,
+    /// Maximum sources in an exact leaf, in 1..=256. Sixteen is a useful
+    /// starting point; the best value depends on geometry and accuracy.
+    pub leaf_capacity: usize,
+}
+
+impl Default for WakeTreeSpec {
+    fn default() -> Self {
+        Self {
+            absolute_velocity_error_mps: 1e-5,
+            leaf_capacity: 16,
+        }
+    }
+}
+
+impl WakeTreeSpec {
+    /// Stable configuration identity for a caller's admission-frozen run.
+    /// Changing accuracy or leaf size changes the numerical model identity.
+    #[must_use]
+    pub fn digest(&self) -> String {
+        let mut bytes = self
+            .absolute_velocity_error_mps
+            .to_bits()
+            .to_le_bytes()
+            .to_vec();
+        bytes.extend_from_slice(&(self.leaf_capacity as u64).to_le_bytes());
+        fs_blake3::hash_domain("org.frankensim.fs-vpm.wake-tree.v1", &bytes).to_hex()
+    }
+}
+
+/// Work and local approximation evidence from one successfully published step.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WakeAdvectionReport {
+    /// Exact segment-target contributions actually evaluated.
+    pub direct_interactions: u64,
+    /// Accepted cluster-target Taylor evaluations.
+    pub accepted_cells: u64,
+    /// Tree nodes inspected across all stage probes.
+    pub visited_cells: u64,
+    /// Largest summed cluster error bound at a single probe [m/s].
+    pub max_velocity_error_bound_mps: f64,
+    /// Peak number of tree nodes retained at one stage.
+    pub peak_tree_nodes: usize,
+    /// Admitted work units, including assembly, construction and evaluation.
+    pub work_used: u64,
+}
+
 impl FilamentWake {
     /// Convect the complete near wake by finite-core self-induction plus uniform
     /// ambient flow, hold the lifting line fixed, and emit one endpoint row.
@@ -108,9 +162,51 @@ impl FilamentWake {
         gamma: &[f64],
         config: SelfInducedShed,
         boundary: WakeBoundary<'_>,
+        incident_variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Refusal> {
+        self.advance_self_induced(gamma, config, boundary, None, incident_variation, cancelled)
+            .map(|_| ())
+    }
+
+    /// Evolve the wake with an error-controlled tree, retaining exact near
+    /// interactions, moving-line staging, image handling and atomic publication.
+    /// Tree geometry and moments are rebuilt at each RK stage. `max_work` meters
+    /// source assembly, bounded tree construction, node visits and exact pairs;
+    /// it need not admit the full direct all-pairs cost. Exhaustion refuses.
+    /// The reported local velocity bound does not certify trajectory error.
+    ///
+    /// # Errors
+    /// Existing environment refusals, invalid tree settings, unrepresentable
+    /// moments, or the metered work cap. The original wake remains unchanged.
+    pub fn shed_self_induced_with_tree(
+        &mut self,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: WakeBoundary<'_>,
+        tree: WakeTreeSpec,
+        incident_variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<WakeAdvectionReport, Refusal> {
+        self.advance_self_induced(
+            gamma,
+            config,
+            boundary,
+            Some(tree),
+            incident_variation,
+            cancelled,
+        )
+    }
+
+    fn advance_self_induced(
+        &mut self,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: WakeBoundary<'_>,
+        tree: Option<WakeTreeSpec>,
         mut incident_variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<(), Refusal> {
+    ) -> Result<WakeAdvectionReport, Refusal> {
         checkpoint(&mut cancelled)?;
         if self.downstream_gamma.is_some() {
             return Err(refusal(
@@ -133,10 +229,11 @@ impl FilamentWake {
             image_plane: boundary.image_plane,
             line_step_m: line.step_distance(config.substeps),
         };
-        integrate_nodes(
+        let report = integrate_nodes(
             &mut points,
             config,
             settings,
+            tree,
             |stage_points, fraction, sources| {
                 scatter(&mut state, stage_points);
                 line.apply(&mut state, fraction)?;
@@ -155,7 +252,7 @@ impl FilamentWake {
         state.rows.push(emitted);
         checkpoint(&mut cancelled)?;
         *self = state;
-        Ok(())
+        Ok(report)
     }
 }
 

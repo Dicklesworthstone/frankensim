@@ -1,9 +1,13 @@
 //! Shared bounded RK2 stages for material vertices. Geometry is prepared once
 //! per stage, independently of how physical sources are partitioned/stored.
 
-use super::{Refusal, SelfInducedShed, checkpoint, refusal};
+use super::{Refusal, SelfInducedShed, WakeAdvectionReport, WakeTreeSpec, checkpoint, refusal};
+
+#[path = "tree.rs"]
+mod tree;
 use crate::filament3d::SegmentGeometry;
 use crate::images3d::ImagePlane;
+use tree::SourceTree;
 
 struct PreparedSource {
     geometry: SegmentGeometry,
@@ -113,25 +117,44 @@ pub(crate) fn integrate_nodes(
     points: &mut [[f64; 3]],
     config: SelfInducedShed,
     settings: StageSettings,
+    tree_spec: Option<WakeTreeSpec>,
     mut assemble: impl FnMut(&[[f64; 3]], f64, &mut PreparedSources) -> Result<(), Refusal>,
     variation: &mut impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), Refusal> {
+) -> Result<WakeAdvectionReport, Refusal> {
+    if tree_spec.is_some_and(|s| {
+        !s.absolute_velocity_error_mps.is_finite()
+            || s.absolute_velocity_error_mps < 0.0
+            || !(1..=256).contains(&s.leaf_capacity)
+    }) {
+        return Err(refusal(
+            "wake-tree-invalid",
+            "finite nonnegative accuracy and leaf size 1..=256 required",
+        ));
+    }
     let bound = settings
         .source_bound
         .checked_mul(if settings.image_plane.is_some() { 2 } else { 1 });
-    let work = bound.and_then(|bound| {
-        u64::try_from(config.substeps)
-            .ok()?
-            .checked_mul(2)?
-            .checked_mul(u64::try_from(points.len()).ok()?.checked_add(1)?)?
-            .checked_add(1)?
-            .checked_mul(u64::try_from(bound).ok()?.checked_add(1)?)
+    let admitted_work = bound.and_then(|bound| {
+        let stages = u64::try_from(config.substeps).ok()?.checked_mul(2)?;
+        let targets = u64::try_from(points.len()).ok()?;
+        let sources = u64::try_from(bound).ok()?.checked_add(1)?;
+        if tree_spec.is_some() {
+            stages
+                .checked_add(1)?
+                .checked_mul(sources)?
+                .checked_add(stages.checked_mul(targets)?)
+        } else {
+            stages
+                .checked_mul(targets.checked_add(1)?)?
+                .checked_add(1)?
+                .checked_mul(sources)
+        }
     });
-    if work.is_none_or(|v| v > config.max_work) {
+    if admitted_work.is_none_or(|v| v > config.max_work) {
         return Err(refusal(
             "wake-advection-work-exhausted",
-            "direct sweep exceeds the work cap",
+            "wake evolution exceeds the work cap",
         ));
     }
     let bound = bound.expect("checked work bound");
@@ -164,9 +187,17 @@ pub(crate) fn integrate_nodes(
         .map_err(|_| allocation())?;
     midpoint.extend_from_slice(points);
     let mut resolved_edges = Vec::new();
+    let mut tree = SourceTree::default();
+    let mut report = WakeAdvectionReport::default();
+    let mut work = WorkMeter {
+        limit: config.max_work,
+        used: 0,
+        metered: tree_spec.is_some(),
+    };
     for substep in 0..config.substeps {
         checkpoint(cancelled)?;
         let fraction = substep as f64 / config.substeps as f64;
+        work.charge(bound as u64 + 1)?;
         sources.sources.clear();
         assemble(points, fraction, &mut sources)?;
         sources.images(settings.image_plane)?;
@@ -184,12 +215,20 @@ pub(crate) fn integrate_nodes(
             );
         }
         admit_line_step(settings.line_step_m, first_limit)?;
+        if let Some(spec) = tree_spec.filter(|s| s.absolute_velocity_error_mps > 0.0) {
+            tree.rebuild(&sources.sources, spec, &mut work, cancelled)?;
+            report.peak_tree_nodes = report.peak_tree_nodes.max(tree.node_count());
+        }
         for (p, q) in points.iter().zip(&mut midpoint) {
             let velocity = velocity_at(
                 *p,
                 fraction * settings.dt_s,
                 &sources,
                 config.ambient_velocity_mps,
+                tree_spec,
+                &mut tree,
+                &mut work,
+                &mut report,
                 variation,
                 cancelled,
             )?;
@@ -197,17 +236,26 @@ pub(crate) fn integrate_nodes(
             *q = translated(*p, delta.map(|v| 0.5 * v), settings.image_plane)?;
         }
         let fraction = (substep as f64 + 0.5) / config.substeps as f64;
+        work.charge(bound as u64 + 1)?;
         sources.sources.clear();
         assemble(&midpoint, fraction, &mut sources)?;
         sources.images(settings.image_plane)?;
         let middle_limit = sources.scale(Some(&resolved_edges))? * config.max_displacement_fraction;
         admit_line_step(settings.line_step_m, middle_limit)?;
+        if let Some(spec) = tree_spec.filter(|s| s.absolute_velocity_error_mps > 0.0) {
+            tree.rebuild(&sources.sources, spec, &mut work, cancelled)?;
+            report.peak_tree_nodes = report.peak_tree_nodes.max(tree.node_count());
+        }
         for (p, q) in points.iter_mut().zip(&midpoint) {
             let velocity = velocity_at(
                 *q,
                 fraction * settings.dt_s,
                 &sources,
                 config.ambient_velocity_mps,
+                tree_spec,
+                &mut tree,
+                &mut work,
+                &mut report,
                 variation,
                 cancelled,
             )?;
@@ -220,22 +268,34 @@ pub(crate) fn integrate_nodes(
     // in the final RK update. Admit the final geometry and evolved cores before
     // publication, without another velocity sweep or incident-field sample.
     checkpoint(cancelled)?;
+    work.charge(bound as u64 + 1)?;
     sources.sources.clear();
     assemble(points, 1.0, &mut sources)?;
     sources.images(settings.image_plane)?;
     sources.scale(Some(&resolved_edges))?;
-    Ok(())
+    report.work_used = if tree_spec.is_some() {
+        work.used
+    } else {
+        admitted_work.unwrap()
+    };
+    Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn velocity_at(
     p: [f64; 3],
     elapsed_s: f64,
     sources: &PreparedSources,
     ambient: [f64; 3],
+    tree_spec: Option<WakeTreeSpec>,
+    tree: &mut SourceTree,
+    work: &mut WorkMeter,
+    report: &mut WakeAdvectionReport,
     variation: &mut impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<[f64; 3], Refusal> {
     checkpoint(cancelled)?;
+    work.charge(1)?;
     let extra = variation(p, elapsed_s)?;
     let mut velocity = ambient;
     for c in 0..3 {
@@ -250,29 +310,17 @@ fn velocity_at(
             "incident velocity exceeds the numerical domain",
         ));
     }
+    if let Some(spec) = tree_spec.filter(|s| s.absolute_velocity_error_mps > 0.0) {
+        return tree.velocity(p, velocity, &sources.sources, spec, work, report, cancelled);
+    }
+    work.charge(sources.sources.len() as u64)?;
+    report.direct_interactions += sources.sources.len() as u64;
     let mut correction = [0.0; 3];
     for (i, s) in sources.sources.iter().enumerate() {
         if i != 0 && i % 256 == 0 {
             checkpoint(cancelled)?;
         }
-        // Bound squared lengths and endpoint products before evaluating the
-        // kernel: an overflowing denominator must not become apparent zero.
-        let extent = s
-            .geometry
-            .start
-            .iter()
-            .zip(s.geometry.end)
-            .zip(p)
-            .fold(0.0_f64, |v, ((a, b), x)| {
-                v.max((x - a).abs()).max((x - b).abs())
-            });
-        if !extent.is_finite() || extent > f64::MAX.sqrt() / 16.0 {
-            return Err(refusal(
-                "wake-advection-nonfinite",
-                "source-target separation exceeds the numerical domain",
-            ));
-        }
-        let value = s.geometry.velocity(p, s.core2_m2);
+        let value = s.unit_velocity(p)?;
         for c in 0..3 {
             let increment = s.circulation * value[c] - correction[c];
             let sum = velocity[c] + increment;
@@ -287,6 +335,55 @@ fn velocity_at(
         ));
     }
     Ok(velocity)
+}
+
+impl PreparedSource {
+    #[inline]
+    fn unit_velocity(&self, p: [f64; 3]) -> Result<[f64; 3], Refusal> {
+        // Bound squared lengths and endpoint products before evaluating the
+        // kernel: an overflowing denominator must not become apparent zero.
+        let extent = self
+            .geometry
+            .start
+            .iter()
+            .zip(self.geometry.end)
+            .zip(p)
+            .fold(0.0_f64, |v, ((a, b), x)| {
+                v.max((x - a).abs()).max((x - b).abs())
+            });
+        if !extent.is_finite() || extent > f64::MAX.sqrt() / 16.0 {
+            return Err(refusal(
+                "wake-advection-nonfinite",
+                "source-target separation exceeds the numerical domain",
+            ));
+        }
+        Ok(self.geometry.velocity(p, self.core2_m2))
+    }
+}
+
+struct WorkMeter {
+    limit: u64,
+    used: u64,
+    metered: bool,
+}
+
+impl WorkMeter {
+    #[inline]
+    fn charge(&mut self, amount: u64) -> Result<(), Refusal> {
+        if self.metered {
+            self.used = self
+                .used
+                .checked_add(amount)
+                .filter(|n| *n <= self.limit)
+                .ok_or_else(|| {
+                    refusal(
+                        "wake-advection-work-exhausted",
+                        "metered tree evolution exhausted its work cap",
+                    )
+                })?;
+        }
+        Ok(())
+    }
 }
 
 fn displacement(velocity: [f64; 3], h: f64, limit: f64) -> Result<[f64; 3], Refusal> {

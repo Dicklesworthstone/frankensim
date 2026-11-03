@@ -8,7 +8,9 @@ use super::topology::{circulation_is_closed, node_key};
 use super::{FarCell, FarField, cell_from_segs_with_cores};
 use crate::filament3d::advection::stage::{PreparedSources, StageSettings, integrate_nodes};
 use crate::filament3d::advection::{LineMotion, append_near_sources, prepare_near};
-use crate::filament3d::{FilamentWake, Refusal, SelfInducedShed, WakeBoundary};
+use crate::filament3d::{
+    FilamentWake, Refusal, SelfInducedShed, WakeAdvectionReport, WakeBoundary, WakeTreeSpec,
+};
 
 impl FarField {
     /// Advance all retained near/far filaments by their common finite-core
@@ -65,9 +67,54 @@ impl FarField {
         gamma: &[f64],
         config: SelfInducedShed,
         boundary: WakeBoundary<'_>,
+        variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Refusal> {
+        self.advance_self_induced(near, gamma, config, boundary, None, variation, cancelled)
+            .map(|_| ())
+    }
+
+    /// Advance the complete connected near/far system with the common
+    /// error-controlled tree. Exact retained sources define the approximation;
+    /// storage partitioning does not create separate integration schedules.
+    /// See [`FilamentWake::shed_self_induced_with_tree`] for accuracy/work units.
+    ///
+    /// # Errors
+    /// The environment refusals, invalid tree settings, unrepresentable moments
+    /// or exhausted metered work. Neither physical partition is published on error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_self_induced_with_tree(
+        &mut self,
+        near: &mut FilamentWake,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: WakeBoundary<'_>,
+        tree: WakeTreeSpec,
+        variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<WakeAdvectionReport, Refusal> {
+        self.advance_self_induced(
+            near,
+            gamma,
+            config,
+            boundary,
+            Some(tree),
+            variation,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_self_induced(
+        &mut self,
+        near: &mut FilamentWake,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: WakeBoundary<'_>,
+        tree: Option<WakeTreeSpec>,
         mut variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<(), Refusal> {
+    ) -> Result<WakeAdvectionReport, Refusal> {
         checkpoint(&mut cancelled)?;
         let proposal = prepare_near(near, gamma, config)?;
         if self.shed_dt_s != proposal.dt_s || self.mode != config.core_mode {
@@ -98,10 +145,11 @@ impl FarField {
             image_plane: boundary.image_plane,
             line_step_m: line.step_distance(config.substeps),
         };
-        integrate_nodes(
+        let report = integrate_nodes(
             &mut points,
             config,
             settings,
+            tree,
             |stage_points, fraction, sources| {
                 bindings.scatter_near(&mut candidate, stage_points);
                 line.apply(&mut candidate, fraction)?;
@@ -126,7 +174,7 @@ impl FarField {
         // No fallible operation remains between these two publications.
         *near = candidate;
         self.cells = cells;
-        Ok(())
+        Ok(report)
     }
 }
 

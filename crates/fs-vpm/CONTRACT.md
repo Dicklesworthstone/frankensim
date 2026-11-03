@@ -675,6 +675,52 @@ existing entry point, checks independent space/time-dependent transport and
 moving-frame covariance, verifies image dynamics against direct finite-core
 line integration, and exercises boundary/callback/work-limit rollback.
 
+### Error-controlled tree dynamics
+
+Both near and combined near/far systems expose `shed_self_induced_with_tree`.
+The caller supplies `WakeTreeSpec`, with an absolute stage-velocity error
+budget in m/s and an exact-leaf capacity. Zero tolerance evaluates the original
+source order exactly. The default existing entry points retain direct
+summation. Freeze the tree settings per run and include `WakeTreeSpec::digest`
+in its numerical identity; these settings are not a runtime autotuner.
+
+Each velocity stage builds a deterministic balanced source tree from the same
+prepared continuous finite segments, including optional image segments. A total
+midpoint-coordinate/source-index ordering fixes subdivision. Nodes retain the
+shared Cartesian monopole, dipole, continuous-line quadrupole and leading
+core-variation moments. They do not clone physical segment lists. Scratch
+storage is reused across stages. Free near/far vertices still evolve once,
+source circulation and age/core semantics remain unchanged, and final source
+admission precedes atomic publication.
+
+An internal node is accepted only when its full expansion error bound fits its
+share of the absolute budget, allocated by unsigned circulation-length measure.
+A half-budget margin accommodates accumulation/partition roundoff. Near or
+uncertifiable nodes open to smaller cells; leaves use the original exact
+finite-segment kernel. A cheap squared-distance rejection gate inverts a lower
+bound on the required Taylor error bound, so it can save bound evaluations but
+can never accept an uncertified approximation. Images use the same budget;
+their approximate normal-velocity residual is bounded by the local error budget,
+while physical stage/endpoint nodes still obey strict plane clearance checks.
+
+`WakeAdvectionReport` reports exact pair evaluations, accepted/visited cells,
+peak node count, metered work and the largest summed local velocity error
+bound. `SelfInducedShed::max_work` meters this mode as follows: source assembly
+uses the conservative source bound plus one per stage, construction charges
+bounded source passes and sorting, each target charges one, each tree visit
+eight, each accepted expansion sixteen, and each exact pair one. Construction
+and source/target work are included even when all circulations vanish. Exhaustion
+or cancellation rolls back the entire interval; accelerated admission does not
+require reserving the worst-case direct all-pairs workload.
+
+The report controls local source-evaluation error, with the analytic and
+floating-point qualifications of the expansion bound below. It does not
+certify accumulated trajectory, impulse or energy error, impose mutual
+pairwise approximate forces, or certify a real-time aircraft schedule. The
+whole-step battery checks exact zero-tolerance parity, accuracy refinement,
+nonzero accepted-cell work, image/core evolution, bit-identical physical
+partitioning, deterministic measured work caps and transactional cancellation.
+
 ### Coupled material motion across near/far representations
 
 `FarField::shed_self_induced` and its environment form advance retained exact
