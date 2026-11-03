@@ -3,6 +3,9 @@
 //! original Ogden energy; its roots and continuous reference do not use the FE
 //! residual or the new material discrete derivative.
 
+#[path = "hyper_conservative/reference_density.rs"]
+mod reference_density;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_feec::highorder::simplex::duffy_quadrature;

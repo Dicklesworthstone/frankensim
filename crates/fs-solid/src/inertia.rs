@@ -341,6 +341,40 @@ impl ReferenceMass {
                 "one positive reference density per Tet10 and complete nodal components required",
             ));
         }
+        Self::from_tet10_density_quadrature(
+            geometry.zip(densities).map(|((nodes, points), &density)| {
+                (
+                    nodes,
+                    points
+                        .into_iter()
+                        .map(move |(shapes, weight)| (shapes, weight, density)),
+                )
+            }),
+            ndofs,
+            maximum_assembly_bytes,
+            cx,
+        )
+    }
+
+    /// The same signed P2 mass kernel with an explicit positive reference
+    /// density at each original quadrature point. The caller admits its density
+    /// interpolation and quadrature degree; current volume never enters.
+    /// Scalar callers retain their original point-mass accumulation order.
+    pub(crate) fn from_tet10_density_quadrature<Q>(
+        geometry: impl ExactSizeIterator<Item = ([usize; 10], Q)>,
+        ndofs: usize,
+        maximum_assembly_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, InertiaError>
+    where
+        Q: IntoIterator<Item = ([f64; 10], f64, f64)>,
+    {
+        checkpoint(cx)?;
+        if geometry.len() == 0 || ndofs == 0 || !ndofs.is_multiple_of(3) {
+            return Err(invalid(
+                "nonempty Tet10 reference quadrature and complete nodal components required",
+            ));
+        }
         // Three uncoupled component blocks, with conservative room for COO
         // growth, stable-sort scratch, CSR and its row offsets. Quadrature is
         // borrowed and accumulated into one fixed local upper triangle.
@@ -362,7 +396,7 @@ impl ReferenceMass {
         }
         let mut mass = Coo::new(ndofs, ndofs);
         let mut reference_mass_kg = 0.0;
-        for ((nodes, points), &density) in geometry.zip(densities) {
+        for (nodes, points) in geometry {
             checkpoint(cx)?;
             if nodes.iter().any(|&node| node >= ndofs / 3)
                 || (0..10).any(|a| nodes[..a].contains(&nodes[a]))
@@ -372,17 +406,19 @@ impl ReferenceMass {
                 ));
             }
             let mut local = [[0.0; 10]; 10];
-            for (shapes, weight) in points {
+            for (shapes, weight, density) in points {
                 checkpoint(cx)?;
                 let partition = shapes.iter().sum::<f64>();
                 if !weight.is_finite()
                     || weight <= 0.0
+                    || !density.is_finite()
+                    || density <= 0.0
                     || shapes.iter().any(|n| !n.is_finite())
                     || !partition.is_finite()
                     || (partition - 1.0).abs() > 64.0 * f64::EPSILON
                 {
                     return Err(invalid(
-                        "positive Tet10 reference quadrature with finite partition of unity required",
+                        "positive Tet10 reference density and quadrature with finite partition of unity required",
                     ));
                 }
                 let point_mass = finite(density * weight)?;

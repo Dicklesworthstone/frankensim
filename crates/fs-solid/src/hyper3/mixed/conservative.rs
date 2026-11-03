@@ -35,6 +35,7 @@ use super::element::{MixedPoint, PreparedMixedElement, PreparedMixedMesh};
 use super::{MixedLawField, MixedUpError, MixedUpSettings};
 use crate::inertia::{MidpointInertia, ReferenceMass};
 use crate::linear3::TetAssemblyBudget;
+use crate::linear3::tet10::TET10_EDGES;
 
 pub use crate::inertia::InertialEnergy;
 
@@ -125,6 +126,21 @@ pub struct ConservativeTetDefinition<'a> {
     pub maximum_quadrature_points: usize,
     pub maximum_mass_assembly_bytes: usize,
     pub material_settings: DiscreteGradientSettings,
+}
+
+/// Immutable pointwise inventory plus reporting-only reference-volume means.
+#[derive(Clone, Debug)]
+struct CornerReferenceDensity<'a> {
+    corners_kg_m3: &'a [[f64; 4]],
+    means_kg_m3: Arc<[f64]>,
+}
+
+fn corner_density_at(density: [f64; 4], lambda: [f64; 4]) -> f64 {
+    if density.iter().all(|rho| *rho == density[0]) {
+        density[0]
+    } else {
+        (0..4).map(|a| lambda[a] * density[a]).sum()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -273,7 +289,66 @@ impl<'a> ConservativeTetDefinition<'a> {
         initial_pressure_pa: &[f64],
         cx: &Cx<'_>,
     ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
+        self.prepare_density(displacement_m, velocity_mps, initial_pressure_pa, None, cx)
+    }
+
+    /// Bind a positive P1 reference density to the native conservative motion.
+    ///
+    /// Each element supplies four corner values in its connectivity order;
+    /// interfaces may be discontinuous. This explicit field replaces the
+    /// definition's cellwise density for inertia. It is interpolated with the
+    /// positive barycentric basis, never the signed quadratic displacement
+    /// shapes, and remains fixed through every deformation and accepted step.
+    /// The full consistent P2 mass is shared by all three formulations.
+    ///
+    /// The existing prepared quadrature is reused without changing material
+    /// samples. Four Duffy points per direction integrate graded affine mass
+    /// exactly. A varying field on a curved quadratic map requires six: the
+    /// polynomial rho*N_a*N_b*det(J) has degree at most eight, and the collapsed
+    /// Duffy Jacobian adds two powers. Constant cell fields keep the original
+    /// scalar quadrature semantics and accumulation bits. Curved/nonlinear
+    /// material energy still needs its own quadrature-convergence assessment.
+    ///
+    /// Initial pressure has the same convention as `prepare_with_pressure`.
+    /// Invalid density, inadequate quadrature, resource limits or cancellation
+    /// refuse preparation without an accepted motion.
+    pub fn prepare_with_reference_density(
+        &self,
+        corner_density_kg_m3: &'a [[f64; 4]],
+        displacement_m: &[[f64; 3]],
+        velocity_mps: &[[f64; 3]],
+        initial_pressure_pa: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
+        self.prepare_density(
+            displacement_m,
+            velocity_mps,
+            initial_pressure_pa,
+            Some(corner_density_kg_m3),
+            cx,
+        )
+    }
+
+    fn prepare_density(
+        &self,
+        displacement_m: &[[f64; 3]],
+        velocity_mps: &[[f64; 3]],
+        initial_pressure_pa: &[f64],
+        corner_density_kg_m3: Option<&'a [[f64; 4]]>,
+        cx: &Cx<'_>,
+    ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
         checkpoint(cx)?;
+        if corner_density_kg_m3.is_some_and(|density| {
+            density.len() != self.elements.len()
+                || density
+                    .iter()
+                    .flatten()
+                    .any(|rho| !rho.is_finite() || *rho <= 0.0)
+        }) {
+            return Err(invalid(
+                "four finite positive reference corner densities per tetrahedron required",
+            ));
+        }
         if self
             .formulation
             .volume_controls()
@@ -319,8 +394,77 @@ impl<'a> ConservativeTetDefinition<'a> {
                 "elastic law field must cover the reference quadrature",
             ));
         }
-        let mass = Arc::new(
-            ReferenceMass::from_tet10_quadrature(
+        let (mass, corner_reference_density) = if let Some(densities) = corner_density_kg_m3 {
+            for (element, density) in self.elements.iter().zip(densities) {
+                checkpoint(cx)?;
+                if density.iter().all(|rho| *rho == density[0]) {
+                    continue;
+                }
+                let affine = TET10_EDGES.iter().enumerate().all(|(edge, &[a, b])| {
+                    (0..3).all(|c| {
+                        self.nodes_m[element[edge + 4]][c]
+                            == f64::midpoint(
+                                self.nodes_m[element[a]][c],
+                                self.nodes_m[element[b]][c],
+                            )
+                    })
+                });
+                if !affine && self.quadrature_points_per_dir < 6 {
+                    return Err(invalid(
+                        "curved TET10 graded reference density requires at least six Duffy points",
+                    ));
+                }
+            }
+            let mass = ReferenceMass::from_tet10_density_quadrature(
+                mesh.elements
+                    .iter()
+                    .zip(densities)
+                    .map(|(element, &density)| {
+                        (
+                            element.connectivity,
+                            element.points.iter().map(move |q| {
+                                (
+                                    q.shapes,
+                                    q.weight_m3,
+                                    corner_density_at(density, q.pressure_shapes),
+                                )
+                            }),
+                        )
+                    }),
+                3 * mesh.nodes_count,
+                self.maximum_mass_assembly_bytes,
+                cx,
+            )
+            .map_err(inertia_error)?;
+            // Aggregates are only for the existing reporting getter. Neither
+            // inertia nor acceleration loads consume these cell means.
+            let mut means = Vec::with_capacity(densities.len());
+            for (element, &density) in mesh.elements.iter().zip(densities) {
+                checkpoint(cx)?;
+                let mean = if density.iter().all(|rho| *rho == density[0]) {
+                    density[0]
+                } else {
+                    element
+                        .points
+                        .iter()
+                        .map(|q| corner_density_at(density, q.pressure_shapes) * q.weight_m3)
+                        .sum::<f64>()
+                        / element.reference_volume_m3
+                };
+                if !mean.is_finite() || mean <= 0.0 {
+                    return Err(invalid("reference-volume mean density is unrepresentable"));
+                }
+                means.push(mean);
+            }
+            (
+                Arc::new(mass),
+                Some(CornerReferenceDensity {
+                    corners_kg_m3: densities,
+                    means_kg_m3: means.into(),
+                }),
+            )
+        } else {
+            let mass = ReferenceMass::from_tet10_quadrature(
                 mesh.elements.iter().map(|element| {
                     (
                         element.connectivity,
@@ -332,8 +476,9 @@ impl<'a> ConservativeTetDefinition<'a> {
                 self.maximum_mass_assembly_bytes,
                 cx,
             )
-            .map_err(inertia_error)?,
-        );
+            .map_err(inertia_error)?;
+            (Arc::new(mass), None)
+        };
         let np = if self.formulation.volume_controls().is_some() {
             mesh.pressure_nodes.len()
         } else {
@@ -374,6 +519,7 @@ impl<'a> ConservativeTetDefinition<'a> {
             definition: *self,
             mesh,
             mass,
+            corner_reference_density,
             points: frozen.points,
             bulk_points: frozen.bulk_points,
             bulk_volume_ratios: frozen.bulk_volume_ratios,
@@ -590,6 +736,7 @@ pub struct ConservativeTetSolid<'a> {
     definition: ConservativeTetDefinition<'a>,
     mesh: Arc<PreparedMixedMesh>,
     mass: Arc<ReferenceMass>,
+    corner_reference_density: Option<CornerReferenceDensity<'a>>,
     points: Vec<DiscreteGradientPoint<'a>>,
     bulk_points: Vec<DiscreteBulkPoint>,
     bulk_volume_ratios: Vec<f64>,
@@ -698,11 +845,66 @@ impl<'a> ConservativeTetSolid<'a> {
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
     }
+    /// Original cell density, or reference-volume-weighted cell means for a
+    /// graded field. These aggregates are reporting values, not pointwise
+    /// density and not a replacement for the retained mass operator.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
-        self.definition.reference_density_kg_m3
+        self.corner_reference_density
+            .as_ref()
+            .map_or(self.definition.reference_density_kg_m3, |density| {
+                density.means_kg_m3.as_ref()
+            })
+    }
+    /// Complete immutable corner field, absent for the original cellwise model.
+    /// Current density would be this P1 field divided by the local positive
+    /// deformation Jacobian, not the cell mean divided by a mean volume ratio.
+    pub fn reference_corner_density_kg_m3(&self) -> Option<&[[f64; 4]]> {
+        self.corner_reference_density
+            .as_ref()
+            .map(|density| density.corners_kg_m3)
     }
     pub fn time_s(&self) -> f64 {
         self.time_s
+    }
+
+    /// Project nodal acceleration [m/s²] through this body's actual full M.
+    ///
+    /// The returned held nodal loads [N] include prescribed coordinates, whose
+    /// contributions enter native support reactions. P2 interpolation retains
+    /// uniform and affine physical acceleration exactly, including the signed
+    /// corner loads, resultant and torque of a graded body. No row lumping or
+    /// reference-volume averaging occurs. Pass these loads to `advance` without
+    /// adding the same acceleration again as a force density. Position-dependent
+    /// field evolution and its potential/tangent remain the external owner's
+    /// responsibility; this method supplies one held load projection.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, ConservativeTetError> {
+        checkpoint(cx)?;
+        if acceleration_m_s2.len() != self.mesh.nodes_count
+            || acceleration_m_s2.iter().flatten().any(|a| !a.is_finite())
+        {
+            return Err(invalid(
+                "one finite acceleration vector per original quadratic node required",
+            ));
+        }
+        let forces = self
+            .mass
+            .action(acceleration_m_s2.as_flattened(), cx)
+            .map_err(inertia_error)?;
+        let mut loads = Vec::with_capacity(forces.len());
+        for (dof, force) in forces.into_iter().enumerate() {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if force != 0.0 {
+                loads.push((dof, force));
+            }
+        }
+        checkpoint(cx)?;
+        Ok(loads)
     }
 
     /// Advance one positive interval. Explicit work allowance gates material,
@@ -1003,6 +1205,7 @@ impl<'a> ConservativeTetSolid<'a> {
                 definition: self.definition,
                 mesh: Arc::clone(&self.mesh),
                 mass: Arc::clone(&self.mass),
+                corner_reference_density: self.corner_reference_density.clone(),
                 points: frozen.points,
                 bulk_points: frozen.bulk_points,
                 bulk_volume_ratios: frozen.bulk_volume_ratios,

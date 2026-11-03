@@ -3874,6 +3874,31 @@ equals the kinetic-energy increment with zero algorithmic loss. This is a
 separate `MidpointInertia` path; existing backward-Euler motion keeps its
 original dissipative semantics.
 
+`ConservativeTetDefinition::prepare_with_reference_density` binds four positive
+P1 corner densities per original tetrahedron to that same signed consistent P2
+mass. The cached barycentric pressure basis supplies the density samples; no
+geometry reconstruction, row lumping or new time integrator is introduced.
+The immutable field and assembled mass remain shared through accepted motion
+for full-material, exact-incompressible and original finite-bulk formulations.
+Four Duffy points per direction admit graded affine inertia; a varying profile
+on a curved quadratic map requires six. Original constant cell fields retain
+their scalar quadrature semantics and accumulation bits.
+
+`reference_corner_density_kg_m3` exposes the retained field. For a graded body,
+`reference_density_kg_m3` reports reference-volume-weighted cell means; physical
+inertia and loads use the full field and mass operator. The body's
+`reference_acceleration_load_n` projects nodal acceleration through its actual
+full `M`, including prescribed coordinates and signed quadratic corner loads.
+Uniform gravity and affine acceleration therefore retain the body's original
+mass, force resultant and torque. The returned loads are held over a native
+interval; evolving position-dependent force laws retain their own owner.
+
+Independent barycentric polynomial integrals check every affine and curved
+mass entry. Native deforming, translating and spinning trajectories check
+energy and both momenta; acceleration fixtures exercise all three formulations
+and constrained support reactions. Admission, scalar parity and cancellation
+checks retain the original transactional boundary.
+
 Assembly contracts each point's true generally nonsymmetric endpoint tangent
 into one local displacement block before one element scatter. The native
 Newton-FGMRES owner uses that actual Jacobian; only its symmetric part supplies
