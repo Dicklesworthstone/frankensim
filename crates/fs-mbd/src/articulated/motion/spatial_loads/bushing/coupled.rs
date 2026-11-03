@@ -12,6 +12,9 @@ use super::super::super::prescribed::{
     PrescribedBaseMotionError, PrescribedBaseMotionState, PrescribedBasePath,
 };
 use super::super::prescribed::PrescribedSpatialMotionStep;
+use super::super::prescribed::implicit::{
+    ImplicitPrescribedSpatialError, ImplicitPrescribedSpatialStep,
+};
 use super::*;
 
 /// Fixed attachment geometry with independently prepared full passive K and C.
@@ -199,6 +202,64 @@ pub fn step_prescribed_base_bushings_with_effort(
         loads,
         bushings,
         duration,
+        Some(&mut effort),
+        cancelled,
+    )
+}
+
+/// Advance supported full K/C coupling with the native implicit midpoint solve.
+///
+/// All spatial loads, bushings and support dynamics use one simultaneous stage.
+/// The nonlinear unknowns are original joint rates; native ABA and RNEA retain
+/// the full mass distribution and prescribed support impulse/work. Implicit
+/// midpoint is A-stable for a linear oscillator but not L-stable; resolve phase
+/// and nonlinear geometry by timestep refinement.
+#[allow(clippy::too_many_arguments)]
+pub fn step_prescribed_base_bushings_implicit(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[CoupledSpatialBushing],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitPrescribedSpatialStep, ImplicitPrescribedSpatialError> {
+    super::super::prescribed::implicit::step_with_bushings_and_effort(
+        model, state, path, loads, bushings, duration, config, None, cancelled,
+    )
+}
+
+/// Solve smooth actuator feedback and supported full-matrix bushings together.
+///
+/// Feedback receives each actual trial midpoint, including numerical derivative
+/// stencils and independent final verification. The effort buffer is reset to
+/// held effort before each call. The law must be deterministic and smooth over
+/// admitted trials; callback-owned side effects cannot be rolled back.
+#[allow(clippy::too_many_arguments)]
+pub fn step_prescribed_base_bushings_implicit_with_effort(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[CoupledSpatialBushing],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    mut effort: impl FnMut(
+        f64,
+        &PrescribedBaseMotionState,
+        &mut [f64],
+    ) -> Result<(), PrescribedBaseMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitPrescribedSpatialStep, ImplicitPrescribedSpatialError> {
+    super::super::prescribed::implicit::step_with_bushings_and_effort(
+        model,
+        state,
+        path,
+        loads,
+        bushings,
+        duration,
+        config,
         Some(&mut effort),
         cancelled,
     )

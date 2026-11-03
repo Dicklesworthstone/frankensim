@@ -718,6 +718,15 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
 }
 
 fn validate_config(config: ImplicitSpatialConfig) -> Result<(), ImplicitSpatialError> {
+    if let Some(reason) = config_error(config) {
+        Err(ImplicitSpatialError::Invalid(reason))
+    } else {
+        Ok(())
+    }
+}
+
+/// Shared hard bounds for free and prescribed-base nonlinear midpoint solves.
+pub(super) fn config_error(config: ImplicitSpatialConfig) -> Option<&'static str> {
     if [
         config.angular_velocity_scale,
         config.linear_velocity_scale,
@@ -727,9 +736,7 @@ fn validate_config(config: ImplicitSpatialConfig) -> Result<(), ImplicitSpatialE
     .iter()
     .any(|x| !x.is_finite() || *x <= 0.0)
     {
-        return Err(ImplicitSpatialError::Invalid(
-            "finite positive rate scales and tolerances required",
-        ));
+        return Some("finite positive rate scales and tolerances required");
     }
     if config.maximum_iterations == 0
         || config.maximum_iterations > 64
@@ -738,11 +745,9 @@ fn validate_config(config: ImplicitSpatialConfig) -> Result<(), ImplicitSpatialE
         || config.krylov_restart == 0
         || config.krylov_restart > 64
     {
-        return Err(ImplicitSpatialError::Invalid(
-            "nonlinear work controls exceed admitted bounds",
-        ));
+        return Some("nonlinear work controls exceed admitted bounds");
     }
-    Ok(())
+    None
 }
 
 fn difference_error(error: FiniteDifferenceError<ImplicitSpatialError>) -> ImplicitSpatialError {

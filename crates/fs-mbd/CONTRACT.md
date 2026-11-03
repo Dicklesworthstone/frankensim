@@ -4397,3 +4397,35 @@ do not certify the continuous path.
 `tests/articulated_prescribed_coupled.rs` checks an independently solved
 translation/rotation mechanism under stationary and translating supports,
 feedback evaluated at the actual stages, and exact diagonal-law parity.
+
+
+## Implicit spatial motion on prescribed supports
+
+`articulated::motion::spatial_loads::prescribed::implicit` advances fixed
+and driven open-chain mechanisms with the same native implicit-midpoint
+solver family used by free flight. The unknowns are original scalar joint
+rates. Native ABA evaluates acceleration at each trial's midpoint joint
+configuration and caller-supplied base boundary; world loads, axial connections,
+diagonal or full passive bushings, and smooth feedback effort share that stage.
+
+The original Newton--Krylov, FGMRES and fallible directional-difference owners
+provide bounded iterations, cancellation and residual-evaluation budgets.
+No dense mass/Jacobian matrix or surrogate floating base is introduced.
+The final residual is independently evaluated before publication. All-fixed
+trees still recover actual reactions and work without fictitious unknowns.
+Feedback must be smooth and deterministic: nonlinear trials and derivative
+stencils may revisit states, and callback side effects remain caller-owned.
+
+Explicit and implicit lanes share admission, native RNEA support recovery,
+endpoint continuation, and physical momentum/work accounts. Support impulse
+and signed support work remain external; bushing storage and damping loss
+retain their original owners. Numerical momentum and energy defects remain
+visible. The caller supplies mutually consistent base pose, twist and spatial
+acceleration samples. Midpoint is A-stable on a linear oscillator but is not
+L-stable, does not select a unique nonlinear branch, and does not certify
+continuous-path geometry or rigid closure.
+
+Focused tests include stiff axial and cross-coupled translation/rotation
+oracles, second-order resolved oscillation, jointly implicit feedback and
+external loads, translating/accelerating/rotating supports, scalar root
+actuation, zero-DOF trees, exact diagonal parity and atomic refusal.

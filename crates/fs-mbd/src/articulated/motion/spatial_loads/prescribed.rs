@@ -4,6 +4,9 @@
 //! path. Only the mechanical boundary changes: native prescribed-base ABA and
 //! RNEA retain the actual support reaction and its signed work.
 
+/// Bounded implicit midpoint for stiff supported connections and smooth feedback.
+pub mod implicit;
+
 use super::super::prescribed::{
     EffortLaw, EvaluatedPrescribedStep, PrescribedBaseMotionError, PrescribedBaseMotionState,
     PrescribedBaseMotionStep, PrescribedBasePath, PrescribedStage, external_sources,

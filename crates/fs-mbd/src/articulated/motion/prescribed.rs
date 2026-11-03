@@ -272,21 +272,30 @@ pub(super) struct EvaluatedPrescribedStep {
     pub(super) dissipated_energy: f64,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
+pub(super) struct PrescribedInitial {
+    pub(super) kinematics: Kinematics,
+    pub(super) momentum: ArticulatedMomentum,
+    pub(super) midpoint_time: f64,
+    endpoint_time: f64,
+}
+
+pub(super) struct PrescribedMidpoint<'a> {
+    pub(super) state: PrescribedBaseMotionState,
+    pub(super) kinematics: Kinematics,
+    pub(super) load: PrescribedStage<'a>,
+    pub(super) generalized_acceleration: Vec<f64>,
+    pub(super) actuator_power: Dd,
+}
+
+/// Common admission and original initial momentum for both midpoint lanes.
+pub(super) fn prepare_step(
     model: &ArticulatedModel,
     state: &PrescribedBaseMotionState,
     path: PrescribedBasePath,
-    loads: FreeFloatingMotionLoads<'a>,
+    loads: FreeFloatingMotionLoads<'_>,
     duration: f64,
-    cancelled: &mut C,
-    mut evaluate: impl FnMut(
-        &PrescribedBaseMotionState,
-        &Kinematics,
-        &mut C,
-    ) -> Result<PrescribedStage<'a>, PrescribedBaseMotionError>,
-    mut effort: Option<&mut EffortLaw<'_>>,
-) -> Result<EvaluatedPrescribedStep, PrescribedBaseMotionError> {
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PrescribedInitial, PrescribedBaseMotionError> {
     poll(cancelled)?;
     let half = 0.5 * duration;
     let midpoint_time = state.time_s + half;
@@ -334,7 +343,34 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
     poll(cancelled)?;
     let momentum_before = momentum_from_kinematics(model, &before)?;
     poll(cancelled)?;
-    let initial_load = evaluate(state, &before, cancelled)?;
+    Ok(PrescribedInitial {
+        kinematics: before,
+        momentum: momentum_before,
+        midpoint_time,
+        endpoint_time,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: FreeFloatingMotionLoads<'a>,
+    duration: f64,
+    cancelled: &mut C,
+    mut evaluate: impl FnMut(
+        &PrescribedBaseMotionState,
+        &Kinematics,
+        &mut C,
+    ) -> Result<PrescribedStage<'a>, PrescribedBaseMotionError>,
+    mut effort: Option<&mut EffortLaw<'_>>,
+) -> Result<EvaluatedPrescribedStep, PrescribedBaseMotionError> {
+    let initial = prepare_step(model, state, path, loads, duration, cancelled)?;
+    let half = 0.5 * duration;
+    let midpoint_time = initial.midpoint_time;
+    let before = &initial.kinematics;
+    let initial_load = evaluate(state, before, cancelled)?;
     admit_stage(&initial_load)?;
     let mut stage_effort = Cow::Borrowed(loads.generalized_force);
     if let Some(law) = effort.as_deref_mut() {
@@ -389,12 +425,62 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
         &midpoint_load.body_wrench,
     )?;
     poll(cancelled)?;
+    let actuator_power = sum_products(
+        stage_effort.iter().copied(),
+        midpoint.joint_velocity.iter().copied(),
+    );
+    finish_step(
+        model,
+        state,
+        path,
+        loads,
+        duration,
+        initial,
+        initial_load.stored_energy,
+        PrescribedMidpoint {
+            state: midpoint,
+            kinematics: middle,
+            load: midpoint_load,
+            generalized_acceleration: midpoint_dynamics.generalized_acceleration,
+            actuator_power,
+        },
+        cancelled,
+    )
+}
+
+/// Common native endpoint, support reaction, momentum impulses and work accounts.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_step(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: FreeFloatingMotionLoads<'_>,
+    duration: f64,
+    initial: PrescribedInitial,
+    stored_energy_before: f64,
+    midpoint: PrescribedMidpoint<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<EvaluatedPrescribedStep, PrescribedBaseMotionError> {
+    poll(cancelled)?;
+    let PrescribedInitial {
+        kinematics: before,
+        momentum: momentum_before,
+        endpoint_time,
+        ..
+    } = initial;
+    let PrescribedMidpoint {
+        state: midpoint,
+        kinematics: middle,
+        load: midpoint_load,
+        generalized_acceleration,
+        actuator_power,
+    } = midpoint;
     let inverse = inverse_dynamics(
         model,
         midpoint.base,
         &midpoint.joint_position,
         &midpoint.joint_velocity,
-        &midpoint_dynamics.generalized_acceleration,
+        &generalized_acceleration,
         loads.gravity_world,
         &midpoint_load.body_wrench,
     )?;
@@ -439,11 +525,7 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
         time_s: endpoint_time,
         base: path.endpoint,
         joint_position: advance(&state.joint_position, &midpoint.joint_velocity, duration)?,
-        joint_velocity: advance(
-            &state.joint_velocity,
-            &midpoint_dynamics.generalized_acceleration,
-            duration,
-        )?,
+        joint_velocity: advance(&state.joint_velocity, &generalized_acceleration, duration)?,
     };
     let after = forward_kinematics(
         model,
@@ -469,10 +551,6 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
     let momentum_change = momentum_change.checked_wrench("prescribed_motion.momentum_change")?;
     let momentum_residual =
         momentum_residual.checked_wrench("prescribed_motion.momentum_residual")?;
-    let actuator_power = sum_products(
-        stage_effort.iter().copied(),
-        midpoint.joint_velocity.iter().copied(),
-    );
     let support_power = sum_products(
         support_wrench_body.to_array(),
         midpoint.base.twist_body.to_array(),
@@ -501,7 +579,7 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
     )?;
     poll(cancelled)?;
     Ok(EvaluatedPrescribedStep {
-        stored_energy_before: initial_load.stored_energy,
+        stored_energy_before,
         dissipated_energy: dissipated_energy.to_f64(),
         step: PrescribedBaseMotionStep {
             state_after,
@@ -580,7 +658,7 @@ fn held_stage<'a>(
     })
 }
 
-fn admit_stage(stage: &PrescribedStage<'_>) -> Result<(), PrescribedBaseMotionError> {
+pub(super) fn admit_stage(stage: &PrescribedStage<'_>) -> Result<(), PrescribedBaseMotionError> {
     stage
         .external
         .checked_wrench("prescribed_motion.stage_sources")?;
@@ -601,7 +679,7 @@ fn admit_stage(stage: &PrescribedStage<'_>) -> Result<(), PrescribedBaseMotionEr
     Ok(())
 }
 
-fn advance(
+pub(super) fn advance(
     values: &[f64],
     rates: &[f64],
     duration: f64,
