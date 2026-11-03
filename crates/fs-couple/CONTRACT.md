@@ -22649,6 +22649,136 @@ support reactions, redundant-load determinacy and original refusal parity; and
 check native continuation, bounded work, cancellation, exact no-ops and atomic
 late refusal/retry.
 
+## Simultaneous contact networks across independent native rods
+
+`rod_motion::rigid_impact::graph::network::apply_rigid_normal_contact_network`
+resolves one original normal-contact event across a bounded slice of continuing
+`RodMotion<I>` trajectories and original finite `RodRigidParticipant` bodies.
+`RodRigidNetworkEndpoint::Rod` identifies both a rod and its material node;
+matching node indices on different rods remain distinct kinetic blocks.
+`RodRigidNetworkContact` admits rod–rod, distinct-node self-contact, rod–body,
+and body–body edges in the same original simultaneous law. Two attachments on
+the same rigid participant remain inadmissible.
+
+The rods share their inertia representation type, but keep independent native
+models, section/material sources, masses, full central tensors, centroid
+offsets, stationary supports, poses and integration histories. Rod attachment
+offsets remain relative to the original material node, while rigid-body arms
+remain COM-relative. Every rod referenced by a witness must represent the same
+physical event time. Unreferenced rods preserve their own clocks without
+constraining unrelated contacts. No pose, clock, constitutive history or
+accepted-step count advances at this frozen-configuration event.
+
+One shared graph core owns the signed original `J M^-1 J^T`, original point
+kinematics, native impulse staging and actual-state admission for both indexed
+networks and the existing one-rod graph APIs. Shared kinetic blocks contribute
+their correct endpoint signs and full translation/rotation response; distinct
+rod owners contribute no artificial cross mass. The original normal solver
+retains complementarity, globally admissible restitution, total work/passivity,
+and unique-impulse versus unique-velocity determinacy. Redundant impulse values
+remain representatives, not unique local pressures or heat allocations.
+
+Each affected rod receives one original point-impulse batch, and each affected
+finite body receives one original resultant update. Every measured directional
+contact velocity must match the admitted law. A single double-double account
+then combines actual stored increments from all rods and bodies, including
+each original rod's support force/couple and each body's independent requested
+transfer. Rounded per-rod energies are never added to certify collective work.
+The original native impulse gates remain authoritative. Common momentum cannot
+inflate a transfer or work allowance, and failed numerical resolution cannot
+be reported as physical dissipation. All native candidates return together
+only after the law, endpoint, transfer, support-inclusive momentum, collective
+kinetic-work and final cancellation checks succeed.
+
+`RodRigidNetworkTransfer` preserves per-rod and per-body receipt ordering;
+untouched participants have no impulse receipt. Zero solutions invoke no
+native impulse owner. Empty rod/body slices are admitted when no witness names
+them. The existing single-rod graph APIs delegate to this same owner and retain
+their report shapes, original capacity and native behavior.
+
+`RodRigidNetworkBudget` checks input/output participants before graph allocation:
+the default and hard ceilings are 128 rods and 128 finite bodies, separately.
+The additional configurable total-node bound includes untouched rods because
+their continuing motion is returned; its default is 1,048,576 nodes and checked
+addition prevents overflow. The original normal law remains bounded to 64 rows.
+Matrix assembly uses quadratic contact work/storage and a linear number of
+original inverse-inertia actions. Native staging is linear in total rod nodes,
+bodies and contacts, with no per-edge trajectory clones or per-rod contact
+solver. Collision discovery, event timing, moving supports, continuous contact
+force evolution, heterogeneous inertia representation types in one slice, and
+thermal/material-loss partition remain separate contracts.
+
+G0/G1/G3/G4 groups compare three independently modeled rods and a finite body
+with analytic simultaneous collision equations for elastic, partially elastic
+and inelastic events; falsify sequential subgroup impacts; and check rod/body/
+contact permutations and native continuation. Independent six-dimensional
+material-origin spatial-mass blocks test eccentric rod–rod/body exchange with
+full tensors under rotated, translated and boosted frames. Supported rods
+independently close their actual force and couple reactions against one shared
+body. Additional cases retain a known small collision loss during large common
+momentum, preserve original single-rod and true rigid-only behavior, retain
+redundant-cycle velocity determinacy, and exercise clock/participant/node
+admission, cancellation, exact no-ops and deterministic retry.
+
+## Simultaneous Coulomb contact networks across independent native rods
+
+`rod_motion::rigid_impact::graph::network::friction::apply_rigid_frictional_contact_network`
+resolves one simultaneous normal-and-two-tangent event across a slice of
+independent native rods and a slice of original finite rigid bodies. A
+`RodRigidFrictionalNetworkContact` adds a tangent hint and an explicitly resolved
+event-local Coulomb coefficient to the indexed `RodRigidNetworkContact`.
+Rod/node indices select an original trajectory and its original kinetic block;
+equal node numbers or equal material/inertia values on different rods never
+merge participants. Rods share their inertia representation type but retain
+independent models, material properties, support sets and integration histories.
+
+Cross-rod contact, distinct-node self-contact, rod/body and body/body edges may
+coexist in the same original Signorini--Coulomb solve. The shared network owner
+supplies actual material-point geometry, compensated relative velocities and
+the complete signed contact-major `3N x 3N` mobility. Original full tensors,
+eccentric offsets, stationary supports and shared-participant cross terms enter
+without surrogate bodies or pairwise resolution. The published single-rod
+`RodMotion::apply_rigid_frictional_contact_graph` now delegates to this owner;
+its public controls, result and original single-rod capacity remain intact.
+
+Every rod referenced by a witness must represent the same physical event time.
+Unreferenced rods impose no clock constraint and retain their original state.
+The existing contact owner retains its non-associated friction law, Newton
+restitution, global passivity, determinacy, work witnesses and refusal classes.
+Redundant impulse representatives do not determine unique local contact loads
+or per-edge heat. Tangential impulses require actual witness collocation within
+the declared geometry allowance; no endpoint is relocated to conceal a couple.
+
+Common staging executes one native point-impulse batch per affected rod and one
+native resultant momentum update per affected finite body. Before returning any
+participant it checks the actual endpoint velocity triples, each original
+transfer, complete stationary-support reactions, aggregate linear and angular
+momentum and collective kinetic work against the original contact work/loss.
+All continuing rods and bodies return in their input order. Poses, constitutive
+state, clocks and accepted-step counts remain unchanged. A zero-impulse result
+invokes no native impulse owner; cancellation or any early/late refusal returns
+no partial candidate.
+
+The original 21-contact / 63-directional-row solver limits, explicit rod/body
+caps and checked aggregate rod-node bound are admitted before graph arrays are
+allocated. Shared response assembly is quadratic in contacts with a linear
+number of original inverse-inertia actions. Native staging is linear in total
+rod nodes, bodies and edges, with no per-edge trajectory clone. Empty rod or
+body slices are supported when no witness references them. Collision discovery,
+event-time location, persistent friction, moving-support work and local thermal
+partition remain separate owners.
+
+G0/G1/G3/G4 groups compare a two-rod/body chain with independent simultaneous
+sticking/sliding equations over restitution and friction regimes, and falsify
+sequential pair resolution. An independent six-dimensional material-origin
+mass oracle covers two eccentric rods, a full-tensor finite body, sticking and
+sliding, world/tangent-frame changes and rod/contact permutations. Further
+fixtures reconstruct cross-rod support force/couple reactions; retain original
+redundant-load determinacy and constitutive ambiguity refusals; and check native
+continuation, participant identity, clock compatibility, bounded nodes/owners,
+late imbalance refusal, cancellation/retry, exact no-ops, a true rigid-only
+empty-rod call and published one-rod API equivalence.
+
 ## Coulomb friction in isolated native rod/rigid impacts
 
 `rod_motion::RodMotion::apply_rigid_frictional_impact` resolves the normal and

@@ -127,6 +127,14 @@ pub(super) struct RigidMomentumTransfer {
     pub(super) expected_angular_body_nm_s: [Dd; 3],
 }
 
+/// One independently continuing rod and its original native impulse receipt.
+/// Rod work is accumulated with every other participant before any rounding.
+pub(super) struct RodMomentumTransfer<'a, I: RodMotionInertia> {
+    pub(super) before: &'a RodMotion<I>,
+    pub(super) after: &'a RodMotion<I>,
+    pub(super) receipt: Option<&'a RodImpulseReport>,
+}
+
 /// Work belongs to the complete simultaneous event, while stored momentum
 /// resolution must be checked independently for every original participant.
 pub(super) struct RodRigidSystemAudit<'a> {
@@ -405,48 +413,78 @@ impl<I: RodMotionInertia> RodMotion<I> {
         controls: RodRigidImpactControls,
         gate: &CancelGate,
     ) -> Result<RodRigidImpulseBalance, RodRigidImpactError> {
+        Self::audit_rod_rigid_network(
+            &[RodMomentumTransfer {
+                before: self,
+                after: next_rod,
+                receipt: rod_report,
+            }],
+            audit,
+            controls,
+            gate,
+        )
+    }
+
+    /// Accumulate every independent rod and finite body in one physical work
+    /// account. Per-rod rounded kinetic differences would lose cross-owner
+    /// cancellation under common translation; only the final event is rounded.
+    pub(super) fn audit_rod_rigid_network(
+        rods: &[RodMomentumTransfer<'_, I>],
+        audit: RodRigidSystemAudit<'_>,
+        controls: RodRigidImpactControls,
+        gate: &CancelGate,
+    ) -> Result<RodRigidImpulseBalance, RodRigidImpactError> {
         checkpoint(gate)?;
-        if rod_report.is_none() && (self.linear != next_rod.linear || self.spin != next_rod.spin) {
-            return Err(RodRigidImpactError::Invalid(
-                "changed rod momentum requires its native impulse receipt",
-            ));
-        }
         let mut kinetic = dd(0.0);
         let mut linear = [dd(0.0); 3];
         let mut angular = [dd(0.0); 3];
         let origin = controls.impulse.balance_origin_m;
-        if let Some(rod_report) = rod_report {
-            if rod_report.support_impulses.len() != self.linear.len() {
+        for transfer in rods {
+            checkpoint(gate)?;
+            let rod = transfer.before;
+            let next_rod = transfer.after;
+            let Some(rod_report) = transfer.receipt else {
+                if rod.linear != next_rod.linear || rod.spin != next_rod.spin {
+                    return Err(RodRigidImpactError::Invalid(
+                        "changed rod momentum requires its native impulse receipt",
+                    ));
+                }
+                continue;
+            };
+            if rod_report.support_impulses.len() != rod.linear.len()
+                || next_rod.linear.len() != rod.linear.len()
+                || next_rod.spin.len() != rod.spin.len()
+            {
                 return Err(RodRigidImpactError::Invalid(
                     "incomplete rod support receipt",
                 ));
             }
-            for node in 0..self.linear.len() {
+            for node in 0..rod.linear.len() {
                 checkpoint(gate)?;
                 let support = &rod_report.support_impulses[node];
-                if self.linear[node] == next_rod.linear[node]
-                    && self.spin[node] == next_rod.spin[node]
+                if rod.linear[node] == next_rod.linear[node]
+                    && rod.spin[node] == next_rod.spin[node]
                     && support.linear_n_s == [0.0; 3]
                     && support.angular_nm_s == [0.0; 3]
                 {
                     continue;
                 }
-                let k = self.kinetics[node];
-                let frame = self.pose.frames[node];
-                let dp = difference(next_rod.linear[node], self.linear[node]);
-                let ds = difference(next_rod.spin[node], self.spin[node]);
-                let old_omega = k.omega(self.spin[node])?;
+                let k = rod.kinetics[node];
+                let frame = rod.pose.frames[node];
+                let dp = difference(next_rod.linear[node], rod.linear[node]);
+                let ds = difference(next_rod.spin[node], rod.spin[node]);
+                let old_omega = k.omega(rod.spin[node])?;
                 let next_omega = k.omega(next_rod.spin[node])?;
                 for c in 0..3 {
                     kinetic = kinetic
                         + dp[c]
-                            * (dd(self.linear[node][c]) * dd(0.5)
+                            * (dd(rod.linear[node][c]) * dd(0.5)
                                 + dd(next_rod.linear[node][c]) * dd(0.5))
                             / dd(k.mass)
                         + ds[c] * (dd(old_omega[c]) * dd(0.5) + dd(next_omega[c]) * dd(0.5));
                     linear[c] = linear[c] + dp[c] - dd(support.linear_n_s[c]);
                 }
-                let node_arm = sub(self.pose.positions_m[node], origin);
+                let node_arm = sub(rod.pose.positions_m[node], origin);
                 let centroid_arm = add(node_arm, rotate(frame, k.center)?);
                 let orbital = cross_dd(centroid_arm, dp);
                 let spin_world = rotate(frame, ds.map(Dd::to_f64))?;

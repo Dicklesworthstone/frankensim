@@ -3,6 +3,9 @@
 #[path = "graph/friction.rs"]
 mod friction;
 
+#[path = "graph/network.rs"]
+mod network;
+
 use super::*;
 use fs_contact::multicontact::{MultiImpactConfig, MultiImpactDeterminacy};
 use fs_couple::rod_motion::rigid_impact::graph::{

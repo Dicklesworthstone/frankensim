@@ -5,18 +5,21 @@
 //! rod self-contact can participate in one contact law without a pair ordering.
 
 pub mod friction;
+pub mod network;
 
+use self::network::{
+    RodRigidNetworkBudget, RodRigidNetworkContact, RodRigidNetworkEndpoint,
+    RodRigidNetworkTransfer, apply_rigid_normal_contact_network, validate_network_budget,
+};
 use super::super::impulse::{RodImpulseReport, RodPointImpulse};
 use super::super::{RodMotion, RodMotionInertia, add, checkpoint, sub};
 use super::multiple::RodRigidMultiImpactError;
 use super::{
-    RigidMomentumTransfer, RodRigidImpactControls, RodRigidImpactError, RodRigidImpulseBalance,
-    RodRigidSystemAudit, components, cross, cross_dd, dd, dot, finite, norm, project_velocity,
-    rotate, validate_controls, vector,
+    RigidMomentumTransfer, RodMomentumTransfer, RodRigidImpactControls, RodRigidImpactError,
+    RodRigidImpulseBalance, RodRigidSystemAudit, components, cross, cross_dd, dd, dot, finite,
+    norm, project_velocity, rotate, validate_controls, vector,
 };
-use fs_contact::multicontact::{
-    MultiImpactConfig, MultiImpactResult, NormalContactImpact, solve_normal_impacts,
-};
+use fs_contact::multicontact::{MultiImpactConfig, MultiImpactResult};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 use fs_mbd::{MassProperties, MomentumImpulseReceipt, RigidBodyState};
@@ -114,13 +117,13 @@ pub(super) struct PreparedGraphContact {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Participant {
-    Rod(usize),
+    Rod { rod: usize, node: usize },
     Rigid(usize),
 }
 
 #[derive(Clone, Copy)]
 struct PreparedEndpoint {
-    original: RodRigidEndpoint,
+    original: RodRigidNetworkEndpoint,
     owner: Participant,
     central_arm_body_m: [f64; 3],
     point_world_m: [f64; 3],
@@ -133,6 +136,12 @@ struct DirectionResponse {
     direction_world: [f64; 3],
     torque_body: [f64; 3],
     rotation_body: [f64; 3],
+}
+
+/// The same endpoint, mobility and publication owner serves one or many rods.
+/// Borrowing the original motions retains their model, material and time owners.
+pub(super) struct ContactNetwork<'a, I: RodMotionInertia> {
+    pub(super) rods: &'a [RodMotion<I>],
 }
 
 impl<I: RodMotionInertia> RodMotion<I> {
@@ -171,80 +180,71 @@ impl<I: RodMotionInertia> RodMotion<I> {
                 "normal graph contact budget",
             ));
         }
-        let geometry = self.prepare_contact_graph(bodies, witnesses, controls, budget, gate)?;
-        let axes: Vec<_> = geometry.contacts.iter().map(|p| [p.normal_world]).collect();
-        let delassus = self.contact_graph_mobility(bodies, &geometry, &axes, gate)?;
-        let contacts: Vec<_> = geometry
-            .contacts
-            .iter()
-            .zip(witnesses)
-            .map(|(point, witness)| {
-                Ok(NormalContactImpact {
-                    gap: point.gap_m,
-                    activation_tolerance: witness.activation_tolerance_m,
-                    relative_normal_speed: project_velocity(
-                        point.normal_world,
-                        point.relative_velocity_world_m_s,
-                    )?,
-                    restitution: witness.restitution,
-                })
-            })
-            .collect::<Result<_, RodRigidImpactError>>()?;
-        let contact =
-            solve_normal_impacts(&contacts, &delassus, contact_config, || gate.is_requested())?;
-        let impulses: Vec<_> = contact.normal_impulses.iter().map(|&p| [p]).collect();
-        let predicted: Vec<_> = contact
-            .relative_normal_speeds_after
-            .iter()
-            .map(|&v| [v])
-            .collect();
-        let (next_rod, next_bodies, transfer) = self.stage_contact_graph(
+        validate_graph_budget(bodies.len(), budget)?;
+        let contacts: Vec<_> = witnesses.iter().copied().map(Into::into).collect();
+        let (mut next_rods, next_bodies, report) = apply_rigid_normal_contact_network(
+            core::slice::from_ref(self),
             bodies,
-            &geometry,
-            &axes,
-            &impulses,
-            &predicted,
-            contact.dissipated_energy,
-            contact.relative_work,
+            &contacts,
             controls,
+            contact_config,
+            RodRigidNetworkBudget {
+                maximum_rods: 1,
+                maximum_bodies: budget.maximum_bodies,
+                maximum_rod_nodes: self.kinetics.len(),
+            },
             gate,
         )?;
+        let next_rod = next_rods
+            .pop()
+            .ok_or_else(|| invalid("absent native rod candidate"))?;
         Ok((
             next_rod,
             next_bodies,
             RodRigidGraphImpactReport {
-                contact,
-                delassus_kg_inverse: delassus,
-                gaps_m: geometry.contacts.iter().map(|p| p.gap_m).collect(),
-                unit_normals_world: geometry.contacts.iter().map(|p| p.normal_world).collect(),
-                relative_normal_speeds_before_m_s: contacts
-                    .iter()
-                    .map(|p| p.relative_normal_speed)
-                    .collect(),
-                transfer,
+                contact: report.contact,
+                delassus_kg_inverse: report.delassus_kg_inverse,
+                gaps_m: report.gaps_m,
+                unit_normals_world: report.unit_normals_world,
+                relative_normal_speeds_before_m_s: report.relative_normal_speeds_before_m_s,
+                transfer: report.transfer.into_single_rod(),
             },
         ))
     }
+}
 
+impl<I: RodMotionInertia> ContactNetwork<'_, I> {
     pub(super) fn prepare_contact_graph(
         &self,
         bodies: &[RodRigidParticipant],
-        witnesses: &[RodRigidGraphContact],
+        witnesses: &[RodRigidNetworkContact],
         controls: RodRigidImpactControls,
-        budget: RodRigidGraphBudget,
+        budget: RodRigidNetworkBudget,
         gate: &CancelGate,
     ) -> Result<GraphGeometry, RodRigidImpactError> {
         checkpoint(gate)?;
-        validate_graph_budget(bodies.len(), budget)?;
+        validate_network_budget(self.rods, bodies.len(), budget)?;
         if witnesses.len() > 64 {
             return Err(invalid("contact graph row budget"));
         }
         validate_controls(controls)?;
         let mut contacts = Vec::with_capacity(witnesses.len());
+        let mut event_time = None;
         for witness in witnesses {
             checkpoint(gate)?;
             let positive = self.graph_endpoint(bodies, witness.positive)?;
             let negative = self.graph_endpoint(bodies, witness.negative)?;
+            // A contact network is one physical event. Unreferenced rods are
+            // retained but do not make unrelated clocks constrain this event.
+            for endpoint in [positive, negative] {
+                if let Participant::Rod { rod, .. } = endpoint.owner {
+                    let time = self.rods[rod].time_s;
+                    if event_time.is_some_and(|previous| previous != time) {
+                        return Err(invalid("contact network rod clocks differ"));
+                    }
+                    event_time = Some(time);
+                }
+            }
             if positive.owner == negative.owner {
                 return Err(invalid(
                     "contact endpoints belong to the same rigid participant",
@@ -315,12 +315,13 @@ impl<I: RodMotionInertia> RodMotion<I> {
                                 * (dot_dd(a.torque_body, b.rotation_body)
                                     + dot_dd(b.torque_body, a.rotation_body));
                         match a.owner {
-                            Participant::Rod(node) => {
+                            Participant::Rod { rod, node } => {
+                                let rod = &self.rods[rod];
                                 for c in 0..3 {
-                                    if !self.model.fixed_positions()[node][c] {
+                                    if !rod.model.fixed_positions()[node][c] {
                                         value = value
                                             + dd(a.direction_world[c]) * dd(b.direction_world[c])
-                                                / dd(self.kinetics[node].mass);
+                                                / dd(rod.kinetics[node].mass);
                                     }
                                 }
                             }
@@ -353,7 +354,14 @@ impl<I: RodMotionInertia> RodMotion<I> {
         law_relative_work_j: f64,
         controls: RodRigidImpactControls,
         gate: &CancelGate,
-    ) -> Result<(Self, Vec<RigidBodyState>, RodRigidGraphTransfer<D>), RodRigidImpactError> {
+    ) -> Result<
+        (
+            Vec<RodMotion<I>>,
+            Vec<RigidBodyState>,
+            RodRigidNetworkTransfer<D>,
+        ),
+        RodRigidImpactError,
+    > {
         checkpoint(gate)?;
         let count = geometry.contacts.len();
         if !matches!(D, 1 | 3)
@@ -372,19 +380,26 @@ impl<I: RodMotionInertia> RodMotion<I> {
             before.push(velocity);
         }
         let mut next_bodies: Vec<_> = bodies.iter().map(|body| body.state).collect();
-        let mut transfer = RodRigidGraphTransfer {
+        let mut transfer = RodRigidNetworkTransfer {
             relative_velocities_after_m_s: before.clone(),
             endpoint_velocity_residuals_m_s: vec![[0.0; D]; count],
             impulses_world_n_s: vec![[0.0; 3]; count],
-            rod_impulse: None,
+            rod_impulses: vec![None; self.rods.len()],
             rigid_impulses: vec![None; bodies.len()],
             balance: None,
         };
         if impulses.iter().flatten().all(|&p| p == 0.0) {
+            let mut rods = Vec::with_capacity(self.rods.len());
+            for rod in self.rods {
+                checkpoint(gate)?;
+                rods.push(rod.clone());
+            }
             checkpoint(gate)?;
-            return Ok((self.clone(), next_bodies, transfer));
+            return Ok((rods, next_bodies, transfer));
         }
-        let mut rod_impulses = Vec::with_capacity(2 * count);
+        // A batch belongs to a complete native trajectory, while each kinetic
+        // block in the mobility is identified by BOTH its rod and node index.
+        let mut rod_impulses = vec![Vec::new(); self.rods.len()];
         let mut body_linear = vec![[Dd::ZERO; 3]; bodies.len()];
         let mut body_angular = vec![[Dd::ZERO; 3]; bodies.len()];
         for i in 0..count {
@@ -418,15 +433,19 @@ impl<I: RodMotionInertia> RodMotion<I> {
                     impulse.map(|v| -v)
                 };
                 match endpoint.original {
-                    RodRigidEndpoint::Rod { node, point_body_m } => {
-                        rod_impulses.push(RodPointImpulse {
+                    RodRigidNetworkEndpoint::Rod {
+                        rod,
+                        node,
+                        point_body_m,
+                    } => {
+                        rod_impulses[rod].push(RodPointImpulse {
                             node,
                             point_body_m,
                             linear_world_n_s: applied,
                             couple_world_nm_s: [0.0; 3],
                         });
                     }
-                    RodRigidEndpoint::Rigid { body, arm_body_m } => {
+                    RodRigidNetworkEndpoint::Rigid { body, arm_body_m } => {
                         let local = components(
                             bodies[body]
                                 .state
@@ -443,13 +462,18 @@ impl<I: RodMotionInertia> RodMotion<I> {
                 }
             }
         }
-        let (next_rod, rod_report) = if rod_impulses.is_empty() {
-            (self.clone(), None)
-        } else {
-            let (next, report) =
-                self.apply_point_impulses(&rod_impulses, controls.impulse, gate)?;
-            (next, Some(report))
-        };
+        let mut next_rods = Vec::with_capacity(self.rods.len());
+        for (index, (rod, impulses)) in self.rods.iter().zip(&rod_impulses).enumerate() {
+            checkpoint(gate)?;
+            let next = if impulses.is_empty() {
+                rod.clone()
+            } else {
+                let (next, report) = rod.apply_point_impulses(impulses, controls.impulse, gate)?;
+                transfer.rod_impulses[index] = Some(report);
+                next
+            };
+            next_rods.push(next);
+        }
         let mut body_transfers = Vec::with_capacity(bodies.len());
         for (index, body) in bodies.iter().enumerate() {
             checkpoint(gate)?;
@@ -483,11 +507,12 @@ impl<I: RodMotionInertia> RodMotion<I> {
             .collect();
         let mut relative_work = Dd::ZERO;
         let mut velocity_defect: f64 = 0.0;
+        let candidate = ContactNetwork { rods: &next_rods };
         for i in 0..count {
             checkpoint(gate)?;
             let point = &geometry.contacts[i];
-            let positive = next_rod.graph_endpoint(&candidates, point.endpoints[0].original)?;
-            let negative = next_rod.graph_endpoint(&candidates, point.endpoints[1].original)?;
+            let positive = candidate.graph_endpoint(&candidates, point.endpoints[0].original)?;
+            let negative = candidate.graph_endpoint(&candidates, point.endpoints[1].original)?;
             let after = relative_velocity(positive, negative)?;
             for a in 0..D {
                 let after = project_velocity(axes[i][a], after)?;
@@ -505,9 +530,19 @@ impl<I: RodMotionInertia> RodMotion<I> {
             finite(&[error])?;
             velocity_defect = velocity_defect.max(error);
         }
-        let balance = self.audit_rigid_system_impulse(
-            &next_rod,
-            rod_report.as_ref(),
+        let rod_transfers: Vec<_> = self
+            .rods
+            .iter()
+            .zip(&next_rods)
+            .zip(&transfer.rod_impulses)
+            .map(|((before, after), receipt)| RodMomentumTransfer {
+                before,
+                after,
+                receipt: receipt.as_ref(),
+            })
+            .collect();
+        let balance = RodMotion::<I>::audit_rod_rigid_network(
+            &rod_transfers,
             RodRigidSystemAudit {
                 bodies: &body_transfers,
                 relative_work_j: relative_work,
@@ -527,32 +562,45 @@ impl<I: RodMotionInertia> RodMotion<I> {
                 work_defect_j: law_work_defect,
             });
         }
-        transfer.rod_impulse = rod_report;
         transfer.balance = Some(balance);
         checkpoint(gate)?;
-        Ok((next_rod, next_bodies, transfer))
+        Ok((next_rods, next_bodies, transfer))
     }
 
     fn graph_endpoint(
         &self,
         bodies: &[RodRigidParticipant],
-        original: RodRigidEndpoint,
+        original: RodRigidNetworkEndpoint,
     ) -> Result<PreparedEndpoint, RodRigidImpactError> {
         let (owner, arm, point, translation, rotation) = match original {
-            RodRigidEndpoint::Rod { node, point_body_m } => {
+            RodRigidNetworkEndpoint::Rod {
+                rod,
+                node,
+                point_body_m,
+            } => {
                 finite(&point_body_m)?;
-                let k = *self
+                let motion = self
+                    .rods
+                    .get(rod)
+                    .ok_or_else(|| invalid("absent graph rod"))?;
+                let k = *motion
                     .kinetics
                     .get(node)
                     .ok_or_else(|| invalid("absent graph rod node"))?;
-                let frame = self.pose.frames[node];
+                let frame = motion.pose.frames[node];
                 let arm = sub(point_body_m, k.center);
-                let point = add(self.pose.positions_m[node], rotate(frame, point_body_m)?);
-                let rotation = rotate(frame, cross(k.omega(self.spin[node])?, arm))?;
-                let translation = self.linear[node].map(|p| dd(p) / dd(k.mass));
-                (Participant::Rod(node), arm, point, translation, rotation)
+                let point = add(motion.pose.positions_m[node], rotate(frame, point_body_m)?);
+                let rotation = rotate(frame, cross(k.omega(motion.spin[node])?, arm))?;
+                let translation = motion.linear[node].map(|p| dd(p) / dd(k.mass));
+                (
+                    Participant::Rod { rod, node },
+                    arm,
+                    point,
+                    translation,
+                    rotation,
+                )
             }
-            RodRigidEndpoint::Rigid { body, arm_body_m } => {
+            RodRigidNetworkEndpoint::Rigid { body, arm_body_m } => {
                 finite(&arm_body_m)?;
                 let body_value = *bodies
                     .get(body)
@@ -596,14 +644,15 @@ impl<I: RodMotionInertia> RodMotion<I> {
         direction: [f64; 3],
     ) -> Result<DirectionResponse, RodRigidImpactError> {
         let (torque, rotation) = match endpoint.owner {
-            Participant::Rod(node) => {
-                let local = rotate(self.pose.frames[node].inverse(), direction)?;
+            Participant::Rod { rod, node } => {
+                let rod = &self.rods[rod];
+                let local = rotate(rod.pose.frames[node].inverse(), direction)?;
                 let torque = cross(endpoint.central_arm_body_m, local);
                 finite(&torque)?;
-                let rotation = if self.model.fixed_frames()[node] {
+                let rotation = if rod.model.fixed_frames()[node] {
                     [0.0; 3]
                 } else {
-                    self.kinetics[node].omega(torque)?
+                    rod.kinetics[node].omega(torque)?
                 };
                 (torque, rotation)
             }

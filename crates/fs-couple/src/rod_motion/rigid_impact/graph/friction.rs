@@ -4,16 +4,17 @@
 //! the common graph owner. This adapter only selects the original three-axis
 //! contact law; normal and tangent impulses share the same graph response.
 
-use super::super::friction::{RodRigidFrictionalControls, RodRigidFrictionalError, contact_frame};
-use super::super::{RodRigidImpactError, project_velocity};
+use super::super::RodRigidImpactError;
+use super::super::friction::{RodRigidFrictionalControls, RodRigidFrictionalError};
+use super::network::friction::{
+    RodRigidFrictionalNetworkContact, apply_rigid_frictional_contact_network,
+};
+use super::network::{RodRigidNetworkBudget, validate_network_budget};
 use super::{
     RodRigidGraphBudget, RodRigidGraphContact, RodRigidGraphTransfer, RodRigidParticipant,
-    validate_graph_budget,
 };
 use crate::rod_motion::{RodMotion, RodMotionInertia, checkpoint};
-use fs_contact::frictional_multicontact::{
-    FrictionalContact, FrictionalContactResult, NormalVelocityLaw, solve_frictional_contacts,
-};
+use fs_contact::frictional_multicontact::FrictionalContactResult;
 use fs_exec::CancelGate;
 use fs_mbd::RigidBodyState;
 
@@ -85,56 +86,38 @@ impl<I: RodMotionInertia> RodMotion<I> {
         {
             return Err(RodRigidImpactError::Invalid("frictional graph contact budget").into());
         }
-        validate_graph_budget(bodies.len(), budget)?;
-        let edges: Vec<_> = witnesses.iter().map(|witness| witness.geometry).collect();
-        let geometry = self.prepare_contact_graph(bodies, &edges, controls.impact, budget, gate)?;
-        let mut frames = Vec::with_capacity(count);
-        let mut contacts = Vec::with_capacity(count);
-        for (i, witness) in witnesses.iter().enumerate() {
-            checkpoint(gate)?;
-            let point = &geometry.contacts[i];
-            let frame = contact_frame(point.normal_world, witness.tangent_world)?;
-            let mut before = [0.0; 3];
-            for a in 0..3 {
-                before[a] = project_velocity(frame[a], point.relative_velocity_world_m_s)?;
-            }
-            frames.push(frame);
-            contacts.push(FrictionalContact {
-                id: i as u64,
-                gap: point.gap_m,
-                activation_tolerance: witness.geometry.activation_tolerance_m,
-                relative_velocity: before,
+        let budget = RodRigidNetworkBudget {
+            maximum_rods: 1,
+            maximum_bodies: budget.maximum_bodies,
+            maximum_rod_nodes: self.model().inertia().len(),
+        };
+        validate_network_budget(core::slice::from_ref(self), bodies.len(), budget)?;
+        let contacts: Vec<_> = witnesses
+            .iter()
+            .map(|witness| RodRigidFrictionalNetworkContact {
+                geometry: witness.geometry.into(),
+                tangent_world: witness.tangent_world,
                 friction_coefficient: witness.friction_coefficient,
-                normal_law: NormalVelocityLaw::NewtonRestitution {
-                    coefficient: witness.geometry.restitution,
-                },
-            });
-        }
-        let delassus = self.contact_graph_mobility(bodies, &geometry, &frames, gate)?;
-        let contact = solve_frictional_contacts(&contacts, &delassus, controls.contact, || {
-            gate.is_requested()
-        })?;
-        let (rod, states, transfer) = self.stage_contact_graph(
+            })
+            .collect();
+        let (mut rods, states, report) = apply_rigid_frictional_contact_network(
+            core::slice::from_ref(self),
             bodies,
-            &geometry,
-            &frames,
-            &contact.impulses,
-            &contact.relative_velocities_after,
-            contact.dissipated_energy,
-            contact.relative_work,
-            controls.impact,
+            &contacts,
+            controls,
+            budget,
             gate,
         )?;
+        let rod = rods.pop().ok_or(RodRigidImpactError::Invalid(
+            "single-rod contact result missing its participant",
+        ))?;
         let report = RodRigidFrictionalGraphReport {
-            contact,
-            delassus_kg_inverse: delassus,
-            gaps_m: contacts.iter().map(|point| point.gap).collect(),
-            frames_world: frames,
-            relative_velocities_before_m_s: contacts
-                .iter()
-                .map(|point| point.relative_velocity)
-                .collect(),
-            transfer,
+            contact: report.contact,
+            delassus_kg_inverse: report.delassus_kg_inverse,
+            gaps_m: report.gaps_m,
+            frames_world: report.frames_world,
+            relative_velocities_before_m_s: report.relative_velocities_before_m_s,
+            transfer: report.transfer.into_single_rod(),
         };
         checkpoint(gate)?;
         Ok((rod, states, report))
