@@ -9,10 +9,9 @@ use fs_material::state_point::{
 use fs_qty::{Dims, QuantitySpec};
 use fs_tribo::FrictionLaw;
 
-/// Dimensionless residual static coefficient after complete cohesive failure.
-pub const RESIDUAL_STATIC_FRICTION_PROPERTY: &str = "cohesive_residual_static_friction";
-/// Dimensionless residual kinetic coefficient after complete cohesive failure.
-pub const RESIDUAL_KINETIC_FRICTION_PROPERTY: &str = "cohesive_residual_kinetic_friction";
+pub use fs_material::cohesive::source::{
+    RESIDUAL_KINETIC_FRICTION_PROPERTY, RESIDUAL_STATIC_FRICTION_PROPERTY,
+};
 
 /// Original resolved source retained separately from irreversible bond history.
 /// No residual coefficient is inferred from bond strength or fracture energy.

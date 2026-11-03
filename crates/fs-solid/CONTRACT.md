@@ -3784,20 +3784,23 @@ whole increment, and the complete physical endpoint is independently replayed
 before acceptance.
 
 The step reports original kinetic, bulk and cohesive endpoint energies,
-intrinsic fracture loss, physical bond-viscosity loss, external force work and
+intrinsic fracture loss, physical bond-viscosity loss, optional damaged-area
+friction loss, external force work and
 prescribed-jump work separately. Prescribed work is
 `sum A t_mean dot (jump1-jump0-B(u1-u0))`, so adoption of a previously loaded
 solid neither guesses its old actuator offset nor drops that actuator's work.
 The full gate is external plus prescribed work minus kinetic/bulk/cohesive
-storage changes, fracture and viscosity. No numerical residual is relabeled as
+storage changes, fracture, viscosity and friction. No numerical residual is relabeled as
 physical dissipation or routed to a thermal field. Signed roundoff-scale bulk
 energies are retained rather than clamped, with materially negative values
 refused under the explicit energy allowance.
 
 Complete failure removes tensile and shear resistance through the original
 material law while retaining mass, velocity, history and clock. Original normal
-compression remains available on reclosure; this is the existing frictionless
-penalty law, not exact nonpenetration or newly discovered contact. Immutable
+compression remains available on reclosure. The default is the existing
+frictionless penalty law; the explicit sourced damaged-area extension below
+adds residual shear resistance. Neither is exact nonpenetration or newly
+discovered contact. Immutable
 candidate publication makes late cancellation, material-domain refusal, failed
 work gates and exhausted solves leave the entire accepted trajectory intact.
 
@@ -3805,8 +3808,8 @@ This is fixed-reference small-strain dynamics with fixed material/source
 conditions during each mechanical increment, fixed frames and fixed topology.
 The explicit temperature transfer below may advance the cohesive source and
 history between increments. It does not update bulk coefficients, impose
-moving reduced constraints, discover contact, add damaged-area friction or
-provide a unique/stable nonlinear root.
+moving reduced constraints, discover contact or provide a unique/stable
+nonlinear root.
 Prescribed interface offsets and reduced external forces are explicit inputs;
 their physical construction and resolution of reversals, crack events and
 softening branches remain caller responsibilities. Smooth elastic motion has
@@ -3822,6 +3825,52 @@ damage. Late cancellation, a material-domain refusal and work-budget exhaustion
 also retain the complete accepted trajectory. These focused native tests do
 not constitute a dynamic crack-propagation, finite-strain or service-validation
 campaign.
+
+### Damaged-area friction in the original deformable dynamics
+
+`CohesiveMotion::with_damaged_area_friction` binds one explicit regularization
+speed per selected original patch. The kinetic coefficient is read from the
+canonical `cohesive_residual_kinetic_friction` property already retained in
+that patch's complete `ResolvedBilinearCohesive` source bundle. The receiving
+owner requires a nonnegative dimensionless coefficient at fixed external
+conditions; it never infers friction from cohesive strength or fracture energy.
+Unselected patches keep their original response, and zero mu retains the
+original arithmetic. Immutable shared configuration avoids per-step copying of
+the patch coefficient array.
+
+The existing material owner supplies the analytic path measure
+`P = integral_0^1 d(s) Kc max(-gn(s),0) ds`, including changing damage and
+compressive reclosure. With the actual straight-path tangential velocity `v`,
+the mean resisting shear is `mu P v/max(|v|,v_reg)`. It is assembled through the
+same `B^T A` map as the original bond and solved with the original mass,
+elasticity, cohesive history, viscosity and Newton/FGMRES owner. A signed net
+normal adhesive force or endpoint `d*p` is not substituted for that integral.
+The original material's damage variable remains the sole damage history.
+
+Friction work is the mean added shear dotted with the actual tangential jump,
+integrated over original area. It is nonnegative, reported separately from
+fracture and surviving-bond viscosity, and debited exactly once in the full
+mechanical energy audit. Prescribed-interface work uses the total bond plus
+friction traction, so a moving support supplies its actual contribution. No
+heat destination or entropy claim is assigned implicitly. Source-temperature
+transfer refreshes the same selected coefficient in the original successor
+bundle while preserving regularization speed, damage, mass, velocity, time and
+step count. Changing mu at fixed jump creates no friction work or heat.
+
+This is velocity-regularized kinetic Coulomb on a declared damaged-area mixture,
+not ideal static friction, a tangential elastic spring, roughness calibration or
+new contact discovery. The speed is a numerical closure in m/s, independent of
+the timestep; timestep refinement still resolves reversals and stopping. The
+fixed-reference and original material-domain limitations remain in force.
+
+`tests/cohesive_dynamics_friction.rs` compares actual native inertial response
+against independent scalar equations for intact, partially damaged and fully
+failed compressed bonds, including surviving-bond viscosity. It checks an
+independent analytic integral while shear initiates and grows damage under
+compression, rotated prescribed-slip work, zero-mu equivalence, low-speed
+physical-time regularization, source-temperature substitution, missing/invalid
+data and cancellation before final publication. These manufactured-data tests
+establish implementation behavior, not measured adhesive-friction calibration.
 
 ### Temperature-dependent adhesion in deformable equilibrium and dynamics
 

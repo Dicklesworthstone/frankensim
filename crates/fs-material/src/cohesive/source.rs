@@ -30,6 +30,10 @@ pub const COHESIVE_STRENGTH_PROPERTY: &str = "cohesive_strength";
 pub const COHESIVE_FRACTURE_ENERGY_PROPERTY: &str = "cohesive_fracture_energy";
 /// Undamaged compression penalty per original bonded area, Pa/m.
 pub const COHESIVE_COMPRESSION_STIFFNESS_PROPERTY: &str = "cohesive_compression_stiffness";
+/// Dimensionless static friction coefficient of the residual fracture surfaces.
+pub const RESIDUAL_STATIC_FRICTION_PROPERTY: &str = "cohesive_residual_static_friction";
+/// Dimensionless kinetic friction coefficient of the residual fracture surfaces.
+pub const RESIDUAL_KINETIC_FRICTION_PROPERTY: &str = "cohesive_residual_kinetic_friction";
 /// Energy per area, J/m². This is not bulk energy density or toughness in Pa√m.
 pub const FRACTURE_ENERGY_PER_AREA_DIMS: Dims = Dims([0, 1, -2, 0, 0, 0]);
 

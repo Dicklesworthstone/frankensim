@@ -20,7 +20,8 @@
 //! fracture plus separately reported physical bond viscosity, not a complete
 //! structural, actuator, thermal or entropy balance.
 //! The [`dynamics`] owner additionally evolves the same accepted interfaces
-//! with consistent inertia and a complete mechanical work balance.
+//! with consistent inertia, optional source-defined damaged-area friction, and
+//! a complete mechanical work balance.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;

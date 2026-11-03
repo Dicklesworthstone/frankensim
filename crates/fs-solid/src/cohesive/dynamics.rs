@@ -16,10 +16,13 @@
 //! fixed-jump temperature transfer preserves that geometry and all motion while
 //! advancing only the original source-defined cohesive coefficients/history.
 //! A broken bond keeps its history, mass and velocity, and still resists normal
-//! compression through its original law. No new contact topology, friction,
-//! heat routing, finite-strain kinematics or stability/unique-root claim is made.
+//! compression through its original law. Explicit damaged-area friction uses
+//! that SAME compression/damage path, without a second bond history. No new
+//! contact topology, heat routing, finite-strain kinematics or stability/unique-
+//! root claim is made.
 
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_material::cohesive::{CohesiveEnergy, CohesivePoint};
@@ -28,6 +31,10 @@ use fs_solver::{LinearOp, NewtonKrylovState, NewtonReport, SolverRunProgress};
 
 use super::temperature::{TemperatureConfig, TemperatureEnergy};
 use super::{CohesiveState, CohesiveSystem, Config, Error, dot, finite, positive};
+
+/// Source-defined residual friction on the original damaged interface area.
+pub mod friction;
+use friction::DamagedAreaFriction;
 
 /// Explicit numerical, trajectory and energy controls. These are not material
 /// coefficients or inferred small-strain validity limits.
@@ -78,6 +85,7 @@ pub struct CohesiveMotion<'m, 'a> {
     time_s: f64,
     steps: usize,
     config: DynamicsConfig,
+    friction: Option<Arc<[Option<DamagedAreaFriction>]>>,
 }
 
 /// Complete candidate, published only after momentum, material and total-work
@@ -87,7 +95,8 @@ pub struct DynamicsStep<'m, 'a> {
     pub nonlinear: NewtonReport,
     pub maximum_force_residual_n: f64,
     pub residual_evaluations: usize,
-    /// Original patch order and fixed local axes; includes physical viscosity.
+    /// Original patch order and local axes; includes viscosity and any explicitly
+    /// bound damaged-area friction.
     pub mean_traction_pa: Vec<[f64; 3]>,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
@@ -98,12 +107,15 @@ pub struct DynamicsStep<'m, 'a> {
     /// Rate-independent cohesive work, actual storage change and fracture loss.
     pub cohesive_energy_j: CohesiveEnergy,
     pub viscous_dissipated_j: f64,
+    /// Nonnegative work of optional damaged-area friction, separate from bond
+    /// viscosity and fracture. No thermal partition is inferred.
+    pub friction_dissipated_j: f64,
     /// Mean reduced external force dotted with the actual displacement change.
     pub external_work_j: f64,
     /// Work entering the interface through changes in prescribed jump offsets.
-    /// This includes the prescribed part of viscous work, exactly once.
+    /// This includes prescribed viscous and damaged-area friction work once.
     pub prescribed_jump_work_j: f64,
-    /// Work input minus all storage changes, fracture and bond-viscosity loss.
+    /// Work input minus storage changes, fracture, viscosity and friction loss.
     pub energy_residual_j: f64,
     pub energy_tolerance_j: f64,
 }
@@ -151,6 +163,7 @@ impl<'m, 'a> CohesiveState<'m, 'a> {
             time_s,
             steps: 0,
             config,
+            friction: None,
         })
     }
 }
@@ -208,6 +221,8 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             config,
             cancelled,
         )?;
+        let friction =
+            friction::temperature_successors(self.friction.as_deref(), target, cancelled)?;
         let mut velocity_m_s = Vec::with_capacity(self.velocity_m_s.len());
         for chunk in self.velocity_m_s.chunks(256) {
             if cancelled() {
@@ -226,6 +241,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
                 time_s: self.time_s,
                 steps: self.steps,
                 config: self.config,
+                friction,
             },
             energy: transferred.energy,
         })
@@ -387,7 +403,8 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
                 - (bulk_stored_after_j - bulk_stored_before_j)
                 - endpoint.energy.stored_change
                 - endpoint.energy.dissipated
-                - endpoint.viscous,
+                - endpoint.viscous
+                - endpoint.friction,
         )?;
         let scale = [
             kinetic_before_j,
@@ -400,6 +417,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             endpoint.prescribed_work,
             endpoint.energy.dissipated,
             endpoint.viscous,
+            endpoint.friction,
         ]
         .into_iter()
         .try_fold(0.0, |sum, value| finite(sum + value.abs()))?;
@@ -430,6 +448,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
                 time_s,
                 steps,
                 config: self.config,
+                friction: self.friction.clone(),
             },
             nonlinear: run.report,
             maximum_force_residual_n,
@@ -443,6 +462,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             cohesive_stored_after_j: endpoint.stored_after,
             cohesive_energy_j: endpoint.energy,
             viscous_dissipated_j: endpoint.viscous,
+            friction_dissipated_j: endpoint.friction,
             external_work_j,
             prescribed_jump_work_j: endpoint.prescribed_work,
             energy_residual_j,
@@ -471,6 +491,7 @@ struct Endpoint<'a> {
     stored_before: f64,
     stored_after: f64,
     viscous: f64,
+    friction: f64,
     prescribed_work: f64,
 }
 impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
@@ -582,22 +603,50 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
             stored_before: 0.0,
             stored_after: 0.0,
             viscous: 0.0,
+            friction: 0.0,
             prescribed_work: 0.0,
         });
         for (index, patch) in state.system.patches.iter().enumerate() {
             self.poll()?;
             let old = state.points[index];
             let jump = patch.jump(x, self.offsets[index])?;
-            let (step, mean) = old
-                .trial_over_time_with_mean_traction(
+            let friction = self
+                .motion
+                .friction
+                .as_ref()
+                .and_then(|models| models[index]);
+            // Zero mu keeps the exact original material path and arithmetic.
+            let (step, mut mean, pressure) = if friction.is_some_and(DamagedAreaFriction::active) {
+                old.trial_over_time_with_damage_weighted_compression(
                     jump,
                     self.dt_s,
                     self.motion.config.solve.local_energy_tolerance_j_m2,
                 )
-                .map_err(|error| Error::Material {
-                    patch: patch.id,
-                    error,
-                })?;
+            } else {
+                old.trial_over_time_with_mean_traction(
+                    jump,
+                    self.dt_s,
+                    self.motion.config.solve.local_energy_tolerance_j_m2,
+                )
+                .map(|(step, mean)| (step, mean, 0.0))
+            }
+            .map_err(|error| Error::Material {
+                patch: patch.id,
+                error,
+            })?;
+            let friction_work = if let Some(model) = friction.filter(|model| model.active()) {
+                let previous = old.jump_m();
+                let slip = [
+                    finite(jump[1] - previous[1])?,
+                    finite(jump[2] - previous[2])?,
+                ];
+                let (traction, work) = model.response(pressure, slip, self.dt_s)?;
+                mean[1] = finite(mean[1] + traction[0])?;
+                mean[2] = finite(mean[2] + traction[1])?;
+                work
+            } else {
+                0.0
+            };
             patch.scatter(mean, &mut residual)?;
             if let Some(end) = &mut endpoint {
                 let next = step.equilibrium.point;
@@ -620,6 +669,7 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
                     end.energy.dissipated + patch.area_m2 * step.equilibrium.energy.dissipated,
                 )?;
                 end.viscous = finite(end.viscous + patch.area_m2 * step.viscous_dissipated_j_m2)?;
+                end.friction = finite(end.friction + patch.area_m2 * friction_work)?;
                 end.points.push(next);
                 end.means.push(mean);
             }
