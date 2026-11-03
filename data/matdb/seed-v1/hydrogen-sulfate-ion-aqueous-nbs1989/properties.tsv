@@ -1,0 +1,52 @@
+frankensim.matdb-source.v1
+observation	identity	Aqueous hydrogen sulfate ion HSO4-, NBS reference	NIST corrected NBS CSV, HSO4<sup>-</sup> ao row	The source molar mass is 97.0696 g/mol. This is the individual hydrogen sulfate or bisulfate ion with charge -1, not molecular H2SO4, sulfate SO4(2-), a salt formula unit, pure liquid sulfuric acid or a commercial acid solution. Keep the named ionic species and source state.
+observation	standard	Literal corrected NBS standard reference quantities	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	The HSO4- ao row gives standard molar formation enthalpy -887.34 kJ/mol, independently tabulated standard molar formation Gibbs energy -755.91 kJ/mol and conventional ionic standard molar entropy 131.8 J/(mol K). The ao state denotes a hypothetical ideal aqueous solution at unit molality with the activity coefficient referenced to infinite dilution. The individual-ion values use H+(ao)=0; ionic entropy is conventional rather than absolute. Retain printed precision and signs without fitting another compilation or replacing the direct Gibbs value by H minus T times species entropy. No per-row probability distribution or cross-species covariance is supplied; uncertainty remains Unstated.
+observation	scope	One explicit NBS elemental and aqueous reference state	NBS tables sections 5.5 to 5.8; NIST corrected CSV header and https://doi.org/10.6028/jres.125.007	All four claims require 298.15 K, 100000 Pa and source-elemental-reference-nbs1989. This identifies the NBS evaluation distributed with the 1989 errata, not a claim that every underlying row was re-evaluated in 1989. Unit molality is a hypothetical activity reference, not a measured finite-concentration 1 mol/kg solution. No source value is relabelled USGS or JANAF. No temperature extrapolation, activity coefficient, ion pairing, molecular sulfuric-acid fraction, concentrated-acid speciation, pH, heat of mixing, kinetic rate or plant dose is supplied.
+scalar	molar-mass	identity,scope	mass	97.0696	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	-887.34	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-755.91	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	131.8	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	standard-entropy	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	standard-entropy	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	standard-entropy	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1

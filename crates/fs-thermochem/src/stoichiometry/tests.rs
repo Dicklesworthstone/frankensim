@@ -55,6 +55,7 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         GoldCyanidation,
         GoldCyanidationDissolvedOxygen,
         HydrogenCyanideDissociation,
+        HydrogenSulfateDissociation,
         WaterDissociation,
         PyriteOxidationFerrous,
         FerrousOxidationFerric,

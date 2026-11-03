@@ -41,6 +41,10 @@
 //! <https://doi.org/10.18434/M32124>. Molecular HCN uses the ao row; the ai row
 //! already represents H+ and CN-. These equations can be composed, but their
 //! presence alone does not solve coupled speciation or supply gas transfer.
+//! Hydrogen-sulfate dissociation likewise retains the HSO4- and SO4(2-)
+//! individual-ion rows in NBS Table 14:S. It is the second acid dissociation,
+//! not a declaration that molecular sulfuric acid is completely dissociated
+//! at arbitrary concentration or that metal-sulfate complexes are absent.
 //! Magnesite calcination and magnetite oxidation retain the crystalline/gas
 //! endpoints of JANAF C-079, Mg-008, C-095, Fe-032, Fe-030 and O-029:
 //! <https://janaf.nist.gov/>. Their standard reaction heats do not determine
@@ -117,6 +121,8 @@ pub enum MineralReaction {
     /// HCN(aq) -> H+(aq) + CN[-](aq).
     /// HCN is the neutral undissociated solute, not the ionized source component.
     HydrogenCyanideDissociation,
+    /// HSO4-(aq) -> H+(aq) + SO4(2-)(aq), the hydrogen-sulfate acid step.
+    HydrogenSulfateDissociation,
     /// H2O(l) -> H+(aq) + OH[-](aq).
     /// Standard water dissociation; activity laws and equilibrium remain explicit.
     WaterDissociation,
@@ -327,6 +333,15 @@ impl MineralReaction {
                     ("H2O(l)", &[2, 1], 0, -1),
                     ("H+(aq)", &[1, 0], 1, 1),
                     ("OH[-](aq)", &[1, 1], -1, 1),
+                ],
+            ),
+            Self::HydrogenSulfateDissociation => (
+                "hydrogen-sulfate-dissociation",
+                &["H", "S", "O"],
+                &[
+                    ("HSO4[-](aq)", &[1, 1, 4], -1, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("SO4[2-](aq)", &[0, 1, 4], -2, 1),
                 ],
             ),
             Self::PyriteOxidationFerrous => (
