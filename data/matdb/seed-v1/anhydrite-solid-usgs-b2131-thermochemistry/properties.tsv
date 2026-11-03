@@ -1,0 +1,49 @@
+frankensim.matdb-source.v1
+observation	identity	Orthorhombic anhydrite CaSO4, pure anhydrous reference	https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/291/	Printed page 285 identifies orthorhombic CaSO4 crystals, formula weight 136.142 g/mol and a 298.15-1000 K table. All nine literal Cp points are retained over that range. This crystalline anhydrite reference is not gypsum, hemihydrate, a dissolved calcium-sulfate ion pair or an unspecified dehydrated product.
+observation	reference-values	Anhydrite USGS reference values at 298.15 K	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/34/full/max/0/default.jpg	Printed page 28 gives standard molar formation enthalpy -1434.4 kJ/mol and absolute standard molar entropy 107.4 J/(mol K), agreeing with the 298.15 K row on page 285. Assigned uncertainty magnitudes are 4.2 kJ/mol and 0.2 J/(mol K), respectively; these are retained as source notes without an invented probability law or hard-bound interpretation. The separate Gibbs-energy entry -1321.8 kJ/mol is not the enthalpy.
+observation	caloric	All nine literal anhydrite constant-pressure heat capacities	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/291/full/max/0/default.jpg	Cp in J/(mol K) is 101.23 at 298.15 K, 101.57 at 300 K, 116.68 at 400 K, 127.18 at 500 K, 135.03 at 600 K, 141.54 at 700 K, 147.55 at 800 K, 153.59 at 900 K and 160.04 at 1000 K. Divide by the same table's formula mass 0.136142 kg/mol for the mass-specific knots. Linear interpolation is an authored approximation with unstated uncertainty. The independent heat-content column is (H(T)-H(298.15))/T in J/(mol K), giving 0.63 at 300 K and 27.87 at 400 K; these are not raw enthalpy differences.
+observation	scope	USGS B2131 anhydrite standard-state reference	https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/9/	Printed page 3 specifies one bar = 100000 Pa, stable condensed elemental forms and ideal elemental gases at the stated temperature. The source-elemental-reference-usgs-b2131 selector preserves this convention separately from JANAF evaluations. Formation enthalpy and absolute entropy are retained only at 298.15 K. This fixed-phase reference supplies no hydration/dehydration heat without compatible water and hydrate participants, phase-stability boundary, aqueous-ion properties, solubility, scale-growth kinetics or plant conversion.
+scalar	molar-mass	identity,scope	mass	136.142	g/mol	constant
+scalar	formation-enthalpy	identity,reference-values,scope	hf	-1434.4	kJ/mol	tabulated
+scalar	standard-entropy	identity,reference-values,scope	s0	107.4	J/mol/K	tabulated
+curve	specific-heat	identity,caloric,scope	cp	temperature	K	J/kg/K	298.15:743.561869224780009,300:746.059261653273788,400:857.046319284276711,500:934.171673693643402,600:991.832057704455642,700:1039.649777438262990,800:1083.794861247814782,900:1128.160303212821907,1000:1175.537306635718588	linear
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	specific-heat	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	1000	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	specific-heat	temperature	298.15	1000	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	specific-heat	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	specific-heat	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	specific-heat	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	specific-heat	phase	1	1	1
+validity	molar-mass	mineral	1	1	1
+validity	formation-enthalpy	mineral	1	1	1
+validity	standard-entropy	mineral	1	1	1
+validity	specific-heat	mineral	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	specific-heat	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	specific-heat	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	specific-heat	specimen	0	0	1

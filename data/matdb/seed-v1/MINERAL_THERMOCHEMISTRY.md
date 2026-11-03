@@ -1,6 +1,6 @@
 # Reactive mineral thermochemistry
 
-These three profiles add 11 claims through the existing `matdb-pack` compiler
+These five profiles add 18 claims through the existing `matdb-pack` compiler
 and catalog. They complement mineral density and hardness references with
 phase-specific molar quantities needed for thermal and chemical accounting.
 
@@ -9,6 +9,8 @@ phase-specific molar quantities needed for thermal and chemical accounting.
 | `calcite-solid-usgs-b2131-thermochemistry` | 0.100087 | −1207400 | 91.71 | 298.15–500 K |
 | `pyrite-solid-janaf-thermochemistry` | 0.119967 | −171544 | 52.916 | 298.15–500 K |
 | `quartz-alpha-janaf-standard-reference` | 0.0600843 | −910857 | 41.463 | No new Cp claim |
+| `gypsum-solid-usgs-b2131-thermochemistry` | 0.172172 | −2023000 | 193.8 | Not supplied |
+| `anhydrite-solid-usgs-b2131-thermochemistry` | 0.136142 | −1434400 | 107.4 | 298.15–1000 K |
 
 Formation enthalpy and entropy are point claims at 298.15 K and 100000 Pa.
 Calcite and pyrite retain four literal molar Cp observations, converted to
@@ -25,6 +27,19 @@ Its reference convention is `source-elemental-reference-usgs-b2131=1`.
 The source specifies one bar and standard elemental states, while its elemental
 evaluations combine JANAF, CODATA and separate USGS calcium measurements.
 This profile is not relabeled as a JANAF evaluation for convenience.
+
+Gypsum (CaSO4·2H2O) and orthorhombic anhydrite (CaSO4) follow the same USGS
+reference convention. Their standard quantities come from
+[printed page 28](https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/34/).
+Anhydrite's [page 285 table](https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/291/)
+supplies nine literal molar Cp entries: 101.23, 101.57, 116.68, 127.18, 135.03,
+141.54, 147.55, 153.59 and 160.04 J/(mol K) at 298.15, 300, 400, 500, 600,
+700, 800, 900 and 1000 K. These become mass-specific knots using the same
+source formula weight; linear interpolation is an authored approximation.
+Gypsum receives no Cp curve because its selected reference table does not
+provide one. Wallboard properties are not substituted for pure hydrated mineral
+thermochemistry. Printed uncertainty magnitudes remain source notes without
+an invented probability distribution or a hard-bound interpretation.
 
 Pyrite follows [JANAF Fe-028](https://janaf.nist.gov/tables/Fe-028.html),
 cross-checked against printed page 1199 of the
@@ -43,8 +58,9 @@ Both JANAF profiles require `source-elemental-reference-janaf=1`.
 All profiles require typed temperature and pressure, `source-phase-solid=1`,
 `source-pure-species=1`, `source-standard-state=1`,
 `engineering-reference-model=1`, and `source-specimen-qualified=0`. The
-additional polymorph selectors are `source-phase-calcite=1`,
-`source-phase-pyrite=1`, or `source-phase-quartz-alpha=1` respectively.
+additional phase selectors are `source-phase-calcite=1`,
+`source-phase-pyrite=1`, `source-phase-quartz-alpha=1`,
+`source-phase-gypsum=1`, or `source-phase-anhydrite=1` respectively.
 Each profile's own elemental-reference selector is mandatory.
 
 These records do not supply aqueous-ion properties, dissolution/oxidation
@@ -56,9 +72,10 @@ an isolated mineral enthalpy is not a heat-of-leaching prediction.
 
 ```bash
 cargo test -p xtask --test mining_mineral_thermochemistry
+cargo test -p xtask --test mining_sulfate_thermochemistry
 ```
 
-The three tests compile the actual manifests, verify canonical packs and query
+The six tests compile the actual manifests, verify canonical packs and query
 receipts, check molar units and printed source values, and refuse incompatible
 phases, conventions, pressures or temperatures. Heating tests integrate the
 compiled Cp curves and compare against independently printed enthalpy columns.
@@ -67,3 +84,11 @@ For 1.5 kg heated from 300 to 400 K, the piecewise-linear estimates are
 printed heat-content changes are about 0.823% and 0.503%, respectively. These
 regression tolerances describe coarse interpolation, not certified uncertainty.
 The calcite check correctly interprets its `(H(T)-H(298.15))/T` source column.
+
+For 2 kg of anhydrite heated from 300 to 400 K, the compiled curve gives
+160310.56 J, differing by approximately 0.424% from the independently printed
+heat-content change. This comparison uses the same divided-by-temperature
+column convention. All nine Cp knots and the exact 1000 K endpoint are checked;
+1000.01 K refuses. Formation enthalpy and entropy still apply only at 298.15 K.
+The new sulfate records alone do not predict scale growth, hydrate stability,
+dehydration rate or a complete reaction heat without compatible participants.

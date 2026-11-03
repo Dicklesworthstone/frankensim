@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	gypsum-solid-usgs-b2131-thermochemistry
+redistribution	permitted	Attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Robie and Hemingway (1995), USGS Bulletin 2131, Thermodynamic Properties of Minerals and Related Substances, printed pages 3 and 28; https://doi.org/10.3133/b2131; primary report https://pubs.usgs.gov/bul/2131/report.pdf; scanned sulfate table https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/34/; original page image https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/34/full/max/0/default.jpg; accessed 2026-11-02
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	usgs-gypsum	properties.tsv	material-tsv-v1
+property	mass	molar-mass	dimensional
+property	hf	standard-molar-formation-enthalpy	dimensional
+property	s0	standard-molar-entropy	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	standard	source-standard-state	dimensional
+axis	convention	source-elemental-reference-usgs-b2131	dimensional
+axis	phase	source-phase-solid	dimensional
+axis	mineral	source-phase-gypsum	dimensional
+axis	pure	source-pure-species	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional

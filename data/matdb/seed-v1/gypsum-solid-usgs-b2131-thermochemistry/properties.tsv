@@ -1,0 +1,37 @@
+frankensim.matdb-source.v1
+observation	identity	Crystalline gypsum CaSO4.2H2O, pure dihydrate reference	https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/34/	The gypsum row on printed page 28 gives formula CaSO4.2H2O and formula weight 172.172 g/mol. The two waters are part of the crystalline formula, not free moisture or a slurry carrier. This is not anhydrite, hemihydrate, wallboard, a dried construction product or a specified ore specimen.
+observation	reference-values	Gypsum USGS reference values at 298.15 K	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/34/full/max/0/default.jpg	The scanned table prints standard molar formation enthalpy -2023.0 kJ/mol and absolute standard molar entropy 193.8 J/(mol K). Its assigned uncertainty magnitudes are 4.3 kJ/mol and 0.3 J/(mol K), respectively. Those magnitudes are preserved here without inventing a probability law or converting them into hard bounds. The separate Gibbs-energy entry -1797.0 kJ/mol is not the enthalpy. Published rounding is retained without substituting secondary quotations.
+observation	scope	USGS B2131 gypsum standard-state point	https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/9/	Printed page 3 specifies one bar = 100000 Pa, stable condensed elemental forms and ideal elemental gases at the stated temperature. The source-elemental-reference-usgs-b2131 selector retains the source convention, separately from JANAF evaluations. All three claims apply only at 298.15 K. This selected sulfate table supplies no gypsum Cp(T), dehydration heat, phase-stability boundary, precipitation/dissolution kinetics, aqueous sulfate or calcium-ion properties, scale-growth law or plant-recovery prediction.
+scalar	molar-mass	identity,scope	mass	172.172	g/mol	constant
+scalar	formation-enthalpy	identity,reference-values,scope	hf	-2023.0	kJ/mol	tabulated
+scalar	standard-entropy	identity,reference-values,scope	s0	193.8	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	molar-mass	mineral	1	1	1
+validity	formation-enthalpy	mineral	1	1	1
+validity	standard-entropy	mineral	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1

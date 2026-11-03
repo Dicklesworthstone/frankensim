@@ -6,8 +6,8 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
-The [mineral-processing guide](MINERAL_PROCESSING.md) covers 31 source profiles
-and 97 claims for ore/gangue constituents and processing reagents, with an
+The [mineral-processing guide](MINERAL_PROCESSING.md) covers 33 source profiles
+and 104 claims for ore/gangue constituents and processing reagents, with an
 executable source-backed lime-hydration, carbonate-calcination, iron-oxide
 oxidation and copper-oxide reduction/oxidation example. Shared physics now provide
 typed Bond milling energy/throughput, ideal ball-mill critical speed, exact
