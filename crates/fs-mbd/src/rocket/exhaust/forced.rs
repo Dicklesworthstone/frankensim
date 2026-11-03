@@ -299,4 +299,5 @@ impl RocketState {
 }
 
 #[cfg(test)]
+#[path = "forced/tests.rs"]
 mod tests;

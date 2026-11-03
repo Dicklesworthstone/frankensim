@@ -29,6 +29,7 @@ use super::{RocketError, RocketForcing, RocketState, RocketStep, mass_integrals,
 use crate::Vec3;
 use fs_math::det;
 
+#[path = "exhaust/forced.rs"]
 mod forced;
 pub use forced::ExhaustEnvironment;
 
@@ -254,4 +255,5 @@ impl RocketState {
 }
 
 #[cfg(test)]
+#[path = "exhaust/tests.rs"]
 mod tests;
