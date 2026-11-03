@@ -14,6 +14,8 @@
 //! its numerical contact-line estimate does not claim measured calibration.
 
 mod curvature;
+mod momentum;
+pub use momentum::{ConversionMomentumReport2, FreeSurfaceMomentumError2};
 pub(crate) mod wetting;
 pub use wetting::{ContactAngleError2, PlanarWall2};
 
@@ -604,6 +606,14 @@ impl FreeSurface {
     /// Also refuses a changed planar wall topology or a conflicting legacy
     /// contact model after assigning an equilibrium angle.
     pub fn step(&mut self) {
+        self.stream_step(None).expect("uncancelled free-surface step");
+        self.apply_conversions();
+    }
+
+    fn stream_step(
+        &mut self,
+        gate: Option<&fs_exec::CancelGate>,
+    ) -> Result<(), FreeSurfaceMomentumError2> {
         assert!(
             crate::admit_explicit_capillary_coefficient(self.sigma),
             "surface tension exceeds conservative explicit capillary-wave domain"
@@ -628,6 +638,7 @@ impl FreeSurface {
         // and streaming with gas reconstruction.
         let mut new_f = self.grid.f.clone();
         for y in 0..ny {
+            if let Some(gate) = gate { momentum::poll(gate)?; }
             for x in 0..nx {
                 let i = self.grid.idx(x, y);
                 let flag = self.grid.flags[i];
@@ -677,11 +688,12 @@ impl FreeSurface {
         }
         self.grid.f = new_f;
         self.scratch = post;
-        self.apply_conversions();
+        Ok(())
     }
 
-    fn apply_conversions(&mut self) {
+    fn conversion_cascade(&mut self, conservative: bool) -> Result<Vec<(usize, f64)>, FreeSurfaceMomentumError2> {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
+        let tolerance = if conservative { 0.0 } else { EPS };
         // Fluid mass is Σf; interface mass tracked. Conversions:
         let mut excess = Vec::new();
         let mut to_fluid = Vec::new();
@@ -691,9 +703,9 @@ impl FreeSurface {
                 continue;
             }
             let rho: f64 = self.grid.f[i].iter().sum();
-            if self.mass[i] > (1.0 + EPS) * rho {
+            if self.mass[i] > (1.0 + tolerance) * rho {
                 to_fluid.push(i);
-            } else if self.mass[i] < -EPS * rho {
+            } else if self.mass[i] < -tolerance * rho {
                 to_gas.push(i);
             }
         }
@@ -748,6 +760,11 @@ impl FreeSurface {
                             &mut populations, u_avg, [0.0; 2], force,
                         );
                     }
+                    if conservative {
+                        // Validate before this new wet cell becomes a donor
+                        // for the next initialization in the same cascade.
+                        momentum::admit_initialized_cell(&populations, force)?;
+                    }
                     self.grid.f[nb] = populations;
                     self.grid.flags[nb] = Cell::Interface;
                     self.mass[nb] = 0.0;
@@ -776,6 +793,12 @@ impl FreeSurface {
                 }
             }
         }
+        Ok(excess)
+    }
+
+    fn apply_conversions(&mut self) {
+        let excess = self.conversion_cascade(false).expect("legacy conversion has no momentum admission");
+        let nx = self.grid.nx;
         // Redistribute after the flag cascade, only beside each converted
         // cell. A global pool would change distant droplets' capillary pressure
         // and exchange their heat even though no physical link joins them.

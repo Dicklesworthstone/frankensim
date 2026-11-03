@@ -6875,6 +6875,35 @@ Existing slope, cut-volume and source/phase-density gates remain mandatory.
 Vanishing cut films still refuse; this does not supply thermal expansion,
 phase-density volume flux, a liquid EOS or pressure-work closure.
 
+### Conservative D2Q9 interface momentum
+
+`FreeSurface::step_with_momentum` advances the original D2Q9 collision and
+streaming operators, then transports each signed conversion mass with its
+donor's physical velocity. Excess enters only adjacent interface capacity;
+negative debt draws only from adjacent positive inventories. Periodic aliases
+are deduplicated and disconnected droplets cannot exchange through a global
+pool. An unlocated carry or insufficient local mass/capacity refuses.
+
+All source transfers accumulate before one velocity update per recipient.
+The original Guo source-frame transformation and an equilibrium difference
+retain physical nonequilibrium stress; the native density reduction remains
+bit-identical. No equilibrium reset erases viscous stress. A zero-mass recipient
+with unresolved momentum refuses. New interface populations are admitted before
+they become initialization donors, including finite forces, relaxation and
+the existing low-Mach domain.
+
+One staged surface makes cancellation and admission failure atomic. The returned
+`ConversionMomentumReport2` records signed conversion kinetic change and local
+mass/linear-momentum defects. Numerical conversion loss is not physical heat.
+The receipt excludes collision/streaming, pressure traction and imposed forces;
+cell-centre relocation does not preserve first mass moments or angular momentum.
+The historical `step` retains its existing conversion behavior.
+
+Seven focused G0/G1/G3 regressions cover unequal-density advancing and receding
+fronts, signed debt, physical boosts and forcing, independent droplets, periodic
+capacity aliases, retained physical stress, native zero-conversion replay,
+cancellation and newly wet-cell refusal.
+
 ### Density-consistent physical state at free-surface ingress and conversion
 
 Newly wet D2Q9 cells and default D3Q19 cells average their neighbors' physical
