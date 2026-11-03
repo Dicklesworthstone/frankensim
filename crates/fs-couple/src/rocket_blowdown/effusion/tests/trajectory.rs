@@ -1,4 +1,5 @@
 //! Continuous kinetic-theory limits and accepted-only adaptive physical windows.
+mod exchange;
 use super::super::trajectory::{
     EffusionAdaptiveSolve, EffusionTrajectoryCandidate, EffusionTrajectoryError,
 };

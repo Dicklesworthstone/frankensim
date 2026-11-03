@@ -26005,3 +26005,47 @@ withdrawal despite replenishment, and source/domain/frame/cancellation rollback.
 Production and fixture files passed Rustfmt parsing and direct source/API review;
 native Cargo execution remains unavailable with the current missing constellation
 sibling manifests. No experimental accuracy or full workspace pass is claimed.
+
+
+### Adaptive molecular feeding with evolving species and shared time control
+
+`GasRocketState::advance_effusion_exchange_adaptive` advances prescribed
+comoving reservoir ports and vacuum outlets over a complete requested interval.
+It shares one step-doubling controller with the existing vacuum-only adaptive
+entry point. Each trial compares a complete native transaction with two native
+half steps, and only the two accepted half-step candidates become history.
+The original coupled gas, momentum, energy, source qualification and shared
+gross-withdrawal checks remain active in every proposal. Typed withdrawal
+limits can request a shorter trial; other physical/source refusals remain
+atomic failures.
+
+The local error comparison follows temperature, pressure, individual species
+mass, velocity increment and displacement beyond the original inertial drift.
+Its species axis is the canonical union of the vessel and geometrically active
+source catalogs, retaining original caloric identity and assigning zero mass
+to absent species. A newly arriving species therefore participates immediately
+in error control. The shared axis uses the original thermochemical bound of
+128 species and bounded stack scratch, preserving closed-vessel coasting;
+active apertures retain their separate original 32-species qualification.
+Geometrically closed source ports do not inspect inactive source catalogs.
+
+`EffusionExchangeTrajectoryStep` retains original per-port receipts in its
+accepted native history. Compensated whole-interval accounts separately sum
+gross incoming/outgoing streams, authoritative net mass and molecular energy,
+inertial momentum/energy, external impulse/work and physical residual/reserve
+reports. Rejected trials contribute no transfers or totals. Exact final-time
+handling, minimum/maximum intervals, attempt/accepted-history limits and late
+cancellation are owned by the same controller for both entry points.
+
+The finite-gas scheme remains first order. Its step-doubling estimate controls
+local error and does not certify a global error bound; physical conservation
+budgets apply to each accepted half step. Source thermochemical states, aperture
+normals and external loads remain held across the requested window. A stationary
+ambient, rotating vessel or independently moving finite receiver is outside
+this common-frame source closure.
+
+Focused genuine-source regressions cover introduced species, temporal
+refinement, accepted-only gross/net accounting, vacuum-only parity, original
+closed-mixture limits, bounded clocks/work and atomic source/cancellation
+refusals. Rustfmt parsing and source/API review are available; native compilation
+and execution remain unverified with the missing constellation dependencies.
