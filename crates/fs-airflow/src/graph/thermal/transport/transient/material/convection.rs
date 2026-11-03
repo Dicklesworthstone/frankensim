@@ -12,6 +12,8 @@
 mod laws;
 /// Original flow and material laws on prescribed wall reservoirs.
 pub mod reservoir;
+/// Section-integrated entrance heat on original finite walls and reservoirs.
+pub mod developing;
 
 use super::*;
 use crate::graph::thermal::medium::convection::{

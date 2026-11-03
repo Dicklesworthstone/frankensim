@@ -344,3 +344,35 @@ requires both the retained cases CSV and an explicit effective wall coefficient.
 Its h=10 W/(m² K) illustration produces geometric upper-layer-rise ratio
 1.314403236 and combined log scatter 0.086888962; this is an uncalibrated
 comparison, not a validation pass. No parameter is fitted to the observations.
+
+## Finite developing circular-duct sections
+
+`developing::evaluate_circular_duct_section` integrates the existing Hausen
+mean relation over explicit heated-entrance distances in diameters. It retains
+the original admitted upstream/downstream `NusseltEvaluation`s and returns a
+distinct `CircularDuctSection`; the ordinary correlation catalog is unchanged.
+The original whole-length card and section evaluator share one formula owner.
+
+With `s=x/D` and `P=Re Pr`, cumulative transfer is
+`s Nu_mean(s) = 3.66 s + 0.0668 P s^(2/3)/(s^(2/3)+0.04 P^(2/3))`.
+The section mean is its difference divided by section length. A rationalized
+cube-root quotient avoids subtracting nearly equal cumulative values for short
+sections. At the exact heated entrance, cumulative transfer has the analytic
+zero limit; the first section reproduces the original downstream mean. Every
+positive upstream point and downstream point must satisfy the unchanged card's
+Re, Pr and L/D support. No small-distance floor or domain extrapolation exists.
+
+The result's positive dimensional coefficient uses `h=Nu_section k/D` and
+retains its original mean-card receipts. It is derived held-property transfer,
+not a new fitted correlation or a validated local discrepancy bound. The mean
+card's engineering allowance does not automatically bound a difference of
+cumulative predictions. No new sensitivity or numerical enclosure is claimed.
+Subdivision additivity assumes the same fluid properties, diameter, velocity
+and wall state throughout the compared intervals. Local source/temperature
+updates remain a separate held-property approximation.
+
+Three regression sources cover cumulative additivity versus entrance resets,
+the analytic differential limit for adjacent floating-point lengths, and
+original domain/dimensional refusal. Source/API and scalar algebra review were
+completed; Rust parsing, compilation and native numerical execution were
+unavailable in the delivery environment. These tests are not reported executed.

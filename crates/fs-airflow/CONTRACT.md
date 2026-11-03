@@ -3029,3 +3029,45 @@ storage remains on original reciprocal links. Original material/correlation
 applicability, low-Mach/Boussinesq assumptions and time/spatial resolution remain
 caller responsibilities; no new experimental calibration or throughput claim
 is made.
+
+## Developing convection on native graph sections
+
+Liquid and gas graph source owners expose `evaluate_developing_sections` and
+`evaluate_quasi_steady_developing_sections`. The shared
+`material::convection::developing` implementation uses the original Hausen mean
+through `fs-convection`'s section-integrated evaluator. Explicit forward/reverse
+entrance distances follow actual signed flow; spatial subdivision does not
+implicitly restart the heated entrance at every pipe cell.
+
+Each binding names an original pipe cell and an existing zero-conductance
+finite wall link or prescribed wall reservoir. The authored diameter must
+match the native circular flow area, and the wall patch must cover that cell's
+full circular wetted perimeter and length. One binding owns that whole wall.
+Original local bulk/film sources, caloric identity, density, Reynolds/Mach and
+mechanical-work limits remain authoritative. Old/new/average flow and signed
+zero crossings retain original correlation support and entrance orientation;
+the forced card still refuses rest and trajectories crossing zero Reynolds.
+
+`ResolvedDevelopingConvection::apply_to` supplies native link and reservoir
+conductances after checking both destinations for conflicts and cancellation.
+The existing thermal owner performs reciprocal wall transfer, external
+reservoir heat, advection and enthalpy storage once on its original clock.
+Returned wall-to-fluid powers are diagnostic and must not be supplied again
+as cell sources. Explicit section counts bound source work; native cell order
+fixes result ordering. No new momentum or thermal integrator is introduced.
+
+This uses the original constant-wall-temperature, hydrodynamically developed
+uniform circular-duct relation. The caller retains that geometry and upstream
+thermal-entrance model; mixing junctions, bends, changing diameter or wall
+conditions are not newly modeled. Updating local properties or finite wall
+and bulk temperatures is a held-property approximation. Exact partition
+additivity is claimed only at the same source and wall state, and the original
+mean-card allowance is not a validated segment-level model error bound.
+
+Three integration regression sources cover independent whole-duct transfer,
+heating/cooling and reversed entrance order; native coupled momentum, advection,
+finite wall and reservoir energy; original gas film EOS/NASA calorics and
+endpoint Mach refusal. Ownership, geometry, cancellation and crossing support
+are exercised in those same tests. Source/API review was completed; Rust
+parsing, compilation and native numerical execution were unavailable, so these
+regression sources are not reported as executed.

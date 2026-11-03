@@ -4,6 +4,7 @@ use super::conduction::{GraphConductionError, GraphConductiveLink, ResolvedGraph
 use super::convection::{GraphConvectionError, GraphConvectiveLink, GraphSourceHeat};
 use super::heating::{GraphHeatingError, LiquidGraphHeating};
 use super::convection::reservoir::{GraphConvectiveReservoir, GraphReservoirConvectionError, GraphReservoirHeat};
+use super::convection::developing::{GraphDevelopingConvectionError, GraphDevelopingHeat, GraphDevelopingSection};
 use super::*;
 use crate::graph::thermal::medium::series::enthalpy::admit_liquid_caloric_source;
 use fs_material::liquid::ResolvedLiquidState;
@@ -278,4 +279,59 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
         Ok(GraphReservoirHeat { admission, convection })
     }
 
+    /// Section-integrated original Hausen heat at the actual inertial endpoint.
+    /// Native whole-wall links and reservoirs share one bounded evaluator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_developing_sections(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        report: &InertialGraphReport,
+        bindings: &[GraphDevelopingSection],
+        maximum_sections: usize,
+    ) -> Result<GraphDevelopingHeat<ResolvedLiquidState>, GraphDevelopingConvectionError> {
+        self.evaluate_developing_flow(
+            cx, thermal, sources, GraphFlow::Inertial(report), bindings, maximum_sections,
+        )
+    }
+
+    /// Evaluate native finite sections without resetting the heated entrance
+    /// at each cell. Re-evaluate on every quasi-steady thermal trial; original
+    /// source identity, density, resistance support and work limits still apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_quasi_steady_developing_sections(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+        bindings: &[GraphDevelopingSection],
+        maximum_sections: usize,
+    ) -> Result<GraphDevelopingHeat<ResolvedLiquidState>, GraphDevelopingConvectionError> {
+        self.evaluate_developing_flow(
+            cx, thermal, sources, GraphFlow::QuasiSteady { hydraulics, duration_s },
+            bindings, maximum_sections,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_developing_flow(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        flow: GraphFlow<'_>,
+        bindings: &[GraphDevelopingSection],
+        maximum_sections: usize,
+    ) -> Result<GraphDevelopingHeat<ResolvedLiquidState>, GraphDevelopingConvectionError> {
+        let admission = self.core.admit_flow(cx, thermal, sources, flow)
+            .map_err(GraphDevelopingConvectionError::Source)?;
+        let convection = convection::developing::evaluate(
+            &self.core, cx, thermal, flow, bindings, maximum_sections,
+            |t| self.law.at_temperature(t).map_err(SourceGraphError::Liquid),
+        )?;
+        Ok(GraphDevelopingHeat { admission, convection })
+    }
 }

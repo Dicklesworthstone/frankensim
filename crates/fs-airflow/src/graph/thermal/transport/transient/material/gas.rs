@@ -8,6 +8,7 @@
 use super::conduction::{GraphConductionError, GraphConductiveLink, ResolvedGraphConduction};
 use super::convection::{GraphConvectionError, GraphConvectiveLink, GraphSourceHeat};
 use super::convection::reservoir::{GraphConvectiveReservoir, GraphReservoirConvectionError, GraphReservoirHeat};
+use super::convection::developing::{GraphDevelopingConvectionError, GraphDevelopingHeat, GraphDevelopingSection};
 use super::*;
 use fs_material::thermochemical_gas::{
     ResolvedThermochemicalGasState, energy::enthalpy::GasEnthalpyLaw,
@@ -342,4 +343,58 @@ impl<'a> GasGraphSources<'a> {
         Ok(GraphReservoirHeat { admission, convection })
     }
 
+    /// Section-integrated original Hausen heat with the original gas source.
+    /// Every actual inertial rate retains native gas Mach and work admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_developing_sections(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        report: &InertialGraphReport,
+        bindings: &[GraphDevelopingSection],
+        maximum_sections: usize,
+    ) -> Result<GraphDevelopingHeat<ResolvedThermochemicalGasState>, GraphDevelopingConvectionError> {
+        self.evaluate_developing_flow(
+            cx, thermal, sources, GraphFlow::Inertial(report), bindings, maximum_sections,
+        )
+    }
+
+    /// Original fixed-pressure/composition bulk or film gas properties supply
+    /// each developing section on the same quasi-steady thermal endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_quasi_steady_developing_sections(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+        bindings: &[GraphDevelopingSection],
+        maximum_sections: usize,
+    ) -> Result<GraphDevelopingHeat<ResolvedThermochemicalGasState>, GraphDevelopingConvectionError> {
+        self.evaluate_developing_flow(
+            cx, thermal, sources, GraphFlow::QuasiSteady { hydraulics, duration_s },
+            bindings, maximum_sections,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_developing_flow(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        flow: GraphFlow<'_>,
+        bindings: &[GraphDevelopingSection],
+        maximum_sections: usize,
+    ) -> Result<GraphDevelopingHeat<ResolvedThermochemicalGasState>, GraphDevelopingConvectionError> {
+        let admission = self.admit_flow(cx, thermal, sources, flow)
+            .map_err(GraphDevelopingConvectionError::Source)?;
+        let convection = convection::developing::evaluate(
+            &self.core, cx, thermal, flow, bindings, maximum_sections,
+            |t| resolve_gas(self.source, t),
+        )?;
+        Ok(GraphDevelopingHeat { admission, convection })
+    }
 }

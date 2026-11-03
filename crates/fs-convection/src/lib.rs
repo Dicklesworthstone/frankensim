@@ -20,6 +20,9 @@ mod mixed;
 mod natural;
 mod sensitivity;
 
+/// Finite axial sections of the original developing circular-duct relation.
+pub mod developing;
+
 pub use natural::{HorizontalPlateFacing, NaturalConvectionGeometry};
 
 /// Source-bearing compartment-fire correlations and public-data comparisons.
@@ -761,10 +764,7 @@ fn evaluate_formula(
     match id {
         CorrelationId::CircularDuctLaminarCwt => 3.66,
         CorrelationId::CircularDuctLaminarChf => 4.36,
-        CorrelationId::CircularDuctHausen => {
-            let graetz = group("Gz");
-            3.66 + 0.0668 * graetz / (1.0 + 0.04 * det::pow(graetz, 2.0 / 3.0))
-        }
+        CorrelationId::CircularDuctHausen => developing::mean_nusselt(group("Gz")),
         CorrelationId::RectangularDuctLaminarCwt => rectangular_laminar_cwt(group("aspect_ratio")),
         CorrelationId::RectangularDuctLaminarChf => rectangular_laminar_chf(group("aspect_ratio")),
         CorrelationId::RectangularDuctLaminarCwtDevelopingPr072 => {
