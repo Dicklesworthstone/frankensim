@@ -11841,3 +11841,27 @@ isothermal bulk binary liquid equilibrium at fixed pressure; it excludes
 vapor/solid phases, finite-rate mixing, nucleation, capillary interfaces,
 spatial phase separation and a coupled caloric evolution.
 
+
+### Qualified molecular momentum moments
+
+`thermochemical_gas::energy::parcel::transfer::species::effusion::momentum`
+adds an explicit angle-independent, nondeflecting transmission qualification
+bound to the original effusive interface. Scalar mass transmission alone does
+not qualify the angular moment. The capability borrows already sampled beams,
+retaining original source identity and the separately stored molecular energy
+correction; no additional gas or material query is made.
+
+An outward species has mass-flux-weighted normal speed
+`sqrt(pi*R*T/(2*M_i))` and force moment `A*tau_i*p_i/2`. Accepted finite impulse
+uses the original species mass actually withdrawn by the conservation owner.
+For reciprocal streams the transmitted normal stress adds both directional
+moments, including at zero net mass flow. It is not a wall-force difference or
+an additional continuum pressure-thrust term. Collimating or accommodating
+channels require a different angular law. Moving consumers must carry mass,
+momentum and the Galilean energy transform together.
+
+G0/G1/G3/G4 fixtures cover half-pressure moments, species selectivity, arbitrary
+formation datums, reciprocal equilibrium stress, accepted finite withdrawals,
+source identity, closed paths, cancellation and binary scale extremes. Native
+execution remains unverified with the current missing constellation siblings.
+

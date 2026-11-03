@@ -17,12 +17,16 @@
 //! Reservoirs are stationary, well mixed and locally Maxwellian with negligible
 //! bulk drift. Crossing momentum is thermalized in reservoirs or absorbed by
 //! fixed supports; no moving-interface work or momentum state is claimed.
+//! The optional momentum module supplies separately qualified rest-frame beam
+//! moments; a mechanical consumer owns motion and the total-energy crosswalk.
 //! The caller supplies a free-molecular qualification covering EVERY mixture
 //! of the retained gas catalog over the entire authored T/p support. No mean
 //! free path, thinness, species selectivity or empirical accuracy is inferred.
 
 /// Molecular escape into a true vacuum, with no invented receiver state.
 pub mod vacuum;
+/// Explicitly qualified molecular momentum moments for mechanical consumers.
+pub mod momentum;
 
 use super::{
     ClosedGasParcel, GasEnergyError, SpeciesId, Sum, catalog, invalid, poll, positive,
