@@ -19,6 +19,8 @@
 //! free surface, walls, other particles or nonlinear drag is supplied. The
 //! material's continuum/Newtonian validity remains an external model obligation.
 //! Do not superpose another exterior drag law on this same sphere.
+//! The explicit [`finite_reynolds`] and [`unsteady`] extensions retain their
+//! own applicability domains; these Stokes-only limits describe [`CreepingSphere`].
 
 use crate::principal::{PrincipalBody, PrincipalFrame};
 use crate::{MaterialInertiaError, VolumeMoments};
@@ -28,6 +30,8 @@ use fs_mbd::{
     DynamicsError, Gravity, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
 };
 
+/// Nonrotating, quasi-steady sphere motion beyond the Stokes regime.
+pub mod finite_reynolds;
 /// Added fluid inertia and causal viscous memory on the same native body.
 pub mod unsteady;
 

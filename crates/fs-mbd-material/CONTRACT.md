@@ -1136,6 +1136,46 @@ refinement, separate maintained-flow work from heat, and exercise geometry,
 regime and transactional refusals. This is a bounded MR57 capability; it does
 not close the broader exterior/gap-flow bead or claim empirical validation.
 
+## Source-bound finite-Reynolds sphere drag
+
+`creeping_flow::finite_reynolds::FiniteReynoldsSphere` reuses the original
+fluid snapshot, single uniform spherical material geometry and native rigid
+body. It extends translational resistance to the empirical Schiller--Naumann
+law `F = -6*pi*mu*a*(1 + 0.15*Re^0.687)*(v-U)`, with diameter-based Reynolds
+number and a regular zero-slip Stokes limit. `U` is the prescribed undisturbed
+reservoir velocity. The declared Reynolds ceiling cannot exceed 1000.
+The primary formula reference is van Wachem et al., JFM 1018 (2025), A41,
+section 3.2, equations (3.5)-(3.6), DOI `10.1017/jfm.2025.10526`.
+
+The nonlinear native midpoint relation reduces to one monotone speed equation.
+A safeguarded Newton solve uses its analytic tangent, deterministic `fs-math`
+power and at most 64 cancellation-aware iterations, without heap allocation.
+The original `RigidBodyIntegrator::step` advances the only body state.
+Both endpoints and the midpoint must satisfy the Reynolds and fluid/body
+timescale limits. The existing step controls now bound `dt*c_tangent/m`,
+where `c_tangent = 6*pi*mu*a*(1 + 0.15*1.687*Re^0.687)`; its upper bound of
+one prevents a drag-only velocity reversal. Excessive steps refuse and need
+refinement. The result retains actual native motion, solve residual/iterations,
+fluid heat, maintained-flow work and an independent work-energy residual.
+
+This is an isolated, nonrotating, unbounded, incompressible, Newtonian,
+quasi-steady sphere reduction. Nonzero spin refuses; no rotary resistance,
+Magnus lift, Basset memory, added mass, free surface, particle/wall interaction,
+rarefaction or compressibility law is silently combined with this correlation.
+Continuum, Newtonian and incompressible applicability remains a caller/source
+obligation; `FluidTransport` alone cannot enforce Mach or Knudsen limits.
+Fluid diffusion over the radius relative to local tangent body relaxation
+must remain below the caller's limit in (0,0.1]. This conservative screen is
+not a certified error bound for neglected unsteady flow or empirical drag.
+The existing creeping/unsteady owners retain their narrower physical models.
+
+G1/G3/G4 regressions in `tests/creeping_flow/finite_reynolds.rs` check the
+zero-slip and Stokes limits, second-order native velocity/position refinement
+against a closed-form nonlinear decay solution, material-only source swaps,
+buoyant terminal settling, Galilean invariance, maintained-flow work and
+late transactional/refinement/regime refusals. They test the numerical model,
+not measured sphere drag accuracy, and do not close the full MR57 bead.
+
 ## Unsteady buoyant sphere with reciprocal viscous memory
 
 `CreepingSphere::unsteady_motion` releases the original nonrotating material
