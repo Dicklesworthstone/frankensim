@@ -126,7 +126,7 @@ impl BoundaryGrid3 {
         .map(|_| ())
     }
 
-    fn validate_endpoint_force_scale(
+    pub(super) fn validate_endpoint_force_scale(
         &self,
         scale: f64,
         gate: &CancelGate,

@@ -25,8 +25,8 @@ use fs_math::dd::Dd;
 pub struct OpenBoundaryMomentumTransport3 {
     /// Actual population mass introduced at open faces.
     pub mass_change: f64,
-    /// Actual population linear momentum introduced at open faces. With held
-    /// Guo forcing this is also the change in physical momentum.
+    /// Actual population linear momentum introduced at open faces. The full
+    /// Guo endpoint source shift belongs to the separate forcing receipt.
     pub impulse: [f64; 3],
     /// Moment of the actual open-face momentum increments about the origin.
     pub angular_impulse: [f64; 3],
@@ -123,9 +123,22 @@ impl BoundaryGrid3 {
     pub(super) fn reconstruct_immersed_open_faces(
         &mut self,
         next: &mut [Vec<Tile>; Q3],
+        transport: OpenTransport,
+        origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<OpenBoundaryMomentumTransport3> {
+        self.reconstruct_immersed_open_faces_with_endpoint_force(
+            next, transport, origin, gate, None,
+        )
+    }
+
+    pub(super) fn reconstruct_immersed_open_faces_with_endpoint_force(
+        &mut self,
+        next: &mut [Vec<Tile>; Q3],
         mut transport: OpenTransport,
         origin: [f64; 3],
         gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
     ) -> Result<OpenBoundaryMomentumTransport3> {
         checkpoint(gate)?;
         if transport.links == 0 {
@@ -141,7 +154,7 @@ impl BoundaryGrid3 {
                     checkpoint(gate)?;
                 }
                 let values = self
-                    .open_boundary_populations(next, cell, interior, face, None)
+                    .open_boundary_populations(next, cell, interior, face, endpoint_force_scale)
                     .map_err(|source| match source {
                         BoundaryStepError3::Unphysical { cell } => PartialSaturationError3::Cell {
                             cell,

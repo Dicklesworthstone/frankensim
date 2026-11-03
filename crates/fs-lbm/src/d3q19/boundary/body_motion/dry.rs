@@ -175,6 +175,7 @@ struct DryStep<'a, S> {
     // That pose depends only on the accepted incoming state, so every Newton
     // probe shares this source. Cache it before sampling endpoint geometry.
     interior_forcing: Option<[f64; 6]>,
+    endpoint_force_scale: Option<f64>,
     maximum_relative_volume_change: f64,
     gate: &'a CancelGate,
 }
@@ -232,6 +233,70 @@ impl BoundaryGrid3 {
         config: DryBodyCouplingConfig3,
         gate: &CancelGate,
     ) -> Result<DryBodyExchange3> {
+        self.dry_partial_saturation_transition(
+            sampler,
+            shape,
+            body,
+            external_impulse,
+            moment_origin,
+            config,
+            gate,
+            None,
+        )
+    }
+
+    /// Advance one dry body with a prescribed endpoint fluid-force history.
+    ///
+    /// `next_scale` multiplies the original selected spatial force shape at
+    /// the next endpoint. Uniform forcing stays held. Collision and body
+    /// response use the accepted starting force; unpublished physical Guo
+    /// inventories and open faces use the next force. The full trapezoidal
+    /// source and its midpoint occupied-subvolume moment are counted once,
+    /// including in the fictitious-interior correction.
+    ///
+    /// Initialize the selected field with momentum-preserving rebinding. This
+    /// is a smooth fixed-shape prescribed history, not a discontinuous load
+    /// switch, endpoint-dependent force solve, or coupled second-order claim.
+    /// All Newton probes reuse the accepted state and existing scratch. Force,
+    /// populations and the native body's pose/momenta publish together only
+    /// after the original geometric, momentum, work and cancellation gates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dry_partial_saturation_body_and_endpoint_force_scale(
+        &mut self,
+        sampler: &mut BodyFrameSampler3,
+        shape: &impl BodyFrameShape3,
+        body: &mut MovingPartialSaturationBody3,
+        external_impulse: [f64; 6],
+        next_scale: f64,
+        moment_origin: [f64; 3],
+        config: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+    ) -> Result<DryBodyExchange3> {
+        self.validate_immersed_endpoint_force_scale(next_scale, gate)?;
+        self.dry_partial_saturation_transition(
+            sampler,
+            shape,
+            body,
+            external_impulse,
+            moment_origin,
+            config,
+            gate,
+            Some(next_scale),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn dry_partial_saturation_transition(
+        &mut self,
+        sampler: &mut BodyFrameSampler3,
+        shape: &impl BodyFrameShape3,
+        body: &mut MovingPartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        config: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<DryBodyExchange3> {
         checkpoint(gate)?;
         config.admit()?;
         if sampler.dims != self.dimensions()
@@ -262,6 +327,7 @@ impl BoundaryGrid3 {
             radius,
             inside_before,
             interior_forcing: None,
+            endpoint_force_scale,
             maximum_relative_volume_change: config.maximum_relative_volume_change,
             gate,
         };
@@ -370,8 +436,15 @@ impl BoundaryGrid3 {
 
         // The last successful evaluation owns next. No Jacobian/backtrack is
         // performed after this acceptance; every fallible account precedes swap.
-        let (fluid_after, inside_after, slip_after) =
-            self.dry_inventory(true, true, sampler, current.body, moment_origin, gate)?;
+        let (fluid_after, inside_after, slip_after) = self.dry_inventory_with_endpoint_force(
+            true,
+            true,
+            sampler,
+            current.body,
+            moment_origin,
+            gate,
+            endpoint_force_scale,
+        )?;
         if inside_after != current.interior || slip_after != current.slip {
             return Err(invalid(
                 "dry-body final streamed inventory changed after convergence",
@@ -509,6 +582,9 @@ impl BoundaryGrid3 {
             .ok_or_else(|| invalid("dry-body streamed candidate is unavailable"))?;
         core::mem::swap(&mut self.f, &mut next);
         self.next = Some(next);
+        if let Some(scale) = endpoint_force_scale {
+            self.publish_endpoint_force_scale(scale);
+        }
         self.topology_locked = true;
         *body = current.body;
         Ok(receipt)
@@ -530,7 +606,7 @@ impl BoundaryGrid3 {
         let center_impulse = denormalize(correction, step.radius);
         let combined = core::array::from_fn(|i| step.external[i] + center_impulse[i]);
         let mut body = step.initial;
-        let native = self.moving_partial_saturation_transition(
+        let native = self.moving_partial_saturation_transition_with_endpoint_force(
             sampler,
             step.shape,
             &mut body,
@@ -538,6 +614,7 @@ impl BoundaryGrid3 {
             step.origin,
             step.gate,
             false,
+            step.endpoint_force_scale,
         )?;
         let volumes = native.sampled_solid_volume;
         if !(volumes[0] > 0.0)
@@ -553,14 +630,26 @@ impl BoundaryGrid3 {
         let forcing = match step.interior_forcing {
             Some(forcing) => forcing,
             None => {
-                let forcing = self.dry_interior_forcing(sampler, step.origin, step.gate)?;
+                let forcing = self.dry_interior_forcing_with_endpoint_force(
+                    sampler,
+                    step.origin,
+                    step.gate,
+                    step.endpoint_force_scale,
+                )?;
                 step.interior_forcing = Some(forcing);
                 forcing
             }
         };
         sampler.sample(body.center, body.orientation, step.shape, step.gate)?;
-        let (_, interior, slip) =
-            self.dry_inventory(true, false, sampler, body, step.origin, step.gate)?;
+        let (_, interior, slip) = self.dry_inventory_with_endpoint_force(
+            true,
+            false,
+            sampler,
+            body,
+            step.origin,
+            step.gate,
+            step.endpoint_force_scale,
+        )?;
         let delta = difference(
             difference(interior.momentum, step.inside_before.momentum),
             forcing,
@@ -603,6 +692,22 @@ impl BoundaryGrid3 {
         origin: [f64; 3],
         gate: &CancelGate,
     ) -> Result<(ImmersedMomentum3, ImmersedMomentum3, f64)> {
+        self.dry_inventory_with_endpoint_force(
+            candidate, all_fluid, sampler, body, origin, gate, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dry_inventory_with_endpoint_force(
+        &self,
+        candidate: bool,
+        all_fluid: bool,
+        sampler: &BodyFrameSampler3,
+        body: MovingPartialSaturationBody3,
+        origin: [f64; 3],
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<(ImmersedMomentum3, ImmersedMomentum3, f64)> {
         let fields = if candidate {
             self.next
                 .as_ref()
@@ -641,7 +746,7 @@ impl BoundaryGrid3 {
                     momentum[1] += f64::from(E3[q].1) * population;
                     momentum[2] += f64::from(E3[q].2) * population;
                 }
-                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                let force = self.open_force(tile, lane, endpoint_force_scale);
                 if force != [0.0; 3] {
                     for axis in 0..3 {
                         momentum[axis] += 0.5 * force[axis];
@@ -718,6 +823,16 @@ impl BoundaryGrid3 {
         origin: [f64; 3],
         gate: &CancelGate,
     ) -> Result<[f64; 6]> {
+        self.dry_interior_forcing_with_endpoint_force(sampler, origin, gate, None)
+    }
+
+    fn dry_interior_forcing_with_endpoint_force(
+        &self,
+        sampler: &BodyFrameSampler3,
+        origin: [f64; 3],
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<[f64; 6]> {
         let mut total = [0.0; 6];
         if self.force == [0.0; 3] && self.force_field.is_none() {
             return Ok(total);
@@ -741,6 +856,16 @@ impl BoundaryGrid3 {
                     continue;
                 }
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                let force = if endpoint_force_scale.is_some() {
+                    let next = self.open_force(tile, lane, endpoint_force_scale);
+                    if next == force {
+                        force
+                    } else {
+                        core::array::from_fn(|i| 0.5 * force[i] + 0.5 * next[i])
+                    }
+                } else {
+                    force
+                };
                 let impulse = force.map(|force| epsilon * force);
                 let arm = core::array::from_fn(|i| cell[i] as f64 + 0.5 - origin[i]);
                 let angular = if first_moment == [0.0; 3] {

@@ -8800,6 +8800,42 @@ and torque for light, neutral and heavy bodies with periodic and stationary-wall
 boundaries, source subtraction for force confined to the fictitious interior,
 physical source-frame inventories, and forced rollback with exact retry.
 
+### Endpoint fluid-force histories through one physical dry body
+
+`step_with_dry_partial_saturation_body_and_endpoint_force_scale` carries the
+original selected spatial force shape through the SAME positive-dry-inertia
+Newton solve, native rigid split and streamed fluid candidate. Collision and
+reciprocal reflection retain the accepted starting force. Endpoint physical
+Guo inventories and original open-face reconstruction use the actual next force;
+the unchanged uniform contribution remains held. Full-fluid source impulse is
+`(F_old + F_next)/2` per cell, and its local work uses physical velocities in
+their corresponding source frames.
+
+The fictitious-interior subtraction integrates that SAME trapezoidal source
+over the existing collision-midpoint occupancy and cut-cell first moments.
+It is cached once across probes. Candidate endpoint inventories use the next
+force before it is published, so its half-source momentum cannot masquerade as
+an additional physical body load. Independent body and exterior-fluid-plus-body
+linear/angular accounts retain wall, periodic and reservoir contributions.
+All candidates use the original accepted field and reusable post/next storage;
+no full-grid backup, second collision, or force-field clone occurs per probe.
+Force, populations, pose and momenta publish together after final admission.
+Legacy held callers pass no endpoint scale and retain their original arithmetic.
+
+The frozen-geometry `step_with_partial_saturation_body_and_endpoint_force_scale`
+uses the same source/reconstruction path. These are prescribed smooth fixed-shape
+histories, initialized with momentum-preserving field rebinding. They do not
+supply an implicit velocity-dependent load, a discontinuous force switch,
+complete coupled temporal order, or a thermodynamic fluid-energy/heat balance.
+Multi-body and film entry points retain their existing held-force semantics.
+
+Focused regressions specify zero-occupancy native parity across four collision
+models and periodic/wall/reservoir boundaries, independently reconstructed
+physical source work, light/neutral/heavy moving-body ramps and reversal through
+zero, cut-cell interior subtraction, exact held-path parity and atomic
+overflow/budget/late-cancellation refusal with retry. Rustfmt parsing and source
+review are available; native compilation and execution remain unverified.
+
 ### Simultaneous physical dry-body assemblies
 
 `step_with_dry_partial_saturation_bodies` advances one to eight bodies with

@@ -27380,6 +27380,30 @@ closed-mixture limits, bounded clocks/work and atomic source/cancellation
 refusals. Rustfmt parsing and source/API review are available; native compilation
 and execution remain unverified with the missing constellation dependencies.
 
+### Endpoint-sampled fluid forcing on one material dry body
+
+`ResolvedImmersedBody::step_forces_si_with_endpoint_fluid_force_scale` advances
+the original sourced positive dry mass/tensor, fluid populations and accepted
+clock with a smooth prescribed spatial load history. The dimensionless endpoint
+scale multiplies the original SI field selected by
+`rebind_fluid_force_field_si`; the uniform fluid load stays held. Existing
+source density, cell size, timestep, authored body forces/couples and reduced
+gravity retain their original conversion and ownership.
+
+The native dry-body solver uses the next Guo source frame for actual streamed
+inventories and open faces, and subtracts the same trapezoidal source from the
+retained fictitious interior. Complete native momentum, work and boundary
+receipts return unchanged. No fallible conversion follows native publication:
+the body, fluid, force and material clock are adopted together. Refused source
+data, numerical budgets and cancellation preserve every accepted owner.
+
+A genuine source fixture compares ramp, zero crossing and reversal against
+independently constructed original native motion, reconstructs the SI volume
+impulse, and checks physical source identity and rollback/retry. Rustfmt parsing
+and source/API review passed; compilation and execution remain unverified.
+This entry supplies no extra pressure-gradient body traction, endpoint-dependent
+constitutive load, finite heat storage or complete coupled temporal-order claim.
+
 ### SI reservoir boundaries on material immersed bodies
 
 `ImmersedDomain::with_boundaries` creates an explicit

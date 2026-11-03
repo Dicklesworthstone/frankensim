@@ -821,3 +821,126 @@ fn atomic_refusal(model: CollisionModel3) {
     assert_eq!(bodies, expected);
     assert_eq!(snapshot(&refused), snapshot(&clean));
 }
+
+#[test]
+fn endpoint_forcing_with_zero_occupancy_matches_native_fluid_and_physical_source_work() {
+    let gate = CancelGate::new();
+    let shape = |cell| {
+        let spatial = field(cell);
+        core::array::from_fn(|i| spatial[i] + [3e-6, -2e-6, 1e-6][i])
+    };
+    let empty = vec![0.0; N * N * N];
+    let models = [
+        CollisionModel3::Bgk { tau: TAU },
+        CollisionModel3::Trt {
+            tau: TAU,
+            magic: 3.0 / 16.0,
+        },
+        moment_models()[0],
+        moment_models()[1],
+    ];
+    for model in models {
+        for boundaries in [
+            BoundarySpec3::periodic(),
+            BoundarySpec3::new([FaceBoundary3::stationary_wall(); 6]),
+            BoundarySpec3::velocity_pressure_duct_z([0.001, -0.002, 0.012], 1.002),
+        ] {
+            let prepare = || {
+                let mut g =
+                    BoundaryGrid3::with_collision_model(N, N, N, model, UNIFORM, boundaries);
+                g.rebind_force_field(shape);
+                g
+            };
+            let (mut native, mut coupled) = (prepare(), prepare());
+            let mut body = body(0);
+            let initial = body;
+            for scale in [2.0, 0.0, -1.0, 0.5] {
+                let before = snapshot(&coupled);
+                let (mut impulse, mut angular, mut half_shift, mut half_moment) =
+                    ([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]);
+                let mut source_work = 0.0;
+                for z in 0..N {
+                    for y in 0..N {
+                        for x in 0..N {
+                            let cell = [x, y, z];
+                            let old_force = coupled.force_density(x, y, z);
+                            let next_force: [f64; 3] =
+                                core::array::from_fn(|i| UNIFORM[i] + scale * shape(cell)[i]);
+                            let mean: [f64; 3] =
+                                core::array::from_fn(|i| 0.5 * old_force[i] + 0.5 * next_force[i]);
+                            let shift: [f64; 3] =
+                                core::array::from_fn(|i| 0.5 * (next_force[i] - old_force[i]));
+                            let arm = core::array::from_fn(|i| cell[i] as f64 + 0.5 - ORIGIN[i]);
+                            let moment = cross(arm, mean);
+                            let shift_moment = cross(arm, shift);
+                            let f = before[index(cell)];
+                            // Independent original fluid collision: no immersed
+                            // source helper or receipt enters this local-work oracle.
+                            let post = fs_lbm::d3q19::collide_cell3(f, model, old_force).unwrap();
+                            let velocity = |pop: [f64; Q3], force: [f64; 3]| {
+                                let rho = pop.iter().sum::<f64>();
+                                core::array::from_fn::<_, 3, _>(|i| {
+                                    (pop.iter()
+                                        .zip(E3)
+                                        .map(|(f, e)| f * f64::from([e.0, e.1, e.2][i]))
+                                        .sum::<f64>()
+                                        + 0.5 * force[i])
+                                        / rho
+                                })
+                            };
+                            let u = velocity(f, old_force);
+                            let v = velocity(post, next_force);
+                            source_work += dot(mean, core::array::from_fn(|i| 0.5 * (u[i] + v[i])));
+                            for i in 0..3 {
+                                impulse[i] += mean[i];
+                                angular[i] += moment[i];
+                                half_shift[i] += shift[i];
+                                half_moment[i] += shift_moment[i];
+                            }
+                        }
+                    }
+                }
+                native.step_with_endpoint_force_scale(scale, &gate).unwrap();
+                let report = coupled
+                    .step_with_partial_saturation_body_and_endpoint_force_scale(
+                        &empty, &mut body, [0.0; 6], scale, ORIGIN, &gate,
+                    )
+                    .unwrap();
+                assert_eq!(snapshot(&native), snapshot(&coupled));
+                assert_eq!(body, initial);
+                close(report.forcing.midpoint_work, source_work, 2e-15);
+                let (mass, raw_p, raw_l) = fluid_delta(&before, &coupled);
+                close(mass, report.open.mass_change, 2e-11);
+                for i in 0..3 {
+                    close(report.forcing.impulse[i], impulse[i], 3e-16);
+                    close(report.forcing.angular_impulse[i], angular[i], 3e-15);
+                    close(
+                        raw_p[i] + half_shift[i],
+                        impulse[i]
+                            + report.walls.fluid_population_impulse[i]
+                            + report.open.impulse[i],
+                        2e-11,
+                    );
+                    close(
+                        raw_l[i] + half_moment[i],
+                        angular[i]
+                            + report.walls.fluid_population_angular_impulse[i]
+                            + report.open.angular_impulse[i]
+                            + report.periodic.angular_momentum_change[i],
+                        3e-10,
+                    );
+                }
+                for z in 0..N {
+                    for y in 0..N {
+                        for x in 0..N {
+                            assert_eq!(
+                                native.force_density(x, y, z),
+                                coupled.force_density(x, y, z)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

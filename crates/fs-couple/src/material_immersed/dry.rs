@@ -279,6 +279,41 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
         controls: DryBodyCouplingConfig3,
         gate: &CancelGate,
     ) -> Result<DryBodyExchange3, Error> {
+        self.step_forces_si_inner(authored, moment_origin_m, controls, gate, None)
+    }
+
+    /// Advance original material motion with an endpoint-sampled fluid load.
+    ///
+    /// `next_scale` multiplies the spatial SI field selected by
+    /// `rebind_fluid_force_field_si`; it is relative to that original shape,
+    /// not to the previous endpoint. The uniform fluid source stays held.
+    /// Authored body force/couple and reduced gravity retain `step_forces_si`
+    /// semantics. The original density and dx/dt conversion remain unchanged.
+    ///
+    /// The native solver uses the same next Guo force for streamed inventories
+    /// and reservoir faces, and subtracts the trapezoidal fictitious-interior
+    /// source. Body, fluid, force and accepted clock publish together. This
+    /// prescribed fixed-shape history does not infer a pressure-gradient body
+    /// traction, an endpoint constitutive load, heat or complete coupled order.
+    pub fn step_forces_si_with_endpoint_fluid_force_scale(
+        &mut self,
+        authored: [f64; 6],
+        next_scale: f64,
+        moment_origin_m: [f64; 3],
+        controls: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+    ) -> Result<DryBodyExchange3, Error> {
+        self.step_forces_si_inner(authored, moment_origin_m, controls, gate, Some(next_scale))
+    }
+
+    fn step_forces_si_inner(
+        &mut self,
+        authored: [f64; 6],
+        moment_origin_m: [f64; 3],
+        controls: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<DryBodyExchange3, Error> {
         poll(gate)?;
         let next = self
             .native
@@ -305,15 +340,30 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
                 "dry-body source requires its original resolved shape",
             ));
         };
-        let receipt = self.native.grid.step_with_dry_partial_saturation_body(
-            &mut self.native.samplers[0],
-            &shapes[0],
-            &mut self.native.bodies[0],
-            impulse,
-            origin,
-            controls,
-            gate,
-        )?;
+        let receipt = if let Some(scale) = endpoint_force_scale {
+            self.native
+                .grid
+                .step_with_dry_partial_saturation_body_and_endpoint_force_scale(
+                    &mut self.native.samplers[0],
+                    &shapes[0],
+                    &mut self.native.bodies[0],
+                    impulse,
+                    scale,
+                    origin,
+                    controls,
+                    gate,
+                )?
+        } else {
+            self.native.grid.step_with_dry_partial_saturation_body(
+                &mut self.native.samplers[0],
+                &shapes[0],
+                &mut self.native.bodies[0],
+                impulse,
+                origin,
+                controls,
+                gate,
+            )?
+        };
         self.native.accepted_steps = next;
         Ok(receipt)
     }

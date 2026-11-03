@@ -22,9 +22,9 @@
 //! parameter, stresslet accuracy or suspension rheology.
 
 use super::{
-    BoundaryGrid3, BoundaryLink3, CancelGate, CollisionError3, CollisionModel3, E3, Face3,
-    FaceBoundary3, OPP3, PullSource, Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force,
-    collision_kernel3, equilibrium3, planar_face_cells,
+    BoundaryGrid3, BoundaryLink3, BoundaryStepError3, CancelGate, CollisionError3, CollisionModel3,
+    E3, Face3, FaceBoundary3, OPP3, PullSource, Q3, StreamView, TILE_CELLS, WallMomentumExchange3,
+    cell_force, collision_kernel3, equilibrium3, planar_face_cells,
 };
 
 mod collision;
@@ -90,12 +90,13 @@ pub struct PartialSaturationExchange3 {
 
 /// Imposed fluid body force, separate from immersed-body and wall reactions.
 /// All non-solid cells retain fluid, including occupied fractions; the full
-/// held Guo force therefore acts there exactly once, without a saturation
+/// prescribed Guo impulse therefore acts there exactly once, without a saturation
 /// multiplier. An additional solid load belongs separately to the body's
 /// external impulse; the imposed fluid force is not a hydrodynamic reaction.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PartialSaturationForcing3 {
-    /// Sum of held per-cell force densities for this lattice tick.
+    /// Sum of per-cell source impulses for this lattice tick. Endpoint histories
+    /// use the mean of the accepted and next forces; held sources use one force.
     pub impulse: [f64; 3],
     /// Moment of those forces about the requested fixed world origin.
     pub angular_impulse: [f64; 3],
@@ -146,6 +147,34 @@ impl PartialSaturationForcing3 {
             self.angular_impulse[i] += angular[i];
         }
         self.midpoint_work += dot(force, midpoint);
+        Ok(())
+    }
+
+    // Use each physical Guo frame and its actual trapezoidal source impulse.
+    // Unchanged endpoints retain the held-source arithmetic exactly.
+    fn add_endpoint(
+        &mut self,
+        incoming: [f64; Q3],
+        outgoing: [f64; Q3],
+        force: [f64; 3],
+        next_force: [f64; 3],
+        cell: [usize; 3],
+        origin: [f64; 3],
+    ) -> Result<()> {
+        if force == next_force {
+            return self.add(incoming, outgoing, force, cell, origin);
+        }
+        let (_, before) = moments(incoming, force, cell)?;
+        let (_, after) = moments(outgoing, next_force, cell)?;
+        let impulse = core::array::from_fn(|i| 0.5 * force[i] + 0.5 * next_force[i]);
+        let midpoint = core::array::from_fn(|i| 0.5 * (before[i] + after[i]));
+        let arm = core::array::from_fn(|i| cell[i] as f64 + 0.5 - origin[i]);
+        let angular = cross(arm, impulse);
+        for i in 0..3 {
+            self.impulse[i] += impulse[i];
+            self.angular_impulse[i] += angular[i];
+        }
+        self.midpoint_work += dot(impulse, midpoint);
         Ok(())
     }
 
@@ -428,6 +457,51 @@ impl BoundaryGrid3 {
         .map(|(exchange, ())| exchange)
     }
 
+    /// Advance frozen-geometry body coupling with an endpoint-sampled fluid load.
+    ///
+    /// The selected spatial force shape is multiplied by `next_scale` at the
+    /// accepted endpoint. Collision and reciprocal body coupling retain the
+    /// starting Guo force; actual physical momentum receives the trapezoidal
+    /// source impulse. Uniform forcing remains held. The force, populations and
+    /// body publish together. This is a prescribed fixed-shape source history,
+    /// not an implicit endpoint load law or a coupled temporal-order claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_partial_saturation_body_and_endpoint_force_scale(
+        &mut self,
+        solid_fractions: &[f64],
+        body: &mut PartialSaturationBody3,
+        external_impulse: [f64; 6],
+        next_scale: f64,
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<PartialSaturationBodyExchange3> {
+        self.validate_immersed_endpoint_force_scale(next_scale, gate)?;
+        self.partial_saturation_body_step(
+            solid_fractions,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            true,
+            Some(next_scale),
+            |_, _, _| Ok(()),
+        )
+        .map(|(exchange, ())| exchange)
+    }
+
+    pub(super) fn validate_immersed_endpoint_force_scale(
+        &self,
+        scale: f64,
+        gate: &CancelGate,
+    ) -> Result<()> {
+        self.validate_endpoint_force_scale(scale, gate)
+            .map_err(|error| match error {
+                BoundaryStepError3::Cancelled => PartialSaturationError3::Cancelled,
+                BoundaryStepError3::EndpointForce { reason } => invalid(reason),
+                _ => invalid("endpoint fluid force admission refused"),
+            })
+    }
+
     // The motion owner completes its final drift, admission and diagnostics
     // here, while every population still belongs to the previous state.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -467,6 +541,36 @@ impl BoundaryGrid3 {
         moment_origin: [f64; 3],
         gate: &CancelGate,
         publish: bool,
+        finish: impl FnOnce(
+            &Self,
+            &PartialSaturationBody3,
+            &PartialSaturationBodyExchange3,
+        ) -> Result<T>,
+    ) -> Result<(PartialSaturationBodyExchange3, T)> {
+        self.partial_saturation_body_step(
+            solid_fractions,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            publish,
+            None,
+            finish,
+        )
+    }
+
+    // An endpoint scale is admitted once by the public owner, before any
+    // repeated dry-body candidate. No force field changes during these trials.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn partial_saturation_body_step<T>(
+        &mut self,
+        solid_fractions: &[f64],
+        body: &mut PartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+        publish: bool,
+        endpoint_force_scale: Option<f64>,
         finish: impl FnOnce(
             &Self,
             &PartialSaturationBody3,
@@ -626,7 +730,18 @@ impl BoundaryGrid3 {
                         reason: "blended collision overflowed",
                     });
                 }
-                forcing.add(f, post, force, cell, moment_origin)?;
+                if endpoint_force_scale.is_some() {
+                    forcing.add_endpoint(
+                        f,
+                        post,
+                        force,
+                        self.open_force(tile, lane, endpoint_force_scale),
+                        cell,
+                        moment_origin,
+                    )?;
+                } else {
+                    forcing.add(f, post, force, cell, moment_origin)?;
+                }
                 let open_mask = self.open_link_masks[tile].0[lane];
                 if open_mask != 0 {
                     open.add_links(&post, open_mask, cell, moment_origin);
@@ -738,8 +853,13 @@ impl BoundaryGrid3 {
                 }
             }
         }
-        let open = match self.reconstruct_immersed_open_faces(&mut next, open, moment_origin, gate)
-        {
+        let open = match self.reconstruct_immersed_open_faces_with_endpoint_force(
+            &mut next,
+            open,
+            moment_origin,
+            gate,
+            endpoint_force_scale,
+        ) {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.next = Some(next);
@@ -776,6 +896,9 @@ impl BoundaryGrid3 {
         }
         if publish {
             core::mem::swap(&mut self.f, &mut next);
+            if let Some(scale) = endpoint_force_scale {
+                self.publish_endpoint_force_scale(scale);
+            }
             self.topology_locked = true;
         }
         self.next = Some(next);

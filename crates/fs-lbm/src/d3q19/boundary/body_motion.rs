@@ -306,6 +306,32 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
         publish: bool,
     ) -> Result<MovingPartialSaturationExchange3> {
+        self.moving_partial_saturation_transition_with_endpoint_force(
+            sampler,
+            shape,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            publish,
+            None,
+        )
+    }
+
+    // Endpoint forcing is shared with the dry-body candidate and is never
+    // published by a probe. The incoming force still owns collision/coupling.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn moving_partial_saturation_transition_with_endpoint_force(
+        &mut self,
+        sampler: &mut BodyFrameSampler3,
+        shape: &impl BodyFrameShape3,
+        body: &mut MovingPartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+        publish: bool,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<MovingPartialSaturationExchange3> {
         checkpoint(gate)?;
         if !(sampler.dims == self.dimensions()
             && body.mass.is_finite()
@@ -374,13 +400,14 @@ impl BoundaryGrid3 {
         };
         let dims = sampler.dims;
         let samples = sampler.samples_per_axis;
-        let (_, (accepted, receipt)) = self.partial_saturation_body_transition(
+        let (_, (accepted, receipt)) = self.partial_saturation_body_step(
             &sampler.fractions,
             &mut frozen,
             external_impulse,
             moment_origin,
             gate,
             publish,
+            endpoint_force_scale,
             |grid, exchanged, coupling| {
                 let dw = core::array::from_fn(|i| {
                     exchanged.angular_velocity[i] - omega_before_exchange[i]
