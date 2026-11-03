@@ -7,7 +7,10 @@
 //! O(n^3), retained storage and warm intervals O(n^2), with explicit capacities.
 //! Force work is integrated in original coordinates independently of energy.
 
-use super::{ExactLinearSolidEnergy, ExactLinearSolidStep};
+use super::{
+    ExactLinearSolidEnergy, ExactLinearSolidStep, LinearSolidImpulseError,
+    LinearSolidImpulseReport, impulse,
+};
 use crate::linear3::TetElasticAssembly;
 use fs_exec::Cx;
 use fs_math::det;
@@ -190,6 +193,16 @@ pub struct CompleteSpectralSolid {
     stored_j: f64,
     kinetic_j: f64,
     initial_energy_j: f64,
+    cumulative_work_j: f64,
+    work_correction_j: f64,
+}
+
+/// Unpublished native impulse response for a surrounding full-coordinate
+/// support or coupling audit. Prepared matrices and oscillators are borrowed.
+pub(crate) struct SpectralImpulseCandidate {
+    pub(crate) velocity_mps: Vec<f64>,
+    pub(crate) report: LinearSolidImpulseReport,
+    modal_velocity: Vec<f64>,
     cumulative_work_j: f64,
     work_correction_j: f64,
 }
@@ -394,6 +407,104 @@ impl CompleteSpectralSolid {
     }
     pub fn cumulative_work_j(&self) -> f64 {
         self.cumulative_work_j
+    }
+
+    /// Apply an instantaneous impulse in the original `free_dofs()` order.
+    /// All complete-basis modes receive Phi^T J, including admitted rigid
+    /// modes. No stiffness inverse, mode cutoff or new factorization is used.
+    /// The original M audits the actual represented physical velocity change;
+    /// an insufficiently accurate basis or an unrepresentable kick refuses.
+    ///
+    /// Displacement, clock, step count and prepared oscillator/source maps stay
+    /// fixed. J dot average(v) enters the existing cumulative work exactly once.
+    /// Zero impulses preserve both physical and modal state bits. This reduced
+    /// pencil has no discarded support reactions or independent contact law.
+    pub fn apply_momentum_impulse(
+        &mut self,
+        impulse_kg_m_s: &[f64],
+        maximum_impulse_error_kg_m_s: f64,
+        cx: &Cx<'_>,
+    ) -> core::result::Result<LinearSolidImpulseReport, LinearSolidImpulseError> {
+        let candidate =
+            self.trial_momentum_impulse(impulse_kg_m_s, maximum_impulse_error_kg_m_s, cx)?;
+        Ok(self.accept_momentum_impulse(candidate))
+    }
+
+    pub(crate) fn trial_momentum_impulse(
+        &self,
+        impulse_kg_m_s: &[f64],
+        maximum_impulse_error_kg_m_s: f64,
+        cx: &Cx<'_>,
+    ) -> core::result::Result<SpectralImpulseCandidate, LinearSolidImpulseError> {
+        let n = self.free_dofs.len();
+        impulse::admit(impulse_kg_m_s, n, maximum_impulse_error_kg_m_s, cx)?;
+        let map_error = |error| match error {
+            CompleteSpectralSolidError::Cancelled => LinearSolidImpulseError::Cancelled,
+            _ => {
+                LinearSolidImpulseError::Invalid("unrepresentable complete-basis impulse response")
+            }
+        };
+        let mut modal_velocity = self.modal_velocity.clone();
+        let zero = impulse_kg_m_s.iter().all(|j| *j == 0.0);
+        let velocity = if zero {
+            self.velocity.clone()
+        } else {
+            let response = project(&self.basis, impulse_kg_m_s, cx).map_err(map_error)?;
+            for (value, change) in modal_velocity.iter_mut().zip(response) {
+                if change != 0.0 {
+                    *value += change;
+                }
+                if !value.is_finite() {
+                    return Err(LinearSolidImpulseError::Invalid(
+                        "unrepresentable complete-basis velocity",
+                    ));
+                }
+            }
+            reconstruct(&self.basis, &modal_velocity, cx).map_err(map_error)?
+        };
+        let kinetic_after_j = if zero {
+            self.kinetic_j
+        } else {
+            quadratic(&self.mass, &velocity, cx).map_err(map_error)?
+        };
+        let candidate = impulse::audit(
+            &self.mass,
+            &self.velocity,
+            &velocity,
+            impulse_kg_m_s,
+            maximum_impulse_error_kg_m_s,
+            kinetic_after_j,
+            impulse::History {
+                time_s: self.time_s(),
+                stored_j: self.stored_j,
+                kinetic_before_j: self.kinetic_j,
+                initial_energy_j: self.initial_energy_j,
+                cumulative_work_j: self.cumulative_work_j,
+                work_correction_j: self.work_correction_j,
+                cumulative_dissipated_j: 0.0,
+                maximum_work_error_j: self.controls.maximum_work_error_j,
+            },
+            cx,
+        )?;
+        Ok(SpectralImpulseCandidate {
+            velocity_mps: velocity,
+            report: candidate.report,
+            modal_velocity,
+            cumulative_work_j: candidate.cumulative_work_j,
+            work_correction_j: candidate.work_correction_j,
+        })
+    }
+
+    pub(crate) fn accept_momentum_impulse(
+        &mut self,
+        candidate: SpectralImpulseCandidate,
+    ) -> LinearSolidImpulseReport {
+        self.velocity = candidate.velocity_mps;
+        self.modal_velocity = candidate.modal_velocity;
+        self.kinetic_j = candidate.report.energy.kinetic_after_j;
+        self.cumulative_work_j = candidate.cumulative_work_j;
+        self.work_correction_j = candidate.work_correction_j;
+        candidate.report
     }
 
     /// Exact held-force motion, in complete free-DOF order.

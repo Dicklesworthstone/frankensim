@@ -3,6 +3,7 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_solid::dynamics::LinearSolidImpulseError;
 use fs_solid::dynamics::spectral::{
     CompleteSpectralSolid, CompleteSpectralSolidControls, CompleteSpectralSolidError,
 };
@@ -96,6 +97,124 @@ fn ramp(w: f64, q0: f64, v0: f64, g0: f64, rate: f64, t: f64) -> (f64, f64, f64)
         b - w * c * sin + w * d * cos,
         a * t + 0.5 * b * t * t + c * sin / w + d * (1.0 - cos) / w,
     )
+}
+
+#[test]
+fn g1_spectral_impulse_exchanges_momentum_in_rigid_and_elastic_modes() {
+    with_cx(false, |cx| {
+        // Phi=[[1,1/2],[0,1]], M=Phi^-T Phi^-1; one rigid and one elastic mode.
+        let pencil = assembly(&[0.0, 0.0, 0.0, 9.0], &[1.0, -0.5, -0.5, 1.25], 2);
+        let make = || {
+            CompleteSpectralSolid::prepare_with_basis(
+                &pencil,
+                &[0.0, 9.0],
+                &[1.0, 0.5, 0.0, 1.0],
+                0.03,
+                &[0.0, -0.25],
+                &[0.35, 0.3],
+                controls(),
+                cx,
+            )
+            .unwrap()
+        };
+        let mut solid = make();
+        let mut twin = make();
+        let old_u = solid.displacement_m().to_vec();
+        let kick = solid
+            .apply_momentum_impulse(&[0.4, -0.1], 1e-13, cx)
+            .unwrap();
+        twin.apply_momentum_impulse(&[0.4, -0.1], 1e-13, cx)
+            .unwrap();
+        // Phi^T J=[0.4,0.1], so modal rates become [0.6,0.4].
+        near(solid.velocity_mps()[0], 0.8, 2e-15);
+        near(solid.velocity_mps()[1], 0.4, 2e-15);
+        near(kick.kinetic_change_j, 0.195, 2e-15);
+        near(kick.energy.supplied_work_j, 0.195, 2e-15);
+        for axis in 0..2 {
+            near(kick.momentum_change_kg_m_s[axis], [0.4, -0.1][axis], 1e-13);
+        }
+        assert_eq!(solid.displacement_m(), old_u);
+        assert_eq!(solid.steps(), 0);
+        assert_eq!(solid.time_s(), 0.0);
+        let before_zero = bits(&solid);
+        solid.apply_momentum_impulse(&[0.0; 2], 0.0, cx).unwrap();
+        assert_eq!(bits(&solid), before_zero);
+        assert_eq!(bits(&solid), bits(&twin));
+        let step = solid.advance(&[0.0; 2], cx).unwrap();
+        twin.advance(&[0.0; 2], cx).unwrap();
+        assert_eq!(bits(&solid), bits(&twin));
+        let (sin, cos) = (3.0_f64 * 0.03).sin_cos();
+        let q0 = 0.125 + 0.03 * 0.6;
+        let q1 = -0.25 * cos + (0.4 / 3.0) * sin;
+        let v1 = 0.75 * sin + 0.4 * cos;
+        near(solid.displacement_m()[0], q0 + 0.5 * q1, 2e-15);
+        near(solid.displacement_m()[1], q1, 2e-15);
+        near(solid.velocity_mps()[0], 0.6 + 0.5 * v1, 2e-15);
+        near(solid.velocity_mps()[1], v1, 2e-15);
+        assert!(step.energy.cumulative_balance_error_j.abs() < 1e-13);
+    });
+}
+
+#[test]
+fn g4_spectral_impulse_audits_actual_basis_response_and_preserves_zero_bits() {
+    with_cx(false, |cx| {
+        let pencil = assembly(&[0.0], &[1.0], 1);
+        let mut loose = controls();
+        loose.maximum_relative_operator_error = 1e-6;
+        loose.maximum_relative_state_error = 1e-6;
+        let mut solid = CompleteSpectralSolid::prepare_with_basis(
+            &pencil,
+            &[0.0],
+            &[1.0 + 2.0_f64.powi(-24)],
+            0.1,
+            &[-0.0],
+            &[1.0],
+            loose,
+            cx,
+        )
+        .unwrap();
+        let before = bits(&solid);
+        // Reconstructing even the old modal velocity with this admitted basis
+        // would perturb the physical endpoint. Zero impulse must not do so.
+        solid.apply_momentum_impulse(&[0.0], 0.0, cx).unwrap();
+        assert_eq!(bits(&solid), before);
+        assert!(matches!(
+            solid.apply_momentum_impulse(&[0.25], 1e-12, cx),
+            Err(LinearSolidImpulseError::Momentum { .. })
+        ));
+        assert_eq!(bits(&solid), before);
+        // Passing the momentum gate cannot bypass the independent work gate.
+        assert!(matches!(
+            solid.apply_momentum_impulse(&[0.25], 1.0, cx),
+            Err(LinearSolidImpulseError::Energy { .. })
+        ));
+        assert_eq!(bits(&solid), before);
+        with_cx(true, |cancelled| {
+            assert!(matches!(
+                solid.apply_momentum_impulse(&[0.0], 0.0, cancelled),
+                Err(LinearSolidImpulseError::Cancelled)
+            ));
+        });
+        assert_eq!(bits(&solid), before);
+        let mut fast = CompleteSpectralSolid::prepare_with_basis(
+            &pencil,
+            &[0.0],
+            &[1.0],
+            0.1,
+            &[0.0],
+            &[2.0_f64.powi(54)],
+            controls(),
+            cx,
+        )
+        .unwrap();
+        let before = bits(&fast);
+        assert!(matches!(
+            fast.apply_momentum_impulse(&[1.0], 1e-12, cx),
+            Err(LinearSolidImpulseError::Momentum { .. })
+        ));
+        assert_eq!(bits(&fast), before);
+        assert_eq!(fast.steps(), 0);
+    });
 }
 
 #[test]

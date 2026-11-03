@@ -34,6 +34,9 @@ use fs_sparse::Csr;
 pub mod spectral;
 pub mod supported;
 
+mod impulse;
+pub use impulse::{LinearSolidImpulseError, LinearSolidImpulseReport};
+
 /// Explicit complete-state capacity and numerical allowances. No defaults.
 #[derive(Clone, Copy, Debug)]
 pub struct ExactLinearSolidControls {
@@ -122,6 +125,9 @@ pub struct ExactLinearSolid {
     flow: PreparedQuadraticFlow,
     stiffness: Vec<f64>,
     mass: Vec<f64>,
+    // The same admitted inverse already used by the prepared source map.
+    // Retaining it gives instantaneous impulses an O(n^2) response.
+    inverse_mass: Vec<f64>,
     free_dofs: Vec<usize>,
     state: Vec<f64>,
     dt_s: f64,
@@ -517,6 +523,7 @@ impl ExactLinearSolid {
             flow,
             stiffness,
             mass,
+            inverse_mass: inverse,
             free_dofs: assembly.free_dofs.clone(),
             state,
             dt_s,
@@ -559,6 +566,11 @@ impl ExactLinearSolid {
     /// Physical viscosity loss accumulated only from accepted intervals [J].
     pub fn cumulative_dissipated_energy_j(&self) -> f64 {
         self.cumulative_dissipated_j
+    }
+
+    /// Accepted force and instantaneous-impulse work [J].
+    pub fn cumulative_work_j(&self) -> f64 {
+        self.cumulative_work_j
     }
 
     /// One complete exact held-force interval. Every force is in N, in the

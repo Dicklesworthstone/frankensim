@@ -5142,3 +5142,33 @@ The caller owns the original realization, state/port units, real-frequency suppo
 A generic state-space realization supplies no physical storage/dissipation witness. Pole and forced observations therefore expose original states, flows, efforts and signed per-port/total absorbed work, including negative mutual exchanges. They do not label that work as heat or invent boundary energy. Forced `average_total_storage_j` and `total_power_balance_residual_w` are now `Option<f64>`: the existing complete physical pHS/KCM paths return `Some`; an unqualified state-space boundary returns `None`. The original body energy/heat and body-plus-boundary-work balance remain independently computed and enforced. Numerical roots do not certify source passivity, experimental complex-frequency support or spectral/spatial completeness.
 
 G1/G3/G4 regressions in `visco_state_space_loads` cover bare oscillator antiresonance with original derivative inertance, exact loaded free modes, signed mutual D/E work beside all Maxwell/Kelvin strains, original dark-state finite poles, finite-amplitude admission, resources, support, cancellation and factor reuse. Existing fully physical response tests explicitly unwrap complete energy accounts.
+
+### Instantaneous momentum in complete linear-solid trajectories
+
+`ExactLinearSolid::apply_momentum_impulse` and
+`CompleteSpectralSolid::apply_momentum_impulse` accept resolved impulses in
+the original free-DOF order. The dense owner retains the inverse already
+computed and admitted for its source map; the complete-spectrum owner uses
+`Phi^T J` and all basis columns, including zero-stiffness rigid modes. Each
+event uses O(n²) operations and O(n) scratch, without a new factorization or
+propagator rebuild. The dense owner retains one additional n² matrix within
+its conservative preparation envelope. These are operation/storage bounds,
+not measured performance results.
+
+Both owners audit `M * (v_after - v_before)` using the actual represented
+endpoint and an explicit absolute per-component impulse allowance. An admitted
+approximate basis cannot bypass this physical audit. Signed work is
+`J dot (v_before + v_after)/2`; its independent residual uses the momentum
+residual directly, with compensated product accounting. Work enters the
+original cumulative account once. Displacement, clock, accepted-step count,
+viscosity/source preparation and earlier physical losses remain intact.
+Zero impulses preserve physical/modal bits; cancellation, unrepresentable
+kicks and failed momentum/work gates publish nothing.
+
+These reduced pencils cannot recover discarded support reactions or claim a
+full-body angular inventory from an incomplete DOF map. The API applies a
+resolved impulse; it does not select contact laws, restitution or event times.
+G1/G3/G4/G5 regression definitions cover off-diagonal mass, viscous/affine
+continuation, a free tetrahedral mass's independent linear/angular balance,
+mixed rigid/elastic spectral response and analytic continuation, zero identity,
+rounded-basis work refusal and cancellation. Native execution remains outstanding.
