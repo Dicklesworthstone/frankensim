@@ -16,6 +16,13 @@ use crate::{
     RigidBodyState, StepReceipt, Vec3, Wrench,
 };
 use fs_la::factor::{Cholesky, cholesky};
+use fs_math::dd::Dd;
+
+#[path = "graph/driven.rs"]
+mod driven;
+pub use driven::{
+    DistanceDrive, DrivenDistanceGraphStep, DrivenDistanceLinkStep, advance_driven_distance_graph,
+};
 
 /// Maximum simultaneous independent scalar rows in the bounded dense solve.
 pub const MAX_DISTANCE_ROWS: usize = 32;
@@ -60,7 +67,7 @@ pub struct DistanceGraphControls {
 pub struct DistanceResidual {
     /// Endpoint length minus the authored distance [m].
     pub gap_m: f64,
-    /// Endpoint relative material-point speed along the rod [m/s].
+    /// Endpoint range rate minus its prescribed value [m/s], zero for a fixed rod.
     pub range_rate_mps: f64,
 }
 
@@ -95,6 +102,11 @@ pub enum DistanceGraphError {
     Step(DistanceStepError),
     /// Original initial gap or range-rate tolerance is not satisfied.
     InitialConstraint { constraint: usize },
+    /// A prescribed length path or its represented continuation is inadmissible.
+    PrescribedMotion {
+        constraint: usize,
+        reason: &'static str,
+    },
     /// The normalized mobility is dependent or below its declared pivot floor.
     DependentConstraints { constraint: usize },
     /// Caller resource cap exceeded before the corresponding work/allocation.
@@ -150,8 +162,26 @@ pub fn advance_distance_graph(
     wrenches: &[Wrench],
     duration_s: f64,
     controls: DistanceGraphControls,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<DistanceGraphStep, DistanceGraphError> {
+    advance_between(
+        states, properties, links, integrator, wrenches, duration_s, controls, None, cancelled,
+    )
+    .map(|(step, _)| step)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_between(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    links: &[DistanceLink],
+    integrator: RigidBodyIntegrator,
+    wrenches: &[Wrench],
+    duration_s: f64,
+    controls: DistanceGraphControls,
+    targets: Option<&[driven::Target]>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(DistanceGraphStep, driven::Work), DistanceGraphError> {
     poll(&mut cancelled)?;
     let local = controls.step;
     if states.len() != properties.len()
@@ -195,6 +225,7 @@ pub fn advance_distance_graph(
         wrenches,
         duration_s,
         controls,
+        targets,
     };
     let mut initial = reserved(links.len())?;
     for (i, link) in links.iter().enumerate() {
@@ -204,10 +235,20 @@ pub fn advance_distance_graph(
                 DistanceStepError::Invalid("rod endpoints need distinct existing bodies").into(),
             );
         }
-        let g = problem
+        let mut g = problem
             .constraint(link)?
             .geometry(link.bodies.map(|b| states[b]))?;
-        if g.gap.abs() > controls.position_tolerance_m
+        if let Some(targets) = targets {
+            g.rate = (driven::range_rate(
+                link.bodies.map(|b| states[b]),
+                link.bodies.map(|b| properties[b]),
+                link.points_body_m,
+                g.normal,
+            )? - Dd::from_f64(targets[i].initial_rate))
+            .to_f64();
+        }
+        if !g.rate.is_finite()
+            || g.gap.abs() > controls.position_tolerance_m
             || g.rate.abs() > controls.velocity_tolerance_mps
         {
             return Err(DistanceGraphError::InitialConstraint { constraint: i });
@@ -275,6 +316,10 @@ pub fn advance_distance_graph(
         }
         iterations += 1;
     }
+    let mut drive_work = driven::Work::default();
+    if let Some(targets) = targets {
+        drive_work.add(&accepted.impulses, &impulse, targets, false, &mut cancelled)?;
+    }
     mobility = Mobility::new(
         &problem,
         &accepted.states,
@@ -295,16 +340,28 @@ pub fn advance_distance_graph(
         &mut candidate.impulses,
         &mut cancelled,
     )?;
+    if let Some(targets) = targets {
+        drive_work.add(&candidate.impulses, &impulse, targets, true, &mut cancelled)?;
+    }
     let mut residuals = reserved(links.len())?;
-    for link in links {
+    for (i, link) in links.iter().enumerate() {
         poll(&mut cancelled)?;
-        let g = problem
-            .constraint(link)?
-            .geometry(link.bodies.map(|b| accepted.states[b]))?;
+        let g = problem.endpoint_geometry(i, link.bodies.map(|b| accepted.states[b]))?;
         if g.gap.abs() > controls.position_tolerance_m
             || g.rate.abs() > controls.velocity_tolerance_mps
         {
             return Err(DistanceStepError::NotConverged.into());
+        }
+        if let Some(targets) = targets {
+            let target = targets[i];
+            let represented_gap = Dd::from_f64(g.gap) - target.length_residual;
+            let represented_rate = Dd::from_f64(g.rate)
+                + (target.final_rate - Dd::from_f64(target.final_rate.to_f64()));
+            if represented_gap.abs().to_f64() > controls.position_tolerance_m
+                || represented_rate.abs().to_f64() > controls.velocity_tolerance_mps
+            {
+                return Err(DistanceStepError::NotConverged.into());
+            }
         }
         residuals.push(DistanceResidual {
             gap_m: g.gap,
@@ -320,17 +377,20 @@ pub fn advance_distance_graph(
         return Err(DistanceStepError::Invalid("graph impulse work").into());
     }
     poll(&mut cancelled)?;
-    Ok(DistanceGraphStep {
-        states_after: accepted.states,
-        position_impulses: accepted.impulses,
-        free_steps: accepted.steps,
-        velocity_impulses: candidate.impulses,
-        constraint_work_j,
-        residuals,
-        position_iterations: iterations,
-        trial_evaluations: evaluations,
-        planned_live_bytes: bytes as usize,
-    })
+    Ok((
+        DistanceGraphStep {
+            states_after: accepted.states,
+            position_impulses: accepted.impulses,
+            free_steps: accepted.steps,
+            velocity_impulses: candidate.impulses,
+            constraint_work_j,
+            residuals,
+            position_iterations: iterations,
+            trial_evaluations: evaluations,
+            planned_live_bytes: bytes as usize,
+        },
+        drive_work,
+    ))
 }
 
 struct Problem<'a> {
@@ -341,8 +401,38 @@ struct Problem<'a> {
     wrenches: &'a [Wrench],
     duration_s: f64,
     controls: DistanceGraphControls,
+    targets: Option<&'a [driven::Target]>,
 }
 impl Problem<'_> {
+    fn endpoint_geometry(
+        &self,
+        index: usize,
+        states: [RigidBodyState; 2],
+    ) -> Result<Geometry, DistanceStepError> {
+        let mut constraint = self.constraint(&self.links[index])?;
+        if let Some(targets) = self.targets {
+            constraint.length_m = targets[index].length;
+        }
+        let mut g = constraint.geometry(states)?;
+        if let Some(targets) = self.targets {
+            let target = targets[index];
+            // Solve against the original polynomial, retaining the part lost
+            // when the endpoint length/rate are rounded for continuation.
+            g.gap = (Dd::from_f64(g.gap) + target.length_residual).to_f64();
+            let link = self.links[index];
+            g.rate = (driven::range_rate(
+                states,
+                link.bodies.map(|b| self.properties[b]),
+                link.points_body_m,
+                g.normal,
+            )? - target.final_rate)
+                .to_f64();
+            if !g.gap.is_finite() || !g.rate.is_finite() {
+                return Err(DistanceStepError::Invalid("prescribed graph residual"));
+            }
+        }
+        Ok(g)
+    }
     fn constraint(
         &self,
         link: &DistanceLink,
@@ -421,11 +511,9 @@ impl Problem<'_> {
         }
         let chord =
             2.0 * fs_math::det::sin(0.5 * self.controls.step.maximum_rotation_increment_rad);
-        for (link, before) in self.links.iter().zip(initial) {
+        for (i, (link, before)) in self.links.iter().zip(initial).enumerate() {
             poll(cancelled)?;
-            let g = self
-                .constraint(link)?
-                .geometry(link.bodies.map(|b| out.states[b]))?;
+            let g = self.endpoint_geometry(i, link.bodies.map(|b| out.states[b]))?;
             if norm(g.normal.sub(before.normal)) > chord {
                 return Err(DistanceStepError::LocalBranch.into());
             }

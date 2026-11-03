@@ -2039,8 +2039,54 @@ body/row permutations, pair/free/disconnected equivalence, a real 32-row
 connected framework, rank/resource/local-branch refusals and cancellation
 at every observed checkpoint. This supplies smooth regular bilateral distance
 graphs; spherical/weld graphs, redundant constraints, unilateral cables,
-contact/impact coupling, moving lengths, exact energy conservation,
+contact/impact coupling, exact energy conservation,
 symplecticity and validated whole-path enclosures remain separate work.
+
+### Prescribed-length internal actuators on native rigid graphs
+
+`rigid_rattle::distance::graph::advance_driven_distance_graph` extends the same
+simultaneous solver with one `DistanceDrive` per link. The prescribed length is
+`L(t)=L(0)+r(0)t+at²/2`; initial range rates and endpoint lengths/rates enter the
+original full shared-body mobility and native impulse/free-step/impulse path.
+Mixed static/driven rods, loops, disconnected islands and unlinked bodies keep
+their actual finite inertia. The original static API is unchanged. Driven
+range-rate admission and work retain native COM velocity and angular-velocity
+cross arm separately, including for stationary commands: a boost cannot erase
+local spin by rounding a convenience point velocity first. No coordinate is
+snapped or body silently converted to a support.
+
+Central internal reactions retain total linear and orbital-plus-spin angular
+momentum, while a prescribed actuator supplies or recovers signed energy.
+Its work is `j_start*r_start+j_end*r_end`, with each simultaneously solved
+scalar impulse paired with its own event's commanded rate. Per-link and total
+work are returned separately from the actual numerical constraint-work defect.
+That defect uses double-double relative material-point velocities and the
+original applied vector impulses, retaining shared-body work cross terms without
+subtracting large laboratory-frame kinetic energies. Per-link defect attribution
+uses native application order; the total is invariant up to floating roundoff.
+Neither this defect nor free-step error is physical heat.
+
+Command preparation retains length/rate increments in double-double arithmetic.
+The full prescribed quadratic, including an interior contraction minimum, must
+stay above the position tolerance. Rounded continuation length/rate errors are
+reported and admitted against physical tolerances; the final state must satisfy
+both the original polynomial and the represented continuation constraints.
+A nonzero prescribed displacement rounded to unchanged length refuses. Updated
+links and rates are returned for continuation. The native body/row, impulse,
+angular, iteration and trial caps remain authoritative; a bounded stack command
+bank and one fallibly reserved continuation vector add O(R) work/storage. The
+reported logical payload includes that vector, and cancellation remains atomic.
+
+`tests/rigid_distance_graph_driven.rs` checks independent unequal-mass actuator
+force/work balances, held external forces under a large common boost, exact
+static parity, full-tensor closed-framework continuation/reversal and momentum,
+the continuous rotating telescopic-pair phase and signed-work refinement,
+frame/link-order/endpoint covariance, hidden-spin refusal under a large common
+boost, a real 32-row driven graph, polynomial
+collapse/representation/resource refusals and every cancellation checkpoint.
+This is an ideal bilateral length source: finite motor/storage/efficiency laws,
+unilateral cables, contact/impact coupling, exact energy preservation,
+symplecticity and validated whole-path state enclosures remain outside this API.
 
 ## Articulated point/plane impact response
 
