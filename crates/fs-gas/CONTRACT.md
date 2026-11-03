@@ -3248,3 +3248,48 @@ Scope remains a sealed homogeneous ideal-gas parcel with caller-declared
 constant conductance and an infinite fixed-temperature reservoir. No finite
 wall capacity, evolving wall source, radiation law, streams, spatial transport
 or empirical mechanism validation is implied. Time-error estimates are local.
+
+## Finite material bodies in adaptive reacting parcels
+
+With the `material` feature, `chemistry::heat::material::FiniteHeatBody`
+retains an exact original equilibrium enthalpy chart, invariant body mass,
+declared constant body pressure and total thermal conductance. Both prepared
+gas reactors expose `advance_with_finite_body`; the returned gas and original-
+source body endpoints publish together. Source, cancellation, work and energy
+refusals publish neither endpoint.
+
+The existing backward-Euler/SDIRK2 chemical stages eliminate the finite body
+on its original piecewise-linear caloric segments. Binary segment lookup and
+analytic elimination introduce no second time integrator or nested iterative
+temperature root. The constrained gas Jacobian includes the body's changing
+temperature response. Latent plateaus retain their actual enthalpy and phase
+fraction; the adaptive comparison includes both body temperature and liquid
+fraction. Caloric bracketing respects both original source domains.
+
+Gas heat and body heat cancel once. The original material isobaric heat owner
+reports density-derived volume, pressure work, enthalpy and internal-energy
+changes. Fixed-volume gas closes its U change with body U and body p*dV;
+fixed-pressure gas also reports its own outward p*dV. Formation and latent
+energy remain in their respective original potentials. Entropy admission uses
+the actual gas change plus the original body integral of dh/T. Unresolved
+enthalpy-datum heat increments refuse rather than disappear.
+
+This is a homogeneous finite-body model with constant conductance, held
+pressures and no gas/body mass exchange. The caller must justify negligible
+internal body gradients and the pressure applicability of the original chart.
+It does not resolve wall geometry, contact mechanics, moving interfaces or
+spatial flame transport. Source traversal is bounded to 4096 original knots.
+
+Five focused G1/G3/G4 tests cover independent sensible/reacting two-body
+solutions, sharp latent heating/cooling and onset, both gas constraints and
+time methods, enthalpy datum changes, both pressure-work accounts, finite-body
+constrained Jacobian differences, source refusal, cancellation, replay and
+insulated agreement with the original adiabatic owner. The final actual-source
+material-feature heat target passed all 11 tests (five new, six existing).
+A broader material-feature unit run passed 78 tests, excluding the two known
+long hydrogen/methane Cantera cases, before the final finite-denominator guard
+and additional Jacobian test; that final focused run includes both changes.
+Default-feature compilation and all six existing heat tests also passed.
+These are native fallback builds against compatible cached dependencies;
+DSR and required sibling checkouts were unavailable. They do not establish
+a full workspace verdict or measured-material validation.

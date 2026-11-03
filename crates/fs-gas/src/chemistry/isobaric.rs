@@ -7,7 +7,8 @@
 //! p(Vfinal-Vinitial), positive outward. Adiabatic evolution conserves H;
 //! a declared HeatBath instead satisfies Hfinal-Hinitial=Q and dU=Q-p dV.
 //! This homogeneous quasistatic model does not resolve piston inertia, acoustics,
-//! spatial transport, finite bath capacity, inflow or outflow.
+//! spatial transport, inflow or outflow. The material feature also admits an
+//! original-source finite thermal body inside the same chemical stages.
 
 use super::*;
 
@@ -109,7 +110,7 @@ impl IsobaricReactor {
             pressure,
             initial_temperature,
             duration,
-            Some(bath),
+            Some(heat::HeatExchange::Bath(&bath)),
             cancelled,
         )
     }
@@ -133,20 +134,20 @@ impl IsobaricReactor {
             pressure,
             initial_temperature,
             duration,
-            Some(bath),
+            Some(heat::HeatExchange::Bath(&bath)),
             cancelled,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance(
+    pub(super) fn advance(
         &mut self,
         amounts: &[Amount],
         target: Option<Energy>,
         pressure: Pressure,
         initial_temperature: Temperature,
         duration: Time,
-        heat_bath: Option<HeatBath>,
+        heat_exchange: Option<heat::HeatExchange<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<IsobaricKineticsView<'_>, IsobaricKineticsError> {
         poll(&mut cancelled)?;
@@ -175,7 +176,7 @@ impl IsobaricReactor {
             Some(pressure),
             initial_temperature,
             duration,
-            heat_bath,
+            heat_exchange,
             &mut cancelled,
         )?;
         let view = IsobaricKineticsView { inner, pressure };

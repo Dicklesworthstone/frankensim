@@ -188,9 +188,10 @@ pub struct IsochoricKineticsBalance {
     /// Signed accepted reservoir heat into the parcel [J]; zero if adiabatic.
     /// This excludes reaction heat, already contained in the source energies.
     pub heat_input_j: f64,
-    /// Reservoir entropy delivered to the parcel, Q/Tb [J/K].
+    /// Counterpart entropy delivered to the parcel [J/K]: Q/Tb for a held
+    /// bath, or minus the actual finite body's source-integrated entropy change.
     pub entropy_transfer_j_k: f64,
-    /// Parcel entropy change minus Q/Tb [J/K], including chemistry and thermal
+    /// Parcel entropy change minus entropy transfer [J/K], including chemistry and thermal
     /// exchange. This is a discrete balance, not a pure dissipation integral.
     pub entropy_production_j_k: f64,
     /// Smallest accepted parcel-plus-reservoir entropy increment [J/K].
@@ -301,6 +302,9 @@ pub enum IsochoricKineticsError {
     Invalid(&'static str),
     /// Original source or constitutive kinetics refusal.
     Chemistry(KineticsErrorV1),
+    /// Original finite-body caloric source or pressure-work refusal.
+    #[cfg(feature = "material")]
+    FiniteBody(fs_material::phase::PhaseStateError),
     /// The declared source bracket cannot represent the prescribed total U.
     EnergyNotBracketed {
         lower_energy_j: f64,
@@ -339,6 +343,12 @@ impl From<KineticsErrorV1> for IsochoricKineticsError {
             KineticsErrorV1::Cancelled => Self::Cancelled,
             other => Self::Chemistry(other),
         }
+    }
+}
+#[cfg(feature = "material")]
+impl From<fs_material::phase::PhaseStateError> for IsochoricKineticsError {
+    fn from(error: fs_material::phase::PhaseStateError) -> Self {
+        Self::FiniteBody(error)
     }
 }
 
@@ -450,7 +460,7 @@ fn advance_prepared_constraint<'a>(
     pressure: Option<Pressure>,
     initial_temperature: Temperature,
     duration: Time,
-    heat_bath: Option<HeatBath>,
+    heat_exchange: Option<heat::HeatExchange<'_>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<IsochoricKineticsView<'a>, IsochoricKineticsError> {
     poll(&mut cancelled)?;
@@ -544,7 +554,7 @@ fn advance_prepared_constraint<'a>(
                 full,
                 stage_forcing,
                 accepted,
-                heat_bath,
+                heat_exchange,
                 &mut cancelled,
             )?;
             full_concentrations.copy_from_slice(reactor.concentrations());
@@ -554,7 +564,7 @@ fn advance_prepared_constraint<'a>(
                 half,
                 stage_forcing,
                 accepted,
-                heat_bath,
+                heat_exchange,
                 &mut cancelled,
             )?;
             let fine_state = reactor.implicit_step(
@@ -563,7 +573,7 @@ fn advance_prepared_constraint<'a>(
                 fine,
                 stage_forcing,
                 half_state,
-                heat_bath,
+                heat_exchange,
                 &mut cancelled,
             )?;
             let mut error = ((fine_state.temperature.value() - full_state.temperature.value())
@@ -578,7 +588,7 @@ fn advance_prepared_constraint<'a>(
                     + controls.relative_tolerance * c.abs().max(current_concentrations[i]);
                 error = error.max((c - full_concentrations[i]).abs() / scale);
             }
-            if heat_bath.is_some() {
+            if let Some(exchange) = heat_exchange {
                 // Use a datum-independent sensible-energy scale; a large
                 // arbitrary formation origin must not loosen heat accuracy.
                 let scale = controls.energy_tolerance_j / volume.value()
@@ -592,6 +602,18 @@ fn advance_prepared_constraint<'a>(
                     .heat_density_j_m3
                     .difference(full_state.heat_density_j_m3);
                 error = error.max(heat_error.abs() / scale);
+                error = error.max(exchange.additional_error(
+                    accepted.heat_density_j_m3,
+                    full_state.heat_density_j_m3,
+                    fine_state.heat_density_j_m3,
+                    volume.value(),
+                    controls,
+                )?);
+                exchange.admit_heat(
+                    fine_state.heat_density_j_m3,
+                    volume.value(),
+                    controls.energy_tolerance_j,
+                )?;
             }
             // The two-half-step endpoint has estimated local error
             // (fine - full)/(2^p - 1); no Richardson extrapolation is applied
@@ -601,13 +623,13 @@ fn advance_prepared_constraint<'a>(
                 - accepted.entropy_density_j_m3_k)
                 * volume.value();
             let entropy_production = entropy_change
-                - heat_bath.map_or(0.0, |bath| {
-                    fine_state
-                        .heat_density_j_m3
-                        .difference(accepted.heat_density_j_m3)
-                        * volume.value()
-                        / bath.temperature().value()
-                });
+                - heat_exchange.map_or(Ok(0.0), |exchange| {
+                    exchange.entropy_transfer(
+                        accepted.heat_density_j_m3,
+                        fine_state.heat_density_j_m3,
+                        volume.value(),
+                    )
+                })?;
             if !error.is_finite()
                 || !entropy_change.is_finite()
                 || !entropy_production.is_finite()
@@ -703,9 +725,9 @@ fn advance_prepared_constraint<'a>(
     balance.composition_reference_roundoff_j = reactor.composition_reference_roundoff_j();
     balance.entropy_change_j_k =
         (accepted.entropy_density_j_m3_k - initial.entropy_density_j_m3_k) * volume.value();
-    balance.entropy_transfer_j_k = heat_bath.map_or(0.0, |bath| {
-        balance.heat_input_j / bath.temperature().value()
-    });
+    balance.entropy_transfer_j_k = heat_exchange.map_or(Ok(0.0), |exchange| {
+        exchange.entropy_transfer(Sum::default(), accepted.heat_density_j_m3, volume.value())
+    })?;
     balance.entropy_production_j_k = balance.entropy_change_j_k - balance.entropy_transfer_j_k;
     balance.nonlinear_iterations = reactor.stats.nonlinear_iterations;
     balance.temperature_evaluations = reactor.stats.temperature_evaluations;

@@ -1,4 +1,4 @@
-use super::heat::HeatStage;
+use super::heat::{HeatExchange, HeatStage};
 use super::*;
 
 #[derive(Default)]
@@ -35,6 +35,8 @@ pub(super) struct ReactorState {
     pub internal_energy_density_j_m3: f64,
     pub constraint_energy_density_j_m3: f64,
     pub heat_capacity_density_j_m3_k: f64,
+    /// Positive -dQ/dT of this implicit heat stage, separate from physical Cp/Cv.
+    pub heat_feedback_density_j_m3_k: f64,
     pub entropy_density_j_m3_k: f64,
     pub heat_density_j_m3: Sum,
 }
@@ -311,8 +313,31 @@ impl Reactor {
         bath: HeatBath,
         diagonal_step: f64,
     ) -> Result<(Vec<f64>, Vec<f64>), IsochoricKineticsError> {
-        let heat =
-            HeatStage::implicit(Sum::default(), Some(bath), self.volume, diagonal_step, 0.0)?;
+        let heat = HeatStage::implicit(
+            Sum::default(),
+            Some(HeatExchange::Bath(&bath)),
+            self.volume,
+            diagonal_step,
+            0.0,
+        )?;
+        self.constrained_rate_linearization_at_stage(extents, temperature_hint, heat)
+    }
+
+    #[cfg(all(test, feature = "material"))]
+    pub(super) fn finite_body_rate_linearization(
+        &mut self,
+        extents: &[f64],
+        temperature_hint: f64,
+        body: heat::material::FiniteHeatBody<'_>,
+        diagonal_step: f64,
+    ) -> Result<(Vec<f64>, Vec<f64>), IsochoricKineticsError> {
+        let heat = HeatStage::implicit(
+            Sum::default(),
+            Some(HeatExchange::Body(body)),
+            self.volume,
+            diagonal_step,
+            0.0,
+        )?;
         self.constrained_rate_linearization_at_stage(extents, temperature_hint, heat)
     }
 
@@ -321,7 +346,7 @@ impl Reactor {
         &mut self,
         extents: &[f64],
         temperature_hint: f64,
-        heat: HeatStage,
+        heat: HeatStage<'_>,
     ) -> Result<(Vec<f64>, Vec<f64>), IsochoricKineticsError> {
         let state = resolve(
             &self.mechanism,
@@ -350,7 +375,8 @@ impl Reactor {
                 derivative.add(
                     self.state.temperature_derivatives()[j]
                         * (-self.state.reaction_energies()[k]
-                            / (state.heat_capacity_density_j_m3_k + heat.capacity_density_j_m3_k)),
+                            / (state.heat_capacity_density_j_m3_k
+                                + state.heat_feedback_density_j_m3_k)),
                 );
                 jacobian[j * nr + k] = derivative.value();
             }
@@ -449,14 +475,14 @@ impl Reactor {
         out: &mut [f64],
         stage_forcing: &mut [f64],
         base_state: ReactorState,
-        heat_bath: Option<HeatBath>,
+        heat_exchange: Option<HeatExchange<'_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ReactorState, IsochoricKineticsError> {
         out.copy_from_slice(base);
         if self.controls.method == IsochoricKineticsMethod::BackwardEuler {
             let heat = HeatStage::implicit(
                 base_state.heat_density_j_m3,
-                heat_bath,
+                heat_exchange,
                 self.volume,
                 step,
                 0.0,
@@ -478,7 +504,7 @@ impl Reactor {
         const GAMMA: f64 = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
         let heat = HeatStage::implicit(
             base_state.heat_density_j_m3,
-            heat_bath,
+            heat_exchange,
             self.volume,
             GAMMA * step,
             0.0,
@@ -492,7 +518,7 @@ impl Reactor {
             heat,
             cancelled,
         )?;
-        self.stage_entropy(stage, base_state, heat_bath, step)?;
+        self.stage_entropy(stage, base_state, heat_exchange, step)?;
         // Every successful implicit_stage exit has evaluated reaction rates
         // at exactly the returned state. Reserve this sole extra vector once.
         for (forcing, rate) in stage_forcing.iter_mut().zip(self.state.rates()) {
@@ -501,12 +527,17 @@ impl Reactor {
                 return Err(failed(step, "unrepresentable SDIRK stage forcing"));
             }
         }
-        let heat_forcing = heat_bath.map_or(0.0, |bath| {
-            bath.increment_density((1.0 - GAMMA) * step, stage.temperature.value(), self.volume)
-        });
+        let heat_forcing = heat_exchange.map_or(Ok(0.0), |exchange| {
+            exchange.increment_density(
+                (1.0 - GAMMA) * step,
+                stage.temperature.value(),
+                stage.heat_density_j_m3,
+                self.volume,
+            )
+        })?;
         let heat = HeatStage::implicit(
             base_state.heat_density_j_m3,
-            heat_bath,
+            heat_exchange,
             self.volume,
             GAMMA * step,
             heat_forcing,
@@ -520,7 +551,7 @@ impl Reactor {
             heat,
             cancelled,
         )?;
-        self.stage_entropy(endpoint, base_state, heat_bath, step)?;
+        self.stage_entropy(endpoint, base_state, heat_exchange, step)?;
         Ok(endpoint)
     }
 
@@ -528,15 +559,18 @@ impl Reactor {
         &self,
         stage: ReactorState,
         base: ReactorState,
-        heat_bath: Option<HeatBath>,
+        heat_exchange: Option<HeatExchange<'_>>,
         step: f64,
     ) -> Result<(), IsochoricKineticsError> {
         let change = (stage.entropy_density_j_m3_k - base.entropy_density_j_m3_k) * self.volume;
         let production = change
-            - heat_bath.map_or(0.0, |bath| {
-                stage.heat_density_j_m3.difference(base.heat_density_j_m3) * self.volume
-                    / bath.temperature().value()
-            });
+            - heat_exchange.map_or(Ok(0.0), |exchange| {
+                exchange.entropy_transfer(
+                    base.heat_density_j_m3,
+                    stage.heat_density_j_m3,
+                    self.volume,
+                )
+            })?;
         if !production.is_finite() || production < -self.controls.entropy_tolerance_j_k {
             return Err(failed(
                 step,
@@ -554,7 +588,7 @@ impl Reactor {
         forcing: Option<&[f64]>,
         out: &mut [f64],
         hint: f64,
-        heat: HeatStage,
+        heat: HeatStage<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ReactorState, IsochoricKineticsError> {
         if !positive(step) {
@@ -602,7 +636,7 @@ impl Reactor {
             }
             for k in 0..nr {
                 self.temperature_extent_derivatives[k] = -self.state.reaction_energies()[k]
-                    / (state.heat_capacity_density_j_m3_k + heat.capacity_density_j_m3_k);
+                    / (state.heat_capacity_density_j_m3_k + state.heat_feedback_density_j_m3_k);
             }
             let direct_fallback = self.newton.solve(
                 &self.nu,
@@ -1286,6 +1320,7 @@ fn evaluate_state(
         internal_energy_density_j_m3,
         constraint_energy_density_j_m3,
         heat_capacity_density_j_m3_k,
+        heat_feedback_density_j_m3_k: 0.0,
         entropy_density_j_m3_k: physical.entropy_density_j_m3_k * volume_ratio,
         heat_density_j_m3: Sum::default(),
     };
@@ -1375,7 +1410,7 @@ fn resolve(
     nu: &[f64],
     extents: &[f64],
     hint: f64,
-    heat: HeatStage,
+    heat: HeatStage<'_>,
     work: &mut StateWorkspace,
     statistics: &mut Statistics,
     cancelled: &mut impl FnMut() -> bool,
@@ -1408,7 +1443,7 @@ fn resolve(
                     cancelled: &mut _| {
         statistics.temperature_evaluations += 1;
         let mut state = evaluate_state(mechanism, Temperature::new(temperature), work, cancelled)?;
-        state.heat_density_j_m3 = heat.heat(temperature);
+        (state.heat_density_j_m3, state.heat_feedback_density_j_m3_k) = heat.heat(temperature)?;
         let mut residual = chemical;
         residual.add(-caloric.target_increment_density);
         // Keep the compensation term separate from the leading cumulative
@@ -1448,8 +1483,10 @@ fn resolve(
         }
         Ok(state)
     };
-    let mut lo = controls.minimum_temperature_k;
-    let mut hi = controls.maximum_temperature_k;
+    let (mut lo, mut hi) = heat.temperature_interval(
+        controls.minimum_temperature_k,
+        controls.maximum_temperature_k,
+    )?;
     let mut t = hint.clamp(lo, hi);
     let first = evaluate(t, work, statistics, &mut *cancelled)?;
     let mut residual = work.energy_residual_density;
@@ -1480,8 +1517,8 @@ fn resolve(
         } else {
             hi = t;
         }
-        let next =
-            t - residual / (state.heat_capacity_density_j_m3_k + heat.capacity_density_j_m3_k);
+        let next = t - residual
+            / (state.heat_capacity_density_j_m3_k + state.heat_feedback_density_j_m3_k);
         t = if next > lo && next < hi {
             next
         } else {

@@ -1,6 +1,10 @@
 use super::*;
 use crate::chemistry::isobaric::IsobaricReactor;
 
+#[cfg(feature = "material")]
+#[path = "heat/material.rs"]
+mod finite_body;
+
 fn thermal_mechanism(binding: f64, rate: f64, reference: f64) -> IdealGasKineticsV1 {
     let model = |name, formation_r| {
         let original = source(name, 0.01, 4.0, 0.0, 0.0);

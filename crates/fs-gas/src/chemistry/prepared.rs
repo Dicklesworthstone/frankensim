@@ -159,7 +159,7 @@ impl IsochoricReactor {
             None,
             initial_temperature,
             duration,
-            Some(bath),
+            Some(heat::HeatExchange::Bath(&bath)),
             cancelled,
         )
     }
@@ -186,7 +186,7 @@ impl IsochoricReactor {
             None,
             initial_temperature,
             duration,
-            Some(bath),
+            Some(heat::HeatExchange::Bath(&bath)),
             cancelled,
         )
     }
