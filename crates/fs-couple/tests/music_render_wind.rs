@@ -286,3 +286,29 @@ fn attached_materials_are_explicit_and_cannot_enable_ambient_source_callbacks() 
         assert!(!output.with_extension("provenance.json").exists());
     }
 }
+
+#[test]
+fn forced_jet_sidecar_names_the_measured_exit_and_stays_silent_for_kutta() {
+    // The committed D4 flute card at 6 Pa (Re_h 236, inside the measured exit's neighbourhood) with the
+    // coarse forced-jet row and a short output: the jet_response sidecar names `exit measured`, and a
+    // Kutta row's sidecar carries no exit field (its bytes are those of a sidecar without the field).
+    // The 1024-sample window holds only the onset, so the card's 2.2 s release is dropped (a command past
+    // the observed window is refused), as flue_window_mass.rs does.
+    let card = include_str!("../../../data/instruments/descriptions/flute/flute-d4.performance");
+    let (jet, out) = ("jet 90 1e-6 3 0\n", "output 120000 ");
+    let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t3.32e2\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
+    for row in [jet, events, out] { assert_eq!(card.matches(row).count(), 1, "the D4 card changed: {row}"); }
+    let dir = directory();
+    for (tail, named) in [("", false), (" exit kutta", false), (" exit measured", true)] {
+        let text = card.replace(events, "events\t1\nevent\t0e0\t5e-2\tpressure-pa\t6e0").replace(out, "output 1024 ")
+            .replace(jet, &format!("{jet}jet_response forced-bickley 0.25 40{tail}\n"));
+        let input = dir.join(format!("exit{}.performance", tail.len()));
+        std::fs::write(&input, text).unwrap();
+        let wav = dir.join(format!("exit{}.wav", tail.len()));
+        success(run(&input, &wav, 512, false));
+        let sidecar = std::fs::read_to_string(wav.with_extension("provenance.json")).unwrap();
+        assert!(sidecar.contains("\"jet_response\":{\"kind\":\"forced-bickley\""), "{sidecar}");
+        assert_eq!(sidecar.contains(",\"exit\":\"measured\"}"), named, "{sidecar}");
+        assert_eq!(sidecar.contains("\"exit\":"), named, "{sidecar}");
+    }
+}

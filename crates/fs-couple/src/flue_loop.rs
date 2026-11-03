@@ -1372,7 +1372,9 @@ impl FlueVoice {
     /// [`Self::with_forced_jet`] under the named exit law ([`forced_jet::JetExitLaw`]).
     ///
     /// # Errors
-    /// As [`Self::with_forced_jet`].
+    /// As [`Self::with_forced_jet`]. `exit measured` is admitted only where Re_h = U0 h / nu lies
+    /// within a factor 2 of 200, the one Re_h at which de la Cuadra measured it (Fig. 2.28);
+    /// elsewhere the voice refuses.
     pub fn with_forced_jet_exit(mut self, spec: forced_jet::ForcedJetSpec,
         exit_law: forced_jet::JetExitLaw, reference_pressure_pa: f64) -> Result<Self, FlueError>
     {
@@ -1403,6 +1405,12 @@ impl FlueVoice {
         } else {
             forced_jet::JetExit::UNIFORM
         };
+        if exit_law == forced_jet::JetExitLaw::Measured {
+            let re_h = exit.centre_over_bulk * reference_bulk * self.geometry.flue_height_m / self.nu;
+            if !forced_jet::measured_exit_reynolds_admitted(re_h) {
+                return Err(FlueError::Invalid { what: "exit measured: U_j h / nu is outside 100 to 400, a numerical neighbourhood (factor 2) chosen in code, not a measured range, around the only Re_h (200) at which the exit receptivity was measured (de la Cuadra 2005 Fig. 2.28)" });
+            }
+        }
         let kernel = forced_jet::ForcedJetKernel::new_with_exit(spec, exit_law, exit,
             self.geometry.flue_height_m, self.geometry.cut_up_m, self.nu, reference_bulk,
             self.minimum_jet_speed_m_s, self.max_jet_history_samples, self.dt)

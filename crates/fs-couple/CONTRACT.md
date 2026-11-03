@@ -4794,13 +4794,15 @@ The fixed-order SI records explicitly supply mechanical/output clocks, the outpu
 sample window and pascal scale/ceiling, bore and exterior gas, cylinder dimensions
 and prescribed terminal reflection, mouth dimensions, jet card/gain/onset seed, an
 optional opt-in jet response in place of the gain chain (`jet_response forced-bickley
-SPACING WINDOW`, `jet_transfer nolle-price-2015 CHANNEL CHAMFER_DEPTH_M` or
+SPACING WINDOW [exit kutta|measured]`, `jet_transfer nolle-price-2015 CHANNEL CHAMFER_DEPTH_M` or
 `jet_transfer auvray-2014 BETA GAMMA SOURCE_TAG`, exclusive; the last is Auvray et al.'s
 jet drive (JASA 136(1) 389, 2014), an in-phase receptivity `h exp(BETA W/h) v / U` delayed
 by `W / (GAMMA U)`, a Bickley cut `b = 2h/5` and Verge's source length `(4/pi) sqrt(2hW)`,
 on `U = sqrt(2P/rho)`, so it refuses every windway row; BETA and GAMMA must be positive,
 GAMMA at most 1, and no field has a default; that paper's Table I gives BETA 0.3 and
-GAMMA 0.4, validated on one recorder at W/h 4),
+GAMMA 0.4, validated on one recorder at W/h 4; `exit measured` is admitted only where
+Re_h = U0 h / nu lies within a factor 2 of 200, the one Re_h at which de la Cuadra measured
+it (Fig. 2.28); elsewhere the voice refuses),
 jet limits, wave memory, fractional phase band/budget, optional viscothermal cells
 and band, receiver position/resolution/band, and control compilation limits. The
 suffix is the existing canonical, typed blowing-pressure gesture schedule.

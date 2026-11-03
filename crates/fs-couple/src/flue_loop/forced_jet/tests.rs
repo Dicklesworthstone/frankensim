@@ -179,3 +179,15 @@ fn g1_a_jet_below_the_minimum_reads_rest_until_its_ring_ends_then_freezes() {
     }
     assert_eq!((short.ring == ring, short.head, short.used), (true, head, n));
 }
+
+#[test]
+fn measured_exit_reynolds_neighbourhood_is_closed_at_both_ends() {
+    use crate::flue_loop::forced_jet::{measured_exit_reynolds_admitted as admitted,
+        MEASURED_EXIT_RE_H, MEASURED_EXIT_RE_H_FACTOR};
+    assert_eq!(MEASURED_EXIT_RE_H, 200.0);
+    assert_eq!(MEASURED_EXIT_RE_H_FACTOR, 2.0);
+    for ok in [100.0, 100.000001, 200.0, 399.999999, 400.0] { assert!(admitted(ok), "{ok}"); }
+    // Planted negatives: just outside either end, zero, negative, non-finite, and the cards' own values.
+    for no in [99.999999, 400.000001, 0.0, -200.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
+        1224.0, 1755.0] { assert!(!admitted(no), "{no}"); }
+}

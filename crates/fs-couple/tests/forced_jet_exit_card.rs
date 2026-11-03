@@ -15,13 +15,21 @@ use fs_exec::CancelGate;
 const CARD: &str =
     include_str!("../../../data/instruments/descriptions/flute/flute-d4.performance");
 const JET: &str = "jet 90 1e-6 3 0\n";
+const WHISTLE_D5: &str =
+    include_str!("../../../data/instruments/descriptions/tin-whistle/tin-whistle-d5.performance");
+const HOLD: &str = "pressure-pa\t3.32e2";
+/// 6 Pa: U0 = 3.19 m/s, Re_h = U0 h / nu = 236 on this card, inside the 100 to 400 neighbourhood.
+const IN_BAND: &str = "pressure-pa\t6e0";
 
-fn parse(tail: &str) -> Result<FlueFilePerformance, String> {
+fn parse_at(pressure: &str, tail: &str) -> Result<FlueFilePerformance, String> {
     assert_eq!(CARD.matches(JET).count(), 1, "the D4 jet row changed; update this test");
-    let text = CARD.replace(JET, &format!("{JET}jet_response forced-bickley 0.25 40{tail}\n"));
+    assert_eq!(CARD.matches(HOLD).count(), 1, "the D4 hold pressure changed; update this test");
+    let text = CARD.replace(HOLD, pressure)
+        .replace(JET, &format!("{JET}jet_response forced-bickley 0.25 40{tail}\n"));
     FlueFilePerformance::from_bytes(text.as_bytes(), 256, &CancelGate::new_clock_free())
         .map_err(|e| format!("{e:?}"))
 }
+fn parse(tail: &str) -> Result<FlueFilePerformance, String> { parse_at(HOLD, tail) } // the committed card, 332 Pa
 
 #[test]
 fn no_tail_is_kutta() {
@@ -39,7 +47,7 @@ fn no_tail_is_kutta() {
 
 #[test]
 fn exit_measured_is_h_over_b_of_the_lip_jet() {
-    let card = parse(" exit measured").expect("parses");
+    let card = parse_at(IN_BAND, " exit measured").expect("parses");
     let jet = card.renderer().voice().forced_jet().expect("forced jet attached");
     assert_eq!(jet.exit_law(), JetExitLaw::Measured);
     let r = 1.0 / JetExit::UNIFORM.half_width_over_height;
@@ -59,7 +67,30 @@ fn exit_measured_is_h_over_b_of_the_lip_jet() {
 #[test]
 fn other_exit_laws_are_refused() {
     for tail in [" exit fletcher", " exit", " measured", " exit measured extra"] {
-        let err = parse(tail).err().unwrap_or_else(|| panic!("'{tail}' must be refused"));
+        let err = parse_at(IN_BAND, tail).err().unwrap_or_else(|| panic!("'{tail}' must be refused"));
         println!("'{tail}' refused: {err}");
     }
+}
+
+#[test]
+fn exit_measured_is_refused_outside_the_measured_reynolds_neighbourhood() {
+    // The committed whistle D5 card (developing windway, Re_h = U0 h / nu = 1224) already carries
+    // `jet_response forced-bickley 0.1 90`; the tail alone is added.
+    const ROW: &str = "jet_response forced-bickley 0.1 90\n";
+    assert_eq!(WHISTLE_D5.matches(ROW).count(), 1, "the whistle D5 jet_response row changed; update this test");
+    let text = WHISTLE_D5.replace(ROW, "jet_response forced-bickley 0.1 90 exit measured\n");
+    let err = FlueFilePerformance::from_bytes(text.as_bytes(), 256, &CancelGate::new_clock_free())
+        .err().expect("exit measured must be refused at Re_h 1224");
+    let err = format!("{err:?}");
+    assert!(err.contains("exit measured: U_j h / nu is outside 100 to 400"), "{err}");
+    assert!(err.contains("not a measured range"), "{err}");
+}
+
+#[test]
+fn kutta_attaches_where_measured_refuses() {
+    // The committed D4 card (332 Pa, Re_h 1755): no tail and `exit kutta` attach; `exit measured` refuses.
+    parse("").expect("no tail attaches at Re_h 1755");
+    parse(" exit kutta").expect("exit kutta attaches at Re_h 1755");
+    let err = parse(" exit measured").err().expect("measured must refuse at Re_h 1755");
+    assert!(err.contains("exit measured: U_j h / nu is outside 100 to 400"), "{err}");
 }

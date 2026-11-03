@@ -1076,8 +1076,9 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
         jet.spec().beta, jet.spec().gamma, json_string(&jet.spec().source), jet.cut_up_over_height(),
         jet.growth(), jet.half_width_m(), jet.source_length_m()));
     let jet_json = renderer.voice().forced_jet().map_or_else(auvray_json, |jet| format!(
-        ",\"jet_response\":{{\"kind\":\"forced-bickley\",\"spacing_b\":{:e},\"window_b_over_u0\":{:e},\"half_width_m\":{:e},\"centre_over_bulk\":{:e},\"reynolds\":{:e}}}",
-        jet.spec().spacing, jet.spec().window, jet.half_width_m(), jet.centre_over_bulk(), jet.reynolds()));
+        ",\"jet_response\":{{\"kind\":\"forced-bickley\",\"spacing_b\":{:e},\"window_b_over_u0\":{:e},\"half_width_m\":{:e},\"centre_over_bulk\":{:e},\"reynolds\":{:e}{}}}",
+        jet.spec().spacing, jet.spec().window, jet.half_width_m(), jet.centre_over_bulk(), jet.reynolds(),
+        if jet.exit_law() == fs_couple::flue_loop::forced_jet::JetExitLaw::Measured { ",\"exit\":\"measured\"" } else { "" }));
     // Named only when the opt-in feeds the card the exit's centre speed instead of the bulk speed.
     let card_speed_json = renderer.voice().card_centreline_speed().map_or_else(String::new, |speed| format!(
         ",\"jet_card_speed\":{{\"definition\":\"centreline\",\"law\":{},\"held_pressure_pa\":{:e},\"held_bulk_speed_m_s\":{:e},\"held_card_speed_m_s\":{:e}}}",

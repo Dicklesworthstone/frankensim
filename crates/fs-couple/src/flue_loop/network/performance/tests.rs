@@ -343,7 +343,11 @@ fn measured_exit_negative_current_feedback_keeps_the_jet_mouth_residual_increasi
     const SAMPLES: usize = 2048;
     const GRID: usize = 129;
     assert_eq!(CARD.matches(JET).count(), 1, "the D4 jet row changed; update this test");
-    let text = CARD.replace(JET, &format!("{JET}jet_response forced-bickley 0.25 40 exit measured\n"));
+    // In band: 6 Pa gives U0 = 3.19 m/s and Re_h = 236 on this card (the gate admits 100 to 400).
+    const HOLD: &str = "pressure-pa\t3.32e2";
+    assert_eq!(CARD.matches(HOLD).count(), 1, "the D4 hold pressure changed; update this test");
+    let text = CARD.replace(HOLD, "pressure-pa\t6e0")
+        .replace(JET, &format!("{JET}jet_response forced-bickley 0.25 40 exit measured\n"));
     let mut renderer = FlueFilePerformance::from_bytes(text.as_bytes(), 256,
         &CancelGate::new_clock_free()).unwrap().into_renderer();
     let v = &mut renderer.voice;
@@ -351,7 +355,7 @@ fn measured_exit_negative_current_feedback_keeps_the_jet_mouth_residual_increasi
     // windway, no mouth contraction.
     assert!(v.forced.is_some() && v.nolle.is_none() && v.unsteady_windway.is_none()
         && v.mouth_contraction.is_none());
-    v.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+    v.apply(FlueControl::SetBlowingPressure(6.0)).unwrap();
     let (dt, b, area) = (v.dt, 0.5*v.geometry.flue_height_m, v.geometry.mouth_area_m2());
     let (mut lowest, mut highest) = (f64::INFINITY, f64::NEG_INFINITY);
     for n in 0..SAMPLES {
@@ -398,7 +402,7 @@ fn measured_exit_negative_current_feedback_keeps_the_jet_mouth_residual_increasi
         }
         v.step_block(&mut [0.0]).unwrap();
     }
-    println!("D4 measured exit, 300 Pa: {SAMPLES} samples, current feedback {lowest:e} to {highest:e}");
+    println!("D4 measured exit, 6 Pa: {SAMPLES} samples, current feedback {lowest:e} to {highest:e}");
 }
 
 // The example card with a short output, a held 300 Pa gesture (its own events fall outside a short

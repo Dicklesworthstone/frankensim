@@ -22,6 +22,8 @@
 //! The exit receptivity is Fletcher & Thwaites' Kutta condition unless the row ends `exit
 //! measured` ([`JetExitLaw::Measured`]): then the jet issues displaced by `(h / U0) v`, in phase,
 //! as de la Cuadra measured, and nothing is carried (Kutta's `1/omega` seed is absent).
+//! `exit measured` is admitted only where Re_h = U0 h / nu lies within a factor 2 of 200, the one
+//! Re_h at which de la Cuadra measured it (Fig. 2.28); elsewhere the voice refuses.
 //!
 //! The station is `cut-up / b`. The step response is integrated once, at the Reynolds number
 //! `U0 b / nu` of the reference (held) pressure. At variable speed its clock is
@@ -121,6 +123,22 @@ pub const PRODUCTION_SPEC: ForcedJetSpec = ForcedJetSpec { spacing: 0.1, window:
 pub const COARSE_SPEC: ForcedJetSpec = ForcedJetSpec { spacing: 0.25, window: 40.0 };
 /// Most integrated responses one process retains for reuse.
 pub const RETAINED_RESPONSES: usize = 32;
+/// `Re_h = U_j h / nu` of the only receptivity measurement behind `exit measured`: de la Cuadra
+/// (thesis, Stanford 2005) Fig. 2.28, a CO2 jet of 3 m/s from a 1 mm flue. Its phase and amplitude
+/// cover three frequencies (omega h / U_j = 0.23 to 0.48) at that one Reynolds number.
+pub const MEASURED_EXIT_RE_H: f64 = 200.0;
+/// The factor either side of it that `exit measured` admits: a numerical neighbourhood chosen in
+/// code, not a measured range.
+pub const MEASURED_EXIT_RE_H_FACTOR: f64 = 2.0;
+
+/// Whether `re_h = U_j h / nu` lies in that neighbourhood (both ends admitted).
+#[must_use]
+pub fn measured_exit_reynolds_admitted(re_h: f64) -> bool {
+    re_h.is_finite()
+        && (MEASURED_EXIT_RE_H / MEASURED_EXIT_RE_H_FACTOR
+            ..=MEASURED_EXIT_RE_H * MEASURED_EXIT_RE_H_FACTOR)
+            .contains(&re_h)
+}
 
 // Integrated responses by their exact inputs. The integration is deterministic and its bits do
 // not depend on the worker count, so a voice built again from the same flue, gas and row reuses
