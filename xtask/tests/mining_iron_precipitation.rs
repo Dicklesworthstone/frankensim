@@ -9,15 +9,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs_matdb::{NormalizedPack, PropertyKey, QueryPoint, SelectionPolicy, UncertaintyModel};
 use fs_qty::{
-    Amount, Dims, MolarMass, QuantitySpec,
+    Amount, Dimensionless, Dims, MolarMass, QuantitySpec,
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 use fs_thermochem::{
-    SpeciesId,
+    SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K,
     stoichiometry::{
         ConservedReaction, FormationEnthalpySource, ReactionBalanceError, ReactionEnthalpy,
         minerals::MineralReaction,
         network::{ReactionNetwork, ReactionNetworkError},
+        thermodynamics::FormationGibbsSource,
     },
 };
 
@@ -159,18 +160,42 @@ fn heat(
     reaction.standard_enthalpy_change(&sources).unwrap()
 }
 
+fn gibbs_sources<'a>(
+    reaction: &'a ConservedReaction,
+    packs: &'a [NormalizedPack; 6],
+    points: &'a [QueryPoint; 6],
+) -> Vec<FormationGibbsSource<'a>> {
+    reaction
+        .terms()
+        .iter()
+        .map(|term| {
+            let index = SPECIES
+                .iter()
+                .position(|name| *name == term.species.as_str())
+                .unwrap();
+            FormationGibbsSource {
+                species: &term.species,
+                pack: &packs[index],
+                at: &points[index],
+                reference_axis: REFERENCE,
+            }
+        })
+        .collect()
+}
+
 #[test]
 fn g0_g3_source_values_require_the_named_solid_phase_and_reference() {
     for (index, values) in [
-        (0, [0.088854, -562_600.0, 60.4, 2100.0, 0.6]),
-        (1, [0.074093, -986_100.0, 83.4, 1300.0, 0.4]),
+        (0, [0.088854, -562_600.0, -491_800.0, 60.4, 2100.0, 0.6]),
+        (1, [0.074093, -986_100.0, -898_000.0, 83.4, 1300.0, 0.4]),
     ] {
         let pack = compile(SLUGS[index]);
         let query = point(index);
-        assert_eq!(pack.claims().claim_count(), 5);
+        assert_eq!(pack.claims().claim_count(), 6);
         let properties = [
             ("molar-mass", MolarMass::DIMS),
             ("standard-molar-formation-enthalpy", MOLAR_ENERGY),
+            ("standard-molar-formation-gibbs-energy", MOLAR_ENERGY),
             ("standard-molar-entropy", MOLAR_ENTROPY),
             (
                 "reported-formation-enthalpy-uncertainty-magnitude",
@@ -269,6 +294,104 @@ fn g1_actual_sources_close_the_goethite_and_lime_hess_cycle() {
             .iter()
             .all(|term| term.species.as_str() != "Fe(OH)3(s)")
     );
+}
+
+#[test]
+fn g1_g3_direct_gibbs_and_explicit_activities_close_the_precipitation_cycle() {
+    let packs = SLUGS.map(compile);
+    let points = std::array::from_fn(point);
+    let reactions = [
+        MineralReaction::FerricHydrolysisGoethite,
+        MineralReaction::HydratedLimeNeutralization,
+        MineralReaction::FerricGoethitePrecipitationWithHydratedLime,
+    ]
+    .map(|reaction| reaction.build().unwrap());
+    let standard = std::array::from_fn::<_, 3, _>(|i| {
+        reactions[i]
+            .standard_gibbs_change(&gibbs_sources(&reactions[i], &packs, &points))
+            .unwrap()
+    });
+    // Independent literal Gf columns in B2131 p16, not fitted H - T*S values.
+    for (result, expected) in standard.iter().zip([-900.0, -129_800.0, -391_200.0]) {
+        assert_eq!(result.molar().value(), expected);
+        for term in result.terms() {
+            let pack = packs.iter().find(|p| p.pack_id() == term.pack_id).unwrap();
+            pack.claims().verify_receipt(&term.answer.receipt).unwrap();
+            assert!(term.answer.receipt.observation_backed);
+            assert!(!term.answer.receipt.source_hashes.is_empty());
+            assert_eq!(
+                term.answer.evidence.value.uncertainty,
+                UncertaintyModel::Unstated
+            );
+        }
+    }
+    assert_eq!(
+        2.0 * standard[0].molar().value() + 3.0 * standard[1].molar().value(),
+        standard[2].molar().value()
+    );
+
+    // Shared declared activities make the proton cancellation observable in
+    // both the reaction quotient and the local Gibbs energy. Solids and water
+    // are explicitly present; the evaluator does not invent unit activities.
+    let activities = reactions.each_ref().map(|reaction| {
+        reaction
+            .terms()
+            .iter()
+            .map(|term| {
+                let activity = match term.species.as_str() {
+                    "Fe[3+](aq)" | "Ca[2+](aq)" => 1e-3,
+                    _ => 1.0,
+                };
+                (term.species.clone(), Dimensionless::new(activity))
+            })
+            .collect::<Vec<_>>()
+    });
+    let states =
+        std::array::from_fn::<_, 3, _>(|i| standard[i].at_activities(&activities[i]).unwrap());
+    let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * 298.15;
+    for (i, log_q) in [1e3_f64.ln(), 1e-3_f64.ln(), 1e-3_f64.ln()]
+        .into_iter()
+        .enumerate()
+    {
+        assert!((states[i].log_quotient.value() - log_q).abs() < 1e-12);
+        assert!(
+            (states[i].molar.value() - (standard[i].molar().value() + rt * log_q)).abs() < 1e-8
+        );
+        assert!(std::ptr::eq(states[i].standard, &standard[i]));
+        assert_eq!(states[i].activities, activities[i]);
+        assert!(standard[i].at_activities(&activities[i][1..]).is_err());
+    }
+    assert!(
+        (2.0 * states[0].molar.value() + 3.0 * states[1].molar.value() - states[2].molar.value())
+            .abs()
+            < 1e-8
+    );
+    assert!(states[0].molar.value() > 0.0);
+    let mut less_acidic = activities[0].clone();
+    let proton = less_acidic
+        .iter_mut()
+        .find(|(species, _)| species.as_str() == "H+(aq)")
+        .unwrap();
+    proton.1 = Dimensionless::new(1e-3);
+    let lower_proton_activity = standard[0].at_activities(&less_acidic).unwrap();
+    assert!((lower_proton_activity.log_quotient.value() - 1e-6_f64.ln()).abs() < 1e-12);
+    assert!(lower_proton_activity.molar.value() < 0.0);
+
+    for (reaction_index, solid_index, phase) in [
+        (0, 0, "source-phase-goethite"),
+        (2, 1, "source-phase-portlandite"),
+    ] {
+        let reaction = &reactions[reaction_index];
+        let mut sources = gibbs_sources(reaction, &packs, &points);
+        assert!(reaction.standard_gibbs_change(&sources[1..]).is_err());
+        let wrong_phase = points[solid_index].clone().with(phase, 0.0).unwrap();
+        sources
+            .iter_mut()
+            .find(|source| source.species.as_str() == SPECIES[solid_index])
+            .unwrap()
+            .at = &wrong_phase;
+        assert!(reaction.standard_gibbs_change(&sources).is_err());
+    }
 }
 
 #[test]

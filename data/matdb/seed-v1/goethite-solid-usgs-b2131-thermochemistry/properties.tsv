@@ -1,60 +1,72 @@
 frankensim.matdb-source.v1
 observation	identity	Goethite FeO(OH), USGS standard elemental reference	USGS Bulletin 2131 printed page 16, FeO(OH)(goethite) row	This is the crystalline goethite FeO(OH) phase with the source's formula weight 88.854 g/mol. It is not lepidocrocite, ferrihydrite, an unspecified ferric hydroxide, a mixed sludge or an ore specimen.
 observation	reference-values	FeO(OH)(goethite) reference quantities	USGS Bulletin 2131 printed page 16	Retain the printed standard formation enthalpy -562.6 kJ/mol and standard molar entropy 60.4 J/(mol K). The named goethite phase and standard elemental reference are required. This row cannot supply Fe(OH)3 or another FeO(OH) polymorph merely because iron, oxygen and hydrogen occur in that material.
+observation	gibbs-reference	Literal goethite standard formation Gibbs energy	USGS Bulletin 2131 printed page 16, FeO(OH)(goethite) row	The separate Gibbs column prints -491.8 kJ/mol with a reported uncertainty magnitude 2.1 kJ/mol. Retain this direct tabulation under the USGS elemental-reference convention and named goethite phase. Formation Gibbs energy is not formation enthalpy minus temperature times absolute species entropy alone. The printed magnitude does not supply a probability distribution, covariance or guaranteed bound; uncertainty remains Unstated.
 observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 16	The source prints 2.1 kJ/mol for the formation-enthalpy uncertainty magnitude and 0.6 J/(mol K) for the entropy uncertainty magnitude. Page 3 describes the calorimetric convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain the printed magnitudes; all claims retain Unstated uncertainty semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.
 observation	scope	USGS source-reference scope	USGS Bulletin 2131 printed pages iv, 1 and 3	The selected quantities apply only at 298.15 K and 100000 Pa with source-elemental-reference-usgs-b2131 and the declared pure goethite phase. No heat-capacity curve, temperature extrapolation, surface hydration, sorption, particle-size effect, precipitate selection, dissolution or precipitation rate is supplied. A complete reaction must use compatible participant references; a caller label cannot change a source evaluation.
 scalar	molar-mass	identity,scope	mass	88.854	g/mol	tabulated
 scalar	formation-enthalpy	reference-values,reported-uncertainty,scope	hf	-562.6	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,gibbs-reference,scope	gf	-491.8	kJ/mol	tabulated
 scalar	entropy	reference-values,reported-uncertainty,scope	s0	60.4	J/mol/K	tabulated
 scalar	formation-uncertainty	reported-uncertainty,scope	hf_uncertainty	2.1	kJ/mol	tabulated
 scalar	entropy-uncertainty	reported-uncertainty,scope	s_uncertainty	0.6	J/mol/K	tabulated
 uncertainty	molar-mass	unstated	-	-	-	-
 uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
 uncertainty	entropy	unstated	-	-	-	-
 uncertainty	formation-uncertainty	unstated	-	-	-	-
 uncertainty	entropy-uncertainty	unstated	-	-	-	-
 validity	molar-mass	temperature	298.15	298.15	K
 validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
 validity	entropy	temperature	298.15	298.15	K
 validity	formation-uncertainty	temperature	298.15	298.15	K
 validity	entropy-uncertainty	temperature	298.15	298.15	K
 validity	molar-mass	pressure	100000	100000	Pa
 validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
 validity	entropy	pressure	100000	100000	Pa
 validity	formation-uncertainty	pressure	100000	100000	Pa
 validity	entropy-uncertainty	pressure	100000	100000	Pa
 validity	molar-mass	standard	1	1	1
 validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
 validity	entropy	standard	1	1	1
 validity	formation-uncertainty	standard	1	1	1
 validity	entropy-uncertainty	standard	1	1	1
 validity	molar-mass	convention	1	1	1
 validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
 validity	entropy	convention	1	1	1
 validity	formation-uncertainty	convention	1	1	1
 validity	entropy-uncertainty	convention	1	1	1
 validity	molar-mass	phase	1	1	1
 validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
 validity	entropy	phase	1	1	1
 validity	formation-uncertainty	phase	1	1	1
 validity	entropy-uncertainty	phase	1	1	1
 validity	molar-mass	polymorph	1	1	1
 validity	formation-enthalpy	polymorph	1	1	1
+validity	formation-gibbs-energy	polymorph	1	1	1
 validity	entropy	polymorph	1	1	1
 validity	formation-uncertainty	polymorph	1	1	1
 validity	entropy-uncertainty	polymorph	1	1	1
 validity	molar-mass	pure	1	1	1
 validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
 validity	entropy	pure	1	1	1
 validity	formation-uncertainty	pure	1	1	1
 validity	entropy-uncertainty	pure	1	1	1
 validity	molar-mass	reference	1	1	1
 validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
 validity	entropy	reference	1	1	1
 validity	formation-uncertainty	reference	1	1	1
 validity	entropy-uncertainty	reference	1	1	1
 validity	molar-mass	specimen	0	0	1
 validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
 validity	entropy	specimen	0	0	1
 validity	formation-uncertainty	specimen	0	0	1
 validity	entropy-uncertainty	specimen	0	0	1
