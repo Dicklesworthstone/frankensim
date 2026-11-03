@@ -1,5 +1,32 @@
 # CONTRACT: fs-lbm
 
+## Native terrain velocity evolution
+
+`terrain_wind::run_v04c_terrain_wind` now evolves the existing D3Q19 BGK
+boundary grid above a synthetic Gaussian hill. The authored-heightfield entry
+accepts physical elevations, the caller's native runner and cancellation gate.
+Cubic physical spacing and explicit `timestep_s` determine the velocity unit;
+`tau` determines the reported laminar viscosity. Grid, memory, finite input,
+open-face-neighbor and low-Mach admission precede a successful receipt.
+
+The x inlet imposes a roughness-shifted logarithmic profile, x outlet fixes
+reference density, y is periodic, the lower wall and voxel terrain are still,
+and the upper wall moves at the reference top speed. Initial fluid is at rest;
+`num_steps` advances actual populations. The original partial reconstruction at
+wall/open seams remains. Final vector discrepancy, mean velocity, maximum speed
+and downstream reverse flow come from interior fluid observations, excluding
+the two x boundary columns on each end. Reverse flow requires a negative
+streamwise velocity, rather than merely slow positive flow. Both RMS and
+maximum discrepancy must meet the declared band. Schema v2 binds exact input
+bits, including timestep, viscosity control, terrain and step count.
+
+This is a finite-time laminar numerical experiment. The logarithmic input is
+not a turbulence/wall-function model; no atmospheric LES, open-sky condition,
+steady convergence, matched fs-atmo statistics or experimental validation is
+claimed. The default resolution is 48×48×12 on 200×200×50 m so all three
+spacings are equal. The existing battery covers rest, live time/viscosity/terrain
+response, physical-velocity rescaling, admission and cancellation.
+
 ## Prepared analytic rheology in the native sparse free surface
 
 `d3q19::freesurface3::rheology::FreeSurfaceRheology3` supplies prepared
