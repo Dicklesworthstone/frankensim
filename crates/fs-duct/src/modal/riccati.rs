@@ -72,7 +72,7 @@
 //! tests certify `bessel_j0_certified` and `J1` against an independent
 //! quadrature. (The staircase's legacy `bessel_j0` is not used here.)
 
-use super::{ModalMouthImpedance, ModalResponse, bessel_j0_certified, j1_roots_unchecked, mat_inv, modal_wave};
+use super::{ModalMouthImpedance, ModalResponse, bessel_j0_certified, j1_roots_unchecked, mat_inv};
 use crate::profile::{RadiusProfile, RiccatiSteps};
 use crate::{
     DuctError, LossModel, TabulatedLoad, Termination, segment_wave, termination_impedance,
@@ -406,7 +406,7 @@ fn propagate<'a>(
             {
                 None
             } else {
-                Some(modal_wave(state, r_mouth, omega, loss, &basis.gammas[1..])?)
+                Some(segment_wave(state, r_mouth, omega, loss)?)
             };
             let (plane, ka) = match load {
                 MouthLoad::Analytic(t) => termination_impedance(t, state, r_mouth, omega)?,
@@ -415,7 +415,7 @@ fn propagate<'a>(
                     omega * r_mouth / state.sound_speed,
                 ),
                 MouthLoad::Matched => (
-                    Some(mouth.as_ref().ok_or(DuctError::Singular)?.zc[0]),
+                    Some(mouth.as_ref().ok_or(DuctError::Singular)?.characteristic_impedance),
                     omega * r_mouth / state.sound_speed,
                 ),
             };
@@ -430,12 +430,22 @@ fn propagate<'a>(
                     {
                         (z.scale(1.0 / zref), C64::ONE)
                     }
-                    _ => (
-                        mouth.as_ref().ok_or(DuctError::Singular)?.zc[k].scale(1.0 / zref),
-                        C64::ONE,
-                    ),
+                    _ => {
+                        let wave = mouth.as_ref().ok_or(DuctError::Singular)?;
+                        let k0 = wave.wavenumber;
+                        let kt = C64::from_re(basis.gammas[k] / r_mouth);
+                        let kn = crate::select_forward_decaying(((k0 - kt) * (k0 + kt)).sqrt());
+                        // U/P = k_n/(k_0 Zc_0) stays finite when the axial
+                        // wavelength diverges at cutoff. In this chart its
+                        // exact limit is [P/Zref, U] = [1, 0]; constructing
+                        // Zc_n first would introduce an artificial pole.
+                        (
+                            C64::ONE,
+                            (kn / (k0 * wave.characteristic_impedance)).scale(zref),
+                        )
+                    }
                 };
-                if !finite(xk) {
+                if !finite(xk) || !finite(yk) {
                     return Err(DuctError::Singular);
                 }
                 x_blk[k * n + k] = xk;

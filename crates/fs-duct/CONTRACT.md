@@ -546,6 +546,14 @@ pipe `Z_in = +i Zc cot(kL)`.
     impose the exact ideal condition on every retained mode, as in the
     staircase. Scalar radiation and tabulated loads retain the disclosed
     matched higher-mode closure; `Matched` matches every mode.
+    The continuous matched boundary stores modal admittance
+    `U_n/P_n = k_n/(k_0 Zc_0)`. At a transverse cutoff it retains finite
+    pressure with exactly zero axial modal flow, instead of first forming
+    an infinite characteristic impedance. The tapered-field regression
+    checks this limit from propagating and evanescent sides and closes
+    acoustic work through the same pressure/flow solution. A genuine inlet
+    impedance pole still refuses; staircase native-wave coordinates retain
+    their separate cutoff limitation.
   - Losses follow the staircase rule: `segment_wave` for the plane mode,
     `k_n` from the lossy `k_0`, `Zc_n = Zc_0 k_0/k_n`. A uniform section
     reproduces both exactly.

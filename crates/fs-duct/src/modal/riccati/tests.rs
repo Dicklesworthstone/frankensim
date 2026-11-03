@@ -4,6 +4,7 @@
 use super::*;
 use crate::modal::{
     bessel_j0, bessel_j0_certified, bessel_j1, mm_input_impedance, modal_characteristic_impedances,
+    modal_wave,
 };
 use crate::profile::{MAX_RICCATI_STEPS, profile_impedance};
 use crate::{Duct, Segment};
@@ -59,6 +60,75 @@ fn exp_horn() -> RadiusProfile {
 fn complex_exp(z: C64) -> C64 {
     let (s, c) = det::sin_cos(z.im);
     C64::new(c, s).scale(det::exp(z.re))
+}
+
+#[test]
+fn matched_mouth_cutoff_retains_physical_pressure_flow_and_power() {
+    // G1: an infinite continuation has U_n/P_n = k_n S/(omega rho).
+    // At cutoff this is exactly zero, while the finite tapered section can
+    // still carry nonzero pressure in that mode and exchange it with mode 0.
+    let gas = air20();
+    let gamma = j1_roots_unchecked(1)[0];
+    let radius = gamma / 128.0;
+    let profile = RadiusProfile::spline(vec![(0.0, radius / 2.0), (0.03, radius)], None).unwrap();
+    let omega = gas.sound_speed * 128.0;
+    assert_eq!(omega / gas.sound_speed, gamma / profile.outlet_radius());
+    let plane_z = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+    let load_z = C64::new(0.8, -0.15).scale(plane_z);
+    let table = TabulatedLoad::try_new(
+        vec![omega * 0.99, omega * 1.01], vec![load_z; 2], "authored/cutoff-test", 0.0,
+    ).unwrap();
+    let inlet_flow = [C64::from_re(1.0e-5), C64::new(-4.0e-6, 3.0e-6)];
+    for (load, expected_plane_z) in [
+        (MouthLoad::Matched, C64::from_re(plane_z)),
+        (MouthLoad::Tabulated(&table), load_z),
+    ] {
+        let field = mm_profile_field(
+            &profile, &gas, omega, LossModel::Lossless, load,
+            ModeCount(2), RiccatiSteps(64), &inlet_flow,
+        ).unwrap();
+        let p = field.pressure.last().unwrap();
+        let u = field.flow.last().unwrap();
+        assert_eq!(u[1], C64::ZERO, "cutoff continuation cannot carry axial flow");
+        assert!(p[1].abs() > 1.0e-4, "the cutoff pressure must not be discarded");
+        assert!(rel(p[0], expected_plane_z * u[0]) < 2.0e-12);
+        let power = |pressure: &[C64], flow: &[C64]| -> f64 {
+            pressure.iter().zip(flow).map(|(&p, &u)| 0.5 * (p * u.conj()).re).sum()
+        };
+        let incoming = power(&field.pressure[0], &inlet_flow);
+        let outgoing = power(p, u);
+        assert!(outgoing > 0.0);
+        assert!((incoming - outgoing).abs() < 2.0e-10 * outgoing);
+    }
+}
+
+#[test]
+fn matched_mouth_cutoff_is_continuous_from_propagating_and_evanescent_sides() {
+    // G1/G3: the matched admittance has its physical square-root branch point,
+    // but the finite-section response has the same limit from either side.
+    let gas = air20();
+    let radius = j1_roots_unchecked(1)[0] / 128.0;
+    let profile = RadiusProfile::spline(vec![(0.0, radius / 2.0), (0.03, radius)], None).unwrap();
+    let omega = gas.sound_speed * 128.0;
+    let response = |factor| {
+        mm_profile_impedance(
+            &profile, &gas, omega * factor, LossModel::Lossless,
+            MouthLoad::Matched, ModeCount(2), RiccatiSteps(64),
+        ).unwrap().impedance_matrix
+    };
+    let cutoff = response(1.0);
+    let scale = cutoff.iter().map(|z| z.abs()).fold(0.0, f64::max);
+    for direction in [-1.0, 1.0] {
+        let mut previous = f64::INFINITY;
+        for offset in [1.0e-4, 1.0e-6, 1.0e-8] {
+            let current = response(1.0 + direction * offset);
+            let error = current.iter().zip(&cutoff)
+                .map(|(&a, &b)| (a - b).abs() / scale).fold(0.0, f64::max);
+            assert!(error < 0.2 * previous, "side={direction}, offset={offset}, error={error}");
+            previous = error;
+        }
+        assert!(previous < 1.0e-3);
+    }
 }
 
 /// `J_n(x) = (1/2 pi) int_0^{2 pi} cos(n t - x sin t) dt` by the trapezoid
