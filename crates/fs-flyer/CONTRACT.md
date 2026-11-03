@@ -694,6 +694,22 @@ retain all three components about the same assembly COM. Propeller mounts can
 refer to two rotors inside a larger gear train, so additional engine/flywheel
 inertia is supplied physically by the caller rather than invented.
 
+The shared steady, dynamic, harmonic and swirl load assembly now streams its
+accepted local strip velocities and panel circulation through
+`fs_wing::wrench::CirculatoryWrenchAccumulator`, with the assembly COM as the
+moment origin. This returns the complete circulatory force and moment through
+the common spatial-wrench type. The original strip/panel order and Vec3
+operation order are retained bit for bit; profile drag, section moments,
+induced/parasite drag, thrust and shaft-torque ownership remain separate.
+Invalid or overflowing panel wrenches refuse before a load evaluation is
+published. The new local-flow hinge API uses that same panel force/moment law.
+
+The native loop migration is covered by exact six-component arithmetic parity
+and independent spatial-work/origin/covariance tests. The 29-test actual wing,
+hinge and nonlinear numerical-source run passes, including the existing hinge
+golden; the complete native propulsion and frontend suites were not executed
+for this change. No historical SimLoop path or solver equation is changed.
+
 Gear ratio, rotor axis, blade handedness and positive thrust direction are
 distinct inputs. Handedness maps signed ABSOLUTE spin into the current BEMT
 positive-speed branch; the physical aerodynamic torque reverses with that

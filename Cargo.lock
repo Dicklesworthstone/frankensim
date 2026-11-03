@@ -3172,6 +3172,7 @@ version = "0.0.1"
 dependencies = [
  "fs-airfoil",
  "fs-blake3",
+ "fs-ga",
  "fs-math",
  "fs-solver",
 ]

@@ -30,6 +30,7 @@ pub mod rom;
 pub mod romreduce;
 pub mod romsched;
 pub mod smoothed_plane;
+pub mod wrench;
 
 /// Panel-count cap (refusals at cap AND cap+1).
 pub const MAX_PANELS: usize = 512;

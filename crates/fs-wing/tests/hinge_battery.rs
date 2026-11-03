@@ -5,8 +5,12 @@
 //! oracle as designed), typed refusals at cap and cap+1, determinism,
 //! golden. Repro: cargo test -p fs-wing --test hinge_battery
 
-use fs_wing::hinge::{AXIS_UNIT_TOL, HingeAxis, SectionCouple, hinge_load};
-use fs_wing::nonlinear::{InfluenceOperator, StripRegime, StripSpec, solve_nonlinear};
+use fs_wing::hinge::{
+    AXIS_UNIT_TOL, HingeAxis, SectionCouple, hinge_load, hinge_load_with_incident,
+};
+use fs_wing::nonlinear::{
+    InfluenceOperator, StripRegime, StripSpec, solve_nonlinear, solve_nonlinear_with_incident,
+};
 use fs_wing::{SurfaceId, flat_surface};
 
 fn jlog(case: &str, payload: &str) {
@@ -288,6 +292,13 @@ fn determinism_and_golden() {
     let a = hinge_load(&p, &sol.gamma, fs_v, RHO, &CANARDS, &axis, &[]).unwrap();
     let b = hinge_load(&p, &sol.gamma, fs_v, RHO, &CANARDS, &axis, &[]).unwrap();
     assert_eq!(a, b, "bitwise repeat");
+    let local = vec![fs_v; p.len()];
+    let uniform_local =
+        hinge_load_with_incident(&p, &sol.gamma, &local, RHO, &CANARDS, &axis, &[]).unwrap();
+    assert_eq!(
+        a, uniform_local,
+        "uniform local-flow entry point must retain every result bit"
+    );
     let mut payload = Vec::new();
     for i in &a.items {
         payload.extend_from_slice(&i.moment_nm.to_bits().to_le_bytes());
@@ -302,5 +313,112 @@ fn determinism_and_golden() {
         digest, "08685e43461661db86796d5e64e0024d9c46adfde93966be14816ad255ac71c2",
         "hinge golden moved — determinism regression or an intentional \
          model change requiring the golden-bump protocol"
+    );
+}
+
+#[test]
+fn local_wash_and_gust_hinge_load_matches_each_panel_and_its_origin_shift() {
+    let (p, strips, axis) = layout();
+    let fs_v = freestream(0.06);
+    let op = InfluenceOperator::build(&p, fs_v, RHO).unwrap();
+    let strip_velocity: Vec<[f64; 3]> = strips
+        .iter()
+        .map(|strip| {
+            let panel = &p[strip.panel_indices[0]];
+            let y = 0.5 * (panel.a[1] + panel.b[1]);
+            [fs_v[0] + 1.5 + 0.2 * y, 0.15, fs_v[2] + 0.06 * y]
+        })
+        .collect();
+    let sol = solve_nonlinear_with_incident(
+        &op,
+        &p,
+        &strips,
+        fs_v,
+        RHO,
+        &camber_closure,
+        &strip_velocity,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut panel_velocity = vec![[0.0; 3]; p.len()];
+    for (strip, velocity) in strips.iter().zip(&strip_velocity) {
+        for &j in &strip.panel_indices {
+            panel_velocity[j] = *velocity;
+        }
+    }
+    let couples = [SectionCouple {
+        moment_nm: -2.5,
+        span_unit: [0.0, 1.0, 0.0],
+    }];
+    let report = hinge_load_with_incident(
+        &p,
+        &sol.gamma,
+        &panel_velocity,
+        RHO,
+        &CANARDS,
+        &axis,
+        &couples,
+    )
+    .unwrap();
+    let mut oracle = 0.0;
+    for item in &report.items {
+        let j = item.panel;
+        let span = p[j].b[1] - p[j].a[1];
+        // Independent flat-panel signed force and y-axis moment quadrature.
+        let fx = -RHO * sol.gamma[j] * panel_velocity[j][2] * span;
+        let fz = RHO * sol.gamma[j] * panel_velocity[j][0] * span;
+        let x = 0.5 * (p[j].a[0] + p[j].b[0]) - axis.point_m[0];
+        let z = 0.5 * (p[j].a[2] + p[j].b[2]) - axis.point_m[2];
+        let expected = z * fx - x * fz;
+        assert!((item.moment_nm - expected).abs() < 1e-12 * expected.abs().max(1.0));
+        oracle += expected;
+    }
+    assert_eq!(report.items.len(), 8);
+    assert!((report.circulatory_nm - oracle).abs() < 1e-10);
+    assert_eq!(report.section_nm, -2.5);
+    let uniform = hinge_load(&p, &sol.gamma, fs_v, RHO, &CANARDS, &axis, &couples).unwrap();
+    assert!(
+        (report.circulatory_nm - uniform.circulatory_nm).abs() > 0.01,
+        "local velocity must affect hinge load for the same accepted circulation"
+    );
+    let mut shifted = axis;
+    let displacement = [0.2, 0.0, -0.3];
+    for i in 0..3 {
+        shifted.point_m[i] += displacement[i];
+    }
+    let moved = hinge_load_with_incident(
+        &p,
+        &sol.gamma,
+        &panel_velocity,
+        RHO,
+        &CANARDS,
+        &shifted,
+        &couples,
+    )
+    .unwrap();
+    let transport = displacement[2] * report.force_n[0] - displacement[0] * report.force_n[2];
+    assert!((moved.circulatory_nm - (report.circulatory_nm - transport)).abs() < 1e-10);
+    assert_eq!(moved.section_nm, report.section_nm);
+    assert_eq!(
+        hinge_load_with_incident(
+            &p,
+            &sol.gamma,
+            &panel_velocity[1..],
+            RHO,
+            &CANARDS,
+            &axis,
+            &[]
+        )
+        .unwrap_err()
+        .code,
+        "incident-flow-invalid"
+    );
+    panel_velocity[0][1] = f64::NAN;
+    assert_eq!(
+        hinge_load_with_incident(&p, &sol.gamma, &panel_velocity, RHO, &CANARDS, &axis, &[])
+            .unwrap_err()
+            .code,
+        "incident-flow-invalid"
     );
 }

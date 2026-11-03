@@ -64,6 +64,41 @@ force, force perpendicularity to uniform incident flow, ground-plane-preserving
 rotation, and the analytic `q*S*cl` force projection under explicit local flow
 and wash for a constant section coefficient of either sign.
 
+### Circulatory spatial wrench and local-flow hinge loads
+
+`wrench::CirculatoryWrenchAccumulator` streams accepted panel circulation and
+the corresponding local incident velocity into an `fs_ga::Wrench`. Density
+and moment origin are fixed at construction; all geometry, velocities and the
+origin share one Cartesian frame. Each panel contributes
+`F = rho * gamma * (V cross (B - A))` at the bound midpoint and
+`M = (midpoint - origin) cross F`. The full bound segment retains swept,
+canted and vertical loads and all three moments. Uniform or per-strip flow
+uses the same API, without allocation on success, ownership reconstruction or
+an additional aerodynamic solve. Insertion order and native Vec3 arithmetic
+are retained.
+
+Malformed geometry, nonfinite circulation/flow and unrepresentable panel or
+accumulated wrenches refuse with `circulatory-wrench-invalid`; a failed add
+leaves the accumulator unchanged. These are circulatory loads only: profile
+and induced-drag models, section couples and apparent mass retain their own
+owners. This force assembly does not extend the nonlinear section-plane model.
+
+`hinge::hinge_load_with_incident` accepts one local velocity per panel in the
+full geometry, retaining the coupled solution's wash, gust and rigid-motion
+effects on selected hinge surfaces. It projects each panel's checked wrench
+onto the hinge axis, then adds the existing section couples as free vectors.
+The uniform entry point shares this owner while retaining its original scalar
+projection/sum order and frozen golden.
+
+Three wrench tests establish per-panel zero incident-flow work, six-component
+bit parity with the previous native propulsion loop, shifted-origin moments,
+rigid-frame/coadjoint transport and atomic refusal. The seven-case hinge
+battery includes nonlinear local-wash/gust loading, an independent panel
+quadrature, a live uniform-flow counterexample, origin shifts and uniform
+bit equality. These and the unchanged nonlinear/continuation/oscillation
+batteries pass in a 29-test native numerical-source run; this is not a full
+workspace or frontend qualification.
+
 ### Spatially varying strip inflow
 
 `nonlinear::solve_nonlinear_with_incident` accepts one body-frame incident

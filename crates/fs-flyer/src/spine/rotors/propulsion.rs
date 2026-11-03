@@ -459,19 +459,18 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                 "distributed coupled solve omitted its accepted local velocities",
             )
         })?;
-        let mut force = Vec3::default();
-        let mut moment = Vec3::default();
+        let mut circulatory = fs_wing::wrench::CirculatoryWrenchAccumulator::new(rho, design.cg_m)
+            .map_err(wing_error)?;
         for (s, strip) in strips.iter().enumerate() {
-            let velocity = vec(local[s]);
             for &j in &strip.panel_indices {
-                let panel = &panels[j];
-                let segment = vec(panel.b) - vec(panel.a);
-                let panel_force = velocity.cross(segment).scale(rho * fields.gamma[j]);
-                let arm = (vec(panel.a) + vec(panel.b)).scale(0.5) - vec(design.cg_m);
-                force = force + panel_force;
-                moment = moment + arm.cross(panel_force);
+                circulatory
+                    .add_panel(&panels[j], fields.gamma[j], local[s])
+                    .map_err(wing_error)?;
             }
         }
+        let circulatory_wrench = circulatory.total();
+        let mut force = circulatory_wrench.force;
+        let mut moment = circulatory_wrench.torque;
         // The induced-drag screen uses transverse lift, not its body-z
         // projection; the latter introduces a spurious cos(alpha)^2 factor.
         let lift = wind_axis_lift(force, alpha);
