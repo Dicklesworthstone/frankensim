@@ -364,7 +364,7 @@ fn redundant_contacts_keep_unique_motion_and_common_support_work() {
         }
     }
     // Both supports have the same sliding sign and determine the same total
-    // impulse, but different translations make the support-work split unknown.
+    // impulse, but different belt speeds make TOTAL work undetermined.
     let contact = plane();
     let other = ArticulatedFrictionalContact {
         id: 8,
@@ -382,7 +382,9 @@ fn redundant_contacts_keep_unique_motion_and_common_support_work() {
             FrictionalContactConfig::default(),
             || false,
         ),
-        Err(ArticulatedContactError::UnresolvedSupportWork)
+        Err(ArticulatedContactError::FrictionLaw(
+            fs_contact::frictional_multicontact::FrictionalContactError::UnresolvedWork { .. }
+        ))
     ));
     assert_eq!(state.base, before);
     assert_eq!(state.joint_velocity, &[2.0]);

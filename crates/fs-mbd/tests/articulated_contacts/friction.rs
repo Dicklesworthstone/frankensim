@@ -371,15 +371,50 @@ fn refusal_and_late_cancellation_publish_no_articulated_state() {
         },
         ..duplicate
     };
-    assert!(matches!(
-        resolve_articulated_frictional_contacts(
-            &[state],
-            &[duplicate, moving_duplicate],
-            FrictionalContactConfig::default(),
-            || false
+    // Distinct tangential belt speeds do no work in exactly frictionless
+    // directions. The original restricted mobility proves total work.
+    let harmless = resolve_articulated_frictional_contacts(
+        &[state],
+        &[duplicate, moving_duplicate],
+        FrictionalContactConfig::default(),
+        || false,
+    )
+    .unwrap();
+    assert!(harmless.contact.impulse_work_witness.is_some());
+    close(harmless.plane_work, 0.0);
+    close_vector(
+        harmless.responses[0].base_after.twist_body.linear,
+        Vec3::new(3.0, 0.0, 0.0),
+    );
+    let unresolved = ArticulatedFrictionalContact {
+        other: ContactCounterpart::PrescribedPlane {
+            point_world: Vec3::default(),
+            velocity_world: Vec3::new(0.0, 1.0, 0.0),
+        },
+        ..moving_duplicate
+    };
+    // Both rows demand the same native velocity jump, so existence is
+    // determined. Different incoming speeds still leave total work dependent
+    // on how the redundant normal impulse is divided between supports.
+    let elastic_duplicate = ArticulatedFrictionalContact {
+        normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 1.0 },
+        ..duplicate
+    };
+    let unresolved_result = resolve_articulated_frictional_contacts(
+        &[state],
+        &[elastic_duplicate, unresolved],
+        FrictionalContactConfig::default(),
+        || false,
+    );
+    assert!(
+        matches!(
+            unresolved_result,
+            Err(ArticulatedContactError::FrictionLaw(
+                fs_contact::frictional_multicontact::FrictionalContactError::UnresolvedWork { .. }
+            ))
         ),
-        Err(ArticulatedContactError::UnresolvedSupportWork)
-    ));
+        "{unresolved_result:?}"
+    );
     let mut probes = 0;
     let baseline = resolve_articulated_frictional_contacts(
         &[state],

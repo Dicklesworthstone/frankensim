@@ -337,7 +337,12 @@ fn redundant_directional_support_retains_velocity_only_and_work_authority() {
             FrictionalContactConfig::default(),
             || false,
         ),
-        Err(ArticulatedContactError::UnresolvedSupportWork)
+        Err(ArticulatedContactError::EllipticFrictionLaw(
+            fs_contact::frictional_multicontact::elliptic::EllipticFrictionalContactError::Transformed {
+                error: fs_contact::frictional_multicontact::FrictionalContactError::UnresolvedWork { .. },
+                ..
+            }
+        ))
     ));
 }
 

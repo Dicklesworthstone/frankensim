@@ -1,6 +1,6 @@
 //! Native simultaneous momentum exchange across free and prescribed boundaries.
 
-use fs_contact::multicontact::MultiImpactConfig;
+use fs_contact::multicontact::{MultiImpactConfig, MultiImpactDeterminacy};
 use fs_ga::{Mat3, Se3, So3, So3Tangent, Twist, Vec3};
 use fs_mbd::articulated::{
     ArticulatedError, ArticulatedModel, BaseState, FreeFloatingBaseState, JointLimits, JointModel,
@@ -374,7 +374,7 @@ fn driven_full_tensor_support_retains_force_couple_and_both_work_sources() {
 }
 
 #[test]
-fn locked_redundant_limited_and_cancelled_events_publish_no_partial_state() {
+fn redundant_motion_and_atomic_locked_limited_cancelled_events() {
     let fixed = single(JointModel::FIXED, inertia(1., Vec3::default(), 1.));
     let base = BaseState::stationary(Se3::identity());
     let contact = plane(point(0, 0, Vec3::default()), Vec3::default(), 0.);
@@ -435,15 +435,33 @@ fn locked_redundant_limited_and_cancelled_events_publish_no_partial_state() {
         joint_velocity: &[-0.1],
         ..limited[0]
     }];
-    assert!(
-        resolve_mixed_articulated_contacts(
-            &small,
-            &[contact, contact],
-            MultiImpactConfig::default(),
-            || false,
-        )
-        .is_err()
+    // Duplicate rows determine the original hinge motion and total work;
+    // individual normal loads remain an admissible representative.
+    let redundant = resolve_mixed_articulated_contacts(
+        &small,
+        &[contact, contact],
+        MultiImpactConfig::default(),
+        || false,
+    )
+    .unwrap();
+    assert!(matches!(
+        redundant.normal_law.determinacy,
+        MultiImpactDeterminacy::UniqueVelocity(_)
+    ));
+    let Response::Prescribed(response) = &redundant.responses[0] else {
+        panic!("lost prescribed boundary")
+    };
+    close(response.joint_velocity_after[0], 0.);
+    close(redundant.normal_impulses.iter().sum(), 0.125);
+    vector_close(
+        response.support_impulse_body.force,
+        Vec3::new(0., 0.075, 0.),
     );
+    close(redundant.boundary_work, 0.);
+    close(redundant.dissipated_energy, 0.0125);
+    close(redundant.energy_balance_residual, 0.);
+    vector_close(redundant.linear_momentum_residual, Vec3::default());
+    vector_close(redundant.angular_momentum_residual, Vec3::default());
     let mut total_polls = 0;
     resolve_mixed_articulated_contacts(&small, &[contact], MultiImpactConfig::default(), || {
         total_polls += 1;

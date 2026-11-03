@@ -177,9 +177,9 @@ mass and support work. It admits one supplied contact configuration with
 positive normal mobility; locked directions refuse. Both base boundaries check
 the actual returned normal restitution on the relative impact-speed scale;
 large common motion cannot admit a collision lost in endpoint rounding.
-It does not detect impact
-time, advance pose, add compliance, solve simultaneous supported contacts or
-allocate dissipation to heat. Native G0/G1/G3 tests use full-tensor off-centre
+It does not detect impact time, advance pose, add compliance or allocate
+dissipation to heat. The separate simultaneous owner below combines supported
+and free trees. Native G0/G1/G3 tests use full-tensor off-centre
 hinges, a coupled slider mass oracle, driven supports, scalar root actuation,
 frame changes, a fully fixed tree, impulse units and actual endpoint limits.
 
@@ -189,6 +189,63 @@ representative status. The contact owner's active preimpact velocity range
 admission and native mechanical Gram structure determine total support work;
 unresolved work refuses. Actual endpoint, momentum and energy audits remain
 authoritative.
+
+### Mixed free and prescribed articulated contact islands
+
+`articulated_contacts::mixed::resolve_mixed_articulated_contacts`,
+`resolve_mixed_articulated_frictional_contacts` and
+`resolve_mixed_articulated_elliptic_contacts`
+resolve simultaneous normal, circular-Coulomb and directional-Coulomb events
+over one common set of free and prescribed-base trees. Each input declares
+`ArticulatedContactBoundary`; the returned `MixedArticulatedImpulseResponse`
+retains the corresponding native response in input-system order. Original
+free-only entry points and their concrete response types remain available.
+
+Each contact row probes only its involved trees using their original free or
+prescribed ABA inverse mass. The full contact-space mobility retains shared-link,
+joint/base and normal/tangent coupling. One law solve precedes one accumulated
+physical impulse application per tree. A supported tree's base pose and twist
+stay fixed while its unconstrained joints respond. A fully fixed tree can
+participate in an impact against a mobile counterpart; an approaching contact
+whose complete relative direction is locked refuses. No surrogate heavy base,
+independent link mass or sequential contact clipping is substituted.
+
+The global receipts include the full six-component prescribed-base reactions
+in linear and world-origin angular momentum balance. `plane_work` and
+`support_work` retain signed source contributions;
+`boundary_work` is their sum. Driven translation and rotation can supply or
+absorb energy. Contact dissipation remains distinct from this external work.
+Under a unique-velocity law, the native Gram mobility and the contact owner's
+work-range witness determine motion and total boundary work; individual contact
+impulses, base reactions and plane/base work shares remain representatives.
+Compatible rotating supports and independent contact islands are admitted.
+The circular and directional owners also admit distinct harmless tangent belt
+velocities when the corresponding friction coefficients are exactly zero;
+ambiguous total relative work refuses in the original contact owner.
+
+Actual returned link kinematics must reproduce the contact law on the relative
+speed scale, independently of a large common support velocity. Original joint
+endpoint limits, momentum/work audits and cancellation all precede publication
+of the complete candidate. Configuration and borrowed inputs are unchanged.
+Seven G0/G1/G3 groups cover full-tensor hinge reactions, driven support work,
+redundant and permuted contacts, a supported-wall/free-body impact chain,
+finite-mass projectile/hinge exchange, circular and directional sticking/sliding,
+rotating support work, late limits/cancellation and unresolved stored speeds.
+These are supplied-configuration zero-duration events, without collision
+discovery, support compliance, time advancement or automatic heat allocation.
+
+### Signed spatial momentum and impulse work reductions
+
+Native rigid and articulated momentum receipts accumulate signed linear and
+world-origin angular contributions with double-double reductions before the
+final `f64` result. Spin, COM offset and world-origin orbital terms remain
+separate through accumulation, preserving finite resultants and couples amid
+large opposing momenta. Actual before/after velocity increments are paired for
+linear/angular changes, and impulse work retains separate endpoint pairings
+instead of first rounding a midpoint velocity. The same signed reduction
+preserves separated-contact couples. This improves the numerical receipt of
+the original stored `f64` state; it does not create extra physical precision,
+project momentum or change the native inverse mass or impact law.
 
 ## Instantaneous rigid-point motion
 
@@ -1861,9 +1918,10 @@ entry admits simultaneous normal contacts between independently free trees,
 stationary supported mechanisms and externally driven mechanisms. Each
 `MixedArticulatedContactSystem` declares its actual free or prescribed base;
 the existing native ABA inverse-mass maps supply its contact mobility. All
-contacts share the original geometry, positive-definite simultaneous normal
-law, accumulated link impulses and endpoint admission. The original free-only
-entry retains its native response type through the result's default type
+contacts share the original geometry, simultaneous normal law, accumulated
+link impulses and endpoint admission, including its redundant unique-velocity
+response with representative impulses and admitted total work. The original
+free-only entry retains its native response type through the result's default type
 parameter.
 
 Prescribed bases retain their actual native reaction force and couple, in
@@ -1878,11 +1936,11 @@ velocity projection is introduced.
 
 The original limits of 64 contacts and 128 systems, full-tensor and
 offset-COM treatment, actual endpoint speed limits, nonnegative-gap admission,
-global restitution passivity and cancellation remain active. Locked,
-redundant or insufficiently resolved active normal mobilities refuse through
-the original solver. This entry adds instantaneous normal momentum exchange;
-mixed-boundary friction, collision detection and sustained-contact trajectories
-remain outside this entry.
+global restitution passivity and cancellation remain active. Locked or
+insufficiently resolved active normal mobilities refuse through the original
+solver. This entry adds instantaneous normal momentum exchange; the adjacent
+circular and directional mixed-boundary entries extend it to friction.
+Collision detection and sustained-contact trajectories remain separate owners.
 
 Focused native tests cover free-only response parity, a free body striking a
 supported hinge with physical support recoil, two coupled contacts sharing
@@ -2212,9 +2270,12 @@ endpoint/momentum/work admission with the circular entry point. Its receipt
 keeps physical impulses and velocities separate from the contact solver's
 explicitly transformed determinacy witness. An invertible tangent congruence
 preserves unique-impulse versus unique-velocity authority; redundant individual
-loads still do not become unique pressure or heat allocations. Common support
-translation remains admissible in the velocity-only lane, while independent
-support work retains the original refusal.
+loads still do not become unique pressure or heat allocations. The transformed
+contact owner's explicit work-range witness also establishes unique total
+relative work. Compatible rotating supports, independent islands and exact
+frictionless tangent motion remain admissible; incompatible redundant work
+returns the original transformed `UnresolvedWork` refusal. Individual support
+loads and source-work shares remain representatives.
 
 `apply_rigid_elliptic_impacts_with` resolves each geometrically active source
 once, in canonical contact-ID order, from the original preimpact point velocity,
@@ -2321,9 +2382,9 @@ rolling-resistance model or automatic heat allocation.
 
 `frictional_impact::apply_rigid_frictional_impacts` consumes the contact core's explicit impulse/velocity determinacy receipt. Its original shared-body Gram mobility makes a unique contact velocity image sufficient for unique native body momenta, even when individual contact impulses are indeterminate. Such impulses remain an admissible representative; the report does not promote them to unique local pressure or heat.
 
-A velocity-only event may contain dynamic bodies and prescribed supports sharing one common translation. Their total support work is that translation dotted with the uniquely determined net support impulse. Independently moving prescribed supports require a separate work-determinacy witness; this consumer returns `UnresolvedSupportWork` instead of publishing an arbitrary work allocation. Existing actual endpoint-velocity, kinetic/work, linear/angular-momentum and cancellation gates still precede atomic body publication.
+A velocity-only event carries the contact core's explicit impulse-work range witness, proving that its total relative work is independent of the selected contact-impulse representative. The original Gram mobility then also determines total prescribed-support work from the actual kinetic change. This admits compatible translating or rotating supports, mixed finite-body contacts and independent islands without requiring a common support translation. Exactly frictionless tangent coordinates can be excluded from the work proof, so distinct harmless tangent belt speeds remain admissible. Incompatible redundant source work returns `Contact(UnresolvedWork)`; the directional owner retains the original transformed error. Individual support loads and source-work allocations remain representatives. Existing actual endpoint-velocity, kinetic/work, linear/angular-momentum and cancellation gates still precede atomic body publication.
 
-Three new native G1/G3 groups in `tests/frictional_impact/redundant.rs` cover a finite-height, three-point body in stick and gross slide with independently derived load transfer, energy and momenta; frictionless duplicate normal rows with restitution; common conveyor translation/work and refusal of independently moving supports. Canonical input permutation is exact. These and four original impact regressions pass, together with four existing configuration-step regressions, in the bounded native source-selected lane. Generic rank/feedback, configuration, contact discovery and physical heat-partition boundaries remain explicit.
+Native G1/G3 groups in `tests/frictional_impact/redundant.rs` cover a finite-height, three-point body in stick and gross slide with independently derived load transfer, energy and momenta; frictionless duplicate normal rows with restitution; conveyor work; and a rotating platform coupled to a finite-body collision under frame changes and contact permutations. Directional regressions retain the transformed witness and circular-limit behavior. Generic rank/feedback, configuration, contact discovery and physical heat-partition boundaries remain explicit.
 
 
 ### Automatic native sphere collision trajectories

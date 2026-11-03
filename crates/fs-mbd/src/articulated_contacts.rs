@@ -1,4 +1,4 @@
-//! Simultaneous point impacts over free articulated systems.
+//! Simultaneous point impacts over free and supported articulated systems.
 //!
 //! One contact-space inverse mass is assembled from the existing ABA owner.
 //! All impulses are solved together and accumulated before any physical state
@@ -18,7 +18,7 @@ pub mod trajectory;
 /// Configuration-admitted sustained contact under joint, body, and gravity loads.
 pub mod step;
 
-/// Simultaneous normal contacts with original free and prescribed-base boundaries.
+/// Simultaneous normal and Coulomb contacts with free and prescribed bases.
 pub mod mixed;
 
 use core::fmt;
@@ -73,10 +73,14 @@ pub struct ArticulatedContactResult<R = FreeFloatingImpulseResponse> {
     pub delassus: Vec<f64>,
     /// Contact-law result, including predicted speeds and solver residuals.
     pub normal_law: MultiImpactResult,
-    /// Signed work from all prescribed planes, in joules.
+    /// Signed plane work, in J; a representative source share under redundancy.
     pub plane_work: f64,
-    /// Signed work from prescribed base reactions, in J; zero for free trees.
+    /// Signed base-reaction work, in J; zero for free trees and a representative
+    /// source share when contact impulses are nonunique.
     pub support_work: f64,
+    /// Total plane and base work, in J. The admitted law determines this total
+    /// even when individual contact impulses and support loads are nonunique.
+    pub boundary_work: f64,
     /// Globally admitted impact loss, in joules; no heat partition is implied.
     pub dissipated_energy: f64,
     /// Actual kinetic change minus plane and base work plus admitted loss, in J.
@@ -117,8 +121,7 @@ pub enum ArticulatedContactError {
     TangentialContacts(fs_tribo::tangential::multiple::MultipleTangentialError),
     /// Original retained history could not be transported to the contact frame.
     TangentialTransport(fs_tribo::tangential::transport::TangentialTransportError),
-    /// Redundant impulses do not determine work between independently moving
-    /// supports. A common support translation has determined total work.
+    /// Redundant impulses lack an admitted total boundary-work witness.
     UnresolvedSupportWork,
     /// Dynamic witnesses do not share a normal line of action.
     NonCollinearContact {
@@ -357,6 +360,7 @@ fn resolve_contacts<S: ContactSystem>(
         delassus,
         plane_work: mechanics.plane_work,
         support_work: mechanics.support_work,
+        boundary_work: mechanics.boundary_work,
         dissipated_energy: law.dissipated_energy,
         normal_law: law,
         energy_balance_residual: mechanics.energy_balance_residual,
@@ -389,6 +393,7 @@ struct EventResult<R = FreeFloatingImpulseResponse> {
     speeds_after: Vec<f64>,
     plane_work: f64,
     support_work: f64,
+    boundary_work: f64,
     kinetic_energy_change: f64,
     energy_balance_residual: f64,
     linear_momentum_residual: Vec3,
@@ -489,7 +494,6 @@ impl EventWorkspace {
     ) -> Result<EventResult<S::Response>, ArticulatedContactError> {
         let mut plane_work_sum = Dd::ZERO;
         let mut support_work_sum = Dd::ZERO;
-        let mut has_support = false;
         let mut external_linear = VectorSum::default();
         let mut external_angular = VectorSum::default();
         // Scratch grows with touched links, not with every link in every tree.
@@ -574,7 +578,6 @@ impl EventWorkspace {
                 angular_scale = finite(angular_scale + magnitude(impulse.torque))?;
                 support_work_sum = support_work_sum + Dd::from_f64(finite(work)?);
                 energy_scale = finite(energy_scale + work.abs())?;
-                has_support = true;
             }
             linear_scale = finite(
                 linear_scale
@@ -640,11 +643,10 @@ impl EventWorkspace {
             speeds_after.push(actual);
         }
         let energy_change = finite(energy_change_sum.to_f64())?;
-        let mut stored_and_mechanical_sum =
-            energy_change_sum - plane_work_sum + Dd::from_f64(law.stored_energy_change);
-        if has_support {
-            stored_and_mechanical_sum = stored_and_mechanical_sum - support_work_sum;
-        }
+        let boundary_work_sum = plane_work_sum + support_work_sum;
+        let boundary_work = finite(boundary_work_sum.to_f64())?;
+        let stored_and_mechanical_sum =
+            energy_change_sum - boundary_work_sum + Dd::from_f64(law.stored_energy_change);
         let stored_and_mechanical_work = finite(stored_and_mechanical_sum.to_f64())?;
         let energy_balance_residual =
             finite((stored_and_mechanical_sum + Dd::from_f64(law.dissipated_energy)).to_f64())?;
@@ -671,6 +673,7 @@ impl EventWorkspace {
             speeds_after,
             plane_work,
             support_work: finite(support_work_sum.to_f64())?,
+            boundary_work,
             kinetic_energy_change: energy_change,
             energy_balance_residual,
             linear_momentum_residual,

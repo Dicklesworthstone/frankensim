@@ -7,9 +7,10 @@
 
 use super::{
     ArticulatedContactError, ArticulatedContactSystem, ArticulatedFrictionalContact,
-    ArticulatedFrictionalContactResult, ArticulatedImpactKinematics, EventResponse,
+    ArticulatedFrictionalContactResult, ArticulatedImpactKinematics, ContactSystem, EventResponse,
     FrictionalContactConfig, PreparedContactEvent, admit_support_work, prepare_event_with,
 };
+use crate::articulated::FreeFloatingImpulseResponse;
 use fs_contact::frictional_multicontact::elliptic::{
     EllipticFriction, EllipticFrictionalContact, EllipticFrictionalContactResult,
     solve_elliptic_frictional_contacts,
@@ -20,8 +21,8 @@ pub type ArticulatedEllipticContact = ArticulatedFrictionalContact<EllipticFrict
 /// Original geometry and normal law, resolved against a source at this event.
 pub type ArticulatedImpactGeometry = ArticulatedFrictionalContact<()>;
 /// Original mechanical receipts with physical ellipse impulses and coordinates.
-pub type ArticulatedEllipticContactResult =
-    ArticulatedFrictionalContactResult<EllipticFrictionalContactResult>;
+pub type ArticulatedEllipticContactResult<R = FreeFloatingImpulseResponse> =
+    ArticulatedFrictionalContactResult<EllipticFrictionalContactResult, R>;
 
 /// One private active-source candidate, retaining its original input mapping.
 #[derive(Debug, Clone)]
@@ -67,8 +68,9 @@ impl<E: core::fmt::Debug> std::error::Error for ArticulatedEllipticSourceError<E
 /// frame. The original contact owner admits positive principal coefficients or
 /// the fully frictionless pair; a singly zero coefficient is unsupported.
 /// Determinacy evidence remains explicitly in transformed coordinates. Native
-/// unique-velocity admission does not make individual pressures or support work
-/// unique: independently moving redundant supports retain their refusal.
+/// unique-velocity admission does not make individual pressures or source-work
+/// shares unique. The original contact owner separately admits total work;
+/// incompatible redundant support motion refuses through that range check.
 ///
 /// No contact detection, finite displacement, timestep, inferred pressure or
 /// thermal allocation is added. The caller owns the fixed event configuration
@@ -77,8 +79,17 @@ pub fn resolve_articulated_elliptic_contacts(
     systems: &[ArticulatedContactSystem<'_>],
     contacts: &[ArticulatedEllipticContact],
     config: FrictionalContactConfig,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedEllipticContactResult, ArticulatedContactError> {
+    resolve_elliptic_event(systems, contacts, config, cancelled)
+}
+
+pub(in crate::articulated_contacts) fn resolve_elliptic_event<S: ContactSystem>(
+    systems: &[S],
+    contacts: &[ArticulatedEllipticContact],
+    config: FrictionalContactConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ArticulatedEllipticContactResult<S::Response>, ArticulatedContactError> {
     let event = prepare_event_with(systems, contacts, config, &mut cancelled, |query| {
         let c = contacts[query.original_index];
         Ok::<_, ArticulatedContactError>(EllipticFrictionalContact {
@@ -185,13 +196,13 @@ pub fn resolve_articulated_elliptic_contacts_with<S, E>(
     })
 }
 
-fn resolve_prepared<F>(
-    systems: &[ArticulatedContactSystem<'_>],
+fn resolve_prepared<F, S: ContactSystem>(
+    systems: &[S],
     contacts: &[ArticulatedFrictionalContact<F>],
     config: FrictionalContactConfig,
     event: PreparedContactEvent<EllipticFrictionalContact>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<ArticulatedEllipticContactResult, ArticulatedContactError> {
+) -> Result<ArticulatedEllipticContactResult<S::Response>, ArticulatedContactError> {
     let PreparedContactEvent {
         mut workspace,
         prepared,
@@ -232,6 +243,8 @@ fn resolve_prepared<F>(
             .collect(),
         delassus,
         plane_work: mechanics.plane_work,
+        support_work: mechanics.support_work,
+        boundary_work: mechanics.boundary_work,
         energy_balance_residual: mechanics.energy_balance_residual,
         linear_momentum_residual: mechanics.linear_momentum_residual,
         angular_momentum_residual: mechanics.angular_momentum_residual,

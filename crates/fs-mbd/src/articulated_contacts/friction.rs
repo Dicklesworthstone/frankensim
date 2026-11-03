@@ -13,8 +13,8 @@ pub mod constrained;
 pub mod elliptic;
 
 use super::{
-    ArticulatedContactError, ArticulatedContactSystem, ContactCounterpart, EventResponse,
-    EventWorkspace, LinkContactPoint, Prepared, finite, poll,
+    ArticulatedContactError, ArticulatedContactSystem, ContactCounterpart, ContactSystem,
+    EventResponse, EventWorkspace, LinkContactPoint, Prepared, finite, poll,
 };
 use crate::articulated::FreeFloatingImpulseResponse;
 use crate::articulated::contact_geometry::prepare_contact_frame;
@@ -49,11 +49,14 @@ pub struct ArticulatedFrictionalContact<F = f64> {
 
 /// All native system responses and independently reconstructed balances.
 #[derive(Debug, Clone)]
-pub struct ArticulatedFrictionalContactResult<R = FrictionalContactResult> {
+pub struct ArticulatedFrictionalContactResult<
+    R = FrictionalContactResult,
+    S = FreeFloatingImpulseResponse,
+> {
     /// Canonical contact order for every contact-space vector and matrix below.
     pub contact_ids: Vec<u64>,
     /// Updated states and physical momenta, in original system order.
-    pub responses: Vec<FreeFloatingImpulseResponse>,
+    pub responses: Vec<S>,
     /// Original contact owner result, including cone, complementarity and
     /// passivity residuals. A velocity-only witness does not identify local loads.
     pub contact: R,
@@ -61,9 +64,16 @@ pub struct ArticulatedFrictionalContactResult<R = FrictionalContactResult> {
     pub relative_velocities_after: Vec<[f64; 3]>,
     /// Full row-major 3N-by-3N J M^-1 J^T, in inverse kilograms.
     pub delassus: Vec<f64>,
-    /// Signed work supplied by prescribed translating supports, in joules.
+    /// Signed plane work, in J. With nonunique impulses this is the selected
+    /// representative's contribution, not a unique source-work allocation.
     pub plane_work: f64,
-    /// Actual kinetic change minus plane work plus admitted loss, in joules.
+    /// Signed work from prescribed base reactions, in J; zero for free trees.
+    /// Individual source contributions need not be unique under redundant contact.
+    pub support_work: f64,
+    /// Total plane and base-support work, in J. The admitted law determines
+    /// this total even when individual contact impulses are nonunique.
+    pub boundary_work: f64,
+    /// Actual kinetic change minus total boundary work plus admitted loss, in J.
     pub energy_balance_residual: f64,
     /// Actual global momentum change minus external support impulse, in N s.
     pub linear_momentum_residual: Vec3,
@@ -111,8 +121,20 @@ pub fn resolve_articulated_frictional_contacts(
     systems: &[ArticulatedContactSystem<'_>],
     contacts: &[ArticulatedFrictionalContact],
     config: FrictionalContactConfig,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedFrictionalContactResult, ArticulatedContactError> {
+    resolve_frictional_event(systems, contacts, config, cancelled)
+}
+
+pub(super) fn resolve_frictional_event<S: ContactSystem>(
+    systems: &[S],
+    contacts: &[ArticulatedFrictionalContact],
+    config: FrictionalContactConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<
+    ArticulatedFrictionalContactResult<FrictionalContactResult, S::Response>,
+    ArticulatedContactError,
+> {
     let PreparedContactEvent {
         mut workspace,
         prepared,
@@ -153,6 +175,8 @@ pub fn resolve_articulated_frictional_contacts(
             .collect(),
         delassus,
         plane_work: mechanics.plane_work,
+        support_work: mechanics.support_work,
+        boundary_work: mechanics.boundary_work,
         energy_balance_residual: mechanics.energy_balance_residual,
         linear_momentum_residual: mechanics.linear_momentum_residual,
         angular_momentum_residual: mechanics.angular_momentum_residual,
@@ -167,8 +191,8 @@ struct PreparedContactEvent<L = FrictionalContact> {
     order: Vec<usize>,
 }
 
-fn prepare_event(
-    systems: &[ArticulatedContactSystem<'_>],
+fn prepare_event<S: ContactSystem>(
+    systems: &[S],
     contacts: &[ArticulatedFrictionalContact],
     config: FrictionalContactConfig,
     cancelled: &mut impl FnMut() -> bool,
@@ -189,8 +213,8 @@ fn prepare_event(
 /// Assemble geometry and native point rows once, independent of coefficient
 /// source. The law callback only receives original incoming kinematics; the
 /// complete native response is still admitted by EventWorkspace::apply.
-fn prepare_event_with<F: Copy, L, E: From<ArticulatedContactError>>(
-    systems: &[ArticulatedContactSystem<'_>],
+fn prepare_event_with<F: Copy, L, E: From<ArticulatedContactError>, S: ContactSystem>(
+    systems: &[S],
     contacts: &[ArticulatedFrictionalContact<F>],
     config: FrictionalContactConfig,
     cancelled: &mut impl FnMut() -> bool,
@@ -258,28 +282,20 @@ fn prepare_event_with<F: Copy, L, E: From<ArticulatedContactError>>(
 
 fn admit_support_work<F>(
     contact: &FrictionalContactResult,
-    contacts: &[ArticulatedFrictionalContact<F>],
-    order: &[usize],
+    _contacts: &[ArticulatedFrictionalContact<F>],
+    _order: &[usize],
 ) -> Result<(), ArticulatedContactError> {
     if matches!(
         contact.determinacy,
         FrictionalContactDeterminacy::UniqueVelocity(_)
-    ) {
-        // For a native mechanical Gram matrix a null contact impulse changes
-        // no body momentum. Its total support impulse is therefore zero, as
-        // is its support work at one common translation. Independently moving
-        // supports need an additional work-determinacy witness, not a guess.
-        let mut common_support_velocity = None;
-        for &active in &contact.active_indices {
-            if let ContactCounterpart::PrescribedPlane { velocity_world, .. } =
-                contacts[order[active]].other
-            {
-                if common_support_velocity.is_some_and(|velocity| velocity != velocity_world) {
-                    return Err(ArticulatedContactError::UnresolvedSupportWork);
-                }
-                common_support_velocity = Some(velocity_world);
-            }
-        }
+    ) && contact.impulse_work_witness.is_none()
+    {
+        // Native W = J M^-1 J^T gives the same physical momentum increment
+        // for every admitted contact-impulse representative. The contact owner
+        // separately proves its TOTAL relative work is unique. Therefore
+        // delta-K minus that work determines total prescribed-boundary work,
+        // including rotating bases/planes, without inventing local load shares.
+        return Err(ArticulatedContactError::UnresolvedSupportWork);
     }
     Ok(())
 }

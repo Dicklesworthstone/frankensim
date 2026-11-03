@@ -1,9 +1,15 @@
-//! Simultaneous normal impacts with free and prescribed articulated boundaries.
+//! Simultaneous normal and Coulomb impacts with native articulated boundaries.
 //!
 //! Every tree uses its original native inverse-mass action. Prescribed supports
 //! retain their full reaction impulse and signed work in the shared physical
 //! endpoint audit; they are never represented by a large fictitious mass.
 
+use super::friction::elliptic::{
+    ArticulatedEllipticContact, ArticulatedEllipticContactResult, resolve_elliptic_event,
+};
+use super::friction::{
+    ArticulatedFrictionalContact, ArticulatedFrictionalContactResult, resolve_frictional_event,
+};
 use super::{
     ArticulatedContactError, ArticulatedContactResult, ArticulatedContactSystem,
     ArticulatedNormalContact, resolve_contacts,
@@ -14,6 +20,7 @@ use crate::articulated::{
     apply_free_floating_impulses, apply_prescribed_base_impulses, free_floating_impulse_delta,
     prescribed_base_impulse_delta,
 };
+use fs_contact::frictional_multicontact::{FrictionalContactConfig, FrictionalContactResult};
 use fs_contact::multicontact::MultiImpactConfig;
 use fs_ga::{Twist, Vec3, Wrench};
 
@@ -40,6 +47,11 @@ pub struct MixedArticulatedContactSystem<'a> {
 }
 
 /// Actual native response of one tree, in input-system order.
+///
+/// A unique-velocity law determines motion and total boundary work without
+/// identifying individual contact/support loads or source-work contributions.
+/// Prescribed reactions retain the selected impulse representative's full six
+/// components and signed work, in their original native frames.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MixedArticulatedImpulseResponse {
     /// Original free-tree response with all base and joint recoil.
@@ -57,10 +69,11 @@ pub enum MixedArticulatedImpulseResponse {
 /// All point pairs use equal and opposite impulses. Support reactions are
 /// external impulses; their signed work is separate from moving-plane work.
 ///
-/// The same bounds of 64 contacts and 128 trees apply. Singular or immobile
-/// active contact directions refuse through the original positive-definite
-/// contact solver. No arbitrary reactions, support compliance, position repair,
-/// friction, collision detection or continuous trajectory are inferred.
+/// The same bounds of 64 contacts and 128 trees apply. Redundant rows can
+/// determine physical motion with representative impulses; the original law
+/// separately admits total work. Locked directions or unresolved motion/work
+/// refuse. No support compliance, position repair, friction, collision
+/// detection or continuous trajectory is inferred by this normal entry.
 /// All borrowed input states remain unchanged on refusal or cancellation.
 pub fn resolve_mixed_articulated_contacts(
     systems: &[MixedArticulatedContactSystem<'_>],
@@ -69,6 +82,68 @@ pub fn resolve_mixed_articulated_contacts(
     cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedContactResult<MixedArticulatedImpulseResponse>, ArticulatedContactError> {
     resolve_contacts(systems, contacts, config, cancelled)
+}
+
+impl MixedArticulatedImpulseResponse {
+    /// Unchanged configuration with the actually returned base twist.
+    #[must_use]
+    pub fn base_after(&self) -> ArticulatedContactBoundary {
+        match self {
+            Self::Free(response) => ArticulatedContactBoundary::Free(response.base_after),
+            Self::Prescribed(response) => {
+                ArticulatedContactBoundary::Prescribed(response.base_after)
+            }
+        }
+    }
+
+    /// Actual returned generalized velocities in the original compact order.
+    #[must_use]
+    pub fn joint_velocity_after(&self) -> &[f64] {
+        self.impulse_view().joint_velocity_after
+    }
+}
+
+/// Resolve simultaneous Coulomb impacts over mixed free and prescribed bases.
+///
+/// Each tree uses its original constrained or free ABA mobility, retaining all
+/// cross-contact and normal/tangent coupling. Prescribed supports transmit full
+/// force/couple impulses and signed work; free trees recoil in the same global
+/// solve. Native endpoint kinematics, momentum, energy and limits are admitted
+/// before any complete candidate publishes.
+///
+/// The original law distinguishes unique impulses from unique motion and total
+/// work. In the latter case individual contact/support loads and source-work
+/// contributions remain representative. This adds no support compliance,
+/// contact detection, force duration, or frictional heat partition.
+pub fn resolve_mixed_articulated_frictional_contacts(
+    systems: &[MixedArticulatedContactSystem<'_>],
+    contacts: &[ArticulatedFrictionalContact],
+    config: FrictionalContactConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    ArticulatedFrictionalContactResult<FrictionalContactResult, MixedArticulatedImpulseResponse>,
+    ArticulatedContactError,
+> {
+    resolve_frictional_event(systems, contacts, config, cancelled)
+}
+
+/// Resolve directional Coulomb impacts over free and prescribed-base trees.
+///
+/// Principal friction axes remain in each original material contact frame.
+/// The same native constrained mobility, full support reactions, signed total
+/// boundary work and actual endpoint audits as the circular mixed-base entry
+/// point apply. A unique-velocity witness does not identify individual support
+/// loads or their source-work allocation.
+pub fn resolve_mixed_articulated_elliptic_contacts(
+    systems: &[MixedArticulatedContactSystem<'_>],
+    contacts: &[ArticulatedEllipticContact],
+    config: FrictionalContactConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    ArticulatedEllipticContactResult<MixedArticulatedImpulseResponse>,
+    ArticulatedContactError,
+> {
+    resolve_elliptic_event(systems, contacts, config, cancelled)
 }
 
 // Views share the physical assembly without changing the original public free

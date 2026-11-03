@@ -274,6 +274,8 @@ pub fn resolve_bilateral_articulated_frictional_contacts(
                 .collect(),
             delassus: projection.contact_mobility,
             plane_work: mechanics.plane_work,
+            support_work: mechanics.support_work,
+            boundary_work: mechanics.boundary_work,
             energy_balance_residual: mechanics.energy_balance_residual,
             linear_momentum_residual: mechanics.linear_momentum_residual,
             angular_momentum_residual: mechanics.angular_momentum_residual,
