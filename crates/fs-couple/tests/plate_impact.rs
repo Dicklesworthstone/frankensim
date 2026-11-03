@@ -20,6 +20,9 @@ use fs_time::galpha::{ImplicitSolveConfig, OperatorGeneralizedAlpha, SecondOrder
 #[path = "plate_impact/multiple.rs"]
 mod multiple;
 
+#[path = "plate_impact/bodies.rs"]
+mod bodies;
+
 const TENSOR: [f64; 9] = [2.0, 0.2, -0.1, 0.2, 3.0, 0.3, -0.1, 0.3, 4.0];
 
 fn close(a: f64, b: f64) {

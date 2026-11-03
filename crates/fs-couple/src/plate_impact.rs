@@ -4,9 +4,10 @@
 //!
 //! This is a localized event, at fixed configuration, in the flat plate's +z
 //! direction. The caller supplies a body material point above the selected
-//! plate point. [`multiple`] couples simultaneous normal contacts through the
-//! same original mass and momentum owners. Neither path detects collisions,
-//! rotates the plate normal, applies friction, or deposits impact loss as heat.
+//! plate point. [`multiple`] couples sites on one body; [`bodies`] couples
+//! several finite bodies through the same original mass and momentum owners.
+//! These paths do not detect collisions, rotate the plate normal, apply
+//! friction, or deposit impact loss as heat.
 //! Momentum resultants are those represented by this transverse plate model:
 //! Pz and the two bending angular momenta Lx/Ly. In-plane translation and
 //! drilling rotation require the corresponding shell/solid dynamics owner.
@@ -32,6 +33,9 @@ use fs_time::galpha::second_order_adjoint::trajectory::StructuralTrajectoryModel
 
 #[path = "plate_impact/multiple.rs"]
 pub mod multiple;
+
+#[path = "plate_impact/bodies.rs"]
+pub mod bodies;
 
 /// Physical and numerical allowances. Background momentum never enlarges an
 /// impulse allowance. All supports are stationary in the original plate frame.
@@ -126,6 +130,17 @@ pub struct PlateImpulseBalance {
     pub kinetic_energy_change_j: f64,
     pub work_energy_residual_j: f64,
     pub energy_residual_j: f64,
+}
+
+/// One actual native rigid update in the common plate momentum/work audit.
+/// The iterator supplying these records does not copy an entire body history.
+struct PlateBodyTransfer {
+    before: RigidBodyState,
+    after: RigidBodyState,
+    properties: MassProperties,
+    // Retain the unrounded aggregate request through the actual-state audit.
+    linear_impulse: [Dd; 3],
+    angular_impulse: [Dd; 3],
 }
 
 /// Prepared point response of the same spatial trajectory. Construction solves
@@ -518,29 +533,40 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
         dissipated_energy: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlateImpulseBalance, PlateRigidImpactError> {
+        self.account_transfers(
+            plate,
+            trial,
+            plate_receipt,
+            core::iter::once(PlateBodyTransfer {
+                before: body,
+                after: next_body,
+                properties,
+                linear_impulse: components(linear_impulse).map(dd),
+                angular_impulse: components(angular_impulse).map(dd),
+            }),
+            full_impulse,
+            dd(relative_work),
+            dissipated_energy,
+            cancelled,
+        )
+    }
+
+    // Account every actual finite participant together with the ORIGINAL plate
+    // and complete support inertia. Rounded per-body energies are not summed.
+    #[allow(clippy::too_many_arguments)]
+    fn account_transfers(
+        &self,
+        plate: &SecondOrderState,
+        trial: &SecondOrderState,
+        plate_receipt: &SecondOrderImpulse,
+        bodies: impl IntoIterator<Item = PlateBodyTransfer>,
+        full_impulse: impl Fn(usize) -> f64,
+        relative_work: Dd,
+        dissipated_energy: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlateImpulseBalance, PlateRigidImpactError> {
         let n = self.unit_impulse.len();
         let rel = self.controls.impulse.relative_impulse_tolerance;
-        let dp = next_body
-            .linear_momentum_world()
-            .sub(body.linear_momentum_world());
-        let dl = next_body
-            .angular_momentum_body()
-            .sub(body.angular_momentum_body());
-        for (actual, commanded) in components(dp).into_iter().zip(components(linear_impulse)) {
-            check(
-                "rigid linear transfer",
-                actual - commanded,
-                self.controls.linear_impulse_tolerance_ns + rel * actual.abs().max(commanded.abs()),
-            )?;
-        }
-        for (actual, commanded) in components(dl).into_iter().zip(components(angular_impulse)) {
-            check(
-                "rigid angular transfer",
-                actual - commanded,
-                self.controls.angular_impulse_tolerance_nms
-                    + rel * actual.abs().max(commanded.abs()),
-            )?;
-        }
         let map = &self.dynamics.model().dof_map;
         let mut full_change = vec![0.0; map.len()];
         for (i, &r) in map.iter().enumerate() {
@@ -565,71 +591,96 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
         }
         let (plate_linear, plate_angular) = self.resultants(&momentum);
         let (support_linear, support_angular) = self.resultants(&support);
-        let body_angular = body
-            .pose()
-            .orientation()
-            .rotate_body_to_world(dl)
-            .add(body.pose().position_world().cross(dp));
-        let linear_residual = plate_linear.add(dp).sub(support_linear);
-        let angular_residual = plate_angular.add(body_angular).sub(support_angular);
-        for residual in components(linear_residual) {
-            check(
-                "pair linear balance",
-                residual,
-                self.controls.linear_impulse_tolerance_ns
-                    + rel
-                        * components(linear_impulse)
-                            .into_iter()
-                            .map(f64::abs)
-                            .fold(0.0, f64::max),
-            )?;
-        }
-        for residual in components(angular_residual) {
-            check(
-                "pair angular balance",
-                residual,
-                self.controls.angular_impulse_tolerance_nms,
-            )?;
-        }
-        // Accumulate actual changes from BOTH bodies before rounding. Separate
-        // large energies or per-body work totals can erase a small impact loss.
+        let mut linear_residual: [Dd; 3] = std::array::from_fn(|c| {
+            dd(components(plate_linear)[c]) - dd(components(support_linear)[c])
+        });
+        let mut angular_residual: [Dd; 3] = std::array::from_fn(|c| {
+            dd(components(plate_angular)[c]) - dd(components(support_angular)[c])
+        });
+        let mut linear_scale = Dd::ZERO;
         let mut energy = Dd::ZERO;
         for i in 0..n {
             energy = energy
                 + (dd(0.5 * plate.v[i]) + dd(0.5 * trial.v[i]))
                     * dd(plate_receipt.momentum_change[i]);
         }
-        for (increment, (before, after)) in components(dp).into_iter().zip(
-            components(
-                body.center_of_mass_velocity_world(properties)
-                    .map_err(PlateRigidImpactError::Body)?,
-            )
-            .into_iter()
-            .zip(components(
-                next_body
-                    .center_of_mass_velocity_world(properties)
-                    .map_err(PlateRigidImpactError::Body)?,
-            )),
-        ) {
-            energy = energy + dd(increment) * (dd(0.5 * before) + dd(0.5 * after));
-        }
-        for (increment, (before, after)) in components(dl).into_iter().zip(
-            components(
+        for transfer in bodies {
+            poll(cancelled)?;
+            let PlateBodyTransfer {
+                before: body,
+                after: next_body,
+                properties,
+                linear_impulse,
+                angular_impulse,
+            } = transfer;
+            let before_p = components(body.linear_momentum_world());
+            let after_p = components(next_body.linear_momentum_world());
+            let before_l = components(body.angular_momentum_body());
+            let after_l = components(next_body.angular_momentum_body());
+            let dp: [Dd; 3] = std::array::from_fn(|c| dd(after_p[c]) - dd(before_p[c]));
+            let dl: [Dd; 3] = std::array::from_fn(|c| dd(after_l[c]) - dd(before_l[c]));
+            for c in 0..3 {
+                let commanded = linear_impulse[c];
+                check(
+                    "rigid linear transfer",
+                    (dp[c] - commanded).to_f64(),
+                    self.controls.linear_impulse_tolerance_ns
+                        + rel * dp[c].to_f64().abs().max(commanded.to_f64().abs()),
+                )?;
+                let commanded = angular_impulse[c];
+                check(
+                    "rigid angular transfer",
+                    (dl[c] - commanded).to_f64(),
+                    self.controls.angular_impulse_tolerance_nms
+                        + rel * dl[c].to_f64().abs().max(commanded.to_f64().abs()),
+                )?;
+            }
+            linear_scale = linear_scale
+                + dd(linear_impulse
+                    .into_iter()
+                    .map(Dd::to_f64)
+                    .map(f64::abs)
+                    .fold(0.0, f64::max));
+            let spin_world = rotate_body_increment(body, dl);
+            let orbital = cross_increment(body.pose().position_world(), dp);
+            let before_omega = components(
                 properties
                     .angular_velocity_body_checked(body.angular_momentum_body())
                     .map_err(PlateRigidImpactError::Body)?,
-            )
-            .into_iter()
-            .zip(components(
+            );
+            let after_omega = components(
                 properties
                     .angular_velocity_body_checked(next_body.angular_momentum_body())
                     .map_err(PlateRigidImpactError::Body)?,
-            )),
-        ) {
-            energy = energy + dd(increment) * (dd(0.5 * before) + dd(0.5 * after));
+            );
+            for c in 0..3 {
+                linear_residual[c] = linear_residual[c] + dp[c];
+                angular_residual[c] = angular_residual[c] + spin_world[c] + orbital[c];
+                let mean_velocity =
+                    (dd(0.5 * before_p[c]) + dd(0.5 * after_p[c])) / dd(properties.mass());
+                energy = energy
+                    + dp[c] * mean_velocity
+                    + dl[c] * (dd(0.5 * before_omega[c]) + dd(0.5 * after_omega[c]));
+            }
+        }
+        let linear_residual = vector(linear_residual.map(Dd::to_f64));
+        let angular_residual = vector(angular_residual.map(Dd::to_f64));
+        for residual in components(linear_residual) {
+            check(
+                "system linear balance",
+                residual,
+                self.controls.linear_impulse_tolerance_ns + rel * linear_scale.to_f64(),
+            )?;
+        }
+        for residual in components(angular_residual) {
+            check(
+                "system angular balance",
+                residual,
+                self.controls.angular_impulse_tolerance_nms,
+            )?;
         }
         let energy_residual = (energy + dd(dissipated_energy)).to_f64();
-        let work_residual = (energy - dd(relative_work)).to_f64();
+        let work_residual = (energy - relative_work).to_f64();
         check(
             "impact work",
             work_residual,
@@ -685,4 +736,26 @@ fn relative_speed(row: &[f64], motion: &PointKinematics, velocity: &[f64]) -> f6
         relative = relative - dd(row) * dd(v);
     }
     relative.to_f64()
+}
+
+fn vector(v: [f64; 3]) -> Vec3 {
+    Vec3::new(v[0], v[1], v[2])
+}
+
+fn cross_increment(arm: Vec3, impulse: [Dd; 3]) -> [Dd; 3] {
+    [
+        dd(arm.y) * impulse[2] - dd(arm.z) * impulse[1],
+        dd(arm.z) * impulse[0] - dd(arm.x) * impulse[2],
+        dd(arm.x) * impulse[1] - dd(arm.y) * impulse[0],
+    ]
+}
+
+fn rotate_body_increment(body: RigidBodyState, increment: [Dd; 3]) -> [Dd; 3] {
+    let orientation = body.pose().orientation();
+    let high = components(orientation.rotate_body_to_world(vector(increment.map(|x| x.hi))));
+    if increment.iter().all(|x| x.lo == 0.0) {
+        return high.map(dd);
+    }
+    let low = components(orientation.rotate_body_to_world(vector(increment.map(|x| x.lo))));
+    std::array::from_fn(|c| dd(high[c]) + dd(low[c]))
 }

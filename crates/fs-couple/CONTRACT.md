@@ -212,6 +212,70 @@ compensated physical loss, inactive/separating no-ops, mass/budget refusal and
 final-poll atomic cancellation. The bridge advances the flexible-body coupling
 gap in `frankensim-b8bxd.9.3`; it does not close its broader program.
 
+## Simultaneous plate impacts against multiple finite rigid bodies
+
+`fs_couple::plate_impact::bodies::PlateRigidImpactNetwork` extends the continuing
+spatial plate adapter to several explicitly indexed finite rigid bodies. The
+existing isolated and one-body simultaneous public APIs remain available.
+
+Preparation takes the original `PlateDynamics`, mesh, complete reference mass,
+`PlateImpactSite` slice, `PlateRigidImpactSetControls`, and
+`PlateRigidImpactNetworkBudget`. It reuses the original point stencils, support
+admission, consistent-mass solves, and cached `B M^-1 B^T` of
+`PlateRigidImpactSet`. The cache is solved once per site. Each event receives a
+mutable `PlateImpactBody` slice and one `PlateImpactBodyWitness` per prepared
+site, declaring a participant index and a COM-relative material arm in that
+body's axes. Equal poses or inertias never merge distinct participants.
+
+The original plate contribution couples all sites, including sites on different
+bodies. Rigid translational and full-tensor rotational cross terms are added
+only when two sites name the same finite body. The resulting complete matrix
+goes to the original `fs-contact` simultaneous normal-law owner. Initially
+separating active rows remain in this law. `UniqueImpulses` and `UniqueVelocity`
+determinations are returned unchanged; redundant impulses and support entries
+remain representative loads, not unique local pressure or heat allocations.
+
+An accepted nonzero event stages one original structural impulse and native
+acceleration restart, plus one resultant native momentum impulse per affected
+body. Point velocities are remeasured from the actual candidate native states
+at every site, including geometrically inactive sites. Unrounded compensated
+body resultants remain available through the per-body requested/actual transfer
+checks. The shared audit reconstructs full constrained-row inertia reactions,
+the represented transverse `Pz`, `Lx`, and `Ly`, each finite body's spin and
+orbital increments, and collective kinetic work in one compensated accumulator.
+The original native impulse-work bounds and separate physical loss/work bounds
+remain authoritative. A failed numerical bound is not reported as dissipation.
+
+Only after all original laws, native updates, endpoint checks, transfer balances,
+and the final cancellation poll succeed are the plate velocity/acceleration and
+affected rigid states published. Time, displacement, step history, and untouched
+participants retain their original bits. No event clones an entire body array.
+All-zero events are exact no-ops; cancellation or any early/late refusal leaves
+every supplied participant unchanged.
+
+Contact, mobility-product, mass, point-location, and workspace budgets retain
+their original owners. `max_bodies` is a separate explicit positive bound;
+checked workspace arithmetic reserves the actual storage size of all native
+body receipts and compensated resultants before preparation allocates. Event
+assembly is quadratic in contact count, with a linear number of original rigid
+inverse-inertia actions. There is one plate impulse solve per event and no
+per-body plate solve, sequential impulse sweep, or new numerical solver.
+
+Independent tests compare a dense consistent plate mass and per-body full
+tensor oracle against mixed same-body and distinct-body rows, all three elastic
+regimes, contact/body permutations, translated geometry, and native trajectory
+continuation with damping. Analytic shared-plate tests exercise active separating
+and inactive rows. Supported and redundant fixtures independently reconstruct
+full support reactions. Additional tests falsify sequential isolated impacts and
+naive subtraction of large kinetic energies, preserve the strict native work
+refusal at unresolved scales, and verify cancellation, bounded participants,
+late imbalance refusal, retry equivalence, and one-body API compatibility.
+
+This remains a fixed-configuration frictionless normal event for one flat plate
+with its original +z normal and stationary supports. It does not perform collision
+discovery, rigid-rigid contact, curved or finite-rotation shell kinematics,
+frictional plate contact, moving-support work, or local thermal partition.
+
 ## Simultaneous plate and finite rigid-body normal impacts
 
 `plate_impact::multiple::PlateRigidImpactSet` resolves an entire localized normal

@@ -76,11 +76,11 @@ struct PointRow {
 /// The original plate mass is solved once per point at preparation. An event
 /// performs one structural impulse update/restart, regardless of contact count.
 pub struct PlateRigidImpactSet<'a, L: ?Sized> {
-    first: PlateRigidImpact<'a, L>,
+    pub(super) first: PlateRigidImpact<'a, L>,
     additional: Vec<PointRow>,
-    sites: Vec<PlateImpactSite>,
+    pub(super) sites: Vec<PlateImpactSite>,
     plate_delassus: Vec<f64>,
-    contact: MultiImpactConfig,
+    pub(super) contact: MultiImpactConfig,
 }
 
 impl<'a, L: PlateLoad + ?Sized> PlateRigidImpactSet<'a, L> {
@@ -417,7 +417,7 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpactSet<'a, L> {
         Ok(report)
     }
 
-    fn row(&self, i: usize) -> (&PlatePointStencil, &[f64], &[f64]) {
+    pub(super) fn row(&self, i: usize) -> (&PlatePointStencil, &[f64], &[f64]) {
         if i == 0 {
             (
                 &self.first.point,
