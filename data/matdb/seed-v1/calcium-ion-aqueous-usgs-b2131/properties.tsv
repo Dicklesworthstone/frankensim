@@ -1,4 +1,17 @@
 frankensim.matdb-source.v1
+observation	gibbs-reference	Calcium-ion standard formation Gibbs energy	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/12/full/max/0/default.jpg	The printed page 6 Ca2+(aq) row gives formation Gibbs energy -553.6 kJ/mol. This is the separate Gibbs column, not enthalpy minus temperature times conventional ionic entropy. The point applies at 298.15 K and 100000 Pa under the USGS elemental and H+(aq) zero conventions; no finite-concentration activity model or reaction uncertainty interval is supplied.
+scalar	formation-gibbs-energy	gibbs-reference	gf	-553.6	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
 observation	identity	Calcium ion Ca2+(aq), conventional aqueous reference	USGS Bulletin 2131 printed page 6, Ca2+ aqueous-ion row	The listed formula weight is 40.078 g/mol. This is an individual dissolved calcium ion reference, not metallic calcium, CaO, a calcium-carbonate or calcium-sulfate ion pair, total dissolved calcium, a pure ion phase or an ore specimen.
 observation	reference-values	Ca2+(aq) formation enthalpy and conventional ionic entropy	USGS Bulletin 2131 printed page 6, Ca2+ aqueous-ion row	Retain formation enthalpy -543.0 kJ/mol and conventional ionic entropy -56.2 J/(mol K), including the negative sign. The entropy is relative to the H+(aq) zero convention, not an absolute ionic entropy. These values are point claims at 298.15 K and 100000 Pa, not concentration-dependent partial molar properties.
 observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 6	The Ca2+ row reports magnitudes 1.0 kJ/mol for formation enthalpy and 1.0 J/(mol K) for entropy. Page 3 describes the calorimetric uncertainty convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. The two dimensional metadata claims retain the reported magnitudes. Main claims keep Unstated confidence semantics; these magnitudes are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.

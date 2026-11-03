@@ -1,4 +1,16 @@
 frankensim.matdb-source.v1
+observation	gibbs-reference	Literal pyrite standard formation Gibbs energy	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/18/full/max/0/default.jpg	USGS B2131 printed page 12 gives crystalline pyrite FeS2 formation Gibbs energy -160.1 kJ/mol and a printed uncertainty magnitude 1.7 kJ/mol. This is the pyrite polymorph, not marcasite, a sulfide concentrate or a bulk ore. The value is admitted only under the USGS elemental reference; no silent substitution of JANAF numbers is allowed. No probability distribution, covariance, dissolution rate or ore accessibility is inferred. Unstated uncertainty is retained.
+scalar	formation-gibbs-energy	identity,gibbs-reference,scope	gf	-160.1	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-energy	polymorph	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
 observation	identity	Pyrite FeS2, USGS standard elemental reference	USGS Bulletin 2131 printed page 12, FeS2(pyrite) row	This is crystalline pyrite FeS2 with the source's formula weight 119.979 g/mol, not marcasite or a composite ore. The selected pyrite and marcasite rows have different entropies and formation enthalpies.
 observation	reference-values	FeS2(pyrite) reference quantities	USGS Bulletin 2131 printed page 12	Retain the printed standard formation enthalpy -171.5 kJ/mol and standard molar entropy 52.9 J/(mol K). The elemental sulfur reference is orthorhombic sulfur, as in the standard-state table on printed page 12; do not substitute the alternate S2-gas-reference high-temperature table. This USGS profile is distinct from the existing JANAF pyrite evaluation (119.967 g/mol and -171.544 kJ/mol), not a relabeling or correction of that source.
 observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 12	The source prints 1.7 kJ/mol for the formation-enthalpy uncertainty magnitude and 0.1 J/(mol K) for the entropy uncertainty magnitude. Page 3 describes the calorimetric convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain the printed magnitudes; all claims retain Unstated uncertainty semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.

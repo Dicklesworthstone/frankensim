@@ -1,4 +1,16 @@
 frankensim.matdb-source.v1
+observation	gibbs-reference	Calcite standard formation Gibbs energy	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/274/full/max/0/default.jpg	The selected printed page 268 temperature table gives formation Gibbs energy -1128.5 kJ/mol at 298.15 K, preserved without substituting a different compilation's value. This is a separate formation quantity, not formation enthalpy minus temperature times absolute calcite entropy. No uncertainty interval or extrapolation follows from source rounding. The one-bar USGS reference and pure calcite phase are required.
+scalar	formation-gibbs-energy	gibbs-reference	gf	-1128.5	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-energy	polymorph	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
 observation	identity	Rhombohedral calcite CaCO3, pure solid reference	https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/274/	USGS Bulletin 2131 printed page 268 identifies calcite, formula weight 100.087 g/mol and a 298.15-1200 K table. This pack retains only 298.15-500 K. It does not identify aragonite, limestone composition, porosity, moisture or a producer specimen.
 observation	reference-values	Calcite standard reference values at 298.15 K	https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/274/	The selected temperature table gives formation enthalpy -1207.4 kJ/mol and absolute entropy 91.71 J/(mol K). These are point claims at 298.15 K. The selected table does not provide uncertainty bands; none are inferred from its rounding or propagated from another table.
 observation	caloric	Selected literal USGS calcite heat capacities	https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/274/	Cp in J/(mol K) is 83.47 at 298.15 K, 83.82 at 300 K, 97.00 at 400 K and 104.55 at 500 K. Divide these entries by 0.100087 kg/mol for the mass-specific knots. Linear interpolation is an authored approximation with unstated source and interpolation uncertainty; no additional measured temperatures are invented. The source enthalpy column is (H(T)-H(298.15))/T in J/(mol K), not H(T)-H(298.15).

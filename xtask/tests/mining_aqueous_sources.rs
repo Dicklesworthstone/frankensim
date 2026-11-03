@@ -136,7 +136,7 @@ fn g0_g3_ionic_source_values_preserve_convention_and_reported_uncertainty() {
         let pack = compile(slug);
         assert_eq!(
             pack.claims().claim_count(),
-            if reported.is_some() { 5 } else { 3 }
+            if reported.is_some() { 6 } else { 4 }
         );
         let query = point(false);
         let mut values = vec![

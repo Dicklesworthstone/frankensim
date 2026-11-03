@@ -1,4 +1,17 @@
 frankensim.matdb-source.v1
+observation	gibbs-reference	Bicarbonate-ion standard formation Gibbs energy	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/21/full/max/0/default.jpg	The printed page 15 HCO3-(aq) row gives formation Gibbs energy -586.8 kJ/mol with a reported magnitude 0.3 kJ/mol. This retains the source's distinct Gibbs column and rounding at 298.15 K and 100000 Pa. The source supplies no universal confidence probability or joint covariance, so uncertainty stays Unstated. HCO3-(aq) is not CO3(2-), H2CO3 or dissolved CO2, and finite-concentration activities are not inferred.
+scalar	formation-gibbs-energy	gibbs-reference	gf	-586.8	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
 observation	identity	Bicarbonate ion HCO3-(aq), conventional aqueous reference	USGS Bulletin 2131 printed page 15, HCO3- aqueous-ion row	The listed formula weight is 61.017 g/mol. This identifies bicarbonate alone, not CO3(2-), CO2(aq), CO2 gas, H2CO3, total inorganic carbon, a calcium-bicarbonate ion pair or an assayed process solution. Those chemically distinct endpoints have different proton consumption and thermodynamic properties.
 observation	reference-values	HCO3-(aq) formation enthalpy and conventional ionic entropy	USGS Bulletin 2131 printed page 15, HCO3- aqueous-ion row	Retain formation enthalpy -689.9 kJ/mol and conventional ionic entropy 98.4 J/(mol K), relative to the H+(aq) zero convention. These values are point claims at 298.15 K and 100000 Pa. With the matched USGS calcite and calcium-ion formation values they support CaCO3(s)+H+(aq)=Ca2+(aq)+HCO3-(aq), whose standard enthalpy is -25.5 kJ per mole of written reaction. This is the one-proton bicarbonate endpoint, not a two-proton carbon-dioxide endpoint or a bulk acid-consumption prediction.
 observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 15	The HCO3- row reports magnitudes 0.2 kJ/mol for formation enthalpy and 0.5 J/(mol K) for entropy. Page 3 describes the calorimetric uncertainty convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. The dimensional metadata claims preserve these magnitudes. Main claims keep Unstated confidence semantics; no independent Gaussian errors, hard interval or certified propagated reaction uncertainty is inferred.

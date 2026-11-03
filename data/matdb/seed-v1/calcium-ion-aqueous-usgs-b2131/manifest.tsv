@@ -6,6 +6,7 @@ license	Attributed-Numerical-Facts-Only-No-Source-Document-License
 source	usgs-aqueous-reference	properties.tsv	material-tsv-v1
 property	mass	molar-mass	dimensional
 property	hf	standard-molar-formation-enthalpy	dimensional
+property	gf	standard-molar-formation-gibbs-energy	dimensional
 property	s0	conventional-standard-molar-entropy	dimensional
 property	hf_uncertainty	reported-formation-enthalpy-uncertainty-magnitude	dimensional
 property	s_uncertainty	reported-conventional-entropy-uncertainty-magnitude	dimensional

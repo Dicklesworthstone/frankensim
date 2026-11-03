@@ -1,4 +1,17 @@
 frankensim.matdb-source.v1
+observation	gibbs-reference	Literal ferrous standard formation Gibbs energy	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/13/full/max/0/default.jpg	USGS B2131 printed page 7 gives Fe2+(aq) formation Gibbs energy -90.0 kJ/mol, independently of formation enthalpy and conventional ionic entropy. The printed Gibbs uncertainty magnitude is 2.0 kJ/mol; no probability distribution, cross-species covariance or certified reaction interval is inferred. The claim retains Unstated uncertainty and the source's H+(aq)-zero convention. It is not computed by subtracting temperature times the species entropy from formation enthalpy.
+scalar	formation-gibbs-energy	identity,gibbs-reference,scope	gf	-90.0	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
 observation	identity	Ferrous ion Fe2+(aq), conventional aqueous reference	USGS Bulletin 2131 printed page 7, Fe2+(aq) row	This is the individual dissolved Fe2+ ion with formula weight 55.847 g/mol. It is not metallic iron, Fe3+, total dissolved iron, an iron-sulfate complex, a pure-ion phase or a qualified ore specimen.
 observation	reference-values	Fe2+(aq) reference quantities	USGS Bulletin 2131 printed page 7	Retain the printed formation enthalpy -91.1 kJ/mol and conventional ionic entropy -107.1 J/(mol K). The negative entropy is relative to the H+(aq) zero convention, not an absolute ionic entropy. The USGS row cites reference 411 (Tremaine and LeBlanc, 1980); later evaluations are not silently substituted.
 observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 7	The source prints 3.0 kJ/mol for the formation-enthalpy uncertainty magnitude and 2.0 J/(mol K) for the entropy uncertainty magnitude. Page 3 describes the calorimetric convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain the printed magnitudes; all claims retain Unstated uncertainty semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.

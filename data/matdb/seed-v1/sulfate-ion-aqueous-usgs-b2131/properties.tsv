@@ -1,4 +1,17 @@
 frankensim.matdb-source.v1
+observation	gibbs-reference	Literal sulfate standard formation Gibbs energy	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/24/full/max/0/default.jpg	USGS B2131 printed page 18 gives SO4(2-)(aq) formation Gibbs energy -744.0 kJ/mol and a printed uncertainty magnitude 0.4 kJ/mol. This is the individual sulfate ion under the source's H+(aq)-zero convention, not sulfuric acid or a finite-concentration sulfate solution. Gibbs energy is a separate tabulated quantity; no probability model, covariance, activity coefficient or temperature extrapolation is inferred. Unstated uncertainty is retained.
+scalar	formation-gibbs-energy	identity,gibbs-reference,scope	gf	-744.0	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
 observation	identity	Sulfate ion SO4(2-)(aq), conventional aqueous reference	USGS Bulletin 2131 printed page 18, SO4(2-)(aq) row	This is the individual dissolved sulfate ion SO4(2-) with formula weight 96.064 g/mol. It is not bisulfate HSO4-, sulfuric acid, sulfite, an ion pair, total dissolved sulfur or a pure-ion phase.
 observation	reference-values	SO4(2-)(aq) reference quantities	USGS Bulletin 2131 printed page 18	Retain the printed formation enthalpy -909.3 kJ/mol and conventional ionic entropy 18.5 J/(mol K). These are the source's unit-activity ionic reference quantities, not finite-concentration partial molar properties.
 observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 18	The source prints 0.4 kJ/mol for the formation-enthalpy uncertainty magnitude and 0.4 J/(mol K) for the entropy uncertainty magnitude. Page 3 describes the calorimetric convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain the printed magnitudes; all claims retain Unstated uncertainty semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.

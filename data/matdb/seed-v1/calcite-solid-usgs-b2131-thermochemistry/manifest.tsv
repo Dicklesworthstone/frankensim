@@ -6,6 +6,7 @@ license	Attributed-Numerical-Facts-Only-No-Source-Document-License
 source	usgs-calcite	properties.tsv	material-tsv-v1
 property	mass	molar-mass	dimensional
 property	hf	standard-molar-formation-enthalpy	dimensional
+property	gf	standard-molar-formation-gibbs-energy	dimensional
 property	s0	standard-molar-entropy	dimensional
 property	cp	specific-heat-capacity	dimensional
 axis	temperature	temperature	absolute-temperature

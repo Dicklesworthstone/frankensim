@@ -184,7 +184,8 @@ fn g0_g3_actual_usgs_rows_preserve_values_phases_and_ionic_conventions() {
                 value,
             ));
         }
-        assert_eq!(pack.claims().claim_count(), values.len());
+        // Source profiles also carry a separate standard formation Gibbs claim.
+        assert_eq!(pack.claims().claim_count(), values.len() + 1);
         for (property, dims, expected) in values {
             let key = PropertyKey::new(property, dims);
             let answer = pack

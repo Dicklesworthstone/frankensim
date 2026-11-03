@@ -1,4 +1,15 @@
 frankensim.matdb-source.v1
+observation	gibbs-reference	Literal liquid-water standard formation Gibbs energy	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/22/full/max/0/default.jpg	USGS B2131 printed page 16 gives H2O(l) formation Gibbs energy -237.1 kJ/mol and a printed uncertainty magnitude 0.1 kJ/mol. This is pure liquid water, not steam, aqueous H2O activity in an arbitrary solution or a temperature-dependent solvent model. The Gibbs column is independently tabulated; no probability distribution, covariance or extrapolation is inferred. Unstated uncertainty is retained.
+scalar	formation-gibbs-energy	identity,gibbs-reference,scope	gf	-237.1	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
 observation	identity	Water H2O(l), USGS pure-liquid reference	USGS Bulletin 2131 printed page 16, H2O(l) row	This is pure liquid water H2O with the source formula weight 18.015 g/mol, not steam, ice, a slurry carrier mixture or a finite-concentration electrolyte solution.
 observation	reference-values	H2O(l) reference quantities	USGS Bulletin 2131 printed page 16	Retain standard formation enthalpy -285.8 kJ/mol and standard molar entropy 70.0 J/(mol K) from the liquid-water row. The separately printed steam row and more precise JANAF evaluations are not substituted.
 observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 16	The source prints 0.1 kJ/mol for the formation-enthalpy uncertainty magnitude and 0.1 J/(mol K) for the entropy uncertainty magnitude. Page 3 describes the calorimetric convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain the printed magnitudes; all claims retain Unstated uncertainty semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.

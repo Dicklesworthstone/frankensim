@@ -1,4 +1,15 @@
 frankensim.matdb-source.v1
+observation	gibbs-reference	Oxygen elemental-reference formation Gibbs zero	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/14/full/max/0/default.jpg	USGS B2131 printed page 8 gives O2(g) standard formation Gibbs energy zero by the elemental-reference convention. This gas-phase reference does not assert zero Gibbs change for oxygen reactions or define dissolved-oxygen activity, Henry-law constants, mass transfer or fugacity at arbitrary pressure. The literal source reference zero has Unstated uncertainty semantics; no statistical confidence or probability distribution is invented.
+scalar	formation-gibbs-energy	identity,gibbs-reference,scope	gf	0.0	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
 observation	identity	Oxygen O2, USGS ideal-gas reference state	USGS Bulletin 2131 printed page 8, O2(g) row	This is pure ideal-gas O2 in its elemental reference state at one bar, with the source formula weight 31.999 g/mol. It is not dissolved oxygen, air, an oxygen-transfer model or a measured gas supply.
 observation	reference-values	O2(g) reference quantities	USGS Bulletin 2131 printed page 8	Retain standard formation enthalpy 0.0 kJ/mol and standard molar entropy 205.15 J/(mol K). The zero formation enthalpy is the elemental reference convention and remains an explicit source claim. The table prints no formation-enthalpy uncertainty magnitude for this reference zero.
 observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 8	The source prints 0.02 J/(mol K) for the entropy uncertainty magnitude. Page 3 describes the calorimetric convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain the printed magnitudes; all claims retain Unstated uncertainty semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.

@@ -1,0 +1,52 @@
+frankensim.matdb-source.v1
+observation	identity	Ferric iron Fe3+(aq), conventional aqueous reference	USGS Bulletin 2131 printed page 7, Fe3+ row	Formula weight 55.847 g/mol identifies individual dissolved iron(III), not ferrous iron, an iron hydroxide solid, total dissolved iron or a ferric-sulfate complex. The source's rounded formula weights are retained.
+observation	reference-values	Literal ferric standard-state thermochemistry	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/13/full/max/0/default.jpg	The row gives formation enthalpy -49.9 kJ/mol, formation Gibbs energy -16.7 kJ/mol and conventional ionic entropy -280.0 J/(mol K). These are separate printed quantities. Reported uncertainty magnitudes are 5.0 kJ/mol for enthalpy, 2.0 kJ/mol for Gibbs energy and 13.0 J/(mol K) for entropy. No independent Gaussian model, universal coverage probability, cross-species covariance or hard bound is inferred; claims retain Unstated uncertainty.
+observation	scope	USGS aqueous reference and ionic zero convention	USGS Bulletin 2131 printed pages iv, 1, 3 and 7	All claims apply only at 298.15 K and 100000 Pa. The source's m=1 is the hypothetical ideal aqueous unit-activity state referred to infinite dilution. Both the USGS elemental reference and H+(aq) zero convention are required. The negative entropy is conventional. No finite-concentration activity coefficient, redox kinetics, hydrolysis, precipitation, leaching conversion or reactor-rate law is supplied.
+scalar	molar-mass	identity,scope	mass	55.847	g/mol	tabulated
+scalar	formation-enthalpy	identity,reference-values,scope	hf	-49.9	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,reference-values,scope	gf	-16.7	kJ/mol	tabulated
+scalar	conventional-entropy	identity,reference-values,scope	s0	-280.0	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	conventional-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	conventional-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	conventional-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	conventional-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	conventional-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	conventional-entropy	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	conventional-entropy	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	conventional-entropy	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	conventional-entropy	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	conventional-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	conventional-entropy	specimen	0	0	1
