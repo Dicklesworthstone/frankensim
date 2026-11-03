@@ -87,3 +87,80 @@ fn the_books_close_with_the_bank_exchange_booked() {
     assert!(l.coupling_j.abs() < 2.0e-3 * l.input_j, "coupling {:e} of {:e} J", l.coupling_j, l.input_j);
     assert!(l.damper_loss_j > 0.0 && p.take_error().is_none());
 }
+
+#[test]
+fn silent_strings_use_supplied_pads_above_the_estimated_break_and_the_same_pedal_factor() {
+    let mut desc = Description::embedded().unwrap().truncated(4).unwrap();
+    desc.courses.retain(|c| [57, 89].contains(&c.midi));
+    let length = desc.courses[1].length_m;
+    let make = |pad: Option<(f64, f64, f64)>, sustain: f64| {
+        let row = pad.map_or_else(|| "free,89".into(), |(start, end, drag)|
+            format!("pad,89,{},{},{drag}", start * length, end * length));
+        let mut cfg = Config::live(RATE);
+        cfg.max_partials = 16;
+        cfg.course_mode_budget = 48;
+        cfg.duplex = false;
+        cfg.silent_bank_hz = 2_000.0;
+        cfg.retire_ringing_j = 0.0;
+        cfg.retire_damped_j = 0.0;
+        cfg.damper_specification = Some(format!("frankensim-piano-dampers-v1\nfree,57\n{row}\n"));
+        let mut piano = LivePiano::new(&desc, cfg).unwrap();
+        piano.set_sustain(sustain).unwrap();
+        piano.note_on(57, 2.0).unwrap();
+        piano
+    };
+    let mut half_pedal = make(Some((0.31, 0.39, 0.4)), 0.5);
+    let mut quarter_drag = make(Some((0.31, 0.39, 0.1)), 0.0);
+    let mut moved = make(Some((0.21, 0.29, 0.1)), 0.0);
+    let mut free = make(None, 0.0);
+    let mut raised = make(Some((0.31, 0.39, 0.4)), 1.0);
+    let a = render(&mut half_pedal, 0.08);
+    assert!(render(&mut quarter_drag, 0.08) == a);
+    let b = render(&mut moved, 0.08);
+    let c = render(&mut free, 0.08);
+    assert!(render(&mut raised, 0.08) == c, "a fully raised supplied pad acts as a free row");
+    assert!(half_pedal.grant_for(89).is_none(), "the padded string must still be owned by the silent bank");
+    assert!(half_pedal.ledger.damper_loss_j > 0.0, "an unplayed pad above MIDI 88 must dissipate bridge-driven motion");
+    assert_eq!(half_pedal.ledger.damper_loss_j.to_bits(), quarter_drag.ledger.damper_loss_j.to_bits());
+    assert!(moved.ledger.damper_loss_j > 0.0 && b != a, "the bank must use the supplied station geometry");
+    assert_eq!(free.ledger.damper_loss_j, 0.0);
+    assert_eq!(raised.ledger.damper_loss_j, 0.0);
+
+    // The same pad remains attached when the sympathetic key moves from the
+    // silent bank to the dynamic set and is caught, then released by the rod.
+    let before = half_pedal.stored_energy_j();
+    half_pedal.silent_key_down(89).unwrap();
+    half_pedal.apply_pending_notes();
+    assert!(half_pedal.grant_for(89).is_some());
+    assert!((half_pedal.stored_energy_j() - before).abs() < 1e-10 * half_pedal.ledger.input_j);
+    half_pedal.set_sostenuto(true);
+    half_pedal.note_off(89);
+    let loss = half_pedal.ledger.damper_loss_j;
+    render(&mut half_pedal, 0.02);
+    assert_eq!(half_pedal.ledger.damper_loss_j, loss);
+    half_pedal.set_sostenuto(false);
+    render(&mut half_pedal, 0.02);
+    assert!(half_pedal.ledger.damper_loss_j > loss);
+    for piano in [&mut half_pedal, &mut quarter_drag, &mut moved, &mut free, &mut raised] {
+        let ledger = piano.close_ledger();
+        assert!(ledger.residual_j.abs() < 1e-8 * ledger.input_j);
+        assert!(piano.take_error().is_none());
+    }
+}
+
+#[test]
+fn a_supplied_pad_cannot_silently_overdamp_the_silent_bank_approximation() {
+    let mut desc = Description::embedded().unwrap().truncated(4).unwrap();
+    desc.courses.retain(|c| c.midi == 57);
+    let length = desc.courses[0].length_m;
+    let mut cfg = Config::live(RATE);
+    cfg.max_partials = 16;
+    cfg.damper_specification = Some(format!("frankensim-piano-dampers-v1\npad,57,{},{},1000000\n",
+        0.31 * length, 0.39 * length));
+    // The active pad's exact viscous flows admit this physical source. The
+    // silent bank keeps its existing underdamped transition domain and refuses.
+    assert!(LivePiano::new(&desc, cfg.clone()).is_ok());
+    cfg.silent_bank_hz = 600.0;
+    let error = LivePiano::new(&desc, cfg).err().unwrap();
+    assert!(error.contains("silent-bank partial would be overdamped"), "{error}");
+}

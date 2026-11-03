@@ -118,6 +118,43 @@ WASM cannot silently ignore the selection. Rebuild using
 physics. `info().stringStretchingSelected` reports the explicit selection,
 including a supplied all-linear file.
 
+## Per-key damper preparation
+
+`options.damperSpecification` accepts the complete reference damper file as
+text, bounded to 1 MiB. Every course in the final imported or tuned scale must
+have exactly one `pad` or `free` row. The existing Rust specification owner
+checks coverage, finite values, and that each pad lies strictly inside its
+speaking string before the engine is created.
+
+```text
+frankensim-piano-dampers-v1
+pad,69,0.20,0.24,0.7
+free,100
+```
+
+This example covers a two-key scale. Supply all keys when using the built-in
+88-key scale. Pad endpoints are distances from the string's fixed end in metres;
+the last field is total viscous drag in N s/m **per speaking string**. A `free`
+row declares no damper, independently of MIDI pitch. Pads never touch duplex
+segments.
+
+The same admitted geometry and drag govern sounding-string pad projections,
+sympathetic-bank decay, damper eligibility, and sustain/sostenuto behavior.
+Sustain retains the current squared engagement law. The selected text survives
+timing probes and playback copies and composes with `stringStretching`, source
+string materials, source gas, and all three mechanical clocks. Omitting it uses
+the reference owner's existing estimated pads.
+
+The model remains finite-footprint viscous drag, with the live engine's declared
+quadrature and silent-bank approximation. Falling damper action and felt impact
+are separate physical models. The silent bank retains its current underdamped
+transition domain: a supplied drag that exceeds it refuses during preparation,
+with the affected key reported. No drag is clamped to make the file pass.
+Rebuild WASM with `engine-piano/build-wasm.sh`;
+the factory requires `supportsDamperSpecification()` before forwarding this
+selection. `info().damperSpecificationSelected` reports an explicitly supplied
+file, including an all-free file.
+
 ## Native composition
 
 ```rust

@@ -28,7 +28,7 @@
 //! * string partials are capped per key (mode budget) and by a partial band;
 //! * one mechanical step per audio sample (the reference default is four);
 //! * dampers are a K-point viscous pad (the reference uses a finer quadrature
-//!   of the same estimated pad);
+//!   of the same supplied or explicitly estimated pad);
 //! * the soundboard keeps the complete FE modal slice below `board_band_hz`.
 //!
 //! All dense eigen-solves, exact-ZOH coefficient probes and projections are
@@ -40,7 +40,7 @@ use crate::refmods::{
     board_geometry, felt,
     geometry::{self, Course},
     hammer_felt,
-    linear::{Bank, BoardMode, string_stretching::{Material, Specification, WaveMaterial}},
+    linear::{Bank, BoardMode, dampers, string_stretching::{Material, Specification, WaveMaterial}},
     relaxation, shank, steinway_d, steinway_scale,
 };
 use crate::stretch::{Stretch, damped_transition};
@@ -57,14 +57,6 @@ use std::f64::consts::{PI, TAU};
 const CATCH_DISTANCE: f64 = 0.020;
 /// Reference launch clearance below the string (engine.rs `arm`).
 const LAUNCH_CLEARANCE: f64 = 0.002;
-/// Estimated damper pad of the reference (`dampers::Specification::estimated`):
-/// centre at 35 % of the speaking length, width min(40 mm, 8 % L), 0.4 N s/m
-/// total drag per string, no dampers above MIDI 88.
-const DAMPER_CENTRE: f64 = 0.35;
-const DAMPER_WIDTH_FRACTION: f64 = 0.08;
-const DAMPER_WIDTH_MAX_M: f64 = 0.04;
-const DAMPER_DRAG_NS_M: f64 = 0.4;
-const LAST_DAMPED_MIDI: u8 = 88;
 /// The scale dumped by the offline reference binary (`grand_piano --preset
 /// steinway-d --dump-scale`): RT-0425 Appendix A wrapped-string model, 84
 /// published courses plus four estimated extensions, tensions adjusted to
@@ -90,8 +82,12 @@ pub struct Config {
     /// Dynamic string modes simulated at once (the CPU budget). Beyond it the
     /// quietest key is retired; the event is counted.
     pub max_dynamic_modes: usize,
-    /// Quadrature points of the estimated viscous damper pad.
+    /// Quadrature points of each admitted viscous damper pad.
     pub damper_points: usize,
+    /// The reference's complete `frankensim-piano-dampers-v1` specification:
+    /// one physical `pad` or explicit `free` row for every course. Both active
+    /// and silent strings use it. `None` selects the shared owner's estimates.
+    pub damper_specification: Option<String>,
     /// Simulate the duplex (aliquot) segments of sounding keys.
     pub duplex: bool,
     /// Keep every non-sounding string attached quasi-statically.
@@ -197,6 +193,7 @@ impl Config {
             max_courses: 24,
             max_dynamic_modes: 2400,
             damper_points: 4,
+            damper_specification: None,
             duplex: true,
             static_attachment: true,
             microphone_m: [0.675, 1.0, 1.0],
@@ -1398,6 +1395,12 @@ struct Modes {
 }
 
 #[derive(Clone)]
+struct CourseDamper {
+    fractions: Vec<f64>,
+    drag_ns_m: f64,
+}
+
+#[derive(Clone)]
 struct PadPoint {
     shape: Vec<f64>,
     lift: f64,
@@ -1515,7 +1518,7 @@ struct Key {
     rate_n_s_m_p: f64,
     thickness: f64,
     contacts: Vec<Contact>,
-    has_damper: bool,
+    damper: Option<CourseDamper>,
     /// Bank string indices of this course: (speaking, duplex) per member.
     segs: Vec<usize>,
     last_force: f64,
@@ -1828,6 +1831,23 @@ impl LivePiano {
             return Err("invalid live piano configuration".into());
         }
         let courses = desc.courses.clone();
+        // One physical input owner for both live string paths. Resolve every
+        // course and quadrature station before any note can be accepted.
+        let damper_spec = match cfg.damper_specification.as_deref() {
+            Some(text) => dampers::Specification::read(text, &courses)?,
+            None => dampers::Specification::estimated(&courses)?,
+        };
+        let mut course_dampers = Vec::with_capacity(courses.len());
+        for c in &courses {
+            course_dampers.push(match damper_spec.pad(c.midi)? {
+                Some(pad) => Some(CourseDamper {
+                    fractions: pad.midpoint_fractions(c.length_m, cfg.damper_points)
+                        .map_err(|e| format!("key {}: {e}", c.midi))?,
+                    drag_ns_m: pad.drag_ns_m(),
+                }),
+                None => None,
+            });
+        }
         let board = &desc.board;
         let r = board.len();
         let dt = 1.0 / f64::from(rate);
@@ -1968,28 +1988,21 @@ impl LivePiano {
                 for &si in &key_segs[ci] {
                     let seg = &segs[si];
                     let first = bank_modes.len();
-                    let padded = !seg.duplex && c.midi <= LAST_DAMPED_MIDI;
-                    let width = (DAMPER_WIDTH_FRACTION * seg.length_m).min(DAMPER_WIDTH_MAX_M);
-                    let lead = DAMPER_CENTRE - 0.5 * width / seg.length_m;
-                    let span = width / seg.length_m;
-                    let points = cfg.damper_points;
+                    let pad = if seg.duplex { None } else { course_dampers[ci].as_ref() };
                     let root = det::sqrt(seg.modal_mass_kg);
                     for (p, k) in (seg.off..seg.off + seg.n_max).enumerate() {
                         if m.omega[k] > top {
                             break;
                         }
-                        let c_pad = if padded {
-                            (0..points).map(|j| {
-                                let fraction = lead + span * (j as f64 + 0.5) / points as f64;
+                        let c_pad = pad.map_or(0.0, |pad| {
+                            pad.fractions.iter().map(|&fraction| {
                                 let shape = det::sin((p + 1) as f64 * PI * fraction) / root;
-                                DAMPER_DRAG_NS_M / points as f64 * shape * shape
+                                pad.drag_ns_m / pad.fractions.len() as f64 * shape * shape
                             }).sum()
-                        } else {
-                            0.0
-                        };
+                        });
                         let c_int = losses[k].mass_rate + losses[k].strain_rate;
                         if c_int + c_pad >= 1.9 * m.omega[k] {
-                            return Err("a silent-bank partial would be overdamped".into());
+                            return Err(format!("key {}: a silent-bank partial would be overdamped", c.midi));
                         }
                         let c_gas = string_gas_drag_rates.get(k).copied().unwrap_or(0.0);
                         bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], c_int, c_gas, c_pad, z: 0.0, v: 0.0, p: [1.0, 0.0, 0.0, 1.0], share: 0.0 });
@@ -2139,7 +2152,7 @@ impl LivePiano {
                 rate_n_s_m_p,
                 thickness,
                 contacts,
-                has_damper: c.midi <= LAST_DAMPED_MIDI,
+                damper: course_dampers[ci].clone(),
                 segs: key_segs[ci].clone(),
                 last_force: 0.0,
             });
@@ -2312,12 +2325,13 @@ impl LivePiano {
     /// Sostenuto pedal (engine.rs `set_sostenuto`). Pressing it latches the dampers of
     /// every key held down at that moment, and of every key while the sustain pedal is
     /// fully down (the rod catches dampers raised by either); keys pressed later are not
-    /// caught. Releasing it lets every latched damper fall.
+    /// caught. A free key has no damper for the rod to catch. Releasing it lets every
+    /// latched damper fall.
     pub fn set_sostenuto(&mut self, on: bool) {
         if on && !self.sostenuto {
             let raised = self.sustain >= 1.0;
             for key in &mut self.keys {
-                key.latched = key.held || raised;
+                key.latched = key.damper.is_some() && (key.held || raised);
             }
         }
         if !on {
@@ -2382,19 +2396,14 @@ impl LivePiano {
         let half = 0.25 * self.dt;
         loss_w += half * endpoint_drag;
         let mut pad = Vec::new();
-        if !seg.duplex && self.keys[seg.course].has_damper {
+        if let Some(damper) = self.keys[seg.course].damper.as_ref().filter(|_| !seg.duplex) {
             let ci = seg.course;
             if self.pad_cache[ci].as_ref().is_none_or(|(count, _)| *count != n) {
-                // The reference's estimated pad, as `damper_points` midpoint
-                // stations: y = phi*z + (x/L - sum(phi*beta))*b at each station.
-                let width = (DAMPER_WIDTH_FRACTION * seg.length_m).min(DAMPER_WIDTH_MAX_M);
-                let start = DAMPER_CENTRE - 0.5 * width / seg.length_m;
-                let span = width / seg.length_m;
-                let count = self.cfg.damper_points;
+                // Shared physical stations: y = phi*z + (x/L - sum(phi*beta))*b.
+                let count = damper.fractions.len();
                 let root = det::sqrt(seg.modal_mass_kg);
                 let mut points = Vec::with_capacity(count);
-                for i in 0..count {
-                    let fraction = start + span * (i as f64 + 0.5) / count as f64;
+                for &fraction in &damper.fractions {
                     let shape: Vec<f64> = (1..=n).map(|p| det::sin(p as f64 * PI * fraction) / root).collect();
                     let lift = fraction - shape.iter().zip(&m.beta[off..off + n]).map(|(g, b)| g * b).sum::<f64>();
                     let norm_string = shape.iter().map(|g| g * g).sum::<f64>();
@@ -2812,7 +2821,7 @@ impl LivePiano {
     }
 
     fn is_damped(&self, ac: &ACourse) -> bool {
-        self.keys[ac.ci].has_damper && !self.lifted(ac.ci)
+        self.keys[ac.ci].damper.is_some() && !self.lifted(ac.ci)
     }
 
     /// The key or a pedal holds this course's dampers up (whether or not it has any).
@@ -3040,11 +3049,12 @@ impl LivePiano {
         self.engagement_cached = engagement;
         let half_dt = 0.5 * self.dt;
         for ac in &mut self.active {
+            let drag_ns_m = self.keys[ac.ci].damper.as_ref().map_or(0.0, |pad| pad.drag_ns_m);
             for s in &mut ac.segs {
                 let count = s.pad.len() as f64;
                 for p in &mut s.pad {
                     p.norm = p.norm_string + p.lift * p.lift * ac.gl_norm2;
-                    let drag = DAMPER_DRAG_NS_M * engagement / count;
+                    let drag = drag_ns_m * engagement / count;
                     p.coef = if p.norm == 0.0 || drag == 0.0 { 0.0 } else { det::expm1(-drag * p.norm * half_dt) / p.norm };
                 }
             }

@@ -10,7 +10,7 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
   }
   const limits = [Number(options.courseModeBudget) || 0, Number(options.maxDynamicModes) || 0, Number(options.fullScalePa) || 0];
   const coords = Number(options.boardCoordinates) || 0;
-  const stretching = [];
+  const specifications = [];
   if (options.stringStretching !== undefined) {
     if (typeof options.stringStretching !== 'string' || !options.stringStretching.trim()
         || new TextEncoder().encode(options.stringStretching).length > 64 * 1024) {
@@ -19,10 +19,22 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
     if (typeof Engine.supportsStringStretching !== 'function' || Engine.supportsStringStretching() !== true) {
       throw new Error('selected nonlinear strings require rebuilding the piano WASM with stringStretching support');
     }
-    stretching.push(options.stringStretching);
+    specifications.push(options.stringStretching);
+  }
+  if (options.damperSpecification !== undefined) {
+    if (typeof options.damperSpecification !== 'string' || !options.damperSpecification.trim()
+        || new TextEncoder().encode(options.damperSpecification).length > 1024 * 1024) {
+      throw new RangeError('damperSpecification must be nonempty reference specification text of at most 1 MiB');
+    }
+    if (typeof Engine.supportsDamperSpecification !== 'function' || Engine.supportsDamperSpecification() !== true) {
+      throw new Error('selected per-key dampers require rebuilding the piano WASM with damperSpecification support');
+    }
+    // Keep the earlier optional stretching argument in its original ABI slot.
+    if (!specifications.length) specifications.push(undefined);
+    specifications.push(options.damperSpecification);
   }
   if (options.scaleCsv !== undefined || options.stretchTuning !== undefined || options.gas !== undefined
-      || options.stringMaterials !== undefined || options.gasSources !== undefined || stretching.length) {
+      || options.stringMaterials !== undefined || options.gasSources !== undefined || specifications.length) {
     let scale = '';
     if (options.scaleCsv !== undefined) {
       if (typeof options.scaleCsv !== 'string' || !options.scaleCsv.trim()
@@ -47,7 +59,7 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
       }
       return Engine[method](sampleRate, bytes ?? new Uint8Array(),
         bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning,
-        options.gas ?? '293.15 101325 0', ...materials, ...(sources ?? []), ...stretching);
+        options.gas ?? '293.15 101325 0', ...materials, ...(sources ?? []), ...specifications);
     }
     if (sources) {
       if (typeof Engine.withGasSources !== 'function') {
@@ -55,20 +67,20 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
       }
       return Engine.withGasSources(sampleRate, bytes ?? new Uint8Array(),
         bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning,
-        options.gas, ...sources, ...stretching);
+        options.gas, ...sources, ...specifications);
     }
     if (options.gas !== undefined) {
       if (typeof Engine.withAtmosphere !== 'function') {
         throw new Error('selected atmosphere requires rebuilding the piano WASM with withAtmosphere support');
       }
       return Engine.withAtmosphere(sampleRate, bytes ?? new Uint8Array(),
-        bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning, options.gas, ...stretching);
+        bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning, options.gas, ...specifications);
     }
     if (typeof Engine.withPreparation !== 'function') {
       throw new Error('selected physical scale preparation requires rebuilding the piano WASM with withPreparation support');
     }
     return Engine.withPreparation(sampleRate, bytes ?? new Uint8Array(),
-      bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning, ...stretching);
+      bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning, ...specifications);
   }
   // Preserve the original calls at 1x, including compatibility with deployed
   // WASM. An explicitly higher clock MUST NOT silently fall back on old code.

@@ -16,11 +16,39 @@ const MAX_BYTES: u64 = 1024 * 1024;
 const MAX_CELLS: usize = 128;
 const MAX_TERMS: usize = 4_000_000;
 
+/// An admitted physical pad on one course's speaking strings.
 #[derive(Clone, Copy, Debug)]
-struct Pad {
+pub struct Pad {
     start_m: f64,
     end_m: f64,
     drag_ns_m: f64,
+}
+impl Pad {
+    /// Total viscous drag on EACH speaking string [N s/m].
+    pub fn drag_ns_m(&self) -> f64 { self.drag_ns_m }
+
+    /// The existing positive midpoint quadrature, in fractions of the original
+    /// speaking length. Live and offline preparations can select their declared
+    /// spatial resolution without inventing different pad geometry.
+    pub fn midpoint_fractions(&self, length_m: f64, count: usize) -> Result<Vec<f64>, String> {
+        if !length_m.is_finite() || length_m <= self.end_m || !(1..=MAX_CELLS).contains(&count) {
+            return Err("damper midpoint preparation requires its speaking length and 1..128 points".into());
+        }
+        let start = self.start_m / length_m;
+        let end = self.end_m / length_m;
+        let span = (self.end_m - self.start_m) / length_m;
+        let mut previous = start;
+        let mut fractions = Vec::with_capacity(count);
+        for i in 0..count {
+            let fraction = start + span * (i as f64 + 0.5) / count as f64;
+            if !fraction.is_finite() || fraction <= previous || fraction >= end {
+                return Err("damper footprint has no representable spatial resolution".into());
+            }
+            previous = fraction;
+            fractions.push(fraction);
+        }
+        Ok(fractions)
+    }
 }
 
 /// Every supplied course has either a finite pad or an explicit `free` row.
@@ -30,6 +58,12 @@ pub struct Specification {
     pads: BTreeMap<u8, Option<Pad>>,
 }
 impl Specification {
+    /// Read the admitted pad without changing its geometry. `None` is an
+    /// explicit free key; an absent key is an error, never an estimated pad.
+    pub fn pad(&self, midi: u8) -> Result<Option<Pad>, String> {
+        self.pads.get(&midi).copied().ok_or_else(|| format!("missing damper key {midi}"))
+    }
+
     pub fn read(text: &str, courses: &[Course]) -> Result<Self, String> {
         if text.len() as u64 > MAX_BYTES { return Err("damper file exceeds 1 MiB".into()); }
         let mut header = false;
@@ -239,13 +273,7 @@ impl Prepared {
             if terms > MAX_TERMS { return Err("damper projection exceeds four million terms".into()); }
             let root_mass = det::sqrt(c.modal_mass_kg());
             let mut points = Vec::with_capacity(count);
-            let mut previous = p.start_m / c.length_m;
-            for i in 0..count {
-                let fraction = p.start_m / c.length_m + span * (i as f64 + 0.5) / count as f64;
-                if !fraction.is_finite() || fraction <= previous || fraction >= p.end_m / c.length_m {
-                    return Err("damper footprint has no representable spatial resolution".into());
-                }
-                previous = fraction;
+            for fraction in p.midpoint_fractions(c.length_m, count)? {
                 let shape: Vec<f64> = (1..=s.modes.len()).map(|n|
                     det::sin(n as f64 * std::f64::consts::PI * fraction) / root_mass).collect();
                 // z=q_fixed+beta*b: y=phi*z+(x/L-sum(phi*beta))*b.
@@ -536,6 +564,37 @@ mod tests {
     }
     fn specification() -> Specification {
         Specification::read(&format!("{HEADER}\npad,69,0.33,0.37,0.4\n"), &[course()]).unwrap()
+    }
+    #[test]
+    fn admitted_pad_reader_keeps_free_keys_and_spatially_resolved_drag() {
+        let courses = [course(), Course { midi: 90, ..course() }];
+        let spec = Specification::read(&format!("{HEADER}\nfree,69\npad,90,0.25,0.75,0.8\n"), &courses).unwrap();
+        assert!(spec.pad(69).unwrap().is_none());
+        assert!(spec.pad(68).is_err(), "missing is not an explicit free key");
+        let pad = spec.pad(90).unwrap().unwrap();
+        assert_eq!(pad.drag_ns_m(), 0.8);
+        let stations = pad.midpoint_fractions(courses[1].length_m, 2).unwrap();
+        assert_eq!(stations, [0.375, 0.625]);
+        // Opposite-moving halves of the second partial both dissipate. Sharing
+        // the stations must never turn the pad into a mean-velocity contact.
+        let speeds: Vec<_> = stations.iter().map(|x| det::sin(2.0 * std::f64::consts::PI * x)).collect();
+        assert!(speeds.iter().sum::<f64>().abs() < 1e-14);
+        let power = pad.drag_ns_m() / speeds.len() as f64 * speeds.iter().map(|v| v*v).sum::<f64>();
+        assert!((power - 0.4).abs() < 1e-14);
+        let estimated = Specification::estimated(&courses).unwrap();
+        assert!(estimated.pad(69).unwrap().is_some());
+        assert!(estimated.pad(90).unwrap().is_none());
+    }
+    #[test]
+    fn shared_pad_stations_refuse_a_collapsed_or_invalid_quadrature() {
+        let pad = specification().pad(69).unwrap().unwrap();
+        for (length, count) in [(1.0, 0), (1.0, 129), (0.36, 4), (f64::NAN, 4)] {
+            assert!(pad.midpoint_fractions(length, count).is_err());
+        }
+        let start = 0.3_f64;
+        let end = f64::from_bits(start.to_bits() + 1);
+        let thin = Specification::read(&format!("{HEADER}\npad,69,{start},{end},0.4\n"), &[course()]).unwrap();
+        assert!(thin.pad(69).unwrap().unwrap().midpoint_fractions(1.0, 4).is_err());
     }
     #[test]
     fn distributed_loss_reaches_a_partial_at_the_point_dampers_node() {

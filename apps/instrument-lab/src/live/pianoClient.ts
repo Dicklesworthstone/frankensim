@@ -114,6 +114,8 @@ export interface PianoInfo {
   silentBankModes?: number;
   /** True when the complete reference string-stretching file was explicitly selected. */
   stringStretchingSelected?: boolean;
+  /** True when complete per-key damper geometry/drag was supplied. */
+  damperSpecificationSelected?: boolean;
 }
 
 /** Soundboard drawing data: FE quadrature points and bare mode shapes. */
@@ -286,6 +288,8 @@ export interface PianoEngineOptions {
   stretchTuning?: PianoStretchTuning;
   /** Complete reference linear/stretch/waves specification; waves require geometry-derived axial board rows. */
   stringStretching?: string;
+  /** Complete reference pad/free specification in SI units; controls active and sympathetic strings. */
+  damperSpecification?: string;
   /** T[K] P[Pa] RH, mixture T P mole|mass N SPECIES FRACTION…, or thermochemical with gasSources; resolved in Rust. */
   gas?: string;
   /** Canonical source triples for gas's thermochemical record; shared with kit atmosphere ingress. */

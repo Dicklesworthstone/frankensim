@@ -132,3 +132,106 @@ fn the_sostenuto_catches_only_what_is_up_when_it_is_pressed() {
     p.all_notes_off();
     assert!(!p.sostenuto() && !p.una_corda());
 }
+
+fn damper_description(keys: &[u8]) -> Description {
+    let mut desc = Description::embedded().unwrap().truncated(4).unwrap();
+    desc.courses.retain(|c| keys.contains(&c.midi));
+    desc
+}
+
+fn damper_config(text: String) -> Config {
+    let mut cfg = Config::live(RATE);
+    cfg.max_partials = 16;
+    cfg.course_mode_budget = 48;
+    cfg.duplex = false;
+    cfg.retire_ringing_j = 0.0;
+    cfg.retire_damped_j = 0.0;
+    cfg.damper_specification = Some(text);
+    cfg
+}
+
+#[test]
+fn supplied_free_and_pad_rows_control_release_and_sostenuto_across_the_old_break() {
+    let desc = damper_description(&[57, 89]);
+    let length = desc.courses[1].length_m;
+    let cfg = damper_config(format!("frankensim-piano-dampers-v1\nfree,57\npad,89,{},{},0.4\n",
+        0.31 * length, 0.39 * length));
+    for midi in [57, 89] {
+        let mut held = LivePiano::new(&desc, cfg.clone()).unwrap();
+        held.note_on(midi, 2.0).unwrap();
+        play(&mut held, 0.03);
+        let mut released = held.clone();
+        let mut caught = held.clone();
+        let mut sustained = held.clone();
+        released.note_off(midi);
+        caught.set_sostenuto(true);
+        caught.note_off(midi);
+        sustained.set_sustain(1.0).unwrap();
+        sustained.note_off(midi);
+        let ringing = play(&mut held, 0.06);
+        let stopped = play(&mut released, 0.06);
+        assert!(play(&mut caught, 0.06) == ringing);
+        assert!(play(&mut sustained, 0.06) == ringing);
+        if midi == 57 {
+            assert!(stopped == ringing, "an explicit free key has no release drag");
+            assert_eq!(released.ledger.damper_loss_j, 0.0);
+        } else {
+            assert!(stopped != ringing, "the supplied pad above MIDI 88 must act");
+            assert!(released.ledger.damper_loss_j > 0.0);
+            caught.set_sostenuto(false);
+            assert!(play(&mut caught, 0.03) != play(&mut held, 0.03));
+            assert!(caught.ledger.damper_loss_j > 0.0);
+        }
+        for piano in [&mut held, &mut released, &mut caught, &mut sustained] {
+            let ledger = piano.close_ledger();
+            assert!(ledger.residual_j.abs() < 1e-8 * ledger.input_j);
+            assert!(piano.take_error().is_none());
+        }
+    }
+}
+
+#[test]
+fn authored_drag_uses_the_existing_squared_pedal_factor_and_pad_geometry() {
+    let desc = damper_description(&[57]);
+    let length = desc.courses[0].length_m;
+    let make = |start: f64, end: f64, drag: f64| {
+        let text = format!("frankensim-piano-dampers-v1\npad,57,{},{},{drag}\n", start * length, end * length);
+        LivePiano::new(&desc, damper_config(text)).unwrap()
+    };
+    let mut half_pedal = make(0.31, 0.39, 0.4);
+    let mut quarter_drag = make(0.31, 0.39, 0.1);
+    let mut moved = make(0.21, 0.29, 0.1);
+    for piano in [&mut half_pedal, &mut quarter_drag, &mut moved] { piano.note_on(57, 2.0).unwrap(); }
+    let initial = play(&mut half_pedal, 0.03);
+    assert!(play(&mut quarter_drag, 0.03) == initial);
+    assert!(play(&mut moved, 0.03) == initial, "raised pads do not affect the strike");
+    half_pedal.set_sustain(0.5).unwrap();
+    for piano in [&mut half_pedal, &mut quarter_drag, &mut moved] { piano.note_off(57); }
+    let a = play(&mut half_pedal, 0.04);
+    assert!(play(&mut quarter_drag, 0.04) == a, "0.4 * (1 - 0.5)^2 is the same physical drag as 0.1");
+    assert!(play(&mut moved, 0.04) != a, "actual pad stations must reach the modal projection");
+    assert!(half_pedal.ledger.damper_loss_j > 0.0 && moved.ledger.damper_loss_j > 0.0);
+    let mut copy = moved.clone();
+    assert!(play(&mut copy, 0.02) == play(&mut moved, 0.02), "timing copies retain the supplied pads");
+    for piano in [&mut half_pedal, &mut quarter_drag, &mut moved, &mut copy] {
+        assert!(piano.take_error().is_none());
+    }
+}
+
+#[test]
+fn the_complete_damper_source_is_admitted_before_any_note() {
+    let desc = damper_description(&[57, 89]);
+    let header = "frankensim-piano-dampers-v1";
+    let length = desc.courses[0].length_m;
+    let start = 0.3 * length;
+    let end = f64::from_bits(start.to_bits() + 1);
+    for text in [String::new(), format!("{header}\nfree,57\n"),
+        format!("{header}\nfree,57\nfree,57\nfree,89\n"),
+        format!("{header}\nfree,57\nfree,89\nfree,60\n"),
+        format!("{header}\npad,57,0.01,0.02,NaN\nfree,89\n"),
+        format!("{header}\npad,57,0.01,{length},0.4\nfree,89\n"),
+        format!("{header}\npad,57,{start},{end},0.4\nfree,89\n")] {
+        assert!(LivePiano::new(&desc, damper_config(text)).is_err());
+    }
+    assert!(LivePiano::new(&desc, damper_config(format!("{header}\nfree,57\nfree,89\n"))).is_ok());
+}

@@ -9,6 +9,7 @@ function recording() {
   class Engine {
     constructor(...args) { calls.push(['legacy', ...args]); }
     static supportsStringStretching() { return true; }
+    static supportsDamperSpecification() { return true; }
     static withBoard(...args) { calls.push(['board', ...args]); return { kind: 'board' }; }
     static withOversampling(...args) { calls.push(['rate', ...args]); return { kind: 'rate' }; }
     static withBoardOversampling(...args) { calls.push(['board-rate', ...args]); return { kind: 'board-rate' }; }
@@ -32,6 +33,71 @@ const gasSources = () => ({ phase: 'frozen', waterSpecies: null, components: [
   { speciesPack: new Uint8Array([99, 1, 2, 99]).subarray(1, 3),
     nasa9Pack: new Uint8Array([3]), transportPack: new Uint8Array([4, 5]) },
 ] });
+
+test('per-key dampers reach every preparation without shifting source packets or nonlinear strings', () => {
+  const { Engine, calls } = recording();
+  const damperSpecification = 'frankensim-piano-dampers-v1\npad,69,0.20,0.24,0.7\nfree,100\n';
+  const stretch = 'frankensim-piano-string-stretching-v1\nstretch,69,160000,0.05\nlinear,100\n';
+  const board = new Uint8Array([8, 9]);
+  const preparations = [
+    [{}, 'prepared'],
+    [{ scaleCsv: scale, stretchTuning: { concertAHz: 442 } }, 'prepared'],
+    [{ gas: '293.15 101325 0.65' }, 'atmosphere'],
+    [{ gas: sourceGas, gasSources: gasSources() }, 'source-gas'],
+    [{ stringMaterials: materialInput() }, 'materials'],
+    [{ stringMaterials: materialInput(), gas: sourceGas, gasSources: gasSources() }, 'source-materials'],
+  ];
+  for (const substeps of [1, 2, 4]) {
+    for (const bytes of [null, board]) {
+      for (const stringStretching of [undefined, stretch]) {
+        for (const [physical, kind] of preparations) {
+          const options = Object.freeze({ ...physical, substeps, boardCoordinates: 16,
+            courseModeBudget: 180, maxDynamicModes: 2100, fullScalePa: 7,
+            stringStretching, damperSpecification });
+          assert.equal(createPianoEngine(Engine, 48000, options, bytes).kind, kind);
+          const call = calls.at(-1);
+          assert.deepEqual(call.slice(1, 8), [48000, bytes ?? new Uint8Array(), bytes ? 0 : 16,
+            180, 2100, 7, substeps]);
+          assert.deepEqual(call.slice(-2), [stringStretching, damperSpecification]);
+          const previous = { ...options };
+          delete previous.damperSpecification;
+          if (stringStretching !== undefined || Object.keys(physical).length) {
+            createPianoEngine(Engine, 48000, previous, bytes);
+            assert.deepEqual(call.slice(0, stringStretching === undefined ? -2 : -1), calls.at(-1));
+          }
+        }
+      }
+    }
+  }
+});
+
+test('per-key dampers preserve native refusals and enforce their own binding and UTF-8 limits', () => {
+  const damperSpecification = 'frankensim-piano-dampers-v1\nfree,69\n';
+  for (const support of [undefined, () => false, () => 1]) {
+    const { Engine, calls } = recording();
+    Engine.supportsDamperSpecification = support;
+    assert.throws(() => createPianoEngine(Engine, 48000, { damperSpecification }), /rebuilding.*WASM/);
+    assert.equal(calls.length, 0);
+    createPianoEngine(Engine, 48000);
+    assert.equal(calls.at(-1)[0], 'legacy');
+    createPianoEngine(Engine, 48000, {
+      stringStretching: 'frankensim-piano-string-stretching-v1\nlinear,69\n',
+    });
+    assert.equal(calls.at(-1)[0], 'prepared');
+  }
+  const { Engine, calls } = recording();
+  for (const value of [null, '', '  \n', 1, {}, 'é'.repeat(512 * 1024 + 1)]) {
+    assert.throws(() => createPianoEngine(Engine, 48000, { damperSpecification: value }), /damperSpecification/);
+  }
+  assert.equal(calls.length, 0);
+  const limit = '#'.repeat(1024 * 1024);
+  createPianoEngine(Engine, 48000, { damperSpecification: limit });
+  assert.equal(calls.at(-1).at(-1), limit);
+  const refusal = new Error('key 69: pad must lie strictly inside its speaking string');
+  Engine.withPreparation = () => { throw refusal; };
+  assert.throws(() => createPianoEngine(Engine, 48000, { damperSpecification }), error => error === refusal);
+  assert.equal(calls.length, 1);
+});
 
 test('nonlinear string specification reaches every physical preparation at each board and clock', () => {
   const { Engine, calls } = recording();
