@@ -574,8 +574,8 @@ impl FreeSurface {
                 let mut count = 1.0;
                 for q in 1..Q {
                     if let Some(value) = self.planar_angle_ghost_in([
-                        x as i64 + i64::from(E[q][0]),
-                        y as i64 + i64::from(E[q][1]),
+                        x as i64 + i64::from(E[q].0),
+                        y as i64 + i64::from(E[q].1),
                     ], &self.fill_raw) {
                         acc += value;
                         count += 1.0;
