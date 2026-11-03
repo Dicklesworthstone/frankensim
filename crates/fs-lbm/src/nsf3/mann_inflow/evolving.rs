@@ -92,6 +92,7 @@ pub struct NsfEvolvingMannInflow {
     binding: GridBinding,
     profile: Vec<NsfReservoirTileState>,
     averaging: Option<SpatialAverage>,
+    wall: Option<MannPlaneWall>,
     maximum_wavenumber_rad_m: f64,
     advection_speed_m_s: f64,
     maximum_workspace_bytes: usize,
@@ -197,6 +198,7 @@ impl NsfEvolvingMannInflow {
             binding,
             profile,
             averaging: None,
+            wall: None,
             maximum_wavenumber_rad_m,
             advection_speed_m_s,
             maximum_workspace_bytes,
@@ -226,6 +228,21 @@ impl NsfEvolvingMannInflow {
         self.averaging.as_ref().map(|a| &a.filter)
     }
 
+    /// Observe the accepted/trial Mann realization through a harmonic slip
+    /// plane in its own frame. The mean must be tangent; every ghost centre
+    /// must be in the exact upper half-space. OU draws and clocks are unchanged.
+    /// Combining this with box/face averaging refuses in either order.
+    pub fn with_plane_wall(mut self, wall: MannPlaneWall) -> Result<Self, NsfEvolvingMannError> {
+        admit_plane_wall(self.config.frame(), self.averaging.is_some())?;
+        self.wall = Some(wall);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn plane_wall(&self) -> Option<MannPlaneWall> {
+        self.wall
+    }
+
     pub fn with_cell_average(
         self,
         maximum_filter_bytes: usize,
@@ -249,6 +266,11 @@ impl NsfEvolvingMannInflow {
         maximum_filter_bytes: usize,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, NsfEvolvingMannError> {
+        if self.wall.is_some() {
+            return Err(NsfEvolvingMannError::Input(
+                "Mann plane blocking currently requires point observations",
+            ));
+        }
         let remaining = self
             .maximum_workspace_bytes
             .saturating_sub(self.workspace_bytes());
@@ -351,9 +373,12 @@ impl NsfEvolvingMannInflow {
                 averaging: self.averaging.as_ref(),
             },
             &mut self.profile,
-            |point, filter| match filter {
-                Some(filter) => self.trial.sample_filtered(point, filter),
-                None => self.trial.sample(point),
+            |point, filter| match self.wall {
+                Some(wall) => self.trial.sample_wall_blocked(point, wall),
+                None => match filter {
+                    Some(filter) => self.trial.sample_filtered(point, filter),
+                    None => self.trial.sample(point),
+                },
             },
             &mut cancelled,
         )?;

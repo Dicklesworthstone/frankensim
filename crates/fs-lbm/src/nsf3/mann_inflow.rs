@@ -9,14 +9,16 @@
 //!
 //! Spatial synthesis is the existing fs-atmo Mann tensor quadrature (Mann,
 //! 1998, doi:10.1016/S0266-8920(97)00036-2). Convected synthetic inflow is also
-//! used by Nathan et al. (2018), doi:10.5194/wes-3-905-2018. This adapter adds
-//! neither wall conditioning nor eddy turnover, mean subtraction, intensity
+//! used by Nathan et al. (2018), doi:10.5194/wes-3-905-2018. This adapter exposes
+//! an optional harmonic slip-plane correction through fs-atmo's existing modes.
+//! It adds no viscous wall layer, eddy turnover, mean subtraction, intensity
 //! rescaling, thermodynamic fluctuations or nonreflecting characteristics.
 
 use super::{NsfError, NsfGrid3, NsfOpenState, NsfReservoirTileState};
 use crate::lattice3::Lattice3;
 use fs_atmo::mann_field::HomogeneousMannField;
 use fs_atmo::mann_field::filter::MannBoxFilter;
+use fs_atmo::mann_field::wall::MannPlaneWall;
 use fs_math::det;
 
 mod evolving;
@@ -130,6 +132,7 @@ pub struct NsfFrozenMannInflow {
     maximum_wavenumber_rad_m: f64,
     convection_speed_m_s: f64,
     averaging: Option<SpatialAverage>,
+    wall: Option<MannPlaneWall>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -193,6 +196,33 @@ fn speed(velocity: [f64; 3]) -> f64 {
         let normalized = velocity.map(|u| u / scale);
         scale * det::sqrt(dot(normalized, normalized))
     }
+}
+
+// Test tangency after the authored rotation, at the same roundoff scale
+// as frame admission. Scaling avoids overflowing the velocity projection.
+fn admit_plane_wall(
+    config: NsfFrozenMannConfig,
+    has_average: bool,
+) -> Result<(), NsfFrozenMannError> {
+    if has_average {
+        return Err(NsfFrozenMannError::Input(
+            "Mann plane blocking currently requires point observations",
+        ));
+    }
+    for velocity in [config.mean_velocity_m_s, config.convection_velocity_m_s] {
+        let scale = velocity.iter().fold(0.0_f64, |m, &u| m.max(u.abs()));
+        if scale != 0.0 {
+            let normal = (0..3)
+                .map(|i| config.field_to_grid[i][2] * (velocity[i] / scale))
+                .sum::<f64>();
+            if normal.abs() > 256.0 * f64::EPSILON {
+                return Err(NsfFrozenMannError::Input(
+                    "wall-blocked inlet mean and frozen convection must be tangent to the plane",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn prepare_spatial_average(
@@ -271,7 +301,24 @@ impl NsfFrozenMannInflow {
             maximum_wavenumber_rad_m,
             convection_speed_m_s,
             averaging: None,
+            wall: None,
         })
+    }
+
+    /// Apply harmonic no-penetration blocking at a plane in the Mann frame.
+    /// Mean velocity and frozen convection must be tangent within the admitted
+    /// rotation's roundoff scale. Actual sampled ghost centres must lie on or
+    /// above the plane. This supplies slip, not a resolved viscous wall layer.
+    /// Box/face averaging and wall blocking currently refuse in either order.
+    pub fn with_plane_wall(mut self, wall: MannPlaneWall) -> Result<Self, NsfFrozenMannError> {
+        admit_plane_wall(self.config, self.averaging.is_some())?;
+        self.wall = Some(wall);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn plane_wall(&self) -> Option<MannPlaneWall> {
+        self.wall
     }
 
     /// Resolve the inlet velocity as the exact average over a ghost cell's
@@ -316,6 +363,11 @@ impl NsfFrozenMannInflow {
         maximum_filter_bytes: usize,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, NsfFrozenMannError> {
+        if self.wall.is_some() {
+            return Err(NsfFrozenMannError::Input(
+                "Mann plane blocking currently requires point observations",
+            ));
+        }
         self.averaging = Some(prepare_spatial_average(
             self.snapshot.model(),
             self.config.field_to_grid,
@@ -382,9 +434,12 @@ impl NsfFrozenMannInflow {
                 averaging: self.averaging.as_ref(),
             },
             &mut states,
-            |point, filter| match filter {
-                Some(filter) => self.snapshot.sample_filtered(point, filter),
-                None => self.snapshot.sample(point),
+            |point, filter| match self.wall {
+                Some(wall) => self.snapshot.sample_wall_blocked(point, wall),
+                None => match filter {
+                    Some(filter) => self.snapshot.sample_filtered(point, filter),
+                    None => self.snapshot.sample(point),
+                },
             },
             &mut cancelled,
         )?;

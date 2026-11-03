@@ -287,6 +287,22 @@ impl FixedStepMannField {
     pub fn sample(&self, point_m: [f64; 3]) -> Result<FlowSample, Refusal> {
         self.sample_with_gains(point_m, None)
     }
+    /// Read the accepted quadratures through the same harmonic slip-plane
+    /// observation as the original clock owner; no additional state or draws.
+    pub fn sample_wall_blocked(
+        &self,
+        point_m: [f64; 3],
+        wall: MannPlaneWall,
+    ) -> Result<FlowSample, Refusal> {
+        wall::sample_modes(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            point_m,
+            wall,
+        )
+    }
+
     pub fn sample_filtered(
         &self,
         point_m: [f64; 3],
@@ -318,6 +334,25 @@ impl FixedStepMannField {
             None,
         )
     }
+    /// Stationary two-point wall-blocked covariance with this owner's
+    /// original correlation times and phase advection. Both heights matter.
+    pub fn covariance_wall_blocked(
+        &self,
+        first_m: [f64; 3],
+        second_m: [f64; 3],
+        lag_s: f64,
+        wall: MannPlaneWall,
+    ) -> Result<[[f64; 3]; 3], Refusal> {
+        wall::covariance_modes(
+            self.model(),
+            Some(self.correlation_times_s()),
+            first_m,
+            second_m,
+            lag_s,
+            wall,
+        )
+    }
+
     pub fn covariance_filtered(
         &self,
         separation_m: [f64; 3],

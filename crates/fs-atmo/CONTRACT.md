@@ -66,9 +66,10 @@ FetchAdjustedMassConsistent mode.
   performs the tensor algebra; velocity/gradient samples allocate no storage.
   `covariance` exposes the exact represented spatial or space-time tensor,
   including finite-band and quadrature effects. Checkpoints retain model inputs
-  and all four paths and rebuild the deterministic model on resume. This field
-  is homogeneous in all three coordinates and has **no wall condition**; z = 0
-  is an ordinary plane. No terrain/flight boundary treatment is implied.
+  and all four paths and rebuild the deterministic model on resume. The
+  original homogeneous observation has no wall condition; z = 0 is an ordinary
+  plane. The explicit plane-blocked observation below adds its own boundary
+  treatment without changing the retained model or quadratures.
 - `mann_field::fixed_step::FixedStepMannField` starts from a retained homogeneous
   snapshot and evolves its four quadratures at an explicitly supplied physical
   time step. Each mode uses the exact OU transition
@@ -88,6 +89,36 @@ FetchAdjustedMassConsistent mode.
   spectral geometry and fixed metadata; shared coefficient storage is counted
   conservatively per owner. Authored OU decorrelation is a synthetic temporal
   model, not resolved nonlinear eddy turnover, and is not temporally bandlimited.
+
+### Full-tensor Mann observations above a plane
+
+`mann_field::wall::MannPlaneWall` declares a finite plane `z = height_m` in
+the authored Mann frame. Both temporal owners expose `sample_wall_blocked`
+and `covariance_wall_blocked`; the spectral model also exposes equal-time
+covariance. Sampling preserves the original accepted quadratures and adds the
+harmonic, irrotational correction of Hunt & Graham (1978),
+<https://doi.org/10.1017/S0022112078000130>. With horizontal wavenumber magnitude
+`q` and height `h`, a modal amplitude `a` receives
+`a_z * (i*kx/q, i*ky/q, -1) * exp(i*k.wall_point - i*k.U*t - q*h)`.
+
+The correction enforces zero normal velocity at the plane, preserves
+solenoidality and decays aloft. All nine derivatives are analytic. Covariance
+transforms both original polarizations and all cross-components at both
+observation points, retaining the original OU decay and phase advection.
+Both coordinates are required because normal homogeneity is lost. The common
+first-point phase is removed before covariance evaluation. Near-wall
+differences use half-angle identities and `expm1`; exact vertical modes have
+a separate zero-correction branch, and an exactly vanished correction does
+not evaluate an irrelevant distant-wall phase.
+
+Only finite points in the exact upper half-space are admitted. The same
+retained modal arrays are read without new allocations, draws or clock
+changes. This is an outer-flow slip-plane construction, without a viscous
+no-slip layer, ground-generated turbulence or a calibrated near-ground
+spectrum. Point observations are supported; homogeneous sinc filters do not
+supply the evanescent correction's spatial average. Six focused Rust
+regressions accompany this source-reviewed implementation; native compilation
+and execution were unavailable during the change.
 
 ## Invariants
 

@@ -2534,9 +2534,35 @@ Grid spacing, dimensions, dt, aperture orientation and tile membership stay
 bound. Spatial and advective phase bounds retain their original refusals;
 the temporal bound covers advection only because OU innovations are not
 bandlimited. Reports expose both clocks, authored correlation times and actual
-work. This is a synthetic homogeneous turbulent inlet with held boundary
-controls during each native step, not a wall-conditioned atmospheric layer,
-resolved eddy-turnover model, nonreflecting boundary or temporal-order upgrade.
+work. The default observation is a synthetic homogeneous turbulent inlet
+with held boundary controls during each native step. Authored OU evolution
+supplies no resolved eddy-turnover, nonreflecting-boundary or temporal-order
+qualification. The explicit planar observation below adds its own boundary
+condition.
+
+### Plane-blocked Mann observations on frozen and evolving inlets
+
+Both `NsfFrozenMannInflow` and `NsfEvolvingMannInflow` expose
+`with_plane_wall(MannPlaneWall)`. The original atmosphere supplies a
+harmonic no-penetration correction before the existing frame rotation,
+physical-unit conversion, gas admission and atomic profile publication.
+The plane belongs to the Mann frame; every actual exterior ghost centre must
+lie in its upper half-space. Mean velocity must be tangential, and the frozen
+adapter also requires tangential convection because it translates query
+coordinates. Tangency uses the admitted rotation's roundoff scale without
+altering the supplied velocities.
+
+The wall observation reads the same frozen snapshot or evolving trial
+quadratures and adds no numerical arrays. Rejected samples and cancellation
+preserve the accepted profile and atmosphere; retries use the original
+temporal owner. Box/face averaging combined with wall blocking refuses in
+both attachment orders because the homogeneous sinc gain does not average
+the evanescent wall correction. This is point-sampled slip-plane conditioning,
+without a viscous no-slip layer, wall-generated turbulence or calibrated
+near-ground spectrum. Four native regressions cover rotated profiles, exact
+wall-normal values, incompatible settings and evolving rollback/replay.
+They are included but were not executed while the build environment was
+unavailable.
 
 ### Source-owned NASA9 energy and local transport in the NSF grid
 

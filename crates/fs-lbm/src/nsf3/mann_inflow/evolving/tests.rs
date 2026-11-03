@@ -37,9 +37,12 @@ fn check_profile(grid: &NsfGrid3<D3q27>, inlet: &NsfEvolvingMannInflow) {
             c.grid_origin_in_field_m[1] - x,
             c.grid_origin_in_field_m[2] + z,
         ];
-        let u = match inlet.spatial_filter() {
-            Some(filter) => inlet.field().sample_filtered(at, filter),
-            None => inlet.field().sample(at),
+        let u = match inlet.plane_wall() {
+            Some(wall) => inlet.field().sample_wall_blocked(at, wall),
+            None => match inlet.spatial_filter() {
+                Some(filter) => inlet.field().sample_filtered(at, filter),
+                None => inlet.field().sample(at),
+            },
         }
         .unwrap()
         .u;
@@ -226,4 +229,91 @@ fn g4_evolving_mann_cancellation_keeps_boundary_and_noise_for_exact_retry() {
         assert_eq!(grid.state_hash(), expected_grid.state_hash());
         assert_eq!(inlet.profile.as_ptr(), allocation);
     }
+}
+
+#[test]
+fn g4_plane_blocked_evolving_mann_keeps_accepted_noise_and_profile_on_refusal() {
+    let make = || {
+        let mut grid = build_grid(1, false);
+        let wall = MannPlaneWall::new(config().grid_origin_in_field_m[2] + 3.5 * grid.law.dx_m)
+            .unwrap();
+        let mut source = inlet(&grid).with_plane_wall(wall).unwrap();
+        source.apply(&mut grid, 0).unwrap();
+        check_profile(&grid, &source);
+        for tile in grid.reservoir_aperture_tile_states(0).unwrap() {
+            if tile.cell[2] == 3 {
+                assert_eq!(tile.state.velocity_m_s[2], 0.0);
+            }
+        }
+        grid.step().unwrap();
+        (grid, source, wall)
+    };
+    let (mut expected_grid, mut expected_inlet, _) = make();
+    let mut count = 0;
+    let expected_report = expected_inlet
+        .apply_cancellable(&mut expected_grid, 4 * 16, || {
+            count += 1;
+            false
+        })
+        .unwrap();
+    assert_eq!(expected_report.ou_mode_transitions, 4 * 16);
+    check_profile(&expected_grid, &expected_inlet);
+    for outside in [false, true] {
+        let (mut grid, mut source, wall) = make();
+        let accepted = source.field().checkpoint();
+        let before = (grid.state_hash(), grid.force.clone(), grid.div.clone());
+        let profile = grid.reservoir_aperture_tile_states(0).unwrap().collect::<Vec<_>>();
+        let workspace = source.workspace_bytes();
+        let allocation = source.profile.as_ptr();
+        if outside {
+            let outside_wall = MannPlaneWall::new(wall.height_m() + 2.0 * grid.law.dx_m).unwrap();
+            source = source.with_plane_wall(outside_wall).unwrap();
+            assert!(matches!(
+                source.apply(&mut grid, 4 * 16),
+                Err(NsfEvolvingMannError::Atmosphere(_))
+            ));
+            source = source.with_plane_wall(wall).unwrap();
+        } else {
+            let mut polls = 0;
+            assert!(matches!(
+                source.apply_cancellable(&mut grid, 4 * 16, || {
+                    polls += 1;
+                    polls == count - 2
+                }),
+                Err(NsfEvolvingMannError::Cancelled)
+            ));
+        }
+        assert_eq!(source.field().checkpoint(), accepted);
+        assert_eq!((grid.state_hash(), grid.force.clone(), grid.div.clone()), before);
+        assert_eq!(grid.reservoir_aperture_tile_states(0).unwrap().collect::<Vec<_>>(), profile);
+        assert_eq!(source.apply(&mut grid, 4 * 16).unwrap(), expected_report);
+        assert_eq!(source.field(), expected_inlet.field());
+        assert_eq!(grid.state_hash(), expected_grid.state_hash());
+        assert_eq!(source.profile.as_ptr(), allocation);
+        assert_eq!(source.workspace_bytes(), workspace);
+    }
+}
+
+#[test]
+fn g0_plane_blocked_evolving_mann_refuses_averages_in_both_orders_and_normal_mean() {
+    let grid = build_grid(1, false);
+    let wall = MannPlaneWall::new(0.0).unwrap();
+    for face in [false, true] {
+        let averaged = if face {
+            inlet(&grid).with_face_average(16 * 8, || false)
+        } else {
+            inlet(&grid).with_cell_average(16 * 8, || false)
+        }.unwrap();
+        assert!(matches!(averaged.with_plane_wall(wall), Err(NsfEvolvingMannError::Input(_))));
+        let blocked = inlet(&grid).with_plane_wall(wall).unwrap();
+        let result = if face {
+            blocked.with_face_average(16 * 8, || false)
+        } else {
+            blocked.with_cell_average(16 * 8, || false)
+        };
+        assert!(matches!(result, Err(NsfEvolvingMannError::Input(_))));
+    }
+    let mut source = inlet(&grid);
+    source.config.mean_velocity_m_s[2] = 0.01;
+    assert!(matches!(source.with_plane_wall(wall), Err(NsfEvolvingMannError::Input(_))));
 }

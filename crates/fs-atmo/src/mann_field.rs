@@ -13,10 +13,10 @@
 //! lifetime used in the spatial tensor. Advection is explicit. Sampling
 //! evaluates precomputed polarizations without allocating or drawing noise.
 //!
-//! **There is no wall boundary condition.** Spatial coordinates can have
-//! either sign, including negative z; vertical velocity generally does not
-//! vanish at z = 0. Do not substitute this field for a wall-compatible field
-//! near terrain without a separately justified boundary treatment.
+//! The original homogeneous observations have no wall boundary condition.
+//! The explicit [`wall`] observation adds a harmonic slip-plane correction,
+//! preserving this realization and its far-field tensor. It does not resolve
+//! a viscous no-slip layer or generate wall turbulence.
 //!
 //! Spatial synthesis follows the spectral-tensor construction of Mann,
 //! *Wind field simulation*, Probabilistic Engineering Mechanics 13 (1998),
@@ -34,6 +34,10 @@ use filter::MannBoxFilter;
 
 /// Exact OU evolution on a separately declared fixed physical time step.
 pub mod fixed_step;
+
+/// Harmonic no-penetration correction above a plane in the Mann frame.
+pub mod wall;
+use wall::MannPlaneWall;
 
 /// Independent Philox namespace for homogeneous Mann quadrature geometry.
 pub const MANN_FIELD_KERNEL: u32 = 0x4d41_4e4e;
@@ -260,6 +264,18 @@ impl MannSpectralModel {
         self.parameters
     }
 
+    /// Exact represented two-point covariance after harmonic wall blocking.
+    /// Both coordinates are required because vertical homogeneity is lost.
+    /// This transforms the full original tensor, including cross-components.
+    pub fn covariance_wall_blocked(
+        &self,
+        first_m: [f64; 3],
+        second_m: [f64; 3],
+        wall: MannPlaneWall,
+    ) -> Result<[[f64; 3]; 3], Refusal> {
+        wall::covariance_modes(self, None, first_m, second_m, 0.0, wall)
+    }
+
     /// Exact represented equal-time covariance `E[u_i(x) u_j(x+r)]`.
     /// At zero separation this gives the retained Reynolds-stress tensor;
     /// at nonzero separation it reports the actual finite-mode coherence.
@@ -437,6 +453,24 @@ impl HomogeneousMannField {
         self.sample_with_gains(point_m, None)
     }
 
+    /// Velocity and analytic gradient above an explicit slip plane. The
+    /// harmonic correction enforces no penetration and preserves divergence;
+    /// it uses the current quadratures without allocating or drawing noise.
+    /// Points below the plane refuse. Spatial filters are not combined here.
+    pub fn sample_wall_blocked(
+        &self,
+        point_m: [f64; 3],
+        wall: MannPlaneWall,
+    ) -> Result<FlowSample, Refusal> {
+        wall::sample_modes(
+            &self.model,
+            self.tick() as f64 / TICK_HZ,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            point_m,
+            wall,
+        )
+    }
+
     /// Exact average of velocity and its analytic gradient over a prepared
     /// box, face or line centered at `point_m`. The same scalar gain acts on
     /// both transverse polarizations, preserving solenoidality. This filters
@@ -469,6 +503,26 @@ impl HomogeneousMannField {
     /// This exposes the retained space-time model without sampling noise.
     pub fn covariance(&self, separation_m: [f64; 3], lag_s: f64) -> Result<[[f64; 3]; 3], Refusal> {
         self.covariance_with_gains(separation_m, lag_s, None)
+    }
+
+    /// Exact `E[u_i(first,t) u_j(second,t+lag)]` after wall blocking.
+    /// This retains the original modal OU decay and phase advection; heights
+    /// are measured relative to the fixed plane at both observation times.
+    pub fn covariance_wall_blocked(
+        &self,
+        first_m: [f64; 3],
+        second_m: [f64; 3],
+        lag_s: f64,
+        wall: MannPlaneWall,
+    ) -> Result<[[f64; 3]; 3], Refusal> {
+        wall::covariance_modes(
+            &self.model,
+            Some(&self.correlation_times_s),
+            first_m,
+            second_m,
+            lag_s,
+            wall,
+        )
     }
 
     /// Exact represented covariance when the same spatial filter is applied
