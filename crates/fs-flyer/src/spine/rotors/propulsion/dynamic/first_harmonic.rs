@@ -8,9 +8,9 @@
 //! first-harmonic skew gain. Neither supplies transported far-wake geometry.
 
 use super::{
-    AerodynamicFields, AerodynamicSolution, AerodynamicStage, DynamicPropulsion, GearedLoads,
-    GearedPropulsion, GearedState, GearedStep, PropulsionInputs, Refusal, air_error, geared,
-    reject,
+    AerodynamicFields, AerodynamicSolution, AerodynamicStage, BladeIncident, DynamicPropulsion,
+    GearedLoads, GearedPropulsion, GearedState, GearedStep, PropulsionInputs, Refusal, air_error,
+    geared, reject,
 };
 use fs_airscrew::dynamic_inflow::first_harmonic::skew::{
     SkewInflowControls, SkewInflowStep, SkewTransport,
@@ -148,6 +148,20 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
         let mut result = Self::new(propulsion, density_kg_m3, azimuth_points)?;
         result.skew = Some(controls);
         Ok(result)
+    }
+
+    /// Resolve external wind or wind/wing variation with the same native blade
+    /// policy as uniform dynamic propulsion. Applies to normal, skewed and
+    /// continued harmonic stages; the original modal transport is unchanged.
+    pub fn with_blade_incident(mut self, incident: BladeIncident) -> Result<Self, Refusal> {
+        self.base = self.base.with_blade_incident(incident)?;
+        Ok(self)
+    }
+
+    /// Selected spatial resolution of incident air at blade sections.
+    #[must_use]
+    pub fn blade_incident(&self) -> BladeIncident {
+        self.base.blade_incident()
     }
 
     #[must_use]

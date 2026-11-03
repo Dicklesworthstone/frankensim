@@ -39,6 +39,7 @@ use blade_wash::BladeWash;
 // One wing/wash solve shared by the uniform and harmonic blade owners.
 struct WingAtInduction {
     disk_velocity_mps: [[f64; 3]; 2],
+    disk_wing_velocity_mps: [[f64; 3]; 2],
     disk_axial_mps: [f64; 2],
     gamma: Vec<f64>,
     strip_alpha_eff_rad: Vec<f64>,
@@ -131,6 +132,22 @@ pub struct DynamicPropulsion<'p, 'a, const N: usize> {
     disk_wash: [[DiskWash; 2]; 2],
     oblique: Option<(AzimuthQuadrature, [DiskFrame; 2])>,
     blade_wash: Option<BladeWash>,
+    blade_incident: BladeIncident,
+}
+
+/// Spatial resolution of external incident air in the native blade quadrature.
+/// This selects blade loading; the existing axial/modal wake transport keeps
+/// its hub incident velocity and receiving-disk mean mutual-wake contribution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BladeIncident {
+    /// Original hub wind/wing sampling; pointwise other-disk wash remains active.
+    #[default]
+    Hub,
+    /// Sample the caller's world material-air field at each actual blade point.
+    WindField,
+    /// Also evaluate the same accepted wing circulation at each blade point.
+    /// Uses the original free-air wing kernel, including its core treatment.
+    WindAndWingField,
 }
 
 fn air_error(error: fs_airscrew::Refusal) -> Refusal {
@@ -163,6 +180,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             disk_wash,
             oblique: None,
             blade_wash: None,
+            blade_incident: BladeIncident::Hub,
         })
     }
 
@@ -216,6 +234,35 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         )?);
         result.oblique = Some((rule, frames));
         Ok(result)
+    }
+
+    /// Select pointwise wind or wind/wing loading for an admitted oblique model.
+    /// Every stage samples the current world pose and the same accepted wing
+    /// circulation. Carrier tilt and self-induction keep their original owners;
+    /// the added field contains only air-velocity differences from each hub.
+    /// No second wing solve or per-section allocation is introduced. Wind mode
+    /// costs one callback per blade point; wing mode additionally evaluates the
+    /// native O(panel-count) free-air kernel at each point.
+    ///
+    /// # Errors
+    /// `dynamic-propulsion-invalid` if a pointwise mode is selected without
+    /// native oblique blade quadrature. Stage callback/domain refusals remain
+    /// atomic and propagate through `evaluate`, `step` and harmonic consumers.
+    pub fn with_blade_incident(mut self, incident: BladeIncident) -> Result<Self, Refusal> {
+        if incident != BladeIncident::Hub && self.oblique.is_none() {
+            return Err(reject(
+                "dynamic-propulsion-invalid",
+                "pointwise incident air requires oblique blade quadrature",
+            ));
+        }
+        self.blade_incident = incident;
+        Ok(self)
+    }
+
+    /// Selected external incident-air resolution. Construction defaults to hub sampling.
+    #[must_use]
+    pub fn blade_incident(&self) -> BladeIncident {
+        self.blade_incident
     }
 
     /// The explicit per-disk apparent-air-mass model.
@@ -306,6 +353,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             )
         };
         let mut disk_velocity_mps = [[0.0; 3]; 2];
+        let mut disk_wing_velocity_mps = [[0.0; 3]; 2];
         let mut disk_axial_mps = [0.0; 2];
         for k in 0..2 {
             let mut incident = stage.incident.disk_velocity_mps[k];
@@ -337,11 +385,13 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
                 &wing.gamma,
                 stage.freestream,
             );
+            disk_wing_velocity_mps[k] = induced;
             disk_velocity_mps[k] = core::array::from_fn(|j| incident[j] + induced[j]);
             disk_axial_mps[k] = self.axes.axial(k, incident, induced);
         }
         Ok(WingAtInduction {
             disk_velocity_mps,
+            disk_wing_velocity_mps,
             disk_axial_mps,
             gamma: wing.gamma,
             strip_alpha_eff_rad: wing.alpha_eff_rad,
@@ -419,7 +469,8 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             .as_ref()
             .expect("prepared external blade wash");
         let source = induction[1 - k];
-        if wash.active(k, source) {
+        let varying_wake = wash.active(k, source);
+        if varying_wake || self.blade_incident != BladeIncident::Hub {
             return rule
                 .evaluate_with_incident_variation(
                     &self.propulsion.design.rotor,
@@ -429,7 +480,42 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
                     stage.carrier_angular_velocity_body_rad_s,
                     induction[k],
                     stage.disks[k].omega_rad_s,
-                    |sample, _| Ok(wash.velocity(k, sample, source)),
+                    |sample, arm| {
+                        let mut variation = if varying_wake {
+                            wash.velocity(k, sample, source)
+                        } else {
+                            [0.0; 3]
+                        };
+                        if self.blade_incident != BladeIncident::Hub {
+                            let point =
+                                core::array::from_fn(|j| stage.disks[k].center_m[j] + arm[j]);
+                            let wind = stage
+                                .air
+                                .variation(point, stage.disk_wind_world_mps[k])
+                                .map_err(|error| fs_airscrew::Refusal {
+                                    code: error.code,
+                                    message: error.message,
+                                    ranked_repairs: error.ranked_repairs,
+                                })?;
+                            // Skip exact zero additions to retain original uniform-wind
+                            // arithmetic, including when mutual wake loading is active.
+                            if wind != [0.0; 3] {
+                                variation = core::array::from_fn(|j| variation[j] + wind[j]);
+                            }
+                            if self.blade_incident == BladeIncident::WindAndWingField {
+                                let local = induced_velocity_free(
+                                    point,
+                                    stage.panels,
+                                    &wing.gamma,
+                                    stage.freestream,
+                                );
+                                variation = core::array::from_fn(|j| {
+                                    variation[j] + (local[j] - wing.disk_wing_velocity_mps[k][j])
+                                });
+                            }
+                        }
+                        Ok(variation)
+                    },
                 )
                 .map_err(air_error);
         }

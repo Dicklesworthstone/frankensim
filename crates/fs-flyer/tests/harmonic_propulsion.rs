@@ -13,6 +13,9 @@ use fs_flyer::spine::rotors::propulsion::{
 };
 use fs_ga::{Mat3, Quat, So3, Vec3};
 
+#[path = "harmonic_propulsion/incident_field.rs"]
+mod incident_field;
+
 const RHO: f64 = 1.225;
 const ZERO: [f64; 3] = [0.0; 3];
 fn v(a: [f64; 3]) -> Vec3 {

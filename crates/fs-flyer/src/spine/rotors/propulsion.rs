@@ -25,6 +25,10 @@ use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, StripSpec};
 #[path = "propulsion/dynamic.rs"]
 pub mod dynamic;
 
+#[path = "propulsion/incident.rs"]
+mod incident;
+use incident::StageIncidentAir;
+
 #[path = "propulsion/swirl.rs"]
 pub mod swirl;
 
@@ -118,6 +122,8 @@ struct AerodynamicStage<'a> {
     rho: f64,
     incident: IncidentInflow<'a>,
     carrier_angular_velocity_body_rad_s: [f64; 3],
+    air: &'a StageIncidentAir<'a>,
+    disk_wind_world_mps: [[f64; 3]; 2],
 }
 
 struct AerodynamicFields<'a> {
@@ -387,35 +393,15 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                 ..disks[k]
             };
         }
-        let sample = |point_body: [f64; 3]| -> Result<[f64; 3], Refusal> {
-            let arm = vec(point_body) - vec(design.cg_m);
-            let point_world = vec(state.rigid.pos_m)
-                + rotation.rotate(arm).map_err(|_| {
-                    reject("propulsion-state-invalid", "world sample position overflow")
-                })?;
-            let wind = vec(wind_world(array(point_world))?);
-            if !finite(wind) {
-                return Err(reject(
-                    "propulsion-state-invalid",
-                    "nonfinite material air velocity",
-                ));
-            }
-            let relative = rotation
-                .inverse()
-                .rotate(vec(state.rigid.vel_mps) - wind)
-                .map_err(|_| {
-                    reject("propulsion-state-invalid", "relative air velocity overflow")
-                })?
-                + omega.cross(arm);
-            if !finite(relative) {
-                return Err(reject(
-                    "propulsion-state-invalid",
-                    "local relative air velocity overflow",
-                ));
-            }
-            Ok(array(relative))
-        };
-        let freestream = sample(design.cg_m)?;
+        let air = StageIncidentAir::new(
+            design.cg_m,
+            state.rigid.pos_m,
+            state.rigid.vel_mps,
+            state.rigid.omega_body,
+            rotation,
+            wind_world,
+        );
+        let freestream = air.sample(design.cg_m)?.relative_velocity_mps;
         let cg_air = vec(freestream);
         let speed2 = cg_air.dot(cg_air);
         let airspeed = speed2.sqrt();
@@ -435,11 +421,18 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         let mut strip_velocity = Vec::with_capacity(strips.len());
         for strip in &strips {
             let panel = &panels[strip.panel_indices[0]];
-            strip_velocity.push(sample(array((vec(panel.a) + vec(panel.b)).scale(0.5)))?);
+            strip_velocity.push(
+                air.sample(array((vec(panel.a) + vec(panel.b)).scale(0.5)))?
+                    .relative_velocity_mps,
+            );
         }
+        let disk_air = [
+            air.sample(disks[0].center_m)?,
+            air.sample(disks[1].center_m)?,
+        ];
         let incident = IncidentInflow {
             strip_velocity_mps: &strip_velocity,
-            disk_velocity_mps: [sample(disks[0].center_m)?, sample(disks[1].center_m)?],
+            disk_velocity_mps: disk_air.each_ref().map(|air| air.relative_velocity_mps),
         };
         let aerodynamics = solve(AerodynamicStage {
             op: &op,
@@ -451,6 +444,8 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             rho,
             incident,
             carrier_angular_velocity_body_rad_s: state.rigid.omega_body,
+            air: &air,
+            disk_wind_world_mps: disk_air.map(|air| air.wind_world_mps),
         })?;
         let fields = aerodynamics.load_fields();
         let local = fields.strip_velocity_mps.ok_or_else(|| {

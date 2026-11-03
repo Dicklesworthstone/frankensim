@@ -1249,9 +1249,10 @@ that same physical absolute-spin work.
 The wake remains the named constant-density uniform AXIAL apparent-air-mass
 model and its straight axial wash. The scalar momentum/energy receipts are not
 a full oblique-fluid impulse or passivity theorem. Ambient/wing incident flow
-is sampled at the hub; actual carrier tilt and the other disk's finite wake
-vary over the blades. Intradisk ambient wind gradients, skew-wake
-geometry/induction, blade-phase harmonics, flapping and
+defaults to hub sampling; the explicit `BladeIncident` policy below can resolve
+both fields at native blade sections. Actual carrier tilt and the other disk's
+finite wake already vary over the blades. Skew-wake geometry/induction,
+blade-phase harmonics, flapping and
 unsteady airfoil memory remain outside this model. The existing normal wake
 and new section-domain refusals both apply; no negative-speed clipping or
 reversed-flow fallback occurs.
@@ -1298,11 +1299,12 @@ approximation even when the blade law resolves incident crossflow. The
 existing straight wash geometry is a finite-window transfer approximation;
 it is not a free wake, skewed induction solution, full world-fluid momentum
 account, wake-distortion model or total fluid/body energy theorem. Incident
-air/wing-induced flow is still sampled at each disk center apart from actual
-carrier tilt kinematics; other-disk wake loading is evaluated at the actual
-blade sections. Finite blade phase, higher modes, flapping, cyclic
-pitch, swirl, wake deformation and intradisk ambient wind
-gradients remain unimplemented. Apparent air inertia remains excluded from
+air/wing-induced flow defaults to each disk center, with the explicit
+`BladeIncident` policy below resolving spatial variation at actual blade
+sections. Carrier tilt and other-disk wake loading retain their original
+pointwise owners. Finite blade phase, higher modes, flapping, cyclic
+pitch, swirl and wake deformation remain unimplemented in this tier.
+Apparent air inertia remains excluded from
 the aircraft's rigid inertia.
 
 Four native cases in `tests/harmonic_propulsion.rs` establish zero-mode
@@ -1436,14 +1438,69 @@ separately from mean-relative hub work, own induced work and profile heating.
 That signed spatial-air term closes the local section power identity; it is not
 extra carrier work or a total two-wake energy balance. The scalar/modal wake
 transport still consumes its declared receiving-disk mean, not a newly resolved
-transport PDE. No wake deformation, contraction, intra-disk ambient/wing-field
-gradient, swirl or full fluid/body conservation theorem is introduced.
+transport PDE. Ambient/wing-field gradients use the separate opt-in policy
+below. No wake deformation, contraction, swirl or full fluid/body conservation
+theorem is introduced.
 
 The partial-overlap harmonic test independently reconstructs pointwise support
 and source coordinates, checks the new hub moment and work, and retains exact
 zero-harmonic parity and absence of self-wash. Canted force/arm/shaft and actual
 trajectory momentum regressions exercise overlapping disks. Native blade tests
 independently integrate the original section law and spatial-air work.
+
+### Spatial wind and accepted wing fields at real blade points
+
+`dynamic::BladeIncident` is an explicit force-resolution choice for
+`DynamicPropulsion::new_oblique` and every `HarmonicPropulsion` variant.
+`with_blade_incident` selects `Hub` (the unchanged default), `WindField`, or
+`WindAndWingField`. Selecting either field mode on the axial-only dynamic
+constructor refuses with `dynamic-propulsion-invalid`; no hidden quadrature or
+different force owner is substituted. The same selected path is used at start,
+midpoint, skewed and continued stages.
+
+The wind callback keeps its original contract: it returns world-frame material
+air velocity [m/s] at an actual world position [m]. For a body point `p`, the
+stage samples `x_world + R_body_to_world * (p - cg_body)`, at that stage's time
+and pose. It caches the admitted pose and each already-required hub wind
+sample. `WindField` then supplies only
+`R_world_to_body * (wind_world(hub) - wind_world(blade))` as the additional
+relative-air velocity. The subtraction occurs before rotation and before any
+large carrier velocity is introduced. Native carrier tilt, absolute shaft
+rotation and own induction remain owned by the original blade evaluator;
+none is resampled or doubled. Spatially uniform world wind yields exact zero
+increments and retains the original loads, including partial mutual overlap.
+
+`WindAndWingField` additionally evaluates the original free-air wing kernel at
+each blade point using the same accepted circulation and stage freestream.
+Subtracting its already-included hub value adds exactly the local wing-field
+variation. The original kernel/core treatment and one wing solve per force
+stage are retained. No nonlinear wing solve runs inside the blade loop. Neither
+mode allocates per blade sample. Wind mode adds one material-air callback per
+sample; wing mode also adds an O(panel-count) native kernel evaluation. The
+already-prepared mutual-wake geometry and section quadrature are reused.
+
+All added fields enter the original section force law. The resulting full
+force, transverse hub moment and separate signed shaft torque reach the same
+aircraft/gear owners. Their combined signed material-air work remains in
+`incident_variation_work_w`; it is neither carrier work nor dissipation. The
+scalar/modal wake law continues to use the original hub ambient/wing velocity
+and receiving-disk mean mutual wake. Resolving blade loading does not claim a
+resolved wake transport PDE, full fluid momentum account, blade-phase model
+or closed wing/wake energy balance.
+
+World-position, material-velocity and transformed-increment failures refuse
+before publishing a load. Callback refusals keep their original code, message
+and repairs through the native blade adapter. A refusal at a later blade or
+predicted-midpoint stage leaves caller-owned physical state and continuation
+anchors unchanged; callback side effects remain caller-owned.
+
+The incident-field cases in `tests/harmonic_propulsion/incident_field.rs` check
+exact uniform-wind and zero-mode parity, independently reconstruct native
+blade loads and signed spatial-air work under world shear and wing variation,
+and verify actual carrier wrench assembly. They exercise both canted physical
+spin directions, equivalent mechanical sign conventions, rotated world poses,
+late blade/midpoint refusal with exact retry, and actual world momentum along
+a trajectory with evolving harmonic wakes.
 
 ## Actual stage-by-stage wing continuation in skewed flight
 
