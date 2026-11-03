@@ -23931,3 +23931,56 @@ paired-source mechanical step, independent hot friction/viscosity and finite
 cell heating, heating/cooling with fixed-jump damage excluded from heat, and
 late conductivity/cancellation rollback of both source owners and both physical
 states (G1/G3/G4).
+
+## Independently dynamic loads in causal shell resonance
+
+`MaterialShellImage::prepare_coating_resonance_with_load` and the corresponding
+monolithic `MaterialShellAssemblyImage` method compose the unchanged causal shell
+with a complete `ShellResonanceLoad`. The caller supplies an existing exactly
+quadratic `PortHamiltonian` and one original `ShellHarmonicPort` per load input.
+Force ports retain their physical velocity/force units; exterior and cavity
+ports retain their independently signed volume-flow/opposing-pressure units.
+Repeated, signed and nonorthogonal original projections are permitted. Mutual
+load coupling is retained through the original full J/R/Q/G matrices.
+
+The existing `with_parallel_load_columns` owner connects load input to shell
+flow and applies minus the load output through the same shell columns. All load
+states follow the original shell, substrate and coating states. The shared
+fs-phs pole and contour solvers see this complete joint generator. No isolated
+impedance inverse, load condensation, new mode projection, damping ratio or
+material fit is introduced. In particular, an independently evolving load mode
+survives when signed shell projections cancel and its port is unobservable.
+
+`ShellResonanceLoadResponse` reports every original load coordinate, physical
+flow and effort, signed absorbed power per port, load storage and actual R loss.
+Those quantities use complex-envelope conventions, not finite-cycle averages.
+Independent load rows check `s*z = (J-R)*Q*z + G*flow`. Independent accounts check
+`2 Re(s) H_load + D_load - P_load`,
+`2 Re(s) H_shell + D_shell + P_load`, and the complete joint decay balance.
+Source mechanical/material channels remain distinct from load dissipation;
+absorbed port work is never relabeled as radiation or as irreversible heat.
+All these accounts must pass the declared physical tolerance before publication.
+
+The complete dimension, including every load coordinate, is admitted before
+allocation. Preparation payload/work include original load matrices, full joint
+interconnection and shared physical admissions. Observation resources reserve
+both load-state and load-port work before spectral queries. Cancellation is
+polled around synchronous shared admissions and through source/load rows.
+The mechanical seed helper initializes appended load coordinates to zero;
+callers can supply a complete load-dominated seed or use contour discovery.
+Source images and accepted histories are immutable on success or refusal.
+
+Nonquadratic or undeclared load storage refuses. This API accepts an ordinary
+continuous pHS owner, not a descriptor load or a separately authored algebraic
+feedthrough law. The load's finite authored real-frequency band is intersected
+with the shell source bands and retained with results. Selecting the owner
+selects its global causal continuation; out-of-band/real-relaxation results
+retain the existing explicit support flag and no experimental accuracy claim.
+The original source Prony/constant-loss approximations, fixed shell basis and
+shared numerical count/rank limitations remain unchanged.
+
+`tests/coating_dynamic_poles.rs` exercises independent hereditary dispersion of
+a moving-support mass/spring/damper attachment, the two split resonances and
+their joint contour discovery, original mutual force-port coupling, a pure load
+pole at an isolated component resonance with zero net signed volume coupling,
+and dimension/band/port/cancellation refusals (G0/G1/G3).
