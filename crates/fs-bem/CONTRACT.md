@@ -227,8 +227,20 @@ everywhere: this is screening, not a viscous truth source.
   uniform scaling and joint rigid rotation/translation of section and flow;
   `dcl_dalpha_adjoint` — one transposed solve for the solution
   sensitivity plus solve-free finite-difference output partials, FD-gated
-  and explicitly not claimed as an exact symbolic derivative. The
-  constant-panel integrals carry a battery-pinned lesson: the normal
+  and explicitly not claimed as an exact symbolic derivative. This historical
+  adjoint path and its arithmetic remain unchanged.
+  `solve_with_lift_slope -> LiftSolution2d { solution, dcl_dalpha }` is a joint
+  steady/tangent API: one geometry-only Hess–Smith LU solves both the primal
+  RHS and its analytic angle derivative. The tangential velocity and its
+  tangent share the same panel integrals; `Cp' = -2*vt*vt'`, and the lift
+  derivative includes rotation of the force projection as well as pressure
+  changes. It adds O(n^2) tangent work and O(n) storage to the ordinary solve,
+  with no perturbed solves or finite-difference output partials. The steady
+  `sources`, `gamma`, `vt` and `cl` retain the ordinary solve's bits.
+  Non-finite tangent solutions and output derivatives return typed errors.
+  This is the derivative of the admitted discrete inviscid model at fixed
+  geometry, not a viscous, stall or shape derivative.
+  The constant-panel integrals carry a battery-pinned lesson: the normal
   component is (θ₂−θ₁)/2π — the reversed order self-cancels a closed
   sheet's field (caught by the single-panel-vs-quadrature and
   uniform-sheet probes). `solve_naca0012_prestall` is the narrower G2
@@ -248,8 +260,16 @@ everywhere: this is screening, not a viscous truth source.
   The response retains camber lift at zero incidence and the section's actual
   zero-lift angle without dividing by `sin(alpha)`. This is a local
   attached-flow, quasi-steady screening closure; it is not a resolved unsteady
-  pressure, stall, or separated-flow model. The slope is evaluated once at
-  construction, with no panel solves or sensitivity work inside wake steps.
+  pressure, stall, or separated-flow model. Construction obtains steady lift
+  and its analytic slope from the joint API using one dense factorization;
+  the prior separate steady/adjoint path required three factorizations and
+  cubic finite-difference output work. There are no panel solves or
+  sensitivity calculations inside wake steps. Analytic tangents remove the
+  finite-difference noise from transformed and near-zero-incidence wake
+  histories. The battery checks independent five-point derivatives for
+  symmetric/cambered sections at signed angles, bitwise joint/ordinary
+  steady equality, and rigid-frame/scale invariance. The wake-history
+  similarity tolerance is tightened from 2e-7 to 2e-10.
 
 ### `helmholtz` (bead frankensim-fsim-helmholtz-bem-k1ryv)
 

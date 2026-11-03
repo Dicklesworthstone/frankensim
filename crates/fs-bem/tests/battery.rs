@@ -439,9 +439,9 @@ fn bem_lift_and_adjoint_are_section_similarity_invariant() {
 /// than fixed points in the caller's global frame.
 #[test]
 fn bem_wake_lift_history_is_section_similarity_invariant() {
-    // The cached slope uses finite-difference output partials. Account for its
-    // 2e-7 derivative tolerance in this time-integrated similarity comparison.
-    let tolerance = 2e-7;
+    // Analytic panel tangents remove the finite-difference noise formerly
+    // amplified by wake integration; retain a geometry-roundoff allowance.
+    let tolerance = 2e-10;
     let foil = naca4_symmetric(0.12, 48).expect("valid section");
     let alpha = 0.07;
     let mut baseline = WakeSim::new(&foil, alpha, 0.05, 0.05).expect("baseline wake");
@@ -492,7 +492,10 @@ fn bem_cambered_wake_has_continuous_zero_incidence_lift() {
     for alpha in [-1e-10, -1e-14, 1e-14, 1e-10] {
         let nearby = run(alpha);
         for (got, want) in nearby.history().iter().zip(at_zero.history()) {
-            assert!((got.bound - want.bound).abs() < 2e-7, "continuity at {alpha}");
+            assert!(
+                (got.bound - want.bound).abs() < 2e-9,
+                "continuity at {alpha}"
+            );
         }
     }
 }
@@ -516,7 +519,10 @@ fn bem_cambered_wake_tracks_the_sections_zero_lift_angle() {
         }
     }
     let zero_lift_alpha = f64::midpoint(lo, hi);
-    assert!(zero_lift_alpha < -0.005, "camber shifts the zero-lift angle");
+    assert!(
+        zero_lift_alpha < -0.005,
+        "camber shifts the zero-lift angle"
+    );
     for offset in [-0.02, 0.0, 0.02] {
         let mut wake =
             WakeSim::new(&foil, zero_lift_alpha + offset, 0.05, 0.05).expect("wake near zero lift");
@@ -526,10 +532,86 @@ fn bem_cambered_wake_tracks_the_sections_zero_lift_angle() {
             if offset == 0.0 {
                 assert!(bound.abs() < 2e-8, "zero-lift section must stay unloaded");
             } else {
-                assert!(bound * offset > 0.0, "transient lift sign follows the section");
+                assert!(
+                    bound * offset > 0.0,
+                    "transient lift sign follows the section"
+                );
             }
             let shed: f64 = wake.wake().iter().map(|vortex| vortex.gamma).sum();
             assert!((bound + shed).abs() < 1e-12);
+        }
+    }
+}
+
+/// G0: the joint tangent preserves every steady output bit, while an
+/// independent five-point difference checks the complete pressure lift.
+/// Large signed angles exercise the inviscid algebra, not a stall claim.
+#[test]
+fn bem_joint_lift_slope_preserves_primal_and_matches_independent_differences() {
+    let symmetric = naca4_symmetric(0.12, 64).expect("symmetric section");
+    let cambered = cambered_section();
+    for foil in [&symmetric, &cambered] {
+        for alpha in [-0.6, -0.08, 0.0, 0.07, 0.6] {
+            let joint = panel2d::solve_with_lift_slope(foil, alpha).expect("joint solve");
+            let steady = panel2d::solve(foil, alpha).expect("ordinary solve");
+            assert_eq!(joint.solution.cl.to_bits(), steady.cl.to_bits());
+            assert_eq!(joint.solution.gamma.to_bits(), steady.gamma.to_bits());
+            assert_eq!(joint.solution.sources.len(), steady.sources.len());
+            assert_eq!(joint.solution.vt.len(), steady.vt.len());
+            for (actual, expected) in joint.solution.sources.iter().zip(&steady.sources) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            for (actual, expected) in joint.solution.vt.iter().zip(&steady.vt) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            let h = 1e-4;
+            let cl = |angle| panel2d::solve(foil, angle).expect("independent probe").cl;
+            let finite_difference = (-cl(alpha + 2.0 * h) + 8.0 * cl(alpha + h)
+                - 8.0 * cl(alpha - h)
+                + cl(alpha - 2.0 * h))
+                / (12.0 * h);
+            assert!(
+                (joint.dcl_dalpha - finite_difference).abs()
+                    < 2e-8 * finite_difference.abs().max(1.0),
+                "alpha={alpha}: analytic={}, finite difference={finite_difference}",
+                joint.dcl_dalpha
+            );
+        }
+    }
+    let camber_at_zero = panel2d::solve_with_lift_slope(&cambered, 0.0).expect("camber tangent");
+    assert!(camber_at_zero.solution.cl > 0.1);
+    assert!(camber_at_zero.dcl_dalpha > 5.0);
+    for alpha in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            panel2d::solve_with_lift_slope(&cambered, alpha),
+            Err(BemError::InvalidScalar {
+                name: "angle of attack",
+                ..
+            })
+        ));
+    }
+}
+
+/// G3: the exact discrete lift tangent transforms with the pressure solution,
+/// including camber and a nonzero global rotation of the lift axis.
+#[test]
+fn bem_joint_lift_slope_is_section_similarity_invariant() {
+    let foil = cambered_section();
+    for alpha in [-0.2, 0.0, 0.3] {
+        let baseline = panel2d::solve_with_lift_slope(&foil, alpha).expect("baseline tangent");
+        for (scale, rotation, translation) in [
+            (1.0e-9, 0.0, [0.0, 0.0]),
+            (0.2, -0.7, [-1.3, 0.8]),
+            (8.0, 2.3, [13.0, -21.0]),
+        ] {
+            let transformed = transformed_section(&foil, scale, rotation, translation);
+            let joint = panel2d::solve_with_lift_slope(&transformed, alpha + rotation)
+                .expect("transformed tangent");
+            assert!((joint.solution.cl - baseline.solution.cl).abs() < 2e-10);
+            assert!(
+                (joint.dcl_dalpha - baseline.dcl_dalpha).abs() < 2e-10,
+                "scale={scale}, rotation={rotation}, alpha={alpha}"
+            );
         }
     }
 }

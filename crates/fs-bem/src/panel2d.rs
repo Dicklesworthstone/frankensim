@@ -49,7 +49,7 @@ fn copied_vec(values: &[f64], operation: &'static str) -> Result<Vec<f64>, BemEr
 /// discipline): bump on ANY change that can move this kernel's output
 /// bits — transcendental routing, quadrature, assembly order.
 /// Downstream goldens pin this in golden-couplings.json.
-pub const PANEL_BIT_SEMANTICS_VERSION: u32 = 2;
+pub const PANEL_BIT_SEMANTICS_VERSION: u32 = 3;
 
 fn det_hypot(x: f64, y: f64) -> f64 {
     det::sqrt(x.mul_add(x, y * y))
@@ -204,6 +204,17 @@ pub struct PanelSolution2d {
     pub cl: f64,
     /// Tangential speeds at panel midpoints.
     pub vt: Vec<f64>,
+}
+
+/// Steady panel solution and its analytic fixed-geometry lift tangent.
+/// The slope differentiates the discrete inviscid pressure-integrated model;
+/// it is not a viscous, stall, or geometry sensitivity.
+#[derive(Debug, Clone)]
+pub struct LiftSolution2d {
+    /// Same steady result and arithmetic as [`solve`].
+    pub solution: PanelSolution2d,
+    /// dCl/dalpha [rad^-1], including the rotating lift-axis contribution.
+    pub dcl_dalpha: f64,
 }
 
 /// Symmetric NACA 4-digit thickness form (e.g. t = 0.12 for 0012),
@@ -409,8 +420,36 @@ fn vortex_velocity(foil: &Airfoil2d, g: &Geometry, j: usize, p: [f64; 2]) -> [f6
 /// # Errors
 /// Returns [`BemError`] for invalid geometry/angle, an inadmissible dense
 /// request, a singular panel system, or a non-finite result.
-#[allow(clippy::too_many_lines)] // assembly + Kutta + postprocess, one narrative
 pub fn solve(foil: &Airfoil2d, alpha: f64) -> Result<PanelSolution2d, BemError> {
+    solve_impl::<false>(foil, alpha).map(|(solution, _)| solution)
+}
+
+/// Solve the steady section and its analytic lift slope with one factorization.
+///
+/// The Hess–Smith matrix depends only on geometry, so the same LU solves the
+/// primal RHS and its analytic angle derivative. Surface velocities and their
+/// tangents share the panel-integral evaluations; Cp and the rotating lift axis
+/// are differentiated explicitly. No perturbed solves or finite differences
+/// enter this API. The steady result retains [`solve`]'s operation order.
+///
+/// # Errors
+/// The same admissions as [`solve`], plus a typed non-finite-result error if
+/// the tangent solve, tangential velocities or lift derivative are non-finite.
+pub fn solve_with_lift_slope(foil: &Airfoil2d, alpha: f64) -> Result<LiftSolution2d, BemError> {
+    let (solution, dcl_dalpha) = solve_impl::<true>(foil, alpha)?;
+    Ok(LiftSolution2d {
+        solution,
+        dcl_dalpha,
+    })
+}
+
+// The false specialization removes tangent allocations and work from solve.
+// Its unused tuple slope is zero; only the true specialization exposes a slope.
+#[allow(clippy::too_many_lines)] // assembly, shared primal/tangent solve and postprocess
+fn solve_impl<const WITH_LIFT_SLOPE: bool>(
+    foil: &Airfoil2d,
+    alpha: f64,
+) -> Result<(PanelSolution2d, f64), BemError> {
     validate_alpha(alpha)?;
     let g = geometry(foil)?;
     let n = foil.nodes.len();
@@ -434,6 +473,34 @@ pub fn solve(foil: &Airfoil2d, alpha: f64) -> Result<PanelSolution2d, BemError> 
         });
     }
     let gamma = x[n];
+    let u_inf_d = [-u_inf[1], u_inf[0]];
+    let mut dx_dalpha = if WITH_LIFT_SLOPE {
+        zeroed_vec(dim, "2D panel tangent RHS")?
+    } else {
+        Vec::new()
+    };
+    let mut dvt_dalpha = if WITH_LIFT_SLOPE {
+        zeroed_vec(n, "2D tangential velocity derivatives")?
+    } else {
+        Vec::new()
+    };
+    if WITH_LIFT_SLOPE {
+        // Geometry and A are fixed: A*x' = b'. Reuse the primal LU.
+        for (i, slot) in dx_dalpha.iter_mut().take(n).enumerate() {
+            let nrm = g.normal[i];
+            *slot = -(u_inf_d[0] * nrm[0] + u_inf_d[1] * nrm[1]);
+        }
+        for &i in &[0usize, n - 1] {
+            let tan = g.tangent[i];
+            dx_dalpha[n] -= u_inf_d[0] * tan[0] + u_inf_d[1] * tan[1];
+        }
+        f.solve(&mut dx_dalpha);
+        if dx_dalpha.iter().any(|value| !value.is_finite()) {
+            return Err(BemError::NonFiniteResult {
+                operation: "2D panel tangent solution",
+            });
+        }
+    }
     // Tangential speeds for Cp.
     let mut vt = Vec::new();
     vt.try_reserve_exact(n)
@@ -443,18 +510,35 @@ pub fn solve(foil: &Airfoil2d, alpha: f64) -> Result<PanelSolution2d, BemError> 
     for i in 0..n {
         let (mid, tan) = (g.mid[i], g.tangent[i]);
         let mut v = [u_inf[0], u_inf[1]];
+        let mut dv_dalpha = u_inf_d;
         for (j, &xj) in x.iter().take(n).enumerate() {
             if i == j {
                 v[0] += 0.5 * gamma * tan[0];
                 v[1] += 0.5 * gamma * tan[1];
+                if WITH_LIFT_SLOPE {
+                    dv_dalpha[0] += 0.5 * dx_dalpha[n] * tan[0];
+                    dv_dalpha[1] += 0.5 * dx_dalpha[n] * tan[1];
+                }
                 continue;
             }
             let sv = source_velocity(foil, &g, j, mid);
-            let vv = vortex_velocity(foil, &g, j, mid);
+            let vv = if WITH_LIFT_SLOPE {
+                // Rotate the source field already evaluated for this pair.
+                [sv[1], -sv[0]]
+            } else {
+                vortex_velocity(foil, &g, j, mid)
+            };
             v[0] += sv[0] * xj + vv[0] * gamma;
             v[1] += sv[1] * xj + vv[1] * gamma;
+            if WITH_LIFT_SLOPE {
+                dv_dalpha[0] += sv[0] * dx_dalpha[j] + vv[0] * dx_dalpha[n];
+                dv_dalpha[1] += sv[1] * dx_dalpha[j] + vv[1] * dx_dalpha[n];
+            }
         }
         vt.push(v[0] * tan[0] + v[1] * tan[1]);
+        if WITH_LIFT_SLOPE {
+            dvt_dalpha[i] = dv_dalpha[0] * tan[0] + dv_dalpha[1] * tan[1];
+        }
     }
     // Lift by PRESSURE INTEGRATION (v_n = 0 on the body, so
     // |v|² = v_t²): Cl = −∮ Cp·n_lift ds/c. Rotate the force normal to
@@ -462,10 +546,17 @@ pub fn solve(foil: &Airfoil2d, alpha: f64) -> Result<PanelSolution2d, BemError> 
     // what the collocation system actually enforces.
     let mut fx = 0.0;
     let mut fy = 0.0;
+    let mut dfx_dalpha = 0.0;
+    let mut dfy_dalpha = 0.0;
     for (i, &vti) in vt.iter().enumerate() {
         let cp = 1.0 - vti * vti;
         fx += -cp * g.normal[i][0] * g.len[i];
         fy += -cp * g.normal[i][1] * g.len[i];
+        if WITH_LIFT_SLOPE {
+            let dcp_dalpha = -2.0 * vti * dvt_dalpha[i];
+            dfx_dalpha += -dcp_dalpha * g.normal[i][0] * g.len[i];
+            dfy_dalpha += -dcp_dalpha * g.normal[i][1] * g.len[i];
+        }
     }
     let cl = (fy * det::cos(alpha) - fx * det::sin(alpha)) / g.chord;
     if !cl.is_finite() || vt.iter().any(|value| !value.is_finite()) {
@@ -474,12 +565,29 @@ pub fn solve(foil: &Airfoil2d, alpha: f64) -> Result<PanelSolution2d, BemError> 
         });
     }
     let sources = copied_vec(&x[..n], "2D source densities")?;
-    Ok(PanelSolution2d {
-        sources,
-        gamma,
-        cl,
-        vt,
-    })
+    let dcl_dalpha = if WITH_LIFT_SLOPE {
+        // Differentiate both the pressure force and its rotating lift axis.
+        let derivative =
+            (dfy_dalpha * u_inf[0] - dfx_dalpha * u_inf[1] - fy * u_inf[1] - fx * u_inf[0])
+                / g.chord;
+        if !derivative.is_finite() || dvt_dalpha.iter().any(|value| !value.is_finite()) {
+            return Err(BemError::NonFiniteResult {
+                operation: "2D analytic lift derivative",
+            });
+        }
+        derivative
+    } else {
+        0.0
+    };
+    Ok((
+        PanelSolution2d {
+            sources,
+            gamma,
+            cl,
+            vt,
+        },
+        dcl_dalpha,
+    ))
 }
 
 /// dCl/dα by the ADJOINT of the panel system: one transposed solve

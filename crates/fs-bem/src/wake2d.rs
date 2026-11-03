@@ -13,7 +13,7 @@
 //! ledgered.
 
 use crate::BemError;
-use crate::panel2d::{Airfoil2d, dcl_dalpha_adjoint, solve};
+use crate::panel2d::{Airfoil2d, solve_with_lift_slope};
 
 /// Largest admitted number of wake steps/vortices in one v1 state.
 pub const MAX_WAKE_STEPS: usize = 1_000_000;
@@ -116,11 +116,11 @@ impl WakeSim {
                 requirement: "finite radians with |alpha relative to chord| <= pi/2",
             });
         }
-        let steady = solve(foil, alpha)?;
-        // Cache the section's local attached-flow response. Unlike Γ/sin(α),
-        // this remains finite when camber produces lift at zero incidence.
-        // No additional panel solves are needed while stepping the wake.
-        let circulation_slope = 0.5 * dcl_dalpha_adjoint(foil, alpha)?;
+        let lift = solve_with_lift_slope(foil, alpha)?;
+        // Cache the section's local attached-flow response from one panel LU
+        // and its analytic tangent. Unlike Γ/sin(α), this stays finite when
+        // camber produces lift at zero incidence. Wake steps need no solves.
+        let circulation_slope = 0.5 * lift.dcl_dalpha;
         let sim = WakeSim {
             alpha: local_alpha,
             dt,
@@ -130,7 +130,7 @@ impl WakeSim {
             // Screening-model normalization for unit chord/speed. This is an
             // inferred circulation scale, not a second exact Kutta-Joukowski
             // evaluation of the pressure-integrated panel result.
-            steady_gamma: steady.cl / 2.0,
+            steady_gamma: lift.solution.cl / 2.0,
             circulation_slope,
             te: [1.0, 0.0],
         };
