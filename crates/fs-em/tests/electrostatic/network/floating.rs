@@ -86,6 +86,86 @@ fn neutral_and_charged_floating_electrodes_keep_native_energy_and_total_charge()
 }
 
 #[test]
+fn disconnected_floating_charges_survive_independent_large_voltage_biases() {
+    let mesh = TriComplex2::from_indexed_triangles(
+        "independent-charged-floating-capacitors",
+        vec![
+            [0., 0.],
+            [1., 0.],
+            [1., 1.],
+            [0., 1.],
+            [2., 0.],
+            [3., 0.],
+            [3., 1.],
+            [2., 1.],
+        ],
+        vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]],
+        Metric2::planar(DEPTH).unwrap(),
+    )
+    .unwrap();
+    let materials = vec![
+        dielectric(4e-11),
+        dielectric(4e-11),
+        dielectric(7e-11),
+        dielectric(7e-11),
+    ];
+    let problem = PlanarElectrostatics::new(mesh, materials, limits(), &mut || false).unwrap();
+    let matrix = problem
+        .capacitance_matrix(
+            &[&[0, 3], &[1, 2], &[4, 7], &[5, 6]],
+            extraction(),
+            &mut || false,
+        )
+        .unwrap();
+    let floating = matrix
+        .prepare_floating(&[1, 3], reduction_controls(), &mut || false)
+        .unwrap();
+    let capacitance = [4e-11 * DEPTH, 7e-11 * DEPTH];
+    let charge = [capacitance[0] * 1e-6, -capacitance[1] * 2e-6];
+    let original = floating
+        .solve(&[0., 0.], &charge, 1e-29, 1e-35, &mut || false)
+        .unwrap();
+    let bias = 2.0_f64.powi(50);
+    let shifted = floating
+        .solve(&[bias, -bias], &charge, 1e-29, 1e-35, &mut || false)
+        .unwrap();
+    near(shifted.component_relative_voltage_v[1], 1e-6);
+    near(shifted.component_relative_voltage_v[3], -2e-6);
+    assert_eq!(
+        shifted.component_reference_voltage_v,
+        [bias, bias, -bias, -bias]
+    );
+    assert_eq!(
+        shifted.component_relative_voltage_v,
+        original.component_relative_voltage_v
+    );
+    assert_eq!(shifted.terminal_charge_c, original.terminal_charge_c);
+    assert_eq!(
+        shifted.field().energy_j().to_bits(),
+        original.field().energy_j().to_bits()
+    );
+    // The old global-relative observation stays compatible, but its second
+    // component cannot represent these microvolt differences at a 2^51 V bias.
+    assert_eq!(shifted.reference_terminal, 0);
+    assert_eq!(shifted.reference_voltage_v, bias);
+    assert_eq!(shifted.terminal_voltage_v[2], -2.0 * bias);
+    assert_eq!(shifted.terminal_voltage_v[3], -2.0 * bias);
+    let expected_energy = 0.5 * (capacitance[0] + 4.0 * capacitance[1]) * 1e-12;
+    assert!((shifted.field().energy_j() - expected_energy).abs() < 1e-35);
+    let circuit = matrix
+        .circuit_at_voltages(
+            &[0, 1, 2, 3],
+            &shifted.component_relative_voltage_v,
+            1e-29,
+            1e-35,
+            &mut || false,
+        )
+        .unwrap();
+    assert!(circuit.maximum_charge_residual_c() < 1e-29);
+    assert!(circuit.energy_residual_j().abs() < 1e-35);
+}
+
+#[test]
 fn multiple_charge_controls_preserve_order_and_an_explicit_voltage_reference() {
     let epsilon = 4e-6;
     let problem = hexagon([0.0; 2], [epsilon; 6]);

@@ -50,6 +50,63 @@ pub(crate) fn prescribed_boundary(
     )
 }
 
+/// One deterministic prescribed reference for each connected scalar operator.
+/// Disconnected bodies have independent gauges: carrying another component's
+/// common voltage into a reduced right-hand side can hide its physical load
+/// below the Krylov residual scale. Nonzero entries include material contact
+/// couplings, so electrically joined mesh pieces share the same reference.
+pub(crate) fn component_references(
+    stiffness: &Csr,
+    prescribed: &[Option<f64>],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<f64>, PotentialError> {
+    fn root(parent: &mut [usize], mut vertex: usize) -> usize {
+        while parent[vertex] != vertex {
+            parent[vertex] = parent[parent[vertex]];
+            vertex = parent[vertex];
+        }
+        vertex
+    }
+    let n = stiffness.nrows();
+    if stiffness.ncols() != n
+        || prescribed.len() != n
+        || prescribed.iter().flatten().any(|value| !value.is_finite())
+    {
+        return Err(PotentialError::Invalid(
+            "complete finite scalar-potential references required",
+        ));
+    }
+    let mut components: Vec<_> = (0..n).collect();
+    for vertex in 0..n {
+        poll(cancelled)?;
+        let (columns, values) = stiffness.row(vertex);
+        for (&column, &value) in columns.iter().zip(values) {
+            if column != vertex && value != 0.0 {
+                let a = root(&mut components, vertex);
+                let b = root(&mut components, column);
+                components[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut anchors = vec![None; n];
+    for vertex in 0..n {
+        poll(cancelled)?;
+        let component = root(&mut components, vertex);
+        components[vertex] = component;
+        if anchors[component].is_none() {
+            anchors[component] = prescribed[vertex];
+        }
+    }
+    let mut references = Vec::with_capacity(n);
+    for component in components {
+        poll(cancelled)?;
+        references.push(anchors[component].ok_or(PotentialError::Invalid(
+            "every scalar-potential component needs a prescribed reference",
+        ))?);
+    }
+    Ok(references)
+}
+
 /// Eliminate the original prescribed coordinates and use the existing checked
 /// CG recurrence, including its independently recomputed Euclidean residual.
 pub(crate) fn solve(
@@ -59,6 +116,34 @@ pub(crate) fn solve(
     controls: CheckedCgConfig,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<f64>, Option<SolveReport>), PotentialError> {
+    let solved = solve_relative(stiffness, rhs, prescribed, controls, cancelled)?;
+    let mut absolute = Vec::with_capacity(solved.relative.len());
+    for (vertex, &relative) in solved.relative.iter().enumerate() {
+        poll(cancelled)?;
+        absolute.push(match prescribed[vertex] {
+            Some(value) => value,
+            None => finite(solved.references[vertex] + relative)?,
+        });
+    }
+    Ok((absolute, solved.report))
+}
+
+/// Preserve physical potential differences separately from their gauges. An
+/// induced free potential can be far below one ulp of a prescribed common
+/// voltage; restoring that voltage before field recovery would erase it.
+pub(crate) struct RelativePotential {
+    pub relative: Vec<f64>,
+    pub references: Vec<f64>,
+    pub report: Option<SolveReport>,
+}
+
+pub(crate) fn solve_relative(
+    stiffness: &Csr,
+    rhs: &[f64],
+    prescribed: &[Option<f64>],
+    controls: CheckedCgConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<RelativePotential, PotentialError> {
     poll(cancelled)?;
     let n = stiffness.nrows();
     if stiffness.ncols() != n
@@ -84,14 +169,14 @@ pub(crate) fn solve(
     // for differences before multiplying by that operator: a large common
     // voltage must not dominate either elimination or the CG residual scale.
     // The original absolute prescribed outputs remain bit-for-bit unchanged.
-    let reference = prescribed.iter().flatten().copied().next().unwrap_or(0.0);
+    let references = component_references(stiffness, prescribed, cancelled)?;
     for &v in &free {
         poll(cancelled)?;
         let mut load = rhs[v];
         let (cols, vals) = stiffness.row(v);
         for (&w, &value) in cols.iter().zip(vals) {
             if let Some(voltage) = prescribed[w] {
-                let difference = finite(voltage - reference)?;
+                let difference = finite(voltage - references[v])?;
                 load = finite((-value).mul_add(difference, load))?;
             } else {
                 columns.push(index[w]);
@@ -102,7 +187,14 @@ pub(crate) fn solve(
         reduced_rhs.push(load);
     }
     let matrix = Csr::from_parts(free.len(), free.len(), row_ptr, columns, values);
-    let mut voltage: Vec<_> = prescribed.iter().map(|v| v.unwrap_or(0.0)).collect();
+    let mut relative = prescribed
+        .iter()
+        .zip(&references)
+        .map(|(value, &reference)| match value {
+            Some(value) => finite(value - reference),
+            None => Ok(0.0),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let report = if free.is_empty() {
         None
     } else {
@@ -121,12 +213,16 @@ pub(crate) fn solve(
             return Err(PotentialError::Nonconvergence(result.report));
         }
         for (&v, &value) in free.iter().zip(&result.x) {
-            voltage[v] = finite(reference + value)?;
+            relative[v] = value;
         }
         Some(result.report)
     };
     poll(cancelled)?;
-    Ok((voltage, report))
+    Ok(RelativePotential {
+        relative,
+        references,
+        report,
+    })
 }
 
 /// Electrode labels must refer to disjoint unions of complete exterior edges,
@@ -217,7 +313,9 @@ pub(crate) fn terminal_components(
     }
     for terminal in terminals {
         if terminal.is_empty() || terminal.iter().any(|&v| v >= n) {
-            return Err(PotentialError::Invalid("complete valid terminal traces required"));
+            return Err(PotentialError::Invalid(
+                "complete valid terminal traces required",
+            ));
         }
         for &v in *terminal {
             poll(cancelled)?;

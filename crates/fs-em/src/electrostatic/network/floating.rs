@@ -41,11 +41,20 @@ pub struct FloatingCapacitance<'s, 'm> {
 /// One actual-amplitude mixed voltage/charge solution on all original terminals.
 pub struct FloatingCapacitanceResponse<'m> {
     /// Complete original terminal order, relative to `reference_terminal`.
-    /// Keeping the reference separate avoids losing small floating voltages
-    /// when a large, physically irrelevant common potential is supplied.
+    /// This backward-compatible observation can round small voltages away on a
+    /// disconnected component with a different large reference. Native field
+    /// and circuit consumers should use `component_relative_voltage_v`.
     pub terminal_voltage_v: Vec<f64>,
     pub reference_terminal: usize,
     pub reference_voltage_v: f64,
+    /// Actual solved voltages relative to the first retained terminal in each
+    /// connected electrical component, in complete original terminal order.
+    /// These are sufficient to initialize the original native capacitor network
+    /// without losing charge-induced voltages under independent common biases.
+    pub component_relative_voltage_v: Vec<f64>,
+    /// The actual prescribed reference voltage for each original terminal.
+    /// Keep it separate from the relative coordinate when precision matters.
+    pub component_reference_voltage_v: Vec<f64>,
     /// Independently recovered original weak electrode reactions, in coulombs.
     pub terminal_charge_c: Vec<f64>,
     pub maximum_floating_charge_residual_c: f64,
@@ -56,8 +65,8 @@ pub struct FloatingCapacitanceResponse<'m> {
 
 impl<'m> FloatingCapacitanceResponse<'m> {
     /// Native spatial field, including material identity, energy and force API.
-    /// Its nodal voltage reference remains the original FIRST terminal, as in
-    /// `PlanarCapacitanceMatrix::field_at_voltages`.
+    /// Its nodal voltages use the first original terminal of each connected
+    /// component, as in `PlanarCapacitanceMatrix::field_at_voltages`.
     pub fn field(&self) -> &ElectricField<'m> {
         &self.field
     }
@@ -259,9 +268,29 @@ impl<'s, 'm> FloatingCapacitance<'s, 'm> {
             ));
         }
         let reference_voltage_v = retained_voltage_v[0];
-        let differences = retained_voltage_v
+        let n = self.source.terminals.len();
+        let mut component_reference = vec![None; n];
+        for (&terminal, &voltage) in self.retained.iter().zip(retained_voltage_v) {
+            poll(cancelled)?;
+            component_reference[self.source.reference_terminals[terminal]].get_or_insert(voltage);
+        }
+        let component_reference_voltage_v =
+            self.source
+                .reference_terminals
+                .iter()
+                .map(|&component| {
+                    component_reference[component].ok_or_else(|| invalid(
+                "every floating dielectric component needs a retained voltage reference",
+            ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        // Transfer only actual voltage differences. A physically irrelevant
+        // bias on another component must not obscure this one's trapped charge.
+        let differences = self
+            .retained
             .iter()
-            .map(|&v| finite(v - reference_voltage_v))
+            .zip(retained_voltage_v)
+            .map(|(&terminal, &voltage)| finite(voltage - component_reference_voltage_v[terminal]))
             .collect::<Result<Vec<_>, _>>()?;
         let mut charged_voltage = floating_charge_c
             .iter()
@@ -270,7 +299,7 @@ impl<'s, 'm> FloatingCapacitance<'s, 'm> {
             .collect::<Result<Vec<_>, _>>()?;
         self.factor.solve(&mut charged_voltage);
         poll(cancelled)?;
-        let mut voltage = vec![0.0; self.source.terminals.len()];
+        let mut voltage = vec![0.0; n];
         for (&t, &v) in self.retained.iter().zip(&differences) {
             voltage[t] = v;
         }
@@ -325,11 +354,29 @@ impl<'s, 'm> FloatingCapacitance<'s, 'm> {
                 "native floating charge or terminal-field energy failed",
             ));
         }
+        // Restore the previous single-reference observation only after all
+        // physical field, charge and work checks. The component-local values
+        // remain separately available even if this addition loses a small V.
+        let mut terminal_voltage_v = Vec::with_capacity(n);
+        for (&local, &reference) in voltage.iter().zip(&component_reference_voltage_v) {
+            poll(cancelled)?;
+            terminal_voltage_v.push(if reference == reference_voltage_v {
+                local
+            } else {
+                finite(finite(reference - reference_voltage_v)? + local)?
+            });
+        }
+        for (&terminal, &value) in self.retained.iter().zip(retained_voltage_v) {
+            poll(cancelled)?;
+            terminal_voltage_v[terminal] = finite(value - reference_voltage_v)?;
+        }
         poll(cancelled)?;
         Ok(FloatingCapacitanceResponse {
-            terminal_voltage_v: voltage,
+            terminal_voltage_v,
             reference_terminal: self.retained[0],
             reference_voltage_v,
+            component_relative_voltage_v: voltage,
+            component_reference_voltage_v,
             terminal_charge_c,
             maximum_floating_charge_residual_c,
             terminal_energy_residual_j,

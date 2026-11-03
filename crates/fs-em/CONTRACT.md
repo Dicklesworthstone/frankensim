@@ -1,5 +1,17 @@
 # fs-em contract
 
+## Gauge-stable dielectric charge and energy
+
+Planar electrostatic elimination and physical recovery remove the independent
+voltage reference of each connected component before multiplying field or
+charge operators. Electrode-basis superposition uses each connected terminal
+group's reference, including ideal electrodes that join disconnected mesh
+pieces. Large unrelated voltage offsets cannot become fictitious charge or
+inflate the Krylov load scale of another component. Charge and energy retain
+their original absolute acceptance gates; no tolerance is relaxed to hide
+gauge cancellation. Focused charged-domain and independent-capacitor tests
+exercise these physical invariances.
+
 ## Source-bound load resistance on continuing three-dimensional windings
 
 `SpatialNonlinearWindingCircuit::with_graph_resistors` attaches the existing

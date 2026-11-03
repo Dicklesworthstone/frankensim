@@ -97,6 +97,19 @@ fn finite(value: f64) -> Result<f64, ElectrostaticError> {
         ))
     }
 }
+fn accumulate(sum: &mut f64, correction: &mut f64, value: f64) -> Result<(), ElectrostaticError> {
+    let next = finite(*sum + value)?;
+    *correction = finite(
+        *correction
+            + if sum.abs() >= value.abs() {
+                (*sum - next) + value
+            } else {
+                (value - next) + *sum
+            },
+    )?;
+    *sum = next;
+    Ok(())
+}
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
@@ -304,7 +317,7 @@ impl PlanarElectrostatics {
                 rhs[vertex as usize] = finite(rhs[vertex as usize] + charge / 3.0)?;
             }
         }
-        let (voltage, report) = scalar_potential::solve(
+        let solved = scalar_potential::solve_relative(
             &self.stiffness,
             &rhs,
             &prescribed,
@@ -312,14 +325,15 @@ impl PlanarElectrostatics {
             cancelled,
         )?;
         self.recover_field(
-            voltage,
+            solved.relative,
+            solved.references,
             free_charge_density_c_m3,
             &rhs,
             &prescribed,
             volume_charge_c,
             controls.charge_tolerance_c,
             controls.energy_tolerance_j,
-            report,
+            solved.report,
             cancelled,
         )
     }
@@ -379,7 +393,8 @@ impl PlanarElectrostatics {
     #[allow(clippy::too_many_arguments)]
     fn recover_field(
         &self,
-        voltage: Vec<f64>,
+        relative_voltage: Vec<f64>,
+        reference_voltage: Vec<f64>,
         free_charge_density_c_m3: &[f64],
         rhs: &[f64],
         prescribed: &[Option<f64>],
@@ -391,30 +406,60 @@ impl PlanarElectrostatics {
     ) -> Result<ElectricField<'_>, ElectrostaticError> {
         let n = self.mesh.vertices().len();
         let ElectricCellResponse {
-            electric_field_v_m, displacement_c_m2, cell_energy_j, energy_j,
-        } = self.cell_response(&voltage, cancelled)?;
+            electric_field_v_m,
+            displacement_c_m2,
+            cell_energy_j,
+            energy_j,
+        } = self.cell_response(&relative_voltage, cancelled)?;
         let mut nodal_boundary_charge_c = vec![None; n];
         let mut boundary_charge_c = 0.0;
+        let mut boundary_charge_correction = 0.0;
         let mut maximum_free_charge_residual_c: f64 = 0.0;
         let mut source_pairing_j = 0.0;
+        let mut source_pairing_correction = 0.0;
         for v in 0..n {
             poll(cancelled)?;
             let (cols, vals) = self.stiffness.row(v);
             let mut applied = 0.0;
+            let mut applied_correction = 0.0;
             for (&w, &value) in cols.iter().zip(vals) {
-                applied = finite(value.mul_add(voltage[w], applied))?;
+                // The full scalar operator annihilates constants. Apply it to
+                // edge differences before multiplication, as the field-gradient
+                // owner does, rather than subtracting enormous biased charges.
+                let difference = finite(relative_voltage[w] - relative_voltage[v])?;
+                accumulate(
+                    &mut applied,
+                    &mut applied_correction,
+                    finite(value * difference)?,
+                )?;
             }
+            let applied = finite(applied + applied_correction)?;
             let reaction = finite(applied - rhs[v])?;
             let supplied = if prescribed[v].is_some() {
                 nodal_boundary_charge_c[v] = Some(reaction);
-                boundary_charge_c = finite(boundary_charge_c + reaction)?;
-                finite(rhs[v] + reaction)?
+                accumulate(
+                    &mut boundary_charge_c,
+                    &mut boundary_charge_correction,
+                    reaction,
+                )?;
+                // rhs + reaction is exactly the applied operator; do not lose
+                // that sum by subtracting and then re-adding a large cell load.
+                applied
             } else {
                 maximum_free_charge_residual_c = maximum_free_charge_residual_c.max(reaction.abs());
                 rhs[v]
             };
-            source_pairing_j = finite(voltage[v].mul_add(supplied, source_pairing_j))?;
+            // Gauge balance is independent on each disconnected component.
+            // Pair with its own voltage differences; an arbitrary common bias
+            // must not amplify roundoff in charge balance into spurious energy.
+            accumulate(
+                &mut source_pairing_j,
+                &mut source_pairing_correction,
+                finite(relative_voltage[v] * supplied)?,
+            )?;
         }
+        let boundary_charge_c = finite(boundary_charge_c + boundary_charge_correction)?;
+        let source_pairing_j = finite(source_pairing_j + source_pairing_correction)?;
         let charge_balance_residual_c = finite(volume_charge_c + boundary_charge_c)?;
         let energy_balance_residual_j = finite(energy_j - 0.5 * source_pairing_j)?;
         if charge_balance_residual_c.abs() > charge_tolerance_c
@@ -427,11 +472,23 @@ impl PlanarElectrostatics {
                 energy_residual_j: energy_balance_residual_j,
             });
         }
+        // Absolute voltages are an observational view only. Reconstruct them
+        // after every physical calculation, preserving authored traces exactly.
+        let mut voltage = Vec::with_capacity(n);
+        for v in 0..n {
+            poll(cancelled)?;
+            voltage.push(match prescribed[v] {
+                Some(value) => value,
+                None => finite(reference_voltage[v] + relative_voltage[v])?,
+            });
+        }
         poll(cancelled)?;
         Ok(ElectricField {
             problem: self,
             free_charge_density_c_m3: free_charge_density_c_m3.to_vec(),
             voltage_v: voltage,
+            relative_voltage_v: relative_voltage,
+            reference_voltage_v: reference_voltage,
             electric_field_v_m,
             displacement_c_m2,
             cell_energy_j,
@@ -514,6 +571,8 @@ pub struct ElectricField<'a> {
     problem: &'a PlanarElectrostatics,
     free_charge_density_c_m3: Vec<f64>,
     voltage_v: Vec<f64>,
+    relative_voltage_v: Vec<f64>,
+    reference_voltage_v: Vec<f64>,
     electric_field_v_m: Vec<[f64; 2]>,
     displacement_c_m2: Vec<[f64; 2]>,
     cell_energy_j: Vec<f64>,
@@ -530,8 +589,21 @@ impl ElectricField<'_> {
     pub fn problem(&self) -> &PlanarElectrostatics {
         self.problem
     }
+    /// Absolute nodal voltage view. Prescribed traces are retained exactly;
+    /// small induced voltages can round away under a large common reference.
+    /// All physical fields and balances use `relative_voltage_v` instead.
     pub fn voltage_v(&self) -> &[f64] {
         &self.voltage_v
+    }
+    /// Actual solved potentials relative to each component's prescribed gauge.
+    /// These retain charge-induced voltages below the spacing of absolute V.
+    pub fn relative_voltage_v(&self) -> &[f64] {
+        &self.relative_voltage_v
+    }
+    /// The component's prescribed reference at each original vertex [V].
+    /// Absolute voltage is reference plus relative voltage, subject to rounding.
+    pub fn reference_voltage_v(&self) -> &[f64] {
+        &self.reference_voltage_v
     }
     /// Original prescribed volume-charge source per cell [C/m3], retained even
     /// when positive and negative charges cancel in the total inventory.
@@ -570,7 +642,8 @@ impl ElectricField<'_> {
     pub fn maximum_free_charge_residual_c(&self) -> f64 {
         self.maximum_free_charge_residual_c
     }
-    /// U - (sum(V * volume-load) + sum(V * electrode-charge))/2 [J].
+    /// U - (sum(V * volume-load) + sum(V * electrode-charge))/2 [J],
+    /// evaluated relative to each connected component's prescribed reference.
     pub fn energy_balance_residual_j(&self) -> f64 {
         self.energy_balance_residual_j
     }

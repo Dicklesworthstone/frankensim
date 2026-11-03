@@ -147,6 +147,62 @@ fn three_electrode_matrix_matches_independent_geometry_energy_charge_and_gauge()
 }
 
 #[test]
+fn disconnected_capacitors_remove_each_component_bias_before_superposition() {
+    let single = super::common::layered(0.5, 1.0, DEPTH);
+    let mut vertices = single.vertices().to_vec();
+    vertices.extend(single.vertices().iter().map(|&[x, y]| [x + 3.0, y]));
+    let mut faces = single.faces().to_vec();
+    faces.extend(
+        single
+            .faces()
+            .iter()
+            .map(|face| face.map(|vertex| vertex + 6)),
+    );
+    let mesh = TriComplex2::from_indexed_triangles(
+        "two-independent-capacitors",
+        vertices,
+        faces,
+        Metric2::planar(DEPTH).unwrap(),
+    )
+    .unwrap();
+    let mut materials = vec![dielectric(4e-11); 4];
+    materials.extend(vec![dielectric(7e-11); 4]);
+    let problem = PlanarElectrostatics::new(mesh, materials, limits(), &mut || false).unwrap();
+    let terminals: [&[usize]; 4] = [&[0, 3], &[2, 5], &[6, 9], &[8, 11]];
+    let matrix = problem
+        .capacitance_matrix(&terminals, extraction(), &mut || false)
+        .unwrap();
+    let bias = 2.0_f64.powi(40);
+    let volts = [bias, bias + 3.0, -bias, -bias + 6.0];
+    let response = matrix.response(&volts, &mut || false).unwrap();
+    let expected = [
+        -3.0 * 4e-11 * DEPTH,
+        3.0 * 4e-11 * DEPTH,
+        -6.0 * 7e-11 * DEPTH,
+        6.0 * 7e-11 * DEPTH,
+    ];
+    for (&actual, target) in response.terminal_charge_c.iter().zip(expected) {
+        assert!((actual - target).abs() < 1e-23, "{actual} != {target}");
+    }
+    let expected_energy = 0.5 * DEPTH * (4e-11 * 9.0 + 7e-11 * 36.0);
+    assert!((response.energy_j - expected_energy).abs() < 1e-23);
+    let field = matrix
+        .field_at_voltages(&volts, 1e-23, 1e-23, &mut || false)
+        .unwrap();
+    assert_eq!(field.voltage_v()[0], 0.0);
+    assert_eq!(field.voltage_v()[6], 0.0);
+    assert!((field.energy_j() - expected_energy).abs() < 1e-23);
+    // The independent native pair-capacitor storage gate must see the same
+    // charge and energy even when the components have unrelated references.
+    let circuit = matrix
+        .circuit_at_voltages(&[0, 1, 2, 3], &volts, 1e-23, 1e-23, &mut || false)
+        .unwrap();
+    assert_eq!(circuit.branches().len(), 2);
+    assert!(circuit.maximum_charge_residual_c() < 1e-23);
+    assert!(circuit.energy_residual_j().abs() < 1e-23);
+}
+
+#[test]
 fn regional_dielectric_swap_changes_actual_multi_capacitor_circuit_dynamics() {
     let mut outcomes = Vec::new();
     for scale in [1.0, 3.0] {

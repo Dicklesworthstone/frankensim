@@ -27,7 +27,8 @@ pub struct CapacitanceMatrixControls {
     /// Exactly one native unit-voltage solve is needed per terminal.
     pub maximum_field_solves: usize,
     /// Total retained scalar field/charge samples across all unit solutions,
-    /// counted as terminals*(2*vertices + 6*triangles). Matrix entries must fit
+    /// counted as terminals*(4*vertices + 6*triangles), including separately
+    /// retained relative potentials and reference voltages. Matrix entries must fit
     /// this bound too. This bounds the repeated solves and dense Gram work.
     pub maximum_field_values: usize,
     /// Absolute [F] charge/energy coefficient, reciprocity and gauge allowance.
@@ -50,6 +51,7 @@ pub struct CapacitanceResponse {
 pub struct PlanarCapacitanceMatrix<'m> {
     problem: &'m PlanarElectrostatics,
     terminals: Vec<Vec<usize>>,
+    reference_terminals: Vec<usize>,
     basis: Vec<ElectricField<'m>>,
     matrix_f: Vec<f64>,
     charge_matrix_f: Vec<f64>,
@@ -100,7 +102,7 @@ impl PlanarElectrostatics {
             .mesh
             .vertices()
             .len()
-            .checked_mul(2)
+            .checked_mul(4)
             .and_then(|n| {
                 self.mesh
                     .faces()
@@ -127,6 +129,19 @@ impl PlanarElectrostatics {
             ));
         }
         let mut boundary = self.terminal_boundary(terminals, &vec![0.0; count], cancelled)?;
+        // A common electrode can join otherwise disconnected dielectric pieces.
+        // Each resulting electrical component has its own arbitrary potential,
+        // which must be removed before superposing any charge or field basis.
+        let components =
+            crate::scalar_potential::terminal_components(&self.mesh, terminals, cancelled)?;
+        let mut first_terminal = vec![None; self.mesh.vertices().len()];
+        let reference_terminals = terminals
+            .iter()
+            .enumerate()
+            .map(|(terminal, vertices)| {
+                *first_terminal[components[vertices[0]]].get_or_insert(terminal)
+            })
+            .collect();
         let zero_charge = vec![0.0; self.mesh.faces().len()];
         let mut basis = Vec::with_capacity(count);
         let mut charge_matrix = vec![0.0; entries];
@@ -203,6 +218,7 @@ impl PlanarElectrostatics {
         Ok(PlanarCapacitanceMatrix {
             problem: self,
             terminals: terminals.iter().map(|v| v.to_vec()).collect(),
+            reference_terminals,
             basis,
             matrix_f,
             charge_matrix_f: charge_matrix,
@@ -264,13 +280,19 @@ impl<'m> PlanarCapacitanceMatrix<'m> {
                 "one finite voltage per original electrode required",
             ));
         }
-        voltage_v.iter().map(|v| finite(v - voltage_v[0])).collect()
+        voltage_v
+            .iter()
+            .zip(&self.reference_terminals)
+            .map(|(&voltage, &reference)| finite(voltage - voltage_v[reference]))
+            .collect()
     }
 
     /// Recover an actual spatial electric field from the original unit-voltage
     /// solutions, including native weak charge reactions and energy admission.
     /// This performs no new linear solve. Nodal potentials are reported relative
-    /// to the FIRST electrode; a common voltage never enters field arithmetic.
+    /// to the first electrode of each connected electrical component; independent
+    /// common voltages never enter field arithmetic. Shared equipotential
+    /// terminals join components before their references are selected.
     ///
     /// Supply instantaneous terminal voltages from the native circuit in this
     /// owner's original electrode order. The returned field can drive the same
@@ -308,8 +330,17 @@ impl<'m> PlanarCapacitanceMatrix<'m> {
                 prescribed[v] = Some(potential);
             }
         }
+        let references = crate::scalar_potential::component_references(
+            &self.problem.stiffness,
+            &prescribed,
+            cancelled,
+        )?;
+        for (potential, &reference) in voltage.iter_mut().zip(&references) {
+            *potential = finite(*potential - reference)?;
+        }
         self.problem.recover_field(
             voltage,
+            references,
             &vec![0.0; self.problem.mesh.faces().len()],
             &vec![0.0; vertices],
             &prescribed,

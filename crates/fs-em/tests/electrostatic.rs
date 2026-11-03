@@ -222,6 +222,165 @@ fn free_charge_and_electrode_reactions_close_gauss_and_energy() {
 }
 
 #[test]
+fn large_common_voltage_preserves_native_charge_and_energy() {
+    let problem = slab(dielectric(4e-11), dielectric(4e-11));
+    let mut budget = controls();
+    budget.charge_tolerance_c = 1e-23;
+    budget.energy_tolerance_j = 1e-23;
+    let boundary = [(0, 0.0), (3, 0.0), (2, 6.0), (5, 6.0)];
+    let original = problem
+        .solve(&[0.0; 4], &boundary, budget, &mut || false)
+        .unwrap();
+    // The physical voltage differences remain exactly representable. Only the
+    // arbitrary electric-potential reference changes, by over twelve decades.
+    let bias = 2.0_f64.powi(40);
+    let shifted_boundary = boundary.map(|(vertex, value)| (vertex, bias + value));
+    let shifted = problem
+        .solve(&[0.0; 4], &shifted_boundary, budget, &mut || false)
+        .unwrap();
+    for (vertex, value) in shifted_boundary {
+        assert_eq!(shifted.voltage_v()[vertex].to_bits(), value.to_bits());
+    }
+    for (before, after) in original
+        .electric_field_v_m()
+        .iter()
+        .zip(shifted.electric_field_v_m())
+    {
+        assert!((before[0] - after[0]).abs() < 1e-12);
+        assert!((before[1] - after[1]).abs() < 1e-12);
+    }
+    for (before, after) in original
+        .nodal_boundary_charge_c()
+        .iter()
+        .zip(shifted.nodal_boundary_charge_c())
+    {
+        match (before, after) {
+            (Some(a), Some(b)) => assert!((a - b).abs() < 1e-24),
+            (None, None) => {}
+            _ => panic!("a gauge change altered the electrode trace"),
+        }
+    }
+    near(shifted.energy_j(), 0.5 * (4e-11 * 0.2) * 36.0);
+    assert!((shifted.energy_j() - original.energy_j()).abs() < 1e-23);
+    assert!(shifted.charge_balance_residual_c().abs() < 1e-23);
+    assert!(shifted.energy_balance_residual_j().abs() < 1e-23);
+}
+
+#[test]
+fn induced_voltage_below_absolute_spacing_survives_in_the_physical_field() {
+    let epsilon = 4e-11;
+    let induced_voltage = 1e-6;
+    let mesh = TriComplex2::from_indexed_triangles(
+        "charge-induced-sub-ulp-voltage",
+        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.5, 0.5]],
+        vec![[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
+        Metric2::planar(0.25).unwrap(),
+    )
+    .unwrap();
+    let problem = PlanarElectrostatics::new(
+        mesh,
+        vec![dielectric(epsilon); 4],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let charges = [12.0 * epsilon * induced_voltage; 4];
+    let mut budget = controls();
+    budget.charge_tolerance_c = 1e-29;
+    budget.energy_tolerance_j = 1e-35;
+    let boundary = [0, 1, 2, 3].map(|vertex| (vertex, 0.0));
+    let original = problem
+        .solve(&charges, &boundary, budget, &mut || false)
+        .unwrap();
+    let bias = 2.0_f64.powi(50);
+    let shifted = problem
+        .solve(
+            &charges,
+            &boundary.map(|(vertex, _)| (vertex, bias)),
+            budget,
+            &mut || false,
+        )
+        .unwrap();
+    // V_center-V_edge=rho/(12 epsilon). The induced microvolt is real even
+    // though adding it to this arbitrary reference rounds to exactly `bias`.
+    near(shifted.relative_voltage_v()[4], induced_voltage);
+    let expected_energy = 0.5 * epsilon * induced_voltage * induced_voltage;
+    assert!((shifted.energy_j() - expected_energy).abs() < 1e-35);
+    assert!(shifted.voltage_v().iter().all(|&voltage| voltage == bias));
+    assert!(shifted.reference_voltage_v().iter().all(|&voltage| voltage == bias));
+    assert_eq!(shifted.relative_voltage_v(), original.relative_voltage_v());
+    assert_eq!(shifted.electric_field_v_m(), original.electric_field_v_m());
+    assert_eq!(shifted.displacement_c_m2(), original.displacement_c_m2());
+    assert_eq!(
+        shifted.nodal_boundary_charge_c(),
+        original.nodal_boundary_charge_c(),
+    );
+    assert_eq!(shifted.energy_j().to_bits(), original.energy_j().to_bits());
+}
+
+#[test]
+fn disconnected_charged_domains_keep_independent_voltage_references() {
+    let mut points = Vec::new();
+    let mut faces = Vec::new();
+    for piece in 0..2 {
+        let offset = 5 * piece;
+        let x = 2.0 * piece as f64;
+        points.extend([
+            [x, 0.0],
+            [x + 1.0, 0.0],
+            [x + 1.0, 1.0],
+            [x, 1.0],
+            [x + 0.5, 0.5],
+        ]);
+        faces.extend(
+            [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]]
+                .map(|face| face.map(|vertex| vertex + offset)),
+        );
+    }
+    let mesh = TriComplex2::from_indexed_triangles(
+        "independently-biased-charged-dielectrics",
+        points,
+        faces,
+        Metric2::planar(0.25).unwrap(),
+    )
+    .unwrap();
+    let mut materials = vec![dielectric(4e-11); 4];
+    materials.extend(vec![dielectric(8e-11); 4]);
+    let problem = PlanarElectrostatics::new(mesh, materials, limits(), &mut || false).unwrap();
+    let rho = [12.0 * 4e-11, -24.0 * 8e-11];
+    let charges = [
+        rho[0], rho[0], rho[0], rho[0], rho[1], rho[1], rho[1], rho[1],
+    ];
+    let boundary = [0, 1, 2, 3, 5, 6, 7, 8].map(|vertex| (vertex, 0.0));
+    let mut budget = controls();
+    budget.charge_tolerance_c = 1e-23;
+    budget.energy_tolerance_j = 1e-23;
+    let original = problem
+        .solve(&charges, &boundary, budget, &mut || false)
+        .unwrap();
+    let bias = [2.0_f64.powi(40), -2.0_f64.powi(40)];
+    let shifted_boundary = boundary.map(|(vertex, _)| (vertex, bias[usize::from(vertex >= 5)]));
+    let shifted = problem
+        .solve(&charges, &shifted_boundary, budget, &mut || false)
+        .unwrap();
+    // Each component's known source equation is independent: V_center-V_edge
+    // equals rho/(12 epsilon), hence +1 V and -2 V despite unrelated gauges.
+    assert_eq!(shifted.voltage_v()[4] - bias[0], 1.0);
+    assert_eq!(shifted.voltage_v()[9] - bias[1], -2.0);
+    for (piece, expected_rho) in rho.into_iter().enumerate() {
+        let first = piece * 5;
+        let reaction: f64 = shifted.nodal_boundary_charge_c()[first..first + 4]
+            .iter()
+            .map(|charge| charge.unwrap())
+            .sum();
+        assert!((reaction + 0.25 * expected_rho).abs() < 1e-23);
+    }
+    assert!((shifted.energy_j() - original.energy_j()).abs() < 1e-23);
+    assert!(shifted.maximum_free_charge_residual_c() < 1e-23);
+    assert!(shifted.energy_balance_residual_j().abs() < 1e-23);
+}
+
+#[test]
 fn spatial_dielectric_changes_native_circuit_charge_and_decay() {
     let mut voltages = Vec::new();
     for epsilon in [4e-6, 8e-6] {
