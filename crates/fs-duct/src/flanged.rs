@@ -39,8 +39,10 @@
 //! no pole or branch point lies in `Re x > TAIL_X`.
 
 use crate::DuctError;
+use crate::fluid::FluidDuctError;
 use crate::levine_schwinger::gauss_legendre;
 use fs_la::eigen_complex::lu_complex;
+use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 use std::sync::LazyLock;
@@ -322,6 +324,44 @@ pub fn flanged_modal_impedance(
     modes: usize,
 ) -> Result<Vec<C64>, DuctError> {
     crate::validate_gas(exterior)?;
+    flanged_modal_impedance_from_state(&gas_acoustic_state(exterior)?, radius, omega, modes)
+}
+
+/// Complete flanged radiation matrix from one original gas or liquid material.
+///
+/// The material supplies its actual density and adiabatic sound speed, once.
+/// The original spectral quadrature, modal normalization, pressure/volume-flow
+/// pairing, phasor convention and finite-mode limit are unchanged. No ideal-gas
+/// EOS, transport data or atmospheric default is inferred for a liquid or real
+/// gas. This is a linear, stationary, homogeneous, nondispersive exterior with
+/// an infinite rigid baffle; bulk absorption, phase motion and mean flow remain
+/// outside this radiation law. Original material failures remain intact.
+pub fn flanged_modal_impedance_from_material<M: FluidAcoustics + ?Sized>(
+    exterior: &M,
+    radius: f64,
+    omega: f64,
+    modes: usize,
+) -> Result<Vec<C64>, FluidDuctError> {
+    let acoustic = exterior.acoustic_state()?;
+    Ok(flanged_modal_impedance_from_state(
+        &acoustic, radius, omega, modes,
+    )?)
+}
+
+fn gas_acoustic_state(gas: &GasState) -> Result<FluidAcousticState, DuctError> {
+    // Gas entry points have already retained their original coherence refusal.
+    // This same snapshot admission is used by every generic fluid consumer.
+    FluidAcousticState::try_new(gas.density, gas.sound_speed).map_err(|_| DuctError::BadParameter {
+        what: "flanged radiation needs a representable material acoustic state",
+    })
+}
+
+fn flanged_modal_impedance_from_state(
+    exterior: &FluidAcousticState,
+    radius: f64,
+    omega: f64,
+    modes: usize,
+) -> Result<Vec<C64>, DuctError> {
     if !(radius > 0.0 && radius.is_finite() && omega > 0.0 && omega.is_finite()) {
         return Err(DuctError::BadParameter {
             what: "flanged modal radiation needs positive finite radius and frequency",
@@ -332,20 +372,24 @@ pub fn flanged_modal_impedance(
             what: "flanged radiation mode count outside 1..=FLANGED_MAX_MODES",
         });
     }
-    let ka = omega / exterior.sound_speed * radius;
+    let ka = omega / exterior.sound_speed_m_s() * radius;
     if !(ka <= FLANGED_MAX_KA) {
         return Err(DuctError::RadiationKaTooLarge { ka });
     }
-    let z0 = exterior.density * exterior.sound_speed
+    let z0 = exterior.density_kg_m3() * exterior.sound_speed_m_s()
         / (core::f64::consts::PI * radius * radius);
     if !(z0.is_finite() && z0 > 0.0) {
         return Err(DuctError::Singular);
     }
-    let (r00, x00) =
-        fs_phs::baffled_piston_impedance(exterior.density, exterior.sound_speed, radius, omega)
-            .map_err(|_| DuctError::BadParameter {
-                what: "flanged radiation piston term",
-            })?;
+    let (r00, x00) = fs_phs::baffled_piston_impedance(
+        exterior.density_kg_m3(),
+        exterior.sound_speed_m_s(),
+        radius,
+        omega,
+    )
+    .map_err(|_| DuctError::BadParameter {
+        what: "flanged radiation piston term",
+    })?;
     let mut matrix = vec![C64::new(r00, x00); modes * modes];
     if modes > 1 {
         let packed_matrix = radiation_matrix(ka, modes)?;
@@ -388,6 +432,29 @@ pub fn flanged_pipe_impedance(
     flanged_pipe_impedance_with_exterior(state, state, radius, omega, modes)
 }
 
+/// Plane-mode load of a pipe and exterior filled by the SAME original fluid.
+///
+/// The material is evaluated once, and its admitted density and adiabatic sound
+/// speed drive both radiation and the eliminated outgoing higher pipe modes.
+/// The numerical owner and exact-input cache are shared with the gas API.
+/// Source, phase and EOS refusals retain the material's original error.
+///
+/// This is the same frozen, linear, infinite-baffle model as
+/// [`flanged_pipe_impedance`]. It does not resolve bulk absorption, a moving
+/// interface, capillarity, phase conversion or an unsteady mean flow. A
+/// pressure-release free surface is a different physical boundary.
+pub fn flanged_pipe_impedance_from_material<M: FluidAcoustics + ?Sized>(
+    material: &M,
+    radius: f64,
+    omega: f64,
+    modes: usize,
+) -> Result<C64, FluidDuctError> {
+    let state = material.acoustic_state()?;
+    Ok(flanged_pipe_impedance_from_states(
+        &state, &state, radius, omega, modes,
+    )?)
+}
+
 /// Flanged aperture between a local duct gas and a homogeneous exterior.
 /// The exterior owns radiation; the duct gas owns the eliminated higher
 /// modes. Both coherent states must have the same static pressure. This is
@@ -411,6 +478,22 @@ pub fn flanged_pipe_impedance_with_exterior(
             what: "flanged radiation interface requires equal static pressure",
         });
     }
+    flanged_pipe_impedance_from_states(
+        &gas_acoustic_state(state)?,
+        &gas_acoustic_state(exterior)?,
+        radius,
+        omega,
+        modes,
+    )
+}
+
+pub(crate) fn flanged_pipe_impedance_from_states(
+    state: &FluidAcousticState,
+    exterior: &FluidAcousticState,
+    radius: f64,
+    omega: f64,
+    modes: usize,
+) -> Result<C64, DuctError> {
     if !(radius > 0.0 && radius.is_finite() && omega > 0.0 && omega.is_finite()) {
         return Err(DuctError::BadParameter {
             what: "flanged radiation needs positive finite radius and frequency",
@@ -421,21 +504,21 @@ pub fn flanged_pipe_impedance_with_exterior(
             what: "flanged radiation mode count outside 1..=FLANGED_MAX_MODES",
         });
     }
-    let ka = omega / exterior.sound_speed * radius;
+    let ka = omega / exterior.sound_speed_m_s() * radius;
     if !(ka <= FLANGED_MAX_KA) {
         return Err(DuctError::RadiationKaTooLarge { ka });
     }
-    let internal_ka = omega / state.sound_speed * radius;
+    let internal_ka = omega / state.sound_speed_m_s() * radius;
     if !(internal_ka <= FLANGED_MAX_KA) {
         return Err(DuctError::RadiationKaTooLarge { ka: internal_ka });
     }
     let key = (
         radius.to_bits(),
         omega.to_bits(),
-        state.density.to_bits(),
-        state.sound_speed.to_bits(),
-        exterior.density.to_bits(),
-        exterior.sound_speed.to_bits(),
+        state.density_kg_m3().to_bits(),
+        state.sound_speed_m_s().to_bits(),
+        exterior.density_kg_m3().to_bits(),
+        exterior.sound_speed_m_s().to_bits(),
         modes,
     );
     if let Some(&hit) = memo().get(&key) {
@@ -463,28 +546,33 @@ fn memo() -> std::sync::MutexGuard<'static, std::collections::HashMap<MemoKey, C
 }
 
 fn flanged_load_uncached(
-    state: &GasState,
-    exterior: &GasState,
+    state: &FluidAcousticState,
+    exterior: &FluidAcousticState,
     radius: f64,
     omega: f64,
     ka: f64,
     modes: usize,
 ) -> Result<C64, DuctError> {
-    let z0 = exterior.density * exterior.sound_speed / (core::f64::consts::PI * radius * radius);
-    let (r00, x00) =
-        fs_phs::baffled_piston_impedance(exterior.density, exterior.sound_speed, radius, omega)
-            .map_err(|_| DuctError::BadParameter {
-                what: "flanged radiation piston term",
-            })?;
+    let z0 = exterior.density_kg_m3() * exterior.sound_speed_m_s()
+        / (core::f64::consts::PI * radius * radius);
+    let (r00, x00) = fs_phs::baffled_piston_impedance(
+        exterior.density_kg_m3(),
+        exterior.sound_speed_m_s(),
+        radius,
+        omega,
+    )
+    .map_err(|_| DuctError::BadParameter {
+        what: "flanged radiation piston term",
+    })?;
     let piston = C64::new(r00, x00);
     let load = if modes == 1 {
         piston
     } else {
         let rules = RULES.as_ref().map_err(Clone::clone)?;
         let z = radiation_matrix(ka, modes)?;
-        let internal_ka = omega / state.sound_speed * radius;
-        let impedance_ratio = state.density * state.sound_speed
-            / (exterior.density * exterior.sound_speed);
+        let internal_ka = omega / state.sound_speed_m_s() * radius;
+        let impedance_ratio = state.density_kg_m3() * state.sound_speed_m_s()
+            / (exterior.density_kg_m3() * exterior.sound_speed_m_s());
         // Modes exactly at cutoff carry ζ = ∞ and drop out (the continuous limit).
         let keep: Vec<usize> = (1..modes)
             .filter(|&n| {

@@ -16,6 +16,7 @@
 //! Every quadrature is fixed-node Gauss–Legendre and refinable through `nodes`.
 
 use crate::{DuctError, modal};
+use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, dd::Dd, det};
 use std::{
@@ -316,7 +317,33 @@ pub fn levine_schwinger_impedance(
     q: LsQuadrature,
 ) -> Result<C64, DuctError> {
     crate::validate_gas(state)?;
-    if [state.density, state.sound_speed, radius, omega]
+    impedance_from_coefficients(state.density, state.sound_speed, radius, omega, q)
+}
+
+/// The same thin-wall numerical owner for any admitted homogeneous fluid.
+pub(crate) fn impedance_from_state(
+    state: &FluidAcousticState,
+    radius: f64,
+    omega: f64,
+    q: LsQuadrature,
+) -> Result<C64, DuctError> {
+    impedance_from_coefficients(
+        state.density_kg_m3(),
+        state.sound_speed_m_s(),
+        radius,
+        omega,
+        q,
+    )
+}
+
+fn impedance_from_coefficients(
+    density: f64,
+    sound_speed: f64,
+    radius: f64,
+    omega: f64,
+    q: LsQuadrature,
+) -> Result<C64, DuctError> {
+    if [density, sound_speed, radius, omega]
         .iter()
         .any(|v| !v.is_finite() || *v <= 0.0)
     {
@@ -324,8 +351,8 @@ pub fn levine_schwinger_impedance(
             what: "Levine-Schwinger gas, radius and omega must be finite positive SI values",
         });
     }
-    let ka = omega / state.sound_speed * radius;
-    let zc = state.density * state.sound_speed / (PI * radius * radius);
+    let ka = omega / sound_speed * radius;
+    let zc = density * sound_speed / (PI * radius * radius);
     let z = levine_schwinger(ka, q)?.normalized_impedance().scale(zc);
     if !z.re.is_finite() || !z.im.is_finite() {
         return Err(DuctError::BadParameter {

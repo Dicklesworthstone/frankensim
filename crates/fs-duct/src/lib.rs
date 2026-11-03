@@ -114,6 +114,7 @@ pub use chimney::{
 };
 
 use fs_la::eigen_complex::lu_complex;
+use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
@@ -1435,6 +1436,40 @@ pub fn compact_radiation_impedance(
     }
 }
 
+/// Original scalar radiation models driven by one actual gas or liquid state.
+///
+/// The material is evaluated once. Density and adiabatic sound speed drive the
+/// same unflanged low-`ka` fit, exact thin-wall Levine--Schwinger integral, or
+/// multimodal flanged load as the gas API. The pipe and exterior contain the
+/// identical homogeneous fluid. Source errors, frequency/cutoff limits and
+/// the supplied LS quadrature remain explicit; no gas surrogate is created.
+///
+/// These are frozen, linear, stationary, nondispersive exterior models. A
+/// liquid free surface, capillary motion, phase transfer, absorption and mean
+/// flow need their own boundary/constitutive model. Closed and ideal-open
+/// boundaries are not radiating and are refused by this API.
+pub fn compact_radiation_impedance_from_material<M: FluidAcoustics + ?Sized>(
+    termination: Termination,
+    material: &M,
+    radius: f64,
+    omega: f64,
+) -> Result<C64, fluid::FluidDuctError> {
+    if matches!(termination, Termination::Closed | Termination::IdealOpen) {
+        return Err(DuctError::BadParameter {
+            what: "compact radiation impedance is defined for radiating mouths only",
+        }
+        .into());
+    }
+    let state = material.acoustic_state()?;
+    Ok(
+        termination_impedance_from_state(termination, &state, radius, omega)?
+            .0
+            .ok_or(DuctError::BadParameter {
+                what: "open radiation load missing impedance",
+            })?,
+    )
+}
+
 /// Free-field observer amplitude after compact radiation: spherical
 /// spreading times ISO 9613-1 molecular absorption.
 ///
@@ -1490,14 +1525,43 @@ fn termination_impedance(
     omega: f64,
 ) -> Result<(Option<C64>, f64), DuctError> {
     validate_gas(state)?;
-    let ka = omega / state.sound_speed * radius;
+    let acoustic = FluidAcousticState::try_new(state.density, state.sound_speed).map_err(|_| {
+        DuctError::BadParameter {
+            what: "duct termination needs representable material acoustic coefficients",
+        }
+    })?;
+    termination_impedance_from_state(termination, &acoustic, radius, omega)
+}
+
+fn termination_impedance_from_state(
+    termination: Termination,
+    state: &FluidAcousticState,
+    radius: f64,
+    omega: f64,
+) -> Result<(Option<C64>, f64), DuctError> {
+    match termination {
+        Termination::Closed => return Ok((None, 0.0)),
+        Termination::IdealOpen => return Ok((Some(C64::ZERO), 0.0)),
+        _ => {}
+    }
+    if !radius.is_finite() || radius <= 0.0 || !omega.is_finite() || omega <= 0.0 {
+        return Err(DuctError::BadParameter {
+            what: "radiation termination needs positive finite radius and frequency",
+        });
+    }
+    let ka = omega / state.sound_speed_m_s() * radius;
     let area = core::f64::consts::PI * radius * radius;
-    let z0 = state.density * state.sound_speed / area;
+    let z0 = state.density_kg_m3() * state.sound_speed_m_s() / area;
+    if !ka.is_finite() || ka <= 0.0 || !z0.is_finite() || z0 <= 0.0 {
+        return Err(DuctError::BadParameter {
+            what: "radiation termination acoustic radius and impedance must be representable",
+        });
+    }
     match termination {
         Termination::Closed => Ok((None, 0.0)),
         Termination::IdealOpen => Ok((Some(C64::ZERO), 0.0)),
         Termination::UnflangedThinWall { quadrature } => Ok((
-            Some(levine_schwinger::levine_schwinger_impedance(
+            Some(levine_schwinger::impedance_from_state(
                 state, radius, omega, quadrature,
             )?),
             ka,
@@ -1514,7 +1578,8 @@ fn termination_impedance(
         // (0.8216 a) below ka = 1 and piston (8/(3π) a) above it jumped,
         // which no causal line can realize.
         Termination::FlangedOpen => Ok((
-            Some(flanged::flanged_pipe_impedance(
+            Some(flanged::flanged_pipe_impedance_from_states(
+                state,
                 state,
                 radius,
                 omega,

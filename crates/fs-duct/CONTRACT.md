@@ -2517,8 +2517,10 @@ adiabatic fluid stiffness and Cp/Cv thermal relaxation. Gas network and generic
 fluid consumers share the same surface-to-volume-flow and phasor conversion.
 
 Closed, pressure-release, explicit and tabulated boundaries retain their
-existing semantics. Gas-specific radiation variants require an explicitly
-resolved impedance in this generic path. The porous skeleton is rigid and
+existing semantics. All three radiating variants use the original material
+snapshot in their existing unflanged low-`ka`, exact thin-wall LS, or
+infinite-baffle modal radiation owner.
+The porous skeleton is rigid and
 fully saturated by one uniform fluid; partial saturation, frame motion and
 transient deposition of absorbed acoustic heat are outside this entry point.
 
@@ -2528,6 +2530,46 @@ check actual pressure/flow, material and pore substitutions, acoustic power,
 separate wall diffusion, single-snapshot evaluation, source support and
 cancellation. These regressions are authored; native Cargo execution remains
 unverified in the resource-exhausted authoring environment.
+
+### Shared-fluid flanged radiation
+
+`flanged_pipe_impedance_from_material` and
+`flanged_modal_impedance_from_material` admit one original `FluidAcoustics`
+response, including liquids and real gases, and reuse the same spectral
+quadrature, modal roots, normalization, Schur complement and exact-input cache
+as the existing gas APIs. The scalar load includes the outgoing higher pipe
+modes; the complete matrix preserves every retained modal cross term and the
+peak-phasor power pairing `Re(U* P)/2`. Existing gas coherence and two-gas
+static-pressure admission remain intact.
+
+`fluid::input_impedance_boundary` resolves `FlangedOpen` from the same single
+complete material snapshot as its duct and wall diffusion. The exterior is
+the identical homogeneous fluid. Original source, phase, numerical-band and
+mode-cap errors remain refusals. No transport coefficients, ideal-gas closure,
+free surface, capillarity, bulk absorption, mean flow or phase motion are
+inferred by the radiation model. The infinite-baffle and finite-mode limits of
+the original owner remain in force.
+
+G1/G3 regressions in `tests/fluid_acoustics/flanged.rs` check the independent
+low-frequency piston asymptote, gas bit equivalence, source-water impedance
+scaling, multimodal reciprocity and positive radiated power, an analytic loaded
+liquid tube, separate wall loss, single-snapshot evaluation and original
+source/cancellation/cap refusals.
+
+`compact_radiation_impedance_from_material` extends that same admission to
+every native scalar radiation model. The original unflanged asymptote retains
+its `ka <= 1` domain; the exact thin-wall LS owner retains its first
+axisymmetric-mode cutoff and explicit quadrature node budget. Gas and generic
+entry points share the original numerical expressions and preserve valid gas
+bits. `NetworkLoad::Radiation` routes all three models through this owner;
+ordinary closed and pressure-release loads retain their separate semantics,
+and neither can masquerade as a radiating termination. The same-fluid,
+stationary, nondispersive assumptions apply to both unflanged models too.
+
+Two additional G1/G3 groups compare liquid pressure/flow to the low-`ka`
+expression and the retained independent LS reference, preserve all gas-model
+bits, close loaded-pipe power for every radiation model, and retain source
+sampling, cutoff, quadrature, geometry and nonradiating-boundary refusals.
 
 ## Distributed locally reacting porous lining
 

@@ -212,6 +212,7 @@ fn flanged_refusals_fire_by_name() {
 #[test]
 fn flanged_load_bitwise_repeat() {
     let gas = air();
+    let acoustic = gas_acoustic_state(&gas).unwrap();
     let omega = omega_of(&gas, 2.3);
     // The same ka the public entry derives from omega.
     let ka = omega / gas.sound_speed * RADIUS;
@@ -221,7 +222,7 @@ fn flanged_load_bitwise_repeat() {
     let calls = 50_u32;
     let mut b = C64::ZERO;
     for _ in 0..calls {
-        b = flanged_load_uncached(&gas, &gas, RADIUS, omega, ka, FLANGED_MODES).expect("fresh");
+        b = flanged_load_uncached(&acoustic, &acoustic, RADIUS, omega, ka, FLANGED_MODES).expect("fresh");
     }
     let per_call_us = start.elapsed().as_secs_f64() * 1.0e6 / f64::from(calls);
     assert_eq!((a.re.to_bits(), a.im.to_bits()), (b.re.to_bits(), b.im.to_bits()));
@@ -303,6 +304,7 @@ fn two_medium_flange_matches_pressure_velocity_continuity() {
 #[test]
 fn flanged_design_is_measured_across_and_beyond_the_cap() {
     let gas = air();
+    let acoustic = gas_acoustic_state(&gas).unwrap();
     let z0 = gas.density * gas.sound_speed / (PI * RADIUS * RADIUS);
     let mut at_cap = None;
     let mut first_above = None;
@@ -313,8 +315,8 @@ fn flanged_design_is_measured_across_and_beyond_the_cap() {
         let closed = C64::new(r / z0, x / z0);
         let quad = radiation_matrix(ka, 1).expect("matrix")[0];
         let piston_rel = (quad - closed).abs() / closed.abs();
-        let l16 = flanged_load_uncached(&gas, &gas, RADIUS, omega, ka, FLANGED_MODES);
-        let l24 = flanged_load_uncached(&gas, &gas, RADIUS, omega, ka, FLANGED_MAX_MODES);
+        let l16 = flanged_load_uncached(&acoustic, &acoustic, RADIUS, omega, ka, FLANGED_MODES);
+        let l24 = flanged_load_uncached(&acoustic, &acoustic, RADIUS, omega, ka, FLANGED_MAX_MODES);
         let line = match (&l16, &l24) {
             (Ok(a), Ok(b)) => {
                 let ladder = (*a - *b).abs() / b.abs();

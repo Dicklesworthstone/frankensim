@@ -589,9 +589,11 @@ fn admit_load(load: Option<C64>) -> Result<(), DuctError> {
 /// and mechanical wall loss remain separate physical contributions.
 ///
 /// Closed, pressure-release, explicit and tabulated loads also use their
-/// existing owners. Gas-only radiation models refuse; a separately admitted
-/// radiation impedance can be supplied as [`NetworkLoad::Impedance`]. The fluid
-/// is uniform and the pore skeleton remains rigid and fully saturated in that
+/// existing owners. Radiation uses the same fluid on both sides of the original
+/// unflanged low-`ka`, exact thin-wall, or multimodal flanged owner. Its original
+/// frequency/cutoff and quadrature admission remains in force. These radiation
+/// boundaries are not liquid free surfaces. The fluid is uniform and the pore
+/// skeleton remains rigid and fully saturated in that
 /// same fluid. This adds no frame waves, partial saturation, mean flow, or
 /// phase-change model. The caller retains the original fluid source receipts.
 #[allow(clippy::too_many_arguments)]
@@ -624,12 +626,15 @@ pub fn input_impedance_boundary<M: ThermoviscousFluid + ?Sized>(
             let surface = material.surface_impedance_rigid_fluid(&state, omega, *thickness_m)?;
             Some(crate::network::porous_volume_impedance(surface, *area_m2)?)
         }
-        NetworkLoad::Radiation { .. } => {
-            return Err(bad(
-                "shared fluid boundaries need an explicitly resolved radiation impedance",
-            )
-            .into());
-        }
+        NetworkLoad::Radiation {
+            radius,
+            termination,
+        } => Some(crate::compact_radiation_impedance_from_material(
+            *termination,
+            &state,
+            *radius,
+            omega,
+        )?),
     };
     poll(&mut cancelled, 0)?;
     // This immutable admitted snapshot implements the shared trait directly:
