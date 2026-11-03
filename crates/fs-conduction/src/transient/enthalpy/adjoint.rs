@@ -933,7 +933,7 @@ fn check_chart(
             poll(cx, vertex)?;
         }
         let curve = storage.curve_for_vertex(vertex);
-        if let Some(source) = storage.sourced_melting {
+        if let Some(source) = storage.sourced_melting.as_ref() {
             if source.conductivity_kink_at(value, vertex)? {
                 return Err(EnthalpyAdjointError::MaterialKink);
             }

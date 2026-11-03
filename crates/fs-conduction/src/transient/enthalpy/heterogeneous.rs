@@ -29,6 +29,7 @@ use fs_material::thermal::conduction::phase::PreparedPhaseConductivity;
 
 use super::adjoint::{EnthalpyAdjointError, EnthalpyStepGradient, EnthalpyStepLinearization};
 use super::material::phase::{MaterialPhaseTransport, PhaseFieldTransport};
+use super::material::melting::{MaterialMeltingTransport, MeltingFieldTransport};
 use super::{
     EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
     finite, poll,
@@ -355,9 +356,9 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         density_kg_m3: &[f64],
     ) -> Result<Self, HeterogeneousEnthalpyError> {
         poll(cx, 0)?;
-        if self.inner.sourced_phase.is_some() {
+        if self.inner.sourced_phase.is_some() || self.inner.sourced_melting.is_some() {
             return Err(EnthalpyError::InvalidInput(
-                "nodal reference density requires an explicitly profile-aware phase source",
+                "nodal reference density requires an explicitly profile-aware original source",
             ).into());
         }
         let n = self.inner.mesh.vertex_count();
@@ -388,6 +389,82 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
     #[must_use]
     pub fn nodal_reference_density_kg_m3(&self) -> Option<&[f64]> {
         self.nodal_reference_density_kg_m3.as_deref()
+    }
+
+    /// Bind each region's original sharp-melting calorics, phase-specific k(T),
+    /// volume-fraction coexistence closure and single-phase reference density.
+    /// Distinct materials retain separate nodal traces and declared contact;
+    /// their enthalpy datums and phase charts are never averaged.
+    pub fn from_melting_materials(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh, materials: &'c [MaterialMeltingTransport],
+        element_material_ids: &[usize], budget: EnthalpyBudget,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        Self::prepare_melting_materials(cx, mesh, materials, element_material_ids, None, budget)
+    }
+
+    /// Bind the same original melting sources with an explicit positive P1
+    /// reference-density field. This initial inventory supersedes the source's
+    /// scalar reference-density answer; equilibrium density still affects only
+    /// mass-to-volume phase conversion, never the closed specimen's mass.
+    pub fn from_melting_materials_with_nodal_reference_density(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh, materials: &'c [MaterialMeltingTransport],
+        element_material_ids: &[usize], density_kg_m3: &[f64], budget: EnthalpyBudget,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        Self::prepare_melting_materials(cx, mesh, materials, element_material_ids, Some(density_kg_m3), budget)
+    }
+
+    fn prepare_melting_materials(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh, materials: &'c [MaterialMeltingTransport],
+        element_material_ids: &[usize], nodal_density: Option<&[f64]>, budget: EnthalpyBudget,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        poll(cx, 0)?;
+        if materials.len() > budget.max_elements {
+            return Err(EnthalpyError::Budget { resource: "materials", required: materials.len(),
+                limit: budget.max_elements }.into());
+        }
+        let mut reference = Vec::with_capacity(materials.len());
+        for (index, material) in materials.iter().enumerate() {
+            if index % ASSEMBLY_TILE == 0 { poll(cx, index)?; }
+            reference.push(ReferenceEnthalpyMaterial { curve: material.caloric().curve(),
+                reference_density_kg_m3: material.reference_density_kg_m3() });
+        }
+        let mut storage = Self::prepare_reference_inventory(cx, mesh, &reference,
+            element_material_ids, nodal_density, budget)?;
+        storage.inner.sourced_melting = Some(MeltingFieldTransport::Assigned {
+            materials, vertex_material_ids: Arc::clone(&storage.vertex_material_ids),
+        });
+        Ok(storage)
+    }
+
+    /// Original caloric, conductivity, coexistence and density-source answers.
+    /// With an explicit nodal density profile, the source's scalar reference
+    /// answer is provenance only; `reference_nodal_masses_kg` owns the inventory.
+    #[must_use]
+    pub fn melting_transport_source(&self, material: usize) -> Option<&'c MaterialMeltingTransport> {
+        self.inner.sourced_melting.as_ref()?.material(material)
+    }
+
+    /// Physical problem using the exact original melting-source assignment.
+    /// The shared unit tensor is only the source assembly's numerical basis.
+    /// Extra material tensors or phase multipliers remain explicitly refused.
+    pub fn melting_transport_problem<'s>(
+        &'s self, boundary: &'s crate::ThermalBoundary, source: &'s crate::ScalarField,
+    ) -> Result<ConductionProblem<'s>, EnthalpyError> {
+        let melting = self.inner.sourced_melting.as_ref().ok_or(EnthalpyError::InvalidInput(
+            "heterogeneous transport has no bound original melting sources"))?;
+        Ok(ConductionProblem { mesh: self.inner.mesh, boundary,
+            material: melting.numerical_basis(), element_materials: None, source })
+    }
+
+    /// Actual element-average heat flux using the same source-specific nodal
+    /// k(h), phase volume mixture and original T(h) as every native step.
+    /// Contact flux retains its existing interface report and sign convention.
+    pub fn melting_transport_heat_flux(&self, cx: &Cx<'_>, h: &[f64])
+        -> Result<Vec<[f64; 3]>, EnthalpyError>
+    {
+        self.inner.sourced_melting.as_ref().ok_or(EnthalpyError::InvalidInput(
+            "heterogeneous transport has no bound original melting sources"))?
+            .element_heat_flux(cx, self.inner.mesh, h)
     }
 
     /// Bind one original isotropic phase source and fixed reference density

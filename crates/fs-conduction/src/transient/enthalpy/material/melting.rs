@@ -27,6 +27,9 @@ use crate::{
     ThermalBoundary,
 };
 
+mod field;
+pub(in crate::transient::enthalpy) use field::MeltingFieldTransport;
+
 /// Declared isotropic effective conductivity of coexisting phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoexistenceConductivity {
@@ -373,8 +376,17 @@ impl MaterialMeltingTransport {
             self.reference_density_kg_m3(),
             budget,
         )?;
-        storage.sourced_melting = Some(self);
+        storage.sourced_melting = Some(MeltingFieldTransport::Uniform(self));
         Ok(storage)
+    }
+
+    /// Physical element-average heat flux from the same P1 nodal k(h) law
+    /// and original nodal T(h) used by the prepared spatial solver.
+    /// This is a constitutive flux, not a conservative face-flux recovery.
+    pub fn element_heat_flux(
+        &self, cx: &Cx<'_>, mesh: &ConductionMesh, h: &[f64],
+    ) -> Result<Vec<[f64; 3]>, EnthalpyError> {
+        MeltingFieldTransport::Uniform(self).element_heat_flux(cx, mesh, h)
     }
 
     /// Construct the existing problem with this law's retained numerical basis.

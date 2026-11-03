@@ -313,7 +313,7 @@ pub struct EnthalpyBackwardEuler<'m, 'c> {
     phase_conductivity: Option<PhaseConductivity>,
     // A source-bound melting adapter supplies nodal k(h), using the existing
     // element-scale assembly with its retained unit tensor as numerical basis.
-    sourced_melting: Option<&'c material::melting::MaterialMeltingTransport>,
+    sourced_melting: Option<material::melting::MeltingFieldTransport<'c>>,
     // Original multiaxis source integrated over P1 h, with no inferred phase mix.
     sourced_phase: Option<material::phase::PhaseFieldTransport<'c>>,
 }
@@ -729,7 +729,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                 "reference mass and history must match the exact transport mesh",
             ));
         }
-        if let Some(source) = self.sourced_melting {
+        if let Some(source) = self.sourced_melting.as_ref() {
             if !source.matches_numerical_basis(problem) {
                 return Err(EnthalpyError::InvalidInput(
                     "source-bound melting requires its original problem tensor and no element override",
@@ -995,7 +995,7 @@ impl StepContext<'_, '_, '_, '_> {
             return source.assemble(self.cx, self.storage.mesh, h, false)
                 .map(|(values, _)| Some(values));
         }
-        if let Some(source) = self.storage.sourced_melting {
+        if let Some(source) = self.storage.sourced_melting.as_ref() {
             let mut nodal = Vec::with_capacity(h.len());
             for (vertex, &value) in h.iter().enumerate() {
                 if vertex % ASSEMBLY_TILE == 0 {
@@ -1048,7 +1048,7 @@ impl StepContext<'_, '_, '_, '_> {
     }
 
     fn phase_scale_derivatives(&self, h: &[f64]) -> Result<Option<Vec<[f64; 4]>>, EnthalpyError> {
-        if let Some(source) = self.storage.sourced_melting {
+        if let Some(source) = self.storage.sourced_melting.as_ref() {
             let mut nodal = Vec::with_capacity(h.len());
             for (vertex, &value) in h.iter().enumerate() {
                 if vertex % ASSEMBLY_TILE == 0 {

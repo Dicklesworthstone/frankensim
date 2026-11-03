@@ -1,5 +1,7 @@
 //! Original source melting reaches spatial fields, heat audits and adjoints.
 mod support;
+#[path = "material_melting/heterogeneous.rs"]
+mod heterogeneous;
 
 use fs_conduction::lumped::{
     BiotGate, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, solve_lumped_enthalpy,

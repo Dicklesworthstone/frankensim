@@ -3213,14 +3213,52 @@ semi-discrete equation is dh/dt=800+0.5h, with heat closure and temporal
 refinement; validity/budget/cancellation refusals; and a conductivity-source
 corner refusal. The contour case is a single-tetrahedron temporal check, not
 a continuum Stefan or mesh-convergence claim. The existing Stefan refinement
-suite remains the spatial-front reference. These new native tests were
-authored but could not execute in the authoring environment because the shared
-filesystem was full; Rustfmt parsing was completed.
+suite remains the spatial-front reference. Focused actual-source native
+verification passes all nine uniform/regional material-melting cases and
+15 adjacent enthalpy-adjoint regressions. This is not a full workspace/DSR verdict.
 
-This source adapter currently binds one isotropic material over a stationary
+These source bindings use isotropic materials over a stationary
 mesh. Evolving geometry, density-driven mass changes, pressure work, convection,
 phase kinetics, anisotropic phase mixtures and uncertainty propagation are
 not supplied by this path.
+
+### Regional original-source sharp melting
+
+`HeterogeneousEnthalpyBackwardEuler::from_melting_materials` binds a retained
+`MaterialMeltingTransport` per material and an explicit material ID per element.
+Each region keeps its own fusion temperature, latent heat, enthalpy datum,
+solid/liquid Cp and conductivity sources, phase densities and coexistence
+closure. Immutable vertex assignments share the existing heterogeneous storage
+owner; neither sources nor charts are copied into per-element models.
+Distinct material IDs require disjoint nodal traces and declared interfaces.
+Conflicting shared vertices, unknown IDs, orphan vertices and exhausted spatial
+budgets use the existing preparation refusals rather than averaging charts.
+
+Reference masses use each material's original single-phase density answer.
+`from_melting_materials_with_nodal_reference_density` instead admits an explicit
+positive P1 reference-density profile through the existing exact mass assembly.
+That declared initial inventory supersedes scalar source density; phase density
+still converts mass fraction to volume fraction and never changes stored mass
+during heating or melting. `melting_transport_source` exposes each retained
+source independently of this inventory choice.
+
+`melting_transport_problem` retains the original unit numerical basis and
+refuses extra conductivity tensors or phase multipliers. The existing nodal
+k(h) interpolation, exact P1 element mean and enthalpy derivative assemble the
+same physical operator for BE, SDIRK2, adaptive stepping and strict discrete adjoints.
+Each nodal source sees only its assigned material's h. Uniform
+`MaterialMeltingTransport::element_heat_flux` and assigned
+`melting_transport_heat_flux` use the same source-specific nodal k(h) and T(h).
+These are constitutive element averages, not a conservative face-flux recovery;
+contact heat remains in the existing interface report. Genuine source
+or caloric corners retain the classical-adjoint refusal.
+
+The regional coupon tests use distinct fusion temperatures, latent heats,
+reference densities, coexistence closures and disjoint enthalpy datums. They
+independently reconstruct conduction/contact balance, element heat flux and
+Jacobian columns, compare source-adjoint perturbations, and check both time
+integrators. Latent exchange with graded reference inventory, uniform-source
+parity and original-assignment/source-domain refusals use the same test seam.
 
 ## Interference-driven linear lumped thermal response
 
