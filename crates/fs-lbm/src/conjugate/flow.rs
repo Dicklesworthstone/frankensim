@@ -25,6 +25,8 @@ pub use density_projection::{
     DensityMomentumReconstruction, DensityMomentumReconstructionControls,
     DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls,
     DensityProjectionReport, ForcedDensityProjection, ForcedDensityProjectionReport,
+    MaterialDensityMomentumControls, MaterialDensityMomentumInput, MaterialDensityMomentumReport,
+    MaterialDensityMomentumStep,
 };
 mod density_transport;
 pub use density_transport::{

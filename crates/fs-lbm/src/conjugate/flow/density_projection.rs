@@ -3,6 +3,11 @@
 use super::{CancelGate, ChtError, FlowFace, FlowField, ProjectionReport, VoxelDomain};
 use super::{finite, finite_positive, poll, poll_every};
 
+mod feedback;
+pub use feedback::{
+    MaterialDensityMomentumControls, MaterialDensityMomentumInput, MaterialDensityMomentumReport,
+    MaterialDensityMomentumStep,
+};
 mod forcing;
 pub use forcing::{
     DensityForceControls, DensityForceInput, DensityForcePrediction, DensityForceReport,

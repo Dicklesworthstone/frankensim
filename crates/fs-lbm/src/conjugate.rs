@@ -137,7 +137,9 @@ pub use flow::{
     FlowFace, FlowField, ForcedDensityProjection, ForcedDensityProjectionReport, LbmCollisionChoice,
     LbmFlow, LbmFlowConfig, LbmFlowReport,
     MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
-    MaterialAdvectionStep, MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport,
+    MaterialAdvectionStep, MaterialDensityMomentumControls, MaterialDensityMomentumInput,
+    MaterialDensityMomentumReport, MaterialDensityMomentumStep, MaterialMomentumControls,
+    MaterialMomentumInput, MaterialMomentumReport,
     MaterialMomentumStep, MaterialVolumeSource, PiecewiseThermalVolumeControls, ProjectionReport,
     ThermalVolumeControls, ThermalVolumeStep, lbm_duct_flow,
 };

@@ -2887,6 +2887,33 @@ electronics cooling (the wedge's second physics after steady conduction).
   datums, held/solid reactions, mass-representation refusal, actual accepted
   material-momentum transport followed by native pressure, and an independent
   density-weighted circulation solution.
+- `FlowField::force_project_material_momentum` composes reconstruction and ONE
+  fresh native force/pressure correction, then returns the actual impulses to
+  the original cell momenta. Each contributing half-cell receives its share
+  in proportion to authoritative `M/2`; original sub-face velocity differences
+  remain intact when there is no impulse. Held reconstruction reactions reach
+  the cells, including both orientations of a solid interface. Actual returned
+  momentum independently passes linear and orbital angular-impulse budgets,
+  using original face and cell centers on graded rectilinear geometry.
+  Authored forces and returned pressure supply impulses; `Q/A` representation
+  errors are audited numerical defects, never invented forces. The original
+  reconstruction, force and pressure accounts remain separate. Incremental
+  cell energy adds a nonnegative half-cell scatter loss and a signed native
+  versus authoritative mass-representation correction; its absolute size is
+  budgeted. The original reconstruction averaging loss cancels from this
+  incremental balance and is not charged again. Centered local work accounts
+  retain small changes under large common velocities. Numerical losses never
+  alter material enthalpy. No arbitrary public projection receipt is accepted:
+  all stages execute here with the same admitted mass, density and geometry.
+  The caller supplies a FRESH volume target, compatible material/EOS evolution
+  and phase mobility; already applied phase-volume pressure must not be applied
+  again. Reconstructing returned cell momentum need not reproduce the final
+  divergence-constrained face field. This force/pressure split does not provide
+  staggered advective inertia or a complete Navier-Stokes timestep. Native
+  regressions cover analytic density-driven circulation, graded angular
+  impulse, held reactions, large velocity datums, zero-impulse preservation,
+  independent representation-work refusal and repeated accepted material
+  transport followed by fresh forcing, pressure and cell feedback.
 - `FlowField::advance_coexistence_volume` supplies a bounded physical consumer
   of that conservative transport: one mobile, common-velocity material mixture
   on ONE adjacent isothermal solid/liquid coexistence interval of its original
