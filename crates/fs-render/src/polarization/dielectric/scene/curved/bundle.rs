@@ -262,6 +262,15 @@ pub enum CurvedBundleSceneError {
     InvalidSurfaceSource {
         object_id: u64,
     },
+    /// The original source, selected side and adjacent medium were admitted,
+    /// but this launch direction does not leave that emitting half space.
+    /// A finite camera-light proposal may exclude this seed. The completed
+    /// launch/query work remains chargeable even though no path is returned.
+    SourceSideExcluded {
+        object_id: u64,
+        field_evaluations: u64,
+        query_work: u64,
+    },
     NumericalRange,
 }
 impl From<CurvedSceneError> for CurvedBundleSceneError {
@@ -595,10 +604,7 @@ impl CurvedPolarizedScene<'_> {
             }
             let cosine = witness.normal.dot(ray.dir);
             let positive = source.side == BoundarySide::Positive;
-            if !cosine.is_finite()
-                || (positive && cosine <= 0.0)
-                || (!positive && cosine >= 0.0)
-            {
+            if !cosine.is_finite() {
                 return Err(invalid());
             }
             match binding.interaction {
@@ -618,6 +624,16 @@ impl CurvedPolarizedScene<'_> {
                         if positive { outside } else { inside },
                     )?;
                 }
+            }
+            // Directional support is decided only after the actual original
+            // geometry, material role and selected-side medium are validated.
+            // A wrong medium or source owner must never become a dark sample.
+            if (positive && cosine <= 0.0) || (!positive && cosine >= 0.0) {
+                return Err(CurvedBundleSceneError::SourceSideExcluded {
+                    object_id: source.object_id,
+                    field_evaluations: result.field_evaluations(),
+                    query_work: oracle.work_used(),
+                });
             }
             let contact = CurvedContact {
                 object_id: instance.object_id(),

@@ -281,7 +281,6 @@ fn g0_surface_source_rejects_wrong_object_point_medium_and_departure_side() {
         for (object, side, ray) in [
             (42, BoundarySide::Positive, initial.ray),
             (9, BoundarySide::Positive, initial.ray),
-            (2, BoundarySide::Negative, initial.ray),
             (
                 2,
                 BoundarySide::Positive,
@@ -302,6 +301,14 @@ fn g0_surface_source_rejects_wrong_object_point_medium_and_departure_side() {
                 })
             );
         }
+        let excluded = connect(
+            initial,
+            BundleSurfaceSource::try_new(2, BoundarySide::Negative).unwrap(),
+        ).unwrap_err();
+        let BundleConnectionError::Scene(CurvedBundleSceneError::SourceSideExcluded {
+            object_id: 2, field_evaluations, query_work,
+        }) = excluded else { panic!("wrong source side must retain its explicit exclusion"); };
+        assert!(field_evaluations > 0 && query_work > 0);
         assert_eq!(
             connect(
                 BundleConnectionLaunch {

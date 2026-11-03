@@ -417,6 +417,23 @@ differentiable lift). Pure Rust throughout.
   partial survival catalog. Finite seeds, recorded local misses and numerical
   caustic refusals do not establish image completeness or exact darkness.
 
+- `BundleImageCatalog::validate_proposal_support` admits a deterministic
+  finite light proposal paired with the original continuous camera estimator.
+  Completed source-side exclusions, proven escape, opaque/detector obstruction,
+  another receiver and the wrong receiving hemisphere may leave no represented
+  light image. The complementary camera path must use this same catalog and
+  retain full emitter weight for an unrepresented image. Empty proposal support
+  does not certify zero physical illumination. Missing branch decisions,
+  numerical contact/refinement failures, singular/grazing images, exhausted
+  work and cancellation remain errors. Strict standalone irradiance keeps its
+  all-seeds-resolved requirement because it has no complementary camera term.
+  `CurvedBundleSceneError::SourceSideExcluded` is produced only after the
+  original source geometry, emitting role and selected-side medium are admitted;
+  it retains the actual completed launch/query work for catalog accounting.
+  Three authored native regressions cover source-side/medium distinctions,
+  geometric obstruction/escape, work accounting and numerical refusal. Rust
+  execution remains unavailable without a toolchain/build runner.
+
 - `polarization::dielectric::scene::curved::camera::CurvedCameraScene` consumes
   native curved visibility, full smooth/GGX reciprocal Fresnel/frame transport and
   Beer integrals as scalar unpolarized camera radiance. It retains the native

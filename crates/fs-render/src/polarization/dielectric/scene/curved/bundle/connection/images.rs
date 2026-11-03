@@ -22,6 +22,8 @@ use super::{
 };
 use crate::charts::Ray;
 use crate::gradient_index::bundle::{BundleError, ProjectionOptions};
+use crate::polarization::dielectric::scene::PathTermination;
+use crate::polarization::dielectric::scene::curved::bundle::CurvedBundleSceneError;
 use fs_exec::Cx;
 use fs_geom::Vec3;
 use fs_math::det;
@@ -209,6 +211,29 @@ impl BundleImageCatalog {
     }
     pub const fn query_work(&self) -> u64 {
         self.work.geometry
+    }
+
+    /// Admit this finite catalog as a light-sampling proposal paired with the
+    /// original continuous camera continuation. Completed geometric misses
+    /// have no light-technique support; an emitter hit absent from this SAME
+    /// catalog must retain its full continuation weight. An empty catalog is
+    /// valid here, but is not a certificate of zero physical illumination.
+    ///
+    /// This accepts only native source-side exclusion, proven escape, opaque
+    /// or detector obstruction, a different receiver, and the wrong receiving
+    /// hemisphere. Work limits, missing branch decisions, unresolved contact,
+    /// failed Newton refinement and singular/grazing images remain errors.
+    /// Standalone incident-irradiance consumers have no complementary camera
+    /// estimator and must keep their stricter all-seeds-resolved admission.
+    pub fn validate_proposal_support(&self) -> Result<(), BundleImageError> {
+        for (seed, result) in self.seeds.iter().enumerate() {
+            if let BundleImageSeedOutcome::Miss(error) = &result.outcome
+                && !is_geometric_support_miss(error)
+            {
+                return Err(BundleImageError::Seed { seed, error: error.clone() });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -432,6 +457,17 @@ impl CurvedPolarizedScene<'_> {
                 seed.policy,
                 &mut work,
             );
+            if let Err(BundleConnectionError::Scene(CurvedBundleSceneError::SourceSideExcluded {
+                field_evaluations, query_work, ..
+            })) = &result {
+                // A supported exclusion happens before a native path result
+                // exists. Charge its actual launch and geometry query once;
+                // all preceding completed Newton trials are already in work.
+                work.fields = work.fields.checked_add(*field_evaluations)
+                    .ok_or(BundleImageError::NumericalRange)?;
+                work.geometry = work.geometry.checked_add(*query_work)
+                    .ok_or(BundleImageError::NumericalRange)?;
+            }
             add_work(&mut catalog.work, work)?;
             let outcome = match result {
                 Ok(solution) => {
@@ -516,6 +552,7 @@ fn is_local_miss(error: &BundleConnectionError) -> bool {
     matches!(
         error,
         BundleConnectionError::ReceiverNotReached(_)
+            | BundleConnectionError::Scene(CurvedBundleSceneError::SourceSideExcluded { .. })
             | BundleConnectionError::WrongDetector
             | BundleConnectionError::BackFacingReceiver
             | BundleConnectionError::BranchChanged
@@ -527,6 +564,17 @@ fn is_local_miss(error: &BundleConnectionError) -> bool {
             | BundleConnectionError::Projection(
                 BundleError::SingularProjection | BundleError::GrazingProjection
             )
+    )
+}
+
+fn is_geometric_support_miss(error: &BundleConnectionError) -> bool {
+    matches!(error,
+        BundleConnectionError::Scene(CurvedBundleSceneError::SourceSideExcluded { .. })
+            | BundleConnectionError::ReceiverNotReached(
+                PathTermination::Opaque | PathTermination::Detected | PathTermination::Escaped
+            )
+            | BundleConnectionError::WrongDetector
+            | BundleConnectionError::BackFacingReceiver
     )
 }
 
@@ -667,3 +715,6 @@ pub(crate) fn classify_image_pair(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod support_tests;
