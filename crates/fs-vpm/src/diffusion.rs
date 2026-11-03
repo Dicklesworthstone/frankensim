@@ -13,6 +13,17 @@
 //! DOI 10.1090/S0025-5718-1989-0983559-9. Area is quadrature support, not the
 //! Biot–Savart regularization core; neither is inferred from circulation.
 //!
+//! [`PseDiffusion::compact_wendland`] instead selects the positive compact
+//! shape `(1-q)^4 (1+4q)`, q=r/epsilon<1, exactly zero outside that radius.
+//! Its coefficient is `1008 nu/(5 pi epsilon^4)`: the radial integral
+//! `integral_0^1 q^3 (1-q)^4 (1+4q) dq = 5/504` gives the same second
+//! moment 2 and resolved Laplacian limit. The shape is Wendland's C2 radial
+//! function, Adv. Comput. Math. 4 (1995), 389–396, DOI 10.1007/BF02123482;
+//! this diffusion normalization is derived from its second moment here.
+//! Width denotes a support radius for this law. Resolve that support by
+//! quadrature and refine radius and particle spacing together; changing
+//! kernel family at unchanged width does not give the same regularization.
+//!
 //! Each pair is integrated exactly with one equal-and-opposite transfer. A
 //! forward half sweep followed by the reversed half sweep is a second-order
 //! symmetric splitting of the fixed-site diffusion operator. Every pair map
@@ -36,11 +47,22 @@
 use super::*;
 use fs_math::det;
 
-/// Immutable, explicitly declared constant-viscosity Gaussian PSE law.
+/// Spatial kernel with unit-coordinate second moment 2 in each direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseKernel {
+    /// Infinite-support Gaussian, `4 exp(-q²)/pi`.
+    Gaussian,
+    /// Positive C2 Wendland shape, `1008 (1-q)^4 (1+4q)/(5 pi)` for q<1.
+    /// It vanishes exactly at and beyond the declared support radius.
+    CompactWendland,
+}
+
+/// Immutable constant-viscosity PSE law with an explicitly selected kernel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PseDiffusion {
     viscosity: f64,
     width: f64,
+    kernel: PseKernel,
 }
 
 impl PseDiffusion {
@@ -50,6 +72,38 @@ impl PseDiffusion {
     /// # Errors
     /// Refuses non-finite, negative or zero-width input.
     pub fn new(kinematic_viscosity_m2_s: f64, kernel_width_m: f64) -> Result<Self, VpmError> {
+        Self::with_kernel(kinematic_viscosity_m2_s, kernel_width_m, PseKernel::Gaussian)
+    }
+
+    /// Select a positive compact-support diffusion kernel with the same
+    /// normalized Laplacian limit as the Gaussian law.
+    ///
+    /// `support_radius_m` is the physical radius beyond which interactions
+    /// vanish exactly, independent of the velocity core. The spatial law is
+    /// `k_ij = 1008 nu/(5 pi radius^4) * (1-q)^4 (1+4q)` for q<1.
+    /// Positive pair weights retain the same circulation conservation and
+    /// vorticity/enstrophy contraction as the original pair integrator.
+    /// This kernel is C2; adequate support overlap and quadrature resolution
+    /// remain required for consistency with continuum diffusion.
+    ///
+    /// # Errors
+    /// Refuses non-finite or negative viscosity and nonpositive/non-finite radius.
+    pub fn compact_wendland(
+        kinematic_viscosity_m2_s: f64,
+        support_radius_m: f64,
+    ) -> Result<Self, VpmError> {
+        Self::with_kernel(
+            kinematic_viscosity_m2_s,
+            support_radius_m,
+            PseKernel::CompactWendland,
+        )
+    }
+
+    fn with_kernel(
+        kinematic_viscosity_m2_s: f64,
+        kernel_width_m: f64,
+        kernel: PseKernel,
+    ) -> Result<Self, VpmError> {
         if !kinematic_viscosity_m2_s.is_finite() || kinematic_viscosity_m2_s < 0.0 {
             return Err(invalid_scalar(
                 "kinematic viscosity",
@@ -67,6 +121,7 @@ impl PseDiffusion {
         Ok(Self {
             viscosity: kinematic_viscosity_m2_s,
             width: kernel_width_m,
+            kernel,
         })
     }
 
@@ -76,10 +131,26 @@ impl PseDiffusion {
         self.viscosity
     }
 
-    /// Declared quadrature-kernel width [m], independent of the velocity core.
+    /// Declared Gaussian width or compact support radius [m], independent
+    /// of the velocity core. The two kernel families have different shapes.
     #[must_use]
     pub const fn kernel_width_m(self) -> f64 {
         self.width
+    }
+
+    /// Explicit spatial kernel; the original constructor selects Gaussian.
+    #[must_use]
+    pub const fn kernel(self) -> PseKernel {
+        self.kernel
+    }
+
+    /// Finite interaction radius [m], or None for the infinite Gaussian tail.
+    #[must_use]
+    pub const fn support_radius_m(self) -> Option<f64> {
+        match self.kernel {
+            PseKernel::Gaussian => None,
+            PseKernel::CompactWendland => Some(self.width),
+        }
     }
 }
 
@@ -292,6 +363,7 @@ pub(super) fn symmetric_sweep(
 }
 
 struct PairKernel {
+    shape: PseKernel,
     width: f64,
     width2: f64,
     rate_time: f64,
@@ -300,11 +372,16 @@ struct PairKernel {
 impl PairKernel {
     fn new(law: PseDiffusion, dt: f64, fraction: f64) -> Self {
         let width2 = law.width * law.width;
+        let normalization = match law.kernel {
+            PseKernel::Gaussian => 4.0 / PI,
+            PseKernel::CompactWendland => 1008.0 / (5.0 * PI),
+        };
         Self {
+            shape: law.kernel,
             width: law.width,
             width2,
-            rate_time: (4.0 / PI) * (law.viscosity / width2) * dt * fraction,
-            log_rate_time: det::ln(4.0 / PI)
+            rate_time: normalization * (law.viscosity / width2) * dt * fraction,
+            log_rate_time: det::ln(normalization)
                 + det::ln(law.viscosity)
                 + det::ln(dt)
                 + det::ln(fraction)
@@ -313,32 +390,57 @@ impl PairKernel {
     }
 
     fn fraction(&self, a: VortexParticle, b: VortexParticle, areas: [f64; 2]) -> f64 {
-        let mut r2 = 0.0;
-        for axis in 0..2 {
-            let delta = a.pos[axis] - b.pos[axis];
-            let scaled = if delta.is_finite() {
-                delta / self.width
-            } else {
-                a.pos[axis] / self.width - b.pos[axis] / self.width
-            };
-            r2 += scaled * scaled;
-        }
-        if r2.is_infinite() {
+        let r2 = scaled_distance2(a, b, self.width);
+        if r2.is_infinite() || (self.shape == PseKernel::CompactWendland && r2 >= 1.0) {
             return 0.0;
         }
+        let (weight, edge, radius) = match self.shape {
+            PseKernel::Gaussian => (det::exp(-r2), 0.0, 0.0),
+            PseKernel::CompactWendland => {
+                let radius = det::sqrt(r2);
+                // Rationalization retains 1-sqrt(r2) near support, including
+                // when the rounded square root itself becomes exactly one.
+                let edge = (1.0 - r2) / (1.0 + radius);
+                let square = edge * edge;
+                (square * square * (1.0 + 4.0 * radius), edge, radius)
+            }
+        };
         let mut exponent =
-            self.rate_time * (areas[0] / self.width2 + areas[1] / self.width2) * det::exp(-r2);
+            self.rate_time * (areas[0] / self.width2 + areas[1] / self.width2) * weight;
         if !exponent.is_normal() {
             // Avoid inf*0, lost narrow-kernel factors, and underflowed Gaussian
             // tails times large rates. The usual physical-scale path uses no logs.
             let scale = areas[0].max(areas[1]);
             let log_area = det::ln(scale) + det::ln(areas[0] / scale + areas[1] / scale);
-            exponent = det::exp(self.log_rate_time + log_area - r2);
+            let log_weight = match self.shape {
+                PseKernel::Gaussian => -r2,
+                PseKernel::CompactWendland => {
+                    4.0 * det::ln(edge) + det::ln(1.0 + 4.0 * radius)
+                }
+            };
+            exponent = det::exp(self.log_rate_time + log_area + log_weight);
         }
         // expm1 retains weak diffusion and tends to exact equilibration at
         // unrepresentably large rates; it never introduces a negative weight.
         -det::expm1(-exponent)
     }
+}
+
+// Shared support metric for the dense owner and prepared neighbor graph.
+// Validated finite positions and a positive finite width give a nonnegative
+// value or infinity; enormous separations carry no representable interaction.
+fn scaled_distance2(a: VortexParticle, b: VortexParticle, width: f64) -> f64 {
+    let mut r2 = 0.0;
+    for axis in 0..2 {
+        let delta = a.pos[axis] - b.pos[axis];
+        let scaled = if delta.is_finite() {
+            delta / width
+        } else {
+            a.pos[axis] / width - b.pos[axis] / width
+        };
+        r2 += scaled * scaled;
+    }
+    r2
 }
 
 fn exchange(
@@ -349,6 +451,22 @@ fn exchange(
     j: usize,
 ) -> Result<(), VpmError> {
     let amount = kernel.fraction(state[i], state[j], [areas[i], areas[j]]);
+    exchange_fraction(state, areas, amount, i, j)
+}
+
+// Prepared graphs cache amount once per run and reuse this exact transfer.
+fn exchange_fraction(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    amount: f64,
+    i: usize,
+    j: usize,
+) -> Result<(), VpmError> {
+    // An absent or unrepresentably weak interaction is exact identity,
+    // including signed zeros; disconnected nodes need no transfer arithmetic.
+    if amount == 0.0 {
+        return Ok(());
+    }
     let scale = areas[i].max(areas[j]);
     let a = areas[i] / scale;
     let b = areas[j] / scale;

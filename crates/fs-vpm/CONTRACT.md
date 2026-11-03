@@ -271,6 +271,24 @@ dGamma_i/dt = sum_j k_ij (A_i Gamma_j - A_j Gamma_i)
 k_ij = 4 nu exp(-|x_i-x_j|²/epsilon²) / (pi epsilon^4).
 ```
 
+`PseDiffusion::compact_wendland(nu, radius)` selects a positive C2 compact
+kernel in the same diffusion owner. Its pair coefficient is
+`1008*nu/(5*pi*radius^4) * (1-q)^4*(1+4*q)` for `q=r/radius < 1`, exactly
+zero at and beyond the radius. The radial moment integral is `5/504`, so the
+normalized Cartesian second moment is 2 as for the Gaussian. This uses the
+Wendland C2 shape (1995, DOI `10.1007/BF02123482`) with its diffusion
+normalization derived here. `kernel()` and `support_radius_m()` expose that
+physical choice. The original constructor continues to select Gaussian.
+
+The compact law uses the same conservative analytical pair map, bounded
+execution and Strang compositions, including the existing conservative,
+ambient-flow and remeshed evolution entries. Kernel width denotes support
+radius for this law; the same numeric width in another kernel family does
+not imply the same regularization. Continuum accuracy still requires support
+overlap, resolved quadrature and radius/cloud refinement. Near the support
+edge, `(1-r²)/(1+r)` preserves the small polynomial factor; absent interactions
+are exact identity, including signed-zero circulations.
+
 The Gaussian's second moment is 2 along each axis, giving the Laplacian in the
 resolved quadrature/kernel limit. This uses the positive integral-operator PSE
 construction of Degond and Mas-Gallic (1989), DOI
@@ -306,6 +324,10 @@ maximum principle and weighted enstrophy, Gaussian/Lamb–Oseen spatial
 refinement, independent three-site temporal modes, dimensional rescaling, and
 zero/positive-viscosity coupled trajectories. These are G0/G1/G3 implementation
 checks, not measured-fluid validation or a machine-performance claim.
+`tests/compact_diffusion.rs` recovers the kernel's second moment from actual
+pair relaxation and independent polar quadrature, checks Gaussian heat
+refinement, signed/disconnected invariants, analytical viscous dipole travel,
+physical unit scaling and resolvable near-support transfers.
 `tests/viscosity2d.rs` additionally exercises the complete moving-cloud
 advection/diffusion transaction against Gaussian spreading, unequal-area
 analytical relaxation, translation and dimensional scaling, permutation-error
