@@ -268,7 +268,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// including trajectories with no regional power schedule.
 /// Version 96 advances native capacity histories with the original evolving
 /// contact law and retains the accepted face queries and physical heat balance.
-pub const SOLVE_DRIVER_VERSION: u32 = 96;
+/// Version 97 uses the complete coupled Newton owner for steady source-curve
+/// contact, retaining its actual tangent, damping and numerical work evidence.
+pub const SOLVE_DRIVER_VERSION: u32 = 97;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

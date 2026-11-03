@@ -1,5 +1,7 @@
 //! Native steady projects consume the existing source-backed contact owner.
 
+mod newton;
+
 use fs_conduction::interface::temperature::steady::SteadyContactConfig;
 use fs_conduction::interface::temperature::{TemperatureContact, TemperatureContacts};
 use fs_conduction::{
@@ -13,7 +15,7 @@ use super::{SolveRefusal, conduction_error, json_string, parse_claim_id};
 use crate::cards::CardPackSet;
 
 const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. The returned field passes freshly queried physical watt residual and heat-balance gates. This is a bounded contact fixed point, not an arbitrary-law convergence or uniqueness proof. Radiation, transient storage, adaptive-goal refinement, adjoints and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. The returned field passes freshly queried physical watt residual and heat-balance gates. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Radiation, adaptive-goal refinement, adjoints and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
 
 struct Source {
     name: String,
@@ -446,6 +448,11 @@ impl Prepared {
         if !tolerance.is_finite() || tolerance <= 0.0 {
             return Err(bad("contact watt allowance is not positive and finite"));
         }
+        if newton::supported(self, &config) {
+            return newton::solve(
+                cx, problem, &contacts, &initial, &config, tolerance, max_pairs, work,
+            );
+        }
         // Inner step-size convergence must not replace the original physical
         // contact residual gate. The source-backed owner checks it independently.
         config.stop.step_atol = 0.0;
@@ -491,7 +498,7 @@ impl Prepared {
         }
         let receipt = format!(
             concat!(
-                "{{\"model\":\"source-backed-face-mean-temperature\",",
+                "{{\"model\":\"source-backed-face-mean-temperature\",\"algorithm\":\"bounded-contact-picard\",",
                 "\"thermal_responses\":{},\"nonlinear_iterations\":{},\"krylov_iterations\":{},",
                 "\"total_thermal_responses\":{},\"total_nonlinear_iterations\":{},\"total_krylov_iterations\":{},",
                 "\"residual_norm_w\":{},\"residual_tolerance_w\":{},\"energy_closure_w\":{},",

@@ -260,7 +260,7 @@ impl PhysicalProblem<'_, '_, '_, '_> {
         let physical = physical.as_ref().filter(|physical|
             same_field(&physical.free_temperature, free_temperature))
             .ok_or_else(|| invalid("<steady-contact-newton>", "tangent field has no matching physical residual"))?;
-        let contact = self.contacts.linearize_temperature(
+        let contact = self.contacts.linearize_temperature_for_newton(
             self.cx, self.problem.boundary, &physical.temperature, self.config.max_face_pairs,
         )?;
         let bulk_and_frozen = assemble_jacobian_with_optional_interfaces(
@@ -422,8 +422,11 @@ impl TemperatureContacts<'_, '_> {
     /// unchanged absolute physical residual and heat-closure gates. The cached
     /// physical evaluation must match the accepted field bit for bit; it is
     /// not a second PDE solve. Every refusal returns no field and mutates no
-    /// caller input. Smooth source derivatives are required at Newton fields;
-    /// this does not claim convergence or uniqueness for arbitrary source laws.
+    /// caller input. Continuous source curves use the original primal tangent
+    /// at knots and inward source-domain endpoints; surface laws retain their
+    /// unique-gradient requirement. This forward-solve tangent does not grant
+    /// a two-sided endpoint derivative or adjoint, or establish convergence or
+    /// uniqueness for arbitrary source laws.
     #[allow(clippy::too_many_lines)]
     pub fn solve_steady_newton(
         &self, cx: &Cx<'_>, problem: ConductionProblem<'_>, initial_temperature: &[f64],

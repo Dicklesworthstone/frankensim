@@ -13,6 +13,10 @@ use fs_conduction::interface::temperature::steady::newton::{
 // resistance is 0.1 K/W. This positive source law has deliberately strong
 // feedback, but is smooth throughout its admitted thermal neighbourhood.
 fn steep_card() -> InterfaceSystemCard {
+    card_with_knots(vec![(309.0, 0.04), (312.0, 0.22)])
+}
+
+fn card_with_knots(knots: Vec<(f64, f64)>) -> InterfaceSystemCard {
     use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
     let dims = AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
     let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
@@ -24,7 +28,7 @@ fn steep_card() -> InterfaceSystemCard {
         value: PropertyValue::Curve {
             abscissa: "TA".into(),
             abscissa_dims: fs_qty::Temperature::DIMS,
-            knots: vec![(309.0, 0.04), (312.0, 0.22)],
+            knots,
             dims,
         },
         validity: ValidityDomain::unconstrained()
@@ -312,6 +316,38 @@ fn g1_newton_backtracks_source_domain_trials_without_losing_the_pinned_law() {
             check_solution(cx, problem, split, &card, &set, &solved);
             near(solved.newton.history[0].step_length, 0.5, 1e-14);
             assert!(solved.residual_evaluations >= solved.newton.iterations + 2);
+            assert_eq!(initial, before);
+        }
+    });
+}
+
+#[test]
+fn g1_steady_newton_reuses_primal_tangents_at_source_endpoints_and_corners() {
+    with_cx(|cx| {
+        let (mesh, split) = mesh([1, 1, 1], 0.0);
+        let bc = boundary(&mesh);
+        let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem {
+            mesh: &mesh, boundary: &bc, material: &material,
+            element_materials: None, source: &source,
+        };
+        for (card, initial_heat) in [
+            (steep_card(), 90.0),
+            (steep_card(), 120.0),
+            // The root remains Q=100 W on the original lower segment. Only
+            // the initial TA=311 K is a genuine source-slope corner.
+            (card_with_knots(vec![(309.0, 0.04), (311.0, 0.16), (312.0, 0.26)]), 110.0),
+        ] {
+            let set = contacts(cx, &mesh, &bc, &card, split, true);
+            let initial = field(&mesh, split, initial_heat);
+            let before = initial.clone();
+            assert!(set.evaluate(cx, &bc, &initial).is_ok());
+            // A forward tangent must not silently relax the independent
+            // two-sided sensitivity contract at these very same states.
+            assert!(set.linearize_temperature(cx, &bc, &initial, 10_000).is_err());
+            let solved = set.solve_steady_newton(cx, problem, &initial, config()).unwrap();
+            check_solution(cx, problem, split, &card, &set, &solved);
             assert_eq!(initial, before);
         }
     });

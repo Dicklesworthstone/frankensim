@@ -276,10 +276,13 @@ performs no hidden final PDE solve and creates no frozen-solver report.
 The stiff slab regressions have the independent admitted root of 100 W and
 check the actual first Newton direction, source-domain damping, local residuals
 and both reservoir reactions on matching and nonmatching meshes. A frozen
-Picard step leaves source support for the same fixture. Smooth contact
-derivatives are required at Newton fields; arbitrary-law convergence, root
-uniqueness, evolving pressure/contact area and interface storage are outside
-this stationary contact model.
+Picard step leaves source support for the same fixture. Continuous source
+curves use the original generalized primal tangent at knots and inward source
+endpoints; surfaces retain their unique-gradient requirement. Regressions
+start at both endpoints and a genuine slope corner while independently
+checking that strict sensitivity queries still refuse there. Arbitrary-law
+convergence, root uniqueness, evolving pressure/contact area and interface
+storage are outside this stationary contact model.
 
 ## Coupled transient capacity contact feedback
 
@@ -445,8 +448,8 @@ tangent of the original continuous piecewise-linear resistance law: the right
 segment at an interior knot and the inward segment at either source endpoint.
 Scalar laws retain zero temperature derivatives. The complete contact flux
 still includes the original frozen operator and its resistance feedback once.
-The primary-enthalpy Newton owner uses this tangent without smoothing the source
-curve or replacing latent storage. Every physical trial retains its pinned
+The steady and primary-enthalpy Newton owners use this tangent without smoothing
+the source curve or replacing latent storage. Every physical trial retains its pinned
 source-domain check; unsupported steps are not extrapolated.
 
 The existing `linearize_temperature` and all accepted-endpoint adjoints retain

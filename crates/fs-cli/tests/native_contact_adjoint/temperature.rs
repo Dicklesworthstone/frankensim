@@ -184,11 +184,37 @@ fn native_temperature_contact_queries_the_accepted_faces_and_preserves_heat() {
                 .unwrap();
             let receipt = artifact(&ledger, stage.str_field("receipt").unwrap());
             let physical = receipt.get("temperature_contact").unwrap();
-            assert!(physical.f64_field("total_thermal_responses").unwrap() > 1.0);
+            assert_eq!(physical.str_field("algorithm"), Some("coupled-newton"));
+            assert_eq!(physical.f64_field("thermal_responses"), Some(1.0));
             assert!(
                 physical.f64_field("total_thermal_responses").unwrap()
                     >= physical.f64_field("thermal_responses").unwrap()
             );
+            let history = physical.get("newton_history").unwrap().as_array().unwrap();
+            assert_eq!(
+                physical.f64_field("nonlinear_iterations"),
+                Some(history.len() as f64)
+            );
+            assert_eq!(
+                physical.f64_field("jacobian_assemblies"),
+                Some(history.len() as f64)
+            );
+            assert!(
+                physical.f64_field("residual_evaluations").unwrap()
+                    >= history.len() as f64 + 1.0
+            );
+            assert_eq!(
+                physical.f64_field("krylov_iterations").unwrap(),
+                history.iter().map(|row| row.f64_field("linear_iterations").unwrap()).sum::<f64>()
+            );
+            for row in history {
+                let step = row.f64_field("accepted_step_length").unwrap();
+                assert!(step > 0.0 && step <= 1.0);
+                assert!(row.f64_field("residual_after_w").unwrap()
+                    < row.f64_field("residual_before_w").unwrap());
+                assert!(row.f64_field("linear_relative_residual").unwrap()
+                    <= row.f64_field("forcing").unwrap());
+            }
             assert!(
                 physical.f64_field("residual_norm_w").unwrap()
                     <= physical.f64_field("residual_tolerance_w").unwrap()

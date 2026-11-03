@@ -669,6 +669,16 @@ state. Heterogeneous `k(T)`, prescribed boundaries, natural convection and
 transported-air responses use the same existing spatial and coupling owners.
 Base and uniform spatial ladders rebuild the contact faces on each mesh.
 
+Solve driver 97 routes steady scalar/continuous-curve sources through the
+existing complete coupled Newton owner, including heterogeneous bulk and the
+contact-temperature feedback in one physical residual and tangent. Tabulated
+knots use the source's existing generalized primal tangent; source-domain
+trials retain the original Armijo backtracking. Surface laws retain the bounded
+contact fixed point. The receipt names the actual algorithm and preserves
+Newton damping, true FGMRES residuals, residual callbacks and tangent assemblies.
+One complete coupled solve counts as one thermal response. Natural-convection
+and transported-air responses warm-start from their last accepted coupled field.
+
 The accepted field passes freshly evaluated physical free-node watt residual
 and global heat-balance gates. Published contact fluxes and physical energy
 refer to that unchanged field, while `temperature_contact` retains the outer
@@ -684,7 +694,7 @@ existing solver and derivative paths. Tests in
 nonlinear bulk conductivity, transported air, independent constant-resistance
 brackets and the unsupported-composition refusals.
 
-Solve driver 95 connects the same pinned matching-contact sources to native
+Solve driver 96 connects the same pinned matching-contact sources to native
 constant-capacity transient projects with prescribed temperature, flux or
 Robin boundaries. Both time grids use the original initial field and authored
 power/boundary switch schedule. Every contact trial retains the unchanged
