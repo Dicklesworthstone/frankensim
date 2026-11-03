@@ -68,6 +68,20 @@ refuses; this is not an implicit tangent approximation.
 The response exposes state, effort and port-output phasors, mean stored energy,
 per-port supplied power, and independently evaluated `Re(e* R e)/2` loss.
 Loss minus supply is reported without clipping or inferring heat from balance.
+`HarmonicResponse::port_power_components` also retains active, quadrature and
+apparent power in original port order. `HarmonicPortPower::from_peak` uses
+`conj(u)*y/2` for this peak `exp(-i omega t)` convention. Apparent power is
+the product of RMS input/output amplitudes and the amplitude of the scalar
+instantaneous-power ripple; signed power factor is mean/apparent, undefined
+for a zero-amplitude pair. Quadrature sign reverses when effort/flow causality
+is exchanged, so an electrical interpretation must name the voltage/current
+chart. These are port exchanges, never additional heat or efficiency factors.
+Wave feedback restores these accounts from actual physical inputs rather than
+the effective incident-wave forcing. Observation is O(ports), reuses the
+original frequency factor, and its payload is included in the harmonic budget.
+Real-waveform quadrature/RMS checks, RLC reactive exchange on both sides of
+resonance, extreme finite half-products, and loaded wave-port checks pin these
+conventions independently of the returned mean-power ledger.
 Independent row/column equilibration handles mixed units; the original equations
 must pass a componentwise backward-residual ceiling, including small algebraic
 constraints. This residual is not a forward-error, linewidth or pole certificate.
@@ -1696,7 +1710,7 @@ Fixed port-output rows assemble closure once; each frequency uses the existing
 shared scaled complex LU and reuses that factor for multiple drives. The
 additional budget bounds all selected ports, closure/output workspace and
 work. Its conservative peak added payload is 8*n*k+256*k+64*m bytes and work
-is 2*n*n*(k+1)+n*m+k*k+8*m, where n is complete state dimension, m original
+is 2*n*n*(k+1)+n*m+k*k+32*m, where n is complete state dimension, m original
 source ports, and k selected wave ports. These are additional to the consumed
 model's existing dense resources and exclude allocator overhead/process RSS.
 Cancellation is polled during preparation, physical observation and shared

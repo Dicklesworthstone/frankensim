@@ -78,6 +78,12 @@ fn bare_resonance_is_closed_before_factorization_and_reference_is_not_heat() {
             );
             let heat = 0.5 * damping * velocity.norm_sq();
             assert!((r.physical.dissipated_power_w - heat).abs() < 1e-12);
+            let port_power = r.physical.port_power_components[0];
+            let force = (incident.scale(2.0) - velocity).scale(4.0);
+            let quadrature = 0.5 * (omega - 4.0 / omega) * velocity.norm_sq();
+            assert_eq!(port_power.active_w, r.physical.port_power_w[0]);
+            assert!((port_power.quadrature_w - quadrature).abs() < 1e-11);
+            assert!((port_power.apparent_w - 0.5 * force.abs() * velocity.abs()).abs() < 1e-11);
             if damping == 0.0 {
                 assert_eq!(r.physical.dissipated_power_w, 0.0);
             }

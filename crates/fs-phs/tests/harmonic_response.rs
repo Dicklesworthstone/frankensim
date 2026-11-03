@@ -4,7 +4,7 @@ use fs_phs::circuit::{
     Branch, CircuitGraph, MutualInductance, TransformerLink, assemble_circuit,
     assemble_circuit_with_mutual_inductance,
 };
-use fs_phs::harmonic::{HarmonicBudget, HarmonicError, HarmonicModel};
+use fs_phs::harmonic::{HarmonicBudget, HarmonicError, HarmonicModel, HarmonicPortPower};
 use fs_phs::{PortHamiltonian, QuadraticStorage, RelaxationBranch, ScalarLaw, SeparableStorage};
 
 fn budget() -> HarmonicBudget {
@@ -150,7 +150,74 @@ fn rlc_resonance_retains_kirchhoff_constraints_and_source_current() {
         let heat = 0.5 * r * current.norm_sq();
         assert!((result.dissipated_power_w / heat - 1.0).abs() < 4e-9);
         assert!(result.power_residual_w.abs() < 3e-11 * heat);
+        // Independent circuit oracle: positive inductive and negative
+        // capacitive reactive exchange for this voltage-driven port. The
+        // current convention is exp(-i omega t), hence conj(V)*I here.
+        let power = result.port_power_components[0];
+        let reactive = 0.5 * (omega * l - 1.0 / (omega * c)) * current.norm_sq();
+        let apparent = 0.5 * voltage.abs() * current.abs();
+        assert_eq!(power.active_w, result.port_power_w[0]);
+        assert!((power.quadrature_w - reactive).abs() < 4e-9 * apparent);
+        assert!((power.apparent_w / apparent - 1.0).abs() < 4e-9);
+        assert!((power.power_factor().unwrap() - heat / apparent).abs() < 4e-9);
     }
+}
+
+#[test]
+fn harmonic_power_matches_real_waveform_mean_rms_and_reversed_source_work() {
+    let input = C64::new(3.0, 4.0);
+    let output = C64::new(-5.0, 2.0);
+    let power = HarmonicPortPower::from_peak(input, output).unwrap();
+    // Integrate real waveforms independently of complex multiplication.
+    let mut mean = 0.0;
+    let mut input_square = 0.0;
+    let mut output_square = 0.0;
+    let mut ripple_square = 0.0;
+    let samples = 4096;
+    for sample in 0..samples {
+        let theta = core::f64::consts::TAU * sample as f64 / samples as f64;
+        let (sin, cos) = theta.sin_cos();
+        let u = input.re * cos + input.im * sin;
+        let y = output.re * cos + output.im * sin;
+        mean += u * y / samples as f64;
+        input_square += u * u / samples as f64;
+        output_square += y * y / samples as f64;
+        ripple_square += (u * y - power.active_w).powi(2) / samples as f64;
+    }
+    assert!(power.active_w < 0.0, "this port absorbs source work");
+    assert!((power.active_w - mean).abs() < 2e-13);
+    assert!((power.apparent_w - (input_square * output_square).sqrt()).abs() < 2e-13);
+    assert!((power.apparent_w - (2.0 * ripple_square).sqrt()).abs() < 2e-13);
+    assert!((power.power_factor().unwrap() - mean / power.apparent_w).abs() < 2e-14);
+    // Causality reversal changes the quadrature chart, not physical real work.
+    let swapped = HarmonicPortPower::from_peak(output, input).unwrap();
+    assert_eq!(swapped.active_w, power.active_w);
+    assert_eq!(swapped.quadrature_w, -power.quadrature_w);
+    assert_eq!(swapped.apparent_w, power.apparent_w);
+    let phase = C64::new(0.6, -0.8);
+    let shifted = HarmonicPortPower::from_peak(input * phase, output * phase).unwrap();
+    assert!((shifted.active_w - power.active_w).abs() < 1e-14);
+    assert!((shifted.quadrature_w - power.quadrature_w).abs() < 1e-14);
+    assert!((shifted.apparent_w - power.apparent_w).abs() < 1e-14);
+}
+
+#[test]
+fn reactive_power_keeps_zero_power_factor_and_representable_extreme_scales() {
+    let reactive = HarmonicPortPower::from_peak(C64::from_re(4.0), C64::new(0.0, 3.0)).unwrap();
+    assert_eq!(reactive.active_w, 0.0);
+    assert_eq!(reactive.quadrature_w, 6.0);
+    assert_eq!(reactive.apparent_w, 6.0);
+    assert_eq!(reactive.power_factor(), Some(0.0));
+    let inactive = HarmonicPortPower::from_peak(C64::ZERO, C64::ONE).unwrap();
+    assert_eq!(inactive.power_factor(), None);
+    let large = HarmonicPortPower::from_peak(C64::new(1e308, 1e308), C64::new(1.0, 1.0)).unwrap();
+    assert_eq!(large.active_w, 1e308);
+    assert_eq!(large.apparent_w, 1e308);
+    assert_eq!(large.power_factor(), Some(1.0));
+    let rescaled = HarmonicPortPower::from_peak(C64::from_re(1e-308), C64::from_re(1e308)).unwrap();
+    assert!((rescaled.active_w - 0.5).abs() < 2e-16);
+    assert!(HarmonicPortPower::from_peak(C64::from_re(f64::NAN), C64::ZERO).is_err());
+    assert!(HarmonicPortPower::from_peak(C64::from_re(f64::MAX), C64::from_re(4.0)).is_err());
 }
 
 #[test]

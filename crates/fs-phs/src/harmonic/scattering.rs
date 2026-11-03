@@ -11,7 +11,8 @@
 //! Frequency response has no time-step warping or interval-average substitution.
 
 use super::{
-    C64, HarmonicError, HarmonicFactor, HarmonicModel, HarmonicResponse, finite, invalid, poll,
+    C64, HarmonicError, HarmonicFactor, HarmonicModel, HarmonicPortPower, HarmonicResponse, finite,
+    invalid, poll,
 };
 
 mod poles;
@@ -26,7 +27,7 @@ pub struct ScatteringBudget {
     /// Peak added output rows, port records, response input and wave accounts.
     pub maximum_payload_bytes: usize,
     /// Bounds closure plus original-row observation: 2*n²*(selected_ports+1)
-    /// + n*source_ports + selected_ports² + 8*source_ports.
+    /// + n*source_ports + selected_ports² + 32*source_ports.
     pub maximum_work: u64,
 }
 
@@ -98,7 +99,7 @@ impl ScatteringModel {
         let work = 2_u128 * n as u128 * n as u128 * (k as u128 + 1)
             + n as u128 * m as u128
             + k as u128 * k as u128
-            + 8_u128 * m as u128;
+            + 32_u128 * m as u128;
         if k == 0
             || k > budget.maximum_ports
             || bytes > budget.maximum_payload_bytes as u128
@@ -282,7 +283,7 @@ impl ScatteringFactor<'_> {
             physical_inputs[p] = u;
             let incident = 0.5 * a.norm_sq() / z;
             let outgoing = 0.5 * b.norm_sq() / z;
-            let power = (u.conj() * physical.output[p]).re * 0.5;
+            let power = HarmonicPortPower::from_peak(u, physical.output[p])?.active_w;
             let residual = incident - outgoing - power;
             if !finite(b)
                 || !finite(u)
@@ -305,11 +306,12 @@ impl ScatteringFactor<'_> {
                 power_residual_w: residual,
             });
         }
-        physical.port_power_w = physical_inputs
-            .iter()
-            .zip(&physical.output)
-            .map(|(u, y)| (u.conj() * *y).re * 0.5)
-            .collect();
+        for (p, &u) in physical_inputs.iter().enumerate() {
+            poll(&mut cancelled)?;
+            let power = HarmonicPortPower::from_peak(u, physical.output[p])?;
+            physical.port_power_w[p] = power.active_w;
+            physical.port_power_components[p] = power;
+        }
         physical.supplied_power_w = physical.port_power_w.iter().sum();
         physical.power_residual_w = physical.dissipated_power_w - physical.supplied_power_w;
         let mut wave_supply: f64 = waves

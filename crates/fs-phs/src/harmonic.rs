@@ -129,6 +129,65 @@ pub struct HarmonicFactor<'a> {
     lu: LuComplex,
 }
 
+/// Cycle-mean and oscillating power at one original conjugate input/output pair.
+///
+/// For the owner's peak `exp(-i omega t)` phasors, the complex exchange is
+/// `conj(u) y / 2`. Its real part transfers energy; its imaginary part retains
+/// phase information that mean work alone loses. Quadrature is positive for
+/// an effort-driven inertia/inductance and negative for compliance/capacitance.
+/// Swapping input and output reverses ONLY that quadrature sign. It must not
+/// be relabelled as electrical reactive power without the voltage/current chart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HarmonicPortPower {
+    /// Mean power, positive into the modeled system [W]. May be negative at
+    /// a source absorbing energy from other ports.
+    pub active_w: f64,
+    /// `Im(conj(u) y)/2`, with the input/output convention above [W].
+    /// This is reversible exchange, never an additional heat source.
+    pub quadrature_w: f64,
+    /// `|u| |y|/2` [W], equal to the product of the two RMS amplitudes.
+    /// Also the amplitude of the instantaneous power's twice-frequency ripple.
+    /// Apparent powers of distinct ports do not cancel like signed mean work.
+    pub apparent_w: f64,
+}
+
+impl HarmonicPortPower {
+    /// Observe one scalar conjugate pair without solving or changing its state.
+    /// Both amplitudes must be PEAK phasors in original power-conjugate units.
+    /// Nonfinite amplitudes and unrepresentable physical power refuse.
+    pub fn from_peak(input: C64, output: C64) -> Result<Self, HarmonicError> {
+        if !finite(input) || !finite(output) {
+            return Err(invalid("finite peak conjugate port amplitudes required"));
+        }
+        // Apply the peak-to-mean factor before the product, to retain finite
+        // half-products near f64::MAX. Halve the larger operand so a tiny
+        // phasor is not flushed before multiplication by a large conjugate.
+        let exchange = if input.re.abs().max(input.im.abs()) >= output.re.abs().max(output.im.abs())
+        {
+            input.scale(0.5).conj() * output
+        } else {
+            input.conj() * output.scale(0.5)
+        };
+        let apparent_w = exchange.abs();
+        if !finite(exchange) || !apparent_w.is_finite() {
+            return Err(invalid("conjugate port power is not representable"));
+        }
+        Ok(Self {
+            active_w: exchange.re,
+            quadrature_w: exchange.im,
+            apparent_w,
+        })
+    }
+
+    /// Signed mean/apparent power. Zero-amplitude ports have no defined power
+    /// factor; `None` does not silently assign them unity or zero efficiency.
+    /// For one sinusoid this is the phase cosine, not a conversion efficiency.
+    #[must_use]
+    pub fn power_factor(&self) -> Option<f64> {
+        (self.apparent_w > 0.0).then(|| self.active_w / self.apparent_w)
+    }
+}
+
 /// Peak complex amplitudes and cycle averages in the source's original units.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HarmonicResponse {
@@ -144,6 +203,9 @@ pub struct HarmonicResponse {
     pub mean_stored_energy_j: f64,
     /// Per-port mean supplied power `Re(conj(u_p) y_p)/2` [W].
     pub port_power_w: Vec<f64>,
+    /// Complete scalar power components in the same original port order.
+    /// These use actual boundary inputs, including physical wave feedback.
+    pub port_power_components: Vec<HarmonicPortPower>,
     /// Sum of supplied powers, signed into the system [W].
     pub supplied_power_w: f64,
     /// Independently evaluated Re(e* R e + e* T x)/2 [W]. T is present only
@@ -221,7 +283,7 @@ impl HarmonicModel {
             .checked_mul(88)
             .and_then(|v| ports.checked_mul(16).and_then(|p| v.checked_add(p)))
             .and_then(|v| n.checked_mul(256).and_then(|p| v.checked_add(p)))
-            .and_then(|v| m.checked_mul(64).and_then(|p| v.checked_add(p)))
+            .and_then(|v| m.checked_mul(96).and_then(|p| v.checked_add(p)))
             .ok_or_else(|| invalid("payload bound overflow"))?;
         let work = (square as u64)
             .checked_mul(
@@ -502,11 +564,14 @@ impl HarmonicFactor<'_> {
                 output[p] = output[p] + effort[i].scale(model.g[i * m + p]);
             }
         }
-        let port_power: Vec<_> = input
-            .iter()
-            .zip(&output)
-            .map(|(u, y)| (u.conj() * *y).re * 0.5)
-            .collect();
+        let mut port_power_components = Vec::with_capacity(m);
+        let mut port_power = Vec::with_capacity(m);
+        for (&u, &y) in input.iter().zip(&output) {
+            poll(&mut cancelled)?;
+            let power = HarmonicPortPower::from_peak(u, y)?;
+            port_power.push(power.active_w);
+            port_power_components.push(power);
+        }
         let supply: f64 = port_power.iter().sum();
         let balance = loss - supply;
         if effort.iter().chain(&output).any(|&v| !finite(v))
@@ -525,6 +590,7 @@ impl HarmonicFactor<'_> {
             output,
             mean_stored_energy_j: energy,
             port_power_w: port_power,
+            port_power_components,
             supplied_power_w: supply,
             dissipated_power_w: loss,
             power_residual_w: balance,
