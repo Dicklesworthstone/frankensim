@@ -3552,3 +3552,48 @@ checkouts were unavailable: these are focused native fallback results, not a
 full workspace/DSR verdict, a continuum Stefan bound or experimental validation.
 The existing stationary isotropic source interpretation and contact/radiation
 domain limits remain authoritative.
+
+## Material enclosure radiation throughout enthalpy histories
+
+`MaterialEnclosureEnthalpyHistoryRun` composes the original primary-h history
+with source-dependent gray reflection in a closed or open enclosure. The
+original pointwise owner supplies mesh, ordered named traces, reciprocal view
+factors and watt tolerances. The wrapper pins original emissivity claims and
+checks exact caloric-object identity against every participating storage node.
+A closed enclosure takes no reservoir schedule; an open enclosure requires
+one explicitly dimensioned black-bath temperature history.
+
+Each sampled boundary must preserve the complete original named face
+partition and natural radiation traces. Immutable face geometry and optical
+factors are shared across candidates instead of rebuilding surface quadrature
+or refactoring the fixed snapshot. The material owner still refreshes actual
+nodal epsilon(T/f) and the current reflected operator at every Newton state.
+Original-source k(h_h) histories compose through the same retained transport
+dispatcher, including nonuniform bulk temperature gradients.
+
+Direct endpoints use right-continuous values. Event steps merge source,
+boundary and bath knots and use interval-end left limits. Adaptive proposals
+reuse the h/T/f full-step/two-half-step controller; the second half retains
+the first half's complete caloric state. Both half-step reports survive and
+publish atomically with the accepted endpoint count and clock. Invalid source,
+bath, budget or cancellation leaves all accepted fields unchanged.
+
+Closed reflection remains internal exchange. Open-bath radiation, Robin
+convection and volumetric generation retain separate signed heat accounts and
+enter the existing reference-mass energy check exactly once. This is a fixed
+geometry gray-patch irradiation model with material pointwise emission, not
+spectral transport, participating gas, moving visibility or a global time-error
+bound.
+
+Five new G0/G1/G3/G4 history regressions cover independent two-patch latent
+endpoints, large enthalpy-datum changes, distinct material temperatures, merged
+bath/source/Robin events, phase-only adaptive rejection, source identity,
+failure/cancellation/resume and simultaneous original-source conductivity with
+active spatial transport. The actual updated library compiled natively against
+matching cached dependencies. The enclosure target passed 11 tests, then its
+new twelfth source-composition test passed through a focused invocation.
+The source-history and material ambient targets also passed 16 and 9 tests.
+Two earlier enclosure-test import paths were corrected; all three earlier
+material enclosure adjoint regressions now execute successfully. DSR and
+required sibling checkouts were unavailable, so this is focused native
+fallback evidence, not full workspace or experimental validation.

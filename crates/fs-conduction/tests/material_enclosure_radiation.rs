@@ -4,6 +4,8 @@ mod support;
 mod adaptive;
 #[path = "material_enclosure_radiation/adjoint.rs"]
 mod adjoint;
+#[path = "material_enclosure_radiation/history.rs"]
+mod history;
 
 use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
 use fs_conduction::transient::enthalpy::heterogeneous::{
@@ -12,13 +14,14 @@ use fs_conduction::transient::enthalpy::heterogeneous::{
 use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyStepConfig};
 use fs_conduction::{
     ConductionMesh, ConductionProblem, ConductivityModel, EMISSIVITY_DIMS, GrayDiffuseEnclosure,
-    MaterialEnclosureRadiationPatch, MaterialPointwiseEnclosureRadiation, OpenDiffuseEnclosure,
+    MaterialEnclosureRadiationPatch, MaterialPointwiseEnclosureRadiation,
     PointwiseEnclosureRadiation, PointwiseEnclosureTolerance, RadiationSurface, ScalarField,
     STEFAN_BOLTZMANN_W_M2_K4 as SIGMA, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity,
     ThermalBc, ThermalBoundary, ThermalBoundaryBuilder, ViewFactorEvidence, ViewFactorMatrix,
     ViewFactorTolerance,
 };
 use fs_evidence::ValidityDomain;
+use fs_conduction::radiation::OpenDiffuseEnclosure;
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 use fs_material::state_point::MaterialPropertySelection;
 use fs_material::thermal::source::ThermalMaterialPoint;

@@ -35,7 +35,7 @@ fn source_card(name: &str, axis: Option<&str>, knots: &[(f64, f64)]) -> Material
         process: "radiation control fixture".into(), revision: 0 }, claims, Vec::new()).unwrap()
 }
 
-fn open(cx: &asupersync::Cx<'_>, mesh: &ConductionMesh, cards: &[MaterialCard; 2],
+fn open(cx: &fs_exec::Cx<'_>, mesh: &ConductionMesh, cards: &[MaterialCard; 2],
     context: &QueryPoint) -> OpenDiffuseEnclosure
 {
     OpenDiffuseEnclosure::new(cx, surfaces(mesh, cards, context),

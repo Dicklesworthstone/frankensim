@@ -11,6 +11,9 @@ mod adaptive;
 /// Scheduled pointwise radiation with original temperature/phase emissivity.
 pub mod material;
 
+/// Scheduled source-dependent reflection in closed and open enclosures.
+pub mod enclosure;
+
 use super::{EnthalpyHistoryRun, conduction, invalid, poll};
 use super::super::radiation::{RadiationRegionHistory, admit_histories, patches_before};
 use super::super::events;

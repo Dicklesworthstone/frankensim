@@ -322,6 +322,11 @@ impl ThermalBoundary {
         self.face_region[boundary_face_slot]
     }
 
+    /// Size of the original face partition, including the adiabatic remainder.
+    pub(crate) fn face_count(&self) -> usize {
+        self.face_region.len()
+    }
+
     /// The prescribed `(vertex, temperature)` pairs, ascending by vertex.
     #[must_use]
     pub fn dirichlet(&self) -> &[(usize, f64)] {

@@ -498,9 +498,9 @@ impl PointwiseEnclosureAssembly {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PatchSystem<'a> {
-    Closed { enclosure: &'a GrayDiffuseEnclosure, factors: PreparedRadiosity<'a> },
+    Closed { enclosure: &'a GrayDiffuseEnclosure, factors: Arc<PreparedRadiosity<'a>> },
     // Own an immutable snapshot so a caller may lower a local open declaration
     // and return this spatial owner. Bath-temperature changes clone the Arc.
     Open(Arc<OpenDiffuseEnclosure>),
@@ -596,7 +596,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
     ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
         admit_configuration(enclosure.surfaces().len(), tolerance)?;
-        let factors = enclosure.prepare_radiosity(cx)?;
+        let factors = Arc::new(enclosure.prepare_radiosity(cx)?);
         Self::prepare(cx, mesh, boundary,
             PatchSystem::Closed { enclosure, factors }, None, tolerance)
     }
@@ -733,6 +733,45 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             spectral_controls: self.spectral_controls,
             additional_bands: self.additional_bands.iter()
                 .map(|band| band.with_ambient_temperature_k(ambient_temperature_k))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    /// Rebind sampled natural-boundary values on the identical fixed partition.
+    /// History candidates share immutable geometry and original optical factors;
+    /// neither a retry nor a changed bath rebuilds the boundary quadrature.
+    pub(crate) fn at_history_boundary<'s>(
+        &'s self, cx: &Cx<'_>, mesh: &'s ConductionMesh, boundary: &'s ThermalBoundary,
+    ) -> Result<PointwiseEnclosureRadiation<'s>, ConductionError> {
+        poll(cx, 0)?;
+        if !std::ptr::eq(mesh, self.mesh)
+            || boundary.face_count() != self.boundary.face_count()
+            || boundary.region_names() != self.boundary.region_names()
+        {
+            return Err(invalid("enclosure history requires its original mesh and named face partition"));
+        }
+        for slot in 0..boundary.face_count() {
+            if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+            if boundary.region_for(slot) != self.boundary.region_for(slot) {
+                return Err(invalid("enclosure history cannot move or relabel an admitted radiation trace"));
+            }
+        }
+        for (patch, surface) in self.system.surfaces().iter().enumerate() {
+            poll(cx, patch)?;
+            let region = boundary.region_names().iter().position(|name| name == surface.name())
+                .ok_or_else(|| invalid("enclosure history requires the original named radiation region"))?;
+            if matches!(boundary.conditions()[region], ThermalBc::Dirichlet { .. }) {
+                return Err(invalid("enclosure history requires natural boundary traces"));
+            }
+            boundary.conditions()[region].validate(mesh.vertex_count())?;
+        }
+        Ok(PointwiseEnclosureRadiation {
+            mesh, boundary, system: self.system.clone(),
+            ambient_temperature_k: self.ambient_temperature_k,
+            geometry: Arc::clone(&self.geometry), tolerance: self.tolerance,
+            spectral_controls: self.spectral_controls,
+            additional_bands: self.additional_bands.iter()
+                .map(|band| band.at_history_boundary(cx, mesh, boundary))
                 .collect::<Result<_, _>>()?,
         })
     }
