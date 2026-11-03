@@ -79,10 +79,30 @@ pub struct PlatesGrid3 {
     pub f: Vec<[f64; Q3]>,
     /// Per-cell relaxation time (rheology writes here).
     pub tau: Vec<f64>,
-    /// Per-cell external force (Boussinesq / body force writes here).
+    /// Per-cell external force density in lattice units. Populations retain
+    /// its Guo half-source frame. Use [`Self::rebind_forcing`] when replacing a
+    /// held load on an evolved state without adding an instantaneous impulse.
     pub fext: Vec<[f64; 3]>,
     post: Vec<[f64; Q3]>,
 }
+
+/// A plate-grid force proposal was refused before accepted fields changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForceRebindError3 {
+    /// Grid storage or the proposed force field does not match its dimensions.
+    Invalid(&'static str),
+    /// Nonfinite forcing, nonpositive density or unrepresentable populations.
+    Unphysical {
+        /// Original x-fastest grid-cell index, including the wall layers.
+        cell: usize,
+    },
+}
+impl core::fmt::Display for ForceRebindError3 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "D3Q19 plate-grid force rebinding: {self:?}")
+    }
+}
+impl std::error::Error for ForceRebindError3 {}
 
 impl PlatesGrid3 {
     /// A resting unit-density plate channel: `nz_fluid` fluid layers
@@ -150,6 +170,73 @@ impl PlatesGrid3 {
         (rho, u)
     }
 
+    /// Replace a held lattice force density without advancing physical time.
+    ///
+    /// Guo populations store `f_phys - S(u,F)/2`. Replacing their half source
+    /// at the accepted physical velocity preserves density, momentum and the
+    /// full force-corrected second moment, including nonequilibrium stress.
+    /// The next native collision then applies the new force for one whole
+    /// lattice step. Switch-on, reversal and removal create no extra impulse.
+    ///
+    /// `forces` covers every cell, including both wall layers. Wall populations
+    /// are unchanged. This retains viscosity and does not equilibrate flow.
+    /// Existing collision scratch stages the proposal without allocation;
+    /// refusal can change scratch but leaves populations and forces untouched.
+    /// Identical forces retain all population and scratch bits. Direct `fext`
+    /// assignment instead changes the interpretation of existing populations.
+    pub fn rebind_forcing(&mut self, forces: &[[f64; 3]]) -> Result<(), ForceRebindError3> {
+        if forces.len() != self.f.len() {
+            return Err(ForceRebindError3::Invalid(
+                "force field must cover all plate-grid cells",
+            ));
+        }
+        self.rebind_forcing_inner(|cell| forces[cell])
+    }
+
+    // A private selector also prepares uniform channel forcing without a
+    // second force-field allocation. Both callers supply immutable values.
+    fn rebind_forcing_inner(
+        &mut self,
+        force: impl Fn(usize) -> [f64; 3],
+    ) -> Result<(), ForceRebindError3> {
+        let plane = self.nx.checked_mul(self.ny).filter(|&n| n > 0);
+        let count = plane.and_then(|n| n.checked_mul(self.nz));
+        let Some((plane, count)) = plane.zip(count).filter(|_| self.nz >= 4) else {
+            return Err(ForceRebindError3::Invalid("invalid plate-grid dimensions"));
+        };
+        if self.f.len() != count || self.fext.len() != count || self.post.len() != count {
+            return Err(ForceRebindError3::Invalid(
+                "populations and forces must match plate-grid dimensions",
+            ));
+        }
+        let mut changed = false;
+        for (cell, previous) in self.fext.iter().enumerate() {
+            let next = force(cell);
+            if !previous.iter().chain(&next).all(|value| value.is_finite()) {
+                return Err(ForceRebindError3::Unphysical { cell });
+            }
+            changed |= *previous != next;
+        }
+        if !changed {
+            return Ok(());
+        }
+        self.post.copy_from_slice(&self.f);
+        for cell in plane..count - plane {
+            let previous = self.fext[cell];
+            let next = force(cell);
+            let velocity = admit_force_frame3(&self.f[cell], previous, cell)?;
+            if previous != next {
+                crate::thermal::forcing::reframe3(&mut self.post[cell], velocity, previous, next);
+                admit_force_frame3(&self.post[cell], next, cell)?;
+            }
+        }
+        core::mem::swap(&mut self.f, &mut self.post);
+        for (cell, stored) in self.fext.iter_mut().enumerate() {
+            *stored = force(cell);
+        }
+        Ok(())
+    }
+
     /// Total mass over all cells (conserved up to roundoff: collision and
     /// Guo forcing are mass-neutral, walls bounce back, x/y wrap).
     #[must_use]
@@ -157,8 +244,9 @@ impl PlatesGrid3 {
         self.f.iter().flat_map(|f| f.iter()).sum()
     }
 
-    /// Deterministically perturb fluid-cell densities with the same
-    /// integer-hash schedule the tiled `Duct` uses (no RNG).
+    /// Prepare perturbed fluid-cell densities at physical rest with the same
+    /// integer-hash schedule the tiled `Duct` uses (no RNG). Existing forces
+    /// select the populations' half-source frame; they do not seed a velocity.
     pub fn perturb(&mut self, seed: u64, amplitude: f64) {
         for z in 1..self.nz - 1 {
             for y in 0..self.ny {
@@ -175,6 +263,14 @@ impl PlatesGrid3 {
                     let rho = 1.0 + amplitude * unit;
                     let i = self.idx(x, y, z);
                     self.f[i] = equilibrium3(rho, [0.0; 3]);
+                    if self.fext[i] != [0.0; 3] {
+                        crate::thermal::forcing::reframe3(
+                            &mut self.f[i],
+                            [0.0; 3],
+                            [0.0; 3],
+                            self.fext[i],
+                        );
+                    }
                 }
             }
         }
@@ -221,6 +317,31 @@ impl PlatesGrid3 {
                 }
             }
         }
+    }
+}
+
+fn admit_force_frame3(
+    populations: &[f64; Q3],
+    force: [f64; 3],
+    cell: usize,
+) -> Result<[f64; 3], ForceRebindError3> {
+    let rho = populations.iter().sum::<f64>();
+    let velocity = core::array::from_fn(|axis| {
+        let momentum = populations
+            .iter()
+            .zip(E3)
+            .map(|(f, e)| f * f64::from([e.0, e.1, e.2][axis]))
+            .sum::<f64>();
+        (momentum + 0.5 * force[axis]) / rho
+    });
+    if rho.is_finite()
+        && rho > 0.0
+        && populations.iter().all(|value| value.is_finite())
+        && velocity.iter().all(|value| value.is_finite())
+    {
+        Ok(velocity)
+    } else {
+        Err(ForceRebindError3::Unphysical { cell })
     }
 }
 
@@ -378,9 +499,8 @@ pub fn plate_channel_flow3(
 ) -> (PlatesGrid3, usize, RheologyStats) {
     assert!(gx.is_finite(), "body force must be finite");
     let mut grid = PlatesGrid3::plates(nx, ny, nz_fluid, 1.0);
-    for i in 0..grid.fext.len() {
-        grid.fext[i] = [gx, 0.0, 0.0];
-    }
+    grid.rebind_forcing_inner(|_| [gx, 0.0, 0.0])
+        .expect("finite channel forcing must admit the resting population frame");
     let mut stats = RheologyStats::default();
     let mut last_peak = 0.0f64;
     let mut steps = 0;
@@ -582,7 +702,12 @@ impl ThermalLbm3 {
                     let previous = self.grid.fext[i];
                     if previous != total {
                         let velocity = self.grid.moments3(i).1;
-                        crate::thermal::forcing::reframe3(&mut self.grid.f[i], velocity, previous, total);
+                        crate::thermal::forcing::reframe3(
+                            &mut self.grid.f[i],
+                            velocity,
+                            previous,
+                            total,
+                        );
                         self.grid.fext[i] = total;
                     }
                 }
@@ -620,7 +745,10 @@ impl ThermalLbm3 {
                         self.gpop[i][q] = if self.grid.is_wall_layer(sz) {
                             let tw = if sz == 0 { self.t_bottom } else { self.t_top };
                             // Anti-bounce-back: fixed halfway temperature.
-                            2.0f64.mul_add(W7[q] * tw, -self.grid.post.as_flattened()[7 * i + OPP7[q]])
+                            2.0f64.mul_add(
+                                W7[q] * tw,
+                                -self.grid.post.as_flattened()[7 * i + OPP7[q]],
+                            )
                         } else {
                             self.grid.post.as_flattened()[7 * self.grid.idx(sx, sy, sz) + q]
                         };

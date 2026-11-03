@@ -7164,6 +7164,26 @@ external loads and atomic refusal. These integration tests remain unexecuted
 under the dependency-build resource limit; focused native force-frame tests are
 separate evidence and do not constitute a full material/free-surface gate.
 
+### Dense D3Q19 plate force histories
+
+`PlatesGrid3::rebind_forcing` changes a held volume-force field through the
+shared Guo half-source transform. The original density, physical momentum and
+complete force-corrected stress survive to population roundoff. Wall
+populations and relaxation times are retained; the next native collision
+supplies the actual new impulse. Existing private collision storage stages the
+proposal with no allocation or persistent duplicate. Invalid layouts, nonfinite
+forces and unrepresentable live cells refuse before accepted publication;
+identical input preserves population and scratch bits.
+
+`plate_channel_flow3` and the plate-grid density perturbation initializer now
+start at physical rest under held forcing. Uniform channel initialization uses
+a private selector without allocating another force field. The raw public
+`fext` assignment convention and the separate legacy Duct/Boundary constructors
+are not redefined. Four focused native tests cover nonuniform density and all
+stress components, switched/reversed/removed force through original collision
+and streaming, late-cell refusal/retry, and actual Newtonian/Carreau startup.
+These selected-production-source checks do not replace the full Cargo gate.
+
 ### Finite-slope thermocapillary height graphs
 
 `free_surface3_from_cells_with_height_graph_thermocapillarity` binds the original

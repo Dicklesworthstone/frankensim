@@ -44,11 +44,11 @@ pub use boundary::{
     PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,
     VelocityProfileReport3, WallMomentumExchange3,
 };
-pub(crate) use coupled::{force_corrected_shear_rate3, force_corrected_stress3};
 pub use coupled::{
-    PlatesGrid3, ThermalLbm3, gbeta_for_rayleigh3, plate_channel_flow3, shear_rate3, update_tau3,
-    update_tau3_field,
+    ForceRebindError3, PlatesGrid3, ThermalLbm3, gbeta_for_rayleigh3, plate_channel_flow3,
+    shear_rate3, update_tau3, update_tau3_field,
 };
+pub(crate) use coupled::{force_corrected_shear_rate3, force_corrected_stress3};
 pub use simd::{
     D3q19BgkSimdTier, D3q19StreamSimdTier, d3q19_bgk_simd_tier, d3q19_stream_simd_tier,
 };
