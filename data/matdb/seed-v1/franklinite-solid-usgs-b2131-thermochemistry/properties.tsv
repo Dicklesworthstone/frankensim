@@ -1,0 +1,82 @@
+frankensim.matdb-source.v1
+observation	identity	Pure zinc ferrite reference phase	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/28/full/max/0/default.jpg	The printed page 22 FRANKLINITE row explicitly gives ZnFe2O4 and formula weight 241.082 g/mol. This is the pure zinc-ferrite endmember with one Zn(II) and two Fe(III) per formula unit. It does not represent Mn-bearing natural franklinite, a substituted ferrite solid solution, a mixed zinc roast calcine, or a qualified ore specimen. The source formula weight and its rounding are retained.
+observation	reference-values	Literal zinc-ferrite standard-state thermochemistry	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/28/full/max/0/default.jpg	Standard molar formation enthalpy is -1188.1 kJ/mol, standard molar formation Gibbs energy is -1082.1 kJ/mol and absolute standard molar entropy is 150.7 J/(mol K). Formation Gibbs energy is transcribed from the independent source column, not calculated as formation enthalpy minus temperature times the species entropy. These values permit declared formation, dissolution and iron-precipitation balances without treating ferrite-bound zinc as free ZnO.
+observation	reported-uncertainty	Printed uncertainty magnitudes without an invented probability model	USGS Bulletin 2131 printed pages 3 and 22	The source prints uncertainty magnitudes 4.0 kJ/mol for formation enthalpy, 4.0 kJ/mol for formation Gibbs energy and 0.3 J/(mol K) for entropy. They are retained as dimensional metadata. No universal coverage probability, independent Gaussian distribution or cross-species covariance is assigned. All claims retain Unstated uncertainty; these magnitudes are not certified reaction bounds.
+observation	scope	USGS reference point, pure endmember and phase scope	USGS Bulletin 2131 printed pages iv, 1, 3 and 22	All claims apply only at 298.15 K and 100000 Pa under source-elemental-reference-usgs-b2131 and source-phase-franklinite. No high-temperature extrapolation, phase fraction, spinel inversion model, solid-solution activity, acid-leach rate, accessible-zinc fraction or recovery is supplied. A complete reaction requires compatible participant references.
+scalar	molar-mass	identity,scope	mass	241.082	g/mol	tabulated
+scalar	formation-enthalpy	identity,reference-values,reported-uncertainty,scope	hf	-1188.1	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,reference-values,reported-uncertainty,scope	gf	-1082.1	kJ/mol	tabulated
+scalar	entropy	identity,reference-values,reported-uncertainty,scope	s0	150.7	J/mol/K	tabulated
+scalar	formation-uncertainty	reported-uncertainty,scope	hf_uncertainty	4.0	kJ/mol	tabulated
+scalar	gibbs-uncertainty	reported-uncertainty,scope	gf_uncertainty	4.0	kJ/mol	tabulated
+scalar	entropy-uncertainty	reported-uncertainty,scope	s_uncertainty	0.3	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	entropy	unstated	-	-	-	-
+uncertainty	formation-uncertainty	unstated	-	-	-	-
+uncertainty	gibbs-uncertainty	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	entropy	temperature	298.15	298.15	K
+validity	formation-uncertainty	temperature	298.15	298.15	K
+validity	gibbs-uncertainty	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	entropy	pressure	100000	100000	Pa
+validity	formation-uncertainty	pressure	100000	100000	Pa
+validity	gibbs-uncertainty	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	entropy	standard	1	1	1
+validity	formation-uncertainty	standard	1	1	1
+validity	gibbs-uncertainty	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	entropy	convention	1	1	1
+validity	formation-uncertainty	convention	1	1	1
+validity	gibbs-uncertainty	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	entropy	phase	1	1	1
+validity	formation-uncertainty	phase	1	1	1
+validity	gibbs-uncertainty	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	molar-mass	mineral	1	1	1
+validity	formation-enthalpy	mineral	1	1	1
+validity	formation-gibbs-energy	mineral	1	1	1
+validity	entropy	mineral	1	1	1
+validity	formation-uncertainty	mineral	1	1	1
+validity	gibbs-uncertainty	mineral	1	1	1
+validity	entropy-uncertainty	mineral	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	entropy	pure	1	1	1
+validity	formation-uncertainty	pure	1	1	1
+validity	gibbs-uncertainty	pure	1	1	1
+validity	entropy-uncertainty	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	entropy	reference	1	1	1
+validity	formation-uncertainty	reference	1	1	1
+validity	gibbs-uncertainty	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	entropy	specimen	0	0	1
+validity	formation-uncertainty	specimen	0	0	1
+validity	gibbs-uncertainty	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1

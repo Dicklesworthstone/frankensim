@@ -1,0 +1,82 @@
+frankensim.matdb-source.v1
+observation	identity	Hematite crystalline iron(III) oxide	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/22/full/max/0/default.jpg	The printed page 16 HEMATITE row gives Fe2O3 and formula weight 159.692 g/mol. This is pure crystalline hematite, not magnetite, maghemite, goethite, a hydrous ferric oxide, an iron-bearing ore or a qualified calcine specimen. The source formula weight and its rounding are retained.
+observation	reference-values	Literal USGS hematite standard-state thermochemistry	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/22/full/max/0/default.jpg	Standard molar formation enthalpy is -826.2 kJ/mol, standard molar formation Gibbs energy is -744.4 kJ/mol and absolute standard molar entropy is 87.4 J/(mol K). Formation Gibbs energy is transcribed from the independent source column, not calculated as formation enthalpy minus temperature times the species entropy. This explicitly named USGS evaluation closes zinc-ferrite formation with compatible USGS zincite and franklinite sources; the existing JANAF hematite evaluation keeps its own source identity and values.
+observation	reported-uncertainty	Printed uncertainty magnitudes without an invented probability model	USGS Bulletin 2131 printed pages 3 and 16	The source prints uncertainty magnitudes 1.3 kJ/mol for formation enthalpy, 1.3 kJ/mol for formation Gibbs energy and 0.2 J/(mol K) for entropy. They are retained as dimensional metadata. No universal coverage probability, independent Gaussian distribution or cross-species covariance is assigned. All claims retain Unstated uncertainty; these magnitudes are not certified reaction bounds.
+observation	scope	USGS reference point and phase scope	USGS Bulletin 2131 printed pages iv, 1, 3 and 16	All claims apply only at 298.15 K and 100000 Pa under source-elemental-reference-usgs-b2131 and source-phase-hematite. No heat-capacity curve, magnetic transition model, high-temperature extrapolation, phase selection, ore conversion, ferrite-formation rate or plant calibration is supplied. A complete reaction requires compatible participant references.
+scalar	molar-mass	identity,scope	mass	159.692	g/mol	tabulated
+scalar	formation-enthalpy	identity,reference-values,reported-uncertainty,scope	hf	-826.2	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,reference-values,reported-uncertainty,scope	gf	-744.4	kJ/mol	tabulated
+scalar	entropy	identity,reference-values,reported-uncertainty,scope	s0	87.4	J/mol/K	tabulated
+scalar	formation-uncertainty	reported-uncertainty,scope	hf_uncertainty	1.3	kJ/mol	tabulated
+scalar	gibbs-uncertainty	reported-uncertainty,scope	gf_uncertainty	1.3	kJ/mol	tabulated
+scalar	entropy-uncertainty	reported-uncertainty,scope	s_uncertainty	0.2	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	entropy	unstated	-	-	-	-
+uncertainty	formation-uncertainty	unstated	-	-	-	-
+uncertainty	gibbs-uncertainty	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	entropy	temperature	298.15	298.15	K
+validity	formation-uncertainty	temperature	298.15	298.15	K
+validity	gibbs-uncertainty	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	entropy	pressure	100000	100000	Pa
+validity	formation-uncertainty	pressure	100000	100000	Pa
+validity	gibbs-uncertainty	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	entropy	standard	1	1	1
+validity	formation-uncertainty	standard	1	1	1
+validity	gibbs-uncertainty	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	entropy	convention	1	1	1
+validity	formation-uncertainty	convention	1	1	1
+validity	gibbs-uncertainty	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	entropy	phase	1	1	1
+validity	formation-uncertainty	phase	1	1	1
+validity	gibbs-uncertainty	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	molar-mass	mineral	1	1	1
+validity	formation-enthalpy	mineral	1	1	1
+validity	formation-gibbs-energy	mineral	1	1	1
+validity	entropy	mineral	1	1	1
+validity	formation-uncertainty	mineral	1	1	1
+validity	gibbs-uncertainty	mineral	1	1	1
+validity	entropy-uncertainty	mineral	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	entropy	pure	1	1	1
+validity	formation-uncertainty	pure	1	1	1
+validity	gibbs-uncertainty	pure	1	1	1
+validity	entropy-uncertainty	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	entropy	reference	1	1	1
+validity	formation-uncertainty	reference	1	1	1
+validity	gibbs-uncertainty	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	entropy	specimen	0	0	1
+validity	formation-uncertainty	specimen	0	0	1
+validity	gibbs-uncertainty	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1
