@@ -18,7 +18,7 @@ pub mod reciprocal;
 use fs_material::laminate::thermal::source::{
     LaminaSourceInput, LaminateThermalSource, LaminateThermalSourceError, ResolvedLaminateThermal,
 };
-use fs_material::laminate::{MAX_LAMINA_LAYERS, ReferenceSurface};
+use fs_material::laminate::{LaminateShearModel, MAX_LAMINA_LAYERS, ReferenceSurface};
 use fs_material::thermal::conduction::LayerConductionConfig;
 use fs_material::thermal::transport::stack::transient::{
     BoundLayeredThermalBody,
@@ -186,6 +186,32 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
         reference: ReferenceSurface,
         discretization: LaminateShellDiscretization,
         limits: LaminateShellLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LaminateShellError> {
+        Self::try_new_with_shear_model(
+            thermal,
+            layers,
+            reference,
+            LaminateShearModel::DirectionalWhitney,
+            discretization,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Bind the original thermal cells with an explicitly chosen shear closure.
+    /// Each refresh keeps the same physical probe axes in the section frame,
+    /// all original sublamina temperatures and the fixed reference inventory.
+    /// This is the same one-way heat-to-mechanics approximation as `try_new`;
+    /// selecting coupled shear does not supply its temperature derivatives for
+    /// a reciprocal heat/work consumer.
+    pub fn try_new_with_shear_model(
+        thermal: &'b BoundLayeredThermalBody<'a>,
+        layers: Vec<LaminaSourceInput>,
+        reference: ReferenceSurface,
+        shear_model: LaminateShearModel,
+        discretization: LaminateShellDiscretization,
+        limits: LaminateShellLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LaminateShellError> {
         poll(&mut cancelled)?;
@@ -283,8 +309,13 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
                 });
             }
         }
-        let source = LaminateThermalSource::try_new(inputs, reference, &mut cancelled)
-            .map_err(LaminateShellError::Source)?;
+        let source = LaminateThermalSource::try_new_with_shear_model(
+            inputs,
+            reference,
+            shear_model,
+            &mut cancelled,
+        )
+        .map_err(LaminateShellError::Source)?;
         let mut cell = 0;
         for (layer, &count) in body.layer_cell_counts().iter().enumerate() {
             for _ in 0..count {

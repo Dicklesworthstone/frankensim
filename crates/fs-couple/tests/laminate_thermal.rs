@@ -5,7 +5,8 @@ mod laminate_thermal_common;
 use fs_couple::laminate_thermal::{
     LaminateShellError, LaminateShellLimits, LaminateShellSnapshot, LayeredThermalShell,
 };
-use fs_material::laminate::ReferenceSurface;
+use fs_material::laminate::{LaminateShearModel, ReferenceSurface};
+use fs_material::laminate::thermal::source::LaminaElasticSource;
 use fs_material::thermal::transport::stack::transient::implicit::{
     LayeredThermalSolveControls, LayeredThermalWorkspace,
 };
@@ -147,6 +148,91 @@ fn g1_implicit_heat_exchange_drives_original_temperature_dependent_bimetal() {
     assert_eq!(initial.time_s(), 0.0);
     assert_eq!(initial.cells(), &old_cells);
     assert_eq!(initial.links(), &old_links);
+}
+
+#[test]
+fn g1_nonuniform_heat_retains_equilibrated_cross_shear_in_native_shell() {
+    use fs_matdb::{InterpolationPolicy, MaterialCard, PropertyKey, PropertyValue};
+    use fs_qty::{Dims, Pressure, Temperature};
+
+    // Extend the authored caloric fixtures with independently selected
+    // orthotropic measurements. No production card or source is synthesized.
+    let cards: Vec<_> = [(9.5, 1.9, 0.5, 3.0), (20.0 / 7.0, 20.0 / 3.0, 1.0 / 7.0, 1.0)]
+        .into_iter().enumerate().map(|(i, (e1, e2, nu, g12))| {
+            let base = card(&format!("coupled shear ply {i}"));
+            let mut claims = base.claims().clone();
+            for (name, dims, value, varies) in [
+                ("young_modulus_1", Pressure::DIMS, e1 * E, true),
+                ("young_modulus_2", Pressure::DIMS, e2 * E, true),
+                ("poisson_ratio_12", Dims::NONE, nu, false),
+                ("shear_modulus_12", Pressure::DIMS, g12 * E, true),
+                ("shear_modulus_31", Pressure::DIMS, 2.0 * E, false),
+                ("shear_modulus_23", Pressure::DIMS, 5.0 * E, false),
+            ] {
+                let mut claim = base.claims_for("young_modulus")[0].1.clone();
+                claim.key = PropertyKey::new(name, dims);
+                claim.value = if varies {
+                    PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+                        knots: vec![(280.0, value * 1.04), (360.0, value * 0.88)], dims }
+                } else { PropertyValue::Scalar { value, dims } };
+                claim.interpolation = if varies { InterpolationPolicy::LinearInside }
+                    else { InterpolationPolicy::ConstantWithinValidity };
+                claims.insert_claim(claim).unwrap();
+            }
+            Arc::new(MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap())
+        }).collect();
+    let body = prepare_body(&cards, &[1, 1], 1.0);
+    let caloric = body.thermal_laws(false).unwrap();
+    let bound = body.bind(&caloric, ids()).unwrap();
+    let initial = initial(&bound, &[300.0, 340.0]);
+    let mut plies = mechanical(&cards);
+    for (ply, angle) in plies.iter_mut().zip([core::f64::consts::FRAC_PI_4, -core::f64::consts::FRAC_PI_4]) {
+        ply.elasticity = LaminaElasticSource::OrthotropicPlane12;
+        ply.orientation_rad = angle;
+    }
+    let mut mesh = discretization();
+    // Both facets place section x along world x, preserving the same declared
+    // physical probe directions across their different local facet frames.
+    for (facet, angle) in mesh.section_angles_rad.iter_mut().enumerate() {
+        let frame = mesh.mesh.facet(facet).unwrap().frame;
+        *angle = frame[1][0].atan2(frame[0][0]);
+    }
+    let model = LaminateShearModel::EquilibratedCylindrical { bending_axis_rad: 0.17 };
+    let owner = LayeredThermalShell::try_new_with_shear_model(
+        &bound, plies, ReferenceSurface::Midsurface, model, mesh, limits(), || false,
+    ).unwrap();
+    let mut workspace = LayeredThermalWorkspace::new(2).unwrap();
+    let step = owner.advance_to(&initial, 0.5, &[0.0; 24], conduction(),
+        LayeredThermalSolveControls::default(), &mut workspace, || false).unwrap();
+    let section = step.shell.material().prepared().section();
+    assert_eq!(owner.source().shear_model(), model);
+    assert_eq!(section.shear_model(), model);
+    for (&actual, expected) in step.shell.temperatures_k().iter().zip([310.0, 330.0]) {
+        close(actual, expected, 5e-10);
+    }
+    for (i, card) in cards.iter().enumerate() {
+        assert!(Arc::ptr_eq(&step.shell.material().source().layers()[i].input().card, card));
+        assert_eq!(step.shell.material().layers()[i].elasticity().card_identity(), card.content_hash());
+    }
+    let reference = owner.source().reference_section();
+    assert_eq!(section.i0_kg_m2().to_bits(), reference.i0_kg_m2().to_bits());
+    assert_eq!(section.i1_kg_m().to_bits(), reference.i1_kg_m().to_bits());
+    assert_eq!(section.i2_kg().to_bits(), reference.i2_kg().to_bits());
+    close(AREA * section.i0_kg_m2(), initial.mass_kg(), 1e-12);
+    assert_ne!(section.shear_pa_m(), reference.shear_pa_m());
+    let h = section.shear_pa_m();
+    assert!(h[1].abs() > 1e-3 * h[0]);
+    for gamma in [[0.002, 0.003], [0.002, -0.003]] {
+        let displacement: Vec<_> = owner.discretization().mesh.nodes.iter().flat_map(|p|
+            [0.0, 0.0, gamma[0] * p[0] + gamma[1] * p[1], 0.0, 0.0, 0.0]).collect();
+        // Constant transverse shear, zero membrane/bending strain: native
+        // mechanical work must include the sign-sensitive off-diagonal term.
+        let expected = 0.5 * AREA * (h[0] * gamma[0] * gamma[0]
+            + 2.0 * h[1] * gamma[0] * gamma[1] + h[3] * gamma[1] * gamma[1]);
+        close(step.shell.model().strain_energy(&displacement).unwrap(), expected, 2e-11 * expected);
+    }
+    close(step.thermal.energy_j(), initial.energy_j(), 1e-8);
+    assert_eq!(initial.time_s(), 0.0);
 }
 
 #[test]

@@ -9,7 +9,9 @@ use fs_material::laminate::thermal::source::{
     IntegratedLaminaExpansion, LaminaElasticSource, LaminaExpansionSource, LaminaSourceInput,
     LaminateThermalSource, LaminateThermalSourceError,
 };
-use fs_material::laminate::{LaminateError, LayerLaw, MAX_LAMINA_LAYERS, ReferenceSurface};
+use fs_material::laminate::{
+    LaminateError, LaminateShearModel, LayerLaw, MAX_LAMINA_LAYERS, ReferenceSurface,
+};
 use fs_material::state_point::{
     DENSITY_PROPERTY, INVERSE_TEMPERATURE_DIMS, IsotropicElasticParameters,
     LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY as CTE, MaterialPropertySelection,
@@ -422,6 +424,91 @@ fn g1_rotated_orthotropic_plane_needs_no_invented_third_axis_elastic_constants()
         scalar.layers()[0].expansion(),
         IntegratedLaminaExpansion::Isotropic(_)
     ));
+}
+
+#[test]
+fn g1_equilibrated_shear_survives_source_refresh_and_corotation() {
+    let mut inputs = Vec::new();
+    // Q1=[[10,1,0],[1,2,0],[0,0,3]], Q2=[[3,1,0],[1,7,0],[0,0,1]]
+    // in GPa, with equal G31=2 GPa, G23=5 GPa at +/-45 degrees.
+    for (index, (e1, e2, nu, g12, angle)) in [
+        (9.5e9, 1.9e9, 0.5, 3e9, core::f64::consts::FRAC_PI_4),
+        (20e9 / 7.0, 20e9 / 3.0, 1.0 / 7.0, 1e9, -core::f64::consts::FRAC_PI_4),
+    ].into_iter().enumerate() {
+        let mut density = claim(DENSITY_PROPERTY, Density::DIMS, &[(300.0, 1300.0 + 400.0 * index as f64)]);
+        density.validity = domain(300.0, 300.0);
+        let mut claims = vec![
+            density,
+            claim("poisson_ratio_12", Dims::NONE, &[(300.0, nu)]),
+            claim("shear_modulus_31", Pressure::DIMS, &[(300.0, 2e9)]),
+            claim("shear_modulus_23", Pressure::DIMS, &[(300.0, 5e9)]),
+            claim(CTE, INVERSE_TEMPERATURE_DIMS, &[(300.0, 1e-5)]),
+        ];
+        for (name, value) in [("young_modulus_1", e1), ("young_modulus_2", e2), ("shear_modulus_12", g12)] {
+            claims.push(claim(name, Pressure::DIMS, &[(300.0, value), (400.0, 0.5 * value)]));
+        }
+        let mut ply = input(card(claims), 0.001);
+        ply.orientation_rad = angle;
+        ply.elasticity = LaminaElasticSource::OrthotropicPlane12;
+        inputs.push(ply);
+    }
+    let model = LaminateShearModel::EquilibratedCylindrical { bending_axis_rad: 0.0 };
+    let source = LaminateThermalSource::try_new_with_shear_model(
+        inputs.clone(), ReferenceSurface::Midsurface, model, || false,
+    ).unwrap();
+    let legacy = LaminateThermalSource::try_new(
+        inputs.clone(), ReferenceSurface::Midsurface, || false,
+    ).unwrap();
+    // Exact rational complementary-energy integral, independently evaluated
+    // for this two-ply section (same oracle as laminate_section, scaled by h).
+    let scale = 0.002e9 / 33_138_104_148_464.0;
+    let expected = [79_043_930_991_093.0, -3_981_858_822_657.0,
+        -3_981_858_822_657.0, 79_043_930_991_093.0];
+    for (&actual, expected) in source.reference_section().shear_pa_m().iter().zip(expected) {
+        near(actual, scale * expected, 2e-12);
+    }
+    let temperatures = [300.0, 400.0];
+    let hot = source.at_temperatures(&temperatures, || false).unwrap();
+    let old = legacy.at_temperatures(&temperatures, || false).unwrap();
+    let section = hot.prepared().section();
+    let old_section = old.prepared().section();
+    assert_eq!(source.shear_model(), model);
+    assert_eq!(section.shear_model(), model);
+    assert!(section.shear_pa_m()[1].abs() > 1e-3 * section.shear_pa_m()[0]);
+    assert_eq!(old_section.shear_pa_m()[1], 0.0);
+    assert_ne!(section.shear_pa_m(), source.reference_section().shear_pa_m());
+    assert_eq!(section.a_pa_m(), old_section.a_pa_m());
+    assert_eq!(section.b_pa_m2(), old_section.b_pa_m2());
+    assert_eq!(section.d_pa_m3(), old_section.d_pa_m3());
+    assert_eq!(hot.prepared().profiles(), old.prepared().profiles());
+    for (current, reference) in [
+        (section.i0_kg_m2(), source.reference_section().i0_kg_m2()),
+        (section.i1_kg_m(), source.reference_section().i1_kg_m()),
+        (section.i2_kg(), source.reference_section().i2_kg()),
+    ] {
+        assert_eq!(current.to_bits(), reference.to_bits());
+    }
+    for (i, original) in inputs.iter().enumerate() {
+        assert!(Arc::ptr_eq(&hot.source().layers()[i].input().card, &original.card));
+        assert_eq!(hot.layers()[i], old.layers()[i]);
+        for property in source.layers()[i].reference_elasticity().properties() {
+            assert_eq!(property.answer().receipt.selected,
+                hot.layers()[i].elasticity().property(property.requirement().name()).unwrap().answer().receipt.selected);
+        }
+    }
+    let angle: f64 = 0.37;
+    for input in &mut inputs { input.orientation_rad += angle; }
+    let rotated = LaminateThermalSource::try_new_with_shear_model(
+        inputs, ReferenceSurface::Midsurface,
+        LaminateShearModel::EquilibratedCylindrical { bending_axis_rad: angle }, || false,
+    ).unwrap().at_temperatures(&temperatures, || false).unwrap();
+    let (s, c) = angle.sin_cos();
+    let r = [[c, -s], [s, c]];
+    let h = section.shear_pa_m();
+    for i in 0..2 { for j in 0..2 {
+        let expected: f64 = (0..2).flat_map(|a| (0..2).map(move |b| r[i][a] * h[2*a+b] * r[j][b])).sum();
+        near(rotated.prepared().section().shear_pa_m()[2*i+j], expected, 2e-12);
+    } }
 }
 
 #[test]

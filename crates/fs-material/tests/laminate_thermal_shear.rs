@@ -6,7 +6,7 @@ use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
-use fs_material::laminate::ReferenceSurface;
+use fs_material::laminate::{LaminateShearModel, ReferenceSurface};
 use fs_material::laminate::thermal::shear::{
     LaminateShearThermoelasticError, ResolvedLaminateShearThermoelastic,
 };
@@ -187,6 +187,31 @@ fn multilayer_inputs(angle: f64) -> Vec<LaminaSourceInput> {
         .enumerate()
         .map(|(i, (h, a))| input(i, h, a + angle))
         .collect()
+}
+
+#[test]
+fn g0_equilibrated_source_refuses_whitney_derivatives_even_when_h_matches() {
+    let inputs = vec![input(0, 0.04, 0.37)];
+    let original = source(inputs.clone(), ReferenceSurface::Midsurface);
+    let coupled = LaminateThermalSource::try_new_with_shear_model(
+        inputs,
+        ReferenceSurface::Midsurface,
+        LaminateShearModel::EquilibratedCylindrical { bending_axis_rad: 0.21 },
+        || false,
+    ).unwrap();
+    let current = coupled.at_temperatures(&[321.0], || false).unwrap();
+    // Both closures are 5/6 h G for a homogeneous ply. Value agreement is
+    // insufficient authority to differentiate a different selected model.
+    for (actual, expected) in current.prepared().section().shear_pa_m().iter()
+        .zip(native_h(&original, &[321.0])) {
+        close(*actual, expected, 1e-12, 1e-12);
+    }
+    assert!(matches!(
+        ResolvedLaminateShearThermoelastic::try_new(&laws(&coupled), &current, || false),
+        Err(LaminateShearThermoelasticError::Invalid(
+            "thermal shear derivatives require the directional Whitney closure"
+        ))
+    ));
 }
 
 #[test]

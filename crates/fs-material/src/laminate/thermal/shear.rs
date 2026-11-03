@@ -26,7 +26,7 @@ pub use increment::LaminateShearTemperatureIncrement;
 use super::source::ResolvedLaminateThermal;
 use super::thermoelastic::AffineLaminaThermoelastic;
 use crate::elastic::thermal::ThermoelasticError;
-use crate::laminate::{rotate_reduced, rotate_transverse};
+use crate::laminate::{LaminateShearModel, rotate_reduced, rotate_transverse};
 use fs_ad::{Dual, Real};
 use std::sync::Arc;
 
@@ -151,6 +151,11 @@ impl ResolvedLaminateShearThermoelastic {
             ));
         }
         let native = current.prepared().section();
+        if native.shear_model() != LaminateShearModel::DirectionalWhitney {
+            return Err(invalid(
+                "thermal shear derivatives require the directional Whitney closure",
+            ));
+        }
         let mut layers = Vec::with_capacity(laws.len());
         let mut temperatures = Vec::with_capacity(laws.len());
         for (i, ((law, source), material)) in

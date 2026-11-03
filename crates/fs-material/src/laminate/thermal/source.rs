@@ -14,7 +14,8 @@
 
 use super::{LaminaThermalStrain, LaminateThermalError, PreparedLaminateThermal};
 use crate::laminate::{
-    LaminaLayer, LaminateError, LaminateSection, LayerLaw, MAX_LAMINA_LAYERS, ReferenceSurface,
+    LaminaLayer, LaminateError, LaminateSection, LaminateShearModel, LayerLaw,
+    MAX_LAMINA_LAYERS, ReferenceSurface,
 };
 use crate::state_point::{
     DENSITY_PROPERTY, INVERSE_TEMPERATURE_DIMS, IntegratedIsotropicThermalExpansion,
@@ -184,6 +185,27 @@ impl LaminateThermalSource {
     pub fn try_new(
         inputs: Vec<LaminaSourceInput>,
         reference: ReferenceSurface,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LaminateThermalSourceError> {
+        Self::try_new_with_shear_model(
+            inputs,
+            reference,
+            LaminateShearModel::DirectionalWhitney,
+            cancelled,
+        )
+    }
+
+    /// Bind original layer sources with an explicit transverse shear closure.
+    /// The same model is rebuilt at each actual layer temperature. Equilibrated
+    /// cylindrical probe axes are fixed relative to the section x/y frame and
+    /// rotate with it when a shell consumer places the section in world space.
+    /// No closure selection changes the original claims, expansion paths, A/B/D
+    /// or reference mass. This remains held-temperature mechanics: the existing
+    /// differentiated shear potential only admits `DirectionalWhitney`.
+    pub fn try_new_with_shear_model(
+        inputs: Vec<LaminaSourceInput>,
+        reference: ReferenceSurface,
+        shear_model: LaminateShearModel,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LaminateThermalSourceError> {
         if cancelled() {
@@ -257,7 +279,7 @@ impl LaminateThermalSource {
             native.push(native_layer(&bound, &bound.reference_elasticity).map_err(material)?);
             layers.push(bound);
         }
-        let section = LaminateSection::try_new(native, reference)
+        let section = section_with_shear_model(native, reference, shear_model)
             .map_err(LaminateThermalSourceError::Section)?;
         if cancelled() {
             return Err(LaminateThermalSourceError::Cancelled);
@@ -275,6 +297,11 @@ impl LaminateThermalSource {
     /// Original geometry, elastic stiffness and fixed reference mass moments.
     pub fn reference_section(&self) -> &LaminateSection {
         &self.reference_section
+    }
+
+    /// Fixed shear closure and physical probe axes for all source snapshots.
+    pub fn shear_model(&self) -> LaminateShearModel {
+        self.reference_section.shear_model()
     }
 
     /// Resolve one current absolute temperature [K] per declared layer, then
@@ -340,7 +367,11 @@ impl LaminateThermalSource {
             });
         }
         let section = Arc::new(
-            LaminateSection::try_new(native, self.reference_section.reference())
+            section_with_shear_model(
+                native,
+                self.reference_section.reference(),
+                self.shear_model(),
+            )
                 .map_err(LaminateThermalSourceError::Section)?,
         );
         let prepared = PreparedLaminateThermal::try_new(section, &profiles, &mut cancelled)
@@ -353,6 +384,19 @@ impl LaminateThermalSource {
             layers: states,
             prepared: Arc::new(prepared),
         })
+    }
+}
+
+fn section_with_shear_model(
+    layers: Vec<LaminaLayer>,
+    reference: ReferenceSurface,
+    shear_model: LaminateShearModel,
+) -> Result<LaminateSection, LaminateError> {
+    match shear_model {
+        LaminateShearModel::DirectionalWhitney => LaminateSection::try_new(layers, reference),
+        LaminateShearModel::EquilibratedCylindrical { bending_axis_rad } => {
+            LaminateSection::try_new_equilibrated_shear(layers, reference, bending_axis_rad)
+        }
     }
 }
 
