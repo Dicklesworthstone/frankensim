@@ -14,6 +14,9 @@
 
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
+/// Point-parcel capture with native central inertia and spatial momentum.
+pub mod capture;
+
 /// Prepared separation into retained rigid subassemblies.
 pub mod partition;
 

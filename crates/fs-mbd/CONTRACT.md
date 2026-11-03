@@ -4071,3 +4071,35 @@ Galilean transformations, opposed streams, signed energy references, burnout
 splitting, tiny depletion, representable extreme velocity variance and actual
 inventory/velocity rounding defects. Rustfmt and source review passed; native
 execution remains unverified in the checkout missing constellation siblings.
+
+## Point-parcel capture on the native rigid body
+
+`assembly::capture::capture_point_mass` admits one incoming point parcel with
+explicit nonnegative mass, body attachment arm and world inertial velocity.
+The parcel sticks to the original rigid body without an external impulse.
+The result uses the existing `RigidBodyState` and `MassProperties`: body axes
+and orientation are retained, the COM moves by `m r/(M+m)`, and central inertia
+becomes `I + mu (|r|² 1 - r r^T)`, with `mu=M m/(M+m)`. The returned COM shift
+must be subtracted from original body points before native continuation. No
+positive parcel radius or fictitious intrinsic inertia is introduced.
+
+The original inverse-inertia Gram factor and bounded 3-by-3 solve determine
+the internal capture impulse from contact slip, including full rotational
+recoil. Nonnegative sticking loss is evaluated as positive translational and
+rotational impulse quadratics and checked against half the slip/impulse work.
+Its heat destination remains explicit. Native momentum residuals include both
+spin and COM relocation; the energy gate uses a common translating frame and
+polarized spin changes, without subtracting large laboratory kinetic energies.
+Absolute tolerances remain caller-owned floating-point gates, not certificates.
+
+Positive capture consumes two part slots and one internal impulse slot under
+`AssemblyControls`; zero mass is an exact one-part identity. Unrepresentable
+mass addition, inertia, momenta, unresolved mobility/work, balance failures and
+late cancellation return no endpoint and leave both original owners unchanged.
+The event uses fixed-size impulse algebra and the existing bounded central-inertia
+decomposition. Six focused test groups
+cover analytic central/off-center capture, full-tensor conservation and frame
+changes, large common translation, inherited rotating-point capture after
+native flight, identity and atomic refusal. This is instantaneous rigid
+sticking, without contact discovery, finite-volume flow, slosh, continuous
+mass flux, thermodynamic mixing or a complete fluid/body energy model.
