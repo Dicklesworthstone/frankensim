@@ -33,7 +33,9 @@ pub use two_dimensional::{
 mod pressure;
 pub use pressure::MaterialGasPressureLink3;
 mod motion;
-pub use motion::MaterialPlanarWallMotionReport3;
+pub use motion::{
+    MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3, MaterialPlanarWallMotionReport3,
+};
 /// Geometric, moment-preserving ingress of an already-liquid tetrahedral body.
 pub mod transfer;
 /// Conservative moving-liquid enthalpy and source-temperature viscosity.

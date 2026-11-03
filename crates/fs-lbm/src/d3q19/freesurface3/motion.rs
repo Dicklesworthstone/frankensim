@@ -9,6 +9,9 @@ use super::*;
 use crate::MACH_LIMIT;
 use crate::d3q19::W3;
 
+mod rigid;
+pub use rigid::{PlanarRigidWallMotion3, PlanarRigidWallReport3};
+
 /// One accepted exact one-cell geometry translation of a complete planar piston.
 ///
 /// This is a conservative geometry/remap receipt, not a pressure solve. The
@@ -108,6 +111,7 @@ pub(super) struct PlanarWallStep3 {
     extent: i64,
     velocity: [f64; 3],
     impulse: [f64; 3],
+    rigid: Option<rigid::RigidWallExchange3>,
 }
 
 impl PlanarWallStep3 {
@@ -130,7 +134,13 @@ impl PlanarWallStep3 {
             return Ok(outgoing);
         }
         let direction = [E3[q].0 as f64, E3[q].1 as f64, E3[q].2 as f64];
-        let projected = (0..3).map(|d| direction[d] * self.velocity[d]).sum::<f64>();
+        let link = self
+            .rigid
+            .as_ref()
+            .map(|exchange| exchange.link(source, direction))
+            .transpose()?;
+        let velocity = link.as_ref().map_or(self.velocity, |link| link.velocity);
+        let projected = (0..3).map(|d| direction[d] * velocity[d]).sum::<f64>();
         let correction = 2.0 * W3[q] * density * projected / CS2_3;
         // Preserve the exact stationary reflection when the correction is zero.
         let incoming = if correction == 0.0 {
@@ -152,6 +162,14 @@ impl PlanarWallStep3 {
                     "moving-wall momentum exchange is unrepresentable",
                 ));
             }
+        }
+        if let (Some(exchange), Some(link)) = (self.rigid.as_mut(), link) {
+            exchange.record(
+                link,
+                direction,
+                incoming + outgoing,
+                2.0 * W3[q] * density / CS2_3,
+            )?;
         }
         Ok(incoming)
     }
@@ -418,6 +436,26 @@ impl FreeSurface3 {
         velocity: [f64; 3],
         gate: &CancelGate,
     ) -> Result<(f64, f64), FreeSurfaceError3> {
+        self.admit_planar_wall_state_with(wall, gate, |p, liquid_velocity| {
+            let relative = core::array::from_fn(|d| liquid_velocity[d] - velocity[d]);
+            if !speed(relative).is_finite() || speed(relative) / CS2_3.sqrt() >= MACH_LIMIT {
+                return Err(refused(
+                    Some(p),
+                    "liquid/wall relative velocity exceeds the lattice Mach domain",
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    // The same flooded geometry and complete wet-endpoint admission serves
+    // uniform and spatially rigid wall motion. Only local velocity differs.
+    fn admit_planar_wall_state_with(
+        &self,
+        wall: PlanarWall3,
+        gate: &CancelGate,
+        admit_velocity: impl Fn([usize; 3], [f64; 3]) -> Result<(), FreeSurfaceError3>,
+    ) -> Result<(f64, f64), FreeSurfaceError3> {
         check_cancel(gate)?;
         let axis = wall.axis();
         let dims = self.grid.tile_dims();
@@ -449,13 +487,7 @@ impl FreeSurface3 {
                         "moving plane requires full liquid cells; partial wetting and moving contact lines are unsupported",
                     ));
                 }
-                let relative = core::array::from_fn(|d| sample.velocity[d] - velocity[d]);
-                if !speed(relative).is_finite() || speed(relative) / CS2_3.sqrt() >= MACH_LIMIT {
-                    return Err(refused(
-                        Some(p),
-                        "liquid/wall relative velocity exceeds the lattice Mach domain",
-                    ));
-                }
+                admit_velocity(p, sample.velocity)?;
             }
         }
         // The optional moving-wall entry admits the complete physical endpoint,
@@ -655,6 +687,7 @@ impl FreeSurface3 {
             extent,
             velocity,
             impulse: [0.0; 3],
+            rigid: None,
         };
         let mut candidate = self.clone();
         candidate.step_inner_with_wall(

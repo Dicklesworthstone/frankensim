@@ -9240,6 +9240,37 @@ and 101 unequal-mass scatter identities were evaluated, with the latter closing
 within 2.23e-15 J. Native Rust typechecking, tests and runtime benchmarks remain
 unexecuted because the shared filesystem is full and memory is constrained.
 
+## Rigid motion and actual link torque on a flooded free-surface wall
+
+`FreeSurface3::planar_rigid_wall_motion_candidate` and the material owner's
+`planar_rigid_wall_motion_candidate_si` admit two tangential translations and
+normal-axis spin on one fixed, completely flooded rectangular domain plane.
+The original halfway reflection evaluates the rigid velocity at each actual
+link midpoint. The same population exchange supplies linear impulse, moment
+about the declared origin, and local velocity dotted with impulse. The old
+uniform-wall entry retains its original population arithmetic.
+
+One link traversal also accumulates the symmetric 3-by-3 derivative of the two
+tangential impulses and axial angular impulse with respect to the prescribed
+twist. This affine response belongs to that unchanged input fluid and origin;
+it is available to finite-inertia coupling without finite-difference trial
+solves. Actual native replay still owns population and endpoint acceptance.
+Accumulation needs constant auxiliary storage beyond the original candidate.
+
+The SI adapter retains the original material source and scaling. Raw numerical
+pressure, reference-pressure impulse and its moment, perturbation loads, and
+optional absolute physical loads remain distinct. Work is mechanical exchange
+at an isothermal boundary, not deposited heat or a liquid total-energy claim.
+Corner speeds bound the finite plane; actual link-relative and both wet-cell
+endpoint speeds retain their original low-Mach and material-scenario limits.
+Geometry, mass, arithmetic and cancellation failures publish no candidate.
+Normal motion, tilting, finite plate edges, cover/vacate and moving contact
+lines are outside this fixed-plane operation.
+
+Focused native regressions specify all-six-plane uniform-path parity, an
+independent rotational impedance and liquid angular-momentum increment,
+affine response replay, origin-shift covariance, and atomic refusal.
+
 ### Mixed prescribed and finite-inertia film surfaces
 
 `LubricationSurface3::{Prescribed, Finite}` and

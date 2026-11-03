@@ -4,6 +4,9 @@ use super::*;
 use crate::d3q19::freesurface3::pressure::GasPressureField3;
 use crate::d3q19::freesurface3::{FreeSurfaceError3, PlanarWallMotionReport3};
 
+mod rigid;
+pub use rigid::{MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3};
+
 /// One accepted isothermal wall-driven free-surface timestep in SI units.
 ///
 /// The paired raw impulses retain the numerical LBM pressure datum for momentum
@@ -257,18 +260,7 @@ impl MaterialFreeSurface3<'_> {
                 "moving-wall velocity exceeds the original material scenario speed",
             ));
         }
-        let impulse_unit = positive(
-            scale.mass_unit_kg * scale.velocity_scale,
-            "moving-wall SI impulse unit is unrepresentable",
-        )?;
-        let force_unit = positive(
-            impulse_unit / scale.timestep_s,
-            "moving-wall SI force unit is unrepresentable",
-        )?;
-        let work_unit = positive(
-            impulse_unit * scale.velocity_scale,
-            "moving-wall SI work unit is unrepresentable",
-        )?;
+        let units = self.planar_wall_units()?;
         let (candidate, raw): (_, PlanarWallMotionReport3) =
             self.lattice.planar_wall_motion_candidate(
                 wall,
@@ -282,6 +274,45 @@ impl MaterialFreeSurface3<'_> {
                 "wall-driven liquid exceeds the original material scenario speed",
             ));
         }
+        let report = self.planar_wall_report_si(raw, velocity_m_s, units)?;
+        if gate.is_requested() {
+            return Err(FreeSurfaceError3::Cancelled.into());
+        }
+        Ok((
+            Self {
+                lattice: candidate,
+                scaling: self.scaling,
+            },
+            report,
+        ))
+    }
+
+    // One conversion and pressure-reference owner for both uniform motion and
+    // the linear part of an actual rigid-wall wrench.
+    fn planar_wall_units(&self) -> Result<[f64; 3], MaterialLbmError> {
+        let scale = &self.scaling;
+        let impulse_unit = positive(
+            scale.mass_unit_kg * scale.velocity_scale,
+            "moving-wall SI impulse unit is unrepresentable",
+        )?;
+        let force_unit = positive(
+            impulse_unit / scale.timestep_s,
+            "moving-wall SI force unit is unrepresentable",
+        )?;
+        let work_unit = positive(
+            impulse_unit * scale.velocity_scale,
+            "moving-wall SI work unit is unrepresentable",
+        )?;
+        Ok([impulse_unit, force_unit, work_unit])
+    }
+
+    fn planar_wall_report_si(
+        &self,
+        raw: PlanarWallMotionReport3,
+        velocity_m_s: [f64; 3],
+        [impulse_unit, force_unit, work_unit]: [f64; 3],
+    ) -> Result<MaterialPlanarWallMotionReport3, MaterialLbmError> {
+        let scale = &self.scaling;
         let fluid_impulse_kg_m_s = vector_si(
             raw.fluid_impulse,
             impulse_unit,
@@ -328,7 +359,7 @@ impl MaterialFreeSurface3<'_> {
             "moving-wall SI actuator work is unrepresentable",
         )?;
         let report = MaterialPlanarWallMotionReport3 {
-            wall,
+            wall: raw.wall,
             velocity_m_s,
             fluid_impulse_kg_m_s,
             wall_impulse_kg_m_s,
@@ -352,15 +383,6 @@ impl MaterialFreeSurface3<'_> {
                 "moving-wall SI liquid speed is unrepresentable",
             )?,
         };
-        if gate.is_requested() {
-            return Err(FreeSurfaceError3::Cancelled.into());
-        }
-        Ok((
-            Self {
-                lattice: candidate,
-                scaling: self.scaling,
-            },
-            report,
-        ))
+        Ok(report)
     }
 }
