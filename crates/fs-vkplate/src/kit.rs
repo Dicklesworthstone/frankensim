@@ -1113,6 +1113,239 @@ pub fn attach_closed_body(p: &mut Piece, spec: &DrumSpec, text: &str) -> Result<
     Ok(())
 }
 
+/// One acoustic mode of a rigid closed cylinder of radius `a` and depth `L`:
+/// `psi = J_m(alpha r / a) {cos, sin}(m theta) cos(p pi z / L)`, `J_m'(alpha) = 0`, at angular frequency
+/// `c sqrt((alpha / a)^2 + (p pi / L)^2)`; `lambda` is the volume mean of `psi^2`.
+#[derive(Clone, Copy, Debug)]
+pub struct CylinderAirMode {
+    pub m: usize,
+    pub n: usize,
+    pub p: usize,
+    pub sine: bool,
+    pub alpha: f64,
+    pub omega: f64,
+    pub lambda: f64,
+}
+
+/// The positive zeros of `J_m'` below `x_max` (for `m = 0`, those of `J_1`), by a 0.005 scan and bisection.
+pub fn bessel_jprime_zeros(m: usize, x_max: f64) -> Vec<f64> {
+    use crate::radiation::bessel_j;
+    let d = |x: f64| if m == 0 { -bessel_j(1, x) } else { 0.5 * (bessel_j(m - 1, x) - bessel_j(m + 1, x)) };
+    let mut out = vec![];
+    let start = if m == 0 { 1e-3 } else { m as f64 }; // J_m' > 0 on (0, j'_m1) and j'_m1 > m
+    let (mut x0, mut f0) = (start, d(start));
+    let mut x = x0;
+    while x < x_max {
+        x += 5e-3;
+        let f1 = d(x);
+        if f0 == 0.0 || f0.signum() != f1.signum() {
+            let (mut lo, mut hi, mut flo) = (x0, x, f0);
+            for _ in 0..200 {
+                let mid = 0.5 * (lo + hi);
+                if mid <= lo || mid >= hi {
+                    break;
+                }
+                let fm = d(mid);
+                if fm.signum() == flo.signum() {
+                    lo = mid;
+                    flo = fm;
+                } else {
+                    hi = mid;
+                }
+            }
+            let z = 0.5 * (lo + hi);
+            if z < x_max {
+                out.push(z);
+            }
+        }
+        x0 = x;
+        f0 = f1;
+    }
+    out
+}
+
+/// Every mode of the rigid closed cylinder below `f_max` except the uniform (0, 0, 0) one, which a `Cavity`
+/// carries as its lumped term; cosine and sine partners both for `m >= 1`. Sorted by frequency.
+pub fn cylinder_air_modes(radius: f64, depth: f64, sound_speed: f64, f_max: f64) -> Vec<CylinderAirMode> {
+    use crate::radiation::bessel_j;
+    let kmax = 2.0 * PI * f_max / sound_speed;
+    let mut out = vec![];
+    for m in 0.. {
+        let mut alphas: Vec<(usize, f64)> = bessel_jprime_zeros(m, kmax * radius).into_iter().enumerate().map(|(i, a)| (i + 1, a)).collect();
+        if m == 0 {
+            alphas.insert(0, (0, 0.0));
+        }
+        if alphas.is_empty() || (m > 0 && alphas[0].1 > kmax * radius) {
+            break;
+        }
+        for &(n, alpha) in &alphas {
+            let radial = if m == 0 {
+                if n == 0 { 1.0 } else { bessel_j(0, alpha).powi(2) }
+            } else {
+                0.5 * (1.0 - (m * m) as f64 / (alpha * alpha)) * bessel_j(m, alpha).powi(2)
+            };
+            for p in 0.. {
+                let kz = p as f64 * PI / depth;
+                let k2 = (alpha / radius).powi(2) + kz * kz;
+                if k2 > kmax * kmax {
+                    break;
+                }
+                if m == 0 && n == 0 && p == 0 {
+                    continue;
+                }
+                let axial = if p == 0 { 1.0 } else { 0.5 };
+                let omega = sound_speed * k2.sqrt();
+                for sine in if m == 0 { vec![false] } else { vec![false, true] } {
+                    out.push(CylinderAirMode { m, n, p, sine, alpha, omega, lambda: radial * axial });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.omega.total_cmp(&b.omega).then(a.m.cmp(&b.m)).then(a.p.cmp(&b.p)).then(a.sine.cmp(&b.sine)));
+    out
+}
+
+/// Opt-in (ALL-IN, MB 14741): the drum's enclosed air as the rigid cylinder's acoustic modes below `f_max`
+/// (`cylinder_air_modes`), beside the lumped cavity, coupling both heads (`AirModes`). Values: the gas record's
+/// density and sound speed and the drum's radius and depth; `f_max` is a declared truncation. The shell is
+/// rigid and the air lossless here. Returns the receipt line.
+pub fn attach_cavity_modes(p: &mut Piece, spec: &DrumSpec, f_max: f64) -> Result<String, String> {
+    use crate::radiation::bessel_j;
+    if !(f_max.is_finite() && f_max > 0.0) {
+        return Err(format!("cavity modes: f_max {f_max} Hz must be positive"));
+    }
+    let find = |head: &str| p.instrument.bodies.iter().position(|b| b.name == format!("{} {head}", spec.name));
+    let (Some(batter), Some(resonant)) = (find("batter"), find("resonant")) else {
+        return Err(format!("cavity modes: {} has no batter and resonant head bodies", spec.name));
+    };
+    let (rho, c) = (p.instrument.gas.density, p.instrument.gas.sound_speed);
+    let (a, l) = (spec.radius, spec.depth);
+    let volume = PI * a * a * l;
+    let modes = cylinder_air_modes(a, l, c, f_max);
+    if let Some(bad) = modes.iter().find(|md| !(md.lambda > 0.0 && md.omega.is_finite())) {
+        return Err(format!("cavity modes: mode {bad:?} has no positive mean square"));
+    }
+    if modes.is_empty() {
+        return Err(format!("cavity modes: none below {f_max} Hz"));
+    }
+    let k = 1.0 / p.instrument.rate;
+    // modes that differ only in their axial order p share one shape on a head: J_m(alpha r / a) {cos, sin}(m th)
+    let mut keys: Vec<(usize, usize, bool, f64)> = vec![];
+    let mut shape = Vec::with_capacity(modes.len());
+    for md in &modes {
+        let s = match keys.iter().position(|q| (q.0, q.1, q.2) == (md.m, md.n, md.sine)) {
+            Some(s) => s,
+            None => {
+                keys.push((md.m, md.n, md.sine, md.alpha));
+                keys.len() - 1
+            }
+        };
+        shape.push(s);
+    }
+    let ns = keys.len();
+    let mut heads = vec![];
+    for (body, at_far_end) in [(batter, false), (resonant, true)] {
+        let b = &p.instrument.bodies[body];
+        let mut g = vec![0.0; ns * b.n];
+        for (s, &(m, _, sine, alpha)) in keys.iter().enumerate() {
+            for i in 0..b.n {
+                let (x, y) = (b.origin[0] + b.xy[i][0], b.origin[1] + b.xy[i][1]);
+                let r = (x * x + y * y).sqrt().min(a);
+                let th = y.atan2(x);
+                let ang = if m == 0 { 1.0 } else if sine { (m as f64 * th).sin() } else { (m as f64 * th).cos() };
+                g[s * b.n + i] = b.h * b.h * bessel_j(m, alpha * r / a) * ang;
+            }
+        }
+        let sign: Vec<f64> = modes.iter().map(|md| if at_far_end && md.p % 2 == 1 { -1.0 } else { 1.0 }).collect();
+        heads.push((body, g, sign));
+    }
+    let kappa: Vec<f64> = modes.iter().map(|md| rho * c * c / (volume * md.lambda)).collect();
+    let wt2: Vec<f64> = modes.iter().map(|md| (2.0 - 2.0 * (md.omega * k).cos()) / (k * k)).collect();
+    let nm = modes.len();
+    p.instrument.air_modes.push(AirModes {
+        kappa,
+        wt2,
+        x: vec![0.0; nm],
+        xp: vec![0.0; nm],
+        shape,
+        heads,
+        y: vec![0.0; nm],
+        q: vec![0.0; ns],
+    });
+    let first: Vec<String> = modes.iter().filter(|md| !md.sine).take(10)
+        .map(|md| format!("({},{},{}) {:.0} Hz", md.m, md.n, md.p, md.omega / (2.0 * PI))).collect();
+    Ok(format!(
+        "cavity modes (opt-in, ALL-IN): the enclosed air as {nm} acoustic modes on {ns} head shapes of a rigid closed cylinder (radius {a} m, depth {l} m; gas rho {rho:.4} kg/m^3, c {c:.2} m/s) from {:.0} to {:.0} Hz (declared truncation {f_max} Hz), coupling both heads beside the lumped (0,0,0) term; first: {}; shell rigid, air lossless (no boundary-layer loss: a lower bound)",
+        modes[0].omega / (2.0 * PI), modes[nm - 1].omega / (2.0 * PI), first.join(", ")
+    ))
+}
+
+/// The declared reference impact speed of the wire's read (MB 14513 ruling 1, (b)): the log-centre of
+/// 0.01-1 m/s; a decade in it moves A by 1.58x.
+pub const WIRE_LOSS_REFERENCE_SPEED_M_S: f64 = 0.1;
+
+/// The viscoelastic Hertz retardation time A of one coil turn on the film (.372, MB 14513): the contact's
+/// loss tangent (the film card's, times the film's share of the contact compliance) read at the half-period
+/// frequency of the elastic Hertz contact of one turn of mass `m_turn` [kg] and stiffness `k_turn`
+/// [N/m^1.5] on a rigid film at `v_ref`: t_c = 2.9432 xi0 / v, xi0 = (5 m v^2 / 4K)^(2/5), f = 1 / 2 t_c;
+/// A = tan_delta / (2 pi f). Returns (f_ref [Hz], A [s]).
+pub fn wire_retardation(m_turn: f64, k_turn: f64, v_ref: f64, tan_delta_contact: f64) -> (f64, f64) {
+    let xi0 = (5.0 * m_turn * v_ref * v_ref / (4.0 * k_turn)).powf(0.4);
+    let f_ref = 0.5 / (2.9432 * xi0 / v_ref);
+    (f_ref, tan_delta_contact / (2.0 * PI * f_ref))
+}
+
+/// Opt-in (ALL-IN, MB 14741; .372 rulings 14513): the snare wires' contacts take the viscoelastic Hertz
+/// loss (`Contact::retardation_s`) instead of the declared Hunt-Crossley 2 s/m. A comes from the cards
+/// (`wire_retardation`): the coil's turn mass and Hertz stiffness, the film card's loss tangent at its
+/// band's upper edge (the read lies above it, ruling (b)), the film's share of the contact compliance.
+/// One retardation time for shear and bulk is an assumption (with a lossless bulk, Brilliantov's Eq. 4 gives
+/// 0.19 tau_E and the E* correspondence 0.89 tau_E). Returns the receipt line.
+pub fn attach_viscoelastic_wires(p: &mut Piece, spec: &DrumSpec) -> Result<String, String> {
+    let wr = spec.wires.ok_or_else(|| format!("viscoelastic wire contact: {} has no wires", spec.name))?;
+    let m = p.instrument.materials.clone().ok_or("viscoelastic wire contact: the drum was built without card materials")?;
+    let steel = m.snare_wire().ok_or("viscoelastic wire contact: no sourced snare wire is bound (fitted strings)")?;
+    let gas = p.instrument.gas.clone();
+    let coil = crate::coil::CoilWire::new(&wr.coil, steel, &gas)?;
+    let film = (m.secondary().young_modulus_pa(), m.secondary().poisson_ratio());
+    let card = card_drum(spec)?;
+    let wires = card.wires.ok_or("viscoelastic wire contact: the card drum has no wires")?;
+    let (law, _) = crate::coil::turn_contact(&wr.coil, steel, film, spec.reso.thickness, wr.coil.pitch_m, wires.preload_per_m, 0.0)?;
+    let Law::Power { k: k_turn, .. } = law;
+    let m_turn = coil.mass_per_m() * wr.coil.pitch_m;
+    let (_, band_hi) = m.film_band_hz(1)?;
+    let tan_film = m.film_tan_delta(1, band_hi)?.ok_or("viscoelastic wire contact: no film loss tangent at the band edge")?;
+    let nu_s = crate::coil::STEEL_POISSON_RATIO_ASSUMED;
+    let c_steel = (1.0 - nu_s * nu_s) / steel.young_modulus_pa();
+    let c_film = (1.0 - film.1 * film.1) / film.0;
+    let share = c_film / (c_steel + c_film);
+    let tan_contact = share * tan_film;
+    let (f_ref, a) = wire_retardation(m_turn, k_turn, WIRE_LOSS_REFERENCE_SPEED_M_S, tan_contact);
+    let wire_bodies: Vec<usize> = p.instrument.bodies.iter().enumerate().filter(|(_, b)| b.name.starts_with("wire ")).map(|(i, _)| i).collect();
+    let mut count = 0;
+    for c in p.instrument.contacts.iter_mut() {
+        if c.b.iter().any(|&(b, _, _)| wire_bodies.contains(&b)) {
+            if c.crush.is_some() {
+                return Err("viscoelastic wire contact: a wire contact crushes".into());
+            }
+            let Law::Power { k, alpha, .. } = c.law;
+            if alpha != 1.5 {
+                return Err(format!("viscoelastic wire contact: law exponent {alpha}, not Hertz"));
+            }
+            c.law = Law::Power { k, alpha, mu: 0.0 };
+            c.retardation_s = Some(a);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Err("viscoelastic wire contact: no wire contacts".into());
+    }
+    Ok(format!(
+        "snare wire contact loss (opt-in, ALL-IN; .372 rulings 14513): viscoelastic Hertz F = K (d^1.5 + 1.5 A d^0.5 d') on all {count} wire contacts, replacing the declared Hunt-Crossley 2 s/m; A = {a:.4e} s = tan delta {tan_contact:.5} / (2 pi {f_ref:.1} Hz): the film card's {tan_film:.4} at its band edge {band_hi:.0} Hz (the read lies above the band) times the film's {share:.4} share of the contact compliance (steel E {:.4e} Pa, nu {nu_s} assumed; film E {:.4e} Pa, nu {}), read at the half-period of one turn ({m_turn:.4e} kg, K {k_turn:.4e} N/m^1.5) on a rigid film at the declared v_ref {WIRE_LOSS_REFERENCE_SPEED_M_S} m/s (the log-centre of 0.01-1 m/s; a decade in v_ref moves A by 1.58x); one retardation time for shear and bulk is an assumption (lossless bulk: Brilliantov Eq. 4 gives 0.19 tau_E, the E* correspondence 0.89 tau_E); the model's contacts (a turn against one free head node) last about half as long, so they carry about twice the loss a read at their own duration would give",
+        steel.young_modulus_pa(), film.0, film.1
+    ))
+}
+
 /// Run a piece for `seconds` of output after its settling time; returns 48 kHz pressure [Pa].
 pub fn render(p: &mut Piece, seconds: f64, mut progress: impl FnMut(f64)) -> Vec<Vec<f64>> {
     let ins = &mut p.instrument;
@@ -1269,5 +1502,193 @@ mod wire_alignment_tests {
         }
         let h = snare().grid;
         assert_eq!(2 * ((snare().wires.unwrap().length / h - 1.0) / 2.0).round() as usize + 1, 103);
+    }
+}
+
+#[cfg(test)]
+mod air_mode_tests {
+    use super::*;
+    use crate::radiation::bessel_j;
+
+    #[test]
+    fn jprime_zeros_match_the_tables() {
+        // Abramowitz and Stegun table 9.5: j'_{0,1} = 3.8317060, j'_{1,1} = 1.8411838, j'_{1,2} = 5.3314428,
+        // j'_{2,1} = 3.0542369, j'_{3,1} = 4.2011889
+        let z0 = bessel_jprime_zeros(0, 8.0);
+        let z1 = bessel_jprime_zeros(1, 6.0);
+        assert!((z0[0] - 3.8317060).abs() < 1e-6 && (z0[1] - 7.0155867).abs() < 1e-6, "{z0:?}");
+        assert!((z1[0] - 1.8411838).abs() < 1e-6 && (z1[1] - 5.3314428).abs() < 1e-6, "{z1:?}");
+        assert!((bessel_jprime_zeros(2, 4.0)[0] - 3.0542369).abs() < 1e-6);
+        assert!((bessel_jprime_zeros(3, 5.0)[0] - 4.2011889).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mean_squares_match_quadrature() {
+        let (a, l) = (0.1703, 0.1524);
+        let modes = cylinder_air_modes(a, l, 343.0, 4000.0);
+        assert!(modes.len() > 20);
+        for md in modes.iter().take(40) {
+            // volume mean of psi^2 by a midpoint rule in r, theta, z
+            let (nr, nt, nz) = (400, 256, 64);
+            let mut s = 0.0;
+            for ir in 0..nr {
+                let r = a * (ir as f64 + 0.5) / nr as f64;
+                let jr = bessel_j(md.m, md.alpha * r / a);
+                for it in 0..nt {
+                    let th = 2.0 * PI * (it as f64 + 0.5) / nt as f64;
+                    let ang = if md.m == 0 { 1.0 } else if md.sine { (md.m as f64 * th).sin() } else { (md.m as f64 * th).cos() };
+                    for iz in 0..nz {
+                        let z = l * (iz as f64 + 0.5) / nz as f64;
+                        let v = jr * ang * (md.p as f64 * PI * z / l).cos();
+                        s += v * v * r;
+                    }
+                }
+            }
+            let mean = s * (a / nr as f64) * (2.0 * PI / nt as f64) * (l / nz as f64) / (PI * a * a * l);
+            assert!((mean / md.lambda - 1.0).abs() < 2e-3, "{md:?}: quadrature {mean}");
+        }
+    }
+
+    /// A point "head" of mass M on two air modes: the leapfrog of heads and air conserves
+    /// E = 0.5 M v^2 + sum 0.5 M_air,m vx_m^2 + sum 0.5 kappa_m (Y+ - X+)(Y - X), M_air = kappa / wt2. The planted
+    /// negative steps the same system by hand with the air's coupling sign flipped; its E must drift.
+    #[test]
+    fn air_modes_conserve_the_discrete_energy_and_a_flipped_coupling_does_not() {
+        let (mass, k) = (4.0e-3, 1.0 / 144000.0);
+        let kappa = vec![1.0e7, 3.0e7];
+        let omega: [f64; 2] = [2.0 * PI * 600.0, 2.0 * PI * 1900.0];
+        let wt2: Vec<f64> = omega.iter().map(|w| (2.0 - 2.0 * (w * k).cos()) / (k * k)).collect();
+        let g = vec![1.2e-3, -0.7e-3];
+        let mut ins = Instrument::new(144000.0);
+        let head = ins.add(Body::point("head", mass));
+        ins.bodies[head].w[0] = 1e-4;
+        ins.bodies[head].wp[0] = 1e-4;
+        ins.air_modes.push(AirModes {
+            kappa: kappa.clone(),
+            wt2: wt2.clone(),
+            x: vec![0.0; 2],
+            xp: vec![0.0; 2],
+            shape: vec![0, 1],
+            heads: vec![(head, g.clone(), vec![1.0, 1.0])],
+            y: vec![0.0; 2],
+            q: vec![0.0; 2],
+        });
+        let energy = |w: f64, wp: f64, x: &[f64], xp: &[f64]| -> f64 {
+            let mut e = 0.5 * mass * ((w - wp) / k).powi(2);
+            for m in 0..2 {
+                e += 0.5 * kappa[m] / wt2[m] * ((x[m] - xp[m]) / k).powi(2) + 0.5 * kappa[m] * (g[m] * w - x[m]) * (g[m] * wp - xp[m]);
+            }
+            e
+        };
+        let mut out: [f64; 0] = [];
+        ins.step(&mut out);
+        let e0 = energy(ins.bodies[head].w[0], ins.bodies[head].wp[0], &ins.air_modes[0].x, &ins.air_modes[0].xp);
+        let mut drift: f64 = 0.0;
+        for _ in 0..20000 {
+            ins.step(&mut out);
+            let e = energy(ins.bodies[head].w[0], ins.bodies[head].wp[0], &ins.air_modes[0].x, &ins.air_modes[0].xp);
+            drift = drift.max((e / e0 - 1.0).abs());
+        }
+        eprintln!("air modes: energy drift {drift:.2e} over 20000 steps (e0 {e0:.3e} J)");
+        assert!(e0 > 0.0 && drift < 1e-9, "{drift}");
+        // planted negative: the same leapfrog by hand, the air driven by -(Y - X)
+        let (mut w, mut wp) = (1e-4, 1e-4);
+        let (mut x, mut xp) = (vec![0.0; 2], vec![0.0; 2]);
+        let mut e_first = None;
+        let mut flipped: f64 = 0.0;
+        for _ in 0..20000 {
+            let mut f = 0.0;
+            let mut xn = vec![0.0; 2];
+            for m in 0..2 {
+                let s = g[m] * w - x[m];
+                f += -kappa[m] * s * g[m];
+                xn[m] = 2.0 * x[m] - xp[m] - k * k * wt2[m] * s;
+            }
+            let wn = 2.0 * w - wp + k * k * f / mass;
+            (wp, w) = (w, wn);
+            (xp, x) = (x, xn);
+            let e = energy(w, wp, &x, &xp);
+            let e1 = *e_first.get_or_insert(e);
+            flipped = flipped.max((e / e1 - 1.0).abs());
+        }
+        eprintln!("planted negative (air coupling sign flipped): energy drift {flipped:.2e}");
+        assert!(flipped > 1e-3, "the energy check cannot see a flipped coupling: {flipped}");
+    }
+
+    /// The air modes' admission term on the snare (890 modes to 8 kHz) is an upper bound on the largest
+    /// eigenvalue of their Gram matrix (built densely, mode by mode, and power-iterated: a lower estimate of
+    /// it), and no larger than the trace bound it replaced.
+    #[test]
+    fn the_air_bound_lies_between_the_gram_eigenvalue_and_the_trace_bound() {
+        let spec = snare();
+        let mut p = drum(&spec, &[(0.005, 4.5)]).unwrap();
+        let rate = p.instrument.rate;
+        let before = p.instrument.gas_admission_rate2(rate);
+        attach_cavity_modes(&mut p, &spec, 8000.0).unwrap();
+        let term = p.instrument.gas_admission_rate2(rate) - before;
+        let ins = &p.instrument;
+        let air = &ins.air_modes[0];
+        let nm = air.kappa.len();
+        let mut v: Vec<Vec<f64>> = vec![vec![]; nm];
+        for (body, weights, sign) in &air.heads {
+            let b = &ins.bodies[*body];
+            for kk in 0..nm {
+                let s = air.shape[kk];
+                let scale = air.kappa[kk].sqrt() * sign[kk];
+                v[kk].extend((0..b.n).map(|i| scale * weights[s * b.n + i] / b.mass[i].sqrt()));
+            }
+        }
+        let mut gram = vec![0.0; nm * nm];
+        for a in 0..nm {
+            for b in a..nm {
+                let d: f64 = v[a].iter().zip(&v[b]).map(|(x, y)| x * y).sum();
+                gram[a * nm + b] = d;
+                gram[b * nm + a] = d;
+            }
+        }
+        let trace_bound = (0..nm).map(|a| gram[a * nm + a]).sum::<f64>() + air.wt2.iter().fold(0.0f64, |x, &y| x.max(y));
+        for a in 0..nm {
+            gram[a * nm + a] += air.wt2[a];
+        }
+        let mut u = vec![1.0; nm];
+        let mut lam = 0.0;
+        for _ in 0..400 {
+            let z: Vec<f64> = (0..nm).map(|a| (0..nm).map(|b| gram[a * nm + b] * u[b]).sum()).collect();
+            let norm = z.iter().map(|x| x * x).sum::<f64>().sqrt();
+            lam = z.iter().zip(&u).map(|(x, y)| x * y).sum::<f64>() / u.iter().map(|x| x * x).sum::<f64>();
+            u = z.iter().map(|x| x / norm).collect();
+        }
+        eprintln!("air bound on the snare: power-iterated lambda {lam:.4e}, admitted term {term:.4e}, trace bound {trace_bound:.4e} ({:.3} of it)", term / trace_bound);
+        assert!(lam > 0.0 && term >= lam * (1.0 - 1e-9), "the bound {term} is below the Gram eigenvalue {lam}");
+        assert!(term <= trace_bound * (1.0 + 1e-12), "{term} > {trace_bound}");
+    }
+
+    /// The snare with air modes to 8 kHz stays admitted (the off path's byte identity is a separate
+    /// check: this binary against the pin's with no new flags, `cmp` of the WAVs).
+    #[test]
+    fn the_snare_with_air_modes_to_8_khz_is_admitted() {
+        let spec = snare();
+        let mut p = drum(&spec, &[(0.005, 4.5)]).unwrap();
+        let (before, _) = p.instrument.stability();
+        let receipt = attach_cavity_modes(&mut p, &spec, 8000.0).unwrap();
+        let (after, _) = p.instrument.stability();
+        assert!(after >= before && after < 0.95, "{before} -> {after}: {receipt}");
+    }
+}
+
+#[cfg(test)]
+mod wire_retardation_tests {
+    use super::*;
+
+    #[test]
+    fn kat5_a_recomputed_from_the_receipt() {
+        // refresh-2 snare receipt: coil 1.9474e-3 kg/m x 3.4 mm pitch, K 1.9094e8 per turn; steel E 2.12e11 (nu 0.3),
+        // film E 4.9033e9 (nu 0.38); film card tan delta 0.0372 at its 20 kHz edge. Design (14510): f_ref 23.73 kHz,
+        // A 2.44e-7 s.
+        let share = ((1.0 - 0.38f64.powi(2)) / 4.9033e9) / ((1.0 - 0.09) / 2.12e11 + (1.0 - 0.38f64.powi(2)) / 4.9033e9);
+        let (f, a) = wire_retardation(1.9474e-3 * 3.4e-3, 1.9094e8, WIRE_LOSS_REFERENCE_SPEED_M_S, share * 0.0372);
+        eprintln!("KAT5 share {share:.4}, f_ref {f:.1} Hz, A {a:.4e} s");
+        assert!((f / 23730.0 - 1.0).abs() < 2e-3, "{f}");
+        assert!((a / 2.44e-7 - 1.0).abs() < 5e-3, "{a}");
     }
 }

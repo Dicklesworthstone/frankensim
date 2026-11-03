@@ -19,6 +19,10 @@ use std::time::Instant;
 mod drum_cards;
 
 const OBSERVER_FLAG: &str = "--observer";
+/// ALL-IN (MB 14741), opt-in: the drum's enclosed air as rigid-cylinder acoustic modes below F_MAX_HZ.
+const CAVITY_MODES_FLAG: &str = "--cavity-modes";
+/// ALL-IN (MB 14741), opt-in: `--wire-contact viscoelastic`, the snare wires' contact loss from the film card (.372).
+const WIRE_CONTACT_FLAG: &str = "--wire-contact";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
@@ -29,11 +33,25 @@ fn main() {
             std::process::exit(2)
         })
     });
+    let cavity_modes = all.iter().position(|a| a == CAVITY_MODES_FLAG).map(|i| {
+        all.get(i + 1).and_then(|s| s.parse::<f64>().ok()).unwrap_or_else(|| {
+            eprintln!("usage: {CAVITY_MODES_FLAG} F_MAX_HZ");
+            std::process::exit(2)
+        })
+    });
+    let wire_contact = all.iter().position(|a| a == WIRE_CONTACT_FLAG).map(|i| match all.get(i + 1).map(String::as_str) {
+        Some("viscoelastic") => (),
+        _ => {
+            eprintln!("usage: {WIRE_CONTACT_FLAG} viscoelastic");
+            std::process::exit(2)
+        }
+    });
+    let valued = |i: usize| i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG);
     let a: Vec<String> = all
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && !(*i > 0 && all[i - 1] == OBSERVER_FLAG)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
@@ -92,6 +110,39 @@ fn main() {
         if let Err(e) = kit::attach_closed_body(&mut p, &spec, &text) {
             eprintln!("refused: {e}");
             std::process::exit(1)
+        }
+    }
+    if let Some(f_max) = cavity_modes {
+        let spec = match a[1].as_str() {
+            "kick" => kit::kick(),
+            "snare" => kit::snare(),
+            "snare-off" => kit::snare_wires_off(),
+            "tom-12" => kit::tom(12.0),
+            "tom-14" => kit::tom(14.0),
+            other => {
+                eprintln!("refused: {CAVITY_MODES_FLAG} is a drum's enclosed air; {other} is not a drum");
+                std::process::exit(1)
+            }
+        };
+        match kit::attach_cavity_modes(&mut p, &spec, f_max) {
+            Ok(receipt) => p.notes.push(receipt),
+            Err(e) => {
+                eprintln!("refused: {e}");
+                std::process::exit(1)
+            }
+        }
+    }
+    if wire_contact.is_some() {
+        if a[1] != "snare" {
+            eprintln!("refused: {WIRE_CONTACT_FLAG} is the snare wires' contact; {} has none", a[1]);
+            std::process::exit(1)
+        }
+        match kit::attach_viscoelastic_wires(&mut p, &kit::snare()) {
+            Ok(receipt) => p.notes.push(receipt),
+            Err(e) => {
+                eprintln!("refused: {e}");
+                std::process::exit(1)
+            }
         }
     }
     let dur = secs.unwrap_or(dur);

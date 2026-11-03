@@ -2000,6 +2000,31 @@ pub struct Cavity {
     pub port: Option<Port>,
 }
 
+/// The enclosed air beyond a `Cavity`'s lumped (uniform) term: acoustic modes of the closed space, each one
+/// spring `kappa = rho c^2 / (V Lambda)` between the heads' projected outward volume `Y = sum_i g_i w_i`
+/// (`g_i = h^2 psi(x_i)`, the mode's shape at the node) and an air coordinate `X` of mass `kappa / omega^2`.
+/// The mode's pressure amplitude is `-kappa (Y - X)` and pushes node `i` with `g_i` times it, so heads and air
+/// exchange energy without making any: held heads leave `X` ringing at the mode's frequency. The leapfrog air
+/// step uses `wt2 = (2 - 2 cos(omega k)) / k^2`, so a held-head mode rings at `omega` exactly. Lossless: the
+/// air's boundary layers on shell and heads are not modelled, a lower bound on loss. Modes that differ only
+/// in their axial order share one shape on a head and differ there by a sign (`(-1)^p` on the far head), so
+/// the weights are stored per shape: `shape[m]` is mode `m`'s shape, and `heads` holds per head body its
+/// weights shape-major (`g` of shape `s` at node `i` is `weights[s * n + i]`) and per mode its sign there.
+/// The step projects and loads once per shape, the same sums as per mode.
+#[derive(Clone)]
+pub struct AirModes {
+    pub kappa: Vec<f64>,
+    pub wt2: Vec<f64>,
+    pub x: Vec<f64>,
+    pub xp: Vec<f64>,
+    pub shape: Vec<usize>,
+    pub heads: Vec<(usize, Vec<f64>, Vec<f64>)>,
+    /// Scratch for the projected volumes, then the pressure amplitudes, of one step.
+    pub y: Vec<f64>,
+    /// Scratch per shape: a head's projection on it, then the pressure it carries there.
+    pub q: Vec<f64>,
+}
+
 /// A hole in a head (a kick drum's front port): the air plug in it is an inertance
 /// rho L_eff / A driven by the cavity pressure; it vents the cavity and radiates as a monopole.
 #[derive(Clone)]
@@ -2270,11 +2295,17 @@ pub struct Contact {
     pub fixed_point_exit: bool,
     /// The crushing of the softer body, with its memory; None for an elastic contact.
     pub crush: Option<Crush>,
+    /// Viscoelastic Hertz loss (Brilliantov et al. 1996, as printed by Ramirez et al. 1999 Eq. 3 and
+    /// Schwager and Poeschel 2008 Eq. 13): F = K (d^1.5 + 1.5 A d^0.5 d'), with A [s] this
+    /// retardation time, clipped at zero force. Discretized as K [secant + A (P(d+) - P(d-)) / 2k],
+    /// P = max(d, 0)^1.5, which dissipates on every step (P is increasing). Only for alpha 1.5 and
+    /// no crush; the law's Hunt-Crossley mu is then unused. None (the default) keeps the Power law.
+    pub retardation_s: Option<f64>,
 }
 
 impl Contact {
     pub fn new(a: Vec<(usize, usize, f64)>, b: Vec<(usize, usize, f64)>, gap: f64, law: Law) -> Contact {
-        Contact { a, b, gap, law, d_now: 0.0, active: true, peak_force: 0.0, force: 0.0, fixed_point_exit: false, crush: None }
+        Contact { a, b, gap, law, d_now: 0.0, active: true, peak_force: 0.0, force: 0.0, fixed_point_exit: false, crush: None, retardation_s: None }
     }
 
     /// The same contact crushing as `crush` describes; its law must be Hertz (alpha 1.5).
@@ -2499,6 +2530,24 @@ fn contact_force(d_pred: f64, comp: f64, force: f64, previous: f64, law: Law, fi
     solve_force(d_pred, comp, force, previous, fixed_exit, |d| contact_phi(d, previous, kk, alpha, mu, k))
 }
 
+/// `contact_phi` for the viscoelastic Hertz law (`Contact::retardation_s`): K [secant of d^2.5 / 2.5 +
+/// A (P(d) - P(previous)) / 2k], P = max(., 0)^1.5, clipped at zero; increasing in d.
+#[inline(always)]
+pub(crate) fn viscoelastic_phi(d: f64, previous: f64, kk: f64, retardation: f64, k: f64) -> (f64, f64) {
+    let (elastic, derivative) = power_secant(d, previous, 1.5);
+    let rate = retardation / (2.0 * k);
+    let (pd, pp) = (d.max(0.0), previous.max(0.0));
+    let value = kk * (elastic + rate * (pd * pd.sqrt() - pp * pp.sqrt()));
+    if value <= 0.0 { (0.0, 0.0) }
+    else { (value, kk * (derivative + rate * 1.5 * pd.sqrt())) }
+}
+
+/// `contact_force` for the viscoelastic Hertz law.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn viscoelastic_force(d_pred: f64, comp: f64, force: f64, previous: f64, kk: f64, retardation: f64, fixed_exit: bool, k: f64) -> f64 {
+    solve_force(d_pred, comp, force, previous, fixed_exit, |d| viscoelastic_phi(d, previous, kk, retardation, k))
+}
+
 /// `contact_force` for a crushing contact, at its current memory.
 #[allow(clippy::too_many_arguments)]
 fn crush_force(d_pred: f64, comp: f64, force: f64, previous: f64, law: Law, crush: &Crush, fixed_exit: bool, k: f64) -> f64 {
@@ -2715,7 +2764,7 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
             continue;
         }
         let Law::Power { k: kk, alpha, mu } = contacts[jc].law;
-        let queued = alpha == 1.5 && contacts[jc].crush.is_none();
+        let queued = alpha == 1.5 && contacts[jc].crush.is_none() && contacts[jc].retardation_s.is_none();
         let c = &contacts[jc];
         if !queued || c.a.iter().chain(&c.b).any(|&(b, i, _)| q.mark[b][i] == q.batch) {
             q.flush(bodies, contacts, k);
@@ -2744,7 +2793,10 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
                     crush.deepest = crush.deepest.max(previous);
                     crush_force(d_pred, comp, c.force, previous, c.law, crush, c.fixed_point_exit, k)
                 }
-                None => contact_force(d_pred, comp, c.force, previous, c.law, c.fixed_point_exit, k),
+                None => match c.retardation_s {
+                    Some(retardation) => viscoelastic_force(d_pred, comp, c.force, previous, kk, retardation, c.fixed_point_exit, k),
+                    None => contact_force(d_pred, comp, c.force, previous, c.law, c.fixed_point_exit, k),
+                },
             };
             apply_force(bodies, c, f, d_pred, comp, k);
             continue;
@@ -2882,6 +2934,8 @@ fn solve_frictions(bodies: &mut [Body], contacts: &[Contact], frictions: &mut [F
 pub struct Instrument {
     pub bodies: Vec<Body>,
     pub cavities: Vec<Cavity>,
+    /// Enclosed-air modes beyond each cavity's lumped term (opt-in; none by default).
+    pub air_modes: Vec<AirModes>,
     pub rads: Vec<RadDamp>,
     pub links: Vec<Link>,
     pub contacts: Vec<Contact>,
@@ -2922,7 +2976,7 @@ impl Instrument {
         if !rate.is_finite() || rate <= 0.0 {
             return Err("instrument sample rate must be positive and finite".into());
         }
-        Ok(Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), load_on: None })
+        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), load_on: None })
     }
     /// Bring every body's bias on from zero as a raised cosine over `seconds`, not all at once, so
     /// the piece ends that time at rest under its load. A step rings every mode it reaches. This
@@ -3198,6 +3252,45 @@ impl Instrument {
             gas_rate2 += 2.0 * rate * radiation.resistance
                 * inverse_volume_mass(&radiation.bodies);
         }
+        // Air modes: the whole set is a sum of rank-one terms v_k v_k^T with v_k = (sqrt(kappa_k) M^-1/2 g_k,
+        // -omega~_k e_k), so its largest mass-normalized eigenvalue is that of their Gram matrix
+        // G_kl = v_k . v_l = sqrt(kappa_k kappa_l) g_k^T M^-1 g_l + delta_kl omega~_k^2. Two upper bounds, the
+        // smaller taken: the trace bound sum_k kappa_k g_k^T M^-1 g_k + max_k omega~_k^2, and the largest absolute
+        // row sum of G (Gershgorin), the tight one when the shapes are near orthogonal on the heads' mass.
+        for air in &self.air_modes {
+            let (nm, ns) = (air.kappa.len(), air.q.len());
+            let grams: Vec<(Vec<f64>, &Vec<f64>)> = air
+                .heads
+                .iter()
+                .map(|(body, weights, sign)| {
+                    let b = &self.bodies[*body];
+                    let n = b.n;
+                    let mut gram = vec![0.0; ns * ns];
+                    for s in 0..ns {
+                        for t in s..ns {
+                            let v: f64 = (0..n).map(|i| weights[s * n + i] * weights[t * n + i] / b.mass[i]).sum();
+                            gram[s * ns + t] = v;
+                            gram[t * ns + s] = v;
+                        }
+                    }
+                    (gram, sign)
+                })
+                .collect();
+            let gkl = |k: usize, l: usize| -> f64 {
+                grams.iter().map(|(gram, sign)| sign[k] * sign[l] * gram[air.shape[k] * ns + air.shape[l]]).sum()
+            };
+            let trace: f64 = (0..nm).map(|k| air.kappa[k] * gkl(k, k)).sum();
+            let trace_bound = trace + air.wt2.iter().fold(0.0f64, |x, &y| x.max(y));
+            let mut row_bound: f64 = 0.0;
+            for k in 0..nm {
+                let mut row = air.wt2[k];
+                for l in 0..nm {
+                    row += (air.kappa[k] * air.kappa[l]).sqrt() * gkl(k, l).abs();
+                }
+                row_bound = row_bound.max(row);
+            }
+            gas_rate2 += trace_bound.min(row_bound);
+        }
         gas_rate2
     }
 
@@ -3319,6 +3412,42 @@ impl Instrument {
                 q.u += du;
                 q.du = du / k;
                 q.x += k * q.u;
+            }
+        }
+        // the enclosed air's modes beyond the lumped term (`AirModes`): forces from this step's head
+        // displacement and air coordinate, then the air coordinate's leapfrog step on the same state
+        for air in self.air_modes.iter_mut() {
+            let (nm, ns) = (air.kappa.len(), air.q.len());
+            air.y.iter_mut().for_each(|y| *y = 0.0);
+            for (body, weights, sign) in &air.heads {
+                let b = &self.bodies[*body];
+                for s in 0..ns {
+                    air.q[s] = weights[s * b.n..(s + 1) * b.n].iter().zip(&b.w).map(|(g, w)| g * w).sum::<f64>();
+                }
+                for m in 0..nm {
+                    air.y[m] += sign[m] * air.q[air.shape[m]];
+                }
+            }
+            for m in 0..nm {
+                let stretch = air.y[m] - air.x[m];
+                let next = 2.0 * air.x[m] - air.xp[m] + k * k * air.wt2[m] * stretch;
+                air.xp[m] = air.x[m];
+                air.x[m] = next;
+                air.y[m] = -air.kappa[m] * stretch; // this mode's pressure amplitude
+            }
+            for (body, weights, sign) in &air.heads {
+                let b = &mut self.bodies[*body];
+                let n = b.n;
+                air.q.iter_mut().for_each(|q| *q = 0.0);
+                for m in 0..nm {
+                    air.q[air.shape[m]] += sign[m] * air.y[m];
+                }
+                for s in 0..ns {
+                    let p = air.q[s];
+                    for (f, g) in b.f.iter_mut().zip(&weights[s * n..(s + 1) * n]) {
+                        *f += p * g;
+                    }
+                }
             }
         }
         for r in &self.rads {
@@ -4015,5 +4144,175 @@ fn coil_mode_rings_at_its_discrete_frequency_and_decays_at_its_own_loss() {
         let e1 = ins.bodies[0].discrete_energy(k);
         let lost = ins.bodies[0].modal_loss_dissipated_j();
         assert!(((e0 - e1) - lost).abs() < 1e-9 * e0, "mode {j}: energy fell {} J, counted {lost} J", e0 - e1);
+    }
+}
+
+/// .372 phase 2 known-answer tests for the viscoelastic Hertz contact, thresholds frozen in the
+/// phase-1 design mail (14510 section 4; MB 14513). The ODE is the continuous law; the discrete
+/// restitution runs the kit's own `viscoelastic_force` / `contact_force` on the relative coordinate
+/// of two masses (`solve_contacts` does exactly this for one contact: comp = k^2 / m_reduced).
+#[cfg(test)]
+mod viscoelastic_contact_tests {
+    use super::*;
+
+    // Ramirez, Poeschel, Brilliantov and Schwager 1999, PRE 60 4465, Eq. 6 and 34
+    const C: [f64; 4] = [1.15344, 0.79826, -0.483582, 0.285279];
+    // Schwager and Poeschel 2008, PRE 78 051304, Table II: eps = sum h_k X^(k/2)
+    const H: [f64; 21] = [1.0, 0.0, -1.153448856, 0.0, 0.7982665581, 0.2666666667, -0.5228825657, -0.4613795424,
+        0.3487426737, 0.4523510496, -0.1464314644, -0.3677282992, -0.0432489833, 0.2818042325, 0.1478525872,
+        -0.1794420590, -0.1784660326, 0.06593358882, 0.1713586178, 0.0252498223, -0.1379234986];
+    // the refresh-2 snare receipt: coil 1.9474e-3 kg/m, pitch 3.4 mm, K 1.9094e8 per turn, 3.5 mm nodes,
+    // film 1390 kg/m^3 x 76.2 um
+    const M_TURN: f64 = 1.9474e-3 * 3.4e-3;
+    const K_TURN: f64 = 1.9094e8;
+    const A_CARD: f64 = 2.44e-7;
+    const K_STEP: f64 = 1.0 / 144000.0;
+
+    fn node() -> (f64, f64) {
+        let m_node = 1.9474e-3 * 3.5e-3;
+        let head = 1390.0 * 76.2e-6 * 3.5e-3 * 3.5e-3;
+        (m_node * head / (m_node + head), K_TURN * 3.5 / 3.4)
+    }
+    fn eps_ramirez(x: f64) -> f64 { 1.0 - C[0] * x + C[1] * x * x + C[2] * x.powi(3) + C[3] * x.powi(4) }
+    fn eps_sp(x: f64) -> f64 { H.iter().enumerate().map(|(k, h)| h * x.powf(k as f64 / 2.0)).sum() }
+    fn t_contact(m: f64, kk: f64, v: f64) -> f64 { 2.9432 * (5.0 * m * v * v / (4.0 * kk)).powf(0.4) / v }
+    fn a_for_x(x: f64, m: f64, kk: f64, v: f64) -> f64 { x / (1.5 * (kk / m).powf(0.4) * v.powf(0.2)) }
+
+    /// RK4 restitution of m xi'' = -K (xi^1.5 + 1.5 A xi^0.5 xi'); `clip`: F >= 0 and the collision ends at
+    /// F = 0 while unloading (Schwager and Poeschel), else at xi = 0 (Ramirez).
+    fn ode(m: f64, kk: f64, v: f64, a: f64, clip: bool, n: usize) -> f64 {
+        let h = t_contact(m, kk, v) / n as f64;
+        let acc = |x: f64, u: f64| -> f64 {
+            if x <= 0.0 { return 0.0; }
+            let mut f = kk * x.powf(1.5) + 1.5 * kk * a * x.sqrt() * u;
+            if clip && f < 0.0 { f = 0.0; }
+            -f / m
+        };
+        let (mut x, mut u) = (0.0, v);
+        for _ in 0..50 * n {
+            let (k1x, k1u) = (u, acc(x, u));
+            let (k2x, k2u) = (u + 0.5 * h * k1u, acc(x + 0.5 * h * k1x, u + 0.5 * h * k1u));
+            let (k3x, k3u) = (u + 0.5 * h * k2u, acc(x + 0.5 * h * k2x, u + 0.5 * h * k2u));
+            let (k4x, k4u) = (u + h * k3u, acc(x + h * k3x, u + h * k3u));
+            x += h / 6.0 * (k1x + 2.0 * k2x + 2.0 * k3x + k4x);
+            u += h / 6.0 * (k1u + 2.0 * k2u + 2.0 * k3u + k4u);
+            if u < 0.0 && (x <= 0.0 || (clip && acc(x, u) == 0.0)) {
+                return -u / v;
+            }
+        }
+        panic!("no separation");
+    }
+
+    /// The kit's discrete contact at 144 kHz: restitution and whether the discrete energy
+    /// 0.5 m ((d+ - d)/k)^2 + 0.5 (U(d+) + U(d)) never rose (relative 1e-12).
+    fn discrete(m: f64, kk: f64, v: f64, a: f64, phase: f64) -> (f64, bool) {
+        let k = K_STEP;
+        let comp = k * k / m;
+        let u = |d: f64| 0.4 * kk * d.max(0.0).powf(2.5);
+        let (mut dp, mut dn) = (-(3.0 + phase) * v * k, -(2.0 + phase) * v * k);
+        let e0 = 0.5 * m * v * v;
+        let mut energy = e0 + 0.5 * (u(dn) + u(dp));
+        let (mut force, mut touched, mut passive) = (0.0, false, true);
+        for _ in 0..100_000 {
+            let pred = 2.0 * dn - dp;
+            let f = if a > 0.0 {
+                viscoelastic_force(pred, comp, force, dp, kk, a, false, k)
+            } else {
+                contact_force(pred, comp, force, dp, Law::Power { k: kk, alpha: 1.5, mu: 0.0 }, false, k)
+            };
+            let next = pred - comp * f;
+            let e = 0.5 * m * ((next - dn) / k).powi(2) + 0.5 * (u(next) + u(dn));
+            passive &= e <= energy * (1.0 + 1e-12) + 1e-30;
+            energy = e;
+            force = f;
+            touched |= f > 0.0;
+            dp = dn;
+            dn = next;
+            if touched && f == 0.0 && dn < 0.0 && dn < dp {
+                return ((dp - dn) / (k * v), passive);
+            }
+        }
+        panic!("no separation");
+    }
+
+    #[test]
+    fn kat1_unclipped_ode_matches_ramirez_to_1e_4_at_x_up_to_0_1() {
+        for x in [0.02, 0.05, 0.1] {
+            let a = a_for_x(x, M_TURN, K_TURN, 0.1);
+            let e = ode(M_TURN, K_TURN, 0.1, a, false, 40_000);
+            let d = (e - eps_ramirez(x)).abs();
+            eprintln!("KAT1 X {x}: ode {e:.8} ramirez {:.8} |d| {d:.2e}", eps_ramirez(x));
+            assert!(d <= 1e-4, "X {x}: {d}");
+        }
+    }
+
+    #[test]
+    fn kat2_clipped_ode_matches_schwager_poeschel_to_1e_5_at_x_up_to_0_3() {
+        for x in [0.02, 0.1, 0.2, 0.3] {
+            let a = a_for_x(x, M_TURN, K_TURN, 0.1);
+            let e = ode(M_TURN, K_TURN, 0.1, a, true, 40_000);
+            let d = (e - eps_sp(x)).abs();
+            eprintln!("KAT2 X {x}: ode {e:.8} S&P {:.8} |d| {d:.2e}", eps_sp(x));
+            assert!(d <= 1e-5, "X {x}: {d}");
+        }
+    }
+
+    #[test]
+    fn kat3_planted_negative_a_zero_gives_e_one_in_the_ode_and_the_kit_solver() {
+        let e = ode(M_TURN, K_TURN, 0.1, 0.0, true, 40_000);
+        eprintln!("KAT3 ode A = 0: e - 1 = {:.2e}", e - 1.0);
+        assert!((e - 1.0).abs() <= 1e-9);
+        let (mn, kn) = node();
+        let mut worst: f64 = 0.0;
+        for (m, kk) in [(M_TURN, K_TURN), (mn, kn)] {
+            for v in [0.01, 0.1, 1.0] {
+                for j in 0..16 {
+                    let (e, passive) = discrete(m, kk, v, 0.0, j as f64 / 16.0);
+                    assert!(passive);
+                    worst = worst.max((e - 1.0).abs());
+                }
+            }
+        }
+        eprintln!("KAT3 kit solver A = 0, 6 cases x 16 phases: max |e - 1| = {worst:.2e}");
+        assert!(worst <= 1e-9, "{worst}");
+    }
+
+    #[test]
+    fn kat4_kit_solver_at_144_khz_within_25_percent_of_the_ode_and_passive() {
+        let (mn, kn) = node();
+        let mut worst_mean: f64 = 0.0;
+        let mut worst_phase: f64 = 0.0;
+        for (label, m, kk) in [("turn on rigid film", M_TURN, K_TURN), ("turn vs free head node", mn, kn)] {
+            for v in [0.01, 0.1, 1.0] {
+                let loss_ode = 1.0 - ode(m, kk, v, A_CARD, true, 20_000);
+                let mut sum = 0.0;
+                let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                for j in 0..16 {
+                    let (e, passive) = discrete(m, kk, v, A_CARD, j as f64 / 16.0);
+                    assert!(passive && e < 1.0, "{label} v {v} phase {j}: e {e}, passive {passive}");
+                    let r = (1.0 - e) / loss_ode - 1.0;
+                    sum += r;
+                    lo = lo.min(r);
+                    hi = hi.max(r);
+                }
+                let mean = sum / 16.0;
+                eprintln!("KAT4 {label} v {v}: 1-e ode {loss_ode:.4}; kit/ode - 1: mean {mean:+.3}, phases [{lo:+.3}, {hi:+.3}]");
+                worst_mean = worst_mean.max(mean.abs());
+                worst_phase = worst_phase.max(lo.abs()).max(hi.abs());
+            }
+        }
+        eprintln!("KAT4 worst phase-mean {worst_mean:.3}, worst single phase {worst_phase:.3} (threshold 0.25 on the phase mean, as the design's 8-21 % were)");
+        assert!(worst_mean <= 0.25, "{worst_mean}");
+    }
+
+    #[test]
+    fn retardation_some_zero_is_the_power_law_bit_for_bit() {
+        let (m, kk) = (M_TURN, K_TURN);
+        let comp = K_STEP * K_STEP / m;
+        for (pred, prev) in [(3e-8, 1e-8), (1e-8, 3e-8), (5e-7, 2e-7), (-1e-9, 2e-8)] {
+            let a = viscoelastic_force(pred, comp, 0.0, prev, kk, 0.0, false, K_STEP);
+            let b = contact_force(pred, comp, 0.0, prev, Law::Power { k: kk, alpha: 1.5, mu: 0.0 }, false, K_STEP);
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
     }
 }
