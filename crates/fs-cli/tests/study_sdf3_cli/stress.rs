@@ -6,9 +6,9 @@ const STRESS: &str = include_str!("../../../../examples/marquee/bracket-3d-stres
 #[test]
 fn g1_g5_stress_self_weight_cli_restarts_the_same_material_load_and_design() {
     let dir = scratch("stress-self-weight");
-    let source = with_material_acceleration(
-        &STRESS.replace(":max-updates 80", ":max-updates 2"), 1.0,
-    );
+    let base = STRESS.replace(":max-updates 80", ":max-updates 2")
+        .replace(":youngs-modulus-pa 1.0", ":youngs-modulus-pa 1000000.0");
+    let source = with_material_acceleration(&base, 1.0);
     let (reference_ledger, reference) = run(&dir, "reference", &source, 6);
     let report = data(&reference_ledger, &reference, "report_json");
     assert_eq!(report.path(&["gradient_check", "passed"]), Some(&J::Bool(true)));
@@ -28,7 +28,7 @@ fn g1_g5_stress_self_weight_cli_restarts_the_same_material_load_and_design() {
     // not merely its old displacement vector. A different physical mass must
     // produce a different solved stress for the unchanged initial geometry.
     let (heavy_ledger, heavy_result) = run(&dir, "heavy",
-        &with_material_acceleration(&STRESS.replace(":max-updates 80", ":max-updates 2"), 2.0), 6);
+        &with_material_acceleration(&base, 2.0), 6);
     let ordinary = data(&reference_ledger, &reference, "iterations");
     let heavy = data(&heavy_ledger, &heavy_result, "iterations");
     let ordinary = ordinary.get("history").and_then(J::as_array).unwrap();

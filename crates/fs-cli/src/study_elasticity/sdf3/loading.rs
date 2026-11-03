@@ -4,6 +4,8 @@
 use super::*;
 use fs_cutfem::elastic3::surface::SurfaceForce3;
 use fs_cutfem::elastic3::dirichlet::EmbeddedDirichletOptions3;
+use fs_cutfem::elastic3::ElasticMaterialField3;
+use fs_material::elastic::acoustic::ElasticAcousticState;
 use fs_topopt::sdf3::Sdf3Elasticity;
 
 /// A fixed reference acceleration, shared by every independent load case.
@@ -35,8 +37,7 @@ impl MaterialAcceleration {
 }
 
 pub(super) fn material(spec: &Spec) -> Result<IsotropicElastic> {
-    IsotropicElastic::new(spec.youngs, spec.poisson,
-        spec.material_acceleration.map_or(1.0, |law| law.density_kg_m3))
+    IsotropicElastic::new(spec.youngs, spec.poisson, 1.0)
         .map_err(|e| fail("cli-study-sdf3-material", e.to_string()))
 }
 
@@ -131,6 +132,14 @@ pub(super) fn build_operator(
     let options = ElasticityOptions3 {
         max_cells: spec.leaves, max_dofs: 50_000, ..Default::default()
     };
+    // The legacy E/nu constructor retains no mass density. Self-weight needs
+    // the complete immutable native state, tied to this declared study source,
+    // on bulk, surface-loaded and embedded-support grids alike.
+    let native = spec.material_acceleration.map(|law|
+        ElasticAcousticState::from_isotropic(material, law.density_kg_m3, spec.id)
+            .map_err(|_| ElasticityError3::Invalid("invalid declared native elastic material")))
+        .transpose()?;
+    let field = native.as_ref().map(ElasticMaterialField3::Uniform);
     if let Some(beta) = spec.fixed.embedded_penalty() {
         let conflict = std::cell::Cell::new(false);
         let patch = |p, n| {
@@ -145,21 +154,38 @@ pub(super) fn build_operator(
             }
             selected
         };
-        let operator = AdaptiveElasticity3::build_with_embedded_dirichlet(
-            bounds, tree, domain, material, &clamp, &patch, options,
-            EmbeddedDirichletOptions3 { beta }, Default::default(), quadrature,
-        )?;
+        let operator = if let Some(field) = field {
+            AdaptiveElasticity3::build_with_material_field_and_embedded_dirichlet(
+                bounds, tree, domain, field, &clamp, &patch, options,
+                EmbeddedDirichletOptions3 { beta }, Default::default(), quadrature,
+            )
+        } else {
+            AdaptiveElasticity3::build_with_embedded_dirichlet(
+                bounds, tree, domain, material, &clamp, &patch, options,
+                EmbeddedDirichletOptions3 { beta }, Default::default(), quadrature,
+            )
+        }?;
         if conflict.get() {
             return Err(ElasticityError3::Invalid(
                 "surface load overlaps an embedded support; declare disjoint physical patches"));
         }
         Ok(operator)
     } else if spec.surfaces.iter().any(Option::is_some) {
-        AdaptiveElasticity3::build_with_surface(bounds, tree, domain, material,
-            &clamp, options, Default::default(), quadrature)
+        if let Some(field) = field {
+            AdaptiveElasticity3::build_with_material_field_and_surface(bounds, tree, domain, field,
+                &clamp, options, Default::default(), quadrature)
+        } else {
+            AdaptiveElasticity3::build_with_surface(bounds, tree, domain, material,
+                &clamp, options, Default::default(), quadrature)
+        }
     } else {
-        AdaptiveElasticity3::build(bounds, tree, domain, material,
-            &clamp, options, quadrature)
+        if let Some(field) = field {
+            AdaptiveElasticity3::build_with_material_field(bounds, tree, domain, field,
+                &clamp, options, quadrature)
+        } else {
+            AdaptiveElasticity3::build(bounds, tree, domain, material,
+                &clamp, options, quadrature)
+        }
     }
 }
 

@@ -25,9 +25,9 @@ the rebuilt material-load identity before restoring optimizer state.
 The acceleration stays fixed in the reference configuration; this does not
 add follower loads or inertial dynamics. `max-stencil-terms` bounds each grid's
 prepared sparse load map and contributes to memory admission. The compliance
-OC optimizer still requires nonpositive sensitivities; self-weight with low
-SIMP penalization can violate that condition and is refused by its existing
-gradient gate. The stress optimizer has no such sign restriction. The
+OC optimizer still requires nonpositive sensitivities; self-weight can
+violate that condition even at higher SIMP penalization and is refused by
+its existing gradient gate. The stress optimizer has no such sign restriction. The
 zero-centered `load-space-limited-simp` mode explicitly refuses this common
 offset because its force-ellipsoid model does not include affine loading.
 

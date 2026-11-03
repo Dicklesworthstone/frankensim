@@ -204,10 +204,14 @@ fn material_acceleration_uses_native_mass_occupancy_and_full_compliance_gradient
     use fs_solver::op::LinearOp;
     use fs_topopt::pipeline::LoadCase;
 
-    let source = unit_source();
+    let source = unit_source()
+        .replace(":youngs-modulus-pa 1.0", ":youngs-modulus-pa 1000000.0")
+        .replace("(pressure :pa 1.0 :x-fraction (0.5 1.0))", "none")
+        .replace("(traction :pa (0.0 1.0 0.0) :x-fraction (0.5 1.0))", "none");
     let source = format!("{}\n (design-regions :solid (((0.0 0.0 0.0) (0.5 0.5 0.5))) :void (((0.0 0.5 0.5) (0.5 1.0 1.0)))))",
         source.trim_end().strip_suffix(')').unwrap());
-    let spec = spec::parse(&with_acceleration(&source)).unwrap();
+    let source = with_acceleration(&source);
+    let spec = spec::parse(&source).unwrap();
     let mut poll = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3::default(), &mut poll).unwrap();
     let op = build(&spec, 1, &mut q).unwrap();
@@ -246,6 +250,20 @@ fn material_acceleration_uses_native_mass_occupancy_and_full_compliance_gradient
     let defect = study.operator().field_residual(&value.objective.displacements[0], &physical_force,
         || ControlFlow::Continue(())).unwrap();
     assert!(defect < 1e-8, "equilibrium must include the actual projected mass");
+
+    // G3: unchanged stiffness and occupancy, twice the source mass, four times
+    // f^T u. Rebuild the declared physical law without an OC sign assumption.
+    let mass_spec = spec::parse(&source.replace(":density-kg-m3 2.0", ":density-kg-m3 4.0")).unwrap();
+    let heavy_op = build(&mass_spec, 1, &mut q).unwrap();
+    let heavy = regions::bind(CutDensityStudy3::new(heavy_op, mass_spec.radius,
+        mass_spec.schedule[0]), &mass_spec).unwrap();
+    let mut heavy = bind_material_acceleration(heavy, &mass_spec, &CancelGate::new(),
+        || ControlFlow::Continue(())).unwrap();
+    let doubled = heavy.evaluate(&raw, &cases, &mut control).unwrap();
+    assert_eq!(doubled.projected_rho, value.projected_rho);
+    near(doubled.objective.compliance, 4.0 * value.objective.compliance,
+        4.0 * value.objective.compliance);
+
     let epsilon = 1e-5;
     let direction: Vec<_> = (0..raw.len()).map(|i| 0.2 + 0.03 * i as f64).collect();
     let shifted = |sign: f64| raw.iter().zip(&direction).map(|(r, d)| r + sign * epsilon * d).collect::<Vec<_>>();
