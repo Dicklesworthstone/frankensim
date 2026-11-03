@@ -1,5 +1,35 @@
 # fs-material — CONTRACT
 
+## Grinding-stream collection for explicit mineral leach charges
+
+`comminution::leach_charge::CollectedLeachCharge` collects an original
+`ParticleStream` over an explicit duration and converts caller-assigned
+mineral fractions into typed amounts. It retains size-class and population IDs,
+the original stream, dry/element/water masses and unallocated mass per class.
+Collection duration is distinct from milling residence and leach contact time.
+
+Each allocation names its solid species, fraction with artifact-backed
+provenance, and a `MolarMassSource` resolved through the actual typed material
+query and receipt verifier. The source pack identity, query, answer and
+uncertainty remain inspectable. Neither elemental assays nor a source-pack
+label authenticates mineralogy. Reactive radius needs an independently sourced
+value or an explicit liberated-spherical-particle declaration allowing
+class diameter/2; bulk ore PSD does not silently become mineral-grain geometry.
+
+Canonical population IDs and exact fraction budgets prevent double allocation.
+The bounded owner handles at most 128 source classes and 1024 declared mineral
+populations; a downstream solver may impose a smaller bound. Positive numerical
+underflow, overflow, duplicate IDs, absent classes and source/schema failures
+refuse without repair. Unallocated dry mass has unknown mineralogy and is not
+certified inert. Original elemental accounts describe the whole charge and
+must not be assigned again to either the mineral or residual inventory.
+
+Six focused tests exercise real typed molar-mass evidence/receipts, independent
+kg/s-to-kg-to-mol arithmetic, duration scaling, original assays and water,
+zero/unallocated controls, radius/fraction evidence and numerical extremes.
+This adapter prepares populations for reaction owners; it does not choose
+kinetics, infer liberation, certify mineral/assay closure or supply a solution.
+
 ## Continuous stirred-tank chemistry with finite shared reagents
 
 `reaction_flow::ReactiveCstr` evolves complete molar inventories in one

@@ -36,6 +36,10 @@ pub mod breakage;
 #[path = "comminution/kinetics.rs"]
 pub mod kinetics;
 
+/// Source-explicit collection of a size-resolved stream into mineral leach charges.
+#[path = "comminution/leach_charge.rs"]
+pub mod leach_charge;
+
 /// Closed grinding/classification balances with explicit source applicability.
 #[path = "comminution/circuit.rs"]
 pub mod circuit;
