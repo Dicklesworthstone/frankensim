@@ -202,6 +202,25 @@ pub enum CollisionModel3 {
         /// Relaxation time; must be finite and greater than one half.
         tau: f64,
     },
+    /// Two-relaxation-time collision, with even populations relaxed at the
+    /// viscous rate and odd populations at an independently controlled rate.
+    ///
+    /// `tau_odd = 1/2 + magic/(tau - 1/2)`. Keeping `magic = 3/16`
+    /// removes the viscosity-dependent halfway-wall error in fully developed,
+    /// uniformly forced planar Poiseuille flow. This is not a general curved
+    /// boundary or high-Reynolds stability guarantee. Guo's even and odd source
+    /// moments use their respective relaxation rates, including the half-force
+    /// correction in the physical velocity. Setting `magic = (tau - 1/2)^2`
+    /// gives BGK to roundoff.
+    /// See Ginzburg & d'Humieres, <https://doi.org/10.1103/PhysRevE.68.066614>,
+    /// Krastins et al., <https://doi.org/10.1002/fld.4856>, and the forcing
+    /// analysis in <https://doi.org/10.1103/PhysRevE.102.063307>.
+    Trt {
+        /// Even relaxation time; the kinematic viscosity is `(tau - 1/2)/3`.
+        tau: f64,
+        /// Positive finite product `(tau - 1/2)(tau_odd - 1/2)`.
+        magic: f64,
+    },
     /// Relax central moments around the measured local velocity.
     ///
     /// Rates must be finite and strictly between zero and two. Rows of total
@@ -239,12 +258,25 @@ impl CollisionModel3 {
     ///
     /// # Errors
     /// [`CollisionError3::InvalidRelaxationTime`] or
+    /// [`CollisionError3::InvalidTrtMagic`] or
     /// [`CollisionError3::InvalidMomentRelaxationRate`] when a parameter is
     /// outside its finite physical window.
     pub fn validate(self) -> Result<(), CollisionError3> {
         match self {
             Self::Bgk { tau } if tau.is_finite() && tau > 0.5 => Ok(()),
             Self::Bgk { tau } => Err(CollisionError3::InvalidRelaxationTime { tau }),
+            Self::Trt { tau, magic } => {
+                Self::Bgk { tau }.validate()?;
+                if !magic.is_finite() || magic <= 0.0 {
+                    return Err(CollisionError3::InvalidTrtMagic { magic });
+                }
+                // Refuse overflow and rounding to 1/2; neither is a usable
+                // independent odd relaxation rate.
+                Self::Bgk {
+                    tau: 0.5 + magic / (tau - 0.5),
+                }
+                .validate()
+            }
             Self::CentralMoment {
                 second_order_rate,
                 higher_order_rate,
@@ -264,7 +296,7 @@ impl CollisionModel3 {
         }
     }
 
-    /// Kinematic viscosity implied by the BGK relaxation time or the
+    /// Kinematic viscosity implied by the BGK/TRT even relaxation time or the
     /// moment-space second-order relaxation rate.
     ///
     /// Call [`CollisionModel3::validate`] first when the model did not come
@@ -272,7 +304,7 @@ impl CollisionModel3 {
     #[must_use]
     pub const fn kinematic_viscosity(self) -> f64 {
         match self {
-            Self::Bgk { tau } => (tau - 0.5) / 3.0,
+            Self::Bgk { tau } | Self::Trt { tau, .. } => (tau - 0.5) / 3.0,
             Self::CentralMoment {
                 second_order_rate, ..
             }
@@ -286,7 +318,10 @@ impl CollisionModel3 {
     #[must_use]
     pub const fn supports_body_force(self) -> bool {
         match self {
-            Self::Bgk { .. } | Self::CentralMoment { .. } | Self::ReducedCumulant { .. } => true,
+            Self::Bgk { .. }
+            | Self::Trt { .. }
+            | Self::CentralMoment { .. }
+            | Self::ReducedCumulant { .. } => true,
         }
     }
 }
@@ -306,6 +341,11 @@ pub enum CollisionError3 {
     InvalidRelaxationTime {
         /// Rejected relaxation time.
         tau: f64,
+    },
+    /// The TRT even/odd relaxation product is not positive and finite.
+    InvalidTrtMagic {
+        /// Rejected relaxation product.
+        magic: f64,
     },
     /// A moment-space relaxation rate is outside `(0, 2)`.
     InvalidMomentRelaxationRate {
@@ -374,6 +414,12 @@ impl core::fmt::Display for CollisionError3 {
         match self {
             Self::InvalidRelaxationTime { tau } => {
                 write!(f, "D3Q19 relaxation time {tau} must be finite and > 0.5")
+            }
+            Self::InvalidTrtMagic { magic } => {
+                write!(
+                    f,
+                    "D3Q19 TRT magic parameter {magic} must be positive and finite"
+                )
             }
             Self::InvalidMomentRelaxationRate { moment_order, rate } => write!(
                 f,
@@ -535,10 +581,60 @@ fn collide_cell3_with_projection(
             }
             Ok(post)
         }
+        CollisionModel3::Trt { tau, magic } => {
+            collide_trt3(populations, equilibrium, velocity, force, tau, magic)
+        }
         CollisionModel3::CentralMoment { .. } | CollisionModel3::ReducedCumulant { .. } => {
             collide_moment_with_force3(populations, equilibrium, velocity, force, model)
         }
     }
+}
+
+// Opposite populations share their even collision/source increment and have
+// opposite odd increments. Evaluate each of the nine pairs once; no matrix,
+// heap allocation or moment transform is needed. Guo's source is
+// S+ = w(9(c.u)(c.F) - 3u.F), S- = 3w(c.F), and each receives 1-omega+/−/2.
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
+fn collide_trt3(
+    populations: [f64; Q3],
+    equilibrium: [f64; Q3],
+    velocity: [f64; 3],
+    force: [f64; 3],
+    tau: f64,
+    magic: f64,
+) -> Result<[f64; Q3], CollisionError3> {
+    let even_rate = 1.0 / tau;
+    let odd_rate = 1.0 / (0.5 + magic / (tau - 0.5));
+    let even_source_factor = 1.0 - 0.5 * even_rate;
+    let odd_source_factor = 1.0 - 0.5 * odd_rate;
+    let uf: f64 = velocity.iter().zip(force).map(|(u, f)| u * f).sum();
+    let mut post = [0.0; Q3];
+    post[0] = populations[0]
+        - even_rate * (populations[0] - equilibrium[0])
+        - even_source_factor * 3.0 * W3[0] * uf;
+    for q in (1..Q3).step_by(2) {
+        let opposite = OPP3[q];
+        let neq = populations[q] - equilibrium[q];
+        let neq_opposite = populations[opposite] - equilibrium[opposite];
+        let even = 0.5 * (neq + neq_opposite);
+        let odd = 0.5 * (neq - neq_opposite);
+        let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+        let eu: f64 = e.iter().zip(velocity).map(|(e, u)| e * u).sum();
+        let ef: f64 = e.iter().zip(force).map(|(e, f)| e * f).sum();
+        let source_even = W3[q] * (9.0 * eu * ef - 3.0 * uf);
+        let source_odd = 3.0 * W3[q] * ef;
+        let even_change = -even_rate * even + even_source_factor * source_even;
+        let odd_change = -odd_rate * odd + odd_source_factor * source_odd;
+        post[q] = populations[q] + even_change + odd_change;
+        post[opposite] = populations[opposite] + even_change - odd_change;
+    }
+    for (direction, value) in post.iter().copied().enumerate() {
+        if !value.is_finite() {
+            return Err(CollisionError3::NonFiniteOutput { direction, value });
+        }
+    }
+    Ok(post)
 }
 
 /// Symmetric source transform around the existing collision operator.
@@ -613,8 +709,8 @@ fn collide_moments3(
             third_order_rate,
             fourth_order_rate,
         ),
-        CollisionModel3::Bgk { .. } => {
-            unreachable!("BGK relaxes populations directly, never through moments")
+        CollisionModel3::Bgk { .. } | CollisionModel3::Trt { .. } => {
+            unreachable!("BGK/TRT relax populations directly, never through moments")
         }
     }
 }
@@ -955,7 +1051,11 @@ mod forcing_tests {
         }
     }
 
-    const MODELS: [CollisionModel3; 2] = [
+    const MODELS: [CollisionModel3; 3] = [
+        CollisionModel3::Trt {
+            tau: 1.0 / 1.23,
+            magic: 3.0 / 16.0,
+        },
         CollisionModel3::CentralMoment {
             second_order_rate: 1.23,
             higher_order_rate: 1.71,

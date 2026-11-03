@@ -37,8 +37,9 @@ pub use density_transport::{
 mod phase_volume;
 pub use phase_volume::{
     CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
-    CoexistenceVolumeStep, PiecewiseThermalVolumeControls, ThermalVolumeControls, ThermalVolumeStep,
-    ConductiveThermalVolumeControls, ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
+    CoexistenceVolumeStep, ConductiveThermalVolumeControls, ConductiveThermalVolumeReport,
+    ConductiveThermalVolumeStep, PiecewiseThermalVolumeControls, ThermalVolumeControls,
+    ThermalVolumeStep,
 };
 
 /// Mass-flow role of one domain face for flux construction and projection.
@@ -618,7 +619,7 @@ pub(crate) fn scale_rows(coo: &Coo, b: &mut [f64]) -> fs_sparse::Csr {
 }
 
 /// Collision operator selection for [`lbm_duct_flow`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LbmCollisionChoice {
     /// BGK. Measured on the plate-fin heatsink example at `tau = 0.519`:
     /// the central-moment operator diverged at step 85 while BGK stayed
@@ -628,6 +629,14 @@ pub enum LbmCollisionChoice {
     Auto,
     /// Single-relaxation-time BGK.
     Bgk,
+    /// Two-relaxation-time collision with the physical viscosity setting the
+    /// even rate. The explicit product controls the odd rate; `3/16` is the
+    /// planar fully developed halfway-wall choice. Arbitrary voxel geometry
+    /// and regularized openings still require spatial convergence evidence.
+    Trt {
+        /// Positive finite product `(tau_even - 1/2)(tau_odd - 1/2)`.
+        magic: f64,
+    },
     /// Central-moment relaxation: second-order rate `1/tau`, higher rate 1.
     CentralMoment,
 }
@@ -840,18 +849,20 @@ pub fn lbm_duct_flow(
             ),
         });
     }
-    let bgk = match config.collision {
-        LbmCollisionChoice::Bgk | LbmCollisionChoice::Auto => true,
-        LbmCollisionChoice::CentralMoment => false,
-    };
-    let collision = if bgk {
-        CollisionModel3::Bgk { tau }
-    } else {
-        CollisionModel3::CentralMoment {
+    let collision = match config.collision {
+        LbmCollisionChoice::Bgk | LbmCollisionChoice::Auto => CollisionModel3::Bgk { tau },
+        LbmCollisionChoice::Trt { magic } => CollisionModel3::Trt { tau, magic },
+        LbmCollisionChoice::CentralMoment => CollisionModel3::CentralMoment {
             second_order_rate: 1.0 / tau,
             higher_order_rate: 1.0,
-        }
+        },
     };
+    collision
+        .validate()
+        .map_err(|error| ChtError::InvalidInput {
+            field: "lbm.collision",
+            reason: error.to_string(),
+        })?;
     let wall = FaceBoundary3::stationary_wall();
     let spec = BoundarySpec3::new([
         FaceBoundary3::Velocity {

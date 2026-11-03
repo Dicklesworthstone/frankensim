@@ -253,6 +253,75 @@ fn shared_bgk_collision_is_bit_compatible_and_fail_closed() {
     ));
 }
 
+/// G0: matching even/odd rates must recover the original forced BGK operator,
+/// including generic non-equilibrium populations rather than only equilibrium.
+#[test]
+fn trt_equal_rates_recover_bgk_and_invalid_rates_refuse() {
+    let mut populations = equilibrium3(1.03, [0.03, -0.02, 0.01]);
+    for (q, value) in populations.iter_mut().enumerate() {
+        *value += (q as f64 - 9.0) * 1e-5;
+    }
+    for force in [[0.0; 3], [7e-4, -3e-4, 5e-4]] {
+        for tau in [0.55_f64, 0.8, 1.7, 3.0] {
+            let bgk = collide_cell3(populations, CollisionModel3::Bgk { tau }, force).unwrap();
+            let model = CollisionModel3::Trt {
+                tau,
+                magic: (tau - 0.5).powi(2),
+            };
+            assert_eq!(model.kinematic_viscosity(), (tau - 0.5) / 3.0);
+            let trt = collide_cell3(populations, model, force).unwrap();
+            for q in 0..Q3 {
+                assert!((bgk[q] - trt[q]).abs() < 2e-15, "tau={tau}, q={q}");
+            }
+        }
+    }
+    // Unlike the equal-rate identity above, an arbitrary odd rate catches a
+    // source that incorrectly uses the even prefactor for both parities.
+    let mass = populations.iter().sum::<f64>();
+    let momentum = |f: [f64; Q3]| -> [f64; 3] {
+        core::array::from_fn(|axis| {
+            f.iter()
+                .enumerate()
+                .map(|(q, value)| f64::from([E3[q].0, E3[q].1, E3[q].2][axis]) * value)
+                .sum()
+        })
+    };
+    let before = momentum(populations);
+    let force = [7e-4, -3e-4, 5e-4];
+    for tau in [0.55, 0.8, 2.5] {
+        for magic in [0.02, 3.0 / 16.0, 1.0] {
+            let post =
+                collide_cell3(populations, CollisionModel3::Trt { tau, magic }, force).unwrap();
+            assert!((post.iter().sum::<f64>() - mass).abs() < 2e-14);
+            let after = momentum(post);
+            for axis in 0..3 {
+                assert!((after[axis] - before[axis] - force[axis]).abs() < 2e-14);
+            }
+        }
+    }
+    for magic in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            collide_cell3(
+                populations,
+                CollisionModel3::Trt { tau: 0.8, magic },
+                [0.0; 3]
+            ),
+            Err(CollisionError3::InvalidTrtMagic { .. })
+        ));
+    }
+    for (tau, magic) in [
+        (0.5, 3.0 / 16.0),
+        (f64::INFINITY, 3.0 / 16.0),
+        (0.6, f64::MAX),
+        (f64::MAX, f64::MIN_POSITIVE),
+    ] {
+        assert!(matches!(
+            collide_cell3(populations, CollisionModel3::Trt { tau, magic }, [0.0; 3]),
+            Err(CollisionError3::InvalidRelaxationTime { .. })
+        ));
+    }
+}
+
 /// lbm3-002c (G0): the correctness-first central-moment rung preserves the
 /// collision invariants, reduces to BGK within solve roundoff at equal rates,
 /// and refuses invalid relaxation-rate combinations.

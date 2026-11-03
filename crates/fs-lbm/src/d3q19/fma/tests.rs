@@ -17,9 +17,13 @@ use super::{PORTABLE_ONLY, collide_cell3};
 // the portable path with itself by accident.
 static SERIAL: Mutex<()> = Mutex::new(());
 
-const MODELS: [CollisionModel3; 5] = [
+const MODELS: [CollisionModel3; 6] = [
     CollisionModel3::Bgk { tau: 0.503 },
     CollisionModel3::Bgk { tau: 0.8 },
+    CollisionModel3::Trt {
+        tau: 1.7,
+        magic: 3.0 / 16.0,
+    },
     CollisionModel3::CentralMoment {
         second_order_rate: 1.23,
         higher_order_rate: 1.71,

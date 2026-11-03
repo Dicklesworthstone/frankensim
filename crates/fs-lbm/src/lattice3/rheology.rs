@@ -497,6 +497,10 @@ mod tests {
     fn newtonian_material_reduces_to_existing_step_and_retains_original_sources() {
         for model in [
             CollisionModel3::Bgk { tau: 0.9 },
+            CollisionModel3::Trt {
+                tau: 0.9,
+                magic: 3.0 / 16.0,
+            },
             CollisionModel3::CentralMoment {
                 second_order_rate: 1.0 / 0.9,
                 higher_order_rate: 1.2,

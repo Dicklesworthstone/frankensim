@@ -391,6 +391,8 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
 /// D3Q19's moment models tie ALL second-order rates together; their existing
 /// bulk/shear tie and physical-frame forcing are retained. D3Q27 changes only
 /// omega1, leaving its independent trace and eight higher groups untouched.
+/// TRT preserves its declared even/odd product, retuning the odd rate with tau
+/// so material and SGS viscosity changes do not silently change wall placement.
 pub trait ViscousLattice3<const Q: usize>: Lattice3<Q> {
     /// Replace the viscous relaxation time, refusing invalid/unrepresentable
     /// rates rather than clamping them. Validate the original model as well.
@@ -410,6 +412,7 @@ impl ViscousLattice3<19> for D3q19 {
         CollisionModel3::Bgk { tau }.validate()?;
         let updated = match collision {
             CollisionModel3::Bgk { .. } => CollisionModel3::Bgk { tau },
+            CollisionModel3::Trt { magic, .. } => CollisionModel3::Trt { tau, magic },
             CollisionModel3::CentralMoment {
                 higher_order_rate, ..
             } => CollisionModel3::CentralMoment {
@@ -1158,6 +1161,17 @@ mod collision_field_tests {
             third_order_rate: 0.8,
             fourth_order_rate: 0.7,
         };
+        let trt = CollisionModel3::Trt {
+            tau: 0.8,
+            magic: 3.0 / 16.0,
+        };
+        assert_eq!(
+            D3q19::with_shear_relaxation(trt, 1.5).unwrap(),
+            CollisionModel3::Trt {
+                tau: 1.5,
+                magic: 3.0 / 16.0,
+            }
+        );
         assert_eq!(
             D3q19::with_shear_relaxation(d19, 1.5).unwrap(),
             CollisionModel3::ReducedCumulant {

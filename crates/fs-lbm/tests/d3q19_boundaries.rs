@@ -401,6 +401,144 @@ fn regularized_velocity_and_pressure_faces_impose_moments() {
     );
 }
 
+/// G2/G3: Couette-Poiseuille superposition on actual halfway walls, on every
+/// Cartesian axis and across several viscosities. The continuum wall location
+/// must stay fixed when tau changes; BGK at high tau is a discriminating control.
+#[test]
+fn trt_laminar_wall_location_is_viscosity_independent() {
+    let height = 8;
+    let h = height as f64;
+    let peak = 0.008;
+    let lower_speed = -0.004;
+    let upper_speed = 0.006;
+    let mut worst_trt_error = 0.0_f64;
+    for axis in 0..3 {
+        let normal = (axis + 1) % 3;
+        let mut dimensions = [4; 3];
+        dimensions[normal] = height;
+        let mut lower = [0.0; 3];
+        let mut upper = [0.0; 3];
+        lower[axis] = lower_speed;
+        upper[axis] = upper_speed;
+        let mut faces = [FaceBoundary3::Periodic; 6];
+        faces[2 * normal] = FaceBoundary3::Wall { velocity: lower };
+        faces[2 * normal + 1] = FaceBoundary3::Wall { velocity: upper };
+        for tau in [0.65, 0.9, 1.7] {
+            let nu = (tau - 0.5) * CS2;
+            let signed_peak = if axis == 1 { -peak } else { peak };
+            let mut force = [0.0; 3];
+            force[axis] = 8.0 * nu * signed_peak / (h * h);
+            let mut grid = BoundaryGrid3::with_collision_model(
+                dimensions[0],
+                dimensions[1],
+                dimensions[2],
+                CollisionModel3::Trt {
+                    tau,
+                    magic: 3.0 / 16.0,
+                },
+                force,
+                BoundarySpec3::new(faces),
+            );
+            let initial_mass = grid.total_mass();
+            let steps = (18.0 * h * h / (std::f64::consts::PI.powi(2) * nu)).ceil() as usize + 80;
+            grid.run(steps);
+            let mut profile_error = 0.0_f64;
+            for y in 0..height {
+                let distance = y as f64 + 0.5;
+                let expected = lower_speed
+                    + (upper_speed - lower_speed) * distance / h
+                    + force[axis] * distance * (h - distance) / (2.0 * nu);
+                let mut p = [1; 3];
+                p[normal] = y;
+                let velocity = grid.velocity(p[0], p[1], p[2]);
+                profile_error = profile_error.max((velocity[axis] - expected).abs() / peak);
+                for transverse in 0..3 {
+                    if transverse != axis {
+                        assert!(velocity[transverse].abs() < 5e-12);
+                    }
+                }
+            }
+            assert!(
+                profile_error < 5e-7,
+                "axis={axis}, tau={tau}, error={profile_error:e}"
+            );
+            assert!((grid.total_mass() - initial_mass).abs() / initial_mass < 5e-11);
+            worst_trt_error = worst_trt_error.max(profile_error);
+
+            if axis == 0 && tau == 1.7 {
+                let mut bgk = BoundaryGrid3::new(
+                    dimensions[0],
+                    dimensions[1],
+                    dimensions[2],
+                    tau,
+                    force,
+                    BoundarySpec3::new(faces),
+                );
+                bgk.run(steps);
+                let y = 0.5;
+                let expected = lower_speed
+                    + (upper_speed - lower_speed) * y / h
+                    + force[axis] * y * (h - y) / (2.0 * nu);
+                let error = (bgk.velocity(1, 0, 1)[axis] - expected).abs() / peak;
+                assert!(error > 1e-3, "BGK control must expose wall slip: {error:e}");
+                println!("BGK tau=1.7 normalized wall error: {error:e}");
+            }
+        }
+    }
+    println!("TRT worst normalized Couette-Poiseuille profile error: {worst_trt_error:e}");
+}
+
+/// The physical duct-to-heat-transfer entry keeps the selected TRT parameter
+/// and physical viscosity, rather than silently falling back to BGK.
+#[test]
+fn trt_physical_duct_selection_and_refusal_use_the_shared_collision_owner() {
+    use fs_exec::CancelGate;
+    use fs_lbm::conjugate::{
+        ChtError, FluidProperties, LbmCollisionChoice, LbmFlowConfig, VoxelDomain, lbm_duct_flow,
+    };
+
+    let domain = VoxelDomain::new(8, 4, 4, 1.0).unwrap();
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1.0,
+        kinematic_viscosity_m2_s: 0.1,
+    };
+    let mut config = LbmFlowConfig {
+        inlet_velocity_m_s: 0.01,
+        lattice_inlet_velocity: 0.02,
+        collision: LbmCollisionChoice::Trt { magic: 3.0 / 16.0 },
+        max_steps: 20_000,
+        check_interval: 50,
+        workers: 1,
+        ..LbmFlowConfig::default()
+    };
+    let flow = lbm_duct_flow(&domain, &fluid, &config, &CancelGate::new_clock_free()).unwrap();
+    assert_eq!(
+        flow.report.collision,
+        CollisionModel3::Trt {
+            tau: flow.report.tau,
+            magic: 3.0 / 16.0
+        }
+    );
+    assert!((flow.report.lattice_viscosity - 0.2).abs() < 1e-15);
+    assert!(flow.report.realized_inflow_m3_s > 0.0);
+    assert!(flow.field.max_divergence(&domain) < 1e-12);
+    assert!(flow.velocity_m_s.iter().flatten().all(|u| u.is_finite()));
+    for magic in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+        config.collision = LbmCollisionChoice::Trt { magic };
+        let error =
+            lbm_duct_flow(&domain, &fluid, &config, &CancelGate::new_clock_free()).unwrap_err();
+        assert!(matches!(
+            error,
+            ChtError::InvalidInput {
+                field: "lbm.collision",
+                ..
+            }
+        ));
+    }
+}
+
 #[test]
 fn regularized_faces_are_axis_generic() {
     let wall = FaceBoundary3::stationary_wall();

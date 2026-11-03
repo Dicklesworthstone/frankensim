@@ -1020,6 +1020,23 @@ rollback. Their addition does not establish executed native validation.
   per-cell collision authority used by `BoundaryGrid3` and public cell calls.
   `Bgk { tau }` retains the frozen general-force projection; the Duct tile
   scalar/SIMD twin is separately bit-locked to its test-only axial oracle.
+  `Trt { tau, magic }` relaxes even populations with `1/tau` and odd
+  populations with `1/(1/2 + magic/(tau-1/2))`. Each Guo source parity uses
+  its own `1-omega/2` factor. Opposite pairs share their increments, with no
+  heap allocation or moment transform. The viscosity stays `(tau-1/2)/3`;
+  `magic=(tau-1/2)^2` recovers BGK to roundoff. Positive finite magic and
+  representable even/odd relaxation times are admitted before collision.
+  `magic=3/16` removes the viscosity-dependent wall offset for uniformly
+  forced, fully developed planar Couette-Poiseuille flow; arbitrary forcing,
+  curved/voxel geometry and open faces retain their own error models.
+  The same model is available through `BoundaryGrid3`, sparse D3Q19 and
+  `Grid3<D3q19>`, and via `LbmCollisionChoice::Trt { magic }` on the original
+  physical duct-to-conjugate-heat path. Material/rheology/SGS retuning keeps
+  magic fixed while updating even viscosity and its corresponding odd rate.
+  Focused regressions cover the three-axis planar profile across viscosities,
+  a BGK wall-slip control, force/stress moments, invalid parameters, physical
+  duct selection, source retuning and portable/FMA equivalence. This adds no
+  turbulent-transition or general high-Reynolds stability claim.
   `CentralMoment` relaxes a full-rank centered D3Q19 monomial basis with
   independent second/higher-order rates. `ReducedCumulant` applies the
   nonlinear `C220`/`C202`/`C022` corrections to the three independent

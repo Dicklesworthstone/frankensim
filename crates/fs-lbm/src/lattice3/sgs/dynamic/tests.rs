@@ -89,6 +89,10 @@ fn zero<L: SgsLattice3<Q>, const Q: usize>(collision: L::Collision) {
 #[test]
 fn dynamic_uniform_velocity_preserves_both_original_lattices() {
     zero::<D3q19, 19>(CollisionModel3::Bgk { tau: 0.8 });
+    zero::<D3q19, 19>(CollisionModel3::Trt {
+        tau: 0.8,
+        magic: 3.0 / 16.0,
+    });
     zero::<D3q27, 27>(CollisionConfig27 {
         model: CollisionModel27::Bgk {
             tau: 0.8,
