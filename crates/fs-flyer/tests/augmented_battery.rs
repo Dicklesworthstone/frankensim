@@ -8,8 +8,8 @@
 
 use fs_flyer::aircraft::wright_openloop_v1;
 use fs_flyer::augmented::{
-    AugmentedEngine, ModeFamily, attribute_modes, build_engine, eig_dense, eigenvalues,
-    wrap_trim_refusal,
+    AugmentedEngine, ModeFamily, ROTOR_INERTIA_KG_M2, attribute_modes, build_engine, eig_dense,
+    eigenvalues, wrap_trim_refusal,
 };
 use fs_flyer::canardmech::CANARD_MECH_V1;
 use fs_flyer::longitudinal::{IYY_KG_M2, eig4, linearize};
@@ -26,7 +26,16 @@ fn rigid_and_column() -> (
     fs_flyer::longitudinal::LongitudinalReport,
     [f64; 4],
 ) {
-    let d = wright_openloop_v1();
+    rigid_and_column_for(wright_openloop_v1())
+}
+
+fn rigid_and_column_for(
+    d: fs_flyer::aircraft::OpenLoopDesign,
+) -> (
+    fs_flyer::aircraft::OpenLoopDesign,
+    fs_flyer::longitudinal::LongitudinalReport,
+    [f64; 4],
+) {
     let trim = d.trim(RHO, [13.0, 0.06, 0.1, 45.0]).unwrap();
     let rep = linearize(&d, &trim, RHO).unwrap();
     let h = 0.004;
@@ -58,6 +67,144 @@ fn rigid_and_column() -> (
         0.0,
     ];
     (d, rep, b)
+}
+
+#[test]
+fn shared_shaft_jacobian_matches_coupled_torque_in_each_physical_coordinate() {
+    let mut design = wright_openloop_v1();
+    design.disks[0].center_m[2] = -1.35;
+    design.disks[1].center_m[2] = -0.25;
+    let (design, rigid, control) = rigid_and_column_for(design);
+    let engine = build_engine(&design, &CANARD_MECH_V1, None, &rigid, &control, RHO).unwrap();
+    let trim = &rigid.trim;
+    let state = [
+        trim.v_mps * trim.alpha_rad.cos(),
+        trim.v_mps * trim.alpha_rad.sin(),
+        0.0,
+        trim.delta_canard_rad,
+        trim.omega_prop_rad_s,
+    ];
+    let shaft_acceleration = |x: [f64; 5]| {
+        let speed = (x[0] * x[0] + x[1] * x[1]).sqrt();
+        let alpha = x[1].atan2(x[0]);
+        let loads = design
+            .force_buildup(speed, alpha, x[3], x[4], x[2], RHO)
+            .unwrap();
+        // Independent total shaft angular-momentum balance: two engine
+        // torque shares and both accepted rotor loads accelerate TWO inertias.
+        let total_torque = 2.0 * fs_airscrew::engine_torque_at_prop_nm(x[4])
+            - loads.coupled.torque_nm.iter().sum::<f64>();
+        total_torque / (2.0 * ROTOR_INERTIA_KG_M2)
+    };
+    for (coordinate, column, h) in [
+        (0, 0, 0.002),
+        (1, 1, 0.002),
+        (2, 2, 0.0004),
+        (3, 4, 0.00016),
+        (4, 6, 0.01),
+    ] {
+        let mut plus = state;
+        let mut minus = state;
+        plus[coordinate] += h;
+        minus[coordinate] -= h;
+        // Five-times smaller perturbations than the engine, sampled directly
+        // off trim: this checks the nonlinear response, not the same FD code.
+        let measured = (shaft_acceleration(plus) - shaft_acceleration(minus)) / (2.0 * h);
+        let predicted = engine.a[6][column];
+        assert!(
+            (measured - predicted).abs() < 2e-4 * (1.0 + measured.abs()),
+            "shaft derivative column {column}: {predicted} vs off-trim {measured}"
+        );
+        assert!(
+            measured.abs() > 1e-6,
+            "column {column} must expose real coupling"
+        );
+        jlog(
+            "shaft-jacobian-coordinate",
+            &format!("\"column\":{column},\"matrix\":{predicted},\"measured\":{measured}"),
+        );
+    }
+    // The supplied rigid and actuator-control owners are retained exactly;
+    // attitude is independent of air velocity and has no bare rotor torque.
+    for row in 0..4 {
+        assert_eq!(&engine.a[row][..4], &rigid.a[row]);
+        assert_eq!(engine.a[row][4], control[row]);
+    }
+    assert_eq!(engine.a[6][3], 0.0);
+    assert_eq!(engine.a[6][5], 0.0);
+    jlog("shaft-jacobian", "\"all_five_physical_coordinates\":true");
+}
+
+#[test]
+fn rotor_speed_column_tracks_washed_body_loads_and_both_unequal_hub_arms() {
+    let mut design = wright_openloop_v1();
+    design.disks[0].center_m[2] = -1.35;
+    design.disks[1].center_m[2] = -0.25;
+    let (mut design, rigid, control) = rigid_and_column_for(design);
+    let engine = build_engine(&design, &CANARD_MECH_V1, None, &rigid, &control, RHO).unwrap();
+    let trim = &rigid.trim;
+    let h = 0.01;
+    let sample = |omega| {
+        design
+            .force_buildup(
+                trim.v_mps,
+                trim.alpha_rad,
+                trim.delta_canard_rad,
+                omega,
+                0.0,
+                RHO,
+            )
+            .unwrap()
+    };
+    let plus = sample(trim.omega_prop_rad_s + h);
+    let minus = sample(trim.omega_prop_rad_s - h);
+    let measured = [
+        (plus.force_n[0] - minus.force_n[0]) / (2.0 * h) / design.gross_mass_kg,
+        (plus.force_n[2] - minus.force_n[2]) / (2.0 * h) / design.gross_mass_kg,
+        (plus.moment_y_nm - minus.moment_y_nm) / (2.0 * h) / IYY_KG_M2,
+    ];
+    for row in 0..3 {
+        assert!(
+            (engine.a[row][6] - measured[row]).abs() < 2e-4 * (1.0 + measured[row].abs()),
+            "body row {row}: {} vs off-trim {}",
+            engine.a[row][6],
+            measured[row]
+        );
+    }
+    assert!(
+        measured[1].abs() > 1e-4,
+        "prop wash must affect vertical momentum"
+    );
+    let thrust_only_pitch: f64 = design
+        .disks
+        .iter()
+        .enumerate()
+        .map(|(k, disk)| {
+            (plus.thrust_n[k] - minus.thrust_n[k]) / (2.0 * h) * (disk.center_m[2] - design.cg_m[2])
+                / IYY_KG_M2
+        })
+        .sum();
+    assert!(
+        (measured[2] - thrust_only_pitch).abs() > 1e-5,
+        "the pitch column must include aerodynamic wash moments, not only thrust arms"
+    );
+    // Disk labels cannot change physical response. The old single-left-arm
+    // approximation violates this on the same unequal-hub aircraft.
+    design.disks.swap(0, 1);
+    let relabeled = build_engine(&design, &CANARD_MECH_V1, None, &rigid, &control, RHO).unwrap();
+    for row in [0, 1, 2, 6] {
+        for column in [0, 1, 2, 4, 6] {
+            assert!(
+                (engine.a[row][column] - relabeled.a[row][column]).abs()
+                    < 1e-8 * (1.0 + engine.a[row][column].abs()),
+                "disk relabeling changed A[{row}][{column}]"
+            );
+        }
+    }
+    jlog(
+        "rotor-body-jacobian",
+        "\"washed_loads_and_unequal_arms\":true",
+    );
 }
 
 #[test]
@@ -289,12 +436,15 @@ fn determinism_and_golden() {
     // Golden bump 2026-11-03: the rigid block now differentiates full local
     // pitch velocity and consistently washed loads. The prior x86_64 digest
     // was reproduced before correction; other ISA pins await remeasurement.
+    // Golden bump 2026-11-03: rotor/body derivatives now use accepted coupled
+    // aircraft loads and the common-shaft torque balance. The old owner
+    // reproduces the preceding x86_64 pin and fails both coupling regressions.
     #[cfg(target_arch = "aarch64")]
     const EXPECTED_DIGEST: &str =
         "389e2a7c4f5a97e8c8507e011979571d10cb87d50c3f57d0b06cd38955d29321";
     #[cfg(target_arch = "x86_64")]
     const EXPECTED_DIGEST: &str =
-        "9aa6dead670f30dca030160a3bb89f8b6f754ab41412c6808552d886869e7093";
+        "6ef89a34ac1662a60c3736cdab26a5ae1df3dc14a857898bacda6eb96f99a8cc";
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     const EXPECTED_DIGEST: &str =
         "48828f654100a2407311265ac37a06525e09ed8543aaca5737ddf86ed1756dcc";

@@ -3,8 +3,9 @@
 //! rigid airframe — rigid 4 (u, w, q, θ) from the E4.6a-iii FD
 //! linearization, actuator 2 (canard deflection + rate, friction
 //! linearized at the regularized-stiction slope — locally EXACT for the
-//! regularized model and documented as such), rotor 1 (torque-balance
-//! ω), and, ONLY when an E4.6c pilot is supplied, pilot 4
+//! regularized model and documented as such), rotor 1 (common-speed
+//! torque balance and force coupling from the same accepted aircraft
+//! loads), and, ONLY when an E4.6c pilot is supplied, pilot 4
 //! (neuromuscular lag states + a first-order Padé of the reaction
 //! delay — a DECLARED approximation carried in the report).
 //!
@@ -19,6 +20,7 @@ use crate::aircraft::OpenLoopDesign;
 use crate::canardmech::CanardMechanism;
 use crate::longitudinal::{IYY_KG_M2, LongitudinalReport, Pole};
 use crate::pilot::PilotWrightModel;
+use fs_math::det;
 
 /// Maximum augmented dimension (absurd-input guard).
 pub const MAX_DIM: usize = 16;
@@ -112,46 +114,55 @@ pub fn build_engine(
     let c_eff = mech.viscous_nm_s + mech.coulomb_nm / mech.friction_reg_rad_s;
     a[4][5] = 1.0;
     a[5][5] = -c_eff / mech.inertia_kg_m2;
-    // Rotor block: I_r ω̇ = Q_engine(ω) − Q_prop(ω, V); FD both.
-    let om0 = trim.omega_prop_rad_s;
-    let h_om = 0.25;
-    let dq_engine = (fs_airscrew::engine_torque_at_prop_nm(om0 + h_om)
-        - fs_airscrew::engine_torque_at_prop_nm(om0 - h_om))
-        / (2.0 * h_om);
-    let qp = |om: f64, v: f64| -> Result<f64, Refusal> {
-        fs_airscrew::bemt_solve(&design.rotor, rho_kg_m3, v, om)
-            .map(|s| s.torque_nm)
-            .map_err(|e| Refusal {
-                code: e.code,
-                message: e.message,
-                ranked_repairs: e.ranked_repairs,
-            })
+    // Common rotor speed: 2 I_r ω̇ = 2 Q_engine − Q_left − Q_right.
+    // The aircraft owner already returns the per-prop torque imbalance,
+    // including each hub's local velocity and converged wing induction.
+    // Differentiate that owner in body (u,w,q), canard angle, and omega;
+    // identifying u with total speed drops transverse/pitch/control feedback.
+    let state = [
+        trim.v_mps * det::cos(trim.alpha_rad),
+        trim.v_mps * det::sin(trim.alpha_rad),
+        0.0,
+        trim.delta_canard_rad,
+        trim.omega_prop_rad_s,
+    ];
+    let evaluate = |x: [f64; 5]| {
+        let uu = x[0] * x[0];
+        let ww = x[1] * x[1];
+        let speed = det::sqrt(uu + ww);
+        let incidence = det::atan2(x[1], x[0]);
+        design.force_buildup(speed, incidence, x[3], x[4], x[2], rho_kg_m3)
     };
-    let v0 = trim.v_mps;
-    let dq_om = (qp(om0 + h_om, v0)? - qp(om0 - h_om, v0)?) / (2.0 * h_om);
-    let dq_v = (qp(om0, v0 + 0.05)? - qp(om0, v0 - 0.05)?) / 0.1;
-    a[6][6] = (dq_engine - dq_om) / ROTOR_INERTIA_KG_M2;
-    a[6][0] = -dq_v / ROTOR_INERTIA_KG_M2; // u ~ V at small alpha
-    // Rotor -> rigid: thrust sensitivity (two props).
-    let dt_om = {
-        let tp = |om: f64| -> Result<f64, Refusal> {
-            fs_airscrew::bemt_solve(&design.rotor, rho_kg_m3, v0, om)
-                .map(|s| s.thrust_n)
-                .map_err(|e| Refusal {
-                    code: e.code,
-                    message: e.message,
-                    ranked_repairs: e.ranked_repairs,
-                })
-        };
-        (tp(om0 + h_om)? - tp(om0 - h_om)?) / (2.0 * h_om)
-    };
-    a[0][6] = 2.0 * dt_om / design.gross_mass_kg;
-    // Thrust line below CG: pitch coupling.
-    let z_arm = design.disks[0].center_m[2] - design.cg_m[2];
-    a[2][6] = 2.0 * dt_om * z_arm / IYY_KG_M2;
+    for (coordinate, column, step) in [
+        (0, 0, 0.01),
+        (1, 1, 0.01),
+        (2, 2, 0.002),
+        (3, 4, 0.0008),
+        (4, 6, 0.05),
+    ] {
+        let mut plus = state;
+        let mut minus = state;
+        plus[coordinate] += step;
+        minus[coordinate] -= step;
+        let plus = evaluate(plus)?;
+        let minus = evaluate(minus)?;
+        let interval = 2.0 * step;
+        a[6][column] =
+            (plus.torque_imbalance_nm - minus.torque_imbalance_nm) / interval / ROTOR_INERTIA_KG_M2;
+        if column == 6 {
+            // Reuse this same pair for the complete rotor -> body column:
+            // both propeller arms, washed wing/canard lift, and their moments.
+            // Incidence is fixed, so the identical weight cancels. The rigid
+            // velocity/attitude block and supplied control column keep their
+            // existing owners; no gravity or Coriolis term is counted twice.
+            a[0][6] = (plus.force_n[0] - minus.force_n[0]) / interval / design.gross_mass_kg;
+            a[1][6] = (plus.force_n[2] - minus.force_n[2]) / interval / design.gross_mass_kg;
+            a[2][6] = (plus.moment_y_nm - minus.moment_y_nm) / interval / IYY_KG_M2;
+        }
+    }
     let mut declared: Vec<&'static str> = vec![
         "actuator friction linearized at the regularized stiction slope (viscous + coulomb/reg)",
-        "rotor state couples through u only (small-alpha V identification)",
+        "rotors share one synchronized speed and equal per-prop inertias; coupled airloads are quasi-steady",
     ];
     let mut pilot_active = false;
     if let Some(p) = pilot {

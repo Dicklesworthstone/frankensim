@@ -1462,3 +1462,33 @@ equivalence, profile-domain refusal before motion publication, complete source
 encoding, and checkpoint/replay continuation. Source/parser review is distinct
 from native execution, which remains unverified for this addition.
 
+## Coupled rotor and aircraft momentum in the augmented model
+
+`augmented::build_engine` takes rotor torque derivatives from the accepted
+`OpenLoopDesign::force_buildup` loads in body axial/transverse velocity, pitch
+rate, canard deflection and common propeller speed. For the existing equal
+per-prop inertia `I_r`, the shared-speed equation is
+`2 I_r omega_dot = 2 Q_engine - Q_left - Q_right`; differentiating the
+aircraft's mean torque imbalance and dividing by `I_r` preserves that total
+shaft angular-momentum balance. Both hub velocities and the converged wing
+induction therefore affect rotor acceleration.
+
+The same speed-perturbation load pair supplies the complete rotor-to-body
+column: axial and vertical forces and pitch moment, including prop wash and
+each propeller's actual moment arm. The supplied rigid matrix and canard
+control column retain their owners unchanged. Attitude is independent of air
+velocity; gravity cancels from the speed column at fixed incidence. The model
+still has one synchronized rotor-speed state, quasi-steady aerodynamic loads
+and a longitudinal rigid block. It does not add independent rotor modes or
+six-DOF gyroscopic dynamics.
+
+The native numeric-source slice passes 28 focused tests: 12 aircraft, seven
+longitudinal and nine augmented cases. Independent off-trim torque/force
+samples use five-times smaller perturbations than the engine; unequal hub
+arms and disk relabeling expose missing load paths. Both new coupling tests
+fail against the previous augmented owner, whose existing x86_64 golden is
+reproduced before the correction. Only the measured augmented x86_64 pin
+changes; aircraft and longitudinal pins and all physical bands are unchanged.
+As in the preceding velocity checks, this bounded source-selected build
+omits the unused continuation branch and unrelated runtime modules; it is not
+a full workspace Cargo or lifecycle validation.
