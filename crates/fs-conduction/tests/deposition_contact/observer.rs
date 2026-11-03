@@ -19,6 +19,9 @@ struct Bulk {
     calls: [usize; 9],
     extra_heat: bool,
     refuse_step: bool,
+    transition_s: Option<f64>,
+    refuse_after_transition: bool,
+    intervals: Vec<(f64, f64, f64)>,
 }
 impl Bulk {
     fn new() -> Self {
@@ -26,6 +29,9 @@ impl Bulk {
             calls: [0; 9],
             extra_heat: false,
             refuse_step: false,
+            transition_s: None,
+            refuse_after_transition: false,
+            intervals: Vec::new(),
         }
     }
 }
@@ -35,13 +41,28 @@ impl DepositionObserver for Bulk {
         self.calls[0] += 1;
         Ok(())
     }
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        checkpoint()?;
+        if self.refuse_after_transition
+            && self.transition_s.is_some_and(|at| thermal.time_s() >= at)
+        {
+            return Err(BulkError::Stage("original source transition"));
+        }
+        Ok(self.transition_s.filter(|&at| thermal.time_s() < at))
+    }
     fn sources(
         &mut self,
-        _: &DepositionSimulation<'_>,
+        thermal: &DepositionSimulation<'_>,
         _: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.calls[1] += 1;
-        Ok(if self.extra_heat {
+        Ok(if let Some(at) = self.transition_s {
+            BTreeMap::from([(CellId(30), if thermal.time_s() < at { 2.0 } else { 6.0 })])
+        } else if self.extra_heat {
             BTreeMap::from([(CellId(30), 7.0)])
         } else {
             BTreeMap::new()
@@ -117,19 +138,107 @@ impl DepositionObserver for Bulk {
     }
     fn step(
         &mut self,
-        _: f64,
-        _: f64,
+        start_s: f64,
+        duration_s: f64,
         _: &BTreeMap<CellId, f64>,
-        _: &DepositionSimulation<'_>,
+        thermal: &DepositionSimulation<'_>,
         _: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
         self.calls[8] += 1;
+        self.intervals.push((start_s, duration_s, thermal.time_s()));
         if self.refuse_step {
             Err(BulkError::Stage("original bulk step"))
         } else {
             Ok(())
         }
     }
+}
+
+#[test]
+fn material_contact_preserves_source_transitions_and_their_heat() {
+    let cards = [bulk("A"), bulk("B")];
+    let curves = [curve(&cards[0]), curve(&cards[1])];
+    let old = initial(&curves, 1.0);
+    let (source, id) = source(&cards, 1.0);
+    let context = point();
+    let contact = MaterialContactLink {
+        link: 7,
+        sides: sides(&curves),
+        point: binding(&cards, &source, &context),
+        selection: ClaimSelection::Pinned(id),
+    };
+    let mut bulk = Bulk::new();
+    bulk.transition_s = Some(0.125);
+    let observer = MaterialContactObserver::new(bulk, &old, vec![contact], || Ok(())).unwrap();
+    let config = StepConfig {
+        max_dt_s: 1.0,
+        energy_tolerance_j: 1e-10,
+    };
+    let (next, accepted, audit) = old
+        .advance_observed(&observer, 0.5, config, || Ok(()))
+        .unwrap();
+
+    // The contact and the inner half-step limiter must not erase or approach
+    // the pulse edge asymptotically. The original owner clips after all CFLs.
+    assert_eq!(
+        accepted.inner().intervals,
+        [(0.0, 0.125, 0.125), (0.125, 0.375, 0.5)]
+    );
+    assert_eq!(audit.substeps, 2);
+    assert_eq!(audit.events, 0);
+    let heat_j = 2.0 * 0.125 + 6.0 * 0.375;
+    assert!((audit.external_heat_j - heat_j).abs() < 1e-12);
+    assert!((next.energy_j() - old.energy_j() - heat_j).abs() < 1e-12);
+    assert_eq!(
+        accepted.endpoint_sources()[0].interface.receipt().selected,
+        id
+    );
+    assert!(observer.inner().intervals.is_empty());
+
+    let (middle, first, _) = old
+        .advance_observed(&observer, 0.125, config, || Ok(()))
+        .unwrap();
+    let (split, last, _) = middle
+        .advance_observed(&first, 0.5, config, || Ok(()))
+        .unwrap();
+    assert_eq!(next.cells(), split.cells());
+    assert_eq!(accepted.inner().intervals, last.inner().intervals);
+}
+
+#[test]
+fn contact_wrapped_transition_failure_rolls_back_the_entire_heat_history() {
+    let cards = [bulk("A"), bulk("B")];
+    let curves = [curve(&cards[0]), curve(&cards[1])];
+    let old = initial(&curves, 1.0);
+    let (source, id) = source(&cards, 1.0);
+    let context = point();
+    let contact = MaterialContactLink {
+        link: 7,
+        sides: sides(&curves),
+        point: binding(&cards, &source, &context),
+        selection: ClaimSelection::Pinned(id),
+    };
+    let mut bulk = Bulk::new();
+    bulk.transition_s = Some(0.125);
+    bulk.refuse_after_transition = true;
+    let observer = MaterialContactObserver::new(bulk, &old, vec![contact], || Ok(())).unwrap();
+    let snapshot = old.cells().clone();
+    let config = StepConfig {
+        max_dt_s: 1.0,
+        energy_tolerance_j: 1e-10,
+    };
+    let error = old
+        .advance_observed(&observer, 0.5, config, || Ok(()))
+        .err()
+        .unwrap();
+    assert_eq!(
+        error,
+        MaterialContactObserverError::Bulk(BulkError::Stage("original source transition"))
+    );
+    assert_eq!(old.cells(), &snapshot);
+    assert_eq!(old.time_s(), 0.0);
+    assert!(observer.inner().intervals.is_empty());
+    assert_eq!(observer.inner().calls, [0; 9]);
 }
 
 #[test]

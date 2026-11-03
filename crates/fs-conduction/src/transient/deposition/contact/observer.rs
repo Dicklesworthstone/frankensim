@@ -261,6 +261,15 @@ impl<O: DepositionObserver> DepositionObserver for MaterialContactObserver<'_, O
             .begin()
             .map_err(MaterialContactObserverError::Bulk)
     }
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        self.inner
+            .next_transition_time_s(thermal, checkpoint)
+            .map_err(MaterialContactObserverError::Bulk)
+    }
     fn sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,
