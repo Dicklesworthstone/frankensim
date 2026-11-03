@@ -44,6 +44,7 @@ use fs_contact::frictional_multicontact::{
     FrictionalContactError, FrictionalContactResult, NormalVelocityLaw, solve_frictional_contacts,
 };
 use fs_mbd::{DynamicsError, MassProperties, RigidBodyState, Vec3};
+use fs_solid::hyper3::mixed::impulse::MixedImpulseReport;
 use fs_solid::hyper3::visco::dynamics::{
     SolidImpulseReport, SolidPointKinematics, SolidPointMobilityMatrix,
 };
@@ -258,6 +259,12 @@ pub(crate) struct SolidImpulseAudit {
 
 pub(crate) trait SolidImpactReceipt {
     fn audit(&self) -> SolidImpulseAudit;
+
+    /// Magnitudes of internal constraint resultant, torque and work defects,
+    /// in kg m/s, kg m²/s and J. They must not cancel native endpoint errors.
+    fn internal_impulse_residuals(&self) -> (f64, f64, f64) {
+        (0.0, 0.0, 0.0)
+    }
 }
 
 impl SolidImpactReceipt for FiniteSolidImpulse {
@@ -289,6 +296,23 @@ impl SolidImpactReceipt for SolidImpulseReport {
             work_residual_j: self.work_residual_j,
             support_work_j: self.support_work_j,
         }
+    }
+}
+
+impl SolidImpactReceipt for MixedImpulseReport {
+    fn audit(&self) -> SolidImpulseAudit {
+        // The native account includes the actual pressure impulse. Keeping it
+        // here measures the complete momentum change minus external supports;
+        // the paired rigid contact cancels only the applied contact load.
+        self.momentum.audit()
+    }
+
+    fn internal_impulse_residuals(&self) -> (f64, f64, f64) {
+        (
+            magnitude(vector(self.pressure.linear_kg_m_s)),
+            magnitude(vector(self.pressure.angular_kg_m2_s)),
+            self.pressure_work_j.abs(),
+        )
     }
 }
 
@@ -693,6 +717,8 @@ pub(crate) fn mixed_contact_candidate_with<
     // One combined solve retains all cross-contact work and support reactions.
     let (solid_next, solid_impulse) = apply_impulses(&solid_impulses).map_err(E::Solid)?;
     let solid_audit = solid_impulse.audit();
+    let (internal_linear, internal_angular, internal_work) =
+        solid_impulse.internal_impulse_residuals();
     let support_work = solid_audit.support_work_j;
     let mut before = solid_audit.kinetic_before_j;
     let mut after = solid_audit.kinetic_after_j;
@@ -704,9 +730,9 @@ pub(crate) fn mixed_contact_candidate_with<
         vector(solid_audit.applied_linear).add(vector(solid_audit.linear_residual));
     let mut angular_residual =
         vector(solid_audit.applied_angular).add(vector(solid_audit.angular_residual));
-    let mut absolute_linear = magnitude(vector(solid_audit.linear_residual));
-    let mut absolute_angular = magnitude(vector(solid_audit.angular_residual));
-    let mut absolute_work = solid_audit.work_residual_j.abs();
+    let mut absolute_linear = magnitude(vector(solid_audit.linear_residual)) + internal_linear;
+    let mut absolute_angular = magnitude(vector(solid_audit.angular_residual)) + internal_angular;
+    let mut absolute_work = solid_audit.work_residual_j.abs() + internal_work;
     for (index, (&old, &property)) in rigid_bodies.iter().zip(rigid_properties).enumerate() {
         cx.checkpoint().map_err(|_| E::Cancelled)?;
         // One native momentum update per body retains all point moments

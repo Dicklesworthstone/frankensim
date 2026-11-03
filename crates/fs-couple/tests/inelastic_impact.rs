@@ -27,6 +27,9 @@ use fs_solver::CheckedCgConfig;
 #[path = "inelastic_impact/mixed.rs"]
 mod mixed;
 
+#[path = "inelastic_impact/volume.rs"]
+mod volume;
+
 #[path = "inelastic_impact/elliptic.rs"]
 mod elliptic;
 

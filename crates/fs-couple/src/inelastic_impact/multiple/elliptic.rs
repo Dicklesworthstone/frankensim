@@ -34,11 +34,11 @@ pub type InelasticMixedEllipticContactError<E> = FiniteSolidRigidContactError<
 pub type InelasticMixedEllipticCandidate<M> =
     InelasticMixedContactCandidate<M, EllipticFrictionalContactResult>;
 
-fn solve<P: Copy>(
+pub(super) fn solve<P: Copy>(
     contacts: &[InelasticMixedEllipticContact<P>],
     queries: &[FiniteSolidMixedContactKinematics],
     matrix: &[f64],
-    controls: InelasticMixedContactControls,
+    controls: FrictionalContactConfig,
     cx: &Cx<'_>,
 ) -> Result<EllipticFrictionalContactResult, EllipticFrictionalContactError> {
     let laws: Vec<_> = queries
@@ -55,7 +55,7 @@ fn solve<P: Copy>(
             }
         })
         .collect();
-    solve_elliptic_frictional_contacts(&laws, matrix, controls.contact, || cx.checkpoint().is_err())
+    solve_elliptic_frictional_contacts(&laws, matrix, controls, || cx.checkpoint().is_err())
 }
 
 /// Directional friction with the original quadratic mixed Maxwell solid.
@@ -79,7 +79,7 @@ pub fn mixed_visco_mixed_elliptic_contact_candidate<'a>(
     native_candidate!(
         @law solid, held, bodies, properties, contacts, origin, controls, cx,
         Some(solid.velocity_mps()), motion,
-        |queries, matrix| solve(contacts, queries, matrix, controls, cx)
+        |queries, matrix| solve(contacts, queries, matrix, controls.contact, cx)
     )
 }
 
@@ -101,7 +101,7 @@ pub fn plastic_mixed_elliptic_contact_candidate<'a, L: FiniteJ2Material>(
     native_candidate!(
         @law solid, held, bodies, properties, contacts, origin, controls, cx,
         Some(solid.velocity_mps()), motion,
-        |queries, matrix| solve(contacts, queries, matrix, controls, cx)
+        |queries, matrix| solve(contacts, queries, matrix, controls.contact, cx)
     )
 }
 
@@ -123,7 +123,7 @@ pub fn visco_mixed_elliptic_contact_candidate<'a>(
     native_candidate!(
         @law solid, held, bodies, properties, contacts, origin, controls, cx,
         Some(solid.velocity_mps()), motion,
-        |queries, matrix| solve(contacts, queries, matrix, controls, cx)
+        |queries, matrix| solve(contacts, queries, matrix, controls.contact, cx)
     )
 }
 
@@ -145,7 +145,7 @@ pub fn thermoplastic_tet_mixed_elliptic_contact_candidate<'a, L: FiniteThermalJ2
     native_candidate!(
         @law solid, held, bodies, properties, contacts, origin, controls, cx,
         solid.velocity_mps(), solid,
-        |queries, matrix| solve(contacts, queries, matrix, controls, cx)
+        |queries, matrix| solve(contacts, queries, matrix, controls.contact, cx)
     )
 }
 
@@ -167,6 +167,6 @@ pub fn thermoplastic_hex_mixed_elliptic_contact_candidate<'a, L: FiniteThermalJ2
     native_candidate!(
         @law solid, held, bodies, properties, contacts, origin, controls, cx,
         Some(solid.velocity_mps()), motion,
-        |queries, matrix| solve(contacts, queries, matrix, controls, cx)
+        |queries, matrix| solve(contacts, queries, matrix, controls.contact, cx)
     )
 }

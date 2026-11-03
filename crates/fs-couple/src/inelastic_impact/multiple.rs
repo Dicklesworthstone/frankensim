@@ -17,7 +17,8 @@ use crate::finite_solid::contact::{
     FiniteSolidRigidContactControls, FiniteSolidRigidContactError, FiniteSolidRigidContactReport,
 };
 use fs_contact::frictional_multicontact::{
-    FrictionalContact, FrictionalContactError, FrictionalContactResult, solve_frictional_contacts,
+    FrictionalContact, FrictionalContactConfig, FrictionalContactError, FrictionalContactResult,
+    solve_frictional_contacts,
 };
 use fs_exec::Cx;
 use fs_material::plastic::finite::{FiniteJ2Material, thermal::FiniteThermalJ2Material};
@@ -61,10 +62,34 @@ pub type InelasticMixedContactError<E> = FiniteSolidRigidContactError<
 
 /// Native candidates are published together only after all contact/work gates.
 #[derive(Debug)]
-pub struct InelasticMixedContactCandidate<M, R = FrictionalContactResult> {
+pub struct InelasticMixedContactCandidate<M, R = FrictionalContactResult, I = SolidImpulseReport> {
     pub solid: M,
     pub rigid_bodies: Vec<RigidBodyState>,
-    pub report: FiniteSolidRigidContactReport<R, SolidImpulseReport>,
+    pub report: FiniteSolidRigidContactReport<R, I>,
+}
+
+pub(super) fn solve<P: Copy>(
+    contacts: &[InelasticMixedContact<P>],
+    queries: &[crate::finite_solid::contact::mixed::FiniteSolidMixedContactKinematics],
+    matrix: &[f64],
+    controls: FrictionalContactConfig,
+    cx: &Cx<'_>,
+) -> Result<FrictionalContactResult, FrictionalContactError> {
+    let laws: Vec<_> = queries
+        .iter()
+        .map(|query| {
+            let contact = contacts[query.original_index];
+            FrictionalContact {
+                id: contact.id,
+                gap: query.gap_m,
+                activation_tolerance: contact.activation_tolerance_m,
+                relative_velocity: query.relative_velocity_m_s,
+                friction_coefficient: contact.friction_coefficient,
+                normal_law: contact.normal_law,
+            }
+        })
+        .collect();
+    solve_frictional_contacts(&laws, matrix, controls, || cx.checkpoint().is_err())
 }
 
 pub(super) fn moving_supports(velocity: Option<&[[f64; 3]]>, held: &[usize]) -> bool {
@@ -87,25 +112,9 @@ macro_rules! native_candidate {
         native_candidate!(
             @law $solid, $held, $bodies, $properties, $contacts,
             $origin, $controls, $cx, $velocity, $candidate_field,
-            |queries: &[crate::finite_solid::contact::mixed::FiniteSolidMixedContactKinematics], matrix: &[f64]| {
-                let laws: Vec<_> = queries
-                    .iter()
-                    .map(|query| {
-                        let contact = $contacts[query.original_index];
-                        FrictionalContact {
-                            id: contact.id,
-                            gap: query.gap_m,
-                            activation_tolerance: contact.activation_tolerance_m,
-                            relative_velocity: query.relative_velocity_m_s,
-                            friction_coefficient: contact.friction_coefficient,
-                            normal_law: contact.normal_law,
-                        }
-                    })
-                    .collect();
-                solve_frictional_contacts(&laws, matrix, $controls.contact, || {
-                    $cx.checkpoint().is_err()
-                })
-            }
+            |queries, matrix| $crate::inelastic_impact::multiple::solve(
+                $contacts, queries, matrix, $controls.contact, $cx
+            )
         )
     }};
     (@law $solid:expr, $held:expr, $bodies:expr, $properties:expr, $contacts:expr,
@@ -157,6 +166,9 @@ pub(super) use native_candidate;
 
 /// Directional friction ellipses through these same native material owners.
 pub mod elliptic;
+
+/// Pressure-aware impacts for exact Maxwell and conservative quadratic solids.
+pub mod volume;
 
 /// Simultaneous Coulomb impacts on the original quadratic mixed Maxwell solid.
 ///

@@ -372,7 +372,7 @@ weights for the curved witness, velocity, supported mobility and opposite
 impulse. The default contact payload remains the original P1 material point.
 Continuous pressure, all Maxwell histories, physical storage and time survive
 unchanged. Exact incompressibility refuses this mass-only contact path; the
-separate constrained nodal impulse does not imply constrained point mobility.
+pressure-aware `multiple::volume` entries below supply its constrained mobility.
 `tests/inelastic_impact/mixed.rs` couples a curved, relaxed quadratic solid to
 off-diagonal rigid inertia. Independent P2 reference integrals determine its
 restitution impulse, moving-support work and kinetic change; the existing audit
@@ -420,6 +420,33 @@ positive impulses, signed moving-support work and kinetic loss. It also covers
 the directional adapter's circular equivalence and a free-slip principal axis.
 These Rust regressions remain unexecuted under the existing native dependency/
 resource blocker; rational checks and formatting do not substitute for Cargo.
+
+`inelastic_impact::multiple::volume` connects exactly incompressible Maxwell
+motion and all three conservative quadratic formulations to this same coupled
+contact owner. Circular and directional Coulomb entries retain every signed
+P2 cross-point/cross-axis response and the full rigid inertia. Exact mode
+assembles and factors the original mass/pressure KKT once per event, then reuses
+it for all homogeneous mobility columns and the final summed impulse. Accepted
+velocities must already meet the original weak-volume-rate allowance. The
+conservative finite-compliance modes retain their original mass-only response.
+
+`VolumeContactControls` carries the native mixed pressure scales, sparse budgets
+and balance controls. The returned `MixedImpulseReport` retains physical
+external impulse, internal pressure impulse, actual rounded momentum, signed
+support work and weak volume rates separately. Pressure resultant, torque and
+work defects are added in magnitude to the coupled absolute residuals; they
+cannot cancel a body's native endpoint error. Pa s pressure impulses never
+replace stored Pa pressure. Maxwell histories remain unchanged, and conservative
+event work enters the original compensated cumulative-energy account without
+resetting its initial energy. Contact loss is not assigned to material heat.
+
+`tests/inelastic_impact/volume.rs` exercises two actual boundary witnesses against
+an independent rational 30-displacement/4-pressure elimination and a two-contact
+restitution solve. It checks pressure-induced cross-axis response, paired
+momentum/work, nonzero pressure impulses with zero pressure work, both friction
+adapters, retained pressure/history and conservative exact/full-material
+dispatch. Native Rust execution remains pending the established build-resource
+block; these are regression definitions backed by separate algebraic checks.
 
 `solid_enthalpy::finite_plastic::FiniteThermoplasticSolid::mixed_contact_candidate`
 binds the thermal Tet4 event to the original source-backed caloric trajectory.
