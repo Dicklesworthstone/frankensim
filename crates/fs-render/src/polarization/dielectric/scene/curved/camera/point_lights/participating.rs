@@ -39,6 +39,7 @@ use crate::polarization::dielectric::scene::curved::participating::{
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
+pub mod images;
 mod vertices;
 pub use vertices::MolecularPointLightBranch;
 

@@ -96,7 +96,7 @@ impl FixtureContributions<'_, '_, '_, '_, '_> {
             })
     }
 
-    fn add_volume(
+    pub(super) fn add_volume(
         &mut self,
         cx: &Cx<'_>,
         path: &CurvedPathResult,

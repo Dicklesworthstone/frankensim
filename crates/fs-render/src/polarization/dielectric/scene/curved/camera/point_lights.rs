@@ -120,6 +120,22 @@ pub enum PointLightCameraError {
         error: crate::polarization::dielectric::scene::curved::participating::transmittance::CurvedTransmittanceError,
     },
     #[cfg(feature = "volumes")]
+    SourceImages {
+        binding: usize,
+        error: crate::polarization::dielectric::scene::curved::participating::transmittance::images::CurvedTransmittanceImageError,
+    },
+    /// A supplied image seed failed locally; that is not a dark source.
+    #[cfg(feature = "volumes")]
+    UnresolvedImageSeed {
+        binding: usize,
+        seed: usize,
+        error: BundleConnectionError,
+    },
+    #[cfg(feature = "volumes")]
+    EmptyImages {
+        binding: usize,
+    },
+    #[cfg(feature = "volumes")]
     SourceCandidateLimit,
     #[cfg(feature = "volumes")]
     SourceDrawLimit,

@@ -553,6 +553,28 @@ differentiable lift). Pure Rust throughout.
   while requiring identical original camera paths. General area-light MIS and
   complete optical-image discovery remain outside this consumer.
 
+- With `photometry` and `volumes`,
+  `camera::point_lights::participating::images::CurvedRayleighImageLightCameraScene`
+  admits finite image groups for original diffuse objects or molecular receiver
+  media. At each matching original camera vertex it discovers distinct native
+  optical images, tracks their source survival separately and adds their
+  incoherent radiometric contributions. Each image keeps its own calibrated
+  angular intensity, Mueller/Fresnel transfer, absorption and bundle focusing.
+  The existing diffuse or polarized molecular contraction applies the local
+  phase-index factor exactly once. Camera continuation and surface/flight
+  random streams remain unchanged. Source ordinals and work budgets are shared
+  with any separately bound single connections; duplicate original
+  source/receiver bindings refuse. Empty catalogs, recorded local misses,
+  ambiguity and exhausted budgets refuse the sample instead of silently
+  dropping unresolved light. A caller-owned workspace is reused across
+  vertices and wavelengths without a mutable scene cache.
+  `CurvedCameraRaster::sample_pixel_rayleigh_image_lights` carries these
+  contributions through all four native wavelength lanes and original XYZ
+  integration, preserving complete-pixel failure and independent source
+  counters. Finite authored seeds do not prove all optical images were found;
+  coherent interference, singular caustic regularization and area-light MIS
+  remain outside this consumer.
+
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original
   `CurvedRayleighScene` surface owner, checked by pointer identity. Native

@@ -1,5 +1,12 @@
 use super::*;
 use crate::charts::TriMesh;
+use crate::polarization::dielectric::scene::curved::bundle::connection::images::{
+    BundleImageOptions, BundleImageSeed,
+};
+use crate::polarization::dielectric::scene::curved::camera::point_lights::participating::images::{
+    CurvedRayleighImageLightCameraScene, PointLightImageGroup, PointLightImageReceiver,
+};
+use crate::polarization::dielectric::scene::curved::participating::transmittance::images::CurvedTransmittanceImageWorkspace;
 use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
 use crate::instances::{GeometryInstance, InstanceScene, RigidTransform, SharedGeometry};
 use crate::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum};
@@ -120,6 +127,26 @@ fn g3_molecular_fixture_pixels_match_analytic_single_scattering_and_keep_camera_
             cx, &molecular, &fixtures, &branches,
         )
         .unwrap();
+        let unbound =
+            CurvedRayleighPointLightCameraScene::try_new(cx, &molecular, &fixtures).unwrap();
+        let image_seeds = [BundleImageSeed {
+            initial_direction: Vec3::new(0.0, 0.0, 1.0),
+            policy: BundleBranchPolicy::Sequence(&[]),
+        }; 2];
+        let groups = [PointLightImageGroup {
+            source: &source,
+            receiver: PointLightImageReceiver::MolecularMedium(0),
+            initial_medium: 0,
+            source_transverse_axis: Vec3::new(0.0, 1.0, 0.0),
+            seeds: &image_seeds,
+            image_options: BundleImageOptions {
+                max_images: 2,
+                ..BundleImageOptions::default()
+            },
+            position_tolerance_m: 1e-6,
+        }];
+        let images = CurvedRayleighImageLightCameraScene::try_new(cx, &unbound, &groups).unwrap();
+        let mut workspace = CurvedTransmittanceImageWorkspace::try_new(2, 2).unwrap();
         let physical = camera(0.0);
         let raster = CurvedCameraRaster::try_new(&physical, 3, 2).unwrap();
         // This seed gives one real collision in each lane inside the sphere;
@@ -143,6 +170,21 @@ fn g3_molecular_fixture_pixels_match_analytic_single_scattering_and_keep_camera_
         let sample = raster
             .sample_pixel_rayleigh_point_lights(cx, &lit, 0, point_settings(), seed, 4, 9)
             .unwrap();
+        let discovered = raster
+            .sample_pixel_rayleigh_image_lights(
+                cx, &images, 0, point_settings(), &mut workspace, seed, 4, 9,
+            )
+            .unwrap();
+        let repeated = raster
+            .sample_pixel_rayleigh_image_lights(
+                cx, &images, 0, point_settings(), &mut workspace, seed, 4, 9,
+            )
+            .unwrap();
+        assert_eq!(discovered, repeated);
+        assert_eq!(discovered.volume_events(), sample.volume_events());
+        assert_eq!(discovered.free_flight_draws(), sample.free_flight_draws());
+        assert_eq!(discovered.source_free_flight_draws(), &[0; CAMERA_WAVELENGTHS]);
+        assert_eq!(discovered.source_candidates(), &[0; CAMERA_WAVELENGTHS]);
         assert_eq!(sample.volume_events(), &[1; CAMERA_WAVELENGTHS]);
         assert_eq!(sample.free_flight_draws(), &[2; CAMERA_WAVELENGTHS]);
         assert_eq!(sample.source_free_flight_draws(), &[0; CAMERA_WAVELENGTHS]);
@@ -183,6 +225,15 @@ fn g3_molecular_fixture_pixels_match_analytic_single_scattering_and_keep_camera_
             );
             assert_eq!(sample.point_light_sample().connections()[lane], 1);
             assert!(sample.point_light_sample().trace_evaluations()[lane] >= 2);
+            // Two seeds converge to one image. Its source power and survival
+            // occur once, while both geometric searches remain in the work.
+            let image_sample = &discovered.pixel_sample().spectral_samples()[lane];
+            assert!((image_sample.radiance_w_m2_sr_nm() - expected).abs()
+                <= 8e-6 * expected + 1e-14);
+            assert_eq!(image_sample.path(), pixel.spectral_samples()[lane].path());
+            assert_eq!(discovered.point_light_sample().connections()[lane], 1);
+            assert!(discovered.point_light_sample().trace_evaluations()[lane]
+                > sample.point_light_sample().trace_evaluations()[lane]);
             for (sum, observer) in expected_xyz.iter_mut().zip([
                 cie_x(wavelength),
                 cie_y(wavelength),
@@ -194,6 +245,16 @@ fn g3_molecular_fixture_pixels_match_analytic_single_scattering_and_keep_camera_
         for (actual, expected) in pixel.xyz().into_iter().zip(expected_xyz) {
             assert!((actual - expected).abs() <= 8e-6 * expected + 1e-14);
         }
+        for (actual, expected) in discovered.pixel_sample().xyz().into_iter().zip(expected_xyz) {
+            assert!((actual - expected).abs() <= 8e-6 * expected + 1e-14);
+        }
+        let mut undersized = CurvedTransmittanceImageWorkspace::try_new(1, 1).unwrap();
+        assert!(matches!(
+            raster.sample_pixel_rayleigh_image_lights(
+                cx, &images, 0, point_settings(), &mut undersized, seed, 4, 9,
+            ),
+            Err(PointLightRasterError::Transport { lane: 0, .. })
+        ));
     });
 }
 
