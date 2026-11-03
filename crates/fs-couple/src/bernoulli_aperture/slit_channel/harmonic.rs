@@ -72,6 +72,8 @@ impl<'a> ChannelContinuousOperator<'a> {
     /// Observe a candidate full field against the ORIGINAL continuous cell
     /// equations and physical energy identity. No state changes. The supplied
     /// pressure is the independently observed pressure-plane difference.
+    /// A strictly positive frequency is required for these cycle means;
+    /// a constant DC field does not have the peak-phasor averaging factor.
     /// Work admission precedes the returned field allocation; a conservative
     /// 256*n arithmetic-work envelope is charged and cancellation is checked per cell.
     pub fn observe_harmonic(
@@ -88,7 +90,7 @@ impl<'a> ChannelContinuousOperator<'a> {
         }
         let n = self.dimension();
         if !omega_rad_s.is_finite()
-            || omega_rad_s < 0.0
+            || omega_rad_s <= 0.0
             || velocities_m_s.len() != n
             || velocities_m_s.iter().any(|&v| !finite(v))
             || !finite(pressure_drop_pa)
@@ -98,7 +100,7 @@ impl<'a> ChannelContinuousOperator<'a> {
             || n.checked_mul(256).is_none_or(|work| work > maximum_work)
         {
             return Err(invalid(
-                "continuous channel observation needs finite frequency, full field, tolerance and declared work",
+                "continuous channel observation needs positive finite frequency, full field, tolerance and declared work",
             ));
         }
         let tolerance = maximum_relative_residual + 64.0 * n as f64 * f64::EPSILON;

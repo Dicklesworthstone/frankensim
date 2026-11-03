@@ -486,6 +486,47 @@ have the period map diag(-1/2,-2). They also cover signed gyroscopic whirl,
 full-inertia pole/exponential agreement, volume contraction, coordinate congruence,
 cycle-origin invariance, free coordinates and unrepresentable/cancelled refusal.
 
+`rotordynamics::periodic::prepare_forced_cycle` extends the SAME preparation
+owner with original generalized force/torque held over each declared segment.
+It retains full M/G/C/K and the common mass/time coordinates. A normalized
+constant source coordinate in the existing exponential yields each affine map;
+it carries no physical mode or stored energy. Load amplitude therefore does not
+set the exponential's scaling budget. The largest forced segment exponential
+has 65 coordinates. Zero forcing uses the identical homogeneous exponential.
+
+`PreparedRotorCycle` caches the full chronological affine map
+`x_next = P x + b` and each segment's transition/source offset.
+`advance` returns original physical q/v at every boundary, including the
+initial state and complete period endpoint; the next segment starts from the
+actually returned original state. Held force changes introduce no impulses.
+Warm trajectories use matrix/vector operations without new exponentials or
+factorizations. A rowwise DD check reconstructs the original increment equation
+`(x_end-x_start) - (P-I)x_start - b = 0`. The unchanged state cannot hide a
+small force behind its large magnitude; underresolved endpoints refuse.
+
+`periodic_orbit` uses native partial-pivot LU on `(I-P)x=b` in the common
+scaled coordinates. Its existing native condition estimator supplies
+`||(I-P)^-1||_1 (1+||P||_1)` as a numerical resolvent-gain estimate with an
+explicit caller limit. This is not an inverse-norm bound or an invariant
+mixed-unit physical condition number. Singular maps refuse even when forcing
+is compatible with a nonunique periodic family. An unstable cycle may have a
+unique periodic particular orbit; no attraction or attained steady state is
+inferred. The actual original initial state passes a rowwise force-scale DD
+fixed-point check, and the independently propagated endpoint must close in the
+declared common scaled full-state norm, including static/nodal zero coordinates.
+
+Explicit byte/work budgets include retained segment maps and a complete boundary
+trajectory/solve; the default dense-byte budget is 4 MiB. Cancellation publishes
+no partial plan, trajectory or orbit. These are kinematics and numerical
+residuals, not state-error certificates or full actuator-energy receipts.
+Stiffness switches can exchange parametric work. Smooth forcing is a separate
+refinement problem; held inputs are not silently reinterpreted as sinusoids.
+
+Focused forced-cycle regressions cover analytic resonant square-wave response
+across force scales, nonbinary static equilibrium, an unstable quarter-period
+particular orbit and growing perturbations, full mutual inertia, coordinate
+congruence and cycle origin, singularity, small-force resolution and cancellation.
+
 `harmonic_response` uses `exp(+i omega t)` and native cancellable complex LU
 on `K - omega^2 M + i omega(C + Omega G)`. Row equilibration precedes the solve;
 compensated inertial products retain the original binary coefficients' detuning

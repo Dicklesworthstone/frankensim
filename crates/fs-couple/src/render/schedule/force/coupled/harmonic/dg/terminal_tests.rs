@@ -414,6 +414,7 @@ fn original_channel_continuous_equations_are_independent_of_step_history_and_clo
         assert!(matches!(view.observe_harmonic(omega, &velocity, drop, WORK, 1e-11, &mut || true),
             Err(AcousticRealizeError::Cancelled)));
         assert!(view.observe_harmonic(omega, &velocity, drop, 0, 1e-11, &mut || false).is_err());
+        assert!(view.observe_harmonic(0.0, &velocity, drop, WORK, 1e-11, &mut || false).is_err());
         let mut wrong = velocity.clone();
         wrong[1] = wrong[1].scale(1.01);
         assert!(view.observe_harmonic(omega, &wrong, drop, WORK, 1e-11, &mut || false).is_err());

@@ -57,7 +57,16 @@ pub enum RotorError {
     PeriodicExponential(fs_phs::PhsError),
     /// Native full period-map eigenspectrum could not be resolved.
     PeriodicSpectrum(fs_la::eigen_complex::EigError),
-    /// Original dynamic equilibrium did not meet the caller's residual limit.
+    /// Unique forced periodic orbit could not be factored; no phase is pinned.
+    PeriodicLinear(fs_la::factor::FactorError),
+    /// The numerical periodic resolvent exceeded the caller's admission limit.
+    PeriodicOrbitUnresolved {
+        /// Estimated gain in the shared mass/time coordinates, not a bound.
+        estimated_gain: f64,
+        /// Caller-supplied maximum accepted estimate.
+        limit: f64,
+    },
+    /// Original equilibrium or affine-cycle residual exceeded the caller's limit.
     Residual {
         /// Measured scale-relative original-force residual.
         relative: f64,

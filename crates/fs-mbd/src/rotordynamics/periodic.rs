@@ -26,6 +26,9 @@ use fs_la::factor::{Cholesky, cholesky};
 use fs_math::{c64::C64, dd::Dd, det};
 use fs_phs::linear_exact::{DenseExponentialBudget, exponential_with_budget};
 
+mod forcing;
+pub use forcing::{RotorPeriodicOrbit, RotorPeriodicTrajectory, prepare_forced_cycle};
+
 /// Hard bound on coefficient switches in a single declared physical cycle.
 pub const MAX_ROTOR_PERIODIC_SEGMENTS: usize = 256;
 
@@ -65,14 +68,19 @@ impl Default for RotorFloquetBudget {
         Self {
             max_segments: 64,
             max_qr_sweeps_per_window: ROTOR_QR_SWEEPS_PER_WINDOW,
-            max_dense_bytes: 1024 * 1024,
+            max_dense_bytes: 4 * 1024 * 1024,
             max_multiply_terms: 4_000_000_000,
         }
     }
 }
 
 impl RotorFloquetBudget {
-    fn admit(self, n: usize, segments: usize) -> Result<DenseExponentialBudget, RotorError> {
+    fn admit(
+        self,
+        n: usize,
+        segments: usize,
+        forced: bool,
+    ) -> Result<DenseExponentialBudget, RotorError> {
         if self.max_segments == 0
             || self.max_segments > MAX_ROTOR_PERIODIC_SEGMENTS
             || segments > self.max_segments
@@ -82,19 +90,29 @@ impl RotorFloquetBudget {
             return Err(RotorError::PeriodicBudget("segment or QR sweep admission"));
         }
         // n <= 32 and segments <= 256 were checked before these products.
-        // Sixteen real d-by-d matrices plus vector storage cover exponential,
-        // Cholesky, complex QR, current/candidate maps and returned payloads.
+        // A held source adds one normalized affine coordinate to the shared
+        // exponential, never another physical mode. Forced plans retain each
+        // segment map and reserve one complete boundary trajectory and solve.
         let d = 2 * n;
-        let bytes = (16 * d * d + 32 * d) * core::mem::size_of::<f64>();
+        let e = d + if forced { 1 } else { 0 };
+        let retained = if forced {
+            segments * (d * d + 3 * d + 16) + d * d + 16 * d
+        } else {
+            0
+        };
+        let bytes = (16 * e * e + 32 * e + retained) * core::mem::size_of::<f64>();
         let cube = (d as u64).pow(3);
-        let work = cube * (84 * segments as u64 + 64 * (self.max_qr_sweeps_per_window as u64 + 1));
+        let exponential_work = (e as u64).pow(3) * 84 * segments as u64;
+        let work = exponential_work
+            + cube
+                * (64 * (self.max_qr_sweeps_per_window as u64 + 1) + if forced { 32 } else { 0 });
         if bytes > self.max_dense_bytes || work > self.max_multiply_terms {
             return Err(RotorError::PeriodicBudget(
                 "dense byte or whole-cycle work admission",
             ));
         }
         Ok(DenseExponentialBudget {
-            max_dimension: d,
+            max_dimension: e,
             max_dense_bytes: self.max_dense_bytes,
             max_multiply_terms: self.max_multiply_terms,
         })
@@ -120,9 +138,33 @@ pub struct RotorFloquetResponse {
     pub spectral_radius: f64,
     /// ln(spectral_radius) / period [1/s], without a stability classification.
     pub growth_rate_per_s: f64,
-    /// Largest independently reconstructed, mass-scaled original column
-    /// residual in forming the generator. Not an eigenvalue or motion bound.
+    /// Largest independently reconstructed, mass-scaled original generator
+    /// or forcing-column residual. Not an eigenvalue or motion bound.
     pub maximum_mass_residual: f64,
+}
+
+/// Cached full affine rotor cycle with a fixed physical force schedule.
+///
+/// Construct with prepare_forced_cycle. Each declared force is held for its
+/// complete segment; coefficient and force changes introduce no state reset.
+/// Warm trajectory calls use the retained maps without new exponentials.
+/// The homogeneous Floquet report does not classify this forced orbit as
+/// attracting: unstable perturbations remain unstable.
+#[derive(Clone, Debug)]
+pub struct PreparedRotorCycle {
+    report: RotorFloquetResponse,
+    state_scale: Vec<f64>,
+    monodromy: Vec<f64>,
+    offset: Vec<f64>,
+    physical_offset: Vec<f64>,
+    segment_maps: Vec<AffineSegmentMap>,
+    boundary_times: Vec<f64>,
+}
+
+#[derive(Clone, Debug)]
+struct AffineSegmentMap {
+    transition: Vec<f64>,
+    offset: Vec<f64>,
 }
 
 /// Analyze a homogeneous cycle of original constant-coefficient rotor segments.
@@ -146,8 +188,27 @@ pub fn periodic_floquet(
     segments: &[RotorPeriodicSegment<'_>],
     relative_mass_residual_tolerance: f64,
     budget: RotorFloquetBudget,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<RotorFloquetResponse, RotorError> {
+    Ok(prepare_cycle(
+        spin_rad_s,
+        segments,
+        None,
+        relative_mass_residual_tolerance,
+        budget,
+        cancelled,
+    )?
+    .report)
+}
+
+fn prepare_cycle(
+    spin_rad_s: f64,
+    segments: &[RotorPeriodicSegment<'_>],
+    forces: Option<&[&[f64]]>,
+    relative_mass_residual_tolerance: f64,
+    budget: RotorFloquetBudget,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreparedRotorCycle, RotorError> {
     poll(&mut cancelled)?;
     if segments.is_empty()
         || segments.len() > MAX_ROTOR_PERIODIC_SEGMENTS
@@ -162,9 +223,23 @@ pub fn periodic_floquet(
     }
     let reference = segments[0].model;
     let n = reference.dofs();
-    let dense_budget = budget.admit(n, segments.len())?;
+    let forced = forces.is_some();
+    let dense_budget = budget.admit(n, segments.len(), forced)?;
+    if forces.is_some_and(|rows| rows.len() != segments.len()) {
+        return Err(RotorError::Invalid(
+            "one original force vector per periodic segment required",
+        ));
+    }
+    let mut boundary_times = if forced {
+        Vec::with_capacity(segments.len() + 1)
+    } else {
+        Vec::new()
+    };
+    if forced {
+        boundary_times.push(0.0);
+    }
     let mut period = Dd::ZERO;
-    for segment in segments {
+    for (index, segment) in segments.iter().enumerate() {
         poll(&mut cancelled)?;
         if segment.model.dofs() != n
             || segment.model.mass() != reference.mass()
@@ -176,8 +251,18 @@ pub fn periodic_floquet(
                 "periodic segments require identical M/G and positive finite durations",
             ));
         }
+        if let Some(force) = forces.map(|rows| rows[index]) {
+            if force.len() != n || force.iter().any(|value| !value.is_finite()) {
+                return Err(RotorError::Invalid(
+                    "matching finite original segment forces required",
+                ));
+            }
+        }
         period = period + Dd::from_f64(segment.duration_seconds);
-        finite(period.to_f64())?;
+        let boundary = finite(period.to_f64())?;
+        if forced {
+            boundary_times.push(boundary);
+        }
     }
     let period_seconds = finite(period.to_f64())?;
     let mass = MassSolve::new(reference, &mut cancelled)?;
@@ -198,7 +283,13 @@ pub fn periodic_floquet(
         monodromy[i * d + i] = 1.0;
     }
     let mut maximum_mass_residual = 0.0_f64;
-    for segment in segments {
+    let mut offset = vec![0.0; d];
+    let mut segment_maps = if forced {
+        Vec::with_capacity(segments.len())
+    } else {
+        Vec::new()
+    };
+    for (index, segment) in segments.iter().enumerate() {
         poll(&mut cancelled)?;
         let (generator, residual) = mass.segment_generator(
             segment,
@@ -208,12 +299,30 @@ pub fn periodic_floquet(
             &mut cancelled,
         )?;
         maximum_mass_residual = maximum_mass_residual.max(residual);
-        poll(&mut cancelled)?;
-        let flow = exponential_with_budget(&generator, d, dense_budget)
-            .map_err(RotorError::PeriodicExponential)?;
-        poll(&mut cancelled)?;
-        // Left multiplication is physical chronological order.
-        monodromy = multiply(&flow, &monodromy, d, &mut cancelled)?;
+        let source = if let Some(force) = forces.map(|rows| rows[index]) {
+            let (column, residual) = mass.force_column(
+                force,
+                segment.duration_seconds,
+                period_seconds,
+                relative_mass_residual_tolerance,
+                &mut cancelled,
+            )?;
+            maximum_mass_residual = maximum_mass_residual.max(residual);
+            column
+        } else {
+            vec![0.0; d]
+        };
+        let flow = affine_segment_flow(&generator, &source, d, dense_budget, &mut cancelled)?;
+        // Left multiplication is physical chronological order. The source
+        // offset has the same order: b_next = E_segment b + b_segment.
+        if forced {
+            offset =
+                forcing::apply_affine(&flow.transition, &flow.offset, &offset, d, &mut cancelled)?;
+        }
+        monodromy = multiply(&flow.transition, &monodromy, d, &mut cancelled)?;
+        if forced {
+            segment_maps.push(flow);
+        }
     }
     let complex: Vec<_> = monodromy
         .iter()
@@ -242,6 +351,7 @@ pub fn periodic_floquet(
         return Err(RotorError::Invalid("periodic multiplier radius underflow"));
     }
     let growth_rate_per_s = finite(det::ln(spectral_radius) / period_seconds)?;
+    let balanced_monodromy = monodromy.clone();
     for i in 0..d {
         poll(&mut cancelled)?;
         for j in 0..d {
@@ -250,7 +360,7 @@ pub fn periodic_floquet(
         }
     }
     poll(&mut cancelled)?;
-    Ok(RotorFloquetResponse {
+    let report = RotorFloquetResponse {
         spin_rad_s,
         period_seconds,
         dofs: n,
@@ -259,6 +369,21 @@ pub fn periodic_floquet(
         spectral_radius,
         growth_rate_per_s,
         maximum_mass_residual,
+    };
+    let mut physical_offset = Vec::with_capacity(d);
+    for i in 0..d {
+        poll(&mut cancelled)?;
+        physical_offset.push(restore_entry(offset[i], state_scale[i], 1.0)?);
+    }
+    poll(&mut cancelled)?;
+    Ok(PreparedRotorCycle {
+        report,
+        state_scale,
+        monodromy: balanced_monodromy,
+        offset,
+        physical_offset,
+        segment_maps,
+        boundary_times,
     })
 }
 
@@ -338,18 +463,66 @@ impl<'a> MassSolve<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<([f64; MAX_ROTOR_DOFS], f64), RotorError> {
         let n = self.model.dofs();
+        let mut rounded = [0.0; MAX_ROTOR_DOFS];
+        let mut original = [Dd::ZERO; MAX_ROTOR_DOFS];
+        for i in 0..n {
+            let index = i * n + column;
+            if stiffness {
+                rounded[i] = model.stiffness()[index];
+                original[i] = Dd::from_f64(rounded[i]);
+            } else {
+                rounded[i] =
+                    finite(spin.mul_add(model.gyro_per_rad_s()[index], model.damping()[index]))?;
+                original[i] = Dd::from_f64(model.damping()[index])
+                    + Dd::from_f64(spin) * Dd::from_f64(model.gyro_per_rad_s()[index]);
+            }
+        }
+        self.solve_rhs(
+            &rounded[..n],
+            &original[..n],
+            self.scale[column],
+            tolerance,
+            cancelled,
+        )
+    }
+
+    fn force_column(
+        &self,
+        force: &[f64],
+        duration: f64,
+        period: f64,
+        tolerance: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, f64), RotorError> {
+        let n = self.model.dofs();
+        let mut original = [Dd::ZERO; MAX_ROTOR_DOFS];
+        for i in 0..n {
+            original[i] = Dd::from_f64(force[i]);
+        }
+        let (acceleration, residual) =
+            self.solve_rhs(force, &original[..n], 1.0, tolerance, cancelled)?;
+        let mut column = vec![0.0; 2 * n];
+        for i in 0..n {
+            column[n + i] = product_three(acceleration[i], duration, period)?;
+        }
+        Ok((column, residual))
+    }
+
+    fn solve_rhs(
+        &self,
+        rounded_rhs: &[f64],
+        original_rhs: &[Dd],
+        column_scale: f64,
+        tolerance: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<([f64; MAX_ROTOR_DOFS], f64), RotorError> {
+        let n = self.model.dofs();
         let mut solution = [0.0; MAX_ROTOR_DOFS];
         for (i, value) in solution.iter_mut().enumerate().take(n) {
-            let index = i * n + column;
-            let coefficient = if stiffness {
-                model.stiffness()[index]
-            } else {
-                finite(spin.mul_add(model.gyro_per_rad_s()[index], model.damping()[index]))?
-            };
-            *value = finite((coefficient / self.scale[i]) / self.scale[column])?;
-            if coefficient != 0.0 && *value == 0.0 {
+            *value = finite((rounded_rhs[i] / self.scale[i]) / column_scale)?;
+            if rounded_rhs[i] != 0.0 && *value == 0.0 {
                 return Err(RotorError::Invalid(
-                    "periodic coefficient scaling underflow",
+                    "periodic coefficient or force scaling underflow",
                 ));
             }
         }
@@ -372,14 +545,7 @@ impl<'a> MassSolve<'a> {
                     / Dd::from_f64(self.scale[j]);
                 action = action + coefficient * Dd::from_f64(value);
             }
-            let index = i * n + column;
-            let original_rhs = if stiffness {
-                Dd::from_f64(model.stiffness()[index])
-            } else {
-                Dd::from_f64(model.damping()[index])
-                    + Dd::from_f64(spin) * Dd::from_f64(model.gyro_per_rad_s()[index])
-            };
-            let rhs = original_rhs / row_scale / Dd::from_f64(self.scale[column]);
+            let rhs = original_rhs[i] / row_scale / Dd::from_f64(column_scale);
             residual_norm = residual_norm.max(finite((action - rhs).to_f64().abs())?);
             action_norm = action_norm.max(finite(action.to_f64().abs())?);
             rhs_norm = rhs_norm.max(finite(rhs.to_f64().abs())?);
@@ -398,6 +564,54 @@ impl<'a> MassSolve<'a> {
         }
         Ok((solution, relative))
     }
+}
+
+fn affine_segment_flow(
+    generator: &[f64],
+    source: &[f64],
+    d: usize,
+    budget: DenseExponentialBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<AffineSegmentMap, RotorError> {
+    poll(cancelled)?;
+    let source_scale = source
+        .iter()
+        .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+    if source_scale == 0.0 {
+        let transition = exponential_with_budget(generator, d, budget)
+            .map_err(RotorError::PeriodicExponential)?;
+        poll(cancelled)?;
+        return Ok(AffineSegmentMap {
+            transition,
+            offset: vec![0.0; d],
+        });
+    }
+    // Normalizing only the source coordinate prevents a large/small load
+    // amplitude from dictating the exponential's scaling and work. It adds
+    // no physical mode or fictitious stored energy.
+    let e = d + 1;
+    let mut augmented = vec![0.0; e * e];
+    for i in 0..d {
+        poll(cancelled)?;
+        augmented[i * e..i * e + d].copy_from_slice(&generator[i * d..(i + 1) * d]);
+        let normalized = finite(source[i] / source_scale)?;
+        if source[i] != 0.0 && normalized == 0.0 {
+            return Err(RotorError::Invalid("periodic force direction underflow"));
+        }
+        augmented[i * e + d] = normalized;
+    }
+    poll(cancelled)?;
+    let result =
+        exponential_with_budget(&augmented, e, budget).map_err(RotorError::PeriodicExponential)?;
+    poll(cancelled)?;
+    let mut transition = vec![0.0; d * d];
+    let mut offset = Vec::with_capacity(d);
+    for i in 0..d {
+        poll(cancelled)?;
+        transition[i * d..(i + 1) * d].copy_from_slice(&result[i * e..i * e + d]);
+        offset.push(product_three(result[i * e + d], source_scale, 1.0)?);
+    }
+    Ok(AffineSegmentMap { transition, offset })
 }
 
 fn multiply(
