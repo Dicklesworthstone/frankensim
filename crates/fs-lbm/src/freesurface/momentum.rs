@@ -6,20 +6,35 @@ use std::collections::BTreeMap;
 
 mod angular;
 
+/// Local numerical conversion policy for conservative momentum stepping.
+/// Legacy native step and pressure-only stepping retain their original
+/// conversion behavior; this selects the explicitly conservative owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConversionRedistribution2 {
+    /// Preserve signed mass and physical linear momentum on adjacent routes.
+    #[default]
+    ConservativeLocal,
+    /// Also preserve out-of-plane angular momentum independently in each
+    /// route-connected region. Periodic domains and unrepresentable spin refuse.
+    ConservativeLocalAngular,
+}
+
 /// Conversion balance in lattice units, excluding collision, streaming,
 /// pressure traction and imposed forces. These are numerical remap terms.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ConversionMomentumReport2 {
     /// Sum of absolute mass transfers between adjacent interface cells.
     pub redistributed_mass: f64,
-    /// Sum of absolute unrepresentable source mass remainders.
+    /// Absolute source mass remainders, plus component closure in angular mode.
     pub absolute_mass_defect: f64,
-    /// Sum of absolute local physical linear-momentum discrepancies.
+    /// Absolute local physical momentum discrepancies, plus component closure
+    /// after the angular correction when that mode is selected.
     pub absolute_momentum_defect: [f64; 2],
-    /// Sum of absolute final angular defects about each actual route
-    /// component's fixed local lattice origin. Linear residuals are reported
-    /// separately; translating residuals to another origin includes their arm.
-    /// `Some` only for angular-preserving conversion; linear mode reports `None`.
+    /// Absolute out-of-plane angular defects summed over actual route-connected
+    /// regions, about each region's first row-major cell centre. Linear
+    /// residuals are separate; translating the angular residual to another
+    /// origin includes their moment arm. None for the default linear policy;
+    /// Some(0.0) for angular mode without transfers.
     pub absolute_angular_momentum_defect: Option<f64>,
     /// Signed resolved kinetic change during conversion, never physical heat.
     pub kinetic_energy_change: f64,
@@ -88,6 +103,30 @@ pub(super) fn admit_initialized_cell(
 }
 
 impl FreeSurface {
+    /// Policy used by momentum stepping, including its gas-pressure variants.
+    #[must_use]
+    pub const fn conversion_redistribution(&self) -> ConversionRedistribution2 {
+        self.redistribution
+    }
+
+    /// Select local conversion closure without changing accepted populations.
+    /// The angular policy requires nonperiodic coordinates: no moment about a
+    /// torus is inferred. The same condition is checked again at every step.
+    /// Native legacy step and pressure-only methods are unaffected; select
+    /// conservative momentum stepping to use this policy.
+    pub fn set_conversion_redistribution(
+        &mut self,
+        policy: ConversionRedistribution2,
+    ) -> Result<(), FreeSurfaceMomentumError2> {
+        if policy == ConversionRedistribution2::ConservativeLocalAngular
+            && (self.grid.periodic_x || self.grid.periodic_y)
+        {
+            return Err(invalid("angular conversion requires a nonperiodic domain"));
+        }
+        self.redistribution = policy;
+        Ok(())
+    }
+
     /// Advance the original collision/streaming owner, then carry each signed
     /// conversion mass with its donor's physical velocity. Only adjacent
     /// interface cells with actual mass/capacity participate; disconnected
@@ -96,8 +135,9 @@ impl FreeSurface {
     /// One staged surface makes cancellation, missing capacity and population
     /// refusal atomic. The legacy `step` retains its historical replay behavior.
     /// The receipt covers conversion alone: it is not a whole-step conservation
-    /// certificate or physical dissipation. Cell-centre relocation does not
-    /// preserve first mass moments or angular momentum; no such claim is made.
+    /// certificate or physical dissipation. The selected angular policy closes
+    /// both momenta locally, but cell-centre relocation does not preserve first
+    /// mass moments or define a Galilean-invariant geometric remap.
     pub fn step_with_momentum(
         &mut self,
         gate: &CancelGate,
@@ -113,17 +153,16 @@ impl FreeSurface {
     /// share the minimum mass-weighted velocity correction; detached fronts
     /// cannot supply one another's corrective impulse or torque.
     ///
-    /// The positive final masses supply the component centroid and planar
-    /// inertia. An unresolved spin, inadmissible speed or nonpositive corrected
-    /// population refuses the whole candidate. Density and physical viscous
-    /// stress use the same Guo-preserving retarget as linear conversion.
+    /// Positive final masses supply the centroid and planar inertia. An
+    /// unresolved spin, inadmissible speed or nonpositive corrected population
+    /// refuses the whole candidate. Density and physical viscous stress retain
+    /// the same Guo-preserving retarget as linear conversion.
     ///
-    /// Angular momentum belongs to the selected inertial lattice frame.
-    /// Relocated mass does not preserve its first spatial moment, so this is
-    /// not a Galilean-equivariant geometric remap. Periodic domains refuse:
-    /// angular transport across their coordinate cut needs a separate owner.
-    /// The separate prescribed gas-pressure entries retain linear conversion.
-    /// The receipt covers conversion, not full-step torque or physical heat.
+    /// This call forces angular closure for one step without changing the
+    /// stored conversion policy. Pressure/momentum stepping uses that stored
+    /// policy, so select ConservativeLocalAngular to compose pressure and spin.
+    /// Periodic domains refuse; relocated first mass moments do not define a
+    /// Galilean-equivariant remap. The receipt excludes full-step torque/heat.
     pub fn step_with_angular_momentum(
         &mut self,
         gate: &CancelGate,
@@ -144,6 +183,27 @@ impl FreeSurface {
         self.momentum_candidate_with_stream(gate, |candidate| candidate.stream_step(Some(gate)))
     }
 
+    pub(crate) fn angular_momentum_candidate(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<(Self, ConversionMomentumReport2), FreeSurfaceMomentumError2> {
+        poll(gate)?;
+        if self.grid.periodic_x || self.grid.periodic_y {
+            return Err(invalid(
+                "angular conversion requires nonperiodic lattice coordinates",
+            ));
+        }
+        // Force the one-call policy only in the shared owner's single private
+        // clone. Its admission, pressure-free stream, conversion and readback
+        // are unchanged; accepting this entry does not reconfigure later steps.
+        let (mut candidate, report) = self.momentum_candidate_with_stream(gate, |candidate| {
+            candidate.redistribution = ConversionRedistribution2::ConservativeLocalAngular;
+            candidate.stream_step(Some(gate))
+        })?;
+        candidate.redistribution = self.redistribution;
+        Ok((candidate, report))
+    }
+
     // A prescribed gas load changes only the original streaming boundary.
     // Both entry points must retain this same admission/conversion sequence
     // and one private copy; the caller's error type preserves pressure errors.
@@ -155,41 +215,17 @@ impl FreeSurface {
     where
         Error: From<FreeSurfaceMomentumError2>,
     {
-        self.momentum_candidate_inner(gate, false, stream)
-    }
-
-    pub(crate) fn angular_momentum_candidate(
-        &self,
-        gate: &CancelGate,
-    ) -> Result<(Self, ConversionMomentumReport2), FreeSurfaceMomentumError2> {
-        poll(gate)?;
-        if self.grid.periodic_x || self.grid.periodic_y {
-            return Err(invalid(
-                "angular conversion requires nonperiodic lattice coordinates",
-            ));
-        }
-        self.momentum_candidate_inner(gate, true, |candidate| candidate.stream_step(Some(gate)))
-    }
-
-    fn momentum_candidate_inner<Error>(
-        &self,
-        gate: &CancelGate,
-        preserve_angular: bool,
-        stream: impl FnOnce(&mut Self) -> Result<(), Error>,
-    ) -> Result<(Self, ConversionMomentumReport2), Error>
-    where
-        Error: From<FreeSurfaceMomentumError2>,
-    {
         self.admit_momentum_step(gate)?;
         let mut candidate = self.clone();
         poll(gate)?;
         stream(&mut candidate)?;
         candidate.admit_momentum_step(gate)?;
-        let report = if preserve_angular {
-            candidate.convert_angular_momentum(gate)?
-        } else {
-            candidate.convert_momentum(gate)?
-        };
+        let report =
+            if candidate.redistribution == ConversionRedistribution2::ConservativeLocalAngular {
+                candidate.convert_angular_momentum(gate)?
+            } else {
+                candidate.convert_momentum(gate)?
+            };
         candidate.admit_momentum_step(gate)?;
         poll(gate)?;
         Ok((candidate, report))
@@ -197,6 +233,11 @@ impl FreeSurface {
 
     fn admit_momentum_step(&self, gate: &CancelGate) -> Result<(), FreeSurfaceMomentumError2> {
         poll(gate)?;
+        if self.redistribution == ConversionRedistribution2::ConservativeLocalAngular
+            && (self.grid.periodic_x || self.grid.periodic_y)
+        {
+            return Err(invalid("angular conversion requires a nonperiodic domain"));
+        }
         let n = self
             .grid
             .nx
@@ -270,28 +311,32 @@ impl FreeSurface {
         Ok(())
     }
 
-    fn convert_momentum(
-        &mut self,
-        gate: &CancelGate,
-    ) -> Result<ConversionMomentumReport2, FreeSurfaceMomentumError2> {
-        self.convert_momentum_inner(gate, None)
-    }
-
     fn convert_angular_momentum(
         &mut self,
         gate: &CancelGate,
     ) -> Result<ConversionMomentumReport2, FreeSurfaceMomentumError2> {
-        let angular = angular::AngularConversion2::capture_sources(self, gate)?;
-        self.convert_momentum_inner(gate, Some(angular))
+        let policy = self.redistribution;
+        self.set_conversion_redistribution(ConversionRedistribution2::ConservativeLocalAngular)?;
+        let result = self.convert_momentum(gate);
+        self.redistribution = policy;
+        result
     }
 
-    fn convert_momentum_inner(
+    fn convert_momentum(
         &mut self,
         gate: &CancelGate,
-        mut angular: Option<angular::AngularConversion2>,
     ) -> Result<ConversionMomentumReport2, FreeSurfaceMomentumError2> {
         poll(gate)?;
-        let excess = self.conversion_cascade(true)?;
+        let mut angular = (self.redistribution
+            == ConversionRedistribution2::ConservativeLocalAngular)
+            .then(angular::AngularConversion2::default);
+        let excess = self.conversion_cascade(true, |surface, cell| {
+            if let Some(angular) = &mut angular {
+                // Capture before class/mass changes, including a source which
+                // survives the cascade and later receives or repays mass.
+                angular.capture(cell, surface.mass[cell], surface.grid.moments(cell).u);
+            }
+        })?;
         let mut recipients = BTreeMap::<usize, Recipient>::new();
         let mut report = ConversionMomentumReport2::default();
         for (source, amount) in excess {
@@ -441,7 +486,7 @@ impl FreeSurface {
                         .sum::<f64>();
         }
         if let Some(angular) = angular {
-            angular.finish(self, gate, &mut report)?;
+            angular.finish(self, &mut report, gate)?;
         }
         if [
             report.redistributed_mass,

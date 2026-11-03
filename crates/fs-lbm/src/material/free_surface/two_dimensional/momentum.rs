@@ -5,15 +5,16 @@ use super::{
 };
 use crate::core2::Cell;
 use crate::freesurface::{
-    ConversionMomentumReport2, FreeSurface, FreeSurfaceMomentumError2, FreeSurfacePressureError2,
-    FreeSurfacePressureMomentumError2,
+    ConversionMomentumReport2, ConversionRedistribution2, FreeSurface, FreeSurfaceMomentumError2,
+    FreeSurfacePressureError2, FreeSurfacePressureMomentumError2,
 };
 use crate::material::free_surface::wetting::FreeSurfaceWettingError;
 use fs_exec::CancelGate;
 
 /// Accepted conversion account per unit out-of-plane depth. Collision,
 /// streaming, pressure traction and body-force impulse are outside this
-/// report; it is not a complete-step torque or energy certificate.
+/// report. Angular closure, when selected, concerns conversion alone; it is
+/// not a complete-step or material first-moment conservation certificate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFreeSurfaceMomentumReport2 {
     /// Unmodified account from the original native conversion owner.
@@ -81,6 +82,25 @@ impl From<FreeSurfaceWettingError> for MaterialFreeSurfaceMomentumError2 {
 }
 
 impl MaterialFreeSurface2<'_> {
+    /// Policy shared by every explicit native/material momentum step, including
+    /// pressure loading and a subsequently attached source-owned wetting model.
+    pub fn conversion_redistribution(&self) -> ConversionRedistribution2 {
+        self.lattice.conversion_redistribution()
+    }
+
+    /// Select local linear or linear-and-angular conversion conservation.
+    /// This changes no accepted physical state. Native angular admission
+    /// refuses periodic geometry; unsupported local spin or population states
+    /// refuse the whole later candidate. Configure this before attaching a
+    /// wetting owner. Legacy native stepping keeps its historical behavior.
+    pub fn set_conversion_redistribution(
+        &mut self,
+        policy: ConversionRedistribution2,
+    ) -> Result<(), MaterialFreeSurfaceMomentumError2> {
+        self.lattice.set_conversion_redistribution(policy)?;
+        Ok(())
+    }
+
     /// Resolved liquid linear momentum per unit out-of-plane depth [kg/s].
     /// Uses tracked interface mass and physical Guo-corrected velocity; gas,
     /// walls and unlocated carry have no represented liquid momentum.
@@ -290,7 +310,7 @@ impl MaterialFreeSurface2<'_> {
             native,
             self.mass_per_depth_unit_kg_m,
             self.scaling.velocity_si(1.0)?,
-            self.scaling.cell_size_m(),
+            self.scaling.cell_size_m,
         )
     }
 }
@@ -314,7 +334,7 @@ impl MaterialFreeSurfaceMomentumReport2 {
             ],
             absolute_angular_momentum_defect_kg_m_per_s: native
                 .absolute_angular_momentum_defect
-                .map(|value| check(((value * mass_unit) * velocity_unit) * length_unit))
+                .map(|defect| check(((defect * mass_unit) * velocity_unit) * length_unit))
                 .transpose()?,
             kinetic_energy_change_j_per_m: check(
                 ((native.kinetic_energy_change * mass_unit) * velocity_unit) * velocity_unit,
@@ -339,7 +359,8 @@ mod tests {
             routes: 3,
         };
         // rho=800 kg/m^3, dx=.002 m, dt=.0005 s: mass/depth=.0032
-        // kg/m, speed=4 m/s, momentum/depth=.0128 kg/s, energy/depth=.0512 J/m.
+        // kg/m, speed=4 m/s, momentum/depth=.0128 kg/s, energy/depth=.0512 J/m,
+        // and angular momentum/depth=.0000256 kg m/s.
         let report =
             MaterialFreeSurfaceMomentumReport2::from_native(native, 0.0032, 4.0, 0.002).unwrap();
         assert_eq!(report.native, native);
@@ -363,5 +384,28 @@ mod tests {
         .unwrap();
         assert_eq!(zero.kinetic_energy_change_j_per_m, 0.0);
         assert_eq!(zero.absolute_angular_momentum_defect_kg_m_per_s, None);
+        let angular_zero = ConversionMomentumReport2 {
+            absolute_angular_momentum_defect: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            MaterialFreeSurfaceMomentumReport2::from_native(
+                angular_zero,
+                f64::MAX,
+                f64::MAX,
+                f64::MAX,
+            )
+            .unwrap()
+            .absolute_angular_momentum_defect_kg_m_per_s,
+            Some(0.0)
+        );
+        let angular_only = ConversionMomentumReport2 {
+            absolute_angular_momentum_defect: Some(1.0),
+            ..Default::default()
+        };
+        assert!(
+            MaterialFreeSurfaceMomentumReport2::from_native(angular_only, 1.0, 1.0, f64::INFINITY)
+                .is_err()
+        );
     }
 }

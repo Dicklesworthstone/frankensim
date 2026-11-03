@@ -4,6 +4,9 @@ use fs_lbm::freesurface::{ContactModel, FreeSurface, PlanarWall2};
 use fs_lbm::material::free_surface::wetting::CoxVoinovLaw;
 use fs_lbm::material::free_surface::{MaterialFreeSurfaceDomain2, MaterialFreeSurfaceWetting2};
 
+#[path = "wetting2/pressure_momentum.rs"]
+mod pressure_momentum;
+
 fn domain2() -> MaterialFreeSurfaceDomain2 {
     MaterialFreeSurfaceDomain2 {
         cells: [20; 2],
@@ -44,6 +47,7 @@ fn flow2<'s, 'm>(
 }
 
 fn same_state(a: &FreeSurface, b: &FreeSurface) {
+    assert_eq!(a.conversion_redistribution(), b.conversion_redistribution());
     assert_eq!(a.grid.f, b.grid.f);
     assert_eq!(a.grid.flags, b.grid.flags);
     assert_eq!(a.mass, b.mass);

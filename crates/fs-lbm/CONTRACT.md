@@ -46,13 +46,53 @@ limits still apply.
 
 ## D2Q9 cell-centre angular conversion
 
-`FreeSurface::step_with_angular_momentum` and the source-bound `MaterialFreeSurface2` / `MaterialFreeSurfaceWetting2` methods opt into local angular closure. Original linear-only and default dispatch remain unchanged. Prescribed cell/link gas-pressure entries retain their separate linear conversion policy; they do not yet compose with this angular mode. The existing signed, capacity-bounded adjacent transport still owns mass and linear momentum. Only actual nonzero transfer links form a correction component; disconnected fronts cannot exchange corrective impulse or torque.
+`FreeSurface::step_with_angular_momentum` and the source-bound
+`MaterialFreeSurface2` / `MaterialFreeSurfaceWetting2` methods retain their
+explicit local angular step. The native and material
+`set_conversion_redistribution` selectors additionally admit
+`ConversionRedistribution2::ConservativeLocalAngular` through the common
+momentum candidate, including prescribed cell/link gas pressure and subsequent
+source-owned wetting composition. `ConservativeLocal` remains the default.
+Legacy native mass-only stepping retains its historical behavior.
 
-Each component retains original signed inventories before the class cascade, including a source later reused as a recipient. Final positive masses determine a centroid and scalar planar inertia. A translation plus rotation supplies the minimum mass-weighted velocity correction for simultaneous linear/angular closure. Existing population retargeting preserves density and physical viscous stress in the held Guo force frame. Read-back inventories must close to scaled roundoff; unresolved spin, low-Mach/positive-population failure, SI overflow or cancellation refuses the complete candidate. Wetting geometry and original source receipts share that transaction.
+The original signed, capacity-bounded adjacent transport still owns mass and
+linear momentum. Sparse components contain only actual nonzero transfer routes;
+disconnected fronts cannot exchange corrective impulse or torque. Original
+signed sources are captured during the class cascade, without an additional
+full-grid snapshot, and survive later reuse as recipients or debt payers.
+Positive final masses determine a centroid and scalar planar inertia. A
+translation plus rotation supplies the minimum mass-weighted velocity
+correction for simultaneous linear/angular closure.
 
-Angular momentum is conserved at cell centres in the selected inertial lattice frame. The remap does not conserve first mass moments and therefore does not promise general boost-equivariance. Periodic coordinates refuse because transport across a periodic cut has no angular owner here. The optional angular defect sums absolute residuals about each component's fixed local origin; translating their bounds also requires the separately reported linear residuals. SI angular quantities are per depth [kg m/s]. Signed numerical kinetic changes remain separate from physical heat. These are conversion accounts, not full-step force/torque certificates.
+Existing population retargeting preserves density and physical viscous stress
+in the held Guo force frame. Actual population readback must close mass, linear
+momentum and angular momentum to their scaled roundoff allowances. Original
+transport defects remain accounted for alongside final component residuals.
+Unresolved spin, inadmissible Mach number, nonpositive corrected populations,
+unit overflow or cancellation refuses the complete candidate. The original
+single native candidate also owns pressure loading, SI accounts and wetting
+source/history acceptance; pressure traction and its physical torque precede
+the conversion inventory and are not removed by the numerical correction.
 
-Regressions cover unequal off-axis fronts under held force, a linear-only torque-producing control, separate selected frames, translated coordinates/origins, disconnected signed-debt components and dual-role sources, unresolved-spin rollback, periodic/cancel refusal, unchanged no-conversion dynamics, material/native replay and units, and dynamic-wetting source refusal/retry.
+Angular momentum is conserved at cell centres in the selected inertial lattice
+frame. The remap does not conserve first mass moments and therefore does not
+promise general boost-equivariance. Periodic coordinates refuse because
+transport across a periodic cut has no angular owner here. The optional angular
+defect sums absolute residuals about each component's fixed local origin;
+translating their bounds also requires the separately reported linear
+residuals. SI angular quantities are per depth [kg m/s]. Signed numerical
+kinetic changes include the actual corrected velocities and remain separate
+from physical heat. These are conversion accounts, not full-step force/torque
+certificates.
+
+Regression definitions cover unequal off-axis fronts under held force, a
+linear-only torque-producing control, separate selected frames, translated
+coordinates/origins, detached signed-debt components and retained sources,
+unresolved-spin rollback, periodic/cancellation refusal, unchanged
+no-conversion dynamics, pressure traction with positive and negative
+conversion mass, SI angular units and gauge shifts, and dynamic-wetting source
+refusal/retry. Route processing polls cancellation without introducing a dense
+angular factorization or another full-flow clone.
 
 ## Rigid-frame momentum forcing on the native D2Q9 core
 

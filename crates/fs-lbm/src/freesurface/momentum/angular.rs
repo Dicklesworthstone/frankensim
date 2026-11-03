@@ -1,10 +1,9 @@
-//! Planar angular closure on the actual adjacent conversion graph.
+//! Scalar spin closure on actual local D2Q9 conversion routes.
 //!
-//! With final positive masses m_i, centroid c and I=sum(m_i*|x_i-c|^2),
-//! the least mass-weighted velocity change is a translation plus rotation:
-//! du_i=-dP/M + omega J(x_i-c), omega=(c cross dP-dL)/I.
-//! These close linear and angular momentum in the declared lattice frame.
-//! First mass moments are not conserved, so boost-equivariance is not claimed.
+//! Cell-centre relocation changes first mass moments. This numerical remap
+//! closes angular momentum in the declared lattice frame; it is not a
+//! Galilean-invariant geometric transfer or a whole-timestep conservation law.
+//! Periodic coordinates are refused by the common momentum admission owner.
 
 use super::*;
 
@@ -33,7 +32,7 @@ struct Participant {
 }
 
 fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
-    a[0] * b[1] - a[1] * b[0]
+    a[0].mul_add(b[1], -a[1] * b[0])
 }
 
 fn snapshot(surface: &FreeSurface, cell: usize) -> Result<Snapshot, FreeSurfaceMomentumError2> {
@@ -43,13 +42,23 @@ fn snapshot(surface: &FreeSurface, cell: usize) -> Result<Snapshot, FreeSurfaceM
             velocity: [0.0; 2],
         });
     }
+    if !matches!(surface.grid.flags[cell], Cell::Fluid | Cell::Interface) {
+        return Err(invalid(
+            "angular conversion participant is not liquid or gas",
+        ));
+    }
     let state = surface.grid.moments(cell);
     let mass = if surface.grid.flags[cell] == Cell::Fluid {
         state.rho
     } else {
         surface.mass[cell]
     };
-    if !mass.is_finite() || mass < 0.0 || mass > state.rho {
+    if !state.rho.is_finite()
+        || state.rho <= 0.0
+        || !mass.is_finite()
+        || mass < 0.0
+        || mass > state.rho
+    {
         return Err(invalid(
             "angular conversion needs bounded final cell masses",
         ));
@@ -61,11 +70,17 @@ fn snapshot(surface: &FreeSurface, cell: usize) -> Result<Snapshot, FreeSurfaceM
     })
 }
 
-// Subtract each cell's inventory before summing, keeping a local fixed origin
-// and retaining the original signed debt of cells that disappear.
-fn difference(cells: &[Participant]) -> (f64, [f64; 2], f64) {
+// Difference local inventories first, avoiding cancellation between large
+// absolute angular totals. The origin remains fixed throughout conversion.
+fn difference(
+    cells: &[Participant],
+    gate: &CancelGate,
+) -> Result<(f64, [f64; 2], f64), FreeSurfaceMomentumError2> {
     let (mut mass, mut momentum, mut angular) = (0.0, [0.0; 2], 0.0);
-    for cell in cells {
+    for (index, cell) in cells.iter().enumerate() {
+        if index % 256 == 0 {
+            poll(gate)?;
+        }
         let dm = cell.after.mass - cell.before.mass;
         let dp = core::array::from_fn(|d| {
             cell.after.mass.mul_add(
@@ -74,48 +89,26 @@ fn difference(cells: &[Participant]) -> (f64, [f64; 2], f64) {
             )
         });
         mass += dm;
-        angular += cross(cell.position, dp);
         for d in 0..2 {
             momentum[d] += dp[d];
         }
+        angular += cross(cell.position, dp);
     }
-    (mass, momentum, angular)
+    Ok((mass, momentum, angular))
 }
 
-fn coordinate_difference(a: usize, b: usize) -> f64 {
-    if a >= b {
-        (a - b) as f64
+fn offset(coordinate: usize, origin: usize) -> f64 {
+    if coordinate >= origin {
+        (coordinate - origin) as f64
     } else {
-        -((b - a) as f64)
+        -((origin - coordinate) as f64)
     }
 }
 
 impl AngularConversion2 {
-    pub(super) fn capture_sources(
-        surface: &FreeSurface,
-        gate: &CancelGate,
-    ) -> Result<Self, FreeSurfaceMomentumError2> {
-        let mut conversion = Self::default();
-        for (cell, flag) in surface.grid.flags.iter().enumerate() {
-            if cell % 256 == 0 {
-                poll(gate)?;
-            }
-            if *flag != Cell::Interface {
-                continue;
-            }
-            let state = surface.grid.moments(cell);
-            let mass = surface.mass[cell];
-            if mass < 0.0 || mass > state.rho {
-                // Capture BEFORE the class cascade. A positive source can be
-                // made interface again by a receding neighbour, then receive
-                // debt; its original signed inventory must survive both roles.
-                conversion.capture(cell, mass, state.u);
-            }
-        }
-        Ok(conversion)
-    }
-
-    fn capture(&mut self, cell: usize, mass: f64, velocity: [f64; 2]) {
+    pub(super) fn capture(&mut self, cell: usize, mass: f64, velocity: [f64; 2]) {
+        // Preserve the ORIGINAL signed source, even if it survives and later
+        // becomes a recipient or pays a neighboring source's negative debt.
         self.nodes.entry(cell).or_insert(Node {
             before: Snapshot { mass, velocity },
             parent: cell,
@@ -145,7 +138,7 @@ impl AngularConversion2 {
         for cell in [source, recipient] {
             self.nodes
                 .get_mut(&cell)
-                .expect("captured source or recipient")
+                .expect("captured route")
                 .transferred_mass += transferred.abs();
         }
         let a = self.root(source);
@@ -159,26 +152,38 @@ impl AngularConversion2 {
     pub(super) fn finish(
         mut self,
         surface: &mut FreeSurface,
-        gate: &CancelGate,
         report: &mut ConversionMomentumReport2,
+        gate: &CancelGate,
     ) -> Result<(), FreeSurfaceMomentumError2> {
         let mut components = BTreeMap::<usize, Vec<usize>>::new();
-        for cell in self.nodes.keys().copied().collect::<Vec<_>>() {
-            poll(gate)?;
+        let mut identifiers = Vec::with_capacity(self.nodes.len());
+        for (index, &cell) in self.nodes.keys().enumerate() {
+            if index % 256 == 0 {
+                poll(gate)?;
+            }
+            identifiers.push(cell);
+        }
+        for (index, cell) in identifiers.into_iter().enumerate() {
+            if index % 256 == 0 {
+                poll(gate)?;
+            }
             components.entry(self.root(cell)).or_default().push(cell);
         }
         let mut angular_defect = 0.0;
         for (origin, members) in components {
+            poll(gate)?;
             let origin = [origin % surface.grid.nx, origin / surface.grid.nx];
             let mut cells = Vec::with_capacity(members.len());
             let (mut mass, mut first, mut mass_scale, mut moment_scale) = (0.0, [0.0; 2], 0.0, 0.0);
-            for cell in members {
-                poll(gate)?;
+            for (index, cell) in members.into_iter().enumerate() {
+                if index % 256 == 0 {
+                    poll(gate)?;
+                }
                 let node = &self.nodes[&cell];
                 let after = snapshot(surface, cell)?;
                 let position = [
-                    coordinate_difference(cell % surface.grid.nx, origin[0]),
-                    coordinate_difference(cell / surface.grid.nx, origin[1]),
+                    offset(cell % surface.grid.nx, origin[0]),
+                    offset(cell / surface.grid.nx, origin[1]),
                 ];
                 mass += after.mass;
                 for d in 0..2 {
@@ -194,10 +199,12 @@ impl AngularConversion2 {
                     position,
                 });
             }
+            // Same mass/linear roundoff policy as the original owner, scoped
+            // to actual connected routes; angular units add local lever arms.
             let mass_roundoff = 128.0 * f64::EPSILON * mass_scale;
             let momentum_roundoff = 256.0 * f64::EPSILON * mass_scale;
             let angular_roundoff = 256.0 * f64::EPSILON * moment_scale;
-            let (dm, dp, dl) = difference(&cells);
+            let (dm, dp, dl) = difference(&cells, gate)?;
             if !mass.is_finite()
                 || !mass_roundoff.is_finite()
                 || !momentum_roundoff.is_finite()
@@ -210,41 +217,51 @@ impl AngularConversion2 {
                 || !dl.is_finite()
             {
                 return Err(invalid(
-                    "angular component mass or momentum is unrepresentable",
+                    "angular conversion component mass or momentum is unrepresentable",
                 ));
             }
             if mass > 0.0 {
                 let centroid = first.map(|x| x / mass);
                 let translation = dp.map(|p| -p / mass);
                 let mut inertia = 0.0;
-                for cell in &cells {
-                    poll(gate)?;
-                    let r = core::array::from_fn(|d| cell.position[d] - centroid[d]);
-                    inertia += cell.after.mass * norm2(r);
+                for (index, cell) in cells.iter().enumerate() {
+                    if index % 256 == 0 {
+                        poll(gate)?;
+                    }
+                    let r = [
+                        cell.position[0] - centroid[0],
+                        cell.position[1] - centroid[1],
+                    ];
+                    inertia += cell.after.mass * r[0].mul_add(r[0], r[1] * r[1]);
                 }
+                // Translating by -dP/M changes orbital L by -c cross dP.
+                // The remaining scalar spin therefore supplies c cross dP-dL.
                 let required = cross(centroid, dp) - dl;
-                // A single surviving point has zero inertia and cannot carry
-                // spin independently of its linear momentum. Never invent an
-                // epsilon inertia or borrow a distant cell to hide this loss.
-                let omega = if required.is_finite() && required.abs() <= 0.5 * angular_roundoff {
-                    0.0
-                } else if required.is_finite() && inertia.is_finite() && inertia > 0.0 {
+                let omega = if inertia > 0.0 {
                     required / inertia
+                } else if inertia == 0.0 && required.abs() <= 0.5 * angular_roundoff {
+                    0.0
                 } else {
                     return Err(invalid(
                         "converted cells cannot resolve angular momentum; refine",
                     ));
                 };
-                if !omega.is_finite() || !centroid.iter().chain(&translation).all(|x| x.is_finite())
-                {
-                    return Err(invalid("angular correction is unrepresentable; refine"));
+                if !inertia.is_finite() || !omega.is_finite() {
+                    return Err(invalid(
+                        "angular conversion inertia or spin is unrepresentable",
+                    ));
                 }
-                for cell in &mut cells {
-                    poll(gate)?;
+                for (index, cell) in cells.iter_mut().enumerate() {
+                    if index % 256 == 0 {
+                        poll(gate)?;
+                    }
                     if cell.after.mass == 0.0 {
                         continue;
                     }
-                    let r: [f64; 2] = core::array::from_fn(|d| cell.position[d] - centroid[d]);
+                    let r = [
+                        cell.position[0] - centroid[0],
+                        cell.position[1] - centroid[1],
+                    ];
                     let previous = cell.after.velocity;
                     let next = [
                         previous[0] + translation[0] - omega * r[1],
@@ -260,15 +277,17 @@ impl AngularConversion2 {
                             retarget_velocity(surface.grid.f[cell.cell], previous, next, force)?;
                     }
                     cell.after = snapshot(surface, cell.cell)?;
-                    let du: [f64; 2] =
-                        core::array::from_fn(|d| cell.after.velocity[d] - previous[d]);
+                    let du = [
+                        cell.after.velocity[0] - previous[0],
+                        cell.after.velocity[1] - previous[1],
+                    ];
                     report.kinetic_energy_change += cell.after.mass
                         * (0..2)
                             .map(|d| (previous[d] + 0.5 * du[d]) * du[d])
                             .sum::<f64>();
                 }
             }
-            let (dm, dp, dl) = difference(&cells);
+            let (dm, dp, dl) = difference(&cells, gate)?;
             if !dm.is_finite()
                 || dm.abs() > mass_roundoff
                 || dp
@@ -281,13 +300,18 @@ impl AngularConversion2 {
                     "converted populations do not preserve both momenta; refine",
                 ));
             }
+            // Keep the original local mass/P defects; closure is additional.
             report.absolute_mass_defect += dm.abs();
             for d in 0..2 {
                 report.absolute_momentum_defect[d] += dp[d].abs();
             }
             angular_defect += dl.abs();
         }
+        poll(gate)?;
         report.absolute_angular_momentum_defect = Some(angular_defect);
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -15,9 +15,13 @@
 
 mod curvature;
 mod momentum;
-pub use momentum::{ConversionMomentumReport2, FreeSurfaceMomentumError2};
+pub use momentum::{
+    ConversionMomentumReport2, ConversionRedistribution2, FreeSurfaceMomentumError2,
+};
 mod pressure;
-pub use pressure::{FreeSurfacePressureError2, FreeSurfacePressureMomentumError2, GasPressureLink2};
+pub use pressure::{
+    FreeSurfacePressureError2, FreeSurfacePressureMomentumError2, GasPressureLink2,
+};
 pub(crate) mod wetting;
 pub use wetting::{ContactAngleError2, PlanarWall2};
 
@@ -324,6 +328,7 @@ pub struct FreeSurface {
     pub carry: f64,
     /// Cell-conversion statistics (cumulative).
     pub conversions: ConversionStats,
+    redistribution: ConversionRedistribution2,
     scratch: Vec<[f64; Q]>,
     fill_raw: Vec<f64>,
     fill_smooth: Vec<f64>,
@@ -399,6 +404,7 @@ impl FreeSurface {
             contact,
             carry: 0.0,
             conversions: ConversionStats::default(),
+            redistribution: ConversionRedistribution2::default(),
             scratch: Vec::new(),
             fill_raw: vec![0.0; nx * ny],
             fill_smooth: vec![0.0; nx * ny],
@@ -752,7 +758,11 @@ impl FreeSurface {
         Ok(())
     }
 
-    fn conversion_cascade(&mut self, conservative: bool) -> Result<Vec<(usize, f64)>, FreeSurfaceMomentumError2> {
+    fn conversion_cascade(
+        &mut self,
+        conservative: bool,
+        mut capture_source: impl FnMut(&Self, usize),
+    ) -> Result<Vec<(usize, f64)>, FreeSurfaceMomentumError2> {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         let tolerance = if conservative { 0.0 } else { EPS };
         // Fluid mass is Σf; interface mass tracked. Conversions:
@@ -773,6 +783,7 @@ impl FreeSurface {
         // Interface → fluid: retain each local excess; gas neighbors become
         // interface (closure).
         for &i in &to_fluid {
+            capture_source(self, i);
             let rho: f64 = self.grid.f[i].iter().sum();
             excess.push((i, self.mass[i] - rho));
             self.grid.flags[i] = Cell::Fluid;
@@ -839,6 +850,7 @@ impl FreeSurface {
             if self.grid.flags[i] != Cell::Interface {
                 continue; // may have been re-flagged by the cascade
             }
+            capture_source(self, i);
             excess.push((i, self.mass[i]));
             self.grid.flags[i] = Cell::Gas;
             self.mass[i] = 0.0;
@@ -858,9 +870,11 @@ impl FreeSurface {
     }
 
     fn apply_conversions(&mut self) {
-        let excess = self.conversion_cascade(false).expect("legacy conversion has no momentum admission");
+        let excess = self
+            .conversion_cascade(false, |_, _| {})
+            .expect("legacy conversion has no momentum admission");
         let nx = self.grid.nx;
-        // Redistribute after the flag cascade, only beside each converted
+// Redistribute after the flag cascade, only beside each converted
         // cell. A global pool would change distant droplets' capillary pressure
         // and exchange their heat even though no physical link joins them.
         for (i, amount) in excess {

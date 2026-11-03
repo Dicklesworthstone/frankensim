@@ -9,6 +9,8 @@ use fs_exec::CancelGate;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod momentum_tests;
 
 /// One actual missing incoming D2Q9 population at a liquid/gas link.
 /// Coordinates are resolved native cell indices, including periodic wrapping.
@@ -228,7 +230,10 @@ impl FreeSurface {
     /// to legacy mass-only conversion. Every refusal leaves accepted state intact.
     ///
     /// The returned account covers CONVERSION alone, excluding pressure and
-    /// body-force impulses. Gas dynamics, angular-momentum conservation and
+    /// body-force impulses. The selected `ConservativeLocalAngular` policy
+    /// additionally closes conversion angular momentum per route-connected
+    /// region on nonperiodic grids; it does not remove physical pressure torque
+    /// or certify angular conservation of the full step. Gas dynamics and
     /// pressure-work/thermal storage are not introduced by this composition.
     pub fn step_with_gas_pressure_and_momentum(
         &mut self,
