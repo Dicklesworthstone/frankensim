@@ -349,10 +349,33 @@ impl ComplexEngineering {
         let s12 = C64::new(-0.5 * nu23, 0.0) * s11 + C64::new(-0.5 * nu32, 0.0) * s22;
 
         let s = [[s00, s01, s02], [s01, s11, s12], [s02, s12, s22]];
+        // Invert dimensionless compliance. A determinant in Pa^-3 cannot
+        // have an absolute singularity threshold: a well-conditioned metal
+        // with E = 100 GPa already has det(S) of order 1e-33. Scaling also
+        // keeps the cofactor products in range when the modulus unit changes.
+        if s.iter()
+            .flatten()
+            .any(|z| !z.re.is_finite() || !z.im.is_finite())
+        {
+            return Err(ViscoError::Parameters {
+                what: "nonfinite complex normal compliance in ComplexEngineering",
+            });
+        }
+        let compliance_scale = s
+            .iter()
+            .flatten()
+            .map(|z| z.re.abs().max(z.im.abs()))
+            .fold(0.0_f64, f64::max);
+        if compliance_scale == 0.0 {
+            return Err(ViscoError::Parameters {
+                what: "zero complex normal compliance in ComplexEngineering",
+            });
+        }
+        let s = s.map(|row| row.map(|z| C64::new(z.re / compliance_scale, z.im / compliance_scale)));
         let det_s = s[0][0] * (s[1][1] * s[2][2] - s[1][2] * s[2][1])
             - s[0][1] * (s[1][0] * s[2][2] - s[1][2] * s[2][0])
             + s[0][2] * (s[1][0] * s[2][1] - s[1][1] * s[2][0]);
-        if !(det_s.re.is_finite() && det_s.im.is_finite()) || det_s.abs() <= 1e-30 {
+        if !(det_s.re.is_finite() && det_s.im.is_finite()) || det_s == C64::ZERO {
             return Err(ViscoError::Parameters {
                 what: "singular complex normal compliance in ComplexEngineering",
             });
@@ -360,7 +383,11 @@ impl ComplexEngineering {
         let inv = |r: usize, c: usize| -> C64 {
             let (r1, r2) = ((r + 1) % 3, (r + 2) % 3);
             let (c1, c2) = ((c + 1) % 3, (c + 2) % 3);
-            (s[c1][r1] * s[c2][r2] - s[c1][r2] * s[c2][r1]) / det_s
+            let normalized = (s[c1][r1] * s[c2][r2] - s[c1][r2] * s[c2][r1]) / det_s;
+            C64::new(
+                normalized.re / compliance_scale,
+                normalized.im / compliance_scale,
+            )
         };
 
         let mut storage = [[0.0f64; 6]; 6];
@@ -381,6 +408,11 @@ impl ComplexEngineering {
         if let Some(q) = self.rotation {
             storage = crate::tensor::rotate_mandel(storage, q);
             loss = crate::tensor::rotate_mandel(loss, q);
+        }
+        if storage.iter().chain(&loss).flatten().any(|x| !x.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "unrepresentable complex engineering stiffness",
+            });
         }
         Ok((storage, loss))
     }

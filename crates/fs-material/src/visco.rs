@@ -1006,7 +1006,19 @@ fn lower_scalar_to_prony(
         let (fe, fi) = target(w)?;
         let (ge, gi) = model.modulus(w);
         let storage_error = (ge - fe) / fe;
-        let loss_error = (gi - fi) / fi.abs().max(1.0e-300);
+        let loss_error = if tolerance.loss.is_some() {
+            // An absolute floor would certify a discarded, representable
+            // relaxation tail as accurate. Exact zero loss must stay zero;
+            // any nonzero replacement then has infinite relative error.
+            if gi == fi {
+                0.0
+            } else {
+                (gi - fi) / fi
+            }
+        } else {
+            // Preserve the original complex-only API's diagnostic bytes.
+            (gi - fi) / fi.abs().max(1.0e-300)
+        };
         let imaginary_relative = (gi - fi) / fe;
         let loss_ratio = fi / fe;
         let complex_error = det::sqrt(
@@ -1674,6 +1686,45 @@ mod tests {
             Err(ViscoError::FitTolerance { achieved, required })
                 if achieved > 0.8 && required == 0.01
         ));
+    }
+
+    #[test]
+    fn component_lowering_retains_relative_gates_for_representable_relaxation_tails() {
+        // The exact alpha=1 Maxwell tail remains positive even when omega*tau
+        // overflows. An absolute 1e-300 denominator would accept its complete
+        // removal at the smaller modulus scales, despite 100% loss error.
+        for scale in [1.0, 1e12, 1e24] {
+            let law = FractionalZener::new(scale, 1.0001 * scale, 1.0, 1e307).unwrap();
+            for frequency in [20.0, 20_000.0] {
+                assert!(law.modulus(core::f64::consts::TAU * frequency).1 > 0.0);
+            }
+            let legacy = lower_to_prony(&law, 20.0, 20_000.0, 1, 1e-3).unwrap();
+            assert!(legacy.model.terms.is_empty());
+            assert!(legacy.sup_rel_storage_err < 1e-3);
+            assert!(matches!(
+                lower_to_prony_components(&law, 20.0, 20_000.0, 1, 1e-3, 1e-2),
+                Err(ViscoError::FitTolerance { achieved, required })
+                    if achieved == 1.0 && required == 1e-2
+            ));
+        }
+
+        // A lossless target needs no positive loss floor.
+        let elastic = GeneralizedMaxwell::new(1.0, Vec::new()).unwrap();
+        let lowered = lower_scalar_to_prony(
+            |omega| Ok(elastic.modulus(omega)),
+            1.0,
+            (20.0, 20_000.0),
+            1,
+            10.0,
+            ScalarLoweringTolerance {
+                complex: None,
+                storage: Some(1e-3),
+                loss: Some(1e-2),
+            },
+        )
+        .unwrap();
+        assert!(lowered.model.terms.is_empty());
+        assert_eq!(lowered.sup_rel_loss_err, 0.0);
     }
 
     #[test]

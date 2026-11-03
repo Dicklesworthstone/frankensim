@@ -79,6 +79,97 @@ fn complex_engineering_wood_fixture() -> ComplexEngineering {
         .expect("valid rotation")
 }
 
+#[test]
+fn g0_complex_engineering_admits_metal_stiffness_and_matches_isotropic_moduli() {
+    // A synthetic 100 GPa solid, not a calibrated alloy. The old dimensional
+    // det(S) <= 1e-30 test incorrectly refused this well-conditioned material.
+    let young = FractionalZener::new(100.0e9, 103.0e9, 0.4, 8.0e-4).unwrap();
+    let nu = 0.3;
+    let shear = FractionalZener::new(
+        young.e0 / (2.0 * (1.0 + nu)),
+        young.e_inf / (2.0 * (1.0 + nu)),
+        young.alpha,
+        young.tau,
+    )
+    .unwrap();
+    let target = ComplexEngineering::new([young; 3], [nu; 3], [shear; 3]).unwrap();
+    for frequency in [20.0, 200.0, 2_000.0, 20_000.0] {
+        let omega = core::f64::consts::TAU * frequency;
+        let (storage, loss) = target.complex_modulus(omega).unwrap();
+        let (ep, epp) = young.modulus(omega);
+        // Independent isotropic Lamé identities, including Mandel shear.
+        for (actual, modulus) in [(storage, ep), (loss, epp)] {
+            let mu = modulus / (2.0 * (1.0 + nu));
+            let lambda = modulus * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+            for i in 0..6 {
+                for j in 0..6 {
+                    let expected = if i < 3 && j < 3 {
+                        lambda + if i == j { 2.0 * mu } else { 0.0 }
+                    } else if i == j {
+                        2.0 * mu
+                    } else {
+                        0.0
+                    };
+                    assert!((actual[i][j] - expected).abs() <= 2e-13 * modulus);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_complex_engineering_spectra_scale_with_modulus_units() {
+    let law = |e0, alpha, tau| FractionalZener::new(e0, 1.1 * e0, alpha, tau).unwrap();
+    let target_at_scale = |scale| {
+        ComplexEngineering::new(
+            [
+                law(1.0 * scale, 0.3, 1e-3),
+                law(1.2 * scale, 0.4, 2e-3),
+                law(0.9 * scale, 0.5, 7e-4),
+            ],
+            [0.2, 0.15, 0.1],
+            [
+                law(0.4 * scale, 0.35, 8e-4),
+                law(0.35 * scale, 0.45, 1e-3),
+                law(0.45 * scale, 0.4, 9e-4),
+            ],
+        )
+        .unwrap()
+        .with_rotation(rotation(unit_axis([1.0, -2.0, 0.5]), 0.4))
+        .unwrap()
+    };
+    let reference = target_at_scale(1.0);
+    for scale in [1e-80, 1e-20, 1e6, 1e11, 1e80] {
+        let target = target_at_scale(scale);
+        for frequency in [20.0, 200.0, 2_000.0, 20_000.0] {
+            let omega = core::f64::consts::TAU * frequency;
+            let (reference_storage, reference_loss) = reference.complex_modulus(omega).unwrap();
+            let (storage, loss) = target.complex_modulus(omega).unwrap();
+            for (actual, expected) in [(storage, reference_storage), (loss, reference_loss)] {
+                let norm = expected.iter().flatten().map(|x| x.abs()).fold(0.0, f64::max);
+                for i in 0..6 {
+                    for j in 0..6 {
+                        assert!(
+                            (actual[i][j] / scale - expected[i][j]).abs() <= 5e-13 * norm,
+                            "modulus scale {scale:e}, frequency {frequency}, component ({i},{j})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_complex_engineering_still_refuses_singular_and_indefinite_compliance() {
+    for modulus in [1.0, 100.0e9] {
+        let young = FractionalZener::new(modulus, 1.1 * modulus, 0.4, 1e-3).unwrap();
+        for nu in [0.5, 0.75] {
+            assert!(ComplexEngineering::new([young; 3], [nu; 3], [young; 3]).is_err());
+        }
+    }
+}
+
 /// Fixture 3: 3-D anisotropic wood TensorProny law for `PlaneStressTarget` in `MaterialPlane::Axes12`.
 fn wood_3d_prony_fixture() -> TensorProny {
     let eng = complex_engineering_wood_fixture();
