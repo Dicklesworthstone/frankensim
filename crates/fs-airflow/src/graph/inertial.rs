@@ -15,6 +15,9 @@ use fs_qty::Density;
 
 use super::{FixedPressure, GraphError, LossGraph, Sum, checkpoint};
 
+/// Vector reaction loads on the original fixed pipe geometry.
+pub mod loads;
+
 /// The existing descriptor owner uses bounded dense matrices and a native
 /// analytic quadratic tangent. Large spatial CFD belongs to its field owner.
 pub const MAX_INERTIAL_GRAPH_STATES: usize = 256;
@@ -44,6 +47,7 @@ pub enum InertialGraphError {
     Invalid(&'static str),
     Graph(GraphError),
     Momentum(PhsError),
+    PipeLoad(loads::PipeLoadError),
     Continuity {
         node: usize,
         residual_m3_s: f64,
@@ -73,6 +77,11 @@ impl From<PhsError> for InertialGraphError {
         Self::Momentum(error)
     }
 }
+impl From<loads::PipeLoadError> for InertialGraphError {
+    fn from(error: loads::PipeLoadError) -> Self {
+        Self::PipeLoad(error)
+    }
+}
 impl core::fmt::Display for InertialGraphError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "inertial hydraulic graph: {self:?}")
@@ -84,6 +93,7 @@ impl std::error::Error for InertialGraphError {}
 struct Compiled {
     topology: LossGraph,
     reference_density: Density,
+    branches: Vec<InertialBranch>,
     inertances: Vec<f64>,
     free: Vec<Option<usize>>,
     states: usize,
@@ -151,6 +161,9 @@ pub struct InertialGraphTrial {
     initial: InertialGraph,
     next: InertialGraph,
     report: InertialGraphReport,
+    // Retain the actual refreshed material samples, not the initial topology's
+    // gravity binding. Vector pipe loads must use the same accepted body force.
+    gravity: Option<Arc<super::GraphGravity>>,
 }
 impl InertialGraphTrial {
     pub fn report(&self) -> &InertialGraphReport {
@@ -177,6 +190,7 @@ impl InertialGraphTrial {
             initial,
             next,
             report,
+            ..
         } = self;
         let (_, reduced_pressures) = initial.admit_step(
             cx,
@@ -306,6 +320,7 @@ impl InertialGraph {
         let compiled = Compiled {
             topology: graph.clone(),
             reference_density,
+            branches: branches.to_vec(),
             inertances,
             free,
             states,
@@ -645,6 +660,7 @@ impl InertialGraph {
         Ok(InertialGraphTrial {
             initial: self.clone(),
             next,
+            gravity: graph.gravity.clone(),
             report: InertialGraphReport {
                 duration_s: dt,
                 average_volume_flows_m3_s: average.clone(),

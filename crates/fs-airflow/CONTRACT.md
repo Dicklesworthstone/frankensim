@@ -2717,6 +2717,28 @@ compressible, turbulent or multiphase storage. Native regression sources cover
 branched startup/decay/reversal, nonlinear loss closure, source gas buoyancy and
 viscosity, explicit pressure-port work and transactional refusal.
 
+### Pipe support forces and moments from native momentum
+
+`InertialGraphTrial::pipe_load` also converts that same trajectory to a physical
+support force, torque and integrated impulses for each original fixed pipe.
+`PipeLoadGeometry` compiles the actual constant-section centreline once; its
+length and area must independently match the original inertia. Bound gravity
+also requires the original endpoints and every distributed source section.
+The reaction includes individual endpoint pressure tractions, accelerating
+retained fluid, advected momentum and original local material weight. The
+latest constitutive recheck supplies gravity samples. A declared uniform
+exterior pressure shares the nodal datum, so shifting a gauge cannot create
+force. Full line and weight moments retain bends and arbitrary moment origins.
+
+Momentum flux integrates the square of the native affine flow, including both
+directions of a reversal with zero average transport. Friction is already in
+the solved pressure trajectory and is not added again as a second wall force.
+The returned wrench is directly usable by a mechanical load/impulse owner;
+regressions include an original articulated-body impulse and independent work
+balance. This is a slender plug-flow load on a fixed control volume, with no
+inferred shaft torque, swirl, reducer/junction closure or moving-pipe feedback.
+Publish candidate loads only after that same hydraulic trial is accepted.
+
 ### Joint branched momentum and finite enthalpy convection
 
 With `transient-transport`,

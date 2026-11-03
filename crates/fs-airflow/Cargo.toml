@@ -52,11 +52,14 @@ fs-alloc = { path = "../fs-alloc" }
 # Exercise original three-dimensional induction with finite material coolant.
 fs-em = { path = "../fs-em" }
 fs-feec = { path = "../fs-feec" }
+fs-ga = { path = "../fs-ga" }
 # Exercise the original nonideal EOS branch through material-bound flow and heat.
 fs-thermochem = { path = "../fs-thermochem" }
 # Test-only authority for the declared base-to-fin bondline cards in the
 # plate-fin end-to-end fixture.
 fs-matdb = { path = "../fs-matdb" }
+# Apply physical pipe reaction impulses through the original rigid-body owner.
+fs-mbd = { path = "../fs-mbd" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 # Exercise sourced finite coolant on the native material frame/heat transaction.
 fs-solid = { path = "../fs-solid" }
