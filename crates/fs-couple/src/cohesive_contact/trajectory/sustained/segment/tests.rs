@@ -3,6 +3,7 @@ use crate::cohesive_contact::impact::TraceTerm;
 use crate::cohesive_contact::trajectory::BodyLoad;
 use crate::cohesive_contact::trajectory::sustained::{
     AuditControls, NaturalMapScales, StoppingControls, SustainedContact, SustainedControls,
+    TurningControls,
 };
 use crate::cohesive_contact::trajectory::sustained::{
     SegmentControls, segment_candidate_controlled,
@@ -93,6 +94,11 @@ fn controls() -> SegmentControls {
             maximum_native_newton_iterations: 100_000,
             maximum_contact_force_n: 100.0,
             maximum_workspace_entries: 1_000_000,
+        },
+        turning: TurningControls {
+            minimum_step_s: 1e-4,
+            maximum_angle_rad: core::f64::consts::FRAC_PI_4,
+            maximum_refinements: 64,
         },
         stopping: StoppingControls {
             minimum_step_s: 1e-4,

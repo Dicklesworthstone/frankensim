@@ -511,9 +511,10 @@ fn advance_shared<'m, 'a>(
                                         candidate.endpoint.gaps_m[index],
                                         candidate.endpoint.normal_velocities_m_s[index],
                                     );
-                                    let earlier_stop = candidate.stops_before(requested_target_s);
+                                    let earlier_endpoint =
+                                        candidate.ends_before(requested_target_s);
                                     last = Some(candidate);
-                                    if earlier_stop {
+                                    if earlier_endpoint {
                                         Err(ArrivalProbeError::EarlierEndpoint)
                                     } else {
                                         Ok(values)
@@ -666,18 +667,19 @@ struct NativeTrial<'m, 'a> {
 }
 
 impl NativeTrial<'_, '_> {
-    fn stops_before(&self, requested_target_s: f64) -> bool {
+    fn ends_before(&self, requested_target_s: f64) -> bool {
         self.target_s < requested_target_s
             && matches!(
                 &self.candidate,
-                NativeCandidate::Supported(segment) if segment.report.stopping.is_some()
+                NativeCandidate::Supported(segment)
+                    if segment.report.stopping.is_some() || segment.report.turning.is_some()
             )
     }
 }
 
 enum ArrivalProbeError {
     Mechanics(TrajectoryError),
-    /// Preserve a real native tangential stop before continuing normal arrival.
+    /// Preserve an actual sliding stop or angular substep before normal arrival.
     EarlierEndpoint,
 }
 

@@ -5,7 +5,9 @@ use crate::cohesive_contact::impact::frictional::{
     FrictionalImpactControls, FrictionalResponseControls, NormalVelocityLaw,
 };
 use crate::cohesive_contact::trajectory::arrival::ArrivalControls;
-use crate::cohesive_contact::trajectory::sustained::{StoppingControls, SustainedControls};
+use crate::cohesive_contact::trajectory::sustained::{
+    StoppingControls, SustainedControls, TurningControls,
+};
 use fs_contact::frictional_multicontact::FrictionalContactConfig;
 use fs_contact::sustained::solve::SolveControls;
 use fs_material::cohesive::BilinearCohesive;
@@ -143,6 +145,11 @@ fn controls(maximum_step_s: f64) -> EvolutionControls {
                 maximum_native_newton_iterations: 400_000,
                 maximum_contact_force_n: 100.0,
                 maximum_workspace_entries: 1_000_000,
+            },
+            turning: TurningControls {
+                minimum_step_s: 1e-6,
+                maximum_angle_rad: core::f64::consts::FRAC_PI_4,
+                maximum_refinements: 64,
             },
             stopping: StoppingControls {
                 minimum_step_s: 1e-6,
@@ -433,3 +440,6 @@ mod arrival;
 
 #[path = "tests/transitions.rs"]
 mod transitions;
+
+#[path = "tests/turning.rs"]
+mod turning;

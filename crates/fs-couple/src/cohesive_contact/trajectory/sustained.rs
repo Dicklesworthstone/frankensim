@@ -24,11 +24,13 @@ use super::geometry::{self, GeometryError, Sum};
 mod audit;
 mod segment;
 mod stopping;
+mod turning;
 pub use segment::{
     SegmentCandidate, SegmentControls, SegmentError, SegmentReport, segment_candidate,
     segment_candidate_controlled,
 };
 pub use stopping::{StoppingControls, StoppingError, StoppingReport};
+pub use turning::{TurningControls, TurningError, TurningReport};
 #[cfg(test)]
 #[path = "sustained/tests.rs"]
 mod tests;

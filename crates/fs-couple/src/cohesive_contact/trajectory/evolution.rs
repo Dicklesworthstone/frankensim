@@ -6,6 +6,8 @@
 //! body velocity or gap is projected. Open contacts remain in geometry checks.
 //! Arrivals narrow activation to a separately requested gap accuracy and retain
 //! the original response at the accepted endpoint of the arrival bracket.
+//! Loaded sliding can also end a segment at a bounded angular resolution,
+//! retaining its full nonzero relative velocity without declaring a stop.
 //!
 //! Geometry and straight native displacement paths have the same approximation
 //! as the transient owner. A positive impact activation gap is not silently
@@ -16,7 +18,7 @@
 pub use super::arrival::{ArrivalControls, ArrivalReport};
 use super::sustained::{
     NaturalMapScales, SegmentCandidate, SegmentControls, StoppingReport, SustainedContact,
-    segment_candidate_controlled,
+    TurningReport, segment_candidate_controlled,
 };
 use super::{
     BodyLoad, FrictionalContact, Sum, TrajectoryControls, TrajectoryError, TrajectoryReport, Work,
@@ -65,6 +67,15 @@ pub struct TimedArrivalReport {
     pub arrival: ArrivalReport,
 }
 
+/// An actual shorter supported segment chosen to resolve sliding direction.
+/// This is a numerical resolution receipt, not a physical stopping event.
+#[derive(Clone, Copy, Debug)]
+pub struct TimedTurningReport {
+    pub time_s: f64,
+    pub segment_start_time_s: f64,
+    pub turning: TurningReport,
+}
+
 /// The complete physical window. External Coulomb loss is separate from the
 /// original material friction and instantaneous impact loss in `trajectory`.
 #[derive(Debug)]
@@ -78,6 +89,8 @@ pub struct EvolutionReport {
     /// At most one arrival is retained per accepted positive native segment.
     /// All unpublished arrival probes still charge `trajectory`'s body work.
     pub arrival_events: Vec<TimedArrivalReport>,
+    /// Original admitted angular substeps, bounded by accepted-step capacity.
+    pub turning_segments: Vec<TimedTurningReport>,
     pub contact_friction_loss_j: f64,
     pub absolute_sustained_energy_defect_j: f64,
     pub absolute_sustained_native_energy_defect_j: f64,
@@ -165,6 +178,7 @@ pub(super) struct State<'s> {
     sustained_steps: usize,
     stopping_events: Vec<TimedStoppingReport>,
     arrival_events: Vec<TimedArrivalReport>,
+    turning_segments: Vec<TimedTurningReport>,
     contact_solves: usize,
     response_evaluations: usize,
     friction_loss: Sum,
@@ -192,6 +206,7 @@ impl<'s> State<'s> {
             || controls.trajectory.closing_velocity_tolerance_m_s
                 > controls.sustained.step.audit.velocity_tolerance_m_s
             || controls.sustained.stopping.minimum_step_s < controls.trajectory.minimum_step_s
+            || controls.sustained.turning.minimum_step_s < controls.trajectory.minimum_step_s
             || !positive(controls.arrival.minimum_step_s)
             || !positive(controls.arrival.time_tolerance_s)
             || !controls.arrival.gap_tolerance_m.is_finite()
@@ -241,6 +256,12 @@ impl<'s> State<'s> {
             extra,
             checked_mul(controls.trajectory.maximum_accepted_steps, arrival_entries)?,
         )?;
+        let turning_entries =
+            core::mem::size_of::<TimedTurningReport>().div_ceil(core::mem::size_of::<f64>());
+        extra = checked_add(
+            extra,
+            checked_mul(controls.trajectory.maximum_accepted_steps, turning_entries)?,
+        )?;
         if !contacts.is_empty() {
             extra = checked_add(extra, controls.sustained.step.maximum_workspace_entries)?;
             extra = checked_add(
@@ -261,6 +282,7 @@ impl<'s> State<'s> {
             sustained_steps: 0,
             stopping_events: Vec::with_capacity(controls.maximum_stopping_events),
             arrival_events: Vec::with_capacity(controls.trajectory.maximum_accepted_steps),
+            turning_segments: Vec::with_capacity(controls.trajectory.maximum_accepted_steps),
             contact_solves: 0,
             response_evaluations: 0,
             friction_loss: Sum::default(),
@@ -512,6 +534,21 @@ impl<'s> State<'s> {
                 stopping,
             });
         }
+        if let Some(turning) = candidate.report.turning.take() {
+            if self.turning_segments.len() >= self.controls.trajectory.maximum_accepted_steps {
+                return Err(TrajectoryError::Budget("retained angular substep reports"));
+            }
+            if turning.elapsed_s != step.elapsed_s {
+                return Err(TrajectoryError::Invalid(
+                    "angular resolution receipt must retain the native duration",
+                ));
+            }
+            self.turning_segments.push(TimedTurningReport {
+                time_s: step.target_time_s,
+                segment_start_time_s: start_time_s,
+                turning,
+            });
+        }
         self.sustained_steps = checked_add(self.sustained_steps, 1)?;
         self.friction_loss.add(step.audit.friction_loss_j)?;
         self.energy_defect.add(step.audit.energy_residual_j.abs())?;
@@ -531,6 +568,7 @@ impl<'s> State<'s> {
             sustained_steps: self.sustained_steps,
             stopping_events: self.stopping_events,
             arrival_events: self.arrival_events,
+            turning_segments: self.turning_segments,
             contact_friction_loss_j: self.friction_loss.total()?,
             absolute_sustained_energy_defect_j: self.energy_defect.total()?,
             absolute_sustained_native_energy_defect_j: self.native_defect.total()?,

@@ -1,4 +1,4 @@
-//! Stop-aware finite segments through the original cohesive material response.
+//! Resolved stops and turns through the original cohesive material response.
 //!
 //! A reflected trial is private numerical continuation. A shortened endpoint
 //! becomes motion only after the same complete sustained-contact audit passes.
@@ -7,23 +7,25 @@
 use super::{
     AuditError, BodyLoad, NaturalMapScales, Prepared, ResponseError, StoppingControls,
     StoppingError, StoppingReport, SustainedCandidate, SustainedContact, SustainedControls,
-    SustainedError, Work, add, admit, finite, mul, poll, positive, solve_actual_controlled,
-    stopping,
+    SustainedError, TurningControls, TurningError, TurningReport, Work, add, admit, finite, mul,
+    poll, positive, solve_actual_controlled, stopping, turning,
 };
 use fs_exec::Cx;
 use fs_solid::cohesive::dynamics::CohesiveMotion;
 
-/// Per-segment limits include every unpublished stopping-time probe.
+/// Per-segment limits include every unpublished stopping and turning probe.
 #[derive(Clone, Copy, Debug)]
 pub struct SegmentControls {
     pub step: SustainedControls,
     pub stopping: StoppingControls,
+    pub turning: TurningControls,
     pub maximum_contact_solves: usize,
     pub maximum_response_evaluations: usize,
 }
 
 /// One complete admitted segment. It can end before the requested time at a
-/// resolved relative sliding stop; the caller then continues from these bodies.
+/// resolved relative sliding stop or angular subdivision; the caller then
+/// continues from these bodies with a newly solved force.
 pub struct SegmentCandidate<'m, 'a> {
     pub step: SustainedCandidate<'m, 'a>,
     pub report: SegmentReport,
@@ -35,6 +37,8 @@ pub struct SegmentReport {
     pub accepted_duration_s: f64,
     /// Bracketed local continuation event, not exact-flow CCD or uniqueness.
     pub stopping: Option<StoppingReport>,
+    /// Actual angular subdivision, distinct from a complete relative stop.
+    pub turning: Option<TurningReport>,
     /// Original contact IDs whose complete relative tangential speed stopped.
     /// Moving supports or another body can leave their world speeds nonzero.
     pub stopped_contact_ids: Vec<u64>,
@@ -48,10 +52,11 @@ pub enum SegmentError {
     Budget(&'static str),
     Step(SustainedError),
     Stopping(StoppingError<SustainedError>),
+    Turning(TurningError),
 }
 impl core::fmt::Display for SegmentError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "cohesive stop-aware segment refused: {self:?}")
+        write!(f, "cohesive resolved contact segment refused: {self:?}")
     }
 }
 impl std::error::Error for SegmentError {}
@@ -65,9 +70,14 @@ impl From<ResponseError> for SegmentError {
         Self::Step(error.into())
     }
 }
+impl From<TurningError> for SegmentError {
+    fn from(error: TurningError) -> Self {
+        Self::Turning(error)
+    }
+}
 
 /// Advance through loaded contact up to the requested duration or an admitted
-/// sliding stop. Loads are held forces; prescribed jump offsets name the
+/// sliding stop or resolved turn. Loads are held forces; prescribed jump offsets name the
 /// requested endpoint and are interpolated to every original shorter trial.
 #[allow(clippy::too_many_arguments)]
 pub fn segment_candidate<'m, 'a>(
@@ -99,6 +109,8 @@ pub fn segment_candidate<'m, 'a>(
 /// accepted bodies. Safeguarded secant/bisection locates a zero of the selected
 /// initial slip-direction velocity; complete tangential velocity must also
 /// vanish within the declared tolerance. A transverse turn is not a stop.
+/// Resolved turns exceeding the configured angular bound instead subdivide the
+/// actual duration and recompute every force and body from the same predecessor.
 ///
 /// The final original replay must pass all contacts' unchanged audit. If that
 /// reveals another reversal, its earlier bracket is resolved before adoption.
@@ -137,6 +149,7 @@ pub fn segment_candidate_controlled<'m, 'a>(
             "bounded stop controls no looser than the physical velocity audit required",
         ));
     }
+    turning::validate(controls.turning)?;
     // This owner's initial/interpolated offset arrays and event records are
     // additional to the single native candidate already bounded by step.
     let mut extra = add(mul(motions.len(), 16)?, mul(contacts.len(), 16)?)?;
@@ -178,9 +191,51 @@ pub fn segment_candidate_controlled<'m, 'a>(
         cancelled,
     )?;
     let mut event = None;
+    let mut turn_trigger = None;
+    let mut turn_refinements = 0;
     loop {
         poll(cancelled)?;
-        match prepared.audit(controls.step.audit, cancelled) {
+        let angular = angular_change(&prepared, controls, cancelled)?;
+        let audit = prepared.audit(controls.step.audit, cancelled);
+        let subdivide = match &audit {
+            Ok(_) => angular.exceeds,
+            Err(AuditError::UnresolvedReversal { .. }) => angular.transverse_exceeds,
+            _ => None,
+        };
+        if let Some(contact_id) = subdivide {
+            let previous_s = prepared.elapsed_s;
+            let h = turning::shorter_duration(previous_s, controls.turning, turn_refinements)?;
+            let actual_s = finite(finite(start_s + h)? - start_s)?;
+            if actual_s < controls.turning.minimum_step_s || actual_s >= previous_s {
+                return Err(TurningError::Unrepresentable {
+                    previous_s,
+                    requested_s: h,
+                    actual_s,
+                }
+                .into());
+            }
+            turn_trigger.get_or_insert(contact_id);
+            turn_refinements = add(turn_refinements, 1)?;
+            // Neither the preceding reflected candidate nor a prior stopping
+            // receipt belongs to this new original-duration solve.
+            drop(prepared);
+            event = None;
+            prepared = at_duration(
+                motions,
+                contacts,
+                loads,
+                &initial_offsets,
+                scales,
+                initial_forces_n,
+                requested_s,
+                h,
+                controls,
+                &mut work,
+                cancelled,
+            )?;
+            continue;
+        }
+        match audit {
             Ok(audited) => {
                 // An exact stop can coincide with the requested endpoint.
                 // The original force solve already freshly replayed this time.
@@ -229,6 +284,12 @@ pub fn segment_candidate_controlled<'m, 'a>(
                         requested_duration_s: requested_s,
                         accepted_duration_s,
                         stopping: event,
+                        turning: turn_trigger.map(|trigger_contact_id| TurningReport {
+                            trigger_contact_id,
+                            elapsed_s: accepted_duration_s,
+                            maximum_angle_rad: angular.maximum_angle_rad,
+                            refinements: turn_refinements,
+                        }),
                         stopped_contact_ids,
                         contact_solves: work.contact_solves,
                         response_evaluations: work.response_evaluations,
@@ -264,22 +325,43 @@ pub fn segment_candidate_controlled<'m, 'a>(
                         controls,
                         &mut work,
                         &mut || poller(),
-                    )?;
+                    )
+                    .map_err(|error| StoppingProbeError::Failure(error.into()))?;
                     let velocity = trial.inputs[index].relative_velocity_after_m_s;
                     let sampled = (trial.elapsed_s, [velocity[1], velocity[2]]);
+                    let transverse_turn = angular_change(&trial, controls, &mut || poller())
+                        .map_err(StoppingProbeError::Failure)?
+                        .transverse_exceeds
+                        .is_some();
                     last = Some(trial);
-                    Ok::<_, SustainedError>(sampled)
+                    if transverse_turn {
+                        Err(StoppingProbeError::Turning)
+                    } else {
+                        Ok(sampled)
+                    }
                 };
-                let stopped = stopping::locate(
+                let result = stopping::locate(
                     [before[1], before[2]],
                     upper_s,
                     [after[1], after[2]],
                     controls.stopping,
                     &mut response,
                     cancelled,
-                )
-                .map_err(SegmentError::Stopping)?;
+                );
                 drop(response);
+                let stopped = match result {
+                    Ok(stopped) => stopped,
+                    Err(StoppingError::Response(StoppingProbeError::Turning)) => {
+                        prepared = last.ok_or(SegmentError::Invalid(
+                            "missing original transverse-turn response",
+                        ))?;
+                        event = None;
+                        // The complete audit and angular bounds select the next
+                        // action; this intermediate scalar probe is not a stop.
+                        continue;
+                    }
+                    Err(error) => return Err(stopping_refusal(error)),
+                };
                 prepared = last.ok_or(SegmentError::Invalid("missing final stopping replay"))?;
                 let actual = prepared.inputs[index].relative_velocity_after_m_s;
                 if prepared.elapsed_s.to_bits() != stopped.elapsed_s.to_bits()
@@ -298,6 +380,123 @@ pub fn segment_candidate_controlled<'m, 'a>(
             Err(error) => return Err(SustainedError::Audit(error).into()),
         }
     }
+}
+
+struct AngularChange {
+    maximum_angle_rad: f64,
+    exceeds: Option<u64>,
+    transverse_exceeds: Option<u64>,
+}
+
+/// Every relevant contact contributes to the admitted angular bound. A truly
+/// collinear reflected endpoint still belongs to the original stopping search.
+fn angular_change(
+    prepared: &Prepared<'_, '_>,
+    controls: SegmentControls,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<AngularChange, SegmentError> {
+    let mut result = AngularChange {
+        maximum_angle_rad: 0.0,
+        exceeds: None,
+        transverse_exceeds: None,
+    };
+    for contact in &prepared.inputs {
+        poll(cancelled)?;
+        if finite(contact.force_n[0] * contact.friction_coefficient)? <= 0.0 {
+            continue;
+        }
+        let before = contact.relative_velocity_before_m_s;
+        let after = contact.relative_velocity_after_m_s;
+        let Some(change) = turning::measure(
+            [before[1], before[2]],
+            [after[1], after[2]],
+            controls.stopping.velocity_tolerance_m_s,
+        )?
+        else {
+            continue;
+        };
+        result.maximum_angle_rad = result.maximum_angle_rad.max(change.angle_rad);
+        if change.angle_rad > controls.turning.maximum_angle_rad {
+            result.exceeds = Some(result.exceeds.map_or(contact.id, |id| id.min(contact.id)));
+            if change.transverse_resolved {
+                result.transverse_exceeds = Some(
+                    result
+                        .transverse_exceeds
+                        .map_or(contact.id, |id| id.min(contact.id)),
+                );
+            }
+        }
+    }
+    Ok(result)
+}
+
+enum StoppingProbeError {
+    Failure(SegmentError),
+    /// A complete native intermediate response resolved a sliding turn.
+    Turning,
+}
+
+/// Keep ordinary stopping refusal details while the private turn marker is
+/// intercepted by the surrounding segment loop, never published as mechanics.
+fn stopping_refusal(error: StoppingError<StoppingProbeError>) -> SegmentError {
+    let error = match error {
+        StoppingError::Response(StoppingProbeError::Failure(error)) => return error,
+        StoppingError::Response(StoppingProbeError::Turning) => {
+            return SegmentError::Invalid("unhandled original turning endpoint");
+        }
+        StoppingError::Invalid(reason) => StoppingError::Invalid(reason),
+        StoppingError::NonFinite(operation) => StoppingError::NonFinite(operation),
+        StoppingError::Cancelled => StoppingError::Cancelled,
+        StoppingError::ResponsePanicked => StoppingError::ResponsePanicked,
+        StoppingError::NotSliding { initial_speed_m_s } => {
+            StoppingError::NotSliding { initial_speed_m_s }
+        }
+        StoppingError::NotBracketed {
+            upper_projection_m_s,
+        } => StoppingError::NotBracketed {
+            upper_projection_m_s,
+        },
+        StoppingError::TransverseVelocity {
+            elapsed_s,
+            velocity_m_s,
+        } => StoppingError::TransverseVelocity {
+            elapsed_s,
+            velocity_m_s,
+        },
+        StoppingError::MinimumStep {
+            bracket_s,
+            minimum_step_s,
+        } => StoppingError::MinimumStep {
+            bracket_s,
+            minimum_step_s,
+        },
+        StoppingError::Unrepresentable {
+            bracket_s,
+            requested_s,
+            actual_s,
+        } => StoppingError::Unrepresentable {
+            bracket_s,
+            requested_s,
+            actual_s,
+        },
+        StoppingError::Budget {
+            evaluations,
+            maximum,
+        } => StoppingError::Budget {
+            evaluations,
+            maximum,
+        },
+        StoppingError::Replay {
+            expected_elapsed_s,
+            actual_elapsed_s,
+            velocity_m_s,
+        } => StoppingError::Replay {
+            expected_elapsed_s,
+            actual_elapsed_s,
+            velocity_m_s,
+        },
+    };
+    SegmentError::Stopping(error)
 }
 
 #[allow(clippy::too_many_arguments)]

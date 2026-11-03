@@ -18532,6 +18532,41 @@ exercise accelerated arrival, a translating wall with its actual source work,
 an arrival during existing support, activation-band refinement, and atomic
 budget/cancellation refusal.
 
+### Angular resolution of sustained sliding
+
+`SegmentControls::turning` bounds the actual change in a loaded contact's
+relative tangential velocity direction. Its minimum duration, angle strictly
+below pi/2, and refinement count are numerical resolution controls; they do not
+change the Coulomb coefficient or declare a new physical stopping event.
+Normalized full tangent vectors and a compensated determinant distinguish
+resolved transverse motion from a collinear reversal without overflowing large
+velocity products or manufacturing a transverse remainder.
+
+A resolved turn exceeding the angle bound shortens the original interval and
+re-solves all held forces and native mechanics from the same accepted bodies.
+Every contact contributes to the final angular bound, and the complete original
+gap, momentum, force and work audit remains mandatory. Original prescribed
+offsets follow their actual shorter physical time. No endpoint velocity or
+history is projected. Collinear reversal continues through the original full
+relative-velocity stopping locator. Its intermediate native probes are also
+checked for transverse turning, so an apparently collinear long interval can
+reveal its change of direction before the scalar stop search exhausts.
+
+The segment's optional `TurningReport` records the trigger contact, actual
+duration, maximum relevant endpoint angle and refinement work.
+`EvolutionReport::turning_segments` retains these bounded numerical receipts
+separately from physical stop and impact reports. A segment can carry both a
+turning receipt and a subsequent genuine stop at the same native endpoint;
+that is one accepted segment. Arrival searches preserve an actual earlier
+angular substep before continuing normal contact localization.
+
+All force solves, mechanical responses, native residuals and Newton work from
+discarded angular trials remain charged to the same segment/window budgets.
+Minimum duration, unrepresentable shortening, source failure and exhausted
+refinement/work budgets refuse without partial publication. The angle bound
+describes the original discrete response endpoints, not a global integration
+error estimate or an exact continuous-flow event-time theorem.
+
 ## Finite cohesive patch load line
 
 `cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.
