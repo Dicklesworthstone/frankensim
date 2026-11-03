@@ -476,6 +476,7 @@ fn common_linear_stiff_relaxation_is_exact_and_unequal_rates_retain_bounded_refu
 }
 
 mod collective_linear;
+mod collective_uniform;
 
 #[test]
 fn cancellation_at_each_boundary_and_input_refusals_leave_exact_retry() {

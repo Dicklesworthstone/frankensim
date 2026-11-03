@@ -3629,8 +3629,8 @@ material or advection pass is claimed.
 `SharedRecoilWorkspace` advances fixed gas amounts against one common
 `SlidingSupport` along an authored scalar axis. Each `SharedRecoilCell`
 retains its own density, volume, momentum and nonnegative frozen linear and
-quadratic resistance coefficients. For unequal linear rates or quadratic drag, the original exact reduced-mass
-pair mechanics is composed in a palindromic Strang sweep. This general path
+quadratic resistance coefficients. For unequal drag laws or heterogeneous nonlinear states, the original exact
+reduced-mass pair mechanics is composed in a palindromic Strang sweep. This general path
 approximates simultaneous shared-support dynamics with one common inertia.
 Single-active-cell intervals reuse the exact original pair map. Multiple
 active cells with one common linear rate and no quadratic drag use the exact
@@ -3751,9 +3751,10 @@ particular, an initially comoving cell retains its induced second-order
 impulse and third-order heat. Work remains separate from heat; no kinetic
 roundoff residual is relabelled dissipation. Existing actual endpoint
 momentum/energy acceptance, compensated accumulators, cancellation and
-private-candidate publication remain authoritative. Unequal-rate or
-quadratic shared systems retain the original bounded refined solver, and
-the one-active-cell path retains the original exact pair calculation.
+private-candidate publication remain authoritative. Other shared systems use
+the original bounded refined solver, except for the uniform nonlinear groups
+described below. The one-active-cell path retains the original exact pair
+calculation.
 
 The original network support owner receives this exact mode through its
 existing workspace call. No network clock, source splitting, caloric storage
@@ -3774,3 +3775,39 @@ fs-math/fs-qty; unrelated surrounding error variants were explicit fixtures.
 The added stiff common-rate network regression was source-reviewed and
 formatter-parsed but not compiled or executed. Full Cargo/network/material
 verification is not claimed by this selected-source run.
+
+### Exact shared recoil for uniform nonlinear gas groups
+
+If all active gas cells enter with exactly the same actual velocity and
+exactly the same frozen linear/quadratic acceleration coefficients, a
+positive quadratic law preserves their common velocity. The shared solver
+now advances this invariant group through one original exact reduced-mass
+pair map using the compensated sum of active gas masses and the one actual
+support inertia. Pure quadratic and combined linear/quadratic laws both
+use one accepted interval, independent of the collective relaxation rate.
+The existing general common-linear mode still handles unequal velocities.
+
+Each gas cell receives its own mass share of physical slip heat and
+integrated work in the initial support frame. The original outer owner
+restores work using each cell's actual represented impulse and checks actual
+gas/support endpoint momentum and energy. No conservation residual becomes
+heat. Disconnected cells do not enter the group and remain unchanged.
+Group detection uses exact equality, with no tolerance merging different
+states or laws; heterogeneous systems retain the original bounded solver.
+
+The implementation uses the existing workspace with no per-advance vector
+allocation. The aggregate unit-density coordinate is private mechanics,
+not a new gas cell, volume, caloric state, transport clock or material model.
+Original network source owners receive the mode through their unchanged
+shared-workspace call. Coefficients remain frozen over the supplied source
+interval; material evolution and complete source/flow splitting accuracy
+retain their original ownership.
+
+Four new actual-source native regression groups check independent Riccati
+slip decay and individual heat/work for both slip signs and pure/combined
+laws; unequal density/volume and mass partition; boosts, ordering and clock
+partition; stiff/light-support one-interval success and exact heterogeneity
+fallback; disconnected cells; and every cancellation checkpoint with exact
+retry and retained workspace storage. All 25 selected-source native tests passed, including
+the existing common-linear, shared, drag and pair regressions. Full Cargo
+and network/material integration execution remain outside this native run.

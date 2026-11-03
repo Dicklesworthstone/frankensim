@@ -1,13 +1,15 @@
 //! One finite axial support coupled to several fixed gas amounts.
 //!
-//! Common linear resistance uses exact collective and deviation modes. Other
-//! laws compose exact pair maps symmetrically with bounded time refinement;
+//! Common linear resistance uses exact collective and deviation modes; an
+//! invariant common-velocity nonlinear group uses one exact aggregate pair.
+//! Other laws compose exact pair maps with bounded symmetric time refinement;
 //! a resolved-rate cap prevents falsely converged saturated pair projections.
 
 use super::{RecoilControl, RecoilLaw, SlidingSupport, Time, WallExchangeError, mechanics};
 use super::{nonnegative, poll, positive};
 
 mod collective_linear;
+mod collective_uniform;
 
 /// One fixed gas amount and its frozen acceleration law against the support.
 /// Coefficients are active even when this cell initially has zero slip.
@@ -186,6 +188,9 @@ impl SharedRecoilWorkspace {
     /// A common positive linear rate with no quadratic terms instead uses the
     /// exact collective/deviation modes in one O(cells) pass, including each
     /// cell's physical heat and work, without a stiffness step restriction.
+    /// Identical actual gas velocities and identical linear/quadratic laws
+    /// also define an invariant group: its summed mass uses one exact pair.
+    /// Group detection is exact and never merges approximately equal inputs.
     ///
     /// These are temporal error estimates, not certified error enclosures.
     /// No moving volume, thermal law, external drive or branch-axis mapping is
@@ -270,6 +275,12 @@ impl SharedRecoilWorkspace {
                 attempted_steps = 1;
             } else if let Some(updated) =
                 collective_linear::advance(cells, &mut self.accepted, dt, support, &mut cancelled)?
+            {
+                next_support = updated;
+                accepted_steps = 1;
+                attempted_steps = 1;
+            } else if let Some(updated) =
+                collective_uniform::advance(cells, &mut self.accepted, dt, support, &mut cancelled)?
             {
                 next_support = updated;
                 accepted_steps = 1;
