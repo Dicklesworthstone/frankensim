@@ -3105,3 +3105,68 @@ mechanical coupling, convergence, source authority and actual field solving
 belong to consumers. This primitive adds no conduction, nonlinear dielectric,
 dispersion, moving geometry, mesh-overlap certification or continuum error bound.
 Focused synthetic G1/G3 tests are in `tests/tetrahedral_electrostatic.rs`.
+
+### Finite-window exterior field momentum and storage rate
+
+The original exposure and real/proper ensemble owners expose momentum_field
+and illumination_momentum_field beside their Maxwell-stress queries. They
+return the explicitly named Minkowski density <D cross B> in N s/m³ and
+<d(D cross B)/dt> in N/m³, using the same original homogeneous lossless
+exterior epsilon and mu. In vacuum this is the electromagnetic momentum
+S/c². A material exterior does not thereby acquire an inferred mechanical,
+striction or moving-body momentum law.
+
+The complete vector fields retain both physical faces, polarization, spatial
+interference and equal-frequency coherent grouping. Deterministic real
+products keep carrier and beat terms; only the authored proper factor law
+removes sum terms. Real derivatives separate carrier and difference terms
+before multiplying their frequencies. Proper derivatives form the frequency
+difference in DD first, so a large common carrier cannot replace a slow beat.
+A proper monochromatic second moment has exactly zero time derivative.
+Every rate uses the original normalized shutter; only uniform weighting
+reduces to an endpoint momentum difference divided by duration.
+
+Results retain original point samples plus compensated exact continuous-cell
+momentum and rate integrals in N s/m and N/m. The native signed modal pairing
+and cosine/sine quadratures integrate the represented band-limited fields
+before their quadratic products are sampled, so a Nyquist carrier cannot
+alias into a false spatially uniform momentum or storage rate. DD modal
+sums and differences remain DD through temporal contraction and frequency
+differentiation. Spatial quadratures combine before frequency factors; the
+already conjugated modal parts rotate by -i while original point amplitudes
+rotate by +i. A consumer still owns the enclosing depth/volume integration
+and interior material accounting. One plane is not a body force, and this
+query does not advance mechanics or debit energy.
+
+The original fields/temporal kernels are reused without new film solves.
+One real/proper bank is streamed at a time; its exact modal integral precedes
+in-place synthesis of the original point samples, without a second retained
+bank or additional FFT. The original N*F² pair-work units remain authoritative.
+The fixed modal pass contracts Q <= 2*N spatial quadratures as well as N point
+samples: each real scalar-pair vector density/rate uses eighteen products,
+and each proper pair uses at most twelve. The additional complete-workspace
+limit includes the frequency coefficient cache, DD point accumulation,
+returned points and fixed modal scratch. Bounded cancellation applies before
+publication.
+
+Two new contraction regressions cover independent real-time density/rate
+quadrature, proper ensembles, uniform/triangular shutters and large-carrier
+slow beats. Three original source-backed stress fixtures additionally cover
+joint-face momentum, its relation to Poynting flux, vacuum volume/surface
+momentum balance, budgets, cancellation, darkness and replay. Two further
+source-backed regressions exercise actual x/y Nyquist waves, real/proper
+factors and a signed cross-frequency beat. They distinguish aliased point
+sums from continuous-cell density and rate: a single traveling spatial mode
+has zero integrated rate while its original point rates remain nonzero.
+
+Independent JavaScript mathematical checks agreed to 4.22e-15 absolute on
+the unit-scale vector/time fixture and 3.49e-9 relative on the 128-interval
+vacuum depth quadrature. Additional modal checks agreed to 7.11e-15 absolute
+with the analytical Nyquist two-frequency beat and 3.93e-12 with direct
+space/time quadrature, including paired modes, a constant and Nyquist bins.
+In the one-mode fixture, sampled density was 1.974 times its exact cell
+integral and sampled rate was -37.15 N/m although the exact integrated rate
+was zero. The Rust regressions are authored but unexecuted: no native
+execution environment is available. These checks do not certify the full
+Maxwell owner, a material force law or a repository-wide quality gate.
+

@@ -56,6 +56,8 @@ pub use exposure::{
     AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
     AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumExposureLayerHeatSpectrum,
     AngularSpectrumExposureLayerLimits, AngularSpectrumExposureLimits,
+    AngularSpectrumExposureMomentumField, AngularSpectrumExposureMomentumLimits,
+    AngularSpectrumExposureMomentumPoint,
     AngularSpectrumExposurePoint, AngularSpectrumExposureStressField,
     AngularSpectrumExposureStressLimits, AngularSpectrumExposureStressPoint,
     AngularSpectrumFactorStatistics, AngularSpectrumHeatAreaQuadrature,

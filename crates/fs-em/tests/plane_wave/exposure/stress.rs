@@ -1,7 +1,8 @@
 //! G1/G3/G4 source-bound finite-window Maxwell stress and traction.
 use super::*;
 use fs_em::plane_wave::angular_spectrum::{
-    AngularSpectrumExposureStressLimits, AngularSpectrumIlluminationLimits,
+    AngularSpectrumExposureStressLimits, AngularSpectrumExposureMomentumLimits,
+    AngularSpectrumIlluminationLimits,
     AngularSpectrumIlluminationSide as Face, PreparedAngularSpectrumIllumination,
 };
 
@@ -281,6 +282,33 @@ fn g1_stress_of_mean_and_joint_face_covariance_matches_authored_ensemble() {
             3e-12,
         );
     }
+    // The same source-bound mean plus joint proper factor supplies D x B.
+    // Here epsilon=mu=1; finite differences shift the original shutter and
+    // independently differentiate the existing Poynting observable.
+    let momentum_limits = AngularSpectrumExposureMomentumLimits {
+        maximum_workspace_bytes: ensemble.momentum_workspace_bytes().unwrap(),
+    };
+    let momentum = ensemble.illumination_momentum_field(
+        Face::TotalRight, distance, window, momentum_limits, || false,
+    ).unwrap();
+    let flux = ensemble.illumination_field(
+        Face::TotalRight, distance, window, || false,
+    ).unwrap();
+    let h = 1e-5;
+    let before = ensemble.illumination_field(Face::TotalRight, distance,
+        HarmonicWindow::new(window.start_s()-h, window.duration_s()).unwrap(),
+        || false).unwrap();
+    let after = ensemble.illumination_field(Face::TotalRight, distance,
+        HarmonicWindow::new(window.start_s()+h, window.duration_s()).unwrap(),
+        || false).unwrap();
+    for (i, point) in momentum.points().iter().enumerate() {
+        for c in 0..3 {
+            near(point.minkowski_density_n_s_m3[c], flux.points()[i].poynting_w_m2[c], 2e-14);
+            let expected = (after.points()[i].poynting_w_m2[c]
+                - before.points()[i].poynting_w_m2[c]) / (2.0*h);
+            near(point.minkowski_rate_n_m3[c], expected, 3e-9*expected.abs().max(1e-12));
+        }
+    }
     let left_stress = ensemble
         .illumination_stress_field(Face::TotalLeft, 0.1, window, stress_limits(), || false)
         .unwrap();
@@ -328,6 +356,53 @@ fn g1_empty_region_short_window_stress_is_field_momentum_storage_not_body_force(
         / window.duration_s();
     assert!(result[2].abs() > 1e-13);
     near(result[2], rate, 3e-10 * rate.abs());
+    // The new original-field observable supplies the previously absent
+    // storage term. Depth quadrature belongs to this test/consumer, not to an
+    // invented body force. The empty vacuum volume has zero mechanical load.
+    let momentum_limits = AngularSpectrumExposureMomentumLimits {
+        maximum_workspace_bytes: bank.momentum_workspace_bytes().unwrap(),
+    };
+    let momentum = bank.illumination_momentum_field(
+        Face::TotalRight, distances[1], window, momentum_limits, || false,
+    ).unwrap();
+    let flux = bank.illumination_field(
+        Face::TotalRight, distances[1], window, || false,
+    ).unwrap();
+    for (point, poynting) in momentum.points().iter().zip(flux.points()) {
+        for c in 0..3 {
+            let expected = epsilon * mu * poynting.poynting_w_m2[c];
+            near(point.minkowski_density_n_s_m3[c], expected,
+                5e-15 * expected.abs().max(1e-30));
+        }
+    }
+    use fs_fft::harmonic_window::HarmonicWindowProfile::{Uniform, Triangular};
+    for profile in [Uniform, Triangular] {
+        let shutter = HarmonicWindow::with_profile(
+            window.start_s(), window.duration_s(), profile,
+        ).unwrap();
+        let surface = bank.boundary_stress_resultant_n(
+            distances, shutter, stress_limits(), || false,
+        ).unwrap();
+        let mut volume_rate = [0.0; 3];
+        let steps = 128;
+        let span = distances[0] + distances[1];
+        for step in 0..=steps {
+            let z = -distances[0] + span * step as f64 / steps as f64;
+            let (face, distance) = if z < 0.0 { (Face::TotalLeft, -z) }
+                else { (Face::TotalRight, z) };
+            let field = bank.illumination_momentum_field(
+                face, distance, shutter, momentum_limits, || false,
+            ).unwrap();
+            let weight = if step == 0 || step == steps { 1.0 }
+                else if step % 2 == 0 { 2.0 } else { 4.0 };
+            let rate = field.momentum_rate_per_depth_n_m();
+            for c in 0..3 { volume_rate[c] += weight * rate[c]; }
+        }
+        for c in 0..3 {
+            let rate = volume_rate[c] * span / (3.0 * steps as f64);
+            near(surface[c], rate, 1e-8 * surface[c].abs().max(1e-20));
+        }
+    }
     near(result[0], 0.0, 1e-20);
     near(result[1], 0.0, 1e-20);
     let cycle = bank
@@ -419,4 +494,192 @@ fn g4_stress_admission_cancellation_darkness_and_replay() {
             .stress_field(Side::Incident, 0.0, window, stress_limits(), || false)
             .is_err()
     );
+    let momentum_exact = AngularSpectrumExposureMomentumLimits {
+        maximum_workspace_bytes: bank.momentum_workspace_bytes().unwrap(),
+    };
+    let momentum = bank.momentum_field(
+        Side::Incident, 0.0, window, momentum_exact, || false,
+    ).unwrap();
+    assert!(bank.momentum_field(Side::Incident, 0.0, window,
+        AngularSpectrumExposureMomentumLimits {
+            maximum_workspace_bytes: momentum_exact.maximum_workspace_bytes - 1,
+        }, || false).is_err());
+    let mut momentum_polls = 0;
+    assert!(matches!(bank.momentum_field(Side::Incident, 0.0, window,
+        momentum_exact, || { momentum_polls += 1; momentum_polls > 5 }),
+        Err(AngularSpectrumError::Cancelled)));
+    assert_eq!(momentum.points(), bank.momentum_field(
+        Side::Incident, 0.0, window, momentum_exact, || false,
+    ).unwrap().points());
+    let dark_momentum = dark.momentum_field(
+        Side::Incident, 0.0, window,
+        AngularSpectrumExposureMomentumLimits {
+            maximum_workspace_bytes: dark.momentum_workspace_bytes().unwrap(),
+        }, || false,
+    ).unwrap();
+    assert_eq!(dark_momentum.momentum_per_depth_n_s_m(), [0.0; 3]);
+    assert_eq!(dark_momentum.momentum_rate_per_depth_n_m(), [0.0; 3]);
+    assert!(wrong.momentum_field(
+        Side::Incident, 0.0, window,
+        AngularSpectrumExposureMomentumLimits {
+            maximum_workspace_bytes: wrong.momentum_workspace_bytes().unwrap(),
+        }, || false,
+    ).is_err());
+
+}
+
+#[test]
+fn g1_momentum_cell_integrals_do_not_alias_signed_nyquist_carriers() {
+    use fs_em::plane_wave::angular_spectrum::AngularSpectrumFactorStatistics;
+    use fs_fft::harmonic_window::HarmonicWindowProfile::{Triangular, Uniform};
+
+    let medium = material(1.0, 1.0);
+    let omega = 2.0;
+    let stack = PlanarDielectricLayers::try_new(
+        &medium, DielectricResponse::Lossless(&medium), omega, &[],
+    ).unwrap();
+    for along_y in [false, true] {
+        let mut cell = grid();
+        if along_y {
+            cell.width = 1;
+            cell.height = 4;
+        }
+        let samples: Vec<_> = (0..4).map(|point| {
+            let value = C64::from_re(if point % 2 == 0 { 1.0 } else { -1.0 });
+            if along_y { [value, C64::ZERO] } else { [C64::ZERO, value] }
+        }).collect();
+        let lines = [PlanarAngularSpectrum::prepare(
+            &stack, cell, &samples,
+            AngularSpectrumLimits {
+                maximum_grid_points: 128,
+                maximum_workspace_bytes: 1 << 20,
+                maximum_fft_work: 1 << 20,
+            }, || false,
+        ).unwrap()];
+        let bank = AngularSpectrumExposure::try_new(
+            &lines[0], &lines, limits(), || false,
+        ).unwrap();
+        let factors = [
+            AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap(),
+            AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap(),
+        ];
+        let statistics = [
+            AngularSpectrumFactorStatistics::Real,
+            AngularSpectrumFactorStatistics::ProperComplex,
+        ];
+        let ensemble = AngularSpectrumExposureEnsemble::try_new_with_statistics(
+            &lines[0], Some(&bank), &factors, &statistics, ensemble_limits(), || false,
+        ).unwrap();
+        let axis = usize::from(along_y);
+        let transverse = -core::f64::consts::PI / cell.spacing_m[axis];
+        let kz = (omega * omega - transverse * transverse).sqrt();
+        let area = (cell.width * cell.height) as f64 * cell.spacing_m[0] * cell.spacing_m[1];
+        let mut expected = [0.0, 0.0, 0.5 * area * kz / omega];
+        expected[axis] = 0.5 * area * transverse / omega;
+        let query = AngularSpectrumExposureMomentumLimits {
+            maximum_workspace_bytes: bank.momentum_workspace_bytes().unwrap(),
+        };
+        let statistical_query = AngularSpectrumExposureMomentumLimits {
+            maximum_workspace_bytes: ensemble.momentum_workspace_bytes().unwrap(),
+        };
+        for profile in [Uniform, Triangular] {
+            let window = HarmonicWindow::with_profile(0.0, 0.2 / omega, profile).unwrap();
+            for distance in [0.0, 0.31] {
+                let field = bank.momentum_field(
+                    Side::Incident, distance, window, query, || false,
+                ).unwrap();
+                let statistical = ensemble.momentum_field(
+                    Side::Incident, distance, window, statistical_query, || false,
+                ).unwrap();
+                for c in 0..3 {
+                    near(field.momentum_per_depth_n_s_m()[c], expected[c], 2e-13 * area);
+                    near(statistical.momentum_per_depth_n_s_m()[c],
+                        3.0 * expected[c], 6e-13 * area);
+                    // One traveling Fourier mode has constant cell momentum,
+                    // even though its local carrier still stores momentum.
+                    near(field.momentum_rate_per_depth_n_m()[c], 0.0, 2e-13 * area * omega);
+                    near(statistical.momentum_rate_per_depth_n_m()[c], 0.0, 6e-13 * area * omega);
+                }
+                if distance == 0.0 {
+                    let sample_area = cell.spacing_m[0] * cell.spacing_m[1];
+                    let sampled_density = field.points().iter()
+                        .map(|p| p.minkowski_density_n_s_m3[2]).sum::<f64>() * sample_area;
+                    let sampled_rate = field.points().iter()
+                        .map(|p| p.minkowski_rate_n_m3[2]).sum::<f64>() * sample_area;
+                    // Negative controls: a sampled product aliases the
+                    // Nyquist carrier to DC, biasing density AND its rate.
+                    assert!(sampled_density > 1.9 * expected[2]);
+                    assert!(sampled_rate.abs() > 0.1 * omega * expected[2]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_nyquist_momentum_rate_retains_the_signed_frequency_beat() {
+    use fs_em::plane_wave::angular_spectrum::AngularSpectrumFactorStatistics;
+    use fs_fft::harmonic_window::HarmonicWindowProfile::{Triangular, Uniform};
+
+    let medium = material(1.0, 1.0);
+    let omega = [2.0, 2.3];
+    let first = PlanarDielectricLayers::try_new(
+        &medium, DielectricResponse::Lossless(&medium), omega[0], &[],
+    ).unwrap();
+    let second = PlanarDielectricLayers::try_new(
+        &medium, DielectricResponse::Lossless(&medium), omega[1], &[],
+    ).unwrap();
+    let samples = |amplitude: C64| (0..4).map(|point| {
+        [C64::ZERO, if point % 2 == 0 { amplitude } else { -amplitude }]
+    }).collect::<Vec<_>>();
+    let lines = [
+        prepare(&first, &samples(C64::ONE)),
+        prepare(&second, &samples(C64::new(0.0, 2.0))),
+    ];
+    let bank = AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap();
+    let factors = [
+        AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap(),
+    ];
+    let statistics = [AngularSpectrumFactorStatistics::ProperComplex];
+    let ensemble = AngularSpectrumExposureEnsemble::try_new_with_statistics(
+        &lines[0], None, &factors, &statistics, ensemble_limits(), || false,
+    ).unwrap();
+    let query = AngularSpectrumExposureMomentumLimits {
+        maximum_workspace_bytes: bank.momentum_workspace_bytes().unwrap(),
+    };
+    let statistical_query = AngularSpectrumExposureMomentumLimits {
+        maximum_workspace_bytes: ensemble.momentum_workspace_bytes().unwrap(),
+    };
+    let cell = grid();
+    let transverse = -core::f64::consts::PI / cell.spacing_m[0];
+    let velocity = omega.map(|w| [
+        transverse / w, 0.0, (w * w - transverse * transverse).sqrt() / w,
+    ]);
+    let area = (cell.width * cell.height) as f64 * cell.spacing_m[0] * cell.spacing_m[1];
+    let delta = omega[1] - omega[0];
+    for profile in [Uniform, Triangular] {
+        let window = HarmonicWindow::with_profile(0.17, 0.31, profile).unwrap();
+        let argument = delta * window.duration_s()
+            * if profile == Uniform { 0.5 } else { 0.25 };
+        let sinc = argument.sin() / argument;
+        let weight = if profile == Uniform { sinc } else { sinc * sinc };
+        let center = delta * (window.start_s() + 0.5 * window.duration_s());
+        for field in [
+            bank.momentum_field(Side::Incident, 0.0, window, query, || false).unwrap(),
+            ensemble.momentum_field(
+                Side::Incident, 0.0, window, statistical_query, || false,
+            ).unwrap(),
+        ] {
+            for c in 0..3 {
+                // The continuous spatial integral removes only the 2*k
+                // carrier. The authored cross-frequency phase remains.
+                let cross = velocity[0][c] + velocity[1][c];
+                let density = 0.5 * velocity[0][c] + 2.0 * velocity[1][c]
+                    - cross * weight * center.sin();
+                let rate = -delta * cross * weight * center.cos();
+                near(field.momentum_per_depth_n_s_m()[c], area * density, 4e-13 * area);
+                near(field.momentum_rate_per_depth_n_m()[c], area * rate, 4e-13 * area);
+            }
+        }
+    }
 }

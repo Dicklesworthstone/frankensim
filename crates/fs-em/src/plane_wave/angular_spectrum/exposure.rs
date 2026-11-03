@@ -26,6 +26,12 @@ pub use stress::{
     AngularSpectrumExposureStressPoint,
 };
 
+mod momentum;
+pub use momentum::{
+    AngularSpectrumExposureMomentumField, AngularSpectrumExposureMomentumLimits,
+    AngularSpectrumExposureMomentumPoint,
+};
+
 mod ensemble;
 pub use ensemble::{
     AngularSpectrumExposureEnsemble, AngularSpectrumExposureEnsembleLimits,
