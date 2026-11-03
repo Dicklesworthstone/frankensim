@@ -626,13 +626,18 @@ differentiable lift). Pure Rust throughout.
 
 - With `photometry` and `volumes`,
   `camera::point_lights::participating::images::CurvedRayleighImageLightCameraScene`
-  admits finite image groups for original diffuse objects or molecular receiver
-  media. At each matching original camera vertex it discovers distinct native
+  admits finite image groups for original continuous surfaces or molecular
+  receiver media. `PointLightImageReceiver::SurfaceObject` admits diffuse,
+  rough dielectric and rough/brushed conductor laws; the original `DiffuseObject`
+  spelling remains equivalent, including duplicate source/receiver identity.
+  At each matching original camera vertex it discovers distinct native
   optical images, tracks their source survival separately and adds their
   incoherent radiometric contributions. Each image keeps its own calibrated
   angular intensity, Mueller/Fresnel transfer, absorption and bundle focusing.
-  The existing diffuse or polarized molecular contraction applies the local
-  phase-index factor exactly once. Camera continuation and surface/flight
+  Each image uses its original reciprocal polarized surface or molecular
+  contraction. Rough-glass images may arrive from either adjacent medium;
+  source-facing irradiance projection and the native radiance transmission law
+  retain their original index factors exactly once. Camera continuation and surface/flight
   random streams remain unchanged. Source ordinals and work budgets are shared
   with any separately bound single connections; duplicate original
   source/receiver bindings refuse. Empty catalogs, recorded local misses,
@@ -644,7 +649,11 @@ differentiable lift). Pure Rust throughout.
   integration, preserving complete-pixel failure and independent source
   counters. Finite authored seeds do not prove all optical images were found;
   coherent interference, singular caustic regularization and area-light MIS
-  remain outside this consumer.
+  remain outside this consumer. G1 controls sum independent TT/TRRT slab
+  throughput, physical absorption/scattering lengths and unfolded bundle areas
+  at rough reflecting/transmitting glass and rough/brushed metal receivers.
+  G3 checks duplicate-seed suppression, compatibility-name identity, exact trace
+  budgets and dispersive image sums in all native spectral pixel lanes.
 
 - Native polarized bundles retain `reverse_branch_log_probability`
   separately from physical Mueller power and Beer absorption. This is the

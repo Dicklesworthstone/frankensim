@@ -9,6 +9,8 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::images::
 use crate::polarization::dielectric::scene::curved::participating::transmittance::images::CurvedTransmittanceImageWorkspace;
 use fs_geom::fixtures::SphereChart;
 
+mod rough;
+
 #[test]
 fn g1_ball_lens_camera_sums_distinct_images_once_and_accepts_exact_trace_budget() {
     with_cx(|cx| {

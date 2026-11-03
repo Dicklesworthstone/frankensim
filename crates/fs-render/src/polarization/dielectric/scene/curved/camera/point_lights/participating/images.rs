@@ -3,9 +3,11 @@
 //! An authored group borrows one fixture, one receiving object or medium, and
 //! a bounded list of native shooting seeds. Discovery resolves and deduplicates
 //! optical images before independently tracking each surviving source leg.
-//! Every distinct image contributes once through the original diffuse or
-//! reciprocal polarized molecular radiometry. Seed multiplicity is not a
-//! probability or a power multiplier.
+//! Every distinct image contributes once through the original continuous
+//! surface or reciprocal polarized molecular response. Rough glass retains
+//! reflection and transmission from either adjacent medium; rough and brushed
+//! metals retain their original finish and complex index. Seed multiplicity
+//! is not a probability or a power multiplier.
 //!
 //! The caller prepares and reuses the workspace, normally once per worker.
 //! No geometry, optical table, source or mutable cache is copied into this
@@ -23,16 +25,14 @@ use super::{
     RayleighPointLightCameraSettings, camera_settings,
 };
 use super::super::{
-    CameraRadianceError, ConnectionWork, CurvedPathResult, CurvedPointLightCameraScene,
+    AreaLightCameraError, ConnectionWork, CurvedPathResult, CurvedPointLightCameraScene,
     CurvedSceneError, FixtureConnection, FixtureConnectionRequest, FixtureConnector,
     FixtureContributions, MAX_POINT_LIGHT_BRANCHES, PointLightBranch, PointLightCameraError,
-    SurfaceEmission, nonnegative, phase_index, validate_settings,
+    SurfaceEmission, SurfaceReceiver, nonnegative, phase_index, receiver_media, validate_settings,
 };
 use crate::charts::Ray;
-use crate::dielectric::DielectricError;
 use crate::photometry::source::PhotometricSource;
 use crate::polarization::Stokes;
-use crate::polarization::dielectric::scene::Interaction;
 use crate::polarization::dielectric::scene::curved::{CurvedTraceEvent, SceneMedium};
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleConnectionLaunch, BundleConnectionTarget,
@@ -54,13 +54,30 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 
 /// Receiver identity belongs to the original native scene. Surface groups
-/// apply only at diffuse encounters; medium groups apply only at accepted
-/// molecular collisions, never at null candidates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// apply at continuous surface encounters; medium groups apply only at accepted
+/// molecular collisions, never at null candidates. Smooth delta receivers do
+/// not define a continuous surface response.
+#[derive(Clone, Copy, Debug)]
 pub enum PointLightImageReceiver {
+    /// Diffuse, rough dielectric, or rough/brushed conductor in the native scene.
+    SurfaceObject(u64),
+    /// Compatible spelling of `SurfaceObject`, with the same receiver identity
+    /// and admission. Keeping both spellings cannot count a source twice.
     DiffuseObject(u64),
     MolecularMedium(usize),
 }
+
+impl PartialEq for PointLightImageReceiver {
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (Self::SurfaceObject(a) | Self::DiffuseObject(a),
+             Self::SurfaceObject(b) | Self::DiffuseObject(b)) => a == b,
+            (Self::MolecularMedium(a), Self::MolecularMedium(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+impl Eq for PointLightImageReceiver {}
 
 /// All authored local seeds for one original fixture/receiver pair. A pair
 /// may occur only once, across both this list and the original single-branch
@@ -109,22 +126,18 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
             {
                 return Err(invalid());
             }
-            let receiver_medium = match group.receiver {
-                PointLightImageReceiver::DiffuseObject(object) => {
+            let [first_medium, second_medium] = match group.receiver {
+                PointLightImageReceiver::SurfaceObject(object)
+                | PointLightImageReceiver::DiffuseObject(object) => {
                     let receiver = scene
                         .bindings
                         .binary_search_by_key(&object, |binding| binding.object_id)
                         .map_err(|_| invalid())?;
-                    let Interaction::DepolarizingDiffuse { medium, .. } =
-                        scene.bindings[receiver].interaction
-                    else {
-                        return Err(invalid());
-                    };
-                    medium
+                    receiver_media(scene.bindings[receiver].interaction).ok_or_else(invalid)?
                 }
-                PointLightImageReceiver::MolecularMedium(medium) => medium,
+                PointLightImageReceiver::MolecularMedium(medium) => [medium, medium],
             };
-            for medium in [group.initial_medium, receiver_medium] {
+            for medium in [group.initial_medium, first_medium, second_medium] {
                 if !matches!(
                     scene.media.get(medium),
                     Some(SceneMedium::Homogeneous(_) | SceneMedium::Differentiable { .. })
@@ -138,7 +151,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                     .map_err(|_| invalid())?;
             }
             for (first, branch) in owner.point_lights.branches.iter().enumerate() {
-                if group.receiver == PointLightImageReceiver::DiffuseObject(branch.receiver_object_id)
+                if group.receiver == PointLightImageReceiver::SurfaceObject(branch.receiver_object_id)
                     && core::ptr::eq(group.source, branch.source)
                 {
                     return Err(PointLightCameraError::DuplicateBinding {
@@ -271,29 +284,18 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
         connector: &mut ParticipatingFixtureConnector<'_, '_, '_, '_, F>,
         workspace: &mut CurvedTransmittanceImageWorkspace,
     ) -> Result<(), PointLightCameraError> {
-        let receiver = if phase.is_some() {
-            PointLightImageReceiver::MolecularMedium(path.medium_index())
+        let (receiver, surface) = if phase.is_some() {
+            (PointLightImageReceiver::MolecularMedium(path.medium_index()), None)
         } else {
             let contact = path
                 .last_contact()
                 .ok_or(PointLightCameraError::NumericalRange)?;
-            let scene = self.owner.point_lights.camera.scene;
-            let binding = scene
-                .bindings
-                .get(contact.witness.boundary_id)
-                .ok_or(PointLightCameraError::NumericalRange)?;
-            let Interaction::DepolarizingDiffuse { reflectance, .. } = binding.interaction else {
-                return Ok(());
-            };
             // Match the original zero-albedo short circuit before discovering
             // images, so no unused replay consumes a source ordinal.
-            let rho = scene.reflectances[reflectance]
-                .at(path.beam().wavelength_nm())
-                .map_err(|_| CameraRadianceError::Optics(DielectricError::InvalidWavelength))?;
-            if rho == 0.0 {
+            let Some(surface) = SurfaceReceiver::at_arrival(self.owner.point_lights.camera, path)? else {
                 return Ok(());
-            }
-            PointLightImageReceiver::DiffuseObject(contact.object_id)
+            };
+            (PointLightImageReceiver::SurfaceObject(contact.object_id), Some(surface))
         };
         let first_group =
             self.owner.point_lights.branches.len() + self.owner.volume_branches.len();
@@ -303,7 +305,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
             }
             cx.checkpoint()?;
             let binding = first_group + slot;
-            let target = group_target(group, path).map_err(|error| {
+            let target = group_target(group, path, surface).map_err(|error| {
                 PointLightCameraError::Connection { binding, error }
             })?;
             let remaining_connections = fixtures
@@ -413,7 +415,8 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                 // owners and routes the prepared image through their shared
                 // radiometry. It neither prepares a scene nor traces again.
                 match group.receiver {
-                    PointLightImageReceiver::DiffuseObject(object) => {
+                    PointLightImageReceiver::SurfaceObject(object)
+                    | PointLightImageReceiver::DiffuseObject(object) => {
                         let branch = PointLightBranch {
                             source: group.source,
                             receiver_object_id: object,
@@ -481,6 +484,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
 fn group_target(
     group: &PointLightImageGroup<'_>,
     path: &CurvedPathResult,
+    surface: Option<SurfaceReceiver>,
 ) -> Result<
     BundleConnectionTarget,
     crate::polarization::dielectric::scene::curved::bundle::connection::BundleConnectionError,
@@ -488,22 +492,8 @@ fn group_target(
     use crate::polarization::dielectric::scene::curved::bundle::connection::BundleConnectionError;
 
     match group.receiver {
-        PointLightImageReceiver::DiffuseObject(object) => {
-            let contact = path
-                .last_contact()
-                .ok_or(BundleConnectionError::NumericalRange)?;
-            let normal = if contact.witness.normal.dot(path.beam().ray().dir) > 0.0 {
-                contact.witness.normal.scale(-1.0)
-            } else {
-                contact.witness.normal
-            };
-            BundleConnectionTarget::try_diffuse_receiver(
-                object,
-                contact.witness.surface_point,
-                normal,
-                group.position_tolerance_m,
-            )
-        }
+        PointLightImageReceiver::SurfaceObject(_) | PointLightImageReceiver::DiffuseObject(_) =>
+            surface.ok_or(BundleConnectionError::NumericalRange)?.target(group.position_tolerance_m),
         PointLightImageReceiver::MolecularMedium(medium) => {
             let position = path.beam().ray().origin;
             BundleConnectionTarget::try_volume_receiver(
@@ -565,6 +555,9 @@ fn rebind_error(binding: usize, error: PointLightCameraError) -> PointLightCamer
         }
         PointLightCameraError::MolecularPhase { error, .. } => {
             PointLightCameraError::MolecularPhase { binding, error }
+        }
+        PointLightCameraError::SurfaceResponse(AreaLightCameraError::PathMismatch { .. }) => {
+            PointLightCameraError::SurfaceResponse(AreaLightCameraError::PathMismatch { binding })
         }
         error => error,
     }
