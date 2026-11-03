@@ -5,36 +5,37 @@
 //! `LongitudinalString` owns the moderate-slope strain `e = u_x + y_x^2/2`, its
 //! storage and its gradient. A `stretch` row retains no axial coordinate (the
 //! averaged Kirchhoff--Carrier tension); a `waves` row retains the axial sine
-//! modes of its band, their damping, and an axial bridge port `u(L) = eta b` with
-//! the authored `LIVE_BRIDGE_AXIAL_RATIO` (the reference now derives a per-mode row
-//! instead; see that constant). Slopes come from the segment's own coordinates and the
+//! modes of its band, their damping, and an axial bridge port whose displacement
+//! comes from the reference's geometry-derived axial participation row. Slopes
+//! come from the segment's own coordinates and the
 //! bridge, `y = sum phi_k (z_k - beta_k b) + x/L b`, with the reference's slope
 //! scales (the Kirchhoff--Carrier channel's diagonal).
 //!
 //! The reference resolves the extension force implicitly, a discrete-gradient
-//! fixed point iterated with its contact solve every tick (about 80 us per 48 kHz
-//! step for one A3 in `examples/validate.rs`). Here the linear motion of strings
+//! fixed point iterated with its contact solve every tick. Here the linear motion of strings
 //! and board keeps its exact transitions and the extension potential acts as one
 //! velocity kick per step, evaluated where the step left the coordinates. The
 //! axial modes are linear oscillators forced by the strings; with the strings'
 //! start and end of the step both known, they take the exact response to that
-//! force varying linearly over the step. Against the reference both converge to
-//! the same motion at second order, and at 48 kHz the two differ by about as much
-//! as the reference differs from itself at 192 kHz. The method's numerical work
-//! is booked in `Ledger::coupling_j`.
+//! force varying linearly over the step. Earlier timestep comparisons used the
+//! former scalar bridge port; that convergence measurement must be repeated with
+//! the geometry-derived rows. The two integration methods do not promise bitwise
+//! parity. The method's numerical work is booked in `Ledger::coupling_j`.
 
 use crate::refmods::linear::string_stretching::{Material, WaveMaterial};
 use fs_math::det;
 use fs_nlmodal::{KcStringParams, kirchhoff_carrier_string, longitudinal::LongitudinalString};
 
-/// AUTHORED: the live engine's axial bridge coupling, `u(L) = LIVE_BRIDGE_AXIAL_RATIO * b` with `b` the bridge's
-/// vertical displacement. It is the former single scalar of the offline renderer (`grand_piano`), whose comment
-/// read ~1.8 degrees of downbearing plus a 28 mm bridge-cap lever arm and which never recorded a source. The
-/// offline renderer no longer uses it: `grand_piano` derives a per-mode axial participation row from its board's
-/// retained rotations (`BoardGeometry::bridge_attachments`, bead pexfp.44). This engine keeps the scalar, and
-/// only here, until its board carries slope rows (`gen_board`'s `.bin`; bead frankensim-live-piano-axial-row-3eh0l);
-/// until then the live and offline renders of a `waves` key couple the axial motion to the board differently.
-pub const LIVE_BRIDGE_AXIAL_RATIO: f64 = 0.06;
+/// Exact transition of y'' + c y' + w2 y = 0 over `dt` for (y, y'), underdamped.
+pub(crate) fn damped_transition(w2: f64, c: f64, dt: f64) -> [f64; 4] {
+    let w = det::sqrt(w2);
+    let zeta = c / (2.0 * w);
+    let wd = w * det::sqrt(1.0 - zeta * zeta);
+    let (s, co) = det::sin_cos(wd * dt);
+    let e = det::exp(-0.5 * c * dt);
+    let h = 0.5 * c / wd;
+    [e * (co + h * s), e * s / wd, -e * w2 * s / wd, e * (co - h * s)]
+}
 
 /// Young's modulus [Pa] and density [kg/m^3] of piano wire (high-carbon steel), as the
 /// reference's graded A3 file (`axial-a3.fspx`) uses them.
@@ -74,8 +75,8 @@ pub(crate) struct Stretch {
     rest_tension: f64,
     material: Material,
     maximum_strain: f64,
-    /// Axial bridge port (zero for `stretch`).
-    port: f64,
+    /// Only the `waves` model has an axial bridge port.
+    axial_port: bool,
     /// Slope coefficient per unit relative coordinate of each retained mode.
     scales: Vec<f64>,
     /// Axial coordinate per unit axial bridge displacement (static correction).
@@ -102,6 +103,9 @@ pub(crate) struct Stretch {
 pub(crate) struct Kick {
     /// d(potential)/d(bridge displacement) [N]: the board takes minus this.
     pub reaction: f64,
+    /// d(potential)/d(axial termination displacement) [N]. Its own modal row
+    /// returns the force to the board; it is not a vertical-force multiplier.
+    pub axial_reaction: f64,
     /// Numerical work of the method on this segment [J].
     pub work: f64,
     /// Axial modal loss of the step [J].
@@ -129,7 +133,8 @@ impl Stretch {
             return Err("derived string extension channel is unrepresentable".into());
         }
         let mut indices = Vec::new();
-        let (mut port, mut damping, mut maximum_strain) = (0.0, 0.0, f64::INFINITY);
+        let (mut damping, mut maximum_strain) = (0.0, f64::INFINITY);
+        let axial_port = waves.is_some();
         if let Some(w) = waves {
             if w.bandwidth_hz > 0.45 * f64::from(rate) {
                 return Err("longitudinal band exceeds the mechanics clock's 0.45*rate guard".into());
@@ -147,7 +152,6 @@ impl Stretch {
                 }
                 indices.push(mode);
             }
-            port = LIVE_BRIDGE_AXIAL_RATIO;
             damping = w.damping_ratio;
             maximum_strain = w.maximum_strain;
         }
@@ -155,7 +159,7 @@ impl Stretch {
         let dt = 1.0 / f64::from(rate);
         let omega2: Vec<f64> = model.axial_omegas().iter().map(|w| w * w).collect();
         let coefficients: Vec<f64> = model.axial_omegas().iter().map(|&w| 2.0 * damping * w).collect();
-        let flow = omega2.iter().zip(&coefficients).map(|(&w2, &c)| crate::kernel::damped_transition(w2, c, dt)).collect();
+        let flow = omega2.iter().zip(&coefficients).map(|(&w2, &c)| damped_transition(w2, c, dt)).collect();
         let betas = model.axial_modes().iter().zip(model.axial_slope_scales())
             .map(|(&mode, &scale)| 2.0 * if mode % 2 == 0 { -1.0 } else { 1.0 } / (length * scale)).collect();
         let axial = indices.len();
@@ -164,7 +168,7 @@ impl Stretch {
             relative: vec![0.0; axial], harmonics: vec![0.0; axial], strain: vec![0.0; axial], weights: vec![0.0; axial],
             u: vec![0.0; axial], w: vec![0.0; axial], force: vec![0.0; axial],
             model, length, ea: material.axial_rigidity_n, rest_tension: tension, material, maximum_strain,
-            port, scales, betas, omega2, damping: coefficients, flow, potential: 0.0,
+            axial_port, scales, betas, omega2, damping: coefficients, flow, potential: 0.0,
         })
     }
 
@@ -180,8 +184,7 @@ impl Stretch {
         }
     }
 
-    fn fill_relative(&mut self, b: f64) {
-        let axial_bridge = self.port * b;
+    fn fill_relative(&mut self, axial_bridge: f64) {
         for ((slot, &u), &bj) in self.relative.iter_mut().zip(&self.u).zip(&self.betas) {
             *slot = u - bj * axial_bridge;
         }
@@ -190,21 +193,23 @@ impl Stretch {
     /// Total extension potential (with the axial stiffness), mean strain (with the
     /// bridge port's) and nonuniform strain bound at the filled slopes and axial state,
     /// from the harmonics of `geometric_strain` (`mean` is their geometric mean).
-    fn storage(&mut self, mean: f64, b: f64) -> (f64, f64, f64) {
+    fn storage(&mut self, mean: f64, axial_bridge: f64) -> (f64, f64, f64) {
         let (base, spread) = self.model.storage_from_strain(mean, &self.harmonics, &self.relative, &mut self.strain)
             .unwrap_or((f64::NAN, f64::NAN));
-        let eps = self.port * b / self.length;
+        let eps = axial_bridge / self.length;
         (base + 0.5 * self.ea * self.length * eps * (2.0 * mean + eps), mean + eps, spread)
     }
 
     /// Stored extension and axial kinetic energy at coordinates `q` (this segment's
-    /// modes), mode constants `beta` and bridge displacement `b` [J]. Cold path.
-    pub fn stored(&self, q: &[f64], beta: &[f64], b: f64) -> f64 {
+    /// modes), mode constants `beta`, transverse bridge displacement `b` and
+    /// axial termination displacement `axial_bridge` [J]. Cold path.
+    pub fn stored(&self, q: &[f64], beta: &[f64], b: f64, axial_bridge: f64) -> f64 {
+        let axial_bridge = if self.axial_port { axial_bridge } else { 0.0 };
         let mut copy = self.clone();
         copy.fill_slopes(q, beta, b);
-        copy.fill_relative(b);
+        copy.fill_relative(axial_bridge);
         let mean = copy.model.geometric_strain(&copy.slopes, &mut copy.harmonics).unwrap_or(f64::NAN);
-        copy.storage(mean, b).0 + 0.5 * self.w.iter().map(|x| x * x).sum::<f64>()
+        copy.storage(mean, axial_bridge).0 + 0.5 * self.w.iter().map(|x| x * x).sum::<f64>()
     }
 
     /// One step of the axial modes, then the kick of the extension potential on the segment's
@@ -216,12 +221,12 @@ impl Stretch {
     /// of the step both known, they take the exact response to that force varying linearly
     /// over the step (a first-order hold): an impulse would sample oscillators of up to
     /// `w dt` ~ 1.3 at 48 kHz too coarsely.
-    pub fn step(&mut self, q: &[f64], beta: &[f64], b: f64, dt: f64, v: &mut [f64]) -> Kick {
+    pub fn step(&mut self, q: &[f64], beta: &[f64], b: f64, axial_bridge: f64, dt: f64, v: &mut [f64]) -> Kick {
+        let axial_bridge = if self.axial_port { axial_bridge } else { 0.0 };
         self.fill_slopes(q, beta, b);
         let mean = self.model.geometric_strain(&self.slopes, &mut self.harmonics).unwrap_or(f64::NAN);
         let c = self.model.strain_energy_coefficient();
         let (mut loss, mut axial_change) = (0.0, 0.0);
-        let axial_bridge = self.port * b;
         for j in 0..self.u.len() {
             let (w2, damping, p) = (self.omega2[j], self.damping[j], self.flow[j]);
             let d = self.model.axial_slope_scales()[j];
@@ -238,8 +243,8 @@ impl Stretch {
             loss += 0.5 * damping * dt * (w0 * w0 + w1 * w1);
             axial_change += 0.5 * (w1 * w1 - w0 * w0 + w2 * (u1 * u1 - u0 * u0));
         }
-        self.fill_relative(b);
-        let (total, mean_total, spread) = self.storage(mean, b);
+        self.fill_relative(axial_bridge);
+        let (total, mean_total, spread) = self.storage(mean, axial_bridge);
         let axial_own: f64 = self.u.iter().zip(&self.omega2).map(|(u, w2)| 0.5 * w2 * u * u).sum();
         let potential = total - axial_own;
         let slope_bound = self.slopes[0].abs() + self.slopes[1..].iter().map(|a| a.abs()).sum::<f64>();
@@ -251,12 +256,13 @@ impl Stretch {
         }
         // The bridge port's mean extension adds EA L eps to the mean's weight
         // (`longitudinal_string.rs`, `evaluate`): 2 c (s_0 + eps) in all.
-        let eps = self.port * b / self.length;
+        let eps = axial_bridge / self.length;
         let sg = &mut self.slope_gradient;
         if self.model.geometric_strain_gradient(&self.slopes, 2.0 * c * (mean + eps), &self.weights, sg).is_err() {
             sg.fill(0.0);
         }
-        let mut reaction = sg[0] / self.length + self.port * self.ea * mean_total;
+        let mut reaction = sg[0] / self.length;
+        let mut axial_reaction = self.ea * mean_total;
         let mut kinetic = 0.0;
         for (((vk, &g), &scale), &bk) in v.iter_mut().zip(&sg[1..]).zip(&self.scales).zip(beta) {
             let force = g * scale;
@@ -266,11 +272,11 @@ impl Stretch {
             kinetic += 0.5 * (*vk * *vk - old * old);
         }
         for ((&weight, &d), &bj) in self.weights.iter().zip(self.model.axial_slope_scales()).zip(&self.betas) {
-            reaction -= self.port * bj * weight * d;
+            axial_reaction -= bj * weight * d;
         }
         // Exact dynamics would trade these against each other; what is left is the method's.
         let work = kinetic + axial_change + loss + potential - self.potential;
         self.potential = potential;
-        Kick { reaction, work, loss, out_of_domain }
+        Kick { reaction, axial_reaction: if self.axial_port { axial_reaction } else { 0.0 }, work, loss, out_of_domain }
     }
 }

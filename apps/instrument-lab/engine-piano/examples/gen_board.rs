@@ -54,7 +54,7 @@ fn main() {
     }.expect("board geometry");
     let courses = geometry::read_scale(fs_live_piano::kernel::SCALE_CSV).expect("embedded scale");
     let start = std::time::Instant::now();
-    let desc = Description::with_reduction_on(&preset, courses.clone(), band, &spec).expect("reduced board");
+    let desc = Description::with_axial_reduction_on(&preset, courses.clone(), band, &spec).expect("reduced board with axial bridge rows");
     println!("prepared in {:.3} s: {} coordinates ({} exact low modes), {} surface points, {:.6} kg, {:.6} m^2",
         start.elapsed().as_secs_f64(), desc.board.len(), desc.exact_low_modes, desc.surface.len(), desc.board_mass_kg, desc.board_area_m2);
     println!("{}", desc.board_provenance);
@@ -87,6 +87,7 @@ fn main() {
         assert_eq!(a.bridge, b.bridge);
     }
     assert_eq!(back.damping, desc.damping);
+    assert_eq!(back.bridge_axial_rows, desc.bridge_axial_rows);
     let worst = back.surface.iter().zip(&desc.surface).flat_map(|(a, b)| a.mode_shape.iter().zip(&b.mode_shape))
         .map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
     let scale = desc.surface.iter().flat_map(|p| p.mode_shape.iter()).fold(0.0_f64, |m, x| m.max(x.abs()));

@@ -81,10 +81,9 @@ fn main() {
             let waves = string_waves.then(|| fs_live_piano::stretch::plain_steel_waves_spec(&[course], 10_000.0, 0.01, 0.05));
             if let Some(text) = &waves {
                 let mut spec = fs_live_piano::refmods::linear::string_stretching::Specification::read(text, &[course]).expect("stretching file");
-                // The reference takes a per-mode axial row; to compare the same equations it gets the live
-                // engine's own labelled scalar times its vertical bridge row (`stretch::LIVE_BRIDGE_AXIAL_RATIO`).
+                // Both engines consume the same geometry-derived termination motion.
                 let rows = spec.waves.keys().map(|&key| {
-                    (key, desc.board.iter().map(|m| fs_live_piano::stretch::LIVE_BRIDGE_AXIAL_RATIO * m.bridge[usize::from(key - 21)]).collect())
+                    (key, desc.bridge_axial_rows[&key].clone())
                 }).collect();
                 spec.set_bridge_axial_rows(rows).expect("axial rows");
                 reference.configure_string_stretching(&spec).expect("reference stretching");

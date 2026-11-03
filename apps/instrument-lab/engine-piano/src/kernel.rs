@@ -43,7 +43,7 @@ use crate::refmods::{
     linear::{Bank, BoardMode, string_stretching::{Material, Specification, WaveMaterial}},
     relaxation, shank, steinway_d, steinway_scale,
 };
-use crate::stretch::Stretch;
+use crate::stretch::{Stretch, damped_transition};
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -186,16 +186,6 @@ struct BankCourse {
     b: f64,
 }
 
-/// Exact transition of y'' + c y' + w2 y = 0 over `dt` for (y, y'), underdamped.
-pub(crate) fn damped_transition(w2: f64, c: f64, dt: f64) -> [f64; 4] {
-    let w = det::sqrt(w2);
-    let zeta = c / (2.0 * w);
-    let wd = w * det::sqrt(1.0 - zeta * zeta);
-    let (s, co) = det::sin_cos(wd * dt);
-    let e = det::exp(-0.5 * c * dt);
-    let h = 0.5 * c / wd;
-    [e * (co + h * s), e * s / wd, -e * w2 * s / wd, e * (co - h * s)]
-}
 impl Config {
     pub fn live(sample_rate: u32) -> Self {
         Self {
@@ -228,6 +218,10 @@ impl Config {
 pub struct Description {
     pub courses: Vec<Course>,
     pub board: Vec<BoardMode>,
+    /// Geometry-derived axial termination rows in the SAME bare-board basis,
+    /// keyed by MIDI note. A missing row means the geometry is unavailable;
+    /// an explicitly present zero row means there is no axial bridge motion.
+    pub bridge_axial_rows: std::collections::BTreeMap<u8, Vec<f64>>,
     /// Full viscous matrix [1/s] in the board coordinates (row-major), when the
     /// board is a bridge-informed reduction; `None` = per-mode damping ratios.
     pub damping: Option<Vec<f64>>,
@@ -251,6 +245,7 @@ pub struct Description {
 /// too long at start-up; nothing else about the board is precomputed.
 pub const BOARD_BIN: &[u8] = include_bytes!("../data/model-d-board-2400-r32.bin");
 const BOARD_MAGIC: &[u8; 8] = b"FSLPBRD1";
+const BOARD_AXIAL_MAGIC: &[u8; 8] = b"FSLPBRD2";
 
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -308,11 +303,13 @@ impl Description {
     /// modes, mass, area, provenance; per coordinate frequency, damping ratio,
     /// volume; bridge rows [key][coordinate] for MIDI 21..108; damping matrix
     /// (zeros when the board is unreduced); per surface point x, y, area (f64)
-    /// then its r mode shapes (f32).
+    /// then its r mode shapes (f32). Version 2 appends the number of axial
+    /// termination rows, then each MIDI key (u32) and its r coefficients (f64).
+    /// Boards without those rows retain version 1 and cannot admit `waves`.
     pub fn board_bytes(&self) -> Vec<u8> {
         let r = self.board.len();
         let mut out = Vec::new();
-        out.extend_from_slice(BOARD_MAGIC);
+        out.extend_from_slice(if self.bridge_axial_rows.is_empty() { BOARD_MAGIC } else { BOARD_AXIAL_MAGIC });
         for value in [r, 88, self.surface.len(), self.exact_low_modes, usize::from(self.damping.is_some())] {
             out.extend_from_slice(&(value as u32).to_le_bytes());
         }
@@ -343,13 +340,24 @@ impl Description {
                 out.extend_from_slice(&(*value as f32).to_le_bytes());
             }
         }
+        if !self.bridge_axial_rows.is_empty() {
+            out.extend_from_slice(&(self.bridge_axial_rows.len() as u32).to_le_bytes());
+            for (&key, row) in &self.bridge_axial_rows {
+                out.extend_from_slice(&u32::from(key).to_le_bytes());
+                for value in row {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
         out
     }
 
     /// Read a board written by `board_bytes`. Strict: no value is repaired.
     pub fn from_board_bytes(courses: Vec<Course>, bytes: &[u8]) -> Result<Self, String> {
         let mut input = Reader { bytes, at: 0 };
-        if input.take(8)? != BOARD_MAGIC {
+        let magic = input.take(8)?;
+        let has_axial_rows = magic == BOARD_AXIAL_MAGIC;
+        if magic != BOARD_MAGIC && !has_axial_rows {
             return Err("not a live-piano board file".into());
         }
         let (r, keys, points, exact, has_damping) = (input.u32()?, input.u32()?, input.u32()?, input.u32()?, input.u32()?);
@@ -386,10 +394,30 @@ impl Description {
             }
             surface.push(board_geometry::SurfaceSample { position_m: [x, y, 0.0], area_m2, mode_shape });
         }
+        let mut bridge_axial_rows = std::collections::BTreeMap::new();
+        if has_axial_rows {
+            let count = input.u32()?;
+            if !(1..=88).contains(&count) {
+                return Err("board axial row count is out of range".into());
+            }
+            for _ in 0..count {
+                let key = input.u32()?;
+                if !(21..=108).contains(&key) {
+                    return Err("board axial row MIDI key is out of range".into());
+                }
+                let mut row = Vec::with_capacity(r);
+                for _ in 0..r {
+                    row.push(input.f64()?);
+                }
+                if bridge_axial_rows.insert(key as u8, row).is_some() {
+                    return Err("board contains duplicate axial rows".into());
+                }
+            }
+        }
         if input.at != bytes.len() {
             return Err("board file has trailing bytes".into());
         }
-        Ok(Self { courses, board, damping, surface, board_provenance: provenance, board_mass_kg: mass, board_area_m2: area, exact_low_modes: exact })
+        Ok(Self { courses, board, bridge_axial_rows, damping, surface, board_provenance: provenance, board_mass_kg: mass, board_area_m2: area, exact_low_modes: exact })
     }
 
     /// Keep only the first `count` coordinates. Legal only inside the exact
@@ -401,6 +429,9 @@ impl Description {
             return Err(format!("only the {} exact low modes may be kept on their own", self.exact_low_modes));
         }
         self.board.truncate(count);
+        for row in self.bridge_axial_rows.values_mut() {
+            row.truncate(count);
+        }
         for p in &mut self.surface {
             p.mode_shape.truncate(count);
         }
@@ -430,10 +461,13 @@ impl Description {
     pub fn with_courses(courses: Vec<Course>, board_band_hz: f64) -> Result<Self, String> {
         let preset = steinway_d::build(8)?;
         let keys: Vec<u8> = courses.iter().map(|c| c.midi).collect();
-        let prepared = board_geometry::BoardGeometry::read(&preset.geometry)?.prepare(&keys, board_band_hz)?;
+        let geometry = board_geometry::BoardGeometry::read(&preset.geometry)?;
+        let prepared = geometry.prepare_with_motion(&keys, board_band_hz)?;
+        let bridge_axial_rows = Self::axial_rows(&geometry, &prepared, &keys)?;
         Ok(Self {
             courses,
             board: prepared.modes,
+            bridge_axial_rows,
             damping: prepared.physical_damping,
             surface: prepared.surface,
             board_provenance: prepared.provenance,
@@ -446,6 +480,13 @@ impl Description {
         self.exact_low_modes = self.exact_low_modes.min(self.board.len());
         self
     }
+    fn axial_rows(geometry: &board_geometry::BoardGeometry,
+        prepared: &board_geometry::PreparedBoard, keys: &[u8])
+        -> Result<std::collections::BTreeMap<u8, Vec<f64>>, String> {
+        let motion = prepared.motion.as_ref().ok_or("axial bridge rows require the retained board motion")?;
+        geometry.bridge_attachments(keys)?.into_iter()
+            .map(|attachment| Ok((attachment.midi, attachment.axial_row(motion)?))).collect()
+    }
     /// The same board through the reference's explicit bridge-informed
     /// reduction (`--board-reduction max,keep_low,Hz,...` or
     /// `pod,max,keep_low,count,top_hz` of the offline binary): a certified FE
@@ -454,15 +495,27 @@ impl Description {
     /// (pivoted at the listed frequencies, or the POD of `count` log-spaced
     /// ones up to `top_hz`), with its full damping matrix.
     pub fn with_reduction(courses: Vec<Course>, source_band_hz: f64, spec: &str) -> Result<Self, String> {
-        Self::with_reduction_on(&steinway_d::build(8)?, courses, source_band_hz, spec)
+        Self::with_axial_reduction_on(&steinway_d::build(8)?, courses, source_band_hz, spec)
     }
     /// `with_reduction` of a given board, e.g. `steinway_d::build_resolved(16, 0.03, true)`:
     /// the mesh the graded offline renders take as `--board-geometry`.
     pub fn with_reduction_on(preset: &steinway_d::Preset, courses: Vec<Course>, source_band_hz: f64, spec: &str) -> Result<Self, String> {
+        Self::prepare_reduction_on(preset, courses, source_band_hz, spec, false)
+    }
+    /// Prepare the same reduced board with geometric axial termination rows.
+    /// Unlike the linear constructor, this requires every requested key to
+    /// have a resolvable bridge attachment in the supplied geometry.
+    pub fn with_axial_reduction_on(preset: &steinway_d::Preset, courses: Vec<Course>, source_band_hz: f64, spec: &str) -> Result<Self, String> {
+        Self::prepare_reduction_on(preset, courses, source_band_hz, spec, true)
+    }
+    fn prepare_reduction_on(preset: &steinway_d::Preset, courses: Vec<Course>, source_band_hz: f64,
+        spec: &str, retain_axial: bool) -> Result<Self, String> {
         let options = board_geometry::ritz::RitzOptions::parse(spec)?;
         let keys: Vec<u8> = courses.iter().map(|c| c.midi).collect();
-        let prepared = board_geometry::BoardGeometry::read(&preset.geometry)?
-            .prepare_reduced(&keys, source_band_hz, false, false, false, false, &options)?;
+        let geometry = board_geometry::BoardGeometry::read(&preset.geometry)?;
+        let prepared = geometry.prepare_reduced(&keys, source_band_hz, retain_axial, false, false, false, &options)?;
+        let bridge_axial_rows = if retain_axial { Self::axial_rows(&geometry, &prepared, &keys)? }
+            else { Default::default() };
         if prepared.physical_damping.is_none() {
             return Err("reduced soundboard requires its full projected material damping".into());
         }
@@ -474,6 +527,7 @@ impl Description {
             exact_low_modes: exact,
             courses,
             board: prepared.modes,
+            bridge_axial_rows,
             damping: prepared.physical_damping,
             surface: prepared.surface,
             board_provenance: format!("{}{mesh}; bridge-informed reduction {spec} of the (0,{source_band_hz}] Hz FE slice", prepared.provenance),
@@ -1378,6 +1432,8 @@ struct ACourse {
     segs: Vec<ASeg>,
     /// Bridge row in the current loaded board basis and S^-1 times it.
     gl: Vec<f64>,
+    /// Independent axial termination row in the same loaded board basis.
+    al: Vec<f64>,
     resp: Vec<f64>,
     /// Sd^-1 times the bridge row: the string-loss Schur solve is only ever
     /// read through `gl . Sd^-1 x = hsd . x` (Sd symmetric), so no r x r product.
@@ -1514,6 +1570,8 @@ pub struct LivePiano {
     /// Bridge rows in the STATIC basis (every string attached as a chord),
     /// course-major. In that basis the static pencil is (diag(lam_s), I).
     g_st: Vec<f64>,
+    /// Axial termination rows in the static basis, course-major.
+    a_st: Vec<f64>,
     lam_s: Vec<f64>,
     /// Physical board damping matrix in the static basis, row-major.
     c_st: Vec<f64>,
@@ -1617,6 +1675,7 @@ impl Clone for LivePiano {
             fv: self.fv.clone(),
             keys: self.keys.clone(),
             g_st: self.g_st.clone(),
+            a_st: self.a_st.clone(),
             lam_s: self.lam_s.clone(),
             c_st: self.c_st.clone(),
             phi_s: self.phi_s.clone(),
@@ -1754,6 +1813,10 @@ impl LivePiano {
         let board = &desc.board;
         let r = board.len();
         let dt = 1.0 / f64::from(rate);
+        if desc.bridge_axial_rows.iter().any(|(&key, row)|
+            !(21..=108).contains(&key) || row.len() != r || row.iter().any(|x| !x.is_finite())) {
+            return Err("axial bridge rows require a valid key and one finite coefficient per board coordinate".into());
+        }
         // The reference bank is the single source of every per-partial constant
         // (frequency, bridge cross inertia, strike projection, intrinsic loss).
         let bank = Bank::new_with_string_damping(&courses, board, rate, 0.45 * f64::from(rate),
@@ -1854,6 +1917,11 @@ impl LivePiano {
         let mut stretch_spec: Vec<Option<(Material, Option<WaveMaterial>)>> = vec![None; courses.len()];
         if let Some(text) = &cfg.string_stretching {
             let spec = Specification::read(text, &courses)?;
+            for key in spec.waves.keys() {
+                if !desc.bridge_axial_rows.contains_key(key) {
+                    return Err(format!("key {key}: longitudinal waves require a geometry-derived axial bridge row; regenerate the board with gen_board"));
+                }
+            }
             for (slot, c) in stretch_spec.iter_mut().zip(&courses) {
                 if let Some(Some(material)) = spec.courses.get(&c.midi) {
                     *slot = Some((*material, spec.waves.get(&c.midi).copied()));
@@ -1967,9 +2035,13 @@ impl LivePiano {
             }
         }
         let mut g_st = vec![0.0; courses.len() * r];
+        let mut a_st = vec![0.0; courses.len() * r];
         for ci in 0..courses.len() {
             for j in 0..r {
                 g_st[ci * r + j] = (0..r).map(|i| g_bare[ci * r + i] * phi_s[i * r + j]).sum();
+                if let Some(row) = desc.bridge_axial_rows.get(&courses[ci].midi) {
+                    a_st[ci * r + j] = (0..r).map(|i| row[i] * phi_s[i * r + j]).sum();
+                }
             }
         }
         // Physical board damping: the supplied full matrix of a reduced board,
@@ -2098,6 +2170,7 @@ impl LivePiano {
             m,
             keys,
             g_st,
+            a_st,
             lam_s,
             c_st,
             phi_s,
@@ -2413,6 +2486,7 @@ impl LivePiano {
             let g = &self.g_st[ci * r..(ci + 1) * r];
             let b = dot(g, &qs);
             let bdot = dot(g, &vs);
+            let axial_bridge = dot(&self.a_st[ci * r..(ci + 1) * r], &qs);
             let ac = &mut self.active[slot];
             let mut kept = Vec::with_capacity(ac.segs.len());
             for s in ac.segs.drain(..) {
@@ -2442,7 +2516,7 @@ impl LivePiano {
                 }
                 // Its extension and axial motion leave with it (the bank strings are linear).
                 if let Some(st) = &s.stretch {
-                    e += st.stored(&self.q[range.clone()], &self.m.beta[range.clone()], b);
+                    e += st.stored(&self.q[range.clone()], &self.m.beta[range.clone()], b, axial_bridge);
                 }
                 // Its chord keeps following the bridge: that kinetic energy stays.
                 self.ledger.retired_j += e - 0.5 * (s.beta2 - handed_beta2) * bdot * bdot;
@@ -2505,7 +2579,7 @@ impl LivePiano {
                 None => {
                     self.keys[ci].slot = Some(self.active.len());
                     self.active.push(ACourse {
-                        ci, segs: fresh, gl: vec![0.0; r], resp: vec![0.0; r], hsd: vec![0.0; r], wy: vec![0.0; r], bm: 0.0, gl_norm2: 0.0, modes: 0, b0: 0.0,
+                        ci, segs: fresh, gl: vec![0.0; r], al: vec![0.0; r], resp: vec![0.0; r], hsd: vec![0.0; r], wy: vec![0.0; r], bm: 0.0, gl_norm2: 0.0, modes: 0, b0: 0.0,
                         damped_now: false, age: 0, shape_n: 0, shape_off: 0,
                     });
                 }
@@ -2620,8 +2694,10 @@ impl LivePiano {
         let mut loss_schur = identity(r);
         for ac in &mut self.active {
             let g = &self.g_st[ac.ci * r..(ac.ci + 1) * r];
+            let a = &self.a_st[ac.ci * r..(ac.ci + 1) * r];
             for j in 0..r {
                 ac.gl[j] = (0..r).map(|i| g[i] * self.phi[i * r + j]).sum();
+                ac.al[j] = (0..r).map(|i| a[i] * self.phi[i * r + j]).sum();
             }
             ac.gl_norm2 = dot(&ac.gl, &ac.gl);
             let w: f64 = ac.segs.iter().map(|s| s.w_schur).sum();
@@ -3694,7 +3770,9 @@ impl LivePiano {
         let mut loss = 0.0;
         for ac in &mut self.active {
             let b = dot(&ac.gl, &self.bq);
+            let axial_bridge = dot(&ac.al, &self.bq);
             let mut reaction = 0.0;
+            let mut axial_reaction = 0.0;
             for s in &mut ac.segs {
                 if s.stretch.is_none() {
                     continue;
@@ -3705,8 +3783,9 @@ impl LivePiano {
                     s.owed = false;
                 }
                 if let Some(st) = s.stretch.as_deref_mut() {
-                    let kick = st.step(&self.q[range.clone()], &self.m.beta[range.clone()], b, dt, &mut self.v[range]);
+                    let kick = st.step(&self.q[range.clone()], &self.m.beta[range.clone()], b, axial_bridge, dt, &mut self.v[range]);
                     reaction += kick.reaction;
+                    axial_reaction += kick.axial_reaction;
                     work += kick.work;
                     loss += kick.loss;
                     if kick.out_of_domain {
@@ -3718,6 +3797,12 @@ impl LivePiano {
                 let push = -dt * reaction;
                 for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
                     *x += push * g;
+                }
+            }
+            if axial_reaction != 0.0 {
+                let push = -dt * axial_reaction;
+                for (x, a) in self.bvel.iter_mut().zip(&ac.al) {
+                    *x += push * a;
                 }
             }
         }
@@ -3742,6 +3827,7 @@ impl LivePiano {
         }
         for ac in &self.active {
             let b = dot(&ac.gl, &self.bq);
+            let axial_bridge = dot(&ac.al, &self.bq);
             for s in &ac.segs {
                 let vel = self.seg_velocity(s);
                 for (k, v) in (s.off..s.off + s.n).zip(vel.iter()) {
@@ -3750,7 +3836,7 @@ impl LivePiano {
                 }
                 if let Some(st) = &s.stretch {
                     let range = s.off..s.off + s.n;
-                    e += st.stored(&self.q[range.clone()], &self.m.beta[range], b);
+                    e += st.stored(&self.q[range.clone()], &self.m.beta[range], b, axial_bridge);
                 }
             }
         }

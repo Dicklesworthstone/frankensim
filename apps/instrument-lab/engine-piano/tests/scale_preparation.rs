@@ -12,6 +12,7 @@ fn description() -> Description {
     Description {
         courses: geometry::demonstration_scale().unwrap(),
         board: vec![BoardMode { frequency_hz: 180.0, damping_ratio: 0.015, bridge, volume: 0.01 }],
+        bridge_axial_rows: Default::default(),
         damping: Some(vec![2.0 * 0.015 * std::f64::consts::TAU * 180.0]),
         surface: vec![fs_live_piano::refmods::board_geometry::SurfaceSample {
             position_m: [0.0, 0.0, 0.0], area_m2: 0.01, mode_shape: vec![1.0],

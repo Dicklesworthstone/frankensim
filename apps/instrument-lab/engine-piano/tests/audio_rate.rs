@@ -11,6 +11,7 @@ fn fixture() -> (Description, Config) {
         bridge, volume: 0.02 }];
     let desc = Description {
         courses: vec![Course { duplex_length_m: 0.0, ..course }], board,
+        bridge_axial_rows: Default::default(),
         damping: None, surface: vec![SurfaceSample {
             position_m: [0.0, 0.0, 0.0], area_m2: 0.02, mode_shape: vec![1.0],
         }], board_provenance: "manufactured test board, source string and felt".into(),

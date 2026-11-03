@@ -52,6 +52,7 @@ fn fixture() -> (Description, Config, [f64; 2]) {
     let desc = Description {
         courses: vec![course],
         board: vec![board],
+        bridge_axial_rows: Default::default(),
         damping: None,
         surface: vec![SurfaceSample {
             position_m: [0.0; 3],
