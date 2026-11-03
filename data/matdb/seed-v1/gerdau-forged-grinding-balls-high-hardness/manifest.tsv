@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	gerdau-forged-grinding-balls-high-hardness
+redistribution	permitted	Selected attributed numerical facts and original interpretation only; no source PDF, prose, artwork or table layout is redistributed
+citation	Gerdau, Grinding Balls brochure, page 2, high-hardness forged-steel product specification; https://gsn.gerdau.com/sites/gsn_gerdau/files/downloadable_files/GrindingBalls_Brochure_v1.pdf; undated source, accessed 2026-11-03
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	grinding-media	properties.tsv	material-tsv-v1
+property	mass	grinding-ball-nominal-mass	dimensional
+property	diameter_min	grinding-ball-average-diameter-specification-minimum	dimensional
+property	diameter_max	grinding-ball-average-diameter-specification-maximum	dimensional
+property	out_of_round	grinding-ball-out-of-round-specification-maximum	dimensional
+property	surface_hardness	grinding-ball-surface-rockwell-c-nominal-specification	dimensional
+property	volumetric_hardness	grinding-ball-average-volumetric-rockwell-c-nominal-specification	dimensional
+property	hardness_tolerance	grinding-ball-rockwell-c-specification-tolerance	dimensional
+axis	nominal_size	source-nominal-ball-size-label	dimensional
+axis	grade	source-gerdau-high-hardness-forged-steel	dimensional
+axis	specification	source-product-specification	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	lot_qualified	source-lot-qualified	dimensional

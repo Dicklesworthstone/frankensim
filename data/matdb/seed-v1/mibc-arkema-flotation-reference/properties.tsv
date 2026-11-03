@@ -1,0 +1,37 @@
+frankensim.matdb-source.v1
+observation	identity	Arkema MIBC product, 4-methyl-2-pentanol, CAS 108-11-2	Manufacturer product identity and purity entry	MIBC is an alcohol flotation frother, distinct from methyl isobutyl ketone. The product has a reported minimum purity by mass, not guaranteed pure-species thermochemistry or a lot certificate. No molecular-mass, reaction, adsorption or recovery-rate parameter is inferred from the product name.
+observation	density	Arkema MIBC liquid at 20 C	Manufacturer density range in g/cm3	The two printed density endpoints are kept separately, without a midpoint, probability distribution or uncertainty estimate. Temperature is exactly 293.15 K; source test pressure is unstated. These product-reference endpoints can bound a declared volume-to-mass dosing calculation, not actual shipment properties or a temperature law.
+observation	partition	Arkema MIBC and water at 20 C	Manufacturer two directional solubilities stated as mass fractions	The 1.7 percent value is MIBC in the water-rich phase; 5.8 percent is water in the MIBC-rich phase. They are different saturated-phase compositions, not interchangeable solubilities, g/L values or an aqueous frother operating dose. No electrolyte, ore-pulp chemistry, interfacial tension, bubble size, coalescence threshold or flotation recovery curve is supplied.
+scalar	density-minimum	identity,density	density_min	0.806	g/cm3	constant
+uncertainty	density-minimum	unstated	-	-	-	-
+validity	density-minimum	temperature	293.15	293.15	K
+validity	density-minimum	product	1	1	1
+validity	density-minimum	reference	1	1	1
+validity	density-minimum	lot_qualified	0	0	1
+validity	density-minimum	pressure_known	0	0	1
+scalar	density-maximum	identity,density	density_max	0.808	g/cm3	constant
+uncertainty	density-maximum	unstated	-	-	-	-
+validity	density-maximum	temperature	293.15	293.15	K
+validity	density-maximum	product	1	1	1
+validity	density-maximum	reference	1	1	1
+validity	density-maximum	lot_qualified	0	0	1
+validity	density-maximum	pressure_known	0	0	1
+scalar	purity-minimum	identity	purity_min	0.985	1	constant
+uncertainty	purity-minimum	unstated	-	-	-	-
+validity	purity-minimum	product	1	1	1
+validity	purity-minimum	reference	1	1	1
+validity	purity-minimum	lot_qualified	0	0	1
+scalar	mibc-in-water	identity,partition	mibc_in_water	0.017	1	constant
+uncertainty	mibc-in-water	unstated	-	-	-	-
+validity	mibc-in-water	temperature	293.15	293.15	K
+validity	mibc-in-water	product	1	1	1
+validity	mibc-in-water	reference	1	1	1
+validity	mibc-in-water	lot_qualified	0	0	1
+validity	mibc-in-water	pressure_known	0	0	1
+scalar	water-in-mibc	identity,partition	water_in_mibc	0.058	1	constant
+uncertainty	water-in-mibc	unstated	-	-	-	-
+validity	water-in-mibc	temperature	293.15	293.15	K
+validity	water-in-mibc	product	1	1	1
+validity	water-in-mibc	reference	1	1	1
+validity	water-in-mibc	lot_qualified	0	0	1
+validity	water-in-mibc	pressure_known	0	0	1

@@ -6,6 +6,12 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The [grinding-media guide](MINING_GRINDING_MEDIA.md) adds discrete
+manufacturer ball specifications and a separately identified apparent charge
+packing reference. The [MIBC guide](MINING_FLOTATION_REAGENTS.md) adds a sourced
+flotation-frother profile with explicit density, purity and phase-composition
+bases. Both use the ordinary compiler and catalog.
+
 The [mineral-processing guide](MINERAL_PROCESSING.md) covers 33 source profiles
 and 104 claims for ore/gangue constituents and processing reagents, with an
 executable source-backed lime-hydration, carbonate-calcination, iron-oxide

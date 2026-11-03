@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	packing	Molycop SAG grinding-ball charge reference	Manufacturer SAG Balls Features, metric apparent packing-density value	The 4520 kg/m3 value is explicitly a theoretical apparent packing density of a ball charge. It includes void space and is not the intrinsic density of steel, ore or slurry. No site packing measurement, porosity distribution, size distribution, fluid filling, temperature dependence or operating mill fill is supplied. The independently rounded imperial value is not merged into this claim. A caller may multiply a separately declared bulk charge volume by this reference, but cannot use it to infer single-ball mass.
+scalar	packing-density	packing	packing_density	4520	kg/m3	constant
+uncertainty	packing-density	unstated	-	-	-	-
+validity	packing-density	sag_charge	1	1	1
+validity	packing-density	theoretical	1	1	1
+validity	packing-density	site_qualified	0	0	1
+validity	packing-density	temperature_known	0	0	1

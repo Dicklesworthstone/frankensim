@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	mibc-arkema-flotation-reference
+redistribution	permitted	Selected attributed numerical facts and original interpretation only; no source prose, images or table layout is redistributed
+citation	Arkema, Methylisobutylcarbinol, Technical Data and Properties; CAS 108-11-2; https://www.arkema.com/global/en/products/product-finder/product/thiochemicals/solvents/methylisobutylcarbinol/; accessed 2026-11-03
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	frother-reference	properties.tsv	material-tsv-v1
+property	density_min	density-reported-range-minimum	dimensional
+property	density_max	density-reported-range-maximum	dimensional
+property	purity_min	mibc-product-purity-mass-fraction-minimum	dimensional
+property	mibc_in_water	water-rich-phase-mibc-saturation-mass-fraction	dimensional
+property	water_in_mibc	mibc-rich-phase-water-saturation-mass-fraction	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	product	source-arkema-mibc-product	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	lot_qualified	source-lot-qualified	dimensional
+axis	pressure_known	source-test-pressure-known	dimensional

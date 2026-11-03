@@ -1,0 +1,11 @@
+frankensim.matdb-manifest.v3
+pack_id	molycop-sag-charge-packing-reference
+redistribution	permitted	Selected attributed numerical facts and original interpretation only; no source prose, images or table layout is redistributed
+citation	Molycop, SAG Balls, Features, theoretical apparent packing density; https://www.molycop.com/products-and-services/consumables/grinding-media/molycop/sag-balls; accessed 2026-11-03
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	charge-reference	properties.tsv	material-tsv-v1
+property	packing_density	grinding-media-theoretical-apparent-packing-density	dimensional
+axis	sag_charge	source-molycop-sag-ball-charge	dimensional
+axis	theoretical	source-theoretical-packing-reference	dimensional
+axis	site_qualified	source-site-packing-qualified	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional

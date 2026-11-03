@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	identity	Gerdau high-hardness forged steel grinding balls	Manufacturer brochure page 2, seven nominal-size rows	The millimetre nominal size labels identify product rows; they are not exact conversions of the adjacent inch labels or the actual diameter bounds. No alloy from another supplier is substituted. Test temperature and qualified lot are unstated.
+observation	geometry	Gerdau high-hardness product geometry and mass specifications	Page 2, metric nominal mass, centimetre average-diameter bounds, millimetre out-of-round tolerance	The metric mass column is retained as printed, without replacing it by a steel-density sphere calculation or the independently rounded pound column. Diameter bounds describe average diameter, not a certified bound on every surface radius. The ambiguous weight-range-percent column is excluded. Discrete product rows do not support interpolation.
+observation	hardness	Gerdau high-hardness product hardness specifications	Page 2, surface and AVH columns under the plus-or-minus 4 Rc heading	Rockwell C surface and average volumetric hardness remain distinct dimensionless nominal-specification records. They cannot satisfy a measured-hardness query, which requires original loading history absent here. The tolerance is a specification offset in Rockwell C points, not a measurement uncertainty, standard deviation, interval coverage, stress, Vickers hardness, wear coefficient or Bond work index. No indentation force, dwell history or lot measurement is invented.
+curve	mass	identity,geometry	mass	nominal_size	mm	kg	25:0.067,32:0.131,38:0.226,50:0.536,64:1.046,76:1.809,89:2.885	tabulated
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	nominal_size	25	89	mm
+validity	mass	grade	1	1	1
+validity	mass	specification	1	1	1
+validity	mass	temperature_known	0	0	1
+validity	mass	lot_qualified	0	0	1
+curve	diameter-minimum	identity,geometry	diameter_min	nominal_size	mm	cm	25:2.568,32:3.206,38:3.815,50:5.108,64:6.431,76:7.742,89:9.002	tabulated
+uncertainty	diameter-minimum	unstated	-	-	-	-
+validity	diameter-minimum	nominal_size	25	89	mm
+validity	diameter-minimum	grade	1	1	1
+validity	diameter-minimum	specification	1	1	1
+validity	diameter-minimum	temperature_known	0	0	1
+validity	diameter-minimum	lot_qualified	0	0	1
+curve	diameter-maximum	identity,geometry	diameter_max	nominal_size	mm	cm	25:2.634,32:3.277,38:3.889,50:5.202,64:6.535,76:7.892,89:9.187	tabulated
+uncertainty	diameter-maximum	unstated	-	-	-	-
+validity	diameter-maximum	nominal_size	25	89	mm
+validity	diameter-maximum	grade	1	1	1
+validity	diameter-maximum	specification	1	1	1
+validity	diameter-maximum	temperature_known	0	0	1
+validity	diameter-maximum	lot_qualified	0	0	1
+curve	out-of-round	identity,geometry	out_of_round	nominal_size	mm	mm	25:1.016,32:1.016,38:1.016,50:1.524,64:1.651,76:2.032,89:2.540	tabulated
+uncertainty	out-of-round	unstated	-	-	-	-
+validity	out-of-round	nominal_size	25	89	mm
+validity	out-of-round	grade	1	1	1
+validity	out-of-round	specification	1	1	1
+validity	out-of-round	temperature_known	0	0	1
+validity	out-of-round	lot_qualified	0	0	1
+curve	surface-hardness	identity,hardness	surface_hardness	nominal_size	mm	1	25:62,32:62,38:62,50:62,64:62,76:62,89:62	tabulated
+uncertainty	surface-hardness	unstated	-	-	-	-
+validity	surface-hardness	nominal_size	25	89	mm
+validity	surface-hardness	grade	1	1	1
+validity	surface-hardness	specification	1	1	1
+validity	surface-hardness	temperature_known	0	0	1
+validity	surface-hardness	lot_qualified	0	0	1
+curve	volumetric-hardness	identity,hardness	volumetric_hardness	nominal_size	mm	1	25:62,32:62,38:62,50:62,64:62,76:61,89:62	tabulated
+uncertainty	volumetric-hardness	unstated	-	-	-	-
+validity	volumetric-hardness	nominal_size	25	89	mm
+validity	volumetric-hardness	grade	1	1	1
+validity	volumetric-hardness	specification	1	1	1
+validity	volumetric-hardness	temperature_known	0	0	1
+validity	volumetric-hardness	lot_qualified	0	0	1
+curve	hardness-tolerance	identity,hardness	hardness_tolerance	nominal_size	mm	1	25:4,32:4,38:4,50:4,64:4,76:4,89:4	tabulated
+uncertainty	hardness-tolerance	unstated	-	-	-	-
+validity	hardness-tolerance	nominal_size	25	89	mm
+validity	hardness-tolerance	grade	1	1	1
+validity	hardness-tolerance	specification	1	1	1
+validity	hardness-tolerance	temperature_known	0	0	1
+validity	hardness-tolerance	lot_qualified	0	0	1

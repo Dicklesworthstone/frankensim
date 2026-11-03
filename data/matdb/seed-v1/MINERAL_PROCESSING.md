@@ -1,5 +1,14 @@
 # Mineral processing: public sources and callable physics
 
+Manufacturer [grinding-media records](MINING_GRINDING_MEDIA.md) now supply
+discrete forged-ball masses, geometry and hardness specifications, plus a
+separate theoretical SAG charge packing-density reference. They support
+media inventories without substituting ball hardness for ore work index.
+
+The [MIBC frother reference](MINING_FLOTATION_REAGENTS.md) supplies product
+density endpoints, minimum purity and separately named saturated-phase mass
+fractions for explicit dosing and material accounting.
+
 Peroxide oxidation, cyanate hydrolysis and ammonia speciation now have matched
 material references and finite-inventory and coupled-pH examples; see
 [cyanide treatment](MINING_CYANIDE_TREATMENT.md).
