@@ -82,6 +82,8 @@ pub mod porous;
 pub mod recovery;
 /// Source-bound finite-batch reaction progress with coupled reagent depletion.
 pub mod reaction_batch;
+/// Complete species transport and shared finite-reagent kinetics in a stirred tank.
+pub mod reaction_flow;
 /// Molecular relaxation absorption and dispersion of any gas mixture (M0.1-W2).
 pub mod relaxation;
 pub mod section;

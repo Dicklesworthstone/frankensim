@@ -1,5 +1,63 @@
 # fs-material — CONTRACT
 
+## Continuous stirred-tank chemistry with finite shared reagents
+
+`reaction_flow::ReactiveCstr` evolves complete molar inventories in one
+isothermal, fixed-full-volume ideal stirred tank. It joins 1..=32 original
+`LocalBilinearReaction` laws consuming one explicitly named shared reagent
+and distinct other reactants. Products may be shared, but cannot feed a
+reactant in this slice. Each conserved equation and species definition remains
+owned by `fs-thermochem::ReactionNetwork`; chemistry uses simultaneous gross
+stock admission so competing pathways cannot independently spend the same acid.
+
+Each local law declares `r_j = k_j * n_Aj * n_Bj / V` in mol/s with explicit
+species roles and `k` in m³/(mol s). The distinct version-1
+`local-bilinear-reaction` card requires zero hidden state, original source
+hashes/provenance and finite typed volume, temperature and both concentration
+domains. Additional source conditions remain mandatory. Batch age, batch
+volume and residence-time domains cannot be promoted into this local law.
+Mineral inventory divided by volume is an empirical availability variable;
+neither reaction orders nor rate constants are inferred from stoichiometry,
+mineral identity, pure-solid activity or particle surface area.
+
+`advance` takes complete initial stocks, complete inlet concentrations, actual
+volumetric flow and one piecewise-constant duration/temperature/condition set.
+Every species, including solids and dissolved products, shares the declared
+ideal residence. At zero flow, reaction continues with no inlet or outlet.
+The returned full inventory is the state for a later feed change or pump
+restart. Transport integrates its own positive exponential outlet amounts;
+outlet is never reconstructed as a mass-balance plug or counted as recovered
+metal. Results expose initial/final/incoming/outgoing amounts, cumulative
+reaction extents and gross species consumption/formation, source endpoint
+queries and independently evaluated complete-species balance residuals.
+`result.final_inventory` is the final tank state; the nested
+`result.reactions.final_inventory` is the cumulative reaction account funded
+by initial stocks plus all inlet, before subtracting the separately integrated
+outlet. The two inventories have intentionally different accounting scopes.
+
+The integrator composes exact transport half-steps with simultaneous RK4
+reaction steps. One full step versus two half steps estimates the generally
+second-order splitting error, divided by three. Error controls include stocks,
+integrated outlets and reaction extents, with time-weighted per-step allowances,
+accumulated estimates and bounded accepted/rejected attempts. These are local
+numerical estimates, not certified global errors. Original source support is
+checked at each split endpoint and reaction stage; rectangular admission
+covers each monotone split path, not an enclosure of the unsplit trajectory.
+Stock overdraw, erased positive finite-time reactants, range/resolution loss,
+out-of-domain stages or exhausted work refuse without publishing partial state.
+Neither negative stock clipping nor renormalized reaction progress is used.
+
+Seven focused regressions cover an independent stopped-flow bilinear solution,
+exact nonreactive washout and outlet integrals, shared acid with unequal proton
+demands, flow interruption, atom/charge/species balances, steady-state step
+refinement, source refusals and atomic budget failure. The runnable
+`mineral_leach_train` example carries copper-oxide and calcite stocks through
+acid-feed, flushing, stopped-flow and restart intervals with explicitly
+synthetic rate declarations. It reports retained/exported copper and acid
+accounts. This slice does not supply ore calibration, selective solids
+residence, speciation/equilibrium feedback, reagent recycling through reaction
+products, heat evolution, gas transfer or changing tank volume.
+
 ## Particle-size-dependent shrinking-core leaching
 
 `reaction_batch::shrinking_core::ShrinkingCoreReaction` binds one exactly
