@@ -110,3 +110,73 @@ refusals, separate direct/caloric energies, finite solid availability and
 the source-mass-to-counterion calculation. These checks do not establish
 commercial purity, dissolution kinetics, concentrated-electrolyte activity,
 plant pH calibration, cyanide destruction or an optimal reagent dose.
+
+## Add reagents to an active leach bath
+
+`cyanide_leach::dosing::DissolvedSodiumReagent` is accepted by the closed
+`GoldCyanidationBatch`, finite-headspace `gas_transfer::AeratedGoldCyanidation`
+and prescribed-pressure `aeration::AeratedGoldCyanidationBatch` owners:
+
+```rust
+use fs_material::cyanide_leach::dosing::DissolvedSodiumReagent;
+use fs_qty::Amount;
+
+let added = bath.dose_reagent(
+    DissolvedSodiumReagent::SodiumCyanide,
+    Amount::new(0.001),
+    1_000_000,
+    || false,
+)?;
+let totals = bath.reagent_inputs();
+assert_eq!(added.inputs, totals);
+```
+
+The argument is an amount in moles **already dissolved into the bath**. NaCN
+adds the same amount of analytical cyanide and sodium. NaOH adds sodium/base
+equivalents. The shared equilibrium owner determines the new pH, HCN, free CN
+and OH; optional competing-metal inventories remain fixed while their bound
+cyanide repartitions. The initial charge stays immutable. `ReagentInputs`
+tracks cumulative NaCN, NaOH and sodium additions separately, and dose and
+advance receipts report independent cyanide and sodium balance residuals.
+
+Dosing preserves the accepted clock, gold dissolution, actual oxygen stocks
+and all existing gas input/transfer accounts. It can replenish a cyanide-limited
+bath without resetting its reaction history. A closed bath still has only its
+original dissolved oxygen available. Each complete candidate is admitted by
+the original chemical source; finite-headspace dosing also checks its retained
+transfer source at the changed chemistry. The prescribed-pressure owner checks
+the next call's pressure boundary and transfer source on the next advance.
+Invalid or unresolved additions, source refusal, work exhaustion and
+cancellation leave the accepted bath and input accounts unchanged.
+
+The actual-source `aerated_gold_leach` example now connects the mass calculation
+above to this active-bath API. Add the four following packs to the same
+`reagent_pack_dir` created above, then run the measured-Henry route:
+
+```bash
+for pack in hydrogen-cyanide-aqueous-nbs1989 hydrogen-ion-aqueous-nbs1989 water-liquid-nbs1989-thermochemistry oxygen-water-henry-sander2023-rettich2000; do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
+    --out "$reagent_pack_dir/$pack.fsmatpk"
+done
+
+cargo run -p fs-material --example aerated_gold_leach -- \
+  --materials "$reagent_pack_dir" \
+  --henry-pack "$reagent_pack_dir/oxygen-water-henry-sander2023-rettich2000.fsmatpk" \
+  --dose-reagents
+```
+
+At the existing 120-second interruption, the example declares 0.0490077 g
+NaCN and 0.0399972 g NaOH actually dissolved, **0.001 mol of each**. It resolves
+the compatible NBS reaction and molar-mass receipts, adds both reagents, prints
+the new pH/free CN and cumulative reagent accounts, and resumes the original
+contact-stop, oxygen-dose and contact-restart scenario. The existing Gibbs
+oxygen-partition route also accepts `--dose-reagents`; its oxygen source
+compilation is in [MINING_OXYGEN_TRANSFER.md](MINING_OXYGEN_TRANSFER.md).
+
+These masses, source boxes and kinetic parameters are numerical illustrations,
+not operating recommendations or measured ore calibration. Neither this API
+nor the example predicts solid dissolution completion, stock-solution carrier
+volume, commercial purity, finite-concentration activities or heat feedback.
+Temperature and volume remain fixed. The pure-water Henry datum remains an
+explicit approximation when used for cyanide liquor.

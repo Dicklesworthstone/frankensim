@@ -1,5 +1,41 @@
 # fs-material — CONTRACT
 
+## Dissolved cyanide and caustic additions during leaching
+
+The closed, finite-headspace and prescribed-pressure cyanidation owners expose
+`dose_reagent` for finite, already-dissolved `SodiumCyanide` and
+`SodiumHydroxide` equivalents. NaCN adds analytical cyanide and sodium; NaOH
+adds sodium/alkalinity. The original shared acid/base owner re-solves pH,
+HCN, free CN and OH. Hydroxide is not installed as a second fixed spectator,
+and a dose never assigns a target pH or assumes all cyanide remains free.
+Optional competing-metal families retain their original totals and sources;
+their ligand partition is re-solved against the increased analytical pool.
+
+The immutable initial charge remains distinct from cumulative `ReagentInputs`.
+At cumulative gold dissolution `x`, the available cyanide before partition is
+`T0+n_NaCN-2*x`, and sodium is `Na0+n_NaCN+n_NaOH`. Dose and advance receipts
+retain the original model and independent cyanide/sodium residuals. Adding a
+reagent preserves elapsed time, gold progress, actual liquid/gas oxygen and
+the existing oxygen input/uptake/stripping accounts. The finite chemical
+ceiling expands with cyanide input; a closed bath still cannot consume more
+than its original dissolved oxygen supplies.
+
+Each dose prepares and admits a complete candidate state before publication.
+Negative, nonfinite or numerically unresolved additions, conflicting sodium
+ownership, source-domain refusal, exhausted work and cancellation leave the
+accepted state and cumulative inputs unchanged. The finite-headspace owner
+also re-admits its retained transfer source at the changed chemistry. The
+prescribed-pressure owner does not retain a boundary between advance calls;
+its next advance admits that call's pressure and transfer source against the
+updated solution.
+
+The boundary is fixed temperature and volume with caller-declared dissolved
+equivalents. Solid dissolution completion, commercial purity, carrier liquid,
+heat of mixing, cyanide destruction and an optimal operating dose are not
+inferred. The NBS source-mass conversion and runnable `--dose-reagents`
+example are documented in
+`data/matdb/seed-v1/MINING_REAGENT_DISSOLUTION.md`.
+
 ## Competing dissolved metals during gold cyanidation
 
 `GoldCyanidationBatch::new_with_competing_metals` couples explicit dissolved
@@ -13,8 +49,8 @@ without a separately declared physical and chemical model.
 
 The supplied charge's `uncomplexed_cyanide` is HCN+CN before optional metal
 equilibration, excluding ligands in any initial gold complex. At cumulative
-gold progress `x`, the remaining available ligand total is `T0-2*x`. Every
-rate stage jointly partitions it among HCN, free CN and the declared metal
+gold progress `x`, the remaining available ligand total is `T0+n_NaCN-2*x`.
+Every rate stage jointly partitions it among HCN, free CN and the declared metal
 complexes while solving electroneutrality with the current gold-complex stock.
 The actual free CN and pH enter the original source-admitted empirical rate;
 the owned uncomplexed-cyanide source coordinate is the actual HCN+CN pool.
@@ -55,8 +91,8 @@ inferred from equilibrium data.
 At fixed volume, `J=kLa*(O_sat-O)` and the coupled balances are `dx/dt=r_Au`,
 `dO/dt=J-r_Au/4`. Actual DO is independently integrated, so an initially
 oxygen-free charge can start reacting after uptake. The finite chemical
-ceiling is `min(Au0,CN0/2)`; closed-batch initial DO is not an open-boundary
-ceiling. The original chemical evaluator, simultaneous acid/base speciation,
+ceiling is `min(Au0,(CN0+n_NaCN)/2)`; closed-batch initial DO is not an
+open-boundary ceiling. The original chemical evaluator, simultaneous acid/base speciation,
 conserved equation and empirical source admission remain authoritative.
 
 The owner separately integrates gross uptake and gross stripping and preserves
@@ -192,10 +228,10 @@ Cumulative progress is mol Au dissolved. The original conserved dissolved-O2
 Elsner equation supplies consumption/formation at extent `x/4`. The original
 `IdealAcidBaseSystem` jointly solves all admitted acid families and water at
 every rate stage. In the absence of optional metal competition, the remaining
-HCN+CN total is `T0-2*x`; dicyanoaurate is an
+HCN+CN total is `T0+n_NaCN-2*x`; dicyanoaurate is an
 internally updated spectator with amount `G0+x`. Thus HCN remains available
 through dissociation, and free CN is never confused with total cyanide.
-Original Gibbs-source receipts, fixed counterions and other family totals
+Original Gibbs-source receipts, initial counterions and other family totals
 remain attached to the model and accepted state. Source temperature must
 match the actual fixed bath temperature. The common activity amount and
 liquid volume are separate declarations.
@@ -214,7 +250,7 @@ balance residuals.
 
 Water retains fixed unit activity. Stoichiometric OH production is distinct
 from equilibrium OH, and no finite solvent H/O or thermal balance is claimed.
-The scope excludes gas transfer, reagent dosing, cyanide destruction, other
+The scope excludes gas transfer, cyanide destruction, other
 cyanicide minerals, passivation, through-flow and calibrated ore/plant recovery.
 The `gold_leach_to_carbon` consumer hands analytical dissolved Au to the
 existing finite-time carbon owner and checks the combined solid/liquid/carbon
@@ -11162,3 +11198,4 @@ Layer/species dissolution and trapping accounts decompose storage and count bind
 Three focused G0/G3 groups passed on the native material test executable: fixed/adaptive mobile heat is unchanged by a 1e24 gas-reference shift; layered competitive displacement agrees with an independent internal-energy reconstruction; and missing/late-invalid caloric sources and late cancellation publish no state. These are numerical implementation checks, not experimental validation or a DSR verdict. The existing Langmuir source's representable reference calibration remains its own obligation.
 
 Scope: stationary rigid geometry, additive per-species calorics and external thermostats. Temperature evolution, sorption heat capacity, thermal conduction, excess-mixture energy and entropy production are not claimed by this held-temperature account.
+

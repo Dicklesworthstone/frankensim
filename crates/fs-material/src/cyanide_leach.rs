@@ -57,6 +57,9 @@ pub mod gas_transfer;
 /// Prescribed-pressure oxygen uptake and stripping with a maintained gas reservoir.
 pub mod aeration;
 
+/// Metered dissolved NaCN/NaOH additions with retained original charge and clock.
+pub mod dosing;
+
 /// Explicit empirical coefficient in m6/(mol2 s).
 pub type CyanidationRateConstant = Qty<6, 0, -1, 0, 0, -2>;
 /// Accessible gold dissolution rate in mol Au/s.
@@ -373,6 +376,8 @@ pub struct CyanidationConservation {
     /// Uncomplexed family plus metal-bound ligands and twice gold-complex stock,
     /// minus original cyanide. Includes the reported equilibrium solve residual.
     pub cyanide: Amount,
+    /// Fixed canonical Na+ spectator minus original and delivered sodium.
+    pub sodium: Amount,
     /// Remaining O2 plus original-equation O2 consumption minus original DO.
     pub dissolved_oxygen: Amount,
 }
@@ -383,7 +388,7 @@ pub struct CyanidationNumerics {
     pub maximum_step: Time,
     /// Absolute cumulative Au local-error-estimate allowance for this call.
     pub absolute_gold_error: Amount,
-    /// Additional fraction of the original finite Au progress ceiling.
+    /// Additional fraction of the current finite Au progress ceiling.
     pub relative_gold_error: Dimensionless,
     /// Maximum accepted plus rejected full/two-half trials, at most 65,536.
     pub maximum_attempts: usize,
@@ -409,6 +414,7 @@ struct Layout {
     speciation: SpeciationOptions,
     competition: Option<competition::BoundCompetition>,
     limit: f64,
+    reagents: dosing::ReagentInputs,
 }
 /// Persistent closed-bath progress and clock; no partial trial state is public.
 #[derive(Clone, Debug)]
@@ -448,6 +454,10 @@ pub struct CyanidationAdvance {
     pub work: usize,
 }
 impl CyanidationAdvance {
+    /// Cumulative accepted reagent inputs, separate from the original charge.
+    pub fn reagent_inputs(&self) -> dosing::ReagentInputs {
+        self.layout.reagents
+    }
     /// Original immutable kinetic and equilibrium source owners.
     pub fn model(&self) -> &GoldCyanidation {
         &self.layout.model
@@ -541,6 +551,7 @@ impl GoldCyanidationBatch {
             speciation,
             competition,
             limit,
+            reagents: dosing::ReagentInputs::default(),
         });
         let mut never = || false;
         let mut work = Work {
@@ -564,6 +575,37 @@ impl GoldCyanidationBatch {
     pub fn initial_charge(&self) -> &CyanidationCharge {
         &self.layout.charge
     }
+    /// Cumulative delivered NaCN/NaOH and sodium, not a replacement initial charge.
+    pub fn reagent_inputs(&self) -> dosing::ReagentInputs {
+        self.layout.reagents
+    }
+
+    /// Add finite already-dissolved equivalents and re-speciate at the retained
+    /// clock/progress, including any original competing-metal equilibrium.
+    pub fn dose_reagent(
+        &mut self,
+        reagent: dosing::DissolvedSodiumReagent,
+        amount: Amount,
+        maximum_work: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<dosing::ReagentDoseReceipt> {
+        let mut work = dosing::work(maximum_work, &mut cancelled)?;
+        let mut layout = dosing::prepare(&self.layout, reagent, amount, &mut work)?;
+        if layout.charge.dissolved_oxygen.value() < product(0.25, layout.limit)? {
+            layout.limit = product(4.0, layout.charge.dissolved_oxygen.value())?;
+        }
+        let layout = Arc::new(layout);
+        let state = evaluate(
+            &layout,
+            self.elapsed().value(),
+            self.state.gold_dissolved.value(),
+            &mut work,
+        )?;
+        let receipt = dosing::receipt(layout.clone(), reagent, amount, &state, &mut work)?;
+        self.layout = layout;
+        self.state = state;
+        Ok(receipt)
+    }
     /// Current private-history snapshot through an immutable reference.
     pub fn state(&self) -> &CyanidationState {
         &self.state
@@ -572,7 +614,7 @@ impl GoldCyanidationBatch {
     pub const fn elapsed(&self) -> Time {
         self.state.elapsed
     }
-    /// Original stoichiometric ceiling in mol Au, not a finite-time conversion promise.
+    /// Current Au/cyanide/original-DO ceiling, not a finite-time conversion promise.
     pub fn maximum_gold_dissolution(&self) -> Amount {
         Amount::new(self.layout.limit)
     }
@@ -783,13 +825,13 @@ fn evaluate_with_oxygen(
         .amounts(Amount::new(quotient(x, 4.0)?))?;
     let c = &layout.charge;
     let gold = remainder(c.accessible_gold.value(), amount(&amounts, AU), x)?;
-    let cyanide = remainder(c.uncomplexed_cyanide.value(), amount(&amounts, CN), x)?;
+    let cyanide = remainder(dosing::cyanide_total(layout)?, amount(&amounts, CN), x)?;
     let oxygen = match oxygen_stock {
         Some(value) => positive_or_zero(value, "integrated dissolved oxygen loses range")?,
         None => remainder(c.dissolved_oxygen.value(), amount(&amounts, OXYGEN), x)?,
     };
     let complex = sum([c.gold_complex.value(), amount(&amounts, COMPLEX)].into_iter())?;
-    let mut spectators = c.spectators.clone();
+    let mut spectators = dosing::spectators(layout)?;
     spectators.push(SpectatorIon {
         species: SpeciesId::new(COMPLEX).expect("fixed species identity"),
         charge: -1,
@@ -925,14 +967,7 @@ fn conservation(
         -c.gold_complex.value(),
     ]
     .into_iter())?;
-    let cyanide = sum([
-        state.uncomplexed_cyanide.value(),
-        bound_cyanide(state),
-        product(2.0, state.gold_complex.value())?,
-        -c.uncomplexed_cyanide.value(),
-        -product(2.0, c.gold_complex.value())?,
-    ]
-    .into_iter())?;
+    let (cyanide, sodium) = dosing::balances(layout, state)?;
     let oxygen = sum([
         state.dissolved_oxygen.value(),
         amount(amounts, OXYGEN),
@@ -943,9 +978,7 @@ fn conservation(
         (gold, c.accessible_gold.value().max(c.gold_complex.value())),
         (
             cyanide - ligand_balance_residual(state),
-            c.uncomplexed_cyanide
-                .value()
-                .max(product(2.0, c.gold_complex.value())?),
+            dosing::cyanide_total(layout)?.max(product(2.0, c.gold_complex.value())?),
         ),
         (oxygen, c.dissolved_oxygen.value()),
     ] {
@@ -958,6 +991,7 @@ fn conservation(
     Ok(CyanidationConservation {
         gold: Amount::new(gold),
         cyanide: Amount::new(cyanide),
+        sodium: Amount::new(sodium),
         dissolved_oxygen: Amount::new(oxygen),
     })
 }

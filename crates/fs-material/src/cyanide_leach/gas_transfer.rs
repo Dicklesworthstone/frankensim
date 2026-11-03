@@ -407,6 +407,8 @@ pub struct AerationConservation {
     /// Uncomplexed cyanide plus gold/competing-metal ligands minus original total.
     /// Retains any reported, tolerance-checked ligand-equilibrium residual.
     pub cyanide: Amount,
+    /// Fixed canonical Na+ spectator minus original and delivered sodium.
+    pub sodium: Amount,
     /// Liquid oxygen + reaction consumption - initial liquid oxygen - net transfer.
     pub liquid_oxygen: Amount,
     /// Gas oxygen + net transfer - initial gas oxygen - all headspace doses.
@@ -446,6 +448,10 @@ pub struct AerationAdvance {
     pub work: usize,
 }
 impl AerationAdvance {
+    /// Cumulative accepted dissolved-reagent inputs at this accepted endpoint.
+    pub fn reagent_inputs(&self) -> dosing::ReagentInputs {
+        self.layout.chemical.reagents
+    }
     /// Original reaction and source-backed chemical rate/acid-base owner.
     pub fn chemical_model(&self) -> &GoldCyanidation {
         &self.layout.chemical.model
@@ -529,7 +535,7 @@ impl AeratedGoldCyanidation {
             .charge
             .accessible_gold
             .value()
-            .min(product(0.5, chemical.charge.uncomplexed_cyanide.value())?);
+            .min(product(0.5, dosing::cyanide_total(&chemical)?)?);
         sum([chemical.charge.dissolved_oxygen.value(), gas_oxygen.value()].into_iter())?;
         let layout = Arc::new(GasLayout {
             chemical,
@@ -570,6 +576,48 @@ impl AeratedGoldCyanidation {
     /// Original liquid charge, including its independent activity basis.
     pub fn initial_charge(&self) -> &CyanidationCharge {
         &self.layout.chemical.charge
+    }
+    /// Cumulative reagent inputs remain separate from the original liquid charge.
+    pub fn reagent_inputs(&self) -> dosing::ReagentInputs {
+        self.layout.chemical.reagents
+    }
+
+    /// Add finite dissolved NaCN/NaOH equivalents while retaining gas inventory,
+    /// oxygen-dose/transfer accounts, contact switch, clock and reaction progress.
+    /// All original chemical/metal and transfer sources admit the post-dose state.
+    pub fn dose_reagent(
+        &mut self,
+        reagent: dosing::DissolvedSodiumReagent,
+        amount: Amount,
+        maximum_work: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<dosing::ReagentDoseReceipt> {
+        let mut work = dosing::work(maximum_work, &mut cancelled)?;
+        let mut layout = (*self.layout).clone();
+        layout.chemical = dosing::prepare(&layout.chemical, reagent, amount, &mut work)?;
+        let state = evaluate(
+            &layout,
+            self.state.solution.elapsed.value(),
+            coordinates(&self.state),
+            self.state.gas_contact_active,
+            &mut work,
+        )?;
+        let candidate = Self {
+            layout: Arc::new(layout),
+            state,
+            cumulative_dose: self.cumulative_dose,
+            accumulated_error: self.accumulated_error,
+        };
+        candidate.balances(&candidate.state, candidate.cumulative_dose.value())?;
+        let receipt = dosing::receipt(
+            Arc::new(candidate.layout.chemical.clone()),
+            reagent,
+            amount,
+            &candidate.state.solution,
+            &mut work,
+        )?;
+        *self = candidate;
+        Ok(receipt)
     }
     /// Accepted chemical/gas/transfer state, immutable to callers.
     pub fn state(&self) -> &AeratedCyanidationState {
@@ -776,14 +824,7 @@ impl AeratedGoldCyanidation {
             -c.gold_complex.value(),
         ]
         .into_iter())?;
-        let cyanide = sum([
-            s.uncomplexed_cyanide.value(),
-            bound_cyanide(s),
-            product(2.0, s.gold_complex.value())?,
-            -c.uncomplexed_cyanide.value(),
-            -product(2.0, c.gold_complex.value())?,
-        ]
-        .into_iter())?;
+        let (cyanide, sodium) = dosing::balances(&self.layout.chemical, s)?;
         let liquid = sum([
             s.dissolved_oxygen.value(),
             consumed,
@@ -817,8 +858,7 @@ impl AeratedGoldCyanidation {
             (gold, c.accessible_gold.value().max(c.gold_complex.value())),
             (
                 cyanide - ligand_balance_residual(s),
-                c.uncomplexed_cyanide
-                    .value()
+                dosing::cyanide_total(&self.layout.chemical)?
                     .max(product(2.0, c.gold_complex.value())?),
             ),
             (liquid, oxygen_scale),
@@ -835,6 +875,7 @@ impl AeratedGoldCyanidation {
         Ok(AerationConservation {
             gold: Amount::new(gold),
             cyanide: Amount::new(cyanide),
+            sodium: Amount::new(sodium),
             liquid_oxygen: Amount::new(liquid),
             gas_oxygen: Amount::new(gas),
             total_oxygen: Amount::new(total),

@@ -8,6 +8,9 @@ pub(in crate::cyanide_leach) mod competition;
 #[path = "tests/gas_transfer.rs"]
 mod gas_transfer;
 
+#[path = "tests/dosing.rs"]
+mod dosing;
+
 use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -315,6 +318,7 @@ fn balances(answer: &CyanidationAdvance) {
     for residual in [
         answer.conservation.gold,
         answer.conservation.cyanide,
+        answer.conservation.sodium,
         answer.conservation.dissolved_oxygen,
     ] {
         close(residual.value(), 0.0, 2e-14);

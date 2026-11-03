@@ -5,6 +5,8 @@
 //! Compare a closed dissolved-oxygen inventory with finite headspace exchange,
 //! then stop contact, meter a gas-phase dose and resume contact. Every oxygen
 //! molecule is assigned to gas, liquid or original-equation consumption.
+//! Optional --dose-reagents resolves declared dissolved NaCN/NaOH masses from
+//! compatible NBS sources and adds their counterions to the same active bath.
 //! Rates, inventories and source boxes are authored numerical illustrations,
 //! not measured ore data, air-flow settings or a calibrated recovery forecast.
 #![deny(unsafe_code)]
@@ -15,10 +17,11 @@ use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSelection, ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, NormalizedPack,
-    Provenance, QueryPoint, SelectionPolicy,
+    PropertyKey, Provenance, QueryPoint, SelectionPolicy,
 };
 use fs_material::cyanide_leach::{
     self, GoldCyanidationBatch,
+    dosing::DissolvedSodiumReagent,
     gas_transfer::{
         AeratedCyanidationState, AeratedGoldCyanidation, AerationAdvance, AerationNumerics,
         GAS_VOLUME_AXIS, KLA_PARAMETER, OXYGEN_TRANSFER_LAW, OxygenHenrySource, OxygenTransfer,
@@ -26,8 +29,8 @@ use fs_material::cyanide_leach::{
     },
 };
 use fs_qty::{
-    Amount, AmountConcentration, Dims, Frequency, Pressure, QuantitySpec, Temperature, Time,
-    Volume,
+    Amount, AmountConcentration, Dims, Frequency, Mass, MolarMass, Pressure, QuantitySpec,
+    Temperature, Time, Volume,
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 use fs_thermochem::{
@@ -57,6 +60,8 @@ const INITIAL_GOLD: f64 = 0.001;
 const INITIAL_DO: f64 = 0.000001;
 const INITIAL_GAS: f64 = 0.0001;
 const OXYGEN_DOSE: f64 = 0.0002;
+const USAGE: &str =
+    "usage: aerated_gold_leach --materials PACK_DIR [--henry-pack PATH.fsmatpk] [--dose-reagents]";
 const PACKS: [(&str, &str); 7] = [
     ("hydrogen-cyanide-aqueous-nbs1989", "HCN(aq)"),
     ("hydrogen-ion-aqueous-nbs1989", "H+(aq)"),
@@ -65,6 +70,14 @@ const PACKS: [(&str, &str); 7] = [
     ("water-liquid-nbs1989-thermochemistry", "H2O(l)"),
     ("oxygen-gas-nbs1989-thermochemistry", "O2(g)"),
     ("oxygen-aqueous-nbs1989-thermochemistry", "O2(aq)"),
+];
+const REAGENT_PACKS: [(&str, &str); 3] = [
+    ("sodium-hydroxide-solid-nbs1989-thermochemistry", "NaOH(s)"),
+    (
+        "sodium-cyanide-cubic-solid-nbs1989-thermochemistry",
+        "NaCN(s)",
+    ),
+    ("sodium-ion-aqueous-nbs1989", "Na[+](aq)"),
 ];
 
 fn point(index: usize) -> Result<QueryPoint> {
@@ -91,12 +104,13 @@ fn point(index: usize) -> Result<QueryPoint> {
     match index {
         4 => flags.extend([("source-phase-liquid", 1.0), ("source-pure-species", 1.0)]),
         5 => flags.extend([("source-phase-gas", 1.0), ("source-pure-species", 1.0)]),
+        7 | 8 => flags.extend([("source-phase-solid", 1.0), ("source-pure-species", 1.0)]),
         _ => {
             flags.extend([
                 ("source-phase-aqueous", 1.0),
                 ("source-aqueous-unit-activity-infinite-dilution", 1.0),
             ]);
-            if [1, 2, 3].contains(&index) {
+            if [1, 2, 3, 9].contains(&index) {
                 flags.extend([
                     ("source-individual-ion", 1.0),
                     ("source-ionic-reference-hydrogen-zero", 1.0),
@@ -104,10 +118,24 @@ fn point(index: usize) -> Result<QueryPoint> {
             }
         }
     }
+    if index == 8 {
+        flags.push(("source-phase-sodium-cyanide-cubic", 1.0));
+    }
     for (axis, value) in flags {
         at = at.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)?;
     }
     Ok(at)
+}
+
+fn load_pack(directory: &Path, name: &str) -> Result<NormalizedPack> {
+    let bytes = std::fs::read(directory.join(format!("{name}.fsmatpk")))?;
+    let decoded = NormalizedPack::from_bytes(&bytes)?;
+    let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes)?;
+    if pack.pack_id() != name || pack.to_bytes() != bytes {
+        return Err(format!("expected canonical source profile {name}").into());
+    }
+    println!("material={} hash={}", pack.pack_id(), pack.content_hash());
+    Ok(pack)
 }
 
 fn load(
@@ -117,16 +145,7 @@ fn load(
     let packs = PACKS
         .iter()
         .take(if gibbs_partition { 7 } else { 5 })
-        .map(|(name, _)| {
-            let bytes = std::fs::read(directory.join(format!("{name}.fsmatpk")))?;
-            let decoded = NormalizedPack::from_bytes(&bytes)?;
-            let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes)?;
-            if pack.pack_id() != *name || pack.to_bytes() != bytes {
-                return Err(format!("expected canonical source profile {name}").into());
-            }
-            println!("material={} hash={}", pack.pack_id(), pack.content_hash());
-            Ok(pack)
-        })
+        .map(|(name, _)| load_pack(directory, name))
         .collect::<Result<Vec<_>>>()?;
     let ids = PACKS
         .iter()
@@ -190,6 +209,111 @@ fn load(
         IdealAcidBaseSystem::new(water, vec![AcidFamily::new(CYANIDE, vec![cyanide])?])?,
         partition,
     ))
+}
+
+fn declared_dissolved_amount(
+    directory: &Path,
+    reagent: DissolvedSodiumReagent,
+    reacted_pure_mass: Mass,
+) -> Result<Amount> {
+    let (solid, ion, recipe) = match reagent {
+        DissolvedSodiumReagent::SodiumCyanide => (1, 2, MineralReaction::SodiumCyanideDissolution),
+        DissolvedSodiumReagent::SodiumHydroxide => {
+            (0, 3, MineralReaction::SodiumHydroxideDissolution)
+        }
+    };
+    let profiles = [REAGENT_PACKS[solid], REAGENT_PACKS[2], PACKS[ion]];
+    let packs = profiles
+        .iter()
+        .map(|(name, _)| load_pack(directory, name))
+        .collect::<Result<Vec<_>>>()?;
+    let species = profiles
+        .iter()
+        .map(|(_, id)| SpeciesId::new(*id))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let points = [point(7 + solid)?, point(9)?, point(ion)?];
+    let reaction = recipe.build()?;
+    let sources = (0..3)
+        .map(|i| FormationGibbsSource {
+            species: &species[i],
+            pack: &packs[i],
+            at: &points[i],
+            reference_axis: REFERENCE,
+        })
+        .collect::<Vec<_>>();
+    let gibbs = reaction.standard_gibbs_change(&sources)?;
+    for term in gibbs.terms() {
+        println!(
+            "reagent_thermodynamic_source={} receipt={}",
+            term.pack_id,
+            term.answer.receipt.content_hash()
+        );
+    }
+    let mass = packs[0].claims().query_typed(
+        &PropertyKey::new("molar-mass", MolarMass::DIMS),
+        &points[0],
+        SelectionPolicy::SingleClaimOnly,
+    )?;
+    packs[0].claims().verify_receipt(&mass.receipt)?;
+    let extent = reaction.extent_from_reacted_mass(
+        &species[0],
+        reacted_pure_mass,
+        MolarMass::new(mass.evidence.value.value),
+    )?;
+    println!(
+        "DECLARED DISSOLVED PURE REAGENT: {:?}, mass_kg={:.12e}, formula_units_mol={:.12e}, molar_mass_receipt={}, reference_dissolution_G_J_per_mol={:.9}",
+        reagent,
+        reacted_pure_mass.value(),
+        extent.value(),
+        mass.receipt.content_hash(),
+        gibbs.molar().value(),
+    );
+    println!(
+        "  Mass already reacted/dissolved is an input; the reference Gibbs diagnostic does not predict solubility, dissolution completion, purity, heat feedback or an optimal dose."
+    );
+    Ok(extent)
+}
+
+fn add_reference_reagents(directory: &Path, bath: &mut AeratedGoldCyanidation) -> Result<()> {
+    // Synthetic finite increments, each 0.001 mol using the literal NBS masses.
+    // They are already-dissolved equivalents at the fixed bath volume and T.
+    for (reagent, mass) in [
+        (
+            DissolvedSodiumReagent::SodiumCyanide,
+            Mass::new(0.0000490077),
+        ),
+        (
+            DissolvedSodiumReagent::SodiumHydroxide,
+            Mass::new(0.0000399972),
+        ),
+    ] {
+        let delivered = declared_dissolved_amount(directory, reagent, mass)?;
+        let before = bath.state().clone();
+        let receipt = bath.dose_reagent(reagent, delivered, 1_000_000, || false)?;
+        let after = bath.state();
+        if after.solution.elapsed != before.solution.elapsed
+            || after.solution.gold_dissolved != before.solution.gold_dissolved
+            || after.solution.dissolved_oxygen != before.solution.dissolved_oxygen
+            || after.gas_oxygen != before.gas_oxygen
+            || after.cumulative_oxygen_transfer != before.cumulative_oxygen_transfer
+        {
+            return Err(
+                "reagent addition changed clock, reaction progress or oxygen inventories".into(),
+            );
+        }
+        println!(
+            "reagent={:?} delivered_mol={:.12e} cumulative_NaCN_mol={:.12e} cumulative_NaOH_mol={:.12e} cumulative_added_Na_mol={:.12e} residual_CN_mol={:.3e} residual_Na_mol={:.3e}",
+            receipt.reagent,
+            receipt.delivered.value(),
+            receipt.inputs.sodium_cyanide.value(),
+            receipt.inputs.sodium_hydroxide.value(),
+            receipt.inputs.sodium.value(),
+            receipt.cyanide_balance.value(),
+            receipt.sodium_balance.value(),
+        );
+        print_state("reagent_added_at_unchanged_clock", bath.state());
+    }
+    Ok(())
 }
 
 fn load_henry(path: &Path) -> Result<OxygenHenrySource> {
@@ -409,6 +533,14 @@ fn print_state(label: &str, state: &AeratedCyanidationState) {
 fn print_advance(label: &str, advance: &AerationAdvance) {
     print_state(label, &advance.state);
     let r = advance.conservation;
+    let reagents = advance.reagent_inputs();
+    println!(
+        "  cumulative_NaCN_mol={:.12e} cumulative_NaOH_mol={:.12e} cumulative_added_Na_mol={:.12e} residual_Na_mol={:.3e}",
+        reagents.sodium_cyanide.value(),
+        reagents.sodium_hydroxide.value(),
+        reagents.sodium.value(),
+        r.sodium.value(),
+    );
     println!(
         "  interval_Au_mol={:.12e} interval_transfer_O2_mol={:.12e} cumulative_dose_O2_mol={:.12e} \
         residual_Au_mol={:.3e} residual_CN_mol={:.3e} residual_liquid_O2_mol={:.3e} \
@@ -440,7 +572,7 @@ fn print_advance(label: &str, advance: &AerationAdvance) {
 fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.as_slice() == ["--help"] {
-        println!("usage: aerated_gold_leach --materials PACK_DIR [--henry-pack PATH.fsmatpk]");
+        println!("{USAGE}");
         println!("Compile these profiles as PACK_DIR/PACK_ID.fsmatpk:");
         for (name, _) in PACKS {
             println!("  {name}");
@@ -448,6 +580,10 @@ fn main() -> Result<()> {
         println!(
             "With --henry-pack, only the first five NBS acid/base packs are loaded; no O2 formation Gibbs packs are required. Compile oxygen-water-henry-sander2023-rettich2000 for the independent measured Hcp route."
         );
+        println!("With --dose-reagents, also compile these profiles into PACK_DIR:");
+        for (name, _) in REAGENT_PACKS {
+            println!("  {name}");
+        }
         println!(
             "Use: cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/PACK_ID/manifest.tsv --out PACK_DIR/PACK_ID.fsmatpk"
         );
@@ -456,13 +592,13 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+    let dose_reagents = args.last().is_some_and(|arg| arg == "--dose-reagents");
+    let args = &args[..args.len() - usize::from(dose_reagents)];
     if ![2, 4].contains(&args.len())
         || args[0] != "--materials"
         || (args.len() == 4 && args[2] != "--henry-pack")
     {
-        return Err(
-            "usage: aerated_gold_leach --materials PACK_DIR [--henry-pack PATH.fsmatpk]".into(),
-        );
+        return Err(USAGE.into());
     }
     let henry = if args.len() == 4 {
         Some(load_henry(Path::new(&args[3]))?)
@@ -522,6 +658,9 @@ fn main() -> Result<()> {
             "authored comparison did not demonstrate the finite-headspace oxygen contribution"
                 .into(),
         );
+    }
+    if dose_reagents {
+        add_reference_reagents(Path::new(&args[1]), &mut coupled)?;
     }
     let stopped = coupled.advance(Time::new(60.0), false, AerationNumerics::default(), || {
         false

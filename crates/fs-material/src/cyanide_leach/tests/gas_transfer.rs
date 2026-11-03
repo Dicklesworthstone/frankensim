@@ -488,6 +488,7 @@ fn conserved(answer: &AerationAdvance) {
     for residual in [
         answer.conservation.gold,
         answer.conservation.cyanide,
+        answer.conservation.sodium,
         answer.conservation.liquid_oxygen,
         answer.conservation.gas_oxygen,
         answer.conservation.total_oxygen,
@@ -509,6 +510,7 @@ fn conserved(answer: &AerationAdvance) {
     );
 }
 fn unchanged_aeration(current: &AeratedGoldCyanidation, before: &AeratedGoldCyanidation) {
+    assert_eq!(current.reagent_inputs(), before.reagent_inputs());
     assert_eq!(
         format!("{:?}", current.state()),
         format!("{:?}", before.state())
@@ -521,6 +523,129 @@ fn unchanged_aeration(current: &AeratedGoldCyanidation, before: &AeratedGoldCyan
         current.maximum_gold_dissolution(),
         before.maximum_gold_dissolution()
     );
+}
+
+#[test]
+fn reagent_doses_survive_attachment_and_preserve_finite_gas_dose_contact_and_progress() {
+    use crate::cyanide_leach::dosing::DissolvedSodiumReagent::*;
+    let mut original = charge(0.1);
+    original.uncomplexed_cyanide = Amount::new(0.2);
+    original.dissolved_oxygen = Amount::new(0.01);
+    let mut closed = super::batch(original.clone());
+    closed
+        .dose_reagent(SodiumCyanide, Amount::new(0.2), 1_000_000, || false)
+        .unwrap();
+    closed
+        .advance(Time::new(0.05), CyanidationNumerics::default(), || false)
+        .unwrap();
+    let mut current = AeratedGoldCyanidation::from_batch(
+        closed,
+        transfer(1.0),
+        Amount::new(0.25),
+        gas_volume(),
+        QueryPoint::new(),
+    )
+    .unwrap();
+    // Attaching gas must retain prior reagent inputs when removing the closed DO ceiling.
+    close(
+        current.maximum_gold_dissolution().unwrap().value(),
+        0.2,
+        1e-15,
+    );
+    let running = current
+        .advance(Time::new(0.2), true, tight(), || false)
+        .unwrap();
+    current.dose_oxygen(Amount::new(0.1), || false).unwrap();
+    current
+        .advance(Time::new(0.0), false, tight(), || false)
+        .unwrap();
+    let before = current.state().clone();
+    let oxygen_dose = current.cumulative_oxygen_dose();
+    current
+        .dose_reagent(SodiumHydroxide, Amount::new(0.03), 1_000_000, || false)
+        .unwrap();
+    let receipt = current
+        .dose_reagent(SodiumCyanide, Amount::new(0.1), 1_000_000, || false)
+        .unwrap();
+    assert_eq!(current.initial_charge(), &original);
+    assert_eq!(receipt.initial_charge(), &original);
+    assert_eq!(current.state().solution.elapsed, before.solution.elapsed);
+    assert_eq!(
+        current.state().solution.gold_dissolved,
+        before.solution.gold_dissolved
+    );
+    assert_eq!(
+        current.state().solution.dissolved_oxygen,
+        before.solution.dissolved_oxygen
+    );
+    assert_eq!(current.state().gas_oxygen, before.gas_oxygen);
+    assert_eq!(
+        current.state().oxygen_partial_pressure,
+        before.oxygen_partial_pressure
+    );
+    assert_eq!(
+        current.state().cumulative_oxygen_transfer,
+        before.cumulative_oxygen_transfer
+    );
+    assert_eq!(current.cumulative_oxygen_dose(), oxygen_dose);
+    assert!(!current.state().gas_contact_active);
+    close(current.reagent_inputs().sodium_cyanide.value(), 0.3, 1e-15);
+    close(current.reagent_inputs().sodium.value(), 0.33, 1e-15);
+    let held = current
+        .advance(Time::new(0.0), false, tight(), || false)
+        .unwrap();
+    assert_eq!(
+        held.accumulated_error_estimate,
+        running.accumulated_error_estimate
+    );
+    assert_eq!(held.reagent_inputs(), current.reagent_inputs());
+    conserved(&held);
+    let restarted = current
+        .advance(Time::new(0.1), true, tight(), || false)
+        .unwrap();
+    assert!(
+        restarted.state.solution.gold_dissolved.value() > before.solution.gold_dissolved.value()
+    );
+    close(
+        restarted.state.solution.uncomplexed_cyanide.value()
+            + 2.0 * restarted.state.solution.gold_complex.value(),
+        0.5,
+        2e-14,
+    );
+    conserved(&restarted);
+    let before = current.clone();
+    for (dose, work) in [(100.0, 1_000_000), (0.1, 1)] {
+        assert!(
+            current
+                .dose_reagent(SodiumCyanide, Amount::new(dose), work, || false)
+                .is_err()
+        );
+        unchanged_aeration(&current, &before);
+    }
+}
+
+#[test]
+fn gas_transfer_source_refusal_rolls_back_reagent_and_chemical_state_together() {
+    use crate::cyanide_leach::dosing::DissolvedSodiumReagent::SodiumHydroxide;
+    let mut source = transfer_card(1.0);
+    source.validity =
+        source
+            .validity
+            .with_quantity(PH_AXIS, QuantitySpec::dimensional(Dims::NONE), 6.99, 7.01);
+    let mut current = AeratedGoldCyanidation::from_batch(
+        super::batch(charge(1.0)),
+        OxygenTransfer::from_card(partition(), source).unwrap(),
+        Amount::new(0.25),
+        gas_volume(),
+        QueryPoint::new(),
+    )
+    .unwrap();
+    let before = current.clone();
+    assert!(
+        matches!(current.dose_reagent(SodiumHydroxide, Amount::new(0.1), 1_000_000, || false),
+        Err(GasTransferError::Cyanidation(CyanidationError::OutsideValidity { axis, .. })) if axis == PH_AXIS)
+    );
+    unchanged_aeration(&current, &before);
 }
 
 #[test]
