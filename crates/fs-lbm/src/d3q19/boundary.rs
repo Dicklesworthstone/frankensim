@@ -610,6 +610,11 @@ pub enum BoundaryStepError3 {
         /// Stable refusal detail.
         reason: &'static str,
     },
+    /// Missing force shape or an inadmissible next endpoint force.
+    EndpointForce {
+        /// Stable refusal detail.
+        reason: &'static str,
+    },
 }
 
 impl core::fmt::Display for BoundaryStepError3 {
@@ -629,6 +634,9 @@ impl core::fmt::Display for BoundaryStepError3 {
             Self::WallMomentum { reason } => write!(f, "D3Q19 wall momentum refused: {reason}"),
             Self::FiniteMassWall { reason } => {
                 write!(f, "D3Q19 finite-mass wall coupling refused: {reason}")
+            }
+            Self::EndpointForce { reason } => {
+                write!(f, "D3Q19 endpoint force refused: {reason}")
             }
         }
     }
@@ -1036,13 +1044,15 @@ impl BoundaryGrid3 {
     /// held field becomes exactly `scale * selected` in every cell, so its
     /// zeros (and the open-face admission) are kept.
     ///
-    /// This is the caller's time history for a fixed spatial shape, such as
-    /// an imposed acoustic pressure gradient. Populations are not reframed:
-    /// Guo forcing adds exactly the held force to the first population
-    /// moment each step, so the physical momentum `sum_q(f_q c_q) + F/2`
-    /// gains the trapezoidal impulse `(F_old + F_new) / 2`, second order for
-    /// a smooth history. A discontinuous change belongs to
-    /// [`Self::rebind_force_field`].
+    /// This low-level setter changes physical momentum immediately by half
+    /// the force change because it does not reframe populations. For a smooth
+    /// endpoint-sampled history, use [`Self::step_with_endpoint_force_scale`]
+    /// or [`Self::step_pooled_with_endpoint_force_scale`]: they collide with
+    /// the old force and publish the new force only at the accepted endpoint,
+    /// giving the trapezoidal impulse `(F_old + F_new) / 2`. Changing the force
+    /// BEFORE collision instead gives `3 F_new/2 - F_old/2` between the old
+    /// and new physical states. A discontinuous held-source change belongs to
+    /// [`Self::rebind_force_field`], which supplies no impulse.
     ///
     /// # Panics
     /// No per-cell field is held, `scale` is non-finite, or a scaled total

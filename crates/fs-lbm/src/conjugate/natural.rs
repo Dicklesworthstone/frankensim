@@ -358,7 +358,8 @@ pub fn natural_convection(
                         BoundaryStepError3::Collision { .. }
                         | BoundaryStepError3::Unphysical { .. }
                         | BoundaryStepError3::WallMomentum { .. }
-                        | BoundaryStepError3::FiniteMassWall { .. } => {
+                        | BoundaryStepError3::FiniteMassWall { .. }
+                        | BoundaryStepError3::EndpointForce { .. } => {
                             ChtError::FlowDiverged { step: steps }
                         }
                         BoundaryStepError3::Pool(detail) => ChtError::Executor { detail },

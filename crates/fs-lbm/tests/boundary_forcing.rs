@@ -431,11 +431,192 @@ fn scaled_field_is_shape_times_scale_with_one_held_force_per_step() {
             impulse = core::array::from_fn(|a| impulse[a] + scale * total_shape[a]);
         }
         assert_eq!(snapshot(&scaled), snapshot(&direct));
-        // Guo adds the held force to the raw first moment every step; the
-        // physical momentum, raw + F/2, therefore gains the trapezoid.
+        // This low-level setter controls raw population momentum only. A
+        // correctly timed physical history is tested by the endpoint API below.
         let end = raw_first_moment(&scaled, |_| true);
         for a in 0..3 {
             close(end[a] - start[a], impulse[a], 1e-13);
         }
+    }
+}
+
+/// G0/G3/G5: periodic transport cancels, leaving the endpoint trapezoid of
+/// the spatially varying force plus the unchanged uniform force. The oracle
+/// reduces physical moments independently of production velocity sampling.
+#[test]
+fn endpoint_force_scale_closes_physical_momentum_and_matches_pooled_bits() {
+    use fs_exec::{CancelGate, TilePool};
+    let gate = CancelGate::new_clock_free();
+    let uniform = [1e-5, -2e-5, 3e-5];
+    let shape = |[x, y, z]: [usize; 3]| {
+        [
+            2e-6 * (x + 1) as f64,
+            -3e-6 * (y + 1) as f64,
+            1e-6 * (z + 1) as f64,
+        ]
+    };
+    for model in [
+        CollisionModel3::Bgk { tau: 0.7 },
+        CollisionModel3::Trt {
+            tau: 0.8,
+            magic: 3.0 / 16.0,
+        },
+        CollisionModel3::CentralMoment {
+            second_order_rate: 1.6,
+            higher_order_rate: 1.0,
+        },
+        CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.6,
+            third_order_rate: 1.0,
+            fourth_order_rate: 1.0,
+        },
+    ] {
+        let make = || {
+            let mut grid = BoundaryGrid3::with_collision_model(
+                12,
+                8,
+                8,
+                model,
+                [0.0; 3],
+                BoundarySpec3::periodic(),
+            );
+            grid.rebind_uniform_force(uniform, &gate).unwrap();
+            grid.rebind_force_field(shape);
+            grid
+        };
+        for workers in [1, 3] {
+            let mut serial = make();
+            let mut pooled = make();
+            let mass = serial.total_mass();
+            let start = fluid_momentum(&serial);
+            let all_cells = cells(&serial);
+            let total_shape = all_cells.iter().fold([0.0; 3], |sum, cell| {
+                let force = shape(*cell);
+                core::array::from_fn(|a| sum[a] + force[a])
+            });
+            let mut expected = start;
+            let mut previous = 1.0;
+            let pool = TilePool::for_host(workers, 0xF02CE);
+            pool.with_parked_crew_local(|parked| {
+                for scale in [0.6, -0.3, 0.0, 1.7] {
+                    serial.step_with_endpoint_force_scale(scale, &gate).unwrap();
+                    pooled
+                        .step_pooled_with_endpoint_force_scale(parked, &gate, scale)
+                        .unwrap();
+                    expected = core::array::from_fn(|a| {
+                        expected[a]
+                            + 0.5 * (previous + scale) * total_shape[a]
+                            + all_cells.len() as f64 * uniform[a]
+                    });
+                    let actual = fluid_momentum(&serial);
+                    for a in 0..3 {
+                        close(actual[a], expected[a], 3e-12);
+                    }
+                    close(serial.total_mass(), mass, 3e-12);
+                    assert_eq!(snapshot(&serial), snapshot(&pooled));
+                    previous = scale;
+                }
+            });
+        }
+    }
+}
+
+/// G1: F(t)=rho*omega*amplitude*cos(omega*t) has the analytic physical
+/// velocity increment amplitude*sin(omega*t). Refining endpoint sampling
+/// gives second-order convergence at the same quarter-period endpoint.
+#[test]
+fn endpoint_force_scale_sinusoidal_physical_velocity_converges_quadratically() {
+    use fs_exec::CancelGate;
+    let gate = CancelGate::new_clock_free();
+    let mut errors = Vec::new();
+    for steps in [8, 16, 32] {
+        let mut grid = uniform_grid(CollisionModel3::Bgk { tau: 0.9 });
+        let amplitude = 0.005;
+        let omega = core::f64::consts::FRAC_PI_2 / steps as f64;
+        let mass = grid.total_mass();
+        let start = fluid_momentum(&grid)[0] / mass;
+        grid.rebind_force_field(|_| [1.4 * omega * amplitude, 0.0, 0.0]);
+        close(fluid_momentum(&grid)[0] / mass, start, 2e-14);
+        for n in 1..=steps {
+            grid.step_with_endpoint_force_scale((omega * n as f64).cos(), &gate)
+                .unwrap();
+        }
+        let increment = fluid_momentum(&grid)[0] / mass - start;
+        // Independent closed form of the trapezoidal sine sum.
+        let discrete = amplitude * (0.5 * omega) / (0.5 * omega).tan();
+        close(increment, discrete, 5e-13);
+        errors.push((increment - amplitude).abs());
+    }
+    assert!(errors[0] / errors[1] > 3.99);
+    assert!(errors[1] / errors[2] > 3.99);
+
+    // Negative control: replacing a force before collision gives the wrong
+    // physical impulse even though its raw population impulse looks correct.
+    let mut early = uniform_grid(CollisionModel3::Bgk { tau: 0.9 });
+    let force = 1e-4;
+    early.rebind_force_field(|_| [force, 0.0, 0.0]);
+    let start = fluid_momentum(&early)[0];
+    early.set_force_field_scale(3.0);
+    early.step();
+    let gained = fluid_momentum(&early)[0] - start;
+    close(gained, 64.0 * 4.0 * force, 2e-13);
+    assert!((gained - 64.0 * 2.0 * force).abs() > 0.01);
+}
+
+/// G4: invalid next forcing, a late invalid collision, and cancellation never
+/// publish a next force without its population state (or the reverse).
+#[test]
+fn endpoint_force_scale_refusals_keep_populations_and_force_atomic() {
+    use fs_exec::{CancelGate, TilePool};
+    use fs_lbm::BoundaryStepError3;
+    let gate = CancelGate::new_clock_free();
+    let pool = TilePool::for_host(2, 0xF02CE);
+    for pooled in [false, true] {
+        let advance = |grid: &mut BoundaryGrid3, scale, gate: &CancelGate| {
+            if pooled {
+                grid.step_pooled_with_endpoint_force_scale(&pool, gate, scale)
+            } else {
+                grid.step_with_endpoint_force_scale(scale, gate)
+            }
+        };
+        let mut grid = uniform_grid(CollisionModel3::Bgk { tau: 0.9 });
+        let before = snapshot(&grid);
+        assert!(matches!(
+            advance(&mut grid, 1.0, &gate),
+            Err(BoundaryStepError3::EndpointForce { .. })
+        ));
+        assert_eq!(snapshot(&grid), before);
+        grid.rebind_force_field(|_| [1e-4, 0.0, 0.0]);
+        let before = snapshot(&grid);
+        for scale in [f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                advance(&mut grid, scale, &gate),
+                Err(BoundaryStepError3::EndpointForce { .. })
+            ));
+            assert_eq!(snapshot(&grid), before);
+        }
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert_eq!(
+            advance(&mut grid, 0.3, &cancelled),
+            Err(BoundaryStepError3::Cancelled)
+        );
+        assert_eq!(snapshot(&grid), before);
+        grid.set_populations(3, 3, 3, &[0.0; Q3]);
+        let before = snapshot(&grid);
+        assert!(matches!(
+            advance(&mut grid, 0.3, &gate),
+            Err(BoundaryStepError3::Collision { .. })
+        ));
+        assert_eq!(snapshot(&grid), before);
+
+        let mut overflow = uniform_grid(CollisionModel3::Bgk { tau: 0.9 });
+        overflow.set_force_field(|_| [2.0, 0.0, 0.0]);
+        let before = snapshot(&overflow);
+        assert!(matches!(
+            advance(&mut overflow, f64::MAX, &gate),
+            Err(BoundaryStepError3::EndpointForce { .. })
+        ));
+        assert_eq!(snapshot(&overflow), before);
     }
 }

@@ -340,17 +340,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Uniform transverse pressure-gradient force density over the free
     // region, zero in the channel and on the two layers the outlet reads.
-    // Held amplitude a = 2 sin(omega/2) v_ac with scale cos(omega (m + 1/2))
-    // gives the free fluid a raw transverse velocity v_ac sin(omega m) after
-    // m forced steps (Guo adds the held force each step).
-    let amplitude = 2.0 * det::sin(0.5 * omega) * v_ac;
-    grid.set_force_field(|[x, _, _]| {
+    // The continuous pressure-gradient acceleration is omega*v_ac*cos(omega*t).
+    // Sample its endpoints and integrate PHYSICAL momentum with the native
+    // trapezoidal source history; the temporal error is second order. Matching
+    // raw population momentum instead would leave a spurious half-force shift.
+    let amplitude = omega * v_ac;
+    let acoustic_force = |[x, _, _]| {
         if x >= exit && x + 3 <= nx {
             [0.0, amplitude, 0.0]
         } else {
             [0.0; 3]
         }
-    });
+    };
+    grid.set_force_field(acoustic_force);
     grid.set_force_field_scale(0.0);
 
     let gate = CancelGate::new();
@@ -523,10 +525,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let forced = (c.periods * period_steps).round() as usize;
         let sample = ((period_steps / c.samples_per_period as f64).round() as usize).max(1);
         let report = (forced / 20).max(1);
+        // Attach F(0) to the accepted steady state without changing its
+        // physical velocity or stress. Each step publishes F(t_(m+1)) only
+        // after collision with F(t_m), including the final measurement frame.
+        grid.rebind_force_field(acoustic_force);
         record(&grid, 0, &mut argmax, &mut momentum)?;
         for m in 0..forced {
-            grid.set_force_field_scale(det::cos(omega * (m as f64 + 0.5)));
-            step(&mut grid, &mut steps)?;
+            grid.step_pooled_with_endpoint_force_scale(
+                parked,
+                &gate,
+                det::cos(omega * (m + 1) as f64),
+            )
+            .map_err(|e| format!("step {}: {e}", steps + 1))?;
+            steps += 1;
             if (m + 1) % sample == 0 {
                 record(&grid, m + 1, &mut argmax, &mut momentum)?;
             }

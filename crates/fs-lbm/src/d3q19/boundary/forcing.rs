@@ -23,6 +23,140 @@ impl core::fmt::Display for BoundaryForcingError3 {
 impl std::error::Error for BoundaryForcingError3 {}
 
 impl BoundaryGrid3 {
+    /// Advance one lattice tick with a prescribed endpoint force history.
+    ///
+    /// The held force belongs to `t_n`; `next_scale` multiplies the field's
+    /// selected spatial shape at `t_(n+1)`. Collision and streaming use the
+    /// OLD force, then accepted populations and the NEW force are published
+    /// together. Since physical momentum is `sum(f_q c_q) + F/2`, the net
+    /// body-force impulse is `(F_n + F_(n+1))/2`, including the unchanged
+    /// uniform force. In a periodic domain, internal transport cancels in
+    /// this balance; wall reactions and open-boundary flux remain separate.
+    ///
+    /// Initialize `F_0` with [`Self::rebind_force_field`] to retain the chosen
+    /// initial physical velocity. This is trapezoidal integration of a smooth,
+    /// prescribed fixed-shape force history, not an implicit solve for a force
+    /// depending on the unknown endpoint velocity. A discontinuous held load
+    /// instead uses `rebind_force_field` followed by an ordinary step.
+    /// See Guo et al., PRE 65, 046308 (2002), doi:10.1103/PhysRevE.65.046308.
+    ///
+    /// Uses the original collision/stream functions and reusable publication
+    /// scratch. Invalid endpoint data, collision refusal or cancellation leave
+    /// both the accepted populations and force unchanged. Checkpoints occur
+    /// at lattice-tile boundaries and immediately before publication.
+    pub fn step_with_endpoint_force_scale(
+        &mut self,
+        next_scale: f64,
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryStepError3> {
+        self.validate_endpoint_force_scale(next_scale, gate)?;
+        let collide = collision_kernel3();
+        for tile in 0..self.f[0].len() {
+            endpoint_checkpoint(gate)?;
+            for lane in 0..TILE_CELLS {
+                if self.solid[tile] & (1u64 << lane) != 0 {
+                    continue;
+                }
+                let populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
+                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                let post = collide(populations, self.collision_model, force).map_err(|source| {
+                    BoundaryStepError3::Collision {
+                        cell: self.coords(tile, lane),
+                        source,
+                    }
+                })?;
+                for (field, value) in self.post.iter_mut().zip(post) {
+                    field[tile].0[lane] = value;
+                }
+            }
+        }
+        let mut next = self.next.take().unwrap_or_else(|| self.f.clone());
+        let view = StreamView {
+            post: &self.post,
+            pull: &self.pull,
+            link_masks: &self.link_masks,
+            open_link_masks: &self.open_link_masks,
+            stationary_link_masks: &self.stationary_link_masks,
+            boundaries: self.boundaries,
+            dims: [self.nx, self.ny, self.nz],
+        };
+        for tile in 0..self.f[0].len() {
+            if let Err(error) = endpoint_checkpoint(gate) {
+                self.next = Some(next);
+                return Err(error);
+            }
+            for lane in 0..TILE_CELLS {
+                if self.solid[tile] & (1u64 << lane) != 0 {
+                    continue;
+                }
+                for (field, value) in next.iter_mut().zip(view.pull_cell(tile, lane)) {
+                    field[tile].0[lane] = value;
+                }
+            }
+        }
+        self.publish_next(next, gate, true)?;
+        self.publish_endpoint_force_scale(next_scale);
+        self.topology_locked = true;
+        Ok(())
+    }
+
+    /// Pooled counterpart of [`Self::step_with_endpoint_force_scale`]. Both
+    /// methods call the same per-cell kernels, so worker count changes neither
+    /// accepted population bits nor the endpoint force. The existing atomic
+    /// pooled publication path owns collision, streaming and cancellation.
+    pub fn step_pooled_with_endpoint_force_scale<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        next_scale: f64,
+    ) -> Result<(), BoundaryStepError3> {
+        self.validate_endpoint_force_scale(next_scale, gate)?;
+        // An empty selection uses the existing final cancellation checkpoint
+        // without scanning wall links or introducing another stepping kernel.
+        self.step_pooled_with_wall_momentum(pool, gate, &[], [0.0; 3])?;
+        self.publish_endpoint_force_scale(next_scale);
+        Ok(())
+    }
+
+    fn validate_endpoint_force_scale(
+        &self,
+        scale: f64,
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryStepError3> {
+        endpoint_checkpoint(gate)?;
+        let refuse = |reason| BoundaryStepError3::EndpointForce { reason };
+        if !scale.is_finite() {
+            return Err(refuse("endpoint force scale must be finite"));
+        }
+        let shape = self
+            .force_field_shape
+            .as_deref()
+            .or(self.force_field.as_deref())
+            .ok_or_else(|| refuse("select a force field before advancing its history"))?;
+        for tile in shape.chunks(TILE_CELLS) {
+            endpoint_checkpoint(gate)?;
+            if tile.iter().any(|local| {
+                local
+                    .iter()
+                    .zip(self.force)
+                    .any(|(value, uniform)| !(scale * value + uniform).is_finite())
+            }) {
+                return Err(refuse("scaled endpoint total force must be finite"));
+            }
+        }
+        Ok(())
+    }
+
+    // The complete shape was admitted before stepping. Do not poll or refuse
+    // between population publication and its matching endpoint force frame.
+    fn publish_endpoint_force_scale(&mut self, scale: f64) {
+        let field = self.force_field.as_mut().expect("admitted force field");
+        let shape = self.force_field_shape.get_or_insert_with(|| field.clone());
+        for (held, local) in field.iter_mut().zip(shape.iter()) {
+            *held = local.map(|value| scale * value);
+        }
+    }
+
     /// Held uniform volume-force density, excluding any per-cell contribution.
     pub const fn uniform_force_density(&self) -> [f64; 3] {
         self.force
@@ -36,7 +170,7 @@ impl BoundaryGrid3 {
     /// Existing per-cell forces and their selected spatial shape remain intact.
     /// A discontinuous pressure-gradient change therefore creates no artificial
     /// half-force impulse. Smooth-history trapezoidal forcing remains the
-    /// separately declared `set_force_field_scale` convention.
+    /// separately declared `step_with_endpoint_force_scale` convention.
     ///
     /// Uses existing collision scratch with no new population or force-field
     /// allocation. Cancellation or a late-cell refusal leaves accepted fields
@@ -162,6 +296,14 @@ impl BoundaryGrid3 {
         }
         poll(gate)?;
         core::mem::swap(&mut self.f, &mut self.post);
+        Ok(())
+    }
+}
+
+fn endpoint_checkpoint(gate: &CancelGate) -> Result<(), BoundaryStepError3> {
+    if gate.is_requested() {
+        Err(BoundaryStepError3::Cancelled)
+    } else {
         Ok(())
     }
 }

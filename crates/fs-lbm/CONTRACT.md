@@ -3461,9 +3461,12 @@ every open-face cell and its first-interior neighbour, the cells the force-free
 regularized reconstruction reads; such a grid keeps a zero uniform force.
 `set_force_field_scale(s)` holds exactly `s * selected` in every cell for a
 fixed spatial shape with a caller-owned time history (an imposed acoustic
-pressure gradient). It does not reframe populations: Guo adds the held force
-to `sum(f_q c_q)` each step, so physical momentum gains the trapezoidal
-impulse `(F_old + F_new) / 2`. All fluid samples and total forces must be
+pressure gradient). It does not reframe populations, so changing its value
+immediately changes physical momentum by half the force difference. For a
+smooth endpoint history, `step_with_endpoint_force_scale` and its pooled
+counterpart collide with `F_old`, then install `F_new` with the accepted state;
+physical momentum receives `(F_old + F_new) / 2`. Scaling BEFORE collision
+instead gives `3 F_new/2 - F_old/2`. All fluid samples and total forces must be
 finite. Rebinding preflights every changed cell's physical velocity and new
 population frame in the existing collision scratch before publishing either
 populations or field; callback failure or late invalid-cell refusal leaves
@@ -7525,7 +7528,7 @@ therefore applies no artificial half-force impulse when an external load
 switches, and supplies no elapsed-time work. Existing spatial fields and their
 selected scaling shape remain intact; the next step applies the new held force.
 This piecewise-held convention is separate from smooth-history trapezoidal
-`set_force_field_scale`.
+`step_with_endpoint_force_scale`.
 
 Both operations use existing collision scratch, allocate no new population or
 force field, poll cancellation at each native tile and publish only after the
@@ -8606,3 +8609,27 @@ endpoint momentum with deliberately unrelated receiver velocities, and
 mismatched clocks/gates, missing inflow velocity, native budgets, cancellation
 and exact retry. Independent arithmetic checks were evaluated separately;
 Rust compilation, rustfmt and native test execution were unavailable.
+
+### Endpoint-sampled D3Q19 force histories
+
+`BoundaryGrid3::step_with_endpoint_force_scale` and its pooled counterpart
+advance the original collision/stream operator with the force at `t_n`, then
+publish the force at `t_(n+1)` with the accepted populations. The next scalar
+multiplies the field's original selected spatial shape. Physical momentum
+`sum(f_q c_q) + F/2` consequently receives `(F_n + F_(n+1))/2` per lattice tick;
+the unchanged uniform force is included once. Periodic transport cancels in
+the global balance; wall reaction and open-boundary transport remain separate.
+This is second-order trapezoidal integration of a prescribed smooth force
+history, not an implicit endpoint constitutive solve. Initialize its first
+force with `rebind_force_field` to preserve the initial physical velocity.
+Invalid endpoint data, a collision refusal or cancellation preserve both
+accepted populations and force. The serial and pooled paths reuse the same
+cell kernels and publication scratch; worker count preserves population bits.
+
+The forced-jet example now uses physical force amplitude `omega * v_ac`,
+momentum-preserving initial rebinding, and the pooled endpoint API. Its smooth
+sinusoidal response has the declared second-order time discretization error.
+`boundary_forcing` tests cover spatial and uniform forcing, all four forcing-
+compatible collision models, physical-momentum closure, sinusoidal convergence,
+the incorrect-order negative control, serial/pooled bits and atomic refusals
+(G0/G1/G3/G4/G5). No new turbulence or open-boundary accuracy claim is made.
