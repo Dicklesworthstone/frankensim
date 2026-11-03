@@ -112,21 +112,17 @@ export async function render(root, r) {
         h('span', null, 'What was decided and why: the first-principles pivot, materials and air as data, the grading changes, the findings that changed the plan.')),
       h('a.card', { href: '#/instruments' }, h('b', null, 'All families'),
         h('span', null, 'Which instruments speak, which are graded, which are still blocked on geometry or data, and the qualification ladder of each.'))));
-  // ---- what changed: re-renders with newer physics, each heard against the render it would replace
-  // One card per family and set, opening its first A/B item.
-  const ab = [];
-  for (const x of idx.ab || []) {
-    const g = ab.find(g => g.family === x.family && g.group === x.group);
-    if (g) g.n += 1;
-    else ab.push({ ...x, n: 1 });
-  }
-  const changed = ab.length
+  // ---- what changed: per family, its newest renders (graded against the recording), when they were made and what physics they added
+  const latest = idx.latest || [];
+  const changed = latest.length
     ? h('section', { id: 'changed' },
-      h('div.sechead', null, h('div', null, h('h2', null, 'New physics, heard against the current render'),
-        h('p', null, 'Each pair plays the render this site has now and a re-render with newer physics switched on, in lock-step: press 1 or 2, or use the switch, to hear one or the other. Not graded yet. Each page says what was switched on, what was refused, and where the pitch landed.'))),
-      h('div.starthere', null, ab.map(x => h('a.card', { href: link('f', x.family, 'listen', x.key) },
-        h('b', null, `${titles[x.family] || x.family}: ${x.n} ${x.n === 1 ? 'note' : 'notes'}, now and re-rendered`),
-        h('span', null, `${x.group} · ${fmt.date(x.date)}`)))))
+      h('div.sechead', null, h('div', null, h('h2', null, 'Latest renders'),
+        h('p', null, 'Re-rendered with newer FrankenSim physics switched on, and each note graded against the real recording.'))),
+      h('div.latestgrid', null, latest.map(x => h('a.card.latest', { href: link('f', x.family, 'listen', x.key) },
+        h('div.lhead', null, h('b', null, titles[x.family] || x.family),
+          h('time', { datetime: x.when, title: `${x.when} UTC` }, fmt.datetime(x.when))),
+        h('span.small.muted', null, `${x.n} ${x.n === 1 ? 'note' : 'notes'} against the recording`),
+        h('div.phys', null, x.physics.map(p => h('span.pchip', null, p)))))))
     : null;
   const unknown = r && r.unknown
     ? h('div.note.warn', { role: 'status' }, h('p', null, `There is no page at ${r.unknown}, so this is the start page.`))

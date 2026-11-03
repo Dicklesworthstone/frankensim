@@ -165,11 +165,17 @@ function header(doc) {
       e.target.setAttribute('aria-expanded', String(!open));
     } }, 'Read more')
     : null;
+  // The description above is of the family's committed render; notes re-rendered since add physics it does not mention.
+  const fresh = (doc.pairs || []).filter(p => p.ours && p.ours.rendered_utc);
+  const newer = fresh.length
+    ? h('p.newer', null, h('span.pchip', null, 'Latest render'),
+      ` ${fresh.length === 1 ? 'One of these notes was' : `${fresh.length} of these notes were`} re-rendered with newer physics than this description; each note's page lists what it adds.`)
+    : null;
   return h('header.familyhead', null,
     h('nav.crumbs', { 'aria-label': 'Breadcrumb' }, h('a', { href: '#/instruments' }, 'Instruments'), h('span', { 'aria-hidden': 'true' }, '/'), h('span', null, doc.section)),
     h('div.titlerow', null, h('h1', null, doc.title), badge(v.badge, v.label)),
     st.reference_instrument ? h('p.small.muted', null, `Graded against: ${st.reference_instrument}`) : null,
-    summary, more,
+    summary, more, newer,
     st.draft ? h('p.small.muted', { role: 'note' }, st.draft) : null,
     v.blocked ? h('p.blocked', null, `Blocked: ${typeof v.blocked === 'string' ? v.blocked : JSON.stringify(v.blocked)}`) : null,
     physics);
@@ -197,7 +203,8 @@ function listenItems(doc) {
 function listen(doc, itemKey) {
   const items = listenItems(doc);
   if (!items.length) return empty('Nothing has been rendered for this family yet. Its screened reference recordings are under References.');
-  const sel = items.find(i => i.key === itemKey) || items.find(i => i.data && i.data.group) || items.find(i => i.kind === 'graded') || items[0];
+  const sel = items.find(i => i.key === itemKey) || items.find(i => i.data && i.data.group)
+    || items.find(i => i.kind === 'graded' && i.data.ours && i.data.ours.rendered_utc) || items.find(i => i.kind === 'graded') || items[0];
   const groups = [...new Set(items.map(i => i.group))];
   const list = h('aside.itemlist', null, groups.map(g => h('div.itemgroup', null, h('h4', null, g),
     items.filter(i => i.group === g).map(i => h(`a.item${i === sel ? '.on' : ''}`, { href: link('f', doc.id, 'listen', i.key) },
@@ -212,6 +219,7 @@ function pairDetail(doc, p) {
   const out = [];
   out.push(h('div.detailhead', null, h('h2', null, [p.note, p.dynamic].filter(Boolean).join(' ')), chip(kindLabel(p.kind), `k-${p.kind}`),
     p.duration_s ? h('span.small.muted', null, `${p.duration_s} s analysed`) : null));
+  if (p.ours && p.ours.rendered_utc) out.push(renderStamp(p.ours));
   if (p.kind === 'graded' && p.tally) {
     const t = p.tally;
     out.push(h('p.verdictline', null, splitBar(t.loose.inside, t.loose.outside),
@@ -306,6 +314,17 @@ function compareTable(p) {
       h('thead', null, h('tr', null, ['First 250 ms after the stroke', 'Simulation', 'Recording'].map(t => h('th', null, t)))),
       h('tbody', null, rows))),
     c.caveat ? h('div.note.warn', null, h('p', null, c.caveat)) : null);
+}
+
+// When the simulation side was rendered, from which commit, and the physics it switched on that the render before it lacked.
+function renderStamp(o) {
+  return h('div.renderstamp', null,
+    h('div.when', null, h('span.label', null, 'Latest render'),
+      h('time', { datetime: o.rendered_utc, title: `${o.rendered_utc} UTC` }, fmt.datetime(o.rendered_utc)),
+      o.git_sha ? h('span.sha', null, String(o.git_sha).slice(0, 9)) : null),
+    o.physics && o.physics.length
+      ? h('div.phys', null, h('span.label', null, 'New physics'), o.physics.map(x => h('span.pchip', null, x)))
+      : null);
 }
 
 function provenance(p) {

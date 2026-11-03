@@ -464,7 +464,10 @@ def build_pair(fid: str, note_id: str, note_dir: Path, media: Media, origin: str
         "audio": audio, "level_match": (pj.get("audio") or {}).get("level_match"),
         "figures": figures,
         "ours": None if ours is None else {"git_sha": ours.get("git_sha"), "observer": ours.get("observer"),
-                                            "recipe": ours.get("recipe"), "sample_rate": ours.get("sample_rate")},
+                                            "recipe": ours.get("recipe"), "sample_rate": ours.get("sample_rate"),
+                                            # when the render was made (UTC, the render host's file time) and the physics it
+                                            # switched on that the render before it lacked: the page's "latest render" stamp
+                                            "rendered_utc": ours.get("rendered_utc"), "physics": ours.get("physics") or []},
         "real": None if real is None else {"reference_id": real.get("reference_id"), "file": real.get("file"),
                                             "segment_s": real.get("segment_s"), "credit": src.get("credit"),
                                             "licence": src.get("licence"), "url": src.get("url")},
@@ -1148,6 +1151,13 @@ def main() -> int:
         # Every A/B item (a new render heard against the current one), for the start page's "New physics" list.
         "ab": [{"family": fid, "key": f"x-{x['id']}", "title": x["title"], "group": x["group"], "date": x["date"]}
                for fid, *_ in FAMILIES for x in extras.get(fid, []) if x.get("before_audio")],
+        # Per family, its newest renders graded against a recording: when, how many notes, and the physics they switched on
+        # (in first-seen order), for the start page's "Latest renders" list. Newest family first.
+        "latest": sorted(({"family": fid, "key": new[0]["id"], "n": len(new), "when": max(p["ours"]["rendered_utc"] for p in new),
+                           "physics": list(dict.fromkeys(x for p in new for x in p["ours"]["physics"]))}
+                          for fid, doc in family_docs.items()
+                          if (new := [p for p in doc["pairs"] if p["ours"] and p["ours"].get("rendered_utc")])),
+                         key=lambda x: x["when"], reverse=True),
         "totals": {
             "families": len(FAMILIES),
             "graded_notes": sum(f["counts"]["graded"] for f in families_index),

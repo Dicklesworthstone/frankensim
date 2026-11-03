@@ -283,6 +283,21 @@ button.ghost:hover { border-color: var(--sim); }
 .starthere .card { border-top: 2px solid var(--sim); }
 .starthere .card b { font-size: 1rem; }
 .starthere .card span { color: var(--muted); font-size: 0.86rem; }
+/* the newest renders: when, and the physics they switched on */
+.newer { margin: 0.5rem 0 0; font-size: 0.86rem; color: var(--ink-2); }
+.newer .pchip { margin-right: 0.2rem; }
+.pchip { display: inline-block; font-size: 0.74rem; line-height: 1.35; padding: 0.18em 0.6em; border-radius: 8px; color: var(--sim-2); background: color-mix(in srgb, var(--sim) 12%, transparent); border: 1px solid color-mix(in srgb, var(--sim) 32%, transparent); }
+.phys { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+.latestgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 0.8rem; margin: 0 0 1rem; }
+.card.latest { border-top: 2px solid var(--sim); gap: 0.5rem; }
+.card.latest .lhead { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; }
+.card.latest .lhead b { font-size: 1rem; }
+.card.latest time { font: 0.78rem var(--mono); color: var(--sim-2); white-space: nowrap; }
+.renderstamp { display: flex; flex-direction: column; gap: 0.5rem; margin: 0.3rem 0 0.9rem; padding: 0.7rem 0.9rem; border-radius: 10px; background: linear-gradient(90deg, color-mix(in srgb, var(--sim) 10%, var(--panel)), var(--panel) 70%); border: 1px solid var(--line); border-left: 3px solid var(--sim); }
+.renderstamp .when { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.55rem; }
+.renderstamp .label { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-right: 0.15rem; }
+.renderstamp time { font-weight: 600; color: var(--ink); }
+.renderstamp .sha { font: 0.74rem var(--mono); color: var(--faint); }
 .badgekey { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .legendrow { display: flex; flex-wrap: wrap; gap: 0.6rem 1.2rem; font-size: 0.82rem; color: var(--muted); align-items: center; }
 .legendrow i { display: inline-block; width: 18px; border-top: 2px dashed; vertical-align: middle; margin-right: 0.35rem; }
