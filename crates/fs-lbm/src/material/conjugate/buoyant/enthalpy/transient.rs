@@ -893,6 +893,68 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         })
     }
 
+    /// Close original source h(T), transport/buoyancy and molecular heat at
+    /// one native backward-Euler Stokes endpoint.
+    ///
+    /// Each trial retains the same accepted thermal/kinetic history, replaces
+    /// its physical heat deposit, and spends the original shared solve budgets.
+    /// Actual endpoint mu and force independently recheck the original momentum
+    /// equations and physical work. Non-cancelling per-cell heat differences
+    /// must fit the native power tolerance before the endpoint can be accepted.
+    /// One accepted mechanical account is retained per physical step.
+    ///
+    /// Original closed-wall/symmetry, Reynolds <= 0.1 and physical power gates
+    /// remain. BE numerical loss, pressure work and buoyancy supply are not
+    /// added as heat. Coupled time accuracy is first order; no SGS is selected.
+    ///
+    /// # Errors
+    /// Original source/caloric/native refusal, actual endpoint physical limits,
+    /// nonconvergence, exhausted shared work or cancellation returns no march.
+    #[cfg(feature = "enthalpy-coupling")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_enthalpy_and_viscous_heat_implicit<
+        'a,
+        S: FluidTransport,
+        C: ConvectionCaloricLaw,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        flow: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        bounds: BoussinesqConfig<3>,
+        caloric: &'a C,
+        controls: MaterialEnthalpyTransientConfig,
+        unsteady: &UnsteadyConfig,
+        heating: ViscousHeatControls,
+        endpoint_controls: MaterialEndpointConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<
+        MaterialEndpointMarch<MaterialViscousHeatMarch<MaterialEnthalpyMarch<'a, S, C>>>,
+        MaterialBuoyancyError,
+    > {
+        let mut heating = MaterialViscousHeat::new(heating);
+        let mut endpoint = MaterialEndpointCoupling::new(endpoint_controls)?;
+        let thermal = self.march_natural_convection_with_enthalpy_inner(
+            domain, solids, flow, thermal, energy, initial_temperature_k,
+            bounds, caloric, controls, unsteady, None, Some(&mut heating),
+            inlet_schedule, power_schedule, radiation, Some(&mut endpoint),
+            gate, resolve,
+        )?;
+        poll(gate)?;
+        Ok(endpoint.finish(MaterialViscousHeatMarch {
+            thermal,
+            heating: heating.audit,
+            mechanical_steps: heating.records,
+        }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn march_natural_convection_with_enthalpy_inner<
         'a,

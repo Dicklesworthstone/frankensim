@@ -87,6 +87,51 @@ impl MaterialViscousHeat {
             records: Vec::new(),
         }
     }
+
+    /// Replace only the physical deposit while retaining the current authored
+    /// power schedule. Fixed-cell heat has a reciprocal thermostat rejection.
+    fn deposit(
+        thermal: &mut ThermalSetup,
+        authored_power_w: &[f64],
+        receipt: &UnsteadyMechanicalStep,
+        gate: &CancelGate,
+    ) -> Result<f64, ChtError> {
+        let cells = receipt.power.cell_heat_w.len();
+        if !authored_power_w.is_empty() && authored_power_w.len() != cells {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.power_w",
+                reason: "expected one source per original cell".into(),
+            });
+        }
+        thermal.power_w.clear();
+        thermal.power_w.extend_from_slice(authored_power_w);
+        if thermal.power_w.is_empty() {
+            thermal.power_w.resize(cells, 0.0);
+        }
+        for (cell, (source, &heat)) in thermal.power_w.iter_mut()
+            .zip(&receipt.power.cell_heat_w).enumerate()
+        {
+            if cell.is_multiple_of(256) { poll(gate)?; }
+            *source += heat;
+            finite("thermal.viscous_heat.power_w", *source)?;
+        }
+        let mut fixed: Vec<_> = thermal.fixed_temperature.iter()
+            .map(|&(cell, _)| cell).collect();
+        fixed.sort_unstable();
+        fixed.dedup();
+        let mut fixed_heat_w = 0.0;
+        for cell in fixed {
+            fixed_heat_w += *receipt.power.cell_heat_w.get(cell).ok_or_else(|| {
+                ChtError::InvalidInput {
+                    field: "thermal.fixed_temperature",
+                    reason: "fixed cell outside original domain".into(),
+                }
+            })?;
+        }
+        let fixed_heat_j = fixed_heat_w * receipt.duration_s;
+        finite("thermal.viscous_heat.fixed_energy_j", fixed_heat_j)?;
+        Ok(fixed_heat_j)
+    }
 }
 
 /// Time-march controls.
@@ -958,13 +1003,6 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
                 reason: "implicit material feedback requires its original molecular material owner without a wall closure".into(),
             }.into());
         }
-        #[cfg(feature = "enthalpy-coupling")]
-        if viscous_heat.is_some() {
-            return Err(ChtError::InvalidInput {
-                field: "unsteady.material_endpoint",
-                reason: "implicit molecular heating needs a joint mechanical/thermal closure and is not selected by this entry".into(),
-            }.into());
-        }
     }
     #[cfg(feature = "enthalpy-coupling")]
     if viscous_heat.is_some()
@@ -1064,10 +1102,17 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
             let scale = power_schedule(time_s);
             finite("unsteady.power_schedule", scale)?;
             scale_power(&mut stepped, setup, scale);
+            #[cfg(feature = "enthalpy-coupling")]
+            if viscous_heat.is_some() && setup.power_w.is_empty() {
+                // An empty authored field must not retain last step's deposit.
+                stepped.power_w.fill(0.0);
+            }
             feedback.step(
                 &mut marcher,
                 material.as_mut().expect("admitted original material owner"),
                 &mut material_heat,
+                #[cfg(feature = "enthalpy-coupling")]
+                viscous_heat.as_deref_mut(),
                 fluid,
                 solids,
                 &mut stepped,
@@ -1126,55 +1171,12 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
             let physical_fixed_heat_j = 0.0;
             #[cfg(feature = "enthalpy-coupling")]
             let physical_fixed_heat_j = if let Some(receipt) = &mechanical_step {
-                // Power scheduling applies only to authored sources. The actual
-                // molecular work is then deposited once and held fixed throughout
-                // every caloric/radiative trial of this SAME physical interval.
-                // An empty authored field has no entries for scale_power to reset.
-                // Clear the preceding physical deposit before adding this receipt.
-                if setup.power_w.is_empty() {
-                    stepped.power_w.fill(0.0);
-                }
-                if stepped.power_w.is_empty() {
-                    stepped.power_w.resize(cells, 0.0);
-                }
-                if stepped.power_w.len() != cells {
-                    return Err(ChtError::InvalidInput {
-                        field: "thermal.power_w",
-                        reason: "expected one source per original cell".into(),
-                    }
-                    .into());
-                }
-                for (cell, (source, &heat)) in stepped
-                    .power_w
-                    .iter_mut()
-                    .zip(&receipt.power.cell_heat_w)
-                    .enumerate()
-                {
-                    if cell.is_multiple_of(256) {
-                        poll(gate)?;
-                    }
-                    *source += heat;
-                    finite("thermal.viscous_heat.power_w", *source)?;
-                }
-                let mut fixed: Vec<_> = stepped
-                    .fixed_temperature
-                    .iter()
-                    .map(|&(cell, _)| cell)
-                    .collect();
-                fixed.sort_unstable();
-                fixed.dedup();
-                let mut fixed_heat_w = 0.0;
-                for cell in fixed {
-                    fixed_heat_w += *receipt.power.cell_heat_w.get(cell).ok_or_else(|| {
-                        ChtError::InvalidInput {
-                            field: "thermal.fixed_temperature",
-                            reason: "fixed cell outside original domain".into(),
-                        }
-                    })?;
-                }
-                let fixed_heat_j = fixed_heat_w * unsteady.time_step_s;
-                finite("thermal.viscous_heat.fixed_energy_j", fixed_heat_j)?;
-                fixed_heat_j
+                let authored = if setup.power_w.is_empty() {
+                    Vec::new()
+                } else {
+                    stepped.power_w.clone()
+                };
+                MaterialViscousHeat::deposit(&mut stepped, &authored, receipt, gate)?
             } else {
                 physical_fixed_heat_j
             };

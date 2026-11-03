@@ -10,6 +10,8 @@ use super::{
     UnsteadyConfig, finite, poll,
 };
 use crate::conjugate::turbulence::TURBULENT_PRANDTL;
+#[cfg(feature = "enthalpy-coupling")]
+use super::MaterialViscousHeat;
 use core::cell::Cell;
 use fs_exec::CancelGate;
 
@@ -164,6 +166,7 @@ impl MaterialEndpointCoupling {
                 &mut MaterialCoefficients,
             ) -> Result<(Vec<f64>, TransientRecord), E>,
         >,
+        #[cfg(feature = "enthalpy-coupling")] mut viscous_heat: Option<&mut MaterialViscousHeat>,
         fluid: &FluidProperties,
         solids: &[SolidMaterial],
         thermal: &mut ThermalSetup,
@@ -195,6 +198,12 @@ impl MaterialEndpointCoupling {
             .clone_from(&coupling.fields.conductivity_w_m_k);
         endpoint.force_n_m3.clone_from(&coupling.fields.force_n_m3);
         let mut iterations = 0usize;
+        #[cfg(feature = "enthalpy-coupling")]
+        let authored_power = if viscous_heat.is_some() {
+            thermal.power_w.clone()
+        } else {
+            Vec::new()
+        };
         for pass in 1..=self.config.maximum_passes_per_step {
             poll(gate)?;
             if self.momentum_solves == self.config.maximum_momentum_solves {
@@ -238,6 +247,20 @@ impl MaterialEndpointCoupling {
                     finite("thermal.sgs_conductivity_w_m_k", *conductivity)?;
                 }
             }
+            #[cfg(feature = "enthalpy-coupling")]
+            let mechanical_step = viscous_heat.as_deref().map(|heating| {
+                marcher.solver.unsteady_mechanical_step(
+                    (step - 1) as f64 * dt, time_s,
+                    Some(&coupling.fields.force_n_m3), heating.controls, gate,
+                )
+            }).transpose()?;
+            let physical_fixed_heat_j = 0.0;
+            #[cfg(feature = "enthalpy-coupling")]
+            let physical_fixed_heat_j = if let Some(receipt) = &mechanical_step {
+                MaterialViscousHeat::deposit(thermal, &authored_power, receipt, gate)?
+            } else {
+                physical_fixed_heat_j
+            };
             let interval = MaterialHeatStep {
                 domain,
                 setup: thermal,
@@ -245,7 +268,7 @@ impl MaterialEndpointCoupling {
                 reference_capacity_j_k: capacity,
                 time_s,
                 time_step_s: dt,
-                physical_fixed_heat_j: 0.0,
+                physical_fixed_heat_j,
                 fluid,
                 solids,
                 flow: &field,
@@ -297,11 +320,59 @@ impl MaterialEndpointCoupling {
             let (transport, force) = field_defects(coupling.fields, &endpoint, gate)?;
             report.transport_relative_defect = transport;
             report.force_defect_n_m3 = force;
-            if report.temperature_defect_k <= self.config.temperature_tolerance_k
+            let material_closed = report.temperature_defect_k <= self.config.temperature_tolerance_k
                 && transport <= self.config.transport_relative_tolerance
-                && force <= self.config.force_tolerance_n_m3
+                && force <= self.config.force_tolerance_n_m3;
+            let physical_ratio = 0.0;
+            #[cfg(feature = "enthalpy-coupling")]
+            let (mechanical_endpoint, physical_ratio) = if let (Some(heating), Some(applied)) =
+                (viscous_heat.as_deref(), mechanical_step.as_ref())
             {
+                // Recheck this SAME projected trajectory with actual endpoint
+                // mu/force. Histories and velocities are untouched; only the
+                // original constitutive rows and physical power are sampled.
+                marcher.solver.set_material_transport(
+                    &endpoint.viscosity_pa_s, Some(&endpoint.force_n_m3), gate,
+                )?;
+                let actual = marcher.solver.sample_unsteady_mechanical_step(
+                    (step - 1) as f64 * dt, time_s,
+                    Some(&endpoint.force_n_m3), heating.controls, gate,
+                )?;
+                let mut transfer_defect_w = 0.0;
+                for (cell, (&credit, &debit)) in applied.power.cell_heat_w.iter()
+                    .zip(&actual.power.cell_heat_w).enumerate()
+                {
+                    if cell.is_multiple_of(256) { poll(gate)?; }
+                    // Non-cancelling local credit/debit differences bound both
+                    // each cell and the total thermal/mechanical transfer.
+                    transfer_defect_w += (credit - debit).abs();
+                }
+                finite("thermal.viscous_heat.endpoint_defect_w", transfer_defect_w)?;
+                let allowance_j = dt * heating.controls.power_tolerance_w;
+                finite("thermal.viscous_heat.endpoint_allowance_j", allowance_j)?;
+                let mut defect = ratio(actual.residual_j.abs(), allowance_j)
+                    .max(ratio(transfer_defect_w, heating.controls.power_tolerance_w));
+                if material_closed && defect <= 1.0 {
+                    // A global power equality alone can hide local momentum
+                    // defects, including a new force orthogonal to velocity.
+                    let momentum = marcher.solver.unsteady_material_momentum_residual(gate)?;
+                    defect = defect.max(ratio(momentum, marcher.unsteady.inner_tolerance));
+                    marcher.residuals.1 = momentum;
+                }
+                (Some(actual), defect)
+            } else {
+                (None, physical_ratio)
+            };
+            if material_closed && physical_ratio <= 1.0 {
                 poll(gate)?;
+                #[cfg(feature = "enthalpy-coupling")]
+                if let (Some(heating), Some(receipt)) =
+                    (viscous_heat.as_deref_mut(), mechanical_endpoint)
+                {
+                    receipt.admit_balance(heating.controls)?;
+                    heating.audit.accept(&receipt, heating.controls)?;
+                    heating.records.push(receipt);
+                }
                 marcher.record_step(step, iterations, gate)?;
                 self.records.push(report);
                 core::mem::swap(coupling.fields, &mut endpoint);
@@ -318,7 +389,8 @@ impl MaterialEndpointCoupling {
                         self.config.temperature_tolerance_k,
                     )
                     .max(ratio(transport, self.config.transport_relative_tolerance))
-                    .max(ratio(force, self.config.force_tolerance_n_m3)),
+                    .max(ratio(force, self.config.force_tolerance_n_m3))
+                    .max(physical_ratio),
                     tolerance: 1.0,
                 }
                 .into());

@@ -12,8 +12,10 @@ use super::*;
 
 /// One accepted-duration native unsteady-Stokes mechanical account.
 ///
-/// All powers use the projected endpoint faces and the source-start material
-/// coefficients. The original thermal owner deposits only power.cell_heat_w.
+/// All powers use the projected endpoint faces and the selected original
+/// material epoch. Explicit coupling selects the source-start epoch; implicit
+/// material coupling independently closes the actual source endpoint epoch.
+/// The original thermal owner deposits only power.cell_heat_w.
 /// K is the native face mass norm, distinct from FlowStepRecord's cell-centred
 /// diagnostic. This is a first-order discrete balance, not an error certificate.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +39,24 @@ pub struct UnsteadyMechanicalStep {
     pub backward_euler_loss_j: f64,
     /// Supply + pressure - heat - kinetic change - numerical loss [J].
     pub residual_j: f64,
+}
+
+impl UnsteadyMechanicalStep {
+    pub(in crate::conjugate) fn admit_balance(
+        &self,
+        controls: ViscousHeatControls,
+    ) -> Result<(), ChtError> {
+        let allowance = finite_value(
+            "unsteady_heat.step_allowance",
+            self.duration_s * controls.power_tolerance_w,
+        )?;
+        if self.residual_j.abs() > allowance {
+            return Err(invalid_power(
+                "transient wall/body work, native kinetic storage and physical/numerical losses do not close",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// One accepted thermal advance's mechanical storage, supply and heat account.
@@ -206,6 +226,34 @@ impl Solver<'_> {
         controls: ViscousHeatControls,
         gate: &CancelGate,
     ) -> Result<UnsteadyMechanicalStep, ChtError> {
+        let step = self.sample_unsteady_mechanical_step(
+            start_s, end_s, buoyancy_force_n_m3, controls, gate,
+        )?;
+        step.admit_balance(controls)?;
+        Ok(step)
+    }
+
+    /// Reassemble the original frozen native equations without solving,
+    /// projecting or changing accepted time levels. The native shared scale
+    /// prevents component cancellation from hiding an endpoint force defect.
+    pub(in crate::conjugate) fn unsteady_material_momentum_residual(
+        &mut self,
+        gate: &CancelGate,
+    ) -> Result<f64, ChtError> {
+        self.coupled_darcy_residual(gate)
+    }
+
+    /// Sample original source coefficients at an unaccepted nonlinear
+    /// endpoint. Physical Reynolds/partition gates still apply immediately;
+    /// its kinetic balance is admitted before a receipt can be published.
+    pub(in crate::conjugate) fn sample_unsteady_mechanical_step(
+        &self,
+        start_s: f64,
+        end_s: f64,
+        buoyancy_force_n_m3: Option<&[[f64; 3]]>,
+        controls: ViscousHeatControls,
+        gate: &CancelGate,
+    ) -> Result<UnsteadyMechanicalStep, ChtError> {
         let time = self
             .time
             .as_ref()
@@ -258,15 +306,6 @@ impl Solver<'_> {
             "unsteady_heat.step_residual",
             time.dt * power.residual_w - (final_energy - initial) - numerical_loss,
         )?;
-        let allowance = finite_value(
-            "unsteady_heat.step_allowance",
-            time.dt * controls.power_tolerance_w,
-        )?;
-        if residual_j.abs() > allowance {
-            return Err(invalid_power(
-                "transient wall/body work, native kinetic storage and physical/numerical losses do not close",
-            ));
-        }
         poll(gate)?;
         Ok(UnsteadyMechanicalStep {
             start_s,

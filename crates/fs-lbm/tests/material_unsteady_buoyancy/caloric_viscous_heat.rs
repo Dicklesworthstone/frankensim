@@ -220,3 +220,6 @@ fn molecular_heat_uses_the_existing_joint_fluid_solid_caloric_owner() {
         }
     }
 }
+
+#[path = "caloric_viscous_heat/implicit.rs"]
+mod implicit;

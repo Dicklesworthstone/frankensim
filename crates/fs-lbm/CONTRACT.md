@@ -7860,3 +7860,39 @@ continuation of gas/liquid/solid storage. The test vessel's declared gas
 volume comes from its initial rigid geometry and physical liquid amount.
 Native compilation, rustfmt and test execution were unavailable after the
 worker filesystem/exec service failed during this implementation.
+
+## Implicit molecular viscous heating with material calorics
+
+The opt-in
+`march_natural_convection_with_enthalpy_and_viscous_heat_implicit` and
+`march_natural_convection_with_enthalpy_and_material_solids_and_viscous_heat_implicit`
+entries compose the original molecular viscous-heating owner with implicit
+material/buoyancy endpoint feedback. They retain the original backward-Euler
+unsteady-Stokes trajectory, fluid h(T) owner and source-solid caloric/exchange
+owners. Accepted time histories stay frozen across nonlinear trials. Each
+trial replaces its provisional physical heat deposit; one accepted mechanical
+receipt enters each physical step's audit/history.
+
+Acceptance independently samples the actual endpoint viscosity and force
+through the original Reynolds, physical heat-partition and kinetic/work laws.
+The non-cancelling L1 local thermal-credit/mechanical-debit defect must fit the
+original power tolerance, the mechanical balance must fit that tolerance times
+the duration, and the original frozen momentum-row residual must meet the
+native inner tolerance. Deposited and accepted endpoint mechanical heat agree
+within the original power tolerance times duration, not necessarily bitwise.
+Loose outer material tolerances cannot waive these physical checks.
+
+Discarded thermal trials remain charged to existing actual-work budgets.
+Fixed-temperature molecular heat retains reciprocal reservoir accounting.
+Source solids receive heat through their original exchanges and receive no
+direct fluid viscous deposit. The original explicit path shares the same
+strict mechanical sampler and physical-deposit helper.
+
+Existing closed-wall/symmetry, Reynolds, mechanical-power and backward-Euler
+restrictions remain. These APIs add no SGS viscous heating, numerical-loss
+heating, new momentum integrator, higher coupled time order or buoyancy
+potential-energy storage claim. Four regression sources cover independent
+endpoint heating, physical admission under loose outer tolerances, native
+history/work budgets and joint fluid/source-solid energy accounting.
+They were source/API reviewed; parsing, compilation and native execution
+were unavailable in the delivery environment.
