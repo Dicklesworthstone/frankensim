@@ -101,6 +101,86 @@ fn momentum(assembly: &GearedAssembly<2>, state: &GearedState, origin: [f64; 3])
 }
 
 #[test]
+fn tandem_dynamic_disks_transfer_current_wake_into_real_blade_and_momentum_loads() {
+    for separation in [0.0_f64, 1.5, 3.0] {
+        let mut design = wright_openloop_v1();
+        design.disks[0].center_m = [-2.5, 0.0, -0.9];
+        design.disks[1].center_m = [
+            -2.5 - design.rotor.radius_m,
+            separation * design.rotor.radius_m,
+            -0.9,
+        ];
+        let assembly = GearedAssembly::new(
+            design.gross_mass_kg,
+            Mat3 {
+                m: [1800.0, 0.0, 0.0, 0.0, 420.0, 0.0, 0.0, 0.0, 1850.0],
+            },
+            core::array::from_fn::<_, 2, _>(|k| GearedRotor {
+                axis_body: [1.0, 0.0, 0.0],
+                ratio: [1.0, -1.0][k],
+                axial_inertia_kgm2: 2.0,
+            }),
+        )
+        .unwrap();
+        let disk_mounts = core::array::from_fn(|k| PropellerMount {
+            thrust_direction_body: [1.0, 0.0, 0.0],
+            ..mounts(false)[k]
+        });
+        let base = GearedPropulsion::new_spatial(&design, &assembly, disk_mounts).unwrap();
+        let model = DynamicPropulsion::new(&base, RHO).unwrap();
+        let mut state = state(&assembly);
+        state.motion.rigid.omega_body = ZERO;
+        let result = model.evaluate(&state, inputs(0.0), &|_| Ok(ZERO)).unwrap();
+        let (panels, _) = design.layout(inputs(0.0).canard_rad).unwrap();
+        let velocity = state.motion.rigid.vel_mps;
+        for k in 0..2 {
+            let other = 1 - k;
+            let axis = v([1.0, 0.0, 0.0]);
+            let offset = v(design.disks[k].center_m) - v(design.disks[other].center_m);
+            let distance = offset.dot(axis);
+            let area_fraction = if separation == 0.0 {
+                1.0
+            } else if separation >= 2.0 {
+                0.0
+            } else {
+                (2.0 * (separation / 2.0).acos()
+                    - 0.5 * separation * (4.0 - separation * separation).sqrt())
+                    / core::f64::consts::PI
+            };
+            let factor = area_fraction
+                * (1.0 - distance / (distance * distance + design.rotor.radius_m.powi(2)).sqrt());
+            let wing = fs_wing::induced_velocity_free(
+                design.disks[k].center_m,
+                &panels,
+                &result.aerodynamics.gamma,
+                velocity,
+            );
+            let unwashed = v(velocity) + v(wing);
+            let expected = (unwashed + axis.scale(factor * state.induced_mps[other])).x;
+            assert!((result.aerodynamics.disk_axial_mps[k] - expected).abs() < 1e-12);
+            let native = model
+                .inflow_model()
+                .evaluate(
+                    &design.rotor,
+                    expected,
+                    state.induced_mps[k],
+                    result.propeller_absolute_speed_rad_s[k].abs(),
+                )
+                .unwrap();
+            let actual = result.aerodynamics.propellers[k];
+            assert!((actual.thrust_n - native.thrust_n).abs() < 1e-9);
+            assert!((actual.torque_nm - native.torque_nm).abs() < 1e-10);
+            assert!(
+                (actual.inflow.acceleration_mps2 - native.inflow.acceleration_mps2).abs() < 1e-11
+            );
+            if separation < 2.0 {
+                assert!((expected - unwashed.x).abs() > 0.02);
+            }
+        }
+    }
+}
+
+#[test]
 fn canted_transient_closes_aircraft_impulse_and_each_physical_wake_balance() {
     let design = wright_openloop_v1();
     let assembly = assembly(design.gross_mass_kg, false);

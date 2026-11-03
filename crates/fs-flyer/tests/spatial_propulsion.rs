@@ -123,6 +123,93 @@ fn g0_coplanar_axial_limit_matches_native_legacy_but_identifies_spatial_model() 
 }
 
 #[test]
+fn tandem_disk_inflow_uses_other_wake_once_in_legacy_and_spatial_solves() {
+    let rotor = wright_openloop_v1().rotor;
+    let rho = 1.225;
+    let velocity = [12.0, 0.0, 0.8];
+    let area = core::f64::consts::PI * rotor.radius_m * rotor.radius_m;
+    for separation in [0.0_f64, 1.5, 3.0] {
+        let (panels, strips, mut disks) = setup();
+        disks[1].center_m[0] -= 1.0;
+        disks[1].center_m[1] = disks[0].center_m[1] + separation * rotor.radius_m;
+        let area_fraction = if separation == 0.0 {
+            1.0
+        } else if separation >= 2.0 {
+            0.0
+        } else {
+            (2.0 * (separation / 2.0).acos()
+                - 0.5 * separation * (4.0 - separation * separation).sqrt())
+                / core::f64::consts::PI
+        };
+        let local = vec![velocity; strips.len()];
+        let incident = IncidentInflow {
+            strip_velocity_mps: &local,
+            disk_velocity_mps: [velocity; 2],
+        };
+        let op = InfluenceOperator::build(&panels, velocity, rho).unwrap();
+        let axes = DiskAxes::new([[1.0, 0.0, 0.0]; 2]).unwrap();
+        let spatial = spatial::coupled_step(
+            &axes,
+            &op,
+            &panels,
+            &strips,
+            &closure,
+            &rotor,
+            &disks,
+            velocity,
+            rho,
+            &precise(),
+            None,
+            incident,
+        )
+        .unwrap();
+        let axial = coupled_prop_airframe_step_with_incident(
+            &op,
+            &panels,
+            &strips,
+            &closure,
+            &rotor,
+            &disks,
+            velocity,
+            rho,
+            &precise(),
+            None,
+            incident,
+        )
+        .unwrap();
+        for result in [&spatial, &axial] {
+            for k in 0..2 {
+                let other = 1 - k;
+                let dx = disks[k].center_m[0] - disks[other].center_m[0];
+                // Independent equal-circle intersection area, including a
+                // partial overlap whose receiving CENTER is outside the wake.
+                let factor =
+                    area_fraction * (1.0 - dx / (dx * dx + rotor.radius_m * rotor.radius_m).sqrt());
+                let wing =
+                    induced_velocity_free(disks[k].center_m, &panels, &result.gamma, velocity);
+                let expected = velocity[0] + wing[0] + factor * result.w_slip[other];
+                let measured = result.power[k].thrust_power_w / result.thrust_n[k];
+                assert!((measured - expected).abs() < 2e-10);
+                let native =
+                    fs_airscrew::bemt_solve(&rotor, rho, expected, disks[k].omega_rad_s).unwrap();
+                assert!((native.thrust_n - result.thrust_n[k]).abs() < 5e-8);
+                assert!((native.torque_nm - result.torque_nm[k]).abs() < 5e-9);
+                let vi = result.w_slip[k];
+                assert!(
+                    (2.0 * rho * area * vi * (expected + vi) - result.thrust_n[k]).abs() < 1e-7
+                );
+                if separation < 2.0 {
+                    assert!((measured - velocity[0] - wing[0]).abs() > 0.005);
+                }
+            }
+        }
+        for k in 0..2 {
+            assert!((spatial.thrust_n[k] - axial.thrust_n[k]).abs() < 1e-9);
+        }
+    }
+}
+
+#[test]
 fn g0_canted_disk_inflow_thrust_and_vector_wash_reconstruct_independently() {
     let (panels, strips, mut disks) = setup();
     disks[0].center_m[2] = -0.3;

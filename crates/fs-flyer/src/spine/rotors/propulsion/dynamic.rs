@@ -20,6 +20,7 @@ use super::{
     GearedPropulsion, GearedState, GearedStep, PropulsionInputs, Refusal, geared, reject,
     wing_error,
 };
+use crate::propcoupling::disk_wash::DiskWash;
 use fs_airscrew::dynamic_inflow::first_harmonic::HarmonicInduction;
 use fs_airscrew::dynamic_inflow::{InflowStep, RotorEvaluation, UniformAxialInflow};
 use fs_airscrew::oblique::{AzimuthQuadrature, DiskFrame, ObliqueLoads, SpinDirection};
@@ -58,7 +59,7 @@ pub struct DynamicState {
 pub struct DynamicAerodynamics {
     /// Physical induction used by both wash and blade sections [m/s].
     pub induced_mps: [f64; 2],
-    /// Projected incident plus wing-induced disk velocity, excluding self-wash.
+    /// Projected incident, wing-induced and other-disk velocity, excluding self-wash.
     pub disk_axial_mps: [f64; 2],
     /// L/R native blade thrust, shaft torque and wake acceleration.
     pub propellers: [RotorEvaluation; 2],
@@ -123,6 +124,7 @@ pub struct DynamicPropulsion<'p, 'a, const N: usize> {
     propulsion: &'p GearedPropulsion<'a, N>,
     inflow: UniformAxialInflow,
     axes: DiskAxes,
+    disk_wash: [[DiskWash; 2]; 2],
     oblique: Option<(AzimuthQuadrature, [DiskFrame; 2])>,
 }
 
@@ -145,11 +147,15 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         propulsion: &'p GearedPropulsion<'a, N>,
         density_kg_m3: f64,
     ) -> Result<Self, Refusal> {
+        let axes = DiskAxes::new(propulsion.mounts.map(|mount| mount.thrust_direction_body))?;
+        let disk_wash =
+            axes.disk_wash_map(&propulsion.design.disks, propulsion.design.rotor.radius_m)?;
         Ok(Self {
             propulsion,
             inflow: UniformAxialInflow::new(propulsion.design.rotor.radius_m, density_kg_m3)
                 .map_err(air_error)?,
-            axes: DiskAxes::new(propulsion.mounts.map(|mount| mount.thrust_direction_body))?,
+            axes,
+            disk_wash,
             oblique: None,
         })
     }
@@ -283,18 +289,40 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             )
         };
         let mut disk_velocity_mps = [[0.0; 3]; 2];
-        let disk_axial_mps = core::array::from_fn(|k| {
+        let mut disk_axial_mps = [0.0; 2];
+        for k in 0..2 {
+            let mut incident = stage.incident.disk_velocity_mps[k];
+            let other = 1 - k;
+            let wash = self.disk_wash[k][other];
+            if wash.mean != 0.0 {
+                let mut increment = wash.mean * induced_mps[other];
+                if let Some(modes) = harmonics {
+                    let (_, frames) = self.oblique.as_ref().ok_or_else(|| {
+                        reject(
+                            "dynamic-propulsion-invalid",
+                            "harmonic wash requires disk frames",
+                        )
+                    })?;
+                    let dot = |direction: [f64; 3]| {
+                        (wash.transverse[0] * direction[0] + wash.transverse[1] * direction[1])
+                            + wash.transverse[2] * direction[2]
+                    };
+                    let first = dot(frames[other].radial_reference()) * modes[other].first_mps[0];
+                    let second = dot(frames[other].azimuth_reference()) * modes[other].first_mps[1];
+                    increment += first + second;
+                }
+                let axis = self.axes.directions()[other];
+                incident = core::array::from_fn(|j| incident[j] + increment * axis[j]);
+            }
             let induced = induced_velocity_free(
                 stage.disks[k].center_m,
                 stage.panels,
                 &wing.gamma,
                 stage.freestream,
             );
-            disk_velocity_mps[k] =
-                core::array::from_fn(|j| stage.incident.disk_velocity_mps[k][j] + induced[j]);
-            self.axes
-                .axial(k, stage.incident.disk_velocity_mps[k], induced)
-        });
+            disk_velocity_mps[k] = core::array::from_fn(|j| incident[j] + induced[j]);
+            disk_axial_mps[k] = self.axes.axial(k, incident, induced);
+        }
         Ok(WingAtInduction {
             disk_velocity_mps,
             disk_axial_mps,

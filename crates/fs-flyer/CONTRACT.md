@@ -1165,7 +1165,7 @@ owned by `fs-airscrew::dynamic_inflow`; its density remains fixed throughout
 a trajectory and its air mass is excluded from aircraft inertia.
 
 Each actual aerodynamic evaluation solves the original wing under the
-current vector wash, projects incident plus wing-induced velocities onto
+current vector wash, projects incident, wing-induced and other-disk velocities onto
 the declared disk axes, and evaluates original blade forces at the stored
 induction. The shared carrier-wrench owner applies thrust arms, counterrotating
 shaft loads, internal motor torque, and fixed/canted geometry exactly once.
@@ -1198,7 +1198,7 @@ calibration, browser wiring or cross-platform qualification.
 `spine::rotors::propulsion::dynamic::DynamicPropulsion::new_oblique` explicitly
 selects native revolution-averaged oblique blade loads over the existing geared
 aircraft and uniform axial wake. The normal constructor keeps the original
-axial model. Each actual aerodynamic stage supplies incident plus wing-induced
+axial model. Each actual aerodynamic stage supplies incident, wing-induced and other-disk
 velocity at each disk center and the carrier angular rate to the native blade
 owner. Fixed body-frame disk references and physical spin directions are
 prepared independently of the signs chosen for mechanical shaft coordinates.
@@ -1267,7 +1267,7 @@ it is not a free wake, skewed induction solution, full world-fluid momentum
 account, wake-distortion model or total fluid/body energy theorem. Incident
 air/wing-induced flow is still sampled at each disk center apart from actual
 carrier tilt kinematics. Finite blade phase, higher modes, flapping, cyclic
-pitch, swirl, direct inter-disk wake coupling and intradisk ambient wind
+pitch, swirl, resolved intra-disk wake loading and intradisk ambient wind
 gradients remain unimplemented. Apparent air inertia remains excluded from
 the aircraft's rigid inertia.
 
@@ -1343,9 +1343,38 @@ full Cargo/DSR, cross-platform, real-time or physical validation. Existing
 positive section throughflow/angle domains, disk-center incident sampling,
 straight finite-window wash geometry and constant air density still apply.
 The extension supplies the skew transport matrix; it does not supply a
-transported/skewed far-wake geometry, direct inter-disk wake coupling,
+transported/skewed far-wake geometry, resolved intra-disk wake loading,
 intradisk ambient wind gradients, reverse-flow regimes, higher modes,
 swirl, flapping/cyclic pitch, or a complete fluid/body energy/momentum model.
+
+## Direct momentum transfer between propeller disks
+
+Steady, uniform-dynamic and first-harmonic propulsion now include the other
+propeller's current wash in the incident velocity used by the original blade
+forces and wake momentum law. Self-wash is excluded from this transfer: each
+disk's native blade/wake law still owns its own induction exactly once. The
+wing-induced field is added once from the same accepted wing circulation.
+Steady transfer uses the current joint coupling iterate; transient transfer
+uses both physical induction states at the actual force stage.
+
+The receiving-disk mean integrates the existing straight finite-2R-window
+field over its physical area. Parallel equal-radius disks use exact circular
+overlap and its exact centroid, so partial overlap remains live even when
+neither center is inside the other wake. Canted disks use a deterministic
+32-annulus by 64-azimuth equal-area midpoint rule. The prepared coefficients
+include transverse first moments; source harmonic modes are evaluated in
+their own physical disk frame before their receiving-area mean is transferred.
+Geometry is prepared outside steady iteration and once at dynamic/harmonic
+model construction; no additional nonlinear wing solve is introduced.
+
+This extends the declared actuator field, not a resolved mutual wake. The
+receiving blades still consume one mean external wash vector; its intra-disk
+variation, wake deformation/contraction, swirl and mutual-wake world energy
+closure remain outside this tier. The canted area rule has a focused
+refinement test, not a uniform quadrature-error certificate. The existing
+wing-strip wash model and gates remain unchanged. Tests cover analytic lens
+area/centroid, canted refinement, separated/coaxial/partial-overlap disk
+inflow, native blade/momentum consumers, and zero-harmonic parity.
 
 ## Actual stage-by-stage wing continuation in skewed flight
 

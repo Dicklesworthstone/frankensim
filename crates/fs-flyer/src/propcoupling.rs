@@ -29,6 +29,9 @@ use fs_wing::{Panel, induced_velocity_free};
 #[path = "propcoupling/spatial.rs"]
 pub mod spatial;
 
+#[path = "propcoupling/disk_wash.rs"]
+pub(crate) mod disk_wash;
+
 /// Aitken candidate A (the Round-3 tuple; family selection is E4.5+).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PropCouplingSolverSpec {
@@ -171,15 +174,10 @@ pub struct CoupledStep {
 /// the battery pins the LAW, not just the digest.
 #[must_use]
 pub fn wash_factor(dx: f64, dy_abs: f64, radius: f64) -> f64 {
-    if dy_abs >= radius || dx.abs() >= 2.0 * radius {
+    if dy_abs >= radius {
         return 0.0;
     }
-    let root = (dx * dx + radius * radius).sqrt();
-    if dx >= 0.0 {
-        1.0 - dx / root
-    } else {
-        1.0 + (-dx) / root
-    }
+    disk_wash::axial_factor(dx, radius)
 }
 
 fn wash_map(
@@ -342,6 +340,13 @@ fn coupled_step_impl(
         Some(axes) => axes.wash_map(strips, panels, disks, rotor.radius_m)?,
         None => wash_map(strips, panels, disks, rotor.radius_m),
     };
+    // Exchange the same candidate wake between disks as between disks and
+    // strips. Self-induction stays exclusively in the native BEMT/momentum law.
+    let disk_axes = match spatial {
+        Some(axes) => axes,
+        None => spatial::DiskAxes::new([[1.0, 0.0, 0.0]; 2])?,
+    };
+    let disk_wash = disk_axes.disk_wash_map(disks, rotor.radius_m)?;
     let disk_area = core::f64::consts::PI * rotor.radius_m * rotor.radius_m;
     let mut x = warm.unwrap_or([0.5, 0.5]);
     let mut x_prev = x;
@@ -415,11 +420,20 @@ fn coupled_step_impl(
         }; 2];
         for k in 0..2 {
             let vi = induced_velocity_free(disks[k].center_m, panels, &wing.gamma, freestream);
-            let axial = incident.map_or(freestream[0], |flow| flow.disk_velocity_mps[k][0]);
-            let v_disk = if let Some(flow) = incident {
-                let net = spatial.map_or(axial + vi[0], |axes| {
-                    axes.axial(k, flow.disk_velocity_mps[k], vi)
-                });
+            let mut disk_incident = incident.map_or(freestream, |flow| flow.disk_velocity_mps[k]);
+            let disk_factors = disk_wash[k].map(|wash| wash.mean);
+            if disk_factors != [0.0; 2] {
+                disk_incident = match spatial {
+                    Some(axes) => axes.velocity(disk_incident, disk_factors, *x),
+                    None => {
+                        disk_incident[0] += strip_wash(disk_factors, *x);
+                        disk_incident
+                    }
+                };
+            }
+            let axial = disk_incident[0];
+            let v_disk = if incident.is_some() {
+                let net = spatial.map_or(axial + vi[0], |axes| axes.axial(k, disk_incident, vi));
                 if !net.is_finite() || net < 0.0 {
                     return Err(Refusal {
                         code: "disk-inflow-invalid",

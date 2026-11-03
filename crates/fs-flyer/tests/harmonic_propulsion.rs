@@ -109,6 +109,115 @@ fn angular_momentum(assembly: &GearedAssembly<2>, state: &GearedState, origin: [
 }
 
 #[test]
+fn partial_overlap_transfers_the_source_harmonic_mean_into_real_disk_loads() {
+    let mut design = wright_openloop_v1();
+    let radius = design.rotor.radius_m;
+    design.disks[0].center_m = [-2.5, 0.0, -0.9];
+    design.disks[1].center_m = [-2.5 - radius, 1.5 * radius, -0.9];
+    let assembly = GearedAssembly::new(
+        design.gross_mass_kg,
+        Mat3 {
+            m: [1800.0, 0.0, 0.0, 0.0, 420.0, 0.0, 0.0, 0.0, 1850.0],
+        },
+        core::array::from_fn::<_, 2, _>(|k| GearedRotor {
+            axis_body: [1.0, 0.0, 0.0],
+            ratio: [1.0, -1.0][k],
+            axial_inertia_kgm2: 2.0,
+        }),
+    )
+    .unwrap();
+    let disk_mounts = core::array::from_fn(|k| PropellerMount {
+        thrust_direction_body: [1.0, 0.0, 0.0],
+        ..mounts(false)[k]
+    });
+    let base = GearedPropulsion::new_spatial(&design, &assembly, disk_mounts).unwrap();
+    let model = HarmonicPropulsion::new(&base, RHO, 64).unwrap();
+    let uniform = DynamicPropulsion::new_oblique(&base, RHO, 64).unwrap();
+    let rule = fs_airscrew::oblique::AzimuthQuadrature::new(64).unwrap();
+    let frames = model.disk_frames();
+    let mut state = initial(&assembly);
+    state.motion.rigid.omega_body = ZERO;
+    let (panels, _) = design.layout(inputs(0.0).canard_rad).unwrap();
+    // Equal-circle intersection area and centroid, independent of production
+    // sampling: neither receiving center lies inside the other source wake.
+    let fraction = (2.0 * 0.75_f64.acos() - 0.75 * 1.75_f64.sqrt()) / core::f64::consts::PI;
+    for harmonics in [true, false] {
+        if !harmonics {
+            state
+                .induction
+                .iter_mut()
+                .for_each(|mode| mode.first_mps = [0.0; 2]);
+        }
+        let result = model.evaluate(&state, inputs(0.0), &|_| Ok(ZERO)).unwrap();
+        let velocity = state.motion.rigid.vel_mps;
+        for k in 0..2 {
+            let other = 1 - k;
+            let offset =
+                (v(design.disks[k].center_m) - v(design.disks[other].center_m)).scale(1.0 / radius);
+            let source_axis = v(frames[other].thrust_axis());
+            let axial = offset.dot(source_axis);
+            let centroid = (offset - source_axis.scale(axial)).scale(0.5);
+            let mode = state.induction[other];
+            let first = mode.first_mps[0] * centroid.dot(v(frames[other].radial_reference()))
+                + mode.first_mps[1] * centroid.dot(v(frames[other].azimuth_reference()));
+            let factor = fraction * (1.0 - axial / (1.0 + axial * axial).sqrt());
+            let wing = fs_wing::induced_velocity_free(
+                design.disks[k].center_m,
+                &panels,
+                &result.aerodynamics.gamma,
+                velocity,
+            );
+            let expected =
+                v(velocity) + v(wing) + source_axis.scale(factor * (mode.mean_mps + first));
+            let frame = frames[k];
+            let coordinates = [
+                frame.thrust_axis(),
+                frame.radial_reference(),
+                frame.azimuth_reference(),
+            ];
+            for j in 0..3 {
+                assert!(
+                    (result.aerodynamics.disk_incident_mps[k][j] - expected.dot(v(coordinates[j])))
+                        .abs()
+                        < 1e-12
+                );
+            }
+            let native = rule
+                .evaluate_first_harmonic(
+                    &design.rotor,
+                    RHO,
+                    frame,
+                    a(expected),
+                    ZERO,
+                    state.induction[k],
+                    result.propeller_absolute_speed_rad_s[k].abs(),
+                )
+                .unwrap();
+            let actual = result.aerodynamics.propellers[k];
+            assert!((actual.thrust_n - native.thrust_n).abs() < 1e-9);
+            assert!((actual.torque_nm - native.torque_nm).abs() < 1e-10);
+            if harmonics {
+                assert!((factor * first).abs() > 0.001);
+            }
+        }
+        if !harmonics {
+            let old = uniform
+                .evaluate(
+                    &DynamicState {
+                        motion: state.motion,
+                        induced_mps: state.induction.map(|mode| mode.mean_mps),
+                    },
+                    inputs(0.0),
+                    &|_| Ok(ZERO),
+                )
+                .unwrap();
+            assert_eq!(old.loads, result.loads);
+            assert_eq!(old.aerodynamics.gamma, result.aerodynamics.gamma);
+        }
+    }
+}
+
+#[test]
 fn asymmetric_wake_reaches_both_real_blades_and_wing_strip_forces() {
     let design = wright_openloop_v1();
     let assembly = assembly(design.gross_mass_kg, false);

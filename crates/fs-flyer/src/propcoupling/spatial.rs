@@ -5,6 +5,7 @@
 //! axial factor and finite 2R window are unchanged. This is still an axial,
 //! quasi-steady BEMT model, not a blade-resolved crossflow or skew-wake model.
 
+use super::disk_wash::{self, DiskWash};
 use super::{
     CoupledStep, IncidentInflow, InfluenceOperator, Panel, PropCouplingSolverSpec, PropDisk,
     Refusal, Rotor, SectionClosure, StripSpec, coupled_step_impl, hash_domain, wash_factor,
@@ -105,6 +106,28 @@ impl DiskAxes {
             .collect()
     }
 
+    /// Area-averaged other-disk wash, prepared once per fixed geometry.
+    /// A disk's own induction is owned by its blade/momentum law, never here.
+    pub(crate) fn disk_wash_map(
+        &self,
+        disks: &[PropDisk; 2],
+        radius: f64,
+    ) -> Result<[[DiskWash; 2]; 2], Refusal> {
+        let mut factors = [[DiskWash::default(); 2]; 2];
+        for k in 0..2 {
+            let other = 1 - k;
+            factors[k][other] = disk_wash::between(
+                disks[other].center_m,
+                self.directions[other],
+                disks[k].center_m,
+                self.directions[k],
+                radius,
+            )
+            .map_err(invalid)?;
+        }
+        Ok(factors)
+    }
+
     pub(crate) fn velocity(
         &self,
         incident: [f64; 3],
@@ -137,12 +160,14 @@ impl DiskAxes {
 
 /// Native two-way wing/BEMT solve for spatially mounted disks.
 ///
-/// The local incident air plus native wing-induced velocity is projected
-/// onto each positive-thrust axis. The scalar momentum root supplies a
+/// The local incident air, native wing-induced velocity and other-disk wash
+/// are projected onto each positive-thrust axis. The scalar momentum root supplies a
 /// vector wash along that axis at every actual 3D strip location. The two
 /// disks may have different axes and spin rates. Only disk-average axial
-/// inflow is modeled: transverse disk loading, blade harmonics, swirl, wake
-/// contraction, and direct disk-to-disk interference remain outside this tier.
+/// inflow is modeled. Other-disk wash is averaged over the receiving disk:
+/// exact circular overlap for parallel axes, a fixed 32 x 64 area rule for
+/// canted axes. Intra-disk blade loading, swirl and wake contraction remain
+/// outside this tier; the axial field still has its original finite 2R window.
 ///
 /// # Errors
 /// Native wing/BEMT/coupling refusals, `spatial-disk-invalid` for geometry,
