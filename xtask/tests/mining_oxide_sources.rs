@@ -154,6 +154,20 @@ fn g0_g3_janaf_reference_points_preserve_units_phases_and_common_reference() {
             0.0,
             205.147,
         ),
+        (
+            "sulfur-dioxide-gas-janaf-mining", // O-034
+            true,
+            0.064064,
+            -296_842.0,
+            248.212,
+        ),
+        (
+            "sulfur-trioxide-gas-janaf-mining", // O-058; gas standard state
+            true,
+            0.080063,
+            -395_765.0,
+            256.769,
+        ),
     ] {
         let pack = compile(slug);
         let query = point(gas, 298.15);
