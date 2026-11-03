@@ -537,7 +537,9 @@ impl<'m> FluxSystem<'m> {
                             &con,
                             gi,
                             gj,
-                            drag_matrix.as_ref().map_or(value, |drag| value + drag[i][j]),
+                            drag_matrix
+                                .as_ref()
+                                .map_or(value, |drag| value + drag[i][j]),
                         );
                     }
                 }
@@ -546,7 +548,14 @@ impl<'m> FluxSystem<'m> {
                 if con[pdof].is_none() {
                     coo.push(pdof, gi, -basis.div[i] * area);
                 }
-                momentum_entry(&mut coo, &mut reactions, &con, gi, pdof, -basis.div[i] * area);
+                momentum_entry(
+                    &mut coo,
+                    &mut reactions,
+                    &con,
+                    gi,
+                    pdof,
+                    -basis.div[i] * area,
+                );
                 // BDF1 mass: (1/dt)(u, v) and (1/dt)(u_prev, v).
                 if inv_dt > 0.0 && (con[gi].is_none() || reactions.is_some()) {
                     for j in 0..6 {
@@ -776,7 +785,9 @@ impl<'m> FluxSystem<'m> {
                             // adds -min(w.n,0) u to this conservative flux,
                             // equivalent to stress t + min(w.n,0) u.
                             let normal_flux = match open_policy {
-                                Some(boundary::OpenBoundaryPolicy::DissipativeBackflow) => wn.max(0.0),
+                                Some(boundary::OpenBoundaryPolicy::DissipativeBackflow) => {
+                                    wn.max(0.0)
+                                }
                                 _ => wn,
                             };
                             for j in 0..6 {
@@ -1277,26 +1288,43 @@ impl<'m> FluxSystem<'m> {
             .collect()
     }
 
-    /// Velocity at a point (containing-cell search by nearest
-    /// centroid — fixture-scale linear scan).
+    /// Velocity from the triangle containing the physical point.
+    ///
+    /// At a shared edge or vertex, the lowest-index triangle supplies its
+    /// one-sided trace. BDM1 preserves the normal trace across an edge, but
+    /// its tangential component may jump; this method does not average it.
+    ///
+    /// # Panics
+    /// If the point is outside the mesh or nonfinite, the vector is shorter
+    /// than the velocity DOF count, or the local evaluation is nonfinite.
+    /// Use [`Self::try_velocity_at`] for a recoverable absence of a sample.
     #[must_use]
     pub fn velocity_at(&self, x: &[f64], pt: [f64; 2]) -> [f64; 2] {
-        let mut best = 0;
-        let mut bd = f64::INFINITY;
-        for (t, c) in self.mesh.centroids.iter().enumerate() {
-            let d = (c[0] - pt[0]).powi(2) + (c[1] - pt[1]).powi(2);
-            if d < bd {
-                bd = d;
-                best = t;
-            }
+        self.try_velocity_at(x, pt)
+            .expect("finite velocity sample inside the flow mesh required")
+    }
+
+    /// Checked containing-cell velocity sample, with no extrapolation.
+    ///
+    /// Returns `None` for a point outside the mesh (including holes), a
+    /// nonfinite point, an incomplete velocity vector, or a nonfinite local
+    /// evaluation. Only the containing cell's six velocity coefficients are
+    /// read; pressure coefficients and other cells are not sampled. Geometry
+    /// lookup is allocation-free and uses [`TriMesh::containing_cell`]'s
+    /// deterministic shared-edge convention and local roundoff allowance.
+    #[must_use]
+    pub fn try_velocity_at(&self, x: &[f64], pt: [f64; 2]) -> Option<[f64; 2]> {
+        if x.len() < self.n_u {
+            return None;
         }
+        let cell = self.mesh.containing_cell(pt)?;
         let mut v = [0.0f64; 2];
         for i in 0..6 {
-            let b = eval_basis(&self.bases[best], i, pt);
-            v[0] += x[self.dof(best, i)] * b[0];
-            v[1] += x[self.dof(best, i)] * b[1];
+            let b = eval_basis(&self.bases[cell], i, pt);
+            v[0] += x[self.dof(cell, i)] * b[0];
+            v[1] += x[self.dof(cell, i)] * b[1];
         }
-        v
+        v.iter().all(|value| value.is_finite()).then_some(v)
     }
 
     /// Kinetic energy of a discrete velocity.

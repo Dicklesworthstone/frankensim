@@ -123,6 +123,36 @@ impl TriMesh {
         self.edges[e].tris.1 == usize::MAX
     }
 
+    /// Find the triangle containing a finite physical point.
+    ///
+    /// Each triangle is the intersection of its three inward half-planes.
+    /// The existing oriented unit normals avoid a solve, division or square
+    /// root per query. The scan allocates nothing and stops at its first hit.
+    /// On a shared edge or vertex, the lowest triangle index owns the sample;
+    /// this selects one trace rather than averaging discontinuous fields.
+    /// A local floating-point roundoff allowance includes represented edges,
+    /// without a mesh-size-dependent geometric tolerance or nearest-cell
+    /// extrapolation. Returns `None` outside the mesh or for a nonfinite point.
+    #[must_use]
+    pub fn containing_cell(&self, point: [f64; 2]) -> Option<usize> {
+        if point.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        self.tri_edges.iter().position(|faces| {
+            faces.iter().all(|&(edge, sign)| {
+                let face = &self.edges[edge];
+                let origin = self.verts[face.verts.0];
+                let projected = [
+                    (point[0] - origin[0]) * face.normal[0],
+                    (point[1] - origin[1]) * face.normal[1],
+                ];
+                let outward = sign * (projected[0] + projected[1]);
+                let roundoff = 8.0 * f64::EPSILON * (projected[0].abs() + projected[1].abs());
+                outward.is_finite() && roundoff.is_finite() && outward <= roundoff
+            })
+        })
+    }
+
     /// RT0 basis value of local edge `k` of triangle `t` at point `x`
     /// (GLOBAL orientation folded in).
     #[must_use]

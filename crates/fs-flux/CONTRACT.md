@@ -105,6 +105,15 @@ adjoints.
   `max_iters` is a strict Krylov iteration budget, including the last short
   restart. An approximate factorization breakdown falls back to identity
   preconditioning without changing the equations or asserting convergence.
+- `TriMesh::containing_cell` and `FluxSystem::try_velocity_at` locate the
+  containing triangle using its oriented half-planes. Velocity samples use
+  that cell's affine BDM field, never a nearest-centroid extrapolation across
+  a viscosity interface, solid gap or exterior boundary. Shared edges and
+  vertices select the lowest-index cell's one-sided trace with a local
+  roundoff allowance; tangential jumps are not averaged. Lookup allocates
+  nothing and stops at the first containing cell. The checked velocity entry
+  returns `None` outside the mesh or for invalid local data; `velocity_at`
+  panics in those cases. Neither entry performs a spatial-error estimate.
 - `FluxSystem::solve_adjoint_checked` solves the actual transposed assembled
   operator, including strong boundary rows, the pressure datum and nonsymmetric
   convection. It uses sparse counting-sort transposition, refined dense LU
@@ -325,6 +334,11 @@ discontinuous viscosity, mass and convection; flux-018 a spatially varying
 viscosity flow above the 1500-dof dense cutoff; flux-019 strict iteration budgets
 and original-residual reporting; and flux-020 a 10,000:1 layered Couette flow
 above the cutoff with independent all-cell divergence and boundary-moment gates.
+The point-sampling lane adds flux-021 a solved 1,000:1 layered Couette channel
+on stretched triangles whose nearest centroid lies in the wrong liquid;
+flux-022 deterministic one-sided tangential traces under rigid coordinate
+changes; and flux-023 disconnected fluid domains, outside points and invalid
+local sample refusal.
 These remain 2-D finite-element checks,
 not a high-Re, large-scale, or cross-ISA qualification.
 

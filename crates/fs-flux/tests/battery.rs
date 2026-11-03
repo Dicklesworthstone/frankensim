@@ -68,6 +68,136 @@ fn interpolate(mesh: &TriMesh, n_total: usize, u: &dyn Fn([f64; 2]) -> [f64; 2])
     x
 }
 
+/// G1: the nearest centroid can lie in the OTHER viscosity layer in an
+/// elongated channel. Sample the actual solved Couette field, whose affine
+/// one-sided profiles are exact in BDM1 and have continuous interface stress.
+#[test]
+fn flux_021_velocity_sampling_resolves_stretched_laminar_layers() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(10.0, 1.0, 1, 2));
+    let system = FluxSystem::new(&mesh);
+    let contrast = 1_000.0;
+    let shear_stress = 1.0 / (0.5 + 0.5 / contrast);
+    let exact = |p: [f64; 2]| {
+        [
+            shear_stress * (p[1].min(0.5) + (p[1] - 0.5).max(0.0) / contrast),
+            0.0,
+        ]
+    };
+    let viscosity = |cell: usize, _: [f64; 2]| {
+        if mesh.centroids[cell][1] < 0.5 {
+            1.0
+        } else {
+            contrast
+        }
+    };
+    let params = FluxParams::default();
+    let (matrix, rhs) =
+        system.assemble_variable_viscosity(params, &viscosity, &|_| [0.0; 2], &exact, None);
+    let solution = system.solve_linear(&matrix, &rhs, params);
+    assert!(solution.converged(params.tol));
+    for (cell, point) in [
+        (0, [9.0, 0.44]),
+        (1, [9.0, 0.46]),
+        (2, [1.0, 0.54]),
+        (3, [1.0, 0.56]),
+    ] {
+        assert_eq!(mesh.containing_cell(point), Some(cell));
+        let got = system.try_velocity_at(&solution.x, point).unwrap();
+        assert!(
+            (got[0] - exact(point)[0]).abs() < 2e-9 && got[1].abs() < 2e-9,
+            "point={point:?}, measured={got:?}, exact={:?}",
+            exact(point)
+        );
+        assert_eq!(got, system.velocity_at(&solution.x, point));
+    }
+}
+
+/// G0/G3: the normal trace agrees on an interior edge, while BDM tangential
+/// traces may differ. Shared-edge ownership must be deterministic and must
+/// not smear either physical side, including under rigid coordinate changes.
+#[test]
+fn flux_022_velocity_sampling_keeps_one_sided_interface_traces() {
+    for (scale, offset) in [(1.0, [0.0, 0.0]), (0.5, [32.0, -8.0]), (8.0, [-4.0, 16.0])] {
+        // A quarter turn preserves these represented interface coordinates
+        // exactly; the original upper/lower halves become left/right halves.
+        let transform = |p: [f64; 2]| [offset[0] - scale * p[1], offset[1] + scale * p[0]];
+        let nodes = [[0.0, 0.0], [2.0, 0.0], [1.0, 1.0], [1.0, -1.0]];
+        let mesh = TriMesh::from_mesh2(&Mesh2 {
+            nodes: nodes.into_iter().map(transform).collect(),
+            elems: vec![vec![0, 1, 2], vec![1, 0, 3]],
+            patches: vec![],
+        });
+        let system = FluxSystem::new(&mesh);
+        let velocity = |p: [f64; 2]| [0.0, if p[0] <= offset[0] { 0.2 } else { 1.4 }];
+        let field = interpolate(&mesh, system.n_u, &velocity);
+        for (reference_point, cell, speed) in [
+            ([1.0, 0.0], 0, 0.2),
+            ([0.0, 0.0], 0, 0.2),
+            ([2.0, 0.0], 0, 0.2),
+            ([1.0, 1e-7], 0, 0.2),
+            ([1.0, -1e-7], 1, 1.4),
+        ] {
+            let point = transform(reference_point);
+            assert_eq!(mesh.containing_cell(point), Some(cell));
+            let got = system.try_velocity_at(&field, point).unwrap();
+            assert!(got[0].abs() < 1e-10 && (got[1] - speed).abs() < 1e-10);
+        }
+    }
+}
+
+/// G0: absent fluid is not a license to extrapolate from a nearby chamber.
+/// Invalid samples return absence without using pressure or another cell.
+#[test]
+fn flux_023_velocity_sampling_refuses_gaps_and_invalid_local_data() {
+    let mut source = Mesh2::triangles(1.0, 1.0, 1, 1);
+    let second = Mesh2::triangles(1.0, 1.0, 1, 1);
+    let offset = source.nodes.len();
+    source
+        .nodes
+        .extend(second.nodes.iter().map(|p| [p[0] + 3.0, p[1]]));
+    source.elems.extend(
+        second
+            .elems
+            .iter()
+            .map(|e| e.iter().map(|i| i + offset).collect()),
+    );
+    let mesh = TriMesh::from_mesh2(&source);
+    let system = FluxSystem::new(&mesh);
+    let mut field = interpolate(&mesh, system.n, &|p| {
+        if p[0] < 2.0 { [0.3, 0.0] } else { [1.2, 0.0] }
+    });
+    // Pressure is not a velocity DOF, and is deliberately not inspected.
+    field[system.n_u..].fill(f64::NAN);
+    for (point, speed) in [([0.2, 0.8], 0.3), ([3.8, 0.2], 1.2)] {
+        let got = system.try_velocity_at(&field, point).unwrap();
+        assert!((got[0] - speed).abs() < 1e-12 && got[1].abs() < 1e-12);
+    }
+    for point in [
+        [2.0, 0.5],
+        [-0.01, 0.5],
+        [0.5, 1.01],
+        [f64::NAN, 0.5],
+        [0.5, f64::INFINITY],
+    ] {
+        assert_eq!(mesh.containing_cell(point), None);
+        assert_eq!(system.try_velocity_at(&field, point), None);
+    }
+    assert_eq!(
+        system.try_velocity_at(&field[..system.n_u - 1], [0.2, 0.8]),
+        None
+    );
+    let cell = mesh.containing_cell([0.2, 0.8]).unwrap();
+    field[2 * mesh.tri_edges[cell][0].0] = f64::NAN;
+    assert_eq!(system.try_velocity_at(&field, [0.2, 0.8]), None);
+
+    let empty = TriMesh::from_mesh2(&Mesh2 {
+        nodes: vec![],
+        elems: vec![],
+        patches: vec![],
+    });
+    assert_eq!(FluxSystem::new(&empty).try_velocity_at(&[], [0.0; 2]), None);
+}
+
 /// G0/G1: rigid rotation has no viscous strain even when viscosity varies.
 /// A vector-gradient diffusion operator spuriously resists this motion.
 #[test]
