@@ -12,6 +12,9 @@ use fs_vfit::discretize::DelayedFilter;
 
 mod realize;
 
+/// Largest FFT ceiling a caller may declare for the mouth-flow ladder (the default stays 65536).
+pub const MAX_MOUTH_FLOW_TAPS: usize = 262_144;
+
 /// Explicit output-realization limits, separate from the original input bank.
 #[derive(Clone, Copy, Debug)]
 pub struct MouthFlowConfig {
@@ -19,7 +22,7 @@ pub struct MouthFlowConfig {
     pub tail_tolerance: f64,
     /// Relative change of the common uncontaminated tap prefix, for EACH mode.
     pub tap_change_tolerance: f64,
-    /// Power-of-two FFT ceiling, in 512..=65536; at least two rungs are required.
+    /// Power-of-two FFT ceiling, in 512..=262144 (default 65536); at least two rungs are required.
     pub max_taps: usize,
     /// Sum of path x mode x ceiling taps admitted before allocation. Each
     /// runtime FIR also stores one history sample per tap. Realization scratch

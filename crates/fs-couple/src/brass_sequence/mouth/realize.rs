@@ -13,7 +13,7 @@ pub(super) fn admit(ducts: &[Duct], labels: &[&str], gas: &GasState,
 {
     if ducts.is_empty() || ducts.len() != labels.len() || line.sample_rate_hz == 0
         || !(1..=fs_duct::modal::MAX_MODES).contains(&line.n_modes)
-        || !(512..=65_536).contains(&output.max_taps) || !output.max_taps.is_power_of_two()
+        || !(512..=MAX_MOUTH_FLOW_TAPS).contains(&output.max_taps) || !output.max_taps.is_power_of_two()
         || !output.tail_tolerance.is_finite() || !(0.0..1.0).contains(&output.tail_tolerance)
         || output.tail_tolerance == 0.0
         || !output.tap_change_tolerance.is_finite()

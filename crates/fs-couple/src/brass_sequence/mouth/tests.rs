@@ -255,6 +255,24 @@ fn flanged_modal_bore_reduces_to_todays_flanged_load_in_the_plane_wave_limit() {
 }
 
 #[test]
+fn a_declared_tap_ceiling_is_admitted_only_inside_its_range() {
+    let gas = air_at(293.15);
+    let duct = flare(0.05);
+    let line = MmLineConfig { sample_rate_hz: 48000, n_modes: 3, extra_slices: 1, loss: LossModel::Bessel };
+    let admit = |max_taps: usize| realize::admit(core::slice::from_ref(&duct), &["flare"], &gas,
+        MmBankLoad::Shared(MmLoad::FlangedModal(&gas)), &line,
+        MouthFlowConfig { max_taps, ..MouthFlowConfig::default() });
+    // The default is unchanged; larger declared ceilings are admitted up to MAX_MOUTH_FLOW_TAPS.
+    assert_eq!(MouthFlowConfig::default().max_taps, 65_536);
+    assert!(admit(65_536).is_ok());
+    assert!(admit(131_072).is_ok());
+    assert!(admit(MAX_MOUTH_FLOW_TAPS).is_ok());
+    assert!(admit(2 * MAX_MOUTH_FLOW_TAPS).is_err());
+    assert!(admit(100_000).is_err());
+    assert!(admit(256).is_err());
+}
+
+#[test]
 fn flanged_mouth_fir_reproduces_the_coupled_mouth_flow_between_dft_bins() {
     // Same property as the analytic outlet FIR test, for the complete radiation matrix and every retained mode.
     let gas = air_at(293.15);

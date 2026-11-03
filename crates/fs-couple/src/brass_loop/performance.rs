@@ -26,6 +26,7 @@
 //! termination <flanged|unflanged|ideal_open>
 //! modes <n_modes> <extra_slices>
 //! mouth_flow_tail_tol <relative_energy>      optional; default 1e-10 (the line ladder's own)
+//! mouth_flow_max_taps <taps>                 optional; power of two in 512..=262144; default 65536 (the ladder's own ceiling)
 //! modal_baffle <relative_kernel_tol> <maximum_kernel_terms>  optional; full modal load and observation
 //! cylinder <radius_m> <length_m>             bore records, mouthpiece to bell
 //! cone <inlet_radius_m> <outlet_radius_m> <length_m>
@@ -86,7 +87,7 @@ use fs_vfit::discretize::DelayedFilter;
 
 use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland};
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::brass_sequence::mouth::{MouthFlowConfig, modal_flow_lines, plane_flow_line};
+use crate::brass_sequence::mouth::{MAX_MOUTH_FLOW_TAPS, MouthFlowConfig, modal_flow_lines, plane_flow_line};
 use crate::driving_point::LineLadder;
 use crate::mm_line::{MmComboReceipt, MmLineConfig, MmLoad};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
@@ -157,6 +158,7 @@ pub struct LipDescription {
     duct: Duct,
     microphone: CircularOutletReceiver,
     mouth_flow_tail_tol: f64,
+    mouth_flow_max_taps: usize,
     modal_baffle: Option<ModalOutletOptions>,
     schedule: GestureSchedule,
     blow_track: String,
@@ -368,6 +370,7 @@ impl LipDescription {
         let mut modes: Option<(usize, usize)> = None;
         let mut microphone: Option<CircularOutletReceiver> = None;
         let mut mouth_flow_tail_tol: Option<f64> = None;
+        let mut mouth_flow_max_taps: Option<usize> = None;
         let mut modal_baffle: Option<ModalOutletOptions> = None;
         let mut nonlinear: Option<NonlinearBoreRecord> = None;
         let mut ambient_words = None;
@@ -540,6 +543,14 @@ impl LipDescription {
                     once(&mut mouth_flow_tail_tol, value, &f)?;
                     f.finish()?;
                 }
+                "mouth_flow_max_taps" => {
+                    let taps = f.count(MAX_MOUTH_FLOW_TAPS as u64)? as usize;
+                    if taps < 512 || !taps.is_power_of_two() {
+                        return f.err("mouth-flow taps must be a power of two in 512..=262144");
+                    }
+                    once(&mut mouth_flow_max_taps, taps, &f)?;
+                    f.finish()?;
+                }
                 "modal_baffle" => {
                     let relative_kernel_tolerance = f.positive()?;
                     if relative_kernel_tolerance >= 1.0 {
@@ -683,6 +694,7 @@ impl LipDescription {
             duct: Duct { segments },
             microphone: microphone.ok_or_else(|| missing("microphone"))?,
             mouth_flow_tail_tol: mouth_flow_tail_tol.unwrap_or(LineLadder::default().tail_tol),
+            mouth_flow_max_taps: mouth_flow_max_taps.unwrap_or(MouthFlowConfig::default().max_taps),
             modal_baffle,
             schedule,
             blow_track,
@@ -838,6 +850,7 @@ impl LipDescription {
         let output = MouthFlowConfig {
             tail_tolerance: self.mouth_flow_tail_tol,
             tap_change_tolerance: self.mouth_flow_tail_tol.sqrt(),
+            max_taps: self.mouth_flow_max_taps,
             ..MouthFlowConfig::default()
         };
         let (mouth, mouth_receipt) = if self.modal_baffle.is_some() {
@@ -1698,6 +1711,28 @@ mod tests {
         let declared = LipDescription::from_bytes(fixture("mouth_flow_tail_tol 1e-6\n").as_bytes())
             .expect("parses");
         assert_eq!(declared.mouth_flow_tail_tol, 1.0e-6);
+    }
+
+    #[test]
+    fn the_mouth_flow_tap_ceiling_defaults_to_the_ladders_own_and_is_declarable() {
+        let default = LipDescription::from_bytes(fixture("").as_bytes()).expect("parses");
+        assert_eq!(default.mouth_flow_max_taps, MouthFlowConfig::default().max_taps);
+        assert_eq!(default.mouth_flow_max_taps, 65_536);
+        for taps in [512_usize, 65_536, 131_072, 262_144] {
+            let declared = LipDescription::from_bytes(fixture(&format!("mouth_flow_max_taps {taps}\n")).as_bytes())
+                .expect("parses");
+            assert_eq!(declared.mouth_flow_max_taps, taps);
+        }
+        for (extra, needle) in [
+            ("mouth_flow_max_taps 100000\n", "power of two"),
+            ("mouth_flow_max_taps 256\n", "power of two"),
+            ("mouth_flow_max_taps 524288\n", "outside its admitted range"),
+            ("mouth_flow_max_taps 0\n", "outside its admitted range"),
+            ("mouth_flow_max_taps 131072\nmouth_flow_max_taps 131072\n", "only appear once"),
+        ] {
+            let error = LipDescription::from_bytes(fixture(extra).as_bytes()).unwrap_err();
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
     }
 
     #[test]
