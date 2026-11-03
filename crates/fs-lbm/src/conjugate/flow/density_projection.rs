@@ -96,7 +96,7 @@ impl FrozenDensity<'_> {
     }
 }
 
-fn face_dual_mass(
+pub(super) fn face_dual_mass(
     domain: &VoxelDomain,
     density_kg_m3: &[f64],
     c: usize,

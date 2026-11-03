@@ -10,6 +10,12 @@ use super::{
     VoxelDomain, finite, finite_positive, poll, poll_every,
 };
 
+mod viscous;
+pub use viscous::{
+    MaterialMomentumViscosityInput, MaterialViscosityControls, MaterialViscosityReport,
+    ViscousMaterialMomentumAdvance,
+};
+
 /// Original material inventory, extensive momentum and authored exchanges.
 #[derive(Debug, Clone, Copy)]
 pub struct MaterialMomentumAdvanceInput<'a> {

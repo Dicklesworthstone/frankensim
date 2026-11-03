@@ -9159,3 +9159,50 @@ local-speed refusal. Two public sampled-body integration tests additionally
 cover midpoint kinematics and atomic failure/retry; these source tests parsed
 but were not executed in the delivery environment. This is not a full crate
 build, resolved-wall validation or experimental calibration.
+
+### Evolving material momentum with sourced molecular viscosity
+
+`FlowField::advance_material_momentum_with_viscosity` borrows one original
+`FluidTransport` evaluation per mobile cell, with no source in fixed solids.
+Only its frozen dynamic viscosity is consumed; actual evolving M/V supplies
+inertia through the original density projection's half-cell face masses.
+The original full symmetric MAC rows and Krylov solver advance a
+backward-Euler molecular predictor without convection or pressure. Reciprocal
+shear, harmonic material-jump transmission, tangentially moving walls and
+stationary no-slip solids retain their original operators. Existing time-level
+paths keep their original constant-density arithmetic.
+
+Native impulses J_f = M_f*(u_new-u_old) reach original extensive cell momentum
+through half-cell mass shares. Independent native and cell accounts check
+delta_K_face + BE_loss + Q_molecular - W_wall and
+delta_K_cell + scatter_loss - delta_K_face - representation_work.
+BE loss is sum M_f*delta_u_f^2/2; scatter loss is
+sum M_c*(delta_u_left-delta_u_right)^2/8. Physical unscaled frozen-row residual,
+actual linear/angular impulse transfer, absolute per-face representation work,
+molecular heat partition and actual M*(h_heated-h_original) insertion have
+physical-unit acceptance gates. The native active-face impulse is not a complete
+fixed-wall reaction measurement.
+
+Only duration times the original molecular cell power enters specific enthalpy.
+Backward-Euler, scatter, projection and material-transport losses remain
+numerical accounts. The existing force/pressure/accepted-mass-route advance then
+runs once with the updated momentum and heated enthalpy. Returned flow remains
+the transport-stage field; endpoint state is the actual returned M, h and P.
+A later call reconstructs current momentum and consumes newly evaluated sources.
+
+Scope is closed, fixed geometry and a first-order frozen-viscosity split.
+There is no added EOS, phase mobility, bulk-viscosity law, turbulence,
+pressure-opening work model or implicit viscosity-temperature feedback.
+Cell and sweep ceilings bound work: each sweep has three existing momentum
+solves, each capped at 20,000 Krylov iterations, and a frozen coupled residual
+readback. Numerical storage is linear in original cells/faces. Any source,
+solve, balance, heat-insertion or cancellation refusal returns no candidate.
+
+Four source-bound regressions cover graded actual inertia distinct from source
+reference density, original liquid-viscosity changes, moving-wall work and
+physical heat, current-state reconstruction, quiescent compatibility and atomic
+refusals. All eight changed Rust sources passed pinned-nightly rustfmt parsing
+through stdin; the three new files were formatted. Independent scalar response
+and 101 unequal-mass scatter identities were evaluated, with the latter closing
+within 2.23e-15 J. Native Rust typechecking, tests and runtime benchmarks remain
+unexecuted because the shared filesystem is full and memory is constrained.

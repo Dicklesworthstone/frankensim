@@ -637,6 +637,9 @@ impl Component {
 struct MomentumResidual {
     relative: f64,
     rms: f64,
+    // Physical unrelaxed row defect, only sampled by the actual-mass
+    // viscosity split. Existing SIMPLE trajectories retain their arithmetic.
+    absolute_force_n: f64,
 }
 
 pub(super) struct Solver<'a> {
@@ -785,6 +788,9 @@ struct TimeLevels {
     scheme: TimeScheme,
     previous: [Vec<f64>; 3],
     older: Option<[Vec<f64>; 3]>,
+    // None preserves the original constant-density inertia. The bounded
+    // material-viscosity split supplies the native M/V half-cell masses.
+    face_mass_kg: Option<[Vec<f64>; 3]>,
 }
 
 /// Internal fan state: the flow through the patch and the curve's rise and
@@ -833,6 +839,20 @@ impl<'a> Solver<'a> {
     pub(super) fn new(
         domain: &'a VoxelDomain,
         fluid: &FluidProperties,
+        config: &'a SimpleConfig,
+    ) -> Self {
+        Self::with_molecular_coefficients(
+            domain,
+            fluid.density_kg_m3,
+            fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s,
+            config,
+        )
+    }
+
+    fn with_molecular_coefficients(
+        domain: &'a VoxelDomain,
+        density_kg_m3: f64,
+        dynamic_viscosity_pa_s: f64,
         config: &'a SimpleConfig,
     ) -> Self {
         let n = domain.dims();
@@ -916,7 +936,7 @@ impl<'a> Solver<'a> {
         };
         let porous = {
             let mut porous = Vec::new();
-            let mu = fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s;
+            let mu = dynamic_viscosity_pa_s;
             for resistance in &config.resistances {
                 if let FlowResistance::Volume {
                     lo,
@@ -934,7 +954,7 @@ impl<'a> Solver<'a> {
                                 let cell: &mut [(f64, f64); 3] = &mut porous[domain.index(x, y, z)];
                                 for a in 0..3 {
                                     cell[a].0 += mu / permeability_m2[a];
-                                    cell[a].1 += 0.5 * fluid.density_kg_m3 * inertial_per_m[a];
+                                    cell[a].1 += 0.5 * density_kg_m3 * inertial_per_m[a];
                                 }
                             }
                         }
@@ -995,8 +1015,8 @@ impl<'a> Solver<'a> {
             domain,
             config,
             n,
-            rho: fluid.density_kg_m3,
-            mu: fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s,
+            rho: density_kg_m3,
+            mu: dynamic_viscosity_pa_s,
             molecular_viscosity: Vec::new(),
             creeping: false,
             pressure_work_axis: None,
@@ -1554,6 +1574,7 @@ impl<'a> Solver<'a> {
             scheme,
             previous: self.vel.clone(),
             older: None,
+            face_mass_kg: None,
         });
     }
 
@@ -1717,7 +1738,11 @@ impl<'a> Solver<'a> {
         let rows = self.comps[a].unknowns.len();
         if rows == 0 {
             self.momentum_rms[a] = 0.0;
-            return Ok(MomentumResidual { relative: 0.0, rms: 0.0 });
+            return Ok(MomentumResidual {
+                relative: 0.0,
+                rms: 0.0,
+                absolute_force_n: 0.0,
+            });
         }
         self.refresh_forchheimer_rows(a, gate)?;
         let comp = &self.comps[a];
@@ -1986,7 +2011,10 @@ impl<'a> Solver<'a> {
             }
             if let Some(time) = &self.time {
                 // rho V du/dt over the staggered volume.
-                let c = self.rho * face_area * length / time.dt;
+                let c = match &time.face_mass_kg {
+                    Some(mass) => mass[a][index] / time.dt,
+                    None => self.rho * face_area * length / time.dt,
+                };
                 match (time.scheme, &time.older) {
                     (TimeScheme::Bdf2, Some(older)) => {
                         a_p += 1.5 * c;
@@ -2086,7 +2114,20 @@ impl<'a> Solver<'a> {
         if !steady.is_finite() {
             return Err(ChtError::FlowDiverged { step: self.sweeps });
         }
-        let residual = MomentumResidual { relative: steady, rms: residual / rows_root };
+        let absolute_force_n = if self.time.as_ref().is_some_and(|time| time.face_mass_kg.is_some()) {
+            r.iter()
+                .zip(&b)
+                .zip(&a_p_relaxed)
+                .map(|((&ax, &rhs), &diagonal)| (rhs - ax).abs() * diagonal)
+                .sum()
+        } else {
+            0.0
+        };
+        let residual = MomentumResidual {
+            relative: steady,
+            rms: residual / rows_root,
+            absolute_force_n,
+        };
         if !solve { return Ok(residual); }
         if steady > 1e-15 {
             let outcome = bicgstab_ilu0("momentum", &matrix, &b, &mut x, inner, 20_000, gate)

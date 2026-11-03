@@ -23,6 +23,8 @@
 
 use super::*;
 
+pub(in crate::conjugate) mod material_momentum;
+
 pub(in crate::conjugate) mod pressure;
 pub use pressure::creeping_flow_with_pressure_work_heat;
 
@@ -160,6 +162,12 @@ pub(crate) fn admit_heating(
             "positive finite power gate and Reynolds ceiling at most 0.1 required",
         ));
     }
+    admit_molecular_boundaries(domain, config)
+}
+
+// Geometry/actuator admission is shared with the molecular-viscosity split,
+// whose convection and pressure are owned by other existing substeps.
+fn admit_molecular_boundaries(domain: &VoxelDomain, config: &SimpleConfig) -> Result<(), ChtError> {
     for (side, face) in config.faces.iter().enumerate() {
         if let FvBoundary::Wall { velocity } = face {
             if velocity.iter().any(|v| !v.is_finite())
