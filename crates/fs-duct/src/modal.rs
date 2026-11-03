@@ -34,6 +34,10 @@
 //! limit, ZK-corrected through the plane mode otherwise; the per-mode
 //! validity boundary of the wide-tube model is a CONTRACT disclosure,
 //! not a hidden assumption.
+//! Exact transverse cutoffs inside finite sections use pressure/constant-flow
+//! transfer in a finite local reference, including the same mouth observation.
+//! Native inlet/mouth characteristic coordinates remain singular at cutoff and
+//! still refuse; no finite local reference is returned as their physical impedance.
 //!
 //! Bessel functions: `J0` uses a double-double series and `J1` uses the
 //! shared `fs_math::special` owner — no coefficient
@@ -330,6 +334,16 @@ fn modal_wave(
     loss: LossModel,
     gammas: &[f64],
 ) -> Result<ModalWave, DuctError> {
+    modal_wave_with_internal_cutoff(state, radius, omega, loss, gammas, false)
+}
+
+// A finite interior section has regular pressure/flow transfer at cutoff.
+// Only its private coordinates may use Zc_0 instead of the infinite Zc_n;
+// the public inlet/mouth native-wave semantics remain unchanged.
+fn modal_wave_with_internal_cutoff(
+    state: &GasState, radius: f64, omega: f64, loss: LossModel,
+    gammas: &[f64], admit_internal_cutoff: bool,
+) -> Result<ModalWave, DuctError> {
     let wave: SegmentWave = segment_wave(state, radius, omega, loss)?;
     let k0 = wave.wavenumber;
     let zc0 = wave.characteristic_impedance;
@@ -347,6 +361,11 @@ fn modal_wave(
             kn = -kn;
         }
         if kn.abs() < 1e-300 {
+            if admit_internal_cutoff && kn == C64::ZERO {
+                k.push(kn);
+                zc.push(zc0);
+                continue;
+            }
             return Err(DuctError::Singular);
         }
         k.push(kn);
@@ -841,6 +860,9 @@ fn mm_reflection_prepared(
     // Recurse from the mouth backward: load -> propagate through the
     // last station -> (junction -> propagate) for every earlier station.
     let propagate = |r: &mut Vec<C64>, flow: &mut Option<Vec<C64>>, wave: &ModalWave, length: f64| -> Result<(), DuctError> {
+        if wave.k.contains(&C64::ZERO) {
+            return outlet::propagate_internal_cutoff(flow, r, wave, length);
+        }
         let e: Vec<C64> = wave
             .k
             .iter()
@@ -855,7 +877,9 @@ fn mm_reflection_prepared(
     propagate(&mut r, &mut mouth_flow, &wave_here, stations[last].length)?;
     for idx in (0..last).rev() {
         let st = &stations[idx];
-        let wave_up = modal_wave(state, st.radius, omega, loss, gammas)?;
+        let wave_up = modal_wave_with_internal_cutoff(
+            state, st.radius, omega, loss, gammas, idx != 0,
+        )?;
         min_shear = min_shear.min(wave_up.shear_number);
         if let Some(junction) = &geometry.junctions[idx] {
             r = outlet::junction(

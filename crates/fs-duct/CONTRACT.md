@@ -552,8 +552,16 @@ pipe `Z_in = +i Zc cot(kL)`.
     an infinite characteristic impedance. The tapered-field regression
     checks this limit from propagating and evanescent sides and closes
     acoustic work through the same pressure/flow solution. A genuine inlet
-    impedance pole still refuses; staircase native-wave coordinates retain
-    their separate cutoff limitation.
+    impedance pole still refuses.
+    The staircase admits an exact transverse cutoff inside a finite section
+    through a private finite reference and the exact pressure/constant-flow
+    transfer `P_left = P_right - i k_0 Zc_0 L U_right`,
+    `U_left = U_right`. Its junction equations and retained mouth-flow map
+    use that same response. Ordinary propagation is unchanged; native inlet
+    and mouth characteristic coordinates still refuse at cutoff. G1/G3 tests
+    compare full input-impedance and mouth-flow matrices with independent
+    simultaneous pressure/flow equations, approach cutoff from both frequency
+    sides, and verify invariance under subdivision of the cutoff section.
   - Losses follow the staircase rule: `segment_wave` for the plane mode,
     `k_n` from the lossy `k_0`, `Zc_n = Zc_0 k_0/k_n`. A uniform section
     reproduces both exactly.

@@ -197,6 +197,52 @@ pub(super) fn propagate(map: &mut Option<Vec<C64>>, e: &[C64], n: usize) {
     }
 }
 
+/// Exact finite-section transfer at an INTERNAL transverse cutoff. Its local
+/// reference is Zc_0, so P_left=P_right-i k_0 Zc_0 L U_right and U_left=U_right
+/// give r=b/(2+b), t=2/(2+b), b=-i k_0 L. Other modes retain their native
+/// decaying propagation. This does not reinterpret an inlet or mouth wave.
+pub(super) fn propagate_internal_cutoff(
+    map: &mut Option<Vec<C64>>, reflection: &mut Vec<C64>, wave: &ModalWave, length: f64,
+) -> Result<(), DuctError> {
+    let n = wave.k.len();
+    let b = C64::new(0.0, -1.0) * wave.k[0].scale(length);
+    let denominator = C64::from_re(2.0) + b;
+    let mut r = vec![C64::ZERO; n];
+    let mut t = Vec::with_capacity(n);
+    for (mode, &k) in wave.k.iter().enumerate() {
+        t.push(if k == C64::ZERO {
+            r[mode] = b / denominator;
+            C64::from_re(2.0) / denominator
+        } else {
+            crate::exp_i(k.scale(length))
+        });
+    }
+    if r.iter().chain(&t).any(|&z| !finite(z)) { return Err(DuctError::Singular); }
+    // a_right = J a_left, J=(I-diag(r)R_right)^-1 diag(t).
+    // The same feedback solve advances reflection and every mouth observer.
+    let mut feedback = reflection.clone();
+    for row in 0..n {
+        for col in 0..n { feedback[row*n+col] = -r[row] * feedback[row*n+col]; }
+        feedback[row*n+row] = feedback[row*n+row] + C64::ONE;
+    }
+    let mut j = mat_inv(&feedback, n)?;
+    for row in 0..n {
+        for col in 0..n { j[row*n+col] = j[row*n+col] * t[col]; }
+    }
+    let mut upstream = mat_mul(reflection, &j, n);
+    for row in 0..n {
+        for col in 0..n { upstream[row*n+col] = t[row] * upstream[row*n+col]; }
+        upstream[row*n+row] = upstream[row*n+row] + r[row];
+    }
+    if upstream.iter().any(|&z| !finite(z)) { return Err(DuctError::Singular); }
+    if let Some(map) = map {
+        *map = mat_mul(map, &j, n);
+        if map.iter().any(|&z| !finite(z)) { return Err(DuctError::Singular); }
+    }
+    *reflection = upstream;
+    Ok(())
+}
+
 /// Reflect and transfer forward amplitudes across an original junction.
 /// Expansion: p_u=F p_d, U_d=F^T U_u. Contraction: p_d=F p_u,
 /// U_u=F^T U_d. Eliminate incoming waves using b_d=R_d a_d, but do

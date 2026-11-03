@@ -79,16 +79,44 @@ fn direct_source(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: us
 {
     let stations = stations_of(duct,1).unwrap();
     let gammas = j1_roots(n-1).unwrap();
-    let waves: Vec<_> = stations.iter().map(|s|
-        modal_wave(gas,s.radius,omega,loss,&gammas).unwrap()).collect();
+    let waves: Vec<_> = stations.iter().map(|s| {
+        let plane = segment_wave(gas, s.radius, omega, loss).unwrap();
+        let mut k = vec![plane.wavenumber];
+        let mut zc = vec![plane.characteristic_impedance];
+        for &gamma in &gammas {
+            let transverse = gamma / s.radius;
+            let axial = (plane.wavenumber * plane.wavenumber
+                - C64::from_re(transverse * transverse)).sqrt();
+            k.push(axial);
+            zc.push(if axial == C64::ZERO {
+                // Only a scale for the independent constant-flow basis below.
+                plane.characteristic_impedance
+            } else {
+                plane.characteristic_impedance * plane.wavenumber / axial
+            });
+        }
+        ModalWave { radius: s.radius, k, zc, shear_number: plane.shear_number }
+    }).collect();
     let dimension = 2*n*stations.len();
     let endpoint = |station: usize, left: bool| {
         let mut p = vec![C64::ZERO;n*dimension];
         let mut u = p.clone();
         for mode in 0..n {
-            let e = crate::exp_i(waves[station].k[mode].scale(stations[station].length));
             let a = station*2*n+mode;
             let b = a+n;
+            if waves[station].k[mode] == C64::ZERO {
+                // Independent exact pressure/flow solution at cutoff:
+                // U(x)=B/Zc0 and P(x)=A+i omega rho x B/(S Zc0).
+                // These unknowns are NOT forward/backward traveling waves.
+                assert_eq!(loss, LossModel::Lossless);
+                p[mode*dimension+a] = C64::ONE;
+                p[mode*dimension+b] = if left { C64::ZERO } else {
+                    C64::new(0.0, omega * stations[station].length / gas.sound_speed)
+                };
+                u[mode*dimension+b] = waves[station].zc[mode].recip();
+                continue;
+            }
+            let e = crate::exp_i(waves[station].k[mode].scale(stations[station].length));
             p[mode*dimension+a] = if left { C64::ONE } else { e };
             p[mode*dimension+b] = if left { e } else { C64::ONE };
             u[mode*dimension+a] = p[mode*dimension+a]/waves[station].zc[mode];
@@ -166,6 +194,78 @@ fn direct_source(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: us
         }
     }
     (zin,transfer)
+}
+
+#[test]
+fn internal_modal_cutoff_preserves_exact_finite_section_and_mouth_flow() {
+    // G1: the neck's first radial mode has infinite axial wavelength, but its
+    // finite pressure/constant-flow solution has no singularity. Solve all
+    // section endpoints simultaneously, independently of the recursion.
+    let gas = air();
+    let radius = j1_roots(1).unwrap()[0] / 128.0;
+    let omega = gas.sound_speed * 128.0;
+    let radii = [0.045, radius, 0.042];
+    let duct = cylinders(&radii);
+    let load = C64::from_re(0.7 * gas.density * gas.sound_speed
+        / (core::f64::consts::PI * radii[2] * radii[2]));
+    let response = mouth_response_load(&duct, &gas, omega, LossModel::Lossless, load, 2, 1).unwrap();
+    let (impedance, flow) = direct(&duct, &gas, omega, LossModel::Lossless, 2, None);
+    for (&actual, &expected) in response.input.impedance_matrix.iter().zip(&impedance) {
+        close(actual, expected, load.abs());
+    }
+    for (&actual, &expected) in response.flow_map.iter().zip(&flow) {
+        close(actual, expected, 1.0);
+    }
+
+    // G3: dividing the same cutoff section must not change its physics.
+    let split = Duct { segments: vec![
+        Segment::Cylinder { radius: radii[0], length: 0.03 },
+        Segment::Cylinder { radius, length: 0.015 },
+        Segment::Cylinder { radius, length: 0.015 },
+        Segment::Cylinder { radius: radii[2], length: 0.03 },
+    ] };
+    let split = mouth_response_load(&split, &gas, omega, LossModel::Lossless, load, 2, 1).unwrap();
+    for (&actual, &expected) in split.input.impedance_matrix.iter().zip(&impedance) {
+        close(actual, expected, load.abs());
+    }
+    for (&actual, &expected) in split.flow_map.iter().zip(&flow) {
+        close(actual, expected, 1.0);
+    }
+
+    // Public native characteristic coordinates still refuse a cutoff at the
+    // inlet or mouth; no finite reference is presented as physical Zc_n.
+    assert!(modal_characteristic_impedances(&gas, radius, omega, LossModel::Lossless, 2).is_err());
+    for radii in [[radius, 0.042], [0.045, radius]] {
+        assert!(mouth_response_load(&cylinders(&radii), &gas, omega,
+            LossModel::Lossless, load, 2, 1).is_err());
+    }
+}
+
+#[test]
+fn internal_modal_cutoff_matches_propagating_and_evanescent_limits() {
+    // G1: exact finite-section transfer is analytic in k_n^2 across cutoff.
+    let gas = air();
+    let radius = j1_roots(1).unwrap()[0] / 128.0;
+    let omega = gas.sound_speed * 128.0;
+    let duct = cylinders(&[0.045, radius, 0.042]);
+    let load = C64::from_re(0.7 * gas.density * gas.sound_speed
+        / (core::f64::consts::PI * 0.042 * 0.042));
+    let at = mouth_response_load(&duct, &gas, omega, LossModel::Lossless, load, 2, 1).unwrap();
+    for direction in [-1.0, 1.0] {
+        let mut previous = f64::INFINITY;
+        for offset in [1.0e-4, 1.0e-6, 1.0e-8] {
+            let near = mouth_response_load(&duct, &gas, omega * (1.0 + direction * offset),
+                LossModel::Lossless, load, 2, 1).unwrap();
+            let impedance_error = near.input.impedance_matrix.iter().zip(&at.input.impedance_matrix)
+                .map(|(&a, &b)| (a - b).abs() / load.abs()).fold(0.0, f64::max);
+            let flow_error = near.flow_map.iter().zip(&at.flow_map)
+                .map(|(&a, &b)| (a - b).abs()).fold(0.0, f64::max);
+            let error = impedance_error.max(flow_error);
+            assert!(error < 0.1 * previous, "side={direction}, offset={offset}, error={error}");
+            previous = error;
+        }
+        assert!(previous < 5.0e-6);
+    }
 }
 
 #[test]
