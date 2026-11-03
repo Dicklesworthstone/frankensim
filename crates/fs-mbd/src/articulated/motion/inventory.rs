@@ -1,7 +1,7 @@
 //! Rigid payload capture and release on articulated trees.
 //!
 //! The root API describes free motion; [`supported`] retains fixed or driven
-//! support reactions and work during a prescribed-base capture.
+//! support reactions and work during prescribed-base capture and release.
 //!
 //! An admitted attachment preserves the target link frame and every joint.
 //! Full rotated centroidal inertia and COM orbital inertia enter the original

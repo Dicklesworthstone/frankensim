@@ -4500,3 +4500,27 @@ thermalization, one-way parity and split continuation, closed/zero/cancelled
 intervals and depletion refusal, Galilean/datum transforms, and tiny-fraction
 and endpoint-rounding limits. Source files were parsed with Rustfmt; these new
 native regressions have not been executed in this dependency-limited session.
+
+
+## Passive release from supported payload inventory
+
+`articulated::motion::inventory::supported::release::release_payload`
+completes supported pickup, native continuous motion, and drop. It restores the
+exact retained link inertia from the original attachment token and reconstructs
+the released payload's current pose and rigid velocity field from native FK.
+The supported time, base boundary, coordinates and rates are copied exactly;
+passive detachment supplies no impulse, support work or mechanical loss.
+
+Free and supported release share the original loaded-inventory identity check.
+Changed or repeated tokens refuse, and captures nested on one link release in
+reverse order. The original full payload tensor is retained; no inertia
+subtraction or artificial recoil is used. Only the changed target contributes
+to the independent world and joint momentum decomposition audits. Common-frame
+energy defects remain visible and must satisfy caller-supplied absolute
+allowances. Original state admission and cancellation precede publication.
+
+This removes an ideal rigid attachment without an ejection impulse. Ongoing
+contact, finite separation dynamics and an ejection energy source remain
+separate models. Focused regressions specify a capture through actual implicit
+gravity-loaded carry into release, driven rotational offset velocity, nested
+and repeated inventory, and atomic refusal.

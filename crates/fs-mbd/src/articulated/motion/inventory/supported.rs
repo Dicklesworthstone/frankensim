@@ -11,6 +11,10 @@
 //! It does not discover contact, impose extra gear/loop rows, resolve a finite
 //! grasp duration, or assign the removed mechanical energy to a thermal body.
 
+/// Continuous-velocity detachment of an exact captured inventory.
+#[path = "supported/release.rs"]
+pub mod release;
+
 use super::super::prescribed::PrescribedBaseMotionState;
 use super::super::reconfigure::{self, ReconfigurationControls, ReconfigurationError};
 use super::super::{
@@ -43,18 +47,19 @@ pub struct SupportedPayloadControls<'a> {
     pub maximum_removed_relative_energy_j: f64,
 }
 
-/// Complete-system momentum and work accounting across a supported catch.
+/// Complete-system momentum and work accounting across a supported inventory event.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SupportedPayloadBalance {
-    /// Original retained tree plus the incoming free payload in world axes.
+    /// Complete system before the event: tree and any incoming free payload.
     pub momentum_before: ArticulatedMomentum,
-    /// Actual loaded tree at the returned endpoint, in the same world frame.
+    /// Complete system after the event: tree and any released free payload.
     pub momentum_after: ArticulatedMomentum,
-    /// Actual sum of retained-body and payload linear momentum increments, N s.
+    /// Actual linear momentum change, before rounding whole-system totals, N s.
     pub linear_momentum_change_world: Vec3,
     /// Actual spin plus orbital increment about the world origin, N m s.
     pub angular_momentum_change_world: Vec3,
-    /// Independent native ABA support impulse ON the complete system.
+    /// Independent native ABA support impulse ON the complete system at capture.
+    /// Passive release has no impulse and reports an exact zero here.
     /// Expressed about the base origin in base axes, in [N m s, N s].
     pub support_impulse_body: Wrench,
     /// The same reaction about the world origin, in world axes.
@@ -63,26 +68,26 @@ pub struct SupportedPayloadBalance {
     pub linear_momentum_residual_world: Vec3,
     /// Actual world-origin angular increment minus support impulse, N m s.
     pub angular_momentum_residual_world: Vec3,
-    /// Native RNEA projection of actual retained-body plus payload increments.
-    /// Capture and support contribute no external relative-joint impulse.
+    /// Native RNEA projection of actual body increments or release decomposition.
+    /// These passive inventory events have no external relative-joint impulse.
     pub joint_momentum_residual: Vec<f64>,
     /// Largest absolute residual divided by its declared allowance, at most one.
     pub maximum_normalized_momentum_residual: f64,
-    /// Actual polarized lab-frame kinetic energy change, J.
+    /// Actual lab-frame kinetic change or passive-release decomposition defect, J.
     pub kinetic_energy_change_j: f64,
     /// Support impulse paired with the unchanged prescribed base twist, J.
     pub support_work_j: f64,
     /// Constant world velocity of the inertial energy-accounting frame, m/s.
     pub accounting_boost_world: Vec3,
-    /// Complete-system kinetic energy in that frame before capture, J.
+    /// Complete-system kinetic energy in that frame before the event, J.
     pub kinetic_before_j: f64,
-    /// Complete-system kinetic energy in the same frame after capture, J.
+    /// Complete-system kinetic energy in the same frame after the event, J.
     pub kinetic_after_j: f64,
-    /// Polarized kinetic energy change in the common translating frame, J.
+    /// Actual common-frame kinetic change or passive-release decomposition defect, J.
     pub accounting_kinetic_energy_change_j: f64,
     /// Support work paired with the base twist in that same frame, J.
     pub accounting_support_work_j: f64,
-    /// Common-frame kinetic change minus support work plus capture loss, J.
+    /// Common-frame kinetic change minus support work plus any capture loss, J.
     /// This finite numerical defect is never assigned to removed energy.
     pub energy_residual_j: f64,
 }

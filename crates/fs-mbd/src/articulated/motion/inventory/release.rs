@@ -109,21 +109,8 @@ pub fn release_payload(
 ) -> Result<PayloadRelease, PayloadError> {
     poll(&mut cancelled)?;
     let target = attachment.target_link;
-    let loaded_link = model
-        .links()
-        .get(target)
-        .ok_or(PayloadError::Invalid("release target link"))?;
+    admit_attachment(model, attachment)?;
     let retained_link = &attachment.retained_link;
-    if loaded_link.name() != retained_link.name()
-        || loaded_link.parent() != retained_link.parent()
-        || loaded_link.parent_from_child_zero() != retained_link.parent_from_child_zero()
-        || loaded_link.joint() != retained_link.joint()
-        || loaded_link.inertia() != attachment.loaded_inertia
-    {
-        return Err(PayloadError::Invalid(
-            "release attachment inventory changed",
-        ));
-    }
     let before = validate_inputs(model, state, target, constraints, controls, &mut cancelled)?;
     let prescribed = impulse.unwrap_or_default();
     validate_vec3(prescribed.point_link_m, "payload_release.point")?;
@@ -342,6 +329,28 @@ fn add_joint_delta(
             poll(cancelled)?;
         }
         *rate = finite(*rate + change, "release joint velocity")?;
+    }
+    Ok(())
+}
+
+pub(super) fn admit_attachment(
+    model: &ArticulatedModel,
+    attachment: &PayloadAttachment,
+) -> Result<(), PayloadError> {
+    let loaded_link = model
+        .links()
+        .get(attachment.target_link)
+        .ok_or(PayloadError::Invalid("release target link"))?;
+    let retained_link = &attachment.retained_link;
+    if loaded_link.name() != retained_link.name()
+        || loaded_link.parent() != retained_link.parent()
+        || loaded_link.parent_from_child_zero() != retained_link.parent_from_child_zero()
+        || loaded_link.joint() != retained_link.joint()
+        || loaded_link.inertia() != attachment.loaded_inertia
+    {
+        return Err(PayloadError::Invalid(
+            "release attachment inventory changed",
+        ));
     }
     Ok(())
 }
