@@ -30,6 +30,7 @@ use fs_contact::ballistic::{
 };
 use fs_contact::frictional_multicontact::NormalVelocityLaw;
 use fs_ga::{Twist, Vec3};
+use fs_math::dd::Dd;
 
 /// One infinite prescribed plane, with its position at the window start.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -177,7 +178,12 @@ pub fn advance_carrier_planes(
         &mut cancelled,
     )?;
     let mut impulses = Impulses::default();
-    let (mut actuator_work, mut external_work, mut loss, mut smooth_defect) = (0.0, 0.0, 0.0, 0.0);
+    let mut momentum_change = Impulses::default();
+    let mut kinetic_change = Dd::ZERO;
+    let mut actuator_work = Dd::ZERO;
+    let mut external_work = Dd::ZERO;
+    let mut loss = Dd::ZERO;
+    let mut smooth_defect = Dd::ZERO;
     let mut events = Vec::new();
     let mut work = Work {
         smooth: 0,
@@ -285,9 +291,15 @@ pub fn advance_carrier_planes(
                 step.external_angular_impulse_world,
                 origin,
             );
-            actuator_work += step.actuator_work;
-            external_work += step.external_work;
-            smooth_defect += step.kinetic_work_residual;
+            momentum_change.add(
+                step.linear_momentum_change_world,
+                step.angular_momentum_change_world,
+                origin,
+            );
+            kinetic_change = kinetic_change + Dd::from_f64(step.kinetic_energy_change);
+            actuator_work = actuator_work + Dd::from_f64(step.actuator_work);
+            external_work = external_work + Dd::from_f64(step.external_work);
+            smooth_defect = smooth_defect + Dd::from_f64(step.kinetic_work_residual);
             state = step.state_after;
             work.accepted += 1;
         }
@@ -343,12 +355,18 @@ pub fn advance_carrier_planes(
                 response.external_angular_impulse_world,
                 origin,
             );
+            momentum_change.add(
+                response.linear_momentum_change_world,
+                response.angular_momentum_change_world,
+                origin,
+            );
+            kinetic_change = kinetic_change + Dd::from_f64(response.kinetic_energy_change);
             state.base = response.base_after;
             state
                 .joint_velocity
                 .clone_from(&response.joint_velocity_after);
-            external_work += impact.plane_work;
-            loss += impact.contact.dissipated_energy;
+            external_work = external_work + Dd::from_f64(impact.plane_work);
+            loss = loss + Dd::from_f64(impact.contact.dissipated_energy);
             events.push(ArticulatedTrajectoryEventResult { time, impact });
         }
     }
@@ -359,11 +377,13 @@ pub fn advance_carrier_planes(
         time,
         &mut cancelled,
     )?;
-    let energy_residual =
-        after.kinetic_energy - before.kinetic_energy - actuator_work - external_work + loss;
-    let linear_residual = after.linear_world - before.linear_world - impulses.linear;
-    let angular_residual =
-        after.angular_about_origin_world - before.angular_about_origin_world - impulses.angular;
+    // Endpoint totals are useful observations, but they may round identically
+    // across a real small transfer on a large translating/rotating background.
+    // Reduce original smooth and event changes independently of source terms.
+    let energy_residual = (kinetic_change - actuator_work - external_work + loss).to_f64();
+    let (linear_residual, angular_residual) = momentum_change.difference(&impulses);
+    let [actuator_work, external_work, loss, smooth_defect] =
+        [actuator_work, external_work, loss, smooth_defect].map(Dd::to_f64);
     if ![
         actuator_work,
         external_work,
@@ -377,6 +397,8 @@ pub fn advance_carrier_planes(
         || ![
             impulses.linear,
             impulses.angular,
+            momentum_change.linear,
+            momentum_change.angular,
             linear_residual,
             angular_residual,
         ]

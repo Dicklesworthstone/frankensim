@@ -119,6 +119,91 @@ fn audit(result: &CarrierPlaneResult) {
 }
 
 #[test]
+fn automatic_smooth_window_retains_small_spin_work_on_large_translation() {
+    let model = body();
+    let initial = state(
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(2.0_f64.powi(30), 0.0, 0.0),
+    );
+    let wrenches = [Wrench::new(Vec3::new(0.2, 0.0, 0.0), Vec3::default())];
+    let duration = 0.0625;
+    let mut settings = config(duration);
+    settings.trajectory.maximum_smooth_step = duration;
+    settings.trajectory.angular_origin_world = Vec3::default();
+    let result = advance_carrier_planes(
+        ArticulatedTrajectorySystem {
+            model: &model,
+            state: &initial,
+            loads: loads(&wrenches, Vec3::default()),
+        },
+        0.5,
+        &[plane()],
+        settings,
+        || false,
+    )
+    .unwrap();
+    let trajectory = &result.trajectory;
+    assert!(trajectory.events.is_empty());
+    // The spin increment is real, but below one ULP of the bulk kinetic energy.
+    assert_eq!(
+        trajectory.momentum_before.kinetic_energy,
+        trajectory.momentum_after.kinetic_energy
+    );
+    close(
+        trajectory.states_after[0].base.twist_body.angular.x,
+        duration,
+    );
+    close(trajectory.external_work, 0.1 * duration * duration);
+    vector(
+        trajectory.external_angular_impulse_about_origin_world,
+        Vec3::new(0.2 * duration, 0.0, 0.0),
+    );
+    audit(&result);
+}
+
+#[test]
+fn automatic_impact_retains_normal_loss_below_bulk_kinetic_energy_resolution() {
+    let model = body();
+    let initial = state(
+        Vec3::new(0.0, 0.5625, 0.0),
+        Vec3::new(2.0_f64.powi(30), -1.0, 0.0),
+    );
+    let wrenches = [Wrench::default()];
+    let mut settings = config(0.125);
+    settings.trajectory.maximum_smooth_step = 0.125;
+    settings.trajectory.angular_origin_world = Vec3::default();
+    let result = advance_carrier_planes(
+        ArticulatedTrajectorySystem {
+            model: &model,
+            state: &initial,
+            loads: loads(&wrenches, Vec3::default()),
+        },
+        0.5,
+        &[CarrierPlane {
+            restitution: 0.5,
+            ..plane()
+        }],
+        settings,
+        || false,
+    )
+    .unwrap();
+    let trajectory = &result.trajectory;
+    assert_eq!(trajectory.events.len(), 1);
+    close(trajectory.events[0].time, 0.0625);
+    close(velocity(&trajectory.states_after[0]).y, 0.5);
+    assert_eq!(
+        trajectory.momentum_before.kinetic_energy,
+        trajectory.momentum_after.kinetic_energy
+    );
+    close(trajectory.contact_dissipated_energy, 0.75);
+    vector(
+        trajectory.external_linear_impulse_world,
+        Vec3::new(0.0, 3.0, 0.0),
+    );
+    audit(&result);
+}
+
+#[test]
 fn analytic_gravity_rebound_needs_no_supplied_time_or_material_witness() {
     let model = body();
     let initial = state(Vec3::new(0.0, 1.5, 0.0), Vec3::default());
