@@ -91,7 +91,7 @@ workspace = true
 [features]
 # Closed-channel two-fluid friction heat on the original thermal timeline.
 superfluid = ["fs-duct/superfluid"]
-# Fixed-reference Stokes or exactly translating nonlinear fluid/body mechanics.
+# Fixed-reference Stokes or native translating/rotating ALE fluid/body mechanics.
 experimental-stokes-motion = ["dep:fs-flux", "fs-flux/continuum"]
 # Coherent finite-film absorption on the original spatial thermal timeline.
 layered-wave-heating = ["fs-em/plane-wave"]

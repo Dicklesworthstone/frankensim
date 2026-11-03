@@ -7,6 +7,7 @@
 //! The entire domain translates: exterior callbacks live on its moving boundary.
 //! This does not move exterior obstacles independently or rotate/deform the mesh.
 
+use super::super::search::{EndpointSearch, Observation, SearchError};
 use super::{impulse_time_loss, maximum, nonnegative, positive, sum};
 use fs_flux::ale::translating::{
     TranslatingAleError, TranslatingAleFlow, TranslatingAleState, TranslatingAleStep,
@@ -86,6 +87,18 @@ impl From<DynamicsError> for PlanarTranslationError {
 impl From<LuWorkspaceError> for PlanarTranslationError {
     fn from(value: LuWorkspaceError) -> Self {
         Self::LinearSolve(value)
+    }
+}
+
+impl From<SearchError<2>> for PlanarTranslationError {
+    fn from(value: SearchError<2>) -> Self {
+        match value {
+            SearchError::Invalid(message) => Self::Invalid(message),
+            SearchError::Stalled { residual } => Self::SearchStalled {
+                residual_n: residual,
+            },
+            SearchError::LinearSolve(error) => Self::LinearSolve(error),
+        }
     }
 }
 
@@ -341,7 +354,8 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
                 None => MaterialNavierStokesBoundary::Velocity { edge, value: &wall },
             },
         ));
-        let mut search = EndpointSearch::new(v0, controls);
+        let mut search =
+            EndpointSearch::new(v0, controls.velocity_bounds_m_s, controls.jacobian_step_m_s);
         let mut last_residual = [f64::NAN; 2];
         for index in 0..controls.maximum_flow_solves {
             poll(&mut cancelled)?;
@@ -529,168 +543,6 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
     }
 }
 
-#[derive(Clone, Copy)]
-struct Observation {
-    velocity: [f64; 2],
-    residual: [f64; 2],
-    limits: [f64; 2],
-}
-#[derive(Clone, Copy)]
-enum Phase {
-    Base,
-    Probe(usize),
-    Descent,
-}
-
-struct EndpointSearch {
-    requested: [f64; 2],
-    base: Observation,
-    probes: [Observation; 2],
-    phase: Phase,
-    direction: [f64; 2],
-    fraction: f64,
-    controls: PlanarTranslationControls,
-}
-impl EndpointSearch {
-    fn new(velocity: [f64; 2], controls: PlanarTranslationControls) -> Self {
-        let empty = Observation {
-            velocity,
-            residual: [0.0; 2],
-            limits: [1.0; 2],
-        };
-        Self {
-            requested: core::array::from_fn(|i| {
-                velocity[i].clamp(
-                    controls.velocity_bounds_m_s[i][0],
-                    controls.velocity_bounds_m_s[i][1],
-                )
-            }),
-            base: empty,
-            probes: [empty; 2],
-            phase: Phase::Base,
-            direction: [0.0; 2],
-            fraction: 1.0,
-            controls,
-        }
-    }
-    fn stalled(&self) -> PlanarTranslationError {
-        PlanarTranslationError::SearchStalled {
-            residual_n: self.base.residual,
-        }
-    }
-    fn probe(&mut self, axis: usize) -> Result<(), PlanarTranslationError> {
-        self.requested = self.base.velocity;
-        let [lo, hi] = self.controls.velocity_bounds_m_s[axis];
-        let v = self.requested[axis];
-        let (room, sign) = if hi - v >= v - lo {
-            (hi - v, 1.0)
-        } else {
-            (v - lo, -1.0)
-        };
-        self.requested[axis] =
-            (v + sign * self.controls.jacobian_step_m_s[axis].min(room)).clamp(lo, hi);
-        if self.requested[axis] == v {
-            return Err(self.stalled());
-        }
-        self.phase = Phase::Probe(axis);
-        Ok(())
-    }
-    fn line_point(&mut self) -> Result<(), PlanarTranslationError> {
-        self.requested = core::array::from_fn(|i| {
-            let [lo, hi] = self.controls.velocity_bounds_m_s[i];
-            self.direction[i]
-                .mul_add(self.fraction, self.base.velocity[i])
-                .clamp(lo, hi)
-        });
-        if !positive(self.fraction) || self.requested == self.base.velocity {
-            return Err(self.stalled());
-        }
-        Ok(())
-    }
-    fn observe(
-        &mut self,
-        observation: Observation,
-        schur: &mut LuWorkspace,
-    ) -> Result<(), PlanarTranslationError> {
-        match self.phase {
-            Phase::Base => {
-                self.base = observation;
-                self.probe(0)?;
-            }
-            Phase::Probe(axis) => {
-                self.probes[axis] = observation;
-                if axis == 0 {
-                    return self.probe(1);
-                }
-                // Normalize by ACTUAL native probe velocity changes. Retain
-                // any rounded cross-coordinate changes in the final direction,
-                // so requested finite differences never stand in for stored p.
-                let h: [f64; 2] =
-                    core::array::from_fn(|j| self.probes[j].velocity[j] - self.base.velocity[j]);
-                if h.into_iter().any(|x| !x.is_finite() || x == 0.0) {
-                    return Err(self.stalled());
-                }
-                let matrix: [f64; 4] = core::array::from_fn(|entry| {
-                    let row = entry / 2;
-                    let col = entry % 2;
-                    (self.probes[col].residual[row] - self.base.residual[row])
-                        / h[col]
-                        / self.base.limits[row]
-                });
-                let rhs: [f64; 2] =
-                    core::array::from_fn(|i| -self.base.residual[i] / self.base.limits[i]);
-                if !matrix.into_iter().chain(rhs).all(f64::is_finite) {
-                    return Err(invalid("unrepresentable coupled response"));
-                }
-                let mut correction = [0.0; 2];
-                schur.solve_into(&matrix, &rhs, &mut correction)?;
-                self.direction = core::array::from_fn(|i| {
-                    sum(core::array::from_fn::<_, 2, _>(|j| {
-                        ((self.probes[j].velocity[i] - self.base.velocity[i]) / h[j])
-                            * correction[j]
-                    }))
-                });
-                if !self.direction.into_iter().all(f64::is_finite) {
-                    return Err(invalid("unrepresentable coupled velocity correction"));
-                }
-                self.fraction = 1.0;
-                for i in 0..2 {
-                    let d = self.direction[i];
-                    let [lo, hi] = self.controls.velocity_bounds_m_s[i];
-                    let room = if d > 0.0 {
-                        hi - self.base.velocity[i]
-                    } else {
-                        lo - self.base.velocity[i]
-                    };
-                    if d != 0.0 {
-                        self.fraction = self.fraction.min(room / d);
-                    }
-                }
-                self.phase = Phase::Descent;
-                self.line_point()?;
-            }
-            Phase::Descent => {
-                // Keep BASE physical scaling fixed during backtracking, so a
-                // new large force cannot manufacture apparent improvement.
-                let merit = |r: [f64; 2]| {
-                    maximum(core::array::from_fn::<_, 2, _>(|i| {
-                        r[i] / self.base.limits[i]
-                    }))
-                };
-                let before = merit(self.base.residual);
-                let after = merit(observation.residual);
-                if before.is_finite() && after <= (1.0 - 1e-4 * self.fraction) * before {
-                    self.base = observation;
-                    self.probe(0)?;
-                } else {
-                    self.fraction *= 0.5;
-                    self.line_point()?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
 fn invalid(message: &'static str) -> PlanarTranslationError {
     PlanarTranslationError::Invalid(message)
 }

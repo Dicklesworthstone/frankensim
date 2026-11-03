@@ -27369,3 +27369,51 @@ redundant rows, global energy refusal, inactive cross-response, atomic retry,
 small momentum beside large kinetic backgrounds and continued live-memory
 motion. Its `modal_impacts/cavity.rs` child retains the full shared-cavity
 integration fixture separately from the core modal tests.
+
+## Finite planar body momentum on the original rigid ALE fluid
+
+With `experimental-stokes-motion`, `stokes_motion::rigid::PlanarRigidMotion`
+closes both world translations AND principal-z angular momentum through the
+original nonlinear rigid-domain ALE owner. Geometry and moment arms follow the
+body's finite motion. The body z axis must be principal and world aligned;
+transverse momentum is refused rather than silently projected. The whole
+reference domain translates/rotates with the body; independently moving
+obstacles, deformation and remeshing remain outside this owner.
+
+The original native momentum impulse constructs each actual trial rate. A
+read-only native ALE kinematics preview supplies the SAME represented endpoint
+pivot, orientation and mesh rates to wall callbacks and to the subsequent flow
+candidate. Initial strong normal means and linear moments include rigid spin.
+The new pose, unwrapped angle and each actual native rate must agree with the
+moving domain before acceptance. Rotation increments stay below pi; accumulated
+angle can cross quaternion/principal-angle branches without resetting springs.
+
+One bounded coupled endpoint search measures three native flow response columns
+and uses the original reusable small LU solver. Its algorithm is shared with
+the existing two-coordinate translation owner; all base/probe/backtracking
+solves consume the declared budget. Dimensional force/torque gates and physical
+probe scales remain distinct. Actual represented cross-coordinate rate changes
+enter the correction; fixed-base residual scaling controls descent. This is a
+local method with native nonlinear refusal, not a global convergence theorem.
+
+Original physical stress alone supplies force and torque about the moving COM.
+No-slip and finite Navier-slip body walls are supported. Advected momentum and
+physical slip loss retain separate native accounts. Body kinetic/spring change,
+physical mechanical damping, signed external/interface work and backward-Euler
+numerical loss are admitted separately. Slip loss is reported in joules and
+is not added again to the body-only work identity or assigned to heat.
+
+The unique flow candidate commits once, together with body pose/momentum and
+unwrapped angle after final cancellation admission. Refusal preserves body,
+fluid history, geometry and clock. The body work gate is not an exact finite-step
+whole-fluid angular-conservation or passivity theorem: native covariant BDF1
+geometry/time defects, fluid dissipation, streams and sources retain their own
+accounting and require refinement.
+
+Four focused G1/G3/G4 regressions cover an independently manufactured rotating
+Couette field with nonzero force and torque, springs/damping and no-slip/finite/
+perfect-slip walls; common boosts; the independent closed-fluid added-mass
+limit and existing translation parity; continued finite rotation across angle
+branches; actual normal-moment admission; and budget/datum/final-cancellation
+rollback with exact retry. Pinned Rust parsing is recorded separately from
+native compilation and numerical execution, which remain unrun in this session.

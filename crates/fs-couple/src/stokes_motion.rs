@@ -35,6 +35,11 @@ pub mod planar;
 /// Finite guided translation on the original nonlinear moving-domain flow.
 pub mod translating;
 
+/// Finite planar translation and rotation through the original rigid ALE flow.
+pub mod rigid;
+
+mod search;
+
 /// Fixed physical and approximation data; all mechanical values cover the
 /// explicit out-of-plane depth, rather than being per-unit-depth quantities.
 #[derive(Clone, Copy, Debug, PartialEq)]
