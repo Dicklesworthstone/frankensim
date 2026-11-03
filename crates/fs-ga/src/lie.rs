@@ -1250,6 +1250,104 @@ mod tests {
     }
 
     #[test]
+    fn g0_slow_screws_retain_axial_translation_and_the_study_constraint() {
+        // Rotation and translation along the same axis commute, giving an
+        // independent exact reference even when their scales differ greatly.
+        for (angle, distance) in [
+            (1.0e-300, 1.0e6),
+            (1.0e-13, 1.0e6),
+            (1.0e-10, 1.0e6),
+            (1.0e-10, 1.0),
+            (1.0e-8, 1.0),
+            (1.0e-5, 1.0),
+            (1.0e-4, 1.0),
+        ] {
+            let twist = Twist::new(Vec3::new(0.0, 0.0, angle), Vec3::new(0.0, 0.0, distance));
+            let pose = Se3::exp(twist).unwrap_or_else(|error| {
+                panic!("slow screw angle={angle:e}, distance={distance:e}: {error}")
+            });
+            let expected = Se3::from_parts(
+                So3::exp(So3Tangent::new(twist.angular)).unwrap(),
+                twist.linear,
+            )
+            .unwrap();
+            for (actual, reference) in pose.as_motor().0.0.iter().zip(expected.as_motor().0.0) {
+                assert!(
+                    (actual - reference).abs()
+                        <= 8.0 * f64::EPSILON * reference.abs().max(f64::MIN_POSITIVE),
+                    "angle={angle:e}, distance={distance:e}: {actual:e} vs {reference:e}"
+                );
+            }
+            let recovered = expected.log();
+            assert!((recovered.angular.z - angle).abs() <= 8.0 * f64::EPSILON * angle);
+            assert!((recovered.linear.z - distance).abs() <= 8.0 * f64::EPSILON * distance);
+        }
+    }
+
+    #[test]
+    fn g1_slow_screw_translation_matches_integrated_rotating_velocity() {
+        // Integrating R_z(angle*t) v over t in [0,1] yields this independent
+        // translation. The half-angle identity avoids subtracting cos from 1.
+        let linear = Vec3::new(0.7, -1.3, 2.1);
+        for angle in [-2.1e-4, -1.0e-8, 1.0e-13, 1.0e-10, 1.0e-7, 1.9e-4, 2.1e-4] {
+            let sinc = det::sin(angle) / angle;
+            let half_sine = det::sin(0.5 * angle);
+            let cosc = 2.0 * half_sine * half_sine / angle;
+            let translation = Vec3::new(
+                sinc * linear.x - cosc * linear.y,
+                cosc * linear.x + sinc * linear.y,
+                linear.z,
+            );
+            let angular = Vec3::new(0.0, 0.0, angle);
+            let expected =
+                Se3::from_parts(So3::exp(So3Tangent::new(angular)).unwrap(), translation).unwrap();
+            let pose = Se3::exp(Twist::new(angular, linear)).unwrap();
+            assert!(
+                vec_error(pose.translation(), translation) < 4.0e-15,
+                "wrong integrated linear velocity at angle {angle:e}"
+            );
+            assert!(
+                vec_error(expected.log().linear, linear) < 4.0e-15,
+                "logarithm lost linear velocity at angle {angle:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn g3_slow_velocity_steps_compose_and_are_frame_covariant() {
+        let twist = Twist::new(Vec3::new(0.0, 0.0, 1.0e-7), Vec3::new(0.7, -1.3, 2.1));
+        let frame = Se3::from_parts(
+            So3::exp(So3Tangent::new(Vec3::new(0.3, -0.7, 0.2))).unwrap(),
+            Vec3::new(2.0, -3.0, 0.7),
+        )
+        .unwrap();
+        let mut walked = Se3::identity();
+        for _ in 0..128 {
+            walked = walked.body_plus(twist.scale(1.0 / 128.0)).unwrap();
+        }
+        let jumped = Se3::exp(twist).unwrap();
+        let probe = Vec3::new(0.8, -1.2, 0.4);
+        assert!(
+            vec_error(
+                walked.transform_point(probe).unwrap(),
+                jumped.transform_point(probe).unwrap()
+            ) < 1.0e-13
+        );
+        let transformed = Se3::exp(twist.scale(1.0 / 128.0).transform_by(&frame)).unwrap();
+        let conjugated = frame
+            .compose(Se3::exp(twist.scale(1.0 / 128.0)).unwrap())
+            .unwrap()
+            .compose(frame.inverse().unwrap())
+            .unwrap();
+        assert!(
+            vec_error(
+                transformed.transform_point(probe).unwrap(),
+                conjugated.transform_point(probe).unwrap()
+            ) < 3.0e-15
+        );
+    }
+
+    #[test]
     fn g0_so3_jacobians_have_analytic_inverse() {
         for angular in [
             Vec3::new(0.0, 0.0, 0.0),

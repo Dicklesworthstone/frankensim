@@ -26,9 +26,10 @@ const E013: usize = 0b1011;
 const E023: usize = 0b1101;
 const E123: usize = 0b1110;
 
-/// Angle threshold under which a screw is treated as a pure translation
-/// (the exp/log series is exact to f64 below it).
-const TINY_ANGLE: f64 = 1e-9;
+/// Half-angle threshold for the analytic exp/log series. A small rotation
+/// does not make a screw a pure translation: its angular–linear coupling
+/// remains present even when the squared angle underflows.
+const SMALL_ANGLE: f64 = 1e-4;
 
 /// A Euclidean point (homogeneous trivector).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -433,12 +434,33 @@ impl Motor {
 #[must_use]
 pub fn exp_bivector(b: &Pga) -> Motor {
     let b = b.grade_part(2);
+    if b.0[E12] == 0.0 && b.0[E13] == 0.0 && b.0[E23] == 0.0 {
+        // An exactly ideal bivector is nilpotent. Test its coordinates,
+        // not its squared norm, which can underflow for a nonzero rotation.
+        return Motor(Pga::scalar(1.0).add(&b));
+    }
     let b_sq = b.gp(&b); // = −θ² − 2θd·I  (scalar + pseudoscalar only)
     let s = b_sq.scalar_part();
     let theta = det::sqrt((-s).max(0.0));
-    if theta < TINY_ANGLE {
-        // Ideal (or vanishing) bivector: (B)² = 0 ⇒ exp is exactly 1 + B.
-        return Motor(Pga::scalar(1.0).add(&b));
+    if theta < SMALL_ANGLE {
+        // B² = -theta² + p I with I² = 0 and I commuting with B.
+        // exp(B) = cos(theta) + sinc(theta) B
+        //        + p/2 [sinc(theta) I + k(theta) B I],
+        // k(theta) = (sin(theta) - theta cos(theta)) / theta³.
+        // This retains the Study-constraint term p I / 2 instead of
+        // incorrectly dropping it with the small rotational norm.
+        let theta_sq = -s;
+        let cos = 1.0 + theta_sq * (-0.5 + theta_sq * (1.0 / 24.0 - theta_sq / 720.0));
+        let sinc = 1.0 + theta_sq * (-1.0 / 6.0 + theta_sq * (1.0 / 120.0 - theta_sq / 5040.0));
+        let k =
+            1.0 / 3.0 + theta_sq * (-1.0 / 30.0 + theta_sq * (1.0 / 840.0 - theta_sq / 45360.0));
+        let half_p = 0.5 * b_sq.0[E0123];
+        return Motor(
+            Pga::scalar(cos)
+                .add(&b.scale(sinc))
+                .add(&Pga::blade(E0123, half_p * sinc))
+                .add(&b.gp(&Pga::blade(E0123, 1.0)).scale(half_p * k)),
+        );
     }
     let d = -b_sq.0[E0123] / (2.0 * theta);
     // ℓ = B (θ − d I) / θ²   [(θ + dI)⁻¹ = (θ − dI)/θ² since I² = 0]
@@ -465,9 +487,22 @@ pub fn motor_log(m: &Motor) -> Pga {
     let p = mv.0[E0123];
     let b2 = mv.grade_part(2);
     let ne = det::sqrt(b2.0[E12] * b2.0[E12] + b2.0[E13] * b2.0[E13] + b2.0[E23] * b2.0[E23]);
-    if ne < TINY_ANGLE {
-        // Pure translator (or identity): M = 1 + B with B ideal.
-        return b2.scale(1.0 / s0);
+    if ne < SMALL_ANGLE {
+        // With u = ne/s0, atan(u)/ne = (1 - u²/3 + ...)/s0.
+        // The ideal correction is
+        // p (atan(u) s0 - ne) / ne³ * b2 I. Its finite limit is
+        // -p/(3 s0²) * b2 I; dropping it loses the linear generator.
+        // Ratios also remove a common near-unit representative scale.
+        let inverse = 1.0 / s0;
+        let u_sq = (ne * inverse) * (ne * inverse);
+        let scale = inverse * (1.0 + u_sq * (-1.0 / 3.0 + u_sq * (1.0 / 5.0 - u_sq / 7.0)));
+        let ideal_scale = -p
+            * inverse
+            * inverse
+            * (1.0 / 3.0 + u_sq * (-1.0 / 5.0 + u_sq * (1.0 / 7.0 - u_sq / 9.0)));
+        return b2
+            .scale(scale)
+            .add(&b2.gp(&Pga::blade(E0123, 1.0)).scale(ideal_scale));
     }
     let theta = det::atan2(ne, s0);
     let (sin_t, cos_t) = (det::sin(theta), det::cos(theta));

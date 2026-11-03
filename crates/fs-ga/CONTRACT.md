@@ -65,8 +65,12 @@ fs-scenario frames, the gradient stack's manifold variants.
    randomized screws (worst observed ~1e−13); the monomorphized kernel
    agrees with the dense path to < 1e−12.
 4. **exp/log**: mutually inverse on the principal branch (< 1e−10 over
-   randomized screws; pure translators exact through the θ→0 branch);
-   `exp` emits unit motors (defect < 1e−12).
+   randomized screws; pure translators use the exact nilpotent branch);
+   `exp` emits unit motors (defect < 1e−12). The analytic small-angle
+   exp/log limits retain angular–linear coupling, including the motor's
+   pseudoscalar Study term, rather than treating a slow screw as a pure
+   translation. Nonzero angular coordinates remain active even when their
+   squared norm underflows.
 5. **Façade exactness**: quat ↔ rotor is a bitwise relabeling both ways;
    motor → (quat, translation) recovers the quat bitwise and the
    translation to ≲1e−13 relative.
@@ -152,6 +156,10 @@ round trips, finite-difference checks of left-trivialized SO(3)/SE(3)
 differentials, adjoint homomorphism, bracket covariance, the exact relation
 between left/space and right/body perturbations, structured refusal, and
 bit-identical deterministic replay (Gauntlet G0/G3/G5).
+Slow-screw regressions compare with commuting axial translation and with the
+independently integrated rotating linear velocity, check the small-angle
+exp/log branch boundary, and exercise velocity-step subdivision and rigid
+frame covariance. These are floating-point checks, not interval enclosures.
 
 Unit tests audit the generated tables themselves (exhaustive blade-level
 associativity, metric squares, complements, reverse/involution signs).
