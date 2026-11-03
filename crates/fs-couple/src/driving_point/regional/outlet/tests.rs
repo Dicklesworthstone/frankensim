@@ -22,6 +22,132 @@ fn duct(a: GasState, b: GasState) -> RegionalDuct {
     ] }, &[a, b]).unwrap()
 }
 
+fn duct_with_open_and_vented_holes(air: GasState) -> RegionalDuct {
+    let hole = |state| Segment::ToneHole {
+        hole_radius: 0.0006, chimney_height: 0.003, bore_radius: 0.0015, state,
+    };
+    RegionalDuct::new(&Duct { segments: vec![
+        Segment::Cylinder { radius: 0.0015, length: 0.12 },
+        Segment::ToneHole { hole_radius: 0.0005, chimney_height: 0.003,
+            bore_radius: 0.0015, state: HoleState::Open },
+        Segment::Cylinder { radius: 0.0015, length: 0.17 },
+        hole(HoleState::Closed),
+        hole(HoleState::Vent(0.0)),
+        hole(HoleState::Vent(0.25)),
+        Segment::Cylinder { radius: 0.0015, length: 0.21 },
+    ] }, &[air; 7]).unwrap()
+}
+
+#[test]
+fn explicit_common_mouth_speeds_preserve_observers_and_scaled_shunt_bits() {
+    let air = gas(false);
+    let d = duct_with_open_and_vented_holes(air);
+    let mut receiver = location();
+    receiver.maximum_frequency_hz = 700.0;
+    let (mut common_bell, mut common_holes, common_shunt) = d
+        .baffled_outlet_and_open_holes_and_shunt_delayed_at_with_port_scale(
+            8000, 256, receiver, WallModel::Rigid, air.sound_speed, 0.5,
+        ).unwrap();
+    let (mut explicit_bell, mut explicit_holes, explicit_shunt) = d
+        .baffled_outlet_and_open_holes_and_shunt_with_delay_speeds(
+            8000, 256, receiver, WallModel::Rigid, air.sound_speed,
+            &[air.sound_speed; 2], 0.5,
+        ).unwrap();
+    assert_eq!(common_holes.len(), 2);
+    assert_eq!(explicit_holes.len(), 2);
+    assert_eq!(common_bell.info().fft_samples, explicit_bell.info().fft_samples);
+    let mut common_shunt = common_shunt.unwrap();
+    let mut explicit_shunt = explicit_shunt.unwrap();
+    assert_eq!(common_shunt.r2_pa_s_m3.to_bits(), explicit_shunt.r2_pa_s_m3.to_bits());
+    for sample in 0..1024 {
+        let pressure = 0.1 * (0.13 * sample as f64).sin();
+        assert_eq!(common_bell.step(pressure).unwrap().to_bits(),
+            explicit_bell.step(pressure).unwrap().to_bits());
+        for (common, explicit) in common_holes.iter_mut().zip(&mut explicit_holes) {
+            assert_eq!(common.step(pressure).unwrap().to_bits(), explicit.step(pressure).unwrap().to_bits());
+        }
+        assert_eq!(common_shunt.step(pressure).unwrap().to_bits(),
+            explicit_shunt.step(pressure).unwrap().to_bits());
+        assert_eq!(common_shunt.s12_history().to_bits(), explicit_shunt.s12_history().to_bits());
+    }
+}
+
+#[test]
+fn each_open_or_vented_mouth_uses_its_own_original_rayleigh_speed_and_site() {
+    let air = gas(false);
+    let d = duct_with_open_and_vented_holes(air);
+    let sites = d.open_hole_sites();
+    assert_eq!(sites.len(), 2);
+    assert!((d.total_axial_length_m() - 0.5).abs() < 1e-14);
+    let mut receiver = location();
+    receiver.position_m = [0.05, 0.1, 0.8];
+    receiver.maximum_frequency_hz = 700.0;
+    let bell_speed = air.sound_speed * 1.1;
+    let speeds = [air.sound_speed * 0.8, air.sound_speed * 1.3];
+    let (bell, holes, _) = d.baffled_outlet_and_open_holes_and_shunt_with_delay_speeds(
+        8000, 256, receiver, WallModel::Rigid, bell_speed, &speeds, 1.0,
+    ).unwrap();
+    let bell_rayleigh = BaffledPressure::circular_outlet(0.0015, 8000, receiver,
+        RayleighMedium { density: air.density, sound_speed: bell_speed }).unwrap();
+    assert_eq!(bell.info().exterior_delay_samples, bell_rayleigh.delay_samples);
+    for (hole, ((axial_position, radius), speed)) in
+        holes.iter().zip([(0.12, 0.0005), (0.29, 0.0003)].into_iter().zip(speeds))
+    {
+        let mut expected_receiver = receiver;
+        expected_receiver.position_m[0] += 0.5 - axial_position;
+        assert!((hole.info().receiver.position_m[0] - expected_receiver.position_m[0]).abs() < 1e-14);
+        assert_eq!(hole.info().radius_m, radius);
+        let mut original = BaffledPressure::circular_outlet(radius, 8000, expected_receiver,
+            RayleighMedium { density: air.density, sound_speed: speed }).unwrap();
+        assert_eq!(hole.info().exterior_delay_samples, original.delay_samples);
+        let mut radiation = hole.radiation.clone();
+        let mut previous = 0.0;
+        let mut energy = 0.0;
+        for sample in 0..400 {
+            let flow = 1e-5 * (0.17 * sample as f64).sin();
+            let expected = original.step(&[flow]).unwrap();
+            let actual = radiation.push((flow - previous) * 8000.0).unwrap();
+            previous = flow;
+            assert!((actual - expected).abs() < 1e-12);
+            energy += expected * expected;
+        }
+        assert!(energy > 0.0);
+    }
+}
+
+#[test]
+fn mouth_speeds_admit_exact_open_count_and_finite_positive_values_before_observation() {
+    let air = gas(false);
+    let d = duct_with_open_and_vented_holes(air);
+    // Deliberately invalid observation clock: speed admission must happen first.
+    let refused = |bell_speed, hole_speeds: &[f64]| d
+        .baffled_outlet_and_open_holes_and_shunt_with_delay_speeds(
+            0, 0, location(), WallModel::Rigid, bell_speed, hole_speeds, 1.0,
+        ).unwrap_err();
+    for speeds in [&[][..], &[air.sound_speed][..], &[air.sound_speed; 3][..]] {
+        assert!(matches!(refused(air.sound_speed, speeds),
+            OutletError::Transfer(DrivingPointError::Invalid {
+                what: "one propagation speed is required per open or vented hole"
+            })));
+    }
+    for speed in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        for (bell_speed, speeds) in [(speed, [air.sound_speed; 2]),
+            (air.sound_speed, [air.sound_speed, speed])]
+        {
+            assert!(matches!(refused(bell_speed, &speeds),
+                OutletError::Transfer(DrivingPointError::Invalid {
+                    what: "mouth propagation speeds must be finite and positive"
+                })));
+        }
+    }
+    let no_holes = duct(air, air);
+    assert!(matches!(no_holes.baffled_outlet_and_open_holes_and_shunt_with_delay_speeds(
+        0, 0, location(), WallModel::Rigid, air.sound_speed, &[air.sound_speed], 1.0,
+    ).unwrap_err(), OutletError::Transfer(DrivingPointError::Invalid {
+        what: "one propagation speed is required per open or vented hole"
+    })));
+}
+
 #[test]
 fn a_matched_delay_becomes_the_exact_delayed_physical_difference_not_a_wrapped_echo() {
     let rate = 48000;

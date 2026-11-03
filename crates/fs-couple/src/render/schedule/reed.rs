@@ -953,6 +953,7 @@ impl ReedPerformance {
                 rate,
                 samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
+                declared_law.as_ref(), &gas_records,
             )?;
             (voice, terminal, observer, omission)
         } else {
@@ -970,6 +971,7 @@ impl ReedPerformance {
                 rate,
                 samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
+                declared_law.as_ref(), &gas_records,
             )?;
             (voice, terminal, observer, omission)
         };
@@ -1049,7 +1051,7 @@ impl ReedPerformance {
             omission.admit(true, self.observer_law_declared)?;
         }
         if let Some(terminal) = &self.terminal {
-            terminal.admit_molecular_hole_observers(self.observer_law_declared)?;
+            terminal.admit_hole_observers(self.observer_law_declared)?;
         }
         Ok(omission)
     }

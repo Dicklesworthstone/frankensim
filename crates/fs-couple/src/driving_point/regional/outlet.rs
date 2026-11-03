@@ -550,7 +550,57 @@ impl RegionalDuct {
         delay_speed_m_s: f64,
         port_resistance_scale: f64,
     ) -> Result<(OutletPressure, Vec<OutletPressure>, Option<RegisterHoleShuntLine>), OutletError> {
+        self.baffled_outlets_with_mouth_speeds(
+            sample_rate_hz, fft_samples, receiver, wall, delay_speed_m_s, None,
+            port_resistance_scale,
+        )
+    }
+
+    /// Original joint observer with a separate propagation speed for each mouth.
+    /// Hole speeds follow [`Self::open_hole_sites`] in bore order and include
+    /// vented openings but exclude closed holes. All speeds are positive and
+    /// finite; the complete slice is admitted before any observer is built.
+    /// The terminal load, gas density, axial transfer, common observation
+    /// latency and numerical WDF port scale retain their original owners.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn baffled_outlet_and_open_holes_and_shunt_with_delay_speeds(
+        &self,
+        sample_rate_hz: u32,
+        fft_samples: usize,
+        receiver: CircularOutletReceiver,
+        wall: WallModel<'_>,
+        bell_delay_speed_m_s: f64,
+        hole_delay_speeds_m_s: &[f64],
+        port_resistance_scale: f64,
+    ) -> Result<(OutletPressure, Vec<OutletPressure>, Option<RegisterHoleShuntLine>), OutletError> {
+        self.baffled_outlets_with_mouth_speeds(
+            sample_rate_hz, fft_samples, receiver, wall, bell_delay_speed_m_s,
+            Some(hole_delay_speeds_m_s), port_resistance_scale,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn baffled_outlets_with_mouth_speeds(
+        &self,
+        sample_rate_hz: u32,
+        fft_samples: usize,
+        receiver: CircularOutletReceiver,
+        wall: WallModel<'_>,
+        delay_speed_m_s: f64,
+        hole_delay_speeds_m_s: Option<&[f64]>,
+        port_resistance_scale: f64,
+    ) -> Result<(OutletPressure, Vec<OutletPressure>, Option<RegisterHoleShuntLine>), OutletError> {
         let sites = self.open_hole_sites();
+        if let Some(speeds) = hole_delay_speeds_m_s {
+            if speeds.len() != sites.len() {
+                return Err(invalid("one propagation speed is required per open or vented hole").into());
+            }
+            if !delay_speed_m_s.is_finite() || delay_speed_m_s <= 0.0
+                || speeds.iter().any(|speed| !speed.is_finite() || *speed <= 0.0)
+            {
+                return Err(invalid("mouth propagation speeds must be finite and positive").into());
+            }
+        }
         if sites.is_empty() {
             let bell = self.baffled_outlet_delayed_at(
                 sample_rate_hz,
@@ -581,7 +631,7 @@ impl RegionalDuct {
         let bell_rayleigh = rayleigh_acceleration_taps(bell_mic, sample_rate_hz)?;
         let total_length_m = self.total_axial_length_m();
         let mut hole_mics = Vec::with_capacity(sites.len());
-        for site in &sites {
+        for (hole, site) in sites.iter().enumerate() {
             let mut hole_receiver = receiver;
             hole_receiver.position_m[0] =
                 receiver.position_m[0] + (total_length_m - site.axial_position_m);
@@ -589,7 +639,10 @@ impl RegionalDuct {
                 site.effective_radius_m,
                 sample_rate_hz,
                 hole_receiver,
-                medium,
+                RayleighMedium {
+                    density: medium.density,
+                    sound_speed: hole_delay_speeds_m_s.map_or(medium.sound_speed, |speeds| speeds[hole]),
+                },
             )
             .map_err(OutletError::Receiver)?;
             let exterior_delay_samples = mic.delay_samples;
@@ -715,7 +768,7 @@ impl RegionalDuct {
         Ok((bell, holes, shunt_line))
     }
 
-    fn total_axial_length_m(&self) -> f64 {
+    pub(crate) fn total_axial_length_m(&self) -> f64 {
         self.regions
             .iter()
             .flat_map(|region| &region.duct.segments)
@@ -723,7 +776,7 @@ impl RegionalDuct {
             .sum()
     }
 
-    fn open_hole_sites(&self) -> Vec<OpenHoleSite> {
+    pub(crate) fn open_hole_sites(&self) -> Vec<OpenHoleSite> {
         if let Some(field) = &self.continuous {
             return field.open_hole_sites().into_iter().map(|site| OpenHoleSite {
                 axial_position_m: site.axial_position_m,
@@ -770,9 +823,9 @@ impl RegionalDuct {
     }
 }
 
-struct OpenHoleSite {
-    axial_position_m: f64,
-    effective_radius_m: f64,
+pub(crate) struct OpenHoleSite {
+    pub(crate) axial_position_m: f64,
+    pub(crate) effective_radius_m: f64,
     bore_one_way_time_s: f64,
     one_way_time_s: f64,
 }

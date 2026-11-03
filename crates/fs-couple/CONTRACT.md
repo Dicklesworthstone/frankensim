@@ -19780,6 +19780,39 @@ contact, source-domain or cancellation checks publish no state. This is
 small-displacement surface contact, not resolved moving-channel gas flow.
 Native `solid_closure spatial` data and the Lab starter select this exact owner.
 
+## Regional reed pressure with independent mouth propagation
+
+The physical `ReedPerformance` observer now binds an independent atmospheric
+filter to every open or vented regional tone-hole mouth. It uses the original
+regional site's effective radius, exterior gas and translated receiver position
+`[receiver.x + L - x_hole, receiver.y, receiver.z]`. The bell and each mouth
+therefore retain their own propagation range, attenuation, dispersive FIR delay
+admission and omission policy. Each original Rayleigh receiver consumes that
+mouth's filter delay allocation; pressures are filtered separately before
+summation. No extra delay or pressure gain is applied after the sum.
+
+The regional outlet owner accepts one positive finite propagation speed per
+open/vented site in original bore order and validates the complete count before
+constructing receivers. Closed sites have no receiver. The same original joint
+transfer sweep, exterior density and loading, axial/chimney propagation, shared
+replay gate and latency, numerical shunt port resistance and source priming
+remain authoritative. Existing common-speed entry points retain their original
+arithmetic. Source mechanics and reed/bore feedback do not consume atmospheric
+observation filters.
+
+`ReedPerformance::open_hole_observers` exposes each actual receiver and filter
+receipt; `molecular_open_hole_observers` remains a compatibility alias. Molecular
+and regional playback share the existing per-mouth filtering owner. The
+lossless law preserves the original receiver arithmetic and pressure addition
+order. The parallel-baffle geometry, independent mouth-load approximation and
+existing finite-history limitations remain; no mutual exterior scattering or
+new radiation power model is introduced.
+
+Authored native regressions cover independent open/vented geometry and filter
+receipts, per-mouth Rayleigh/FIR delay accounting, samplewise reconstruction
+from independently filtered pressures, unchanged reed/bore mechanics, block
+replay, common-speed/port-scale equivalence and invalid speed/count refusal.
+
 ## Native event-resolved adhesive stopping and restart
 
 `contact::adhesive_events::AdhesiveEventModalSystem` applies the original
