@@ -17,7 +17,7 @@ mod curvature;
 mod momentum;
 pub use momentum::{ConversionMomentumReport2, FreeSurfaceMomentumError2};
 mod pressure;
-pub use pressure::{FreeSurfacePressureError2, GasPressureLink2};
+pub use pressure::{FreeSurfacePressureError2, FreeSurfacePressureMomentumError2, GasPressureLink2};
 pub(crate) mod wetting;
 pub use wetting::{ContactAngleError2, PlanarWall2};
 

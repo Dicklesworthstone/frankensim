@@ -407,3 +407,165 @@ fn g3_dense_default_step_carries_momentum_through_live_conversions() {
         assert!((momentum[d] - sampled[d]).abs() < 2e-14);
     }
 }
+
+#[test]
+fn g1_dense_material_pressure_and_momentum_share_native_traction_and_si_units() {
+    let bulk = liquid(0, 300.0, None);
+    let gate = CancelGate::new_clock_free();
+    let dx = 0.001;
+    let dt = 0.0002;
+    let reference_pa = 100_000.0;
+    let make = |reference| {
+        let mut domain = domain2();
+        domain.gravity_m_s2 = [0.5, -1.25];
+        plan_free_surface_from_material(&bulk, dx, dt, 0.1)
+            .unwrap()
+            .with_pressure_reference(reference)
+            .unwrap()
+            .free_surface2(domain, |x, y| shape(PlanarWall2::YMin, x, y))
+            .unwrap()
+    };
+    let mut unloaded = make(reference_pa);
+    let mut ambient = make(reference_pa);
+    let expected = unloaded.step_with_momentum(&gate).unwrap();
+    let actual = ambient
+        .step_with_gas_pressure_and_momentum(&gate, 0.2, |_| reference_pa)
+        .unwrap();
+    assert_eq!(actual, expected);
+    same_state(ambient.lattice(), unloaded.lattice());
+
+    let mut loaded = make(reference_pa);
+    let mut links = make(reference_pa);
+    let mut shifted = make(reference_pa + 20_000.0);
+    let mut native = loaded.lattice().clone();
+    let velocity_unit = dx / dt;
+    let pressure_unit = bulk.density_kg_m3() * velocity_unit * velocity_unit;
+    let mass_unit = bulk.density_kg_m3() * dx * dx;
+    let native_report = native
+        .step_with_gas_pressure_and_momentum(&gate, 0.2, |_| Ok(10.0 / pressure_unit))
+        .unwrap();
+    let physical = loaded
+        .step_with_gas_pressure_and_momentum(&gate, 0.2, |_| reference_pa + 10.0)
+        .unwrap();
+    let count = std::cell::Cell::new(0);
+    let linked = links
+        .step_with_gas_link_pressure_and_momentum(&gate, 0.2, |p| {
+            count.set(count.get() + 1);
+            assert_eq!(
+                p.liquid_center_m,
+                p.link.liquid_cell.map(|c| (c as f64 + 0.5) * dx)
+            );
+            assert_eq!(
+                p.gas_center_m,
+                p.link.gas_cell.map(|c| (c as f64 + 0.5) * dx)
+            );
+            for d in 0..2 {
+                assert_eq!(
+                    p.midpoint_m[d],
+                    f64::midpoint(p.liquid_center_m[d], p.gas_center_m[d])
+                );
+            }
+            reference_pa + 10.0
+        })
+        .unwrap();
+    let offset = shifted
+        .step_with_gas_pressure_and_momentum(&gate, 0.2, |_| reference_pa + 20_010.0)
+        .unwrap();
+    assert!(count.get() > 0);
+    assert_eq!(physical.native, native_report);
+    assert_eq!(physical, linked);
+    assert_eq!(physical, offset);
+    same_state(loaded.lattice(), &native);
+    same_state(loaded.lattice(), links.lattice());
+    same_state(loaded.lattice(), shifted.lattice());
+    assert_ne!(loaded.lattice().grid.f, unloaded.lattice().grid.f);
+    for d in 0..2 {
+        assert_eq!(
+            physical.absolute_momentum_defect_kg_per_s[d],
+            (native_report.absolute_momentum_defect[d] * mass_unit) * velocity_unit
+        );
+    }
+}
+
+#[test]
+fn g4_dense_pressure_momentum_wetting_refuses_atomically_and_retries() {
+    use fs_lbm::material::free_surface::MaterialFreeSurfaceMomentumError2;
+    let bulk = liquid(0, 300.0, Some(0.05));
+    let gate = CancelGate::new_clock_free();
+    let angle = PI / 3.0;
+    let supported = dynamic_card(&bulk, [angle; 2], [angle; 2], 100.0, false);
+    let narrow = dynamic_card(&bulk, [angle; 2], [angle; 2], 1e-12, true);
+    let make = |card| {
+        plan_free_surface_from_material(&bulk, 0.001, 0.0002, 0.1)
+            .unwrap()
+            .with_pressure_reference(100_000.0)
+            .unwrap()
+            .free_surface2(domain2(), |x, y| shape(PlanarWall2::YMin, x, y))
+            .unwrap()
+            .with_dynamic_planar_wetting(
+                PlanarWall2::YMin,
+                card,
+                MaterialPropertySelection::SingleClaimOnly,
+                controls(),
+                &gate,
+            )
+            .unwrap()
+    };
+    let mut retry = make(&supported);
+    let mut reference = make(&supported);
+    let before = retry.flow().lattice().clone();
+    let samples = retry.samples().clone();
+    let calls = std::cell::Cell::new(0);
+    assert!(matches!(
+        retry.step_with_gas_link_pressure_and_momentum(&gate, 0.2, |_| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                f64::NAN
+            } else {
+                100_000.0
+            }
+        }),
+        Err(MaterialFreeSurfaceMomentumError2::Pressure(_))
+    ));
+    assert_eq!(calls.get(), 2);
+    same_state(retry.flow().lattice(), &before);
+    assert_eq!(retry.samples(), &samples);
+
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    calls.set(0);
+    assert!(
+        retry
+            .step_with_gas_pressure_and_momentum(&cancelled, 0.2, |_| {
+                calls.set(calls.get() + 1);
+                100_000.0
+            })
+            .is_err()
+    );
+    assert_eq!(calls.get(), 0);
+    same_state(retry.flow().lattice(), &before);
+    assert_eq!(retry.samples(), &samples);
+    let a = retry
+        .step_with_gas_link_pressure_and_momentum(&gate, 0.2, |_| 100_000.0)
+        .unwrap();
+    let b = reference
+        .step_with_gas_pressure_and_momentum(&gate, 0.2, |_| 100_000.0)
+        .unwrap();
+    assert_eq!(a, b);
+    same_state(retry.flow().lattice(), reference.flow().lattice());
+    assert_eq!(retry.samples(), reference.samples());
+
+    let mut refused = make(&narrow);
+    let before = refused.flow().lattice().clone();
+    let samples = refused.samples().clone();
+    let mut native = before.clone();
+    native
+        .step_with_gas_pressure_and_momentum(&gate, 0.2, |_| Ok(0.0))
+        .unwrap();
+    assert!(matches!(
+        refused.step_with_gas_pressure_and_momentum(&gate, 0.2, |_| 100_000.0),
+        Err(MaterialFreeSurfaceMomentumError2::Wetting(_))
+    ));
+    same_state(refused.flow().lattice(), &before);
+    assert_eq!(refused.samples(), &samples);
+}

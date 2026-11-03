@@ -6,7 +6,7 @@ use super::super::wetting::{
 };
 use super::{
     FreeSurface, MaterialFreeSurface2, MaterialFreeSurfaceMomentumError2,
-    MaterialFreeSurfaceMomentumReport2, PlanarWall2,
+    MaterialFreeSurfaceMomentumReport2, MaterialGasPressureLink2, PlanarWall2,
 };
 use crate::freesurface::FreeSurfaceMomentumError2;
 use crate::freesurface::wetting::WallFill2;
@@ -141,6 +141,7 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
                     reason,
                 )) => Error::Invalid(reason),
                 MaterialFreeSurfaceMomentumError2::Units(error) => Error::Flow(error),
+                MaterialFreeSurfaceMomentumError2::Pressure(error) => Error::Flow(error.into()),
                 MaterialFreeSurfaceMomentumError2::Wetting(error) => error,
             })
     }
@@ -157,6 +158,42 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
     ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
         let (lattice, native) = self.flow.lattice.momentum_candidate(gate)?;
         let report = self.flow.momentum_report_si(native)?;
+        self.finish_step(lattice, gate)?;
+        Ok(report)
+    }
+
+    /// Advance prescribed absolute gas pressure [Pa], conservative conversion
+    /// and this same sourced contact-line history in one atomic proposal.
+    /// Coordinates supplied to the pressure field are liquid cell centres [m].
+    /// The flow must have an explicit fixed pressure reference. Pressure,
+    /// conversion, SI-range, wetting-source and cancellation refusals leave
+    /// both the accepted liquid and the complete contact history unchanged.
+    pub fn step_with_gas_pressure_and_momentum(
+        &mut self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn([f64; 2]) -> f64,
+    ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
+        let (lattice, report) = self.flow.gas_pressure_momentum_candidate(
+            gate, maximum_density_excursion, pressure_pa,
+        )?;
+        self.finish_step(lattice, gate)?;
+        Ok(report)
+    }
+
+    /// Use independent absolute pressures [Pa] at exposed liquid/gas links,
+    /// conservative conversion and sourced wetting in the same proposal.
+    /// Geometry is supplied in metres. The conversion receipt does not include
+    /// pressure work, gas storage or a physical contact-line heat allocation.
+    pub fn step_with_gas_link_pressure_and_momentum(
+        &mut self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(MaterialGasPressureLink2) -> f64,
+    ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
+        let (lattice, report) = self.flow.gas_link_pressure_momentum_candidate(
+            gate, maximum_density_excursion, pressure_pa,
+        )?;
         self.finish_step(lattice, gate)?;
         Ok(report)
     }

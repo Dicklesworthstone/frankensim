@@ -1,5 +1,29 @@
 # CONTRACT: fs-lbm
 
+## Prescribed gas traction with conservative D2Q9 conversion
+
+`step_with_gas_pressure_and_momentum` and
+`step_with_gas_link_pressure_and_momentum` compose the original dense pressure
+reconstruction with signed local mass-and-momentum conversion. Ordinary and
+pressure-loaded conservative steps share one admission/streaming/conversion
+sequence. Each accepted step uses one staged surface; a refused pressure load,
+unsupported numerical state, unavailable conversion capacity or cancellation
+publishes no liquid state. Pressure callbacks are sampled only on the actual
+pre-conversion exposed cells or links; newly exposed links are sampled next step.
+
+The same entries on `MaterialFreeSurface2` and `MaterialFreeSurfaceWetting2`
+accept absolute pressure in Pa with an explicit fixed reference and geometry in
+metres. SI reporting and sourced contact-line history admit the same native
+candidate before publication. A source-domain refusal preserves both liquid
+state and all wetting history. Uniform cell/link loads use identical native
+traction arithmetic, including the existing Guo force-frame reconstruction.
+
+The caller's combined gas/capillary density-excursion bound remains a numerical
+admission limit. This composition does not add a gas equation of state, gas
+storage, pressure-work heating or an angular-momentum conservation claim. The
+returned physical receipt covers conversion only, with mass, linear momentum
+and signed numerical kinetic change per depth in kg/m, kg/s and J/m.
+
 ## Source-backed conservative D2Q9 momentum conversion
 
 `MaterialFreeSurface2::step_with_momentum` and

@@ -108,10 +108,24 @@ impl FreeSurface {
         &self,
         gate: &CancelGate,
     ) -> Result<(Self, ConversionMomentumReport2), FreeSurfaceMomentumError2> {
+        self.momentum_candidate_with_stream(gate, |candidate| candidate.stream_step(Some(gate)))
+    }
+
+    // A prescribed gas load changes only the original streaming boundary.
+    // Both entry points must retain this same admission/conversion sequence
+    // and one private copy; the caller's error type preserves pressure errors.
+    pub(super) fn momentum_candidate_with_stream<Error>(
+        &self,
+        gate: &CancelGate,
+        stream: impl FnOnce(&mut Self) -> Result<(), Error>,
+    ) -> Result<(Self, ConversionMomentumReport2), Error>
+    where
+        Error: From<FreeSurfaceMomentumError2>,
+    {
         self.admit_momentum_step(gate)?;
         let mut candidate = self.clone();
         poll(gate)?;
-        candidate.stream_step(Some(gate))?;
+        stream(&mut candidate)?;
         candidate.admit_momentum_step(gate)?;
         let report = candidate.convert_momentum(gate)?;
         candidate.admit_momentum_step(gate)?;

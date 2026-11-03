@@ -1,8 +1,13 @@
 //! Source-backed access to the original conservative D2Q9 conversion owner.
 
-use super::{MaterialFreeSurface2, MaterialLbmError, finite};
+use super::{
+    MaterialFreeSurface2, MaterialGasPressureLink2, MaterialLbmError, finite, pressure_perturbation,
+};
 use crate::core2::Cell;
-use crate::freesurface::{ConversionMomentumReport2, FreeSurfaceMomentumError2};
+use crate::freesurface::{
+    ConversionMomentumReport2, FreeSurface, FreeSurfaceMomentumError2, FreeSurfacePressureError2,
+    FreeSurfacePressureMomentumError2,
+};
 use crate::material::free_surface::wetting::FreeSurfaceWettingError;
 use fs_exec::CancelGate;
 
@@ -29,7 +34,9 @@ pub struct MaterialFreeSurfaceMomentumReport2 {
 pub enum MaterialFreeSurfaceMomentumError2 {
     /// Original conversion, force-frame, numerical-domain or cancellation error.
     Native(FreeSurfaceMomentumError2),
-    /// The original physical-unit conversion could not represent its result.
+    /// The prescribed gas load, pressure domain or cancellation gate refused.
+    Pressure(FreeSurfacePressureError2),
+    /// The material scaling or physical-unit conversion refused its input/result.
     Units(MaterialLbmError),
     /// The attached contact-line geometry or selected material source refused.
     Wetting(FreeSurfaceWettingError),
@@ -38,6 +45,7 @@ impl core::fmt::Display for MaterialFreeSurfaceMomentumError2 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Native(e) => write!(f, "material free-surface momentum: {e}"),
+            Self::Pressure(e) => write!(f, "material free-surface momentum pressure: {e}"),
             Self::Units(e) => write!(f, "material free-surface momentum units: {e}"),
             Self::Wetting(e) => write!(f, "material free-surface momentum: {e}"),
         }
@@ -47,6 +55,14 @@ impl std::error::Error for MaterialFreeSurfaceMomentumError2 {}
 impl From<FreeSurfaceMomentumError2> for MaterialFreeSurfaceMomentumError2 {
     fn from(error: FreeSurfaceMomentumError2) -> Self {
         Self::Native(error)
+    }
+}
+impl From<FreeSurfacePressureMomentumError2> for MaterialFreeSurfaceMomentumError2 {
+    fn from(error: FreeSurfacePressureMomentumError2) -> Self {
+        match error {
+            FreeSurfacePressureMomentumError2::Momentum(e) => Self::Native(e),
+            FreeSurfacePressureMomentumError2::Pressure(e) => Self::Pressure(e),
+        }
     }
 }
 impl From<MaterialLbmError> for MaterialFreeSurfaceMomentumError2 {
@@ -115,6 +131,132 @@ impl MaterialFreeSurface2<'_> {
         }
         self.lattice = candidate;
         Ok(report)
+    }
+
+    /// Advance with absolute gas pressure [Pa] and the original conservative
+    /// mass/momentum conversion in the same step. The callback is sampled at
+    /// exposed liquid cell centres [m] about the fixed pressure reference.
+    /// Pressure is held for this timestep; the combined gas/capillary density
+    /// excursion must satisfy the caller's native numerical-domain bound.
+    ///
+    /// One candidate admits traction, conversion and physical reporting before
+    /// publication. The returned account covers conversion only; gas dynamics
+    /// and pressure-work heating remain outside this isothermal liquid model.
+    pub fn step_with_gas_pressure_and_momentum(
+        &mut self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn([f64; 2]) -> f64,
+    ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
+        let (candidate, report) =
+            self.gas_pressure_momentum_candidate(gate, maximum_density_excursion, pressure_pa)?;
+        if gate.is_requested() {
+            return Err(FreeSurfaceMomentumError2::Cancelled.into());
+        }
+        self.lattice = candidate;
+        Ok(report)
+    }
+
+    /// Apply distinct absolute pressures [Pa] to actual liquid/gas links while
+    /// retaining conservative local conversion. Cell centres and link midpoint
+    /// are in metres. Uniform link loads reproduce the cell-pressure entry.
+    /// The same fixed reference, density bound and atomic publication apply.
+    pub fn step_with_gas_link_pressure_and_momentum(
+        &mut self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(MaterialGasPressureLink2) -> f64,
+    ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
+        let (candidate, report) = self.gas_link_pressure_momentum_candidate(
+            gate,
+            maximum_density_excursion,
+            pressure_pa,
+        )?;
+        if gate.is_requested() {
+            return Err(FreeSurfaceMomentumError2::Cancelled.into());
+        }
+        self.lattice = candidate;
+        Ok(report)
+    }
+
+    pub(super) fn gas_pressure_momentum_candidate(
+        &self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn([f64; 2]) -> f64,
+    ) -> Result<(FreeSurface, MaterialFreeSurfaceMomentumReport2), MaterialFreeSurfaceMomentumError2>
+    {
+        let reference = self
+            .scaling
+            .reference_pressure_pa
+            .ok_or(MaterialLbmError::Invalid(
+                "absolute gas loading requires an explicit fixed pressure reference",
+            ))?;
+        let dx = self.scaling.cell_size_m;
+        let unit = self.scaling.pressure_unit_pa;
+        let (candidate, native) = self.lattice.gas_pressure_momentum_candidate(
+            gate,
+            maximum_density_excursion,
+            |coordinates| {
+                let position = coordinates.map(|c| (c as f64 + 0.5) * dx);
+                pressure_perturbation(
+                    reference,
+                    unit,
+                    pressure_pa(position),
+                    coordinates,
+                    &position,
+                )
+            },
+        )?;
+        Ok((candidate, self.momentum_report_si(native)?))
+    }
+
+    pub(super) fn gas_link_pressure_momentum_candidate(
+        &self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(MaterialGasPressureLink2) -> f64,
+    ) -> Result<(FreeSurface, MaterialFreeSurfaceMomentumReport2), MaterialFreeSurfaceMomentumError2>
+    {
+        let reference = self
+            .scaling
+            .reference_pressure_pa
+            .ok_or(MaterialLbmError::Invalid(
+                "absolute gas loading requires an explicit fixed pressure reference",
+            ))?;
+        let dx = self.scaling.cell_size_m;
+        let unit = self.scaling.pressure_unit_pa;
+        let (candidate, native) = self.lattice.gas_link_pressure_momentum_candidate(
+            gate,
+            maximum_density_excursion,
+            |link| {
+                let liquid_center_m = link.liquid_cell.map(|c| (c as f64 + 0.5) * dx);
+                let gas_center_m = link.gas_cell.map(|c| (c as f64 + 0.5) * dx);
+                let midpoint_m =
+                    core::array::from_fn(|d| f64::midpoint(liquid_center_m[d], gas_center_m[d]));
+                let physical = MaterialGasPressureLink2 {
+                    link,
+                    liquid_center_m,
+                    gas_center_m,
+                    midpoint_m,
+                };
+                pressure_perturbation(
+                    reference,
+                    unit,
+                    pressure_pa(physical),
+                    link.liquid_cell,
+                    &[
+                        liquid_center_m[0],
+                        liquid_center_m[1],
+                        gas_center_m[0],
+                        gas_center_m[1],
+                        midpoint_m[0],
+                        midpoint_m[1],
+                    ],
+                )
+            },
+        )?;
+        Ok((candidate, self.momentum_report_si(native)?))
     }
 
     pub(super) fn momentum_report_si(

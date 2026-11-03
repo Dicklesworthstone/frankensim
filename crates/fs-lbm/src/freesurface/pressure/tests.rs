@@ -173,3 +173,293 @@ fn g0_g4_late_pressure_refusal_and_cancellation_leave_the_complete_state() {
     );
     same(&flow, &initial);
 }
+
+fn advancing_front() -> FreeSurface {
+    let mut flow = slab(1.0);
+    flow.grid.g = [0.0001, -0.0002];
+    let donor = flow.grid.idx(5, 6);
+    let velocity = [0.025, -0.008];
+    let mut populations = equilibrium(1.0, velocity[0], velocity[1]);
+    crate::thermal::forcing::reframe2(&mut populations, velocity, [0.0; 2], flow.grid.g);
+    flow.grid.f[donor] = populations;
+    flow.mass[donor] = 1.2 * populations.iter().sum::<f64>();
+    flow
+}
+
+// Independently sum the actual signed liquid inventories. The pre-conversion
+// snapshot includes excess/debt; gas populations carry no represented mass.
+fn inventory(flow: &FreeSurface) -> (f64, [f64; 2], f64) {
+    let mut mass = 0.0;
+    let mut momentum = [0.0; 2];
+    let mut kinetic = 0.0;
+    for i in 0..flow.grid.f.len() {
+        if !matches!(flow.grid.flags[i], Cell::Fluid | Cell::Interface) {
+            continue;
+        }
+        let state = flow.grid.moments(i);
+        let m = if flow.grid.flags[i] == Cell::Fluid {
+            state.rho
+        } else {
+            flow.mass[i]
+        };
+        mass += m;
+        for d in 0..2 {
+            momentum[d] += m * state.u[d];
+        }
+        kinetic += 0.5 * m * (state.u[0] * state.u[0] + state.u[1] * state.u[1]);
+    }
+    (mass, momentum, kinetic)
+}
+
+#[test]
+fn g1_combined_loaded_front_preserves_conversion_momentum_with_real_routes() {
+    let gate = CancelGate::new_clock_free();
+    let mut flow = advancing_front();
+    let pressure = |_: [usize; 2]| Ok(0.002 * CS2);
+    // Measure immediately after the ORIGINAL pressure/force streaming owner,
+    // before conversion. Boundary and body-force impulses belong to this part
+    // of the step and must not be mistaken for a conversion residual.
+    let boundary = GasPressure2::new(Field::Cell(&pressure), 0.05).unwrap();
+    let mut streamed = flow.clone();
+    streamed
+        .stream_step_with_pressure(Some(&gate), Some(&boundary))
+        .unwrap();
+    let before = inventory(&streamed);
+    let report = flow
+        .step_with_gas_pressure_and_momentum(&gate, 0.05, pressure)
+        .unwrap();
+    let after = inventory(&flow);
+    assert!(report.routes > 0);
+    assert!(report.redistributed_mass > 0.1);
+    assert_eq!(flow.carry, 0.0);
+    assert!((after.0 - before.0).abs() < 2e-12);
+    for d in 0..2 {
+        assert!((after.1[d] - before.1[d]).abs() < 5e-13);
+        assert!(report.absolute_momentum_defect[d] < 5e-13);
+    }
+    assert!((after.2 - before.2 - report.kinetic_energy_change).abs() < 1e-14);
+    for i in 0..flow.grid.f.len() {
+        if flow.grid.flags[i] == Cell::Interface {
+            assert!(flow.mass[i] >= 0.0);
+            assert!(flow.mass[i] <= flow.grid.f[i].iter().sum::<f64>());
+        }
+    }
+}
+
+#[test]
+fn g3_combined_ambient_cell_and_link_pressure_replay_momentum_conversion_bits() {
+    let gate = CancelGate::new_clock_free();
+    let mut ordinary = advancing_front();
+    let mut cell = ordinary.clone();
+    let mut link = ordinary.clone();
+    let expected = ordinary.step_with_momentum(&gate).unwrap();
+    let cell_report = cell
+        .step_with_gas_pressure_and_momentum(&gate, 0.1, |_| Ok(0.0))
+        .unwrap();
+    let link_report = link
+        .step_with_gas_link_pressure_and_momentum(&gate, 0.1, |_| Ok(0.0))
+        .unwrap();
+    assert!(expected.routes > 0);
+    assert_eq!(cell_report, expected);
+    assert_eq!(link_report, expected);
+    same(&ordinary, &cell);
+    same(&ordinary, &link);
+}
+
+#[test]
+fn g1_combined_pressure_drives_actual_forced_populations_in_the_physical_frame() {
+    let gate = CancelGate::new_clock_free();
+    let mut flow = slab(1.02);
+    flow.grid.g = [0.0002, -0.0003];
+    let velocity = [0.025, -0.01];
+    for i in 0..flow.grid.f.len() {
+        flow.grid.fext[i] = [0.0001, -0.0001];
+        if matches!(flow.grid.flags[i], Cell::Fluid | Cell::Interface) {
+            let force =
+                core::array::from_fn(|d| flow.grid.g[d].mul_add(1.02, flow.grid.fext[i][d]));
+            let mut f = equilibrium(1.02, velocity[0], velocity[1]);
+            crate::thermal::forcing::reframe2(&mut f, velocity, [0.0; 2], force);
+            flow.grid.f[i] = f;
+        }
+    }
+    let cell = flow.grid.idx(5, 6);
+    let state = flow.grid.moments(cell);
+    let force: [f64; 2] =
+        core::array::from_fn(|d| flow.grid.g[d].mul_add(state.rho, flow.grid.fext[cell][d]));
+    let mut post = Vec::new();
+    flow.grid.collide_into(&mut post);
+    let mut ambient = flow.clone();
+    ambient.step_with_momentum(&gate).unwrap();
+    flow.step_with_gas_pressure_and_momentum(&gate, 0.05, |_| Ok(0.015 * CS2))
+        .unwrap();
+    let u2 = state.u[0] * state.u[0] + state.u[1] * state.u[1];
+    let uf = state.u[0] * force[0] + state.u[1] * force[1];
+    let mut normal_impulse = 0.0;
+    for q in 1..Q {
+        if E[q].1 != -1 {
+            continue;
+        }
+        let e = [f64::from(E[q].0), f64::from(E[q].1)];
+        let eu = e[0] * state.u[0] + e[1] * state.u[1];
+        let ef = e[0] * force[0] + e[1] * force[1];
+        let restored_pair = flow.grid.f[cell][q]
+            + post[cell][OPP[q]]
+            + crate::W[q] * (-uf / CS2 + eu * ef / (CS2 * CS2));
+        let expected = 2.0 * crate::W[q] * 1.015 * (1.0 + 4.5 * eu * eu - 1.5 * u2);
+        assert!((restored_pair - expected).abs() < 5e-15);
+        // A higher upper gas load must send real downward momentum into the
+        // liquid. The physical source-frame term cancels between these loads.
+        let difference = flow.grid.f[cell][q] - ambient.grid.f[cell][q];
+        let expected_difference = 2.0 * crate::W[q] * 0.015 * (1.0 + 4.5 * eu * eu - 1.5 * u2);
+        assert!((difference - expected_difference).abs() < 5e-15);
+        normal_impulse += e[1] * difference;
+    }
+    assert!(normal_impulse < -0.004);
+}
+
+#[test]
+fn g1_combined_callbacks_visit_only_actual_gas_links_at_the_streaming_time_level() {
+    let gate = CancelGate::new_clock_free();
+    let mut cell = advancing_front();
+    let mut link = cell.clone();
+    let cells = std::cell::RefCell::new(Vec::new());
+    let links = std::cell::RefCell::new(Vec::new());
+    let a = cell
+        .step_with_gas_pressure_and_momentum(&gate, 0.05, |p| {
+            cells.borrow_mut().push(p);
+            Ok(0.002 * CS2)
+        })
+        .unwrap();
+    let b = link
+        .step_with_gas_link_pressure_and_momentum(&gate, 0.05, |p| {
+            links.borrow_mut().push(p);
+            Ok(0.002 * CS2)
+        })
+        .unwrap();
+    assert_eq!(a, b);
+    same(&cell, &link);
+    assert_eq!(*cells.borrow(), (0..12).map(|x| [x, 6]).collect::<Vec<_>>());
+    let mut expected = Vec::new();
+    for x in 0..12 {
+        for q in 1..Q {
+            if E[q].1 == -1 {
+                expected.push(GasPressureLink2 {
+                    liquid_cell: [x, 6],
+                    gas_cell: [(x as i32 - E[q].0).rem_euclid(12) as usize, 7],
+                    incoming_direction: q,
+                });
+            }
+        }
+    }
+    assert_eq!(*links.borrow(), expected);
+    assert!(a.routes > 0);
+    assert!(cell.conversions.gas_to_interface > 0);
+    // The newly exposed y=7 front was created AFTER this field was sampled.
+    // It must not receive a second collision or stale previous-step pressure.
+    let mut full = FreeSurface::new(Grid::uniform(8, 8, 0.8), 0.0, ContactModel::Neutral);
+    full.step_with_gas_link_pressure_and_momentum(&gate, 0.05, |_| {
+        panic!("walls and fully flooded interiors must not query gas pressure")
+    })
+    .unwrap();
+}
+
+#[test]
+fn g0_g4_combined_pressure_and_conversion_failures_keep_their_owner_and_roll_back() {
+    let gate = CancelGate::new_clock_free();
+    let initial = slab(1.0);
+    for bound in [0.0, -1.0, 1.0, f64::NAN] {
+        let mut flow = initial.clone();
+        assert!(matches!(
+            flow.step_with_gas_pressure_and_momentum(&gate, bound, |_| {
+                panic!("invalid bound queried the pressure field")
+            }),
+            Err(FreeSurfacePressureMomentumError2::Pressure(
+                FreeSurfacePressureError2::Invalid {
+                    coordinates: None,
+                    ..
+                }
+            ))
+        ));
+        same(&flow, &initial);
+    }
+    let authored = FreeSurfacePressureError2::Invalid {
+        coordinates: Some([10, 6]),
+        reason: "selected pressure source is outside its physical domain",
+    };
+    let mut flow = initial.clone();
+    assert_eq!(
+        flow.step_with_gas_pressure_and_momentum(&gate, 0.05, |p| {
+            if p == [10, 6] {
+                Err(authored.clone())
+            } else {
+                Ok(0.001)
+            }
+        }),
+        Err(FreeSurfacePressureMomentumError2::Pressure(
+            authored.clone()
+        ))
+    );
+    same(&flow, &initial);
+
+    // Streaming and the prescribed load are valid; only the unpayable local
+    // conversion debt fails. Preserve that original momentum-owner error.
+    let mut grid = Grid::uniform(5, 5, 0.8);
+    grid.flags.fill(Cell::Gas);
+    let i = grid.idx(2, 2);
+    grid.flags[i] = Cell::Fluid;
+    let mut debt = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+    debt.mass[i] = -0.25;
+    let before = debt.clone();
+    let visits = std::cell::Cell::new(0);
+    assert!(matches!(
+        debt.step_with_gas_link_pressure_and_momentum(&gate, 0.05, |_| {
+            visits.set(visits.get() + 1);
+            Ok(0.0)
+        }),
+        Err(FreeSurfacePressureMomentumError2::Momentum(
+            FreeSurfaceMomentumError2::Invalid(_)
+        ))
+    ));
+    assert_eq!(visits.get(), Q - 1);
+    same(&debt, &before);
+}
+
+#[test]
+fn g4_combined_cancellation_before_or_during_pressure_sampling_is_atomic() {
+    let initial = advancing_front();
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    let mut flow = initial.clone();
+    assert_eq!(
+        flow.step_with_gas_pressure_and_momentum(&cancelled, 0.05, |_| {
+            panic!("cancelled step queried the pressure field")
+        }),
+        Err(FreeSurfacePressureMomentumError2::Pressure(
+            FreeSurfacePressureError2::Cancelled
+        ))
+    );
+    same(&flow, &initial);
+    let gate = CancelGate::new_clock_free();
+    assert_eq!(
+        flow.step_with_gas_link_pressure_and_momentum(&gate, 0.05, |link| {
+            if link.liquid_cell == [10, 6] {
+                gate.request();
+            }
+            Ok(0.002 * CS2)
+        }),
+        Err(FreeSurfacePressureMomentumError2::Pressure(
+            FreeSurfacePressureError2::Cancelled
+        ))
+    );
+    same(&flow, &initial);
+    let open = CancelGate::new_clock_free();
+    let mut reference = initial.clone();
+    let a = flow
+        .step_with_gas_pressure_and_momentum(&open, 0.05, |_| Ok(0.002 * CS2))
+        .unwrap();
+    let b = reference
+        .step_with_gas_pressure_and_momentum(&open, 0.05, |_| Ok(0.002 * CS2))
+        .unwrap();
+    assert_eq!(a, b);
+    same(&flow, &reference);
+}
