@@ -449,6 +449,23 @@ fn nonlinear_radial_motion_matches_charge_and_lorentz_work_oracles() {
     );
     near(step.energy_residual_j, 0.0, 2e-10);
     assert!(step.heat_j > 0.0 && step.mechanical_work_j.abs() > 1e-4);
+    use fs_em::spatial::vector_potential::induction::mechanical::SpatialLorentzLoadLimits;
+    let cells: Vec<_> = step.cells.iter().map(|cell| cell.cell).collect();
+    let loads = candidate
+        .lorentz_loads(
+            &cells,
+            SpatialLorentzLoadLimits {
+                max_vertices: 8,
+                max_cells: 6,
+            },
+            &mut || false,
+        )
+        .unwrap();
+    near(
+        loads.power_w(&velocity, &mut || false).unwrap() * dt,
+        step.mechanical_work_j,
+        2e-10,
+    );
     let q = |v| {
         if v == 0 {
             0.0

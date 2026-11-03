@@ -1,5 +1,37 @@
 # fs-em contract
 
+## Consistent three-dimensional Lorentz loads for mechanical momentum
+
+`SpatialInductionCandidate::lorentz_loads` and its nonlinear counterpart
+transfer a selected set of original conducting cells from the same accepted
+induction update into `SpatialLorentzLoads`. For each tetrahedron the native
+P1 load is `F_a = volume * (sum_b f_b + f_a) / 20`, where `f = J cross B`.
+This preserves net force, torque and every P1 virtual-work pairing. Vertex
+sampling with lumped volume weights or replacing the density with its mean
+does not generally preserve these mechanical quantities.
+
+Original vertex order is retained for nodal-force consumers. A canonical
+`fs_ga::Wrench` transforms both force and torque to an explicitly supplied
+receiving frame and moment origin, ready for native `fs-mbd` inputs. Selected
+cell IDs are canonicalized; duplicate, nonconducting, over-budget and cancelled
+selections refuse without changing state. Near-source moment reduction and
+compensated accumulation limit avoidable translation and cancellation error.
+The extraction is linear in mesh vertices plus selected element work, with
+sorting and binary source lookup only for selected cells; wrench queries are O(1).
+
+Linear midpoint loads and nonlinear endpoint loads retain their own update's
+time stage. Pairing with the admitted prescribed velocity recovers the selected
+Lorentz work. These are free-conduction-current volume forces, excluding
+magnetization/interface forces; an overlapping enclosing Maxwell load must not
+be added. This transfer neither moves geometry nor closes mechanical feedback.
+
+Production-kernel regressions cover analytic nonuniform
+force/torque, general P1 and rigid virtual work, arbitrary frames and origins,
+refinement/shared-node assembly, translated geometry, transactional refusals,
+and actual native articulated-body linear/angular impulse response. Additional
+linear and saturated solved-field regressions compare the transferred loads
+with their original induction work.
+
 ## Three-dimensional dielectric fields, circuit storage and force
 
 `spatial::electrostatic::SpatialElectrostatics` solves the fixed-geometry,

@@ -493,6 +493,43 @@ fn three_dimensional_radial_motion_changes_the_field_and_closes_independent_lore
     );
     near(s.energy_residual_j, 0.0, 2e-10);
     assert!(s.heat_j > 0.0 && s.mechanical_work_j.abs() > 1e-5);
+    use fs_em::spatial::vector_potential::induction::mechanical::SpatialLorentzLoadLimits;
+    let limits = SpatialLorentzLoadLimits {
+        max_vertices: 8,
+        max_cells: 6,
+    };
+    let cells: Vec<_> = s.cells.iter().map(|cell| cell.cell).collect();
+    let loads = candidate
+        .lorentz_loads(&cells, limits, &mut || false)
+        .unwrap();
+    near(
+        loads.power_w(&velocity, &mut || false).unwrap() * dt,
+        s.mechanical_work_j,
+        2e-10,
+    );
+    let reversed: Vec<_> = cells.iter().copied().rev().collect();
+    let reordered = candidate
+        .lorentz_loads(&reversed, limits, &mut || false)
+        .unwrap();
+    assert_eq!(loads.nodal_forces_n(), reordered.nodal_forces_n());
+    let subset = candidate
+        .lorentz_loads(&cells[..3], limits, &mut || false)
+        .unwrap();
+    near(
+        subset.power_w(&velocity, &mut || false).unwrap() * dt,
+        s.cells[..3].iter().map(|cell| cell.mechanical_work_j).sum(),
+        2e-10,
+    );
+    assert!(
+        candidate
+            .lorentz_loads(&[cells[0], cells[0]], limits, &mut || false)
+            .is_err()
+    );
+    assert!(
+        candidate
+            .lorentz_loads(&[usize::MAX], limits, &mut || false)
+            .is_err()
+    );
     for c in &s.cells {
         let tet = problem.mesh().tets[c.cell];
         let q = |v: u32| {

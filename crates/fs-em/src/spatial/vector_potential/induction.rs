@@ -19,6 +19,7 @@
 //! A-v formulation reference: https://getdp.info/doc/texinfo/getdp.html .
 
 mod coupling;
+pub mod mechanical;
 pub mod nonlinear;
 pub mod thermal;
 
