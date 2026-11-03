@@ -272,9 +272,11 @@ impl<'a> TwoLayerConduction<'a> {
     }
 
     /// Solve the steady layer flux using exact chart integrals and a safeguarded
-    /// scalar Newton solve. Both charts must cover the full endpoint temperature
-    /// interval. This deliberately conservative support requirement avoids any
-    /// extrapolated trial or silently inferred phase transition within a layer.
+    /// scalar Newton solve. Each chart covers only its own physical layer, from
+    /// its bulk endpoint to its solved contact face. The two supports need not
+    /// cover the opposite bulk endpoint or overlap across a finite contact jump.
+    /// A source-limited flux bracket refuses an unsupported contact solution;
+    /// no trial extrapolates either chart or infers an internal phase transition.
     ///
     /// Contact resistance is area-specific; its temperature jump is j*R, not
     /// Q*R. Source-free layers share one heat flux and contact adds no storage.
@@ -296,10 +298,8 @@ impl<'a> TwoLayerConduction<'a> {
                 "invalid layer-conduction heat tolerance or iteration budget",
             ));
         }
-        for curve in self.curves {
-            for t in temperatures_k {
-                curve.conductivity_w_m_k(t)?;
-            }
+        for (curve, t) in self.curves.into_iter().zip(temperatures_k) {
+            curve.conductivity_w_m_k(t)?;
         }
         let [ta, tb] = temperatures_k;
         if ta == tb {
@@ -331,25 +331,45 @@ impl<'a> TwoLayerConduction<'a> {
         let (kh, kc) = (self.curves[hot], self.curves[cold]);
         let (dh, dc) = (self.distances_m[hot], self.distances_m[cold]);
         let r = self.contact_resistance_m2_k_w;
-        let (mut lo, mut hi) = (tc, th);
-        let mut u = lo + 0.5 * (hi - lo);
+        // Positive conductivity makes both Kirchhoff inverses monotone. Bound
+        // flux by the heat each ORIGINAL layer can carry before its own source
+        // runs out. Contact can bridge disjoint temperature supports; it never
+        // requires the intervening temperatures to belong to either material.
+        let hot_limit = kh.temperature_range_k()[0].max(tc);
+        let cold_limit = kc.temperature_range_k()[1].min(th);
+        let hot_integral = kh.integral_w_m(hot_limit, th)?;
+        let cold_integral = kc.integral_w_m(tc, cold_limit)?;
+        if hot_integral == 0.0 || cold_integral == 0.0 {
+            return Err(DepositionError::MaterialDomain);
+        }
+        let hot_flux_limit = positive(hot_integral / dh)?;
+        let cold_flux_limit = positive(cold_integral / dc)?;
+        let mut hi = hot_flux_limit.min(cold_flux_limit);
+        if r > 0.0 {
+            hi = hi.min(positive((th - tc) / r)?);
+        }
+        let mut lo = 0.0;
+        // Evaluate the supported upper endpoint first. Its gap sign determines
+        // whether ANY physical root is supported, including an exact source-end
+        // root. Starting at an interior guess would lose that distinction.
+        let mut flux = hi;
         for iteration in 0..config.max_iterations {
             checkpoint()?;
+            // Preserve exact admitted source endpoints when division followed
+            // by multiplication would round their integral just outside support.
+            let u = if flux == hot_flux_limit {
+                hot_limit
+            } else {
+                kh.temperature_after_integral_w_m(th, -finite(flux * dh)?)?
+            };
+            let v = if flux == cold_flux_limit {
+                cold_limit
+            } else {
+                kc.temperature_after_integral_w_m(tc, finite(flux * dc)?)?
+            };
             let jh = finite(kh.integral_w_m(u, th)? / dh)?;
-            let jump = finite(r * jh)?;
-            let v = finite(u - jump)?;
-            // An interface below the cold boundary is only a bracket sign, not
-            // a material evaluation. It implies the physical root lies right.
-            if v < tc {
-                lo = u;
-                let next = lo + 0.5 * (hi - lo);
-                if next == u {
-                    return Err(DepositionError::Arithmetic);
-                }
-                u = next;
-                continue;
-            }
             let jc = finite(kc.integral_w_m(tc, v)? / dc)?;
+            let jump = finite(r * jh)?;
             let qh = finite(self.area_m2 * jh)?;
             let qc = finite(self.area_m2 * jc)?;
             let residual = finite(qh - qc)?;
@@ -398,15 +418,24 @@ impl<'a> TwoLayerConduction<'a> {
                     iterations: iteration + 1,
                 });
             }
-            if residual > 0.0 {
-                lo = u;
-            } else {
-                hi = u;
+            let gap = finite((u - v) - finite(r * flux)?)?;
+            if iteration == 0 && gap > 0.0 {
+                // The largest supported flux still leaves an unclosed positive
+                // temperature gap. Reaching a root would leave at least one
+                // original source, regardless of the iteration budget.
+                return Err(DepositionError::MaterialDomain);
             }
-            let a = positive(kh.conductivity_w_m_k(u)? / dh)?;
-            let b = positive(kc.conductivity_w_m_k(v)? / dc)?;
-            let derivative = positive(a + b * (1.0 + r * a))?;
-            let newton = u + (jh - jc) / derivative;
+            if gap > 0.0 {
+                lo = flux;
+            } else {
+                hi = flux;
+            }
+            let differential_resistance = positive(
+                positive(dh / kh.conductivity_w_m_k(u)?)?
+                    + positive(dc / kc.conductivity_w_m_k(v)?)?
+                    + r,
+            )?;
+            let newton = flux + gap / differential_resistance;
             let width = hi - lo;
             // Periodic bisection guarantees bracket contraction without
             // rejecting a rapidly converging Newton step near one bracket end.
@@ -415,10 +444,10 @@ impl<'a> TwoLayerConduction<'a> {
             } else {
                 lo + 0.5 * width
             };
-            if next == u || next <= lo || next >= hi {
+            if next == flux || next <= lo || next >= hi {
                 return Err(DepositionError::Arithmetic);
             }
-            u = next;
+            flux = next;
         }
         Err(DepositionError::Budget("layer-conduction iterations"))
     }

@@ -112,6 +112,49 @@ fn real_backward_euler_step_uses_integrated_flux_and_closes_internal_energy_once
 }
 
 #[test]
+fn source_local_layer_domains_feed_the_original_implicit_energy_owner() {
+    let card = source();
+    let caloric = curve(&card);
+    let context = QueryPoint::new().with("T", 300.0).unwrap();
+    let prepare = |range| ResolvedConductionLayer::new(
+        &caloric,
+        ThermalMaterialPoint { material: &card, context: &context,
+            temperature_axis: "T", liquid_fraction_axis: None },
+        &PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
+        ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+        SolidLiquidPhase::Solid, range, || Ok(()),
+    ).unwrap();
+    let hot = prepare([500.0, 800.0]);
+    let cold = prepare([250.0, 450.0]);
+    let old = initial(&caloric);
+    // For k=2+0.01*T, independent affine integrals give 30000 W/m²
+    // through [590,510] K / 0.02 m and [400,310] K / 0.01665 m.
+    // The contact's 110 K jump therefore requires R=110/30000 m² K/W.
+    let prepared = PreparedLayerConduction::new(&old, vec![LayerLinkBinding {
+        link: 7, layers: [&hot, &cold], distances_m: [0.02, 0.01665],
+        contact_area_resistance_m2_k_w: 110.0 / 30000.0,
+    }], 1, || Ok(())).unwrap();
+    let step = BackwardEulerStep::new(&old, 1.0 / 12.0, || Ok(())).unwrap();
+    let trial = step.evaluate(&[-10.0, 10.0],
+        |state| prepared.resolve(state, config(), || Ok(())), || Ok(())).unwrap();
+    assert!(trial.maximum_cell_residual_j() < 1e-8);
+    let (next, samples, audit) = trial.accept(1e-8, 1e-8, || Ok(())).unwrap();
+    assert!((next.temperature_k(CellId(1)).unwrap() - 590.0).abs() < 1e-10);
+    assert!((next.temperature_k(CellId(2)).unwrap() - 310.0).abs() < 1e-10);
+    assert!((samples[0].applied_power_a_to_b_w - 120.0).abs() < 1e-8);
+    assert!((samples[0].response.interface_temperature_k[0] - 510.0).abs() < 1e-9);
+    assert!((samples[0].response.interface_temperature_k[1] - 400.0).abs() < 1e-9);
+    assert!(Arc::ptr_eq(&samples[0].source_lines[0], hot.source_line()));
+    assert!(Arc::ptr_eq(&samples[0].source_lines[1], cold.source_line()));
+    assert_eq!(audit.external_heat_j, 0.0);
+    assert!(audit.residual_j.abs() < 1e-8);
+    assert_eq!(old.time_s(), 0.0);
+    // The contact cannot make unsupported material bulk temperatures admissible.
+    assert!(step.evaluate(&[-200.0, 200.0],
+        |state| prepared.resolve(state, config(), || Ok(())), || Ok(())).is_err());
+}
+
+#[test]
 fn source_spans_cannot_cross_a_melting_plateau_or_use_foreign_caloric_objects() {
     let card=source();let context=QueryPoint::new().with("T",300.0).unwrap();
     let mixed=EquilibriumEnthalpyPhaseCurve::try_new(card.content_hash(),

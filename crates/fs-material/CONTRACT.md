@@ -7009,12 +7009,19 @@ existing quasi-steady, one-dimensional layer model. The returned
 preserving its knots and temperature support. The borrowed caloric paths retain
 their source receipts, fixed reference mass basis, datum and entropy selection.
 It integrates k(T) through both legs using the shared `TwoLayerConduction`
-kernel; the kernel's public API and numerical equations remain unchanged.
+kernel; the kernel's public API and physical equations remain unchanged.
 
 Every evaluation admits the actual active link, ordered endpoints, transfer
 area, original material-law objects, mass/volume bases and stored-energy
-coordinates. Both conductivity charts must cover the full endpoint-temperature
-interval. Positive lengths and area, nonnegative area-specific contact
+coordinates. Each conductivity chart covers only its own bulk-to-face
+temperature interval. Supports may overlap only at a perfect-contact face or
+be disjoint across a finite contact jump; neither source is queried at the
+opposite material's bulk temperature. The shared flux is bracketed by each
+original chart's available Kirchhoff integral, and exact chart inverses plus
+a safeguarded monotone solve close the contact jump. An unclosed jump at the
+largest supported flux refuses the actual interface as outside material
+support. Independent layer-heat and contact-jump gates remain authoritative.
+Positive lengths and area, nonnegative area-specific contact
 resistance, an iteration budget and numerical tolerances are explicit inputs.
 The caller declares homogeneous, internally source-free legs and alignment of
 the selected scalar k with heat flow. This does not establish isotropy or source

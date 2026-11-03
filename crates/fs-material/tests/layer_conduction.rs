@@ -4,6 +4,9 @@ use fs_material::thermal::conduction::{
 };
 use fs_thermal::enthalpy::{DepositionError, series_contact_conductance_w_k};
 
+#[path = "layer_conduction/source_domains.rs"]
+mod source_domains;
+
 fn config() -> LayerConductionConfig {
     LayerConductionConfig { max_iterations: 96, absolute_heat_tolerance_w: 1e-9,
         relative_heat_tolerance: 1e-12 }
