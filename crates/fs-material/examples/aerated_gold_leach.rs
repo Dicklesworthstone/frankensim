@@ -1,4 +1,5 @@
-//! Actual NBS equilibrium sources with explicitly synthetic leach/transfer laws.
+//! Actual NBS acid/base sources and optional measured Henry oxygen solubility,
+//! with explicitly synthetic leach/transfer laws.
 //!
 //! Run `aerated_gold_leach --materials PACK_DIR`; --help lists all seven packs.
 //! Compare a closed dissolved-oxygen inventory with finite headspace exchange,
@@ -13,14 +14,15 @@ use std::{error::Error, path::Path};
 use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, NormalizedPack, Provenance,
-    QueryPoint,
+    ClaimSelection, ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, NormalizedPack,
+    Provenance, QueryPoint, SelectionPolicy,
 };
 use fs_material::cyanide_leach::{
     self, GoldCyanidationBatch,
     gas_transfer::{
         AeratedCyanidationState, AeratedGoldCyanidation, AerationAdvance, AerationNumerics,
-        GAS_VOLUME_AXIS, KLA_PARAMETER, OXYGEN_TRANSFER_LAW, OxygenTransfer, PARTIAL_PRESSURE_AXIS,
+        GAS_VOLUME_AXIS, KLA_PARAMETER, OXYGEN_TRANSFER_LAW, OxygenHenrySource, OxygenTransfer,
+        PARTIAL_PRESSURE_AXIS,
     },
 };
 use fs_qty::{
@@ -108,9 +110,13 @@ fn point(index: usize) -> Result<QueryPoint> {
     Ok(at)
 }
 
-fn load(directory: &Path) -> Result<(IdealAcidBaseSystem, IdealGasLiquidPartition)> {
+fn load(
+    directory: &Path,
+    gibbs_partition: bool,
+) -> Result<(IdealAcidBaseSystem, Option<IdealGasLiquidPartition>)> {
     let packs = PACKS
         .iter()
+        .take(if gibbs_partition { 7 } else { 5 })
         .map(|(name, _)| {
             let bytes = std::fs::read(directory.join(format!("{name}.fsmatpk")))?;
             let decoded = NormalizedPack::from_bytes(&bytes)?;
@@ -124,9 +130,10 @@ fn load(directory: &Path) -> Result<(IdealAcidBaseSystem, IdealGasLiquidPartitio
         .collect::<Result<Vec<_>>>()?;
     let ids = PACKS
         .iter()
+        .take(packs.len())
         .map(|(_, id)| SpeciesId::new(*id))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let points = (0..PACKS.len()).map(point).collect::<Result<Vec<_>>>()?;
+    let points = (0..packs.len()).map(point).collect::<Result<Vec<_>>>()?;
     let sources = |indices: &[usize]| {
         indices
             .iter()
@@ -152,32 +159,77 @@ fn load(directory: &Path) -> Result<(IdealAcidBaseSystem, IdealGasLiquidPartitio
         ids[1].clone(),
         &sources(&[0, 1, 2]),
     )?;
-    let phases = vec![ids[5].clone(), ids[6].clone()];
-    let elements =
-        ElementalMatrix::new(vec![ElementId::new("O")?], phases.clone(), vec![vec![2, 2]])?;
-    let transfer_id = ReactionId::new("oxygen-gas-aqueous-partition")?;
-    let coefficients = StoichiometricMatrix::new(
-        phases.clone(),
-        vec![transfer_id.clone()],
-        vec![vec![-1], vec![1]],
-    )?;
-    let charge = ChargeVector::new(phases, vec![0, 0])?;
-    let partition = IdealGasLiquidPartition::from_sources(
-        ConservedReaction::new(&elements, &coefficients, &charge, transfer_id)?,
-        ids[5].clone(),
-        ids[6].clone(),
-        &sources(&[5, 6]),
-    )?;
-    println!(
-        "source_T_K={} source_p_ref_Pa={} oxygen_partition_lnK={:.12}",
-        TEMPERATURE,
-        partition.standard().reference_pressure().value(),
-        partition.standard().log_equilibrium_constant().value(),
-    );
+    let partition = if gibbs_partition {
+        let phases = vec![ids[5].clone(), ids[6].clone()];
+        let elements =
+            ElementalMatrix::new(vec![ElementId::new("O")?], phases.clone(), vec![vec![2, 2]])?;
+        let transfer_id = ReactionId::new("oxygen-gas-aqueous-partition")?;
+        let coefficients = StoichiometricMatrix::new(
+            phases.clone(),
+            vec![transfer_id.clone()],
+            vec![vec![-1], vec![1]],
+        )?;
+        let charge = ChargeVector::new(phases, vec![0, 0])?;
+        let partition = IdealGasLiquidPartition::from_sources(
+            ConservedReaction::new(&elements, &coefficients, &charge, transfer_id)?,
+            ids[5].clone(),
+            ids[6].clone(),
+            &sources(&[5, 6]),
+        )?;
+        println!(
+            "source_T_K={} source_p_ref_Pa={} oxygen_partition_lnK={:.12}",
+            TEMPERATURE,
+            partition.standard().reference_pressure().value(),
+            partition.standard().log_equilibrium_constant().value(),
+        );
+        Some(partition)
+    } else {
+        None
+    };
     Ok((
         IdealAcidBaseSystem::new(water, vec![AcidFamily::new(CYANIDE, vec![cyanide])?])?,
         partition,
     ))
+}
+
+fn load_henry(path: &Path) -> Result<OxygenHenrySource> {
+    let bytes = std::fs::read(path)?;
+    let decoded = NormalizedPack::from_bytes(&bytes)?;
+    let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes)?;
+    let mut at = QueryPoint::new().with_quantity(
+        "temperature",
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        )),
+        TEMPERATURE,
+    )?;
+    for (axis, value) in [
+        ("source-solvent-pure-water", 1.0),
+        ("source-henry-infinite-dilution", 1.0),
+        ("source-solute-molecular-oxygen", 1.0),
+        ("engineering-reference-model", 1.0),
+        ("source-specimen-qualified", 0.0),
+    ] {
+        at = at.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)?;
+    }
+    let source = OxygenHenrySource::from_pack(
+        pack,
+        at,
+        ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+    )?;
+    println!(
+        "Henry material={} hash={} receipt={} Hcp_mol_per_m3_Pa={:.12e}",
+        source.pack().pack_id(),
+        source.pack_hash(),
+        source.answer().receipt.content_hash(),
+        source.answer().evidence.value.value
+    );
+    println!(
+        "ENGINEERING REFERENCE ASSUMPTION: measured pure-water infinite-dilution Hcp is used in this cyanide solution. No salting-out/slurry correction, finite-pressure validation or ore calibration is asserted; uncertainty remains {:?}.",
+        source.answer().evidence.value.uncertainty
+    );
+    Ok(source)
 }
 
 fn card(
@@ -276,7 +328,10 @@ fn bath(chemistry: IdealAcidBaseSystem) -> Result<GoldCyanidationBatch> {
     )?)
 }
 
-fn transfer(partition: IdealGasLiquidPartition) -> Result<OxygenTransfer> {
+fn transfer(
+    partition: Option<IdealGasLiquidPartition>,
+    henry: Option<OxygenHenrySource>,
+) -> Result<OxygenTransfer> {
     use cyanide_leach::*;
     let declaration = "SYNTHETIC liquid-film exchange J=kLa*(D_equilibrium(G)-D), kLa=0.01/s; \
         fixed T=298.15 K, V_liquid=0.01 m3, V_gas=0.0001 m3, n_ref=10 mol; \
@@ -305,17 +360,19 @@ fn transfer(partition: IdealGasLiquidPartition) -> Result<OxygenTransfer> {
             ACTIVITY_AMOUNT,
         ),
     ]);
-    Ok(OxygenTransfer::from_card(
-        partition,
-        card(
-            OXYGEN_TRANSFER_LAW,
-            declaration,
-            KLA_PARAMETER,
-            0.01,
-            Frequency::DIMS,
-            validity,
-        ),
-    )?)
+    let source = card(
+        OXYGEN_TRANSFER_LAW,
+        declaration,
+        KLA_PARAMETER,
+        0.01,
+        Frequency::DIMS,
+        validity,
+    );
+    Ok(match (partition, henry) {
+        (Some(partition), None) => OxygenTransfer::from_card(partition, source)?,
+        (None, Some(henry)) => OxygenTransfer::from_henry_source(henry, source)?,
+        _ => return Err("select exactly one oxygen equilibrium source route".into()),
+    })
 }
 
 fn print_state(label: &str, state: &AeratedCyanidationState) {
@@ -340,6 +397,13 @@ fn print_state(label: &str, state: &AeratedCyanidationState) {
         state.equilibrium_dissolved_oxygen.value(),
         state.cumulative_oxygen_transfer.value(),
     );
+    if let Some(answer) = &state.henry_answer {
+        println!(
+            "  actual_Hcp_mol_per_m3_Pa={:.12e} Henry_receipt={}",
+            answer.evidence.value.value,
+            answer.receipt.content_hash()
+        );
+    }
 }
 
 fn print_advance(label: &str, advance: &AerationAdvance) {
@@ -376,11 +440,14 @@ fn print_advance(label: &str, advance: &AerationAdvance) {
 fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.as_slice() == ["--help"] {
-        println!("usage: aerated_gold_leach --materials PACK_DIR");
+        println!("usage: aerated_gold_leach --materials PACK_DIR [--henry-pack PATH.fsmatpk]");
         println!("Compile these profiles as PACK_DIR/PACK_ID.fsmatpk:");
         for (name, _) in PACKS {
             println!("  {name}");
         }
+        println!(
+            "With --henry-pack, only the first five NBS acid/base packs are loaded; no O2 formation Gibbs packs are required. Compile oxygen-water-henry-sander2023-rettich2000 for the independent measured Hcp route."
+        );
         println!(
             "Use: cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/PACK_ID/manifest.tsv --out PACK_DIR/PACK_ID.fsmatpk"
         );
@@ -389,13 +456,35 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-    if args.len() != 2 || args[0] != "--materials" {
-        return Err("usage: aerated_gold_leach --materials PACK_DIR".into());
+    if ![2, 4].contains(&args.len())
+        || args[0] != "--materials"
+        || (args.len() == 4 && args[2] != "--henry-pack")
+    {
+        return Err(
+            "usage: aerated_gold_leach --materials PACK_DIR [--henry-pack PATH.fsmatpk]".into(),
+        );
     }
-    let (chemistry, partition) = load(Path::new(&args[1]))?;
+    let henry = if args.len() == 4 {
+        Some(load_henry(Path::new(&args[3]))?)
+    } else {
+        None
+    };
+    let (chemistry, partition) = load(Path::new(&args[1]), henry.is_none())?;
     let bath = bath(chemistry)?;
     let initial_do_ceiling = bath.maximum_gold_dissolution().value();
-    let transfer = transfer(partition)?;
+    let transfer = transfer(partition, henry)?;
+    let mut transfer_conditions = QueryPoint::new();
+    if let Some(source) = transfer.henry_source() {
+        for (axis, value) in source.point().axes() {
+            if axis != cyanide_leach::TEMPERATURE_AXIS {
+                transfer_conditions = transfer_conditions.with_quantity(
+                    axis,
+                    source.point().axis_quantities()[axis],
+                    *value,
+                )?;
+            }
+        }
+    }
     println!(
         "SYNTHETIC charge: Au={INITIAL_GOLD} mol, HCN+CN=0.01 mol, Na+=0.01 mol, \
         initial_liquid_O2={INITIAL_DO} mol, initial_gas_O2={INITIAL_GAS} mol. \
@@ -406,7 +495,7 @@ fn main() -> Result<()> {
         transfer.clone(),
         Amount::new(INITIAL_GAS),
         Volume::new(HEADSPACE_VOLUME),
-        QueryPoint::new(),
+        transfer_conditions.clone(),
     )?;
     let no_contact =
         isolated.advance(Time::new(120.0), false, AerationNumerics::default(), || {
@@ -418,7 +507,7 @@ fn main() -> Result<()> {
         transfer,
         Amount::new(INITIAL_GAS),
         Volume::new(HEADSPACE_VOLUME),
-        QueryPoint::new(),
+        transfer_conditions,
     )?;
     print_state("coupled_initial", coupled.state());
     let active = coupled.advance(Time::new(120.0), true, AerationNumerics::default(), || {

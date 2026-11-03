@@ -1,0 +1,13 @@
+frankensim.matdb-source.v1
+observation	identity	Molecular oxygen in water	CAS 7782-44-7; https://henrys-law.org/henry/casrn/7782-44-7	The solute is molecular O2 and the solvent reference is pure water at infinite dilution.
+observation	henry-reference	Selected normalized Henry solubility coefficient	https://henrys-law.org/henry/casrn/7782-44-7	Sander's Rettich et al. (2000) row gives H_s^cp=1.3e-5 mol/(m3 Pa) at 298.15 K. This retains the normalized table's two significant digits; no more precise original measurement or average of the other rows is claimed.
+observation	convention	Concentration divided by species partial pressure	Sander (2023), doi:10.5194/acp-23-10901-2023	The convention is c_O2=H_s^cp*p_O2, with c in mol/m3 of liquid and oxygen partial pressure in Pa. It is not the reciprocal volatility convention, molality/bar convention, gas mole fraction, or total gas pressure.
+observation	scope	Dilute-water equilibrium reference only	Rettich et al. (2000), doi:10.1006/jcht.1999.0581; Sander (2023), oxygen entry	This point pack supplies no finite concentration/pressure validity interval, salting-out correction, electrolyte calibration, kLa, interfacial area, oxygen-transfer rate, cyanidation rate or plant recovery. A consumer must declare its dilute-solution/ideal-gas assumptions and independently source operational kinetics. Only 298.15 K is admitted; the source's temperature dependence is not extrapolated by this pack. Uncertainty is unstated.
+scalar	henry-solubility	identity,henry-reference,convention,scope	henry	1.3e-5	mol/m^3/Pa	tabulated
+uncertainty	henry-solubility	unstated	-	-	-	-
+validity	henry-solubility	temperature	298.15	298.15	K
+validity	henry-solubility	water	1	1	1
+validity	henry-solubility	dilute	1	1	1
+validity	henry-solubility	oxygen	1	1	1
+validity	henry-solubility	reference	1	1	1
+validity	henry-solubility	specimen	0	0	1

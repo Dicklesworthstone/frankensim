@@ -4,8 +4,8 @@
 //! D [mol O2] in the liquid and G [mol O2] in a fixed ideal headspace,
 //! `J=kLa*(D_equilibrium(G)-D)`, `dD/dt=J-r/4`, `dG/dt=-J`, `dx/dt=r`.
 //! A fourth coordinate independently integrates signed gas-to-liquid transfer.
-//! Original Gibbs evidence supplies the partition; a distinct local source
-//! supplies kLa [1/s]. The liquid-film form follows the EPA oxygen-transfer
+//! Original Gibbs evidence or a directly measured Henry solubility supplies the
+//! partition; a distinct local source supplies kLa [1/s]. The liquid-film form follows the EPA oxygen-transfer
 //! proceedings, Section II, "Fundamental Oxygen Transfer Model":
 //! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=9101KJ0Z.TXT>.
 //! No clean-water coefficient is silently assigned to an ore slurry.
@@ -19,7 +19,11 @@
 //! reservoir, air composition, bubble hydrodynamics or thermal balance exists.
 
 use super::*;
+use fs_blake3::ContentHash;
+use fs_matdb::{ClaimSelection, MaterialAnswer, NormalizedPack, PropertyKey};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Frequency, Pressure};
+use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 use fs_thermochem::stoichiometry::thermodynamics::gas_liquid::{
     GasLiquidError, IdealGasLiquidPartition,
 };
@@ -34,6 +38,19 @@ pub const PARTIAL_PRESSURE_AXIS: &str = "oxygen-partial-pressure";
 pub const GAS_VOLUME_AXIS: &str = "gas-volume";
 /// Signed oxygen transfer, positive from gas to liquid, mol O2/s.
 pub type OxygenTransferRate = Qty<0, 0, -1, 0, 0, 1>;
+/// IUPAC H_s^cp = dissolved amount concentration / gas partial pressure,
+/// mol/(m3 Pa), not its reciprocal or an activity-based equilibrium constant.
+/// <https://doi.org/10.1351/goldbook.09024>.
+pub type HenrySolubilityCp = Qty<-2, -1, 2, 0, 0, 1>;
+/// Original material property; shared convention with the dissolved-gas owner.
+pub const HENRY_SOLUBILITY_PROPERTY: &str = "henry_molar_solubility";
+const HENRY_FLAGS: [(&str, f64); 5] = [
+    ("source-solvent-pure-water", 1.0),
+    ("source-henry-infinite-dilution", 1.0),
+    ("source-solute-molecular-oxygen", 1.0),
+    ("engineering-reference-model", 1.0),
+    ("source-specimen-qualified", 0.0),
+];
 
 /// Any refused operation leaves the entire accepted state and accounts intact.
 #[derive(Clone, Debug, PartialEq)]
@@ -71,10 +88,147 @@ impl From<ReactionBalanceError> for GasTransferError {
 }
 type Result<T> = core::result::Result<T, GasTransferError>;
 
-/// Original oxygen equilibrium and an independent liquid-film transfer source.
+/// Direct source evidence for molecular O2 solubility in pure water at infinite
+/// dilution. The source does not invent a finite concentration/pressure range,
+/// salt correction, heat balance or formation Gibbs energy. Applying it to an
+/// ore liquor remains an explicitly declared engineering reference assumption.
+#[derive(Clone, Debug)]
+pub struct OxygenHenrySource {
+    pack: Arc<NormalizedPack>,
+    pack_hash: ContentHash,
+    point: QueryPoint,
+    answer: MaterialAnswer,
+}
+impl OxygenHenrySource {
+    /// Resolve the exact Hcp quantity from original normalized source evidence.
+    /// The selected claim itself must declare the solute, solvent, infinite-
+    /// dilution convention and typed absolute-temperature support. An initial
+    /// selection is explicit; later evaluations pin that exact original claim.
+    pub fn from_pack(
+        pack: NormalizedPack,
+        point: QueryPoint,
+        selection: ClaimSelection,
+    ) -> Result<Self> {
+        let key = PropertyKey::new(HENRY_SOLUBILITY_PROPERTY, HenrySolubilityCp::DIMS);
+        let answer = match selection {
+            ClaimSelection::Policy(policy) => pack.claims().query_typed(&key, &point, policy)?,
+            ClaimSelection::Pinned(id) => pack.claims().query_pinned_typed(&key, &point, id)?,
+        };
+        pack.claims().verify_receipt(&answer.receipt)?;
+        require(
+            answer.receipt.observation_backed && !answer.receipt.source_hashes.is_empty(),
+            "direct Henry solubility needs original observation-backed evidence",
+        )?;
+        let claim = pack
+            .claims()
+            .claim(answer.receipt.selected)
+            .expect("resolved original claim");
+        let temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        require(
+            point.axis_quantities().get(TEMPERATURE_AXIS) == Some(&temperature)
+                && claim.validity.axis_quantities().get(TEMPERATURE_AXIS) == Some(&temperature)
+                && claim.validity.bound(TEMPERATURE_AXIS).is_some(),
+            "Henry source needs its own semantic absolute-temperature support",
+        )?;
+        for (flag, expected) in HENRY_FLAGS {
+            require(
+                point.axes().get(flag) == Some(&expected)
+                    && point.axis_quantities().get(flag)
+                        == Some(&QuantitySpec::dimensional(Dims::NONE))
+                    && claim.validity.bound(flag) == Some((expected, expected))
+                    && claim.validity.axis_quantities().get(flag)
+                        == Some(&QuantitySpec::dimensional(Dims::NONE)),
+                "Henry claim must identify molecular O2, pure water, infinite dilution and unqualified engineering reference use",
+            )?;
+        }
+        require(
+            point.axes().len() == HENRY_FLAGS.len() + 1
+                && claim.validity.bounds().len() == HENRY_FLAGS.len() + 1
+                && point
+                    .axes()
+                    .keys()
+                    .all(|axis| point.axis_quantities().contains_key(axis))
+                && claim.validity.bounds().iter().all(|(axis, &(lo, hi))| {
+                    lo.is_finite()
+                        && hi.is_finite()
+                        && lo <= hi
+                        && claim.validity.axis_quantities().contains_key(axis)
+                }),
+            "Henry reference supports only typed temperature and its five declared source flags",
+        )?;
+        positive(
+            answer.evidence.value.value,
+            "Hcp must be finite and positive",
+        )?;
+        Ok(Self {
+            pack_hash: pack.content_hash(),
+            pack: Arc::new(pack),
+            point,
+            answer,
+        })
+    }
+    /// Immutable original pack, including normalization and provenance records.
+    pub fn pack(&self) -> &NormalizedPack {
+        &self.pack
+    }
+    /// Whole-pack identity at source admission.
+    pub const fn pack_hash(&self) -> ContentHash {
+        self.pack_hash
+    }
+    /// Original typed source query, including all source qualification flags.
+    pub fn point(&self) -> &QueryPoint {
+        &self.point
+    }
+    /// Original source answer and replayable receipt; uncertainty stays unchanged.
+    pub fn answer(&self) -> &MaterialAnswer {
+        &self.answer
+    }
+
+    fn at_runtime(&self, actual: &QueryPoint) -> Result<MaterialAnswer> {
+        let mut point = QueryPoint::new();
+        for (axis, quantity) in self.point.axis_quantities() {
+            let value = *actual.axes().get(axis).ok_or(CyanidationError::Invalid(
+                "missing actual Henry source condition",
+            ))?;
+            // The physical owner uses dimensional kelvin. This explicit bridge
+            // preserves the source's semantic absolute-temperature descriptor.
+            let runtime_quantity = if axis == TEMPERATURE_AXIS {
+                QuantitySpec::dimensional(Temperature::DIMS)
+            } else {
+                *quantity
+            };
+            require(
+                actual.axis_quantities().get(axis) == Some(&runtime_quantity),
+                "actual Henry source condition has wrong quantity",
+            )?;
+            point = point.with_quantity(axis, *quantity, value)?;
+        }
+        let answer = self.pack.claims().query_pinned_typed(
+            &PropertyKey::new(HENRY_SOLUBILITY_PROPERTY, HenrySolubilityCp::DIMS),
+            &point,
+            self.answer.receipt.selected,
+        )?;
+        positive(
+            answer.evidence.value.value,
+            "actual Hcp must be finite and positive",
+        )?;
+        Ok(answer)
+    }
+}
+
+#[derive(Clone, Debug)]
+enum OxygenPartition {
+    Thermodynamic(IdealGasLiquidPartition),
+    Henry(OxygenHenrySource),
+}
+
+/// Original oxygen partition evidence and an independent liquid-film transfer source.
 #[derive(Clone, Debug)]
 pub struct OxygenTransfer {
-    equilibrium: IdealGasLiquidPartition,
+    partition: OxygenPartition,
     source: ConstitutiveModelCard,
     kla: Frequency,
 }
@@ -85,11 +239,24 @@ impl OxygenTransfer {
         equilibrium: IdealGasLiquidPartition,
         source: ConstitutiveModelCard,
     ) -> Result<Self> {
+        require(
+            equilibrium.gas().as_str() == "O2(g)" && equilibrium.aqueous().as_str() == OXYGEN,
+            "require original molecular oxygen gas/aqueous partition",
+        )?;
+        Self::with_partition(OxygenPartition::Thermodynamic(equilibrium), source)
+    }
+    /// Use directly measured Hcp with an independently declared kLa. No gas or
+    /// aqueous formation Gibbs values are synthesized from this measurement.
+    pub fn from_henry_source(
+        henry: OxygenHenrySource,
+        source: ConstitutiveModelCard,
+    ) -> Result<Self> {
+        Self::with_partition(OxygenPartition::Henry(henry), source)
+    }
+    fn with_partition(partition: OxygenPartition, source: ConstitutiveModelCard) -> Result<Self> {
         source.validate()?;
         require(
-            equilibrium.gas().as_str() == "O2(g)"
-                && equilibrium.aqueous().as_str() == OXYGEN
-                && source.law.0 == OXYGEN_TRANSFER_LAW
+            source.law.0 == OXYGEN_TRANSFER_LAW
                 && source.law_version == 1
                 && source.state_schema_version == 0
                 && source.initial_state == InitialStatePolicy::ZeroInternalState
@@ -139,14 +306,25 @@ impl OxygenTransfer {
             )?;
         }
         Ok(Self {
-            equilibrium,
+            partition,
             source,
             kla,
         })
     }
-    /// Original gas/aqueous Gibbs evidence and declared ideal partition.
-    pub fn equilibrium(&self) -> &IdealGasLiquidPartition {
-        &self.equilibrium
+    /// Original gas/aqueous Gibbs owner when that route was explicitly selected.
+    /// Direct Henry measurements do not carry a fabricated Gibbs model.
+    pub fn equilibrium(&self) -> Option<&IdealGasLiquidPartition> {
+        match &self.partition {
+            OxygenPartition::Thermodynamic(value) => Some(value),
+            OxygenPartition::Henry(_) => None,
+        }
+    }
+    /// Original measured Henry source, if that independent route was selected.
+    pub fn henry_source(&self) -> Option<&OxygenHenrySource> {
+        match &self.partition {
+            OxygenPartition::Henry(value) => Some(value),
+            OxygenPartition::Thermodynamic(_) => None,
+        }
     }
     /// Original transfer source and its complete applicability box.
     pub fn source(&self) -> &ConstitutiveModelCard {
@@ -215,6 +393,9 @@ pub struct AeratedCyanidationState {
     pub cumulative_oxygen_transfer: Amount,
     /// Original transfer-source conditions at this state.
     pub transfer_conditions: QueryPoint,
+    /// Actual temperature/context query and original pinned Hcp receipt for the
+    /// direct measured route. `None` means the retained Gibbs owner was used.
+    pub henry_answer: Option<MaterialAnswer>,
     /// Explicit contact switch for this state; it changes no source coefficient.
     pub gas_contact_active: bool,
 }
@@ -318,19 +499,21 @@ impl AeratedGoldCyanidation {
             "gas oxygen must be finite and nonnegative",
         )?;
         positive(gas_volume.value(), "headspace volume must be positive")?;
-        let aqueous_reference = batch.model().chemistry().water().standard();
-        let gas_reference = transfer.equilibrium.standard();
-        require(
-            gas_reference.temperature() == aqueous_reference.temperature()
-                && gas_reference.reference_pressure() == aqueous_reference.reference_pressure()
-                && gas_reference.reference_axis() == aqueous_reference.reference_axis(),
-            "oxygen partition and aqueous chemistry need a common T, pressure and reference",
-        )?;
-        ReactionNetwork::new(vec![
-            batch.model().reaction().clone(),
-            transfer.equilibrium.reaction().clone(),
-        ])
-        .map_err(CyanidationError::from)?;
+        if let Some(equilibrium) = transfer.equilibrium() {
+            let aqueous_reference = batch.model().chemistry().water().standard();
+            let gas_reference = equilibrium.standard();
+            require(
+                gas_reference.temperature() == aqueous_reference.temperature()
+                    && gas_reference.reference_pressure() == aqueous_reference.reference_pressure()
+                    && gas_reference.reference_axis() == aqueous_reference.reference_axis(),
+                "oxygen partition and aqueous chemistry need a common T, pressure and reference",
+            )?;
+            ReactionNetwork::new(vec![
+                batch.model().reaction().clone(),
+                equilibrium.reaction().clone(),
+            ])
+            .map_err(CyanidationError::from)?;
+        }
         require(
             transfer_axes()
                 .iter()
@@ -689,14 +872,15 @@ fn evaluate(
     require(raw[3].is_finite(), "nonfinite signed oxygen transfer")?;
     let solution = evaluate_with_oxygen(&layout.chemical, elapsed, raw[0], Some(raw[1]), work)?;
     let c = &layout.chemical.charge;
-    let pressure = layout
-        .transfer
-        .equilibrium
-        .ideal_partial_pressure(Amount::new(raw[2]), layout.gas_volume)?;
-    let target = layout
-        .transfer
-        .equilibrium
-        .equilibrium_aqueous_amount(pressure, c.amount_at_unit_activity)?;
+    let pressure = match &layout.transfer.partition {
+        OxygenPartition::Thermodynamic(equilibrium) => {
+            equilibrium.ideal_partial_pressure(Amount::new(raw[2]), layout.gas_volume)?
+        }
+        OxygenPartition::Henry(_) => Pressure::new(product(
+            quotient(raw[2], layout.gas_volume.value())?,
+            product(UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K, c.temperature.value())?,
+        )?),
+    };
     let values = [
         quotient(raw[1], c.solution_volume.value())?,
         pressure.value(),
@@ -719,6 +903,22 @@ fn evaluate(
     for ((axis, dims, _), value) in transfer_axes().into_iter().zip(values) {
         point = point.with_quantity(axis, QuantitySpec::dimensional(dims), value)?;
     }
+    let (target, henry_answer) = match &layout.transfer.partition {
+        OxygenPartition::Thermodynamic(equilibrium) => (
+            equilibrium.equilibrium_aqueous_amount(pressure, c.amount_at_unit_activity)?,
+            None,
+        ),
+        OxygenPartition::Henry(henry) => {
+            let answer = henry.at_runtime(&point)?;
+            // Hcp is amount concentration per pressure, so physical solution
+            // volume converts to mol. The independent activity basis is NOT used.
+            let dissolved = product(
+                product(answer.evidence.value.value, pressure.value())?,
+                c.solution_volume.value(),
+            )?;
+            (Amount::new(dissolved), Some(answer))
+        }
+    };
     for (axis, &(minimum, maximum)) in layout.transfer.source.validity.bounds() {
         let value = *point.axes().get(axis).ok_or(CyanidationError::Invalid(
             "missing transfer source condition",
@@ -752,6 +952,7 @@ fn evaluate(
         oxygen_transfer_rate: OxygenTransferRate::new(rate),
         cumulative_oxygen_transfer: Amount::new(raw[3]),
         transfer_conditions: point,
+        henry_answer,
         gas_contact_active: active,
     })
 }

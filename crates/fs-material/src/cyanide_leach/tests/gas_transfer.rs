@@ -3,8 +3,10 @@
 use super::*;
 use crate::cyanide_leach::gas_transfer::{
     AeratedGoldCyanidation, AerationAdvance, AerationNumerics, GAS_VOLUME_AXIS, GasTransferError,
-    KLA_PARAMETER, OXYGEN_TRANSFER_LAW, OxygenTransfer, PARTIAL_PRESSURE_AXIS,
+    HENRY_SOLUBILITY_PROPERTY, HenrySolubilityCp, KLA_PARAMETER, OXYGEN_TRANSFER_LAW,
+    OxygenHenrySource, OxygenTransfer, PARTIAL_PRESSURE_AXIS,
 };
+use fs_matdb::{ClaimSelection, SelectionPolicy};
 use fs_qty::Pressure;
 use fs_thermochem::{
     ChargeVector, ElementId, ElementalMatrix, ReactionId, StoichiometricMatrix,
@@ -12,10 +14,343 @@ use fs_thermochem::{
 };
 
 const P0: f64 = 100_000.0;
+
+fn henry_point(temperature: f64) -> QueryPoint {
+    let mut point = QueryPoint::new()
+        .with_quantity(
+            TEMPERATURE_AXIS,
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AbsoluteTemperature,
+                ValueForm::Static,
+            )),
+            temperature,
+        )
+        .unwrap();
+    for (axis, value) in [
+        ("source-solvent-pure-water", 1.0),
+        ("source-henry-infinite-dilution", 1.0),
+        ("source-solute-molecular-oxygen", 1.0),
+        ("engineering-reference-model", 1.0),
+        ("source-specimen-qualified", 0.0),
+    ] {
+        point = point
+            .with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)
+            .unwrap();
+    }
+    point
+}
+fn henry_pack(point: &QueryPoint, dims: Dims, observation_backed: bool) -> NormalizedPack {
+    let artifact = hash_domain(
+        "authored-Hcp-fixture-v1",
+        b"Hcp=1/P0 mathematical fixture, not O2 measurements",
+    );
+    let provenance = Provenance {
+        source: "authored Hcp analytic test; not measured oxygen solubility".into(),
+        license: "project test fixture".into(),
+        artifact: Some(artifact),
+    };
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "authored pure-water reference fixture".into(),
+            method: "manufactured independent finite-headspace exponential".into(),
+            artifact,
+            caveats: "synthetic known-answer inputs, no physical calibration".into(),
+            provenance: provenance.clone(),
+        })
+        .unwrap();
+    let mut validity = ValidityDomain::unconstrained();
+    for (axis, value) in point.axes() {
+        validity = validity.with_quantity(axis, point.axis_quantities()[axis], *value, *value);
+    }
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(HENRY_SOLUBILITY_PROPERTY, dims),
+            value: PropertyValue::Scalar {
+                value: 1.0 / P0,
+                dims,
+            },
+            validity,
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: if observation_backed {
+                vec![observation]
+            } else {
+                vec![]
+            },
+            provenance,
+        })
+        .unwrap();
+    NormalizedPack::new(
+        "authored-Hcp-fixture",
+        "authored-v1",
+        artifact,
+        "project test fixture",
+        claims,
+        vec![],
+        vec![],
+    )
+    .unwrap()
+}
+fn measured_source(temperature: f64) -> OxygenHenrySource {
+    let point = henry_point(temperature);
+    OxygenHenrySource::from_pack(
+        henry_pack(&point, HenrySolubilityCp::DIMS, true),
+        point,
+        ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+    )
+    .unwrap()
+}
+fn henry_context(source: &OxygenHenrySource) -> QueryPoint {
+    let mut point = QueryPoint::new();
+    for (axis, value) in source.point().axes() {
+        if axis != TEMPERATURE_AXIS {
+            point = point
+                .with_quantity(axis, source.point().axis_quantities()[axis], *value)
+                .unwrap();
+        }
+    }
+    point
+}
+fn attach_henry(
+    c: CyanidationCharge,
+    rate: f64,
+    gas: f64,
+    kla: f64,
+    source: OxygenHenrySource,
+    context: QueryPoint,
+) -> std::result::Result<AeratedGoldCyanidation, GasTransferError> {
+    let batch = GoldCyanidationBatch::new(
+        GoldCyanidation::from_card(system(false), "uncomplexed-cyanide", card(rate)).unwrap(),
+        c,
+        QueryPoint::new(),
+        options(),
+    )
+    .unwrap();
+    AeratedGoldCyanidation::from_batch(
+        batch,
+        OxygenTransfer::from_henry_source(source, transfer_card(kla)).unwrap(),
+        Amount::new(gas),
+        gas_volume(),
+        context,
+    )
+}
 fn gas_volume() -> Volume {
     // K=1 and n_ref=1 make D_equilibrium=G; this is a manufactured partition.
     Volume::new(UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * TEMPERATURE / P0)
 }
+
+#[test]
+fn measured_henry_uses_physical_volume_and_matches_finite_exchange_in_both_directions() {
+    for (liquid, gas) in [(0.01, 0.25), (0.24, 0.01)] {
+        let source = measured_source(TEMPERATURE);
+        let context = henry_context(&source);
+        let source_hash = source.pack_hash();
+        let mut c = charge(1.0);
+        c.dissolved_oxygen = Amount::new(liquid);
+        // Deliberately unequal: Hcp uses physical volume, never activity amount.
+        c.solution_volume = Volume::new(2.0);
+        c.amount_at_unit_activity = Amount::new(7.0);
+        let mut coupled = attach_henry(c, 0.0, gas, 0.7, source, context).unwrap();
+        close(
+            coupled.state().equilibrium_dissolved_oxygen.value(),
+            2.0 * gas,
+            2e-15,
+        );
+        assert!(coupled.transfer_model().equilibrium().is_none());
+        let answer = coupled
+            .advance(Time::new(0.4), true, tight(), || false)
+            .unwrap();
+        // Hcp*R*T*V_liquid/V_gas = 2; lambda=kLa*(1+2).
+        let total = liquid + gas;
+        let equilibrium = total * 2.0 / 3.0;
+        let expected = equilibrium + (liquid - equilibrium) * (-0.7_f64 * 3.0 * 0.4).exp();
+        close(
+            answer.state.solution.dissolved_oxygen.value(),
+            expected,
+            3e-10,
+        );
+        close(answer.state.gas_oxygen.value(), total - expected, 3e-10);
+        assert_eq!(
+            answer.interval_oxygen_transfer.value().is_sign_positive(),
+            expected > liquid
+        );
+        let retained = answer.transfer_model().henry_source().unwrap();
+        assert_eq!(retained.pack_hash(), source_hash);
+        let actual = answer.state.henry_answer.as_ref().unwrap();
+        retained
+            .pack()
+            .claims()
+            .verify_receipt(&actual.receipt)
+            .unwrap();
+        assert_eq!(actual.receipt.selected, retained.answer().receipt.selected);
+        assert_eq!(
+            actual.evidence.value.uncertainty,
+            UncertaintyModel::Unstated
+        );
+        assert_eq!(
+            actual.receipt.axis_quantities[TEMPERATURE_AXIS],
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AbsoluteTemperature,
+                ValueForm::Static
+            ))
+        );
+        conserved(&answer);
+    }
+}
+
+#[test]
+fn direct_henry_couples_reaction_and_retains_partitioned_clock_and_doses() {
+    let source = measured_source(TEMPERATURE);
+    let context = henry_context(&source);
+    let mut c = charge(1.0);
+    c.dissolved_oxygen = Amount::new(0.0001);
+    let mut measured = attach_henry(c, 4.0, 0.25, 1.0, source, context).unwrap();
+    let mut gibbs = bath(0.0001, 0.25, 4.0, 1.0);
+    let mut partitioned = measured.clone();
+    let answer = measured
+        .advance(Time::new(0.5), true, tight(), || false)
+        .unwrap();
+    let reference = gibbs
+        .advance(Time::new(0.5), true, tight(), || false)
+        .unwrap();
+    assert!(answer.state.solution.gold_dissolved.value() > 4.0 * 0.0001);
+    close(
+        answer.state.solution.gold_dissolved.value(),
+        reference.state.solution.gold_dissolved.value(),
+        3e-10,
+    );
+    close(
+        answer.state.solution.free_cyanide.value(),
+        reference.state.solution.free_cyanide.value(),
+        3e-10,
+    );
+    partitioned
+        .advance(Time::new(0.2), true, tight(), || false)
+        .unwrap();
+    let split = partitioned
+        .advance(Time::new(0.3), true, tight(), || false)
+        .unwrap();
+    close(
+        split.state.solution.gold_dissolved.value(),
+        answer.state.solution.gold_dissolved.value(),
+        3e-10,
+    );
+    assert_eq!(split.state.solution.elapsed, Time::new(0.5));
+    let before_dose = measured.state().clone();
+    measured.dose_oxygen(Amount::new(0.1), || false).unwrap();
+    close(
+        measured.state().gas_oxygen.value(),
+        before_dose.gas_oxygen.value() + 0.1,
+        1e-15,
+    );
+    assert_eq!(
+        measured.state().solution.elapsed,
+        before_dose.solution.elapsed
+    );
+    assert_eq!(
+        measured.state().solution.dissolved_oxygen,
+        before_dose.solution.dissolved_oxygen
+    );
+    let stopped = measured
+        .advance(Time::new(0.1), false, tight(), || false)
+        .unwrap();
+    assert_eq!(stopped.interval_oxygen_transfer.value(), 0.0);
+    conserved(&stopped);
+    let before = measured.clone();
+    assert!(matches!(
+        measured.advance(Time::new(0.1), true, tight(), || true),
+        Err(GasTransferError::Cyanidation(CyanidationError::Cancelled))
+    ));
+    unchanged_aeration(&measured, &before);
+    conserved(&answer);
+}
+
+#[test]
+fn measured_henry_admits_actual_temperature_and_all_source_flags() {
+    let wrong_temperature = measured_source(TEMPERATURE + 1.0);
+    let context = henry_context(&wrong_temperature);
+    assert!(attach_henry(charge(1.0), 0.0, 0.25, 1.0, wrong_temperature, context).is_err());
+    let source = measured_source(TEMPERATURE);
+    assert!(
+        attach_henry(
+            charge(1.0),
+            0.0,
+            0.25,
+            1.0,
+            source.clone(),
+            QueryPoint::new()
+        )
+        .is_err()
+    );
+    for (axis, value) in [
+        ("source-solvent-pure-water", 0.0),
+        ("source-henry-infinite-dilution", 0.0),
+        ("source-solute-molecular-oxygen", 0.0),
+        ("engineering-reference-model", 0.0),
+        ("source-specimen-qualified", 1.0),
+    ] {
+        let context = henry_context(&source)
+            .with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)
+            .unwrap();
+        assert!(
+            attach_henry(charge(1.0), 0.0, 0.25, 1.0, source.clone(), context).is_err(),
+            "accepted altered {axis}"
+        );
+    }
+}
+
+#[test]
+fn measured_henry_refuses_wrong_conventions_unowned_flags_and_dynamic_source_axes() {
+    let point = henry_point(TEMPERATURE);
+    for (dims, observed) in [(Dims::NONE, true), (HenrySolubilityCp::DIMS, false)] {
+        assert!(
+            OxygenHenrySource::from_pack(
+                henry_pack(&point, dims, observed),
+                point.clone(),
+                ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly)
+            )
+            .is_err()
+        );
+    }
+    // Query flags cannot manufacture source-owned identity or qualification.
+    let mut incomplete = QueryPoint::new();
+    for (axis, value) in point.axes() {
+        if axis != "source-specimen-qualified" {
+            incomplete = incomplete
+                .with_quantity(axis, point.axis_quantities()[axis], *value)
+                .unwrap();
+        }
+    }
+    assert!(
+        OxygenHenrySource::from_pack(
+            henry_pack(&incomplete, HenrySolubilityCp::DIMS, true),
+            point.clone(),
+            ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly)
+        )
+        .is_err()
+    );
+    for (axis, dims) in [
+        (PARTIAL_PRESSURE_AXIS, Pressure::DIMS),
+        (OXYGEN_AXIS, AmountConcentration::DIMS),
+        ("ionic-strength", AmountConcentration::DIMS),
+    ] {
+        let dynamic = point
+            .clone()
+            .with_quantity(axis, QuantitySpec::dimensional(dims), 1.0)
+            .unwrap();
+        assert!(
+            OxygenHenrySource::from_pack(
+                henry_pack(&dynamic, HenrySolubilityCp::DIMS, true),
+                dynamic,
+                ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly)
+            )
+            .is_err(),
+            "accepted unsupported dynamic axis {axis}"
+        );
+    }
+}
+
 fn partition() -> IdealGasLiquidPartition {
     partition_with_atoms(2)
 }
@@ -220,6 +555,7 @@ fn independent_closed_gas_relaxation_has_both_transfer_signs_and_no_invented_rea
     }
     let equilibrium = transfer(1.0)
         .equilibrium()
+        .unwrap()
         .equilibrium_aqueous_amount(Pressure::new(P0 * 0.5), Amount::new(1.0))
         .unwrap();
     let mut stationary = bath(equilibrium.value(), 0.5, 0.0, 1.0);

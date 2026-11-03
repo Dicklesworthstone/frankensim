@@ -5,13 +5,15 @@
 `cyanide_leach::gas_transfer::AeratedGoldCyanidation` attaches a finite,
 fixed-volume ideal oxygen headspace to the original admitted cyanidation bath.
 The original charge, source-backed acid/base families, empirical dissolution
-law, reaction progress and absolute clock survive attachment. The original
-reaction-network owner joins the exact O2 species definitions; matching labels
-alone cannot admit a different molecular formula. Thermochemical references
-must share temperature, reference pressure and elemental convention.
+law, reaction progress and absolute clock survive attachment. For the Gibbs
+partition route, the original reaction-network owner joins exact O2 species
+definitions; matching labels alone cannot admit a different molecular formula.
+Those thermochemical references must share temperature, reference pressure and
+elemental convention.
 
-`OxygenTransfer` combines the original `IdealGasLiquidPartition` with a distinct
-`local-oxygen-gas-liquid-transfer` source card declaring kLa in inverse seconds.
+`OxygenTransfer` binds either the original `IdealGasLiquidPartition` or a
+measured `OxygenHenrySource` to a separate `local-oxygen-gas-liquid-transfer`
+source card declaring kLa in inverse seconds.
 At each stage, current gas stock supplies ideal partial pressure and hence
 equilibrium dissolved amount D*. The explicit local law is `J=kLa*(D*-D)`.
 With original gold rate r, the coupled balances are `dx/dt=r`,
@@ -20,6 +22,20 @@ gas-to-liquid transfer. Thus oxygen supply changes while reaction consumes it.
 An explicit contact switch stops exchange without stopping dissolved-oxygen
 consumption. Metered `dose_oxygen` calls add actual O2 to the gas stock between
 advances and retain a separate cumulative input account.
+
+`OxygenHenrySource::from_pack` resolves an observation-backed Hcp claim in
+mol/(m3 Pa), retaining the original pack, content hash, typed query and receipt.
+The selected claim itself must declare semantic absolute temperature and the
+five molecular-O2/pure-water/infinite-dilution/engineering-reference/unqualified-
+specimen flags. Unsupported additional source axes are refused. Each stage
+requeries the pinned claim using actual temperature and all declared flags;
+its equilibrium amount is `Hcp*p_O2*V_liquid`, with physical liquid volume
+independent of the activity-reference amount. The accepted state retains
+`henry_answer`. This route supplies no formation Gibbs data or elemental
+reference convention: `equilibrium()` returns `None`, while `henry_source()`
+returns the original source. Applying the pure-water datum to a cyanide liquor
+is an explicit engineering approximation and supplies no salinity correction,
+kLa or ore kinetics.
 
 Bounded RK4 full/two-half trials retain the positive two-half solution without
 clipping or correcting balances. Difference/15 is measured in the stated

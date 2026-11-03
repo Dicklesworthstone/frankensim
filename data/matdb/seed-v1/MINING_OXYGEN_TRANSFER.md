@@ -150,3 +150,65 @@ Au/CN/oxygen/charge residuals. The final gas plus liquid plus consumed oxygen
 matches the original plus metered 0.000301 mol oxygen account. The example
 does not infer air purity, bubble hydrodynamics, heat feedback, competing
 cyanide complexes or carbon adsorption chemistry.
+
+## Use measured oxygen solubility in the coupled leach
+
+`oxygen-water-henry-sander2023-rettich2000` supplies the directly measured
+oxygen-in-water reference **Hcp = 1.3e-5 mol/(m3 Pa) at 298.15 K**, using the
+Rettich, Battino and Wilhelm (2000) row in
+[Sander's normalized oxygen compilation](https://henrys-law.org/henry/casrn/7782-44-7).
+The original measurement paper is
+[J. Chem. Thermodynamics 32, 1145–1156](https://doi.org/10.1006/jcht.1999.0581);
+the compilation is [Sander (2023)](https://doi.org/10.5194/acp-23-10901-2023).
+The imported datum is one rounded reference point, with `Unstated` uncertainty.
+It does not supply kLa, a finite-pressure validity range, a temperature curve,
+or a saline/slurry correction.
+
+`gas_transfer::OxygenHenrySource::from_pack` resolves the original typed
+`henry_molar_solubility` claim and retains its complete pack, hash, typed query,
+answer and replayable receipt. `OxygenTransfer::from_henry_source` connects it
+to the same finite gas/liquid/reaction solver and a separately supplied kLa
+card. This route does not need oxygen formation Gibbs profiles or invent an
+elemental reference convention. The existing `from_card` Gibbs route remains
+available; `equilibrium()` returns `Some` for that route and `None` for a
+measured Henry source, which is accessible through `henry_source()`.
+
+The IUPAC amount-concentration/partial-pressure convention gives
+
+```text
+p_O2 = n_gas*R*T/V_gas
+c_O2_equilibrium = Hcp*p_O2
+n_O2_equilibrium = Hcp*p_O2*V_liquid
+```
+
+The multiplier is the physical solution volume, independent of the solution's
+amount-at-unit-activity basis. The selected claim must own the molecular-O2,
+pure-water, infinite-dilution, engineering-reference and unqualified-specimen
+flags. The consumer admits only that declared reference context plus typed
+temperature. A claim that additionally depends on pressure, concentration,
+ionic strength or another unsupported coordinate is refused. Every numerical
+stage re-queries the same original claim with the actual solution temperature
+and all five actual declared flags, preserving the source's semantic kelvin
+descriptor. Each accepted state carries its resulting `henry_answer` receipt.
+
+Pure-water infinite-dilution solubility applied to a cyanide-bearing solution is
+an **explicit engineering reference assumption**, not electrolyte calibration.
+The example prints that assumption and keeps its ore rate, kLa and inventory
+choices visibly synthetic. Compile the new profile and select this route:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/oxygen-water-henry-sander2023-rettich2000/manifest.tsv \
+  --out "$aerated_pack_dir/oxygen-water-henry-sander2023-rettich2000.fsmatpk"
+cargo run -p fs-material --example aerated_gold_leach -- \
+  --materials "$aerated_pack_dir" \
+  --henry-pack "$aerated_pack_dir/oxygen-water-henry-sander2023-rettich2000.fsmatpk"
+```
+
+This option loads only the five NBS cyanide/acid/base profiles from the example's
+list, followed by the independent measured Henry pack. It exercises the same
+finite-headspace, contact-stop, metered-dose and restart sequence, printing
+the actual Hcp receipt alongside the chemical and oxygen-accounting results.
+Consumer tests independently check finite exchange in both directions with
+unequal solution-volume/activity bases, coupled reaction, retained clock and
+dose accounts, receipt replay, and original source/context refusals.

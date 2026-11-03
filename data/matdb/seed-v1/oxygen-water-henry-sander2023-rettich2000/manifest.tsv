@@ -1,0 +1,13 @@
+frankensim.matdb-manifest.v3
+pack_id	oxygen-water-henry-sander2023-rettich2000
+redistribution	permitted	Attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Rolf Sander (2023), Compilation of Henry's law constants (version 5.0.0) for water as solvent, Atmos. Chem. Phys. 23, 10901-12440, doi:10.5194/acp-23-10901-2023, oxygen entry CAS 7782-44-7, measured-data row attributed to Rettich, Battino and Wilhelm (2000), J. Chem. Thermodyn. 32, 1145-1156, doi:10.1006/jcht.1999.0581; normalized source table https://henrys-law.org/henry/casrn/7782-44-7; accessed 2026-11-03
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	oxygen-water-reference	properties.tsv	material-tsv-v1
+property	henry	henry_molar_solubility	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	water	source-solvent-pure-water	dimensional
+axis	dilute	source-henry-infinite-dilution	dimensional
+axis	oxygen	source-solute-molecular-oxygen	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional
