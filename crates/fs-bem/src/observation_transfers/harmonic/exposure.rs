@@ -33,6 +33,17 @@ pub use surface::{
     PreparedHarmonicSurfacePower,
 };
 
+mod momentum;
+pub use momentum::{
+    HarmonicMomentumLimits, HarmonicWaveMomentumFlux, HarmonicWaveMomentumTransfer,
+    PreparedHarmonicSurfaceWaveMomentum,
+};
+
+mod volume;
+pub use volume::{
+    HarmonicVolumeQuadrature, HarmonicWaveMomentumStorage, PreparedHarmonicVolumeWaveMomentum,
+};
+
 /// Bounds the deterministic in-place sort used for frequency grouping.
 pub const MAX_EXPOSURE_LINES: usize = 4096;
 /// Empty factors count too: an authored factor bank must be bounded.
@@ -147,6 +158,9 @@ pub struct PreparedHarmonicExposure<'a> {
     factors: Vec<Bank>,
     workspace_bytes: usize,
     receiver_frequency_pairs: usize,
+    // Every original frequency owner must authorize nondispersive wave stress;
+    // the reference medium alone cannot authorize a relaxing/dark line.
+    wave_momentum: bool,
 }
 
 /// Complete observation; identities and source clock borrow the immutable owner.
@@ -339,6 +353,7 @@ impl<'a> PreparedHarmonicExposure<'a> {
             .ok_or_else(overflow)?;
         admit(workspace_bytes, limits.maximum_workspace_bytes)?;
 
+        let mut wave_momentum = reference.radiation_momentum;
         for bank in core::iter::once(mean).chain(input_factors.iter().copied()) {
             for line in bank {
                 poll(&mut cancelled)?;
@@ -353,6 +368,7 @@ impl<'a> PreparedHarmonicExposure<'a> {
                         "BEM exposure line belongs to a different physical owner",
                     ));
                 }
+                wave_momentum &= owner.radiation_momentum;
                 owner.factors(line.coefficients, 1)?;
             }
         }
@@ -381,6 +397,7 @@ impl<'a> PreparedHarmonicExposure<'a> {
             factors,
             workspace_bytes,
             receiver_frequency_pairs: receivers * actual_pairs,
+            wave_momentum,
         })
     }
 

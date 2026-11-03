@@ -488,6 +488,9 @@ pub use momentum::{HarmonicMomentumFlux, PreparedHarmonicSurfaceMomentum};
 
 mod exposure;
 pub use exposure::{
+    HarmonicMomentumLimits, HarmonicVolumeQuadrature, HarmonicWaveMomentumFlux,
+    HarmonicWaveMomentumStorage, HarmonicWaveMomentumTransfer,
+    PreparedHarmonicSurfaceWaveMomentum, PreparedHarmonicVolumeWaveMomentum,
     HarmonicAveragedField, HarmonicExposureFactorStatistics, HarmonicExposureLimits,
     HarmonicExposureLine, HarmonicExposureMoments, HarmonicPressureArrayLimits,
     HarmonicPressureChannel, HarmonicPressureChannelMoments, HarmonicPressureTap,

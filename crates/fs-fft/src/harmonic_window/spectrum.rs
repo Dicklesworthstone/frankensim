@@ -8,6 +8,7 @@ use super::*;
 
 mod causal;
 pub use causal::HarmonicCausalIntegral;
+mod increment;
 mod ripple;
 
 /// Hard bound on generated tones BEFORE frequency coalescing.
@@ -404,25 +405,9 @@ impl PreparedHarmonicProductSpectrum {
     pub fn evaluate_cancellable(
         &self,
         time_s: f64,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<f64, ProductSpectrumError> {
-        spectrum_poll(&mut cancelled)?;
-        if !time_s.is_finite() {
-            return Err(WindowError::InvalidWindow.into());
-        }
-        let mut sum = self.dc;
-        for (index, tone) in self.tones.iter().enumerate() {
-            if index % 64 == 0 {
-                spectrum_poll(&mut cancelled)?;
-            }
-            let omega = tone.angular_frequency_rad_s;
-            let angle = checked(omega * Dd::from_f64(time_s))?;
-            let (real, imaginary) = proper_phase(angle);
-            sum =
-                checked(sum + checked(tone.amplitude[0] * real - tone.amplitude[1] * imaginary)?)?;
-        }
-        spectrum_poll(&mut cancelled)?;
-        spectrum_result(sum)
+        spectrum_result(self.evaluate_from_clock_dd_cancellable(Dd::from_f64(time_s), cancelled)?)
     }
 
     pub fn mean(&self, window: HarmonicWindow) -> Result<f64, ProductSpectrumError> {

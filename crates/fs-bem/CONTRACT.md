@@ -2720,3 +2720,45 @@ monopole/dipole fields on near and far spheres. The circular dipole retains the
 expected angular momentum rate `P/omega`; translated moment origins retain the
 physical orbital contribution. Refusal, work boundaries, empty surfaces and
 late cancellation preserve atomic publication.
+
+### Finite-time acoustic wave-momentum transport and storage
+
+`PreparedHarmonicSurfaceWaveMomentum` contracts the original prepared exposure
+into six signed spectra of S dA and (x-origin) cross S dA, with
+S = (p^2/(2 rho c^2) - rho |u|^2/2) I + rho u u.
+It retains deterministic/real sum-frequency terms and proper beat terms,
+spatial/source DD cancellation, exact unweighted interval transport and the
+original DD source clock. Preparation contracts space before scalar spectral
+storage; queries allocate no memory and perform no BEM solve.
+
+`PreparedHarmonicVolumeWaveMomentum` uses nonnegative authored
+`HarmonicVolumeQuadrature` weights at original receivers to retain p*u/c^2
+and its moment about the same declared origin. Endpoint storage and endpoint
+changes are distinct from normalized detector averages. Changes use analytic
+tone increments: constant storage cancels before summation, and neither a
+short interval nor a low clock component is lost by first forming an f64 end
+time. Surface and volume observations reuse the same six-channel compiler,
+factor laws and scalar spectral owner, with explicit work/storage admission.
+Zero area/volume entries retain their budget and input checks but do not create
+irrelevant overflow through a zero weighted lever arm.
+
+All original owners, including silent lines and a dark reference, must
+authorize homogeneous nondispersive rest-medium wave momentum. In a
+source-free irrotational region the declared current obeys
+d_t(p*u/c^2) + div(S) = 0. It is scalar-potential wave pseudomomentum, not total
+fluid mechanical momentum. Finite-window body impulse, second-order mean
+pressure/flow, closed geometry, matching surface/volume cubature and interior
+source terms are not inferred. See Stone, Phys. Rev. E 62, 1341 (2000),
+<https://arxiv.org/abs/cond-mat/9909315>, sections IV-VII. Original field and
+quadrature uncertainty remains unresolved.
+
+Eleven production-source native surface/volume tests pass. Independent
+real-time/ensemble contractions check mixed real/proper stress and stored
+momentum; whole-cycle parity, orientation/frame/origin covariance, subperiod
+standing/traveling waves, weak cancellation, DD clock subdivision and atomic
+admission/cancellation are exercised. A two-frequency plane-wave closed box
+checks storage change plus outward transport with 4/8/16/32 midpoint volume
+quadrature; its residual converges quadratically rather than being declared
+zero by construction. Six further native fs-fft tests exercise the shared
+endpoint/increment implementation. No full BEM solve, workspace build,
+mechanical-force inference or experimental validation is claimed.

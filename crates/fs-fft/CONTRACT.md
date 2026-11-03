@@ -637,3 +637,27 @@ the same native run as the 13 original-owner nonlinear thermal regressions:
 cases above. The shared math is exercised directly, without nominal numerical
 or constitutive substitutes. Native rustfmt passed; the scoped executable is
 not the full repository quality gate.
+
+### DD-clock observable endpoints and storage increments
+
+`PreparedHarmonicProductSpectrum::evaluate_from_clock_dd` retains the original
+source epoch and low result components. `increment_from_clock_dd` computes
+f(start+duration)-f(start) tone by tone, using separate source and half-duration
+phase rotations and -2i*sin(omega*duration/2). DC cancels algebraically before
+summation; no rounded endpoint subtraction or f64 start+duration is formed.
+The existing f64 evaluator shares the same endpoint implementation.
+
+Duration must be finite and nonnegative; zero duration yields exact zero.
+Nonfinite or unrepresentable phases, including a nonzero phase increment lost
+to underflow, refuse. Work is O(distinct tones), allocation-free and cancellable.
+The original deterministic transcendental and DD finite-range limits remain;
+this is not an interval or near-null relative-error certificate. An endpoint
+change is neither a normalized detector average nor an input time integral.
+
+Six native tests pass against the complete production harmonic-window/product
+modules: independent multitone endpoint values, short intervals beside a huge
+DC and unresolved f64 epoch, DD-clock subdivision, retained low storage and
+f64 continuation, zero/invalid/underflow cases, and cancellation/replay.
+The finite-volume acoustic observer consumes these endpoints and changes in
+its separate surface/volume conservation tests. Full workspace validation was
+not executed in the delivery environment.
