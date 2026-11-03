@@ -6,7 +6,7 @@
 
 use super::{FlueInputError, Rows, bad, poll};
 use crate::bernoulli_aperture::contraction::ContractionSpec;
-use crate::flue_loop::forced_jet::ForcedJetSpec;
+use crate::flue_loop::forced_jet::{ForcedJetSpec, JetExitLaw};
 use crate::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
 use crate::flue_loop::{FlueError, FlueVoice};
 use fs_exec::CancelGate;
@@ -125,7 +125,7 @@ impl FlueFlowInput {
 pub(crate) struct FlueJetInput {
     card_centreline: bool,
     transfer: Option<NolleSpec>,
-    response: Option<ForcedJetSpec>,
+    response: Option<(ForcedJetSpec, JetExitLaw)>,
 }
 
 impl FlueJetInput {
@@ -179,8 +179,27 @@ impl FlueJetInput {
                 spacing: row.scalar()?,
                 window: row.scalar()?,
             };
+            let exit = match row.fields.next() {
+                None => JetExitLaw::Kutta,
+                Some("exit") => match row.fields.next() {
+                    Some("kutta") => JetExitLaw::Kutta,
+                    Some("measured") => JetExitLaw::Measured,
+                    _ => {
+                        return Err(bad(
+                            row.line,
+                            "jet_response exit must be kutta or measured",
+                        ));
+                    }
+                },
+                Some(_) => {
+                    return Err(bad(
+                        row.line,
+                        "jet_response requires forced-bickley SPACING WINDOW [exit kutta|measured]",
+                    ));
+                }
+            };
             row.end()?;
-            Some(spec)
+            Some((spec, exit))
         } else {
             None
         };
@@ -222,10 +241,10 @@ impl FlueJetInput {
             None => voice,
         };
         match self.response {
-            Some(spec) => {
+            Some((spec, exit)) => {
                 poll(gate)?;
                 let voice = voice
-                    .with_forced_jet(spec, held_pressure_pa)
+                    .with_forced_jet_exit(spec, exit, held_pressure_pa)
                     .map_err(FlueInputError::Physics)?;
                 poll(gate)?;
                 Ok(voice)

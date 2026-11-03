@@ -19,6 +19,10 @@
 //! p. 69): the centre speed from Bernoulli and `b` from the momentum conserved between the
 //! exit and the jet.
 //!
+//! The exit receptivity is Fletcher & Thwaites' Kutta condition unless the row ends `exit
+//! measured` ([`JetExitLaw::Measured`]): then the jet issues displaced by `(h / U0) v`, in phase,
+//! as de la Cuadra measured, and nothing is carried (Kutta's `1/omega` seed is absent).
+//!
 //! The station is `cut-up / b`. The step response is integrated once, at the Reynolds number
 //! `U0 b / nu` of the reference (held) pressure. At variable speed its clock is
 //! `tau(t) = integral U0(t) / b dt`: each accepted interval retains its own advance.
@@ -47,7 +51,8 @@ use std::sync::{Mutex, PoisonError};
 
 use fs_aeroac::AeroacError;
 use fs_aeroac::forced_jet::{
-    FRONT_MARGIN, ForcedJetResolution, JetStepResponse, bickley_step_response,
+    ExitReceptivity, FRONT_MARGIN, ForcedJetResolution, JetStepResponse,
+    bickley_step_response_with_exit,
 };
 
 use crate::bernoulli_aperture::developing::DevelopingSlitState;
@@ -120,18 +125,25 @@ pub const RETAINED_RESPONSES: usize = 32;
 // Integrated responses by their exact inputs. The integration is deterministic and its bits do
 // not depend on the worker count, so a voice built again from the same flue, gas and row reuses
 // the identical response instead of integrating it again.
-static RESPONSES: Mutex<Vec<([u64; 5], JetStepResponse)>> = Mutex::new(Vec::new());
+static RESPONSES: Mutex<Vec<([u64; 6], JetStepResponse)>> = Mutex::new(Vec::new());
 
-fn integrated(station: f64, resolution: &ForcedJetResolution)
+fn integrated(station: f64, resolution: &ForcedJetResolution, exit: ExitReceptivity)
     -> Result<JetStepResponse, AeroacError>
 {
+    // A measured exit's R is positive, so its bits are never the Kutta key's 0.
+    let exit_key = match exit {
+        ExitReceptivity::Kutta => 0,
+        ExitReceptivity::Measured { displacement_per_velocity } => {
+            displacement_per_velocity.to_bits()
+        }
+    };
     let key = [station.to_bits(), resolution.spacing.to_bits(), resolution.window.to_bits(),
-        resolution.reynolds.to_bits(), resolution.streamwise_cells as u64];
+        resolution.reynolds.to_bits(), resolution.streamwise_cells as u64, exit_key];
     let retained = || RESPONSES.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((_, step)) = retained().iter().find(|(k, _)| *k == key) {
         return Ok(step.clone());
     }
-    let step = bickley_step_response(station, resolution)?;
+    let step = bickley_step_response_with_exit(station, resolution, exit)?;
     let mut cache = retained();
     if !cache.iter().any(|(k, _)| *k == key) {
         if cache.len() == RETAINED_RESPONSES {
@@ -152,6 +164,34 @@ pub struct ForcedJetSpec {
     pub window: f64,
 }
 
+/// Optional tail `exit LAW` of the card row `jet_response forced-bickley SPACING WINDOW`: how the
+/// mouth's transverse velocity enters the jet at the exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JetExitLaw {
+    /// No tail (or `exit kutta`): Fletcher & Thwaites' zero displacement and zero slope.
+    #[default]
+    Kutta,
+    /// `exit measured`: the jet issues displaced by `eta(0, t) = (h / U_j) v_ac(t)`, in phase, with
+    /// no carried term (Terrien, Vergez, de la Cuadra and Fabre, arXiv 1402.3143, Eq. 1, after de
+    /// la Cuadra; thesis, Stanford 2005, sec. 2.3.5, Fig. 2.28 and sec. 4.3.3). `h` is the flue
+    /// height (the lip opening of a lip jet) and `U_j` the jet's central speed, which is the
+    /// Bickley centre speed `U0` here, so `R = h / b` in `b / U0` units.
+    Measured,
+}
+
+impl JetExitLaw {
+    /// The solver's exit receptivity for a Bickley half-width over flue height `b / h`.
+    #[must_use]
+    pub fn receptivity(self, half_width_over_height: f64) -> ExitReceptivity {
+        match self {
+            Self::Kutta => ExitReceptivity::Kutta,
+            Self::Measured => ExitReceptivity::Measured {
+                displacement_per_velocity: 1.0 / half_width_over_height,
+            },
+        }
+    }
+}
+
 /// One accepted physical-time velocity interval and its convective-clock advance.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct JetInterval {
@@ -164,6 +204,7 @@ struct JetInterval {
 #[derive(Debug, Clone)]
 pub struct ForcedJetKernel {
     spec: ForcedJetSpec,
+    exit_law: JetExitLaw,
     step: JetStepResponse,
     half_width_m: f64,
     centre_over_bulk: f64,
@@ -219,6 +260,28 @@ impl ForcedJetKernel {
         max_taps: usize,
         sample_period_s: f64,
     ) -> Result<Self, &'static str> {
+        Self::new_with_exit(spec, JetExitLaw::Kutta, exit, flue_height_m, cut_up_m,
+            kinematic_viscosity_m2_s, reference_bulk_m_s, minimum_bulk_m_s, max_taps,
+            sample_period_s)
+    }
+
+    /// [`Self::new`] under the named exit law.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_exit(
+        spec: ForcedJetSpec,
+        exit_law: JetExitLaw,
+        exit: JetExit,
+        flue_height_m: f64,
+        cut_up_m: f64,
+        kinematic_viscosity_m2_s: f64,
+        reference_bulk_m_s: f64,
+        minimum_bulk_m_s: f64,
+        max_taps: usize,
+        sample_period_s: f64,
+    ) -> Result<Self, &'static str> {
         let (width_ratio, centre_over_bulk) = (exit.half_width_over_height, exit.centre_over_bulk);
         let half_width_m = width_ratio * flue_height_m;
         let inputs = [
@@ -254,7 +317,8 @@ impl ForcedJetKernel {
             reynolds,
             workers,
         };
-        let step = integrated(station, &resolution).map_err(refusal)?;
+        let step = integrated(station, &resolution, exit_law.receptivity(width_ratio))
+            .map_err(refusal)?;
         let slowest = step
             .hat_weights(
                 centre_over_bulk * minimum_bulk_m_s,
@@ -268,6 +332,7 @@ impl ForcedJetKernel {
         }
         Ok(Self {
             spec,
+            exit_law,
             step,
             half_width_m,
             centre_over_bulk,
@@ -293,6 +358,12 @@ impl ForcedJetKernel {
     #[must_use]
     pub const fn spec(&self) -> ForcedJetSpec {
         self.spec
+    }
+
+    /// The exit law this response was integrated under.
+    #[must_use]
+    pub const fn exit_law(&self) -> JetExitLaw {
+        self.exit_law
     }
 
     /// The integrated step response.

@@ -33,6 +33,18 @@
 //! - Output: the centreline displacement relative to the nozzle at station
 //!   `X`, `eta = xi + eta_dev`, with `d_t eta_dev + d_x eta_dev = v(x, 0)`
 //!   and `eta_dev(0) = -xi`.
+//! - Opt-in, by name ([`ExitReceptivity::Measured`]): the measured exit
+//!   receptivity in place of the Kutta seed. The jet issues displaced by
+//!   `eta(0, t) = R v_ac(t)`, in phase, with `R = (h / U_j)` in `b / U0`
+//!   units (Terrien, Vergez, de la Cuadra and Fabre, arXiv 1402.3143, Eq. 1,
+//!   "according to the empirical model proposed by de la Cuadra"; de la
+//!   Cuadra, thesis, Stanford 2005, sec. 2.3.5 and Fig. 2.28: V_ac and eta_0
+//!   in phase). Fletcher's `1/omega` and `pi` phase are "not observed" there
+//!   (sec. 4.3.3), so no carried term enters: `psi(0, y) = -R v_ac U`, the
+//!   exit's own transverse velocity stays zero (the zero-slope half kept),
+//!   and the output is `eta = eta_dev` with `eta_dev(0) = R v_ac`. Growth and
+//!   convection remain this solve's. The Kutta law is the default and its
+//!   arithmetic is unchanged.
 //!
 //! Numerics: third-order upwind-biased streamwise transport (second-order
 //! closures at both ends), the discrete second difference of `U` for `U''`
@@ -57,6 +69,52 @@ use fs_math::det;
 /// Smallest clearance [b] between the disturbance front at the end of the
 /// window and the downstream wall.
 pub const FRONT_MARGIN: f64 = 8.0;
+
+/// How the acoustic transverse velocity enters the jet at the flue exit.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ExitReceptivity {
+    /// Fletcher & Thwaites' zero displacement and zero slope: the jet issues
+    /// undisplaced while the fluid is carried by `xi = int v_ac dt`.
+    #[default]
+    Kutta,
+    /// The measured receptivity (module documentation): the jet issues
+    /// displaced by `R v_ac`, in phase, with no carried term; `R` is the exit
+    /// displacement per exit transverse velocity [b per v/U0], `h / U_j` in
+    /// jet units.
+    Measured {
+        /// `R` [b/U0].
+        displacement_per_velocity: f64,
+    },
+}
+
+impl ExitReceptivity {
+    /// The exit shift `s` (`psi(0, y) = s U`, `eta_dev(0) = -s`), the exit's
+    /// imposed transverse velocity and the carried displacement added to the
+    /// output, at transverse velocity `vac` and its integral `xi`.
+    fn exit_values(self, vac: f64, xi: f64) -> (f64, f64, f64) {
+        match self {
+            Self::Kutta => (xi, vac, xi),
+            Self::Measured { displacement_per_velocity } => {
+                (-(displacement_per_velocity * vac), 0.0, 0.0)
+            }
+        }
+    }
+
+    fn validate(self) -> Result<(), AeroacError> {
+        match self {
+            Self::Kutta => Ok(()),
+            Self::Measured { displacement_per_velocity: r } => {
+                if r > 0.0 && r.is_finite() {
+                    Ok(())
+                } else {
+                    Err(AeroacError::InvalidParameter {
+                        what: "forced jet: measured exit receptivity must be positive and finite",
+                    })
+                }
+            }
+        }
+    }
+}
 
 /// Grid, window and viscosity of one forced-jet computation, in jet units.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -163,8 +221,10 @@ struct RowContext<'a> {
     cols: usize,
     rows: usize,
     h: f64,
-    vac: f64,
-    xi: f64,
+    /// The exit's imposed transverse velocity (`v_ac` under Kutta).
+    wall_v: f64,
+    /// The exit shift `s`, `psi(0, y) = s U` (`xi` under Kutta).
+    shift: f64,
     /// `1 / (Re h^2)`, absent for the inviscid jet.
     visc: Option<f64>,
 }
@@ -174,8 +234,8 @@ impl RowContext<'_> {
     fn row(&self, r: usize, prow: &[f64], deriv: &mut [f64], drow: &mut [f64]) {
         let (cols, h) = (self.cols, self.h);
         let zr = &self.z[r * cols..(r + 1) * cols];
-        let psi0 = self.xi * self.u[r];
-        let z0 = -2.0 * (prow[0] - psi0 - h * self.vac) / (h * h) - self.xi * self.upp[r];
+        let psi0 = self.shift * self.u[r];
+        let z0 = -2.0 * (prow[0] - psi0 - h * self.wall_v) / (h * h) - self.shift * self.upp[r];
         upwind(zr, z0, h, deriv);
         let half = 0.5 / h;
         for c in 0..cols {
@@ -297,6 +357,8 @@ pub struct ForcedJet {
     eta: Vec<f64>,
     time: f64,
     xi: f64,
+    vac: f64,
+    exit: ExitReceptivity,
     stage_z: Vec<f64>,
     stage_e: Vec<f64>,
     dz: Vec<f64>,
@@ -305,8 +367,17 @@ pub struct ForcedJet {
 }
 
 impl ForcedJet {
-    /// Quiescent jet at `t = 0`.
+    /// Quiescent jet at `t = 0` under the Kutta exit.
     pub fn new(resolution: ForcedJetResolution) -> Result<Self, AeroacError> {
+        Self::with_exit(resolution, ExitReceptivity::Kutta)
+    }
+
+    /// Quiescent jet at `t = 0` under the named exit receptivity.
+    pub fn with_exit(
+        resolution: ForcedJetResolution,
+        exit: ExitReceptivity,
+    ) -> Result<Self, AeroacError> {
+        exit.validate()?;
         let (nx, ny) = resolution.validate()?;
         let h = resolution.spacing;
         let cols = nx - 1;
@@ -356,6 +427,8 @@ impl ForcedJet {
             eta: vec![0.0; cols],
             time: 0.0,
             xi: 0.0,
+            vac: 0.0,
+            exit,
             stage_z: vec![0.0; rows * cols],
             stage_e: vec![0.0; cols],
             dz: vec![0.0; rows * cols],
@@ -382,8 +455,15 @@ impl ForcedJet {
         &self.eta
     }
 
-    /// Centreline displacement relative to the nozzle, `xi + eta_dev(x)` [b],
-    /// by cubic interpolation between nodes.
+    /// The exit receptivity this solver runs.
+    #[must_use]
+    pub fn exit(&self) -> ExitReceptivity {
+        self.exit
+    }
+
+    /// Centreline displacement relative to the nozzle, `xi + eta_dev(x)` [b]
+    /// (`eta_dev(x)` under the measured exit, which carries nothing), by cubic
+    /// interpolation between nodes.
     pub fn displacement_at(&self, station: f64) -> Result<f64, AeroacError> {
         let h = self.res.spacing;
         let s = station / h;
@@ -392,9 +472,10 @@ impl ForcedJet {
                 what: "forced jet: station outside the interpolation range",
             });
         }
+        let (shift, _, carried) = self.exit.exit_values(self.vac, self.xi);
         let i = s.floor() as usize;
         let f = s - i as f64;
-        let val = |n: usize| if n == 0 { -self.xi } else { self.eta[n - 1] };
+        let val = |n: usize| if n == 0 { -shift } else { self.eta[n - 1] };
         let w = [
             -f * (f - 1.0) * (f - 2.0) / 6.0,
             (f + 1.0) * (f - 1.0) * (f - 2.0) / 2.0,
@@ -402,7 +483,7 @@ impl ForcedJet {
             (f + 1.0) * f * (f - 1.0) / 6.0,
         ];
         let dev = w[0] * val(i - 1) + w[1] * val(i) + w[2] * val(i + 1) + w[3] * val(i + 2);
-        Ok(self.xi + dev)
+        Ok(carried + dev)
     }
 
     /// Advance one SSP-RK3 step of `courant * spacing`.
@@ -441,6 +522,7 @@ impl ForcedJet {
         self.time = t + dt;
         let (vac, xi) = forcing(self.time);
         self.xi = xi;
+        self.vac = vac;
         if !(vac.is_finite() && xi.is_finite() && self.eta.iter().all(|v| v.is_finite())) {
             return Err(AeroacError::NonFinite {
                 what: "forced jet: state left the finite domain",
@@ -451,11 +533,13 @@ impl ForcedJet {
 
     /// Right-hand side into `self.dz`, `self.de` (`self.psi` is the work field).
     fn rhs(&mut self, z: &[f64], e: &[f64], (vac, xi): (f64, f64)) {
+        // Under Kutta these are (xi, v_ac) themselves, so its arithmetic is unchanged.
+        let (shift, wall_v, _) = self.exit.exit_values(vac, xi);
         let (nx, cols, rows) = (self.nx, self.cols, self.rows);
         let h = self.res.spacing;
         let (u, upp, fft) = (&self.u, &self.upp, &self.fft);
         let pair = 2 * cols;
-        // Assemble h^2 times the Poisson source (the exit value psi_0 = xi U
+        // Assemble h^2 times the Poisson source (the exit value psi_0 = s U
         // moves to the right side) and transform each row pair.
         {
             let tasks: Vec<(usize, &mut [f64])> = self
@@ -474,7 +558,7 @@ impl ForcedJet {
                     for (o, zz) in row.iter_mut().zip(&z[r * cols..(r + 1) * cols]) {
                         *o = -h * h * zz;
                     }
-                    row[0] -= xi * u[r];
+                    row[0] -= shift * u[r];
                 }
                 let (a, b) = chunk.split_at_mut(cols.min(chunk.len()));
                 let b = if b.is_empty() { None } else { Some(b) };
@@ -519,8 +603,8 @@ impl ForcedJet {
                 cols,
                 rows,
                 h,
-                vac,
-                xi,
+                wall_v,
+                shift,
                 visc: self
                     .res
                     .reynolds
@@ -545,14 +629,14 @@ impl ForcedJet {
                 }
             });
         }
-        // Centreline displacement deviation: unit speed, inflow -xi; the
-        // exit streamfunction there is xi U(0) = xi.
+        // Centreline displacement deviation: unit speed, inflow -s; the
+        // exit streamfunction there is s U(0) = s.
         let prow = &self.psi[self.centre * cols..(self.centre + 1) * cols];
-        upwind(e, -xi, h, &mut self.de);
+        upwind(e, -shift, h, &mut self.de);
         let half = 0.5 / h;
         for c in 0..cols {
             let left = if c == 0 {
-                xi * self.u[self.centre]
+                shift * self.u[self.centre]
             } else {
                 prow[c - 1]
             };
@@ -571,14 +655,25 @@ pub struct JetStepResponse {
     values: Vec<f64>,
     integrals: Vec<f64>,
     resolution: ForcedJetResolution,
+    exit: ExitReceptivity,
 }
 
-/// Integrate the forced jet's unit-step response at `station` [b] over the window.
+/// Integrate the forced jet's unit-step response at `station` [b] over the window (Kutta exit).
 pub fn bickley_step_response(
     station: f64,
     resolution: &ForcedJetResolution,
 ) -> Result<JetStepResponse, AeroacError> {
-    let mut jet = ForcedJet::new(*resolution)?;
+    bickley_step_response_with_exit(station, resolution, ExitReceptivity::Kutta)
+}
+
+/// Integrate the forced jet's unit-step response at `station` [b] over the window under the
+/// named exit receptivity.
+pub fn bickley_step_response_with_exit(
+    station: f64,
+    resolution: &ForcedJetResolution,
+    exit: ExitReceptivity,
+) -> Result<JetStepResponse, AeroacError> {
+    let mut jet = ForcedJet::with_exit(*resolution, exit)?;
     jet.displacement_at(station)?;
     let dt = resolution.time_step();
     let steps = (resolution.window / dt).ceil() as usize;
@@ -602,6 +697,7 @@ pub fn bickley_step_response(
         values,
         integrals,
         resolution: *resolution,
+        exit,
     })
 }
 
@@ -662,6 +758,12 @@ impl JetStepResponse {
     #[must_use]
     pub fn resolution(&self) -> &ForcedJetResolution {
         &self.resolution
+    }
+
+    /// The exit receptivity the response was integrated under.
+    #[must_use]
+    pub fn exit(&self) -> ExitReceptivity {
+        self.exit
     }
 
     /// Zero-frequency gain of the held response, `s(window)`.

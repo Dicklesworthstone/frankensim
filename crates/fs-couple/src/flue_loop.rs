@@ -1342,8 +1342,18 @@ impl FlueVoice {
     /// unsteady windway, a non-positive reference pressure, one outside the developing
     /// windway's validity or one whose jet is below the declared minimum speed, a history
     /// longer than the budget at that minimum, or the integrator's own refusal.
-    pub fn with_forced_jet(mut self, spec: forced_jet::ForcedJetSpec, reference_pressure_pa: f64)
+    pub fn with_forced_jet(self, spec: forced_jet::ForcedJetSpec, reference_pressure_pa: f64)
         -> Result<Self, FlueError>
+    {
+        self.with_forced_jet_exit(spec, forced_jet::JetExitLaw::Kutta, reference_pressure_pa)
+    }
+
+    /// [`Self::with_forced_jet`] under the named exit law ([`forced_jet::JetExitLaw`]).
+    ///
+    /// # Errors
+    /// As [`Self::with_forced_jet`].
+    pub fn with_forced_jet_exit(mut self, spec: forced_jet::ForcedJetSpec,
+        exit_law: forced_jet::JetExitLaw, reference_pressure_pa: f64) -> Result<Self, FlueError>
     {
         if self.poisoned || self.samples != 0 || self.nolle.is_some() || self.forced.is_some()
             || self.unsteady_windway.is_some() {
@@ -1372,7 +1382,7 @@ impl FlueVoice {
         } else {
             forced_jet::JetExit::UNIFORM
         };
-        let kernel = forced_jet::ForcedJetKernel::new(spec, exit,
+        let kernel = forced_jet::ForcedJetKernel::new_with_exit(spec, exit_law, exit,
             self.geometry.flue_height_m, self.geometry.cut_up_m, self.nu, reference_bulk,
             self.minimum_jet_speed_m_s, self.max_jet_history_samples, self.dt)
             .map_err(|what| FlueError::Invalid { what })?;
@@ -1381,6 +1391,12 @@ impl FlueVoice {
             kernel.half_width_m(), kernel.centre_over_bulk(), kernel.step_response().station(),
             kernel.reynolds(), reference_pressure_pa, spec.spacing, spec.window,
             kernel.held_gain_s(reference_bulk)));
+        if let fs_aeroac::forced_jet::ExitReceptivity::Measured { displacement_per_velocity } =
+            kernel.step_response().exit()
+        {
+            self.island.provenance.push_str(&format!(
+                "; exit receptivity: measured, eta(0) = (h/U0) v in phase, R {displacement_per_velocity:.6} b per v/U0, no carried term (Terrien et al. arXiv 1402.3143 Eq. 1 after de la Cuadra 2005 sec. 2.3.5)"));
+        }
         self.forced = Some(kernel);
         Ok(self)
     }
