@@ -1,10 +1,10 @@
-//! Original source friction through simultaneous articulated impact response.
+//! Original source friction in articulated impact and loaded contact motion.
 //!
 //! The original articulated owner retains joint constraints, floating-base
 //! recoil, prescribed support reactions and every cross-contact influence.
-//! This adapter samples the same ordered interface claims as the independent
-//! rigid-body path and returns one
-//! complete mechanical/source candidate, without mutating any accepted state.
+//! These adapters sample the same ordered interface claims as the independent
+//! rigid-body path and return a complete mechanical/source candidate without
+//! mutating any accepted state.
 
 use super::impact::{SourceRigidImpactBinding, SourceRigidImpactError};
 use fs_contact::frictional_multicontact::FrictionalContactConfig;
@@ -15,6 +15,9 @@ use fs_contact::interface_binding::thermal_friction::elliptic::{
 };
 use fs_exec::CancelGate;
 use fs_mbd::articulated::FreeFloatingImpulseResponse;
+use fs_mbd::articulated::motion::prescribed::{
+    PrescribedBaseMotionError, PrescribedBaseMotionState, PrescribedBasePath,
+};
 use fs_mbd::articulated_contacts::friction::ArticulatedImpactKinematics;
 use fs_mbd::articulated_contacts::friction::elliptic::{
     ArticulatedEllipticContactResult, ArticulatedEllipticSourceError, ArticulatedImpactGeometry,
@@ -24,6 +27,15 @@ use fs_mbd::articulated_contacts::mixed::{
     MixedArticulatedContactSystem, MixedArticulatedImpulseResponse,
     resolve_mixed_articulated_elliptic_contacts_with,
 };
+use fs_mbd::articulated_contacts::step::mixed::MixedArticulatedContactPath;
+use fs_mbd::articulated_contacts::step::mixed::elliptic::{
+    MixedArticulatedEllipticContactStepResult, MixedArticulatedEllipticSourceStepError,
+    step_mixed_articulated_elliptic_contacts_with,
+};
+use fs_mbd::articulated_contacts::step::{
+    ArticulatedContactStepConfig, ArticulatedContactStepError,
+};
+use fs_mbd::articulated_contacts::trajectory::mixed::MixedArticulatedTrajectorySystem;
 use fs_mbd::articulated_contacts::{ArticulatedContactError, ArticulatedContactSystem};
 
 /// Actual incoming contact geometry and the original claims sampled there.
@@ -172,6 +184,92 @@ pub fn resolve_source_mixed_articulated_elliptic_contacts<E>(
         || gate.is_requested(),
     )?;
     Ok(SourceArticulatedImpactCandidate {
+        mechanical: result.mechanical,
+        sources,
+    })
+}
+
+/// Complete material and mechanical candidate for a loaded contact interval.
+///
+/// The native step retains every load, contact and prescribed-support reaction,
+/// the actual endpoint states and clocks, and independent impulse/work accounts.
+/// Source candidates stay private through native drift, full-path admission and
+/// final cancellation. The caller must adopt all endpoints and source histories
+/// together.
+pub struct SourceMixedArticulatedContactStepCandidate<P> {
+    /// Original native directional force/contact/drift result and path admission.
+    pub mechanical: MixedArticulatedEllipticContactStepResult<P>,
+    /// Original active material samples in native canonical contact-ID order.
+    pub sources: Vec<SourceArticulatedImpactReceipt>,
+}
+
+/// Evolve loaded free and supported mechanisms with original material friction.
+///
+/// Each active interface uses the existing source sampler exactly once, at the
+/// actual incoming tangent speed AFTER the held-load kick. The original native
+/// simultaneous contact solve, driven support paths and full-path geometry owner
+/// determine the entire candidate; no source history escapes on a later refusal.
+/// The full native boundary work includes plane and prescribed-base work.
+///
+/// Conditions, support-path and geometry callbacks must stage any external state
+/// until success. Geometry must admit the complete frozen-witness path, not just
+/// its endpoints. The source coefficient role is explicit and frozen over this
+/// first-order interval. Sampling retains existing travel/texture/history: this
+/// adapter does not integrate finite slip, infer pressure from impulse, or
+/// deposit contact/splitting loss into heat or wear.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn step_source_mixed_articulated_elliptic_contacts<P, E, SE>(
+    systems: &[MixedArticulatedTrajectorySystem<'_>],
+    contacts: &[ArticulatedImpactGeometry],
+    histories: &[SourceThermalEllipticState],
+    bindings: &[SourceRigidImpactBinding<'_>],
+    start_time_s: f64,
+    config: ArticulatedContactStepConfig,
+    mut conditions: impl FnMut(
+        &SourceThermalEllipticState,
+        &ArticulatedImpactKinematics,
+    ) -> Result<SourceFrictionConditions, SE>,
+    support_path: impl FnMut(
+        usize,
+        &PrescribedBaseMotionState,
+        f64,
+    ) -> Result<PrescribedBasePath, PrescribedBaseMotionError>,
+    admit_path: impl FnOnce(&MixedArticulatedContactPath<'_, ()>) -> Result<P, E>,
+    gate: &CancelGate,
+) -> Result<
+    SourceMixedArticulatedContactStepCandidate<P>,
+    MixedArticulatedEllipticSourceStepError<E, SourceRigidImpactError<SE>>,
+> {
+    if histories.len() != contacts.len() || bindings.len() != contacts.len() {
+        return Err(MixedArticulatedEllipticSourceStepError::Step(
+            ArticulatedContactStepError::Invalid(
+                "one original source history and binding per articulated contact required",
+            ),
+        ));
+    }
+    let markers = vec![(); contacts.len()];
+    let mut sources = Vec::new();
+    let result = step_mixed_articulated_elliptic_contacts_with(
+        systems,
+        contacts,
+        &markers,
+        start_time_s,
+        config,
+        |_, kinematics| {
+            sample_source(
+                histories,
+                bindings,
+                &mut conditions,
+                &mut sources,
+                kinematics,
+                gate,
+            )
+        },
+        support_path,
+        admit_path,
+        || gate.is_requested(),
+    )?;
+    Ok(SourceMixedArticulatedContactStepCandidate {
         mechanical: result.mechanical,
         sources,
     })

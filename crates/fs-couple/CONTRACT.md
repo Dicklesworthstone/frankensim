@@ -2615,6 +2615,32 @@ partition and requires a finite dry heat route for every evolving physical
 contact. No recording fit, invented reservoir, missing rosin data or transported
 third-body layer is supplied by this coupling.
 
+## Sourced directional force/contact/drift for mixed articulated mechanisms
+
+`friction_heat::directional::articulated::step_source_mixed_articulated_elliptic_contacts`
+connects original material-interface histories and coefficient laws to the native
+loaded mixed-tree step. Every geometrically active source is sampled once from
+actual post-load-kick tangent kinematics; inactive sources remain unqueried.
+Original ordering, claim pins, coefficient role, texture and accepted travel
+coordinates retain the existing source sampler. Native simultaneous directional
+contact, free/prescribed drift, common clocks and complete-path admission remain
+the original mechanical owners.
+
+One candidate carries actual endpoint trees and source receipts only after all
+native source, drift, endpoint, momentum, work and final-cancellation gates.
+The caller adopts them together. Complete native boundary work includes driven
+supports as well as moving planes; load support work, drift support work and
+numerical force/contact splitting remain separate. This first-order held-source
+composition does not integrate source travel or infer pressure, wear, thermal
+partition or heat from contact/splitting loss. Conditions, support-path and
+geometry callbacks must stage their external state until complete acceptance.
+
+Focused original-source regressions specify analytic post-kick speed, both joint
+recoils and actual travel, driven support work, common boosts, inactive histories,
+typed source/path refusal, terminal cancellation and deterministic retry.
+The source and tests received scoped Rustfmt parsing and API review; compilation
+and execution remain unverified in the constrained editing environment.
+
 ## Sourced directional friction in articulated impacts
 
 `friction_heat::directional::articulated::resolve_source_articulated_elliptic_contacts`
