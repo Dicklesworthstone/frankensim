@@ -157,6 +157,20 @@ impl ResolvedIsotropicElasticModuli {
         self.bulk_modulus_pa
     }
 
+    /// Admitted Mandel stiffness, preserving the selected independent moduli.
+    /// In particular, sourced K/G and E/G never round-trip through Poisson
+    /// ratio before entering a mechanical or thermal operator.
+    #[must_use]
+    pub fn stiffness_mandel_pa(&self) -> crate::Tangent6 {
+        stiffness_from_moduli(
+            self.young_modulus_pa,
+            self.poisson_ratio,
+            self.shear_modulus_pa,
+            self.bulk_modulus_pa,
+            self.parameters.members().2,
+        )
+    }
+
     /// Binds the full material state, parameter roles, domains and response.
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
@@ -231,6 +245,18 @@ impl IsotropicElasticDerivation {
 }
 
 impl IsotropicElasticStatePoint {
+    /// The original selected isotropic stiffness in orthonormal Mandel order.
+    /// Canonical E/nu states keep their original arithmetic; alternative source
+    /// pairs use their retained bulk/shear values without a lossy E/nu detour.
+    #[must_use]
+    pub fn stiffness_mandel_pa(&self) -> crate::Tangent6 {
+        let (shear, bulk, tag) = self.derivation.as_ref().map_or(
+            (0.0, 0.0, 0),
+            |d| (d.shear_modulus_pa, d.bulk_modulus_pa, d.parameters.members().2),
+        );
+        stiffness_from_moduli(self.young_modulus_pa, self.poisson_ratio, shear, bulk, tag)
+    }
+
     /// Adopt canonical density/Young/Poisson data from an existing complete
     /// bundle. Other physics and original property receipts remain intact.
     /// Physical bounds are checked even if the bundle requested only finiteness.
@@ -546,11 +572,12 @@ fn elastic_moduli(
     {
         return Err(invalid_parameters());
     }
-    // The existing solid consumer reconstructs these Lame coefficients.
-    // Refuse a numerically unrepresentable law before its infallible ingress.
-    let lambda = young * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson));
-    let twice_mu = 2.0 * (young / (2.0 * (1.0 + poisson)));
-    let diagonal = lambda + twice_mu;
+    // Admit the actual tensor that mechanics consumes, not an E/nu
+    // reconstruction that perturbs the original K/G pair near its limits.
+    let stiffness = stiffness_from_moduli(young, poisson, shear, bulk, tag);
+    let lambda = stiffness[0][1];
+    let twice_mu = stiffness[3][3];
+    let diagonal = stiffness[0][0];
     if !lambda.is_finite()
         || !twice_mu.is_finite()
         || twice_mu <= 0.0
@@ -573,6 +600,18 @@ fn elastic_moduli(
         return Err(invalid_parameters());
     }
     Ok([young, poisson, shear, bulk])
+}
+
+fn stiffness_from_moduli(young: f64, poisson: f64, shear: f64, bulk: f64, tag: u8)
+    -> crate::Tangent6
+{
+    if tag == 0 {
+        // Only the constant stiffness is queried; this helper does not admit
+        // strain or manufacture a source calibration domain.
+        crate::IsotropicElastic { youngs: young, poisson, strain_limit: 1.0 }.stiffness()
+    } else {
+        crate::elastic::bulk_shear_stiffness(bulk, shear)
+    }
 }
 
 fn invalid_parameters() -> MaterialStatePointError {
@@ -997,6 +1036,29 @@ mod tests {
                 close(state.poisson_ratio(), 0.25);
                 close(state.young_modulus_pa() / scale, 60e9);
                 close(state.derivation().unwrap().bulk_modulus_pa() / scale, 40e9);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_selected_moduli_survive_extreme_poisson_ratios() {
+        for (bulk, shear) in [(1e12, 1.0), (1e-6, 1.0)] {
+            let young = if bulk >= shear {
+                shear * (9.0 / (3.0 + shear / bulk))
+            } else {
+                bulk * (9.0 / (1.0 + 3.0 * bulk / shear))
+            };
+            let source = card([2500.0, young, 0.25, shear, bulk]);
+            for tag in [1, 2] {
+                let state = resolve(&source, tag).unwrap();
+                let c = state.stiffness_mandel_pa();
+                assert_eq!(c[3][3], 2.0 * shear);
+                let derived = state.derivation().unwrap();
+                assert_eq!(c[0][0], derived.bulk_modulus_pa() + (4.0 / 3.0) * shear);
+                assert_eq!(c[0][1], derived.bulk_modulus_pa() - (2.0 / 3.0) * shear);
+                if tag == 2 {
+                    assert_eq!(derived.bulk_modulus_pa(), bulk);
+                }
             }
         }
     }

@@ -382,10 +382,9 @@ impl TetElasticMaterial {
     /// retaining its explicit elastic/yield source selection in the identity.
     #[must_use]
     pub fn from_resolved_state(state: &IsotropicSolidStatePoint) -> Self {
-        Self::try_new(
+        Self::try_new_mandel(
             state.density_kg_m3(),
-            state.young_modulus_pa(),
-            state.poisson_ratio(),
+            state.elastic_state().stiffness_mandel_pa(),
             *state.identity().as_bytes(),
         )
         .expect("an admitted isotropic material state satisfies tet invariants")
@@ -395,10 +394,9 @@ impl TetElasticMaterial {
     /// vibration analysis, without requiring an unrelated yield datum.
     #[must_use]
     pub fn from_resolved_elastic_state(state: &IsotropicElasticStatePoint) -> Self {
-        Self::try_new(
+        Self::try_new_mandel(
             state.density_kg_m3(),
-            state.young_modulus_pa(),
-            state.poisson_ratio(),
+            state.stiffness_mandel_pa(),
             *state.identity().as_bytes(),
         )
         .expect("an admitted isotropic-elastic state satisfies tet invariants")

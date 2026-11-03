@@ -186,10 +186,9 @@ impl SolidStiffnessModel {
                     current.clone(),
                     &parameters,
                 )?;
-                let mut material = TetElasticMaterial::try_new(
+                let mut material = TetElasticMaterial::try_new_mandel(
                     density,
-                    moduli.young_modulus_pa(),
-                    moduli.poisson_ratio(),
+                    moduli.stiffness_mandel_pa(),
                     identity.0,
                 )?;
                 if self != Self::Isotropic {

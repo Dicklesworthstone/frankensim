@@ -45,13 +45,21 @@ fn point(t: f64) -> QueryPoint {
         .unwrap()
 }
 fn card(omit: &[&str]) -> MaterialCard {
+    card_with_moduli(omit, 40.0, 24.0)
+}
+fn card_with_moduli(omit: &[&str], bulk: f64, shear: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
+    let young = if bulk >= shear {
+        shear * (9.0 / (3.0 + shear / bulk))
+    } else {
+        bulk * (9.0 / (1.0 + 3.0 * bulk / shear))
+    };
     for (name, dims, start, end, upper) in [
         (DENSITY_PROPERTY, Density::DIMS, 6.0, 6.0, 300.0),
-        (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, 60.0, 30.0, 400.0),
+        (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, young, 0.5 * young, 400.0),
         (POISSON_RATIO_PROPERTY, Dims::NONE, 0.25, 0.25, 400.0),
-        (BULK_MODULUS_PROPERTY, Pressure::DIMS, 40.0, 20.0, 400.0),
-        (SHEAR_MODULUS_PROPERTY, Pressure::DIMS, 24.0, 12.0, 400.0),
+        (BULK_MODULUS_PROPERTY, Pressure::DIMS, bulk, 0.5 * bulk, 400.0),
+        (SHEAR_MODULUS_PROPERTY, Pressure::DIMS, shear, 0.5 * shear, 400.0),
         (
             LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
             INVERSE_TEMPERATURE_DIMS,
@@ -190,6 +198,74 @@ fn g1_explicit_source_pairs_share_native_stress_and_stiffness() {
     });
     assert_ne!(identities[0], identities[1]);
     assert_ne!(identities[1], identities[2]);
+}
+
+#[test]
+fn g1_bulk_shear_sources_reach_mechanics_without_a_poisson_round_trip() {
+    use fs_material::state_point::{
+        IsotropicElasticParameters, ScalarAdmissibility, ScalarPropertyRequirement,
+        resolve_isotropic_elastic_state_point_from_parameters,
+    };
+
+    let positive = |name, dims| {
+        ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
+            .unwrap()
+    };
+    let parameters = IsotropicElasticParameters::BulkShear {
+        bulk_modulus: positive(BULK_MODULUS_PROPERTY, Pressure::DIMS),
+        shear_modulus: positive(SHEAR_MODULUS_PROPERTY, Pressure::DIMS),
+    };
+    // The source pair is representable even when conversion to nu loses
+    // significant bulk/shear response. These are numerical limit fixtures,
+    // not a claim that displacement P1 elements avoid volumetric locking.
+    for (bulk, shear) in [(1e12, 1.0), (1e-6, 1.0), (40.0, 24.0)] {
+        let source = card_with_moduli(
+            &[YOUNG_MODULUS_PROPERTY, POISSON_RATIO_PROPERTY], bulk, shear,
+        );
+        let state = resolve_isotropic_elastic_state_point_from_parameters(
+            &source, &point(300.0), &positive(DENSITY_PROPERTY, Density::DIMS),
+            &parameters, MaterialPropertySelection::SingleClaimOnly,
+        ).unwrap();
+        let direct = TetElasticMaterial::from_resolved_elastic_state(&state);
+        let coupled = SolidStiffnessModel::IsotropicBulkShear
+            .material(state.resolved(), 6.0, FRAME, 0.01).unwrap();
+        assert_eq!(direct.stiffness_mandel_pa(), coupled.stiffness_mandel_pa());
+        let c = direct.stiffness_mandel_pa();
+        assert_eq!(c[3][3], 2.0 * shear, "original shear modulus must survive");
+        assert_eq!(c[0][0], bulk + (4.0 / 3.0) * shear);
+        assert_eq!(c[0][1], bulk - (2.0 / 3.0) * shear);
+        // Independent hydrostatic Hooke law: epsilon=e I => sigma=3 K e I.
+        let dilation = 1e-4;
+        for row in c.iter().take(3) {
+            let stress: f64 = row[..3].iter().map(|v| v * dilation).sum();
+            let expected = 3.0 * bulk * dilation;
+            assert!((stress - expected).abs() <= 8e-16 * (bulk + shear) * dilation);
+        }
+        with_cx(|cx| {
+            let assembly = problem(&direct).assemble(cx).unwrap();
+            // A single free axial DOF has Kxx = Cxxxx V for the unit tet;
+            // reference mass must remain independent of elastic parameterization.
+            close(assembly.stiffness.to_dense()[0], c[0][0] / 6.0);
+            close(assembly.total_mass_kg, 1.0);
+        });
+    }
+}
+
+#[test]
+fn g1_young_shear_source_retains_the_supplied_shear_at_the_auxetic_limit() {
+    for (bulk, shear) in [(1e12, 1.0), (1e-6, 1.0)] {
+        let source = card_with_moduli(&[POISSON_RATIO_PROPERTY, BULK_MODULUS_PROPERTY], bulk, shear);
+        let model = SolidStiffnessModel::IsotropicYoungShear;
+        let state = model.resolve(&source, &point(300.0), MaterialPropertySelection::SingleClaimOnly)
+            .unwrap();
+        assert_eq!(state.properties().len(), 2);
+        let material = model.material(&state, 6.0, FRAME, 0.01).unwrap();
+        // A pure tensor shear has sigma_xy=2G epsilon_xy. The supplied G
+        // must not be replaced by E/[2(1+nu)] after nu rounded near -1.
+        for i in 3..6 {
+            assert_eq!(material.stiffness_mandel_pa()[i][i], 2.0 * shear);
+        }
+    }
 }
 
 #[test]

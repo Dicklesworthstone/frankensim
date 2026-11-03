@@ -128,17 +128,8 @@ impl ElasticAcousticState {
         {
             return Err(invalid("isotropic bulk and shear moduli must be finite and positive"));
         }
-        let lambda = bulk_modulus_pa - (2.0 / 3.0) * shear_modulus_pa;
-        let mut stiffness = [[0.0; 6]; 6];
-        for (i, row) in stiffness.iter_mut().enumerate().take(3) {
-            row[..3].fill(lambda);
-            row[i] = bulk_modulus_pa + (4.0 / 3.0) * shear_modulus_pa;
-        }
-        for (i, row) in stiffness.iter_mut().enumerate().skip(3) {
-            row[i] = 2.0 * shear_modulus_pa;
-        }
         Self::try_new_mandel(
-            stiffness,
+            super::bulk_shear_stiffness(bulk_modulus_pa, shear_modulus_pa),
             density_kg_m3,
             material_state_identity,
             maximum_absolute_mandel_strain,

@@ -12,6 +12,22 @@ pub mod thermal;
 /// Wave and hydrostatic response from the original admitted elastic tensor.
 pub mod acoustic;
 
+/// Mandel stiffness from the independent bulk/shear pair. Keep the original
+/// moduli: an E/nu round trip loses bulk response near incompressibility and
+/// shear response near the auxetic limit. Admission belongs to the caller.
+pub(crate) fn bulk_shear_stiffness(bulk: f64, shear: f64) -> Tangent6 {
+    let lambda = bulk - (2.0 / 3.0) * shear;
+    let mut stiffness = [[0.0; 6]; 6];
+    for (i, row) in stiffness.iter_mut().enumerate().take(3) {
+        row[..3].fill(lambda);
+        row[i] = bulk + (4.0 / 3.0) * shear;
+    }
+    for (i, row) in stiffness.iter_mut().enumerate().skip(3) {
+        row[i] = 2.0 * shear;
+    }
+    stiffness
+}
+
 /// Isotropic linear elasticity (E, ν).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IsotropicElastic {
