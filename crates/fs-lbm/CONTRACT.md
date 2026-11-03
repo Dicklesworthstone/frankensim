@@ -1933,6 +1933,32 @@ scratch is usable only after a successful preparation. This is a wall-resolved
 planar closure, not a wall function, rough-wall model, arbitrary solid/open
 boundary filter, nonuniform mesh method or DNS qualification.
 
+`Grid3::{channel_dynamic_sgs_workspace, prepare_channel_dynamic_sgs,
+step_serial_with_channel_dynamic_sgs, step_pooled_with_channel_dynamic_sgs}`
+connects this closure to the original isothermal lattice collision/streaming
+owner, including D3Q27 cumulant collision. It infers the unique nonperiodic
+wall axis, requires an all-fluid rectangle and passes the original stationary
+halfway wall values. The two remaining axes must be periodic. The existing
+uniform body force enters through the same Guo-centered macroscopic velocity;
+spatially varying or time-dependent `ForcedGrid3` force history is not implied.
+
+The channel and periodic native adapters share molecular-ratio admission,
+collision conversion and dissipation reporting. Every preparation starts from
+the original collision or supplied molecular field. A zero fitted viscosity
+preserves that collision exactly; D3Q27 central/cumulant changes only the shear
+rate while retaining independent trace and higher rates. Prepared collisions
+feed the original serial or pooled transaction, so refusal or cancellation
+publishes neither populations nor the accepted step count.
+
+`ChannelDynamicSgsWorkspace3` includes the shared filter, current density and
+velocity, and the collision field, with nominal payload
+`N * (136 + 32 + size_of::<Collision>())` bytes and actual-capacity admission.
+Preparation allocates no additional arrays. Native regressions exercise
+wall/body-force transport, nonshear rates, local molecular fields, prepared
+collision equivalence, serial/pooled identity and failed-trial retry. This
+adds a native resolved-channel route for the cumulant solver, without claiming
+a developed-turbulence accuracy/stability envelope or calibrated wall law.
+
 ### Moving/open D3Q19 boundaries and turbulent wall loads
 
 `BoundaryGrid3::{sgs_workspace, prepare_sgs, step_with_sgs,

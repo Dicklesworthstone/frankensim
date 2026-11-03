@@ -144,8 +144,29 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             .prepare(config, &local.density, &local.velocity, || {
                 checkpoint().is_err()
             })?;
+        let dissipation = self.apply_dynamic_sgs_viscosities(
+            config.maximum_eddy_to_molecular,
+            molecular,
+            workspace.filter.viscosities(),
+            local,
+            checkpoint,
+        )?;
+        Ok(DynamicSgsStepReport { fit, dissipation })
+    }
+
+    // Both nonlocal geometries retain the same native molecular law, shear
+    // conversion and diagnostics. Prepared macro/viscosity lengths are admitted
+    // by their caller; no filter or boundary is inferred in this conversion.
+    pub(super) fn apply_dynamic_sgs_viscosities(
+        &self,
+        maximum_ratio: f64,
+        molecular: Option<&[L::Collision]>,
+        viscosities: &[f64],
+        local: &mut SgsWorkspace3<L::Collision>,
+        mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<SgsReport, SgsStepError<L::Error>> {
         let mut dissipation = SgsReport::default();
-        for (cell, &eddy) in workspace.filter.viscosities().iter().enumerate() {
+        for (cell, &eddy) in viscosities.iter().enumerate() {
             if cell % 64 == 0 {
                 checkpoint()?;
             }
@@ -156,11 +177,11 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
                 return Err(SgsError::InvalidMolecularViscosity { cell }.into());
             }
             let ratio = eddy / nu;
-            if !ratio.is_finite() || ratio > config.maximum_eddy_to_molecular {
+            if !ratio.is_finite() || ratio > maximum_ratio {
                 return Err(SgsError::ViscosityRatioExceeded {
                     cell,
                     ratio,
-                    maximum: config.maximum_eddy_to_molecular,
+                    maximum: maximum_ratio,
                 }
                 .into());
             }
@@ -194,7 +215,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         {
             return Err(SgsError::NonFiniteViscosity.into());
         }
-        Ok(DynamicSgsStepReport { fit, dissipation })
+        Ok(dissipation)
     }
 }
 

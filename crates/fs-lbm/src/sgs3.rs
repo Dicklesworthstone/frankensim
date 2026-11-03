@@ -63,6 +63,25 @@ impl<C> DynamicSgsWorkspace3<C> {
     pub fn eddy_viscosities(&self) -> &[f64] { self.filter.viscosities() }
 }
 
+/// Reused native collision/macroscopic fields and the planar-channel filter.
+/// Outputs are consumable only after successful preparation.
+pub struct ChannelDynamicSgsWorkspace3<C> {
+    pub(crate) local: SgsWorkspace3<C>,
+    pub(crate) filter: dynamic::channel::ChannelDynamicSgs,
+}
+
+impl<C> ChannelDynamicSgsWorkspace3<C> {
+    pub fn collisions(&self) -> &[C] { self.local.collisions() }
+    pub fn eddy_viscosities(&self) -> &[f64] { self.filter.viscosities() }
+    /// Actual numerical capacities, excluding allocator overhead and metadata.
+    pub fn workspace_bytes(&self) -> usize {
+        (3 * self.local.velocity.capacity() + self.local.density.capacity())
+            * core::mem::size_of::<f64>()
+            + self.local.collisions.capacity() * core::mem::size_of::<C>()
+            + self.filter.workspace_bytes()
+    }
+}
+
 /// Dynamic fit diagnostics and the original pre-step shear dissipation account.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DynamicSgsStepReport {

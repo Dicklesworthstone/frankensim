@@ -6,6 +6,7 @@ use crate::sgs3::{
 };
 use fs_exec::{CancelGate, Cx, KernelRunner};
 
+mod channel;
 mod dynamic;
 
 impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
