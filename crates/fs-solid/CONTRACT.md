@@ -1380,6 +1380,25 @@ fully clamped storage, and late work/strain or cancellation refusal.
 This does not differentiate the replacement map or validate a real material
 transition.
 
+## Instantaneous impulses on an accepted P1 trajectory
+
+`loads3::transient::TetTransientRun3::apply_nodal_impulse` applies
+explicit nodal impulses through the same sparse consistent reference mass as
+Newmark stepping. It solves `M_ff delta_v_f = J_f`, retains supported velocity,
+and recovers full support impulses as `M delta_v - J` on restrained rows.
+Momentum gates use the actual representable velocity change. Moving supports
+retain their impulse work; `average(v) dot M delta_v` is checked against applied
+plus support work without subtracting large endpoint kinetic energies.
+
+The event preserves displacement, time, step count, material, thermal state
+and finite loads. Native acceleration and finite-force reactions are refreshed
+for the new velocity and damping force before transactional publication.
+It does not advance a strain/history law or generate damping heat at zero time.
+Collision timing, restitution and the opposite partner remain with the caller.
+`tests/transient_impulse3.rs` supplies direct consistent-mass, support-work,
+continued-motion and refused-candidate regressions. These are local numerical
+checks, not calibration of an impact law.
+
 ## Thermal material evolution in sparse P1 dynamics
 
 `loads3::transient::thermal::advance_thermal_candidate` refreshes the actual

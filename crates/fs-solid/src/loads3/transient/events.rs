@@ -4,6 +4,10 @@
 use super::*;
 use crate::linear3::TetMaterialField;
 
+/// Instantaneous physical impulses on the same consistent reference mass.
+pub mod impulse;
+pub use impulse::{NodalImpulse3, NodalImpulseControls3};
+
 /// Independent physical admission limits for a zero-duration material change.
 #[derive(Debug, Clone, Copy)]
 pub struct MaterialRebindConfig3 {
