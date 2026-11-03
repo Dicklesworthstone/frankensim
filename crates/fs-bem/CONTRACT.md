@@ -2670,3 +2670,53 @@ supplies nominal outer identity/medium/hash/error declarations and the original
 prepared-observation layout/admission, while omitting untouched array/readout
 children. This verifies the physical observation algebra, not a complete BEM
 crate build, boundary solve or repository quality gate. Native rustfmt passed.
+
+
+## Acoustic radiation momentum on original physical surfaces
+
+`PreparedHarmonicObservation::momentum_surface` prepares a borrowed,
+allocation-free `PreparedHarmonicSurfaceMomentum` on existing
+`HarmonicSurfaceQuadrature` receivers and an explicit moment origin. Dense,
+iterative and scattering routes share their original pressure/velocity transfer
+bank. No new boundary solve, source covariance matrix, receiver interpolation,
+or far-field replacement is introduced.
+
+For peak phasors the cycle-mean inviscid radiation stress is
+`S_ij=(|p|²/(4 rho c²)-rho |u|²/4) delta_ij + rho Re(u_i conj(u_j))/2`.
+The observer integrates `S dA` [N] and `(x-origin) cross S dA` [N m].
+All three velocity components and the isotropic pressure/kinetic contribution
+remain present, including standing waves, reactive near fields and acoustic
+vortex angular momentum. Original coherent source columns are contracted before
+products; independent covariance factors and independent-source powers combine
+afterward. Double-double stress and spatial accumulation retain quiet signed
+residuals. Source phase conventions, SI coordinates and producer uncertainty
+remain those of the original field owner. Molecular/relaxing observers explicitly
+refuse this stress operator: their equilibrium sound speed is readout calibration,
+not a nondispersive constitutive energy law. Both direct and retained molecular
+field preparation preserve that boundary, including empty/dark observations.
+
+Construction and evaluation allocate no heap storage. Coherent evaluation
+admits `Q M (4 S+7)` transfer/quadratic products for Q quadrature entries,
+M coherence factors and S sources; independent sources admit `7 Q S`.
+Fixed-size stress/traction/moment arithmetic accompanies each sample. Repeated,
+zero and signed area vectors retain their authored meanings; all indices and
+scalars are admitted even when silent. Cancellation, invalid values, exceeded
+work caps and unrepresentable products return no partial momentum result.
+
+The observable is second-order complete-cycle acoustic momentum flux in a
+homogeneous, inviscid, nondispersive fluid at rest. Its negative is the enclosed
+system's mean reaction only for a complete outward closed surface, a complete
+total acoustic field, and the stated fluid assumptions. Area-vector cancellation
+alone proves neither closure nor enclosure. Open patches are supported as
+oriented flux observations. Streaming, viscous wall stress, moving media,
+finite-window field-storage changes and quadrature/continuum error bounds are
+outside this owner; no mechanical-body update or absorbed-force certificate is
+inferred from a partial field.
+
+Native regressions compare against real-time integration of the independent
+quadratic stress, traveling/standing waves, incoherent versus diagonal-factor
+banks, quiet coherent and spatial cancellations, and analytic outgoing
+monopole/dipole fields on near and far spheres. The circular dipole retains the
+expected angular momentum rate `P/omega`; translated moment origins retain the
+physical orbital contribution. Refusal, work boundaries, empty surfaces and
+late cancellation preserve atomic publication.

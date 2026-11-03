@@ -452,7 +452,8 @@ impl<'a> MolecularBemObservation<'a> {
             &self.boundary.receivers,
             self.operator_hash(),
             samples,
-        )?)
+        )?
+        .without_radiation_momentum())
     }
 
     /// One row of the work-conjugate boundary impedance at the same frequency.

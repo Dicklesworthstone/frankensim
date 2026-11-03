@@ -169,7 +169,8 @@ impl MolecularBemObservation<'_> {
             &self.boundary.receivers,
             self.operator_hash(),
             fields,
-        )?;
+        )?
+        .without_radiation_momentum();
         poll(&mut cancelled)?;
         Ok(PreparedMolecularResponse {
             source: self.source().clone(),

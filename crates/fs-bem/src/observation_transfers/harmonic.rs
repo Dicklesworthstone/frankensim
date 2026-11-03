@@ -56,6 +56,9 @@ pub struct PreparedHarmonicObservation {
     producer_hash: ContentHash,
     // Source-major, receiver-minor; p, ux, uy, uz per declared source unit.
     transfers: Vec<[C64; 4]>,
+    // Molecular observers retain equilibrium c for readout calibration, not
+    // the nondispersive constitutive storage required by radiation stress.
+    radiation_momentum: bool,
 }
 
 pub(super) fn admit_frequency(omega: f64, medium: Medium) -> Result<(), TransferError> {
@@ -170,7 +173,14 @@ impl PreparedHarmonicObservation {
             receivers: receivers.to_vec(),
             producer_hash,
             transfers,
+            radiation_momentum: true,
         })
+    }
+    /// Preserve p/u observations without inferring nondispersive stress
+    /// from an equilibrium sound-speed calibration in a relaxing medium.
+    pub(super) fn without_radiation_momentum(mut self) -> Self {
+        self.radiation_momentum = false;
+        self
     }
     pub fn angular_frequency_rad_s(&self) -> f64 {
         self.omega
@@ -472,6 +482,9 @@ impl PreparedMicrophoneArray<'_> {
         self.finish()
     }
 }
+
+mod momentum;
+pub use momentum::{HarmonicMomentumFlux, PreparedHarmonicSurfaceMomentum};
 
 mod exposure;
 pub use exposure::{
