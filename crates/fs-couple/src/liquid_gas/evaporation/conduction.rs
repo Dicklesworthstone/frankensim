@@ -8,7 +8,8 @@ use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceCellHeat,
     conduction::{
         FreeSurfaceBodyContact, FreeSurfaceBodyInterface, FreeSurfaceConductionControls,
-        FreeSurfaceConductionFace, FreeSurfaceGasFace, FreeSurfaceThermalBody,
+        FreeSurfaceConductionFace, FreeSurfaceGasFace, FreeSurfaceRadiationFace,
+        FreeSurfaceThermalBody,
     },
     viscous::FreeSurfaceViscousConductionReport,
 };
@@ -132,6 +133,61 @@ pub fn advance_liquid_surfaces_with_gas_and_conduction<'s, 'm, 'catalog, 'b>(
     with_viscous_heating: bool,
     gate: &CancelGate,
 ) -> Result<ConductingLiquidGasCandidate<'s, 'm, 'catalog, 'b>, Error> {
+    advance_liquid_surfaces_with_gas_and_radiative_conduction(
+        liquid,
+        gas,
+        catalog,
+        surfaces,
+        bodies,
+        faces,
+        heat,
+        contacts,
+        interfaces,
+        exposed,
+        &[],
+        phase_controls,
+        thermal_controls,
+        gas_controls,
+        maximum_density_excursion,
+        with_viscous_heating,
+        gate,
+    )
+}
+
+/// Add original resolved-cell liquid radiation to the same phase/thermal step.
+///
+/// Phase and thermal radiation use the native liquid caloric temperature. The
+/// original gray-radiation law requires a resolved liquid thermal boundary layer
+/// or an explicitly justified lumped surface value; this entry does not invent
+/// a distinct interface temperature or a latent sink in the solved-surface law.
+/// Its radiation is external supply and its gas-film transfer is internal to the
+/// retained gas/liquid inventory. Both enter the original native thermal owner
+/// exactly once, including combined thermal stability and source admission.
+///
+/// All phase/conduction source, fixed-volume, optional pressure, atomic state
+/// and first-order splitting limits of
+/// [`advance_liquid_surfaces_with_gas_and_conduction`] remain in force. Bound
+/// solved-surface stress and wetting histories retain their original refusal.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_liquid_surfaces_with_gas_and_radiative_conduction<'s, 'm, 'catalog, 'b>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surfaces: &[LiquidGasEvaporationSurface<'_>],
+    bodies: &[FreeSurfaceThermalBody<'b>],
+    faces: &[FreeSurfaceConductionFace],
+    heat: &[FreeSurfaceCellHeat],
+    contacts: &[FreeSurfaceBodyContact],
+    interfaces: &[FreeSurfaceBodyInterface<'_>],
+    exposed: &[FreeSurfaceGasFace],
+    radiation: &[FreeSurfaceRadiationFace],
+    phase_controls: DistributedLiquidGasSolve,
+    thermal_controls: FreeSurfaceConductionControls,
+    gas_controls: GasEnergySolve,
+    maximum_density_excursion: Option<f64>,
+    with_viscous_heating: bool,
+    gate: &CancelGate,
+) -> Result<ConductingLiquidGasCandidate<'s, 'm, 'catalog, 'b>, Error> {
     poll(gate)?;
     let mut next_bodies = bodies.to_vec();
     let mut thermal_result = None;
@@ -153,35 +209,21 @@ pub fn advance_liquid_surfaces_with_gas_and_conduction<'s, 'm, 'catalog, 'b>(
             // ClosedGasParcel wraps this exact isochoric owner. Keep the
             // post-phase parcel until the entire thermal candidate succeeds.
             let mut thermal_gas = phase_gas.clone().into_isochoric();
-            let report = match maximum_density_excursion {
-                Some(maximum) => next_liquid.step_with_pressurized_finite_gas_environment(
-                    faces,
-                    heat,
-                    thermal_controls,
-                    &mut next_bodies,
-                    contacts,
-                    interfaces,
-                    &mut thermal_gas,
-                    exposed,
-                    gas_controls,
-                    maximum,
-                    with_viscous_heating,
-                    gate,
-                )?,
-                None => next_liquid.step_with_finite_gas_environment(
-                    faces,
-                    heat,
-                    thermal_controls,
-                    &mut next_bodies,
-                    contacts,
-                    interfaces,
-                    &mut thermal_gas,
-                    exposed,
-                    gas_controls,
-                    with_viscous_heating,
-                    gate,
-                )?,
-            };
+            let report = next_liquid.step_with_radiative_finite_gas_environment(
+                faces,
+                heat,
+                thermal_controls,
+                &mut next_bodies,
+                contacts,
+                interfaces,
+                &mut thermal_gas,
+                exposed,
+                radiation,
+                gas_controls,
+                maximum_density_excursion,
+                with_viscous_heating,
+                gate,
+            )?;
             if thermal_gas.mass_kg() != phase_gas.mass_kg()
                 || thermal_gas.volume_m3() != phase_gas.volume_m3()
                 || thermal_gas.model() != phase_gas.model()

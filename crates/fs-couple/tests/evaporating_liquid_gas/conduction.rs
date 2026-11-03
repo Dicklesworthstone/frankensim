@@ -1,5 +1,8 @@
 //! Native phase, conduction, finite walls and electrical heat share one clock.
 
+#[path = "conduction/radiation.rs"]
+mod radiation;
+
 use super::*;
 use fs_couple::liquid_gas::evaporation::{
     conduction::{ConductingLiquidGasCandidate, advance_liquid_surfaces_with_gas_and_conduction},

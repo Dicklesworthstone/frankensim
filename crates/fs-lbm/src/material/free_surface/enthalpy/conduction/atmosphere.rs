@@ -242,8 +242,19 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         self.step_with_finite_gas_environment_inner(
-            faces, heat, controls, bodies, contacts, interfaces, gas, exposed,
-            gas_controls, None, with_viscous_heating, gate,
+            faces,
+            heat,
+            controls,
+            bodies,
+            contacts,
+            interfaces,
+            gas,
+            exposed,
+            &[],
+            gas_controls,
+            None,
+            with_viscous_heating,
+            gate,
         )
     }
 
@@ -283,8 +294,69 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         self.step_with_finite_gas_environment_inner(
-            faces, heat, controls, bodies, contacts, interfaces, gas, exposed,
-            gas_controls, Some(maximum_density_excursion), with_viscous_heating, gate,
+            faces,
+            heat,
+            controls,
+            bodies,
+            contacts,
+            interfaces,
+            gas,
+            exposed,
+            &[],
+            gas_controls,
+            Some(maximum_density_excursion),
+            with_viscous_heating,
+            gate,
+        )
+    }
+
+    /// Couple original finite-gas heat and resolved-cell liquid radiation.
+    ///
+    /// Radiation uses the existing gray, opaque liquid law at the actual cell
+    /// temperature; the caller must resolve the liquid boundary layer or justify
+    /// this lumped surface temperature. It remains a separate external supply,
+    /// never a debit from the finite gas. Original material emissivity claims,
+    /// finite walls, electrical heating, optional molecular heat and combined
+    /// thermal stability limits remain with the same native thermal owner.
+    ///
+    /// Optional pressure uses the same post-thermal gas EOS and retains the
+    /// fixed-volume, connectivity and density-excursion admission of
+    /// `step_with_pressurized_finite_gas_environment`. This does not solve a
+    /// separate zero-storage interface temperature or its latent-power balance.
+    /// An attached solved-surface stress still requires its full original
+    /// boundary and cannot be bypassed here. All states publish together only
+    /// after the original thermal/flow transaction succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_radiative_finite_gas_environment(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        gas: &mut IsochoricGasParcel,
+        exposed: &[FreeSurfaceGasFace],
+        radiation: &[FreeSurfaceRadiationFace],
+        gas_controls: GasEnergySolve,
+        maximum_density_excursion: Option<f64>,
+        with_viscous_heating: bool,
+        gate: &CancelGate,
+    ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
+        self.step_with_finite_gas_environment_inner(
+            faces,
+            heat,
+            controls,
+            bodies,
+            contacts,
+            interfaces,
+            gas,
+            exposed,
+            radiation,
+            gas_controls,
+            maximum_density_excursion,
+            with_viscous_heating,
+            gate,
         )
     }
 
@@ -299,14 +371,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         interfaces: &[FreeSurfaceBodyInterface<'_>],
         gas: &mut IsochoricGasParcel,
         exposed: &[FreeSurfaceGasFace],
+        radiation: &[FreeSurfaceRadiationFace],
         gas_controls: GasEnergySolve,
         maximum_density_excursion: Option<f64>,
         with_viscous_heating: bool,
         gate: &CancelGate,
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         poll(gate)?;
-        if (exposed.is_empty() && bodies.iter().all(|body| body.gas_faces().is_empty()))
-            || exposed.len() > controls.maximum_faces
+        if (exposed.is_empty()
+            && radiation.is_empty()
+            && bodies.iter().all(|body| body.gas_faces().is_empty()))
+            || exposed.len().saturating_add(radiation.len()) > controls.maximum_faces
         {
             return Err(Error::Invalid(
                 "finite atmosphere requires bounded exposed liquid or solid patches",
@@ -327,7 +402,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         } else {
             Vec::new()
         };
-        let conduction = self.advance_with_interfaces_and_environment(
+        let conduction = self.advance_with_radiative_environment(
             faces,
             heat,
             controls,
@@ -336,6 +411,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             contacts,
             interfaces,
             &environment,
+            radiation,
             Some(&mut candidate),
             gate,
         )?;
