@@ -3,8 +3,9 @@
 //! The original Galerkin state [q; M*P] and every original MIMO pole coordinate
 //! evolve together. Mouth pressure is continuous and outward duct volume flow
 //! drives the impedance. No flow is held across an interval: only the incident
-//! pressure waves are held. Exactly zero direct impedance uses the existing
-//! differentiated pressure constraint, without an artificial resistance.
+//! pressure waves are held. Exactly zero and reciprocal PSD mixed-rank direct
+//! impedance retain their original null pressure constraints, differentiated
+//! once by the existing owner without artificial resistance or state removal.
 //!
 //! The original source band, clock and passivity reports survive attachment.
 //! Generic rational coordinates have no declared physical storage; their work
@@ -14,7 +15,7 @@
 
 use super::{GasState, LinearSplitBudget, ModalGalerkinSource, ModalTimeError, ModeCount};
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::dg_port::{TerminalSolve, eliminate_zero_direct};
+use crate::dg_port::{TerminalSolve, eliminate_mixed_direct, eliminate_zero_direct};
 use crate::modal_mouth::realization::{BemModalMouthRealization, BemModalMouthRealizationRecord};
 use fs_duct::modal::time_domain::{ModalEnd, assemble_lossless};
 use fs_duct::{LossModel, RadiusProfile, segment_wave};
@@ -195,9 +196,11 @@ impl RationalModalLine {
     /// The interval is exactly the original load clock. Inlet waves use the
     /// positive real reference rho*c/S, including evanescent radial modes.
     ///
-    /// Invertible direct D and exactly zero D are supported. Mixed-rank D or
-    /// singular differentiated pressure constraints refuse explicitly. A zero-D
-    /// source must already satisfy pressure continuity with the quiescent duct;
+    /// Invertible, exactly zero and reciprocal PSD mixed-rank direct D are
+    /// supported. Mixed-rank flow uses the complete original positive range
+    /// and differentiated null pressure constraints. Unresolved rank or singular
+    /// differentiated constraints refuse. The source history must already
+    /// satisfy the retained pressure manifold with the quiescent duct;
     /// inconsistent accepted history is never projected or discarded.
     pub fn new(
         profile: &RadiusProfile,
@@ -291,7 +294,7 @@ impl RationalModalLine {
                     generator[i * n + col] -= g[i * 2 * p + k] * inlet_pressure[k][col] / z0;
                 }
                 // Explicit constant coordinates hold ALL incident modes. This
-                // lets zero-D elimination react to the complete forcing at once.
+                // lets constrained elimination react to the complete forcing at once.
                 generator[i * n + physical + k] = 2.0 * g[i * 2 * p + k] / z0;
             }
         }
@@ -315,9 +318,7 @@ impl RationalModalLine {
             generator = original.generator;
             constraints = original.constraints;
             original.flow_columns
-        } else {
-            let solve = TerminalSolve::new(&model.d, p).map_err(|_| invalid(
-                "rational modal mouth needs invertible D or exactly zero D; mixed-rank direct constraints are unsupported"))?;
+        } else if let Ok(solve) = TerminalSolve::new(&model.d, p) {
             let mut rows = vec![vec![0.0; n]; p];
             for col in 0..n {
                 poll(gate)?;
@@ -336,6 +337,25 @@ impl RationalModalLine {
             }
             constraints.clear();
             rows
+        } else {
+            let mixed_bytes = bytes + 256u128 * (n as u128).pow(2);
+            if mixed_bytes > budget.exact.max_dense_bytes as u128 {
+                return Err(invalid(
+                    "original mixed-rank terminal workspace exceeds authored capacity",
+                ));
+            }
+            let original = eliminate_mixed_direct(
+                &generator,
+                &inputs,
+                &constraints,
+                &model.d,
+                &vec![0.0; n],
+                gate,
+            )
+            .map_err(RationalModalError::Terminal)?;
+            generator = original.generator;
+            constraints = original.constraints;
+            original.flow_columns
         };
         let mut load_pressure_rows = vec![vec![0.0; n]; p];
         for k in 0..p {
@@ -687,7 +707,7 @@ fn check_constraints(
             0.0,
             scale,
             tolerance,
-            "original zero-D modal pressure constraint is inconsistent; state projection is forbidden",
+            "original modal null-pressure constraint is inconsistent; state projection is forbidden",
         )?;
     }
     Ok(())

@@ -2,14 +2,17 @@
 use super::*;
 use fs_duct::dg::continuous::{DgContinuous, state::DgTrajectoryPort};
 
+mod mixed_direct;
 mod network;
 mod zero_direct;
+pub(crate) use mixed_direct::eliminate as eliminate_mixed_direct;
 pub(crate) use network::DgContinuousNetwork;
 pub(crate) use zero_direct::eliminate as eliminate_zero_direct;
 
 /// Original DG/rational ODE after eliminating terminal flow multipliers.
-/// Invertible D uses direct pressure closure; exactly zero D retains pressure
-/// constraints and differentiates them once. Terminal coordinates carry no
+/// Invertible D uses direct pressure closure. Zero and reciprocal mixed-rank D
+/// retain null-pressure constraints and differentiate them once, keeping every
+/// original duct/load state. Terminal coordinates carry no
 /// declared storage; signed port work stays with the original external owner.
 pub(crate) struct DgContinuousTerminal {
     pub generator: Vec<f64>,
@@ -21,6 +24,9 @@ pub(crate) struct DgContinuousTerminal {
     pub flow_columns: Vec<Vec<f64>>,
     pub pressure_columns: Vec<Vec<f64>>,
     pub load_pressure_columns: Vec<Vec<f64>>,
+    /// Original D times the inlet-dependent flow. Mathematically zero for the
+    /// null-pressure directions; retain its actual arithmetic in observations.
+    pub load_pressure_inlet_factors: Vec<f64>,
 }
 impl DgPortLoad {
     pub(crate) fn prepare_continuous_terminal(
@@ -32,11 +38,45 @@ impl DgPortLoad {
         let Some(terminal) = &self.terminal else {
             return Ok(None);
         };
+        DgContinuousTerminal::new(
+            terminal,
+            self.terminal_ports(),
+            original,
+            maximum_dense_bytes,
+            gate,
+        )
+        .map(Some)
+    }
+}
+
+impl DgContinuousTerminal {
+    /// Cold assembly from complete original owners; the public load adapter
+    /// supplies its authored port order and unchanged source identity.
+    pub(crate) fn new(
+        terminal: &PreparedMimoLoad,
+        ports: &[PortId],
+        original: &DgContinuousNetwork,
+        maximum_dense_bytes: usize,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<Self, AcousticRealizeError> {
         if gate.is_requested() {
             return Err(AcousticRealizeError::Cancelled);
         }
         let view = terminal.continuous_operator();
         let (nd, nt, p) = (original.dimension, view.dimension(), terminal.ports());
+        if ports.len() != p
+            || original.terminal_pressure_columns.len() != p
+            || original.terminal_input_columns.len() != p
+            || original
+                .terminal_pressure_columns
+                .iter()
+                .chain(&original.terminal_input_columns)
+                .any(|row| row.len() != nd)
+        {
+            return Err(invalid(
+                "continuous terminal requires every original pressure and flow port",
+            ));
+        }
         let n = nd
             .checked_add(nt)
             .ok_or_else(|| invalid("continuous terminal dimension overflow"))?;
@@ -62,13 +102,13 @@ impl DgPortLoad {
         let solve = if zero_direct {
             None
         } else {
-            Some(super::terminal::TerminalSolve::new(&model.d, p).map_err(|_| {
-                invalid(
-                    "continuous rational terminal needs invertible D or exactly zero D; mixed-rank direct constraints are unsupported",
-                )
-            })?)
+            super::terminal::TerminalSolve::new(&model.d, p).ok()
         };
-        let ports = self.terminal_ports().to_vec();
+        if !zero_direct && solve.is_none() && 256 * n * n > maximum_dense_bytes {
+            return Err(invalid(
+                "complete mixed-rank terminal exceeds its dense preparation allowance",
+            ));
+        }
         let mut pressure_columns = Vec::with_capacity(p);
         for column in &original.terminal_pressure_columns {
             let mut pressure = vec![0.0; n];
@@ -134,8 +174,18 @@ impl DgPortLoad {
                     constraints[k][nd + i] = -model.c[k * nt + i];
                 }
             }
-            let retained =
-                zero_direct::eliminate(&generator, &inputs, &constraints, &inlet_column, gate)?;
+            let retained = if zero_direct {
+                zero_direct::eliminate(&generator, &inputs, &constraints, &inlet_column, gate)?
+            } else {
+                eliminate_mixed_direct(
+                    &generator,
+                    &inputs,
+                    &constraints,
+                    &model.d,
+                    &inlet_column,
+                    gate,
+                )?
+            };
             generator = retained.generator;
             inlet_column = retained.inlet_column;
             (
@@ -145,7 +195,11 @@ impl DgPortLoad {
             )
         };
         let mut load_pressure_columns = vec![vec![0.0; n]; p];
+        let mut load_pressure_inlet_factors = vec![0.0; p];
         for i in 0..p {
+            load_pressure_inlet_factors[i] = (0..p)
+                .map(|k| model.d[i * p + k] * inlet_flow_factors[k])
+                .sum();
             for j in 0..n {
                 let mut value = if j < nd {
                     0.0
@@ -182,6 +236,7 @@ impl DgPortLoad {
             .iter()
             .chain(&inlet_column)
             .chain(&inlet_flow_factors)
+            .chain(&load_pressure_inlet_factors)
             .chain(flow_columns.iter().flatten())
             .chain(load_pressure_columns.iter().flatten())
             .any(|v| !v.is_finite())
@@ -190,19 +245,23 @@ impl DgPortLoad {
                 "continuous terminal elimination left its finite source domain",
             ));
         }
-        Ok(Some(DgContinuousTerminal {
+        Ok(Self {
             generator,
             inlet_column,
             inlet_flow_factors,
             constraints,
             extra_scales,
-            ports,
+            ports: ports.to_vec(),
             flow_columns,
             pressure_columns,
             load_pressure_columns,
-        }))
+            load_pressure_inlet_factors,
+        })
     }
 }
+
+#[cfg(test)]
+mod terminal_tests;
 
 /// Complete independently integrated observations of one original terminal.
 pub(crate) struct DgTerminalTrajectory {

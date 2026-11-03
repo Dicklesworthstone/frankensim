@@ -317,12 +317,18 @@ impl PreparedJointDg {
                 for (k, &b) in column.iter().enumerate() {
                     flow[2 * k + 1] = attachment.inlet_flow_factors[i] * b;
                 }
-                for source in [
-                    &attachment.pressure_columns[i],
-                    &attachment.load_pressure_columns[i],
+                for (source, inlet_factor) in [
+                    (&attachment.pressure_columns[i], 0.0),
+                    (
+                        &attachment.load_pressure_columns[i],
+                        attachment.load_pressure_inlet_factors[i],
+                    ),
                 ] {
                     let mut pressure = vec![0.0; n];
                     pressure[nm..].copy_from_slice(source);
+                    for (k, &b) in column.iter().enumerate() {
+                        pressure[2 * k + 1] = inlet_factor * b;
+                    }
                     let mut form = vec![0.0; n * n];
                     for a in 0..n {
                         for b in 0..n {
@@ -342,7 +348,15 @@ impl PreparedJointDg {
                         .zip(&attachment.load_pressure_columns[i])
                         .map(|(a, b)| a - b)
                         .collect();
-                    terminal_dual_norm(&difference, nd, &attachment.extra_scales)?
+                    let original = terminal_dual_norm(&difference, nd, &attachment.extra_scales)?;
+                    // Mechanical p coordinates have unit mass and no cross
+                    // storage with material memory, so this is their exact
+                    // dual contribution to the shared interval norm bound.
+                    let mechanical: f64 = column
+                        .iter()
+                        .map(|b| (attachment.load_pressure_inlet_factors[i] * b).powi(2))
+                        .sum();
+                    finite(det::sqrt(original * original + mechanical))?
                 });
             }
             let cache = TerminalCache {

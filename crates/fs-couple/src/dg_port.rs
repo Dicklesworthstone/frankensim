@@ -30,6 +30,7 @@ mod terminal;
 mod continuous;
 pub(crate) use continuous::{DgJunctionTrajectory, DgTerminalTrajectory};
 pub(crate) use continuous::eliminate_zero_direct;
+pub(crate) use continuous::eliminate_mixed_direct;
 pub(crate) use terminal::TerminalSolve;
 use terminal::{TerminalCoupling, TerminalRelation};
 mod mouth;

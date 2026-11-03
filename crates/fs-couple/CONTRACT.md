@@ -24166,3 +24166,55 @@ passivity between samples, or the full repository build.
 `ShellForcedBudget` admits the additional observation payload and work before the solve. Each branch/interface projection is reused across original mechanical equation checks. Cancellation, malformed input, insufficient resources or failed original physical accounting returns no partial response and preserves the factor/source. The fixed source basis and already selected causal material approximation remain the source model's limits. This is a linear image response; finite-amplitude coating strain admission remains the source image's separate geometric strain check.
 
 `coating_dynamic_response` checks independently solved causal body/load amplitudes, actual source memory and load heat, a finite joint response at an exactly singular standalone attachment resonance, two-coordinate cross-memory and dynamic-load coupling, mutual signed port work, both oriented pressure drives, shared-factor reuse, and source-band/resource/cancellation admission. Existing shell pole and free-mode semantics remain unchanged.
+
+### Mixed-rank continuous rational terminals
+
+The continuous DG and modal rational consumers admit reciprocal positive-semidefinite mixed-rank direct impedance through one shared constrained-terminal owner. Existing invertible-direct and exactly-zero-direct paths retain their established solve order. The mixed path keeps every original duct coordinate, original rational pole coordinate, signed physical port, accepted source history, source clock, source band and source admission report.
+
+For the original equations `x' = A x + F q + b u` and `H x = D q`, a fixed complete orthogonal range/null chart changes only the coordinates of zero-storage flow multipliers. The actual original direct range is solved through the existing terminal solver. The remaining original null-pressure constraints are differentiated once through the existing zero-direct owner. Returned flow rows and inlet factors are reconstructed in the original port basis, then checked against original pressure closure and the original state equation. No material or duct coordinate is removed, no history is projected or reset, and no resistance is added to regularize a constraint. Modal held-input coordinates let all incident modes participate in the same elimination.
+
+A spectral cutoff alone is not authority to discard a fast physical direction. The shared Jacobi chart must agree with independent original-coordinate principal-minor checks through the shared LU owner: a resolved original principal range block is extended by every one- and two-coordinate combination, and the first exactly-zero LU pivot must agree with the proposed rank. Original null rows, componentwise reconstruction, orthogonality and closure are checked separately. Small nonzero positive directions, hidden negative pairs, unresolved/rounded-rank ambiguity, nonreciprocal direct matrices and singular higher-index constraints refuse. This is conservative numerical admission, not an exact-arithmetic rank or passivity certificate; a rounded source that acquires additional nonzero pivots may refuse even when its author intended an exact null.
+
+The existing prepared exact generator and integral-observation owner advances the complete admitted finite state and computes interval means and work. Original load pressure remains `C z + D q`, including any computed inlet-flow contribution. Independent duct-side and load-side signed work must agree. Generic rational coordinates have no declared physical storage, so generic terminal work remains signed exchange rather than being labeled total stored energy or heat. Attachment and every update check the retained original pressure manifold; inconsistent history, nonfinite inputs, cancellation and failed updates do not mutate accepted history or accounts.
+
+The shared mixed cold path requires a `256*n²` numerical byte allowance, with complete dimension `n <= 256`, bounded shared spectral/principal-minor work and cancellation polls. Each consumer separately admits its retained and exact-propagation storage; the modal consumer adds this workspace to its existing preparation envelope. The range/null chart and flow maps are prepared once; playback reuses the existing exact flow/observation operators. Spatial/radial truncation, source-fit error, source-band coverage and held-input clock error remain distinct from exact propagation of the admitted finite operator.
+
+Focused evidence covers analytic common/differential compliance flow, signed port covariance, several positive and null channels, isolated and rotated tiny nonzero directions, hidden indefinite pairs, higher-index refusal, unchanged zero-direct regressions, mutual two-mode real/conjugate-pole history and work under exact substepping, clock convergence to independent weak harmonic and original joint-descriptor responses, preserved compatible history, inconsistent-history refusal and atomic rejected updates. These checks do not imply a full-workspace test run or certify arbitrary source fits.
+
+### Mixed-rank rational terminations in the original DG trajectory
+
+The continuous DG terminal path shares its reciprocal mixed-rank direct-term
+closure with the modal duct path. It retains every original DG, compliant-wall
+and rational pole coordinate. Only terminal flow multipliers are eliminated:
+resolved direct-range flows satisfy the original impedance law, while the
+remaining null-pressure constraints are differentiated once. Existing full-rank
+and exactly-zero direct paths preserve their original arithmetic. Unresolved
+rank, nonreciprocal sources, higher-index constraints and capacity or
+cancellation failures refuse before changing accepted history.
+
+The exact mechanical/DG renderer carries the resulting inlet-dependent flows
+through its original mechanical velocity columns. Independent load-pressure
+observations use the actual original `C z + D q`, including the computed
+`D * inlet_flow_factor`; that term is mathematically zero on the admitted null
+space, but is not erased from floating-point observations. Its mechanical dual
+norm contribution participates in the existing interval pressure check. Each
+side retains its signed interface work; rational coordinates are not assigned
+invented storage or called heat.
+
+Cold assembly admits at least `256 * n * n` numerical bytes for a mixed-rank
+terminal, with complete original `n <= 256` and the shared spectral work cap.
+The existing exact propagator separately admits its complete generator and
+work forms. Caller-authored terminal ordering is checked against every original
+pressure and flow column. Inconsistent initial or candidate histories remain
+subject to the existing constraint checks; they are never projected or reset.
+
+The four focused `dg_port::continuous::terminal_tests` exercise the actual cold
+constructor with original DG and wall operators, a signed mutual two-port
+rational relaxation law, and the actual prepared quadratic flow. They compare
+separate integrated duct/wall and load work/heat accounts across zero, mixed
+and full-rank direct terms; original-state semigroup agreement across clocks;
+physical terminal permutation; and resource, cancellation and history refusal.
+The fixture's load storage and heat are known independently from its authored
+relaxation law, not inferred for arbitrary rational fits. Native checks compile
+the exact production cold assembly with those real owners. They do not claim a
+complete renderer, workspace or DSR validation run.
