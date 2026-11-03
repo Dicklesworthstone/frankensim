@@ -10,6 +10,8 @@ mod expansion;
 mod impulse;
 #[path = "finite_solid/pressure.rs"]
 mod pressure;
+#[path = "finite_solid/reference_density.rs"]
+mod reference_density;
 #[path = "finite_solid/split.rs"]
 mod split;
 #[path = "finite_solid/thermal.rs"]

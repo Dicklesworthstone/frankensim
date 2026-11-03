@@ -3,8 +3,12 @@
 //! The same immutable material card supplies a finite-strain constitutive model
 //! and original reference density. Ordinary bindings share one typed context;
 //! thermal preparation retains explicit reference and current contexts. The
-//! mass stays fixed as the body deforms. Native hyper3 supplies Piola forces,
-//! consistent tangents and stored energy; native generalized-alpha at rho_inf=1
+//! mass stays fixed as the body deforms.
+//! An explicit density-field constructor also accepts the existing source-bound
+//! P1 matter owner independently of the cellwise constitutive law. Its original
+//! nodal distribution then supplies all inertial, impulse and contact responses.
+//! Native hyper3 supplies Piola forces, consistent tangents and stored energy;
+//! native generalized-alpha at rho_inf=1
 //! supplies implicit-midpoint motion. No constitutive law or integrator is
 //! duplicated here.
 //! Reference shape gradients and volumes are prepared once and shared across
@@ -51,6 +55,7 @@ use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
     ScalarPropertyRequirement, resolve_material_state_point,
 };
+use fs_mbd_material::density_field::TetrahedralDensityBody;
 use fs_qty::Density;
 use fs_solid::hyper3::prepared::PreparedHyperTetProblem;
 use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
@@ -315,6 +320,7 @@ pub struct FiniteSolidStep {
 pub struct FiniteSolidBody<'a> {
     problem: HyperTetProblem<'a, FiniteSolidMaterial>,
     prepared: Arc<PreparedHyperTetProblem<'a, FiniteSolidMaterial>>,
+    reference_density_field: Option<Arc<TetrahedralDensityBody>>,
     mass: Arc<Csr>,
     free_mass: Arc<Csr>,
     free: Arc<[usize]>,
@@ -342,6 +348,7 @@ impl<'a> FiniteSolidBody<'a> {
     ) -> Result<Self, FiniteSolidError> {
         Self::initialize(
             problem,
+            None,
             None,
             TetPressure::Uniform(0.0),
             displacement_m,
@@ -373,6 +380,72 @@ impl<'a> FiniteSolidBody<'a> {
     ) -> Result<Self, FiniteSolidError> {
         Self::initialize(
             problem,
+            None,
+            Some(surface),
+            pressure_pa.into(),
+            displacement_m,
+            velocity_m_s,
+            time_s,
+            controls,
+            cx,
+        )
+    }
+
+    /// Bind an explicitly independent, source-resolved P1 reference density.
+    ///
+    /// The existing density-body owner supplies the ORIGINAL nodal densities,
+    /// positions, topology and source receipts. This explicit choice replaces
+    /// the constitutive bindings' scalar inertial densities; it does not
+    /// interpolate stiffness or assert that different material/source states
+    /// describe the same substance. The caller owns that constitutive model.
+    ///
+    /// Reference vertices and the tetrahedral partition must match exactly.
+    /// Cell order and local connectivity permutations are admitted without
+    /// changing the native solid's node/element order or contact-point identities.
+    /// Mechanical/history-dependent density sources refuse. The consistent
+    /// mass is integrated once and shared by motion, impulses and contact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_reference_density_field(
+        problem: HyperTetProblem<'a, FiniteSolidMaterial>,
+        density: Arc<TetrahedralDensityBody>,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        time_s: f64,
+        controls: FiniteSolidInitialization,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteSolidError> {
+        Self::initialize(
+            problem,
+            Some(density),
+            None,
+            TetPressure::Uniform(0.0),
+            displacement_m,
+            velocity_m_s,
+            time_s,
+            controls,
+            cx,
+        )
+    }
+
+    /// Combine the same explicit P1 reference matter with current-area pressure.
+    /// Density-field admission and pressure-surface admission are independent;
+    /// both must describe this original mesh. Every interval still supplies its
+    /// held pressure explicitly through the existing pressure step methods.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_reference_density_field_and_pressure<'p>(
+        problem: HyperTetProblem<'a, FiniteSolidMaterial>,
+        density: Arc<TetrahedralDensityBody>,
+        surface: Arc<ClosedTetPressureSurface>,
+        pressure_pa: impl Into<TetPressure<'p>>,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        time_s: f64,
+        controls: FiniteSolidInitialization,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteSolidError> {
+        Self::initialize(
+            problem,
+            Some(density),
             Some(surface),
             pressure_pa.into(),
             displacement_m,
@@ -386,6 +459,7 @@ impl<'a> FiniteSolidBody<'a> {
     #[allow(clippy::too_many_arguments)]
     fn initialize(
         problem: HyperTetProblem<'a, FiniteSolidMaterial>,
+        reference_density_field: Option<Arc<TetrahedralDensityBody>>,
         pressure_surface: Option<Arc<ClosedTetPressureSurface>>,
         pressure: TetPressure<'_>,
         displacement_m: &[[f64; 3]],
@@ -428,16 +502,24 @@ impl<'a> FiniteSolidBody<'a> {
             .checked_mul(3)
             .ok_or(FiniteSolidError::Invalid("DOF count overflow"))?;
         let prepared = Arc::new(problem.prepare(cx)?);
-        let densities: Vec<f64> = match problem.material {
-            HyperelasticLawField::Uniform(material) => {
-                vec![material.reference_density_kg_m3(); problem.tetrahedra.len()]
+        let mass = match &reference_density_field {
+            Some(density) => {
+                let nodal = admit_reference_density_field(&problem, density, cx)?;
+                problem.reference_mass_matrix_with_nodal_density(&nodal, cx)?
             }
-            HyperelasticLawField::PerElement(materials) => materials
-                .iter()
-                .map(FiniteSolidMaterial::reference_density_kg_m3)
-                .collect(),
+            None => {
+                let densities: Vec<f64> = match problem.material {
+                    HyperelasticLawField::Uniform(material) => {
+                        vec![material.reference_density_kg_m3(); problem.tetrahedra.len()]
+                    }
+                    HyperelasticLawField::PerElement(materials) => materials
+                        .iter()
+                        .map(FiniteSolidMaterial::reference_density_kg_m3)
+                        .collect(),
+                };
+                problem.reference_mass_matrix(&densities, cx)?
+            }
         };
-        let mass = problem.reference_mass_matrix(&densities, cx)?;
         let mut fixed = vec![0.0; dofs];
         let mut is_fixed = vec![false; dofs];
         let u: Vec<f64> = displacement_m.iter().flatten().copied().collect();
@@ -520,6 +602,7 @@ impl<'a> FiniteSolidBody<'a> {
         let body = Self {
             problem,
             prepared,
+            reference_density_field,
             mass: Arc::new(mass),
             free_mass,
             free,
@@ -550,6 +633,68 @@ impl<'a> FiniteSolidBody<'a> {
     }
     pub const fn reference_mass_kg(&self) -> f64 {
         self.reference_mass_kg
+    }
+
+    /// Original graded reference matter, including every nodal source receipt.
+    /// The same owner survives accepted time, force and impulse candidates.
+    /// `None` means inertia comes from the original constitutive bindings.
+    pub fn reference_density_field(&self) -> Option<&TetrahedralDensityBody> {
+        self.reference_density_field.as_deref()
+    }
+
+    /// Project a prescribed P1 acceleration [m/s²] through this body's actual
+    /// reference mass. Uniform gravity therefore follows the retained density
+    /// distribution, including loads on supported nodes.
+    ///
+    /// Pass these sorted nodal forces to the existing candidate-step methods;
+    /// do not count the same acceleration again as a body-force density.
+    /// This is a held load. Resampling a position-dependent field and supplying
+    /// its potential/tangent remain responsibilities of that field's owner.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, FiniteSolidError> {
+        checkpoint(cx)?;
+        if acceleration_m_s2.len() != self.problem.nodes_m.len() {
+            return Err(FiniteSolidError::Invalid(
+                "one acceleration vector per original solid node required",
+            ));
+        }
+        for acceleration in acceleration_m_s2 {
+            checkpoint(cx)?;
+            if acceleration.iter().any(|value| !value.is_finite()) {
+                return Err(FiniteSolidError::Invalid("acceleration must be finite"));
+            }
+        }
+        let mut forces = vec![0.0; self.mass.nrows()];
+        // Use checked row contractions so cancellation stays bounded even for
+        // large meshes; the complete mass retains supported-node contributions.
+        let acceleration = acceleration_m_s2.as_flattened();
+        for (row, force) in forces.iter_mut().enumerate() {
+            if row % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let (columns, values) = self.mass.row(row);
+            *force = columns
+                .iter()
+                .zip(values)
+                .fold(0.0, |sum, (&column, &value)| {
+                    value.mul_add(acceleration[column], sum)
+                });
+            if !force.is_finite() {
+                return Err(FiniteSolidError::Invalid(
+                    "acceleration load is not representable",
+                ));
+            }
+        }
+        let loads = forces
+            .into_iter()
+            .enumerate()
+            .filter(|(_, force)| *force != 0.0)
+            .collect();
+        checkpoint(cx)?;
+        Ok(loads)
     }
 
     /// Full node-major displacement, including fixed supports.
@@ -892,6 +1037,58 @@ impl<'a> FiniteSolidBody<'a> {
             },
         ))
     }
+}
+
+fn admit_reference_density_field(
+    problem: &HyperTetProblem<'_, FiniteSolidMaterial>,
+    density: &TetrahedralDensityBody,
+    cx: &Cx<'_>,
+) -> Result<Vec<f64>, FiniteSolidError> {
+    checkpoint(cx)?;
+    if density.vertices().len() != problem.nodes_m.len()
+        || density.tetrahedra().len() != problem.tetrahedra.len()
+    {
+        return Err(FiniteSolidError::Invalid(
+            "reference density must cover exactly the original solid mesh",
+        ));
+    }
+    let mut values = Vec::with_capacity(problem.nodes_m.len());
+    for (index, (vertex, &position)) in density.vertices().iter().zip(problem.nodes_m).enumerate() {
+        checkpoint(cx)?;
+        let source_position = vertex.position_m();
+        if [source_position.x, source_position.y, source_position.z] != position {
+            return Err(FiniteSolidError::Invalid(
+                "reference density vertex positions differ from the solid mesh",
+            ));
+        }
+        let property = vertex
+            .material()
+            .property(DENSITY_PROPERTY)
+            .expect("the density body retains its original density requirement");
+        if !property.is_static_at_fixed_external_conditions() {
+            return Err(FiniteSolidError::Source(format!(
+                "node {index}: reference density cannot freeze mechanical or history source axes"
+            )));
+        }
+        values.push(vertex.density_kg_m3());
+    }
+    // Canonicalize a temporary partition only for the identity check. The
+    // original element/material/contact order still drives native assembly.
+    let mut cells = Vec::with_capacity(problem.tetrahedra.len());
+    for &tet in problem.tetrahedra {
+        checkpoint(cx)?;
+        let mut cell = tet;
+        cell.sort_unstable();
+        cells.push(cell);
+    }
+    cells.sort_unstable();
+    if cells != density.tetrahedra() {
+        return Err(FiniteSolidError::Invalid(
+            "reference density tetrahedra differ from the solid partition",
+        ));
+    }
+    checkpoint(cx)?;
+    Ok(values)
 }
 
 fn checkpoint(cx: &Cx<'_>) -> Result<(), HyperTetError> {
