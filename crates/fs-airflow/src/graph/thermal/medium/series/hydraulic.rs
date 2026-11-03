@@ -20,6 +20,9 @@ use fs_qty::{Area, Length, MassFlowRate};
 /// Source-preserving inversion of complete fixed-state series pressure losses.
 pub mod pressure;
 
+// Geometry-derived Newtonian laminar laws feed this same material/flow owner.
+mod laminar;
+
 /// Immutable geometry/calibration, not fluid-specific pressure-loss constants.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFlowResistance {

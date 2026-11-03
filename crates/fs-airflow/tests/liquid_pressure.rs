@@ -73,6 +73,11 @@ fn with_card_path<R>(card: &MaterialCard, convention: LiquidPropertyTemperature,
 }
 fn with_card_path_gate<R>(card: &MaterialCard, convention: LiquidPropertyTemperature,
     run: impl FnOnce(&Cx<'_>, &LiquidHeatPath<'_, '_>, &CancelGate) -> R) -> R {
+    with_card_geometry_gate(card, convention, geometry(), run)
+}
+fn with_card_geometry_gate<R>(card: &MaterialCard, convention: LiquidPropertyTemperature,
+    flow_geometry: FlowHeatGeometry,
+    run: impl FnOnce(&Cx<'_>, &LiquidHeatPath<'_, '_>, &CancelGate) -> R) -> R {
     let law = LiquidTemperatureLaw::try_new(&card,&point(300.0),"T",LiquidViscosityBasis::Dynamic,
         MaterialPropertySelection::SingleClaimOnly).unwrap();
     let cp = PropertyKey::with_quantity("specific_heat_capacity",QuantitySpec::dimensional(Dims([2,0,-2,-1,0,0])));
@@ -85,8 +90,8 @@ fn with_card_path_gate<R>(card: &MaterialCard, convention: LiquidPropertyTempera
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
         let cx = Cx::new(&gate,arena,StreamKey { seed: 91,kernel_id: 740,tile: 0,iteration: 0 },
             Budget::INFINITE,ExecMode::Deterministic);
-        let sections = [LiquidHeatSection { region: "first",geometry: geometry(),correlation: CorrelationId::CircularDuctLaminarCwt },
-            LiquidHeatSection { region: "last",geometry: geometry(),correlation: CorrelationId::CircularDuctLaminarCwt }];
+        let sections = [LiquidHeatSection { region: "first",geometry: flow_geometry,correlation: CorrelationId::CircularDuctLaminarCwt },
+            LiquidHeatSection { region: "last",geometry: flow_geometry,correlation: CorrelationId::CircularDuctLaminarCwt }];
         let path = LiquidHeatPath::try_new(&cx,&law,&source,MassFlowRate::new(0.001),Temperature::new(300.0),
             &sections,convention).unwrap();
         run(&cx,&path,&gate)
@@ -118,6 +123,48 @@ fn pressure_selects_mass_instead_of_reusing_template_flow() {
         });
     }
 }
+
+#[test]
+fn geometry_derived_laminar_pressure_closes_existing_coolant_heat_path() {
+    let flow_geometry = FlowHeatGeometry {
+        wetted_area: Area::new(core::f64::consts::PI * 0.01 * 2.0),
+        ..geometry()
+    };
+    let resistance = MaterialFlowResistance::circular_laminar(
+        geometry().heated_length, geometry().characteristic_length, 2300.0,
+    ).unwrap();
+    let sections = [
+        LiquidResistanceSection { region: "first", resistance },
+        LiquidResistanceSection { region: "last", resistance },
+    ];
+    for scale in [1.0, 2.0] {
+        let material = card(false, scale);
+        with_card_geometry_gate(&material, LiquidPropertyTemperature::BulkMean,
+            flow_geometry, |cx, path, _| {
+            let result = path.solve_pressure_driven(cx, &[400.0, 400.0], &sections,
+                Pressure::new(50.0), local(), pressure_budget()).unwrap();
+            // Independent Hagen-Poiseuille through two 2 m, 10 mm sections;
+            // no fitted loss coefficient or copied implementation constant.
+            let expected_mass = 1000.0 * core::f64::consts::PI * 0.005_f64.powi(4)
+                * 50.0 / (8.0 * (0.002 * scale) * 4.0);
+            close(result.mass_flow_kg_per_s, expected_mass);
+            let capacity = expected_mass * 2000.0;
+            let h = 3.66 * 0.5 / 0.01;
+            let wall_area = 2.0 * core::f64::consts::PI * 0.01 * 2.0;
+            let outlet = 400.0 - 100.0 * (-h * wall_area / capacity).exp();
+            close(result.thermal.regions[1].outlet.temperature_k(), outlet);
+            close(result.thermal.total_heat_rate_w, capacity * (outlet - 300.0));
+            close(result.hydraulics.total_pressure_drop_pa, 50.0);
+            close(result.hydraulics.total_dissipated_power_w, 50.0 * expected_mass / 1000.0);
+            for region in &result.hydraulics.regions {
+                assert_eq!(region.loss.law, resistance);
+                close(region.material.dynamic_viscosity_pa_s(), 0.002 * scale);
+                close(region.loss.pressure_drop_pa, 25.0);
+            }
+        });
+    }
+}
+
 #[test]
 fn heating_changes_viscosity_flow_and_the_downstream_heat_trajectory_together() {
     with_path(true,1.0,LiquidPropertyTemperature::BulkMean,|cx,path| {

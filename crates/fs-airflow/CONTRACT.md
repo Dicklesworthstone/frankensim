@@ -1,5 +1,29 @@
 # CONTRACT: fs-airflow
 
+## Geometry-derived laminar duct resistance
+
+`MaterialFlowResistance::circular_laminar` and `rectangular_laminar` compile
+straight, stationary, no-slip Newtonian duct dimensions into the existing
+material-dependent pressure-loss law. Circular resistance uses Hagen-Poiseuille;
+rectangular resistance retains the full Fourier side-wall correction, including
+the square-duct and parallel-plate limits. Hydraulic diameter qualifies Reynolds
+number but never substitutes circular drag for a rectangular cross section.
+
+Each material evaluation supplies its actual dynamic viscosity and density.
+Existing signed flow, pressure inversion, graph/thermal coupling, tangents and
+dissipated-power accounting retain their owners. Six deterministic exponential
+evaluations compile rectangular geometry once; no series or allocation enters
+subsequent pressure/heat trials. The accelerated series' omitted correction is
+below 1e-23 before floating-point roundoff, not a physical error certificate.
+
+The caller selects a Reynolds ceiling in `(0,2300]`; this is an applicability
+screen, not a transition prediction. A developed Newtonian profile remains an
+authored assumption. Entrance effects, non-Newtonian stress, moving/slipping
+walls and unsteady-profile corrections are outside these constructors. Gas use
+retains the existing frozen-density approximation. Focused regressions compare
+analytic circular flow and an independent rectangular series, side exchange,
+SI rescaling, signed dissipation and the original material/coolant heat path.
+
 ## Static and total fan shaft power
 
 `qoi::FanPowerSpec` requires an explicit `FanPowerBasis`. Static efficiency
