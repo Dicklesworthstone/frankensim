@@ -8,6 +8,7 @@
 
 use super::{ElasticAcousticState, invalid};
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
+use crate::tensor::{from_mandel, mandel_stiffness_to_voigt, to_mandel};
 use fs_blake3::ContentHash;
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 
@@ -74,16 +75,6 @@ impl ElasticAcousticState {
     }
 }
 
-fn mandel_strain(strain: &Voigt) -> Voigt {
-    std::array::from_fn(|i| {
-        if i < 3 {
-            strain[i]
-        } else {
-            core::f64::consts::SQRT_2 * strain[i]
-        }
-    })
-}
-
 /// A frozen full tensor can directly drive the existing plane-stress/strain,
 /// tetrahedral and hexahedral `SmallStrainLaw` consumers. Their constrained
 /// reductions use this exact tangent and retain all transverse couplings.
@@ -98,32 +89,17 @@ impl SmallStrainLaw for ElasticAcousticState {
     fn initial_state(&self) {}
 
     fn stress(&self, strain: &Voigt, (): &Self::State) -> Voigt {
-        match self.strain_response(mandel_strain(strain)) {
-            Ok(response) => std::array::from_fn(|i| {
-                if i < 3 {
-                    response.stress_mandel_pa[i]
-                } else {
-                    core::f64::consts::FRAC_1_SQRT_2 * response.stress_mandel_pa[i]
-                }
-            }),
+        match self.strain_response(to_mandel(strain)) {
+            Ok(response) => from_mandel(&response.stress_mandel_pa),
             Err(_) => [f64::NAN; 6],
         }
     }
 
     fn tangent(&self, strain: &Voigt, (): &Self::State) -> Tangent6 {
-        if !self.admits_mandel_strain(&mandel_strain(strain)) {
+        if !self.admits_mandel_strain(&to_mandel(strain)) {
             return [[f64::NAN; 6]; 6];
         }
-        std::array::from_fn(|i| {
-            std::array::from_fn(|j| {
-                let scale = match (i < 3, j < 3) {
-                    (true, false) => core::f64::consts::SQRT_2,
-                    (false, true) => core::f64::consts::FRAC_1_SQRT_2,
-                    _ => 1.0,
-                };
-                self.stiffness_mandel_pa[i][j] * scale
-            })
-        })
+        mandel_stiffness_to_voigt(&self.stiffness_mandel_pa)
     }
 
     fn update_state(&self, _strain: &Voigt, (): &Self::State) {}

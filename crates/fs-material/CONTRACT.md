@@ -1,5 +1,25 @@
 # fs-material — CONTRACT
 
+## Frozen source thermoelasticity in native small-strain mechanics
+
+`ResolvedThermoelastic::try_mechanical_law` prepares a borrowed
+`FrozenThermoelasticLaw` for existing plane, tetrahedral and hexahedral
+`SmallStrainLaw` consumers. It retains the original temperature, complete
+elastic/expansion source responses, full oriented stiffness and independently
+integrated thermal strain. Per-element views admit nonuniform temperatures.
+Native plane stress relaxes all three transverse strains, including thermal
+shear; total and elastic Mandel strain retain the original separate bounds.
+
+Preparation converts the work-conjugate tangent once. Constitutive evaluations
+use fixed arrays without source queries, matrix inversion or thermal derivative
+work. The same shared Mandel/tensor-Voigt helpers serve frozen acoustic elasticity.
+The borrowed source's `state` remains the free-energy, entropy, internal-energy
+and thermal-derivative owner. A temperature update requires a fresh source
+response; this fixed-temperature view supplies no heat step, parameter-work
+account, finite-strain or geometric-prestress model. Focused regressions cover
+potential derivatives, anisotropic free expansion through P1/Q1 plane solves,
+and a nonuniformly heated, loaded body with independent segmentwise response.
+
 ## Species exchange with separately owned internal energy
 
 `ClosedGasParcel::exchange_species_boundary_relative_with_energy` uses the

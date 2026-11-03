@@ -3,7 +3,42 @@
 //! once, no engineering factor-2 — the factor lives in the contraction
 //! helpers where it belongs).
 
-use crate::Voigt;
+use crate::{Tangent6, Voigt};
+
+/// Tensor-shear Voigt components to the orthonormal Mandel representation.
+/// Applies to either symmetric strain or symmetric stress, in xy/yz/zx order.
+#[must_use]
+pub fn to_mandel(value: &Voigt) -> Voigt {
+    std::array::from_fn(|i| {
+        if i < 3 { value[i] } else { core::f64::consts::SQRT_2 * value[i] }
+    })
+}
+
+/// Orthonormal Mandel components to tensor-shear Voigt components.
+#[must_use]
+pub fn from_mandel(value: &Voigt) -> Voigt {
+    std::array::from_fn(|i| {
+        if i < 3 { value[i] } else { core::f64::consts::FRAC_1_SQRT_2 * value[i] }
+    })
+}
+
+/// Work-conjugate stiffness conversion `D^-1 C_M D`, where
+/// `D=diag(1,1,1,sqrt(2),sqrt(2),sqrt(2))`. A symmetric Mandel tensor becomes
+/// symmetric under tensor double-contraction weights, not necessarily under
+/// ordinary matrix transpose when normal/shear coupling is present.
+#[must_use]
+pub fn mandel_stiffness_to_voigt(stiffness: &Tangent6) -> Tangent6 {
+    std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            let scale = match (i < 3, j < 3) {
+                (true, false) => core::f64::consts::SQRT_2,
+                (false, true) => core::f64::consts::FRAC_1_SQRT_2,
+                _ => 1.0,
+            };
+            stiffness[i][j] * scale
+        })
+    })
+}
 
 pub use fs_matdb::{
     StrainTensorBasis, StrainTensorNotation, StressTensorBasis, StressTensorNotation,

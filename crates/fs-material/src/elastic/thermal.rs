@@ -24,6 +24,10 @@ use fs_qty::{Dims, Pressure, QuantitySpec};
 pub mod tensor;
 pub use tensor::{AffineThermoelastic, ThermoelasticSymmetry};
 
+/// Prepared native mechanical views of the original frozen thermal potential.
+pub mod mechanics;
+pub use mechanics::FrozenThermoelasticLaw;
+
 #[derive(Debug)]
 pub enum ThermoelasticError {
     Source(MaterialStatePointError),
