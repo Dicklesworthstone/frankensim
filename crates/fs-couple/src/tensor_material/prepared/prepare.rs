@@ -22,8 +22,59 @@ impl PreparedTensorBody {
         controls: PreparedTensorControls,
         gate: &CancelGate,
     ) -> Result<Self> {
+        Self::prepare_sources(
+            coordinates,
+            mass_kg,
+            points,
+            heat_groups,
+            dt_s,
+            None,
+            controls,
+            gate,
+        )
+    }
+
+    /// Prepare continuous F(s)=F_start+(F_end-F_start)*s, s=t/h. The positive
+    /// `force_scale_n` conditions additional force records only; it changes no
+    /// physical source amplitude, inertia or material storage. Native capacity
+    /// includes these records and a separately bounded one-way moment observer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_mass_matrix_affine(
+        coordinates: usize,
+        mass_kg: Vec<f64>,
+        points: Vec<ProjectedTensorProny>,
+        heat_groups: Vec<usize>,
+        dt_s: f64,
+        force_scale_n: f64,
+        controls: PreparedTensorControls,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        Self::prepare_sources(
+            coordinates,
+            mass_kg,
+            points,
+            heat_groups,
+            dt_s,
+            Some(force_scale_n),
+            controls,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_sources(
+        coordinates: usize,
+        mass_kg: Vec<f64>,
+        points: Vec<ProjectedTensorProny>,
+        heat_groups: Vec<usize>,
+        dt_s: f64,
+        force_scale_n: Option<f64>,
+        controls: PreparedTensorControls,
+        gate: &CancelGate,
+    ) -> Result<Self> {
         poll(gate)?;
         let n = coordinates;
+        let source_blocks = usize::from(force_scale_n.is_some());
         if n == 0
             || n > 128
             || !dt_s.is_finite()
@@ -38,6 +89,12 @@ impl PreparedTensorBody {
             || heat_groups.len() != points.len()
             || mass_kg.len() != n * n
             || !finite(&mass_kg)
+            || force_scale_n.is_some_and(|scale| {
+                !scale.is_finite()
+                    || scale <= 0.0
+                    || !scale.recip().is_finite()
+                    || !dt_s.recip().is_finite()
+            })
         {
             return Err(invalid(
                 "finite complete source, clock and controls required",
@@ -62,8 +119,14 @@ impl PreparedTensorBody {
         // Even the preliminary grouping scratch is admitted BEFORE allocation.
         // A fixed-capacity sorted vector needs no unbounded tree nodes and keeps
         // the exact positive source-time ordering without changing arithmetic.
-        bound((2 * n) as u128, controls.maximum_state_coordinates as u128)?;
-        bound((4 * n) as u128, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128)?;
+        bound(
+            ((2 + source_blocks) * n) as u128,
+            controls.maximum_state_coordinates as u128,
+        )?;
+        bound(
+            (2 * (2 + source_blocks) * n) as u128,
+            MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128,
+        )?;
         let source_branches = points
             .iter()
             .try_fold(0usize, |sum, point| sum.checked_add(point.branches().len()))
@@ -72,7 +135,7 @@ impl PreparedTensorBody {
             .maximum_state_coordinates
             .min(MAX_LINEAR_EXPONENTIAL_BLOCK_DIM / 2)
             / n)
-            .saturating_sub(2)
+            .saturating_sub(2 + source_blocks)
             .min(source_branches);
         bound(
             128 + 9 * groups as u128 + 8 * time_capacity as u128,
@@ -113,7 +176,7 @@ impl PreparedTensorBody {
                     ));
                 }
                 if let Err(at) = times.binary_search_by_key(&tau.to_bits(), |t| t.to_bits()) {
-                    let states = (3usize + times.len())
+                    let states = (3usize + source_blocks + times.len())
                         .checked_mul(n)
                         .ok_or_else(|| invalid("complete history extent overflow"))?;
                     bound(states as u128, controls.maximum_state_coordinates as u128)?;
@@ -135,7 +198,8 @@ impl PreparedTensorBody {
         if seen.iter().any(|x| !x) {
             return Err(invalid("heat groups must be contiguous and nonempty"));
         }
-        let states = (2 + times.len()) * n;
+        let physical_states = (2 + times.len()) * n;
+        let states = physical_states + source_blocks * n;
         let dimension = states + n + 1;
         bound(states as u128, controls.maximum_state_coordinates as u128)?;
         bound(2 * states as u128, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128)?;
@@ -146,6 +210,12 @@ impl PreparedTensorBody {
             MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128,
         )?;
         bound(dimension as u128, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128)?;
+        if force_scale_n.is_some() {
+            bound(
+                (states + 2 * n) as u128,
+                MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as u128,
+            )?;
+        }
         let rows = row_counts
             .iter()
             .try_fold(0usize, |a, b| a.checked_add(*b))
@@ -158,6 +228,7 @@ impl PreparedTensorBody {
             kelvin_points,
             groups,
             rows,
+            force_scale_n.is_some(),
             controls,
         )?;
         let budget = DenseExponentialBudget {
@@ -262,7 +333,14 @@ impl PreparedTensorBody {
         let mut input = zeros(states * n)?;
         for i in 0..n {
             poll(gate)?;
-            input[(n + i) * n + i] = 1.0;
+            if force_scale_n.is_some() {
+                // The held input is the interval force INCREMENT [N]. The
+                // force record starts at F0 and evolves with derivative dF/h.
+                input[(physical_states + i) * n + i] = dt_s.recip();
+                generator[(n + i) * states + physical_states + i] = 1.0;
+            } else {
+                input[(n + i) * n + i] = 1.0;
+            }
             for k in 0..n {
                 generator[i * states + n + k] = inertia.inverse_entry(i, k);
                 generator[(n + i) * states + k] = -equilibrium[i * n + k];
@@ -289,18 +367,47 @@ impl PreparedTensorBody {
             for t in 0..times.len() {
                 heat_scales[(2 + t) * n + i] = scale(branch_stiffness[t * n * n + i * n + i])?;
             }
+            if let Some(scale) = force_scale_n {
+                heat_scales[physical_states + i] = scale.recip();
+            }
         }
-        let flow = PreparedQuadraticFlow::new_extended_controlled(
-            &system,
-            &split,
-            &generator,
-            &heat_scales[base..],
-            dt_s,
-            &[],
-            &[],
-            budget,
-            || gate.is_requested(),
-        )?;
+        let flow = if force_scale_n.is_some() {
+            let mut work = zeros(states * states)?;
+            for i in 0..n {
+                poll(gate)?;
+                for j in 0..n {
+                    let value = 0.5 * inertia.inverse_entry(i, j);
+                    work[(physical_states + i) * states + n + j] = value;
+                    work[(n + j) * states + physical_states + i] = value;
+                }
+            }
+            // This observes the original F(t)^T M^-1 p(t), independently of
+            // energy or the separately prepared linear displacement moment.
+            PreparedQuadraticFlow::new_extended_input_controlled(
+                &system,
+                &split,
+                &generator,
+                &heat_scales[base..],
+                &input,
+                dt_s,
+                &[work],
+                &[],
+                budget,
+                || gate.is_requested(),
+            )?
+        } else {
+            PreparedQuadraticFlow::new_extended_controlled(
+                &system,
+                &split,
+                &generator,
+                &heat_scales[base..],
+                dt_s,
+                &[],
+                &[],
+                budget,
+                || gate.is_requested(),
+            )?
+        };
         // Independent positive-loss caches use a diagonal similarity only.
         // Source rows are changed contragrediently; physical squares stay exact.
         for i in 0..states {
@@ -316,6 +423,20 @@ impl PreparedTensorBody {
         if !finite(&generator) || !finite(&input) {
             return Err(invalid("conditioned original heat trajectory overflow"));
         }
+        let affine = force_scale_n
+            .map(|force_scale_n| {
+                super::affine::prepare_observer(
+                    n,
+                    &generator,
+                    &input,
+                    &heat_scales,
+                    dt_s,
+                    force_scale_n,
+                    budget,
+                    gate,
+                )
+            })
+            .transpose()?;
         let mut sources = Vec::with_capacity(groups);
         for &count in &row_counts {
             sources.push(zeros(count * states)?);
@@ -383,7 +504,8 @@ impl PreparedTensorBody {
             flow,
             heat,
             heat_scales,
-            states,
+            affine,
+            states: physical_states,
             dt_s,
             controls,
         })
@@ -428,6 +550,7 @@ fn admit_resources(
     kv: usize,
     g: usize,
     rows: usize,
+    affine: bool,
     controls: PreparedTensorControls,
 ) -> Result<()> {
     let (n, s, p, b, kv, g, rows) = (
@@ -441,19 +564,27 @@ fn admit_resources(
     );
     let d = s + n + 1;
     let source = 8 * (2 * p * n * n + 6 * (p + b + kv) * n + 256 * p + 72 * b) + 1024 * p + 512 * b;
-    let bytes = source
+    let mut bytes = source
         + 8 * (36 * d * d
             + g * (132 * s * s + s * n)
             + 32 * s * s
             + 8 * s * n
             + 4 * rows * s
             + 256 * (s + p + b));
-    let work = 624 * d * d * d
+    let mut work = 624 * d * d * d
         + 2048 * g * (2 * s) * (2 * s) * (2 * s)
         + 128 * (2 * n) * (2 * n) * (2 * n) * (2 * n)
         + 16 * (rows + g * s) * s * s
         + 64 * (p + b + 1) * n * n;
-    let warm = 64 * s * s + g * (16 * s * s + s * n) + 64 * (p + b + 1) * n + 16 * n * n;
+    let mut warm = 64 * s * s + g * (16 * s * s + s * n) + 64 * (p + b + 1) * n + 16 * n * n;
+    if affine {
+        let observer = s + 2 * n;
+        // Original force-work Gramian plus one native one-way integral
+        // exponential and its retained linear maps. No n-fold Gramian cache.
+        bytes += 8 * (8 * observer * observer + 2 * d * d + 4 * n * (s + n) + 256 * (s + n));
+        work += 80 * observer * observer * observer + 32 * observer * observer;
+        warm += 8 * d * d + 16 * n * (s + n);
+    }
     bound(bytes, controls.maximum_preparation_bytes as u128)?;
     bound(work, controls.maximum_preparation_multiply_terms as u128)?;
     bound(warm, controls.maximum_step_multiply_terms as u128)

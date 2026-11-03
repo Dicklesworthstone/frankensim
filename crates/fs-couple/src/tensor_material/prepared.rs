@@ -10,7 +10,7 @@
 //!
 //! The original fs-phs flow and positive source-square kernels are prepared once.
 //! Warm calls use bounded contractions and source-domain checks, independently
-//! integrate held-force work and grouped physical heat, and publish atomically.
+//! integrate held or affine-force work and grouped physical heat, and publish atomically.
 //! Material properties, geometry, force ports and the positive clock stay fixed.
 
 use super::{Inertia, InitialMemory, TensorMaterialError};
@@ -20,13 +20,17 @@ use fs_phs::linear_exact::prepared::PreparedQuadraticFlow;
 use fs_phs::linear_exact::{DenseExponentialBudget, PreparedSourceLoss};
 use fs_phs::{PhsError, PreparedStepError};
 
+mod affine;
 mod prepare;
+pub use affine::PreparedTensorAffineStep;
 
 /// Explicit whole-owner resource and physical numerical allowances. No defaults.
 #[derive(Clone, Copy, Debug)]
 pub struct PreparedTensorControls {
     pub maximum_coordinates: usize,
     pub maximum_material_points: usize,
+    /// Complete propagation coordinates, including force records for affine loading.
+    /// Accepted physical state remains displacement, momentum and material memory.
     pub maximum_state_coordinates: usize,
     pub maximum_heat_groups: usize,
     /// Includes retained source data, ALL channel caches and simultaneous scratch.
@@ -169,6 +173,7 @@ pub struct PreparedTensorBody {
     flow: PreparedQuadraticFlow,
     heat: Vec<PreparedSourceLoss>,
     heat_scales: Vec<f64>,
+    affine: Option<affine::AffinePrepared>,
     states: usize,
     dt_s: f64,
     controls: PreparedTensorControls,
@@ -179,6 +184,17 @@ impl PreparedTensorBody {
     }
     pub fn state_dimension(&self) -> usize {
         self.states
+    }
+    /// Prepared physical plus source-record coordinates. Affine loading adds
+    /// exactly one force coordinate per physical displacement; these carry no
+    /// mechanical storage and never enter accepted constitutive history.
+    pub fn propagation_state_dimension(&self) -> usize {
+        self.states
+            + if self.affine.is_some() {
+                self.coordinates()
+            } else {
+                0
+            }
     }
     /// Increasing exact positive source times; adjacent f64 values stay distinct.
     pub fn relaxation_times_s(&self) -> &[f64] {
@@ -250,7 +266,7 @@ impl PreparedTensorBody {
         }
         self.admit_displacement(displacement_m, gate)?;
         let energy = self.energy(&state, &velocity, gate)?;
-        let scratch = Scratch::new(self.states, n)?;
+        let scratch = Scratch::new(self.states, n, self.affine.is_some())?;
         poll(gate)?;
         Ok(PreparedTensorHistory {
             body: self,
@@ -353,15 +369,28 @@ struct Scratch {
     endpoint: Vec<f64>,
     heat_state: Vec<f64>,
     heat_coordinates: Vec<f64>,
+    source_state: Vec<f64>,
+    physical_candidate: Vec<f64>,
+    source_increment: Vec<f64>,
+    integrals: Vec<f64>,
 }
 impl Scratch {
-    fn new(states: usize, ports: usize) -> Result<Self> {
+    fn new(physical_states: usize, ports: usize, affine: bool) -> Result<Self> {
+        let states = physical_states + if affine { ports } else { 0 };
         Ok(Self {
             augmented: zeros(states + ports + 1)?,
             balanced: zeros(states)?,
             endpoint: zeros(states)?,
             heat_state: zeros(states)?,
             heat_coordinates: zeros(2 * states)?,
+            source_state: if affine { zeros(states)? } else { Vec::new() },
+            physical_candidate: if affine {
+                zeros(physical_states)?
+            } else {
+                Vec::new()
+            },
+            source_increment: if affine { zeros(ports)? } else { Vec::new() },
+            integrals: if affine { zeros(1)? } else { Vec::new() },
         })
     }
 }
@@ -424,6 +453,11 @@ impl PreparedTensorHistory<'_> {
     /// candidate endpoint; this is not a within-interval strain/band certificate.
     /// Any refusal leaves physical state, clock and every work/heat counter intact.
     pub fn advance(&mut self, force_n: &[f64], gate: &CancelGate) -> Result<PreparedTensorStep> {
+        if self.body.affine.is_some() {
+            return self
+                .advance_affine(force_n, force_n, gate)
+                .map(|step| step.motion);
+        }
         poll(gate)?;
         let body = self.body;
         let n = body.coordinates();

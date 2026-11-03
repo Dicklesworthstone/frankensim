@@ -23449,3 +23449,52 @@ not add a radiation law, fit damping or establish the attached source's
 frequency accuracy. Regional loaded regressions cover exact repeated-gas parity,
 mutual-load memory and heat under three clock subdivisions, source/capacity
 refusals and preservation of accepted history after malformed input.
+
+## Exact affine forcing of prepared tensor mechanics
+
+`PreparedTensorBody::from_mass_matrix_affine` prepares the original tensor
+mechanics for F(s)=(1-s)F0+sF1, s=t/h. A positive caller-supplied force scale
+conditions numerical coordinates only. It neither clips forces nor changes
+material parameters. Each interval seeds its explicit force record; finite
+force jumps between intervals apply no mechanical impulse. Accepted state
+remains the original displacement, momentum and shared Maxwell histories.
+
+The existing native extended-input flow propagates the complete coupled
+trajectory. Its signed quadratic observation integrates F(t)^T M^-1 p(t)
+independently of original physical energy and positive material heat. The
+existing positive source-loss owner integrates every original Kelvin and
+Maxwell channel on that same affine trajectory. No endpoint-force average or
+energy residual substitutes for applied work or physical heat.
+
+`advance_affine` returns the ordinary motion/heat report and the first normalized
+velocity moment integral_0^1 s*v(h*s) ds. One separately prepared native
+one-way displacement-integral exponential supplies all coordinates' moments.
+Its observers do not feed back into motion or material history. Endpoint-weighted
+moment work must agree with independently integrated force/velocity work before
+publication, in addition to the original interval and cumulative energy gates.
+Preparation is cached; warm steps use bounded contractions and source checks.
+
+`maximum_state_coordinates` bounds physical plus force-record propagation
+coordinates; `state_dimension()` reports physical coordinates and
+`propagation_state_dimension()` additionally includes the force records.
+All flow, source-loss and observer native dimensions, storage, preparation work
+and warm work are admitted explicitly. Existing held preparation retains its
+previous cache and evaluation route. An affine-prepared history also accepts a
+held force through equal endpoints. Held-only preparation refuses affine input.
+
+The fixed-source, fixed-clock, compatible-prehistory and zero-eigenstrain scope
+of prepared mechanics is unchanged. Source validity remains an endpoint check,
+not a certificate over all intermediate strains. This prescribed-force path
+does not supply an implicit contact solve, evolving material law or nonlinear
+finite-deformation integrator.
+
+Native `tests/tensor_material_prepared_affine.rs` passes three focused tests:
+an independently derived standard-linear-solid solution under a global ramp,
+with work from integral F*v and heat from the branch-force square; constant
+endpoint agreement with the original held runtime; and capacity/failed-input/
+cancellation/exhausted-step/wrong-preparation atomicity. The analytical test uses
+both compatible prehistories, three conditioning scales and 40 consecutive
+intervals. It explicitly falsifies average-force times displacement as work
+(maximum observed difference 2.485e-8 J). All six existing prepared-material
+tests remain green. This is original-source native numerical verification,
+not experimental material qualification or a full workspace Cargo/DSR/RCH pass.
