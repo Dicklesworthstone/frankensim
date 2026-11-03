@@ -216,7 +216,10 @@ fn liquid_fraction_controls_time_error_while_latent_nodes_stay_isothermal() {
         let stepper = prepare(cx, &mesh, &curve);
         let mut policy = config(100.0);
         policy.enthalpy_absolute_tolerance_j_kg = 1000.0;
-        policy.liquid_fraction_absolute_tolerance = 1e-6;
+        // This is a local step-doubling allowance, not a global error bound.
+        // The independent modal solution below needs the tighter allowance
+        // to retain its 0.02 J/kg accumulated-enthalpy accuracy requirement.
+        policy.liquid_fraction_absolute_tolerance = 5e-7;
         let mut state = stepper
             .adaptive_state(cx, &[80.0, 200.0, 200.0, 320.0], 0.0, 0.15, policy)
             .unwrap();
@@ -549,9 +552,17 @@ fn minimum_step_and_cancellation_preserve_accepted_physics() {
         let mut state = stepper
             .adaptive_state(cx, &initial, 0.0, 0.5, policy)
             .unwrap();
-        let refused = state.advance_to(cx, p, None, 1.0, 100).unwrap();
+        // The final clock tick is integrated by the preceding valid trial.
+        // Its tiny extension must not make a rejection at the REQUESTED
+        // floor retry the same physical trial until the work budget expires.
+        let refused = state
+            .advance_to(cx, p, None, 0.5_f64.next_up(), 100)
+            .unwrap();
         assert_eq!(refused.status, AdaptiveEnthalpyStatus::MinimumStep);
         assert_eq!((refused.accepted, refused.rejected), (0, 1));
+        assert_eq!(refused.endpoint_solves, 3);
+        assert!(refused.last_error.unwrap().normalized > 1.0);
+        assert!(refused.last_endpoint_refusal.is_none());
         assert_eq!(state.time_s(), 0.0);
         assert_eq!(bits(state.specific_enthalpy_j_kg()), bits(&initial));
         assert_eq!(refused.integrated_net_input_j, 0.0);

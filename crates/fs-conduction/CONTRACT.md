@@ -82,6 +82,28 @@ source claims or material assignments is not established by this binding.
 Tensor, sharp-melting and declared-multiplier paths remain available through
 their original owners.
 
+`from_phase_materials_with_nodal_reference_density` binds those same original
+conductivity sources and caloric charts together with an explicitly authored,
+positive P1 reference-density field. It assembles the immutable nodal masses
+directly as `sum_e V_e*(sum_a rho_a + rho_i)/20`; no intermediate scalar-density
+inventory is required. Density and enthalpy correlations therefore survive in
+storage, latent evolution, endpoint energy and the existing density adjoints.
+The original source still owns `k(T,f)` and its domain. The profile is a separate
+reference-inventory declaration, not a density inferred from conductivity or
+updated from the evolving temperature.
+
+For this profile, `reference_material` and `phase_transport_material` return
+`None` rather than expose a superseded scalar inventory. The source-only
+`phase_conductivity_source` accessor retains the exact prepared conductivity
+and borrowed caloric owner; `phase_transport_problem` and
+`phase_transport_heat_flux` retain their original geometry and flux meanings.
+Late profile replacement on an already source-bound problem remains refused.
+Focused regressions use independent P1 storage and conductivity integrals,
+graded sensible/latent heating, two-material conservative contact, density
+JVP/adjoint pairing and finite differences, uniform scalar parity and explicit
+source, budget and cancellation refusals. Geometry and reference mass remain
+fixed; this constructor establishes no motion or mechanical coupling.
+
 ## Enthalpy-dependent spatial enclosure emissivity
 
 `MaterialPointwiseEnclosureRadiation` binds original material/card/claim
@@ -2362,7 +2384,8 @@ authority.
   closed specimen's mass. `reference_material` returns `None` for such a profile
   so scalar-only coupled source owners refuse an unsupported inventory binding.
   An already bound scalar phase-source inventory refuses profile replacement;
-  its original source identity cannot describe an independently declared field.
+  the explicit `from_phase_materials_with_nodal_reference_density` constructor
+  instead declares the profile when the original sources are first bound.
   The original element/material density controls remain additive constant
   perturbations about the frozen profile. Explicit nodal controls additionally
   provide a residual JVP and an optional nodal pullback using the same symmetric
@@ -2423,6 +2446,14 @@ authority.
   Its reported balance defect is measured, not bounded by one step's energy
   tolerance. Each call lands exactly on its declared event time under fixed
   source and boundary laws, allowing explicit workload changes between calls.
+  A bisectable trial that would leave exactly one floating-point clock tick
+  before an event includes that tick before its coarse and fine solves when
+  the extended duration exceeds the request by at most `8*EPSILON*request`.
+  Coarsely resolved clocks retain the minimum-step refusal. Actual half-step
+  times determine heat input and all acceptance checks.
+  Rejection backoff uses the unextended requested duration, preserving the
+  minimum-step stop. An already unbisectable requested interval still refuses
+  without changing accepted time, state, heat or observer history.
   A trial budget or minimum-step stop returns a distinguishable partial
   trajectory. Cancellation and endpoint refusals preserve accepted physical
   history; continuing a bounded call retains the same controller state.

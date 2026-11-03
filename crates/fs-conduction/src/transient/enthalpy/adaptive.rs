@@ -46,7 +46,10 @@ pub struct AdaptiveEnthalpyConfig {
     /// Smallest requested full trial, s. An event may clip it further, but
     /// a rejected event-clipped trial cannot silently relax this floor.
     pub minimum_step_s: f64,
-    /// Largest requested full trial, s.
+    /// Largest requested full trial, s. An already bisectable trial may absorb
+    /// one final clock tick before an event, within a relative rounding
+    /// allowance of `8*f64::EPSILON` of its requested duration. The adjusted
+    /// interval is solved and checked in full; coarsely resolved clocks refuse.
     pub maximum_step_s: f64,
     /// Unchanged nonlinear, Krylov and per-endpoint energy gates.
     pub endpoint: EnthalpyStepConfig,
@@ -427,12 +430,34 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             }
             let trial_start = self.time_s;
             let remaining = end - trial_start;
-            let trial_end = if self.next_step_s >= remaining {
+            // Backoff uses the requested/event-clipped step, not any rounding
+            // extension below. A refused trial at the requested floor must
+            // stop instead of retrying the same extended endpoint forever.
+            let requested_step = self.next_step_s.min(remaining);
+            let mut trial_end = if self.next_step_s >= remaining {
                 end
             } else {
                 finite(self.time_s + self.next_step_s)?
             };
-            let dt = trial_end - self.time_s;
+            // A rounded positive trial can leave an adjacent-float event
+            // suffix with no representable midpoint. Include ONLY that final
+            // clock tick within a relative arithmetic-rounding allowance
+            // before all three solves, so its physical heat is integrated and
+            // every acceptance gate still applies. Never move accepted time,
+            // cross the event, enlarge a coarsely resolved step or rescue an
+            // unbisectable requested trial.
+            let requested_dt = finite(trial_end - trial_start)?;
+            let requested_middle = trial_start + 0.5 * requested_dt;
+            if requested_dt > 0.0
+                && trial_start < requested_middle
+                && requested_middle < trial_end
+                && trial_end < end
+                && trial_end.next_up() == end
+                && remaining - requested_step <= (8.0 * f64::EPSILON) * requested_step
+            {
+                trial_end = end;
+            }
+            let dt = finite(trial_end - self.time_s)?;
             let middle = self.time_s + 0.5 * dt;
             let first_dt = middle - self.time_s;
             let second_dt = trial_end - middle;
@@ -465,7 +490,7 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
                     self.rejected += 1;
                     self.last_error = None;
                     self.last_endpoint_refusal = Some(error);
-                    if !self.reduce_step(dt, 0.5) {
+                    if !self.reduce_step(requested_step, 0.5) {
                         status = AdaptiveEnthalpyStatus::MinimumStep;
                         break;
                     }
@@ -479,7 +504,7 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
                 self.last_error = Some(error);
                 self.last_endpoint_refusal = None;
                 let factor = (0.9 / error.normalized.sqrt()).clamp(0.1, 0.5);
-                if !self.reduce_step(dt, factor) {
+                if !self.reduce_step(requested_step, factor) {
                     status = AdaptiveEnthalpyStatus::MinimumStep;
                     break;
                 }

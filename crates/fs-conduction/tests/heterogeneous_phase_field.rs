@@ -1,5 +1,7 @@
 //! Original phase sources retain material ownership through spatial transport.
 //! All constitutive values are manufactured fixtures, not measured material data.
+#[path = "heterogeneous_phase_field/nodal_density.rs"]
+mod nodal_density;
 mod support;
 
 use fs_conduction::material::LiquidMassFractionConductivity;
@@ -652,33 +654,60 @@ fn native_adaptive_heating_preserves_each_materials_single_latent_account() {
         .unwrap();
         let masses = storage.reference_nodal_masses_kg().to_vec();
         let old = [-20., -20., -20., -20., 980., 980., 980., 980.];
+        let policy = AdaptiveEnthalpyConfig {
+            enthalpy_absolute_tolerance_j_kg: 1e-5,
+            temperature_absolute_tolerance_k: 1e-5,
+            liquid_fraction_absolute_tolerance: 1e-7,
+            relative_tolerance: 0.0,
+            minimum_step_s: 1e-6,
+            maximum_step_s: 0.4,
+            endpoint: config(),
+        };
         let mut state = storage
-            .adaptive_state(
-                cx,
-                &old,
-                0.0,
-                0.2,
-                AdaptiveEnthalpyConfig {
-                    enthalpy_absolute_tolerance_j_kg: 1e-5,
-                    temperature_absolute_tolerance_k: 1e-5,
-                    liquid_fraction_absolute_tolerance: 1e-7,
-                    relative_tolerance: 0.0,
-                    minimum_step_s: 1e-6,
-                    maximum_step_s: 0.4,
-                    endpoint: config(),
-                },
-            )
+            .adaptive_state(cx, &old, 0.0, 0.2, policy)
             .unwrap();
+        let mut observed_time = 0.0_f64;
+        let mut observed_duration = 0.0;
+        let mut observed_heat = 0.0;
+        let mut observed_pairs = 0;
         let report = state
-            .advance_to(
+            .advance_to_observed(
                 cx,
                 storage.phase_transport_problem(&boundary, &q).unwrap(),
                 None,
                 3.0,
                 100,
+                |trial| {
+                    assert_eq!(trial.start_time_s.to_bits(), observed_time.to_bits());
+                    assert!(trial.start_time_s < trial.midpoint_time_s);
+                    assert!(trial.midpoint_time_s < trial.end_time_s);
+                    for (dt, step) in [
+                        (trial.midpoint_time_s - trial.start_time_s, trial.first_half),
+                        (trial.end_time_s - trial.midpoint_time_s, trial.second_half),
+                    ] {
+                        observed_duration += dt;
+                        observed_heat += dt * step.source_w;
+                        near(step.stored_energy_change_j, dt * step.source_w, 1e-10);
+                    }
+                    observed_time = trial.end_time_s;
+                    observed_pairs += 1;
+                    std::ops::ControlFlow::Continue(())
+                },
             )
             .unwrap();
-        assert_eq!(report.status, AdaptiveEnthalpyStatus::ReachedEnd);
+        assert_eq!(
+            report.status,
+            AdaptiveEnthalpyStatus::ReachedEnd,
+            "{report:#?}; accepted h={:?}",
+            state.specific_enthalpy_j_kg()
+        );
+        assert_eq!(state.time_s().to_bits(), 3.0_f64.to_bits());
+        assert_eq!(report.time_s.to_bits(), 3.0_f64.to_bits());
+        assert_eq!(observed_time.to_bits(), 3.0_f64.to_bits());
+        assert_eq!(observed_pairs, report.accepted);
+        near(observed_duration, 3.0, 1e-14);
+        near(observed_heat, 100.0, 1e-10);
+        near(report.integrated_net_input_j, observed_heat, 1e-12);
         for i in 0..8 {
             let (h, t, f) = if i < 4 {
                 (130.0, 430.0, 1.0)
@@ -698,6 +727,118 @@ fn native_adaptive_heating_preserves_each_materials_single_latent_account() {
             .sum::<f64>();
         near(energy, 100.0, 1e-9);
         assert_eq!(storage.reference_nodal_masses_kg(), masses.as_slice());
+
+        // If the WHOLE remaining event interval is one clock tick, no two
+        // positive half steps exist. Refuse without relabeling accepted time,
+        // publishing an observer pair or changing the physical inventory.
+        let previous_h = state.specific_enthalpy_j_kg().to_vec();
+        let previous_solves = state.endpoint_solves();
+        let previous_step = state.next_step_s().to_bits();
+        let refused = state
+            .advance_to_observed(
+                cx,
+                storage.phase_transport_problem(&boundary, &q).unwrap(),
+                None,
+                3.0_f64.next_up(),
+                1,
+                |_| panic!("an unbisectable event interval cannot publish a half-step pair"),
+            )
+            .unwrap();
+        assert_eq!(refused.status, AdaptiveEnthalpyStatus::MinimumStep);
+        assert_eq!(
+            (refused.accepted, refused.rejected, refused.endpoint_solves),
+            (0, 0, 0)
+        );
+        assert_eq!(state.time_s().to_bits(), 3.0_f64.to_bits());
+        assert_eq!(state.specific_enthalpy_j_kg(), previous_h);
+        assert_eq!(state.endpoint_solves(), previous_solves);
+        assert_eq!(state.next_step_s().to_bits(), previous_step);
+        assert_eq!(
+            refused.integrated_net_input_j.to_bits(),
+            report.integrated_net_input_j.to_bits()
+        );
+
+        // A requested one-tick trial is itself unbisectable. A further
+        // one-tick event suffix must not double that requested step to make
+        // it admissible: retain the step budget and untouched initial state.
+        let tick = 3.0_f64.next_up() - 3.0;
+        let mut limited = storage
+            .adaptive_state(
+                cx,
+                &previous_h,
+                3.0,
+                tick,
+                AdaptiveEnthalpyConfig {
+                    minimum_step_s: tick,
+                    maximum_step_s: tick,
+                    ..policy
+                },
+            )
+            .unwrap();
+        let refused = limited
+            .advance_to_observed(
+                cx,
+                storage.phase_transport_problem(&boundary, &q).unwrap(),
+                None,
+                3.0_f64.next_up().next_up(),
+                1,
+                |_| panic!("an unbisectable requested step cannot publish a half-step pair"),
+            )
+            .unwrap();
+        assert_eq!(refused.status, AdaptiveEnthalpyStatus::MinimumStep);
+        assert_eq!(
+            (refused.accepted, refused.rejected, refused.endpoint_solves),
+            (0, 0, 0)
+        );
+        assert_eq!(limited.time_s().to_bits(), 3.0_f64.to_bits());
+        assert_eq!(limited.specific_enthalpy_j_kg(), previous_h);
+        assert_eq!(limited.next_step_s().to_bits(), tick.to_bits());
+        assert_eq!(refused.integrated_net_input_j, 0.0);
+        assert_eq!(refused.stored_energy_change_j, 0.0);
+
+        // At a coarse absolute clock, one clock tick can be a substantial
+        // physical duration. Keep the admitted four-second pair; do not turn
+        // it into six seconds just to absorb an unbisectable two-second tail.
+        let start = 1e16;
+        let mut coarse_clock = storage
+            .adaptive_state(
+                cx,
+                &previous_h,
+                start,
+                4.0,
+                AdaptiveEnthalpyConfig {
+                    minimum_step_s: 4.0,
+                    maximum_step_s: 4.0,
+                    ..policy
+                },
+            )
+            .unwrap();
+        let mut observed_duration = 0.0;
+        let refused = coarse_clock
+            .advance_to_observed(
+                cx,
+                storage.phase_transport_problem(&boundary, &q).unwrap(),
+                None,
+                start + 6.0,
+                4,
+                |trial| {
+                    observed_duration += trial.end_time_s - trial.start_time_s;
+                    std::ops::ControlFlow::Continue(())
+                },
+            )
+            .unwrap();
+        assert_eq!(refused.status, AdaptiveEnthalpyStatus::MinimumStep);
+        assert_eq!(
+            (refused.accepted, refused.rejected, refused.endpoint_solves),
+            (1, 0, 3)
+        );
+        assert_eq!(coarse_clock.time_s().to_bits(), (start + 4.0).to_bits());
+        assert_eq!(observed_duration, 4.0);
+        near(refused.integrated_net_input_j, 400.0 / 3.0, 1e-10);
+        near(refused.stored_energy_change_j, 400.0 / 3.0, 1e-9);
+        for (i, &h) in coarse_clock.specific_enthalpy_j_kg().iter().enumerate() {
+            near(h, previous_h[i] + 400.0 / DENSITY[i / 4], 1e-8);
+        }
     });
 }
 

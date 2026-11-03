@@ -25,6 +25,7 @@ pub use radiation::{EnthalpyHeatStep, EnthalpyRadiation};
 
 use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
+use fs_material::thermal::conduction::phase::PreparedPhaseConductivity;
 
 use super::adjoint::{EnthalpyAdjointError, EnthalpyStepGradient, EnthalpyStepLinearization};
 use super::material::phase::{MaterialPhaseTransport, PhaseFieldTransport};
@@ -113,6 +114,29 @@ impl From<EnthalpyError> for HeterogeneousEnthalpyError {
     }
 }
 
+fn admit_nodal_reference_density(
+    cx: &Cx<'_>,
+    vertices: usize,
+    density_kg_m3: &[f64],
+) -> Result<(), EnthalpyError> {
+    if density_kg_m3.len() != vertices {
+        return Err(EnthalpyError::InvalidInput(
+            "one nodal reference density per mesh vertex required",
+        ));
+    }
+    for (vertex, &density) in density_kg_m3.iter().enumerate() {
+        if vertex % ASSEMBLY_TILE == 0 {
+            poll(cx, vertex)?;
+        }
+        if !density.is_finite() || density <= 0.0 {
+            return Err(EnthalpyError::InvalidInput(
+                "positive finite nodal reference densities required",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Prepared heterogeneous masses and nodal phase-chart ownership.
 ///
 /// The uniform stepper is private, so its single-chart accessor cannot be used
@@ -140,12 +164,23 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
     /// # Errors
     /// Refuses invalid densities, exhausted budgets, missing assignments,
     /// unknown material IDs, orphan vertices and conflicting shared vertices.
-    #[allow(clippy::too_many_lines)]
     pub fn new(
         cx: &Cx<'_>,
         mesh: &'m ConductionMesh,
         materials: &[ReferenceEnthalpyMaterial<'c>],
         element_material_ids: &[usize],
+        budget: EnthalpyBudget,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        Self::prepare_reference_inventory(cx, mesh, materials, element_material_ids, None, budget)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn prepare_reference_inventory(
+        cx: &Cx<'_>,
+        mesh: &'m ConductionMesh,
+        materials: &[ReferenceEnthalpyMaterial<'c>],
+        element_material_ids: &[usize],
+        nodal_density: Option<&[f64]>,
         budget: EnthalpyBudget,
     ) -> Result<Self, HeterogeneousEnthalpyError> {
         poll(cx, 0)?;
@@ -183,6 +218,9 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             .ok_or(EnthalpyError::InvalidInput(
                 "spatial allocation size overflow",
             ))?;
+        if let Some(density) = nodal_density {
+            admit_nodal_reference_density(cx, n, density)?;
+        }
         for (index, material) in materials.iter().enumerate() {
             if index % ASSEMBLY_TILE == 0 {
                 poll(cx, index)?;
@@ -212,15 +250,26 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
                         material: id,
                         material_count: materials.len(),
                     })?;
-            let contribution =
-                finite(material.reference_density_kg_m3 * mesh.element_volume(element) / 4.0)?;
-            if contribution <= 0.0 {
-                return Err(EnthalpyError::InvalidInput(
-                    "positive reference mass is not representable",
+            let local = if let Some(density) = nodal_density {
+                super::reference_mass::p1_nodal_masses(
+                    mesh.element_volume(element),
+                    vertices.map(|vertex| density[vertex as usize]),
                 )
-                .into());
-            }
-            for &vertex in vertices {
+                .ok_or(EnthalpyError::InvalidInput(
+                    "positive nodal reference mass is not representable",
+                ))?
+            } else {
+                let contribution =
+                    finite(material.reference_density_kg_m3 * mesh.element_volume(element) / 4.0)?;
+                if contribution <= 0.0 {
+                    return Err(EnthalpyError::InvalidInput(
+                        "positive reference mass is not representable",
+                    )
+                    .into());
+                }
+                [contribution; 4]
+            };
+            for (&vertex, contribution) in vertices.iter().zip(local) {
                 let vertex = vertex as usize;
                 let previous = vertex_material_ids[vertex];
                 if previous != usize::MAX && previous != id {
@@ -261,7 +310,7 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             vertex_material_ids: vertex_material_ids.into(),
             material_count: materials.len(),
             reference_materials: materials.to_vec(),
-            nodal_reference_density_kg_m3: None,
+            nodal_reference_density_kg_m3: nodal_density.map(<[f64]>::to_vec),
         })
     }
 
@@ -292,19 +341,7 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             ).into());
         }
         let n = self.inner.mesh.vertex_count();
-        if density_kg_m3.len() != n {
-            return Err(EnthalpyError::InvalidInput(
-                "one nodal reference density per mesh vertex required",
-            ).into());
-        }
-        for (vertex, &density) in density_kg_m3.iter().enumerate() {
-            if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
-            if !density.is_finite() || density <= 0.0 {
-                return Err(EnthalpyError::InvalidInput(
-                    "positive finite nodal reference densities required",
-                ).into());
-            }
-        }
+        admit_nodal_reference_density(cx, n, density_kg_m3)?;
         let mut masses = vec![0.0; n];
         for (element, vertices) in self.inner.mesh.complex().tets.iter().enumerate() {
             if element % ASSEMBLY_TILE == 0 { poll(cx, element)?; }
@@ -347,6 +384,52 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         element_material_ids: &[usize],
         budget: EnthalpyBudget,
     ) -> Result<Self, HeterogeneousEnthalpyError> {
+        Self::prepare_phase_materials(cx, mesh, materials, element_material_ids, None, budget)
+    }
+
+    /// Bind original isotropic k(T,f) sources to an explicitly declared initial
+    /// P1 reference-density inventory on the same heterogeneous mesh.
+    ///
+    /// The positive nodal profile supplies the actual exact reference masses
+    /// `m_i = sum_e V_e*(sum_a rho_a + rho_i)/20`. Material scalar densities
+    /// are superseded at preparation; they never enter mass assembly or any
+    /// subsequent solve. The original caloric charts, source claims, support,
+    /// material assignments and conductivity moments remain unchanged.
+    /// Density does not infer a porosity, conductivity or mixture correction.
+    ///
+    /// This declares inventory BEFORE evolution. Neither equilibrium rho(T)
+    /// nor later source rebinding changes the closed specimen's mass. Scalar
+    /// inventory accessors return None; [`Self::phase_conductivity_source`]
+    /// exposes each retained source independently of the spatial mass field.
+    /// Existing preparation budgets and cancellation cover all added work.
+    /// Invalid profiles, material assignments or unrepresentable mass refuse
+    /// before returning a prepared owner.
+    pub fn from_phase_materials_with_nodal_reference_density(
+        cx: &Cx<'_>,
+        mesh: &'m ConductionMesh,
+        materials: &'c [MaterialPhaseTransport<'c>],
+        element_material_ids: &[usize],
+        density_kg_m3: &[f64],
+        budget: EnthalpyBudget,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        Self::prepare_phase_materials(
+            cx,
+            mesh,
+            materials,
+            element_material_ids,
+            Some(density_kg_m3),
+            budget,
+        )
+    }
+
+    fn prepare_phase_materials(
+        cx: &Cx<'_>,
+        mesh: &'m ConductionMesh,
+        materials: &'c [MaterialPhaseTransport<'c>],
+        element_material_ids: &[usize],
+        nodal_density: Option<&[f64]>,
+        budget: EnthalpyBudget,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
         poll(cx, 0)?;
         // Bound the temporary reference inventory before allocating it; the
         // original constructor admits the complete spatial assignment below.
@@ -367,7 +450,14 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
                 reference_density_kg_m3: material.reference_density_kg_m3(),
             });
         }
-        let mut storage = Self::new(cx, mesh, &reference, element_material_ids, budget)?;
+        let mut storage = Self::prepare_reference_inventory(
+            cx,
+            mesh,
+            &reference,
+            element_material_ids,
+            nodal_density,
+            budget,
+        )?;
         storage.inner.sourced_phase = Some(PhaseFieldTransport::Assigned {
             materials,
             element_material_ids: Arc::clone(&storage.element_material_ids),
@@ -377,13 +467,35 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
     }
 
     /// Original source and reference density at a retained material-table ID.
-    /// Returns None for an unknown ID or a model prepared without phase sources.
+    /// Returns None for an unknown ID, absent phase sources or an explicit
+    /// nodal profile: the source's scalar density is not that field's inventory.
     #[must_use]
     pub fn phase_transport_material(
         &self,
         material: usize,
     ) -> Option<&'c MaterialPhaseTransport<'c>> {
-        self.inner.sourced_phase.as_ref()?.material(material)
+        if self.nodal_reference_density_kg_m3.is_some() {
+            None
+        } else {
+            self.inner.sourced_phase.as_ref()?.material(material)
+        }
+    }
+
+    /// Original conductivity/caloric source without a scalar mass assertion.
+    /// Available for both scalar and P1 reference inventories; returns None
+    /// for an unknown material ID or storage without bound phase sources.
+    #[must_use]
+    pub fn phase_conductivity_source(
+        &self,
+        material: usize,
+    ) -> Option<&'c PreparedPhaseConductivity<'c>> {
+        Some(
+            self.inner
+                .sourced_phase
+                .as_ref()?
+                .material(material)?
+                .conductivity_source(),
+        )
     }
 
     /// Physical problem for the original phase-source assignment and exact mesh.
