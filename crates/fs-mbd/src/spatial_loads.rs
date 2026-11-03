@@ -169,6 +169,26 @@ impl PreparedSpatialLoads {
         self.force_world
     }
 
+    /// Orientation-independent upper bound on the applied COM torque [N m].
+    ///
+    /// The triangle bound includes both free couples and the three prepared
+    /// point-force moments. It is reusable without revisiting the input force
+    /// set. Constrained steppers use it to bound angular travel before trying
+    /// a new attitude; freezing the initial torque magnitude is not a bound.
+    ///
+    /// # Errors
+    /// Refuses a finite load set whose bound cannot be represented in `f64`.
+    pub fn torque_norm_bound(&self) -> Result<f64, DynamicsError> {
+        let mut bound = self.torque_body.stable_norm("spatial_load.torque_bound")?;
+        for vector in core::iter::once(self.torque_world).chain(self.point_force_moments_world) {
+            bound = finite_derived(
+                bound + vector.stable_norm("spatial_load.torque_bound")?,
+                "spatial_load.torque_bound",
+            )?;
+        }
+        Ok(bound)
+    }
+
     /// Instantaneous native wrench at the specified attitude.
     ///
     /// This query is useful for force/power inspection. Freezing this returned
@@ -401,4 +421,3 @@ fn finite_vec(value: Vec3, field: &'static str) -> Result<(), DynamicsError> {
         Err(DynamicsError::NonFinite(field))
     }
 }
-

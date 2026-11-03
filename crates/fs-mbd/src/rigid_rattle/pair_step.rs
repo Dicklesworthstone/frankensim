@@ -5,6 +5,7 @@
 //! bounded residual-decreasing native free trials, then endpoint reaction.
 
 use super::distance::{DistanceStepControls, DistanceStepError, DistanceStepReceipt};
+use crate::spatial_loads::{PreparedSpatialLoads, SpatialStepReceipt};
 use crate::{
     ActionReactionImpulseReceipt, MassProperties, RigidBodyIntegrator, RigidBodyState, StepReceipt,
     Vec3, Wrench, apply_equal_and_opposite_impulse_at_body_points,
@@ -32,8 +33,44 @@ pub(super) fn advance(
     wrenches: [Wrench; 2],
     duration_s: f64,
     controls: DistanceStepControls,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<DistanceStepReceipt, DistanceStepError> {
+    advance_with(
+        constraint, states, integrator, wrenches, duration_s, controls, cancelled,
+    )
+}
+
+pub(super) fn advance_spatial(
+    constraint: &impl Constraint,
+    states: [RigidBodyState; 2],
+    integrator: RigidBodyIntegrator,
+    loads: [PreparedSpatialLoads; 2],
+    duration_s: f64,
+    controls: DistanceStepControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<DistanceStepReceipt<SpatialStepReceipt>, DistanceStepError> {
+    poll(&mut cancelled)?;
+    let bounds = [loads[0].torque_norm_bound()?, loads[1].torque_norm_bound()?];
+    advance_with(
+        constraint,
+        states,
+        integrator,
+        SpatialFlow { loads, bounds },
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+fn advance_with<F: FreeFlow>(
+    constraint: &impl Constraint,
+    states: [RigidBodyState; 2],
+    integrator: RigidBodyIntegrator,
+    flow: F,
+    duration_s: f64,
+    controls: DistanceStepControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<DistanceStepReceipt<F::Receipt>, DistanceStepError> {
     poll(&mut cancelled)?;
     if !positive(duration_s)
         || !positive(controls.maximum_impulse_ns)
@@ -61,7 +98,7 @@ pub(super) fn advance(
         properties,
         states,
         integrator,
-        wrenches,
+        flow,
         duration_s,
         controls,
         initial,
@@ -104,7 +141,7 @@ pub(super) fn advance(
         iterations += 1;
     }
     poll(&mut cancelled)?;
-    let free = trial.steps.map(|s| s.state_after);
+    let free = trial.steps.map(F::state_after);
     let final_impulse = -trial.geometry.rate / mobility(properties, free, trial.geometry)?;
     if !final_impulse.is_finite() || final_impulse.abs() > controls.maximum_impulse_ns {
         return Err(DistanceStepError::LocalBranch);
@@ -168,27 +205,89 @@ fn apply(
     )?)
 }
 
-struct Trial {
+trait FreeFlow {
+    type Receipt: Copy;
+
+    fn torque_bound(&self, index: usize) -> f64;
+    fn step(
+        &self,
+        index: usize,
+        integrator: RigidBodyIntegrator,
+        state: RigidBodyState,
+        properties: MassProperties,
+        duration_s: f64,
+    ) -> Result<Self::Receipt, DistanceStepError>;
+    fn state_after(receipt: Self::Receipt) -> RigidBodyState;
+}
+
+impl FreeFlow for [Wrench; 2] {
+    type Receipt = StepReceipt;
+
+    fn torque_bound(&self, index: usize) -> f64 {
+        norm(self[index].torque_body)
+    }
+    fn step(
+        &self,
+        index: usize,
+        integrator: RigidBodyIntegrator,
+        state: RigidBodyState,
+        properties: MassProperties,
+        duration_s: f64,
+    ) -> Result<StepReceipt, DistanceStepError> {
+        Ok(integrator.step(state, properties, self[index], duration_s)?)
+    }
+    fn state_after(receipt: StepReceipt) -> RigidBodyState {
+        receipt.state_after
+    }
+}
+
+struct SpatialFlow {
+    loads: [PreparedSpatialLoads; 2],
+    bounds: [f64; 2],
+}
+
+impl FreeFlow for SpatialFlow {
+    type Receipt = SpatialStepReceipt;
+
+    fn torque_bound(&self, index: usize) -> f64 {
+        self.bounds[index]
+    }
+    fn step(
+        &self,
+        index: usize,
+        integrator: RigidBodyIntegrator,
+        state: RigidBodyState,
+        properties: MassProperties,
+        duration_s: f64,
+    ) -> Result<SpatialStepReceipt, DistanceStepError> {
+        Ok(integrator.step_spatial(state, properties, &self.loads[index], duration_s)?)
+    }
+    fn state_after(receipt: SpatialStepReceipt) -> RigidBodyState {
+        receipt.step.state_after
+    }
+}
+
+struct Trial<R> {
     impulse: ActionReactionImpulseReceipt,
-    steps: [StepReceipt; 2],
+    steps: [R; 2],
     geometry: Geometry,
 }
-struct Problem<'a, C> {
+struct Problem<'a, C, F> {
     constraint: &'a C,
     properties: [MassProperties; 2],
     states: [RigidBodyState; 2],
     integrator: RigidBodyIntegrator,
-    wrenches: [Wrench; 2],
+    flow: F,
     duration_s: f64,
     controls: DistanceStepControls,
     initial: Geometry,
 }
-impl<C: Constraint> Problem<'_, C> {
+impl<C: Constraint, F: FreeFlow> Problem<'_, C, F> {
     fn evaluate(
         &self,
         impulse_ns: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Trial, DistanceStepError> {
+    ) -> Result<Trial<F::Receipt>, DistanceStepError> {
         poll(cancelled)?;
         let impulse = apply(self.properties, self.states, self.initial, impulse_ns)?;
         let states = [impulse.first.state_after, impulse.second.state_after];
@@ -196,29 +295,31 @@ impl<C: Constraint> Problem<'_, C> {
             let principal = self.properties[i].principal_inertia_body();
             let minimum = principal.x.min(principal.y).min(principal.z);
             let travel = (norm(states[i].angular_momentum_body())
-                + self.duration_s * norm(self.wrenches[i].torque_body))
+                + self.duration_s * self.flow.torque_bound(i))
                 * (self.duration_s / minimum);
             if !travel.is_finite() || travel > self.controls.maximum_rotation_increment_rad {
                 return Err(DistanceStepError::LocalBranch);
             }
         }
-        let first = self.integrator.step(
+        let first = self.flow.step(
+            0,
+            self.integrator,
             states[0],
             self.properties[0],
-            self.wrenches[0],
             self.duration_s,
         )?;
         poll(cancelled)?;
-        let second = self.integrator.step(
+        let second = self.flow.step(
+            1,
+            self.integrator,
             states[1],
             self.properties[1],
-            self.wrenches[1],
             self.duration_s,
         )?;
         poll(cancelled)?;
         let geometry = self
             .constraint
-            .geometry([first.state_after, second.state_after])?;
+            .geometry([F::state_after(first), F::state_after(second)])?;
         let max_chord = 2.0 * fs_math::det::sin(0.5 * self.controls.maximum_rotation_increment_rad);
         if norm(geometry.normal.sub(self.initial.normal)) > max_chord {
             return Err(DistanceStepError::LocalBranch);

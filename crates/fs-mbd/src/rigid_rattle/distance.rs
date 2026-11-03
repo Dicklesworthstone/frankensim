@@ -12,6 +12,7 @@
 //! second-order motion on the admitted local branch. This does not assert
 //! symplecticity, exact energy conservation, or a global root certificate.
 
+use crate::spatial_loads::{PreparedSpatialLoads, SpatialStepReceipt};
 use crate::{
     ActionReactionImpulseReceipt, DynamicsError, MassProperties, RigidBodyIntegrator,
     RigidBodyState, StepReceipt, Vec3, Wrench, apply_equal_and_opposite_impulse_at_body_points,
@@ -42,13 +43,13 @@ pub struct RigidDistanceConstraint {
 
 /// Both accepted native endpoints and their physical constraint impulses.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DistanceStepReceipt {
+pub struct DistanceStepReceipt<FreeStep = StepReceipt> {
     /// Final bodies in constructor order, with both constraints satisfied.
     pub states_after: [RigidBodyState; 2],
     /// Central equal-and-opposite impulses at the initial material points.
     pub position_impulse: ActionReactionImpulseReceipt,
     /// Native smooth steps before the final tangent impulses.
-    pub free_steps: [StepReceipt; 2],
+    pub free_steps: [FreeStep; 2],
     /// Central equal-and-opposite impulses at the endpoint material points.
     pub velocity_impulse: ActionReactionImpulseReceipt,
     /// Sum of both native pair impulse works [J]. This discrete constraint
@@ -147,6 +148,33 @@ impl RigidDistanceConstraint {
     ) -> Result<DistanceStepReceipt, DistanceStepError> {
         super::pair_step::advance(
             self, states, integrator, wrenches, duration_s, controls, cancelled,
+        )
+    }
+
+    /// Advance under prepared world-held point forces and body/world couples.
+    ///
+    /// Every constraint trial uses the native spatial-load step, reevaluating
+    /// moments at the actual endpoint attitudes. Preparation, free rotation,
+    /// and work accounting remain owned by [`PreparedSpatialLoads`] and
+    /// [`RigidBodyIntegrator::step_spatial`]. The supplied loads are held over
+    /// this interval; they are not a state-dependent spring or drag callback.
+    ///
+    /// The complete native spatial receipts retain applied world linear and
+    /// angular impulse, force/couple work, and their numerical defects. Internal
+    /// constraint reactions are separate. The original local solve, no-pose-
+    /// repair behavior, and atomic cancellation are unchanged. Torque bounds
+    /// are prepared once from the loads; all trials remain allocation-free.
+    pub fn advance_spatial(
+        &self,
+        states: [RigidBodyState; 2],
+        integrator: RigidBodyIntegrator,
+        loads: [PreparedSpatialLoads; 2],
+        duration_s: f64,
+        controls: DistanceStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DistanceStepReceipt<SpatialStepReceipt>, DistanceStepError> {
+        super::pair_step::advance_spatial(
+            self, states, integrator, loads, duration_s, controls, cancelled,
         )
     }
 

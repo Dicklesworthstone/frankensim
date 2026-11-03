@@ -2041,6 +2041,44 @@ exchange and atomic refusals. This is one bilateral positive-length rod, with
 tension and compression. Zero-length ball joints, general joint graphs, unilateral
 cables, exact energy conservation and symplecticity remain outside this entry.
 
+### Spatial loads during finite-pair constraint motion
+
+`RigidDistanceConstraint::advance_spatial` and
+`FinitePointPlaneConstraint::advance_spatial` compose the original scalar pair
+constraint owner with `RigidBodyIntegrator::step_spatial`. World-held point
+forces retain their actual rotating material arms in every trial. Body-held
+and world-held free couples retain their respective frames. A once-converted
+body torque would instead change the physical loading and is not substituted.
+
+The native pair impulse/free-step/impulse solve is shared with the existing
+held-wrench entry. A private statically dispatched free-step seam retains the
+original `step` path and arithmetic for held wrenches, while the spatial entry
+uses the original spatial-load Verlet/free-rotation owner. Its complete
+`SpatialStepReceipt` is retained in each `free_steps` entry: external world
+linear/angular impulse, force/couple work, and native numerical defects remain
+separate from reciprocal constraint impulses and their signed work. Both public
+pair receipt types have a default free-step type, preserving the original
+held-wrench result layout. This introduces no alternate rigid integrator.
+
+Prepared force moments are reused at constant cost. The orientation-independent
+triangle bound from `PreparedSpatialLoads::torque_norm_bound` is computed once
+per body and interval, and bounds angular travel before each free trial. It can
+be conservative near a moment cancellation; a local-branch refusal requires a
+smaller interval, not a frozen initial-moment approximation. There are no heap
+buffers, repeated point-force reductions, or extra inertia factorizations.
+
+Loads are held for one admitted positive interval. State-dependent springs,
+drag, arbitrary constraint graphs and contact remain separate owners. Neither
+exact loaded energy conservation nor continuous-trajectory enclosure is claimed.
+Cancellation or late load/solve refusal publishes neither finite body.
+
+`tests/rigid_spatial_constraints.rs` checks independent continuous loaded-rotor
+and sliding-bead/finite-carrier equations, second-order refinement and reversal,
+full-tensor external/reaction momentum and work accounts, frame/boost covariance,
+native spatial-receipt identity, the torque bound, and all observed cancellation
+checkpoints. Existing pair, finite-plane and spatial-load regressions continue
+to exercise their original public paths.
+
 ## Coupled distance graphs between native rigid bodies
 
 `rigid_rattle::distance::graph::advance_distance_graph` advances multiple

@@ -27,11 +27,11 @@ pub struct FinitePointPlaneConstraint {
 
 /// Both native bodies and their internal constraint impulse/work account.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FinitePlaneStepReceipt {
+pub struct FinitePlaneStepReceipt<FreeStep = StepReceipt> {
     /// Point body followed by the finite plane carrier.
     pub states_after: [RigidBodyState; 2],
     pub position_impulse: ActionReactionImpulseReceipt,
-    pub free_steps: [StepReceipt; 2],
+    pub free_steps: [FreeStep; 2],
     pub velocity_impulse: ActionReactionImpulseReceipt,
     /// Signed constraint impulse work, paired from relative native COM/spin
     /// velocities. This numerical integration defect is neither heat nor an
@@ -113,27 +113,65 @@ impl FinitePointPlaneConstraint {
             controls,
             &mut cancelled,
         )?;
-        // Internal work must cancel common translation before local spin is
-        // added: a rounded laboratory point velocity can lose that spin.
-        let constraint_work_j =
-            (relative_work(step.position_impulse) + relative_work(step.velocity_impulse)).to_f64();
-        if !constraint_work_j.is_finite() {
-            return Err(DistanceStepError::Invalid("finite plane constraint work"));
-        }
-        if cancelled() {
-            return Err(DistanceStepError::Cancelled);
-        }
-        Ok(FinitePlaneStepReceipt {
-            states_after: step.states_after,
-            position_impulse: step.position_impulse,
-            free_steps: step.free_steps,
-            velocity_impulse: step.velocity_impulse,
-            constraint_work_j,
-            final_gap_m: step.final_gap_m,
-            final_normal_speed_mps: step.final_range_rate_mps,
-            position_iterations: step.position_iterations,
-        })
+        finish(step, &mut cancelled)
     }
+
+    /// Evolve a loaded finite carrier and sliding body with spatial moments.
+    ///
+    /// World-held point forces follow their actual rotating material arms in
+    /// every trial; body and world free couples retain their declared frames.
+    /// Both original spatial-load receipts expose external impulse and work
+    /// separately from the reciprocal sliding reaction. The finite carrier,
+    /// local branch, tolerances and cancellation contract are those of
+    /// [`Self::advance`]; loads are held over this interval, with no extra heap
+    /// buffers or alternate free-motion solver.
+    pub fn advance_spatial(
+        &self,
+        states: [RigidBodyState; 2],
+        integrator: RigidBodyIntegrator,
+        loads: [crate::spatial_loads::PreparedSpatialLoads; 2],
+        duration_s: f64,
+        controls: DistanceStepControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FinitePlaneStepReceipt<crate::spatial_loads::SpatialStepReceipt>, DistanceStepError>
+    {
+        let step = pair_step::advance_spatial(
+            self,
+            states,
+            integrator,
+            loads,
+            duration_s,
+            controls,
+            &mut cancelled,
+        )?;
+        finish(step, &mut cancelled)
+    }
+}
+
+fn finish<FreeStep>(
+    step: super::distance::DistanceStepReceipt<FreeStep>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<FinitePlaneStepReceipt<FreeStep>, DistanceStepError> {
+    // Internal work must cancel common translation before local spin is
+    // added: a rounded laboratory point velocity can lose that spin.
+    let constraint_work_j =
+        (relative_work(step.position_impulse) + relative_work(step.velocity_impulse)).to_f64();
+    if !constraint_work_j.is_finite() {
+        return Err(DistanceStepError::Invalid("finite plane constraint work"));
+    }
+    if cancelled() {
+        return Err(DistanceStepError::Cancelled);
+    }
+    Ok(FinitePlaneStepReceipt {
+        states_after: step.states_after,
+        position_impulse: step.position_impulse,
+        free_steps: step.free_steps,
+        velocity_impulse: step.velocity_impulse,
+        constraint_work_j,
+        final_gap_m: step.final_gap_m,
+        final_normal_speed_mps: step.final_range_rate_mps,
+        position_iterations: step.position_iterations,
+    })
 }
 
 impl Constraint for FinitePointPlaneConstraint {
