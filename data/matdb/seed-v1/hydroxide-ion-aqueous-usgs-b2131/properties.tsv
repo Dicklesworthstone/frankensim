@@ -1,0 +1,76 @@
+frankensim.matdb-source.v1
+observation	identity	Hydroxide OH-(aq), conventional aqueous reference	USGS Bulletin 2131 printed page 16, OH- aqueous-ion row	Formula weight 17.007 g/mol identifies the individual dissolved hydroxide ion, not a hydroxyl radical, a hydroxide mineral, total alkalinity or a measured base concentration. The original rounded formula weight is retained.
+observation	reference-values	Literal hydroxide standard-state thermochemistry	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/22/full/max/0/default.jpg	The row separately prints formation enthalpy -230.0 kJ/mol, formation Gibbs energy -157.3 kJ/mol and conventional ionic entropy -10.7 J/(mol K). Printed uncertainty magnitudes are 0.1 kJ/mol for enthalpy, 0.1 kJ/mol for Gibbs energy and 0.2 J/(mol K) for entropy. These are source metadata, not independent Gaussian deviations, universal confidence intervals, covariance or guaranteed bounds. All claims retain Unstated uncertainty. Direct formation Gibbs energy is not reconstructed from formation enthalpy minus absolute species entropy.
+observation	scope	USGS aqueous reference and H+(aq) zero convention	USGS Bulletin 2131 printed pages iv, 1, 3 and 16	All claims apply only at 298.15 K and 100000 Pa. The printed m=1 state is hypothetical ideal aqueous unit activity referred to infinite dilution, not a finite-concentration 1 mol/kg solution. Both the USGS elemental reference and H+(aq) zero convention are required. The negative entropy is conventional, not absolute. These source data do not supply activity coefficients, alkalinity, speciation, pH, heat of dilution or reaction kinetics. Other participant sources must use compatible references; NBS1989 values remain a separate compilation.
+scalar	molar-mass	identity,scope	mass	17.007	g/mol	tabulated
+scalar	formation-enthalpy	identity,reference-values,scope	hf	-230.0	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,reference-values,scope	gf	-157.3	kJ/mol	tabulated
+scalar	conventional-entropy	identity,reference-values,scope	s0	-10.7	J/mol/K	tabulated
+scalar	formation-uncertainty	reference-values,scope	hf_uncertainty	0.1	kJ/mol	tabulated
+scalar	entropy-uncertainty	reference-values,scope	s_uncertainty	0.2	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	conventional-entropy	unstated	-	-	-	-
+uncertainty	formation-uncertainty	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	conventional-entropy	temperature	298.15	298.15	K
+validity	formation-uncertainty	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	conventional-entropy	pressure	100000	100000	Pa
+validity	formation-uncertainty	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	conventional-entropy	standard	1	1	1
+validity	formation-uncertainty	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	conventional-entropy	convention	1	1	1
+validity	formation-uncertainty	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	conventional-entropy	phase	1	1	1
+validity	formation-uncertainty	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	conventional-entropy	aqueous	1	1	1
+validity	formation-uncertainty	aqueous	1	1	1
+validity	entropy-uncertainty	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	conventional-entropy	ionic	1	1	1
+validity	formation-uncertainty	ionic	1	1	1
+validity	entropy-uncertainty	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	conventional-entropy	identity	1	1	1
+validity	formation-uncertainty	identity	1	1	1
+validity	entropy-uncertainty	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	conventional-entropy	reference	1	1	1
+validity	formation-uncertainty	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	conventional-entropy	specimen	0	0	1
+validity	formation-uncertainty	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1

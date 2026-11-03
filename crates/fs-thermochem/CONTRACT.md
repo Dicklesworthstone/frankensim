@@ -1,5 +1,60 @@
 # CONTRACT: fs-thermochem
 
+## Coupled pH and finite mineral precipitation
+
+`acid_base::precipitation::HydrolysisPrecipitation` composes the original
+`IdealAcidBaseSystem` with one explicitly selected, exactly conserved reaction
+`M(z+) + w H2O -> solid + z H+`. The cation and solid coefficients are -1/+1;
+water consumption is a positive integer and z is the original charge number
+between 1 and 32. The original reaction-network owner checks shared elemental
+and charge definitions. Aqueous, pure-liquid and pure-solid source phases must
+match their declared roles. All reused species must retain identical selected
+source answers/receipts and a common reference state. The chosen solid does not
+automatically establish stability against omitted competing phases.
+
+The input is the finite analytical total of this dissolved cation plus this
+solid, alongside all acid/base-family totals and fixed spectator ions. The
+cation cannot also occur in a family or caller spectator list. Each trial
+partition calls the original complete aqueous charge/family solve. Thus
+precipitation changes proton activity through electroneutrality; pH is not
+frozen at a pre-precipitation value. At coexistence, `a_M = a_H^z / K_precip`.
+If the all-dissolved state is undersaturated, the solid remains absent and its
+mass-action equality is not forced. An empty component has undefined saturation
+and a separately reported `EmptyComponent` status.
+
+The outer residual decreases monotonically with dissolved amount: increasing
+cation raises pH under the inner charge balance and decreases proton activity.
+Bounded bisection in log dissolved amount retains positive trace metal that a
+reaction-extent subtraction could erase. The caller declares a positive search
+floor, logarithmic partition/saturation tolerances and iteration bound; both
+inner and outer solves poll cancellation. Unsupported brackets, inadequate
+numerical resolution, inconsistent sources, cancellation and exhausted work
+return no partial result. Present-solid success requires both the logarithmic
+bracket and saturation residual to meet the requested tolerances.
+The residual includes its remaining variation over the inner pH bracket;
+an approximate pH cannot silently satisfy a tighter mineral tolerance.
+Phase absence also requires its inequality sign to hold across that bracket.
+
+Results retain the original phase/family models, total/dissolved/solid amounts,
+full aqueous speciation, independently reduced component residual, natural-log
+IAP/K for the dissolution direction, numerical bracket and nested work counts.
+Solid amount is evaluated from the total minus the solved dissolved amount;
+binary64 rounding can make a large solid amount equal the total while a tiny
+positive dissolved amount remains separately represented. The exposed balance
+residual preserves that rounding discrepancy; no stock is clipped or silently
+discarded. Numerical brackets and residuals are estimates, not certificates or
+experimental uncertainty bounds.
+
+The model keeps the original common `a=n/n_ref` ideal activity approximation,
+fixed solvent basis and unit water activity. It does not close finite solvent
+H/O stocks, include omitted metal complexes/nonideal activities, choose between
+solids, or predict nucleation, rate, reagent purity or commercial lime dose.
+Analytical tests cover a manufactured charge/saturation state, a buffering
+family at the same pH, absent/empty phases, trace dissolved stocks, scaling and
+source/work/cancellation refusal. Actual USGS iron/goethite/H+/OH-/water packs
+exercise acid suppression and declared-base promotion of precipitation. The
+`mineral_precipitation` example exposes these ideal-solution calculations.
+
 ## Coupled source-backed ideal aqueous acid/base speciation
 
 `stoichiometry::thermodynamics::acid_base::IdealAcidBaseSystem` couples

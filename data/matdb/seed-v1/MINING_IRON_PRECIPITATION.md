@@ -122,6 +122,54 @@ strictly positive dimensionless activity, including water and the named solids.
 These diagnostics evaluate the local reaction driving force at the supplied
 state; they do not select an equilibrium composition or a finite conversion.
 
+## Solve pH and finite goethite precipitation together
+
+`HydrolysisPrecipitation` now couples the original ideal acid/base solver to
+one selected, finite mineral component. For goethite it solves both aqueous
+electroneutrality and `a(Fe3+) = a(H+)^3 / K_precip`; pH changes with the
+precipitating fraction. An undersaturated all-dissolved state leaves the solid
+absent. A logarithmic dissolved-amount coordinate preserves trace dissolved
+iron even when subtracting the solid from the total would erase it.
+
+The added `hydroxide-ion-aqueous-usgs-b2131` profile closes the matching USGS
+water-ion source set. Its literal page-16 values are molar mass 0.017007 kg/mol,
+formation H -230000 J/mol, direct formation G -157300 J/mol and conventional
+ionic S -10.7 J/(mol K). The separately printed H/G uncertainty magnitudes
+are 100 J/mol and the S magnitude is 0.2 J/(mol K); all claims retain
+`Unstated` uncertainty. These rounded USGS values give water pKw
+13.980355142113232, without substituting the separate NBS evaluation.
+
+Compile the iron, goethite, proton and water packs as below, then add hydroxide
+and run the coupled example:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/hydroxide-ion-aqueous-usgs-b2131/manifest.tsv \
+  --out "$precipitation_pack_dir/hydroxide-ion-aqueous-usgs-b2131.fsmatpk"
+cargo run -p fs-thermochem --example mineral_precipitation -- \
+  --materials "$precipitation_pack_dir" 0.001 0.003 0 10
+cargo test -p xtask --test mining_precipitation_speciation --test mining_hydroxide_source
+```
+
+The four numerical arguments are total Fe component, fixed chloride, fixed
+sodium and amount at unit aqueous activity, all in mol. All aqueous activities
+use the same explicit `a=n/n_ref` basis. Water and the chosen solid have unit
+activity. With this 10 mol basis, the authored 0.001 mol Fe / 0.003 mol chloride
+case gives pH about 3.522879 and 1.878e-10 mol dissolved Fe3+. Increasing fixed
+chloride to 1.003 mol suppresses precipitation and leaves all 0.001 mol Fe
+dissolved. Keeping chloride at 0.003 mol and adding 0.004 mol fixed sodium
+instead gives pH about 9.980356 and 7.966e-30 mol dissolved Fe3+ in this model.
+
+The output retains original sources, component and charge residuals, the
+dissolved-amount bracket, saturation residual and its remaining variation over
+the inner pH bracket. Inadequate inner resolution cannot silently satisfy a
+tighter phase tolerance. Numerical diagnostics are estimates, not uncertainty
+certificates. The calculation includes free Fe3+, water ions, declared
+acid/base families and spectators, and this selected solid only. It does not
+include omitted iron complexes, competing solids, nonideal activity effects,
+finite-solvent H/O closure, nucleation or rate. Chloride/sodium arguments are
+explicit analytical inventories, not calculated commercial acid or lime doses.
+
 ## Compile and check the actual sources
 
 ```bash

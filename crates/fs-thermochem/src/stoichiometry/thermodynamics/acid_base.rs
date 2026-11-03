@@ -36,6 +36,8 @@ use std::{
     sync::Arc,
 };
 
+/// Coupled charge balance, acid/base families and one finite hydrolyzing solid.
+pub mod precipitation;
 #[path = "acid_base/solve.rs"]
 mod solve;
 

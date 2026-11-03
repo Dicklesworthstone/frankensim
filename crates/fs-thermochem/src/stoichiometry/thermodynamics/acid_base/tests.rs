@@ -11,6 +11,9 @@ use fs_matdb::{
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Amount, Dimensionless, Dims, QuantitySpec};
 
+#[path = "tests/precipitation.rs"]
+mod precipitation;
+
 const REFERENCE: &str = "source-elemental-reference-authored-acid-base-test";
 const PROPERTY: &str = "standard-molar-formation-gibbs-energy";
 const TEMPERATURE: f64 = 298.15;
