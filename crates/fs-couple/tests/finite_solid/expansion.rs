@@ -5,6 +5,7 @@ use fs_couple::finite_solid::thermal::{
     ExpansionThermalFrame, ExpansionThermalReference, ThermalReference,
 };
 use fs_matdb::{ClaimSelection, SelectionPolicy};
+use fs_material::hyper::acoustic::HyperelasticAcousticState;
 use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_material::thermal::transport::expansion::{
     FreeExpansionGeometryQuery, FreeExpansionStrainSources, PreparedFreeExpansion,
@@ -128,6 +129,92 @@ fn det(f: &[f64; 9]) -> f64 {
         + f[2] * (f[3] * f[7] - f[4] * f[6])
 }
 
+// The authored Ogden alpha=2 law has shear modulus 15 and bulk modulus 40.
+// At any stress-free thermal reference, the spatial tensor is the underlying
+// isotropic one; only the actual density rho0/det(F) changes its wave speeds.
+fn assert_free_acoustics(material: &FiniteSolidMaterial, f: &[f64; 9]) {
+    let view = material.acoustic_state(f).unwrap();
+    assert!(std::ptr::eq(view.material(), material));
+    assert_eq!(view.native().deformation_gradient(), f);
+    let generic: &dyn HyperelasticMaterial = material;
+    assert_eq!(
+        view.native(),
+        &HyperelasticAcousticState::from_material(generic, f, 6.0).unwrap(),
+    );
+    near(view.native().reference_density_kg_m3(), 6.0, 0.0);
+    let rho = 6.0 / det(f);
+    near(view.native().current_density_kg_m3(), rho, 1e-12 * rho);
+    for stress in material.first_piola(f).unwrap() {
+        near(stress, 0.0, 2e-11);
+    }
+    let waves = view.directional_waves([0.3, -0.4, 0.5]).unwrap();
+    for i in 0..3 {
+        for j in 0..3 {
+            let expected =
+                if i == j { 15.0 } else { 0.0 } + 45.0 * waves.direction[i] * waves.direction[j];
+            near(waves.acoustic_tensor_pa[i][j], expected, 3e-11);
+        }
+    }
+    for (mode, modulus) in waves.modes.into_iter().zip([15.0, 15.0, 60.0]) {
+        let speed = (modulus / rho).sqrt();
+        near(mode.directional_modulus_pa, modulus, 3e-11);
+        near(mode.phase_speed_m_s.unwrap(), speed, 1e-11 * speed);
+        for (velocity, normal) in mode
+            .energy_velocity_m_s
+            .unwrap()
+            .into_iter()
+            .zip(waves.direction)
+        {
+            near(velocity, speed * normal, 2e-11 * speed);
+        }
+    }
+}
+
+#[test]
+fn g0_thermal_acoustics_admit_elastic_deformation_and_conserve_original_density() {
+    // The existing mean source admits 300->310 K with s=1+0.3*10=4.
+    // Its positive reference/endpoint densities are 6 and 6/64 respectively.
+    let source = super::thermal::thermal_card(0.3, 1.0, false);
+    let material = super::thermal::prepared(&source);
+    let free = [4.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 4.0];
+    assert!(material.law().law().tangent(&free).is_err());
+    assert_free_acoustics(&material, &free);
+
+    let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    // Total F=I is admitted by the bare law but Fe=I/4 leaves its [1/3,3]
+    // elastic envelope. Retaining the thermal source must refuse this state.
+    assert!(material.law().law().tangent(&identity).is_ok());
+    assert!(material.acoustic_state(&identity).is_err());
+    for invalid in [
+        [0.0; 9],
+        [f64::NAN; 9],
+        [-4.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 4.0],
+    ] {
+        assert!(material.acoustic_state(&invalid).is_err());
+    }
+
+    let original = FiniteSolidMaterial::resolve(
+        &source,
+        0,
+        &point(300.0),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    assert_eq!(
+        original.acoustic_state(&identity).unwrap().native(),
+        &original.law().law().acoustic_state(&identity, 6.0).unwrap(),
+    );
+
+    // Fe and the pulled-back tangent remain admitted, but total J overflows.
+    // Acoustic preparation must reject the total map before publishing mass.
+    let huge_source = super::thermal::thermal_card(2e101, 1e-305, false);
+    let huge = super::thermal::prepared(&huge_source);
+    let stretch = 3.0 * huge.thermal_reference().unwrap().principal_stretches()[0];
+    let f = [stretch, 0.0, 0.0, 0.0, stretch, 0.0, 0.0, 0.0, stretch];
+    assert!(huge.consistent_tangent(&f).is_ok());
+    assert!(huge.acoustic_state(&f).is_err());
+}
+
 // Independent Ogden-alpha=2 energy through invariants, using F's projections
 // onto principal directions rather than the production pullback tensors.
 fn energy(f: &[f64; 9], s: [f64; 3], q: [[f64; 3]; 3]) -> f64 {
@@ -151,6 +238,24 @@ fn g1_oriented_expansion_energy_piola_tangent_and_native_assembly_are_consistent
         let f = [1.09, 0.04, -0.02, 0.03, 0.97, 0.05, 0.01, -0.06, 1.08];
         let p = material.first_piola(&f).unwrap();
         let a = material.consistent_tangent(&f).unwrap();
+        let waves = material
+            .acoustic_state(&f)
+            .unwrap()
+            .directional_waves([0.4, -0.3, 0.8])
+            .unwrap();
+        let q: [f64; 3] =
+            std::array::from_fn(|j| (0..3).map(|i| f[3 * i + j] * waves.direction[i]).sum());
+        for i in 0..3 {
+            for k in 0..3 {
+                let mut expected = 0.0;
+                for j in 0..3 {
+                    for l in 0..3 {
+                        expected += a[3 * i + j][3 * k + l] * q[j] * q[l] / det(&f);
+                    }
+                }
+                near(waves.acoustic_tensor_pa[i][k], expected, 3e-11);
+            }
+        }
         near(
             material.energy_density(&f),
             energy(&f, STRETCHES, Q),
@@ -206,7 +311,7 @@ fn g1_oriented_expansion_energy_piola_tangent_and_native_assembly_are_consistent
 }
 
 #[test]
-fn g1_directional_free_expansion_rotation_cooling_and_restraint_keep_original_mass() {
+fn g1_directional_free_expansion_rotation_cooling_and_acoustics_keep_original_mass() {
     with_cx(|_, cx| {
         let source = card(STRETCHES, "T", false);
         for temperature in [290.0, 300.0, 310.0] {
@@ -230,6 +335,7 @@ fn g1_directional_free_expansion_rotation_cooling_and_restraint_keep_original_ma
                     .map(|k| rotation[index / 3][k] * fth[3 * k + index % 3])
                     .sum()
             });
+            assert_free_acoustics(&material, &f);
             for stress in material.first_piola(&f).unwrap() {
                 near(stress, 0.0, 1.0e-12);
             }

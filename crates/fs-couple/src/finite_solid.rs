@@ -38,6 +38,9 @@ pub mod gravity;
 /// Source-declared engineering thermal reference preparation.
 pub mod thermal;
 
+/// Source-bound local waves through the original reference-deformation tangent.
+pub mod acoustic;
+
 /// Power-conjugate point impulses on the original consistent reference mass.
 pub mod impulse;
 

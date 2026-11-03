@@ -21,6 +21,7 @@
 //! dispersion, a propagation solver, a reduced membrane wave law or measured
 //! adiabatic/ultrasonic validation of isothermal material parameters.
 
+use super::cards::HyperelasticMaterial;
 use super::{Hyperelastic, det3};
 use crate::MaterialError;
 use fs_la::eigen::jacobi_eigh;
@@ -87,19 +88,57 @@ impl Hyperelastic {
         deformation_gradient: &[f64; 9],
         reference_density_kg_m3: f64,
     ) -> Result<HyperelasticAcousticState, MaterialError> {
+        HyperelasticAcousticState::from_material(
+            self,
+            deformation_gradient,
+            reference_density_kg_m3,
+        )
+    }
+}
+
+impl HyperelasticAcousticState {
+    /// Freeze a material's consistent tangent with respect to TOTAL F and
+    /// its mass per ORIGINAL reference volume. Reference-deformation adapters
+    /// retain their complete energy/stress/tangent pullback through this trait.
+    ///
+    /// Underlying law parameters are readmitted, while the adapter owns the
+    /// elastic deformation and stretch envelope. In particular, a thermal
+    /// `F=Fe Fth` need not put total F inside the bare law's elastic envelope.
+    /// Total F still needs finite entries and a finite positive determinant;
+    /// reference/current density and the returned tangent must be representable.
+    /// Signed directional instabilities remain results of subsequent queries.
+    pub fn from_material<M: HyperelasticMaterial + ?Sized>(
+        material: &M,
+        deformation_gradient: &[f64; 9],
+        reference_density_kg_m3: f64,
+    ) -> Result<Self, MaterialError> {
         if !(reference_density_kg_m3.is_finite() && reference_density_kg_m3 > 0.0) {
             return Err(MaterialError::Parameters {
                 what: "hyperelastic acoustic reference density must be finite and positive".into(),
             });
         }
-        Self::new(self.model.clone(), self.stretch_limit)?;
-        let tangent = self.tangent(deformation_gradient)?;
+        let law = material.hyperelastic();
+        Hyperelastic::new(law.model.clone(), law.stretch_limit)?;
+        if deformation_gradient.iter().any(|value| !value.is_finite()) {
+            return Err(state_error("total deformation gradient must be finite"));
+        }
         let jacobian = det3(deformation_gradient);
+        if !(jacobian.is_finite() && jacobian > 0.0) {
+            return Err(state_error(
+                "total deformation determinant must be finite and positive",
+            ));
+        }
         let current_density_kg_m3 = reference_density_kg_m3 / jacobian;
         if !(current_density_kg_m3.is_finite() && current_density_kg_m3 > 0.0) {
             return Err(state_error("current density is unrepresentable"));
         }
-        Ok(HyperelasticAcousticState {
+        let tangent = material.consistent_tangent(deformation_gradient)?;
+        if tangent.iter().flatten().any(|value| !value.is_finite()) {
+            return Err(state_error(
+                "material consistent tangent is unrepresentable",
+            ));
+        }
+        Ok(Self {
             deformation_gradient: *deformation_gradient,
             tangent,
             reference_density_kg_m3,
@@ -107,9 +146,6 @@ impl Hyperelastic {
             jacobian,
         })
     }
-}
-
-impl HyperelasticAcousticState {
     /// Original admitted deformation, in row-major order.
     #[must_use]
     pub const fn deformation_gradient(&self) -> &[f64; 9] {

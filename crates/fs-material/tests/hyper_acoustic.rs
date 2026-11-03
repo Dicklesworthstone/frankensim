@@ -1,6 +1,8 @@
 //! G0/G3: small waves retain the original finite-strain tangent and signed modes.
 
 use fs_material::MaterialError;
+use fs_material::hyper::acoustic::HyperelasticAcousticState;
+use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_material::hyper::{FibreInvariants, Hyperelastic, HyperelasticModel, OgdenTerm, Volumetric};
 
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
@@ -125,6 +127,27 @@ fn g0_reference_waves_match_small_strain_longitudinal_and_shear_speeds() {
             1.0,
             2e-13,
         );
+    }
+}
+
+#[test]
+fn g0_material_factory_accepts_trait_objects_and_preserves_native_law_results() {
+    let f = [1.2, 0.15, 0.03, -0.04, 0.93, 0.08, 0.02, -0.05, 1.08];
+    for law in laws() {
+        let material: &dyn HyperelasticMaterial = &law;
+        let generic = HyperelasticAcousticState::from_material(material, &f, 1000.0).unwrap();
+        let original = law.acoustic_state(&f, 1000.0).unwrap();
+        assert_eq!(generic, original);
+        assert_eq!(
+            generic.directional_waves([0.4, -0.3, 0.8]).unwrap(),
+            original.directional_waves([0.4, -0.3, 0.8]).unwrap(),
+        );
+        for invalid in [[0.0; 9], [f64::NAN; 9], [f64::MAX; 9]] {
+            assert!(matches!(
+                HyperelasticAcousticState::from_material(material, &invalid, 1000.0),
+                Err(MaterialError::State { .. }),
+            ));
+        }
     }
 }
 
