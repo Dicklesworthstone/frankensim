@@ -6,6 +6,7 @@
 //! endpoint-evaluated conductivity, prescribed exterior laws and matching
 //! contact are supported. Temperature-dependent conductivity uses the shared
 //! Newton tangent, including k'(T), with immutable accepted physical history.
+//! Admitted source-backed contact curves join the same capacity Newton system.
 //! The retained final-QoI difference is Estimated temporal error; it supplies
 //! neither a spatial bound nor a continuous-time peak claim.
 
@@ -366,6 +367,8 @@ fn march(
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
     temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    coupled_contact_newton: bool,
+    max_contact_pairs: usize,
     policy: &ConductionTransient,
     ends_s: &[f64],
     workload: Option<&Workload<'_>>,
@@ -445,7 +448,8 @@ fn march(
         let mut physical_energy = None;
         let (endpoint, nonlinear_evidence, krylov_iterations) = if let Some(contacts) = temperature_contacts {
             let solved = contact::advance(
-                cx, engine, step_problem, contacts, &old, dt, config, nonlinear, deadline,
+                cx, engine, step_problem, contacts, coupled_contact_newton,
+                max_contact_pairs, &old, dt, config, nonlinear, deadline,
             )?;
             contact_responses += solved.responses;
             nonlinear_updates += solved.nonlinear_updates;
@@ -601,7 +605,9 @@ fn march(
         evidence.push(LinearSolveEvidence {
             nonlinear_iteration: ordinal - 1,
             method: if temperature_contacts.is_some() {
-                if nonlinear.is_some() {
+                if coupled_contact_newton {
+                    "fgmres-backward-euler-coupled-contact-newton"
+                } else if nonlinear.is_some() {
                     "fgmres-backward-euler-newton-temperature-contact"
                 } else {
                     "pcg-backward-euler-temperature-contact"
@@ -687,6 +693,8 @@ pub(super) fn solve(
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
     temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    coupled_contact_newton: bool,
+    max_contact_pairs: usize,
     labels: &[u32],
     region_ids: &BTreeMap<String, u32>,
     radiation: Option<&radiation::LoweredRadiation>,
@@ -698,6 +706,9 @@ pub(super) fn solve(
 ) -> Result<NativeTransientResult, SolveRefusal> {
     admit(spec)?;
     poll(cx, deadline)?;
+    if coupled_contact_newton && (temperature_contacts.is_none() || max_contact_pairs == 0) {
+        return Err(bad("coupled contact Newton requires source-backed contacts and a positive face-pair allowance"));
+    }
     let objective = adjoint::requested(spec)?;
     if temperature_contacts.is_some() {
         super::contact::admit(spec, objective.is_some(), false)?;
@@ -911,12 +922,12 @@ pub(super) fn solve(
             .check(initial_temperature)
             .map_err(lower)?;
     }
-    // The source-bound material selects the numerical path. Newton tolerances
+    // Source-bound bulk or contact feedback selects Newton. Its tolerances
     // measure the actual transient residual in joules; absolute temperature
     // never supplies the residual scale. Reserve 99% of the energy allowance
     // for the independently checked relative-residual and rounding effects.
     // Both grids reuse these same bounded controls, retained below.
-    let nonlinear = if temperature_dependent {
+    let nonlinear = if temperature_dependent || coupled_contact_newton {
         let mut config = NonlinearStepConfig::default();
         if let Some(solver) = &spec.solver {
             config.residual_rtol = solver.tolerance_rel;
@@ -924,8 +935,8 @@ pub(super) fn solve(
         config.residual_atol_j = 0.01 * policy.energy_tolerance.value
             / fs_math::det::sqrt(problem.mesh.vertex_count().max(1) as f64);
         if temperature_contacts.is_some() {
-            // The outer source-law audit has its own fixed absolute target;
-            // an inner k(T) relative stop must leave room below that gate.
+            // The independent source-law audit has a fixed absolute target;
+            // the numerical Newton stop must leave room below that gate.
             config.residual_rtol = config.residual_rtol.min(1e-13);
         }
         config.validate().map_err(lower)?;
@@ -949,7 +960,9 @@ pub(super) fn solve(
     let airflow_factor = airflow.map_or(1, |_| airflow::exchange_config(false).max_iterations);
     let natural_factor = if natural_requested { buoyancy::MAX_ITERATIONS } else { 1 };
     let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
-    let contact_factor = if temperature_contacts.is_some() { contact::MAX_RESPONSES } else { 1 };
+    let contact_factor = if temperature_contacts.is_some() {
+        contact::max_responses(coupled_contact_newton)
+    } else { 1 };
     let max_endpoint_evaluations_per_step = if natural_requested {
         natural_factor.checked_mul(2)
             .ok_or_else(|| bad("natural endpoint evaluation allowance overflows"))?
@@ -998,6 +1011,8 @@ pub(super) fn solve(
         problem,
         interfaces,
         temperature_contacts,
+        coupled_contact_newton,
+        max_contact_pairs,
         policy,
         &grids.coarse,
         workload.as_ref(),
@@ -1020,6 +1035,8 @@ pub(super) fn solve(
         problem,
         interfaces,
         temperature_contacts,
+        coupled_contact_newton,
+        max_contact_pairs,
         policy,
         &grids.fine,
         workload.as_ref(),
@@ -1078,24 +1095,36 @@ pub(super) fn solve(
     let contact_responses = coarse.contact_responses + fine.contact_responses;
     let contact_receipt = if temperature_contacts.is_some() {
         format!(concat!(
-            "{{\"method\":\"source-backed-contact-fixed-point\",",
+            "{{\"method\":{},\"max_face_pairs\":{},",
             "\"max_thermal_responses_per_step\":{},\"max_krylov_iterations_per_step\":{},",
             "\"coarse_thermal_responses\":{},\"fine_thermal_responses\":{},\"total_thermal_responses\":{},",
             "\"physical_residual_tolerance_j\":{},\"history\":\"unchanged-physical-old-temperature-in-every-contact-trial\",",
-            "\"nonlinear_detail\":\"contact step rows count every inner k(T) Newton update and backtrack\",",
+            "\"nonlinear_detail\":{},",
             "\"scope\":{}}}"
         ),
-            contact::MAX_RESPONSES, max_krylov_per_step,
+            json_string(contact::method(coupled_contact_newton)), max_contact_pairs,
+            contact_factor, max_krylov_per_step,
             coarse.contact_responses, fine.contact_responses, contact_responses,
             number(contact::residual_tolerance_j(policy.energy_tolerance.value, problem.mesh.vertex_count())?)?,
+            json_string(if coupled_contact_newton {
+                "one complete capacity/bulk/contact Newton solve per step; contact rows count its updates, Krylov iterations and backtracks"
+            } else {
+                "contact step rows count every inner k(T) Newton update and backtrack"
+            }),
             json_string(contact::NO_CLAIM),
         )
     } else {
         "null".to_string()
     };
     let nonlinear_receipt = if let Some(config) = nonlinear {
+        let contact_tangent = if coupled_contact_newton {
+            ",\"temperature_contact\":\"endpoint-source-law-with-generalized-primal-tangent\""
+        } else { "" };
         format!(
-            "{{\"method\":\"newton-fgmres\",\"conductivity\":\"endpoint-k(T)-with-k-prime-tangent\",\"max_updates_per_step\":{},\"max_krylov_iterations_per_step\":{},\"residual_rtol\":{},\"residual_atol_j\":{},\"armijo_c\":{},\"line_search_shrink\":{},\"max_backtracks_per_update\":{},\"coarse_updates\":{},\"fine_updates\":{},\"total_updates\":{nonlinear_updates},\"total_backtracks\":{nonlinear_backtracks}}}",
+            "{{\"method\":\"newton-fgmres\",\"conductivity\":{}{contact_tangent},\"max_updates_per_step\":{},\"max_krylov_iterations_per_step\":{},\"residual_rtol\":{},\"residual_atol_j\":{},\"armijo_c\":{},\"line_search_shrink\":{},\"max_backtracks_per_update\":{},\"coarse_updates\":{},\"fine_updates\":{},\"total_updates\":{nonlinear_updates},\"total_backtracks\":{nonlinear_backtracks}}}",
+            json_string(if temperature_dependent {
+                "endpoint-k(T)-with-k-prime-tangent"
+            } else { "temperature-independent" }),
             max_updates_per_step,
             max_krylov_per_step,
             number(config.residual_rtol)?,

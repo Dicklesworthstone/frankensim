@@ -291,13 +291,20 @@ backward Euler with the source-backed contact response inside the same Newton
 system as nonlinear bulk conductivity. Every residual trial re-queries the
 pinned contact law at its actual trace temperatures. The tangent adds only the
 missing contact-temperature feedback to the ordinary bulk-plus-frozen-contact
-Jacobian, so the conservative contact block is counted once.
+Jacobian, so the conservative contact block is counted once. Constant bulk
+conductivity uses this same owner when the contact response is nonlinear.
+Continuous source curves use their generalized primal tangent at knots and
+inward source endpoints; strict endpoint sensitivities keep their independent
+two-sided derivative requirement.
 
 The existing Armijo globalization backtracks positive-Kelvin, bulk-material and
 typed contact-source domain misses without switching claims or extrapolating
 source data. The original frozen-contact operator supplies the physical
 preconditioner. A caller-declared face cap bounds contact tangent assembly, and
-the original linear/Newton work budgets remain authoritative.
+the original linear/Newton work budgets remain authoritative. Focused capacity
+regressions advance inward from both source endpoints and a slope corner,
+recheck the physical endpoint and refuse outward source-domain trials without
+changing old history.
 
 Publication requires both the nonlinear solver's endpoint gate and a fresh
 complete contact endpoint audit against the caller's absolute joule residual and
@@ -448,9 +455,9 @@ tangent of the original continuous piecewise-linear resistance law: the right
 segment at an interior knot and the inward segment at either source endpoint.
 Scalar laws retain zero temperature derivatives. The complete contact flux
 still includes the original frozen operator and its resistance feedback once.
-The steady and primary-enthalpy Newton owners use this tangent without smoothing
-the source curve or replacing latent storage. Every physical trial retains its pinned
-source-domain check; unsupported steps are not extrapolated.
+The steady, constant-capacity and primary-enthalpy Newton owners use this tangent
+without smoothing the source curve or replacing latent storage. Every physical
+trial retains its pinned source-domain check; unsupported steps are not extrapolated.
 
 The existing `linearize_temperature` and all accepted-endpoint adjoints retain
 their unique two-sided derivative requirements. The new primal rule does not

@@ -2,7 +2,7 @@
 
 use super::*;
 use fs_project::{
-    ConductionTransient, TransientInitialTemperature, TransientPowerStep,
+    ConductionTransient, ThermalBoundaryCondition, TransientInitialTemperature, TransientPowerStep,
     TransientRegionCapacity, TransientRegionPower, spec::dims,
 };
 use fs_qty::QtyAny;
@@ -36,7 +36,11 @@ fn fixture(nonlinear: bool, max_step: f64) -> Fixture {
 }
 
 fn receipt(f: &Fixture, ordinal: usize) -> (J, J) {
-    let (source, contact, ledger) = prepare(f, ordinal, None);
+    receipt_with_pack(f, ordinal, temperature_pack())
+}
+
+fn receipt_with_pack(f: &Fixture, ordinal: usize, pack: (Vec<u8>, String, String)) -> (J, J) {
+    let (source, contact, ledger) = prepare_with_pack(f, ordinal, None, pack);
     let result = run(f, &source, &contact, &ledger);
     assert_eq!(result.exit_code, fs_cli::exit::SUCCESS, "{}\n{}", result.stdout, result.stderr);
     let result = J::parse(&result.stdout).unwrap();
@@ -62,21 +66,41 @@ fn native_transient_contact_requeries_endpoints_and_preserves_physical_history()
         let (conduction, field) = receipt(&f, 50);
         let time = conduction.get("transient").unwrap();
         let contact = time.get("temperature_contact").unwrap();
+        let numerical = time.get("nonlinear").unwrap();
+        assert_eq!(contact.str_field("method"), Some("source-backed-contact-newton"));
+        assert_eq!(n(contact, "max_thermal_responses_per_step"), 1.0);
+        assert_eq!(numerical.str_field("method"), Some("newton-fgmres"));
+        assert_eq!(numerical.str_field("conductivity"), Some(if nonlinear {
+            "endpoint-k(T)-with-k-prime-tangent"
+        } else { "temperature-independent" }));
+        assert_eq!(numerical.str_field("temperature_contact"),
+            Some("endpoint-source-law-with-generalized-primal-tangent"));
         let (_, card, selected) = temperature_pack();
         let mut total_responses = 0.0;
+        let mut total_updates = 0.0;
+        let mut total_backtracks = 0.0;
         for grid in ["coarse", "fine"] {
             let rows = time.get(grid).unwrap().as_array().unwrap();
             let mut delivered_j = 0.0;
+            let mut grid_updates = 0.0;
             let mut min_query = f64::INFINITY;
             let mut max_query = f64::NEG_INFINITY;
             assert!(rows.iter().any(|row| n(row, "time_s") == 0.75), "each grid must land on the authored power switch");
             for row in rows {
                 let physical = row.get("temperature_contact").unwrap();
+                assert_eq!(physical.str_field("method"), Some("source-backed-contact-newton"));
+                assert_eq!(n(physical, "thermal_responses"), 1.0);
                 assert!(n(physical, "physical_residual_norm_j") <= n(physical, "physical_residual_tolerance_j"));
                 assert!(n(physical, "physical_energy_residual_j").abs() <= n(time, "energy_tolerance_j"));
                 assert_eq!(n(row, "energy_residual_j"), n(physical, "physical_energy_residual_j"));
                 assert_eq!(n(row, "krylov_iterations"), n(physical, "krylov_iterations"));
+                assert!(n(physical, "krylov_iterations") <= n(contact, "max_krylov_iterations_per_step"));
+                assert!(n(physical, "nonlinear_updates") <= n(numerical, "max_updates_per_step"));
+                assert!(n(physical, "nonlinear_backtracks") <= n(physical, "nonlinear_updates")
+                    * n(numerical, "max_backtracks_per_update"));
                 total_responses += n(physical, "thermal_responses");
+                grid_updates += n(physical, "nonlinear_updates");
+                total_backtracks += n(physical, "nonlinear_backtracks");
                 delivered_j += n(row, "dt_s") * n(row, "source_w");
                 for state in physical.get("face_states").unwrap().as_array().unwrap() {
                     let query = n(state, "query_temperature_k");
@@ -91,9 +115,17 @@ fn native_transient_contact_requeries_endpoints_and_preserves_physical_history()
             }
             assert!((delivered_j - 14.0).abs() < 1e-10, "contact trials must not replay workload energy: {delivered_j}");
             assert!(max_query - min_query > 1e-4, "the source must follow the evolving interface");
+            assert_eq!(grid_updates, n(numerical, &format!("{grid}_updates")));
+            total_updates += grid_updates;
         }
         assert_eq!(n(contact, "total_thermal_responses"), total_responses);
-        assert!(total_responses > n(time, "total_steps"));
+        assert_eq!(total_responses, n(time, "total_steps"));
+        assert_eq!(n(contact, "coarse_thermal_responses"), n(time, "coarse_steps"));
+        assert_eq!(n(contact, "fine_thermal_responses"), n(time, "fine_steps"));
+        assert!(total_updates > 0.0);
+        assert_eq!(total_updates, n(numerical, "total_updates"));
+        assert_eq!(total_updates, n(conduction.get("solver").unwrap(), "iterations"));
+        assert_eq!(total_backtracks, n(numerical, "total_backtracks"));
         let energy = time.get("energy").unwrap();
         assert!(n(energy, "window_residual_j").abs() <= n(time, "fine_steps") * n(time, "energy_tolerance_j"));
         assert!(n(energy, "maximum_step_residual_j") <= n(time, "energy_tolerance_j"));
@@ -103,6 +135,46 @@ fn native_transient_contact_requeries_endpoints_and_preserves_physical_history()
         let (_, frozen, _) = f.solve(0.29315, None, 51);
         assert!((maximum(&field) - maximum(&frozen)).abs() > 1e-6,
             "a live source law must not reduce to the initial frozen resistance");
+    }
+}
+
+#[test]
+fn native_transient_contact_newton_starts_at_the_original_resistance_knot() {
+    for nonlinear in [false, true] {
+        let mut f = fixture(nonlinear, 0.5);
+        let setup = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        // 300/3 is exact: both original face means start at the source corner.
+        setup.transient.as_mut().unwrap().initial_temperature =
+            TransientInitialTemperature::Uniform(QtyAny::new(300.0, dims::TEMPERATURE));
+        setup.boundaries[0].condition = ThermalBoundaryCondition::FixedTemperature {
+            temperature: QtyAny::new(300.0, dims::TEMPERATURE),
+        };
+        let corner = temperature_pack_from_knots(vec![(200.0, 0.2), (300.0, 0.3), (450.0, 0.6)]);
+        let (conduction, field) = receipt_with_pack(&f, 55, corner);
+        let time = conduction.get("transient").unwrap();
+        assert_eq!(n(time, "initial_temperature_k"), 300.0);
+        assert_eq!(time.get("temperature_contact").unwrap().str_field("method"),
+            Some("source-backed-contact-newton"));
+        assert!(n(time.get("nonlinear").unwrap(), "total_updates") > 0.0);
+        let mut moved_above_corner = false;
+        for grid in ["coarse", "fine"] {
+            for row in time.get(grid).unwrap().as_array().unwrap() {
+                let physical = row.get("temperature_contact").unwrap();
+                assert_eq!(n(physical, "thermal_responses"), 1.0);
+                assert!(n(physical, "physical_residual_norm_j") <= n(physical, "physical_residual_tolerance_j"));
+                assert!(n(physical, "physical_energy_residual_j").abs() <= n(time, "energy_tolerance_j"));
+                for state in physical.get("face_states").unwrap().as_array().unwrap() {
+                    let query = n(state, "query_temperature_k");
+                    let slope = if query <= 300.0 { 0.001 } else { 0.002 };
+                    let expected = 0.3 + slope * (query - 300.0);
+                    assert!((n(state, "resistance_m2_k_w") - expected).abs() < 1e-13,
+                        "a primal knot tangent must preserve the original resistance law");
+                    moved_above_corner |= query > 300.0 + 1e-8;
+                }
+            }
+        }
+        assert!(moved_above_corner);
+        assert!(maximum(&field) > 300.0);
     }
 }
 

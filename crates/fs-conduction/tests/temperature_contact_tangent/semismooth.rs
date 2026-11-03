@@ -96,6 +96,100 @@ fn g0_primal_contact_keeps_surface_gradient_corners_strict() {
 }
 
 #[test]
+fn g1_capacity_newton_admits_source_corners_and_inward_ends_without_extrapolation() {
+    use fs_conduction::{ConductionProblem, ConductivityModel, LinearConfig, ScalarField};
+    use fs_conduction::interface::temperature::ContactIterationConfig;
+    use fs_conduction::transient::VolumetricHeatCapacity;
+    use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
+
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let bc = ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap();
+        let card = corner_card();
+        let contacts = contacts(cx, &mesh, &bc, &card, false);
+        let capacities = [VolumetricHeatCapacity::declared(10.0).unwrap(); 2];
+        let engine = BackwardEuler::per_element(cx, &mesh, &capacities).unwrap();
+        // The bulk material has no temperature-domain restriction. Any outward
+        // refusal below must therefore come from the original contact source.
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let config = StepConfig {
+            linear: LinearConfig { tolerance: 1e-12, max_iterations: 256, restart: 8 },
+            energy_tolerance_j: 1e-8,
+        };
+        let nonlinear = NonlinearStepConfig {
+            residual_rtol: 1e-12, residual_atol_j: 1e-11, ..Default::default()
+        };
+        let coupling = ContactIterationConfig {
+            max_iterations: 1, relaxation: 0.5, residual_tolerance_j: 1e-8,
+        };
+        for (initial_temperature, volumetric_heat, expected_resistance) in [
+            (320.0, 10.0, 0.5078125), (320.0, -10.0, 0.49609375),
+            (256.0, 10.0, 0.25390625), (384.0, -10.0, 0.9921875),
+        ] {
+            let source = ScalarField::Uniform(volumetric_heat);
+            let problem = ConductionProblem { mesh: &mesh, boundary: &bc, material: &material,
+                element_materials: None, source: &source };
+            let old = [initial_temperature; 8];
+            let before = old.map(f64::to_bits);
+            let initial = contacts.evaluate(cx, &bc, &old).unwrap();
+            assert!(contacts.linearize_temperature(cx, &bc, &old, 1).is_err(),
+                "forward admission must not weaken the strict endpoint derivative");
+            let next = contacts.advance_capacity_newton(
+                cx, &engine, problem, &old, 1.0, config, nonlinear, coupling, 1,
+            ).unwrap();
+            let expected_temperature = initial_temperature + volumetric_heat / 10.0;
+            for &temperature in &next.conduction.temperature {
+                near(temperature, expected_temperature, 2e-9);
+            }
+            assert_eq!(next.iterations, 1, "one complete coupled thermal response");
+            assert!(next.nonlinear_updates > 0 && next.krylov_iterations > 0);
+            // The original two unit tetrahedra have total volume 1/3. Their
+            // uniform capacity/source gives delta T = dt*f/c_v exactly; no
+            // contact heat is external input and no trial advances old storage.
+            near(next.physical.source_w, volumetric_heat / 3.0, 1e-12);
+            near(next.physical.stored_energy_change_j, volumetric_heat / 3.0, 1e-8);
+            near(next.physical.energy_residual_j, 0.0, config.energy_tolerance_j);
+            assert!(next.physical.residual_norm_j <= coupling.residual_tolerance_j);
+            assert_eq!(next.physical_contacts.states(), next.applied_contacts.states());
+            for state in next.physical_contacts.states() {
+                near(state.interface_temperature_k, expected_temperature, 2e-9);
+                near(state.resistance.value_m2_k_per_w(), expected_resistance, 2e-11);
+                assert_eq!(state.resistance.card_identity(), card.content_hash());
+                assert_eq!(state.resistance.receipt().selected,
+                    initial.states()[0].resistance.receipt().selected);
+            }
+            assert_eq!(old.map(f64::to_bits), before);
+        }
+        for (initial_temperature, outward_heat) in [(256.0, -10.0), (384.0, 10.0)] {
+            let old = [initial_temperature; 8];
+            let before = old.map(f64::to_bits);
+            let source = ScalarField::Uniform(outward_heat);
+            let problem = ConductionProblem { mesh: &mesh, boundary: &bc, material: &material,
+                element_materials: None, source: &source };
+            assert!(contacts.evaluate(cx, &bc, &old).is_ok());
+            assert!(matches!(contacts.advance_capacity_newton(
+                cx, &engine, problem, &old, 1.0, config, nonlinear, coupling, 1,
+            ), Err(ConductionError::LineSearchFailed { iteration: 0, backtracks, .. })
+                if backtracks == nonlinear.line_search.max_backtracks),
+                "every outward trial must remain outside the pinned source domain");
+            assert_eq!(old.map(f64::to_bits), before);
+
+            // The refused attempt leaves the same original history usable for
+            // an inward retry through the unchanged physical owners.
+            let inward = ScalarField::Uniform(-outward_heat);
+            let retry = contacts.advance_capacity_newton(
+                cx, &engine, ConductionProblem { source: &inward, ..problem }, &old,
+                1.0, config, nonlinear, coupling, 1,
+            ).unwrap();
+            for &temperature in &retry.conduction.temperature {
+                near(temperature, initial_temperature - outward_heat / 10.0, 2e-9);
+            }
+            assert_eq!(old.map(f64::to_bits), before);
+        }
+    });
+}
+
+#[test]
 fn g1_enthalpy_newton_heats_and_cools_from_a_source_corner_and_inward_from_its_ends() {
     use fs_blake3::ContentHash;
     use fs_conduction::{ConductionProblem, ConductivityModel, ScalarField};

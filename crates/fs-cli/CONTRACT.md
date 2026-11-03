@@ -704,12 +704,24 @@ balance can pass. Published interface heat and reservoir reactions come from
 that freshly audited endpoint. Internal contact transfer is not another
 external heat source.
 
+Solve driver 98 closes scalar/continuous-curve capacity contact inside the
+existing complete transient Newton system, including constant-conductivity
+bulk. These steps report the actual FGMRES response and consume one thermal
+response with its bounded Newton/Krylov/backtracking work. The original selected
+face allowance bounds contact tangent assembly. The same source-shape admission
+selects steady and transient Newton; surface laws keep their bounded contact
+fixed point. Source knots and inward endpoints use the original generalized
+primal tangent without relaxing physical source support or strict sensitivity
+requirements. The immutable old field, switch-aligned grids and independent
+endpoint audits remain shared by both numerical routes.
+
 The existing trajectory records now retain actual contact temperatures,
 resistances, source identities and counted thermal/Newton/Krylov work. Contact
 responses and per-step source-state rows consume the existing work and memory
 allowances. A source-domain exit publishes no completed trajectory. Tests in
 `native_contact_adjoint/temperature/transient.rs` cover live versus frozen
-contact, time refinement, a scheduled power pulse and late source refusal.
+contact, time refinement, a scheduled power pulse, source-knot starts, complete
+Newton work accounting and late source refusal.
 This contact composition still refuses total-enthalpy storage, radiation,
 derived natural/transported-air convection and trajectory derivatives. Its
 temporal difference remains Estimated; it provides no continuous-time peak or

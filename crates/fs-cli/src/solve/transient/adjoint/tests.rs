@@ -95,7 +95,7 @@ fn run(cx: &Cx<'_>, input: Inputs, output: Option<&str>) -> (String, Vec<f64>) {
     let result = super::super::solve(cx, &spec, ConductionProblem {
         mesh: &mesh, boundary: &boundary, material: &material,
         element_materials: None, source: &source,
-    }, None, &labels, &ids, None, None, &[], 101325.0,
+    }, None, None, false, 0, &labels, &ids, None, None, &[], 101325.0,
         LinearConfig { tolerance: 1e-10, max_iterations: 2000, restart: 20 }, None).unwrap();
     (result.receipt, result.solution.conduction.temperature)
 }

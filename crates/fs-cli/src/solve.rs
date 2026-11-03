@@ -270,7 +270,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// contact law and retains the accepted face queries and physical heat balance.
 /// Version 97 uses the complete coupled Newton owner for steady source-curve
 /// contact, retaining its actual tangent, damping and numerical work evidence.
-pub const SOLVE_DRIVER_VERSION: u32 = 97;
+/// Version 98 carries continuous-curve capacity contact through the complete
+/// transient Newton owner, including constant bulk and source-knot starts.
+pub const SOLVE_DRIVER_VERSION: u32 = 98;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -7041,6 +7043,8 @@ fn conduction_solve_receipt(
             }
             let time = transient::solve(
                 &cx, spec, problem, interfaces.as_ref(), transient_contacts.as_ref(),
+                temperature_contact.as_ref().is_some_and(|prepared| prepared.supports_coupled_newton()),
+                limits.max_selected_faces,
                 &labels, &region_ids,
                 radiation.as_ref(), airflow_path.as_ref(), &natural_laws,
                 pressure_pa, linear, deadline,

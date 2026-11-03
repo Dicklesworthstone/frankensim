@@ -12,7 +12,9 @@ use fs_solver::FgmresState;
 use crate::interface::temperature::{TemperatureContactEvaluation, TemperatureContacts};
 
 /// Explicit nonlinear work, stopping and globalization policy for one endpoint.
-/// Constant heat capacity and constant contact resistance remain prerequisites.
+/// Heat capacity remains temperature independent. The ordinary endpoint keeps
+/// its supplied contact operator fixed; the source-backed contact entry point
+/// includes the original temperature-dependent contact law in the same solve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NonlinearStepConfig {
     /// Maximum accepted Newton updates, not a convergence condition.
@@ -266,6 +268,10 @@ impl BackwardEuler<'_> {
     /// bulk-plus-frozen-contact Jacobian, so the physical contact block is
     /// counted exactly once. Source-domain trial misses backtrack through the
     /// existing Armijo policy; no claim switching or extrapolation is allowed.
+    /// Continuous source curves use their original primal tangent at knots and
+    /// inward domain endpoints. Surface laws retain their unique-gradient
+    /// requirement; accepted-endpoint derivatives and adjoints still require
+    /// the separate strict two-sided contact linearization.
     ///
     /// The accepted endpoint is returned only after the original nonlinear
     /// residual and energy gates pass. Geometry, pressure and all nonthermal
@@ -338,7 +344,7 @@ impl BackwardEuler<'_> {
                 });
             }
 
-            let contact = contacts.linearize_temperature(
+            let contact = contacts.linearize_temperature_for_newton(
                 cx, problem.boundary, &temperature, max_face_pairs,
             )?;
             let bulk = assemble_jacobian_with_optional_interfaces(

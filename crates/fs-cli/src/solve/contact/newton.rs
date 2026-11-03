@@ -7,7 +7,6 @@ use fs_conduction::{
     ResidualClaim, SolveConfig, StopReason,
 };
 use fs_exec::Cx;
-use fs_matdb::{InterpolationPolicy, PropertyValue};
 use fs_solver::{Globalization, LineSearchConfig, NewtonKrylovConfig};
 
 use super::super::{SolveRefusal, radiation::SolidSolution};
@@ -22,24 +21,7 @@ const MAX_NEWTON_BACKTRACKS: usize = 4096;
 /// gradient at the caller's operating point.
 pub(super) fn supported(prepared: &Prepared, config: &SolveConfig) -> bool {
     matches!(config.nonlinearity, Nonlinearity::Newton { .. })
-        && prepared.sources.iter().all(|source| {
-            prepared
-                .library
-                .interface(&source.card)
-                .and_then(|card| card.claims().claim(source.selected))
-                .is_some_and(|claim| {
-                    matches!(
-                        (&claim.value, &claim.interpolation),
-                        (
-                            PropertyValue::Scalar { .. },
-                            InterpolationPolicy::ConstantWithinValidity
-                        ) | (
-                            PropertyValue::Curve { .. },
-                            InterpolationPolicy::LinearInside
-                        )
-                    )
-                })
-        })
+        && prepared.supports_coupled_newton()
 }
 
 fn controls(

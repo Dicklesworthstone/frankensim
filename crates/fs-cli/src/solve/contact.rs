@@ -8,7 +8,7 @@ use fs_conduction::{
     ConductionMesh, ConductionProblem, ConductionSolver, DofMap, SolveConfig, ThermalBoundary,
 };
 use fs_exec::Cx;
-use fs_matdb::{ClaimId, PropertyValue, QueryPoint};
+use fs_matdb::{ClaimId, InterpolationPolicy, PropertyValue, QueryPoint};
 use fs_project::{BindingRequirements, BindingTarget, CardLibrary, ProjectSpec};
 
 use super::{SolveRefusal, conduction_error, json_string, parse_claim_id};
@@ -313,11 +313,16 @@ mod tests {
                 binding.properties[0].value_lo,
                 binding.properties[0].value_hi
             );
+            let prepared = prepare(&spec, &cards).unwrap();
             assert_eq!(
-                prepare(&spec, &cards).unwrap().is_some(),
+                prepared.is_some(),
                 off_point_resistance != 0.1,
                 "globally flat tables keep constant-contact compositions; other T tables stay conservative"
             );
+            if let Some(prepared) = prepared {
+                assert!(!prepared.supports_coupled_newton(),
+                    "source surfaces must retain their fixed-point path");
+            }
         }
     }
 }
@@ -364,6 +369,28 @@ pub(super) fn admit(
 }
 
 impl Prepared {
+    /// Continuous source curves have a primal tangent at knots and endpoints.
+    /// Surface laws retain the fixed point without imposing a unique gradient.
+    pub(super) fn supports_coupled_newton(&self) -> bool {
+        self.sources.iter().all(|source| {
+            self.library
+                .interface(&source.card)
+                .and_then(|card| card.claims().claim(source.selected))
+                .is_some_and(|claim| {
+                    matches!(
+                        (&claim.value, &claim.interpolation),
+                        (
+                            PropertyValue::Scalar { .. },
+                            InterpolationPolicy::ConstantWithinValidity
+                        ) | (
+                            PropertyValue::Curve { .. },
+                            InterpolationPolicy::LinearInside
+                        )
+                    )
+                })
+        })
+    }
+
     /// Bind the original sources to this spatial rung once. Both transient
     /// grids reuse these exact faces and pinned claims; only queried T evolves.
     pub(super) fn bind<'m>(

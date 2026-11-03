@@ -5,7 +5,19 @@ use fs_conduction::interface::temperature::{ContactIterationConfig, TemperatureC
 use super::*;
 
 pub(super) const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching contact queries each pinned resistance law at the arithmetic mean of its two independent face-temperature means. Pressure, finish, medium, geometry and claim selection remain fixed. Every counted contact trial uses the same immutable old field; the accepted unchanged endpoint passes freshly queried complete nodal joule-residual and separate storage/heat gates. Published contact heat and reservoir reactions describe that physical endpoint, while inner Krylov residuals describe its counted numerical response. Contact heat is internal transfer and is not added to external input. This bounded fixed point does not establish arbitrary-law convergence or uniqueness. Total-enthalpy storage, radiation, derived natural/airflow convection and trajectory derivatives are not supplied for temperature-varying contact by this native adapter.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching contact queries each pinned resistance law at the arithmetic mean of its two independent face-temperature means. Pressure, finish, medium, geometry and claim selection remain fixed. Every counted contact trial uses the same immutable old field; the accepted unchanged endpoint passes freshly queried complete nodal joule-residual and separate storage/heat gates. Published contact heat and reservoir reactions describe that physical endpoint, while inner Krylov residuals describe its counted numerical response. Contact heat is internal transfer and is not added to external input. Scalar and continuous linear source curves share the complete capacity/bulk/contact Newton solve, with generalized primal source tangents at curve knots and inward source endpoints; every physical trial still passes its pinned source query. Surface laws retain the bounded contact fixed point. Neither algorithm establishes arbitrary-law convergence or uniqueness. Total-enthalpy storage, radiation, derived natural/airflow convection and trajectory derivatives are not supplied for temperature-varying contact by this native adapter.";
+
+pub(super) const fn method(coupled_newton: bool) -> &'static str {
+    if coupled_newton {
+        "source-backed-contact-newton"
+    } else {
+        "source-backed-contact-fixed-point"
+    }
+}
+
+pub(super) const fn max_responses(coupled_newton: bool) -> usize {
+    if coupled_newton { 1 } else { MAX_RESPONSES }
+}
 
 pub(super) struct Step {
     pub(super) conduction: StepSolution,
@@ -32,20 +44,29 @@ pub(super) fn residual_tolerance_j(energy_tolerance_j: f64, vertices: usize) -> 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance(
     cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
-    contacts: &TemperatureContacts<'_, '_>, old: &[f64], dt_s: f64,
+    contacts: &TemperatureContacts<'_, '_>, coupled_newton: bool, max_face_pairs: usize,
+    old: &[f64], dt_s: f64,
     config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
     deadline: Option<(Instant, f64)>,
 ) -> Result<Step, SolveRefusal> {
     poll(cx, deadline)?;
     let tolerance = residual_tolerance_j(config.energy_tolerance_j, problem.mesh.vertex_count())?;
-    let accepted = contacts.advance_capacity(
-        cx, engine, problem, old, dt_s, config, nonlinear,
-        ContactIterationConfig {
-            max_iterations: MAX_RESPONSES,
-            relaxation: 0.5,
-            residual_tolerance_j: tolerance,
-        },
-    ).map_err(lower)?;
+    let coupling = ContactIterationConfig {
+        max_iterations: max_responses(coupled_newton),
+        relaxation: 0.5,
+        residual_tolerance_j: tolerance,
+    };
+    let accepted = if coupled_newton {
+        let nonlinear = nonlinear.ok_or_else(|| bad("coupled contact Newton lost its nonlinear controls"))?;
+        contacts.advance_capacity_newton(
+            cx, engine, problem, old, dt_s, config, nonlinear, coupling, max_face_pairs,
+        )
+    } else {
+        contacts.advance_capacity(cx, engine, problem, old, dt_s, config, nonlinear, coupling)
+    }.map_err(|error| match error {
+        cancelled @ ConductionError::Cancelled { .. } => lower(cancelled),
+        other => bad(format!("source-backed contact step refused: {other}")),
+    })?;
     poll(cx, deadline)?;
 
     let mut states = Vec::with_capacity(accepted.physical_contacts.states().len());
@@ -65,12 +86,13 @@ pub(super) fn advance(
         ));
     }
     let receipt = format!(concat!(
-        "{{\"method\":\"source-backed-contact-fixed-point\",\"thermal_responses\":{},",
+        "{{\"method\":{},\"thermal_responses\":{},",
         "\"krylov_iterations\":{},\"nonlinear_updates\":{},\"nonlinear_backtracks\":{},",
         "\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},",
         "\"physical_energy_residual_j\":{},\"energy_tolerance_j\":{},\"face_states\":[{}]}}"
     ),
-        accepted.iterations, accepted.krylov_iterations, accepted.nonlinear_updates,
+        json_string(method(coupled_newton)), accepted.iterations,
+        accepted.krylov_iterations, accepted.nonlinear_updates,
         accepted.nonlinear_backtracks, number(accepted.physical.residual_norm_j)?,
         number(tolerance)?, number(accepted.physical.energy_residual_j)?,
         number(config.energy_tolerance_j)?, states.join(","),
