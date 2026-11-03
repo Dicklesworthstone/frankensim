@@ -229,7 +229,7 @@ fn invalid_core_interface_work_and_displacement_refuse_atomically() {
     let mut attached = original.clone();
     attached.downstream_gamma = Some(vec![4.0]);
     let mut tight = config(2);
-    tight.max_work = 59; // Exact admission boundary: 2 * 2 * (2 + 1) * (4 + 1).
+    tight.max_work = 64; // Exact boundary: (2 * 2 * (2 + 1) + 1) * (4 + 1).
     let mut too_large = config(2);
     too_large.max_displacement_fraction = 1e-8;
     let mut overflow = config(usize::MAX);
@@ -252,7 +252,7 @@ fn invalid_core_interface_work_and_displacement_refuse_atomically() {
         assert_eq!(wake, before);
     }
     let mut at_cap = original;
-    tight.max_work = 60;
+    tight.max_work = 65;
     at_cap.shed_self_induced(&[4.0], tight, || false).unwrap();
     let mut extreme = ring(f64::MAX);
     let before = extreme.clone();

@@ -23,8 +23,8 @@
 use fs_blake3::hash_domain;
 
 #[path = "filament3d/advection.rs"]
-mod advection;
-pub use advection::SelfInducedShed;
+pub(crate) mod advection;
+pub use advection::{SelfInducedShed, WakeBoundary};
 
 #[path = "filament3d/remesh.rs"]
 mod remesh;

@@ -531,26 +531,62 @@ Kelvin balance. The fixed line can exchange hydrodynamic impulse with the
 wake; full vector impulse conservation is not imposed on this supported system.
 
 Admission includes a conservative direct-work bound covering both RK stages,
-source assembly and node updates even for zero circulation. Every active source
-needs a finite positive core. Both stages limit each full-substep displacement
+source assembly, node updates even for zero circulation, and final source
+admission: `(2 * substeps * (targets + 1) + 1) * (source_bound + 1)`. Every
+active source needs a finite positive core. Both stages limit each full-substep displacement
 against the declared fraction of active core radii and resolved edge lengths.
 Edges exactly zero-length at interval start are newborn edges: the core guard
 applies immediately, and their length joins the edge guard in later intervals.
 This permits finite-core release from the line. Excessive motion refuses and
 can be resolved by increasing the fixed substep count. The guard is a resolution
-condition, not a certified integration-error estimate. Cancellation is checked
-within 256 source-target contributions and before publishing the private
-candidate; any refusal preserves the original state.
+condition, not a certified integration-error estimate. The accepted endpoint
+sources are assembled and admitted once more, without another velocity sweep:
+a resolved edge that collapses only in the final RK update, or an invalid final
+evolved core, refuses before publication. Cancellation is checked within 256
+source-target contributions and before publishing the private candidate; any
+refusal preserves the original state.
 
-This operation is a direct all-pairs near-wake solver. An attached far-field
-interface refuses rather than moving only one end of shared filaments. Images,
-nonuniform external fields, remeshing and resolved viscous tube-strain dynamics
-remain separate. Its focused tests use the independently integrated velocity
-of a rectangular ring: with one span edge fixed, the opposite edge rotates at
-an analytic angular rate. They check second-order temporal refinement,
-circulation reversal, support-relative vector impulse, stage-dependent core
-spreading, three-dimensional frame covariance, uniform transport, repeated
+The default near-only operation requires a complete near wake; an attached
+far-field interface uses the coupled operation below. Its original focused
+tests use the independently integrated velocity of a rectangular ring: with
+one span edge fixed, the opposite edge rotates at an analytic angular rate.
+They check second-order temporal refinement, circulation reversal,
+support-relative vector impulse, stage-dependent core spreading,
+three-dimensional frame covariance, uniform transport, repeated
 positive-circulation emission, exact age accounting and transactional refusals.
+
+### Moving line, incident field and image boundary
+
+`FilamentWake::shed_self_induced_with_environment` adds a `WakeBoundary` and
+an incident-velocity callback to the same integrator. Optional endpoint line
+nodes prescribe a linear per-node trajectory over the interval. Both RK stages
+assemble sources at the corresponding line position, and the new row is
+emitted at the endpoint. Free nodes initially coincident with the line remain
+free. This represents translation or prescribed linear deformation; it does
+not claim exact finite rigid-body rotation. Prescribed line motion obeys the
+same per-substep core/edge displacement limit as the material vertices.
+
+The callback receives the actual stage position [m] and elapsed time [s]
+within the interval, and returns an additive velocity [m/s] beyond the uniform
+ambient value. It must exclude this wake's own induction and images. Spatially
+and temporally varying fields therefore participate in both midpoint stages.
+Callback errors and non-finite outputs refuse without publishing physical
+state; callback side effects themselves are caller-owned.
+
+An optional stationary `ImagePlane` mirrors every assembled physical source
+and reverses its circulation, retaining its stage core. Images are rebuilt in
+the source scratch each stage, not materialized in physical rows, far cells,
+impulse ledgers or digests. The induced normal velocity cancels at the plane.
+The caller supplies a boundary-compatible incident field; wake images do not
+cancel imposed normal flow. Physical nodes and line trajectories must stay
+strictly above the plane at initial, midpoint and final positions. The work
+budget counts the additional image sources. These checks do not certify
+clearance continuously between discrete stages.
+
+`tests/advection_environment.rs` compares the default environment with the
+existing entry point, checks independent space/time-dependent transport and
+moving-frame covariance, verifies image dynamics against direct finite-core
+line integration, and exercises boundary/callback/work-limit rollback.
 
 ## Finite-core connected 3-D wake
 
