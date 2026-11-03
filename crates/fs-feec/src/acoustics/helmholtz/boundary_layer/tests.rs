@@ -153,6 +153,128 @@ fn penetration_depths_and_computed_band_refuse_unresolved_layers() {
     );
 }
 
+/// G0/G3: Cp=Cv decouples temperature from pressure exactly. A nonexistent
+/// thermal acoustic layer cannot restrict the actual viscous boundary layer.
+#[test]
+fn zero_thermal_coupling_admits_the_viscous_band_independently_of_conductivity() {
+    let viscous = BoundaryLayerTransport {
+        thermal_conductivity_w_m_k: 0.0,
+        heat_capacity_ratio: 1.0,
+        ..TRANSPORT
+    };
+    let conductive = BoundaryLayerTransport {
+        thermal_conductivity_w_m_k: 1e6,
+        ..viscous
+    };
+    let band = viscous.frequency_band_hz(AIR, GEOMETRY).unwrap();
+    assert_eq!(conductive.frequency_band_hz(AIR, GEOMETRY).unwrap(), band);
+    let frequency = 300.0;
+    let expected = viscous.scales(AIR, GEOMETRY, frequency).unwrap();
+    let actual = conductive.scales(AIR, GEOMETRY, frequency).unwrap();
+    assert_eq!(actual.viscous_depth_m, expected.viscous_depth_m);
+    assert_eq!(actual.geometry_ratio, expected.geometry_ratio);
+    assert_eq!(actual.wavelength_ratio, expected.wavelength_ratio);
+    assert_eq!(actual.thermal_depth_m, 0.0);
+    assert!(conductive.scales(AIR, GEOMETRY, band.0 * 0.99).is_err());
+    assert!(conductive.scales(AIR, GEOMETRY, band.1 * 1.01).is_err());
+    let coupled = BoundaryLayerTransport {
+        heat_capacity_ratio: 1.0_f64.next_up(),
+        ..conductive
+    };
+    assert!(coupled.frequency_band_hz(AIR, GEOMETRY).is_err());
+    assert!(coupled.scales(AIR, GEOMETRY, frequency).is_err());
+    let inactive = BoundaryLayerTransport {
+        dynamic_viscosity_pa_s: 0.0,
+        thermal_conductivity_w_m_k: f64::MAX,
+        cp_j_kg_k: 1e-300,
+        ..viscous
+    };
+    // The unused thermal diffusivity is not representable. With both pressure
+    // loss channels absent, no diffusion calculation or frequency limit applies.
+    assert_eq!(
+        inactive.frequency_band_hz(AIR, GEOMETRY).unwrap(),
+        (0.0, f64::INFINITY)
+    );
+    let scales = inactive.scales(AIR, GEOMETRY, frequency).unwrap();
+    assert_eq!(scales.viscous_depth_m, 0.0);
+    assert_eq!(scales.thermal_depth_m, 0.0);
+    assert_eq!(scales.geometry_ratio, 0.0);
+    assert_eq!(scales.wavelength_ratio, 0.0);
+    let invalid = BoundaryLayerTransport {
+        thermal_conductivity_w_m_k: f64::NAN,
+        ..inactive
+    };
+    assert!(invalid.frequency_band_hz(AIR, GEOMETRY).is_err());
+    assert!(invalid.scales(AIR, GEOMETRY, frequency).is_err());
+}
+
+/// G1/G3: retain the original full FE response and positive viscous work when
+/// thermal compression is absent, including a finite solid's inactive channel.
+#[test]
+fn zero_thermal_coupling_retains_full_fe_viscous_response_and_work() {
+    use super::thermal_wall::{ConductiveThermalWall, ThermalWallDepth, WallThermalTransport};
+
+    let (complex, positions) = box_mesh(1, [0.5, 0.04, 0.04]);
+    let fe = HelmholtzFe::new(&complex, &positions, 2, AIR).unwrap();
+    let source = end_faces(&fe, 0.0);
+    let outlet = end_faces(&fe, 0.5);
+    let walls = side_faces(&fe, 0.5);
+    let modes = complete_basis(&fe);
+    let ports = [source.as_slice(), outlet.as_slice()];
+    let viscous = BoundaryLayerTransport {
+        thermal_conductivity_w_m_k: 0.0,
+        heat_capacity_ratio: 1.0,
+        ..TRANSPORT
+    };
+    let baseline = ReducedHelmholtz::new_with_boundary_layers(
+        &fe, &modes, &ports, false, &walls, viscous, GEOMETRY,
+    )
+    .unwrap();
+    let frequency = 300.0;
+    let admittances = [[0.0, 0.0], [0.7, 0.0]];
+    let response = baseline.response(frequency, 0, 0.01, &admittances).unwrap();
+    let power = baseline
+        .boundary_layer_power(frequency, &response.amplitudes)
+        .unwrap();
+    assert!(power.viscous_w > 0.0);
+    assert_eq!(power.thermal_w, 0.0);
+    let conductive = BoundaryLayerTransport {
+        thermal_conductivity_w_m_k: 1e6,
+        ..viscous
+    };
+    let solid = ThermalWall::Conductive(ConductiveThermalWall {
+        transport: WallThermalTransport {
+            conductivity_w_m_k: 1.0,
+            volumetric_heat_capacity_j_m3_k: 1e3,
+        },
+        depth: ThermalWallDepth::HalfSpace,
+        minimum_tangential_scale_m: 1e-9,
+    });
+    // The deliberately unresolved thermal wall would refuse if that inactive
+    // heat problem were solved. It cannot affect the viscous pressure response.
+    assert!(
+        solid
+            .response(conductive, AIR, GEOMETRY, frequency)
+            .is_err()
+    );
+    for wall in [ThermalWall::Isothermal, ThermalWall::Adiabatic, solid] {
+        let model = ReducedHelmholtz::new_with_boundary_layers(
+            &fe, &modes, &ports, false, &walls, conductive, GEOMETRY,
+        )
+        .unwrap()
+        .with_thermal_wall(wall)
+        .unwrap();
+        let actual = model.response(frequency, 0, 0.01, &admittances).unwrap();
+        assert_eq!(actual.amplitudes, response.amplitudes);
+        assert_eq!(
+            model
+                .boundary_layer_power(frequency, &actual.amplitudes)
+                .unwrap(),
+            power,
+        );
+    }
+}
+
 #[test]
 fn full_fe_boundary_layer_input_work_closes_and_zero_loss_is_bitwise() {
     let (complex, positions) = box_mesh(2, [0.5, 0.04, 0.04]);

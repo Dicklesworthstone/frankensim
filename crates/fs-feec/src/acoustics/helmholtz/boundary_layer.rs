@@ -57,11 +57,13 @@ pub struct BoundaryLayerGeometry {
 pub struct BoundaryLayerScales {
     /// Viscous penetration depth `sqrt(2 mu/(rho omega))` [m].
     pub viscous_depth_m: f64,
-    /// Thermal penetration depth `sqrt(2 kappa/(rho cp omega))` [m].
+    /// Active thermal penetration depth `sqrt(2 kappa/(rho cp omega))` [m].
+    /// Zero when Cp=Cv, since temperature then decouples from pressure.
     pub thermal_depth_m: f64,
-    /// Largest depth divided by the smaller physical geometry scale.
+    /// Largest acoustically active depth divided by the smaller geometry scale.
+    /// The thermal depth is inactive when Cp=Cv.
     pub geometry_ratio: f64,
-    /// Largest depth multiplied by the acoustic wavenumber.
+    /// Largest acoustically active depth multiplied by the acoustic wavenumber.
     pub wavelength_ratio: f64,
 }
 
@@ -96,7 +98,14 @@ impl BoundaryLayerTransport {
             return Err(invalid("boundary-layer gas transport"));
         }
         let viscous = self.dynamic_viscosity_pa_s / medium.density_kg_m3;
-        let thermal = self.thermal_conductivity_w_m_k / medium.density_kg_m3 / self.cp_j_kg_k;
+        // Cp=Cv removes the thermal pressure term exactly. Validate the source
+        // coefficients above, but do not evaluate a nonexistent acoustic
+        // diffusion channel (which may otherwise overflow or restrict the band).
+        let thermal = if self.heat_capacity_ratio == 1.0 {
+            0.0
+        } else {
+            self.thermal_conductivity_w_m_k / medium.density_kg_m3 / self.cp_j_kg_k
+        };
         if !viscous.is_finite() || !thermal.is_finite() {
             return Err(invalid("boundary-layer diffusivity overflow"));
         }
@@ -105,7 +114,9 @@ impl BoundaryLayerTransport {
 
     /// Compute the thin-layer admission interval [Hz]. Both endpoints follow
     /// from `delta <= ratio * min(radius,half_gap)` and `k delta <= ratio`.
-    /// A zero-loss medium has `(0,+infinity)`. An empty band refuses.
+    /// Only acoustically active layers constrain this band: Cp=Cv removes the
+    /// thermal pressure term exactly. A zero-loss medium has `(0,+infinity)`.
+    /// An empty band refuses.
     pub fn frequency_band_hz(
         self,
         medium: Medium,
@@ -368,7 +379,7 @@ impl ReducedBoundaryLayer {
         operator: &mut [[f64; 2]],
     ) -> Result<(), AcousticFeError> {
         let (viscous, thermal) = self.coefficients(medium, frequency_hz)?;
-        if self.thermal_wall != ThermalWall::Isothermal {
+        if thermal != 0.0 && self.thermal_wall != ThermalWall::Isothermal {
             let response =
                 self.thermal_wall
                     .response(self.transport, medium, self.geometry, frequency_hz)?;
@@ -454,7 +465,7 @@ impl ReducedHelmholtz {
             return Ok(BoundaryLayerPower::default());
         };
         let (viscous, mut thermal) = wall.coefficients(self.medium, frequency_hz)?;
-        if wall.thermal_wall != ThermalWall::Isothermal {
+        if thermal != 0.0 && wall.thermal_wall != ThermalWall::Isothermal {
             let response = wall.thermal_wall.response(
                 wall.transport,
                 self.medium,
