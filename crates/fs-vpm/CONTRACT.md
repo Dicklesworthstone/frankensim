@@ -54,11 +54,31 @@ budget accountant. Tests use `fs-alloc` to construct scoped contexts.
   the compatibility path. Valid admitted fixtures therefore have bitwise-equal
   results on the same build and ISA.
 
+
+The 2-D kernel has no absolute distance cutoff. Only exact coincidence gives
+zero self velocity; a finite nonzero separation keeps its signed tangential
+field at any admitted scale. Checked and compatibility paths use the same
+kernel and retain the original arithmetic on ordinary finite intermediates.
+The exceptional-range path normalizes the squared distance with the original
+core radius, then scales each velocity component by binary exponents. This
+retains finite fields when a squared length, scalar vortex strength, or
+normalized transverse separation alone would overflow or underflow. It adds no
+buffers, pair visits, or logarithms. The checked owner still refuses coordinate
+differences, actual velocity sums, or RK stage positions that do not fit f64;
+it does not turn an unrepresentable physical field into zero.
+
+The velocity and checked-dipole regressions in `tests/vpm.rs` cover signed
+scaling from `1e-180` through `1e300`, core-radius retention, subnormal source
+geometry, exceptional component ranges, the original ordinary arithmetic, and
+transactional refusal. These checks concern the represented algebraic vortex
+model, not the continuum validity of fluid mechanics at arbitrary lengths.
+
 ## Error model
 
 The checked path validates finite particle coordinates/circulations and finite
-`dt`; signed finite `dt` is allowed. `core` must be finite, nonnegative, and
-have a finite square. Count/work/byte arithmetic is checked before allocation.
+`dt`; signed finite `dt` is allowed. `core` must be finite and nonnegative;
+its square need not be representable. Count/work/byte arithmetic is checked
+before allocation.
 Local cap, ambient budget, allocation, and non-finite-intermediate failures are
 typed. All owned vectors use fallible reservation, and an error publishes no
 particle vector.

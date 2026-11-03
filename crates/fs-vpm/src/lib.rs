@@ -406,27 +406,125 @@ fn reserved_vec<T>(phase: &'static str, elements: usize) -> Result<Vec<T>, VpmEr
 #[must_use]
 pub fn induced_velocity(particles: &[VortexParticle], point: [f64; 2], core: f64) -> [f64; 2] {
     let mut u = [0.0, 0.0];
-    let core2 = core * core;
+    let kernel = VelocityKernel::new(core);
     for p in particles {
-        add_induced_contribution(&mut u, p, point, core2);
+        add_induced_contribution(&mut u, p, point, kernel);
     }
     u
+}
+
+// Keep the usual arithmetic and one precomputed core square on the hot path.
+// The original radius is also retained: squaring it can underflow or overflow
+// even when the regularized velocity is finite.
+#[derive(Clone, Copy)]
+struct VelocityKernel {
+    core: f64,
+    core2: f64,
+}
+
+impl VelocityKernel {
+    fn new(core: f64) -> Self {
+        Self {
+            core: core.abs(),
+            core2: core * core,
+        }
+    }
+
+    fn contribution(self, r: [f64; 2], circulation: f64) -> [f64; 2] {
+        // Only exact coincidence has zero self velocity. A dimensional distance
+        // floor would suppress real vortex transport after a change of scale.
+        if r == [0.0; 2] {
+            return [0.0; 2];
+        }
+        let r2 = r[0] * r[0] + r[1] * r[1] + self.core2;
+        let denominator = 2.0 * PI * r2;
+        let g = circulation / denominator;
+        let ordinary = [-g * r[1], g * r[0]];
+        if r2.is_normal()
+            && denominator.is_finite()
+            && (g.is_normal() || circulation == 0.0)
+            && ordinary.into_iter().all(f64::is_finite)
+        {
+            return ordinary;
+        }
+        if !r.into_iter().all(f64::is_finite)
+            || !circulation.is_finite()
+            || !self.core.is_finite()
+        {
+            return [f64::NAN; 2];
+        }
+        let scale = r[0].abs().max(r[1].abs()).max(self.core);
+        let x = r[0] / scale;
+        let y = r[1] / scale;
+        let core = self.core / scale;
+        let normalized = 2.0 * PI * (x * x + y * y + core * core);
+        [
+            scaled_velocity_component(circulation, -r[1], scale, normalized),
+            scaled_velocity_component(circulation, r[0], scale, normalized),
+        ]
+    }
+}
+
+// x = mantissa * 2^exponent, with mantissa in [1, 2). Inputs are positive
+// finite values. Normalizing subnormals by an exact power of two retains all
+// their represented bits.
+fn binary_parts(x: f64) -> (f64, i32) {
+    let (value, correction) = if x.is_normal() {
+        (x, 0)
+    } else {
+        (x * 18_014_398_509_481_984.0, -54)
+    };
+    let bits = value.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023 + correction;
+    let mantissa = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | (1023_u64 << 52));
+    (mantissa, exponent)
+}
+
+// Evaluate Gamma * component / (scale^2 * normalized) without overflowing
+// a quotient or losing a tiny component before multiplication by Gamma.
+// Only exceptional-range pairs use this path; no logarithms or allocations.
+fn scaled_velocity_component(
+    circulation: f64,
+    component: f64,
+    scale: f64,
+    normalized: f64,
+) -> f64 {
+    let negative = circulation.is_sign_negative() ^ component.is_sign_negative();
+    let sign = if negative { -1.0 } else { 1.0 };
+    if circulation == 0.0 || component == 0.0 {
+        return 0.0_f64.copysign(sign);
+    }
+    let (gamma_m, gamma_e) = binary_parts(circulation.abs());
+    let (component_m, component_e) = binary_parts(component.abs());
+    let (scale_m, scale_e) = binary_parts(scale);
+    let fraction = (gamma_m * component_m) / (scale_m * scale_m * normalized);
+    let (mantissa, adjustment) = binary_parts(fraction);
+    let exponent = gamma_e + component_e - 2 * scale_e + adjustment;
+    let magnitude = if exponent > 1023 {
+        f64::INFINITY
+    } else if exponent < -1075 {
+        0.0
+    } else if exponent >= -1022 {
+        mantissa * f64::from_bits(((exponent + 1023) as u64) << 52)
+    } else {
+        // One final rounding into the subnormal range, including the
+        // half-minimum tie. The intermediate is an exact normal scaling.
+        let shifted = f64::from_bits(((exponent + 1023 + 54) as u64) << 52);
+        (mantissa * shifted) * (1.0 / 18_014_398_509_481_984.0)
+    };
+    magnitude.copysign(sign)
 }
 
 fn add_induced_contribution(
     velocity: &mut [f64; 2],
     source: &VortexParticle,
     point: [f64; 2],
-    core2: f64,
+    kernel: VelocityKernel,
 ) {
     let r = [point[0] - source.pos[0], point[1] - source.pos[1]];
-    let r2 = r[0] * r[0] + r[1] * r[1] + core2;
-    if r2 <= 1e-30 {
-        return; // coincident (self) with no desingularization
-    }
-    let g = source.circulation / (2.0 * PI * r2);
-    velocity[0] += -g * r[1];
-    velocity[1] += g * r[0];
+    let increments = kernel.contribution(r, source.circulation);
+    velocity[0] += increments[0];
+    velocity[1] += increments[1];
 }
 
 fn velocities(particles: &[VortexParticle], core: f64) -> Vec<[f64; 2]> {
@@ -534,7 +632,7 @@ fn checked_induced_contribution(
     velocity: &mut [f64; 2],
     source: &VortexParticle,
     point: [f64; 2],
-    core2: f64,
+    kernel: VelocityKernel,
     phase: &'static str,
     target: usize,
 ) -> Result<(), VpmError> {
@@ -545,24 +643,8 @@ fn checked_induced_contribution(
             particle: target,
         });
     }
-    let r2 = r[0] * r[0] + r[1] * r[1] + core2;
-    if !r2.is_finite() {
-        return Err(VpmError::NonFiniteResult {
-            phase,
-            particle: target,
-        });
-    }
-    if r2 <= 1e-30 {
-        return Ok(());
-    }
-    let denominator = 2.0 * PI * r2;
-    let g = source.circulation / denominator;
-    let increments = [-g * r[1], g * r[0]];
-    if !denominator.is_finite()
-        || !g.is_finite()
-        || !increments[0].is_finite()
-        || !increments[1].is_finite()
-    {
+    let increments = kernel.contribution(r, source.circulation);
+    if !increments[0].is_finite() || !increments[1].is_finite() {
         return Err(VpmError::NonFiniteResult {
             phase,
             particle: target,
@@ -582,7 +664,7 @@ fn checked_induced_contribution(
 #[allow(clippy::too_many_arguments)]
 fn checked_velocities(
     particles: &[VortexParticle],
-    core2: f64,
+    kernel: VelocityKernel,
     output: &mut Vec<[f64; 2]>,
     pair_evaluations: &mut u64,
     meter: &mut WorkMeter,
@@ -605,7 +687,7 @@ fn checked_velocities(
                     &mut velocity,
                     source,
                     particle.pos,
-                    core2,
+                    kernel,
                     phase,
                     target,
                 )
@@ -728,10 +810,7 @@ fn simulate_impl(
     if !core.is_finite() || core < 0.0 {
         return Err(invalid_scalar("core", core, None));
     }
-    let core2 = core * core;
-    if !core2.is_finite() {
-        return Err(invalid_scalar("core", core, None));
-    }
+    let kernel = VelocityKernel::new(core);
 
     admit_cap("particles", particles.len(), budget.max_particles)?;
     admit_cap("steps", steps, budget.max_steps)?;
@@ -804,7 +883,7 @@ fn simulate_impl(
         }
         checked_velocities(
             &state,
-            core2,
+            kernel,
             &mut scratch.k1,
             &mut pair_evaluations,
             &mut meter,
@@ -827,7 +906,7 @@ fn simulate_impl(
         meter.boundary(&mut accountant, cx, "fs-vpm.rk4-s2-complete")?;
         checked_velocities(
             &scratch.s2,
-            core2,
+            kernel,
             &mut scratch.k2,
             &mut pair_evaluations,
             &mut meter,
@@ -850,7 +929,7 @@ fn simulate_impl(
         meter.boundary(&mut accountant, cx, "fs-vpm.rk4-s3-complete")?;
         checked_velocities(
             &scratch.s3,
-            core2,
+            kernel,
             &mut scratch.k3,
             &mut pair_evaluations,
             &mut meter,
@@ -873,7 +952,7 @@ fn simulate_impl(
         meter.boundary(&mut accountant, cx, "fs-vpm.rk4-s4-complete")?;
         checked_velocities(
             &scratch.s4,
-            core2,
+            kernel,
             &mut scratch.k4,
             &mut pair_evaluations,
             &mut meter,

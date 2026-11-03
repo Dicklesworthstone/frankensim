@@ -383,3 +383,123 @@ fn g4_ambient_cost_poll_and_cancellation_refuse_without_partial_state() {
         }))
     );
 }
+
+#[test]
+fn vortex_velocity_preserves_signed_dimensional_scaling_and_core_radius() {
+    for scale in [1e-180, 1e-16, 1.0, 1e160, 1e300] {
+        for sign in [-1.0, 1.0] {
+            for core_ratio in [0.0, 0.2] {
+                let source = [VortexParticle::new([0.0, 0.0], sign * TAU * scale)];
+                let velocity =
+                    induced_velocity(&source, [0.3 * scale, -0.4 * scale], core_ratio * scale);
+                let denominator = 0.3_f64.powi(2) + 0.4_f64.powi(2) + core_ratio.powi(2);
+                let expected = [sign * 0.4 / denominator, sign * 0.3 / denominator];
+                for axis in 0..2 {
+                    assert!(
+                        (velocity[axis] - expected[axis]).abs() <= 3e-14 * expected[axis].abs(),
+                        "scale={scale}, core={core_ratio}: {velocity:?} != {expected:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn finite_vortex_components_survive_unrepresentable_intermediate_strengths() {
+    // Gamma / r^2 overflows, while Gamma / (2 pi r) is representable.
+    let strong = [VortexParticle::new([0.0, 0.0], 1e308)];
+    let near = induced_velocity(&strong, [0.1, 0.0], 0.0);
+    let expected = (1e308 / TAU) / 0.1;
+    assert_eq!(near[0], 0.0);
+    assert!((near[1] / expected - 1.0).abs() < 3e-15);
+
+    // Both r^2 and Gamma / r^2 are unusable in the direct formula.
+    // Normalizing the tiny transverse separation first would also erase a
+    // physically representable velocity component.
+    let point = [1e160, 1e-250];
+    let far = induced_velocity(&strong, point, 0.0);
+    let expected_x = -(((1e308 * point[1]) / TAU) / point[0]) / point[0];
+    let expected_y = (1e308 / TAU) / point[0];
+    assert!(far[0] < 0.0 && far[0].is_finite());
+    assert!((far[0] / expected_x - 1.0).abs() < 4e-15);
+    assert!((far[1] / expected_y - 1.0).abs() < 4e-15);
+
+    let weak = [VortexParticle::new([0.0, 0.0], f64::from_bits(1))];
+    let tiny = induced_velocity(&weak, [f64::from_bits(1), 0.0], 0.0);
+    assert!((tiny[1] - 1.0 / TAU).abs() < 2e-15);
+}
+
+#[test]
+fn ordinary_vortex_velocity_retains_the_original_arithmetic() {
+    let point = [1.3, -0.7];
+    let origin = [0.2, 0.4];
+    let core = 0.15;
+    let r = [point[0] - origin[0], point[1] - origin[1]];
+    let r2 = r[0] * r[0] + r[1] * r[1] + core * core;
+    for circulation in [-3.5, 0.0, 2.25] {
+        let g = circulation / (2.0 * PI * r2);
+        // The public reduction begins at positive zero in both components.
+        let expected = [0.0 + -g * r[1], 0.0 + g * r[0]];
+        let actual = induced_velocity(&[VortexParticle::new(origin, circulation)], point, core);
+        assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+    }
+}
+
+#[test]
+fn checked_dipole_translation_retains_momentum_across_length_scales() {
+    let gate = CancelGate::new_clock_free();
+    let steps = 8;
+    let expected_x = 0.01 * steps as f64 / (1.0 + 0.25_f64.powi(2));
+    for scale in [1e-180, 1e-16, 1.0, 1e160, 1e300] {
+        let start = [
+            VortexParticle::new([0.0, 0.5 * scale], TAU * scale),
+            VortexParticle::new([0.0, -0.5 * scale], -TAU * scale),
+        ];
+        let dt = 0.01 * scale;
+        let core = 0.25 * scale;
+        let checked = with_cx(&gate, Budget::INFINITE, |cx| {
+            simulate_with_cx(cx, &start, dt, steps, core, roomy_budget(2, steps))
+        })
+        .expect("a finite scaled dipole must retain its physical translation");
+        assert_particles_bitwise_equal(&checked.particles, &simulate(&start, dt, steps, core));
+        for (index, particle) in checked.particles.iter().enumerate() {
+            assert!((particle.pos[0] / scale - expected_x).abs() < 3e-14);
+            let expected_y = if index == 0 { 0.5 } else { -0.5 };
+            assert!((particle.pos[1] / scale - expected_y).abs() < 3e-14);
+        }
+        // Normalize before taking the circulation first moment: its physical
+        // units scale as length^2 and can exceed f64 at the largest scale.
+        let first_moment: [f64; 2] = core::array::from_fn(|axis| {
+            checked
+                .particles
+                .iter()
+                .map(|p| (p.circulation / scale) * (p.pos[axis] / scale))
+                .sum()
+        });
+        assert!(first_moment[0].abs() < 3e-14);
+        assert!((first_moment[1] - TAU).abs() < 3e-14);
+        assert_eq!(checked.pair_evaluations, 4 * steps as u64 * 2 * 2);
+    }
+}
+
+#[test]
+fn checked_vortex_still_refuses_an_unrepresentable_physical_velocity() {
+    let start = [
+        VortexParticle::new([0.0, 0.0], 1e300),
+        VortexParticle::new([1e-300, 0.0], -1e300),
+    ];
+    let original = start;
+    let gate = CancelGate::new_clock_free();
+    let error = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_with_cx(cx, &start, 0.1, 1, 0.0, roomy_budget(2, 1))
+    });
+    assert_eq!(
+        error,
+        Err(VpmError::NonFiniteResult {
+            phase: "fs-vpm.rk4-k1",
+            particle: 0,
+        })
+    );
+    assert_particles_bitwise_equal(&start, &original);
+}
