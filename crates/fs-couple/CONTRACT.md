@@ -27527,3 +27527,44 @@ limit and existing translation parity; continued finite rotation across angle
 branches; actual normal-moment admission; and budget/datum/final-cancellation
 rollback with exact retry. Pinned Rust parsing is recorded separately from
 native compilation and numerical execution, which remain unrun in this session.
+
+## Simultaneous Coulomb impacts on continuing modal and cavity surfaces
+
+`impulse::impact::frictional::PreparedModalFrictionalImpacts` retains all three
+reciprocal contact-frame rows and their complete mass-normalized Gram mobility.
+One original `fs-contact::frictional_multicontact` solve accounts for normal/shear
+and cross-contact response; one compensated transpose application transfers its
+impulses to the original modal momenta. Normal, sticking and sliding reactions
+are not split into separate corrections. Locked tangent rows remain exactly
+locked, and the original solver's velocity-only determinacy does not authorize
+a unique local load or heat allocation.
+
+`CoupledModalSystem::apply_frictional_impacts` checks actual native momentum
+increments, actual normal and tangential velocities, complementarity, the
+circular Coulomb cone, final sliding direction, contact work, net passivity and
+kinetic-energy closure before one atomic publication. Failure or cancellation
+retains the accepted network. Normal and frictional impact owners share the
+same original relative-row construction and native momentum admission.
+Positions, clock, held forcing, previous frames, material relaxation, acoustic
+memory and radiation state continue across the instantaneous momentum jump.
+
+`SharedCavity::apply_surface_frictional_impacts` restricts endpoints to original
+physical surfaces and admits the candidate's actual cavity volume flows before
+publication. It does not impart a direct impulse to neck or auxiliary acoustic
+coordinates; those evolve through their original continuing dynamics.
+
+Preparation reuses contact rows, full mobility and projection scratch. The
+bounded native solve and result still allocate. Frames are explicit frozen
+orthonormal physical inputs; their projected modal rows need not be orthogonal.
+The API admits at most 21 contacts and retains the existing setup-work budget.
+Collision discovery, moving-frame transport, persistent friction histories,
+material inference and a per-contact thermal partition remain outside this
+instantaneous owner. Spatial momentum conservation requires the corresponding
+symmetry in the retained modal basis. No global nonsmooth existence theorem or
+measured performance improvement is asserted.
+
+`tests/modal_frictional_impacts.rs` checks analytic finite-mass stick/slip under
+tangent rotation, coupled off-centre spin and orbital angular momentum, shared
+body cross-contact mobility and stable-ID reduction, locked tangents and native
+determinacy, invalid frames, global energy refusal, cancellation, penetration,
+late native-state refusal, and continued material/acoustic/forced histories.

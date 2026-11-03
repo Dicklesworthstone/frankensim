@@ -7,6 +7,9 @@
 
 use super::{ModalCouplingError, SharedCavity, network_invalid};
 use crate::render::schedule::force::coupled::impulse::ModalImpulseReceipt;
+use crate::render::schedule::force::coupled::impulse::impact::frictional::{
+    ModalFrictionalImpactError, ModalFrictionalImpactReceipt, PreparedModalFrictionalImpacts,
+};
 use crate::render::schedule::force::coupled::impulse::impact::multiple::{
     ModalMultiImpactError, ModalMultiImpactReceipt, PreparedModalImpacts,
 };
@@ -16,6 +19,52 @@ use crate::render::schedule::force::coupled::impulse::impact::{
 use fs_exec::CancelGate;
 
 impl SharedCavity {
+    /// Apply one simultaneous Coulomb event to the original physical surfaces.
+    /// Normal and both tangent traces address the same surface pair at each
+    /// contact. Zero tangents retain the original native locked-direction
+    /// classification; they are not replaced by invented inertia or friction.
+    ///
+    /// Actual flow and every modal/contact gate precede one publication.
+    /// Neck/viscous auxiliary velocities, compression, constitutive/radiation
+    /// histories, q and clock remain continuous. Prepare against Self::network;
+    /// acoustic auxiliaries cannot become contact partners. Total impact loss
+    /// carries no automatic local heat/pressure or shock interpretation.
+    pub fn apply_surface_frictional_impacts(
+        &mut self,
+        impacts: &mut PreparedModalFrictionalImpacts,
+        gate: &CancelGate,
+    ) -> Result<ModalFrictionalImpactReceipt, ModalFrictionalImpactError> {
+        poll(gate)?;
+        if impacts
+            .component_pairs()
+            .flatten()
+            .any(|index| index >= self.neck_component)
+        {
+            return Err(network_invalid(
+                "cavity Coulomb impacts require original physical surfaces",
+            )
+            .into());
+        }
+        let column = &self.column;
+        let surface_modes = self.surface_modes;
+        let neck_shape = self.source.neck_volume_shape_m2_per_sqrt_kg();
+        let neck_area = self.source.neck_area_m2();
+        self.system
+            .apply_frictional_impacts_with_admission(impacts, gate, |components| {
+                validate_volume_flows(
+                    components
+                        .iter()
+                        .flat_map(|model| model.states())
+                        .map(|state| state.velocity_m_sqrt_kg_per_s),
+                    column,
+                    surface_modes,
+                    neck_shape,
+                    neck_area,
+                    gate,
+                )
+            })
+    }
+
     /// Resolve one simultaneous frictionless contact set on the continuing
     /// physical surfaces. Every row shares the complete native Delassus solve;
     /// a free striker may have zero cavity-volume projection while retaining

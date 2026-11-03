@@ -23,6 +23,9 @@ use fs_math::dd::Dd;
 /// Simultaneous normal contacts on this same continuing modal state.
 pub mod multiple;
 
+/// Simultaneous normal/tangential Coulomb contacts on the original modal state.
+pub mod frictional;
+
 /// Physical normal ports in one common scalar direction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModalImpactContact {
@@ -116,29 +119,12 @@ impl PreparedModalImpact {
     ) -> Result<Self, ModalImpactError> {
         poll(Some(gate))?;
         finite(contact.reference_gap_m)?;
-        let mut column = vec![0.0; system.mode_count()];
-        for (attachment, sign) in [(&contact.first, 1.0), (&contact.second, -1.0)] {
-            let Some(model) = system.models.get(attachment.component) else {
-                return Err(
-                    invalid("impact attachment component is outside the original network").into(),
-                );
-            };
-            if attachment.shapes.len() != model.modes().len()
-                || attachment.shapes.iter().any(|value| !value.is_finite())
-            {
-                return Err(invalid(
-                    "impact attachment must cover its complete original modal basis",
-                )
-                .into());
-            }
-            let offset = system.offsets[attachment.component];
-            for (index, &shape) in attachment.shapes.iter().enumerate() {
-                if index % 64 == 0 {
-                    poll(Some(gate))?;
-                }
-                column[offset + index] = finite(column[offset + index] + sign * shape)?;
-            }
-        }
+        let column = relative_column(
+            system,
+            (contact.first.component, &contact.first.shapes),
+            (contact.second.component, &contact.second.shapes),
+            gate,
+        )?;
         let mut mobility = Dd::ZERO;
         for (index, &shape) in column.iter().enumerate() {
             if index % 64 == 0 {
@@ -321,4 +307,72 @@ fn checked(value: Dd) -> Result<f64, ModalCouplingError> {
     finite(value.hi)?;
     finite(value.lo)?;
     finite(value.to_f64())
+}
+
+// One actual displacement/velocity trace and its reciprocal impulse column.
+// Tangential rows may be zero; the normal-law owner separately admits inertia.
+fn relative_column(
+    system: &CoupledModalSystem,
+    first: (usize, &[f64]),
+    second: (usize, &[f64]),
+    gate: &CancelGate,
+) -> Result<Vec<f64>, ModalCouplingError> {
+    let mut column = vec![0.0; system.mode_count()];
+    for ((component, shapes), sign) in [(first, 1.0), (second, -1.0)] {
+        let Some(model) = system.models.get(component) else {
+            return Err(invalid(
+                "impact attachment component is outside the original network",
+            ));
+        };
+        if shapes.len() != model.modes().len() || shapes.iter().any(|value| !value.is_finite()) {
+            return Err(invalid(
+                "impact attachment must cover its complete original modal basis",
+            ));
+        }
+        let offset = system.offsets[component];
+        for (index, &shape) in shapes.iter().enumerate() {
+            if index % 64 == 0 {
+                poll(Some(gate))?;
+            }
+            column[offset + index] = finite(column[offset + index] + sign * shape)?;
+        }
+    }
+    Ok(column)
+}
+
+// Audit the FULL compensated reciprocal projection, including its rounding
+// tail, against represented endpoint increments. Contact cancellation cannot
+// excuse a swallowed small net momentum change.
+fn audit_modal_momentum(
+    system: &CoupledModalSystem,
+    after_models: &[ModalAcousticTimeModel],
+    requested: &[Dd],
+    gate: &CancelGate,
+) -> Result<f64, ModalCouplingError> {
+    let mut maximum = 0.0_f64;
+    for (mode, (before, after)) in system
+        .models
+        .iter()
+        .flat_map(|model| model.states())
+        .zip(after_models.iter().flat_map(|model| model.states()))
+        .enumerate()
+    {
+        if mode % 64 == 0 {
+            poll(Some(gate))?;
+        }
+        let actual = Dd::from_f64(after.velocity_m_sqrt_kg_per_s)
+            - Dd::from_f64(before.velocity_m_sqrt_kg_per_s);
+        let scale = checked(actual)?.abs().max(checked(requested[mode])?.abs());
+        let residual = checked(actual - requested[mode])?.abs();
+        let relative = if scale == 0.0 { 0.0 } else { residual / scale };
+        if relative > system.config.solve_relative_tolerance {
+            return Err(ModalCouplingError::ImpulseResidual {
+                mode,
+                relative,
+                tolerance: system.config.solve_relative_tolerance,
+            });
+        }
+        maximum = maximum.max(relative);
+    }
+    Ok(maximum)
 }

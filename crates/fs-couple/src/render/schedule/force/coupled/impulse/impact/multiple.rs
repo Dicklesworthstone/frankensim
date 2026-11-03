@@ -13,7 +13,7 @@
 
 use super::{
     CoupledModalSystem, ModalAcousticTimeModel, ModalCouplingError, ModalImpactContact,
-    ModalImpactError, PreparedModalImpact, checked, finite, invalid, poll,
+    ModalImpactError, PreparedModalImpact, audit_modal_momentum, checked, finite, invalid, poll,
 };
 use fs_contact::multicontact::{
     MultiImpactConfig, MultiImpactError, MultiImpactResult, NormalContactImpact,
@@ -266,37 +266,9 @@ impl CoupledModalSystem {
         } else {
             &self.models
         };
-        let mut maximum_relative_momentum_residual =
-            jump.map_or(0.0, |jump| jump.maximum_relative_momentum_residual);
-        // Audit the FULL compensated reciprocal projection, including its
-        // rounding tail, against represented endpoint increments. Contact
-        // cancellation cannot excuse a swallowed small net momentum change.
-        for (mode, (before, after)) in self
-            .models
-            .iter()
-            .flat_map(|model| model.states())
-            .zip(after_models.iter().flat_map(|model| model.states()))
-            .enumerate()
-        {
-            if mode % 64 == 0 {
-                poll(Some(gate))?;
-            }
-            let actual = Dd::from_f64(after.velocity_m_sqrt_kg_per_s)
-                - Dd::from_f64(before.velocity_m_sqrt_kg_per_s);
-            let requested = impacts.requested[mode];
-            let scale = checked(actual)?.abs().max(checked(requested)?.abs());
-            let residual = checked(actual - requested)?.abs();
-            let relative = if scale == 0.0 { 0.0 } else { residual / scale };
-            if relative > self.config.solve_relative_tolerance {
-                return Err(ModalCouplingError::ImpulseResidual {
-                    mode,
-                    relative,
-                    tolerance: self.config.solve_relative_tolerance,
-                }
-                .into());
-            }
-            maximum_relative_momentum_residual = maximum_relative_momentum_residual.max(relative);
-        }
+        let maximum_relative_momentum_residual =
+            audit_modal_momentum(self, after_models, &impacts.requested, gate)?
+                .max(jump.map_or(0.0, |jump| jump.maximum_relative_momentum_residual));
         let mut speeds_after = Vec::with_capacity(impacts.rows.len());
         let mut work = Dd::ZERO;
         let mut maximum_velocity_residual_m_s = 0.0_f64;
