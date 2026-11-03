@@ -458,6 +458,87 @@ fn aero_006_domain_and_missing_property_refusals_are_typed() {
 }
 
 #[test]
+fn aero_006_surface_mach_includes_translation_and_advancing_rim() {
+    let form_only = ReducedAeroModel::try_new(
+        identity("fixture.surface-mach"),
+        envelope(),
+        uncertainty(),
+        ReducedAeroComponents {
+            form_drag: Some(FormDrag { coefficient: 1.0 }),
+            ..ReducedAeroComponents::default()
+        },
+        &[ContributionFamily::TranslationalFormDrag],
+    )
+    .unwrap();
+    let mut state = input(Vec3::ZERO);
+    state.gas = GasProperties::try_from(GasPropertyCard {
+        source_id: "gas.surface-mach.fixture".to_owned(),
+        density_kg_per_m3: Some(1.2),
+        dynamic_viscosity_pa_s: Some(1.8e-5),
+        speed_of_sound_m_per_s: Some(10.0),
+        velocity_world_m_per_s: Vec3::ZERO,
+    })
+    .unwrap();
+    state.geometry.radius_m = 1.0;
+    state.geometry.exterior_thickness_m = 0.0;
+    state.pose = DiscPose::try_new(Vec3::new(0.0, 0.0, 1.0)).unwrap();
+
+    // A purely translating face must obey the same limit as a spinning rim.
+    // Using a normal velocity keeps this zero-thickness disc's form drag active.
+    state.kinematics.linear_velocity_world_m_per_s = Vec3::new(0.0, 0.0, 8.0);
+    state.kinematics.angular_velocity_world_rad_per_s = Vec3::ZERO;
+    assert!(form_only.evaluate(&state).is_ok());
+    state.kinematics.linear_velocity_world_m_per_s.z = 8.0 + 1e-8;
+    assert!(matches!(
+        form_only.evaluate(&state),
+        Err(ReducedAeroError::OutsideCorrelationDomain {
+            quantity: "tip_mach",
+            ..
+        })
+    ));
+
+    // Spin and translation can EACH satisfy the limit while the advancing
+    // surface exceeds it. The full model keeps spin active for in-plane motion.
+    let full = model("fixture.advancing-rim", 1.0);
+    state.kinematics.linear_velocity_world_m_per_s = Vec3::new(4.0, 0.0, 0.0);
+    state.kinematics.angular_velocity_world_rad_per_s = Vec3::new(0.0, 0.0, 4.0);
+    assert!(full.evaluate(&state).is_ok());
+    state.kinematics.linear_velocity_world_m_per_s.x = 4.0 + 1e-8;
+    assert!(matches!(
+        full.evaluate(&state),
+        Err(ReducedAeroError::OutsideCorrelationDomain {
+            quantity: "tip_mach",
+            ..
+        })
+    ));
+
+    // A common inertial velocity boost does not change the surface gate.
+    state.kinematics.linear_velocity_world_m_per_s = Vec3::new(104.0, -50.0, 25.0);
+    state.gas = GasProperties::try_from(GasPropertyCard {
+        source_id: "gas.boosted-surface-mach.fixture".to_owned(),
+        density_kg_per_m3: Some(1.2),
+        dynamic_viscosity_pa_s: Some(1.8e-5),
+        speed_of_sound_m_per_s: Some(10.0),
+        velocity_world_m_per_s: Vec3::new(100.0, -50.0, 25.0),
+    })
+    .unwrap();
+    assert!(full.evaluate(&state).is_ok());
+
+    // Reorientation moves the finite-thickness rim too, not just its midplane.
+    state.kinematics.linear_velocity_world_m_per_s = Vec3::new(100.0, -50.0, 25.0);
+    state.kinematics.angular_velocity_world_rad_per_s = Vec3::new(6.0, 0.0, 0.0);
+    assert!(full.evaluate(&state).is_ok());
+    state.geometry.exterior_thickness_m = 2.0;
+    assert!(matches!(
+        full.evaluate(&state),
+        Err(ReducedAeroError::OutsideCorrelationDomain {
+            quantity: "tip_mach",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn aero_007_alternatives_remain_distinct_and_deterministically_sorted() {
     let alternatives = AlternativeWrenchSet::evaluate(
         &[model("zeta", 1.1), model("alpha", 0.6)],

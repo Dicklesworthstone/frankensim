@@ -38,6 +38,13 @@ adjoints.
   coefficient-uncertainty card identities flow into the `EstimateOnly` receipt;
   a private evaluation snapshot makes `WorkWindow` refuse any later public
   correlation, source-identity, or uncertainty-width relabelling.
+  The Mach envelope covers fluid-relative center translation and all surface
+  rotation through the conservative bound
+  `(|v_center-v_gas| + |omega| hypot(radius, thickness/2))/c`; a translational
+  or advancing-rim violation cannot bypass admission because rotational drag
+  is absent. Vacuum and fully inactive contributions retain their exact zero
+  limit. This bound may refuse a state whose exact maximum surface speed is
+  lower; it does not extend the incompressible correlations into compressible flow.
   `WorkWindow` refuses duplicate caller keys,
   providing one domain-level exactly-once work receipt before the coupling
   driver supplies its chosen closed accounting chart.
@@ -349,7 +356,8 @@ topology, stale-cache, orientation, and finiteness cases.
 reversal and stationary-ambient dissipation; aero-003 quadratic scaling and
 source receipt mutation; aero-004 moving-ambient accounting identity;
 aero-005 frame objectivity; aero-006 correlation-domain and missing-property
-refusal; aero-007 alternative-correlation disagreement; aero-008 exactly-once
+refusal, translation/advancing-rim/finite-thickness Mach and common velocity
+boosts; aero-007 alternative-correlation disagreement; aero-008 exactly-once
 work; aero-009 hostile thin-gap/target-fit refusal; aero-014 forged wrench,
 power, and receipt-identity refusal.
 

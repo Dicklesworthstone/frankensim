@@ -253,7 +253,7 @@ pub struct GasPropertyCard {
     pub density_kg_per_m3: Option<f64>,
     /// Dynamic viscosity [Pa s].
     pub dynamic_viscosity_pa_s: Option<f64>,
-    /// Speed of sound [m/s], used for a tip-Mach validity gate.
+    /// Speed of sound [m/s], used for the fluid-relative surface-Mach gate.
     pub speed_of_sound_m_per_s: Option<f64>,
     /// Ambient gas velocity [m/s] in the explicit world frame.
     pub velocity_world_m_per_s: Vec3,
@@ -493,7 +493,11 @@ pub struct ApplicabilityEnvelope {
     pub rotational_reynolds: ClosedRange,
     /// Valid relative roughness `height / radius` range.
     pub relative_roughness: ClosedRange,
-    /// Maximum rim-tip Mach number, inclusive.
+    /// Maximum fluid-relative surface Mach number, inclusive.
+    /// Admission uses the conservative rigid-surface speed bound
+    /// `|v_center - v_gas| + |omega| * hypot(radius, thickness/2)`.
+    /// It therefore covers translation, rotation and their combination;
+    /// a correlation must not pass just because its center is not spinning.
     pub maximum_tip_mach: f64,
 }
 
@@ -790,18 +794,38 @@ impl ReducedAeroModel {
             self.envelope
                 .rotational_reynolds
                 .require("rotational_reynolds", re)?;
-            let mach = finite_derived(
-                angular_speed * geometry.radius_m / input.gas.speed_of_sound_m_per_s,
-                "tip_mach",
-            )?;
-            if mach > self.envelope.maximum_tip_mach {
-                return Err(ReducedAeroError::OutsideCorrelationDomain {
-                    quantity: "tip_mach",
-                    value: mach,
-                    minimum: 0.0,
-                    maximum: self.envelope.maximum_tip_mach,
-                });
-            }
+        }
+
+        // Every surface point moves at v_relative + omega x r. Checking
+        // omega*radius alone admitted arbitrary supersonic translation and
+        // missed the faster advancing rim when translation and spin combine.
+        // The bounding radius includes the exposed finite-thickness rim.
+        // This O(1) sufficient gate is deliberately conservative; it does not
+        // claim to solve the maximum-speed point on the rotating cylinder.
+        let surface_radius = checked_norm(
+            Vec3::new(geometry.radius_m, 0.5 * geometry.exterior_thickness_m, 0.0),
+            "surface_radius_m",
+        )?;
+        let surface_speed_bound = checked_sum(
+            speed,
+            checked_product(
+                angular_speed,
+                surface_radius,
+                "surface_rotational_speed_m_per_s",
+            )?,
+            "surface_speed_bound_m_per_s",
+        )?;
+        let mach = finite_derived(
+            surface_speed_bound / input.gas.speed_of_sound_m_per_s,
+            "tip_mach",
+        )?;
+        if mach > self.envelope.maximum_tip_mach {
+            return Err(ReducedAeroError::OutsideCorrelationDomain {
+                quantity: "tip_mach",
+                value: mach,
+                minimum: 0.0,
+                maximum: self.envelope.maximum_tip_mach,
+            });
         }
 
         let face_area = finite_derived(geometry.face_area_m2(), "face_area_m2")?;
