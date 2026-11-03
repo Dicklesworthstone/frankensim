@@ -47,6 +47,7 @@ pub use boundary::{
     PartialSaturationBodyResponse3, PartialSaturationError3, PartialSaturationExchange3,
     PartialSaturationForcing3, PeriodicMomentumTransport3, PlaneLubricationExchange3, RigidFrame3,
     SphereLubrication3, SphereLubricationExchange3, VelocityProfileReport3, WallMomentumExchange3,
+    WallRotor3, WallRotorError3, WallRotorExchange3,
 };
 pub use coupled::{
     ForceRebindError3, PlatesGrid3, ThermalLbm3, gbeta_for_rayleigh3, plate_channel_flow3,

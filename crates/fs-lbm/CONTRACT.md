@@ -9684,3 +9684,36 @@ replay, origin covariance, continued native motion, exact uniform-path parity,
 physical source/pressure units and atomic refusal/retry. Targeted Rust syntax,
 format and whitespace checks passed. Native typechecking and test execution
 remain outstanding in the delivery environment.
+
+## Finite-inertia planar wall rotors
+
+`WallRotor3` and `BoundaryGrid3::step_with_finite_inertia_rotor` advance a flush
+circular disk's actual spin together with native D3Q19 collision and wall
+streaming. The grid stays inertial. Disk center and Cartesian spin axis are
+fixed by a bearing; disk inertia uses lattice mass-length-squared units.
+Positive spin uses the positive Cartesian axis on either face. Cell centers
+are at `[x+0.5,y+0.5,z+0.5]`, and wall planes at zero or the grid dimension.
+
+Each selected face cell owns its complete five-link stencil. Open/periodic
+domains, moving housing walls, side-wall seams and obstructed patch cells
+refuse. Complete tangent pairs cancel moving-wall mass and moving-mass
+momentum corrections. Native half-link impulse yields
+`J_h=A-D*omega_mid`, where `D=sum(rho*r_perp^2/3)`. The analytic midpoint
+inertia solve has no explicit added-inertia step restriction. The held
+midpoint spin drives the original bounce; bearing force and transverse
+torque are returned separately, with all moments about the requested origin.
+
+The receipt closes fluid, rotor and housing momentum against the applied
+rotor couple and held fluid body force. Rotor kinetic change equals midpoint
+external work plus measured fluid-on-rotor work to roundoff; fluid
+viscous/numerical dissipation is not assigned to that mechanical identity.
+Reusable patch metadata and next-state storage avoid dense per-step
+allocations after warmup. Cancellation and late refusal publish neither
+fluid nor rotor state. Call the coupled method each step; ordinary grid
+stepping treats the underlying face as stationary.
+
+`tests/finite_inertia_rotor3.rs` covers native impulse slopes on all six faces
+and two radii, small inertia, all four collision models, arbitrary-origin
+source/bearing balance, fluid-driven spin-up, topology admission and atomic
+late refusal. `examples/finite_rotor3.rs` runs unforced spin-down and reports
+actual fluid/rotor/housing angular exchange.
