@@ -18,11 +18,19 @@
 # Geometry: data/instruments/geometry/flute-boehm-silver-bfoot-boehm1871 (Boehm 1871 as recomputed by
 # Miller 1922, Table II, rescaled from A=435 to A=440 by Boehm's published Schema rule; riser of the
 # Pearl PF-661 from Wolfe, Smith and Green 2003). Every geometry number is a dimensions.tsv row.
-# Player: experienced flautist, mf, de la Cuadra, Fabre, Montgermont and Chafe, Acta Acustica 94(5),
-# 2008, pp.740-749. Mean mouth pressure 300 Pa (D4) to 600 Pa (A5), jet length W 8 mm to 4.5 mm
-# (Sec. 5.1); lip-hole area ~6e-6 to ~3.5e-6 m2 (Fig. 4) and height ~0.9 mm (Fig. 6) are read off
-# the plots; values between the two published endpoints are linear in log2(f). Never read from a
-# recording. Labium offset +0.29 mm on the pipe side: one player's measured reference jet (Onogi,
+# Player: experienced flautist FA, mf, on a Yamaha 281 S (de la Cuadra, Fabre, Montgermont and Chafe,
+# Acta Acustica 94(5), 2008, pp.740-749; the same player and data in de la Cuadra's thesis, Stanford 2005).
+# Each note's controls are that player's own measured trace at that note: thesis Fig. 3.4 (pdf p.77, the
+# slurred D major scale at mf, "D3 (293Hz) to A4 (880Hz)" in the thesis's octave naming = D4 to A5 here),
+# digitised, one median per note over its sustained segment (ledger delacuadra-2008-flute-controls-figure-reads):
+#   note  P_m (Pa)  W (mm)  h (mm)  width = S_m / h (mm)
+#   D4    332       7.50    1.13    6.18
+#   G4    438       6.25    0.98    5.89
+#   A5    628       5.21    0.98    4.21
+# P_m is the middle of the mouth-pressure band (U_j in the figure uses a rho the thesis does not state).
+# Read resolution, one pixel: h 0.052 mm, W 0.21 mm, P_m about 8 Pa, S_m 0.41 mm2. The 2008 Sec. 5.1 text
+# ("300 to 600 Pa", "8 mm to 4.5 mm") is a rounded summary of this trace, not per-note values, and is no
+# longer an input. Never read from a recording. Labium offset +0.29 mm on the pipe side: one player's measured reference jet (Onogi,
 # Yokoyama and Iida, Acta Acustica 5 (2021) 11, Table 1: y/h = 0.24 +- 0.25 at h = 1.2 mm), so the
 # bracket is -0.01 to +0.59 mm; jet angle 0, because the measured 39 degrees are inside that offset.
 # Onset ramp (50 ms) and the jet displacement gain (90) are UNKNOWN or authored: see unknowns.tsv and
@@ -36,6 +44,9 @@
 # dead interval over the lip, Fletcher 1975 p.235, inside his 1 to 2 mm of p.234), solved in the window's
 # exterior. Not represented: the face's angle, shape and extent, the lip's thickness, the lip plate's
 # shape, and the hole's taper and undercut (unknowns.tsv).
+# W minus the open strip, with the measured W: D4 1.66, G4 0.81, A5 0.90 mm. G4 and A5 are below Fletcher's
+# 1 to 2 mm of p.234, but the strip comes from Coltman's players and W from FA, so this compares two players
+# and nothing is changed for it.
 # The jet card is an inline X-Est
 # lip-jet card, not the interim 2-D slot-jet card: theta/b 1.75 places the island's band peak (0.55 omega_c,
 # omega_c = U / 4 theta) at the published Strouhal number of maximum jet amplification, Str_h = 0.025 (de la

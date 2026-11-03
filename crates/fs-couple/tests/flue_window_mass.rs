@@ -379,12 +379,12 @@ fn flute() -> (String, [f64; 3], String) {
         .map(|f| f.parse().unwrap())
         .collect();
     assert_eq!(fields.len(), 3);
-    let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t3.79e2\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
+    let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t4.38e2\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
     assert!(FLUTE.contains(events), "the G4 gesture changed; update this test");
     (
         FLUTE
             .replace("output 120000 5", "output 1024 1")
-            .replace(events, "events\t1\nevent\t0e0\t5e-2\tpressure-pa\t3.79e2"),
+            .replace(events, "events\t1\nevent\t0e0\t5e-2\tpressure-pa\t4.38e2"),
         [fields[0], fields[1], fields[2]],
         rows[0].to_owned(),
     )
@@ -444,7 +444,7 @@ fn the_flute_window_is_its_embouchure_hole_under_the_lip() {
         record.ladder.rungs[record.ladder.rungs.len() - 1].outer_cells.len()
     );
     assert!(load.band_error() <= 0.05);
-    assert!(text.contains("\nflue 0.00594 0.00090 0.00708 0.00029 0 0\n"));
+    assert!(text.contains("\nflue 0.00589 0.00098 0.00625 0.00029 0 0\n"));
     render(file);
 }
 
