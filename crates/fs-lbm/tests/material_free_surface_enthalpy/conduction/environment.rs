@@ -72,6 +72,18 @@ fn with_exposed_law<T>(
     law: &LiquidTemperatureLaw<'_>,
     run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> T,
 ) -> T {
+    with_exposed_law_and_pressure(card, moving, chart, initial_h, law, None, run)
+}
+
+fn with_exposed_law_and_pressure<T>(
+    card: &MaterialCard,
+    moving: bool,
+    chart: &EquilibriumEnthalpyPhaseCurve,
+    initial_h: f64,
+    law: &LiquidTemperatureLaw<'_>,
+    reference_pressure_pa: Option<f64>,
+    run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> T,
+) -> T {
     let source = resolve_liquid_surface_state(
         card,
         &point(400.0),
@@ -98,8 +110,11 @@ fn with_exposed_law<T>(
     }
     let gate = CancelGate::new_clock_free();
     with_cx(&gate, |cx| {
-        let flow = plan_free_surface_from_material(&source, 0.001, 0.001, 0.1)
-            .unwrap()
+        let mut scaling = plan_free_surface_from_material(&source, 0.001, 0.001, 0.1).unwrap();
+        if let Some(reference) = reference_pressure_pa {
+            scaling = scaling.with_pressure_reference(reference).unwrap();
+        }
+        let flow = scaling
             .free_surface3_from_cells(domain(), &cells, cx)
             .unwrap();
         let mut thermal = flow

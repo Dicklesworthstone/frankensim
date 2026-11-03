@@ -28,6 +28,22 @@ pub struct FreeSurfaceFiniteGasExchange {
     /// Accumulated absolute allowance from the original gas energy inversion.
     pub gas_energy_tolerance_j: f64,
     pub substeps: usize,
+    /// Present when this same finite atmosphere supplies the native gas load.
+    /// The post-thermal EOS pressure is held during the following flow stage.
+    pub pressure: Option<FreeSurfaceFiniteGasPressureLoad>,
+}
+
+/// The original finite atmosphere's actual pressure used by liquid momentum.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeSurfaceFiniteGasPressureLoad {
+    /// Original accepted EOS pressure before thermal exchange [Pa].
+    pub initial_pressure_pa: f64,
+    /// Post-thermal EOS pressure supplied to every exposed native gas link [Pa].
+    pub applied_pressure_pa: f64,
+    /// Fixed physical gas volume owned by the original parcel [m3].
+    pub volume_m3: f64,
+    /// Maximum combined gas/capillary fractional lattice-density excursion.
+    pub maximum_density_excursion: f64,
 }
 
 #[derive(Clone)]
@@ -36,6 +52,8 @@ pub(super) struct FiniteAtmosphere {
     pub(super) temperature_slope: f64,
     controls: GasEnergySolve,
     initial_temperature_k: f64,
+    initial_pressure_pa: f64,
+    pub(super) maximum_density_excursion: Option<f64>,
     substeps: usize,
 }
 
@@ -60,8 +78,36 @@ impl FiniteAtmosphere {
             temperature_slope,
             controls,
             initial_temperature_k: temperature,
+            initial_pressure_pa: parcel.state().state().pressure,
+            maximum_density_excursion: None,
             substeps: 0,
         })
+    }
+
+    pub(super) fn with_pressure(
+        mut self,
+        flow: &MaterialFreeSurface3<'_>,
+        maximum_density_excursion: Option<f64>,
+    ) -> Result<Self, Error> {
+        if let Some(maximum) = maximum_density_excursion {
+            if !maximum.is_finite() || maximum <= 0.0 || maximum >= 1.0 {
+                return Err(Error::Invalid(
+                    "finite-atmosphere pressure bound must be finite and in (0,1)",
+                ));
+            }
+            if flow.scaling.reference_pressure_pa.is_none() {
+                return Err(Error::Invalid(
+                    "finite-atmosphere traction requires an explicit fixed pressure reference",
+                ));
+            }
+            if flow.lattice.geometry_epoch() != 0 {
+                return Err(Error::Invalid(
+                    "fixed-volume atmosphere traction does not admit moving solid geometry",
+                ));
+            }
+        }
+        self.maximum_density_excursion = maximum_density_excursion;
+        Ok(self)
     }
 
     pub(super) fn accept_heat(
@@ -138,6 +184,14 @@ impl FiniteAtmosphere {
             combined_thermal_balance_defect_j: combined,
             gas_energy_tolerance_j: allowance,
             substeps: self.substeps,
+            pressure: self.maximum_density_excursion.map(|maximum_density_excursion| {
+                FreeSurfaceFiniteGasPressureLoad {
+                    initial_pressure_pa: self.initial_pressure_pa,
+                    applied_pressure_pa: self.parcel.state().state().pressure,
+                    volume_m3: self.parcel.volume_m3(),
+                    maximum_density_excursion,
+                }
+            }),
         })
     }
 }
@@ -187,6 +241,69 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         with_viscous_heating: bool,
         gate: &CancelGate,
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
+        self.step_with_finite_gas_environment_inner(
+            faces, heat, controls, bodies, contacts, interfaces, gas, exposed,
+            gas_controls, None, with_viscous_heating, gate,
+        )
+    }
+
+    /// Couple finite atmospheric heat storage AND its EOS pressure to the liquid.
+    ///
+    /// The same original gas parcel exchanges opposite heat with exposed liquid
+    /// and finite solids on every thermal substep. Its ACTUAL post-thermal EOS
+    /// pressure then supplies the original normal gas-link reconstruction in
+    /// the following native flow/advection stage. No stale initial pressure or
+    /// separately prescribed pressure field owns that boundary.
+    ///
+    /// All exposed gas links must communicate with this one well-mixed atmosphere.
+    /// The caller declares its fixed physical volume and owns this connectivity
+    /// assumption. A rigid vessel with a fixed amount of incompressible liquid
+    /// is the intended scope; numerical fill and lattice-density changes never
+    /// change gas volume. Moving-solid geometry refuses. There is no gas momentum,
+    /// compression work, evaporation or pressure-dependent liquid caloric law.
+    ///
+    /// This retains the original first-order thermal/flow split, with pressure
+    /// held over its flow stage. The combined gas/liquid/solid thermal audit is
+    /// distinct from a complete mechanical-energy audit. Late pressure, source,
+    /// geometry, mass or cancellation refusal preserves every accepted owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_pressurized_finite_gas_environment(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        gas: &mut IsochoricGasParcel,
+        exposed: &[FreeSurfaceGasFace],
+        gas_controls: GasEnergySolve,
+        maximum_density_excursion: f64,
+        with_viscous_heating: bool,
+        gate: &CancelGate,
+    ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
+        self.step_with_finite_gas_environment_inner(
+            faces, heat, controls, bodies, contacts, interfaces, gas, exposed,
+            gas_controls, Some(maximum_density_excursion), with_viscous_heating, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_finite_gas_environment_inner(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        gas: &mut IsochoricGasParcel,
+        exposed: &[FreeSurfaceGasFace],
+        gas_controls: GasEnergySolve,
+        maximum_density_excursion: Option<f64>,
+        with_viscous_heating: bool,
+        gate: &CancelGate,
+    ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         poll(gate)?;
         if (exposed.is_empty() && bodies.iter().all(|body| body.gas_faces().is_empty()))
             || exposed.len() > controls.maximum_faces
@@ -195,7 +312,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 "finite atmosphere requires bounded exposed liquid or solid patches",
             ));
         }
-        let mut candidate = FiniteAtmosphere::try_new(gas, gas_controls)?;
+        let mut candidate = FiniteAtmosphere::try_new(gas, gas_controls)?
+            .with_pressure(&self.flow, maximum_density_excursion)?;
         let environment: Vec<_> = exposed
             .iter()
             .map(|&face| FreeSurfaceGasContact {

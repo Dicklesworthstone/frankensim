@@ -7819,3 +7819,44 @@ Four regression sources cover an independent nonlinear two-cell heat balance,
 same-step buoyancy from solid heating, exact work-budget/source refusal, and
 joint SGS/solid energy accounting with constant-Cp specialization. They were
 syntax-checked; native execution was unavailable in the delivery environment.
+
+## Finite-atmosphere EOS pressure driving free-surface momentum
+
+The opt-in `step_with_pressurized_finite_gas_environment` and
+`step_with_pressurized_finite_gas_surface_exchange` close the original
+finite-atmosphere heat-to-pressure-to-liquid-momentum path. The SAME
+`IsochoricGasParcel` receives the aggregate opposite liquid/solid heat on
+each existing thermal substep. After all substeps, its actual endpoint EOS
+pressure supplies the original native missing-gas-link reconstruction over
+one flow/advection stage. The initial gas pressure is not reused as a stale
+mechanical load. Prescribed and finite-atmosphere pressure owners cannot
+both supply that boundary.
+
+No EOS, caloric source, momentum solver or second physical clock is added.
+Finite solid conduction/radiation, solved interface temperature, electrical
+and thermocapillary bindings retain the existing shared transaction and
+source-domain checks. Original gas/capillary density-excursion and native
+flow/transport gates run before publication; late pressure refusal therefore
+preserves gas, liquid, finite solids, sources and clock together.
+`FreeSurfaceFiniteGasPressureLoad` reports the original initial and actual
+applied EOS pressures, fixed parcel volume and declared native pressure bound.
+
+All exposed gas links must communicate with one well-mixed atmosphere.
+The caller owns that physical connectivity and the parcel's fixed physical
+volume, which may include an explicitly connected rigid plenum. A fixed
+rigid vessel and fixed amount of incompressible liquid are the intended
+geometry; moving-solid epochs refuse. Numerical lattice density and
+`mass/rho` fill never evolve physical gas volume. The original first-order
+thermal/flow split and fixed source-pressure liquid caloric scope remain.
+There is no gas momentum, inferred pocket topology, compression work,
+evaporation or complete mechanical-energy/passivity claim. The combined
+thermal storage audit does not become a whole-fluid kinetic-energy audit.
+
+Four authored regressions independently calculate caloric pressure change
+and planar-link traction for heating/cooling, exercise radiant surface heat
+feeding gas pressure, preserve formation-energy gauges and finite-volume
+causality, and check late pressure refusal, requested cancellation and exact
+continuation of gas/liquid/solid storage. The test vessel's declared gas
+volume comes from its initial rigid geometry and physical liquid amount.
+Native compilation, rustfmt and test execution were unavailable after the
+worker filesystem/exec service failed during this implementation.

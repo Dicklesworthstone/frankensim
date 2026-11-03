@@ -45,7 +45,7 @@ pub use surface::{FreeSurfaceImplicitReport, FreeSurfaceImplicitSolve};
 pub mod atmosphere;
 pub use atmosphere::{
     FreeSurfaceBodyGasExchange, FreeSurfaceBodyGasFace, FreeSurfaceBodyGasSample,
-    FreeSurfaceFiniteGasExchange,
+    FreeSurfaceFiniteGasExchange, FreeSurfaceFiniteGasPressureLoad,
 };
 /// Native source-driven current and Joule heat in a declared fully wet core.
 pub mod electrical;
@@ -755,6 +755,15 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
+        if gas_pressure.is_some()
+            && finite_atmosphere
+                .as_deref()
+                .is_some_and(|gas| gas.maximum_density_excursion.is_some())
+        {
+            return Err(Error::Invalid(
+                "finite atmosphere and prescribed pressure cannot both own the gas boundary",
+            ));
+        }
         let surface_stress = !surfaces.is_empty()
             && (self.temperature_dependent_thermocapillarity()
                 || self.local_thermocapillary_surface().is_some());
@@ -1260,6 +1269,31 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         // candidate. Publication occurs only after wetting/flow/transport gates.
         let endpoint_wetting = observer.current_wetting()?;
         let wetting_outer_gas = endpoint_wetting.as_ref().and_then(WettingBinding::outer_gas);
+        // Resolve only the final scalar EOS pressure, after ALL thermal
+        // substeps, from this same finite-gas candidate. The closure captures
+        // that scalar rather than borrowing the observer needed by surface
+        // stress. Native reconstruction retains capillarity, forcing and every
+        // pressure/transport gate; no second flow step or gas debit is added.
+        let atmosphere_pressure = observer.finite_atmosphere.as_ref().and_then(|gas| {
+            gas.maximum_density_excursion.map(|maximum| {
+                let pressure = gas.parcel.state().state().pressure;
+                (
+                    maximum,
+                    super::super::pressure::lattice_pressure_field(
+                        self.flow.scaling.reference_pressure_pa
+                            .expect("finite atmosphere pressure reference admitted"),
+                        self.flow.scaling.cell_size_m,
+                        self.flow.scaling.pressure_unit_pa,
+                        move |_| pressure,
+                    ),
+                )
+            })
+        });
+        let gas_pressure = gas_pressure.or_else(|| {
+            atmosphere_pressure.as_ref().map(|(maximum, field)| {
+                (*maximum, GasPressureField::Cell(field))
+            })
+        });
         let flow = if surface_stress {
             let surface = self.thermocapillary.expect("admitted surface-stress geometry");
             let scaling = self.flow.scaling;

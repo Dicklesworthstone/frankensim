@@ -448,6 +448,66 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         with_viscous_heating: bool,
         gate: &CancelGate,
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
+        self.step_with_finite_gas_surface_exchange_inner(
+            faces, heat, controls, bodies, contacts, interfaces, gas, surfaces,
+            gas_controls, solve, None, with_viscous_heating, gate,
+        )
+    }
+
+    /// Solve surface heat exchange and load the liquid with the SAME finite gas.
+    ///
+    /// Gas/radiation interface temperatures, finite solid heat, electrical and
+    /// thermocapillary bindings retain their original coupled thermal owner.
+    /// Its post-thermal gas EOS pressure drives the following original native
+    /// momentum/advection stage once. The applied pressure and fixed physical
+    /// gas volume are returned in the finite-gas pressure report.
+    ///
+    /// All gas links must communicate with the single well-mixed fixed-volume
+    /// atmosphere, as required by the pressurized finite-environment entry.
+    /// The caller owns that physical connectivity and volume assumption. This
+    /// does not infer a gas pocket from fill or supply compression work, gas
+    /// momentum, evaporation or a total mechanical-energy closure. Pressure
+    /// failures after the thermal solve still preserve gas, liquid and solids.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_pressurized_finite_gas_surface_exchange(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        gas: &mut IsochoricGasParcel,
+        surfaces: &[FreeSurfaceInterfaceFace],
+        gas_controls: GasEnergySolve,
+        solve: FreeSurfaceInterfaceSolve,
+        maximum_density_excursion: f64,
+        with_viscous_heating: bool,
+        gate: &CancelGate,
+    ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
+        self.step_with_finite_gas_surface_exchange_inner(
+            faces, heat, controls, bodies, contacts, interfaces, gas, surfaces,
+            gas_controls, solve, Some(maximum_density_excursion), with_viscous_heating, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_finite_gas_surface_exchange_inner(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        gas: &mut IsochoricGasParcel,
+        surfaces: &[FreeSurfaceInterfaceFace],
+        gas_controls: GasEnergySolve,
+        solve: FreeSurfaceInterfaceSolve,
+        maximum_density_excursion: Option<f64>,
+        with_viscous_heating: bool,
+        gate: &CancelGate,
+    ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         poll(gate)?;
         if solve.local_boundary_evolution == LocalSurfaceBoundaryEvolution::UniformReservoir {
             return Err(Error::Invalid(
@@ -459,7 +519,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 "finite atmosphere requires bounded exposed liquid patches",
             ));
         }
-        let mut candidate = atmosphere::FiniteAtmosphere::try_new(gas, gas_controls)?;
+        let mut candidate = atmosphere::FiniteAtmosphere::try_new(gas, gas_controls)?
+            .with_pressure(&self.flow, maximum_density_excursion)?;
         let boundaries: Vec<_> = surfaces
             .iter()
             .map(|&surface| FreeSurfaceInterfaceContact {

@@ -5,6 +5,9 @@ use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel
 #[path = "atmosphere/solid.rs"]
 mod solid;
 
+#[path = "atmosphere/pressure.rs"]
+mod pressure;
+
 fn gas_controls() -> GasEnergySolve {
     GasEnergySolve {
         minimum_temperature_k: 200.0,
