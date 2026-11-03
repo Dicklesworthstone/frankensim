@@ -3852,9 +3852,21 @@ scalar Robin law, not a resolved fluid boundary layer.
 
 The existing steady and transient Picard/Krylov owner evaluates these
 coefficients from the previous pass and warm-starts the next solve until the
-largest temperature change is below 1e-10 of the span (200 passes, else
-`SolverNotConverged { system: "energy conductivity" }`). Storage, sources,
-contacts and independent energy accounting retain their original owners.
+largest temperature change is below 1e-10 of the span. This update only proposes
+acceptance. The original assembly and physical accounting are then evaluated
+at the unchanged candidate with its own conductivity, nonlinear half cells,
+contact and compact links. No extra Krylov solve or time advance occurs.
+The actual row-scaled residual and every free cell/junction's heat closure must
+meet `EnergyConfig::tolerance`; each heat residual uses its own throughput and
+an explicit local product-roundoff allowance. Opposing defects cannot cancel
+through the global ledger. Storage retains the original previous-time state.
+If the local heat gate needs more accuracy, the next counted linear solve uses
+a tighter tolerance; the requested physical endpoint allowance stays fixed.
+The same 200-pass bound refuses an unresolved endpoint. Returned conductivity,
+wall links, junction branches and reservoir heat describe the accepted field;
+the iteration report sums the actual native conductivity Krylov work.
+`tests/conjugate/nonlinear_contact.rs` also refuses steady and transient fields
+whose opposing local heat errors cancel globally and pass a loose linear gate.
 G1/G3 regressions in `tests/conjugate.rs` check the source-free analytic
 Kirchhoff profile at 1/2/10/20 cells, crossed knots on arbitrary widths along
 all orthotropic axes under both heat-flow signs, a finite same-material contact

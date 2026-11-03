@@ -107,9 +107,79 @@ fn nonlinear_material_interface_matches_composite_slab_in_each_direction() {
                 assert!((through_a - flux).abs() < 1e-6);
                 assert!((through_b - flux).abs() < 1e-6);
                 assert!(solution.report.balance.relative_residual < 1e-9);
+                // The report must be the original law at these exact cells,
+                // not the final linear solve's previous conductivity epoch.
+                let ka = 1.0 + 0.01 * (solution.temperature[a] - 300.0);
+                let kb = 4.0 - 0.01 * (solution.temperature[b] - 300.0);
+                for actual in solution.conductivity[a] {
+                    assert!((actual - ka).abs() < 2e-15 * ka);
+                }
+                for actual in solution.conductivity[b] {
+                    assert!((actual - kb).abs() < 2e-15 * kb);
+                }
+                let boundary_heat = domain.face_area(a, axis) * (through_b - through_a);
+                assert!((solution.report.balance.boundary_outflow_w - boundary_heat).abs() < 1e-10);
+                assert!(solution.report.relative_residual <= EnergyConfig::default().tolerance);
+                assert!(solution.report.iterations > 0);
             }
         }
     }
+}
+
+#[test]
+fn nonlinear_endpoint_refuses_cancelling_local_heat_errors() {
+    // Both reservoirs and the initial iterate are 350 K, but the cells have
+    // opposite 100 W sources. That uniform field closes the global heat ledger
+    // EXACTLY while violating both local equations by 100 W. Its row-scaled
+    // algebraic residual is below 0.2 because that norm contains the 350 K
+    // reservoir offset. No Krylov work is allowed to repair the field.
+    let domain = VoxelDomain::from_fn(2, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let material = SolidMaterial::new("nonlinear slab", 1.0)
+        .with_conductivity_table(&[(300.0, 1.0), (400.0, 2.0)])
+        .with_heat_capacity(1.0);
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(350.0);
+    faces[1] = ThermalFace::Temperature(350.0);
+    let mut setup = ThermalSetup::new(faces);
+    setup.power_w = vec![100.0, -100.0];
+    let config = EnergyConfig { tolerance: 0.2, max_iterations: 0,
+        ..EnergyConfig::default() };
+    let error = solve_energy(
+        &domain, &unit_fluid(), std::slice::from_ref(&material),
+        &FlowField::quiescent(&domain), &setup, &config, &CancelGate::new(),
+    ).unwrap_err();
+    assert!(matches!(error, ChtError::SolverNotConverged { .. }), "{error:?}");
+
+    // With funded Krylov work the same loose request can be repaired. The
+    // acceptance is physical: independently integrate both boundary halves
+    // and the common full-cell segment at the returned temperatures.
+    let funded = EnergyConfig { max_iterations: 50, ..config };
+    let accepted = solve_energy(
+        &domain, &unit_fluid(), std::slice::from_ref(&material),
+        &FlowField::quiescent(&domain), &setup, &funded, &CancelGate::new(),
+    ).unwrap();
+    let [a, b] = [accepted.temperature[0], accepted.temperature[1]];
+    assert!(a > 350.0 && b < 350.0);
+    let boundary = [2.0 * (potential_a(a) - potential_a(350.0)),
+        2.0 * (potential_a(b) - potential_a(350.0))];
+    let internal = potential_a(a) - potential_a(b);
+    for (i, transfer) in [internal, -internal].into_iter().enumerate() {
+        let residual = boundary[i] + transfer - setup.power_w[i];
+        let scale = boundary[i].abs() + transfer.abs() + setup.power_w[i].abs();
+        assert!(residual.abs() <= config.tolerance * scale);
+    }
+    assert!((accepted.report.balance.boundary_outflow_w - boundary.iter().sum::<f64>()).abs() < 1e-10);
+    assert!(accepted.report.iterations > 0);
+
+    // The exact same defect must not become a physical time step: frozen old
+    // storage is zero at this candidate, as are every boundary/contact flux.
+    let error = march_energy(
+        &domain, &unit_fluid(), &[material], &FlowField::quiescent(&domain),
+        &setup, &[350.0; 2], |_| 1.0,
+        &TransientConfig { time_step_s: 0.1, steps: 1, energy: config },
+        None, &CancelGate::new(),
+    ).unwrap_err();
+    assert!(matches!(error, ChtError::SolverNotConverged { .. }), "{error:?}");
 }
 
 #[test]

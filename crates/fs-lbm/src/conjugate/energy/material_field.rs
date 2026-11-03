@@ -177,7 +177,7 @@ impl EnergyConfig {
         }
         let solution = solve_energy_field(
             domain, fluid, solids, flow, setup, self, step, None,
-            Some(molecular_w_m_k), enthalpy, gate,
+            Some(molecular_w_m_k), enthalpy, false, gate,
         )?;
         super::super::poll(gate)?;
         Ok(solution)

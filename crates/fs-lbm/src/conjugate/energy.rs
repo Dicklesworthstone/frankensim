@@ -25,7 +25,7 @@ use super::conductance::{ConductivityCurve, interface_conductance};
 use super::compact_storage::{CompactHeatStorage, CompactStorageControls, bindings};
 use super::domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 use super::flow::{FlowField, scale_rows};
-use super::krylov::bicgstab_ilu0;
+use super::krylov::{KrylovOutcome, bicgstab_ilu0, residual_norms};
 use super::{ChtError, finite, finite_positive};
 use crate::d3q19::Face3;
 
@@ -267,7 +267,10 @@ impl ThermalSetup {
 pub struct EnergyConfig {
     /// Convection scheme.
     pub scheme: ConvectionScheme,
-    /// Relative residual of the Jacobi-row-scaled system.
+    /// Relative residual of the Jacobi-row-scaled system. Authored k(T) also
+    /// checks every free cell and compact junction's physical heat residual at
+    /// the unchanged endpoint, relative to its own heat throughput, with an
+    /// explicit floating-point roundoff allowance.
     pub tolerance: f64,
     /// Krylov iteration budget.
     pub max_iterations: usize,
@@ -316,9 +319,10 @@ pub struct EnergyReport {
     pub unknowns: usize,
     /// Stored nonzeros.
     pub nonzeros: usize,
-    /// BiCGStab iterations.
+    /// BiCGStab iterations, summed over all native conductivity passes.
     pub iterations: usize,
-    /// Recomputed relative residual of the row-scaled system.
+    /// Recomputed relative residual of the row-scaled system. With authored
+    /// k(T), this is the original nonlinear operator at the returned field.
     pub relative_residual: f64,
     /// Largest interior-face cell Péclet number `|F| / D`.
     pub max_cell_peclet: f64,
@@ -435,7 +439,8 @@ struct Context<'a> {
     domain: &'a VoxelDomain,
     flow: &'a FlowField,
     solids: &'a [SolidMaterial],
-    /// Previous Picard state, only for the authored k(T) table path.
+    /// Coefficient state, only for the authored k(T) table path. A Picard
+    /// solve uses its previous iterate; endpoint evaluation uses the candidate.
     conductivity_temperature: Option<&'a [f64]>,
     faces: [ThermalFace; 6],
     /// Conductivity along x, y, z per cell.
@@ -752,8 +757,11 @@ pub(crate) struct PseudoStep<'a> {
 /// The energy solve, iterated to a consistent temperature field when a solid
 /// declares a temperature-dependent conductivity. Each Picard pass evaluates
 /// the integrated bulk laws and their material/contact interface conditions,
-/// until the largest temperature change is below 1e-10 of its span.
-#[allow(clippy::too_many_arguments)]// physics inputs + step state
+/// until the largest temperature change is below 1e-10 of its span. That
+/// update only proposes convergence: the unchanged candidate must also pass
+/// the original operator and independent local heat balances with k(T)
+/// re-evaluated at its own temperatures.
+#[allow(clippy::too_many_arguments)] // physics inputs + step state
 pub(crate) fn solve_energy_inner(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -820,6 +828,9 @@ pub(crate) fn solve_energy_inner(
         Some((&start, None)),
         gate,
     )?;
+    let mut iterations = solution.report.iterations;
+    let mut endpoint_residual = f64::INFINITY;
+    let mut linear_config = *config;
     for _ in 0..200 {
         super::poll(gate)?;
         let next = solve_energy_once(
@@ -828,7 +839,7 @@ pub(crate) fn solve_energy_inner(
             solids,
             flow,
             setup,
-            config,
+            &linear_config,
             step,
             Some((&scales(&solution.temperature), Some(&solution.temperature))),
             gate,
@@ -844,16 +855,43 @@ pub(crate) fn solve_energy_inner(
             .iter()
             .zip(&solution.temperature)
             .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        iterations = iterations.saturating_add(next.report.iterations);
         solution = next;
         if change <= 1e-10 * (hi - lo).max(1e-12) {
-            return Ok(solution);
+            // Reuse the original sparse assembly and physical accounting at
+            // the UNCHANGED candidate. This evaluation performs no Krylov
+            // solve and retains the original old-time storage state.
+            match solve_energy_field(
+                domain, fluid, solids, flow, setup, config, step,
+                Some((&scales(&solution.temperature), Some(&solution.temperature))),
+                None, None, true, gate,
+            ) {
+                Ok(mut accepted) => {
+                    accepted.report.iterations = iterations;
+                    return Ok(accepted);
+                }
+                Err(ChtError::SolverNotConverged {
+                    system: "energy conductivity endpoint" | "energy conductivity heat",
+                    relative_residual,
+                    ..
+                }) => {
+                    endpoint_residual = relative_residual;
+                    // A small global algebraic residual can mask a local
+                    // heat error, especially with a large Kelvin offset.
+                    // Give the next counted solve more numerical headroom;
+                    // the requested endpoint tolerance is never widened.
+                    let tighter = 0.1 * linear_config.tolerance;
+                    if tighter > 0.0 { linear_config.tolerance = tighter; }
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
     Err(ChtError::SolverNotConverged {
         system: "energy conductivity",
         iterations: 200,
-        relative_residual: f64::NAN,
-        tolerance: 1e-10,
+        relative_residual: endpoint_residual,
+        tolerance: config.tolerance,
     })
 }
 
@@ -871,7 +909,7 @@ fn solve_energy_once(
     nonlinear: Option<(&[f64], Option<&[f64]>)>,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
-    solve_energy_field(domain, fluid, solids, flow, setup, config, step, nonlinear, None, None, gate)
+    solve_energy_field(domain, fluid, solids, flow, setup, config, step, nonlinear, None, None, false, gate)
 }
 
 /// Shared assembly/solve/accounting kernel. An explicit field replaces only
@@ -888,6 +926,7 @@ fn solve_energy_field(
     nonlinear: Option<(&[f64], Option<&[f64]>)>,
     molecular_conductivity: Option<&[[f64; 3]]>,
     enthalpy: Option<AdvectiveEnthalpyField<'_>>,
+    evaluate_only: bool,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
     fluid.validate()?;
@@ -1281,15 +1320,22 @@ fn solve_energy_field(
         }
         (None, None) => vec![guess; unknowns],
     };
-    let outcome = bicgstab_ilu0(
-        "energy",
-        &a,
-        &b,
-        &mut temperature,
-        config.tolerance,
-        config.max_iterations,
-        gate,
-    )?;
+    let outcome = if evaluate_only {
+        let (residual, scale) = residual_norms(&a, &b, &temperature);
+        let relative_residual = if scale > 0.0 { residual / scale } else { residual };
+        if !relative_residual.is_finite() || relative_residual > config.tolerance {
+            return Err(ChtError::SolverNotConverged {
+                system: "energy conductivity endpoint", iterations: 0,
+                relative_residual, tolerance: config.tolerance,
+            });
+        }
+        KrylovOutcome { iterations: 0, relative_residual }
+    } else {
+        bicgstab_ilu0(
+            "energy", &a, &b, &mut temperature, config.tolerance,
+            config.max_iterations, gate,
+        )?
+    };
 
     // Independent accounting from boundary and fixed-cell fluxes.
     let (mut source_w, mut fixed_w, mut out_w, mut adv_w, mut scale) = (0.0, 0.0, 0.0, 0.0, 0.0f64);
@@ -1299,6 +1345,7 @@ fn solve_energy_field(
     };
     let mut sink_w = 0.0f64;
     let mut solid_fluid_links = Vec::new();
+    let mut local_heat_residual = 0.0f64;
     for c in 0..cells {
         if c.is_multiple_of(4096) { super::poll(gate)?; }
         // Collapsed cells have no ordinary face, source or sink equations.
@@ -1316,6 +1363,37 @@ fn solve_energy_field(
             }
         }
         let sink = sinks[c].0.mul_add(temperature[c], -sinks[c].1);
+        if evaluate_only && fixed[c].is_none() {
+            let mut residual = sink - source(c);
+            let mut throughput = sink.abs() + source(c).abs();
+            let mut arithmetic = (sinks[c].0 * temperature[c]).abs()
+                + sinks[c].1.abs() + source(c).abs();
+            for f in 0..6 {
+                if compact.toward_component(c, f) { continue; }
+                let term = ctx.checked_term(c, f)?;
+                let heat = flux_of(&term, c);
+                residual += heat;
+                throughput += heat.abs();
+                arithmetic += (term.diag * temperature[c]).abs() + term.rhs.abs()
+                    + term.off.map_or(0.0, |(n, g)| (g * temperature[n]).abs());
+            }
+            for &(j, g) in compact.links_of(c) {
+                let heat = g * (temperature[c] - temperature[cells + j]);
+                residual += heat;
+                throughput += heat.abs();
+                arithmetic += g * (temperature[c].abs() + temperature[cells + j].abs());
+            }
+            if let Some(step) = step {
+                let coefficient = step.coefficient_w_k[c];
+                let storage = coefficient * (temperature[c] - step.previous[c]);
+                residual += storage;
+                throughput += storage.abs();
+                arithmetic += coefficient * (temperature[c].abs() + step.previous[c].abs());
+            }
+            local_heat_residual = local_heat_residual.max(
+                heat_residual_ratio(residual, throughput, arithmetic, compact.links_of(c).len())?,
+            );
+        }
         sink_w += sink;
         scale += sink.abs();
         if fixed[c].is_some() {
@@ -1372,6 +1450,38 @@ fn solve_energy_field(
     for part in &setup.compact_components {
         source_w += part.power_w;
         scale += part.power_w.abs();
+    }
+    if evaluate_only {
+        for (j, part) in setup.compact_components.iter().enumerate() {
+            super::poll(gate)?;
+            let t = temperature[cells + j];
+            let mut residual = -part.power_w;
+            let mut throughput = part.power_w.abs();
+            let mut arithmetic = throughput;
+            for &(n, g, _) in &compact.links[j] {
+                let heat = g * (t - temperature[n]);
+                residual += heat;
+                throughput += heat.abs();
+                arithmetic += g * (t.abs() + temperature[n].abs());
+            }
+            if let Some(step) = step && !step.junction_coefficient_w_k.is_empty() {
+                let coefficient = step.junction_coefficient_w_k[j];
+                let old = step.previous[domain.index(part.lo[0], part.lo[1], part.lo[2])];
+                let storage = coefficient * (t - old);
+                residual += storage;
+                throughput += storage.abs();
+                arithmetic += coefficient * (t.abs() + old.abs());
+            }
+            local_heat_residual = local_heat_residual.max(
+                heat_residual_ratio(residual, throughput, arithmetic, compact.links[j].len())?,
+            );
+        }
+        if local_heat_residual > config.tolerance {
+            return Err(ChtError::SolverNotConverged {
+                system: "energy conductivity heat", iterations: 0,
+                relative_residual: local_heat_residual, tolerance: config.tolerance,
+            });
+        }
     }
     scale += fixed_w.abs();
     let residual_w = source_w + fixed_w - out_w - sink_w;
@@ -1448,6 +1558,32 @@ fn solve_energy_field(
         junctions,
         report,
     })
+}
+
+/// Local physical heat closure, after allowing only the rounding of the
+/// explicitly accumulated products. An unrelated hot cell or opposing residual
+/// elsewhere supplies no local allowance. The allowance grows with this row's
+/// compact links, in addition to the fixed six-face stencil, sinks and storage.
+fn heat_residual_ratio(
+    residual: f64, throughput: f64, arithmetic: f64, compact_links: usize,
+) -> Result<f64, ChtError> {
+    if !residual.is_finite() || !throughput.is_finite() || !arithmetic.is_finite() {
+        return Err(ChtError::InvalidInput {
+            field: "thermal.conductivity_heat_residual",
+            reason: "actual endpoint heat or its roundoff scale is unrepresentable".into(),
+        });
+    }
+    let rounding = (64.0 + 8.0 * compact_links as f64) * f64::EPSILON * arithmetic;
+    if !rounding.is_finite() {
+        return Err(ChtError::InvalidInput {
+            field: "thermal.conductivity_heat_residual",
+            reason: "actual endpoint roundoff allowance is unrepresentable".into(),
+        });
+    }
+    let excess = (residual.abs() - rounding).max(0.0);
+    Ok(if excess == 0.0 { 0.0 } else if throughput > 0.0 {
+        excess / throughput
+    } else { f64::INFINITY })
 }
 
 /// Validate bulk material references only where a spatial bulk equation exists.
