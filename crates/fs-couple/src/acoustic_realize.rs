@@ -327,8 +327,9 @@ pub struct RealizeOptions<'a> {
     pub observer_relaxation: Option<&'a fs_material::relaxation::RelaxationState>,
     /// Physical flanged-outlet microphone for an unbranched reed-driven duct.
     /// Its regional gas, exterior load and causal observation share the existing
-    /// owners. A uniform-medium lumped ladder exports its original terminal
-    /// flow instead of using the characteristic-line transfer. Other coupled
+    /// owners. A uniform-medium lumped ladder admits and advances the same
+    /// original volume/flow frustum model, including for a single cone, and
+    /// exports its terminal flow. Other coupled
     /// members and unsupported medium/wall combinations refuse explicitly.
     /// The observer law/relaxation above applies to this path's exterior gas;
     /// the receiver position replaces `assembly.listener.distance_m`.
@@ -5033,6 +5034,27 @@ fn realize_reed_on_duct_with_receiver(
                     what: "lumped ladder ODE reed requires a linear plate bank",
                 });
             }
+            let (sections, taps) = bore_spec_with_cells(duct, cells).ok_or(
+                AcousticRealizeError::InvalidDescription {
+                    what: "duct cannot be sliced into a lumped ladder",
+                },
+            )?;
+            // Select the physical frustum image before either model-form gate.
+            // The passive scan below borrows this exact chain; the source then
+            // takes it unchanged, so a cone is never qualified as a psi-line
+            // and rendered with a different finite-volume approximation.
+            let receiver = receiver
+                .map(|receiver| {
+                    reed_ode::PreparedReedOutlet::new(
+                        &sections,
+                        duct_outlet(duct.termination),
+                        &taps,
+                        gas,
+                        duct.wall,
+                        receiver,
+                    )
+                })
+                .transpose()?;
             let dispersion_error_cents = lumped_ladder_dispersion_cents(cells);
             let min_admissible_cells = min_admissible_lumped_cells(max_pitch_error_cents);
             if dispersion_error_cents > max_pitch_error_cents {
@@ -5043,11 +5065,6 @@ fn realize_reed_on_duct_with_receiver(
                     max_pitch_error_cents,
                 });
             }
-            let (sections, taps) = bore_spec_with_cells(duct, cells).ok_or(
-                AcousticRealizeError::InvalidDescription {
-                    what: "duct cannot be sliced into a lumped ladder",
-                },
-            )?;
             // Dispersion alone is a necessary condition. The admission is the
             // ladder's MEASURED passive pitch against the line's own TMM.
             let pitch_error_cents = lumped_ladder_pitch_error_cents(
@@ -5057,6 +5074,7 @@ fn realize_reed_on_duct_with_receiver(
                 duct,
                 termination,
                 gas,
+                receiver.as_ref().map(|prepared| &prepared.line),
             )?;
             if pitch_error_cents.abs() > max_pitch_error_cents {
                 return Err(AcousticRealizeError::LumpedLadderBand {
@@ -5247,8 +5265,10 @@ fn lumped_ladder_pitch_error_cents(
     duct: &ViscothermalDuct,
     termination: Termination,
     gas: &GasState,
+    prepared_chain: Option<&fs_phs::PortHamiltonian>,
 ) -> Result<f64, AcousticRealizeError> {
-    let (ladder, line) = lumped_ladder_resonances(physics, sections, taps, duct, termination, gas)?;
+    let (ladder, line) =
+        lumped_ladder_resonances(physics, sections, taps, duct, termination, gas, prepared_chain)?;
     Ok(ladder.map_or(f64::INFINITY, |ladder| {
         1200.0 * det::ln(ladder / line) / core::f64::consts::LN_2
     }))
@@ -5267,6 +5287,7 @@ fn lumped_ladder_resonances(
     duct: &ViscothermalDuct,
     termination: Termination,
     gas: &GasState,
+    prepared_chain: Option<&fs_phs::PortHamiltonian>,
 ) -> Result<(Option<f64>, f64), AcousticRealizeError> {
     let length: f64 = physics.segments.iter().map(Segment::axial_length).sum();
     let quarter = core::f64::consts::TAU * gas.sound_speed / (4.0 * length);
@@ -5286,14 +5307,17 @@ fn lumped_ladder_resonances(
     .ok_or(AcousticRealizeError::InvalidDescription {
         what: "no passive line resonance inside the lumped-ladder scan",
     })?;
-    let chain = ChainImpedance::new(&ode_bore_chain(
-        sections,
-        duct_outlet(duct.termination),
-        1,
-        taps,
-        gas,
-        duct.wall,
-    )?)?;
+    let chain = match prepared_chain {
+        Some(chain) => ChainImpedance::new(chain)?,
+        None => ChainImpedance::new(&ode_bore_chain(
+            sections,
+            duct_outlet(duct.termination),
+            1,
+            taps,
+            gas,
+            duct.wall,
+        )?)?,
+    };
     let ladder = first_impedance_peak(line / 1.25, line * 1.25, 160, |omega| {
         chain.magnitude(omega)
     })?;
@@ -6128,7 +6152,7 @@ mod lumped_ladder_resonance_tests {
         };
         let (sections, taps) = bore_spec_with_cells(duct, cells).unwrap();
         let physics = physics_duct(duct).unwrap();
-        lumped_ladder_resonances(&physics, &sections, &taps, duct, termination, &gas).unwrap()
+        lumped_ladder_resonances(&physics, &sections, &taps, duct, termination, &gas, None).unwrap()
     }
 
     #[test]

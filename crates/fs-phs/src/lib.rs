@@ -4391,7 +4391,7 @@ pub enum ChainOutlet {
     Radiating(MouthFlange),
 }
 
-// Keep the state-layout choice shared with physical outlet observation.
+// Preserve the legacy automatic choice of the spherical psi-line.
 fn spherical_chain_section(
     sections: &[AcousticSection],
     outlet: ChainOutlet,
@@ -4413,7 +4413,6 @@ fn spherical_chain_section(
 /// # Errors
 /// As [`acoustic_chain`], plus a bad wall pin.
 #[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
-#[allow(clippy::too_many_lines)]// one coherent physics stage
 pub fn acoustic_chain_outlet_wall(
     sections: &[AcousticSection],
     density: f64,
@@ -4448,6 +4447,45 @@ pub fn acoustic_chain_outlet_wall(
             wall,
         );
     }
+    acoustic_frustum_chain_outlet_wall(
+        sections,
+        density,
+        sound_speed,
+        outlet,
+        inlets,
+        taps,
+        viscothermal,
+        wall,
+    )
+}
+
+/// The original compression-volume/volume-flow frustum chain, selected explicitly.
+///
+/// Every authored section is discretized using its actual conical cell volume
+/// and series inertance, including a single widening cone. Unlike the legacy
+/// automatic selection in [`acoustic_chain_outlet_wall`], this never changes to
+/// spherical psi coordinates. Its terminal flow participates directly in the
+/// same discrete volume balance as the inlet. Radiation, viscothermal, tap and
+/// wall owners are unchanged; finite spatial resolution still needs admission.
+///
+/// # Errors
+/// As [`acoustic_chain_outlet_wall`] for the original frustum-chain parameters.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_lines)] // one coherent physics stage
+pub fn acoustic_frustum_chain_outlet_wall(
+    sections: &[AcousticSection],
+    density: f64,
+    sound_speed: f64,
+    outlet: ChainOutlet,
+    inlets: usize,
+    taps: &[AcousticTap],
+    viscothermal: Option<&ViscothermalPin>,
+    wall: Option<&WallPin>,
+) -> Result<PortHamiltonian, PhsError> {
+    let mouth = match outlet {
+        ChainOutlet::Radiating(flange) => Some(flange),
+        ChainOutlet::PressureRelease | ChainOutlet::Rigid => None,
+    };
     let mut n_cells = 0usize;
     let mut last_radius = 0.0;
     for s in sections {

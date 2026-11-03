@@ -3,12 +3,12 @@
 //! The native charges and fluxes alternate orientation along the chain. The
 //! final storage effort is therefore multiplied by (-1)^N. Radiation and
 //! viscothermal inertia already belong to that storage; an observer must not
-//! replace it with rho*dx/A. The spherical psi-line refuses because its loaded
-//! terminal omits an Euler near-field flow needed by a physical microphone.
+//! replace it with rho*dx/A. This image explicitly selects the original
+//! compression-volume/volume-flow frustum owner, including for a single cone.
 
 use crate::{
     AcousticSection, AcousticTap, ChainOutlet, PhsError, PortHamiltonian, ViscothermalPin, WallPin,
-    acoustic_chain_outlet_wall, spherical_chain_section,
+    acoustic_frustum_chain_outlet_wall,
 };
 
 /// Immutable physical flow row belonging to one returned acoustic chain.
@@ -55,18 +55,16 @@ impl AcousticOutletFlow {
     }
 }
 
-/// Assemble the unchanged acoustic chain and its physical terminal-flow row.
+/// Assemble the original frustum chain and its physical terminal-flow row.
 ///
 /// All geometry, material, boundary, loss and wall admission remains with
-/// [`acoustic_chain_outlet_wall`]. The row uses its actual complete quadratic
+/// [`acoustic_frustum_chain_outlet_wall`]. The row uses its actual complete quadratic
 /// storage, including terminal radiation mass and resolved viscothermal inertia.
-/// Cylinder/frustum chains retain their original coordinate conventions. The
-/// automatically selected single widening spherical cone refuses: its compact
-/// loaded terminal neglects the Euler near-field term in physical volume flow,
-/// so scaled terminal storage effort alone is not a physical outlet history.
-/// The original cone remains available through the source-chain API. Spatial
-/// and constitutive approximations remain those of the original admitted chain;
-/// this is not a new acoustic solver.
+/// A single widening cone uses that same mass-conserving owner rather than the
+/// legacy spherical psi-line, whose compact loaded boundary omits the Euler
+/// near-field contribution to physical flow. Callers must admit the returned
+/// frustum model's spatial error and advance this same model when observing it.
+/// The legacy source-chain API keeps its existing automatic model choice.
 ///
 /// # Errors
 /// Original chain refusals or an unrepresentable physical observation map.
@@ -81,12 +79,7 @@ pub fn acoustic_chain_with_outlet_flow(
     viscothermal: Option<&ViscothermalPin>,
     wall: Option<&WallPin>,
 ) -> Result<(PortHamiltonian, AcousticOutletFlow), PhsError> {
-    if spherical_chain_section(sections, outlet).is_some() {
-        return Err(PhsError::Unadmitted {
-            what: "physical spherical outlet requires the unresolved Euler near-field flow",
-        });
-    }
-    let system = acoustic_chain_outlet_wall(
+    let system = acoustic_frustum_chain_outlet_wall(
         sections,
         density,
         sound_speed,

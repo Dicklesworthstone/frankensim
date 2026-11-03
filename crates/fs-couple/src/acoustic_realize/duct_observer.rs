@@ -26,10 +26,11 @@ use fs_scenario::{AcousticAssembly, WaveguideEnd};
 /// This bounded image admits an unbranched cylinder/cone chain with its existing
 /// local wall law and flanged termination. Strings, separate body/plate/cavity
 /// members, other excitation and tone holes refuse; none is silently dropped.
-/// The explicit lumped ladder admits cylinder/frustum chains with uniform
-/// interior/exterior gas and its original numerical wall. Its automatically
-/// selected single widening spherical psi-line refuses: that loaded terminal
-/// omits an Euler near-field contribution to physical volume flow.
+/// The explicit lumped ladder uses the original compression-volume/volume-flow
+/// frustum owner, including for a single widening cone, with uniform
+/// interior/exterior gas and its original numerical wall. The exact same
+/// prepared chain supplies passive-pitch admission, reed feedback and terminal
+/// flow. The legacy spherical psi-line is not used by this physical image.
 /// It observes the actual admitted loaded terminal flow;
 /// spatial propagation remains in the LC state, without a separate TMM transfer.
 /// The original compact/Foster mouth-load approximation remains; this receiver

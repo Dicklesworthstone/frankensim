@@ -15,71 +15,75 @@ fn section(cells: usize, cone: bool) -> AcousticSection {
     }
 }
 
-fn observed_sections(cells: usize, tapered: bool) -> Vec<AcousticSection> {
-    if tapered {
-        // Two distinct slopes exercise the original frustum kernel, whose
-        // coordinates retain physical compression volume throughout the bore.
-        vec![
-            AcousticSection {
-                length: 0.1,
-                radius: 0.01,
-                outlet_radius: 0.015,
-                cells: 1,
-            },
-            AcousticSection {
-                length: 0.2,
-                radius: 0.015,
-                outlet_radius: 0.02,
-                cells: cells - 1,
-            },
-        ]
-    } else {
-        vec![section(cells, false)]
-    }
+fn geometries(cells: usize) -> [(&'static str, Vec<AcousticSection>); 3] {
+    [
+        ("cylinder", vec![section(cells, false)]),
+        ("single cone", vec![section(cells, true)]),
+        (
+            "joined frusta",
+            vec![
+                AcousticSection {
+                    length: 0.1,
+                    radius: 0.01,
+                    outlet_radius: 0.015,
+                    cells: 1,
+                },
+                AcousticSection {
+                    length: 0.2,
+                    radius: 0.015,
+                    outlet_radius: 0.02,
+                    cells: cells - 1,
+                },
+            ],
+        ),
+    ]
 }
 
 #[test]
 fn outward_flow_closes_independent_compression_volume_balance_for_odd_and_even_chains() {
     for cells in [2, 3, 4, 5] {
-        for outlet in [
-            ChainOutlet::PressureRelease,
-            ChainOutlet::Radiating(MouthFlange::Flanged),
-        ] {
-            let (system, flow) = acoustic_chain_with_outlet_flow(
-                &[section(cells, false)],
-                1.2,
-                340.0,
-                outlet,
-                1,
-                &[],
-                None,
-                None,
-            )
-            .unwrap();
-            let mut initial = vec![0.0; system.state_dim()];
-            for i in 0..cells {
-                initial[2 * i] = (i as f64 + 1.0) * 1e-8;
-                initial[2 * i + 1] = (2 * i + 1) as f64 * 1e-4;
+        for (shape, sections) in geometries(cells) {
+            for outlet in [
+                ChainOutlet::PressureRelease,
+                ChainOutlet::Radiating(MouthFlange::Flanged),
+            ] {
+                let (system, flow) = acoustic_chain_with_outlet_flow(
+                    &sections,
+                    1.2,
+                    340.0,
+                    outlet,
+                    1,
+                    &[],
+                    None,
+                    None,
+                )
+                .unwrap();
+                let mut initial = vec![0.0; system.state_dim()];
+                for i in 0..cells {
+                    initial[2 * i] = (i as f64 + 1.0) * 1e-8;
+                    initial[2 * i + 1] = (2 * i + 1) as f64 * 1e-4;
+                }
+                let input = 2e-4;
+                let dt = 1e-5;
+                let step = fs_phs::step(&system, &initial, &[input], dt).unwrap();
+                let midpoint: Vec<_> = initial
+                    .iter()
+                    .zip(&step.x)
+                    .map(|(a, b)| f64::midpoint(*a, *b))
+                    .collect();
+                let volume_change: f64 = (0..cells)
+                    .map(|i| {
+                        let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                        sign * (step.x[2 * i] - initial[2 * i])
+                    })
+                    .sum();
+                let boundary_change = dt * (input - flow.volume_flow_m3_s(&midpoint).unwrap());
+                assert!(
+                    (volume_change - boundary_change).abs()
+                        < 1e-11 * boundary_change.abs().max(1e-12),
+                    "{shape}, cells={cells}, {outlet:?}: stored={volume_change:e}, boundary={boundary_change:e}"
+                );
             }
-            let input = 2e-4;
-            let dt = 1e-5;
-            let step = fs_phs::step(&system, &initial, &[input], dt).unwrap();
-            let midpoint: Vec<_> = initial
-                .iter()
-                .zip(&step.x)
-                .map(|(a, b)| f64::midpoint(*a, *b))
-                .collect();
-            let volume_change: f64 = (0..cells)
-                .map(|i| {
-                    let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
-                    sign * (step.x[2 * i] - initial[2 * i])
-                })
-                .sum();
-            let boundary_change = dt * (input - flow.volume_flow_m3_s(&midpoint).unwrap());
-            assert!(
-                (volume_change - boundary_change).abs() < 1e-11 * boundary_change.abs().max(1e-12),
-                "cells={cells}, {outlet:?}: stored={volume_change:e}, boundary={boundary_change:e}"
-            );
         }
     }
 }
@@ -93,10 +97,10 @@ fn cylinder_and_frustum_preserve_physical_low_frequency_through_flow() {
         foster_branches: 2,
     };
     for cells in [3, 4] {
-        for tapered in [false, true] {
+        for (shape, sections) in geometries(cells) {
             for loss in [None, Some(&pin)] {
                 let (system, flow) = acoustic_chain_with_outlet_flow(
-                    &observed_sections(cells, tapered),
+                    &sections,
                     1.2,
                     340.0,
                     ChainOutlet::Radiating(MouthFlange::Flanged),
@@ -132,7 +136,7 @@ fn cylinder_and_frustum_preserve_physical_low_frequency_through_flow() {
                 // the arbitrary alternating orientation of its native states.
                 assert!(
                     (outward - C64::ONE).abs() < 2e-5,
-                    "cells={cells}, tapered={tapered}, loss={}: {outward:?}",
+                    "{shape}, cells={cells}, loss={}: {outward:?}",
                     loss.is_some()
                 );
                 let real: Vec<_> = response.state.iter().map(|x| x.re).collect();
@@ -148,8 +152,7 @@ fn observed_terminal_flow_reproduces_independent_physical_radiation_work() {
     let speed = 340.0;
     let dt = 1e-5;
     for cells in [3, 4] {
-        for tapered in [false, true] {
-            let sections = observed_sections(cells, tapered);
+        for (shape, sections) in geometries(cells) {
             let (system, flow) = acoustic_chain_with_outlet_flow(
                 &sections,
                 density,
@@ -185,7 +188,7 @@ fn observed_terminal_flow_reproduces_independent_physical_radiation_work() {
             assert!(expected > 0.0);
             assert!(
                 (step.dissipated - expected).abs() < 1e-11 * expected,
-                "cells={cells}, tapered={tapered}: native={}, physical={expected}",
+                "{shape}, cells={cells}: native={}, physical={expected}",
                 step.dissipated
             );
         }
@@ -193,7 +196,7 @@ fn observed_terminal_flow_reproduces_independent_physical_radiation_work() {
 }
 
 #[test]
-fn spherical_source_remains_available_but_its_approximate_terminal_is_not_a_physical_observer() {
+fn a_single_cone_uses_physical_volume_coordinates_while_the_legacy_source_keeps_its_psi_image() {
     for cells in [3, 4] {
         for outlet in [
             ChainOutlet::PressureRelease,
@@ -207,10 +210,13 @@ fn spherical_source_remains_available_but_its_approximate_terminal_is_not_a_phys
             let step =
                 fs_phs::step(&original, &vec![0.0; original.state_dim()], &[2e-4], 1e-5).unwrap();
             assert!(step.x.iter().any(|x| *x != 0.0));
-            assert!(
-                acoustic_chain_with_outlet_flow(&sections, 1.2, 340.0, outlet, 1, &[], None, None,)
-                    .is_err()
-            );
+            let (physical, flow) =
+                acoustic_chain_with_outlet_flow(&sections, 1.2, 340.0, outlet, 1, &[], None, None)
+                    .unwrap();
+            assert_eq!(physical.state_dim(), 2 * cells);
+            let step =
+                fs_phs::step(&physical, &vec![0.0; physical.state_dim()], &[2e-4], 1e-5).unwrap();
+            assert!(flow.volume_flow_m3_s(&step.x).unwrap() > 0.0);
         }
     }
 }

@@ -1,7 +1,7 @@
 //! G1/G3: actual LC outlet flow reaches the existing physical microphone.
 use fs_couple::acoustic_realize::{
-    BoreRealization, BoreRealizationReceipt, RealizeOptions, duct_observer::BaffledDuctObserver,
-    realize_assembly_with_options,
+    AcousticRealizeError, BoreRealization, BoreRealizationReceipt, RealizeOptions,
+    duct_observer::BaffledDuctObserver, realize_assembly_with_options,
 };
 use fs_couple::air_path::GasAbsorptionModel;
 use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
@@ -58,12 +58,12 @@ fn input(mass_kg: f64) -> AcousticAssembly {
     }
 }
 
-fn receiver(gas: GasState, path_samples: usize) -> CircularOutletReceiver {
+fn receiver(gas: GasState, path_samples: usize, radius_m: f64) -> CircularOutletReceiver {
     // With one equal-area annulus every ray has this exact travel length,
     // even though the original finite-aperture receiver remains in use.
     let path = path_samples as f64 * gas.sound_speed / f64::from(RATE);
     CircularOutletReceiver {
-        position_m: [0.0, 0.0, (path * path - 0.004_f64.powi(2) / 2.0).sqrt()],
+        position_m: [0.0, 0.0, (path * path - radius_m * radius_m / 2.0).sqrt()],
         radial_rings: 1,
         angular_points: 8,
         maximum_frequency_hz: 500.0,
@@ -81,22 +81,34 @@ fn options(gas: GasState, path_samples: usize) -> RealizeOptions<'static> {
             segment_gases: None,
             exterior_gas: None,
             material_wall: None,
-            receiver: receiver(gas, path_samples),
+            receiver: receiver(gas, path_samples, 0.004),
         }),
         ..RealizeOptions::default()
     }
 }
 
 #[test]
-fn massive_and_quasistatic_reeds_emit_retarded_outlet_pressure_with_inverse_distance_amplitude() {
-    for mass in [0.0, 1e-4] {
-        let input = input(mass);
+fn cylinder_and_single_cone_reeds_emit_retarded_pressure_with_inverse_distance_amplitude() {
+    for (mass, radius, cells) in [
+        (0.0, 0.004, 4),
+        (1e-4, 0.004, 4),
+        (0.0, 0.006, 8),
+        (1e-4, 0.006, 8),
+    ] {
+        let mut input = input(mass);
+        input.duct.as_mut().unwrap().segments[0].outlet_radius_m = radius;
         let gas = gas(101_325.0);
-        let near = realize_assembly_with_options(&input, &options(gas, 16)).unwrap();
-        let far = realize_assembly_with_options(&input, &options(gas, 32)).unwrap();
+        let observer_options = |samples| {
+            let mut result = options(gas, samples);
+            result.bore = BoreRealization::lumped_ladder_with_tolerance(cells, 500.0);
+            result.baffled_duct.as_mut().unwrap().receiver = receiver(gas, samples, radius);
+            result
+        };
+        let near = realize_assembly_with_options(&input, &observer_options(16)).unwrap();
+        let far = realize_assembly_with_options(&input, &observer_options(32)).unwrap();
         assert!(matches!(
             near.bore_receipt,
-            Some(BoreRealizationReceipt::LumpedLadder { cells: 4, .. })
+            Some(BoreRealizationReceipt::LumpedLadder { cells: actual, .. }) if actual == cells
         ));
         let binding = near.duct_observer.as_ref().unwrap();
         assert_eq!(binding.axial_delay_samples, 0);
@@ -114,13 +126,61 @@ fn massive_and_quasistatic_reeds_emit_retarded_outlet_pressure_with_inverse_dist
         }
         // The explicitly selected receiver never contains instantaneous local
         // mouth pressure, even though that diagnostic has the same Pa units.
-        let mut diagnostic = options(gas, 16);
+        let mut diagnostic = observer_options(16);
         diagnostic.baffled_duct = None;
         let mut local = input.clone();
         local.listener.distance_m = 1.0;
         let source = realize_assembly_with_options(&local, &diagnostic).unwrap();
         assert!(source.pressure_pa[..15].iter().any(|p| *p != 0.0));
     }
+}
+
+#[test]
+fn single_cone_pitch_admission_qualifies_the_same_frustum_that_radiates() {
+    let gas = gas(101_325.0);
+    let mut input = input(0.0);
+    input.duct.as_mut().unwrap().segments[0].outlet_radius_m = 0.006;
+    input.listener.distance_m = 1.0;
+    input.duration_s = 1.0 / f64::from(RATE);
+    let mut physical_options = options(gas, 16);
+    physical_options.bore = BoreRealization::lumped_ladder_with_tolerance(8, 500.0);
+    physical_options.baffled_duct.as_mut().unwrap().receiver = receiver(gas, 16, 0.006);
+    let physical = realize_assembly_with_options(&input, &physical_options).unwrap();
+    let mut legacy_options = physical_options;
+    legacy_options.baffled_duct = None;
+    let legacy = realize_assembly_with_options(&input, &legacy_options).unwrap();
+    let (physical_error, dispersion) = match physical.bore_receipt.unwrap() {
+        BoreRealizationReceipt::LumpedLadder {
+            pitch_error_cents,
+            dispersion_error_cents,
+            ..
+        } => (pitch_error_cents.abs(), dispersion_error_cents),
+        other => panic!("unexpected physical receipt: {other:?}"),
+    };
+    let legacy_error = match legacy.bore_receipt.unwrap() {
+        BoreRealizationReceipt::LumpedLadder {
+            pitch_error_cents, ..
+        } => pitch_error_cents.abs(),
+        other => panic!("unexpected legacy receipt: {other:?}"),
+    };
+    // The coarse frustum has a different finite spatial error from the
+    // legacy psi-line. A tolerance between the two must reject this physical
+    // image even though the old source image passes for the same geometry.
+    assert!(physical_error > legacy_error + 1.0);
+    let tolerance = f64::midpoint(physical_error, legacy_error);
+    assert!(dispersion < tolerance);
+    physical_options.bore = BoreRealization::lumped_ladder_with_tolerance(8, tolerance);
+    match realize_assembly_with_options(&input, &physical_options).unwrap_err() {
+        AcousticRealizeError::LumpedLadderBand {
+            pitch_error_cents, ..
+        } => {
+            assert!(pitch_error_cents.abs() > tolerance);
+            assert!((pitch_error_cents.abs() - physical_error).abs() < 1e-9);
+        }
+        other => panic!("unexpected physical admission refusal: {other:?}"),
+    }
+    legacy_options.bore = physical_options.bore;
+    assert!(realize_assembly_with_options(&input, &legacy_options).is_ok());
 }
 
 #[test]
@@ -150,15 +210,4 @@ fn unsupported_boundary_and_region_physics_are_not_silently_omitted() {
     options.baffled_duct.as_mut().unwrap().exterior_gas = None;
     input.duct.as_mut().unwrap().termination = WaveguideEnd::Closed;
     assert!(realize_assembly_with_options(&input, &options).is_err());
-    input.duct.as_mut().unwrap().termination = WaveguideEnd::FlangedOpen;
-    input.duct.as_mut().unwrap().segments[0].outlet_radius_m = 0.006;
-    // A lone widening cone uses the legacy spherical psi image, whose loaded
-    // boundary omits a physical Euler near-field flow. Do not turn its load
-    // current into a physical microphone; leave ordinary cone rendering intact.
-    assert!(realize_assembly_with_options(&input, &options).is_err());
-    options.baffled_duct = None;
-    input.listener.distance_m = 1.0;
-    let legacy = realize_assembly_with_options(&input, &options).unwrap();
-    assert!(legacy.pressure_pa.iter().all(|p| p.is_finite()));
-    assert!(legacy.pressure_pa.iter().any(|p| *p != 0.0));
 }

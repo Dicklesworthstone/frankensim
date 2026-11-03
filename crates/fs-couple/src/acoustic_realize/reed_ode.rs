@@ -43,6 +43,46 @@ struct ReedOutletObserver<'a> {
     receiver: &'a mut crate::pcm_wav::baffled::BaffledPressure,
 }
 
+// Admit the same physical frustum that will produce the outlet history. The
+// passive gate borrows this original chain; rendering then takes ownership.
+// No second assembly or legacy spherical image can enter between those steps.
+pub(super) struct PreparedReedOutlet<'a> {
+    pub(super) line: fs_phs::PortHamiltonian,
+    observer: ReedOutletObserver<'a>,
+}
+
+impl<'a> PreparedReedOutlet<'a> {
+    pub(super) fn new(
+        sections: &[AcousticSection],
+        outlet: ChainOutlet,
+        taps: &[AcousticTap],
+        gas: &GasState,
+        wall: Option<LocallyReactingWall>,
+        receiver: &'a mut crate::pcm_wav::baffled::BaffledPressure,
+    ) -> Result<Self, AcousticRealizeError> {
+        if !taps.is_empty() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "physical ODE outlet observation requires separate receivers for side openings",
+            });
+        }
+        let (line, flow) = fs_phs::acoustic_outlet::acoustic_chain_with_outlet_flow(
+            sections,
+            gas.density,
+            gas.sound_speed,
+            outlet,
+            1,
+            taps,
+            Some(&viscothermal_pin(gas)),
+            wall_pin(wall).as_ref(),
+        )
+        .map_err(render_phs_error)?;
+        Ok(Self {
+            line,
+            observer: ReedOutletObserver { flow, receiver },
+        })
+    }
+}
+
 // A physical microphone reads actual terminal flow. The legacy source-pressure
 // diagnostic remains available to existing internal model comparisons, but is
 // never mixed into this explicitly selected exterior observation.
@@ -58,7 +98,7 @@ pub(super) fn realize_reed_ode_with_receiver(
     sample_rate_hz: u32,
     n: usize,
     wall: Option<LocallyReactingWall>,
-    receiver: Option<&mut crate::pcm_wav::baffled::BaffledPressure>,
+    receiver: Option<PreparedReedOutlet<'_>>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     if !crate::reed_bore::reed_parameters_valid(reed) {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -72,18 +112,7 @@ pub(super) fn realize_reed_ode_with_receiver(
         });
     }
     let (line, mut receiver) = if let Some(receiver) = receiver {
-        let (line, flow) = fs_phs::acoustic_outlet::acoustic_chain_with_outlet_flow(
-            sections,
-            gas.density,
-            gas.sound_speed,
-            outlet,
-            inlets,
-            taps,
-            Some(&viscothermal_pin(gas)),
-            wall_pin(wall).as_ref(),
-        )
-        .map_err(render_phs_error)?;
-        (line, Some(ReedOutletObserver { flow, receiver }))
+        (receiver.line, Some(receiver.observer))
     } else {
         (
             ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?,

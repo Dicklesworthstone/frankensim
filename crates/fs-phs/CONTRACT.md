@@ -3,21 +3,29 @@
 ## Physical acoustic terminal flow
 
 `acoustic_outlet::acoustic_chain_with_outlet_flow` returns the original loaded
-chain and its physical outward-volume-flow functional. The row is derived from
-the actual quadratic storage, retaining terminal radiation and viscothermal
-inertia and alternating native coordinate orientation on cylinder/frustum chains.
-The automatically selected single widening spherical psi-line refuses: its
-loaded terminal neglects the Euler near-field term `(alpha/rho) integral(psi dt)`
-in physical volume flow. Its scaled radiation-port current therefore cannot
-silently become a physical microphone signal or claim physical DC continuity.
-The original cone source API and power balance are unchanged.
+frustum chain and its physical outward-volume-flow functional. The explicit
+`acoustic_frustum_chain_outlet_wall` constructor shares the existing frustum
+assembly unchanged, including its conical cell volumes, inertances, radiation,
+viscothermal, tap and wall owners. A single widening cone now uses these same
+compression-volume/volume-flow coordinates. Authored geometry is not split or
+disguised to select the model. The legacy `acoustic_chain_outlet_wall` entry point
+retains its automatic spherical psi-line choice and original source behavior.
+
+The flow row uses the actual complete quadratic storage, retaining terminal
+radiation and viscothermal inertia and the alternating native orientation.
+It does not reinterpret the legacy psi-line's approximate radiation-port current,
+whose loaded boundary omits an Euler near-field contribution, as physical flow.
+The caller must advance this returned frustum model and admit its own spatial
+error; a different source model's pitch qualification cannot qualify this image.
 A rigid closure exports exactly zero flow even from a nonzero disconnected
 retained flux. Evaluation is read-only and allocation-free; invalid state
-extent, nonfinite coordinates or arithmetic refuse. This does not add a power
-port, a radiation solver or side-opening observation. G1/G3 integration tests
-check independent compression-volume conservation for odd/even cell counts,
-the cylinder/frustum low-frequency through-flow limit, physical radiation work,
-rigid closure and spherical-observation refusal.
+extent, nonfinite coordinates or arithmetic refuse. Observation adds no power
+port, radiation solver or side-opening receiver.
+
+Authored G1/G3 regressions cover independent compression-volume conservation
+for odd/even cylinder, single-cone and joined-frustum chains; their low-frequency
+through-flow limit with and without viscothermal memory; physical radiation
+work; rigid closure; and continued legacy spherical-source behavior.
 
 ## Purpose and layer
 
