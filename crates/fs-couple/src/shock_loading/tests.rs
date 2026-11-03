@@ -5,6 +5,8 @@ mod mixture;
 mod molecular;
 #[cfg(feature = "experimental-compressible")]
 mod spatial;
+#[cfg(feature = "experimental-compressible")]
+mod vector_traction;
 
 use super::*;
 use fs_evidence::ValidityDomain;

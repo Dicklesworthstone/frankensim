@@ -2367,8 +2367,26 @@ subtracted over the same accepted interval. Actual transport-law tests exercise
 a tensile 2-D wall load through nodal force and affine virtual work, and a full
 3-D six-wall momentum balance with retained loads after late cancellation.
 Both cases differ from their Euler-only middle-stage impulses. They transfer
-normal traction only; moving walls, tangential no-slip stress and reciprocal
-fluid/solid energy closure remain separate capabilities.
+normal traction only; moving walls and reciprocal fluid/solid energy closure
+remain separate capabilities.
+
+`WallVectorTractionImpulse::{from_molecular_euler2d, from_molecular_euler3d}`
+and `ShockLoadSurface::project_vector_tractions` additionally preserve every
+component of the complete source-owned wall momentum. The 3-D source's resolved
+stationary adiabatic no-slip shear therefore reaches structural drag, torque
+and spatial virtual work through scalar P1 area weights prepared once from the
+same original surface rows. Normal stress and transverse impulse remain in
+their original Cartesian decomposition until exterior pressure is subtracted,
+so a large balanced ambient pressure cannot erase small rotated shear. No
+traction is inferred from scalar pressure. Compensated shared-node assembly
+and resultant, moment and work reduction retain small transmitted impulses
+among opposing face loads. The 2-D source retains its native
+slip-wall physics. Authored moving or isothermal walls refuse even at zero net
+energy transfer; changing a 3-D wall configuration invalidates its prior
+complete-step report, while an identical configuration preserves it. Independent
+resultant, pure-couple, affine-work, frame-rotation and native no-slip half-cell
+shear checks cover this stationary one-way load transfer. It does not advance
+structural motion or return that motion to the fluid.
 
 ## Constitutive feedback through public material equations
 

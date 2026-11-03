@@ -22,7 +22,7 @@ const REFLECTING: AxisBoundaries = AxisBoundaries::Ends {
     upper: BoundaryCondition::Reflecting,
 };
 
-fn law(gas: &FrozenGas, viscosity: f64) -> ConstantTransport {
+pub(super) fn law(gas: &FrozenGas, viscosity: f64) -> ConstantTransport {
     let models = gas.source().components().to_vec();
     let ids: Vec<_> = models.iter().map(|model| model.species().clone()).collect();
     let source = IdealGasEquilibriumV1::new(
@@ -109,6 +109,13 @@ fn complete_planar_molecular_traction_preserves_tension_and_the_original_p1_load
     let load = left
         .project_tractions(&[traction], [0.0, 0.5, 0.5], || false)
         .unwrap();
+    let vector =
+        WallVectorTractionImpulse::from_molecular_euler2d(&flow, BoundarySide::XMin, 0, axes, 0.25)
+            .unwrap();
+    let vector_load = left
+        .project_vector_tractions(&[vector], [0.0, 0.5, 0.5], || false)
+        .unwrap();
+    assert_eq!(vector_load, load);
     let expected = complete + 0.25 * report.elapsed.value();
     assert!(expected > 0.0);
     close(load.resultant_impulse_n_s[0], expected);

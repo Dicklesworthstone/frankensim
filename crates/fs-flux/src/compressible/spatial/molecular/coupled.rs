@@ -46,12 +46,18 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     /// Apply the same physical wall to both molecular half steps. Euler keeps
     /// its impermeable pressure boundary; wall work/heat enter the combined
     /// conservative exchange report only through the molecular face flux.
+    /// Changing a wall invalidates the previous complete-step report so its
+    /// accepted impulse cannot be relabeled with a different wall condition.
     pub fn with_wall(
         mut self,
         side: BoundarySide,
         wall: MolecularWall3d,
     ) -> Result<Self, MolecularError> {
+        let changed = self.molecular.wall(side) != wall;
         self.molecular = self.molecular.with_wall(side, wall)?;
+        if changed {
+            self.last_step = None;
+        }
         Ok(self)
     }
 

@@ -1,8 +1,9 @@
 //! Reflected shock loading on stationary, explicitly matched structural surfaces.
 //!
 //! The original gas owner supplies its accepted wall impulse. The Euler path
-//! retains pressure; the molecular path includes viscous normal stress from
-//! both molecular half steps. Neither samples endpoint pressure or replaces
+//! retains pressure; the molecular paths include viscous normal stress and
+//! resolved no-slip wall shear from both molecular half steps. Neither samples
+//! endpoint pressure or replaces
 //! the shock with a linear acoustic wave. The original
 //! shell pressure port owns the spatial P1 load and its conjugate volume row.
 //! Cold preparation compresses those rows; interval projection visits only
@@ -14,6 +15,7 @@
 //! loads is one-way prescribed loading, not a reciprocal moving-wall FSI solve.
 
 use fs_gas::dynamics::{Boundaries, Boundary, Euler1d, StepReport};
+use fs_math::dd::Dd;
 use fs_plate::shell::{
     ShellMesh,
     pressure::{OrientedShellFacet, ShellFace, ShellPressurePort},
@@ -77,6 +79,20 @@ pub struct WallPressureImpulse {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WallTractionImpulse {
     inner: WallImpulse,
+}
+
+/// Complete vector traction from one accepted stationary molecular wall face.
+///
+/// The gas impulse includes pressure and all resolved viscous momentum transfer,
+/// including shear. Only the original complete molecular flow owner can create
+/// this account. Open, moving and nonadiabatic walls require additional mass or
+/// energy coupling and are not admitted. The structural frame is supplied by an
+/// explicit orthonormal embedding; the gas face is never spatially averaged.
+#[cfg(feature = "experimental-compressible")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WallVectorTractionImpulse {
+    normal: WallImpulse,
+    tangential_pa_s: [f64; 3],
 }
 
 /// Common stationary normal-load account. Only the pressure wrapper imposes
@@ -289,6 +305,94 @@ impl WallTractionImpulse {
     }
 }
 
+#[cfg(feature = "experimental-compressible")]
+impl WallVectorTractionImpulse {
+    fn new(
+        duration_s: f64,
+        end_time_s: f64,
+        area_m2: f64,
+        normal: [f64; 3],
+        normal_impulse_n_s: f64,
+        tangential_impulse_n_s: [f64; 3],
+        exterior_pressure_pa: f64,
+    ) -> Result<Self, Error> {
+        let normal = WallImpulse::new(
+            duration_s,
+            end_time_s,
+            area_m2,
+            normal,
+            normal_impulse_n_s,
+            exterior_pressure_pa,
+        )?;
+        if tangential_impulse_n_s.iter().any(|x| !x.is_finite()) {
+            return Err(Error::Invalid(
+                "finite original tangential wall impulse required",
+            ));
+        }
+        let tangential_pa_s = tangential_impulse_n_s.map(|x| x / area_m2);
+        let result = Self {
+            normal,
+            tangential_pa_s,
+        };
+        if (0..3).any(|axis| {
+            !tangential_pa_s[axis].is_finite()
+                || (tangential_impulse_n_s[axis] != 0.0 && tangential_pa_s[axis] == 0.0)
+        }) || result
+            .gas_traction_impulse_pa_s()
+            .iter()
+            .any(|x| !x.is_finite())
+            || result
+                .net_traction_impulse_pa_s()
+                .iter()
+                .any(|x| !x.is_finite())
+        {
+            return Err(Error::Invalid(
+                "wall vector-traction integral is unrepresentable",
+            ));
+        }
+        Ok(result)
+    }
+
+    /// Complete accepted molecular/Euler duration [s].
+    pub const fn duration_s(&self) -> f64 {
+        self.normal.duration_s
+    }
+    /// Complete accepted source clock at the end of the interval [s].
+    pub const fn end_time_s(&self) -> f64 {
+        self.normal.end_time_s
+    }
+    /// Original physical gas face area [m²].
+    pub const fn area_m2(&self) -> f64 {
+        self.normal.area_m2
+    }
+    /// Unit normal from the gas into the support in the structural frame.
+    pub const fn outward_normal(&self) -> [f64; 3] {
+        self.normal.normal
+    }
+    /// Complete gas traction-time vector in the structural frame [Pa s].
+    pub fn gas_traction_impulse_pa_s(&self) -> [f64; 3] {
+        core::array::from_fn(|axis| {
+            self.normal.normal[axis] * self.normal.gas_pa_s + self.tangential_pa_s[axis]
+        })
+    }
+    /// Opposing exterior absolute pressure integrated over this interval [Pa s].
+    pub const fn exterior_pressure_impulse_pa_s(&self) -> f64 {
+        self.normal.exterior_pa_s
+    }
+    /// Gas vector traction minus the exterior normal pressure, integrated [Pa s].
+    pub fn net_traction_impulse_pa_s(&self) -> [f64; 3] {
+        // Subtract opposing normal pressures before combining them with
+        // shear. A large common ambient pressure must not erase a small drag.
+        let normal = self.normal.net_pa_s();
+        core::array::from_fn(|axis| self.normal.normal[axis] * normal + self.tangential_pa_s[axis])
+    }
+    /// Interval-mean gas traction vector [Pa], including resolved wall shear.
+    pub fn mean_gas_traction_pa(&self) -> [f64; 3] {
+        self.gas_traction_impulse_pa_s()
+            .map(|x| x / self.normal.duration_s)
+    }
+}
+
 impl WallImpulse {
     fn new(
         duration_s: f64,
@@ -351,10 +455,18 @@ pub struct SurfaceBudget {
 }
 
 #[derive(Clone, Debug)]
+struct PatchWeight {
+    node: usize,
+    normal_area_m2: [f64; 3],
+    #[cfg(feature = "experimental-compressible")]
+    area_m2: f64,
+}
+
+#[derive(Clone, Debug)]
 struct Patch {
     area_m2: f64,
     normal: [f64; 3],
-    row: Vec<(usize, [f64; 3])>,
+    row: Vec<PatchWeight>,
 }
 
 /// One planar oriented structural patch per fluid face, preserving original
@@ -436,7 +548,20 @@ impl ShockLoadSurface {
                 }
                 let area = [weights[0], weights[1], weights[2]];
                 if area != [0.0; 3] {
-                    row.push((node, area));
+                    #[cfg(feature = "experimental-compressible")]
+                    let scalar_area = dot(area, normal);
+                    #[cfg(feature = "experimental-compressible")]
+                    if !positive(scalar_area) {
+                        return Err(Error::Invalid(
+                            "P1 vector-traction area weight is unrepresentable",
+                        ));
+                    }
+                    row.push(PatchWeight {
+                        node,
+                        normal_area_m2: area,
+                        #[cfg(feature = "experimental-compressible")]
+                        area_m2: scalar_area,
+                    });
                 }
             }
             patches.push(Patch {
@@ -495,6 +620,89 @@ impl ShockLoadSurface {
         )
     }
 
+    /// Project complete pressure and viscous shear impulses onto the original
+    /// translational P1 degrees of freedom. Scalar shape-function area weights
+    /// are prepared once from the original planar pressure row, then applied
+    /// to every traction component. Exterior pressure acts only along the
+    /// matched normal; the tangential gas impulse is retained without clipping.
+    ///
+    /// The resulting nodal impulse, its moment and spatial virtual work share
+    /// the same sparse projection. This remains prescribed stationary-flow
+    /// loading: structural motion does not feed back into the gas wall.
+    #[cfg(feature = "experimental-compressible")]
+    pub fn project_vector_tractions(
+        &self,
+        impulses: &[WallVectorTractionImpulse],
+        origin_m: [f64; 3],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ShockLoad, Error> {
+        poll(&mut cancelled)?;
+        if impulses.len() != self.patches.len() || origin_m.iter().any(|x| !x.is_finite()) {
+            return Err(Error::Invalid(
+                "one wall impulse per patch and finite moment origin required",
+            ));
+        }
+        let first = impulses
+            .first()
+            .ok_or(Error::Invalid("empty wall impulse list"))?;
+        // Keep overlapping face contributions until all impulses at an
+        // original node have been assembled. Opposing large wall loads must
+        // not erase a third, smaller resolved shear before cancellation.
+        let mut nodal_impulses = vec![[Dd::ZERO; 3]; self.positions.len()];
+        let mut gas_impulse = [Dd::ZERO; 3];
+        let mut exterior_impulse = [Dd::ZERO; 3];
+        for (patch, impulse) in self.patches.iter().zip(impulses) {
+            poll(&mut cancelled)?;
+            if impulse.duration_s() != first.duration_s()
+                || impulse.end_time_s() != first.end_time_s()
+                || !same_normal(patch.normal, impulse.outward_normal())
+                || (patch.area_m2 - impulse.area_m2()).abs()
+                    > ROUNDING * patch.area_m2.max(impulse.area_m2())
+            {
+                return Err(Error::Invalid(
+                    "wall/surface area, outward normal or accepted interval mismatch",
+                ));
+            }
+            let gas = impulse.gas_traction_impulse_pa_s();
+            let net = impulse.net_traction_impulse_pa_s();
+            for axis in 0..3 {
+                gas_impulse[axis] = gas_impulse[axis] + Dd::from_f64(gas[axis] * impulse.area_m2());
+                exterior_impulse[axis] = exterior_impulse[axis]
+                    - Dd::from_f64(
+                        impulse.outward_normal()[axis]
+                            * impulse.exterior_pressure_impulse_pa_s()
+                            * impulse.area_m2(),
+                    );
+            }
+            for (i, weight) in patch.row.iter().enumerate() {
+                if i % 256 == 0 {
+                    poll(&mut cancelled)?;
+                }
+                for axis in 0..3 {
+                    nodal_impulses[weight.node][axis] = nodal_impulses[weight.node][axis]
+                        + Dd::from_f64(weight.area_m2 * net[axis]);
+                }
+            }
+        }
+        self.finish_load(
+            ShockLoad {
+                duration_s: first.duration_s(),
+                end_time_s: first.end_time_s(),
+                nodal_impulses_n_s: nodal_impulses
+                    .into_iter()
+                    .map(|value| value.map(Dd::to_f64))
+                    .collect(),
+                mean_nodal_forces_n: Vec::new(),
+                gas_impulse_n_s: gas_impulse.map(Dd::to_f64),
+                exterior_impulse_n_s: exterior_impulse.map(Dd::to_f64),
+                resultant_impulse_n_s: [0.0; 3],
+                angular_impulse_n_m_s: [0.0; 3],
+            },
+            origin_m,
+            cancelled,
+        )
+    }
+
     fn project_impulses(
         &self,
         mut impulses: impl ExactSizeIterator<Item = WallImpulse>,
@@ -534,38 +742,68 @@ impl ShockLoadSurface {
                 exterior_impulse[axis] -=
                     impulse.normal[axis] * impulse.exterior_pa_s * impulse.area_m2;
             }
-            for (i, &(node, row)) in patch.row.iter().enumerate() {
+            for (i, weight) in patch.row.iter().enumerate() {
                 if i % 256 == 0 {
                     poll(&mut cancelled)?;
                 }
                 for axis in 0..3 {
-                    nodal_impulses[node][axis] += row[axis] * impulse.net_pa_s();
+                    nodal_impulses[weight.node][axis] +=
+                        weight.normal_area_m2[axis] * impulse.net_pa_s();
                 }
             }
         }
-        let mut forces = Vec::with_capacity(nodal_impulses.len());
-        let mut resultant = [0.0; 3];
-        let mut moment = [0.0; 3];
-        for (i, (position, impulse)) in self.positions.iter().zip(&nodal_impulses).enumerate() {
+        self.finish_load(
+            ShockLoad {
+                duration_s: first.duration_s,
+                end_time_s: first.end_time_s,
+                nodal_impulses_n_s: nodal_impulses,
+                mean_nodal_forces_n: Vec::new(),
+                gas_impulse_n_s: gas_impulse,
+                exterior_impulse_n_s: exterior_impulse,
+                resultant_impulse_n_s: [0.0; 3],
+                angular_impulse_n_m_s: [0.0; 3],
+            },
+            origin_m,
+            cancelled,
+        )
+    }
+
+    fn finish_load(
+        &self,
+        mut load: ShockLoad,
+        origin_m: [f64; 3],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ShockLoad, Error> {
+        let mut forces = Vec::with_capacity(load.nodal_impulses_n_s.len());
+        let mut resultant = [Dd::ZERO; 3];
+        let mut moment = [Dd::ZERO; 3];
+        for (i, (position, impulse)) in self
+            .positions
+            .iter()
+            .zip(&load.nodal_impulses_n_s)
+            .enumerate()
+        {
             if i % 256 == 0 {
                 poll(&mut cancelled)?;
             }
             let lever = core::array::from_fn(|axis| position[axis] - origin_m[axis]);
             let torque = cross(lever, *impulse);
             for axis in 0..3 {
-                resultant[axis] += impulse[axis];
-                moment[axis] += torque[axis];
+                resultant[axis] = resultant[axis] + Dd::from_f64(impulse[axis]);
+                moment[axis] = moment[axis] + Dd::from_f64(torque[axis]);
             }
-            forces.push(impulse.map(|x| x / first.duration_s));
+            forces.push(impulse.map(|x| x / load.duration_s));
         }
+        let resultant = resultant.map(Dd::to_f64);
+        let moment = moment.map(Dd::to_f64);
         if forces
             .iter()
             .flatten()
-            .chain(nodal_impulses.iter().flatten())
+            .chain(load.nodal_impulses_n_s.iter().flatten())
             .chain(&resultant)
             .chain(&moment)
-            .chain(&gas_impulse)
-            .chain(&exterior_impulse)
+            .chain(&load.gas_impulse_n_s)
+            .chain(&load.exterior_impulse_n_s)
             .any(|x| !x.is_finite())
         {
             return Err(Error::Invalid(
@@ -573,16 +811,10 @@ impl ShockLoadSurface {
             ));
         }
         poll(&mut cancelled)?;
-        Ok(ShockLoad {
-            duration_s: first.duration_s,
-            end_time_s: first.end_time_s,
-            nodal_impulses_n_s: nodal_impulses,
-            mean_nodal_forces_n: forces,
-            gas_impulse_n_s: gas_impulse,
-            exterior_impulse_n_s: exterior_impulse,
-            resultant_impulse_n_s: resultant,
-            angular_impulse_n_m_s: moment,
-        })
+        load.mean_nodal_forces_n = forces;
+        load.resultant_impulse_n_s = resultant;
+        load.angular_impulse_n_m_s = moment;
+        Ok(load)
     }
 }
 
@@ -618,12 +850,13 @@ impl ShockLoad {
                 "finite displacement at each original structural node required",
             ));
         }
-        let work: f64 = self
-            .mean_nodal_forces_n
-            .iter()
-            .zip(displacement_m)
-            .map(|(force, u)| dot(*force, *u))
-            .sum();
+        let mut work = Dd::ZERO;
+        for (force, displacement) in self.mean_nodal_forces_n.iter().zip(displacement_m) {
+            for axis in 0..3 {
+                work = work + Dd::from_f64(force[axis] * displacement[axis]);
+            }
+        }
+        let work = work.to_f64();
         if !work.is_finite() {
             return Err(Error::Invalid("virtual work overflow"));
         }

@@ -1,9 +1,13 @@
 //! Per-face structural loads from original accepted Cartesian Euler steps.
-use super::{Error, ROUNDING, WallPressureImpulse, WallTractionImpulse, dot, unit};
+use super::{
+    Error, ROUNDING, WallPressureImpulse, WallTractionImpulse, WallVectorTractionImpulse, dot, unit,
+};
 use fs_flux::compressible::mixture::{MixtureEuler2d, reactive::ReactingEuler2d};
 use fs_flux::compressible::molecular::MolecularEuler2d;
 use fs_flux::compressible::spatial::mixture::{MixtureEuler3d, reactive::ReactingEuler3d};
-use fs_flux::compressible::spatial::molecular::MolecularEuler3d;
+use fs_flux::compressible::spatial::molecular::{
+    MolecularEuler3d, MolecularWall3d, WallThermalCondition,
+};
 use fs_flux::compressible::spatial::{Boundaries3d, BoundarySide as SpatialSide, Euler3d};
 use fs_flux::compressible::{
     AxisBoundaries, Boundaries2d, BoundaryCondition, BoundarySide, Euler2d,
@@ -428,6 +432,118 @@ impl WallTractionImpulse {
             exterior_pressure_pa,
         )
     }
+}
+
+impl WallVectorTractionImpulse {
+    /// Complete original planar molecular wall impulse in the structural frame.
+    ///
+    /// The current 2-D source uses stationary adiabatic slip walls; its vector
+    /// therefore contains only the source's signed normal stress. No shear is
+    /// inferred from pressure. Face ordering, physical area and both molecular
+    /// half intervals remain those of the actual accepted flow.
+    pub fn from_molecular_euler2d<L: TransportLaw>(
+        flow: &MolecularEuler2d<L>,
+        side: BoundarySide,
+        face: usize,
+        axes: [[f64; 3]; 2],
+        exterior_pressure_pa: f64,
+    ) -> Result<Self, Error> {
+        let accepted = flow.flow();
+        let (axis, sign, normal) = planar_frame(accepted.boundaries(), side, axes)?;
+        let report = flow
+            .last_step()
+            .ok_or(Error::Invalid("no complete molecular wall interval"))?;
+        let impulse = flow
+            .boundary_impulses(side)
+            .get(face)
+            .ok_or(Error::Invalid(
+                "wall face index outside the original Cartesian side",
+            ))?;
+        stationary_wall_transfer(impulse.mass, impulse.energy)?;
+        Self::new(
+            report.elapsed.value(),
+            accepted.time().value(),
+            accepted.grid().face_area(side),
+            normal,
+            sign * impulse.momentum[axis],
+            embed_tangential_momentum(impulse.momentum, axes, axis),
+            exterior_pressure_pa,
+        )
+    }
+
+    /// Preserve pressure and every resolved viscous impulse from one accepted
+    /// 3-D wall face. The complete molecular/Euler/molecular owner supplies
+    /// the original vector; endpoint pressure and the middle Euler report
+    /// cannot replace it. No extra viscous force is added.
+    ///
+    /// Slip and no-slip walls must be stationary and adiabatic, with no mass
+    /// or energy transfer. Authored moving or isothermal walls refuse even
+    /// when their particular accepted energy integral happens to vanish.
+    /// `axes` embeds the original x/y/z vectors into the structural frame;
+    /// the caller matches this face to its original structural patch.
+    pub fn from_molecular_euler3d<L: TransportLaw>(
+        flow: &MolecularEuler3d<L>,
+        side: SpatialSide,
+        face: usize,
+        axes: [[f64; 3]; 3],
+        exterior_pressure_pa: f64,
+    ) -> Result<Self, Error> {
+        let accepted = flow.flow();
+        let (axis, sign, normal) = spatial_frame(accepted.boundaries(), side, axes)?;
+        match flow.wall(side) {
+            MolecularWall3d::SlipAdiabatic => {}
+            MolecularWall3d::NoSlip {
+                velocity,
+                thermal: WallThermalCondition::Adiabatic,
+            } if velocity == [0.0; 3] => {}
+            _ => {
+                return Err(Error::Invalid(
+                    "vector structural traction requires a stationary adiabatic wall",
+                ));
+            }
+        }
+        let report = flow
+            .last_step()
+            .ok_or(Error::Invalid("no complete molecular wall interval"))?;
+        let impulse = flow
+            .boundary_impulses(side)
+            .get(face)
+            .ok_or(Error::Invalid(
+                "wall face index outside the original Cartesian side",
+            ))?;
+        stationary_wall_transfer(impulse.mass, impulse.energy)?;
+        Self::new(
+            report.elapsed.value(),
+            accepted.time().value(),
+            accepted.grid().face_area(side),
+            normal,
+            sign * impulse.momentum[axis],
+            embed_tangential_momentum(impulse.momentum, axes, axis),
+            exterior_pressure_pa,
+        )
+    }
+}
+
+fn stationary_wall_transfer(mass: f64, energy: f64) -> Result<(), Error> {
+    if mass != 0.0 || energy != 0.0 {
+        return Err(Error::Invalid(
+            "stationary adiabatic wall must transfer only momentum",
+        ));
+    }
+    Ok(())
+}
+
+fn embed_tangential_momentum<const N: usize>(
+    momentum: [f64; N],
+    axes: [[f64; 3]; N],
+    normal: usize,
+) -> [f64; 3] {
+    core::array::from_fn(|global| {
+        (0..N)
+            .filter(|&axis| axis != normal)
+            .map(|axis| axes[axis][global] * momentum[axis])
+            .sum()
+    })
 }
 
 fn planar_frame(
