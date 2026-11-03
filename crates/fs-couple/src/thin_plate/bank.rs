@@ -1,8 +1,8 @@
 //! Reciprocal body/cavity/exterior evolution through the existing prepared owner.
 use super::piston::BaffledPistonRadiation;
 use super::{
-    AcousticRealizeError, CompactBody, GasState, PreparedVkBody, PreparedVkStep, VkBody,
-    prepare_render_linear, render_step_error,
+    AcousticRealizeError, CompactBody, GasState, PreparedVkBody, PreparedVkStep,
+    ProposedCompactStep, VkBody, prepare_render_linear, render_step_error,
 };
 use fs_exec::CancelGate;
 use fs_phs::{PortHamiltonian, PreparedStepRecord};
@@ -137,6 +137,8 @@ pub struct PlateBank {
     radiation_clock: Option<(GasState, u32)>,
     radiation_pending: Option<(GasState, u32, Vec<[u64; 7]>)>,
     runtime: Option<BankRuntime>,
+    // Reused O(mode-count) proposals for the independent scalar path.
+    compact_steps: Vec<ProposedCompactStep>,
 }
 
 struct BankRuntime {
@@ -310,8 +312,10 @@ impl PlateBank {
                 .map_or(0.0, |c| c.sys.hamiltonian(&c.x))
     }
 
-    /// Drive every original force projection and sum compact-monopole pressures
-    /// from the jointly accepted interval-mean surface acceleration.
+    /// Drive every original force projection and sum compact-monopole pressures.
+    /// The independent scalar path observes exact endpoint accelerations; the
+    /// joint owner observes interval-mean accelerations. Both admit all motion,
+    /// radiation histories and the finite pressure sum before physical commit.
     pub fn drive_and_radiate(
         &mut self,
         force_n: f64,
@@ -328,19 +332,35 @@ impl PlateBank {
             && self.radiation_pending.is_none()
             && self.runtime.is_none()
         {
-            if !rho.is_finite() || rho <= 0.0 || !listener_m.is_finite() || listener_m <= 0.0 {
+            if !force_n.is_finite()
+                || !dt.is_finite()
+                || dt <= 0.0
+                || !rho.is_finite()
+                || rho <= 0.0
+                || !listener_m.is_finite()
+                || listener_m <= 0.0
+            {
                 return Err(invalid(
-                    "compact bank observation needs positive finite density and distance",
+                    "compact bank needs finite force and positive duration, density and distance",
                 ));
             }
+            self.compact_steps.clear();
             let mut pressure = 0.0;
             for body in &mut self.linear {
-                pressure += body.drive_and_radiate(
+                let (proposed, sample) = body.prepare_radiating_step(
                     force_n * body.drive_participation,
                     dt,
                     rho,
                     listener_m,
                 )?;
+                pressure += sample;
+                self.compact_steps.push(proposed);
+            }
+            if !pressure.is_finite() {
+                return Err(invalid("compact bank pressure sum is not finite"));
+            }
+            for (body, &proposed) in self.linear.iter_mut().zip(&self.compact_steps) {
+                body.commit_step(proposed);
             }
             return Ok(pressure);
         }

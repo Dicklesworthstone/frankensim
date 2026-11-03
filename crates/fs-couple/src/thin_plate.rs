@@ -85,6 +85,8 @@ pub struct CompactBody {
 struct PistonLoad {
     filter: DigitalFilter,
     state: DigitalFilterState,
+    // Reused trial memory. Only `state` is accepted physical history.
+    proposed_state: DigitalFilterState,
     gas: GasState,
     sample_rate_hz: u32,
 }
@@ -100,6 +102,16 @@ pub(crate) struct HeldStep {
 impl HeldStep {
     /// A body at rest under no force (the quiescent past before a render).
     pub(crate) const REST: Self = Self { y: 0.0, v: 0.0, force_n: 0.0 };
+}
+
+/// Small scalar proposal; any filter proposal stays in its owner's reused
+/// scratch. Preparation and acceptance occur without intervening body changes.
+#[derive(Clone, Copy)]
+struct ProposedCompactStep {
+    y: f64,
+    v: f64,
+    acceleration: f64,
+    held: HeldStep,
 }
 
 impl CompactBody {
@@ -153,8 +165,7 @@ impl CompactBody {
     ///
     /// # Errors
     /// Refuses invalid force, duration, mass, frequency or damping and
-    /// non-finite motion. A filter already advanced before a motion refusal
-    /// is not rolled back; callers must discard a refused coupled run.
+    /// non-finite motion without advancing mechanics or radiation memory.
     /// A retained digital radiation load requires its original sample period;
     /// a clock mismatch refuses before either the filter or body advances.
     /// Propagates the radiation-filter step refusal instead of silently
@@ -171,6 +182,16 @@ impl CompactBody {
         force_n: f64,
         dt: f64,
     ) -> Result<(f64, HeldStep), AcousticRealizeError> {
+        let proposed = self.prepare_step(force_n, dt)?;
+        self.commit_step(proposed);
+        Ok((proposed.acceleration, proposed.held))
+    }
+
+    fn prepare_step(
+        &mut self,
+        force_n: f64,
+        dt: f64,
+    ) -> Result<ProposedCompactStep, AcousticRealizeError> {
         if !(force_n.is_finite()
             && dt.is_finite()
             && dt > 0.0
@@ -194,7 +215,8 @@ impl CompactBody {
             // p = Z_face * mean surface velocity, Q = area_modal * q_dot.
             // Generalized reaction is -area_modal * p, preserving work and
             // eigenvector scaling even for negative or nearly cancelling modes.
-            match load.filter.step(&mut load.state, self.v * self.area_m2 / self.piston_area_m2) {
+            load.proposed_state.clone_from(&load.state);
+            match load.filter.step(&mut load.proposed_state, self.v * self.area_m2 / self.piston_area_m2) {
                 Ok(p_face) => -p_face * self.area_m2,
                 Err(e) => return Err(AcousticRealizeError::Nonlinear(e.to_string())),
             }
@@ -203,9 +225,37 @@ impl CompactBody {
         };
         let step = HeldStep { y: self.y, v: self.v, force_n: force_n + f_rad };
         let (y, v, acc) = self.transition(step, dt)?;
-        self.v = v;
-        self.y = y;
-        Ok((acc, step))
+        Ok(ProposedCompactStep { y, v, acceleration: acc, held: step })
+    }
+
+    fn commit_step(&mut self, proposed: ProposedCompactStep) {
+        if let Some(load) = self.rad.as_mut() {
+            core::mem::swap(&mut load.state, &mut load.proposed_state);
+        }
+        self.v = proposed.v;
+        self.y = proposed.y;
+    }
+
+    fn prepare_radiating_step(
+        &mut self,
+        force_n: f64,
+        dt: f64,
+        rho: f64,
+        listener_m: f64,
+    ) -> Result<(ProposedCompactStep, f64), AcousticRealizeError> {
+        if !rho.is_finite() || rho <= 0.0 || !listener_m.is_finite() || listener_m <= 0.0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "compact radiator observation needs positive finite density and distance",
+            });
+        }
+        let proposed = self.prepare_step(force_n, dt)?;
+        let pressure = self.radiate(proposed.acceleration, rho, listener_m);
+        if !pressure.is_finite() {
+            return Err(AcousticRealizeError::Nonlinear(
+                "compact radiator pressure is not finite".to_string(),
+            ));
+        }
+        Ok((proposed, pressure))
     }
 
     /// Exact acceleration `elapsed_s` into a recorded step of this body, under
@@ -274,10 +324,13 @@ impl CompactBody {
         self.area_m2 * self.v
     }
 
-    /// Drive and radiate in one step.
+    /// Drive and radiate in one accepted step. The observation is admitted
+    /// before either mechanical or radiation-filter history advances.
     ///
     /// # Errors
-    /// Propagates [`CompactBody::drive`] radiation refusals.
+    /// Propagates [`CompactBody::drive`] refusals and rejects nonpositive or
+    /// nonfinite observation parameters and nonfinite pressure. Refusal leaves
+    /// the original physical histories available for retry.
     pub fn drive_and_radiate(
         &mut self,
         force_n: f64,
@@ -285,8 +338,9 @@ impl CompactBody {
         rho: f64,
         listener_m: f64,
     ) -> Result<f64, AcousticRealizeError> {
-        let acc = self.drive(force_n, dt)?;
-        Ok(self.radiate(acc, rho, listener_m))
+        let (proposed, pressure) = self.prepare_radiating_step(force_n, dt, rho, listener_m)?;
+        self.commit_step(proposed);
+        Ok(pressure)
     }
 
     /// Load this body's radiating piston with the baffled-piston radiation of `gas` at
@@ -315,7 +369,8 @@ impl CompactBody {
         let radius = (self.piston_area_m2 / core::f64::consts::PI).sqrt();
         let filter = piston_radiation_filter(radius, gas, sample_rate_hz)?;
         let state = filter.zero_state();
-        self.rad = Some(PistonLoad { filter, state, gas: *gas, sample_rate_hz });
+        let proposed_state = state.clone();
+        self.rad = Some(PistonLoad { filter, state, proposed_state, gas: *gas, sample_rate_hz });
         Ok(())
     }
 

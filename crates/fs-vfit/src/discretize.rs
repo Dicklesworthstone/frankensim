@@ -231,9 +231,21 @@ impl DigitalFilter {
 }
 
 /// Per-section DF-II memory of a [`DigitalFilter`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct DigitalFilterState {
     w: Vec<[f64; 2]>,
+}
+
+impl Clone for DigitalFilterState {
+    fn clone(&self) -> Self {
+        Self { w: self.w.clone() }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        // Coupled consumers reuse a trial state until every physical owner and
+        // observation accepts. Retain its allocation when the shape is unchanged.
+        self.w.clone_from(&source.w);
+    }
 }
 
 /// Driving-point reflectance `R = (Z − Zc) / (Z + Zc)`.
@@ -1954,6 +1966,42 @@ mod runtime_tests {
         let expect = [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125];
         for (got, want) in y.iter().zip(expect) {
             assert!((got - want).abs() < 1.0e-15);
+        }
+    }
+
+    #[test]
+    fn digital_filter_trial_state_copy_reuses_memory_and_preserves_bits() {
+        let filter = DigitalFilter {
+            sections: vec![Biquad {
+                b: [1.0, 0.0, 0.0],
+                a: [-0.5, 0.0],
+            }],
+            direct: 0.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut accepted = filter.zero_state();
+        let mut proposed = filter.zero_state();
+        let allocation = proposed.w.as_ptr();
+        for input in [1.0, -0.25, 0.0, 2.5] {
+            proposed.clone_from(&accepted);
+            assert_eq!(proposed.w.as_ptr(), allocation);
+            assert_eq!(proposed, accepted);
+            assert_eq!(
+                filter.step(&mut proposed, input).unwrap().to_bits(),
+                filter.step(&mut accepted, input).unwrap().to_bits()
+            );
+        }
+        // Clone keeps the old representation semantics, including signed zero
+        // and payload bits; copying is independent of runtime admission.
+        accepted.w[0] = [-0.0, f64::from_bits(0x7ff8_0000_0000_1234)];
+        proposed.clone_from(&accepted);
+        assert_eq!(proposed.w.as_ptr(), allocation);
+        for state in [proposed, accepted.clone()] {
+            assert_eq!(
+                state.w[0].map(f64::to_bits),
+                accepted.w[0].map(f64::to_bits)
+            );
         }
     }
 

@@ -6236,8 +6236,19 @@ clarinet is one filling of those objects.
   compare analytical damped/undamped motion and held-force subdivision,
   including a step beyond the former Euler stability limit. Radiation-filter
   reaction remains sampled and held, not an exact continuous coupled solution.
-  If motion refuses after the filter advances, the caller must discard the run;
-  the filter memory is not rolled back.
+  Compact motion and sampled radiation-filter memory are proposed together.
+  `drive_and_radiate` admits positive finite observer density/distance and finite
+  pressure before publishing either history. The independent `PlateBank` path
+  prepares every mode and checks the final pressure sum before publishing all
+  modes together; a later mode refusal leaves earlier accepted modes unchanged.
+  Refused motion, filtering or observation can therefore be retried from the
+  same accepted physical histories. Filter coefficients stay in place, while a
+  second mutable filter-state buffer and O(mode-count) scalar proposals are
+  reused after initial allocation. This preserves exact scalar transition and
+  pressure summation order; it does not promote sampled independent radiation
+  loads to the joint continuous-radiation model. Focused tests in
+  `thin_plate/bank/tests.rs` cover late-mode refusal, pressure overflow and
+  bitwise-equivalent retry, including nonzero retained filter histories.
   The finished pressure history is passed through ISO 9613-1
   absorption (`air_path`) with the assembly's explicit humidity;
   Stokes–Kirchhoff is only the fallback outside the ISO window.

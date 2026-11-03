@@ -393,3 +393,177 @@ fn an_uncoupled_large_bank_keeps_the_existing_exact_scalar_path() {
         assert_eq!((a.y, a.v), (b.y, b.v));
     }
 }
+
+fn loaded_compact() -> CompactBody {
+    let mut body = compact(0.25, 1000.0, 0.03, 1.0);
+    body.attach_piston_load(&air(), 48_000).unwrap();
+    // The next filter proposal must advance a nonzero physical history.
+    for _ in 0..3 {
+        body.drive(1.0, 1.0 / 48_000.0).unwrap();
+    }
+    body
+}
+
+fn compact_history(
+    body: &CompactBody,
+) -> (u64, u64, Option<fs_vfit::discretize::DigitalFilterState>) {
+    (
+        body.y.to_bits(),
+        body.v.to_bits(),
+        body.rad.as_ref().map(|load| load.state.clone()),
+    )
+}
+
+#[test]
+fn compact_motion_refusal_preserves_radiation_history_and_retry() {
+    let mut body = loaded_compact();
+    let before = compact_history(&body);
+    let mut twin = body.clone();
+    let load = body.rad.as_ref().unwrap();
+    let mut next_filter = load.state.clone();
+    load.filter
+        .step(
+            &mut next_filter,
+            body.v * body.area_m2 / body.piston_area_m2,
+        )
+        .unwrap();
+    assert_ne!(
+        next_filter, load.state,
+        "this refusal must occur after real filter work"
+    );
+
+    // The original filter can advance, but force/mass overflows in mechanics.
+    assert!(body.drive(f64::MAX, 1.0 / 48_000.0).is_err());
+    assert_eq!(compact_history(&body), before);
+    for force in [0.0, 2.0, -0.4, 0.0] {
+        let actual = body.drive(force, 1.0 / 48_000.0).unwrap();
+        let expected = twin.drive(force, 1.0 / 48_000.0).unwrap();
+        assert_eq!(actual.to_bits(), expected.to_bits());
+        assert_eq!(compact_history(&body), compact_history(&twin));
+    }
+}
+
+#[test]
+fn compact_observation_refusal_preserves_mechanics_and_filter() {
+    let mut body = loaded_compact();
+    let mut twin = body.clone();
+    let before = compact_history(&body);
+    for (density, distance) in [
+        (0.0, 1.0),
+        (-1.0, 1.0),
+        (f64::NAN, 1.0),
+        (f64::INFINITY, 1.0),
+        (1.2, 0.0),
+        (1.2, -1.0),
+        (1.2, f64::NAN),
+        (1.2, f64::INFINITY),
+        (f64::MAX, f64::MIN_POSITIVE),
+    ] {
+        assert!(
+            body.drive_and_radiate(2.0, 1.0 / 48_000.0, density, distance)
+                .is_err()
+        );
+        assert_eq!(compact_history(&body), before);
+    }
+    let actual = body
+        .drive_and_radiate(2.0, 1.0 / 48_000.0, air().density, 1.0)
+        .unwrap();
+    let expected = twin
+        .drive_and_radiate(2.0, 1.0 / 48_000.0, air().density, 1.0)
+        .unwrap();
+    assert_eq!(actual.to_bits(), expected.to_bits());
+    assert_eq!(compact_history(&body), compact_history(&twin));
+}
+
+#[test]
+fn compact_bank_late_mode_refusal_preserves_every_owner_and_retry() {
+    let mut bank = PlateBank {
+        linear: vec![loaded_compact(), loaded_compact()],
+        ..PlateBank::default()
+    };
+    // A finite force projection whose product refuses only in the SECOND mode.
+    // Zero force remains admissible, so retry requires no model/state repair.
+    bank.linear[1].drive_participation = f64::MAX;
+    let before: Vec<_> = bank.linear.iter().map(compact_history).collect();
+    let mut twin = PlateBank {
+        linear: bank.linear.clone(),
+        ..PlateBank::default()
+    };
+    assert!(
+        bank.drive_and_radiate(2.0, 1.0 / 48_000.0, air().density, 1.0)
+            .is_err()
+    );
+    assert_eq!(
+        bank.linear.iter().map(compact_history).collect::<Vec<_>>(),
+        before
+    );
+    for _ in 0..16 {
+        let actual = bank
+            .drive_and_radiate(0.0, 1.0 / 48_000.0, air().density, 1.0)
+            .unwrap();
+        let expected = twin
+            .drive_and_radiate(0.0, 1.0 / 48_000.0, air().density, 1.0)
+            .unwrap();
+        assert_eq!(actual.to_bits(), expected.to_bits());
+        assert_eq!(
+            bank.linear.iter().map(compact_history).collect::<Vec<_>>(),
+            twin.linear.iter().map(compact_history).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        bank.runtime.is_none(),
+        "atomicity must retain the scalar path"
+    );
+}
+
+#[test]
+fn compact_bank_pressure_sum_refusal_is_atomic_and_empty_inputs_are_admitted() {
+    let mut body = compact(1.0, 1.0, 1.0, 1.0);
+    body.zeta = 0.0;
+    let mut bank = PlateBank {
+        linear: vec![body.clone(), body.clone()],
+        ..PlateBank::default()
+    };
+    let before: Vec<_> = bank.linear.iter().map(compact_history).collect();
+    let force = f64::MAX / 16.0;
+    let pressure = body.drive_and_radiate(force, 0.001, 1.0, 0.01).unwrap();
+    assert!(pressure.is_finite() && pressure > f64::MAX / 2.0);
+    assert!(bank.drive_and_radiate(force, 0.001, 1.0, 0.01).is_err());
+    assert_eq!(
+        bank.linear.iter().map(compact_history).collect::<Vec<_>>(),
+        before
+    );
+
+    // Retry uses the untouched accepted modes and reuses their scalar workspace.
+    let mut reference = bank.linear.clone();
+    let scratch = bank.compact_steps.as_ptr();
+    let expected: f64 = reference
+        .iter_mut()
+        .map(|b| b.drive_and_radiate(1.0, 0.001, 1.0, 0.01).unwrap())
+        .sum();
+    assert_eq!(
+        bank.drive_and_radiate(1.0, 0.001, 1.0, 0.01)
+            .unwrap()
+            .to_bits(),
+        expected.to_bits()
+    );
+    assert_eq!(bank.compact_steps.as_ptr(), scratch);
+    for (actual, expected) in bank.linear.iter().zip(&reference) {
+        assert_eq!(compact_history(actual), compact_history(expected));
+    }
+
+    let mut empty = PlateBank::default();
+    for (force, dt, density, distance) in [
+        (f64::NAN, 0.001, 1.0, 1.0),
+        (1.0, 0.0, 1.0, 1.0),
+        (1.0, 0.001, 0.0, 1.0),
+        (1.0, 0.001, 1.0, 0.0),
+    ] {
+        assert!(
+            empty
+                .drive_and_radiate(force, dt, density, distance)
+                .is_err()
+        );
+    }
+    assert_eq!(empty.drive_and_radiate(1.0, 0.001, 1.0, 1.0).unwrap(), 0.0);
+}
