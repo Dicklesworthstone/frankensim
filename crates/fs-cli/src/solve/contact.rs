@@ -26,12 +26,13 @@ pub(super) struct Prepared {
     temperature_axis: String,
 }
 
-/// Complete contact work on one mesh, including every natural/airflow trial.
+/// Counted contact work and the last physically accepted field on one mesh.
 #[derive(Default)]
 pub(super) struct Work {
     responses: usize,
     nonlinear: usize,
     krylov: usize,
+    last_temperature: Option<Vec<f64>>,
 }
 
 impl Work {
@@ -419,7 +420,16 @@ impl Prepared {
             energy_tolerance_w: tolerance,
         };
         let accepted = contacts
-            .solve_steady(cx, problem, &initial, config, coupling)
+            // The next natural/airflow callback starts from its last accepted
+            // thermal field. The owner restores current prescribed values and
+            // rechecks material and contact support, residual and heat balance.
+            .solve_steady(
+                cx,
+                problem,
+                work.last_temperature.as_deref().unwrap_or(&initial),
+                config,
+                coupling,
+            )
             .map_err(lower)?;
         work.record(
             accepted.iterations,
@@ -475,6 +485,7 @@ impl Prepared {
             .fluxes(&conduction.temperature)
             .map_err(lower)?;
         poll(cx)?;
+        work.last_temperature = Some(conduction.temperature.clone());
         Ok((
             super::radiation::SolidSolution::from_conduction(conduction),
             receipt,

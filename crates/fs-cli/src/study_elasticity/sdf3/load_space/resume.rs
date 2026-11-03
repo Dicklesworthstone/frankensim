@@ -223,4 +223,5 @@ pub(super) fn drive(spec: &Spec, ledger: &Ledger, cap: Option<usize>, gate: &Can
 }
 
 #[cfg(test)]
+#[path = "resume/tests.rs"]
 mod tests;

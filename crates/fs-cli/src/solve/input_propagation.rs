@@ -51,9 +51,12 @@ pub(super) fn account_joint_corner(
         Err(reason) => {
             let isolated = vertices.iter().map(|(label, value)| format!("{label} = {value} K"))
                 .collect::<Vec<_>>().join("; ");
-            return Ok((PropagatedTerm::Unmeasured { reason: format!(
-                "joint boundary/model-form corner could not be evaluated: {reason}; individual boundary half-width {half_width_k} K and model-form half-width {model_half_width_k} K do not establish the combined response; isolated boundary vertices: {isolated}"
-            ) }, f64::NAN));
+            return Ok((PropagatedTerm::UnmeasuredWithDetail {
+                reason: "One required combination of boundary inputs and convection uncertainty was refused; the boundary contribution remains unmeasured. The conduction receipt retains the refusal and evaluated vertices.".into(),
+                detail: format!(
+                    "joint boundary/model-form corner could not be evaluated: {reason}; individual boundary half-width {half_width_k} K and model-form half-width {model_half_width_k} K do not establish the combined response; isolated boundary vertices: {isolated}"
+                ),
+            }, f64::NAN));
         }
     };
     let deviation = (value - nominal_k).abs();
@@ -130,9 +133,28 @@ mod tests {
             Err("weakened cooling leaves the material temperature span".into())).unwrap();
         assert!(excess.is_nan());
         assert!(term.half_width().is_none());
-        let PropagatedTerm::Unmeasured { reason } = term else { panic!("joint refusal must remain NO-DATA") };
-        assert!(reason.contains("material temperature span"));
-        assert!(reason.contains("hot = 302 K"));
+        let PropagatedTerm::UnmeasuredWithDetail { detail, .. } = term else { panic!("joint refusal must remain NO-DATA") };
+        assert!(detail.contains("material temperature span"));
+        assert!(detail.contains("hot = 302 K"));
+    }
+
+    #[test]
+    fn detailed_joint_refusal_reaches_the_bounded_qoi_budget_without_losing_evidence() {
+        let cause = "source law refused a joint input; retained thermal response. ".repeat(30);
+        let (term, excess) = account_joint_corner(measured(), 3.0, 300.0, Err(cause.clone())).unwrap();
+        let PropagatedTerm::UnmeasuredWithDetail { reason, detail } = &term else { panic!("unmeasured") };
+        assert!(detail.len() > fs_evidence::uncertainty::MAX_UNCERTAINTY_TEXT_BYTES);
+        assert!(detail.contains(&cause));
+        assert!(detail.contains("hot = 302 K"));
+        assert!(reason.contains("remains unmeasured"));
+        assert!(term.json().unwrap().contains("\"detail\":"));
+        let propagation = super::super::InputPropagation {
+            nominal_k: 300.0, boundary: term, model_form: measured(),
+            solver_algebraic: measured(), parameters: measured(), geometry: measured(),
+            interaction_excess_k: excess,
+        };
+        super::super::propagation_term_receipts(Some(&propagation), None, None,
+            fs_blake3::hash_bytes(b"conduction-with-full-joint-refusal")).unwrap();
     }
 
     #[test]

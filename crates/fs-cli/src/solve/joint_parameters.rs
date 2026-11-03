@@ -98,7 +98,7 @@ pub(super) fn propagate(
         else { return Ok(gap("joint/conductivity corner design exceeds 64 physical re-solves; no partial parameter bound was produced")); };
     let (mut half_width, mut vertices, conductivity_detail) = match conductivity {
         PropagatedTerm::Measured { half_width_k, detail, vertices, .. } => (half_width_k, vertices, detail),
-        PropagatedTerm::Unmeasured { .. } => (0.0, Vec::new(),
+        PropagatedTerm::Unmeasured { .. } | PropagatedTerm::UnmeasuredWithDetail { .. } => (0.0, Vec::new(),
             "no conductivity tolerance declared: material laws held at their nominal values; unprovided material uncertainty is not bounded".into()),
     };
     if !nominal.is_finite() || !half_width.is_finite() || half_width < 0.0 {

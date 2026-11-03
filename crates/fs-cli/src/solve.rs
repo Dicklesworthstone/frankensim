@@ -262,7 +262,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// transpose with independently sourced emissivities and one black-bath control.
 /// Version 93 connects native steady temperature-varying contact to the shared
 /// source-backed physical residual/heat gates without frozen-contact bounds.
-pub const SOLVE_DRIVER_VERSION: u32 = 93;
+/// Version 94 carries the accepted contact temperature field into each next
+/// natural/airflow response on the same mesh instead of restarting it cold.
+pub const SOLVE_DRIVER_VERSION: u32 = 94;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -7782,13 +7784,15 @@ struct InputPropagation {
 enum PropagatedTerm {
     Measured { half_width_k: f64, method: &'static str, detail: String, vertices: Vec<(String, f64)> },
     Unmeasured { reason: String },
+    /// A bounded budget explanation with full diagnostics in the conduction receipt.
+    UnmeasuredWithDetail { reason: String, detail: String },
 }
 
 impl PropagatedTerm {
     fn half_width(&self) -> Option<f64> {
         match self {
             Self::Measured { half_width_k, .. } => Some(*half_width_k),
-            Self::Unmeasured { .. } => None,
+            Self::Unmeasured { .. } | Self::UnmeasuredWithDetail { .. } => None,
         }
     }
 
@@ -7821,6 +7825,10 @@ impl PropagatedTerm {
             }
             Self::Unmeasured { reason } => {
                 format!("{{\"state\":\"no-data\",\"reason\":{}}}", json_string(reason))
+            }
+            Self::UnmeasuredWithDetail { reason, detail } => {
+                format!("{{\"state\":\"no-data\",\"reason\":{},\"detail\":{}}}",
+                    json_string(reason), json_string(detail))
             }
         })
     }
@@ -7906,7 +7914,8 @@ fn propagation_term_receipts(
                     let solved = if solved.is_empty() { String::new() } else { format!("; re-solved maxima: {solved}") };
                     QoiTermReceipt::interval(kind, *half_width_k, cite(&format!("{method}: {detail}{solved}")))
                 }
-                PropagatedTerm::Unmeasured { reason } => {
+                PropagatedTerm::Unmeasured { reason }
+                | PropagatedTerm::UnmeasuredWithDetail { reason, .. } => {
                     QoiTermReceipt::gap(kind, reason.clone(), cite("declared-input propagation gap"))
                 }
             }

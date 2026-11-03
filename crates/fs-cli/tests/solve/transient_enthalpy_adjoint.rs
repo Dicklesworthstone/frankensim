@@ -13,7 +13,9 @@ use fs_project::{
 mod json;
 use json::JsonValue as J;
 
+#[path = "transient_enthalpy_adjoint/prescribed.rs"]
 mod prescribed;
+#[path = "transient_enthalpy_adjoint/flux.rs"]
 mod flux;
 
 const CP: f64 = 10.0;

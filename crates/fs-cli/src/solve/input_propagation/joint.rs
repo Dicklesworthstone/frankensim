@@ -172,10 +172,10 @@ mod tests {
                 else { Ok(Ok((label,294.0))) }
             }).unwrap();
         assert_eq!(calls,2); assert!(excess.is_nan());
-        let PropagatedTerm::Unmeasured { reason } = gap else { panic!("a subset is not a complete result") };
-        assert!(reason.contains("outside the material span"));
-        assert!(reason.contains("1/4 joint corners completed"));
-        assert!(reason.contains("= 294 K"));
+        let PropagatedTerm::UnmeasuredWithDetail { detail, .. } = gap else { panic!("a subset is not a complete result") };
+        assert!(detail.contains("outside the material span"));
+        assert!(detail.contains("1/4 joint corners completed"));
+        assert!(detail.contains("= 294 K"));
         for code in ["cli-solve-cancelled", "cli-solve-work-envelope"] {
             let error = account_joint_design(measured(10.0),1.0,300.0,&points(),0.5,8,
                 |_,_,_,_| Err(conduction_error(code,"stop","retain prefix"))).err().unwrap();

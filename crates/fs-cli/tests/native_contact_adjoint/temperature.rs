@@ -171,7 +171,7 @@ fn native_temperature_contact_queries_the_accepted_faces_and_preserves_heat() {
                 .unwrap();
             let receipt = artifact(&ledger, stage.str_field("receipt").unwrap());
             let physical = receipt.get("temperature_contact").unwrap();
-            assert!(physical.f64_field("thermal_responses").unwrap() > 1.0);
+            assert!(physical.f64_field("total_thermal_responses").unwrap() > 1.0);
             assert!(
                 physical.f64_field("total_thermal_responses").unwrap()
                     >= physical.f64_field("thermal_responses").unwrap()

@@ -21,6 +21,8 @@ its existing body/pressure/traction dead loads. Zero dead-load vectors are
 valid for a pure self-weight study. The native compliance and stress adjoints
 differentiate the changing force as well as stiffness. Stress resume checks
 the rebuilt material-load identity before restoring optimizer state.
+Accelerated studies retain the native material's strain-domain checks, so the
+declared elastic modulus and SI loads must describe a valid small-strain state.
 
 The acceleration stays fixed in the reference configuration; this does not
 add follower loads or inertial dynamics. `max-stencil-terms` bounds each grid's
