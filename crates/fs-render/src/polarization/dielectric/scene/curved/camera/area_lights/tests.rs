@@ -245,3 +245,5 @@ fn g1_area_lens_images_sum_original_branch_power_with_independent_source_surviva
         assert_eq!(result, repeat);
     });
 }
+
+mod mis;

@@ -1,0 +1,74 @@
+//! Analytic area-to-direction reciprocity, including an oblique receiver.
+
+use super::*;
+use crate::spectral::SpectralReflectance;
+
+#[test]
+fn g1_reciprocal_area_pdf_cancels_receiver_obliquity_and_common_host_index() {
+    with_cx(|cx| {
+        let point = Point3::new(0.0, 0.0, 2.0);
+        let receiver_normal = Vec3::new(0.6, 0.0, -0.8);
+        let geometry = InstanceScene::try_new(vec![
+            source(0.0),
+            mesh(9, vec![[-0.8, -1.0, 1.4], [0.8, -1.0, 2.6], [0.0, 1.0, 2.0]],
+                vec![[0, 1, 2]], RigidTransform::identity()),
+        ]).unwrap();
+        let reflectance = [SpectralReflectance::constant(0.6).unwrap()];
+        let emitter = SurfaceEmitter::new(2,
+            super::super::super::RadianceSpectrum::try_constant(4.0).unwrap(),
+            EmissionSides::Front);
+        for (index, absorption) in [(1.0, 0.0), (1.7, 0.5)] {
+            let material = glass(index, absorption);
+            let media = [SceneMedium::Homogeneous(&material)];
+            let scene = CurvedPolarizedScene::try_new_with_materials(
+                cx, &geometry, &media, &[], &[], &reflectance,
+                vec![
+                    SurfaceBinding { object_id: 2, interaction: Interaction::Opaque },
+                    SurfaceBinding { object_id: 9, interaction: Interaction::DepolarizingDiffuse {
+                        medium: 0, reflectance: 0,
+                    } },
+                ],
+                100_000,
+            ).unwrap();
+            let panel = CurvedAreaEmitter::try_new(cx, &scene, &emitter, 1).unwrap();
+            let sample = panel.sample_area([4.0 / 9.0, 0.5]).unwrap();
+            let target = BundleConnectionTarget::try_diffuse_receiver(
+                9, point, receiver_normal, 2e-7,
+            ).unwrap();
+            let connected = scene.connect_bundle_from_surface_with_policy(
+                cx,
+                BundleConnectionLaunch {
+                    ray: Ray { origin: sample.position_m(), dir: Vec3::new(0.0, 0.0, 1.0) },
+                    transverse_axis: Vec3::new(0.0, 1.0, 0.0),
+                    wavelength_nm: 550.0,
+                    normalized_source_stokes: Stokes::unpolarized(1.0),
+                    initial_medium: 0,
+                },
+                BundleSurfaceSource::try_new(2, BoundarySide::Positive).unwrap(),
+                target, options(), BundleBranchPolicy::Sequence(&[]),
+            ).unwrap();
+            let weights = panel.mis_weights(sample, &connected, target, options().projection).unwrap();
+            // The oblique receiving footprint is r²/cos(receiver); reciprocal
+            // etendue cancels that cosine, leaving r²/cos(source) = 4.
+            let light_pdf = 4.0 / 0.27;
+            let continuation_pdf = 0.8 / core::f64::consts::PI;
+            let light_squared = light_pdf * light_pdf;
+            let continuation_squared = continuation_pdf * continuation_pdf;
+            near(weights.light_log_pdf_solid_angle().exp(), light_pdf, 3e-6);
+            near(weights.continuation_log_pdf_solid_angle().exp(), continuation_pdf, 3e-6);
+            near(weights.light_weight(),
+                light_squared / (light_squared + continuation_squared), 3e-6);
+            near(weights.continuation_weight(),
+                continuation_squared / (light_squared + continuation_squared), 3e-6);
+            near(weights.light_weight() + weights.continuation_weight(), 1.0, 1e-15);
+            // Reverse lookup keeps the same represented area density and
+            // actual integrated launch point, independently of patch numbering.
+            let recovered = panel.sample_at_contact(
+                connected.path().source_contact().unwrap(), sample.position_m(),
+            ).unwrap();
+            assert_eq!(recovered.position_m(), sample.position_m());
+            assert_eq!(recovered.triangle_index(), sample.triangle_index());
+            assert_eq!(recovered.pdf_area_per_m2(), sample.pdf_area_per_m2());
+        }
+    });
+}

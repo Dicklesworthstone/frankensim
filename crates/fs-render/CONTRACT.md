@@ -590,6 +590,24 @@ differentiable lift). Pure Rust throughout.
   coherent interference, singular caustic regularization and area-light MIS
   remain outside this consumer.
 
+- Native polarized bundles retain `reverse_branch_log_probability`
+  separately from physical Mueller power and Beer absorption. This is the
+  exact scalar proposal for the selected smooth chain traversed backward;
+  transmitted absorbing multilayers use the opposite local indices and
+  reversed authored layer order. Smooth conductors contribute probability
+  one. Camera surface observers can retain the original sampled direction,
+  event and discrete/solid-angle proposal without resampling the native walk.
+- `camera::area_lights::mis` evaluates complementary power-heuristic weights
+  for a regular source-to-diffuse image in one receiver solid-angle measure.
+  The source area density uses the reciprocal native footprint and actual
+  endpoint phase indices; the competitor is the native cosine PDF times the
+  reverse discrete branch proposals. Per-image enumeration adds no image-count
+  divisor. Original-panel hit lookup retains the represented area density and
+  unsnapped camera point, refusing edge or owner ambiguity. These local weights
+  do not establish membership of a separate camera path in a finite seed
+  catalog. G1/G3 cases cover oblique receiving area, common refractive host,
+  scalar versus polarized lens power and an asymmetric absorbing coating.
+
 - `camera::area_lights::CurvedAreaEmitter` prepares area sampling on an
   original native panel and its exact `SurfaceEmitter`, directly from the
   surface scene or from an admitted camera emitter. Sources are one original

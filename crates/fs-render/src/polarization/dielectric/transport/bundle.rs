@@ -72,8 +72,10 @@ pub struct PolarizedRayBundle {
     bundle: RayBundlePropagation,
     interface_state: Stokes,
     interface_log_power: f64,
+    reverse_branch_log_probability: f64,
 }
 
+#[derive(Clone, Copy)]
 enum InterfaceOptics<'a> {
     Bare,
     Film(&'a CoherentDielectricCoating),
@@ -113,6 +115,7 @@ impl PolarizedRayBundle {
             bundle,
             interface_state,
             interface_log_power: 0.0,
+            reverse_branch_log_probability: 0.0,
         })
     }
 
@@ -128,6 +131,16 @@ impl PolarizedRayBundle {
     /// Log of accumulated physical interface power, excluding bulk absorption.
     pub const fn interface_log_power(&self) -> f64 {
         self.interface_log_power
+    }
+
+    /// Log of the native scalar proposal for traversing the selected smooth
+    /// interface chain backward. This is a product of discrete branch
+    /// probabilities, not a solid-angle density or physical Mueller power.
+    /// Bulk absorption, source departure and receiver response are excluded.
+    /// Transmitted coatings use the reversed physical layer order and local
+    /// indices; a smooth conductor has deterministic reflection probability one.
+    pub const fn reverse_branch_log_probability(&self) -> f64 {
+        self.reverse_branch_log_probability
     }
 
     pub fn continue_in<F: SecondOrderIndexField + ?Sized>(
@@ -338,6 +351,22 @@ impl PolarizedRayBundle {
         if matrix.0[0][0] == 0.0 {
             return Err(BundleInterfaceError::UnavailableBranch.into());
         }
+        let reverse_probability = reverse_probability(
+            optics,
+            response,
+            normal,
+            surface.normal.dot(previous.ray.dir) > 0.0,
+            bundle.propagation().ray.dir,
+            wavelength_nm,
+            eta_i,
+            eta_t,
+            event,
+        )?;
+        let reverse_branch_log_probability =
+            self.reverse_branch_log_probability + det::ln(reverse_probability);
+        if !reverse_branch_log_probability.is_finite() || reverse_branch_log_probability > 0.0 {
+            return Err(PolarizedBundleError::NumericalRange);
+        }
         // Reuse the actual native frame rotation, Mueller application and
         // physical-roundoff admission, with deterministic physical power.
         let output = incident
@@ -349,7 +378,9 @@ impl PolarizedRayBundle {
                 medium(target),
             )?
             .with_reference_axis(bundle.propagation().transverse_axis)?;
-        self.retain_interface_power(bundle, output.power())
+        let mut result = self.retain_interface_power(bundle, output.power())?;
+        result.reverse_branch_log_probability = reverse_branch_log_probability;
+        Ok(result)
     }
 
     fn endpoint_beam(&self) -> Result<PolarizedBeam, PolarizedBundleError> {
@@ -397,6 +428,7 @@ impl PolarizedRayBundle {
             bundle,
             interface_state,
             interface_log_power,
+            reverse_branch_log_probability: self.reverse_branch_log_probability,
         })
     }
 
@@ -430,6 +462,67 @@ impl PolarizedRayBundle {
         }
         Ok(value)
     }
+}
+
+// The scalar sampler has full polarization support, but its proposal is not
+// the polarization-dependent physical power retained above. In particular,
+// an absorbing multilayer can have different survival-conditioned proposals
+// in opposite directions even though its transmitted power is reciprocal.
+#[allow(clippy::too_many_arguments)]
+fn reverse_probability(
+    optics: InterfaceOptics<'_>,
+    forward: super::super::PolarizedFresnel,
+    incident_normal: Vec3,
+    forward_reverse_layers: bool,
+    outgoing: Vec3,
+    wavelength_nm: f64,
+    eta_i: f64,
+    eta_t: f64,
+    event: DielectricEvent,
+) -> Result<f64, PolarizedBundleError> {
+    let transmission = event == DielectricEvent::Transmission;
+    let reverse_layers = forward_reverse_layers ^ transmission;
+    let cosine = incident_normal.dot(outgoing).abs().clamp(0.0, 1.0);
+    let (incident_index, target_index) = if transmission { (eta_t, eta_i) } else { (eta_i, eta_t) };
+    let response = if !transmission {
+        forward
+    } else {
+        match optics {
+            InterfaceOptics::Bare => {
+                fresnel_dielectric_polarized(cosine, incident_index, target_index)
+            }
+            InterfaceOptics::Film(coating) => super::super::fresnel_coated_dielectric_polarized(
+                cosine, incident_index, target_index, wavelength_nm, coating,
+            ),
+            InterfaceOptics::Surface(material) => material
+                .interface(wavelength_nm, reverse_layers)
+                .and_then(|interface| {
+                    interface.fresnel_polarized(cosine, incident_index, target_index)
+                }),
+        }
+        .map_err(BeamError::from)?
+    };
+    let probabilities = match optics {
+        InterfaceOptics::Bare => [response.scalar.reflectance, response.scalar.transmittance],
+        InterfaceOptics::Film(coating) if coating.thickness_m() == 0.0 => {
+            [response.scalar.reflectance, response.scalar.transmittance]
+        }
+        InterfaceOptics::Film(_) => {
+            let reflected = response.reflection.0[0][0];
+            let transmitted = response.transmission.0[0][0];
+            let total = reflected + transmitted;
+            [reflected / total, transmitted / total]
+        }
+        InterfaceOptics::Surface(material) => material
+            .interface(wavelength_nm, reverse_layers)
+            .map_err(BeamError::from)?
+            .event_probabilities(response.scalar),
+    };
+    let probability = probabilities[usize::from(transmission)];
+    if !probability.is_finite() || probability <= 0.0 || probability > 1.0 {
+        return Err(PolarizedBundleError::NumericalRange);
+    }
+    Ok(probability)
 }
 
 #[cfg(test)]

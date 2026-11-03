@@ -619,15 +619,7 @@ impl CurvedPolarizedScene<'_> {
             };
             result.max_contact_resolution_m = contact.resolution_m;
             result.source_contact = Some(contact);
-            signature.update(b"surface-source");
-            append_contact(
-                &mut signature,
-                contact,
-                initial_medium,
-                initial_medium,
-                positive,
-                6,
-            );
+            signature = self.surface_source_signature(contact, initial_medium, source.side);
             Some(GradientDeparture {
                 witness,
                 side: source.side,
@@ -985,6 +977,29 @@ impl CurvedPolarizedScene<'_> {
         Ok(result)
     }
 
+    // The camera compares a reversed recorded native history with a source
+    // connection. Keep its initial source tag under this same branch owner.
+    pub(super) fn surface_source_signature(
+        &self,
+        contact: CurvedContact,
+        initial_medium: usize,
+        side: BoundarySide,
+    ) -> DomainHasher {
+        let mut signature = DomainHasher::new("org.frankensim.curved-bundle-branch.v1");
+        signature.update(&(initial_medium as u64).to_le_bytes());
+        append_medium(&mut signature, self.medium_identity(initial_medium));
+        signature.update(b"surface-source");
+        append_contact(
+            &mut signature,
+            contact,
+            initial_medium,
+            initial_medium,
+            side == BoundarySide::Positive,
+            6,
+        );
+        signature
+    }
+
     fn bundle_medium_sample(
         &self,
         index: usize,
@@ -1165,7 +1180,7 @@ fn require_medium(
     Ok(())
 }
 
-fn append_medium(signature: &mut DomainHasher, identity: Option<ContentHash>) {
+pub(super) fn append_medium(signature: &mut DomainHasher, identity: Option<ContentHash>) {
     match identity {
         None => signature.update(&[0]),
         Some(identity) => {
@@ -1175,7 +1190,7 @@ fn append_medium(signature: &mut DomainHasher, identity: Option<ContentHash>) {
     }
 }
 
-fn append_contact(
+pub(super) fn append_contact(
     signature: &mut DomainHasher,
     contact: CurvedContact,
     incoming_medium: usize,

@@ -32,13 +32,30 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
     }
 
     pub(super) fn observe(&mut self, path: &CurvedPathResult) -> Result<(), CurvedSceneError> {
-        self.add_surface(path).map_err(|error| {
+        self.observe_weighted(path, 1.0)
+    }
+
+    /// Apply a complementary camera-strategy weight to this emitter hit.
+    /// Ordinary camera consumers retain weight one and their original arithmetic.
+    pub(super) fn observe_weighted(
+        &mut self,
+        path: &CurvedPathResult,
+        weight: f64,
+    ) -> Result<(), CurvedSceneError> {
+        self.add_surface(path, weight).map_err(|error| {
             self.error = Some(error);
             CurvedSceneError::NumericalRange
         })
     }
 
-    fn add_surface(&mut self, path: &CurvedPathResult) -> Result<(), CameraRadianceError> {
+    fn add_surface(
+        &mut self,
+        path: &CurvedPathResult,
+        mis_weight: f64,
+    ) -> Result<(), CameraRadianceError> {
+        if !mis_weight.is_finite() || !(0.0..=1.0).contains(&mis_weight) {
+            return Err(CameraRadianceError::NumericalRange);
+        }
         let contact = path
             .last_contact()
             .ok_or(CameraRadianceError::NumericalRange)?;
@@ -62,7 +79,7 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
             return Ok(());
         }
         let emitted = emitter.spectrum.evaluate(beam.wavelength_nm())?;
-        if emitted == 0.0 {
+        if emitted == 0.0 || mis_weight == 0.0 {
             return Ok(());
         }
         if beam.power().i == 0.0 {
@@ -72,11 +89,23 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         }
         let local_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let ratio = self.initial_index / local_index;
-        let weight = finite_nonnegative(beam.power().i * (ratio * ratio))?;
-        let contribution = finite_nonnegative(emitted * weight)?;
-        if contribution == 0.0 {
-            return Err(CameraRadianceError::NumericalRange);
-        }
+        let weight = beam.power().i * (ratio * ratio);
+        let direct = (emitted * weight) * mis_weight;
+        let contribution = if direct.is_finite() && direct > 0.0 {
+            direct
+        } else {
+            // A small complementary weight can rescue an overflowing
+            // intermediate, and the camera prefix can rescue underflow.
+            let logarithm = fs_math::det::ln(emitted)
+                + fs_math::det::ln(beam.power().i)
+                + 2.0 * (fs_math::det::ln(self.initial_index) - fs_math::det::ln(local_index))
+                + fs_math::det::ln(mis_weight);
+            let value = fs_math::det::exp(logarithm);
+            if !value.is_finite() || value <= 0.0 {
+                return Err(CameraRadianceError::NumericalRange);
+            }
+            value
+        };
         self.radiance = finite_nonnegative(self.radiance + contribution)?;
         Ok(())
     }

@@ -10,6 +10,8 @@ use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::fixtures::SphereChart;
 use fs_geom::{Chart, NormalDifferential, Point3, Vec3};
 
+mod reverse_proposal;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>)) {
     let gate = CancelGate::new();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {

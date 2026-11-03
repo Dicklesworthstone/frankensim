@@ -165,6 +165,21 @@ impl CurvedPathResult {
     }
 }
 
+/// Native surface arrivals and sampled continuations for camera strategies.
+/// A departure retains the original proposal measure: `pdf` is a discrete
+/// probability when `delta`, otherwise a density in inverse steradians.
+/// Geometry, medium selection and random sampling remain owned by this walk.
+pub(super) enum CurvedTraceEvent<'a> {
+    Arrival(&'a CurvedPathResult),
+    Departure {
+        path: &'a CurvedPathResult,
+        incoming_beam: PolarizedBeam,
+        event: DielectricEvent,
+        pdf: f64,
+        delta: bool,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum CurvedSceneError {
     Scene(SceneError),
@@ -458,9 +473,35 @@ impl<'a> CurvedPolarizedScene<'a> {
         .map(|(path, _)| path)
     }
 
-    // Surface-only and participating paths share every interface, geometric
-    // departure, optical integral, and limit. A flight law supplies arc length;
-    // this driver alone decides whether a physical surface occurs before it.
+    /// Surface-only camera strategies may observe the original continuation
+    /// proposal after each successful scatter, without resampling the path.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_with_samples_events_mode(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+        radiance_brushing: bool,
+        observe_event: impl FnMut(CurvedTraceEvent<'_>) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedPathResult, CurvedSceneError> {
+        self.trace_with_flights_events(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            samples,
+            radiance_brushing,
+            observe_event,
+            0,
+            |_, _| Ok(None),
+            |_, _, _, _| Err(CurvedSceneError::NumericalRange),
+        )
+        .map(|(path, _)| path)
+    }
+
+    // Existing surface and molecular consumers observe arrivals only.
     #[allow(clippy::too_many_arguments)]
     fn trace_with_flights(
         &self,
@@ -468,9 +509,48 @@ impl<'a> CurvedPolarizedScene<'a> {
         beam: PolarizedBeam,
         initial_medium: usize,
         settings: CurvedTraceSettings,
-        mut samples: impl FnMut(u32) -> [f64; 3],
+        samples: impl FnMut(u32) -> [f64; 3],
         radiance_brushing: bool,
         mut observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+        max_volume_events: u32,
+        flight: impl FnMut(usize, f64) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
+        scatter: impl FnMut(
+            usize,
+            &CurvedPathResult,
+            [f64; 2],
+            f64,
+        ) -> Result<Option<PolarizedBeam>, CurvedSceneError>,
+    ) -> Result<(CurvedPathResult, u32), CurvedSceneError> {
+        self.trace_with_flights_events(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            samples,
+            radiance_brushing,
+            |event| match event {
+                CurvedTraceEvent::Arrival(path) => observe_surface(path),
+                CurvedTraceEvent::Departure { .. } => Ok(()),
+            },
+            max_volume_events,
+            flight,
+            scatter,
+        )
+    }
+
+    // Surface-only and participating paths share every interface, geometric
+    // departure, optical integral, and limit. A flight law supplies arc length;
+    // this driver alone decides whether a physical surface occurs before it.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_with_flights_events(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        mut samples: impl FnMut(u32) -> [f64; 3],
+        radiance_brushing: bool,
+        mut observe_event: impl FnMut(CurvedTraceEvent<'_>) -> Result<(), CurvedSceneError>,
         max_volume_events: u32,
         mut flight: impl FnMut(usize, f64) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
         mut scatter: impl FnMut(
@@ -690,8 +770,9 @@ impl<'a> CurvedPolarizedScene<'a> {
             // Emission belongs to the arriving path, before this surface's
             // reflection/transmission proposal or termination. Departure
             // witnesses prevent the same physical encounter being counted twice.
-            observe_surface(&result)?;
-            match binding.interaction {
+            observe_event(CurvedTraceEvent::Arrival(&result))?;
+            let incoming_beam = result.beam;
+            let (proposal_event, pdf, delta) = match binding.interaction {
                 Interaction::Detector { reference_axis } => {
                     result.beam = result.beam.with_reference_axis(reference_axis)?;
                     result.termination = PathTermination::Detected;
@@ -725,10 +806,11 @@ impl<'a> CurvedPolarizedScene<'a> {
                         break;
                     }
                     let draw = samples(event);
-                    result.beam = result
+                    let next = result
                         .beam
-                        .sample_depolarizing_diffuse(witness.normal, rho, [draw[0], draw[1]])?
-                        .beam;
+                        .sample_depolarizing_diffuse(witness.normal, rho, [draw[0], draw[1]])?;
+                    result.beam = next.beam;
+                    (DielectricEvent::Reflection, next.pdf_solid_angle, false)
                 }
                 Interaction::SmoothConductor { optics, medium } => {
                     if result.medium != medium {
@@ -744,6 +826,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         .reflect_conductor(witness.normal, &self.conductors[optics])
                         .map_err(SceneError::from)?
                         .beam;
+                    (DielectricEvent::Reflection, 1.0, true)
                 }
                 Interaction::RoughConductor {
                     optics,
@@ -773,6 +856,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         break;
                     };
                     result.beam = next.beam;
+                    (next.event, next.pdf, next.delta)
                 }
                 Interaction::BrushedConductor {
                     optics,
@@ -812,6 +896,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         break;
                     };
                     result.beam = next.beam;
+                    (next.event, next.pdf, next.delta)
                 }
                 interaction @ (Interaction::Dielectric {
                     outside, inside, ..
@@ -855,12 +940,20 @@ impl<'a> CurvedPolarizedScene<'a> {
                         result.medium_identity = self.medium_identity(target);
                     }
                     result.beam = next.beam;
+                    (next.event, next.pdf, next.delta)
                 }
-            }
+            };
             let outgoing = witness.normal.dot(result.beam.ray().dir);
             if !outgoing.is_finite() || outgoing == 0.0 {
                 return Err(CurvedSceneError::InvalidContact);
             }
+            observe_event(CurvedTraceEvent::Departure {
+                path: &result,
+                incoming_beam,
+                event: proposal_event,
+                pdf,
+                delta,
+            })?;
             departure = Some(GradientDeparture {
                 witness,
                 side: if outgoing > 0.0 {

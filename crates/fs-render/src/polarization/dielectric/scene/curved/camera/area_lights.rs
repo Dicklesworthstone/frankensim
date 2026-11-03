@@ -41,6 +41,9 @@ use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
+/// Reciprocal optical-image densities and complementary camera MIS weights.
+pub mod mis;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum AreaEmitterError {
     InvalidEmitter { object_id: u64 },

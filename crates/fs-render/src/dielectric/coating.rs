@@ -350,6 +350,13 @@ impl<'a> DielectricInterface<'a> {
         Ok(self.fresnel_polarized(cosine, eta_i, eta_t)?.scalar)
     }
 
+    /// Proposal probabilities for a response already evaluated by this exact
+    /// interface. Keep the native active-coating and bare-interface arithmetic
+    /// without evaluating the optical stack a second time.
+    pub(crate) fn event_probabilities(self, response: FresnelDielectric) -> [f64; 2] {
+        super::interface_event_probabilities(Some(self), response)
+    }
+
     /// Reflected and transmitted signed Mueller matrices in the native s/p frames.
     pub fn fresnel_polarized(
         self,
