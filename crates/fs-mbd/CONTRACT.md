@@ -1935,6 +1935,46 @@ reversal and second-order refinement, continuation, momentum symmetries,
 stationary identity, unresolved prescribed acceleration and all cancellation
 checkpoints.
 
+### Prescribed rigidly rotating supports
+
+`PointPlaneRattle::advance_rotating_plane` extends the same native solve to a
+plane rotating at a held world angular velocity about a translating pivot.
+`step::PlaneRigidMotion` declares the pivot, its held world velocity and the
+held world angular velocity. The pivot need not lie on the plane. The endpoint
+normal and plane point follow the original native quaternion rotation; the
+velocity constraint uses the actual source field `U + omega cross (x-c(t))`
+at the material point. The initial and final physical impulses use their own
+endpoint normals, with no position repair or substituted free-body dynamics.
+
+The receipt returns the endpoint plane and motion for continuation, reciprocal
+linear impulse, reciprocal angular impulse about the fixed INITIAL pivot,
+signed support work, and a separately paired relative-frame work defect.
+Prescribed motion supplies external momentum and power; no finite support
+inertia is inferred. Tangential surface motion contributes no frictionless
+normal work. Constraint work and source work are not relabeled as heat.
+
+Double-double geometry retains prescribed motion until physical admission.
+Actual material-point offsets use `(COM-origin)+arm_world`, and relative point
+velocities retain the separate native COM and spin components. A remote world
+origin or large common boost therefore cannot erase a short lever arm, local
+normal speed or torque. Both represented and pre-rounding prescribed endpoint
+gap/speed must pass the original tolerances; an unrepresentable moving pivot
+refuses rather than changing the source at continuation. Static/translating
+entry arithmetic remains unchanged, and stationary rigid motion recovers the
+original step within this admitted physical geometry domain.
+
+The original impulse, iteration and backtracking caps remain authoritative;
+both body and prescribed support travel must fit the local angular cap. The
+step owns no heap storage and cancellation or late refusal returns no state.
+This remains a smooth bilateral local branch, including tensile reactions,
+without unilateral contact, friction, a finite-inertia support, exact energy
+conservation or a global nonlinear-root certificate. The G0/G1/G3/G4 cases in
+`tests/rigid_rotating_plane.rs` cover an independently derived discrete
+point-mass solution, the continuous centrifugal trajectory and second-order
+refinement, reversal, full-inertia frame/boost covariance, P/L/source-work
+closure, stationary identity, remote-origin and hidden-spin failures, and
+every cancellation checkpoint.
+
 ## Distance between independent finite rigid bodies
 
 `rigid_rattle::distance::RigidDistanceConstraint::advance` evolves two independent

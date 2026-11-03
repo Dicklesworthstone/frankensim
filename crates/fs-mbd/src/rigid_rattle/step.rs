@@ -10,8 +10,8 @@
 //! impulse, with bounded recoil and angular travel. It refuses failure of this
 //! local solve instead of searching for a remote zero after a large rotation.
 //! This is a smooth bilateral constraint: tensile reactions are allowed. It
-//! also supports prescribed translation with constant normal acceleration.
-//! It supplies no unilateral contact, friction, impact or plane-rotation law.
+//! also supports prescribed translation and rigidly rotating plane supports.
+//! It supplies no unilateral contact, friction or impact law.
 //! The original free map is symmetric; this composition is second order on
 //! the locally connected smooth branch. Neither exact energy preservation nor
 //! symplecticity of the original implicit rigid-body map is claimed.
@@ -21,6 +21,10 @@ use crate::{
     DynamicsError, ImpulseReceipt, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
 };
 use fs_math::dd::Dd;
+
+#[path = "step/rotating.rs"]
+mod rotating;
+pub use rotating::{PlaneRigidMotion, RotatingPlaneStepReceipt};
 
 /// Work and local-branch limits, independent of the projector's gap/speed tolerances.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -154,7 +158,8 @@ impl PointPlaneRattle {
             duration_s,
             controls,
             self.plane_point_world_m,
-            [0.0; 2],
+            self.normal_world,
+            [PlaneSpeed::Normal(0.0); 2],
             cancelled,
         )
     }
@@ -245,7 +250,11 @@ impl PointPlaneRattle {
             duration_s,
             controls,
             plane_after.plane_point_world_m,
-            [initial_speed, final_speed],
+            plane_after.normal_world,
+            [
+                PlaneSpeed::Normal(initial_speed),
+                PlaneSpeed::Normal(final_speed),
+            ],
             &mut cancelled,
         )?;
         if (Dd::from_f64(step.final_gap_m) + Dd::from_f64(displacement_residual))
@@ -322,7 +331,8 @@ impl PointPlaneRattle {
         duration_s: f64,
         controls: PointPlaneStepControls,
         endpoint_plane: fs_ga::Vec3,
-        plane_speeds: [f64; 2],
+        endpoint_normal: fs_ga::Vec3,
+        plane_speeds: [PlaneSpeed; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PointPlaneStepReceipt, PointPlaneStepError> {
         poll(&mut cancelled)?;
@@ -348,20 +358,25 @@ impl PointPlaneRattle {
             wrench,
             duration_s,
             controls,
-            normal: native(self.normal_world),
+            initial_normal: native(self.normal_world),
+            normal: native(endpoint_normal),
             arm: native(self.point_body_m),
             plane_point: native(endpoint_plane),
             plane_speed: plane_speeds[1],
         };
-        let (gap, speed) =
-            problem.observables_at(state, native(self.plane_point_world_m), plane_speeds[0])?;
+        let (gap, speed) = problem.observables_at(
+            state,
+            native(self.plane_point_world_m),
+            problem.initial_normal,
+            plane_speeds[0],
+        )?;
         if gap.abs() > self.controls.position_tolerance_m
             || speed.abs() > self.controls.velocity_tolerance_mps
         {
             return Err(PointPlaneStepError::InitialConstraint);
         }
         let mobility = state
-            .directional_effective_mass(self.properties, problem.arm, problem.normal)?
+            .directional_effective_mass(self.properties, problem.arm, problem.initial_normal)?
             .inverse_mass_kg_inverse;
         let response = duration_s * mobility;
         if !response.is_finite() || response <= 0.0 {
@@ -452,10 +467,22 @@ struct Problem<'a> {
     wrench: Wrench,
     duration_s: f64,
     controls: PointPlaneStepControls,
+    initial_normal: Vec3,
     normal: Vec3,
     arm: Vec3,
     plane_point: Vec3,
-    plane_speed: f64,
+    plane_speed: PlaneSpeed,
+}
+
+#[derive(Clone, Copy)]
+enum PlaneSpeed {
+    // Keep the established stationary/translating arithmetic unchanged.
+    Normal(f64),
+    Rigid {
+        pivot: [Dd; 3],
+        velocity: Vec3,
+        angular_velocity: Vec3,
+    },
 }
 struct Trial {
     impulse: ImpulseReceipt,
@@ -464,18 +491,36 @@ struct Trial {
 }
 impl Problem<'_> {
     fn observables(&self, state: RigidBodyState) -> Result<(f64, f64), PointPlaneStepError> {
-        self.observables_at(state, self.plane_point, self.plane_speed)
+        self.observables_at(state, self.plane_point, self.normal, self.plane_speed)
     }
 
     fn observables_at(
         &self,
         state: RigidBodyState,
         plane_point: Vec3,
-        plane_speed: f64,
+        normal: Vec3,
+        plane_speed: PlaneSpeed,
     ) -> Result<(f64, f64), PointPlaneStepError> {
         let point = state.point_kinematics(self.constraint.properties, self.arm)?;
-        let gap = self.normal.dot(point.point_world.sub(plane_point));
-        let speed = self.normal.dot(point.point_velocity_world) - plane_speed;
+        let (gap, speed) = match plane_speed {
+            PlaneSpeed::Normal(value) => (
+                normal.dot(point.point_world.sub(plane_point)),
+                normal.dot(point.point_velocity_world) - value,
+            ),
+            PlaneSpeed::Rigid { .. } => (
+                rotating::gap(
+                    rotating::dd_vec(normal),
+                    state,
+                    point.arm_world,
+                    rotating::dd_vec(plane_point),
+                ),
+                rotating::relative_speed(
+                    rotating::dd_vec(normal),
+                    rotating::point_velocity(point),
+                    plane_speed.velocity_at(state, point),
+                ),
+            ),
+        };
         if !gap.is_finite() || !speed.is_finite() {
             return Err(PointPlaneStepError::Invalid("constraint gap or speed"));
         }
@@ -491,7 +536,7 @@ impl Problem<'_> {
         let impulse = self.state.apply_impulse_at_body_point(
             self.constraint.properties,
             self.arm,
-            self.normal.scale(impulse_ns),
+            self.initial_normal.scale(impulse_ns),
         )?;
         let moments = self.constraint.properties.principal_inertia_body();
         let minimum = moments.x.min(moments.y).min(moments.z);
