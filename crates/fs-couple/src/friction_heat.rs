@@ -52,6 +52,8 @@ pub mod articulated;
 
 /// Original adhesive junctions, simultaneous native recoil and finite-cell heat.
 pub mod adhesive;
+/// Native deformable cohesive reclosure, physical interface loss and finite heat.
+pub mod cohesive;
 /// Source-backed Hertz sliding/spin recoil and finite-cell temperature feedback.
 pub mod hertz;
 pub mod hertz_rolling;

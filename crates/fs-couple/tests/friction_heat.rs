@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 #[path = "friction_heat/entropy.rs"]
 mod entropy;
 
+#[path = "friction_heat/cohesive.rs"]
+mod cohesive;
+
 struct Sensible;
 impl ThermalLaw for Sensible {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {

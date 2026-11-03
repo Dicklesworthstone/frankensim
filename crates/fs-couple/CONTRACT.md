@@ -15661,6 +15661,45 @@ The scope remains frozen poses, supplied positive normal patches, matching finit
 Four G0/G1/G5 tests in `rigid_friction_heat_network.rs` cover an independently eliminated three-body/two-interface reference with shared middle-body mobility and shared finite heat capacity, retained second-step input permutation, source/budget/cancellation/competing-owner rollback and exact retry, and zero-friction hot-to-cold conduction. The reference interface temperatures are 304.69405993744004 K and 303.18187043010846 K; physical heats are 0.17343547971344292 J and 0.088803662273099 J. Tests admit 2e-7 K and 1e-9 J respectively. Four existing single-interface regressions also pass in the bounded native source-selected lane; this is not full workspace/DSR verification.
 
 
+### Deformable damaged adhesive joints and finite-body heat
+
+`friction_heat::cohesive::propose_deformable_cohesive_heat` advances the original
+`CohesiveMotion` once and routes its accepted per-patch physical friction and
+surviving-bond viscous losses into the original `FrictionHeatNetworkStep`.
+Every source-bound mechanical patch has exactly one distinct, matching-area
+thermal face. Original patch identity maps to canonical thermal link order;
+several faces may share a cell without duplicating its capacity or heat.
+The caller declares the fixed-reference face coincidence and original ordered
+surface/material correspondence, which a reduced cohesive jump map cannot infer.
+
+Both ends of each native straight normal-jump path must remain closed. The
+existing thermal route retains original geometry, materials, masses and surface
+coverage, checks its perfect-contact `k A/d` construction, and suppresses the
+replaced direct link once. Common face temperatures and signed hot-to-cold
+exchange are solved from endpoint conductivities and finite caloric laws. There
+is no prescribed heat share or added interface capacity. Fracture work stays in
+its original nonthermal account, and exact static friction contributes no heat.
+
+Mechanical coefficients are frozen for this split increment. Thermal Newton
+trials reuse the actual mechanical losses rather than rerunning the mechanics
+or its damage update. Source-temperature transfer remains explicit between
+increments; timestep refinement is required for thermal-feedback accuracy.
+Sub-resolution numerical enthalpy increments use the original resolvable-iterate
+projection while the physical residual still charges every source and flux.
+The native mechanical, thermal, per-face and combined
+`delta(K + U_bulk + U_bond + H) + D_fracture - W_applied - W_prescribed - Q_other`
+gates precede publication of both candidates. Late source, opening, domain,
+event, work-budget and cancellation refusals preserve both accepted owners.
+Moving coverage, bond thermal resistance/storage and simultaneous mechanical
+source-temperature feedback remain outside this fixed-reference split.
+
+Four native regressions in `tests/friction_heat/cohesive.rs` compare scalar
+momentum and independent finite-volume temperature balances, separate fracture
+from friction during growing damage, permute two unequal patch losses sharing a
+finite cell, and check static zero heat, continuation and late rollback.
+These are manufactured analytical references, not specimen calibration.
+
+
 ### Prepared articulated contacts and same-step finite-cell thermal feedback
 
 `friction_heat::articulated::propose_articulated_friction_heat` borrows the
