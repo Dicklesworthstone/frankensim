@@ -11,6 +11,9 @@ pub mod friction;
 /// Simultaneous normal impacts sharing the original rod and finite rigid body.
 pub mod multiple;
 
+/// Simultaneous normal and tangential impacts on the same native participants.
+pub mod friction_multiple;
+
 use super::impulse::{RodImpulseControls, RodImpulseReport, RodPointImpulse};
 use super::{
     RodMotion, RodMotionError, RodMotionInertia, add, checkpoint, cross, finite, rotate, sub,

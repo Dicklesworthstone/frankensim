@@ -22091,6 +22091,71 @@ native continuation, passivity refusal, budgets, cancellation, retry and no-ops.
 This extends the native flexible-body transfer in `frankensim-b8bxd.9.3` while
 keeping the existing contact owner responsible for the constitutive law.
 
+## Simultaneous rod and finite rigid-body Coulomb impacts
+
+`rod_motion::rigid_impact::friction_multiple` extends the original isolated
+frictional impact to a set sharing the same native `RodMotion` and the same
+finite `RigidBodyState`. `apply_rigid_frictional_impacts` consumes the published
+`RodRigidFrictionalContact`, `RodRigidFrictionalControls` and
+`RodRigidFrictionalError` contracts. The complete contact-major, normal-first
+`3N × 3N` Delassus matrix includes the original rod's full central tensor and
+eccentric material-point arms, the supported translational/rotational freedoms,
+same-node cross response, and every cross response through the shared rigid
+body's full tensor. Distinct rod nodes share the finite body; their nodal mass
+blocks do not acquire fictitious direct coupling during the instantaneous event.
+
+`fs-contact::frictional_multicontact` retains ownership of the non-associated
+Signorini–Coulomb law, Newton restitution, the bounded nonlinear solve, global
+passivity, numerical determinacy and total-work admission. All geometrically
+active witnesses participate, including initially separating contacts. The
+adapter returns the original solver receipt and complete original matrix;
+`UniqueVelocity` retains its range/work witnesses and does not authorize a
+unique local force, pressure or per-contact heat allocation. Unsupported,
+unresolved or nonunique original responses retain their original refusal.
+
+Accepted world point impulses enter one original rod point-impulse batch.
+Opposite body forces and central couples are compensated-summed and enter one
+original rigid momentum-impulse update. Each actual normal and tangent endpoint
+speed is reconstructed from the stored candidate states. The common native
+audit checks support-inclusive world linear/angular momentum, actual kinetic
+work, the original contact relative work and total impact dissipation before
+either candidate is returned. Any nonzero tangent impulse requires the
+original witness points to be collocated within the declared geometry bound;
+their actual separation still enters momentum admission. Stationary support
+reactions are retained and do zero work.
+
+The original contact cap is 21 witnesses / 63 scalar rows, further limited by
+the caller's contact and matrix budgets before allocation. Preparation uses
+`O(N²)` work/storage and `O(N)` prelowered inverse-inertia actions. Publication
+uses one native update per participant and `O(rod nodes + N)` rod work; it does
+not perform per-contact state copies, elastic/source evaluation or a new mass
+factorization. An all-zero solution preserves both native states without
+calling their impulse owners. Cancellation and any failed law, geometry,
+endpoint or balance check return no candidate. The event leaves configuration,
+material history, time and step count unchanged, and accepted states continue
+through the original time integrators. Collision search, gap repair, persistent
+friction, thermal partition and contact sets involving multiple finite rigid
+bodies remain separate contracts.
+
+The original rod point-impulse owner now keeps compensated per-node force,
+material-point moment and free-couple sums through the centroid shift and one
+final native momentum rounding. All prescribed, normal-contact and frictional
+batches share this behavior. Global momentum and work receipts use compensated
+reductions as well. Actual stored increments remain subject to the original
+per-node and aggregate transfer bounds; compensation does not admit unresolved
+kicks. Focused original-owner fixtures retain a small net force/couple across
+all six orderings of large cancelling impulses, verify eccentric mass and
+support reactions, and retain small physical work after large opposing nodal
+kinetic transfers. Scratch remains O(nodes), with O(nodes + impulses) work.
+
+Acceptance coverage includes isolated-API equivalence, analytic coupled
+stick/slip, an independent dense six-dimensional origin spatial-mass oracle,
+same-node and distinct-node contacts, full eccentric tensors, permutation and
+world/tangent-frame changes, supported and redundant contact sets, preservation
+of the original unresolved/nonunique refusal, initially separating and inactive
+witness response, native continuation, bounded work, cancellation, exact no-ops
+and atomic late refusal/retry.
+
 ## Source-backed ellipsoidal fluid carriers
 
 `material_immersed::RetainedFluidEllipsoids` binds one centered uniform

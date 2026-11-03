@@ -497,3 +497,235 @@ fn lost_parallel_impulses_refuse_while_small_resolved_transverse_work_is_retaine
     assert_eq!(state.time_s(), 0.0);
     assert_eq!(state.accepted_steps(), 0);
 }
+
+#[test]
+fn cancelling_point_impulses_retain_small_force_couple_and_eccentric_support_reactions() {
+    let gate = CancelGate::new();
+    let large = 18_014_398_509_481_984.0;
+    let small = RodPointImpulse {
+        node: 1,
+        point_body_m: [0.25, 0.125, -0.0625],
+        linear_world_n_s: [1.0 / 512.0, -1.0 / 1024.0, 1.0 / 2048.0],
+        couple_world_nm_s: [1.0 / 8192.0, -1.0 / 16384.0, 1.0 / 32768.0],
+    };
+    let positive = RodPointImpulse {
+        linear_world_n_s: [large, -0.5 * large, 0.25 * large],
+        couple_world_nm_s: [0.125 * large, -0.0625 * large, 0.03125 * large],
+        ..small
+    };
+    let negative = RodPointImpulse {
+        linear_world_n_s: positive.linear_world_n_s.map(|x| -x),
+        couple_world_nm_s: positive.couple_world_nm_s.map(|x| -x),
+        ..positive
+    };
+    assert_eq!((large + small.linear_world_n_s[0]) - large, 0.0);
+    let impulses = [positive, small, negative];
+    let node_moment = add(
+        cross(small.point_body_m, small.linear_world_n_s),
+        small.couple_world_nm_s,
+    );
+    let origin = [-0.25, 0.125, -0.0625];
+    for supported in [false, true] {
+        let source = if supported {
+            eccentric_source()
+                .with_supports(
+                    &[RodSupport {
+                        node: 1,
+                        position_m: [None, Some(0.0), None],
+                        frame: Some(So3::identity()),
+                    }],
+                    &gate,
+                )
+                .unwrap()
+        } else {
+            eccentric_source()
+        };
+        let model = Arc::new(
+            source
+                .into_spatial_motion_model(RodRootBoundary::Free, &gate)
+                .unwrap(),
+        );
+        let state = SpatialRodMotion::new_spatial(
+            model.clone(),
+            model.initial_pose(),
+            &[[0.0; 3]; 2],
+            &[[0.0; 3]; 2],
+            0.0,
+            1e-12,
+            &gate,
+        )
+        .unwrap();
+        let inertia = model.inertia()[1];
+        let center = inertia.center_of_mass_body_m();
+        let expected_linear = if supported {
+            [small.linear_world_n_s[0], 0.0, small.linear_world_n_s[2]]
+        } else {
+            small.linear_world_n_s
+        };
+        let central_offset = cross(center, small.linear_world_n_s);
+        let expected_spin = if supported {
+            [0.0; 3]
+        } else {
+            std::array::from_fn(|c| node_moment[c] - central_offset[c])
+        };
+        let support_force = if supported {
+            [0.0, -small.linear_world_n_s[1], 0.0]
+        } else {
+            [0.0; 3]
+        };
+        let support_couple = if supported {
+            add(node_moment.map(|x| -x), cross(center, expected_linear))
+        } else {
+            [0.0; 3]
+        };
+        // Independently solve the original six-dimensional material-node mass
+        // matrix. The supported case has a clamped frame and one blocked axis.
+        let mut velocity_jump = [
+            node_moment[0],
+            node_moment[1],
+            node_moment[2],
+            small.linear_world_n_s[0],
+            small.linear_world_n_s[1],
+            small.linear_world_n_s[2],
+        ];
+        let energy = if supported {
+            expected_linear.into_iter().map(|x| x * x).sum::<f64>() / (2.0 * inertia.mass_kg())
+        } else {
+            let tensor = inertia.inertia_com_body_kg_m2();
+            let spatial = fs_mbd::articulated::SpatialInertia::new(
+                inertia.mass_kg(),
+                Vec3::new(center[0], center[1], center[2]),
+                Mat3 {
+                    m: std::array::from_fn(|i| tensor[i / 3][i % 3]),
+                },
+            )
+            .unwrap()
+            .matrix()
+            .unwrap();
+            fs_la::factor::lu(&spatial.m, 6)
+                .unwrap()
+                .solve(&mut velocity_jump);
+            (0..3)
+                .map(|c| {
+                    0.5 * (node_moment[c] * velocity_jump[c]
+                        + small.linear_world_n_s[c] * velocity_jump[c + 3])
+                })
+                .sum()
+        };
+        let arm = std::array::from_fn(|c| state.pose().positions_m[1][c] - origin[c]);
+        let world_moment = add(cross(arm, small.linear_world_n_s), node_moment);
+        for order in [
+            [0, 1, 2],
+            [2, 1, 0],
+            [1, 0, 2],
+            [1, 2, 0],
+            [0, 2, 1],
+            [2, 0, 1],
+        ] {
+            let batch = order.map(|i| impulses[i]);
+            let (next, report) = state
+                .apply_point_impulses(&batch, impulse_controls(origin), &gate)
+                .unwrap();
+            vector_near(next.linear_momenta_kg_m_s()[1], expected_linear, 1e-15);
+            vector_near(next.body_spins_kg_m2_s()[1], expected_spin, 1e-15);
+            vector_near(
+                report.applied_linear_impulse_n_s,
+                small.linear_world_n_s,
+                1e-15,
+            );
+            vector_near(report.applied_angular_impulse_nm_s, world_moment, 1e-15);
+            vector_near(report.support_impulses[1].linear_n_s, support_force, 1e-15);
+            vector_near(
+                report.support_impulses[1].angular_nm_s,
+                support_couple,
+                1e-15,
+            );
+            vector_near(report.linear_balance_residual_n_s, [0.0; 3], 1e-15);
+            vector_near(report.angular_balance_residual_nm_s, [0.0; 3], 1e-15);
+            near(report.applied_work_j, energy, 1e-12);
+            near(report.kinetic_energy_change_j, energy, 1e-12);
+            near(report.energy_residual_j, 0.0, 1e-15);
+            if !supported {
+                vector_near(
+                    next.velocities_m_s().unwrap()[1],
+                    [velocity_jump[3], velocity_jump[4], velocity_jump[5]],
+                    1e-12,
+                );
+                vector_near(
+                    next.angular_velocities_body_rad_s().unwrap()[1],
+                    [velocity_jump[0], velocity_jump[1], velocity_jump[2]],
+                    1e-12,
+                );
+            }
+            assert_eq!(next.pose(), state.pose());
+            assert_eq!(next.time_s(), state.time_s());
+            assert_eq!(next.accepted_steps(), state.accepted_steps());
+        }
+    }
+}
+
+#[test]
+fn cancelling_nodal_work_retains_the_small_physical_kinetic_transfer() {
+    let gate = CancelGate::new();
+    let model = Arc::new(
+        SpatialMaterialRod::try_straight(2.0, vec![section(1.0); 2])
+            .unwrap()
+            .into_motion_model(RodRootBoundary::Free, &gate)
+            .unwrap(),
+    );
+    let initial = RodMotion::new(
+        model.clone(),
+        model.initial_pose(),
+        &[[0.0; 3]; 3],
+        &[[0.0; 3]; 3],
+        0.0,
+        &gate,
+    )
+    .unwrap();
+    assert_eq!(model.inertia()[0].mass_kg(), model.inertia()[2].mass_kg());
+    let large = 67_108_864.0;
+    let small = 0.125;
+    let load = RodPointImpulse {
+        node: 2,
+        point_body_m: [0.0; 3],
+        linear_world_n_s: [large, 0.0, 0.0],
+        couple_world_nm_s: [0.0; 3],
+    };
+    let (state, _) = initial
+        .apply_point_impulses(&[load], impulse_controls([0.0; 3]), &gate)
+        .unwrap();
+    let (next, report) = state
+        .apply_point_impulses(
+            &[
+                RodPointImpulse { node: 0, ..load },
+                RodPointImpulse {
+                    node: 1,
+                    linear_world_n_s: [small, 0.0, 0.0],
+                    ..load
+                },
+                RodPointImpulse {
+                    linear_world_n_s: [-large, 0.0, 0.0],
+                    ..load
+                },
+            ],
+            impulse_controls([0.0; 3]),
+            &gate,
+        )
+        .unwrap();
+    let energy = 0.5 * small * small / model.inertia()[1].mass_kg();
+    near(report.applied_work_j, energy, 1e-12);
+    near(report.kinetic_energy_change_j, energy, 1e-12);
+    near(report.energy_residual_j, 0.0, 1e-15);
+    vector_near(
+        report.actual_linear_momentum_change_kg_m_s,
+        [small, 0.0, 0.0],
+        0.0,
+    );
+    vector_near(next.linear_momenta_kg_m_s()[0], [large, 0.0, 0.0], 0.0);
+    vector_near(next.linear_momenta_kg_m_s()[1], [small, 0.0, 0.0], 0.0);
+    vector_near(next.linear_momenta_kg_m_s()[2], [0.0; 3], 0.0);
+    assert!(
+        ((report.after.kinetic_energy_j - report.before.kinetic_energy_j) - energy).abs()
+            > 0.5 * energy
+    );
+}
