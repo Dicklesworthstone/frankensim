@@ -136,6 +136,144 @@ fn uniform_incident_field_matches_the_legacy_solve_exactly() {
 }
 
 #[test]
+fn uniform_flow_and_explicit_incident_have_identical_wash_and_crossflow_physics() {
+    let (panels, strips) = biplane();
+    let velocity = [12.0, 3.0, 1.2];
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let incident = vec![velocity; strips.len()];
+    let wash: Vec<_> = (0..strips.len())
+        .map(|s| 0.4 + (s % 8) as f64 * 0.3)
+        .collect();
+    for increments in [None, Some(wash.as_slice())] {
+        let uniform = solve_nonlinear(
+            &op,
+            &panels,
+            &strips,
+            velocity,
+            RHO,
+            &camber_closure,
+            increments,
+            None,
+        )
+        .unwrap();
+        let explicit = solve_nonlinear_with_incident(
+            &op,
+            &panels,
+            &strips,
+            velocity,
+            RHO,
+            &camber_closure,
+            &incident,
+            increments,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            uniform, explicit,
+            "input representation changed the physics"
+        );
+    }
+}
+
+#[test]
+fn constant_section_load_uses_washed_chord_plane_dynamic_pressure() {
+    // Prescribed cl isolates dimensional loading from induced incidence.
+    // The independent oracle is q*S*cl*cos(alpha), using washed chord-plane
+    // speed. Spanwise flow must not increase section dynamic pressure.
+    let (panels, strips) = biplane();
+    let velocity = [10.0, 7.0, 2.0];
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let wash: Vec<_> = (0..strips.len()).map(|s| (s % 8) as f64 * 0.5).collect();
+    for cl in [-0.4, 0.6] {
+        let section = |_: usize, _: f64| (cl, StripRegime::Attached);
+        let solution = solve_nonlinear(
+            &op,
+            &panels,
+            &strips,
+            velocity,
+            RHO,
+            &section,
+            Some(&wash),
+            None,
+        )
+        .unwrap();
+        let mut expected_lift = 0.0;
+        for (s, strip) in strips.iter().enumerate() {
+            let u = velocity[0] + wash[s];
+            let speed = u.hypot(velocity[2]);
+            let circulation: f64 = strip.panel_indices.iter().map(|&j| solution.gamma[j]).sum();
+            let expected_circulation = -0.5 * speed * strip.chord_m * cl;
+            assert!((circulation - expected_circulation).abs() < 1e-9);
+            let width = panels[strip.panel_indices[0]].width_m;
+            let dynamic_pressure = 0.5 * RHO * speed * speed;
+            expected_lift += dynamic_pressure * strip.chord_m * width * cl * (u / speed);
+        }
+        assert!(
+            (solution.total_lift_n - expected_lift).abs() < expected_lift.abs() * 1e-9,
+            "{} != {expected_lift}",
+            solution.total_lift_n
+        );
+    }
+}
+
+#[test]
+fn uniform_wash_and_density_admission_matches_the_physical_flow_domain() {
+    let (panels, strips) = biplane();
+    let velocity = freestream(0.08);
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    for decrement in [-velocity[0], -2.0 * velocity[0]] {
+        let wash = vec![decrement; strips.len()];
+        assert_eq!(
+            solve_nonlinear(
+                &op,
+                &panels,
+                &strips,
+                velocity,
+                RHO,
+                &camber_closure,
+                Some(&wash),
+                None,
+            )
+            .unwrap_err()
+            .code,
+            "incident-flow-invalid"
+        );
+    }
+    for density in [0.0, -RHO, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            solve_nonlinear(
+                &op,
+                &panels,
+                &strips,
+                velocity,
+                density,
+                &camber_closure,
+                None,
+                None,
+            )
+            .unwrap_err()
+            .code,
+            "freestream-invalid"
+        );
+    }
+    assert_eq!(
+        solve_nonlinear(
+            &op,
+            &panels,
+            &strips[1..],
+            velocity,
+            RHO,
+            &camber_closure,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .code,
+        "strips-invalid"
+    );
+}
+
+#[test]
 fn nonuniform_vertical_incident_flow_changes_real_strip_loading_and_mirrors() {
     let (panels, strips) = biplane();
     let velocity = freestream(0.05);

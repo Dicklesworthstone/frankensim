@@ -162,9 +162,15 @@ impl InfluenceOperator {
 
 /// The warm-started safeguarded nonlinear solve.
 ///
+/// Uniform freestream supplies the incident velocity of every strip. Axial
+/// wash is added to its x component before computing incidence, chord-plane
+/// speed, circulation and force, exactly as in the explicit-incident entry.
+///
 /// # Errors
 /// `influence-operator-stale` (panels/freestream no longer match the
 /// operator's geometry hash — the reuse rule); `strips-invalid`;
+/// `freestream-invalid` (nonpositive/nonfinite density);
+/// `incident-flow-invalid` (invalid/reversed washed chordwise flow);
 /// `nonlinear-did-not-converge` (iteration cap or relaxation floor hit;
 /// the message reports residual/ω/iterations — never a silent fallback
 /// to the linear answer).
@@ -297,6 +303,13 @@ fn solve_nonlinear_impl(
             "rebuild the operator — canard deflection, warp, attitude, or images changed it",
         ));
     }
+    if section_frames.is_none() && (!rho.is_finite() || rho <= 0.0) {
+        return Err(refuse(
+            "freestream-invalid",
+            format!("density {rho} must be finite and positive"),
+            "supply air density in kg/m^3",
+        ));
+    }
     let n = panels.len();
     if n > MAX_PANELS {
         return Err(refuse("panel-count-invalid", format!("{n}"), "cap"));
@@ -312,7 +325,11 @@ fn solve_nonlinear_impl(
     }
     let mut owned = vec![false; n];
     for s in strips {
-        if s.panel_indices.is_empty() || !(s.chord_m > 0.0) || !s.twist_rad.is_finite() {
+        if s.panel_indices.is_empty()
+            || !s.chord_m.is_finite()
+            || !(s.chord_m > 0.0)
+            || !s.twist_rad.is_finite()
+        {
             return Err(refuse(
                 "strips-invalid",
                 "empty strip or bad chord/twist".into(),
@@ -329,6 +346,13 @@ fn solve_nonlinear_impl(
             }
             owned[i] = true;
         }
+    }
+    if strips.is_empty() || owned.iter().any(|v| !v) {
+        return Err(refuse(
+            "strips-invalid",
+            "every panel must belong to exactly one nonempty strip".into(),
+            "supply the complete strip ownership before applying section forces",
+        ));
     }
     if let Some(frames) = section_frames {
         if frames.len() != strips.len() || strip_incident_mps.is_none() {
@@ -360,7 +384,6 @@ fn solve_nonlinear_impl(
         freestream[1] / vmag,
         freestream[2] / vmag,
     ];
-    let alpha_free = det::atan2(freestream[2], freestream[0]);
     if let Some(du) = strip_du_axial
         && (du.len() != strips.len() || !du.iter().all(|v| v.is_finite()))
     {
@@ -370,39 +393,37 @@ fn solve_nonlinear_impl(
             "one finite axial increment per strip (prop slipstream)",
         ));
     }
-    let local_velocity = if let Some(incident) = strip_incident_mps {
-        if incident.len() != strips.len() || strips.is_empty() || owned.iter().any(|v| !v) {
-            return Err(refuse(
-                "incident-flow-invalid",
-                "one incident velocity per strip and complete panel ownership are required".into(),
-                "sample every owning strip at the same physical tick",
-            ));
-        }
-        let mut local = Vec::with_capacity(strips.len());
-        for (s, velocity) in incident.iter().enumerate() {
-            let mut velocity = *velocity;
-            if section_frames.is_none() {
-                velocity[0] += strip_du_axial.map_or(0.0, |du| du[s]);
-                let speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
-                if !velocity.iter().all(|v| v.is_finite())
-                    || velocity[0] <= 0.0
-                    || !(speed > 0.0 && speed.is_finite())
-                {
-                    return Err(refuse(
-                        "incident-flow-invalid",
-                        format!("strip {s} has invalid/reversed chordwise flow {velocity:?}"),
-                        "this section model requires finite positive chordwise relative flow",
-                    ));
-                }
+    if strip_incident_mps.is_some_and(|incident| incident.len() != strips.len()) {
+        return Err(refuse(
+            "incident-flow-invalid",
+            "one incident velocity per strip is required".into(),
+            "sample every owning strip at the same physical tick",
+        ));
+    }
+    // Uniform and explicit incident inputs share one local-flow owner. Wash
+    // changes the chordwise component, never the three-dimensional speed
+    // norm; section incidence and the returned force must use that same flow.
+    let mut local_velocity = Vec::with_capacity(strips.len());
+    for s in 0..strips.len() {
+        let mut velocity = strip_incident_mps.map_or(freestream, |incident| incident[s]);
+        if section_frames.is_none() {
+            velocity[0] += strip_du_axial.map_or(0.0, |du| du[s]);
+            let speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
+            if !velocity.iter().all(|v| v.is_finite())
+                || velocity[0] <= 0.0
+                || !(speed > 0.0 && speed.is_finite())
+            {
+                return Err(refuse(
+                    "incident-flow-invalid",
+                    format!("strip {s} has invalid/reversed chordwise flow {velocity:?}"),
+                    "this section model requires finite positive chordwise relative flow",
+                ));
             }
-            // The framed lane admits the complete vector once below, while
-            // preparing the reusable angle derivative and section speed.
-            local.push(velocity);
         }
-        Some(local)
-    } else {
-        None
-    };
+        // Framed flow is already complete; its local forward direction is
+        // admitted below and need not have a positive global x component.
+        local_velocity.push(velocity);
+    }
     // All incident values and vortex geometry are fixed during this solve.
     // Cache the expensive Biot–Savart coefficients once; the Picard loop
     // retains the original gamma[j] * coefficient[j] accumulation order.
@@ -417,7 +438,7 @@ fn solve_nonlinear_impl(
             (front.a[2] + front.b[2]) / 2.0,
         ];
         let framed_flow = section_frames
-            .map(|frames| frames[s].flow(local_velocity.as_ref().unwrap()[s]))
+            .map(|frames| frames[s].flow(local_velocity[s]))
             .transpose()?;
         downwash.push(
             panels
@@ -434,18 +455,9 @@ fn solve_nonlinear_impl(
         section_flow.push(if let Some(flow) = framed_flow {
             (flow.incidence_rad, flow.speed_mps, flow.speed_mps)
         } else {
-            match &local_velocity {
-                Some(local) => {
-                    let v = local[s];
-                    let speed = (v[0] * v[0] + v[2] * v[2]).sqrt();
-                    (det::atan2(v[2], v[0]), speed, speed)
-                }
-                None => (
-                    alpha_free,
-                    vmag,
-                    vmag + strip_du_axial.map_or(0.0, |du| du[s]),
-                ),
-            }
+            let v = local_velocity[s];
+            let speed = (v[0] * v[0] + v[2] * v[2]).sqrt();
+            (det::atan2(v[2], v[0]), speed, speed)
         });
     }
     // Row-split ratios from the linear solution; strip totals start from
@@ -693,9 +705,7 @@ fn solve_nonlinear_impl(
     let mut total = 0.0;
     let mut total_force_n = [0.0; 3];
     for (j, p) in panels.iter().enumerate() {
-        let freestream = local_velocity
-            .as_ref()
-            .map_or(freestream, |local| local[panel_strip[j]]);
+        let freestream = local_velocity[panel_strip[j]];
         let seg = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
         // Statement-split (guzez.7.2.1): no within-expression
         // mul-sub/mul-add for LLVM to contract into FMA.

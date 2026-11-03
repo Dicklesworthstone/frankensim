@@ -109,6 +109,17 @@ ownership refuse. The reference freestream still defines common straight
 trailing legs and linear chordwise row ratios: this is quasi-steady strip gust
 loading, without chord-resolved unsteady gust memory.
 
+The compact uniform `solve_nonlinear` entry now uses that same local-flow
+owner. Its scalar wash changes the x component before section incidence,
+chord-plane speed, circulation and Kutta–Joukowsky force are evaluated. A
+uniform vector and its repeated explicit-strip representation produce identical
+reports, including nonzero spanwise flow and unequal wash. Finite positive
+density/chords, complete strip ownership and positive local chordwise flow are
+required. Independent signed constant-Cl tests recover the washed `q S Cl`
+force and exclude spanwise speed from section pressure. Explicit physical
+section frames retain their own forward-direction admission and complete-vector
+wash convention.
+
 Both nonlinear entry points cache immutable strip/panel Biot–Savart coefficients
 once per solve and reuse iteration scratch, retaining the original product/sum
 order. `nonlinear_battery` adds uniform exact-equivalence, mirrored nonuniform

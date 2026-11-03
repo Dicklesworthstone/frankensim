@@ -141,8 +141,9 @@ pub struct CoupledStep<P = BemtPower> {
     /// Accepted effective section incidences [rad], including twist and the
     /// wing solver's trailing-sheet induction. Paired with `gamma`.
     pub strip_alpha_eff_rad: Vec<f64>,
-    /// Accepted local strip velocities including prop wash in distributed
-    /// mode; force assembly must use these with `gamma`. Legacy mode is None.
+    /// Accepted local strip velocities including prop wash. Both compact
+    /// uniform and explicit incident inputs return `Some`; force assembly
+    /// must use these with `gamma`, not the next `w_slip` predictor.
     pub strip_velocity_mps: Option<Vec<[f64; 3]>>,
     /// Correction attempts used, including a rejected trial and its retry.
     pub corrections: u32,
@@ -252,7 +253,7 @@ pub fn coupled_prop_airframe_step(
 /// `T = 2 rho A vi (V_disk + vi)`; strip wash is `wash_factor * vi`.
 /// Local section incidence, circulation, and returned force velocities all
 /// receive this same wash. Both loading modes use the disk-induced velocity
-/// convention; the ordinary path retains its freestream-force approximation.
+/// convention and return the accepted washed force velocities.
 /// Each disk must meet its own relative convergence tolerance, so a strongly
 /// loaded disk cannot hide an unconverged weak disk. The momentum root uses
 /// its rationalized form to retain small nonzero induction at weak loading.
@@ -517,21 +518,16 @@ fn coupled_step_with_rotors<P: Copy>(
                 };
             }
             let axial = disk_incident[0];
-            let v_disk = if incident.is_some() {
-                let net = spatial.map_or(axial + vi[0], |axes| axes.axial(k, disk_incident, vi));
-                if !net.is_finite() || net < 0.0 {
-                    return Err(Refusal {
-                        code: "disk-inflow-invalid",
-                        message: format!("disk {k} has reversed/non-finite axial inflow {net}"),
-                        ranked_repairs: vec![
-                            "the axial BEMT model does not admit reversed inflow".into(),
-                        ],
-                    });
-                }
-                net
-            } else {
-                (axial + vi[0]).max(0.1)
-            };
+            let v_disk = spatial.map_or(axial + vi[0], |axes| axes.axial(k, disk_incident, vi));
+            if !v_disk.is_finite() || v_disk < 0.0 {
+                return Err(Refusal {
+                    code: "disk-inflow-invalid",
+                    message: format!("disk {k} has reversed/non-finite axial inflow {v_disk}"),
+                    ranked_repairs: vec![
+                        "the axial BEMT model does not admit reversed inflow".into(),
+                    ],
+                });
+            }
             let sol = rotor_solve(k, v_disk, disks[k].omega_rad_s)?;
             thrust[k] = sol.thrust_n;
             torque[k] = sol.torque_nm;
@@ -570,26 +566,44 @@ fn coupled_step_with_rotors<P: Copy>(
                 wing_lift_n: wing.total_lift_n,
                 gamma: wing.gamma,
                 strip_alpha_eff_rad: wing.alpha_eff_rad,
-                strip_velocity_mps: incident.map(|flow| {
-                    flow.strip_velocity_mps
-                        .iter()
-                        .zip(&wash)
-                        .map(|(velocity, factors)| {
+                strip_velocity_mps: Some(
+                    wash.iter()
+                        .enumerate()
+                        .map(|(s, factors)| {
+                            let velocity =
+                                incident.map_or(freestream, |flow| flow.strip_velocity_mps[s]);
                             if let Some(axes) = spatial {
-                                return axes.velocity(*velocity, *factors, x);
+                                return axes.velocity(velocity, *factors, x);
                             }
-                            let mut velocity = *velocity;
+                            let mut velocity = velocity;
                             // `gamma` belongs to the evaluated x, not the next
                             // predictor g returned as the warm-start state.
                             velocity[0] += strip_wash(*factors, x);
                             velocity
                         })
-                        .collect()
-                }),
+                        .collect(),
+                ),
                 corrections,
                 residual: res,
                 spec_digest: {
-                    let base = spatial.map_or_else(|| spec.digest(), |axes| axes.digest(spec));
+                    let base = spatial.map_or_else(
+                        || {
+                            let digest = spec.digest();
+                            if incident.is_some() {
+                                digest
+                            } else {
+                                // Compact input now uses the same local-flow
+                                // physics and physical disk admission. Preserve
+                                // the already-correct explicit-flow identity.
+                                hash_domain(
+                                    "org.frankensim.fs-flyer.uniform-prop-coupling.v1",
+                                    digest.as_bytes(),
+                                )
+                                .to_hex()
+                            }
+                        },
+                        |axes| axes.digest(spec),
+                    );
                     match section_frames {
                         None => base,
                         Some(frames) => {

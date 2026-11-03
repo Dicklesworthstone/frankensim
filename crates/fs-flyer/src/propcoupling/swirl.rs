@@ -53,8 +53,9 @@ impl CoupledSwirlStep {
 /// Select native axial AND angular BEMT in the existing two-way iteration.
 ///
 /// `axes=None` retains body-x wash; supplied axes select the existing spatial
-/// disk-overlap/vector-wash geometry. Distributed incident flow is mandatory,
-/// so reversed disk inflow cannot be hidden by the legacy speed floor.
+/// disk-overlap/vector-wash geometry. Distributed incident flow supplies the
+/// explicit strip and disk velocities; shared admission refuses reversed or
+/// nonfinite disk inflow.
 /// The original correction cap, trial rejection, relaxation arithmetic and
 /// per-disk acceptance remain. A rejected outer trial never becomes a new
 /// station-branch anchor: all rotor calls use the caller's fixed seed.

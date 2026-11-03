@@ -1040,6 +1040,20 @@ physical convention; candidate tuples, acceptance tolerances and budgets are
 unchanged. The independent native regression reconstructs mass-flux thrust and
 the washed wing circulation, and rejects a second halving of the wash.
 
+The compact uniform coupling entry also uses washed local incidence, chord-plane
+speed and force, and returns `Some(strip_velocity_mps)` from its accepted
+evaluation. These velocities reconstruct the returned circulation exactly; the
+next `w_slip` predictor must not replace them. Uniform disk inflow is the actual
+incident-plus-wing-induced axial velocity, with no 0.1 m/s floor. Small positive
+inflow reaches native BEMT unchanged, zero remains admitted, and reversed or
+nonfinite inflow refuses. Its result identity is scoped to
+`uniform-prop-coupling.v1`; the already-correct explicit, spatial and framed
+identities are preserved. The compact coupling golden changes to `0a50ecad...`
+under the unchanged 350 RPM fixture. Independent mass-flux, accepted-flow,
+uniform/explicit equivalence, 0.05 m/s BEMT and actual vortex-induced reversal
+tests cover the correction. The scalar-density native 120-tick startup scenario
+retains `8d87ebbb...`; material and WebAssembly qualification are separate.
+
 The aircraft force assembly always evaluates Kutta–Joukowsky and profile loads
 with those same accepted local strip velocities. Ordinary zero-rate loads and
 trim also use this consistent local field, keeping the force law continuous

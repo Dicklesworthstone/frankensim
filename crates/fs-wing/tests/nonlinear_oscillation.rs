@@ -92,10 +92,11 @@ fn final_mismatch(
     wash: &[f64],
     result: &NonlinearReport,
 ) -> f64 {
-    let speed = dot(freestream, freestream).sqrt();
-    let incidence = det::atan2(freestream[2], freestream[0]);
     let mut worst = 0.0f64;
     for (s, strip) in strips.iter().enumerate() {
+        let chordwise = freestream[0] + wash[s];
+        let speed = chordwise.hypot(freestream[2]);
+        let incidence = det::atan2(freestream[2], chordwise);
         let front = panels[strip.panel_indices[0]];
         let point = core::array::from_fn(|i| 0.5 * (front.a[i] + front.b[i]));
         let complete = induced_velocity_free(point, panels, &result.gamma, freestream)[2];
@@ -107,7 +108,7 @@ fn final_mismatch(
         let alpha = incidence + strip.twist_rad + (complete - bound) / speed;
         let (cl, regime) = closure(s, alpha);
         assert_eq!(regime, result.regimes[s]);
-        let target = -0.5 * (speed + wash[s]) * strip.chord_m * cl;
+        let target = -0.5 * speed * strip.chord_m * cl;
         let actual: f64 = strip.panel_indices.iter().map(|&j| result.gamma[j]).sum();
         worst = worst.max((target - actual).abs() / (actual.abs() + 1e-9));
     }
@@ -144,7 +145,7 @@ fn verify_frozen_launch(freestream: [f64; 3], increment: f64) {
     assert!(solved.residual < GAMMA_TOL);
     assert!(
         recomputed < GAMMA_TOL,
-        "accepted circulation must satisfy the unchanged actual closure"
+        "accepted circulation must satisfy the closure in the actual washed local flow"
     );
     assert!(solved.regimes.iter().all(|&r| r == StripRegime::Attached));
     assert_eq!(

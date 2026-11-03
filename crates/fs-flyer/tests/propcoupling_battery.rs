@@ -130,7 +130,7 @@ fn ordinary_wash_reconstructs_disk_induction_without_a_second_half_factor() {
     for k in 0..2 {
         let induced =
             fs_wing::induced_velocity_free(disks[k].center_m, &panels, &coupled.gamma, velocity);
-        let disk_inflow = (velocity[0] + induced[0]).max(0.1);
+        let disk_inflow = velocity[0] + induced[0];
         let vi = coupled.w_slip[k];
         // Independent mass-flux × far-wake velocity increment. The returned
         // momentum root is already vi, which is half the far-wake increment.
@@ -181,6 +181,176 @@ fn ordinary_wash_reconstructs_disk_induction_without_a_second_half_factor() {
         (double_halved.total_lift_n - coupled.wing_lift_n).abs() > 0.2,
         "the native fixture must detect an extra factor 1/2 in momentum transfer"
     );
+}
+
+#[test]
+fn compact_uniform_loading_returns_the_accepted_local_force_state() {
+    let (panels, strips) = wing_setup();
+    let velocity = freestream();
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let rotor = rotor_1903();
+    let disks = disks();
+    let solve = || {
+        coupled_prop_airframe_step(
+            &op,
+            &panels,
+            &strips,
+            &camber_closure,
+            &rotor,
+            &disks,
+            velocity,
+            RHO,
+            &CANDIDATE_B,
+            None,
+        )
+        .unwrap()
+    };
+    let coupled = solve();
+    let accepted = coupled.strip_velocity_mps.as_ref().unwrap();
+    assert_eq!(accepted.len(), strips.len());
+    assert!(accepted.iter().any(|v| v[0] > velocity[0] + 0.01));
+    let physical = fs_wing::nonlinear::solve_nonlinear_with_incident(
+        &op,
+        &panels,
+        &strips,
+        velocity,
+        RHO,
+        &camber_closure,
+        accepted,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(physical.gamma, coupled.gamma);
+    assert_eq!(physical.alpha_eff_rad, coupled.strip_alpha_eff_rad);
+    assert_eq!(physical.total_lift_n, coupled.wing_lift_n);
+    assert_ne!(coupled.spec_digest, CANDIDATE_B.digest());
+    assert_eq!(coupled, solve());
+}
+
+#[test]
+fn compact_uniform_and_explicit_incident_solve_the_same_two_way_equations() {
+    let (panels, strips) = wing_setup();
+    let velocity = [12.0, 2.0, 1.2];
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let rotor = rotor_1903();
+    let disks = disks();
+    let local = vec![velocity; strips.len()];
+    let spec = PropCouplingSolverSpec {
+        tol: 1e-11,
+        ..CANDIDATE_B
+    };
+    let compact = coupled_prop_airframe_step(
+        &op,
+        &panels,
+        &strips,
+        &camber_closure,
+        &rotor,
+        &disks,
+        velocity,
+        RHO,
+        &spec,
+        None,
+    )
+    .unwrap();
+    let explicit = coupled_prop_airframe_step_with_incident(
+        &op,
+        &panels,
+        &strips,
+        &camber_closure,
+        &rotor,
+        &disks,
+        velocity,
+        RHO,
+        &spec,
+        None,
+        IncidentInflow {
+            strip_velocity_mps: &local,
+            disk_velocity_mps: [velocity; 2],
+        },
+    )
+    .unwrap();
+    // Their original acceptance norms differ; both must solve the same roots.
+    for (x, y) in compact.gamma.iter().zip(&explicit.gamma) {
+        assert!((x - y).abs() < 1e-8);
+    }
+    for k in 0..2 {
+        assert!((compact.thrust_n[k] - explicit.thrust_n[k]).abs() < 1e-8);
+        assert!((compact.torque_nm[k] - explicit.torque_nm[k]).abs() < 1e-8);
+    }
+    assert!((compact.wing_lift_n - explicit.wing_lift_n).abs() < 1e-7);
+    assert_eq!(explicit.spec_digest, spec.digest());
+}
+
+#[test]
+fn compact_uniform_small_positive_disk_inflow_is_not_floored() {
+    let (panels, strips) = wing_setup();
+    let velocity = [0.05, 0.0, 0.0];
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let section = |_: usize, _: f64| (0.0, fs_wing::nonlinear::StripRegime::Attached);
+    let rotor = rotor_1903();
+    let disks = disks();
+    let result = coupled_prop_airframe_step(
+        &op,
+        &panels,
+        &strips,
+        &section,
+        &rotor,
+        &disks,
+        velocity,
+        RHO,
+        &CANDIDATE_B,
+        None,
+    )
+    .unwrap();
+    // Zero section loading removes the induced wing velocity, and these
+    // separated disks do not overlap. Native BEMT must receive exactly 0.05 m/s.
+    let actual = bemt_solve(&rotor, RHO, velocity[0], OMEGA_350).unwrap();
+    let floored = bemt_solve(&rotor, RHO, 0.1, OMEGA_350).unwrap();
+    assert!((actual.thrust_n - floored.thrust_n).abs() > 0.01);
+    assert_eq!(result.thrust_n, [actual.thrust_n; 2]);
+    assert_eq!(result.torque_nm, [actual.torque_nm; 2]);
+}
+
+#[test]
+fn compact_uniform_reversed_disk_inflow_refuses_the_actual_vortex_field() {
+    let (panels, strips) = wing_setup();
+    let velocity = [10.0, 0.0, 1.0];
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let section = |_: usize, _: f64| (0.6, fs_wing::nonlinear::StripRegime::Attached);
+    let wing = fs_wing::nonlinear::solve_nonlinear(
+        &op, &panels, &strips, velocity, RHO, &section, None, None,
+    )
+    .unwrap();
+    let mut disks = disks();
+    for (k, s) in [1, 6].into_iter().enumerate() {
+        let p = panels[s];
+        disks[k].center_m = [
+            0.5 * (p.a[0] + p.b[0]),
+            0.5 * (p.a[1] + p.b[1]),
+            0.5 * (p.a[2] + p.b[2]) + 0.01,
+        ];
+        let induced =
+            fs_wing::induced_velocity_free(disks[k].center_m, &panels, &wing.gamma, velocity);
+        assert!(
+            velocity[0] + induced[0] < 0.0,
+            "fixture must reverse the actual disk inflow"
+        );
+    }
+    let error = coupled_prop_airframe_step(
+        &op,
+        &panels,
+        &strips,
+        &section,
+        &rotor_1903(),
+        &disks,
+        velocity,
+        RHO,
+        &CANDIDATE_B,
+        Some([0.0; 2]),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "disk-inflow-invalid");
 }
 
 #[test]
@@ -623,12 +793,13 @@ fn coupling_golden_digest() {
         "golden",
         &format!("\"digest\":\"{digest}\",\"thrust\":{}", r.thrust_n[0]),
     );
-    // Golden bump 2026-10-28: both loading paths now apply the disk-induced
-    // velocity once, using the same rationalized momentum root. The original
-    // 350 RPM geometry, signed annular solve and all reciprocal-coupling,
-    // warm-start and liveness gates are unchanged.
+    // Golden bump 2026-11-03: compact uniform input now uses washed local
+    // incidence, chord-plane speed and force, matching explicit incident flow.
+    // Measured with the original 350 RPM geometry, signed annular solve and
+    // unchanged reciprocal-coupling, warm-start and liveness gates. Explicit
+    // aircraft/trim/lifecycle and the native 120-tick startup golden are unchanged.
     assert_eq!(
-        digest, "281389a06cab98db04c3f27a581a1b41ff10f2581dcebc9fc81d66a629c60210",
+        digest, "0a50ecadfd76a292baab31b0ba8cfde93014c5d0c3ef9395eec6fee22ac50762",
         "coupling golden moved — determinism regression or an intentional \
          scheme change requiring the golden-bump protocol"
     );
