@@ -3113,3 +3113,59 @@ refusals without source changes.
 With `M_inf=L*L^T`, `x=L^T*P`, `a=sqrt(R/cv_inf)` and `b_j=sqrt(C_j/cp_inf)`, each original process dissipates `sum_i |z_ji-b_j*(y_i+a*x_i)|^2/tau_j`. The symmetric positive-semidefinite resistance is assembled from those original slips. This realizes the source's complete caloric compliance `1/K(s)=(1-R/cp(s))/(rho*R*T)`, including coupled dispersion and absorption, without fitting modal damping or merging reservoirs. Instantaneous and harmonic heat observers independently evaluate each original process; harmonic inputs are peak phasors and heat carries the cycle-mean factor one half.
 
 Complete state/payload/work and existing exact-flow capacity are admitted before dense allocation; cancellation, finite constitutive coefficients and positive frozen pressure mass remain required. Repeated attachment, a different gas, or nonuniform regional material is refused. Uniform regional copies are accepted. This is frozen adiabatic molecular absorption; it does not model higher-mode viscothermal walls, Stokes--Kirchhoff losses, or evolving gas/species fields. Four regressions compare constant/flared two-mode weak equations to the original caloric source, independently verify heat, converge damped poles under spatial refinement, retain equal-rate reservoirs, and exercise original-source/resource/cancellation refusals.
+
+## Finite-expansion Landau first and second sound
+
+The opt-in `superfluid` feature exposes `superfluid::TwoFluidChannel`, a
+constant-reference, uniform-area channel driven by the original immutable
+`fs_material::superfluid::TwoFluidState`. Pressure, temperature and the two
+component velocities remain distinct accepted observables. Finite thermal
+expansion couples density and entropy modes; mass current is barycentric,
+entropy travels with the normal component and relative heat flux is
+`rho_s*s*T0*(v_n-v_s)`.
+
+The symmetric physical equations use thermodynamic storage
+`A=[[kappa_T,-alpha],[-alpha,rho*cp/T0]]`, kinetic masses
+`K=diag(rho,rho*f_s*f_n)` and coupling `D=diag(1,rho*f_s*s)`.
+A two-by-two energy normalization and singular-mode transform preserve this
+whole coupled system. Staggered incidence and implicit midpoint reduce to
+two scalar solves using the existing `fs-la::tridiagonal` owner. Work and
+memory are O(cells); successful steps reuse buffers and same-timestep factors.
+The original linear residual, caller perturbation bounds and quadratic energy
+balance must pass before publication. A wave Courant limit of one is an
+explicit resolution policy, not a time-error estimate.
+
+The two end ports prescribe both component velocities, positive along +x.
+First-order mass/entropy transfers, physical counterflow heat, and quadratic
+wave work are reported separately. Boundary wave power is
+`area*(p'*v + T'*q/T0)`. Reported storage is small-signal wave availability,
+not absolute thermal energy.
+
+Explicit linear or Gorter-Mellink mutual friction is integrated by exact
+frozen-state material updates in a symmetric split. Equal/opposite component
+impulses remove only relative kinetic energy. One per-cell heat array and its
+cumulative account export that loss to an external thermal owner. This
+first-order model does not also inject the same heat into its temperature
+perturbation. Bounded cancellation checkpoints and all numerical/physical
+refusals preserve accepted fields, time and heat accounts.
+
+The `superfluid_second_sound` example uses the source-backed 1.8 K SVP helium
+reference; its domain, commands and limits are in
+`examples/SUPERFLUID_CHANNEL.md`. G0/G1/G3/G4 regressions cover both wave
+speeds and refinement, finite-expansion polarization, mass/entropy/work ports,
+both friction laws and atomic retry. This does not establish experimental
+validation of the complete channel. Normal viscous boundary layers and
+longitudinal/second viscosities, nonlinear heating/phase feedback, vortex
+nucleation/reconnections, critical velocities, thin-film/porous modes and
+Kapitza resistance are outside this owner.
+
+### Explicit in-phase superfluid first sound
+
+`fs_material::superfluid::FirstSoundProjection` reaches the original
+`fluid::segment_wave`, scattering-chain impedance and `DgDuct::from_material`
+owners through `FluidAcoustics`. The full original two-fluid state remains on
+the retained projection. This scalar approximation requires explicitly zero
+thermal expansion and in-phase component motion; it cannot supply second sound
+or classical thermoviscous wall losses. `tests/superfluid_projection.rs` checks
+matched-load propagation, an independently known standing wave and native DG
+energy storage, original-state retention, and refusal of nonzero expansion.

@@ -13,6 +13,8 @@ layer = "L3"
 [features]
 default = []
 nonlinear-euler = ["dep:fs-gas", "fs-gas/experimental-euler", "dep:fs-qty"]
+# Explicit finite-temperature, small-signal two-fluid channel dynamics.
+superfluid = []
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
@@ -43,6 +45,14 @@ required-features = ["nonlinear-euler"]
 [[example]]
 name = "nonlinear_manifold"
 required-features = ["nonlinear-euler"]
+
+[[example]]
+name = "superfluid_second_sound"
+required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_channel"
+required-features = ["superfluid"]
 
 [lints]
 workspace = true

@@ -102,6 +102,9 @@ pub use flanged::{FLANGED_MAX_KA, FLANGED_MAX_MODES, FLANGED_MODES, flanged_pipe
     flanged_pipe_impedance_with_exterior};
 /// Lossless variable-area plane-wave DG in the time domain (M2.2-W3a).
 pub mod dg;
+/// Opt-in, finite-expansion Landau first/second sound and thermal counterflow.
+#[cfg(feature = "superfluid")]
+pub mod superfluid;
 /// Source-owned finite-amplitude Euler propagation on existing duct geometry.
 #[cfg(feature = "nonlinear-euler")]
 pub mod nonlinear;
