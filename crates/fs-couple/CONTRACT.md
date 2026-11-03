@@ -17558,6 +17558,42 @@ establish generalized work/momentum, not Cartesian angular momentum without
 geometric point maps. Tangential impact, event-time search, persistent contact
 and automatic heat/damage allocation are outside this normal-event adapter.
 
+### Coupled normal and tangential impacts
+
+`cohesive_contact::impact::frictional::impacts_candidate` extends the retained
+body event to one normal and two tangential coordinates per contact. Explicit
+orthonormal normal-first traces, Coulomb coefficients, native restitution or
+target-speed laws, and prescribed relative velocities define the event.
+The full contact-major `3m x 3m` mobility retains normal/tangent and cross-contact
+coupling. The original `fs-contact::frictional_multicontact` owner resolves
+normal complementarity and final-velocity tangential maximum dissipation
+together, preserving its original determinacy, work and refusal results.
+
+Normal and Coulomb adapters share original checked-CG mass response,
+compensated transpose impulse distribution, whole-body state staging and
+actual-successor work audits. Every body receives one complete summed impulse
+through its existing cohesive owner. Damage, displacement, source-bound
+material/contact histories, physical time and step budgets retain that owner's
+semantics. Prescribed work is `-sum dot(c,p)`; both contact tangents contribute.
+The final physical dissipation residual retains native positive-work allowances
+rather than using them to erase an unexplained energy gain.
+
+Admission bounds up to 21 contacts and accounts for native mass histories,
+dense range/factorization storage, packed GEMM scratch, and Newton/FGMRES
+workspace using the actual configured restart. Mass receipts identify body,
+contact and normal/tangent component. Representative impulses for a redundant
+event retain their native gauge semantics and confer no individual heat or
+load authority.
+
+Exact original-source numerical regressions cover sliding, sticking,
+off-diagonal inertia, moving support work, unequal-body recoil, shared-body
+multiple impacts, zero friction, cancellation, budgets and physical audit
+refusals. The existing normal regressions exercise the shared implementation.
+Full cohesive-owner regressions additionally specify damaged-state retention,
+subsequent unloading and all-body refusal/replay. Frozen event geometry remains
+caller-owned; event-time search, persistent-contact stepping and allocation of
+instantaneous loss to heat or fracture require their own physical owners.
+
 ## Finite cohesive patch load line
 
 `cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.

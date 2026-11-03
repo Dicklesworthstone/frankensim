@@ -1,6 +1,7 @@
 //! G0/G1: independent mass/impact identities through the original native solvers.
 use super::*;
 use fs_contact::multicontact::MultiImpactDeterminacy;
+use fs_solver::LinearOp;
 use fs_sparse::precond::IdentityPrecond;
 use std::cell::Cell;
 
@@ -137,6 +138,7 @@ fn cross_contact_response_uses_the_full_nondiagonal_original_mass() {
     // Direct 2x2 inverse, and -M*v for the simultaneous zero-velocity endpoint.
     for (&actual, expected) in
         plan.mobility
+            .matrix
             .iter()
             .zip([4.0 / 7.0, -2.0 / 7.0, -2.0 / 7.0, 8.0 / 7.0])
     {

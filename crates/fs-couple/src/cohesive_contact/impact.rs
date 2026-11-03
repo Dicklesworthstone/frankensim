@@ -1,4 +1,4 @@
-//! Simultaneous normal impacts between retained cohesive assemblies.
+//! Simultaneous impacts between retained cohesive assemblies.
 //!
 //! Contact discovery supplies signed velocity traces in each original reduced
 //! coordinate system. Their transpose scatters the impulses, preserving work
@@ -16,6 +16,9 @@ use fs_solid::cohesive::dynamics::CohesiveMotion;
 use fs_solid::cohesive::dynamics::impulse::{ImpulseControls, ImpulseError, ImpulseReport};
 use fs_sparse::precond::Precond;
 
+/// Coupled normal and tangential Coulomb impact on the same retained bodies.
+pub mod frictional;
+mod mechanics;
 mod response;
 pub use response::{
     MassSolveReport, NormalContact, ResponseControls, ResponseError, ResponseReport, TraceTerm,
@@ -93,10 +96,66 @@ pub fn normal_impacts_candidate_controlled<'m, 'a>(
     controls: ImpactControls,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ImpactCandidate<'m, 'a>, ImpactError> {
+    admit_motions(
+        motions,
+        preconditioners,
+        controls.response.maximum_bodies,
+        controls.response.maximum_workspace_entries,
+        cancelled,
+    )?;
+    let bodies: Vec<_> = motions
+        .iter()
+        .zip(preconditioners)
+        .map(|(motion, preconditioner)| response::Body {
+            mass: motion.mass_operator(),
+            velocity: motion.velocity_m_s(),
+            preconditioner: *preconditioner,
+        })
+        .collect();
+    let plan = response::prepare(&bodies, contacts, controls.response, cancelled)?;
+    drop(bodies);
+    let staged = stage_impulses(
+        motions,
+        &plan.body_impulses,
+        preconditioners,
+        controls.impulse,
+        cancelled,
+    )?;
+    let final_velocities: Vec<_> = staged
+        .motions
+        .iter()
+        .map(CohesiveMotion::velocity_m_s)
+        .collect();
+    let report = response::finish(
+        plan,
+        contacts,
+        &final_velocities,
+        &staged.kinetic_changes,
+        &staged.body_work_residuals,
+        controls.response,
+        cancelled,
+    )?;
+    poll(cancelled)?;
+    Ok(ImpactCandidate {
+        motions: staged.motions,
+        report: ImpactReport {
+            response: report,
+            bodies: staged.receipts,
+        },
+    })
+}
+
+fn admit_motions(
+    motions: &[&CohesiveMotion<'_, '_>],
+    preconditioners: &[&dyn Precond],
+    maximum_bodies: usize,
+    maximum_workspace_entries: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ImpactError> {
     poll(cancelled)?;
     if motions.is_empty()
         || motions.len() != preconditioners.len()
-        || motions.len() > controls.response.maximum_bodies
+        || motions.len() > maximum_bodies
     {
         return Err(ImpactError::Invalid(
             "bounded bodies and one native preconditioner each required",
@@ -105,7 +164,7 @@ pub fn normal_impacts_candidate_controlled<'m, 'a>(
     if motions
         .len()
         .checked_mul(8)
-        .is_none_or(|entries| entries > controls.response.maximum_workspace_entries)
+        .is_none_or(|entries| entries > maximum_workspace_entries)
     {
         return Err(ImpactError::Invalid(
             "body table exceeds response workspace",
@@ -128,22 +187,35 @@ pub fn normal_impacts_candidate_controlled<'m, 'a>(
             ));
         }
     }
-    let bodies: Vec<_> = motions
-        .iter()
-        .zip(preconditioners)
-        .map(|(motion, preconditioner)| response::Body {
-            mass: motion.mass_operator(),
-            velocity: motion.velocity_m_s(),
-            preconditioner: *preconditioner,
-        })
-        .collect();
-    let plan = response::prepare(&bodies, contacts, controls.response, cancelled)?;
-    drop(bodies);
+    Ok(())
+}
+
+struct StagedMotions<'m, 'a> {
+    motions: Vec<CohesiveMotion<'m, 'a>>,
+    receipts: Vec<Option<ImpulseReport>>,
+    kinetic_changes: Vec<f64>,
+    body_work_residuals: Vec<f64>,
+}
+
+// Both contact laws enter the original owner once per body, with one complete
+// summed impulse. Material/contact history and whole-event refusal are shared.
+fn stage_impulses<'m, 'a>(
+    motions: &[&CohesiveMotion<'m, 'a>],
+    impulses: &[Vec<f64>],
+    preconditioners: &[&dyn Precond],
+    controls: ImpulseControls,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StagedMotions<'m, 'a>, ImpactError> {
+    if motions.len() != impulses.len() {
+        return Err(ImpactError::Invalid(
+            "one summed impulse per original body required",
+        ));
+    }
     let mut candidates = Vec::with_capacity(motions.len());
     let mut receipts = Vec::with_capacity(motions.len());
     let mut kinetic_changes = Vec::with_capacity(motions.len());
     let mut body_work_residuals = Vec::with_capacity(motions.len());
-    for (body, (motion, impulse)) in motions.iter().zip(&plan.body_impulses).enumerate() {
+    for (body, (motion, impulse)) in motions.iter().zip(impulses).enumerate() {
         poll(cancelled)?;
         if impulse.iter().all(|value| *value == 0.0) {
             candidates.push((**motion).clone());
@@ -156,7 +228,7 @@ pub fn normal_impacts_candidate_controlled<'m, 'a>(
             .impulse_candidate_controlled(
                 impulse,
                 &BorrowedPrecond(preconditioners[body]),
-                controls.impulse,
+                controls,
                 cancelled,
             )
             .map_err(|error| ImpactError::Body { body, error })?;
@@ -165,26 +237,11 @@ pub fn normal_impacts_candidate_controlled<'m, 'a>(
         receipts.push(Some(accepted.report));
         candidates.push(accepted.motion);
     }
-    let final_velocities: Vec<_> = candidates
-        .iter()
-        .map(CohesiveMotion::velocity_m_s)
-        .collect();
-    let report = response::finish(
-        plan,
-        contacts,
-        &final_velocities,
-        &kinetic_changes,
-        &body_work_residuals,
-        controls.response,
-        cancelled,
-    )?;
-    poll(cancelled)?;
-    Ok(ImpactCandidate {
+    Ok(StagedMotions {
         motions: candidates,
-        report: ImpactReport {
-            response: report,
-            bodies: receipts,
-        },
+        receipts,
+        kinetic_changes,
+        body_work_residuals,
     })
 }
 

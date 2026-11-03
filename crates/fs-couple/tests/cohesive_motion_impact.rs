@@ -12,6 +12,9 @@ use fs_solid::cohesive::{Budget, CohesivePatch, CohesiveSystem, Config, JumpTerm
 use fs_solver::{CheckedCgConfig, LinearOp, NewtonKrylovConfig};
 use fs_sparse::precond::{IdentityPrecond, Precond};
 
+#[path = "cohesive_motion_impact/frictional.rs"]
+mod frictional;
+
 struct Scalar(f64);
 impl LinearOp for Scalar {
     fn n(&self) -> usize {
