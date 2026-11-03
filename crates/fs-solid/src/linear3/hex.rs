@@ -1,7 +1,8 @@
 //! Isoparametric HEX8 geometry and fully integrated HEX20/HEX27. The element-specific pieces are
 //! shapes, geometry and topology admission; TET10 owns the shared numerical
 //! assembly path in isoparametric.rs. Positive sampled Jacobians do not prove
-//! global injectivity. Materials are constant per element; mass is consistent.
+//! global injectivity. Elastic materials are constant per element; consistent
+//! mass also admits a positive trilinear reference-density field.
 use super::{
     QuadraticThermalStrainField, TetAssemblyBudget, TetElasticAssembly, TetElasticError,
     TetMaterialField, TetThermalLoad, determinant3, inverse3,
@@ -473,7 +474,36 @@ impl HexElasticProblem<'_> {
     }
 
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
-        self.assemble_with_thermal_materials(None, cx)
+        self.assemble_with_thermal_materials(None, None, cx)
+    }
+
+    /// Assemble consistent inertia from eight positive corner densities [kg/m³]
+    /// per element, in canonical corner order. Density uses the nonnegative Q1
+    /// shapes, not the quadratic displacement shapes with negative lobes.
+    /// Interfaces may be discontinuous; the field is trilinear in reference
+    /// coordinates, including when physical geometry is curved.
+    ///
+    /// The explicit mass rule is independent of `self.quadrature`, which still
+    /// controls stiffness. Three Gauss points per direction integrate affine
+    /// graded mass exactly. General quadratic geometry requires six: the
+    /// coordinatewise degree of `rho * N_i * N_j * det(J)` is at most ten.
+    /// Affine admission uses exact nodal relations; other maps conservatively
+    /// require six. This does not certify stiffness accuracy or map injectivity.
+    ///
+    /// An identical material-density profile with the original rule preserves
+    /// the existing scalar path bitwise, including its curved-quadrature limits.
+    /// A different requested mass rule is honored, subject to the above limits.
+    pub fn assemble_with_reference_density(
+        &self,
+        corner_density_kg_m3: &[[f64; 8]],
+        mass_quadrature: HexQuadrature,
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_with_thermal_materials(
+            None,
+            Some((corner_density_kg_m3, mass_quadrature)),
+            cx,
+        )
     }
 
     /// Assemble the actual temperature-frozen stiffness and ORIGINAL reference
@@ -484,65 +514,169 @@ impl HexElasticProblem<'_> {
         field: impl Into<QuadraticThermalStrainField<'t>>,
         cx: &Cx<'_>,
     ) -> Result<TetElasticAssembly, TetElasticError> {
-        self.assemble_with_thermal_materials(Some(field.into()), cx)
+        self.assemble_with_thermal_materials(Some(field.into()), None, cx)
+    }
+
+    /// Temperature-frozen local stiffness with the explicitly supplied original
+    /// reference-density profile. Hot material samples cannot refresh inventory;
+    /// their quadrature remains the stiffness rule, independently of mass.
+    pub fn assemble_thermoelastic_with_reference_density<'t>(
+        &self,
+        field: impl Into<QuadraticThermalStrainField<'t>>,
+        corner_density_kg_m3: &[[f64; 8]],
+        mass_quadrature: HexQuadrature,
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_with_thermal_materials(
+            Some(field.into()),
+            Some((corner_density_kg_m3, mass_quadrature)),
+            cx,
+        )
+    }
+
+    fn validate_reference_density<const N: usize>(
+        &self,
+        elements: &[[usize; N]],
+        densities: &[[f64; 8]],
+        mass_quadrature: HexQuadrature,
+        cx: &Cx<'_>,
+    ) -> Result<(), TetElasticError> {
+        mass_quadrature.validate()?;
+        if densities.len() != elements.len() {
+            return Err(TetElasticError::MaterialCountMismatch {
+                expected: elements.len(),
+                got: densities.len(),
+            });
+        }
+        for (element, (cell, density)) in elements.iter().zip(densities).enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            if density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
+                return Err(TetElasticError::InvalidMaterial {
+                    what: "hex corner reference densities must be finite and positive",
+                });
+            }
+            let reference = self.materials.at(element).density_kg_m3;
+            if mass_quadrature.points_per_dir >= 6
+                || (mass_quadrature.points_per_dir == self.quadrature.points_per_dir
+                    && density.iter().all(|rho| *rho == reference))
+            {
+                continue;
+            }
+            // An affine image of the canonical cube is fixed by corner 0 and
+            // its three neighbors. Exact relations avoid admitting a curved
+            // map merely because its curvature is small in absolute units.
+            let origin = self.nodes_m[cell[0]];
+            let edges = [1, 3, 4].map(|corner| {
+                core::array::from_fn::<_, 3, _>(|k| self.nodes_m[cell[corner]][k] - origin[k])
+            });
+            let affine = HEX27_REFERENCE_NODES[..N]
+                .iter()
+                .zip(cell)
+                .all(|(r, &node)| {
+                    (0..3).all(|k| {
+                        let expected = origin[k]
+                            + (f64::from(r[0]) + 1.0) * 0.5 * edges[0][k]
+                            + (f64::from(r[1]) + 1.0) * 0.5 * edges[1][k]
+                            + (f64::from(r[2]) + 1.0) * 0.5 * edges[2][k];
+                        self.nodes_m[node][k] == expected
+                    })
+                });
+            if !affine {
+                return Err(TetElasticError::QuadratureInadmissible {
+                    what: "nonaffine hex reference density requires at least six mass Gauss points",
+                });
+            }
+        }
+        Ok(())
     }
 
     fn assemble_with_thermal_materials(
         &self,
         material_samples: Option<QuadraticThermalStrainField<'_>>,
+        reference_density: Option<(&[[f64; 8]], HexQuadrature)>,
         cx: &Cx<'_>,
     ) -> Result<TetElasticAssembly, TetElasticError> {
         match self.elements {
             HexConnectivity::Hex20(elements) => {
                 self.validate(elements, true, cx)?;
-                let q = self.quadrature.points()?;
-                super::isoparametric::assemble::<20, 60, _>(
-                    self.nodes_m,
-                    elements,
-                    self.materials,
-                    material_samples,
-                    self.fixed_dofs,
-                    self.budget,
-                    &q,
-                    &q,
-                    |nodes, r, e, i| {
-                        let p = hex20_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
-                        Ok(super::isoparametric::Point {
-                            shapes: p.shapes,
-                            gradients: p.gradients,
-                            determinant: p.determinant_m3,
-                            scaled_jacobian: p.scaled_jacobian,
-                        })
-                    },
-                    |_, _| None,
-                    cx,
-                )
+                if let Some((density, quadrature)) = reference_density {
+                    self.validate_reference_density(elements, density, quadrature, cx)?;
+                }
             }
             HexConnectivity::Hex27(elements) => {
                 self.validate(elements, true, cx)?;
-                let q = self.quadrature.points()?;
-                super::isoparametric::assemble::<27, 81, _>(
-                    self.nodes_m,
-                    elements,
-                    self.materials,
-                    material_samples,
-                    self.fixed_dofs,
-                    self.budget,
-                    &q,
-                    &q,
-                    |nodes, r, e, i| {
-                        let p = hex27_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
-                        Ok(super::isoparametric::Point {
-                            shapes: p.shapes,
-                            gradients: p.gradients,
-                            determinant: p.determinant_m3,
-                            scaled_jacobian: p.scaled_jacobian,
-                        })
-                    },
-                    |_, _| None,
-                    cx,
-                )
+                if let Some((density, quadrature)) = reference_density {
+                    self.validate_reference_density(elements, density, quadrature, cx)?;
+                }
             }
+        }
+        let q = self.quadrature.points()?;
+        let separate_mass_rule = match reference_density {
+            Some((_, quadrature))
+                if quadrature.points_per_dir != self.quadrature.points_per_dir =>
+            {
+                Some(quadrature.points()?)
+            }
+            _ => None,
+        };
+        let mass_rule = separate_mass_rule.as_deref().unwrap_or(&q);
+        let density_at = |element: usize, coordinate: [f64; 3]| {
+            let density = reference_density?.0[element];
+            if density
+                .iter()
+                .all(|rho| *rho == self.materials.at(element).density_kg_m3)
+            {
+                None
+            } else if density.iter().all(|rho| *rho == density[0]) {
+                Some(density[0])
+            } else {
+                let weights = hex8_shapes(coordinate).0;
+                Some((0..8).map(|a| weights[a] * density[a]).sum())
+            }
+        };
+        match self.elements {
+            HexConnectivity::Hex20(elements) => super::isoparametric::assemble::<20, 60, _>(
+                self.nodes_m,
+                elements,
+                self.materials,
+                material_samples,
+                self.fixed_dofs,
+                self.budget,
+                &q,
+                mass_rule,
+                |nodes, r, e, i| {
+                    let p = hex20_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
+                    Ok(super::isoparametric::Point {
+                        shapes: p.shapes,
+                        gradients: p.gradients,
+                        determinant: p.determinant_m3,
+                        scaled_jacobian: p.scaled_jacobian,
+                    })
+                },
+                density_at,
+                cx,
+            ),
+            HexConnectivity::Hex27(elements) => super::isoparametric::assemble::<27, 81, _>(
+                self.nodes_m,
+                elements,
+                self.materials,
+                material_samples,
+                self.fixed_dofs,
+                self.budget,
+                &q,
+                mass_rule,
+                |nodes, r, e, i| {
+                    let p = hex27_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
+                    Ok(super::isoparametric::Point {
+                        shapes: p.shapes,
+                        gradients: p.gradients,
+                        determinant: p.determinant_m3,
+                        scaled_jacobian: p.scaled_jacobian,
+                    })
+                },
+                density_at,
+                cx,
+            ),
         }
     }
 
@@ -757,7 +891,7 @@ impl HexElasticProblem<'_> {
             maximum_absolute_mandel_strain,
             cx,
         )?;
-        let pencil = self.assemble_with_thermal_materials(Some(thermal_strains), cx)?;
+        let pencil = self.assemble_with_thermal_materials(Some(thermal_strains), None, cx)?;
         let q = self.quadrature.points()?;
         match self.elements {
             HexConnectivity::Hex20(elements) => {

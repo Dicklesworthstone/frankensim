@@ -217,6 +217,7 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
             stiffness_rule,
             mass_rule,
             &evaluate,
+            |_, _| None,
             cx,
         )?;
         let preconditioner = Jacobi::new(&assembly.stiffness);

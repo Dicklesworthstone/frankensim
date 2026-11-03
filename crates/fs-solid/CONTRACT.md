@@ -632,6 +632,30 @@ and frozen mass under changed thermal tensors. The actual generalized modal
 solve verifies that relocating density at identical total mass and stiffness
 increases a supported edge's mass by 25% and reduces its eigenvalues by 20%.
 
+`hex::HexElasticProblem::assemble_with_reference_density` extends original
+reference inertia to HEX20 and HEX27. Each element supplies eight positive
+corner densities; nonnegative Q1 weights interpolate that reference field
+while the original quadratic displacement shapes retain the full consistent
+mass. Interfaces may be discontinuous. The resulting native sparse pencil
+retains total inventory before support reduction, density-weighted first
+moments and rotational inertia. Thermal assembly can change local stiffness
+through `assemble_thermoelastic_with_reference_density` while the same graded
+reference inventory remains fixed.
+
+The explicit mass quadrature is independent of stiffness quadrature. Equal
+rules reuse one prepared point array. Three Gauss points per direction
+integrate affine graded quadratic mass exactly; other new-profile geometries
+conservatively require six for coordinatewise degree ten, including the
+quadratic map's Jacobian determinant. Exact nodal affine relations determine
+that admission. These bounds certify mass polynomial integration, not global
+map injectivity or stiffness accuracy. An identical scalar profile with the
+original rule preserves prior mass bits; a different requested mass rule is
+honored. Native regressions compare every mass entry with independent monomial
+integrals on affine and curved maps, retain first/rotational moments, expose a
+five-point underintegration case, and check exact supported eigenvalue shifts
+at equal total mass and stiffness. Existing geometry, budget and cancellation
+admission remains in force.
+
 `linear3::TetElasticMaterial::acoustic_response` exposes the shared
 `fs-material::elastic::acoustic` law using the exact native Mandel stiffness,
 density and material identity. Source-resolved isotropy, oriented orthotropy and
