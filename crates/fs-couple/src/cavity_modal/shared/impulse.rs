@@ -7,12 +7,62 @@
 
 use super::{ModalCouplingError, SharedCavity, network_invalid};
 use crate::render::schedule::force::coupled::impulse::ModalImpulseReceipt;
+use crate::render::schedule::force::coupled::impulse::impact::multiple::{
+    ModalMultiImpactError, ModalMultiImpactReceipt, PreparedModalImpacts,
+};
 use crate::render::schedule::force::coupled::impulse::impact::{
     ModalImpactError, ModalImpactReceipt, PreparedModalImpact,
 };
 use fs_exec::CancelGate;
 
 impl SharedCavity {
+    /// Resolve one simultaneous frictionless contact set on the continuing
+    /// physical surfaces. Every row shares the complete native Delassus solve;
+    /// a free striker may have zero cavity-volume projection while retaining
+    /// its finite inertia. Prepare against [`Self::network`].
+    ///
+    /// All surface states and the actual physical volume flows are admitted
+    /// before one publication. Neck/viscous auxiliary velocities, compression,
+    /// material/radiation histories, displacements and the clock stay unchanged.
+    /// Contacts attached to acoustic auxiliaries refuse. Redundant rows retain
+    /// the original solver's unresolved local load allocation; no local heat,
+    /// shock, contact search or persistent-contact model is inferred.
+    pub fn apply_surface_impacts(
+        &mut self,
+        impacts: &mut PreparedModalImpacts,
+        gate: &CancelGate,
+    ) -> Result<ModalMultiImpactReceipt, ModalMultiImpactError> {
+        poll(gate)?;
+        if impacts
+            .component_pairs()
+            .flatten()
+            .any(|index| index >= self.neck_component)
+        {
+            return Err(network_invalid(
+                "cavity impacts must attach only to original physical surfaces",
+            )
+            .into());
+        }
+        let column = &self.column;
+        let surface_modes = self.surface_modes;
+        let neck_shape = self.source.neck_volume_shape_m2_per_sqrt_kg();
+        let neck_area = self.source.neck_area_m2();
+        self.system
+            .apply_normal_impacts_with_admission(impacts, gate, |components| {
+                validate_volume_flows(
+                    components
+                        .iter()
+                        .flat_map(|model| model.states())
+                        .map(|state| state.velocity_m_sqrt_kg_per_s),
+                    column,
+                    surface_modes,
+                    neck_shape,
+                    neck_area,
+                    gate,
+                )
+            })
+    }
+
     /// Resolve one frictionless impact between the original moving surfaces.
     /// Prepare its physical attachments against [`Self::network`]. A free-mass
     /// striker can be an ordinary surface with zero cavity-volume projection;

@@ -20,6 +20,9 @@ use fs_contact::impact::{
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 
+/// Simultaneous normal contacts on this same continuing modal state.
+pub mod multiple;
+
 /// Physical normal ports in one common scalar direction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModalImpactContact {

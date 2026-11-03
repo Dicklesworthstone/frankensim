@@ -27209,3 +27209,38 @@ continuation, frame/material/phase refusal, density-distribution refusal,
 budgets, cancellation and retry. Native compilation and test execution remain
 outstanding in the delivery environment; no measured performance or physical
 validation claim is added.
+
+
+## Simultaneous hard impacts on continuing modal and cavity surfaces
+
+`render::schedule::force::coupled::impulse::impact::multiple` prepares complete
+relative attachment rows and their full mass-normalized Delassus matrix.
+`PreparedModalImpacts` retains shared-mode and cross-contact terms; one original
+`fs-contact::multicontact` solve supplies the simultaneous normal impulses, and
+one compensated transpose application updates the original modal momenta. The
+solver's redundant-row velocity determinacy remains distinct from individual
+contact-load authority. Restitution choices that create global energy refuse.
+
+`CoupledModalSystem::apply_normal_impacts` independently checks actual native
+momentum increments, all active contact velocities and complementarity, net
+contact work and kinetic-energy change before one atomic publication. Failed
+geometry, cancellation, limits or balance checks retain every accepted state.
+Positions, clock, held inputs, preceding frames, material relaxation and proper
+radiation histories remain continuous. Prepared rows and projection scratch are
+reused; the bounded native contact solver and returned receipts still allocate.
+No allocation-free multicontact or benchmark speedup is claimed.
+
+`SharedCavity::apply_surface_impacts` admits only original physical surfaces and
+checks actual volume flows before publication. Finite strikers may have zero
+cavity-volume shape. Neck and auxiliary acoustic velocities, compression,
+viscous/thermal/molecular memory and radiation history remain continuous and
+respond during subsequent original evolution. These APIs consume an explicitly
+supplied instantaneous contact set: they do not discover collisions, solve
+friction or sustained contact, infer a thermal loss partition, or establish
+spatial momentum conservation absent the represented mechanical symmetry.
+
+`tests/modal_impacts.rs` covers analytic finite-mass chains, contact permutation,
+redundant rows, global energy refusal, inactive cross-response, atomic retry,
+small momentum beside large kinetic backgrounds and continued live-memory
+motion. Its `modal_impacts/cavity.rs` child retains the full shared-cavity
+integration fixture separately from the core modal tests.
