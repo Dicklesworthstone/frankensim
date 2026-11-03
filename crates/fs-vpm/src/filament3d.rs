@@ -483,6 +483,80 @@ impl FilamentWake {
         .then_some(result)
     }
 
+    /// Geometric hydrodynamic impulse divided by uniform fluid density [m⁴/s].
+    /// Each closed ring contributes Γ times its oriented vector area, equal to
+    /// `½ Γ ∮ x × dx`. This is invariant under translating the world origin;
+    /// coordinates are differenced before cross products. Positive circulation
+    /// follows the newer row's left-to-right edge, as in source assembly.
+    /// This geometric diagnostic does not represent angular momentum or the
+    /// momentum of fluid inside an arbitrary finite control volume.
+    ///
+    /// # Errors
+    /// `impulse-interface-attached` when rows have been transferred to a far
+    /// field: only the combined closed near/far sources have an origin-independent
+    /// impulse. Invalid geometry or an unrepresentable result also refuses.
+    pub fn hydrodynamic_impulse_per_density(&self) -> Result<[f64; 3], Refusal> {
+        if self.downstream_gamma.is_some() {
+            return Err(Refusal {
+                code: "impulse-interface-attached",
+                message: "retained near sources alone do not form a complete closed wake".into(),
+                ranked_repairs: vec!["measure the complete wake before near/far partition".into()],
+            });
+        }
+        self.admit_geometry()?;
+        let mut impulse = [0.0; 3];
+        let mut correction = [0.0; 3];
+        for (ri, row) in self.rows.iter().enumerate() {
+            let next = self
+                .rows
+                .get(ri + 1)
+                .map_or(&self.line_nodes, |row| &row.nodes);
+            for s in 0..self.cert.n_stations {
+                let area = ring_vector_area(next[s], next[s + 1], row.nodes[s + 1], row.nodes[s]);
+                for c in 0..3 {
+                    let value = row.gamma[s] * area[c] - correction[c];
+                    let sum = impulse[c] + value;
+                    correction[c] = (sum - impulse[c]) - value;
+                    impulse[c] = sum;
+                }
+            }
+        }
+        if impulse.iter().any(|v| !v.is_finite()) {
+            return Err(Refusal {
+                code: "impulse-unrepresentable",
+                message: "circulation times vector area exceeds the numerical range".into(),
+                ranked_repairs: vec![
+                    "rescale geometry and circulation to representable units".into(),
+                ],
+            });
+        }
+        Ok(impulse)
+    }
+
+    pub(crate) fn admit_geometry(&self) -> Result<(), Refusal> {
+        let n = self.cert.n_stations;
+        if !(1..=MAX_STATIONS).contains(&n)
+            || self.line_nodes.len() != n + 1
+            || self.line_nodes.iter().flatten().any(|v| !v.is_finite())
+            || self.rows.iter().any(|row| {
+                row.nodes.len() != n + 1
+                    || row.gamma.len() != n
+                    || row.nodes.iter().flatten().any(|v| !v.is_finite())
+                    || row.gamma.iter().any(|v| !v.is_finite())
+            })
+        {
+            return Err(Refusal {
+                code: "filament-geometry-invalid",
+                message: "wake geometry and circulation must match the finite station lattice"
+                    .into(),
+                ranked_repairs: vec![
+                    "retain stations + 1 finite nodes and one finite gamma per station".into(),
+                ],
+            });
+        }
+        Ok(())
+    }
+
     /// Content digest over physical sheet geometry, quad strengths, ages,
     /// cores, and the retained near/far interface circulation.
     #[must_use]
@@ -528,6 +602,19 @@ fn evolved_core(row: &ShedRow, growth_per_tick_m2: f64) -> f64 {
     } else {
         row.core2_m2 + growth_per_tick_m2 * row.age_ticks
     }
+}
+
+pub(crate) fn ring_vector_area(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> [f64; 3] {
+    // Half the cross product of the oriented diagonals equals the polygon
+    // edge integral, including nonplanar quads. It avoids a preferred corner
+    // triangulation, preserving mirrored parallel sheets to the last bit.
+    let c = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let d = [d[0] - b[0], d[1] - b[1], d[2] - b[2]];
+    [
+        0.5 * (c[1] * d[2] - c[2] * d[1]),
+        0.5 * (c[2] * d[0] - c[0] * d[2]),
+        0.5 * (c[0] * d[1] - c[1] * d[0]),
+    ]
 }
 
 /// Biot–Savart velocity of a finite straight segment a→b, unit Γ, at p.

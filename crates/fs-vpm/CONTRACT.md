@@ -195,6 +195,44 @@ on arbitrary finite clouds. The velocity core remains algebraic, not a Gaussian
 heat kernel. This bounded 2-D addition does not close the deferred 3-D/FMM/BEM
 epic or change the existing inviscid thrust-screening consumer.
 
+## Three-dimensional impulse and conservative coarsening
+
+`FilamentWake::hydrodynamic_impulse_per_density` reports the complete closed
+wake's geometric hydrodynamic impulse divided by uniform fluid density:
+`sum Gamma * oriented_vector_area`, in m^4/s. Multiplication by density gives
+kg m/s. Quad orientation matches the published physical-edge convention,
+positive along the newer row's left-to-right span. Local coordinate differences
+and compensated accumulation reduce translation and cancellation error.
+The checked accessor rejects invalid geometry, unrepresentable results, and
+an attached near/far interface: the retained near sources alone are open.
+This is neither angular momentum nor momentum inside an arbitrary finite
+fluid control volume.
+
+`coarsen_oldest` now uses the actual three-dimensional quad areas at every
+station to solve `Gamma_new A_new = Gamma_a A_a + Gamma_b A_b`. It checks all
+three components against a vector-wide floating-point roundoff scale.
+Rotated or transverse wakes and small length units no longer depend on an
+x-spacing assumption or a fixed dimensional spacing cutoff. A single merged
+circulation cannot reproduce a vector outside its new quad's area direction;
+such pairs refuse with `coarsen-impulse-unrepresentable` and retain the
+resolved wake. Invalid counts, geometry, ages, cores and degenerate candidate
+areas also refuse before any mutation. Attached near/far boundaries retain
+their existing coarsening refusal.
+
+Merged node positions use absolute-circulation weights. The row-wide core
+smoothing scale uses the middle node's separation in all three coordinates.
+That geometric smoothing model does not establish conservation of every
+viscous second moment on warped rows. The legacy `station_impulse` remains
+streamwise-integrated circulation; only suitable parallel span lines make it
+proportional to a physical impulse component. No angular-impulse or energy
+conservation claim follows from this coarsener.
+
+The focused momentum/coarsening tests use independent polygon edge integrals,
+an analytic rectangular ring, proper rotations and translations, transverse
+and rescaled wakes, near/far source accounting, and atomic refusal of warped
+or malformed inputs. Existing topology, viscosity and field tests retain
+their own source-model checks.
+
 ## Finite-core connected 3-D wake
 
 `FilamentWake` stores captured **quad strengths**, positive along the current
