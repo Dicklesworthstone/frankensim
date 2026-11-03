@@ -1,5 +1,27 @@
 # CONTRACT: fs-mbd
 
+## Shared spatial loads on prescribed supports
+
+`articulated::motion::spatial_loads::prescribed` connects the original
+`SpatialMotionLoads`, world point forces/free couples, and finite axial
+Kelvin–Voigt connections to the supported motion owner. Both load and effort
+evaluation use the actual initial and midpoint states. The shared geometry
+and constitutive evaluator are reused; no alternative force law or large
+surrogate support mass is introduced.
+
+All connection wrenches enter native ABA and RNEA, including their effect on
+support reaction. External work, actuator work, signed support work, internal
+connection work, actual spring-storage change and nonnegative midpoint damping
+loss have separate accounts. The combined residual subtracts support work
+exactly once. Damping is not deposited into a thermal model implicitly.
+Final connection geometry and the last cancellation poll must also succeed
+before the endpoint is returned.
+
+The existing explicit timestep and connection-mode resolution requirements
+apply. Rotating supports preserve the world direction and actual application
+point of external loads; scalar root joints remain admissible. The targeted
+regression entry is `cargo test -p fs-mbd --test articulated_prescribed_spatial`.
+
 ## Continuous prescribed-base articulated motion
 
 `articulated::motion::prescribed` advances the original compact joint state

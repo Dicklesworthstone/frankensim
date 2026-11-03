@@ -6,6 +6,9 @@
 //! enter native ABA but contribute no external spatial impulse. They are finite
 //! spring/damper elements, not holonomic constraints or a contact regularization.
 
+/// Original point forces and axial connections with fixed or driven supports.
+pub mod prescribed;
+
 /// Simultaneously implicit finite attachments with native momentum reconstruction.
 pub mod implicit;
 

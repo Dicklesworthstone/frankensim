@@ -464,14 +464,30 @@ impl MomentumMap {
         state: &FreeFloatingMotionState,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, FreeFloatingMotionError> {
+        Self::from_joint_state(
+            model,
+            &state.joint_position,
+            &state.joint_velocity,
+            cancelled,
+        )
+    }
+
+    // Shared material geometry for either free or prescribed base motion.
+    // No floating-base reconstruction or fixed-root admission occurs here.
+    fn from_joint_state(
+        model: &ArticulatedModel,
+        joint_position: &[f64],
+        joint_velocity: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, FreeFloatingMotionError> {
         poll(cancelled)?;
         // With a stationary identity base these are base-from-link poses and
         // link twists due solely to the declared relative joint rates.
         let shape = forward_kinematics(
             model,
             BaseState::stationary(Se3::identity()),
-            &state.joint_position,
-            &state.joint_velocity,
+            joint_position,
+            joint_velocity,
         )?;
         let mut mass = 0.0;
         let mut center_base = Vec3::default();
