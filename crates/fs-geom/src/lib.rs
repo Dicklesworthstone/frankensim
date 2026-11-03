@@ -34,6 +34,7 @@
 
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
+use surface::{SurfaceAreaDensity, SurfaceAreaError, SurfaceAreaSample};
 
 mod convert;
 #[cfg(feature = "derived-geometry")]
@@ -55,6 +56,7 @@ pub mod sheaf;
 pub mod sheaf_merge;
 #[cfg(feature = "sheaf-repair")]
 pub mod sheaf_repair;
+pub mod surface;
 
 pub use convert::{Convert, ConvertDiag, ErrBudget, SagittaEnclosure, SampledSdf};
 pub use ident::{EntityId, IdTransform, IdentityMap};
@@ -764,6 +766,46 @@ pub trait Chart: Send + Sync {
         None
     }
 
+    /// Finite area of this chart's original boundary, in square metres.
+    /// This is an opt-in numerical sampling capability, independent of the
+    /// signed-field trace theorem. Names, support boxes and Lipschitz bounds
+    /// never imply it; unsupported or composite boundaries keep the default.
+    /// Implementations must supply the matching sampler and density lookup.
+    fn surface_area(&self, cx: &Cx<'_>) -> Result<f64, SurfaceAreaError> {
+        cx.checkpoint()?;
+        Err(SurfaceAreaError::Unsupported)
+    }
+
+    /// Sample the same original boundary from two independent variates in
+    /// `[0,1)`, returning its outward unit normal and density per square metre.
+    /// The reported density must agree with [`Self::surface_area_pdf_at`];
+    /// samplers must not silently retry invalid or singular draws. No mesh
+    /// conversion, visibility filtering or material-dependent sampling occurs.
+    fn sample_surface_area(
+        &self,
+        cx: &Cx<'_>,
+        _samples: [f64; 2],
+    ) -> Result<SurfaceAreaSample, SurfaceAreaError> {
+        cx.checkpoint()?;
+        Err(SurfaceAreaError::Unsupported)
+    }
+
+    /// Evaluate the matching area density near an actual boundary contact.
+    /// `tolerance_m` is an explicit finite, nonnegative distance allowance;
+    /// it does not authorize changing the caller's point or tracing a different
+    /// boundary. Off-surface and ambiguous queries refuse. A successful density
+    /// lookup supplies neither contact evidence nor a normal-neighborhood or
+    /// differential certificate: native consumers still query the original chart.
+    fn surface_area_pdf_at(
+        &self,
+        cx: &Cx<'_>,
+        _point: Point3,
+        _tolerance_m: f64,
+    ) -> Result<SurfaceAreaDensity, SurfaceAreaError> {
+        cx.checkpoint()?;
+        Err(SurfaceAreaError::Unsupported)
+    }
+
     /// Topology bounds this chart is willing to state.
     fn topology_hint(&self) -> BettiBounds {
         BettiBounds::unknown()
@@ -1009,3 +1051,4 @@ mod tests {
         assert_eq!(BettiBounds::exact(1, 0, 1).b2, (1, 1));
     }
 }
+

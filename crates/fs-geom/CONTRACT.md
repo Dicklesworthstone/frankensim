@@ -55,6 +55,25 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   lives on the `DesignChart: Chart` subtrait so `Region` can hold
   heterogeneous `Arc<dyn Chart>` (same contract, object-safe core;
   fs-xform builds on `DesignChart`).
+- `surface::{SurfaceAreaSample, SurfaceAreaDensity, SurfaceAreaError}` and
+  the object-safe `Chart::{surface_area, sample_surface_area, surface_area_pdf_at}`
+  methods form an explicit native boundary-area proposal. Unsupported owners
+  observe cancellation and refuse; a chart name, support box or trace theorem
+  never implies sampling authority. All three methods describe the same
+  immutable original boundary and physical area measure, retaining positive
+  finite densities and outward normals. These numerical values provide no
+  conversion, visibility, material, contact or normal-differential certificate.
+  `SphereChart` supplies uniform area sampling with `z=1-2u`, uniform azimuth,
+  stable polar radius and matching `1/(4*pi*r^2)` hit density. Native contact
+  lookup uses an explicit distance allowance and scaled normal evaluation.
+  Malformed geometry, unrepresentable area/PDF, off-surface or ambiguous
+  queries and coarse represented draws refuse; samples are never projected,
+  retried or success-conditioned. Constant-work calls checkpoint through `Cx`.
+  Box, torus and composite charts remain unsupported until their original
+  owners explicitly provide coherent sampling and density implementations.
+  Five authored regressions cover independent sphere moments, area/PDF laws,
+  poles, scale/translation, capability refusal and cancellation. Independent
+  numerical controls passed; Rust execution is unavailable without the toolchain.
 - `Region` — charts + per-chart `ProvenanceHash`; deterministic
   `primary()` (first); `check_agreement(&AgreementConfig, &Cx) ->
   Result<AgreementReport, Cancelled>` — seeded sampling over the inflated

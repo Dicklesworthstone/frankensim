@@ -5,6 +5,7 @@
 //! downstream conformance suites import these instead of inventing their
 //! own spheres.
 
+use crate::surface::{SurfaceAreaDensity, SurfaceAreaError, SurfaceAreaSample};
 use crate::{
     Aabb, BettiBounds, Chart, ChartSample, Differentiability, NormalDifferential, Point3,
     TraceNormalCone, TraceStepClaim, Vec3,
@@ -113,6 +114,29 @@ pub struct SphereChart {
     pub center: Point3,
     /// Radius (> 0).
     pub radius: f64,
+}
+
+impl SphereChart {
+    fn area_measure(&self) -> Result<(f64, f64), SurfaceAreaError> {
+        if !finite_point(self.center) || !self.radius.is_finite() || self.radius <= 0.0 {
+            return Err(SurfaceAreaError::InvalidGeometry);
+        }
+        // Multiply the constant before the second radius: squaring a small
+        // radius first needlessly underflows otherwise representable areas.
+        let area = (4.0 * core::f64::consts::PI * self.radius) * self.radius;
+        let pdf = 1.0 / area;
+        if !area.is_finite() || area <= 0.0 || !pdf.is_finite() || pdf <= 0.0 {
+            return Err(SurfaceAreaError::NumericalRange);
+        }
+        for center in [self.center.x, self.center.y, self.center.z] {
+            let lower = center - self.radius;
+            let upper = center + self.radius;
+            if !lower.is_finite() || !upper.is_finite() || lower >= center || upper <= center {
+                return Err(SurfaceAreaError::NumericalRange);
+            }
+        }
+        Ok((area, pdf))
+    }
 }
 
 impl Chart for SphereChart {
@@ -230,6 +254,93 @@ impl Chart for SphereChart {
         Some(NormalDifferential {
             normal: Vec3::new(n[0], n[1], n[2]),
             derivative_per_m,
+        })
+    }
+
+    fn surface_area(&self, cx: &Cx<'_>) -> Result<f64, SurfaceAreaError> {
+        cx.checkpoint()?;
+        self.area_measure().map(|(area, _)| area)
+    }
+
+    /// Uniform sphere area: `z = 1 - 2u`, `phi = 2 pi v`. Both variates
+    /// lie in `[0,1)`; the north pole at `u = 0` is a regular boundary point.
+    /// Translation must preserve the drawn radius/normal displacement within
+    /// `64 epsilon` relative Euclidean error or the draw refuses without retry.
+    fn sample_surface_area(
+        &self,
+        cx: &Cx<'_>,
+        samples: [f64; 2],
+    ) -> Result<SurfaceAreaSample, SurfaceAreaError> {
+        cx.checkpoint()?;
+        if samples.into_iter().any(|u| !u.is_finite() || !(0.0..1.0).contains(&u)) {
+            return Err(SurfaceAreaError::InvalidSample);
+        }
+        let (_, pdf_area_per_m2) = self.area_measure()?;
+        let z = 1.0 - 2.0 * samples[0];
+        // 2 sqrt(u(1-u)) avoids cancellation in sqrt(1-z*z) near a pole.
+        let radial = 2.0 * (samples[0] * (1.0 - samples[0])).sqrt();
+        let (sin, cos) = (core::f64::consts::TAU * samples[1]).sin_cos();
+        let candidate = Vec3::new(radial * cos, radial * sin, z);
+        let length = candidate.norm();
+        if !length.is_finite() || length <= 0.0 {
+            return Err(SurfaceAreaError::NumericalRange);
+        }
+        let normal = candidate.scale(1.0 / length);
+        let position_m = self.center.offset(normal.scale(self.radius));
+        if !finite_point(position_m) || position_m == self.center {
+            return Err(SurfaceAreaError::NumericalRange);
+        }
+        // A translated sphere can have distinct bounds yet lose most of a
+        // sampled displacement to coordinate rounding. Refuse that draw rather
+        // than publish a displaced point with the ideal sphere's area PDF.
+        // This is a numerical representation check, not a projection or retry.
+        let represented = position_m.delta_from(self.center).scale(1.0 / self.radius);
+        let error = Vec3::new(represented.x - normal.x,
+            represented.y - normal.y, represented.z - normal.z);
+        let error_squared = error.dot(error);
+        let allowance = 64.0 * f64::EPSILON;
+        if !error_squared.is_finite() || error_squared > allowance * allowance {
+            return Err(SurfaceAreaError::NumericalRange);
+        }
+        Ok(SurfaceAreaSample { position_m, normal, pdf_area_per_m2 })
+    }
+
+    fn surface_area_pdf_at(
+        &self,
+        cx: &Cx<'_>,
+        point: Point3,
+        tolerance_m: f64,
+    ) -> Result<SurfaceAreaDensity, SurfaceAreaError> {
+        cx.checkpoint()?;
+        if !finite_point(point) || !tolerance_m.is_finite() || tolerance_m < 0.0 {
+            return Err(SurfaceAreaError::InvalidSample);
+        }
+        let (_, pdf_area_per_m2) = self.area_measure()?;
+        let delta = point.delta_from(self.center);
+        let scale = delta.x.abs().max(delta.y.abs()).max(delta.z.abs());
+        if !scale.is_finite() {
+            return Err(SurfaceAreaError::NumericalRange);
+        }
+        if scale == 0.0 {
+            return Err(if tolerance_m < self.radius {
+                SurfaceAreaError::OffSurface
+            } else {
+                SurfaceAreaError::Ambiguous
+            });
+        }
+        let radial = [delta.x / scale, delta.y / scale, delta.z / scale];
+        let length = (radial[0] * radial[0] + radial[1] * radial[1] + radial[2] * radial[2]).sqrt();
+        let distance = scale * length;
+        if !distance.is_finite() || distance <= 0.0 {
+            return Err(SurfaceAreaError::NumericalRange);
+        }
+        if (distance - self.radius).abs() > tolerance_m {
+            return Err(SurfaceAreaError::OffSurface);
+        }
+        let n = radial.map(|value| value / length);
+        Ok(SurfaceAreaDensity {
+            normal: Vec3::new(n[0], n[1], n[2]),
+            pdf_area_per_m2,
         })
     }
 
@@ -554,3 +665,4 @@ mod tests {
         });
     }
 }
+
