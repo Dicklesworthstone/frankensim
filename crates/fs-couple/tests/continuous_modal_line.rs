@@ -519,3 +519,329 @@ fn original_direct_load_has_no_fake_state_and_preserves_matching_and_refusals() 
         .is_err()
     );
 }
+
+#[test]
+fn regional_runtime_preserves_uniform_history_for_every_end_condition() {
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    let profile = RadiusProfile::exponential(0.025, 10.0, 0.12).unwrap();
+    let duration = 1.0 / 96_000.0;
+    for end in [ModalEnd::Rigid, ModalEnd::PressureRelease, ModalEnd::Ports] {
+        let mut uniform = ContinuousModalLine::new(
+            &profile,
+            &gas,
+            ModeCount(2),
+            3,
+            end,
+            duration,
+            budget(),
+            || false,
+        )
+        .unwrap();
+        let mut regional = ContinuousModalLine::new_regional(
+            &profile,
+            &[gas; 3],
+            ModeCount(2),
+            end,
+            duration,
+            budget(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(uniform.port_count(), regional.port_count());
+        for step in 0..32 {
+            let waves = [40.0 * det::sin(0.2 * step as f64), -30.0, 25.0, 10.0];
+            let input = &waves[..uniform.port_count()];
+            uniform.push(input).unwrap();
+            regional.push(input).unwrap();
+            let bits = |line: &ContinuousModalLine| {
+                snapshot(line)
+                    .into_iter()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&regional), bits(&uniform));
+        }
+    }
+    assert!(
+        ContinuousModalLine::new_regional(
+            &profile,
+            &[gas; 3],
+            ModeCount(2),
+            ModalEnd::Rigid,
+            duration,
+            budget(),
+            || true,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn regional_runtime_retains_two_medium_response_and_each_faces_wave_energy() {
+    let cold = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    let warm = GasState::try_new(&GasSpec::dry_air_ussa1976(), 600.0, 101_325.0).unwrap();
+    let (radius, length, duration) = (0.025, 0.12, 1.0 / 96_000.0);
+    let profile = RadiusProfile::exponential(radius, 0.0, length).unwrap();
+    let gases: Vec<_> = (0..8).map(|i| if i < 4 { cold } else { warm }).collect();
+    let mut region = ContinuousModalLine::new_regional(
+        &profile,
+        &gases,
+        ModeCount(1),
+        ModalEnd::Ports,
+        duration,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(region.source().regional_gases(), Some(gases.as_slice()));
+    assert_eq!(region.state().len(), 18);
+    assert_eq!(region.port_count(), 2);
+    let zi = region.source().inlet_reference_impedance();
+    let zm = region.source().mouth_reference_impedance();
+    assert!((zi / zm - 1.0).abs() > 0.3);
+
+    // Independent two-medium plane-wave transfer, with physical pressure and
+    // axial flow continuous at the material interface. Both runtime port
+    // inputs point inward, hence the two-face impedance [A,1;1,D]/C.
+    let omega = TAU * 600.0;
+    let transfer = |gas: GasState| {
+        let z = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+        let phase = omega * (0.5 * length) / gas.sound_speed;
+        let c = C64::from_re(phase.cos());
+        let s = C64::new(0.0, -phase.sin());
+        [c, s.scale(z), s.scale(1.0 / z), c]
+    };
+    let (a, b) = (transfer(cold), transfer(warm));
+    let aa = a[0] * b[0] + a[1] * b[2];
+    let cc = a[2] * b[0] + a[3] * b[2];
+    let dd = a[2] * b[1] + a[3] * b[3];
+    let expected = [aa / cc, C64::ONE / cc, C64::ONE / cc, dd / cc];
+    let model = HarmonicModel::from_ode(
+        region.system(),
+        HarmonicBudget {
+            max_dimension: 124,
+            max_dense_bytes: 16 * 1024 * 1024,
+            max_dense_work: 4_000_000,
+            relative_residual_tolerance: 2e-10,
+        },
+        || false,
+    )
+    .unwrap();
+    let factor = model.factor(omega, || false).unwrap();
+    for column in 0..2 {
+        let mut input = [C64::ZERO; 2];
+        input[column] = C64::ONE;
+        let response = factor.response(&input, || false).unwrap();
+        for row in 0..2 {
+            assert!((response.output[row] - expected[row * 2 + column]).abs() / zi < 0.004);
+        }
+    }
+
+    let (mut incoming, mut outgoing) = (0.0, 0.0);
+    for step in 0..192 {
+        let incident = if step < 48 { [50.0, -30.0] } else { [0.0; 2] };
+        let record = region.push(&incident).unwrap();
+        for port in 0..2 {
+            let reference = if port == 0 { zi } else { zm };
+            close(
+                region.port_accounts()[port].incident_energy,
+                duration * incident[port].powi(2) / reference,
+                1e-12,
+                1e-20,
+            );
+        }
+        assert_eq!(record.physical_heat, 0.0);
+        assert_eq!(record.external_work, 0.0);
+        incoming += record.incident_energy;
+        outgoing += record.outgoing_energy;
+    }
+    assert!(outgoing > 0.0);
+    close(region.stored_energy_j() + outgoing, incoming, 3e-8, 1e-14);
+    let before = snapshot(&region);
+    assert!(region.push(&[f64::NAN, 0.0]).is_err());
+    assert_eq!(snapshot(&region), before);
+}
+
+#[test]
+fn regional_loaded_repeated_gas_preserves_dynamic_and_direct_history_bit_for_bit() {
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    let profile = RadiusProfile::exponential(0.025, 10.0, 0.12).unwrap();
+    let radius = profile.outlet_radius();
+    let z0 = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+    for dynamic in [false, true] {
+        let make_load = || {
+            let conductance = vec![0.15 / z0, 0.08 / z0, 0.08 / z0, 0.2 / z0];
+            if dynamic {
+                coupled_load(radius, gas, &[1.0, 0.6])
+                    .with_direct_conductance(conductance)
+                    .unwrap()
+            } else {
+                ModalAdmittanceLoad::from_conductance(conductance, radius, ModeCount(2), gas)
+                    .unwrap()
+            }
+        };
+        let mut uniform = ContinuousModalLine::new_loaded(
+            &profile,
+            &gas,
+            ModeCount(2),
+            3,
+            make_load(),
+            1.0 / 96_000.0,
+            budget(),
+            || false,
+        )
+        .unwrap();
+        let mut regional = ContinuousModalLine::new_regional_loaded(
+            &profile,
+            &[gas; 3],
+            ModeCount(2),
+            make_load(),
+            1.0 / 96_000.0,
+            budget(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(regional.load_source(), uniform.load_source());
+        assert_eq!(regional.load_state().len(), if dynamic { 2 } else { 0 });
+        for step in 0..32 {
+            let incident = [55.0 * det::sin(0.17 * step as f64), -30.0];
+            let a = uniform.push(&incident).unwrap();
+            let b = regional.push(&incident).unwrap();
+            assert_eq!(a.physical_heat.to_bits(), b.physical_heat.to_bits());
+            assert_eq!(
+                snapshot(&uniform)
+                    .into_iter()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>(),
+                snapshot(&regional)
+                    .into_iter()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+}
+
+#[test]
+fn regional_loaded_memory_heat_and_mutual_reflection_survive_clock_subdivision() {
+    let cold = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    let warm = GasState::try_new(&GasSpec::dry_air_ussa1976(), 600.0, 101_325.0).unwrap();
+    let gases = [cold, cold, warm, warm];
+    let radius = 0.025;
+    let profile = RadiusProfile::exponential(radius, 0.0, 0.04).unwrap();
+    let mouth_z0 = warm.density * warm.sound_speed / (core::f64::consts::PI * radius * radius);
+    let duration = 1.0 / 2400.0;
+    let mut results = Vec::new();
+    for subdivisions in [1, 2, 4] {
+        let load = coupled_load(radius, warm, &[1.0, 0.6])
+            .with_direct_conductance(vec![
+                0.15 / mouth_z0,
+                0.08 / mouth_z0,
+                0.08 / mouth_z0,
+                0.2 / mouth_z0,
+            ])
+            .unwrap();
+        let mut region = ContinuousModalLine::new_regional_loaded(
+            &profile,
+            &gases,
+            ModeCount(2),
+            load,
+            duration / subdivisions as f64,
+            budget(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(region.source().regional_gases(), Some(gases.as_slice()));
+        assert_eq!(region.source().gas_at_element(3), Some(&warm));
+        assert_eq!(region.load_source().unwrap().gas(), &warm);
+        assert_eq!(region.state().len(), 22);
+        assert_eq!(region.load_state().len(), 2);
+        assert_eq!(region.port_count(), 2);
+        assert_eq!(region.system().port_dim(), 2);
+        let (mut incident, mut outgoing, mut heat) = (0.0, 0.0, 0.0);
+        for _ in 0..subdivisions {
+            let record = region.push(&[75.0, 0.0]).unwrap();
+            incident += record.incident_energy;
+            outgoing += record.outgoing_energy;
+            heat += record.physical_heat;
+            assert_eq!(record.external_work, 0.0);
+        }
+        assert!(heat > 1.0e-13, "original load resistance must dissipate");
+        assert!(region.load_state().iter().all(|x| x.abs() > 1.0e-14));
+        assert!(
+            region.port_accounts()[1].outgoing_energy > 1.0e-14,
+            "regional cylinder's cross-mode reflection must come from the mutual load"
+        );
+        close(
+            region.stored_energy_j() + heat + outgoing,
+            incident,
+            3.0e-8,
+            1.0e-14,
+        );
+        let before = snapshot(&region);
+        assert!(region.push(&[f64::MAX, 0.0]).is_err());
+        assert_eq!(snapshot(&region), before);
+        results.push((region.state().to_vec(), outgoing, heat));
+    }
+    for other in &results[1..] {
+        for (&a, &b) in results[0].0.iter().zip(&other.0) {
+            close(a, b, 2.0e-7, 1.0e-12);
+        }
+        close(results[0].1, other.1, 3.0e-8, 1.0e-15);
+        close(results[0].2, other.2, 3.0e-8, 1.0e-15);
+    }
+}
+
+#[test]
+fn regional_loaded_refuses_incompatible_mouth_and_complete_state_capacity() {
+    let cold = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    let warm = GasState::try_new(&GasSpec::dry_air_ussa1976(), 600.0, 101_325.0).unwrap();
+    let unbalanced = GasState::try_new(&GasSpec::dry_air_ussa1976(), 600.0, 100_000.0).unwrap();
+    let profile = RadiusProfile::exponential(0.025, 0.0, 0.04).unwrap();
+    for (radius, load_gas, coupling) in [
+        (0.05, warm, &[1.0, 0.6][..]),
+        (0.025, unbalanced, &[1.0, 0.6][..]),
+        (0.025, warm, &[1.0][..]),
+    ] {
+        assert!(
+            ContinuousModalLine::new_regional_loaded(
+                &profile,
+                &[cold, cold, warm],
+                ModeCount(2),
+                coupled_load(radius, load_gas, coupling),
+                1.0 / 96_000.0,
+                budget(),
+                || false,
+            )
+            .is_err()
+        );
+    }
+    // Sixteen duct states fit, but the complete original load needs two more.
+    assert!(
+        ContinuousModalLine::new_regional_loaded(
+            &profile,
+            &[cold, cold, warm],
+            ModeCount(2),
+            coupled_load(0.025, warm, &[1.0, 0.6]),
+            1.0 / 96_000.0,
+            LinearSplitBudget {
+                max_modes: 16,
+                max_omega_dt: 1.0
+            },
+            || false,
+        )
+        .is_err()
+    );
+    assert!(
+        ContinuousModalLine::new_regional_loaded(
+            &profile,
+            &[cold, cold, warm],
+            ModeCount(2),
+            coupled_load(0.025, warm, &[1.0, 0.6]),
+            1.0 / 96_000.0,
+            budget(),
+            || true,
+        )
+        .is_err()
+    );
+}

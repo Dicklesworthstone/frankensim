@@ -23424,3 +23424,28 @@ check frozen/harmonic/spectral/covariance/angular parity, one-bin fast paths,
 latent backing storage, continuation, export-only defaults, exact zero loss,
 distinct binding, changed mass, caloric-domain refusal and cancellation.
 <!-- porous-load-thermal-receiver:end -->
+
+## Regional continuous modal acoustics and original mouth memory
+
+`mm_line::continuous::ContinuousModalLine::new_regional` consumes one original
+`GasState` per uniform axial element through fs-duct's full regional Galerkin
+owner. Local density and compressibility determine inertia, interface impedance
+and modal cutoff without averaging gas states or changing the retained radial
+basis. Every region has the same static pressure; this is frozen stratification,
+with no mean flow, mixing or thermal evolution.
+
+`new_regional_loaded` attaches a complete `ModalAdmittanceLoad` to that same
+regional operator before preparing the shared exact flow. The original mouth
+radius, mode coordinates and equilibrium pressure must agree; the load's own gas
+may have a different density or composition. Every mutual term, dynamic load
+state and direct conductance remains in the interconnected system. Only inlet
+wave ports remain external. `new_loaded` shares the same original interconnection
+and retains its existing admission order and uniform arithmetic.
+
+External wave references use each face's own original gas and area. Stored
+energy, load heat and incident/outgoing wave energies retain their separate
+physical accounts. The duct interior remains lossless; this constructor does
+not add a radiation law, fit damping or establish the attached source's
+frequency accuracy. Regional loaded regressions cover exact repeated-gas parity,
+mutual-load memory and heat under three clock subdivisions, source/capacity
+refusals and preservation of accepted history after malformed input.

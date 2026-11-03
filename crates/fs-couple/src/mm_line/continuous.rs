@@ -17,7 +17,7 @@
 use fs_duct::RadiusProfile;
 use fs_duct::modal::ModeCount;
 use fs_duct::modal::time_domain::{
-    ModalEnd, ModalGalerkinSource, ModalTimeError, assemble_lossless,
+    ModalEnd, ModalGalerkinSource, ModalTimeError, assemble_lossless, assemble_lossless_regional,
 };
 use fs_material::gas::GasState;
 use fs_phs::PortHamiltonian;
@@ -36,8 +36,9 @@ pub mod rational;
 /// Prepared full-state modal region and its accepted physical history.
 ///
 /// Output pressures and waves use the original mode normalization. The
-/// common positive real reference is rho*c/S at the original inlet; this
-/// is a wave-coordinate choice, not a matched evanescent characteristic.
+/// positive real reference at each face is rho*c/S from its original gas
+/// and area. This is a wave-coordinate choice, not a matched evanescent
+/// characteristic.
 pub struct ContinuousModalLine {
     source: ModalGalerkinSource,
     load_source: Option<ModalLoadSource>,
@@ -83,6 +84,40 @@ impl ContinuousModalLine {
         Self::prepare(source, system, None, duration, budget, &mut cancelled)
     }
 
+    /// Prepare the same exact coupled flow with one original gas state per
+    /// uniform axial element. Density, compressibility and local cutoffs enter
+    /// the original Galerkin operator; neither the state nor the response is
+    /// averaged or retuned. Both external faces use their own gas reference.
+    ///
+    /// All regions share equilibrium pressure and remain frozen. Interfaces
+    /// lie on element boundaries; thermal evolution, mixing and mean flow are
+    /// not supplied by this acoustic image. Every retained modal coordinate,
+    /// source state and independent wave-energy account remains inspectable.
+    ///
+    /// # Errors
+    /// Original regional-source, capacity, cancellation and exact-flow refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_regional(
+        profile: &RadiusProfile,
+        gases: &[GasState],
+        modes: ModeCount,
+        end: ModalEnd,
+        duration: f64,
+        budget: LinearSplitBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ModalTimeError> {
+        let image = assemble_lossless_regional(
+            profile,
+            gases,
+            modes,
+            end,
+            budget.max_modes,
+            &mut cancelled,
+        )?;
+        let (source, system) = image.into_parts();
+        Self::prepare(source, system, None, duration, budget, &mut cancelled)
+    }
+
     /// Attach a quiescent complete original modal load to every mouth mode, then
     /// prepare ONE exact coupled evolution. The load sees actual mouth pressure
     /// and returns outward duct flow: U_duct=-U_load, P_load=P_duct. Every
@@ -107,16 +142,7 @@ impl ContinuousModalLine {
         budget: LinearSplitBudget,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ModalTimeError> {
-        let declaration = load.source();
-        let radius = profile.outlet_radius();
-        if declaration.modes() != modes
-            || (declaration.radius_m() - radius).abs() > 128.0 * f64::EPSILON * radius
-            || declaration.gas().pressure.to_bits() != gas.pressure.to_bits()
-        {
-            return Err(ModalTimeError::Invalid(
-                "modal mouth/load require identical mode coordinates and radius and equal static pressure",
-            ));
-        }
+        Self::validate_load_binding(profile, gas, modes, &load)?;
         let image = assemble_lossless(
             profile,
             gas,
@@ -127,6 +153,79 @@ impl ContinuousModalLine {
             &mut cancelled,
         )?;
         let (source, duct) = image.into_parts();
+        Self::prepare_loaded(source, duct, load, duration, budget, &mut cancelled)
+    }
+
+    /// Attach a complete original modal mouth load to a regional gas duct.
+    /// Every local density and compressibility, mutual load term and memory
+    /// coordinate enters the same exact evolution as [`Self::new_loaded`].
+    /// Only the inlet modes remain external incident/reflected wave ports.
+    ///
+    /// Regional gases remain frozen and share equilibrium pressure. The
+    /// load binds to the actual mouth gas and radial coordinates; its own gas
+    /// may have a different density/composition at that same static pressure.
+    /// No state reduction, independent feedback clock or fitted load is used.
+    ///
+    /// # Errors
+    /// Original regional-source and load-coordinate refusals, complete-state
+    /// capacity, nonpassive structure, cancellation or exact-flow preparation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_regional_loaded(
+        profile: &RadiusProfile,
+        gases: &[GasState],
+        modes: ModeCount,
+        load: ModalAdmittanceLoad,
+        duration: f64,
+        budget: LinearSplitBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ModalTimeError> {
+        let image = assemble_lossless_regional(
+            profile,
+            gases,
+            modes,
+            ModalEnd::Ports,
+            budget.max_modes,
+            &mut cancelled,
+        )?;
+        let (source, duct) = image.into_parts();
+        let mouth_gas =
+            source
+                .gas_at_element(source.elements() - 1)
+                .ok_or(ModalTimeError::Invalid(
+                    "regional modal source requires a mouth gas",
+                ))?;
+        Self::validate_load_binding(profile, mouth_gas, modes, &load)?;
+        Self::prepare_loaded(source, duct, load, duration, budget, &mut cancelled)
+    }
+
+    fn validate_load_binding(
+        profile: &RadiusProfile,
+        gas: &GasState,
+        modes: ModeCount,
+        load: &ModalAdmittanceLoad,
+    ) -> Result<(), ModalTimeError> {
+        let declaration = load.source();
+        let radius = profile.outlet_radius();
+        if declaration.modes() != modes
+            || (declaration.radius_m() - radius).abs() > 128.0 * f64::EPSILON * radius
+            || declaration.gas().pressure.to_bits() != gas.pressure.to_bits()
+        {
+            return Err(ModalTimeError::Invalid(
+                "modal mouth/load require identical mode coordinates and radius and equal static pressure",
+            ));
+        }
+        Ok(())
+    }
+
+    fn prepare_loaded(
+        source: ModalGalerkinSource,
+        duct: PortHamiltonian,
+        load: ModalAdmittanceLoad,
+        duration: f64,
+        budget: LinearSplitBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ModalTimeError> {
+        let modes = source.modes();
         let (load_source, load, direct) = load.into_parts();
         let states = duct
             .state_dim()
@@ -163,7 +262,7 @@ impl ContinuousModalLine {
             Some(load_source),
             duration,
             budget,
-            &mut cancelled,
+            cancelled,
         )
     }
 
