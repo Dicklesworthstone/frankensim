@@ -17,6 +17,10 @@ use crate::{
     RigidBodyState, StepReceipt, Vec3, Wrench, apply_equal_and_opposite_impulse_at_body_points,
 };
 
+/// Simultaneous distance constraints on a graph of independent finite bodies.
+#[path = "distance/graph.rs"]
+pub mod graph;
+
 /// Original dimensioned impulse, angular-travel and nonlinear-work limits.
 /// The angular cap applies to each body and to the connection direction.
 pub use super::step::PointPlaneStepControls as DistanceStepControls;

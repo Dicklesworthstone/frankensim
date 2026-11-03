@@ -1908,6 +1908,46 @@ exchange and atomic refusals. This is one bilateral positive-length rod, with
 tension and compression. Zero-length ball joints, general joint graphs, unilateral
 cables, exact energy conservation and symplecticity remain outside this entry.
 
+## Coupled distance graphs between native rigid bodies
+
+`rigid_rattle::distance::graph::advance_distance_graph` advances multiple
+independent native bodies connected by positive `DistanceLink` rods. Shared
+bodies participate in the complete `J M^-1 J^T` mobility, retaining all
+translational and full-inertia angular cross responses. A coupled initial
+impulse solve closes every endpoint length after the original free steps;
+a coupled solve at the actual endpoint removes every range rate. No body
+is fixed, no pose is repaired, and no rod is replaced by a stiff spring.
+
+The original pair owner applies the simultaneously solved central reactions at
+unchanged poses in caller link order. Both reaction inventories and every
+native free step remain in the receipt. Their actual summed impulse work
+includes shared-body cross terms; individual pair work allocations depend on
+the reported application order. Internal reactions preserve total world
+linear and orbital-plus-spin angular momentum. Finite constraint work remains
+explicit and is not heat or an energy correction.
+
+At most 32 independent scalar rows are admitted. Unit-diagonal mobility scaling
+and the original fs-la Cholesky enforce the authored squared-pivot floor.
+Dependent or insufficiently regular rows refuse; this is floating regularity
+admission, not a condition-number certificate. Initial positions and velocities
+must already satisfy the constraints. The original dimensioned impulse,
+rotation, iteration and backtrack controls remain in force, with explicit
+body/row, trial-evaluation and logical-payload caps. Trial storage is reused:
+O(B+R) native work per trial, O(R²) mobility assembly and two O(R³) bounded
+factorizations. New transaction buffers reserve fallibly; the original
+bounded Cholesky allocation semantics are retained. Cancellation is checked
+per body/row and before atomic publication of all states.
+
+`tests/rigid_distance_graph.rs` checks analytic unequal-mass chain load sharing,
+closed-triangle collective rotation and second-order phase, 300 full-inertia
+off-axis steps with momentum/work balance, reversibility, frame/boost and
+body/row permutations, pair/free/disconnected equivalence, a real 32-row
+connected framework, rank/resource/local-branch refusals and cancellation
+at every observed checkpoint. This supplies smooth regular bilateral distance
+graphs; spherical/weld graphs, redundant constraints, unilateral cables,
+contact/impact coupling, moving lengths, exact energy conservation,
+symplecticity and validated whole-path enclosures remain separate work.
+
 ## Articulated point/plane impact response
 
 `articulated_impact::resolve_articulated_plane_impact` resolves one declared
