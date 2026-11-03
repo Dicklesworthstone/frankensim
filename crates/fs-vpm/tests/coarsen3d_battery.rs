@@ -64,11 +64,11 @@ fn per_station_impulse_exact_and_kelvin_survives() {
             before[s]
         );
     }
-    // Kelvin closure still holds per cell on the COARSENED lattice.
-    for r in 0..wake.rows.len().saturating_sub(1) {
-        for s in 0..8 {
+    // Signed incident-edge balances still hold on the COARSENED lattice.
+    for r in 0..=wake.rows.len() {
+        for s in 0..=8 {
             assert!(
-                bits_equal(wake.cell_net_circulation(r, s).unwrap(), 0.0),
+                wake.node_circulation_residual(r, s).unwrap().abs() < 2e-15,
                 "closure at ({r},{s}) after coarsening"
             );
         }
@@ -194,10 +194,10 @@ fn caps_and_determinism() {
     let a = run();
     assert_eq!(a, run(), "bit-identical twice");
     jlog("golden", &format!("\"digest\":\"{a}\""));
-    // The v2 identity retains weighted age; weights are independent of circulation units.
-    // The physical oracles in viscosity3d and this replay battery verify the change.
+    // v3 identifies the closed sheet and its closing-line/interface data.
+    // topology3d independently checks the evaluated filaments and their impulse.
     assert_eq!(
-        a, "ae0854814c404f0aa26e18f606f5ea4f35b6cfde75cb9419d5ae5b84689f6b00",
+        a, "aa95e437e322a29f4e4309cc7fab439b26206c52ed0bcfabdc94c0dadf8af16e",
         "coarsen golden moved — determinism regression or an \
          intentional merge-rule change requiring the golden-bump protocol"
     );

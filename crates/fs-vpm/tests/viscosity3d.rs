@@ -117,18 +117,23 @@ fn g0_near_wake_and_retained_exact_segments_use_the_same_core() {
     let cert = WakeRateCertificate {
         shed_hz: 100.0,
         n_stations: 1,
-        max_rows: 2,
+        max_rows: 3,
     };
     let a = [0.0, -0.5, 1.0];
     let b = [0.0, 0.5, 1.0];
     let mut near = FilamentWake::new(cert, vec![a, b]).unwrap();
     near.shed(&[2.0], [0.0; 3]).unwrap();
+    near.shed(&[2.0], [-0.2, 0.0, 0.0]).unwrap();
     let p = [0.1, 0.0, 1.1];
     let inviscid = near.induced_velocity(p);
-    near.rows[0].core2_m2 = 0.09;
-    let cell = cell_from_segs(vec![(a, b, 2.0)], 0.09);
-    assert_eq!(near.induced_velocity(p), cell.exact(p));
-    assert!(norm(near.induced_velocity(p)) < 0.5 * norm(inviscid));
+    for row in &mut near.rows { row.core2_m2 = 0.09; }
+    // Independent closed ring: the line closes the two physical trailing
+    // filaments and the starting span has opposite circulation.
+    let c = near.rows[0].nodes[1];
+    let d = near.rows[0].nodes[0];
+    let cell = cell_from_segs(vec![(a, b, 2.0), (b, c, 2.0), (c, d, 2.0), (d, a, 2.0)], 0.09);
+    assert!(difference(near.induced_velocity(p), cell.exact(p)) < 1e-14);
+    assert!(norm(near.induced_velocity(p)) < norm(inviscid));
 }
 
 #[test]

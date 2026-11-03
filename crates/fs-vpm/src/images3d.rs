@@ -89,6 +89,11 @@ pub fn image_identity(source_digest: &str, plane: ImagePlane) -> String {
 #[must_use]
 fn mirror_wake(wake: &FilamentWake, plane: ImagePlane) -> FilamentWake {
     let mut img = wake.clone();
+    if let Some(gamma) = &mut img.downstream_gamma {
+        for g in gamma {
+            *g = -*g;
+        }
+    }
     for n in &mut img.line_nodes {
         *n = plane.mirror(*n);
     }

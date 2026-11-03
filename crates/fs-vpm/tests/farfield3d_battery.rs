@@ -208,10 +208,11 @@ fn audited_prune_lawful_and_certificate_falsifier() {
         .map(|p| hybrid_velocity(&near, &far_full, *p))
         .collect();
     let mut far = far_full.clone();
-    // Measured 2026-08-21: farthest-cell bounds ~0.039, nearest ~0.6;
-    // exact spot-checks of pruned cells ~1e-3. 0.05 prunes the far
-    // tail while the near cells stay (bound >= tol).
-    let tol = 5e-2;
+    // Shared-edge cancellation makes the steady interior cells much weaker
+    // than the physical starting vortex. Keep a threshold that both prunes
+    // some true candidates and still exposes a forged bound below an actual
+    // cell contribution (the former 0.05 threshold exceeded every cell).
+    let tol = 3e-3;
     let receipt = far.prune_audited(&probes, tol).unwrap();
     assert!(
         !receipt.pruned.is_empty(),
@@ -398,10 +399,10 @@ fn determinism_golden() {
     let a = run();
     assert_eq!(a, run(), "bit-identical twice");
     jlog("golden", &format!("\"digest\":\"{a}\""));
-    // The v2 identity includes original source cores, elapsed-age scaling and diffusion state.
-    // The physical oracles in viscosity3d and this replay battery verify the change.
+    // v3 contains the corrected physical edge orientations and shared-span
+    // differences. topology3d separately proves exact partition continuity.
     assert_eq!(
-        a, "570377cdf7d5f49b66c58c81791533f682ed3d113f56db75225334a2c7135d56",
+        a, "5527fe58edd0dc80a5df2b2ad6cab9248abbcd17e6059c6836758c941db3e48a",
         "far-field golden moved — determinism regression or an \
          intentional multipole/prune change requiring the golden-bump protocol"
     );

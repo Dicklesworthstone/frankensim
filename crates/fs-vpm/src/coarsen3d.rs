@@ -55,13 +55,23 @@ fn pair_weights(a: &ShedRow, b: &ShedRow) -> (f64, f64) {
 ///
 /// # Errors
 /// `coarsen-invalid` (k = 0, or fewer than 2k rows — cap AND cap+1 by
-/// construction: exactly 2k admits, 2k−1 refuses).
+/// construction: exactly 2k admits, 2k−1 refuses); `coarsen-interface-attached`
+/// when a far field already owns the trailing edges ending at the oldest row.
+/// Coarsen before aggregation; moving that shared row without also rebuilding
+/// the far field would disconnect physical vortex lines.
 pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric, Refusal> {
     if k == 0 || wake.rows.len() < 2 * k {
         return Err(Refusal {
             code: "coarsen-invalid",
             message: format!("k {k} with {} rows", wake.rows.len()),
             ranked_repairs: vec!["coarsen at most rows/2 pairs from the old end".into()],
+        });
+    }
+    if wake.downstream_gamma.is_some() {
+        return Err(Refusal {
+            code: "coarsen-interface-attached",
+            message: "the oldest row is attached to retained far-field segments".into(),
+            ranked_repairs: vec!["coarsen before transferring rows to the far field".into()],
         });
     }
     // Probes for the REPORTED metric: a near ring around the newest

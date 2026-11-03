@@ -240,7 +240,10 @@ fn ground_effect_direction_and_determinism_golden() {
     // Physics: at the lifting line the image system OPPOSES the wake
     // downwash (ground effect reduces induced downwash) — direction
     // asserted, magnitude REPORTED.
-    let probe = [0.3, 0.0, 1.05];
+    // Evaluate on the actual lifting line, where the axial bound segment has
+    // no self-induction. An off-line probe also sees its bound-vortex field;
+    // ground images need not reduce that arbitrary local velocity magnitude.
+    let probe = [0.0, 0.0, 1.0];
     let free = {
         let f = far.eval(probe);
         let n = near.induced_velocity(probe);
@@ -278,10 +281,10 @@ fn ground_effect_direction_and_determinism_golden() {
             free[2], grounded[2]
         ),
     );
-    // Finite-core velocities and exact interior evaluation intentionally change this field.
-    // The physical oracles in viscosity3d and this replay battery verify the change.
+    // The closed sheet, corrected edge orientations, and near/far seam
+    // intentionally change this field; topology3d owns independent ring oracles.
     assert_eq!(
-        a, "ca47c28777c23cc6d78ea2dae3f46109e9d71b338a782a84bf63b3253e125b29",
+        a, "e79f61dd767ba109bc1da044047f8a6413d425cdc5f537762e525e90ff80c204",
         "grounded-hybrid golden moved — determinism regression or an \
          intentional image/multipole change requiring the golden-bump protocol"
     );

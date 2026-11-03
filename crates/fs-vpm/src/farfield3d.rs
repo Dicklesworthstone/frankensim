@@ -259,8 +259,10 @@ pub struct FarField {
 impl FarField {
     /// Aggregate the OLDEST `n_rows` of `wake` into cells of
     /// `rows_per_cell` consecutive rows each, removing them from the
-    /// near wake. Trailing segments are taken against the pre-removal
-    /// successor rows, so no segment is lost or double-counted.
+    /// near wake. Physical edges come from the exact near-wake traversal.
+    /// Trailing segments end at the pre-removal successors, and the last
+    /// removed quad's strengths remain on the near wake's downstream
+    /// interface. The shared spanwise edge is neither lost nor duplicated.
     ///
     /// # Errors
     /// `farfield-invalid` (n_rows must be a positive multiple of
@@ -280,6 +282,9 @@ impl FarField {
             || n_rows >= wake.rows.len()
             || n_rows % rows_per_cell != 0
             || !(dt_s.is_finite() && dt_s > 0.0)
+            || wake.downstream_gamma.as_ref().is_some_and(|g| {
+                g.len() != wake.cert.n_stations || g.iter().any(|v| !v.is_finite())
+            })
         {
             return Err(Refusal {
                 code: "farfield-invalid",
@@ -322,52 +327,16 @@ impl FarField {
                 });
             }
         }
-        let n_st = wake.cert.n_stations;
-        let total = wake.rows.len();
         let mut cells = Vec::with_capacity(n_rows / rows_per_cell);
         for c0 in (0..n_rows).step_by(rows_per_cell) {
             // Collect the cell's exact segments (spanwise + trailing).
             let mut segs = Vec::new();
             let mut source_core2_m2 = Vec::new();
             for ri in c0..c0 + rows_per_cell {
-                let row = &wake.rows[ri];
-                let core2 = if growth_per_tick == 0.0 {
-                    row.core2_m2
-                } else {
-                    row.core2_m2 + growth_per_tick * row.age_ticks
-                };
-                if !row.core2_m2.is_finite() || row.core2_m2 < 0.0 || !core2.is_finite() {
-                    return Err(Refusal {
-                        code: "farfield-core-invalid",
-                        message: format!(
-                            "row {ri}: initial core² {}, evolved core² {core2}",
-                            row.core2_m2
-                        ),
-                        ranked_repairs: vec![
-                            "use finite nonnegative cores and representable viscosity × age".into(),
-                        ],
-                    });
-                }
-                for s in 0..n_st {
-                    if row.gamma[s] != 0.0 {
-                        segs.push((row.nodes[s], row.nodes[s + 1], row.gamma[s]));
-                        source_core2_m2.push(core2);
-                    }
-                }
-                let next_nodes = if ri + 1 < total {
-                    &wake.rows[ri + 1].nodes
-                } else {
-                    &wake.line_nodes
-                };
-                for e in 0..=n_st {
-                    let left = if e > 0 { row.gamma[e - 1] } else { 0.0 };
-                    let right = if e < n_st { row.gamma[e] } else { 0.0 };
-                    let g = left - right;
-                    if g != 0.0 {
-                        segs.push((row.nodes[e], next_nodes[e], g));
-                        source_core2_m2.push(core2);
-                    }
-                }
+                wake.visit_row_segments(ri, growth_per_tick, &mut |segment| {
+                    segs.push((segment.start, segment.end, segment.circulation));
+                    source_core2_m2.push(segment.core2_m2);
+                });
             }
             let cell = cell_from_segs_with_cores(segs, source_core2_m2);
             let scalars = [
@@ -396,6 +365,7 @@ impl FarField {
             }
             cells.push(cell);
         }
+        wake.downstream_gamma = Some(wake.rows[n_rows - 1].gamma.clone());
         wake.rows.drain(0..n_rows);
         Ok(FarField {
             mode,
@@ -613,7 +583,7 @@ impl FarField {
                 b.extend_from_slice(&core2.to_bits().to_le_bytes());
             }
         }
-        hash_domain("org.frankensim.fs-vpm.farfield3d.v2", &b).to_hex()
+        hash_domain("org.frankensim.fs-vpm.farfield3d.v3", &b).to_hex()
     }
 }
 

@@ -5,14 +5,15 @@
 //! Structure: a lifting line with `n_stations` sheds one ROW of the
 //! filament mesh per 120 Hz tick. The mesh is a quad lattice:
 //!
-//!   - SPANWISE segments (one per station per row) carry the bound
-//!     circulation captured at shed time,
-//!   - TRAILING segments (one per station EDGE per row) carry the
-//!     running spanwise DIFFERENCE of circulation,
+//!   - each quad carries the bound circulation captured at shed time,
+//!   - SPANWISE segments carry the DIFFERENCE between adjacent quads,
+//!   - TRAILING segments carry the spanwise DIFFERENCE of circulation,
+//!   - the newest line closes the sheet with the current bound circulation.
 //!
-//! which makes every mesh cell a closed vortex loop: Kelvin's theorem
-//! holds EXACTLY by construction, and the battery checks it per cell
-//! per step (integer-indexed oracles, never a totals-only sum).
+//! Adjacent quads share one oriented physical edge and one core. This
+//! cancels steady interior spans before regularization, including when
+//! adjacent rows have different ages. Vortex lines have no unbalanced
+//! endpoints: the signed incident circulations close at every node.
 //!
 //! Admission: the wake-rate certificate bounds shed_hz × max_rows ×
 //! stations against a declared budget — refused at cap AND cap+1,
@@ -64,7 +65,8 @@ impl WakeRateCertificate {
             .n_stations
             .saturating_add(1)
             .saturating_mul(self.max_rows)
-            .saturating_add(self.n_stations.saturating_mul(self.max_rows));
+            .saturating_add(self.n_stations.saturating_mul(self.max_rows))
+            .saturating_add(self.n_stations);
         let ok = self.shed_hz.is_finite()
             && self.shed_hz > 0.0
             && self.shed_hz <= 1_000.0
@@ -91,7 +93,9 @@ impl WakeRateCertificate {
 pub struct ShedRow {
     /// Node positions at this row's spanwise line (n_stations + 1).
     pub nodes: Vec<[f64; 3]>,
-    /// Bound circulations captured at shed time (n_stations).
+    /// Bound circulations captured at shed time (n_stations). Each value
+    /// is the strength of the quad from this row to its newer successor,
+    /// positive along the successor's left-to-right spanwise edge.
     pub gamma: Vec<f64>,
     /// Base core width squared [m²], including the streamwise geometric
     /// smoothing added by coarsening. Zero for newly shed rows; viscous
@@ -100,6 +104,19 @@ pub struct ShedRow {
     /// Elapsed shedding intervals since emission; fractional after coarsening.
     /// A newly shed row is age zero. Conversion never resets this age.
     pub age_ticks: f64,
+}
+
+/// One oriented physical filament after adjacent panel contributions cancel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WakeSegment {
+    /// Start of the oriented segment [m].
+    pub start: [f64; 3],
+    /// End of the oriented segment [m].
+    pub end: [f64; 3],
+    /// Circulation along start → end [m²/s].
+    pub circulation: f64,
+    /// Squared Rosenhead–Moore core radius of this edge [m²].
+    pub core2_m2: f64,
 }
 
 /// The connected near-wake.
@@ -111,6 +128,11 @@ pub struct FilamentWake {
     pub line_nodes: Vec<[f64; 3]>,
     /// Shed rows, oldest first.
     pub rows: Vec<ShedRow>,
+    /// Captured quad strengths immediately downstream of the oldest retained
+    /// row, if those quads have been transferred to a far field. Their trailing
+    /// edges end at this row; retaining the strengths preserves its shared
+    /// spanwise edge. `None` denotes the physical starting edge of a full wake.
+    pub downstream_gamma: Option<Vec<f64>>,
     /// Ticks shed so far.
     pub ticks: u64,
 }
@@ -140,14 +162,14 @@ impl FilamentWake {
             cert,
             line_nodes,
             rows: Vec::new(),
+            downstream_gamma: None,
             ticks: 0,
         })
     }
 
     /// Shed one row: capture the CURRENT bound circulations and convect
     /// every existing node by `convect` (rigid prescribed step at this
-    /// tier — the free-wake self-induction mode is E4.7-iii's
-    /// WakeCoreEvolutionMode territory).
+    /// tier; free-wake self-induction is not implemented).
     ///
     /// # Errors
     /// `filament-shed-invalid` (gamma count/finiteness); the row cap
@@ -211,35 +233,138 @@ impl FilamentWake {
         Ok(())
     }
 
-    /// The NET circulation around mesh cell (row r, station s) — the
-    /// Kelvin closure quantity. For the connected quad lattice this is
-    /// IDENTICALLY zero: each cell's loop sums the two spanwise
-    /// segments (this row's and the next row's, opposite traversal)
-    /// and the two trailing segments (running differences), which
-    /// cancel exactly by construction. Exposed so the battery checks
-    /// the INVARIANT rather than trusting the comment.
+    /// Signed incident-circulation residual at the newer, right-hand vertex
+    /// of cell `(r, s)`. This audits the same assembled edge strengths used
+    /// for induction, rather than a difference that cancels itself.
+    /// Use [`Self::node_circulation_residual`] to include outer vertices.
     #[must_use]
     pub fn cell_net_circulation(&self, r: usize, s: usize) -> Option<f64> {
-        if r + 1 >= self.rows.len() || s >= self.cert.n_stations {
+        let newer = r.checked_add(1)?;
+        if newer >= self.rows.len() || s >= self.cert.n_stations {
             return None;
         }
-        // Spanwise circulations bounding the cell.
-        let g_old = self.rows[r].gamma[s];
-        let g_new = self.rows[r + 1].gamma[s];
-        // Trailing segment circulations on the cell's left/right edges
-        // BETWEEN rows r and r+1 carry the running difference of the
-        // newer row's spanwise distribution:
-        //   left edge  s   : sum_{k < s} (g_new[k] − g_old[k]) …
-        // In the standard lattice the loop sum telescopes to
-        //   g_old − g_new + (trailing_right − trailing_left)
-        // with trailing_right − trailing_left = g_new − g_old.
-        let trailing_delta = g_new - g_old;
-        Some(g_old - g_new + trailing_delta)
+        self.node_circulation_residual(newer, s + 1)
     }
 
-    /// Induced velocity at a probe: every spanwise segment plus every
-    /// trailing segment (running spanwise difference between adjacent
-    /// rows), using each row's finite Rosenhead–Moore core.
+    /// Incoming minus outgoing circulation at one lattice node. Rows run
+    /// `0..=rows.len()`, with the final index denoting the lifting line;
+    /// spanwise node indices run `0..=n_stations`. All four incident edge
+    /// strengths use the same differences as velocity evaluation. Roundoff
+    /// residuals are possible for non-binary circulation values.
+    ///
+    /// After aggregation, incoming trailing edges at row zero belong to the
+    /// far field; their retained strengths are included in this local balance.
+    #[must_use]
+    pub fn node_circulation_residual(&self, row: usize, edge: usize) -> Option<f64> {
+        if row > self.rows.len() || edge > self.cert.n_stations {
+            return None;
+        }
+        if self.rows.is_empty() {
+            return Some(0.0);
+        }
+        let incoming_span = if edge > 0 {
+            self.spanwise_circulation(row, edge - 1)
+        } else {
+            0.0
+        };
+        let outgoing_span = if edge < self.cert.n_stations {
+            self.spanwise_circulation(row, edge)
+        } else {
+            0.0
+        };
+        let incoming_trailing = if row > 0 {
+            trailing_circulation(&self.rows[row - 1].gamma, edge)
+        } else {
+            self.downstream_gamma.as_ref().map_or(0.0, |gamma| {
+                trailing_circulation(gamma, edge)
+            })
+        };
+        let outgoing_trailing = self.rows.get(row).map_or(0.0, |r| {
+            trailing_circulation(&r.gamma, edge)
+        });
+        Some((incoming_span - outgoing_span) + (incoming_trailing - outgoing_trailing))
+    }
+
+    fn spanwise_circulation(&self, row: usize, station: usize) -> f64 {
+        if row == self.rows.len() {
+            return self.rows.last().map_or(0.0, |r| r.gamma[station]);
+        }
+        let previous = if row > 0 {
+            self.rows[row - 1].gamma[station]
+        } else {
+            self.downstream_gamma.as_ref().map_or(0.0, |g| g[station])
+        };
+        previous - self.rows[row].gamma[station]
+    }
+
+    /// Visit each nonzero oriented physical edge once, without allocation.
+    /// A spanwise edge uses the newer adjacent row's retained core and age;
+    /// trailing edges use their emitting row. The closing line uses the newest
+    /// row's core. Steady interior spans cancel before core evaluation.
+    ///
+    /// This includes the line's closing segment. A coupled lifting-line solver
+    /// must not add that same bound segment a second time. After aggregation,
+    /// callers add the far field, which owns the removed rows' trailing edges.
+    /// As with the velocity helpers, inputs must already be finite/admitted.
+    pub fn visit_segments_with_core_growth(
+        &self,
+        growth_per_tick_m2: f64,
+        mut visit: impl FnMut(WakeSegment),
+    ) {
+        for row in 0..self.rows.len() {
+            self.visit_row_segments(row, growth_per_tick_m2, &mut visit);
+        }
+        if let Some(last) = self.rows.last() {
+            let core2_m2 = evolved_core(last, growth_per_tick_m2);
+            for s in 0..self.cert.n_stations {
+                let circulation = last.gamma[s];
+                if circulation != 0.0 {
+                    visit(WakeSegment {
+                        start: self.line_nodes[s],
+                        end: self.line_nodes[s + 1],
+                        circulation,
+                        core2_m2,
+                    });
+                }
+            }
+        }
+    }
+
+    pub(crate) fn visit_row_segments(
+        &self,
+        row_index: usize,
+        growth_per_tick_m2: f64,
+        visit: &mut impl FnMut(WakeSegment),
+    ) {
+        let row = &self.rows[row_index];
+        let core2_m2 = evolved_core(row, growth_per_tick_m2);
+        for s in 0..self.cert.n_stations {
+            let circulation = self.spanwise_circulation(row_index, s);
+            if circulation != 0.0 {
+                visit(WakeSegment {
+                    start: row.nodes[s],
+                    end: row.nodes[s + 1],
+                    circulation,
+                    core2_m2,
+                });
+            }
+        }
+        let next_nodes = self.rows.get(row_index + 1).map_or(&self.line_nodes, |r| &r.nodes);
+        for edge in 0..=self.cert.n_stations {
+            let circulation = trailing_circulation(&row.gamma, edge);
+            if circulation != 0.0 {
+                visit(WakeSegment {
+                    start: row.nodes[edge],
+                    end: next_nodes[edge],
+                    circulation,
+                    core2_m2,
+                });
+            }
+        }
+    }
+
+    /// Induced velocity of the complete assembled sheet, including its closing
+    /// line, using each physical edge's finite Rosenhead–Moore core.
     #[must_use]
     pub fn induced_velocity(&self, p: [f64; 3]) -> [f64; 3] {
         self.induced_velocity_with_core_growth(p, 0.0)
@@ -255,58 +380,34 @@ impl FilamentWake {
         growth_per_tick_m2: f64,
     ) -> [f64; 3] {
         let mut v = [0.0f64; 3];
-        let add = |v: &mut [f64; 3], seg_v: [f64; 3], g: f64| {
-            v[0] += g * seg_v[0];
-            v[1] += g * seg_v[1];
-            v[2] += g * seg_v[2];
-        };
-        for (ri, row) in self.rows.iter().enumerate() {
-            let core2 = if growth_per_tick_m2 == 0.0 {
-                row.core2_m2
-            } else {
-                row.core2_m2 + growth_per_tick_m2 * row.age_ticks
-            };
-            // Spanwise segments at this row.
-            for s in 0..self.cert.n_stations {
-                add(
-                    &mut v,
-                    segment_velocity_with_core(p, row.nodes[s], row.nodes[s + 1], core2),
-                    row.gamma[s],
-                );
+        self.visit_segments_with_core_growth(growth_per_tick_m2, |segment| {
+            let sv = segment_velocity_with_core(
+                p, segment.start, segment.end, segment.core2_m2,
+            );
+            for i in 0..3 {
+                v[i] += segment.circulation * sv[i];
             }
-            // Trailing segments to the next row (or the line for the
-            // newest row): edge e carries the running sum difference.
-            let next_nodes = if ri + 1 < self.rows.len() {
-                &self.rows[ri + 1].nodes
-            } else {
-                &self.line_nodes
-            };
-            for e in 0..=self.cert.n_stations {
-                // Trailing circulation at edge e = sum_{k>=e} dGamma…
-                // For the connected lattice: gamma left minus right.
-                let left = if e > 0 { row.gamma[e - 1] } else { 0.0 };
-                let right = if e < self.cert.n_stations {
-                    row.gamma[e]
-                } else {
-                    0.0
-                };
-                let g = left - right;
-                if g != 0.0 {
-                    add(
-                        &mut v,
-                        segment_velocity_with_core(p, row.nodes[e], next_nodes[e], core2),
-                        g,
-                    );
-                }
-            }
-        }
+        });
         v
     }
 
-    /// Content digest (bitwise over nodes + circulations).
+    /// Content digest over physical sheet geometry, quad strengths, ages,
+    /// cores, and the retained near/far interface circulation.
     #[must_use]
     pub fn digest(&self) -> String {
         let mut b = Vec::new();
+        b.extend_from_slice(&(self.cert.n_stations as u64).to_le_bytes());
+        for node in &self.line_nodes {
+            for c in node {
+                b.extend_from_slice(&c.to_bits().to_le_bytes());
+            }
+        }
+        b.push(u8::from(self.downstream_gamma.is_some()));
+        if let Some(gamma) = &self.downstream_gamma {
+            for g in gamma {
+                b.extend_from_slice(&g.to_bits().to_le_bytes());
+            }
+        }
         for row in &self.rows {
             for n in &row.nodes {
                 for c in n {
@@ -319,7 +420,21 @@ impl FilamentWake {
             b.extend_from_slice(&row.core2_m2.to_bits().to_le_bytes());
             b.extend_from_slice(&row.age_ticks.to_bits().to_le_bytes());
         }
-        hash_domain("org.frankensim.fs-vpm.filament3d.v2", &b).to_hex()
+        hash_domain("org.frankensim.fs-vpm.filament3d.v3", &b).to_hex()
+    }
+}
+
+fn trailing_circulation(gamma: &[f64], edge: usize) -> f64 {
+    let left = if edge > 0 { gamma[edge - 1] } else { 0.0 };
+    let right = gamma.get(edge).copied().unwrap_or(0.0);
+    right - left
+}
+
+fn evolved_core(row: &ShedRow, growth_per_tick_m2: f64) -> f64 {
+    if growth_per_tick_m2 == 0.0 {
+        row.core2_m2
+    } else {
+        row.core2_m2 + growth_per_tick_m2 * row.age_ticks
     }
 }
 

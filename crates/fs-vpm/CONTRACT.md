@@ -129,6 +129,57 @@ cost/poll refusal without partial publication.
 
 ## Finite-core connected 3-D wake
 
+`FilamentWake` stores captured **quad strengths**, positive along the current
+lifting line's left-to-right span. Velocity evaluation first assembles unique
+oriented physical edges: a row's spanwise circulation is the older quad strength
+minus the newer one; a trailing edge carries the right-minus-left spanwise
+difference; the current line closes the sheet with the newest strength. This is
+the boundary of an oriented vortex-ring sheet, not a separate full-strength
+spanwise filament for every time sample. In particular a steady wake with a
+common core evaluates to one outer ring, independently of its row subdivision.
+The current line's closing segments are included; downstream consumers must
+not add those same bound segments again.
+
+`visit_segments_with_core_growth` exposes that same allocation-free source
+traversal to exact evaluation and far aggregation. Shared spans cancel **before**
+kernel evaluation, so distinct adjacent core widths/ages cannot create fake
+transverse vorticity for steady circulation. A shared span uses the newer row's
+core and age, and trailing edges use their emitting row. This is a declared
+reduced edge-core model, not a resolved viscous vortex sheet.
+
+`node_circulation_residual` measures incoming minus outgoing circulation on the
+actual assembled edge strengths, including starting, tip, and closing-line
+nodes. The older `cell_net_circulation` entry point now reports this incident-edge
+balance at the named cell's newer right-hand vertex. Small roundoff residuals
+can occur; it no longer reports a tautological subtraction unrelated to the
+velocity sources. `tests/topology3d.rs` independently assembles endpoint
+incidence and compares velocities to separately integrated closed rings, with
+nonuniform time-varying strengths and the hydrodynamic impulse of the actual
+filaments as sign/closure checks (G0/G2/G3).
+
+After aggregation, `downstream_gamma` retains the last transferred quad's
+strengths at the shared near/far interface. The far field owns its trailing
+edges and the near wake owns the single shared span. Repeated conversion
+preserves the exact combined field, including mixed cores and image reflection.
+Coarsening an already attached oldest row refuses with
+`coarsen-interface-attached`: moving it alone would disconnect the retained far
+segments. Coarsen before aggregation. As before, conversion is a snapshot;
+subsequent near/far geometry motion must be kept consistent by the caller.
+
+`segment_kinematics_with_core` returns the finite-segment velocity and its
+exact spatial Jacobian, with no finite-difference step or allocation. The
+exterior derivative preserves the rationalized endpoint expression.
+Positive-core axial and endpoint probes retain a finite, generally nonzero
+curl even when their velocity is zero. Singular on-segment zero-core probes
+and unrepresentable results return `None`; regular extended-axis probes
+remain available. Scaling lengths by s gives velocity /s and Jacobian /s²
+at fixed circulation. The six `tests/segment_kinematics.rs` G0/G1 checks use
+independent differentiated line quadrature, the long-filament core profile,
+Stokes circulation, closed-loop off-filament curl and geometry scaling.
+The kernel convention follows Lindsay and Krasny (JCP 172, 2001), equations
+(1)-(2), DOI 10.1006/jcph.2001.6862. Regularization gives algebraic vorticity
+tails; a visualization core mask is not a claim that curl vanishes outside it.
+
 The connected filament, aggregation, and image lanes use the Rosenhead--Moore
 kernel `dl cross r / [4 pi (|r|^2 + a^2)^(3/2)]`. Straight-segment integration
 is analytic. Its unit-tangent form avoids comparing incompatible length powers,
@@ -180,9 +231,11 @@ Images are evaluation snapshots and must be rebuilt after geometry, diffusion,
 or mode changes. Mirroring preserves source cores, diffusion offsets and the
 axial-vector core moment.
 
-The filament and far-field digest domains are v2 because retained age and
-individual source/core assignment now affect physical evaluation. The updated
-replay goldens cover that intentional identity and kernel change.
+The filament and far-field digest domains are v3 because circulation assembly
+and edge orientation now describe the closed sheet rather than the former
+nonclosing row sources. Filament identity includes the closing-line geometry
+and retained interface circulation as well as row geometry, strengths, cores,
+and ages. The updated replay goldens cover this intentional physical change.
 `tests/viscosity3d.rs` checks independent line quadrature, the analytic long
 filament, length scaling, thin exterior fields, exact/near/far/image agreement,
 mixed-core convergence and fallback, chronology through conversion, continued

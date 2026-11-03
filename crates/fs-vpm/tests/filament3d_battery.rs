@@ -46,13 +46,13 @@ fn kelvin_closure_holds_per_cell_every_step() {
             })
             .collect();
         wake.shed(&g, [-0.1, 0.0, 0.0]).unwrap();
-        // Per-cell oracle after EVERY shed.
-        for r in 0..wake.rows.len().saturating_sub(1) {
-            for s in 0..8 {
-                let net = wake.cell_net_circulation(r, s).unwrap();
+        // All incident-edge balances, including starting/tip/closing nodes.
+        for r in 0..=wake.rows.len() {
+            for s in 0..=8 {
+                let net = wake.node_circulation_residual(r, s).unwrap();
                 assert!(
-                    bits_equal(net, 0.0),
-                    "Kelvin closure at cell ({r},{s}) tick {t}"
+                    net.abs() < 2e-15,
+                    "circulation closure at node ({r},{s}) tick {t}: {net}"
                 );
             }
         }
@@ -60,7 +60,7 @@ fn kelvin_closure_holds_per_cell_every_step() {
     jlog(
         "kelvin",
         &format!(
-            "\"rows\":{},\"cells_checked_per_step\":\"(rows-1)*8\"",
+            "\"rows\":{},\"nodes_checked_per_step\":\"(rows+1)*9\"",
             wake.rows.len()
         ),
     );
@@ -185,10 +185,10 @@ fn shed_determinism_golden() {
     let a = run();
     assert_eq!(a, run(), "bit-identical twice");
     jlog("golden", &format!("\"digest\":\"{a}\""));
-    // Retained elapsed age is part of the v2 physical wake identity.
-    // The physical oracles in viscosity3d and this replay battery verify the change.
+    // v3 identifies closed-sheet assembly, including the current closing line
+    // and any downstream partition circulation. topology3d owns ring oracles.
     assert_eq!(
-        a, "ff0bbc5849dee0a593d7d32f94fdbf49ccd1cd3373505102431b7decfd6cc412",
+        a, "a90cbf0bb24aae1726f1831737f383a49cf268c3523d5ca3dcb889bc85dd14c9",
         "filament shed golden moved — determinism regression or an \
          intentional lattice change requiring the golden-bump protocol"
     );
