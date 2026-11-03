@@ -350,6 +350,38 @@ not resolve bow-stick flexure, distributed hair-wave motion, rosin temperature
 or a measured rosin shear law. It is an additional physical rung for controlled
 comparison, not evidence that the violin now matches a recording.
 
+## Hair compliance on the 6 mm rung
+
+`cannone-h6-bow-hair.material-strings` is the 6 mm card
+`crates/fs-couple/examples/material_strings/cannone-dominant-g3-h6.material-strings`
+with two rows added after its 22nd line: `bow_ribbon 0.010 3` and the
+`bow_compliance` row, both copied from `cannone-hair-compliance.material-strings`.
+It keeps the 6 mm card's 134 retained body modes, tensions and cavity neck.
+It leaves out `bow-residual-flexibility`, which the friction solver refuses
+beside a ribbon with hair compliance. The test
+`crates/fs-vvreg/tests/violin_cannone_bow_hair_card.rs` fails if this card stops
+being exactly the 6 mm card plus those two rows.
+
+The open-string G3 and A4 published from this description were rendered with
+this card on the default 6 mm table and assembly, with the engine built at
+commit 0deca8418:
+
+```bash
+hair_dir="$(mktemp -d)"
+hair=bow-hair-horse-pitteroff-woodhouse-acustica1998
+cargo run -p xtask -- matdb-pack \
+  --manifest "data/matdb/seed-v1/$hair/manifest.tsv" \
+  --out "$hair_dir/$hair.fsmatpk"
+NOTES="G3 A4" \
+MATERIAL_STRINGS_PERFORMANCE="$PWD/data/instruments/descriptions/violin/cannone-h6-bow-hair.material-strings" \
+data/instruments/descriptions/violin/render.sh \
+  target/release/material_strings /path/to/new-h6-bow-hair-run \
+  --pack "$hair.fsmatpk=$hair_dir/$hair.fsmatpk"
+```
+
+The limits of the previous section apply unchanged. The card adds no data of
+its own and does not show that the violin matches a recording.
+
 ## Apply a measured varnish to the existing violin
 
 `cannone-h8-varnish-memory.assembly` adds an explicitly authored 20 µm film
