@@ -5,6 +5,7 @@
 //! using the native checked CG solver on M_ff. Held components keep their
 //! current velocity; their reaction impulse and signed work remain explicit.
 
+use fs_math::dd::Dd;
 use fs_solver::{CheckedCgConfig, CheckedCgError, LinearOp, SolveReport, checked_cg};
 use fs_sparse::precond::Precond;
 
@@ -64,7 +65,8 @@ pub struct SolidImpulseReport {
 
 impl ReferenceMass {
     /// Preserve every accepted state component except instantaneous velocity.
-    /// Repeated applied DOFs sum in caller order; repeated held DOFs refuse.
+    /// Repeated applied DOFs accumulate with compensation in caller order and
+    /// round once per resultant; repeated held DOFs refuse.
     /// Held DOFs retain the accepted velocity, rather than being set to zero.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn impulse_candidate(
@@ -363,7 +365,9 @@ fn admit_impulses(
         }
         held[dof] = true;
     }
-    let mut applied = vec![0.0; n];
+    // These entries are simultaneous loads. Preserve a small net impulse
+    // between large opposing contributions before the native mass solve.
+    let mut accumulated = vec![Dd::ZERO; n];
     for (index, &(dof, impulse)) in nodal_impulses_kg_m_s.iter().enumerate() {
         if index % 256 == 0 {
             checkpoint(cx)?;
@@ -371,7 +375,16 @@ fn admit_impulses(
         if dof >= n || !impulse.is_finite() {
             return Err(invalid("finite in-range nodal impulses required"));
         }
-        applied[dof] = finite(applied[dof] + impulse)?;
+        accumulated[dof] = accumulated[dof] + Dd::from_f64(impulse);
+        finite(accumulated[dof].hi)?;
+        finite(accumulated[dof].lo)?;
+    }
+    let mut applied = Vec::with_capacity(n);
+    for (dof, resultant) in accumulated.into_iter().enumerate() {
+        if dof % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        applied.push(finite(resultant.to_f64())?);
     }
     Ok((held, applied))
 }

@@ -261,6 +261,79 @@ fn deformed_plastic_body_reports_moving_support_work_and_preserves_state_on_refu
         );
         close(event.impulse.work_residual_j, 0.0, 1e-14);
         assert!(event.impulse.support_work_j > 0.003);
+
+        // The original graded mass must receive the net simultaneous load,
+        // even when large opposite impulses surround a much smaller one.
+        // Neither plastic history nor the moving supports may absorb its loss.
+        let large = 2.0_f64.powi(54);
+        for loads in [
+            [(4, large), (4, 0.03), (4, -large)],
+            [(4, -large), (4, 0.03), (4, large)],
+            [(4, large), (4, -large), (4, 0.03)],
+        ] {
+            let simultaneous = motion
+                .impulse_candidate(&held, &loads, origin, impulse_controls(), cx)
+                .unwrap();
+            for i in 0..4 {
+                for c in 0..3 {
+                    let expected_v = old_v[i][c] + if i == 1 && c == 1 { delta_v } else { 0.0 };
+                    close(simultaneous.motion.velocity_mps()[i][c], expected_v, 1e-13);
+                }
+            }
+            for &(dof, reaction) in &simultaneous.impulse.support_impulses_kg_m_s {
+                let expected = if dof % 3 == 1 {
+                    mass(dof / 3, 1) * delta_v
+                } else {
+                    0.0
+                };
+                close(reaction, expected, 1e-13);
+            }
+            for c in 0..3 {
+                let applied = [0.0, 0.03, 0.0][c];
+                close(
+                    simultaneous.impulse.applied.linear_kg_m_s[c],
+                    applied,
+                    1e-13,
+                );
+                close(
+                    simultaneous.impulse.applied.angular_kg_m2_s[c],
+                    applied_torque[c],
+                    1e-13,
+                );
+                close(
+                    simultaneous.impulse.support.linear_kg_m_s[c],
+                    if c == 1 {
+                        3.0 * mass(0, 1) * delta_v
+                    } else {
+                        0.0
+                    },
+                    1e-13,
+                );
+                close(
+                    simultaneous.impulse.support.angular_kg_m2_s[c],
+                    total_torque[c] - applied_torque[c],
+                    1e-13,
+                );
+            }
+            close(
+                simultaneous.impulse.kinetic_change_j,
+                0.1 * MASS_SHARES[1] * delta_v + 0.5 * mass(1, 1) * delta_v * delta_v,
+                1e-14,
+            );
+            close(
+                simultaneous.impulse.applied_work_j,
+                0.03 * (0.1 + 0.5 * delta_v),
+                1e-14,
+            );
+            close(
+                simultaneous.impulse.support_work_j,
+                0.1 * 3.0 * mass(0, 1) * delta_v,
+                1e-14,
+            );
+            assert_eq!(simultaneous.motion.solid().element_states(), old_states);
+            assert_eq!(simultaneous.motion.solid().element_deformation(), old_f);
+            assert_eq!(simultaneous.motion.solid().displacement_m(), old_u);
+        }
         assert_eq!(event.motion.solid().displacement_m(), old_u);
         assert_eq!(event.motion.solid().element_deformation(), old_f);
         assert_eq!(event.motion.solid().element_states(), old_states);

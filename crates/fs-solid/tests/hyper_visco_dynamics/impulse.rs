@@ -151,6 +151,75 @@ fn graded_kick_keeps_relaxed_memory_and_accounts_moving_supports_before_native_a
         close(event.impulse.kinetic_change_j, after.2 - before.2, 1e-14);
         close(event.impulse.work_residual_j, 0.0, 1e-14);
         assert!(event.impulse.support_work_j > 0.003);
+
+        // One simultaneous resultant must survive cancellation regardless of
+        // where its small contribution lies in the supplied contact loads.
+        // The oracle remains the exact graded simplex mass above, including
+        // its off-diagonal reaction at every moving held node.
+        let large = 2.0_f64.powi(54);
+        for loads in [
+            [(4, large), (4, 0.03), (4, -large)],
+            [(4, -large), (4, 0.03), (4, large)],
+            [(4, large), (4, -large), (4, 0.03)],
+        ] {
+            let simultaneous = motion
+                .impulse_candidate(&held, &loads, origin, impulse_controls(), cx)
+                .unwrap();
+            for i in 0..4 {
+                for c in 0..3 {
+                    close(
+                        simultaneous.motion.velocity_mps()[i][c],
+                        expected_v[i][c],
+                        1e-13,
+                    );
+                }
+            }
+            for &(dof, reaction) in &simultaneous.impulse.support_impulses_kg_m_s {
+                let expected = if dof % 3 == 1 {
+                    mass(dof / 3, 1) * 0.02
+                } else {
+                    0.0
+                };
+                close(reaction, expected, 1e-13);
+            }
+            for c in 0..3 {
+                let applied = [0.0, 0.03, 0.0][c];
+                close(
+                    simultaneous.impulse.applied.linear_kg_m_s[c],
+                    applied,
+                    1e-13,
+                );
+                close(
+                    simultaneous.impulse.applied.angular_kg_m2_s[c],
+                    applied_torque[c],
+                    1e-13,
+                );
+                close(
+                    simultaneous.impulse.support.linear_kg_m_s[c],
+                    after.0[c] - before.0[c] - applied,
+                    1e-13,
+                );
+                close(
+                    simultaneous.impulse.support.angular_kg_m2_s[c],
+                    after.1[c] - before.1[c] - applied_torque[c],
+                    1e-13,
+                );
+            }
+            close(
+                simultaneous.impulse.kinetic_change_j,
+                after.2 - before.2,
+                1e-14,
+            );
+            close(simultaneous.impulse.applied_work_j, 0.03 * 0.11, 1e-14);
+            close(
+                simultaneous.impulse.support_work_j,
+                0.1 * 3.0 * mass(0, 1) * 0.02,
+                1e-14,
+            );
+            assert_eq!(simultaneous.motion.solid().element_states(), old_states);
+            assert_eq!(simultaneous.motion.solid().displacement_m(), old_u);
+            assert_eq!(simultaneous.motion.solid().time_s(), HOLD);
+        }
         assert_eq!(event.motion.solid().displacement_m(), old_u);
         assert_eq!(event.motion.solid().element_states(), old_states);
         assert_eq!(event.motion.solid().element_first_piola_pa(), old_stress);
