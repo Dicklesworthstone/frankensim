@@ -182,6 +182,7 @@ fn friction_config() -> RigidDamageFrictionConfig {
         maximum_iterations: 100,
         slip_absolute_tolerance_m: 2e-12,
         slip_relative_tolerance: 1e-10,
+        velocity_absolute_tolerance_m_s: 1e-8,
         newton_damping: 1e-12,
     }
 }
@@ -803,4 +804,158 @@ fn g4_unresolved_midpoint_capture_refuses_reflection_and_keeps_original_motion()
     assert_eq!(owner.damaged_area_friction_states().unwrap(), states);
     assert_eq!(owner.steps(), 0);
     assert!(owner.site_frames().iter().all(Option::is_none));
+}
+
+#[test]
+fn resolved_tiny_sliding_retains_kinetic_heat_at_original_and_transferred_temperatures() {
+    let card = source_card([0.6, 0.3], false, Some([0.3, 0.1]));
+    let query = QueryPoint::new().with("T", 280.0).unwrap();
+    let bond = resolve_bilinear_cohesive(
+        &card,
+        &query,
+        MaterialPropertySelection::SingleClaimOnly,
+        0.05,
+    )
+    .unwrap();
+    let residual =
+        resolve_residual_coulomb(&card, &query, MaterialPropertySelection::SingleClaimOnly)
+            .unwrap();
+    let hot_bond = bond.at_temperature(&card, "T", 320.0).unwrap();
+    let hot_residual = residual.at_temperature(&card, "T", 320.0).unwrap();
+    let point = failed(&bond);
+    let velocity = Vec3::new(0.0, 6e-5, 8e-5);
+    for dt in [2e-9, 1e-9] {
+        for thermal in [false, true] {
+            let mut owner = system(
+                &bond,
+                Some(&residual),
+                point,
+                &[[0.0; 3]],
+                UnitQuaternion::IDENTITY,
+                [Vec3::ZERO, velocity],
+                zero(),
+                dt,
+                config(),
+            );
+            let delta = velocity.scale(dt);
+            assert!(norm(delta) < 0.25 * friction_config().slip_absolute_tolerance_m);
+            assert!(norm(velocity) > friction_config().velocity_absolute_tolerance_m_s);
+            let pressure = if thermal { 0.6 } else { 0.4 };
+            let coefficient = if thermal { 0.1 } else { 0.3 };
+            let capacity = coefficient * pressure;
+            let force = Vec3::new(-pressure, 0.6 * capacity, 0.8 * capacity);
+            let loads = balanced_load(force, v(point.jump_m()).add(delta.scale(0.5)));
+            let frame = *if thermal {
+                owner.step_with_temperature_and_friction(loads, &[&hot_bond], &[&hot_residual], "T")
+            } else {
+                owner.step(loads)
+            }
+            .unwrap();
+            let actual = owner.site_frames()[0].unwrap().friction.unwrap();
+            assert_eq!(actual.regime, DamageFrictionRegime::Sliding);
+            assert_eq!(
+                owner.damaged_area_friction_states().unwrap()[0].occupancy(),
+                DamageFrictionRegime::Sliding
+            );
+            close(actual.friction_dissipation_j, capacity * norm(delta), 1e-20);
+            assert!(actual.friction_dissipation_j > 0.0);
+            close(
+                frame.friction_dissipation_j,
+                actual.friction_dissipation_j,
+                1e-22,
+            );
+            close(actual.local_force_n[0], 0.6 * capacity, 2e-9);
+            close(actual.local_force_n[1], 0.8 * capacity, 2e-9);
+            close(
+                frame.parameter_work_j,
+                if thermal { 2e-5 } else { 0.0 },
+                2e-13,
+            );
+            for (i, expected) in [Vec3::ZERO, velocity].into_iter().enumerate() {
+                close_vec(
+                    owner.bodies()[i]
+                        .state()
+                        .center_of_mass_velocity_world(owner.bodies()[i].properties())
+                        .unwrap(),
+                    expected,
+                    1e-10,
+                );
+            }
+            assert_eq!(
+                owner.sites()[0].point().numerical().material().damage(),
+                1.0
+            );
+        }
+    }
+}
+
+#[test]
+fn actual_stop_restores_static_capacity_and_nonzero_slip_reversal_refuses() {
+    let (source, friction) = sources([0.6, 0.3], false);
+    let point = failed(&source);
+    let dt = 0.002;
+    let acceleration = 0.12 * (1.0 / 0.4 + 1.0 / 0.7);
+    for factor in [1.0, 0.75] {
+        let incoming = factor * acceleration * dt;
+        let slip = (incoming - 0.5 * acceleration * dt) * dt;
+        assert!(slip > friction_config().slip_absolute_tolerance_m);
+        let mut owner = system(
+            &source,
+            Some(&friction),
+            point,
+            &[[0.0; 3]],
+            UnitQuaternion::IDENTITY,
+            [Vec3::ZERO, Vec3::new(0.0, incoming, 0.0)],
+            zero(),
+            dt,
+            config(),
+        );
+        let bodies = owner.bodies().clone();
+        let states = owner.damaged_area_friction_states().unwrap().to_vec();
+        // Normal loading and frame moment hold compression and rotation; no
+        // external shear supplies the two actual bodies' relative deceleration.
+        let mut loads = balanced_load(
+            Vec3::new(-0.4, 0.12, 0.0),
+            v(point.jump_m()).add(Vec3::new(0.0, 0.5 * slip, 0.0)),
+        );
+        loads[0].force_world_n = Vec3::new(0.4, 0.0, 0.0);
+        loads[1].force_world_n = Vec3::new(-0.4, 0.0, 0.0);
+        let result = owner.step(loads).copied();
+        if factor < 1.0 {
+            assert_eq!(
+                result.unwrap_err(),
+                RigidCohesiveError::Invalid(
+                    "unresolved friction stop reverses endpoint slip; subdivide the step"
+                )
+            );
+            assert_eq!(owner.bodies(), &bodies);
+            assert_eq!(owner.damaged_area_friction_states().unwrap(), states);
+            assert_eq!(owner.steps(), 0);
+        } else {
+            let frame = result.unwrap();
+            close(frame.friction_dissipation_j, 0.12 * slip, 1e-12);
+            assert_eq!(
+                owner.damaged_area_friction_states().unwrap()[0].occupancy(),
+                DamageFrictionRegime::Sticking
+            );
+            let jump = owner.sites()[0].point().numerical().material().jump_m();
+            let held = *owner
+                .step(balanced_load(Vec3::new(-0.4, 0.2, 0.0), v(jump)))
+                .unwrap();
+            assert_eq!(held.friction_dissipation_j, 0.0);
+            assert_eq!(
+                owner.site_frames()[0].unwrap().friction.unwrap().regime,
+                DamageFrictionRegime::Sticking
+            );
+            close(
+                owner.site_frames()[0]
+                    .unwrap()
+                    .friction
+                    .unwrap()
+                    .local_force_n[0],
+                0.2,
+                2e-9,
+            );
+        }
+    }
 }

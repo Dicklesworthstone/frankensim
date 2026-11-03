@@ -495,6 +495,7 @@ fn thermal_transfers_consume_original_material_budget_and_do_not_freeze_friction
                 maximum_iterations: 64,
                 slip_absolute_tolerance_m: 1e-12,
                 slip_relative_tolerance: 1e-10,
+                velocity_absolute_tolerance_m_s: 1e-8,
                 newton_damping: 1e-10,
             },
             &CancelGate::new(),

@@ -18968,6 +18968,15 @@ unknowns. Every disk, body pose and material point is solved simultaneously.
 Static capture uses the shared law's static coefficient, or kinetic capture
 when already sliding; a yielded capture solution resolves the entire patch at
 its kinetic coefficients. Numerical cone scaling introduces no elastic spring.
+The explicit `velocity_absolute_tolerance_m_s` is independent of timestep.
+Actual objective velocities from the original native bodies select kinetic
+capture and detect resolved endpoint breakaway, even when a short interval's
+slip is below the displacement tolerance. The same fixed speed gate applies
+after a source-temperature transfer. A static path requires both endpoint
+velocities and net slip to be unresolved; resolved moving paths retain their
+original kinetic `mu * damaged_compression_force * slip` loss under refinement.
+After an actual stop, endpoint occupancy restores the static capture disk for
+the following interval without changing the audited preceding kinetic loss.
 Prepared damped least-squares Newton corrections admit redundant sticking sites
 without changing physical compliance or the final force equations. Individual
 reactions may be a numerical representative of an indeterminate distribution;
@@ -19000,7 +19009,11 @@ viscous/friction losses, redundant quadrature partition, rotating spread patches
 with full inertia, source/cancellation/late-energy rollback, and open/zero-friction
 reduction to the original native dynamics. A resolved incoming slip cannot be
 silently reflected by a zero-displacement midpoint capture: that case refuses
-with a step-subdivision request. Exact stopping times, general intrastep reversals,
+with a step-subdivision request. The same refusal applies to resolved endpoint
+reversals with nonzero net slip. Two further native regressions check kinetic
+work below displacement resolution at original and transferred temperatures,
+an independently predicted actual stop followed by static holding, and
+nonzero-slip reversal with complete rollback. Exact stopping times, general intrastep reversals,
 contact discovery, changing attachment topology, wear/heat deposition and
 arbitrary moving fracture-surface material reselection remain outside this owner.
 

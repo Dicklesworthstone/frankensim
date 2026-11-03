@@ -123,6 +123,28 @@ impl<'a> DamageFrictionState<'a> {
         self.occupancy
     }
 
+    /// Native owners with actual endpoint kinematics can distinguish a stop
+    /// from a sliding increment. This changes occupancy only; source identity,
+    /// original material history and the audited path loss remain untouched.
+    pub(crate) fn with_resolved_endpoint_tangential_velocity(
+        mut self,
+        velocity_m_s: [f64; 2],
+        tolerance_m_s: f64,
+    ) -> Result<Self, DamageFrictionError> {
+        positive(tolerance_m_s)?;
+        for value in velocity_m_s {
+            finite(value)?;
+        }
+        self.occupancy = if self.point.jump_m()[0] >= 0.0 || self.point.damage() == 0.0 {
+            DamageFrictionRegime::Inactive
+        } else if finite(velocity_m_s[0].hypot(velocity_m_s[1]))? > tolerance_m_s {
+            DamageFrictionRegime::Sliding
+        } else {
+            DamageFrictionRegime::Sticking
+        };
+        Ok(self)
+    }
+
     /// A zero net step displacement does not imply rest at its endpoint.
     /// Preserve kinetic occupancy from the receiving bodies' actual velocity.
     pub fn with_endpoint_tangential_velocity(

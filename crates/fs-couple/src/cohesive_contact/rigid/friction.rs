@@ -12,8 +12,9 @@
 //! indeterminate local reactions. All accepted forces satisfy the ORIGINAL
 //! unregularized disks and objective work equations. This is a discrete path
 //! model, not an exact stopping-time or unique softening-branch claim. A
-//! zero-slip capture that reverses resolved endpoint slip refuses; subdivide
-//! that mechanical step to resolve the stop rather than accepting rebound.
+//! reversal of resolved endpoint slip refuses; subdivide that mechanical step
+//! to resolve the stop. Velocity resolution is independent of timestep, so
+//! resolved sliding retains its physical loss even for tiny net increments.
 
 use super::solve::{Evaluation, Work, pack, terminal, unpack};
 use super::*;
@@ -35,6 +36,9 @@ pub struct RigidDamageFrictionConfig {
     /// Absolute actual local sticking-slip tolerance [m].
     pub slip_absolute_tolerance_m: f64,
     pub slip_relative_tolerance: f64,
+    /// Absolute objective tangential velocity resolution [m/s], independent of
+    /// timestep. A small displacement alone cannot establish static capture.
+    pub velocity_absolute_tolerance_m_s: f64,
     /// Dimensionless damping of scaled Newton NORMAL equations, in (0,1).
     /// Does not enter physical force, work, storage or contact compliance.
     pub newton_damping: f64,
@@ -164,6 +168,7 @@ pub(super) struct Friction<'a> {
     temperature: Vec<Option<TemperatureStage<'a>>>,
     last_forces: [[f64; 2]; 64],
     staged_forces: [[f64; 2]; 64],
+    incoming_velocity: [[f64; 2]; 64],
     config: RigidDamageFrictionConfig,
     cone_scale: [f64; 64],
     coordinate_scale: [f64; MAX_DIM],
@@ -186,6 +191,7 @@ struct Joint {
     slips: [f64; 64],
     pressure: [f64; 64],
     slip_tolerance: [f64; 64],
+    endpoint_velocity: [[f64; 2]; 64],
 }
 impl Joint {
     fn worst(&self, n: usize) -> f64 {
@@ -221,6 +227,7 @@ impl<'a> Friction<'a> {
             ));
         }
         positive(config.slip_absolute_tolerance_m)?;
+        positive(config.velocity_absolute_tolerance_m_s)?;
         let c = system.config;
         let local_config = DamageFrictionConfig {
             contact: CohesiveContactConfig {
@@ -322,6 +329,7 @@ impl<'a> Friction<'a> {
             temperature,
             last_forces: [[0.0; 2]; 64],
             staged_forces: [[0.0; 2]; 64],
+            incoming_velocity: [[0.0; 2]; 64],
             config,
             cone_scale,
             coordinate_scale,
@@ -369,9 +377,7 @@ impl<'a> Friction<'a> {
             // numerical residue from an accepted static solve cannot by itself
             // replace its retained branch. No body velocity is changed.
             let velocity = local_slip_velocity(system, p, &bodies)?;
-            let jump = state.point().jump_m();
-            let tolerance = finite(law.jump_tolerance(jump, jump, jump)? / system.dt_s)?;
-            let state = if finite(velocity[0].hypot(velocity[1]))? > tolerance {
+            let state = if self.resolved_velocity(velocity) {
                 state.with_endpoint_tangential_velocity(velocity)?
             } else {
                 state
@@ -399,6 +405,10 @@ impl<'a> Friction<'a> {
 
     pub(super) fn temperature_complete(&self) -> bool {
         self.temperature.iter().all(Option::is_some)
+    }
+
+    fn resolved_velocity(&self, velocity: [f64; 2]) -> bool {
+        velocity[0].hypot(velocity[1]) > self.config.velocity_absolute_tolerance_m_s
     }
 
     fn evaluate(
@@ -429,7 +439,9 @@ impl<'a> Friction<'a> {
             slips: [0.0; 64],
             pressure: [0.0; 64],
             slip_tolerance: [0.0; 64],
+            endpoint_velocity: [[0.0; 2]; 64],
         };
+        let endpoint_bodies = native.receipts.map(|receipt| receipt.state_after);
         for i in 0..12 {
             value.residual[i] = native.residual[i];
             value.tolerance[i] = if i % 6 < 3 {
@@ -440,6 +452,7 @@ impl<'a> Friction<'a> {
                 * x[i].abs().max(native.expected[i].abs());
         }
         for p in 0..count {
+            poll(gate)?;
             let (law, state) = self.history_for_step(p, system.thermal_active)?;
             let trial = system.staged_friction[p].frame;
             let delta = trial.slip_increment_m;
@@ -465,11 +478,23 @@ impl<'a> Friction<'a> {
             value.slips[p] = slip;
             value.pressure[p] = pressure;
             value.slip_tolerance[p] = slip_tol;
+            value.endpoint_velocity[p] = local_slip_velocity(system, p, &endpoint_bodies)?;
+            let moving = self.resolved_velocity(self.incoming_velocity[p])
+                || self.resolved_velocity(value.endpoint_velocity[p]);
             for i in 0..2 {
                 let j = 12 + 2 * p + i;
                 value.residual[j] = finite(forces[p][i] - projected[i])?;
                 let force_tol = law.force_tolerance(forces[p][i], cap)? * 0.0625;
-                value.tolerance[j] = positive(if length <= cap || slip <= 0.25 * slip_tol {
+                value.tolerance[j] = positive(if length <= cap {
+                    // A resolved moving path must reach its kinetic disk even
+                    // when its displacement is below the static resolution.
+                    let resolution = if moving && slip > 0.0 {
+                        slip.min(slip_tol)
+                    } else {
+                        slip_tol
+                    };
+                    force_tol.min(k * resolution * 0.0625)
+                } else if slip <= 0.25 * slip_tol && (!moving || slip == 0.0) {
                     force_tol.min(k * slip_tol * 0.0625)
                 } else {
                     force_tol * (k * slip / (cap + k * slip))
@@ -497,11 +522,19 @@ impl<'a> Friction<'a> {
         x[..12].copy_from_slice(&pack(system.last_wrenches));
         let mut mu = [0.0; 64];
         let mut yielded = [false; 64];
+        let incoming_bodies = system.bodies.each_ref().map(|body| body.state);
         for p in 0..count {
+            poll(gate)?;
             let (law, state) = self.history_for_step(p, system.thermal_active)?;
             x[12 + 2 * p..14 + 2 * p].copy_from_slice(&self.last_forces[p]);
-            mu[p] = law.capture_mu(state);
-            yielded[p] = state.occupancy() == DamageFrictionRegime::Sliding;
+            self.incoming_velocity[p] = local_slip_velocity(system, p, &incoming_bodies)?;
+            yielded[p] = state.occupancy() == DamageFrictionRegime::Sliding
+                || self.resolved_velocity(self.incoming_velocity[p]);
+            mu[p] = if yielded[p] {
+                law.kinetic_mu
+            } else {
+                law.capture_mu(state)
+            };
         }
         let mut work = Work {
             evaluations: 0,
@@ -518,7 +551,8 @@ impl<'a> Friction<'a> {
                 for p in 0..count {
                     if !yielded[p]
                         && value.pressure[p] > 0.0
-                        && value.slips[p] > 0.25 * value.slip_tolerance[p]
+                        && (value.slips[p] > 0.25 * value.slip_tolerance[p]
+                            || self.resolved_velocity(value.endpoint_velocity[p]))
                     {
                         yielded[p] = true;
                         let (law, _) = self.history_for_step(p, system.thermal_active)?;
@@ -688,28 +722,31 @@ impl<'a> Friction<'a> {
             for i in 0..2 {
                 applied[i + 1] += x[12 + 2 * p + i];
             }
+            let old_velocity = self.incoming_velocity[p];
+            let new_velocity = value.endpoint_velocity[p];
+            let incoming_moving = self.resolved_velocity(old_velocity);
+            let endpoint_moving = self.resolved_velocity(new_velocity);
+            let tolerance = self.config.velocity_absolute_tolerance_m_s;
+            if value.pressure[p] > 0.0
+                && incoming_moving
+                && endpoint_moving
+                && old_velocity[0] * new_velocity[0] + old_velocity[1] * new_velocity[1]
+                    < -tolerance * tolerance
+            {
+                return Err(RigidCohesiveError::Invalid(
+                    "unresolved friction stop reverses endpoint slip; subdivide the step",
+                ));
+            }
             let regime = if value.pressure[p] == 0.0 {
                 DamageFrictionRegime::Inactive
-            } else if value.slips[p] <= 0.25 * value.slip_tolerance[p] {
+            } else if value.slips[p] <= 0.25 * value.slip_tolerance[p]
+                && !incoming_moving
+                && !endpoint_moving
+            {
                 DamageFrictionRegime::Sticking
             } else {
                 DamageFrictionRegime::Sliding
             };
-            if regime == DamageFrictionRegime::Sticking {
-                let before = value.native.receipts.map(|r| r.state_before);
-                let after = value.native.receipts.map(|r| r.state_after);
-                let old_velocity = local_slip_velocity(system, p, &before)?;
-                let new_velocity = local_slip_velocity(system, p, &after)?;
-                let tolerance = value.slip_tolerance[p] / system.dt_s;
-                if old_velocity[0].hypot(old_velocity[1]) > tolerance
-                    && new_velocity[0].hypot(new_velocity[1]) > tolerance
-                    && old_velocity[0] * new_velocity[0] + old_velocity[1] * new_velocity[1] < 0.0
-                {
-                    return Err(RigidCohesiveError::Invalid(
-                        "unresolved friction stop reverses endpoint slip; subdivide the step",
-                    ));
-                }
-            }
             let audit = law.audit(
                 state,
                 point.point.material().jump_m(),
@@ -731,7 +768,10 @@ impl<'a> Friction<'a> {
                 system.config.objective.spatial_work_tolerance_j
                     + system.config.energy_relative_tolerance * audit.friction_dissipation_j,
             )?;
-            self.staged[p] = audit.state;
+            self.staged[p] = audit.state.with_resolved_endpoint_tangential_velocity(
+                new_velocity,
+                self.config.velocity_absolute_tolerance_m_s,
+            )?;
             self.staged_forces[p] = frame.local_force_n;
             loss += audit.friction_dissipation_j;
         }
