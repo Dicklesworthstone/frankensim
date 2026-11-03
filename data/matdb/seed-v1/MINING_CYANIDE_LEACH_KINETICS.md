@@ -18,7 +18,7 @@ equation:
 ```
 
 If `x` is moles of gold dissolved, the original equation extent is `x/4`.
-The batch derives stocks from their initial values:
+The closed batch derives stocks from their initial values:
 
 | Inventory | Current amount |
 | --- | --- |
@@ -53,6 +53,84 @@ standard state, 10 kg solvent gives `n_ref = 10 mol`; it does not follow from
 having 0.01 m3 of solution. Water retains fixed unit activity. Stoichiometric
 water consumption and OH production are distinct from equilibrium OH and
 do not close a finite H/O solvent balance or a bath heat calculation.
+
+## Oxygen contact while gold continues to dissolve
+
+`cyanide_leach::aeration::AeratedGoldCyanidationBatch` adds a maintained,
+prescribed oxygen partial pressure to the same chemical batch. It reuses the
+existing `IdealGasLiquidPartition` and the original NBS gas/aqueous oxygen
+profiles. For `O2(g) -> O2(aq)`, the ideal activity laws give
+
+```text
+n_DO_sat = n_ref * K * p_O2 / p_ref
+K = exp(-Delta_r_G_standard / (R*T))
+```
+
+The gas species' partial pressure is supplied explicitly. The standard
+reference pressure stays with the original thermochemical source; it is not
+a total-air pressure, a humidity correction or a measured pressure envelope.
+The solvent-based amount at unit activity remains distinct from liquid volume.
+These Henry-law conventions follow the
+[IUPAC recommendations](https://doi.org/10.1515/pac-2020-0302).
+
+At 298.15 K, the matched NBS profiles give a standard dissolution Gibbs energy
+of 16,400 J/mol and `K = 0.0013391965031285026`. For `n_ref = 10 mol` and
+`p_O2 = 21,000 Pa`, the target is approximately 0.002812312657 mol dissolved
+oxygen. With a separately declared 0.01 m3 liquid volume, this is
+0.281231266 mol/m3. Source compilation, original phase ownership, equilibrium
+activities and pressure/basis scaling are exercised by
+`xtask/tests/mining_gas_solubility_sources.rs`.
+
+A **separate** source card supplies `kLa` in inverse seconds. At fixed volume,
+the explicitly adopted well-mixed transfer closure is
+
+```text
+J = kLa * (n_DO_sat - n_DO)
+dx/dt = r_Au
+d(n_DO)/dt = J - r_Au/4
+```
+
+The transfer structure follows
+[US EPA, Aeration Equipment Evaluation, section 4, equation 16](https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=P100GGR5.TXT).
+That clean-water report does not calibrate a slurry or ore-specific aerator.
+No transfer coefficient is inferred from Gibbs energy, source names or
+stoichiometric reaction coefficients.
+
+Dissolved oxygen is an independently evolved amount. Starting at zero DO
+therefore permits subsequent leaching after oxygen enters. The chemical
+ceiling remains `min(initial_accessible_Au, initial_uncomplexed_CN / 2)`;
+the initial oxygen inventory no longer imposes a ceiling when transfer is
+active. Free CN and pH still come from simultaneous speciation at every
+kinetic stage, with evolving dicyanoaurate in the charge balance.
+
+Gross oxygen uptake and gross stripping have independent cumulative and
+interval accounts. The original Elsner equation supplies consumption, so
+the independently checked oxygen balance is
+
+```text
+current_DO + gold_dissolved/4 + cumulative_O2_out
+    = initial_DO + cumulative_O2_in
+```
+
+Pressure is fixed during one advance and may change on the next advance.
+At `kLa = 0`, exchange stops. At zero oxygen partial pressure and positive
+`kLa`, the boundary strips oxygen; zero pressure is not an exchange-off
+switch. The prescribed reservoir has no finite headspace or gas-feed cap.
+For a finite gas inventory and metered oxygen additions, the separate
+`cyanide_leach::gas_transfer` owner retains those explicit stocks.
+
+The actual pH, free CN, DO, time, volume and temperature remain subject to
+the original chemical rate card. The transfer card separately admits actual
+partial pressure, DO, time, volume and temperature, with optional saturation
+and activity-basis bounds. Caller-supplied extras cannot overwrite owned
+conditions. The external gas species cannot also be a liquid acid-family
+member or spectator.
+
+Every advance is atomic and bounded by work/attempt limits and cancellation.
+Full/two-half RK4 trials independently control raw local differences in gold,
+DO, gross uptake and gross stripping. These estimates are not certified
+global error bounds. Positive inventories are not clipped, and the separately
+reported oxygen balance allowance does not modify any stock.
 
 ## Run the connected calculation
 
@@ -90,9 +168,9 @@ illustrations; no ore or plant calibration is claimed.
 This carbon handoff is deliberately on the existing **analytical Au** basis.
 The carbon stage treats pH as an externally held condition and does not
 return a fully speciated cyanide liquor: no ligand/counterion adsorption law
-has been supplied. Simultaneous CIL chemistry, oxygen mass transfer, reagent
-dosing, through-flow, heat, ore-specific liberation and measured kinetic
-calibration remain separate capabilities.
+has been supplied. Simultaneous CIL chemistry, cyanide/alkalinity dosing, through-flow, heat,
+ore-specific liberation and measured kinetic calibration remain separate
+capabilities.
 
 Numerical advances have bounded work and cancellation checks and publish
 only after the full requested interval succeeds. Local and accumulated error
@@ -100,3 +178,46 @@ estimates are numerical diagnostics, not certified global bounds or source
 uncertainty. The exact coupled fixture in the unit tests holds pH at 7 while
 gold, free CN, HCN and oxygen decline; it has the independent solution
 `n_Au(t) = 1/sqrt(1 + k*t/2)` under the fixture's declared unit scales.
+
+## Run the aerated calculation
+
+The optional mode preserves the original eleven-pack invocation. Compile the
+additional existing oxygen gas profile into the same directory, then run:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/oxygen-gas-nbs1989-thermochemistry/manifest.tsv \
+  --out "$gold_process_packs/oxygen-gas-nbs1989-thermochemistry.fsmatpk"
+cargo run -p fs-material --example gold_leach_to_carbon -- \
+  --materials "$gold_process_packs" --aerated
+```
+
+This mode runs three explicitly authored cases at 21,000 Pa oxygen partial
+pressure and 298.15 K:
+
+| Case | Initial dissolved O2 | Authored kLa |
+| --- | ---: | ---: |
+| Sealed control | 0.00005 mol | 0 /s |
+| Weak oxygen contact | 0 mol | 0.0001 /s |
+| Stronger oxygen contact | 0 mol | 0.01 /s |
+
+Each starts with 0.001 mol accessible gold and 0.01 mol uncomplexed cyanide
+in the independently specified 0.01 m3 liquid and 10 kg solvent basis.
+The chemical source box explicitly covers DO up to 0.4 mol/m3 in this mode.
+The cases differ in their declared initial oxygen and transfer inputs; they
+are not a fitted comparison of commercial aerators.
+
+The example prints the source-derived saturation, actual pH/free CN/DO,
+oxygen entering and leaving, reaction consumption, conservation residuals,
+numerical estimates and bounded-work counts. Its three accepted intervals
+end at 10, 50 and 200 seconds. The resulting dissolved analytical Au then
+enters the same finite carbon-contact calculation, with separate activated
+and natural carbon uptake and a complete analytical-gold balance.
+
+The aeration tests use independent transfer-only exponentials, the closed
+leach's analytic solution, initially oxygen-free Taylor coefficients, pressure
+changes and uptake/stripping reversal. They also exercise amount/volume/basis
+scaling, actual-source refusals and rollback after cancellation or exhausted
+budgets. The example's rate and transfer cards remain synthetic; use measured
+source cards with applicable ore, slurry and equipment conditions before
+treating the results as a process prediction.

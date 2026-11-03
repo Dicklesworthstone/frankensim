@@ -1,6 +1,6 @@
 //! Source-backed chemistry -> finite gold leach -> analytical-Au carbon contact.
 //!
-//! Run `gold_leach_to_carbon --materials PACK_DIR`; --help lists the source packs.
+//! Run `gold_leach_to_carbon --materials PACK_DIR [--aerated]`; --help lists packs.
 //! NBS supplies equilibrium constants, gold molar mass and standard reaction G.
 //! Inventories, kinetic rates, carbon capacities and operating boxes are authored
 //! illustrations, not measured ore data or calibrated CIP/CIL.
@@ -28,7 +28,7 @@ use fs_material::{
     cyanide_leach,
 };
 use fs_qty::{
-    Amount, AmountConcentration, Dimensionless, Dims, Frequency, Mass, MolarMass, QuantitySpec,
+    Amount, AmountConcentration, Dimensionless, Dims, Frequency, Mass, MolarMass, Pressure, QuantitySpec,
     Temperature, Time, Volume,
     chemistry::ElementId,
     semantic::{QuantityKind, SemanticType, ValueForm},
@@ -39,6 +39,7 @@ use fs_thermochem::{
         minerals::MineralReaction,
         thermodynamics::{
             FormationGibbsSource,
+            gas_liquid::IdealGasLiquidPartition,
             acid_base::{
                 AcidDissociation, AcidFamily, IdealAcidBaseSystem, SpeciationOptions, SpectatorIon,
                 WaterAutoprotolysis,
@@ -55,6 +56,7 @@ const VOLUME: f64 = 0.01;
 const TEMPERATURE: f64 = 298.15;
 const INITIAL_GOLD: f64 = 0.001;
 const INITIAL_CYANIDE: f64 = 0.01;
+const OXYGEN_GAS_PACK: &str = "oxygen-gas-nbs1989-thermochemistry";
 const PACKS: [(&str, &str); 11] = [
     ("hydrogen-cyanide-aqueous-nbs1989", "HCN(aq)"),
     ("hydrogen-ion-aqueous-nbs1989", "H+(aq)"),
@@ -93,6 +95,7 @@ fn point(index: usize) -> Result<QueryPoint> {
     match index {
         4 => flags.extend([("source-phase-liquid", 1.0), ("source-pure-species", 1.0)]),
         5 => flags.extend([("source-phase-solid", 1.0), ("source-pure-species", 1.0)]),
+        11 => flags.extend([("source-phase-gas", 1.0), ("source-pure-species", 1.0)]),
         _ => {
             flags.extend([
                 ("source-phase-aqueous", 1.0),
@@ -132,19 +135,53 @@ fn sources<'a>(
         .collect()
 }
 
+fn material(directory: &Path, name: &str) -> Result<NormalizedPack> {
+    let bytes = std::fs::read(directory.join(format!("{name}.fsmatpk")))?;
+    let decoded = NormalizedPack::from_bytes(&bytes)?;
+    let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes)?;
+    if pack.pack_id() != name || pack.to_bytes() != bytes {
+        return Err(format!("expected canonical source profile {name}").into());
+    }
+    println!("material={} hash={}", pack.pack_id(), pack.content_hash());
+    Ok(pack)
+}
+
+fn oxygen_solubility(directory: &Path) -> Result<IdealGasLiquidPartition> {
+    let gas = material(directory, OXYGEN_GAS_PACK)?;
+    let aqueous = material(directory, PACKS[7].0)?;
+    let gas_id = SpeciesId::new("O2(g)")?;
+    let aqueous_id = SpeciesId::new("O2(aq)")?;
+    let gas_at = point(11)?;
+    let aqueous_at = point(7)?;
+    let model = IdealGasLiquidPartition::from_sources(
+        MineralReaction::OxygenDissolution.build()?,
+        gas_id.clone(),
+        aqueous_id.clone(),
+        &[
+            FormationGibbsSource {
+                species: &gas_id, pack: &gas, at: &gas_at, reference_axis: REFERENCE,
+            },
+            FormationGibbsSource {
+                species: &aqueous_id, pack: &aqueous, at: &aqueous_at, reference_axis: REFERENCE,
+            },
+        ],
+    )?;
+    let saturation = model.equilibrium_aqueous_amount(Pressure::new(21_000.0), Amount::new(10.0))?;
+    println!(
+        "oxygen_dissolution_standard_G_J_mol={:.3} lnK={:.12} \
+        prescribed_pO2_Pa=21000 equilibrium_DO_mol={:.12} equilibrium_DO_mol_m3={:.12}",
+        model.standard().molar().value(),
+        model.standard().log_equilibrium_constant().value(),
+        saturation.value(),
+        saturation.value() / VOLUME,
+    );
+    Ok(model)
+}
+
 fn chemistry(directory: &Path) -> Result<(IdealAcidBaseSystem, MolarMass)> {
     let packs = PACKS
         .iter()
-        .map(|(name, _)| {
-            let bytes = std::fs::read(directory.join(format!("{name}.fsmatpk")))?;
-            let decoded = NormalizedPack::from_bytes(&bytes)?;
-            let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes)?;
-            if pack.pack_id() != *name || pack.to_bytes() != bytes {
-                return Err(format!("expected canonical source profile {name}").into());
-            }
-            println!("material={} hash={}", pack.pack_id(), pack.content_hash());
-            Ok(pack)
-        })
+        .map(|(name, _)| material(directory, name))
         .collect::<Result<Vec<_>>>()?;
     let points = (0..PACKS.len()).map(point).collect::<Result<Vec<_>>>()?;
     let ids = PACKS
@@ -367,11 +404,16 @@ fn carbon_contact(
     Ok(())
 }
 
-fn leach_model(chemistry: IdealAcidBaseSystem) -> Result<cyanide_leach::GoldCyanidation> {
-    let declaration = "SYNTHETIC empirical gold law r=k*n_Au*c_free_CN*c_DO with k=1 \
+fn leach_model(
+    chemistry: IdealAcidBaseSystem,
+    oxygen_ceiling: f64,
+) -> Result<cyanide_leach::GoldCyanidation> {
+    let declaration = format!(
+        "SYNTHETIC empirical gold law r=k*n_Au*c_free_CN*c_DO with k=1 \
         m6/(mol2 s), 298.15 K, V=0.01 m3, pH 8..13, time 0..200 s, \
-        accessible Au 0..0.001 mol, free CN 0..1 mol/m3, DO 0..0.1 mol/m3. \
-        No measured ore, particle-size, liberation or reagent-consumption calibration.";
+        accessible Au 0..0.001 mol, free CN 0..1 mol/m3, DO 0..{oxygen_ceiling} mol/m3. \
+        No measured ore, particle-size, liberation or reagent-consumption calibration."
+    );
     println!("{declaration}");
     let mut validity = ValidityDomain::unconstrained();
     for (axis, dims, low, high) in [
@@ -386,7 +428,7 @@ fn leach_model(chemistry: IdealAcidBaseSystem) -> Result<cyanide_leach::GoldCyan
             cyanide_leach::OXYGEN_AXIS,
             AmountConcentration::DIMS,
             0.0,
-            0.1,
+            oxygen_ceiling,
         ),
         (cyanide_leach::GOLD_AXIS, Amount::DIMS, 0.0, INITIAL_GOLD),
         (cyanide_leach::ELAPSED_TIME_AXIS, Time::DIMS, 0.0, 200.0),
@@ -405,7 +447,7 @@ fn leach_model(chemistry: IdealAcidBaseSystem) -> Result<cyanide_leach::GoldCyan
         CYANIDE,
         card(
             cyanide_leach::CYANIDATION_LAW,
-            declaration,
+            &declaration,
             [(
                 cyanide_leach::RATE_PARAMETER,
                 1.0,
@@ -446,6 +488,24 @@ fn print_leach(state: &cyanide_leach::CyanidationState) {
     );
 }
 
+fn leach_charge(sodium: f64, inorganic_carbon: f64, oxygen: f64) -> Result<cyanide_leach::CyanidationCharge> {
+    Ok(cyanide_leach::CyanidationCharge {
+        accessible_gold: Amount::new(INITIAL_GOLD),
+        uncomplexed_cyanide: Amount::new(INITIAL_CYANIDE),
+        dissolved_oxygen: Amount::new(oxygen),
+        gold_complex: Amount::new(0.0),
+        amount_at_unit_activity: Amount::new(10.0),
+        solution_volume: Volume::new(VOLUME),
+        temperature: Temperature::new(TEMPERATURE),
+        spectators: vec![SpectatorIon {
+            species: SpeciesId::new("Na[+](aq)")?,
+            charge: 1,
+            amount: Amount::new(sodium),
+        }],
+        other_families: vec![(CARBONATE.into(), Amount::new(inorganic_carbon))],
+    })
+}
+
 fn run(
     label: &str,
     model: cyanide_leach::GoldCyanidation,
@@ -460,21 +520,7 @@ fn run(
         INITIAL_GOLD * molar_mass.value() * 1e6,
         (4.0 * oxygen).min(INITIAL_GOLD)
     );
-    let charge = cyanide_leach::CyanidationCharge {
-        accessible_gold: Amount::new(INITIAL_GOLD),
-        uncomplexed_cyanide: Amount::new(INITIAL_CYANIDE),
-        dissolved_oxygen: Amount::new(oxygen),
-        gold_complex: Amount::new(0.0),
-        amount_at_unit_activity: Amount::new(10.0),
-        solution_volume: Volume::new(VOLUME),
-        temperature: Temperature::new(TEMPERATURE),
-        spectators: vec![SpectatorIon {
-            species: SpeciesId::new("Na[+](aq)")?,
-            charge: 1,
-            amount: Amount::new(sodium),
-        }],
-        other_families: vec![(CARBONATE.into(), Amount::new(inorganic_carbon))],
-    };
+    let charge = leach_charge(sodium, inorganic_carbon, oxygen)?;
     let mut batch = cyanide_leach::GoldCyanidationBatch::new(
         model,
         charge,
@@ -523,35 +569,170 @@ fn run(
     )
 }
 
+fn oxygen_transfer(
+    solubility: IdealGasLiquidPartition,
+    coefficient: f64,
+) -> Result<cyanide_leach::aeration::OxygenTransfer> {
+    use cyanide_leach::aeration;
+    let declaration = format!(
+        "SYNTHETIC oxygen-transfer card: kLa={coefficient}/s; fixed pO2=21000 Pa, \
+        T=298.15 K, V=0.01 m3, actual DO and equilibrium target 0..0.4 mol/m3, \
+        time 0..200 s. Maintained gas reservoir; no measured ore/slurry/aerator calibration."
+    );
+    println!("{declaration}");
+    let mut validity = ValidityDomain::unconstrained();
+    for (axis, dims, low, high) in [
+        (aeration::OXYGEN_PARTIAL_PRESSURE_AXIS, Pressure::DIMS, 21_000.0, 21_000.0),
+        (cyanide_leach::OXYGEN_AXIS, AmountConcentration::DIMS, 0.0, 0.4),
+        (cyanide_leach::ELAPSED_TIME_AXIS, Time::DIMS, 0.0, 200.0),
+        (cyanide_leach::TEMPERATURE_AXIS, Temperature::DIMS, TEMPERATURE, TEMPERATURE),
+        (cyanide_leach::VOLUME_AXIS, Volume::DIMS, VOLUME, VOLUME),
+        (aeration::SATURATION_CONCENTRATION_AXIS, AmountConcentration::DIMS, 0.0, 0.4),
+        (cyanide_leach::ACTIVITY_REFERENCE_AXIS, Amount::DIMS, 10.0, 10.0),
+    ] {
+        validity = validity.with_quantity(axis, QuantitySpec::dimensional(dims), low, high);
+    }
+    Ok(aeration::OxygenTransfer::from_card(
+        solubility,
+        card(
+            aeration::OXYGEN_TRANSFER_LAW,
+            &declaration,
+            [(aeration::KLA_PARAMETER, coefficient, Frequency::DIMS)],
+            validity,
+        ),
+    )?)
+}
+
+fn run_aerated(
+    label: &str,
+    model: cyanide_leach::GoldCyanidation,
+    solubility: IdealGasLiquidPartition,
+    coefficient: f64,
+    oxygen: f64,
+    molar_mass: MolarMass,
+) -> Result<()> {
+    use cyanide_leach::aeration;
+    println!(
+        "\nscenario={label}; sodium_mol=0.02; carbonate_family_mol=0; \
+        initial_DO_mol={oxygen}; kLa_per_s={coefficient}; prescribed_pO2_Pa=21000"
+    );
+    let mut batch = aeration::AeratedGoldCyanidationBatch::new(
+        model,
+        oxygen_transfer(solubility, coefficient)?,
+        leach_charge(0.020, 0.0, oxygen)?,
+        QueryPoint::new(),
+        SpeciationOptions::default(),
+    )?;
+    println!(
+        "finite_Au_CN_gold_ceiling_mol={:.10}; oxygen availability evolves through the gas boundary",
+        batch.maximum_gold_dissolution().value()
+    );
+    print_leach(batch.state());
+    for duration in [10.0, 40.0, 150.0] {
+        let result = batch.advance(
+            Time::new(duration),
+            Pressure::new(21_000.0),
+            &QueryPoint::new(),
+            aeration::AerationNumerics {
+                maximum_step: Time::new(2.0),
+                absolute_gold_error: Amount::new(1e-11),
+                absolute_oxygen_error: Amount::new(1e-11),
+                absolute_transfer_error: Amount::new(1e-11),
+                relative_error: Dimensionless::new(1e-6),
+                ..aeration::AerationNumerics::default()
+            },
+            || false,
+        )?;
+        print_leach(&result.state);
+        println!(
+            "equilibrium_DO_mol={:.12} cumulative_O2_in_mol={:.12} \
+            cumulative_O2_out_mol={:.12} net_O2_transfer_mol={:.12} \
+            interval_O2_in_mol={:.12} interval_O2_out_mol={:.12} \
+            reaction_O2_consumed_mol={:.12} Au_balance_mol={:.3e} CN_balance_mol={:.3e} \
+            open_O2_balance_mol={:.3e} O2_roundoff_allowance_mol={:.3e} \
+            accepted={} rejected={} work={} accumulated_local_estimates_mol={:?}",
+            result.oxygen_saturation.value(),
+            result.oxygen_in.value(),
+            result.oxygen_out.value(),
+            result.net_oxygen_transfer.value(),
+            result.interval_oxygen_in.value(),
+            result.interval_oxygen_out.value(),
+            result.reaction_extent.value(),
+            result.conservation.gold.value(),
+            result.conservation.cyanide.value(),
+            result.conservation.dissolved_oxygen.value(),
+            result.oxygen_balance_allowance.value(),
+            result.accepted_steps,
+            result.rejected_steps,
+            result.work,
+            [
+                result.accumulated_error_estimates.gold.value(),
+                result.accumulated_error_estimates.dissolved_oxygen.value(),
+                result.accumulated_error_estimates.oxygen_in.value(),
+                result.accumulated_error_estimates.oxygen_out.value(),
+            ],
+        );
+    }
+    let state = batch.state();
+    println!(
+        "Carbon handoff: analytical dissolved Au, with pH externally held; \
+        no ligand/counterion adsorption or post-carbon cyanide speciation is inferred."
+    );
+    carbon_contact(
+        state.gold_complex,
+        state.speciation.ph.value(),
+        state.accessible_gold,
+        molar_mass,
+    )
+}
+
 fn main() -> Result<()> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if arguments.is_empty() || arguments.as_slice() == ["--help"] {
-        println!("usage: gold_leach_to_carbon --materials PACK_DIR");
+        println!("usage: gold_leach_to_carbon --materials PACK_DIR [--aerated]");
         println!("Compile each source with xtask matdb-pack into PACK_DIR/PACK_ID.fsmatpk:");
         for (pack, _) in PACKS {
             println!("  {pack}");
         }
+        println!("Runs lower/higher alkalinity, finite oxygen limitation, and carbonate buffering.");
+        println!("With --aerated, additionally compile {OXYGEN_GAS_PACK}.");
         println!(
-            "Runs lower/higher alkalinity, finite oxygen limitation, and carbonate buffering."
+            "Aerated mode compares a sealed control and two explicit kLa values, including zero-DO startup. \
+            Gas pressure is prescribed; no finite gas-feed supply or aerator calibration is inferred."
         );
         println!(
             "Rates, inventories and carbon cards are authored illustrations, not plant predictions."
         );
         return Ok(());
     }
-    if arguments.len() != 2 || arguments[0] != "--materials" {
-        return Err("usage: gold_leach_to_carbon --materials PACK_DIR".into());
+    if !(arguments.len() == 2 || (arguments.len() == 3 && arguments[2] == "--aerated"))
+        || arguments[0] != "--materials"
+    {
+        return Err("usage: gold_leach_to_carbon --materials PACK_DIR [--aerated]".into());
     }
+    let aerated = arguments.len() == 3;
     println!(
         "Fixed 10 kg solvent gives n_ref=10 mol at unit molal activity; \
         V=0.01 m3 is supplied separately for the empirical concentration rate law."
     );
     println!(
-        "Water retains unit activity; finite Au, cyanide-family and dissolved O2 are accounted. \
+        "Water retains unit activity; finite Au and cyanide-family stocks are accounted. \
         The formal NBS H2CO3 component means CO2(aq)+H2O(l), not a separate hydration model."
     );
     let (chemistry, molar_mass) = chemistry(Path::new(&arguments[1]))?;
-    let model = leach_model(chemistry)?;
+    if aerated {
+        let solubility = oxygen_solubility(Path::new(&arguments[1]))?;
+        let model = leach_model(chemistry, 0.4)?;
+        for (label, coefficient, oxygen) in [
+            ("sealed-control", 0.0, 0.00005),
+            ("weak-aeration-zero-initial-DO", 0.0001, 0.0),
+            ("stronger-aeration-zero-initial-DO", 0.01, 0.0),
+        ] {
+            run_aerated(label, model.clone(), solubility.clone(), coefficient, oxygen, molar_mass)?;
+        }
+        return Ok(());
+    }
+    let model = leach_model(chemistry, 0.1)?;
     for (label, sodium, carbon, oxygen) in [
         ("lower-alkalinity", 0.006, 0.0, 0.001),
         ("higher-alkalinity", 0.020, 0.0, 0.001),

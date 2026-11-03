@@ -1,0 +1,114 @@
+name: Mining original-module validation
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-material/src/separation*'
+      - 'crates/fs-material/src/separation/**'
+      - 'crates/fs-material/src/comminution*'
+      - 'crates/fs-material/src/comminution/**'
+      - 'crates/fs-material/src/reaction_batch*'
+      - 'crates/fs-material/src/reaction_batch/**'
+      - 'crates/fs-material/src/aqueous_adsorption*'
+      - 'crates/fs-material/src/aqueous_adsorption/**'
+      - 'crates/fs-material/src/cyanide_leach*'
+      - 'crates/fs-material/src/cyanide_leach/**'
+      - 'crates/fs-material/examples/gold_leach_to_carbon.rs'
+      - 'crates/fs-thermochem/src/stoichiometry*'
+      - 'crates/fs-thermochem/src/stoichiometry/**'
+      - 'crates/fs-thermochem/examples/mineral_processing.rs'
+      - 'data/matdb/seed-v1/*nbs1989*/**'
+      - 'xtask/tests/mining_gas_solubility_sources.rs'
+      - '.github/workflows/mining-original-modules.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  original-modules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-Z threads=1'
+      CARGO_TARGET_DIR: ${{ runner.temp }}/mining-target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            # Same narrowly checked raw-byte restoration as shared-thermal.yml.
+            # No changed pins, skipped source checks or substantive source edits.
+            python3 - <<'PY'
+          import json, pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          row = next(r for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          if git('rev-parse', 'HEAD').decode().strip() != row['git_head'] or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned NumPy clone; refusing repair')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          path = root / name
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('expected an ordinary tracked batch file')
+          raw = git('cat-file', 'blob', row['git_head'] + ':' + name)
+          actual = path.read_bytes()
+          if actual == raw or actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not a line-ending-only checkout discrepancy')
+          path.write_bytes(raw)
+          git('add', '--', name)
+          if git('rev-parse', ':' + name).strip() != git('rev-parse', row['git_head'] + ':' + name).strip() or path.read_bytes() != raw:
+              raise SystemExit('restoration differs from locked source or index')
+          PY
+            cargo run --manifest-path tools/bootstrap/Cargo.toml
+          fi
+      - name: Build real thermochemistry and material-pack compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p fs-thermochem --lib --example mineral_processing
+          cargo build -p xtask --bin xtask
+      - name: Test original mining modules and source-backed leach consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This compiles the original modules, not the full fs-material/workspace suite.
+          deps="$CARGO_TARGET_DIR/debug/deps"
+          externs=()
+          for name in fs_qty fs_math fs_matdb fs_evidence fs_blake3 fs_thermochem; do
+            libraries=("$deps"/lib"$name"-*.rlib)
+            [[ ${#libraries[@]} -eq 1 && -f "${libraries[0]}" ]] || { echo "Ambiguous/missing Cargo library: $name"; exit 1; }
+            externs+=(--extern "$name=${libraries[0]}")
+          done
+          compiler=(rustc --edition=2024 -Z threads=1 -C debuginfo=0 -L "dependency=$deps" "${externs[@]}")
+          probe="$RUNNER_TEMP/mining_original_modules.rs"
+          printf '%s\n' '#![deny(unsafe_code)]' > "$probe"
+          for module in separation comminution reaction_batch aqueous_adsorption cyanide_leach; do
+            printf '#[path = "%s/crates/fs-material/src/%s.rs"] pub mod %s;\n' "$GITHUB_WORKSPACE" "$module" "$module" >> "$probe"
+          done
+          export CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE/crates/fs-material" CARGO_WORKSPACE_DIR="$GITHUB_WORKSPACE"
+          "${compiler[@]}" --test --crate-name fs_material "$probe" -o "$RUNNER_TEMP/mining-tests"
+          "$RUNNER_TEMP/mining-tests" --test-threads=1
+          "${compiler[@]}" --crate-type rlib --crate-name fs_material "$probe" -o "$RUNNER_TEMP/libfs_material.rlib"
+          CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE/xtask" CARGO_BIN_EXE_xtask="$CARGO_TARGET_DIR/debug/xtask" "${compiler[@]}" --test xtask/tests/mining_gas_solubility_sources.rs -o "$RUNNER_TEMP/gas-sources"
+          "$RUNNER_TEMP/gas-sources" --test-threads=1
+          "${compiler[@]}" crates/fs-material/examples/gold_leach_to_carbon.rs --extern "fs_material=$RUNNER_TEMP/libfs_material.rlib" -o "$RUNNER_TEMP/gold_leach_to_carbon"
+          packs="$RUNNER_TEMP/mining-packs"
+          mkdir -p "$packs"
+          profiles=(
+            hydrogen-cyanide-aqueous-nbs1989 hydrogen-ion-aqueous-nbs1989 cyanide-ion-aqueous-nbs1989
+            hydroxide-ion-aqueous-nbs1989 water-liquid-nbs1989-thermochemistry gold-solid-nbs1989-thermochemistry
+            dicyanoaurate-ion-aqueous-nbs1989 oxygen-aqueous-nbs1989-thermochemistry carbonic-component-aqueous-nbs1989
+            bicarbonate-ion-aqueous-nbs1989 carbonate-ion-aqueous-nbs1989 oxygen-gas-nbs1989-thermochemistry
+          )
+          for pack in "${profiles[@]}"; do
+            "$CARGO_TARGET_DIR/debug/xtask" matdb-pack --manifest "data/matdb/seed-v1/$pack/manifest.tsv" --out "$packs/$pack.fsmatpk"
+          done
+          "$RUNNER_TEMP/gold_leach_to_carbon" --materials "$packs"
+          "$RUNNER_TEMP/gold_leach_to_carbon" --materials "$packs" --aerated
