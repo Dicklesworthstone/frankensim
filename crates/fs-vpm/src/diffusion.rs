@@ -47,6 +47,8 @@
 use super::*;
 use fs_math::det;
 
+/// Positive-time adaptivity on an existing compact diffusion graph.
+pub mod adaptive;
 /// Reusable spatial graphs for fixed-site compact-support diffusion.
 pub mod sparse;
 pub use sparse::{PreparationBudget, PreparationReport, PreparedPse};

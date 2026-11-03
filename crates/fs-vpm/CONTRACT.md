@@ -390,6 +390,40 @@ the analytical continuum solution and reports actual sparse/dense pair counts.
 These counts establish algorithmic work, not measured machine speed. The
 finite-cloud, support-resolution and splitting-error limits still apply.
 
+### Adaptive time accuracy on the prepared graph
+
+`PreparedPse::advance_adaptive_with_cx` completes an explicit duration using
+one full symmetric pair step versus two half steps. It accepts the fine state
+when every particle's local estimate
+`|Gamma_fine-Gamma_coarse| / [3(A*atol + rtol*max(|Gamma_old|,|Gamma_fine|))]`
+is at most one. The positive absolute tolerance is in vorticity [1/s]; the
+relative tolerance is dimensionless. The division by three is the second-order
+step-doubling estimate. No extrapolation, clipping, negative diffusion time or
+circulation correction is applied, so accepted steps keep the original pair
+maps' conservation and vorticity-range/enstrophy contraction.
+
+Rejected trials halve the time step. Accepted ratios at most 1/8 allow
+doubling, within explicit minimum/maximum steps; the last endpoint remainder
+may be shorter than the minimum. A failed tolerance floor, stalled represented
+time, aggregate work/pair/attempt cap, cancellation or original physical
+refusal returns no partial window. Geometry remains pinned to the original
+graph. Exact zero-time, zero-viscosity and edgeless identities still validate
+the input and preserve its bits.
+
+Three particle buffers and two fractions per supported edge are reserved once.
+An active trial has six E pair visits and 2 N + 7 E + 1 logical work units;
+initial validation costs N. Rejected trials are included in both counts.
+No trial allocates. The ambient accountant admits the explicit work ceiling
+and reports actual consumption; inactive runs admit only N units. The final
+result includes exact requested elapsed time, accepted/rejected counts and the
+largest accepted local estimate.
+
+This is automatic control of temporal splitting on a fixed spatial graph.
+It is not a global time-error certificate or an estimate of finite-cloud,
+quadrature, kernel, wall or continuum-model error. `tests/adaptive_diffusion.rs`
+uses independent three-site diffusion eigenmodes, an unequal-area analytic
+pair, tolerance refinement, conservation, identities and transactional refusal.
+
 ## Viscous evolution with conservative advection
 
 `conservative::simulate_viscous_with_cx` composes the original PSE diffusion
