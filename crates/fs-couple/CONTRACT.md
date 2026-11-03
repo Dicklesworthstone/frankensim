@@ -16712,10 +16712,18 @@ wind to do positive inertial-frame work on the vehicle.
 This smooth composition is second order, with physical outer timestep and
 native substep controls; it does not locate impact, cutoff, staging or source-
 domain events. The caller splits intervals at known mode changes and refines
-changing flow regimes. The underlying fixed common COM/principal axes, declared
-diagonal exhaust angular flux, ideal frozen nozzle and source-domain limits
-remain in force. General internal-flow/transverse outlet linear momentum,
-slosh, aerodynamic heating and a full exhaust/world-energy audit are not inferred.
+changing flow regimes. The original inertia model remains typed through
+`RocketFlightPropulsion<E>`, `RocketFlightForcing<E>`, the midpoint predictor,
+accepted `RocketFlightStep<I>` and `AtmosphericFlightCandidate<I>`. Full-tensor
+vehicles retain moving principal axes, original material coordinates and native
+angular outflow. Each environment sample recovers point angular velocity and
+drag mobility from that sample's actual remaining full inertia. Default type
+parameters preserve the common-principal-axis API and arithmetic. Fixed common
+COM, ideal frozen nozzle and source-domain limits remain in force. General
+internal-flow/transverse outlet linear momentum, slosh, aerodynamic heating and
+a full exhaust/world-energy audit are not inferred. Added tensor-flight cases
+cover powered/native-owner equivalence, point-flow recovery, closed-valve
+continuation and late source refusal; their native execution remains pending.
 
 The combined native environment/rigid/flight suite passed all 19 tests, including
 rotating-air frame covariance, point-velocity drag/torque, mass and scalar-impulse

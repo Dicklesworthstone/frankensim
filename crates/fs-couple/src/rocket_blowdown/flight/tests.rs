@@ -605,3 +605,6 @@ fn late_cancellation_and_frame_mismatch_cannot_publish_a_trial_or_cutoff() {
     ));
     assert_eq!(start, original);
 }
+
+#[path = "tensor_tests.rs"]
+mod tensor;

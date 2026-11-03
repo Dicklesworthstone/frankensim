@@ -19,7 +19,7 @@ use super::rigid::{
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::rocket::RocketNozzle;
 use fs_mbd::{
     Vec3,
-    rocket::rigid::{RigidRocketError, RigidRocketStep},
+    rocket::rigid::{RigidRocketError, RigidRocketInertia, RigidRocketStep, RocketInertiaModel},
 };
 
 /// Source sampling and aerodynamic reference geometry, in the body frame.
@@ -37,7 +37,7 @@ pub struct RocketFlightGeometry {
 
 /// Explicit propulsion control mode; failed engine/source solves never select coast.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RocketFlightPropulsion {
+pub enum RocketFlightPropulsion<E = Vec3> {
     /// Closed valve: the identical insulated gas state remains aboard the vehicle.
     ClosedValve,
     /// The actual source-bearing reservoir/nozzle supplies accepted mass and impulse.
@@ -48,8 +48,9 @@ pub enum RocketFlightPropulsion {
         thrust_direction_body: Vec3,
         /// Effective force application point relative to the common COM [m].
         thrust_application_arm_body_m: Vec3,
-        /// Explicit diagonal outflow co-rotation moment per mass [m²].
-        co_rotating_exhaust_specific_inertia_m2: Vec3,
+        /// Explicit native outflow co-rotation inertia per mass [m²].
+        /// The type matches the vehicle's diagonal or full-tensor inertia model.
+        co_rotating_exhaust_specific_inertia_m2: E,
         /// Additional exported specific body spin [m²/s], excluding axial jet torque.
         exhaust_swirl_specific_angular_momentum_body_m2_s: Vec3,
     },
@@ -57,9 +58,9 @@ pub enum RocketFlightPropulsion {
 
 /// Propulsion command and additional loads held fixed in their declared frames.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RocketFlightForcing {
+pub struct RocketFlightForcing<E = Vec3> {
     /// Explicit powered or closed-valve mode.
-    pub propulsion: RocketFlightPropulsion,
+    pub propulsion: RocketFlightPropulsion<E>,
     /// World force [N] excluding atmosphere, gravity and engine thrust.
     pub additional_force_world_n: Vec3,
     /// Body torque [N m] excluding the computed aerodynamic and engine moments.
@@ -91,16 +92,16 @@ pub struct RocketFlightEnvironmentSample {
 
 /// Original accepted powered or closed-valve physics report.
 #[derive(Clone, Debug, PartialEq)]
-pub enum RocketFlightStep {
+pub enum RocketFlightStep<I = RigidRocketInertia> {
     /// Full accepted finite-gas blowdown and rigid motion report.
-    Powered(GasRigidRocketStep),
+    Powered(GasRigidRocketStep<I>),
     /// Full accepted native coast; the reservoir is unchanged.
-    Coast(RigidRocketStep),
+    Coast(RigidRocketStep<I>),
 }
-impl RocketFlightStep {
+impl<I> RocketFlightStep<I> {
     /// Original native rigid motion, scalar/world impulse and spin accounting.
     #[must_use]
-    pub const fn mechanics(&self) -> &RigidRocketStep {
+    pub const fn mechanics(&self) -> &RigidRocketStep<I> {
         match self {
             Self::Powered(step) => &step.mechanics,
             Self::Coast(step) => step,
@@ -164,21 +165,21 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AtmosphericFlightErr
 
 /// Accepted endpoint, native report and the actual midpoint/endpoint environment.
 #[derive(Clone, Debug, PartialEq)]
-pub struct AtmosphericFlightCandidate {
-    endpoint: GasRigidRocketState,
-    step: RocketFlightStep,
+pub struct AtmosphericFlightCandidate<I = RigidRocketInertia> {
+    endpoint: GasRigidRocketState<I>,
+    step: RocketFlightStep<I>,
     midpoint_environment: RocketFlightEnvironmentSample,
     endpoint_environment: RocketFlightEnvironmentSample,
 }
-impl AtmosphericFlightCandidate {
+impl<I> AtmosphericFlightCandidate<I> {
     /// Joint endpoint after final source/coefficient-domain admission.
     #[must_use]
-    pub const fn endpoint(&self) -> &GasRigidRocketState {
+    pub const fn endpoint(&self) -> &GasRigidRocketState<I> {
         &self.endpoint
     }
     /// Original accepted gas/rigid owner report, excluding the discarded predictor.
     #[must_use]
-    pub const fn step(&self) -> &RocketFlightStep {
+    pub const fn step(&self) -> &RocketFlightStep<I> {
         &self.step
     }
     /// Environment used for the accepted full interval.
@@ -196,8 +197,8 @@ impl AtmosphericFlightCandidate {
     pub fn into_parts(
         self,
     ) -> (
-        GasRigidRocketState,
-        RocketFlightStep,
+        GasRigidRocketState<I>,
+        RocketFlightStep<I>,
         RocketFlightEnvironmentSample,
         RocketFlightEnvironmentSample,
     ) {
@@ -210,8 +211,8 @@ impl AtmosphericFlightCandidate {
     }
 }
 
-fn sample_environment(
-    state: &GasRigidRocketState,
+fn sample_environment<I: RocketInertiaModel>(
+    state: &GasRigidRocketState<I>,
     atmosphere: &SphericalStandardAtmosphere,
     geometry: RocketFlightGeometry,
     drag_coefficient: &mut impl FnMut(&RelativeAirflow) -> Result<f64, FlightEnvironmentError>,
@@ -267,8 +268,8 @@ fn sample_environment(
 // trace in the ORIGINAL principal frame keeps this bound basis independent.
 // h*||dF/du||*||G|| <= 1 is a conservative local explicit-resolution rule,
 // not an error certificate for arbitrary Cd callbacks or evolving wind.
-fn admit_drag_interval(
-    state: &GasRigidRocketState,
+fn admit_drag_interval<I: RocketInertiaModel>(
+    state: &GasRigidRocketState<I>,
     sample: RocketFlightEnvironmentSample,
     geometry: RocketFlightGeometry,
     duration_s: f64,
@@ -309,14 +310,14 @@ fn admit_drag_interval(
     Ok(())
 }
 
-fn advance_under_sample(
-    state: &GasRigidRocketState,
+fn advance_under_sample<I: RocketInertiaModel>(
+    state: &GasRigidRocketState<I>,
     sample: RocketFlightEnvironmentSample,
-    forcing: RocketFlightForcing,
+    forcing: RocketFlightForcing<I::ExhaustInertia>,
     duration_s: f64,
     controls: GasRigidRocketSolve,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(GasRigidRocketState, RocketFlightStep), AtmosphericFlightError> {
+) -> Result<(GasRigidRocketState<I>, RocketFlightStep<I>), AtmosphericFlightError> {
     let force = sample
         .aerodynamic_load
         .force_world_n
@@ -393,16 +394,16 @@ fn advance_under_sample(
 /// [`AtmosphericFlightError::DragResolution`] reports an actionable outer-step
 /// limit without publishing either owner. `controls.mechanics` only resolves
 /// motion under held loads and cannot satisfy this condition by itself.
-pub fn advance_atmospheric_rocket(
-    state: &GasRigidRocketState,
+pub fn advance_atmospheric_rocket<I: RocketInertiaModel>(
+    state: &GasRigidRocketState<I>,
     atmosphere: &SphericalStandardAtmosphere,
     geometry: RocketFlightGeometry,
-    forcing: RocketFlightForcing,
+    forcing: RocketFlightForcing<I::ExhaustInertia>,
     duration_s: f64,
     controls: GasRigidRocketSolve,
     mut drag_coefficient: impl FnMut(&RelativeAirflow) -> Result<f64, FlightEnvironmentError>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<AtmosphericFlightCandidate, AtmosphericFlightError> {
+) -> Result<AtmosphericFlightCandidate<I>, AtmosphericFlightError> {
     poll(&mut cancelled)?;
     if !duration_s.is_finite()
         || duration_s <= 0.0
