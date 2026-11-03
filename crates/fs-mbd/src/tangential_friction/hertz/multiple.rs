@@ -14,7 +14,7 @@ use super::{
     finite, relative_point, relative_spin,
 };
 use crate::tangential_friction::island::{self, PatchMechanics};
-use crate::tangential_friction::{RigidContactBinding, poll, totals};
+use crate::tangential_friction::{RigidContactBinding, poll};
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_exec::CancelGate;
 use fs_tribo::TriboError;
@@ -131,6 +131,8 @@ pub struct RigidHertzIslandReport {
     pub native: MultipleHertzStep,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Actual native momentum increments contracted with midpoint velocities.
+    pub kinetic_change_j: f64,
     pub midpoint_impulse_work_j: f64,
     pub dissipated_energy_j: f64,
     pub work_energy_residual_j: f64,
@@ -156,7 +158,6 @@ pub struct PreparedRigidHertzIsland {
     body_indices: Vec<usize>,
     before: Vec<RigidBodyState>,
     properties: Vec<MassProperties>,
-    totals_before: (f64, Vec3, Vec3),
     dt_s: f64,
     controls: RigidHertzIslandControls,
     mobility: Vec<f64>,
@@ -355,7 +356,6 @@ impl PreparedRigidHertzIsland {
             PreparedHertzContacts::new(count, compliance, controls.constitutive(), || {
                 gate.is_requested()
             })?;
-        let totals_before = totals(&before, &captured_properties, gate)?;
         poll(gate)?;
         Ok(Self {
             patches,
@@ -363,7 +363,6 @@ impl PreparedRigidHertzIsland {
             body_indices,
             before,
             properties: captured_properties,
-            totals_before,
             dt_s,
             controls,
             mobility,
@@ -441,8 +440,9 @@ impl PreparedRigidHertzIsland {
         let native = self
             .native
             .advance_phases(&inputs, &phases, || gate.is_requested())?;
-        let after = island::apply_wrenches(
+        let impulses = island::apply_wrenches(
             &self.before,
+            &self.properties,
             &self.mechanics,
             &native.contacts,
             self.dt_s,
@@ -460,7 +460,7 @@ impl PreparedRigidHertzIsland {
             let report = island::contact_report(
                 &patch.patch_id,
                 mechanics,
-                &after,
+                &impulses.bodies_after,
                 &self.properties,
                 patch.contact_radius_m,
                 self.dt_s,
@@ -492,21 +492,14 @@ impl PreparedRigidHertzIsland {
             }
             reports.push(report);
         }
-        let report = island::report(
-            reports,
-            native,
-            self.totals_before,
-            &after,
-            &self.properties,
-            gate,
-        )?;
+        let report = island::report(reports, native, &impulses, gate)?;
         if !island::report_admitted(&report, self.controls.mechanical) {
             return Err(RigidHertzIslandError::Audit(Box::new(report)));
         }
         poll(gate)?;
         Ok(RigidHertzIslandCandidate {
             body_indices: self.body_indices.clone(),
-            bodies_after: after,
+            bodies_after: impulses.bodies_after,
             report,
         })
     }

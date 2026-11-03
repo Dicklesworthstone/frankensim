@@ -107,6 +107,22 @@ impulse or infer a new contact law. G0/G3 regressions cover opposing simultaneou
 impulses, canonical permutation, a common transverse boost, origin shifts and
 normal restitution with unchanged controls.
 
+The nonsmooth finite-patch tangential owner and the shared Hertz/adhesive
+shear-spin island now use the same native resultant primitive. They sum every
+point impulse and central couple before one body update, with compensated
+component reductions. Their public `kinetic_change_j` and momentum balances
+come from actual native increments; `kinetic_before_j` and `kinetic_after_j`
+remain absolute diagnostics. Heat couplers must consume the change field,
+since subtracting the diagnostics can discard friction losses under a common
+translation. Physical heat, reversible shear storage, coefficient work and
+numerical dissipation retain their separate original accounts and tolerances.
+
+Focused G0/G3 checks retain a small original momentum and a small resultant
+between opposing large contact impulses, and compare the original tangential
+and shared Hertz solves with a common transverse/normal velocity. These are
+fixed-geometry impulse phases, not new normal-contact, pose-integration or
+constitutive laws; refusal still publishes no body or friction-history update.
+
 ## Linear rotor-bearing operating points
 
 The public `fs_mbd::rotordynamics` module exposes the original operating-point,

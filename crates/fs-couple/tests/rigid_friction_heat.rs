@@ -772,3 +772,79 @@ fn sticking_and_partial_slip_keep_elastic_energy_out_of_physical_heat() {
         }
     }
 }
+
+#[test]
+fn common_normal_velocity_preserves_friction_heat_and_temperature_feedback() {
+    // A common velocity normal to the patch changes neither slip nor its work.
+    // At the boosted kinetic-energy scale, subtracting the reported total
+    // energies loses the entire sub-joule contact loss. The coupled audit must
+    // retain the native impulse-based increment instead of loosening its budget.
+    let run = |common_velocity: f64| {
+        let (initial, properties) = mechanics();
+        let mut bodies: [RigidBodyState; 2] = std::array::from_fn(|i| {
+            RigidBodyState::new(
+                initial[i].pose(),
+                initial[i].linear_momentum_world().add(Vec3::new(
+                    0.0,
+                    0.0,
+                    MASSES[i] * common_velocity,
+                )),
+                initial[i].angular_momentum_body(),
+            )
+            .unwrap()
+        });
+        let mut history = NonsmoothTangentialState::new(1, 8).unwrap();
+        let mut thermal = thermal();
+        let route = FrictionHeatRoute::from_link(&thermal, 7, CONDUCTIVITY).unwrap();
+        let law = law(300.0);
+        let patch = patch();
+        let interface = interface();
+        let c = contact(&law, &patch, &interface, "common-normal-motion");
+        let result = apply_rigid_friction_heat(
+            &mut bodies,
+            &properties,
+            &mut history,
+            &c,
+            binding(),
+            &mut thermal,
+            &route,
+            DT,
+            controls(),
+            &[0.0; 2],
+            300.0,
+            source,
+            &CancelGate::new(),
+        )
+        .unwrap();
+        (result, energy(&thermal), history)
+    };
+    let (reference, reference_heat, reference_history) = run(0.0);
+    let (boosted, boosted_heat, boosted_history) = run(2.0_f64.powi(30));
+    assert_eq!(
+        boosted.mechanical.kinetic_before_j,
+        boosted.mechanical.kinetic_after_j
+    );
+    assert!(boosted.mechanical.kinetic_change_j < -0.1);
+    assert_eq!(
+        boosted.mechanical.kinetic_change_j,
+        reference.mechanical.kinetic_change_j
+    );
+    assert_eq!(
+        boosted.heat.interface_temperature_k,
+        reference.heat.interface_temperature_k
+    );
+    assert_eq!(boosted.heat.body_heat_j, reference.heat.body_heat_j);
+    assert_eq!(boosted.heat.dissipated_j, reference.heat.dissipated_j);
+    assert_eq!(boosted.law, reference.law);
+    assert_eq!(boosted_heat, reference_heat);
+    assert_eq!(boosted_history, reference_history);
+    assert_eq!(
+        boosted.combined_energy_residual_j,
+        reference.combined_energy_residual_j
+    );
+    close(
+        boosted.combined_energy_residual_j,
+        0.0,
+        controls().combined_energy_tolerance_j,
+    );
+}

@@ -182,6 +182,53 @@ fn translation_mobility() -> [[f64; 2]; 2] {
 }
 
 #[test]
+fn common_normal_translation_preserves_shared_patch_friction_and_heat() {
+    let reference_fixture = fixture(true, false);
+    let reference = reference_fixture.run();
+    let mut translated_fixture = fixture(true, false);
+    let boost = 2.0_f64.powi(30);
+    for (body, property) in translated_fixture
+        .bodies
+        .iter_mut()
+        .zip(&translated_fixture.properties)
+    {
+        *body = RigidBodyState::new(
+            body.pose(),
+            body.linear_momentum_world()
+                .add(Vec3::new(0.0, 0.0, boost * property.mass())),
+            body.angular_momentum_body(),
+        )
+        .unwrap();
+    }
+    let translated = translated_fixture.run();
+    assert_eq!(reference.report.contacts, translated.report.contacts);
+    assert_eq!(
+        reference.report.kinetic_change_j,
+        translated.report.kinetic_change_j
+    );
+    assert!(translated.report.dissipated_energy_j > 0.01);
+    assert_eq!(
+        translated.report.kinetic_before_j,
+        translated.report.kinetic_after_j
+    );
+    close(
+        translated.report.kinetic_change_j,
+        -translated.report.dissipated_energy_j,
+        controls().mechanical.energy_tolerance_j,
+    );
+    for (before, after) in reference.bodies_after.iter().zip(&translated.bodies_after) {
+        assert_eq!(
+            before.linear_momentum_world().x,
+            after.linear_momentum_world().x
+        );
+        assert_eq!(
+            before.angular_momentum_body(),
+            after.angular_momentum_body()
+        );
+    }
+}
+
+#[test]
 fn two_sliding_patches_share_middle_body_recoil_and_independent_exact_heat() {
     let f = fixture(true, false);
     let prepared = f.prepared();

@@ -309,7 +309,7 @@ pub fn apply_rigid_friction_heat_network<'m, P, E>(
     let trial = evaluate(&solver.x)?;
     let mechanical = &trial.payload().mechanical;
     let heat = trial.report();
-    let combined = mechanical.kinetic_after_j - mechanical.kinetic_before_j
+    let combined = mechanical.kinetic_change_j
         + mechanical.friction.storage_change_j
         + heat.thermal.stored_energy_change_j
         - heat.external_heat_j

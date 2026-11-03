@@ -15745,7 +15745,14 @@ and source. Stiffness changes or any nonzero parameter work refuse because this
 consumer has no corresponding physical supply port. Final publication of bodies,
 contact history and thermal state follows every gate and cancellation check.
 
-Four native physical tests cover sticking with zero heat, partial slip with only
+The single-patch and shared-network rigid consumers, and the Hertz/adhesive
+island heat consumers, use the native impulse-based `kinetic_change_j` in their combined
+energy audits. Rounded total kinetic energies remain diagnostics: subtracting
+them can erase finite frictional work under a large common velocity. The
+common-normal-velocity regression retains the same slip history, temperature
+feedback, body heat and combined residual without enlarging any tolerance.
+
+Native physical tests cover sticking with zero heat, partial slip with only
 yielded-region heat, gross 3D shear/spin versus an independent inertia/caloric
 reduction, retained temperature feedback, actual momentum/work, staged refusal
 and exact retry. The supported phase has one supplied loaded patch, frozen

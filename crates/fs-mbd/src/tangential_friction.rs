@@ -32,6 +32,7 @@ use fs_contact::tangential::nonsmooth::{
     NonsmoothTangentialError, NonsmoothTangentialState, TangentialMobility,
 };
 use fs_exec::CancelGate;
+use fs_math::dd::Dd;
 
 /// Physical body pair corresponding to one supplied normal/tangential patch.
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +64,9 @@ pub struct RigidFrictionReport {
     pub friction: NonsmoothAudit,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Actual native momentum increments contracted with midpoint velocities.
+    /// Retains small losses beside unchanged common translational motion.
+    pub kinetic_change_j: f64,
     pub midpoint_impulse_work_j: f64,
     pub work_energy_residual_j: f64,
     pub total_energy_residual_j: f64,
@@ -246,7 +250,7 @@ pub fn apply_rigid_friction(
         controls.contact,
         gate,
     )?;
-    let mut next = bodies.to_vec();
+    let mut resultants = vec![ResultantImpulse::default(); bodies.len()];
     for (result, &index) in trial.contacts().iter().zip(&order) {
         poll(gate)?;
         let binding = bindings[index];
@@ -256,23 +260,14 @@ pub fn apply_rigid_friction(
             (binding.body_a, binding.arm_a_body, 1.0),
             (binding.body_b, binding.arm_b_body, -1.0),
         ] {
-            let after_force = next[body]
-                .apply_impulse_at_body_point(properties[body], arm, impulse.scale(sign))?
-                .state_after;
-            let angular = after_force
-                .pose()
-                .orientation()
-                .rotate_world_to_body(couple.scale(sign));
-            next[body] = RigidBodyState::new(
-                after_force.pose(),
-                after_force.linear_momentum_world(),
-                after_force.angular_momentum_body().add(angular),
-            )?;
+            resultants[body].add(bodies[body], arm, impulse.scale(sign), couple.scale(sign));
         }
     }
-    let (energy_before, linear_before, angular_before) = totals(bodies, properties, gate)?;
-    let (energy_after, linear_after, angular_after) = totals(&next, properties, gate)?;
-    let mut midpoint_work = 0.0;
+    let native = apply_resultants(bodies, properties, &resultants, gate)?;
+    let next = &native.bodies_after;
+    let energy_before = native.kinetic_before_j;
+    let energy_after = native.kinetic_after_j;
+    let mut midpoint_work = Dd::from_f64(0.0);
     let mut endpoint_residual = 0.0_f64;
     for ((result, contact), &index) in trial.contacts().iter().zip(&resolved).zip(&order) {
         poll(gate)?;
@@ -297,12 +292,17 @@ pub fn apply_rigid_friction(
         let after_spin = after_a
             .angular_velocity_world
             .sub(after_b.angular_velocity_world);
-        midpoint_work += vector(result.action.force_n)
-            .scale(dt_s)
-            .dot(before_relative.add(after_relative).scale(0.5))
-            + vector(result.action.torque_nm)
-                .scale(dt_s)
-                .dot(before_spin.add(after_spin).scale(0.5));
+        midpoint_work = midpoint_work
+            + Dd::from_f64(
+                vector(result.action.force_n)
+                    .scale(dt_s)
+                    .dot(before_relative.add(after_relative).scale(0.5)),
+            )
+            + Dd::from_f64(
+                vector(result.action.torque_nm)
+                    .scale(dt_s)
+                    .dot(before_spin.add(after_spin).scale(0.5)),
+            );
         let actual = [
             after_relative.dot(vector(contact.frame.longitudinal())),
             after_relative.dot(vector(contact.frame.lateral())),
@@ -313,13 +313,15 @@ pub fn apply_rigid_friction(
                 endpoint_residual.max((actual[j] - result.endpoint_velocity_mps[j]).abs());
         }
     }
+    let midpoint_work = midpoint_work.to_f64();
     let friction = trial.audit();
-    let kinetic_change = energy_after - energy_before;
+    let kinetic_change = native.kinetic_change_j;
     let report = RigidFrictionReport {
         contacts: trial.contacts().to_vec(),
         friction,
         kinetic_before_j: energy_before,
         kinetic_after_j: energy_after,
+        kinetic_change_j: kinetic_change,
         midpoint_impulse_work_j: midpoint_work,
         work_energy_residual_j: kinetic_change - midpoint_work,
         total_energy_residual_j: kinetic_change
@@ -328,8 +330,8 @@ pub fn apply_rigid_friction(
             + friction.elastic_numerical_loss_j
             + friction.mechanical_numerical_loss_j
             - friction.coefficient_work_j,
-        linear_momentum_change_ns: linear_after.sub(linear_before),
-        angular_momentum_change_nms: angular_after.sub(angular_before),
+        linear_momentum_change_ns: native.linear_momentum_change_ns,
+        angular_momentum_change_nms: native.angular_momentum_change_nms,
         endpoint_velocity_residual_mps: endpoint_residual,
     };
     if [
@@ -357,9 +359,96 @@ pub fn apply_rigid_friction(
     next_history.commit(trial)?;
     poll(gate)?;
     // No fallible operation follows this boundary.
-    bodies.copy_from_slice(&next);
+    bodies.copy_from_slice(next);
     *history = next_history;
     Ok(report)
+}
+
+/// All simultaneous contact covectors are summed before rounding native state.
+/// Couples retain their original body-frame central moment independently of
+/// the point-force arm; no contact point is relocated.
+#[derive(Clone, Copy, Default)]
+struct ResultantImpulse {
+    linear: [Dd; 3],
+    angular: [Dd; 3],
+}
+
+impl ResultantImpulse {
+    fn add(&mut self, body: RigidBodyState, arm: Vec3, impulse: Vec3, couple: Vec3) {
+        let orientation = body.pose().orientation();
+        add_components(&mut self.linear, impulse);
+        add_components(
+            &mut self.angular,
+            arm.cross(orientation.rotate_world_to_body(impulse)),
+        );
+        add_components(&mut self.angular, orientation.rotate_world_to_body(couple));
+    }
+}
+
+struct NativeImpulsePhase {
+    bodies_after: Vec<RigidBodyState>,
+    kinetic_before_j: f64,
+    kinetic_after_j: f64,
+    kinetic_change_j: f64,
+    linear_momentum_change_ns: Vec3,
+    angular_momentum_change_nms: Vec3,
+}
+
+fn apply_resultants(
+    before: &[RigidBodyState],
+    properties: &[MassProperties],
+    resultants: &[ResultantImpulse],
+    gate: &CancelGate,
+) -> Result<NativeImpulsePhase, RigidFrictionError> {
+    let mut after = Vec::with_capacity(before.len());
+    let mut energy_before = Dd::from_f64(0.0);
+    let mut energy_after = Dd::from_f64(0.0);
+    let mut kinetic_change = Dd::from_f64(0.0);
+    let mut linear = [Dd::from_f64(0.0); 3];
+    let mut angular = [Dd::from_f64(0.0); 3];
+    for ((&body, &property), impulse) in before.iter().zip(properties).zip(resultants) {
+        poll(gate)?;
+        let receipt = body.apply_momentum_impulse(
+            property,
+            rounded_components(impulse.linear),
+            rounded_components(impulse.angular),
+        )?;
+        energy_before = energy_before + Dd::from_f64(receipt.work.kinetic_energy_before_j);
+        energy_after = energy_after + Dd::from_f64(receipt.work.kinetic_energy_after_j);
+        kinetic_change = kinetic_change + Dd::from_f64(receipt.work.kinetic_energy_change_j);
+        add_components(&mut linear, receipt.linear_increment_world);
+        add_components(
+            &mut angular,
+            body.pose()
+                .position_world()
+                .cross(receipt.linear_increment_world),
+        );
+        add_components(
+            &mut angular,
+            body.pose()
+                .orientation()
+                .rotate_body_to_world(receipt.angular_increment_body),
+        );
+        after.push(receipt.state_after);
+    }
+    Ok(NativeImpulsePhase {
+        bodies_after: after,
+        kinetic_before_j: energy_before.to_f64(),
+        kinetic_after_j: energy_after.to_f64(),
+        kinetic_change_j: kinetic_change.to_f64(),
+        linear_momentum_change_ns: rounded_components(linear),
+        angular_momentum_change_nms: rounded_components(angular),
+    })
+}
+
+fn add_components(sum: &mut [Dd; 3], value: Vec3) {
+    for (entry, component) in sum.iter_mut().zip(components(value)) {
+        *entry = *entry + Dd::from_f64(component);
+    }
+}
+
+fn rounded_components(sum: [Dd; 3]) -> Vec3 {
+    Vec3::new(sum[0].to_f64(), sum[1].to_f64(), sum[2].to_f64())
 }
 
 fn totals(
@@ -402,5 +491,49 @@ fn poll(gate: &CancelGate) -> Result<(), RigidFrictionError> {
         Err(RigidFrictionError::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod impulse_tests {
+    use super::*;
+    use crate::Pose;
+
+    #[test]
+    fn simultaneous_opposing_wrenches_preserve_small_momentum_and_net_load() {
+        let property = MassProperties::new(2.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 2.0)).unwrap();
+        let before = RigidBodyState::new(
+            Pose::identity(),
+            Vec3::new(0.125, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.125),
+        )
+        .unwrap();
+        let large = 2.0_f64.powi(54);
+        // Three simultaneous contacts at the same physical arm: the two large
+        // ones cancel exactly, leaving the 1/4 Ns load. Sequentially updating
+        // native momenta loses the original 1/8 Ns; summing in f64 loses 1/4 Ns.
+        for loads in [[large, 0.25, -large], [-large, 0.25, large]] {
+            let mut impulses = [ResultantImpulse::default()];
+            for load in loads {
+                impulses[0].add(
+                    before,
+                    Vec3::new(0.0, -1.0, 0.0),
+                    Vec3::new(load, 0.0, 0.0),
+                    Vec3::ZERO,
+                );
+            }
+            let result =
+                apply_resultants(&[before], &[property], &impulses, &CancelGate::new()).unwrap();
+            let after = result.bodies_after[0];
+            assert_eq!(after.linear_momentum_world(), Vec3::new(0.375, 0.0, 0.0));
+            assert_eq!(after.angular_momentum_body(), Vec3::new(0.0, 0.0, 0.375));
+            assert_eq!(result.linear_momentum_change_ns, Vec3::new(0.25, 0.0, 0.0));
+            assert_eq!(
+                result.angular_momentum_change_nms,
+                Vec3::new(0.0, 0.0, 0.25)
+            );
+            // Independent quadratic kinetic-energy difference, for m=Izz=2.
+            assert_eq!(result.kinetic_change_j, 0.0625);
+        }
     }
 }

@@ -416,7 +416,7 @@ pub fn propose_rigid_hertz_island_heat<'m, P, E>(
     let trial = evaluate(&solver.x, controls.audit_entropy)?;
     let native = &trial.payload().mechanical.report;
     let heat = trial.report();
-    let combined = native.kinetic_after_j - native.kinetic_before_j
+    let combined = native.kinetic_change_j
         + heat.thermal.stored_energy_change_j
         - heat.external_heat_j;
     let summed = native.total_energy_residual_j + heat.total_energy_residual_j;

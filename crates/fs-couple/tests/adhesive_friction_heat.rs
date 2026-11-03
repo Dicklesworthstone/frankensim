@@ -698,6 +698,64 @@ fn compare(
 }
 
 #[test]
+fn common_translation_preserves_adhesive_spin_heat_and_source_feedback() {
+    let sources = Sources::new();
+    let thermal = thermal(INITIAL, sources.areas());
+    let routes = routes(&thermal);
+    let original = Island::new(true);
+    let contacts = original.contacts(&sources, &routes);
+    let reference = run(
+        &original,
+        &contacts,
+        &thermal,
+        controls(),
+        transport,
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let mut translated = Island::new(true);
+    for (body, property) in translated.bodies.iter_mut().zip(&translated.properties) {
+        *body = RigidBodyState::new(
+            body.pose(),
+            Vec3::new(0.0, 0.0, property.mass() * 2.0_f64.powi(30)),
+            body.angular_momentum_body(),
+        )
+        .unwrap();
+    }
+    let boosted = run(
+        &translated,
+        &contacts,
+        &thermal,
+        controls(),
+        transport,
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let native = &boosted.mechanical.report.mechanical;
+    assert_eq!(native.kinetic_before_j, native.kinetic_after_j);
+    assert!(native.kinetic_change_j < 0.0);
+    assert_eq!(
+        native.kinetic_change_j,
+        reference.mechanical.report.mechanical.kinetic_change_j
+    );
+    assert_eq!(
+        native.contacts,
+        reference.mechanical.report.mechanical.contacts
+    );
+    assert_eq!(boosted.thermal.cells(), reference.thermal.cells());
+    assert_eq!(boosted.source, reference.source);
+    assert_eq!(
+        boosted.combined_energy_residual_j,
+        reference.combined_energy_residual_j
+    );
+    assert_eq!(
+        boosted.summed_energy_residual_j,
+        reference.summed_energy_residual_j
+    );
+    assert!(boosted.combined_energy_residual_j.abs() <= controls().combined_energy_tolerance_j);
+}
+
+#[test]
 fn decimal_prismatic_faces_admit_only_arithmetic_roundoff_not_physical_overcoverage() {
     let sources = Sources::new();
     let areas = sources.areas();

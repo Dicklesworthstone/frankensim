@@ -19,7 +19,7 @@ use crate::tangential_friction::hertz::{
     RigidHertzError, accepted_phase, finite, points, relative_point, relative_spin,
 };
 use crate::tangential_friction::island::{self, PatchMechanics};
-use crate::tangential_friction::{magnitude, poll, totals, vector};
+use crate::tangential_friction::{magnitude, poll, vector};
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::interface_binding::adhesive_shear::spinning::temperature::SourceThermalAdhesivePatch;
 use fs_exec::CancelGate;
@@ -98,7 +98,6 @@ pub struct PreparedRigidAdhesiveIsland<'a> {
     body_indices: Vec<usize>,
     before: Vec<RigidBodyState>,
     properties: Vec<MassProperties>,
-    totals_before: (f64, Vec3, Vec3),
     dt_s: f64,
     controls: RigidAdhesiveIslandControls,
     mobility: Vec<f64>,
@@ -343,7 +342,6 @@ impl<'a> PreparedRigidAdhesiveIsland<'a> {
                 || gate.is_requested(),
             )?)
         };
-        let totals_before = totals(&before, &captured_properties, gate)?;
         poll(gate)?;
         Ok(Self {
             patches,
@@ -353,7 +351,6 @@ impl<'a> PreparedRigidAdhesiveIsland<'a> {
             body_indices,
             before,
             properties: captured_properties,
-            totals_before,
             dt_s,
             controls,
             mobility,
@@ -478,8 +475,9 @@ impl<'a> PreparedRigidAdhesiveIsland<'a> {
                 work_residual_j: 0.0,
             }
         };
-        let after = island::apply_wrenches(
+        let impulses = island::apply_wrenches(
             &self.before,
+            &self.properties,
             &self.mechanics,
             &native.contacts,
             self.dt_s,
@@ -498,7 +496,7 @@ impl<'a> PreparedRigidAdhesiveIsland<'a> {
             let report = island::contact_report(
                 &patch.patch_id,
                 mechanics,
-                &after,
+                &impulses.bodies_after,
                 &self.properties,
                 original.parameters().contact_radius_m,
                 self.dt_s,
@@ -523,14 +521,7 @@ impl<'a> PreparedRigidAdhesiveIsland<'a> {
             }
             reports.push(report);
         }
-        let mechanical = island::report(
-            reports,
-            native,
-            self.totals_before,
-            &after,
-            &self.properties,
-            gate,
-        )?;
+        let mechanical = island::report(reports, native, &impulses, gate)?;
         if !island::report_admitted(&mechanical, self.controls.mechanical) {
             return Err(RigidAdhesiveIslandError::Audit(Box::new(mechanical)));
         }
@@ -541,7 +532,7 @@ impl<'a> PreparedRigidAdhesiveIsland<'a> {
         poll(gate)?;
         Ok(RigidAdhesiveIslandCandidate {
             body_indices: self.body_indices.clone(),
-            bodies_after: after,
+            bodies_after: impulses.bodies_after,
             report,
         })
     }

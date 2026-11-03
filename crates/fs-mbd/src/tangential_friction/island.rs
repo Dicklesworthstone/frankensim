@@ -8,7 +8,7 @@ use super::hertz::multiple::{RigidHertzIslandContactReport, RigidHertzIslandRepo
 use super::hertz::{
     RigidHertzControls, RigidHertzError, finite, points, relative_point, relative_spin,
 };
-use super::{components, magnitude, poll, totals};
+use super::{NativeImpulsePhase, ResultantImpulse, apply_resultants, components, magnitude, poll};
 use crate::{MassProperties, PointKinematics, RigidBodyState, Vec3};
 use fs_exec::CancelGate;
 use fs_tribo::sliding_patch::contact::multiple::MultipleHertzStep;
@@ -92,18 +92,18 @@ pub(super) fn mobility(
 
 pub(super) fn apply_wrenches(
     before: &[RigidBodyState],
+    properties: &[MassProperties],
     mechanics: &[PatchMechanics],
     contacts: &[HertzWrenchStep],
     dt_s: f64,
     gate: &CancelGate,
-) -> Result<Vec<RigidBodyState>, RigidHertzError> {
+) -> Result<NativeImpulsePhase, RigidHertzError> {
     if mechanics.len() != contacts.len() {
         return Err(RigidHertzError::Invalid(
             "one original wrench per contact required",
         ));
     }
-    let mut linear = vec![Vec3::ZERO; before.len()];
-    let mut angular = vec![Vec3::ZERO; before.len()];
+    let mut resultants = vec![ResultantImpulse::default(); before.len()];
     for (mechanics, contact) in mechanics.iter().zip(contacts) {
         poll(gate)?;
         let impulse = mechanics.axes[0]
@@ -112,25 +112,15 @@ pub(super) fn apply_wrenches(
         let couple = mechanics.axes[2].scale(dt_s * contact.spin_moment_nm);
         for (side, sign) in [(0, 1.0), (1, -1.0)] {
             let body = mechanics.bodies[side];
-            let orientation = before[body].pose().orientation();
-            let body_impulse = orientation.rotate_world_to_body(impulse.scale(sign));
-            let body_couple = orientation.rotate_world_to_body(couple.scale(sign));
-            linear[body] = linear[body].add(impulse.scale(sign));
-            angular[body] = angular[body]
-                .add(mechanics.arms[side].cross(body_impulse))
-                .add(body_couple);
+            resultants[body].add(
+                before[body],
+                mechanics.arms[side],
+                impulse.scale(sign),
+                couple.scale(sign),
+            );
         }
     }
-    let mut after = Vec::with_capacity(before.len());
-    for (i, before) in before.iter().enumerate() {
-        poll(gate)?;
-        after.push(RigidBodyState::new(
-            before.pose(),
-            before.linear_momentum_world().add(linear[i]),
-            before.angular_momentum_body().add(angular[i]),
-        )?);
-    }
-    Ok(after)
+    Ok(apply_resultants(before, properties, &resultants, gate)?)
 }
 
 /// Original law evaluated independently at actual native midpoint motion.
@@ -277,13 +267,10 @@ pub(super) fn contact_admitted(
 pub(super) fn report(
     contacts: Vec<RigidHertzIslandContactReport>,
     native: MultipleHertzStep,
-    totals_before: (f64, Vec3, Vec3),
-    after: &[RigidBodyState],
-    properties: &[MassProperties],
+    impulses: &NativeImpulsePhase,
     gate: &CancelGate,
 ) -> Result<RigidHertzIslandReport, RigidHertzError> {
-    let (energy_after, linear_after, angular_after) = totals(after, properties, gate)?;
-    let (energy_before, linear_before, angular_before) = totals_before;
+    poll(gate)?;
     let midpoint_work = contacts
         .iter()
         .map(|r| r.midpoint_impulse_work_j)
@@ -292,14 +279,15 @@ pub(super) fn report(
     Ok(RigidHertzIslandReport {
         contacts,
         native,
-        kinetic_before_j: energy_before,
-        kinetic_after_j: energy_after,
+        kinetic_before_j: impulses.kinetic_before_j,
+        kinetic_after_j: impulses.kinetic_after_j,
+        kinetic_change_j: impulses.kinetic_change_j,
         midpoint_impulse_work_j: midpoint_work,
         dissipated_energy_j: heat,
-        work_energy_residual_j: energy_after - energy_before - midpoint_work,
-        total_energy_residual_j: energy_after - energy_before + heat,
-        linear_momentum_change_ns: linear_after.sub(linear_before),
-        angular_momentum_change_nms: angular_after.sub(angular_before),
+        work_energy_residual_j: impulses.kinetic_change_j - midpoint_work,
+        total_energy_residual_j: impulses.kinetic_change_j + heat,
+        linear_momentum_change_ns: impulses.linear_momentum_change_ns,
+        angular_momentum_change_nms: impulses.angular_momentum_change_nms,
     })
 }
 

@@ -371,6 +371,75 @@ fn shared_body_contacts_publish_physical_recoil_independently_of_input_order() {
 }
 
 #[test]
+fn common_transverse_motion_cannot_hide_friction_loss() {
+    let l = law();
+    let p = patch("boosted", 100.0);
+    let i = interface();
+    let props = [
+        properties(2.0, Vec3::new(1.0, 1.0, 1.0)),
+        properties(4.0, Vec3::new(1.0, 1.0, 1.0)),
+    ];
+    let initial = [
+        state(Pose::identity(), Vec3::new(100.0, 0.0, 0.0), Vec3::ZERO),
+        state(Pose::identity(), Vec3::ZERO, Vec3::ZERO),
+    ];
+    let binding = RigidContactBinding {
+        body_a: 0,
+        body_b: 1,
+        arm_a_body: Vec3::ZERO,
+        arm_b_body: Vec3::ZERO,
+    };
+    let run = |boost: f64| {
+        let mut bodies = core::array::from_fn::<_, 2, _>(|k| {
+            state(
+                initial[k].pose(),
+                initial[k].linear_momentum_world().add(Vec3::new(
+                    0.0,
+                    0.0,
+                    props[k].mass() * boost,
+                )),
+                Vec3::ZERO,
+            )
+        });
+        let mut history = NonsmoothTangentialState::new(1, 8).unwrap();
+        let report = apply_rigid_friction(
+            &mut bodies,
+            &props,
+            &mut history,
+            &[contact(&l, &p, &i)],
+            &[binding],
+            0.001,
+            controls(),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        (bodies, history, report)
+    };
+    let reference = run(0.0);
+    let boost = 2.0_f64.powi(30);
+    let translated = run(boost);
+    assert_eq!(reference.1, translated.1);
+    assert_eq!(reference.2.contacts, translated.2.contacts);
+    assert_eq!(reference.2.kinetic_change_j, translated.2.kinetic_change_j);
+    assert!(translated.2.kinetic_change_j < -1.0);
+    assert!(translated.2.friction.physical_heat_j > 1.0);
+    // Both absolute energies round to the same number; the physical decrease
+    // and thermal accounting must survive that loss of absolute resolution.
+    assert_eq!(translated.2.kinetic_before_j, translated.2.kinetic_after_j);
+    assert!(translated.2.total_energy_residual_j.abs() <= controls().energy_tolerance_j);
+    for k in 0..2 {
+        assert_eq!(
+            reference.0[k].linear_momentum_world().x,
+            translated.0[k].linear_momentum_world().x
+        );
+        assert_eq!(
+            translated.0[k].linear_momentum_world().z,
+            boost * props[k].mass()
+        );
+    }
+}
+
+#[test]
 fn geometry_momentum_and_cancellation_refusals_are_atomic() {
     let l = law();
     let p = patch("patch", 100.0);
