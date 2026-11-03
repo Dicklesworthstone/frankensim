@@ -67,6 +67,10 @@ pub(super) struct PreparedPortLoad {
 }
 
 impl PreparedPortLoad {
+    pub(super) fn port_count(&self) -> usize {
+        self.ports
+    }
+
     pub(super) fn new(
         coordinates: usize,
         load: ViscoPolePortLoad<'_>,

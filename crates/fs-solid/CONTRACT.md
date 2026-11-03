@@ -4695,3 +4695,61 @@ signed mutual ports, mechanically dark original load states, nonlinear-law
 refusal, resource/band refusal and cancellation. Native fallback verification
 compiles the complete `fs-solid` crate against aligned cached dependencies;
 it does not claim a DSR or full-workspace run.
+
+### Forced response of the complete hereditary solid and dynamic load
+
+`PreparedViscoPoles::harmonic_factor` factors its original conditioned
+polynomial at `s = -i omega`, retaining every original free displacement,
+six-component Maxwell strain state and independent quadratic pHS load state.
+It accepts positive finite frequencies in the intersection of the original
+material and attached load bands, including regular coupled problems at a bare
+host resonance or bare attachment resonance. It never evaluates an isolated
+load inverse, condenses away a load/material state, fits a replacement damping
+law, advances accepted histories or introduces a homogeneous state.
+`ViscoJointHarmonicFactor::solve` reuses that immutable shared `fs-la` complex LU
+for multiple forcing columns and phases. Original mechanical, memory and load
+rows are independently checked with the prepared physical residual tolerance;
+up to three corrective solves reuse the same factor without changing that
+tolerance. Genuine joint singularities and unrepresentable states refuse.
+
+Force and state phasors are peak amplitudes for `exp(-i omega t)`. Every original
+material quadrature point undergoes the same full-cycle strain-envelope
+admission as `ViscoHarmonicOperator`; separate real/imaginary amplitude checks
+cannot admit an excessive intermediate phase. The returned body storage uses
+the original equilibrium stiffness, consistent mass and Maxwell strain energy;
+material heat uses the original Kelvin tensors and every Maxwell relaxation
+branch once. Static K/C/M and independent dynamic loads retain separately
+observed original storage and dissipation. Body energy is never obtained by
+subtracting a much larger attachment energy from a combined account.
+
+All reported energies, heat rates and powers are cycle means. Applied work is
+`Re(force^H velocity)/2`; absorbed interface work is
+`Re(flow^H effort)/2`, positive into the load. Signed body, total and individual
+load power defects remain visible. Power admission uses the unchanged physical
+tolerance and the sum of apparent applied/interface work, actual dissipation
+magnitudes and `2 omega` times original mean storage magnitudes. This physical
+oscillatory work scale admits exact antiresonances with zero interface flow and
+finite internal load motion; it adds no constant floor, clips no signed power,
+and does not classify reactive storage as heat. Passivity restrictions remain
+those of the original source and load preparation.
+
+`ViscoJointHarmonicBudget` bounds complete coordinate count, numerical payload
+and conservative factor/solve/refinement/observation work, separately from the
+already admitted immutable source cache. Polling occurs during assembly, shared
+LU/solves, original-row checks, quadrature admission and observation. Refusals
+leave both the factor and accepted source histories unchanged. Determinism is
+fixed-order same-build/ISA behavior; numerical budgets exclude allocator
+metadata and process RSS. This is a dense bounded response path, not a sparse
+large-model performance claim, an interval enclosure, a nonlinear harmonic
+balance method, a zero-frequency solver or support for descriptor/nonquadratic
+independent loads.
+
+Focused G1/G3/G4 evidence in `tests/visco_joint_harmonic.rs` covers analytic
+coupled-oscillator states at bare attachment antiresonance and bare host
+resonance; full Maxwell/Kelvin and mutual load dissipation across five forced
+frequencies; resolving body energy beside an attachment more than ten orders
+larger; phase/repeated-RHS reuse; original full-cycle strain refusal; singular,
+invalid-band, resource and cancellation refusal; and subsequent factor reuse.
+Native compilation of the complete `fs-solid` crate and the four new tests,
+nine existing `visco_harmonic` tests and four existing `visco_dynamic_poles`
+tests passed. These are focused native checks, not a workspace or DSR gate.

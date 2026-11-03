@@ -272,15 +272,39 @@ impl ViscoHarmonicOperator<'_> {
         cx: &Cx<'_>,
     ) -> Result<ViscoHarmonicResponse, ViscoHarmonicError> {
         let result = self.response.solve(force_n, cx)?;
-        for element in &self.source.elements {
+        self.source
+            .validate_harmonic_displacement(&result.displacement, cx)?;
+        checkpoint(cx)?;
+        Ok(ViscoHarmonicResponse {
+            displacement_m: result.displacement,
+            velocity_m_s: result.velocity,
+            relative_residual: result.relative_residual,
+            average_input_power_w: result.average_input_power_w,
+            average_material_heat_w: result.average_viscous_power_w,
+            port_load: result.port_load,
+            power_balance_residual_w: result.power_balance_residual_w,
+        })
+    }
+}
+
+impl ViscoElements {
+    // One original full-cycle material admission for condensed and complete
+    // memory-state forced response. Finite amplitudes cannot use pole-only
+    // normalization as a substitute for this physical strain check.
+    pub(super) fn validate_harmonic_displacement(
+        &self,
+        displacement: &[C64],
+        cx: &Cx<'_>,
+    ) -> Result<(), ViscoElementError> {
+        for element in &self.elements {
             checkpoint(cx)?;
             for point in &element.points {
                 checkpoint(cx)?;
                 let mut re = [0.0; 6];
                 let mut im = [0.0; 6];
                 for (b, &dof) in point.b.iter().zip(&element.dofs) {
-                    if let Ok(row) = self.free_dofs().binary_search(&dof) {
-                        let u = result.displacement[row];
+                    if let Ok(row) = self.equilibrium.free_dofs.binary_search(&dof) {
+                        let u = displacement[row];
                         for i in 0..6 {
                             re[i] = b[i].mul_add(u.re, re[i]);
                             im[i] = b[i].mul_add(u.im, im[i]);
@@ -296,7 +320,7 @@ impl ViscoHarmonicOperator<'_> {
                     .map(|v| v.abs())
                     .fold(0.0_f64, f64::max);
                 if re.iter().chain(&im).any(|v| !v.is_finite()) {
-                    return Err(ViscoElementError::NonFiniteResult.into());
+                    return Err(ViscoElementError::NonFiniteResult);
                 }
                 if scale == 0.0 {
                     continue;
@@ -318,15 +342,7 @@ impl ViscoHarmonicOperator<'_> {
             }
         }
         checkpoint(cx)?;
-        Ok(ViscoHarmonicResponse {
-            displacement_m: result.displacement,
-            velocity_m_s: result.velocity,
-            relative_residual: result.relative_residual,
-            average_input_power_w: result.average_input_power_w,
-            average_material_heat_w: result.average_viscous_power_w,
-            port_load: result.port_load,
-            power_balance_residual_w: result.power_balance_residual_w,
-        })
+        Ok(())
     }
 }
 

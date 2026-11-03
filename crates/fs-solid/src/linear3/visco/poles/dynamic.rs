@@ -72,6 +72,10 @@ pub(super) struct PreparedDynamicLoad {
 }
 
 impl PreparedDynamicLoad {
+    pub(super) fn port_count(&self) -> usize {
+        self.ports
+    }
+
     pub(super) fn new(
         coordinates: usize,
         load: ViscoPoleDynamicLoad<'_>,
@@ -301,26 +305,49 @@ fn inner(a: C64, b: C64) -> f64 {
     (a.conj() * b).re
 }
 
-fn body_energy(
+pub(super) fn body_energy(
     prepared: &PreparedViscoPoles<'_>,
     rate: C64,
     vector: &[C64],
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(f64, f64), ViscoPoleError> {
     let m = prepared.free_dofs().len();
-    let n = prepared.dimension;
     let mut storage = 0.0;
     let mut loss = 0.0;
-    // Dynamic coupling has no host-host entries. These blocks remain the
-    // original equilibrium stiffness, Kelvin viscosity and consistent mass.
+    // Read the original source operators, independently of any attached K/C/M
+    // port law. Forced response uses these same accounts without subtracting
+    // potentially very different body and load energy scales.
     for i in 0..m {
         poll(cancelled)?;
-        for j in 0..m {
-            let at = i * n + j;
-            storage += 0.5
-                * (inner(vector[i], vector[j]) * prepared.coefficients[0][at]
-                    + inner(rate * vector[i], rate * vector[j]) * prepared.coefficients[2][at]);
-            loss += inner(rate * vector[i], rate * vector[j]) * prepared.coefficients[1][at];
+        let (columns, values) = prepared.source.equilibrium.stiffness.row(i);
+        for (&j, &value) in columns.iter().zip(values) {
+            storage += 0.5 * inner(vector[i], vector[j]) * value;
+        }
+        let (columns, values) = prepared.source.equilibrium.mass.row(i);
+        for (&j, &value) in columns.iter().zip(values) {
+            storage += 0.5 * inner(rate * vector[i], rate * vector[j]) * value;
+        }
+    }
+    for element in &prepared.source.elements {
+        if let Some(viscosity) = element.law.kv_pa_s() {
+            for point in &element.points {
+                poll(cancelled)?;
+                let mut strain_rate = [C64::ZERO; 6];
+                for (b, &dof) in point.b.iter().zip(&element.dofs) {
+                    if let Ok(row) = prepared.free_dofs().binary_search(&dof) {
+                        for i in 0..6 {
+                            strain_rate[i] = strain_rate[i] + (rate * vector[row]).scale(b[i]);
+                        }
+                    }
+                }
+                for i in 0..6 {
+                    for j in 0..6 {
+                        loss += point.volume_m3
+                            * inner(strain_rate[i], strain_rate[j])
+                            * viscosity[i][j];
+                    }
+                }
+            }
         }
     }
     for (index, site) in prepared.sites.iter().enumerate() {

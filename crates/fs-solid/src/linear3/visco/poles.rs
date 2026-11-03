@@ -23,6 +23,12 @@ mod dynamic;
 use dynamic::PreparedDynamicLoad;
 pub use dynamic::{ViscoPoleDynamicBudget, ViscoPoleDynamicLoad, ViscoPoleDynamicResponse};
 
+mod response;
+pub use response::{
+    ViscoJointHarmonicBudget, ViscoJointHarmonicError, ViscoJointHarmonicFactor,
+    ViscoJointHarmonicLoad, ViscoJointHarmonicResponse,
+};
+
 /// Source-owned preparation and callback resources, separate from fs-la's
 /// numerical iteration budgets. Allocator overhead/process RSS are excluded.
 #[derive(Clone, Copy, Debug)]
