@@ -5,6 +5,8 @@
 
 use super::{multiple::Response, *};
 
+mod finite_planes;
+pub use finite_planes::{FiniteLubricationPlane3, FinitePlaneResponse3};
 mod pairs;
 pub(in crate::d3q19::boundary) mod planes;
 pub use planes::{LubricatedPlanesExchange3, LubricationPlane3, PlaneLubricationExchange3};
@@ -167,12 +169,13 @@ pub struct SphereLubricationExchange3<const N: usize> {
     pub body_angular_impulses: [[f64; 3]; N],
     /// Full wrench work using ACTUAL returned midpoint translation and spin.
     pub body_work: [f64; N],
-    /// Sum of missing-film reaction impulses received by prescribed planes.
+    /// Sum of missing-film reaction impulses received by all planes.
     /// These are separate from the original resolved-fluid wall exchange.
     pub plane_impulse: [f64; 3],
     /// Total plane reaction angular impulse about the same fixed world origin.
     pub plane_angular_impulse: [f64; 3],
-    /// Actual work received by prescribed translating planes.
+    /// Actual work received by planes. Prescribed surfaces have an external
+    /// driving reservoir; finite surfaces receive this work in kinetic state.
     pub plane_work: f64,
     /// Sum of `resistance * midpoint_mode_speed^2`, nonnegative. Tangential
     /// modes use radius-scaled spin so their speeds also have velocity units.
@@ -275,6 +278,9 @@ enum Counterpart {
     Plane {
         index: usize,
         point: [f64; 3],
+        // A finite carrier receives the opposite wrench about its real center.
+        // None preserves the original prescribed-translation arithmetic.
+        angular: Option<[f64; 3]>,
     },
 }
 
@@ -298,6 +304,23 @@ fn tangent_basis(normal: [f64; 3]) -> [[f64; 3]; 2] {
 }
 
 impl Pair {
+    fn finite_plane(self) -> Option<(usize, Direction)> {
+        match self.counterpart {
+            Counterpart::Plane {
+                index,
+                angular: Some(angular),
+                ..
+            } => Some((
+                index,
+                Direction {
+                    linear: self.normal,
+                    angular: Some(angular),
+                },
+            )),
+            _ => None,
+        }
+    }
+
     fn bodies(self) -> [Option<(usize, f64, Direction)>; 2] {
         [
             Some((
@@ -471,9 +494,27 @@ pub(super) fn solve<const N: usize>(
     plane_reports
         .try_reserve_exact(planes.len())
         .map_err(|_| invalid("lubrication plane report allocation refused"))?;
+    let mut plane_free = Vec::new();
+    if planes.iter().any(|plane| plane.recoil.is_some()) {
+        plane_free
+            .try_reserve_exact(planes.len())
+            .map_err(|_| invalid("finite-plane response allocation refused"))?;
+        for plane in planes {
+            checkpoint(gate)?;
+            plane_free.push(match plane.recoil {
+                Some(input) => FreeResponse::finite_plane(input)?,
+                None => FreeResponse::default(),
+            });
+        }
+    }
     for (index, plane) in planes.iter().copied().enumerate() {
         checkpoint(gate)?;
-        plane_reports.push(PlaneLubricationExchange3::default());
+        plane_reports.push(PlaneLubricationExchange3 {
+            finite_body: plane
+                .recoil
+                .map(|input| FinitePlaneResponse3::initial(input.body)),
+            ..PlaneLubricationExchange3::default()
+        });
         for a in 0..N {
             let distance = plane.distance(bodies[a].center);
             let gap = distance - radii[a];
@@ -499,6 +540,16 @@ pub(super) fn solve<const N: usize>(
             if !point.into_iter().all(f64::is_finite) {
                 return Err(invalid("lubrication plane footpoint overflowed"));
             }
+            if let Some(input) = plane.recoil {
+                finite_planes::admit_point_speed(input.body, point)?;
+            }
+            let plane_angular = |linear, spin: [f64; 3]| {
+                plane.recoil.map(|input| {
+                    let arm = core::array::from_fn(|i| bodies[a].center[i] - input.body.center[i]);
+                    let moment = cross(arm, linear);
+                    core::array::from_fn(|i| moment[i] + spin[i])
+                })
+            };
             if normal_active {
                 let resistance = 6.0
                     * core::f64::consts::PI
@@ -511,7 +562,11 @@ pub(super) fn solve<const N: usize>(
                 }
                 pairs.push(Pair {
                     a,
-                    counterpart: Counterpart::Plane { index, point },
+                    counterpart: Counterpart::Plane {
+                        index,
+                        point,
+                        angular: plane_angular(plane.normal, [0.0; 3]),
+                    },
                     normal: plane.normal,
                     angular: None,
                     resistance,
@@ -521,7 +576,11 @@ pub(super) fn solve<const N: usize>(
                 for mode in tangential {
                     pairs.push(Pair {
                         a,
-                        counterpart: Counterpart::Plane { index, point },
+                        counterpart: Counterpart::Plane {
+                            index,
+                            point,
+                            angular: plane_angular(mode.linear, mode.angular),
+                        },
                         normal: mode.linear,
                         angular: Some(mode.angular),
                         resistance: mode.resistance,
@@ -535,7 +594,7 @@ pub(super) fn solve<const N: usize>(
             plane_reports[index].active_spheres += 1;
         }
     }
-    if pairs.is_empty() {
+    if pairs.is_empty() && plane_free.is_empty() {
         for a in 0..N {
             checkpoint(gate)?;
             proposed[a] = response[a].solve(bodies[a])?;
@@ -583,10 +642,16 @@ pub(super) fn solve<const N: usize>(
                 bodies[pair.a].velocity[axis] - bodies[b].velocity[axis]
                     + 0.5 * (free[pair.a].increment[axis] - free[b].increment[axis])
             }
-            Counterpart::Plane { index, .. } => {
-                bodies[pair.a].velocity[axis] - planes[index].velocity[axis]
-                    + 0.5 * free[pair.a].increment[axis]
-            }
+            Counterpart::Plane { index, .. } => match planes[index].recoil {
+                Some(input) => {
+                    bodies[pair.a].velocity[axis] - input.body.velocity[axis]
+                        + 0.5 * (free[pair.a].increment[axis] - plane_free[index].increment[axis])
+                }
+                None => {
+                    bodies[pair.a].velocity[axis] - planes[index].velocity[axis]
+                        + 0.5 * free[pair.a].increment[axis]
+                }
+            },
         });
         impulse[i] = -dot(pair.normal, slip);
         if let Some(angular) = pair.angular {
@@ -605,6 +670,13 @@ pub(super) fn solve<const N: usize>(
             });
             impulse[i] += dot(angular, omega);
         }
+        if let Some((index, direction)) = pair.finite_plane() {
+            let input = planes[index].recoil.expect("finite plane mode");
+            let omega = core::array::from_fn(|axis| {
+                input.body.angular_velocity[axis] + 0.5 * plane_free[index].increment[axis + 3]
+            });
+            impulse[i] += dot(direction.angular.expect("plane spin direction"), omega);
+        }
         for (j, other) in pairs[..=i].iter().copied().enumerate() {
             let mut entry = if i == j { 1.0 / pair.resistance } else { 0.0 };
             for (a, sign_a, direction_a) in pair.bodies().into_iter().flatten() {
@@ -613,6 +685,12 @@ pub(super) fn solve<const N: usize>(
                         entry += 0.5 * sign_a * sign_b * free[a].mobility(direction_a, direction_b);
                     }
                 }
+            }
+            if let (Some((a, direction_a)), Some((b, direction_b))) =
+                (pair.finite_plane(), other.finite_plane())
+                && a == b
+            {
+                entry += 0.5 * plane_free[a].mobility(direction_a, direction_b);
             }
             matrix[i * k + j] = entry;
         }
@@ -660,7 +738,17 @@ pub(super) fn solve<const N: usize>(
                 report.body_spin_impulses[b][i] -= lambda * angular[i];
             }
         }
-        if let Counterpart::Plane { index, point } = pair.counterpart {
+        if let Some((index, direction)) = pair.finite_plane() {
+            let spin = direction.angular.expect("plane spin direction");
+            let finite = plane_reports[index]
+                .finite_body
+                .as_mut()
+                .expect("finite plane response");
+            for i in 0..3 {
+                finite.spin_impulse[i] -= lambda * spin[i];
+            }
+        }
+        if let Counterpart::Plane { index, point, .. } = pair.counterpart {
             let reaction = pair.normal.map(|x| -lambda * x);
             let mut angular = cross(core::array::from_fn(|i| point[i] - origin[i]), reaction);
             if let Some(spin_axis) = pair.angular {
@@ -711,6 +799,27 @@ pub(super) fn solve<const N: usize>(
             }
         }
     }
+    for (index, plane) in planes.iter().enumerate() {
+        if let Some(input) = plane.recoil {
+            checkpoint(gate)?;
+            finite_planes::finish_response(input, &plane_free[index], &mut plane_reports[index])?;
+        }
+    }
+    for pair in &pairs {
+        if let Counterpart::Plane {
+            index,
+            point,
+            angular: Some(_),
+            ..
+        } = pair.counterpart
+        {
+            let after = plane_reports[index]
+                .finite_body
+                .expect("finite plane response")
+                .body_after;
+            finite_planes::admit_point_speed(after, point)?;
+        }
+    }
     for (pair, lambda) in pairs.iter().zip(impulse) {
         let mut slip = dot(
             pair.normal,
@@ -719,10 +828,16 @@ pub(super) fn solve<const N: usize>(
                     0.5 * ((bodies[pair.a].velocity[i] + proposed[pair.a].velocity[i])
                         - (bodies[b].velocity[i] + proposed[b].velocity[i]))
                 }
-                Counterpart::Plane { index, .. } => {
-                    0.5 * ((bodies[pair.a].velocity[i] - planes[index].velocity[i])
-                        + (proposed[pair.a].velocity[i] - planes[index].velocity[i]))
-                }
+                Counterpart::Plane { index, .. } => match plane_reports[index].finite_body {
+                    Some(finite) => {
+                        0.5 * ((bodies[pair.a].velocity[i] - planes[index].velocity[i])
+                            + (proposed[pair.a].velocity[i] - finite.body_after.velocity[i]))
+                    }
+                    None => {
+                        0.5 * ((bodies[pair.a].velocity[i] - planes[index].velocity[i])
+                            + (proposed[pair.a].velocity[i] - planes[index].velocity[i]))
+                    }
+                },
             }),
         );
         if let Some(angular) = pair.angular {
@@ -746,13 +861,24 @@ pub(super) fn solve<const N: usize>(
                 }),
             );
         }
+        if let Some((index, direction)) = pair.finite_plane() {
+            slip -= dot(
+                direction.angular.expect("plane spin direction"),
+                plane_reports[index]
+                    .finite_body
+                    .expect("finite plane response")
+                    .angular_velocity_midpoint,
+            );
+        }
         report.dissipated_energy += pair.resistance * slip * slip;
         report.constitutive_residual = report
             .constitutive_residual
             .max((lambda + pair.resistance * slip).abs());
     }
     for (plane, exchange) in planes.iter().zip(&mut plane_reports) {
-        exchange.work = dot(exchange.impulse, plane.velocity);
+        if plane.recoil.is_none() {
+            exchange.work = dot(exchange.impulse, plane.velocity);
+        }
         report.plane_work += exchange.work;
         for i in 0..3 {
             report.plane_impulse[i] += exchange.impulse[i];

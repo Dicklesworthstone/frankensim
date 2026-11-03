@@ -8997,3 +8997,42 @@ stress preservation, compatible periodicity, transactional refusals, and the
 actual closed-box collision/stream/wall linear and angular impulse account.
 The runnable
 `rotating_tank3` example supplies a smooth spin-up schedule to this same owner.
+
+### Finite-inertia planar missing-film surfaces
+
+`FiniteLubricationPlane3` and
+`BoundaryGrid3::step_with_lubricated_partial_saturation_finite_planes`
+bind the existing normal and optional leading-logarithmic tangential film
+laws to finite mass and a full world-frame inertia tensor. Plane mobility
+joins the original simultaneous scalar resistance solve. Every sphere film
+sharing a plane therefore sees that plane's solved recoil and spin during
+the same native fluid tick.
+
+For a sphere mode `(n, a)`, the opposing plane wrench uses
+`(n, (sphere_center - plane_center) cross n + a)` with negative sign.
+The local arm retains total world angular momentum and makes common rigid
+translation/rotation a null mode. Plane film work uses the solved center
+and spin midpoint velocities. It enters the plane's kinetic state;
+authored external impulses and couples remain separate. Original film
+dissipation has no inferred thermal destination.
+
+Returned finite-plane responses contain accepted velocities, directly
+accumulated center-angular impulse, kinetic change, external work and
+momentum/work residuals. These residuals measure numerical balance; they
+are not additional numerical-tolerance acceptance gates. Finiteness,
+positive-definite inertia, native low-Mach admission, coupled footpoint
+speeds, existing distinct-plane/positive-gap rules and film/mode budgets
+must all pass before any sphere, plane or population state publishes.
+Even with no active film, finite planes receive their authored external
+impulses. Cancellation and refused candidates preserve accepted state.
+
+This is a frozen-geometry exchange, like the existing spatial immersed
+body response. Centers, plane geometry and world inertia remain fixed.
+Plane extent and mass are caller-owned; no resolved moving wall, solid
+contact, pose drift, gyroscopic step, displaced-fluid closure or GCL is
+provided. Existing stationary resolved-wall reactions remain separate
+external ports. Regression definitions cover the independent two-mass
+normal response, shared-plane angular/work balances and origin shifts,
+common rigid rotation, forced sampled-body BGK/TRT coupling and atomic
+refusals. Native compilation and test execution remain outstanding.
+No measured physical-validation or performance claim is added.

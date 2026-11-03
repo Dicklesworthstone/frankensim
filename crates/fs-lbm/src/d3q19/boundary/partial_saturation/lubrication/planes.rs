@@ -21,6 +21,7 @@ pub struct LubricationPlane3 {
     pub(super) cutoff_gap: f64,
     pub(super) roughness_gap: f64,
     pub(super) tangential: Option<(f64, f64)>,
+    pub(super) recoil: Option<super::finite_planes::FinitePlaneInput>,
 }
 
 impl LubricationPlane3 {
@@ -57,6 +58,7 @@ impl LubricationPlane3 {
             cutoff_gap,
             roughness_gap,
             tangential: None,
+            recoil: None,
         })
     }
 
@@ -180,7 +182,7 @@ pub(super) struct TangentialMode {
     pub resistance: f64,
 }
 
-/// One prescribed surface's reaction, in the caller's plane order.
+/// One surface's reaction, in the caller's plane order.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PlaneLubricationExchange3 {
     /// Missing-film impulse RECEIVED by this plane; opposite to the spheres.
@@ -191,9 +193,12 @@ pub struct PlaneLubricationExchange3 {
     /// Sum of the free reaction couples at the individual plane footpoints.
     /// These retain total angular momentum for noncentral tangential traction.
     pub couple_impulse: [f64; 3],
-    /// Work received by the prescribed surface, `impulse dot velocity`.
-    /// Its driving source supplies the negative of this value.
+    /// Work received by the surface. For prescribed translation this is
+    /// `impulse dot velocity`; finite surfaces use their solved center/spin
+    /// midpoint velocities and the full reaction wrench.
     pub work: f64,
+    /// Present only for a finite-inertia surface, after the shared mode solve.
+    pub finite_body: Option<FinitePlaneResponse3>,
     /// Number of this plane's positive-resistance sphere films.
     pub active_spheres: usize,
     /// Number of this plane's active tangential/parallel-spin blocks.
