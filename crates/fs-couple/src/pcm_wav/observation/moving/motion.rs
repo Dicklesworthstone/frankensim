@@ -8,20 +8,41 @@ use fs_aeroac::curle3d::moving::{
     MovingCompactObserver, PreparedMovingCompactSample, SourceKinematics, UniformSourceMotion,
 };
 
-mod sealed {
+pub(super) mod sealed {
     pub trait Sealed {}
 }
 
 /// Motion accepted by the shared physical-pressure history renderer.
 ///
-/// Implemented for uniform motion, a borrowed prepared curved trajectory, and
-/// [`CompactSourceMotion`] for heterogeneous source ensembles. Sealing keeps
+/// Implemented for uniform motion, a borrowed prepared curved trajectory,
+/// [`CompactSourceMotion`] for heterogeneous fixed-receiver ensembles, and a
+/// borrowed prepared moving source/receiver pair. Sealing keeps
 /// whole-domain speed/clearance guarantees with the original motion owners.
 /// Dispatch is static for homogeneous histories and one enum match for mixed
 /// histories. No trajectory is cloned, evolved, or allocated during callbacks.
 pub trait CompactMotion: sealed::Sealed + Copy {
+    /// The original receiver owner: a fixed microphone or a borrowed path.
+    /// Every source in one render must admit this SAME receiver.
+    type Observer: Copy;
     /// Verify the original microphone, material state and geometric limits.
-    fn admit_observer(self, observer: &MovingCompactObserver) -> Result<(), RenderError>;
+    fn admit_observer(self, observer: &Self::Observer) -> Result<(), RenderError>;
+    /// Sample the original receiver position at its physical arrival time.
+    /// The returned pressure owner always uses source motion in the medium frame.
+    fn observer_at(
+        self,
+        observer: &Self::Observer,
+        receiver_time_s: f64,
+    ) -> Result<MovingCompactObserver, RenderError>;
+    /// Admit the complete requested clock and residual policy before any
+    /// endpoint reconciliation. Fixed receivers have no separate clock owner.
+    fn admit_clock(
+        self,
+        _first_time_s: f64,
+        _last_time_s: f64,
+        _maximum_time_residual_s: f64,
+    ) -> Result<(), RenderError> {
+        Ok(())
+    }
     /// Maximum iterative root steps per receiver sample; uniform motion uses 0.
     fn maximum_root_iterations(self) -> usize;
     /// Evaluate position and its consistent derivatives on the source clock.
@@ -29,7 +50,7 @@ pub trait CompactMotion: sealed::Sealed + Copy {
     /// Prepare the same physical pressure operator at one receiver timestamp.
     fn prepare_at<Cancel: FnMut() -> bool>(
         self,
-        observer: &MovingCompactObserver,
+        observer: &Self::Observer,
         receiver_time_s: f64,
         maximum_time_residual_s: f64,
         cancelled: &mut Cancel,
@@ -37,7 +58,7 @@ pub trait CompactMotion: sealed::Sealed + Copy {
     /// Admit continuous geometry and return a whole-window Doppler-rate bound.
     fn admit_window<Cancel: FnMut() -> bool>(
         self,
-        observer: &MovingCompactObserver,
+        observer: &Self::Observer,
         first: &PreparedMovingCompactSample,
         last: &PreparedMovingCompactSample,
         cancelled: &mut Cancel,
@@ -46,8 +67,17 @@ pub trait CompactMotion: sealed::Sealed + Copy {
 
 impl sealed::Sealed for UniformSourceMotion {}
 impl CompactMotion for UniformSourceMotion {
+    type Observer = MovingCompactObserver;
+
     fn admit_observer(self, _observer: &MovingCompactObserver) -> Result<(), RenderError> {
         Ok(())
+    }
+    fn observer_at(
+        self,
+        observer: &MovingCompactObserver,
+        _time: f64,
+    ) -> Result<MovingCompactObserver, RenderError> {
+        Ok(*observer)
     }
     fn maximum_root_iterations(self) -> usize {
         0
@@ -84,6 +114,8 @@ impl CompactMotion for UniformSourceMotion {
 
 impl sealed::Sealed for &PreparedSourceTrajectory {}
 impl CompactMotion for &PreparedSourceTrajectory {
+    type Observer = MovingCompactObserver;
+
     fn admit_observer(self, observer: &MovingCompactObserver) -> Result<(), RenderError> {
         if self.observer().medium() != observer.medium()
             || self.observer().observer_position_m() != observer.observer_position_m()
@@ -94,6 +126,14 @@ impl CompactMotion for &PreparedSourceTrajectory {
             ));
         }
         Ok(())
+    }
+    fn observer_at(
+        self,
+        observer: &MovingCompactObserver,
+        _time: f64,
+    ) -> Result<MovingCompactObserver, RenderError> {
+        self.admit_observer(observer)?;
+        Ok(*observer)
     }
     fn maximum_root_iterations(self) -> usize {
         PreparedSourceTrajectory::maximum_root_iterations(self)
@@ -162,10 +202,22 @@ impl core::fmt::Debug for CompactSourceMotion<'_> {
 
 impl sealed::Sealed for CompactSourceMotion<'_> {}
 impl CompactMotion for CompactSourceMotion<'_> {
+    type Observer = MovingCompactObserver;
+
     fn admit_observer(self, observer: &MovingCompactObserver) -> Result<(), RenderError> {
         match self {
             Self::Uniform(m) => m.admit_observer(observer),
             Self::Trajectory(m) => m.admit_observer(observer),
+        }
+    }
+    fn observer_at(
+        self,
+        observer: &MovingCompactObserver,
+        time: f64,
+    ) -> Result<MovingCompactObserver, RenderError> {
+        match self {
+            Self::Uniform(m) => m.observer_at(observer, time),
+            Self::Trajectory(m) => m.observer_at(observer, time),
         }
     }
     fn maximum_root_iterations(self) -> usize {

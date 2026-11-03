@@ -6,6 +6,9 @@
 //! and Fdot to the original moving-source pressure operator, at the SAME
 //! retarded time. Uniform motion retains its analytic inverse; prepared curved
 //! motion uses bounded inversion of the original C2 trajectory interpolant.
+//! A moving microphone reads that same Eulerian pressure at its accepted
+//! arrival-time position. Its velocity changes the observed source clock, not
+//! the source's radiation coefficients.
 //!
 //! Input bandwidth, interpolation convergence, finite-source compactness and
 //! pressure linearity remain producer responsibilities. Declared receiver
@@ -24,6 +27,7 @@ use fs_aeroac::curle3d::moving::{
 use fs_math::{dd::Dd, det};
 
 mod motion;
+mod receiver;
 pub use motion::{CompactMotion, CompactSourceMotion};
 
 /// Immutable accepted history and a prescribed trajectory in the medium frame.
@@ -93,8 +97,8 @@ struct PreparedTrack<'a, M> {
 /// not change timestamps or arithmetic. A failed/cancelled block leaves the
 /// output and sample counter untouched; only private scratch may have changed.
 /// Keep the borrowed source histories alive and immutable while observing.
-pub struct MovingCompactRenderer<'a, M = UniformSourceMotion> {
-    observer: MovingCompactObserver,
+pub struct MovingCompactRenderer<'a, M: CompactMotion = UniformSourceMotion> {
+    observer: M::Observer,
     config: MovingPressureConfig,
     tracks: Vec<PreparedTrack<'a, M>>,
     intervals: Vec<CubicInterval>,
@@ -107,7 +111,7 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
     /// Admit the complete receiver window and compile source interpolation.
     /// Cancellation is checked while traversing retained input, before output.
     pub fn new<Cancel: FnMut() -> bool>(
-        observer: MovingCompactObserver,
+        observer: M::Observer,
         sources: &[CompactSourceHistory<'a, M>],
         config: MovingPressureConfig,
         budget: MovingPressureBudget,
@@ -218,6 +222,11 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
         scratch.resize(config.max_block, 0.0);
         for source in sources {
             check_cancel(cancelled)?;
+            source.motion.admit_clock(
+                config.first_receiver_time_s,
+                last_receiver_time,
+                config.maximum_time_residual_s,
+            )?;
             let first_interval = intervals.len();
             if !source.source_bandwidth_hz.is_finite() || source.source_bandwidth_hz < 0.0 {
                 return Err(sizing("source bandwidth must be finite and nonnegative"));
@@ -283,9 +292,24 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
         })
     }
 
-    /// Original microphone geometry and fluid state.
-    pub const fn observer(&self) -> &MovingCompactObserver {
+    /// Original receiver owner: fixed microphone or borrowed accepted path.
+    pub const fn observer(&self) -> &M::Observer {
         &self.observer
+    }
+    /// Actual microphone position and original medium at one admitted time.
+    /// Limits belong to the first source; each other source retains its own
+    /// prepared motion and clearance bounds.
+    pub fn observer_at(&self, time: f64) -> Result<MovingCompactObserver, RenderError> {
+        let last = clock_time(self.config, self.config.samples - 1)?;
+        if !time.is_finite() || time < self.config.first_receiver_time_s || time > last {
+            return Err(sizing(
+                "microphone query exceeds the admitted receiver window",
+            ));
+        }
+        self.tracks[0]
+            .source
+            .motion
+            .observer_at(&self.observer, time)
     }
     /// Admitted physical receiver clock, horizon and declared bandwidth.
     pub const fn config(&self) -> MovingPressureConfig {
@@ -481,7 +505,7 @@ fn interpolate<M>(
 }
 
 fn prepare_history<M: CompactMotion, Cancel: FnMut() -> bool>(
-    observer: &MovingCompactObserver,
+    observer: &M::Observer,
     source: &CompactSourceHistory<'_, M>,
     time: f64,
     tolerance: f64,
@@ -505,6 +529,7 @@ fn prepare_history<M: CompactMotion, Cancel: FnMut() -> bool>(
     for endpoint_time in [first, last] {
         check_cancel(cancelled)?;
         if let Ok(kinematics) = source.motion.kinematics_at(endpoint_time)
+            && let Ok(observer) = source.motion.observer_at(observer, time)
             && let Ok(endpoint) = observer.prepare_emission(endpoint_time, kinematics)
             && endpoint.receiver_time_s() == time
             && endpoint.retarded_time_residual_s() <= tolerance

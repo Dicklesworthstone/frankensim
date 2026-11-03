@@ -108,7 +108,7 @@ fn history(times: &[f64]) -> Vec<TimedCompactSource> {
         })
         .collect()
 }
-fn build<'a, M: CompactMotion>(
+fn build<'a, M: CompactMotion<Observer = MovingCompactObserver>>(
     sources: &[CompactSourceHistory<'a, M>],
     cfg: MovingPressureConfig,
 ) -> MovingCompactRenderer<'a, M> {

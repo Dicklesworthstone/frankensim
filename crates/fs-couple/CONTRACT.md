@@ -1,5 +1,36 @@
 # CONTRACT: fs-couple
 
+## Moving microphones on accepted physical trajectories
+
+`pcm_wav::observation::moving::MovingCompactRenderer::with_moving_receiver`
+observes physical compact volume-flow/force histories through borrowed
+`fs-aeroac::curle3d::moving::trajectory::PreparedMovingReceiverSource` pairs.
+Every source must share the same original microphone trajectory owner. Each
+pair retains its source path, original fluid snapshot, finite receiver window,
+continuous retarded-clearance admission and root-work limits. Source-strength
+interpolation still evaluates values and derivatives at the same returned
+emission time. Neither mechanical trajectory is advanced by observation.
+
+The existing renderer owns one global receiver clock, deterministic coherent
+pressure accumulation and preallocated transactional callback scratch. Microphone
+motion changes the retarded source clock and the whole-window Doppler bandwidth
+bound; it does not replace source velocity in the pressure law or multiply the
+Eulerian pressure by an extra receiver-motion gain. The associated receiver type
+keeps fixed microphones and moving trajectory owners distinct. Complete window
+and residual-policy admission occurs before exact-endpoint reconciliation.
+
+Pressure remains in Pa through the existing `PressureRenderer`, causal
+`DecimatedRenderer` and explicitly scaled PCM writer. Missing source/receiver
+history, insufficient bandwidth, cancellation and numerical refusal publish no
+partial callback. Hermite interpolation is not an antialias filter; the producer
+still declares source bandwidth and geometric amplitude modulation. This is an
+ideal scalar microphone in the original homogeneous quiescent lossless medium,
+with no microphone-body scattering, wind/self-noise, feedback or experimental
+source qualification. Five authored G1/G3/G4 regression groups cover analytic
+receiver motion, independently inverted curved pairs, coherent source sums,
+partition invariance, finite domains, cancellation and the original PCM path.
+Native compilation and execution remain separate verification obligations.
+
 ## Full spatial circuits coupled to complete heat assemblies
 
 `conduction::heat::step_spatial_conduction_circuit_candidate` and the
