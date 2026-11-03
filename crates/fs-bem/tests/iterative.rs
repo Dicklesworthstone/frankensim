@@ -95,7 +95,7 @@ fn emit(
         rung,
         surface.areas().len(),
         ka,
-        std::f64::consts::TAU / (ka * surface.areas().iter().copied().fold(0.0, f64::max).sqrt()),
+        std::f64::consts::TAU / (ka * surface.resolution_length()),
         quoted(&format!("{:?}", options.precond)),
         report.iters,
         report.rel_residual,
@@ -133,10 +133,10 @@ fn bem_iterative_matches_dense() {
             leaf_capacity: 128,
             ..opts()
         };
-        // At k=pi, s=1 resolves only 4.92 panels/wavelength (<6 required).
-        // Use k=2.5 there (6.18 panels/wavelength); finer meshes retain pi
+        // At k=pi, s=1 resolves only 3.24 longest edges/wavelength (<6 required).
+        // Use k=1.5 there (6.78 edges/wavelength); finer meshes retain pi
         // to exercise dense/iterative agreement at the fictitious frequency.
-        let high_k = if s == 1 { 2.5 } else { std::f64::consts::PI };
+        let high_k = if s == 1 { 1.5 } else { std::f64::consts::PI };
         for k in [1.0, high_k] {
             let dense =
                 solve_radiation(&surface, k, Medium::air(), &v, Formulation::BurtonMiller).unwrap();
@@ -760,13 +760,15 @@ fn bem_iterative_input_and_near_storage_boundaries() {
 
 #[test]
 fn bem_directional_matches_dense_above_w5a_regime() {
-    let profile: Vec<_> = (0..10)
+    // Rebalance the short circumferential and long axial edges at k=8 while
+    // preserving the physical two-metre flare, kD>10 and similar panel count.
+    let profile: Vec<_> = (0..21)
         .map(|i| {
-            let t = i as f64 / 9.0;
+            let t = i as f64 / 20.0;
             (2.0 * t, 0.02 + 0.02 * t * t)
         })
         .collect();
-    let bell = fs_bem::radiation_bake::lathe_profile(&profile, 32).unwrap();
+    let bell = fs_bem::radiation_bake::lathe_profile(&profile, 16).unwrap();
     let mask = bell.driven_mask();
     let surface = SpherePanels::from_triangles(bell.triangles).unwrap();
     let v: Vec<_> = mask

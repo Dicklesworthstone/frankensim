@@ -1778,8 +1778,7 @@ fn open_and_impedance_refusals() {
             what: "open edge-grading work cap exceeded"
         })
     ));
-    let area = as_closed.areas().iter().copied().fold(0.0_f64, f64::max);
-    let k6 = TAU / (6.0 * area.sqrt());
+    let k6 = TAU / (6.0 * as_closed.resolution_length());
     let p = PreparedScreen::new(&open, k6, options(0), || false);
     assert!(p.is_ok());
     assert!(matches!(

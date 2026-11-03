@@ -28,6 +28,23 @@ const MAX_SPHERE_RADIUS: f64 = 1.0e50;
 const MAX_ABS_SURFACE_COORDINATE: f64 = 1.0e100;
 const MAX_PANEL_AREA: f64 = 1.0e200;
 
+/// Greatest distance between points on a triangle is its longest edge.
+/// Keep this geometric scale shared by closed panels and open screens.
+pub(crate) fn triangle_diameter(triangle: [[f64; 3]; 3]) -> f64 {
+    let mut maximum_squared = 0.0_f64;
+    for edge in 0..3 {
+        let a = triangle[edge];
+        let b = triangle[(edge + 1) % 3];
+        let delta = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        // Admitted coordinates are bounded by 1e100 (1e9 for open panels),
+        // so these squared distances cannot overflow. One square root avoids
+        // platform libm hypot and its repeated work during geometry import.
+        let squared = delta[0].mul_add(delta[0], delta[1].mul_add(delta[1], delta[2] * delta[2]));
+        maximum_squared = maximum_squared.max(squared);
+    }
+    maximum_squared.sqrt()
+}
+
 /// A converged exterior solve and its full Krylov evidence.
 #[derive(Debug, Clone)]
 pub struct ExteriorSolution {
@@ -129,6 +146,8 @@ pub struct SpherePanels {
     /// The legacy centroid constructor leaves this absent. Helmholtz radiation
     /// uses it for singular and near-singular panel integration when present.
     triangles: Option<Vec<[[f64; 3]; 3]>>,
+    /// Computed once from immutable geometry for repeated frequency queries.
+    resolution_length: f64,
 }
 
 impl SpherePanels {
@@ -138,11 +157,13 @@ impl SpherePanels {
         normals: Vec<[f64; 3]>,
         areas: Vec<f64>,
     ) -> Result<Self, BemError> {
+        let resolution_length = areas.iter().copied().fold(0.0_f64, f64::max).sqrt();
         let panels = Self {
             centroids,
             normals,
             areas,
             triangles: None,
+            resolution_length,
         };
         panels.validate()?;
         Ok(panels)
@@ -177,6 +198,7 @@ impl SpherePanels {
             .map_err(|_| BemError::AllocationFailed {
                 operation: "triangle areas",
             })?;
+        let mut resolution_length = 0.0_f64;
         for (index, &[a, b, c]) in triangles.iter().enumerate() {
             if a.into_iter()
                 .chain(b)
@@ -204,6 +226,7 @@ impl SpherePanels {
                     field: "nondegenerate triangle",
                 });
             }
+            resolution_length = resolution_length.max(triangle_diameter([a, b, c]));
             centroids.push([
                 (a[0] + b[0] + c[0]) / 3.0,
                 (a[1] + b[1] + c[1]) / 3.0,
@@ -221,6 +244,7 @@ impl SpherePanels {
             normals,
             areas,
             triangles: Some(triangles),
+            resolution_length,
         };
         panels.validate()?;
         Ok(panels)
@@ -248,6 +272,18 @@ impl SpherePanels {
     #[must_use]
     pub fn triangles(&self) -> Option<&[[[f64; 3]; 3]]> {
         self.triangles.as_deref()
+    }
+
+    /// Spatial scale used by wavelength admission, in the geometry's units.
+    ///
+    /// Retained triangles use their greatest edge length: small area cannot
+    /// hide a long unresolved direction. Legacy centroid-only panels retain
+    /// `sqrt(maximum area)`, which is an estimate for shape-regular cells and
+    /// cannot establish resolution for unknown aspect ratios. The immutable
+    /// geometry caches this value, so frequency sweeps need no panel scan.
+    #[must_use]
+    pub const fn resolution_length(&self) -> f64 {
+        self.resolution_length
     }
 
     /// Panelize an icosphere (fs-rep-mesh) of given radius/subdivisions.

@@ -23,7 +23,7 @@ fn same(a:&[Solution<'_,'_>],b:&[Solution<'_,'_>]) {
 #[test]
 fn full_reciprocal_batches_cancel_inside_lu_solves_and_flux_without_poisoning_geometry() {
     let surface=SpherePanels::icosphere(1.0,0).unwrap();
-    let geometry=Prepared::new(&surface,1.0,budget(),||false).unwrap();
+    let geometry=Prepared::new(&surface,0.8,budget(),||false).unwrap();
     let fields=[vec![C64::ONE;surface.areas().len()],
         surface.normals().iter().map(|n|C64::from_re(n[2])).collect()];
     let refs:Vec<_>=fields.iter().map(Vec::as_slice).collect();
@@ -55,7 +55,7 @@ fn full_reciprocal_batches_cancel_inside_lu_solves_and_flux_without_poisoning_ge
 #[test]
 fn mechanical_velocity_ports_propagate_mid_factor_and_late_projection_cancellation() {
     let surface=SpherePanels::icosphere(1.0,0).unwrap();
-    let geometry=Prepared::new(&surface,1.0,budget(),||false).unwrap();
+    let geometry=Prepared::new(&surface,0.8,budget(),||false).unwrap();
     let rows=[vec![1.0;surface.areas().len()],vec![-0.4;surface.areas().len()]];
     let refs:Vec<_>=rows.iter().map(Vec::as_slice).collect();
     let mut assembly_polls=0;

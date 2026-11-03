@@ -20,10 +20,10 @@ fn g1_sphere_impedance_and_point_pressure_converge_without_authored_resistance()
     let mut previous=f64::INFINITY;
     for level in [0,1] {
         let surface=SpherePanels::icosphere(1.0,level).unwrap();
-        let geometry=Prepared::new(&surface,1.0,budget(),||false).unwrap();
+        let geometry=Prepared::new(&surface,0.9,budget(),||false).unwrap();
         let velocities=vec![C64::ONE;surface.areas().len()];
         let mut worst=0.0_f64;
-        for k in [0.1,0.5,1.0] {
+        for k in [0.1,0.5,0.9] {
             let p=geometry.solve_batch(k,medium(),&[&velocities],||false).unwrap();
             let area: f64=surface.areas().iter().sum();
             let actual=p[0].pressure.iter().zip(surface.areas())
@@ -48,14 +48,14 @@ fn g1_sphere_impedance_and_point_pressure_converge_without_authored_resistance()
 #[test]
 fn g0_full_complex_multiport_is_reciprocal_and_passive_including_weak_radiators() {
     let surface=SpherePanels::icosphere(1.0,0).unwrap();
-    let geometry=Prepared::new(&surface,1.0,budget(),||false).unwrap();
+    let geometry=Prepared::new(&surface,0.9,budget(),||false).unwrap();
     let mut v=fields(&surface);
     // Signed nonuniform sources and an exact linearly dependent source. No
     // modal rank truncation or positive diagonal loading may remove these.
     v.push(surface.normals().iter().map(|n|C64::from_re(n[0]*n[1])).collect());
     v.push(v[1].iter().map(|x|x.scale(-0.7)).collect());
     let refs:Vec<_>=v.iter().map(Vec::as_slice).collect();
-    for k in [0.02,0.1,0.5,1.0] {
+    for k in [0.02,0.1,0.5,0.9] {
         let p=geometry.solve_batch(k,medium(),&refs,||false).unwrap();
         let z=impedance(&surface,&v,&p);let n=v.len();
         let scale=z.iter().map(|z|z.abs()).fold(0.0_f64,f64::max);
@@ -75,7 +75,7 @@ fn g0_full_complex_multiport_is_reciprocal_and_passive_including_weak_radiators(
 #[test]
 fn g3_phase_mixtures_close_surface_work_against_independent_far_field_quadrature() {
     let surface=SpherePanels::icosphere(1.0,0).unwrap();
-    let geometry=Prepared::new(&surface,1.0,budget(),||false).unwrap();
+    let geometry=Prepared::new(&surface,0.8,budget(),||false).unwrap();
     let velocity:Vec<_>=surface.normals().iter().map(|n|C64::new(n[0]+0.2,n[2]-0.4*n[1])).collect();
     let p=geometry.solve_batch(0.8,medium(),&[&velocity],||false).unwrap();
     let mut integral=0.0;
@@ -111,13 +111,13 @@ fn g0_linear_static_moments_match_independent_gauss_integrals() {
 #[test]
 fn g4_refused_preparation_and_batches_do_not_poison_retry_or_publish_partial_sources() {
     let surface=SpherePanels::icosphere(1.0,0).unwrap();
-    assert!(Prepared::new(&surface,1.0,Budget{maximum_cache_bytes:1,..budget()},||false).is_err());
-    assert!(Prepared::new(&surface,1.0,Budget{maximum_work:1,..budget()},||false).is_err());
-    assert!(Prepared::new(&surface,1.0,Budget{maximum_unknowns:20,..budget()},||false).is_err());
+    assert!(Prepared::new(&surface,0.8,Budget{maximum_cache_bytes:1,..budget()},||false).is_err());
+    assert!(Prepared::new(&surface,0.8,Budget{maximum_work:1,..budget()},||false).is_err());
+    assert!(Prepared::new(&surface,0.8,Budget{maximum_unknowns:20,..budget()},||false).is_err());
     assert!(Prepared::new(&surface,2.0,budget(),||false).is_err());
     let mut calls=0;
-    assert!(matches!(Prepared::new(&surface,1.0,budget(),||{calls+=1;calls==3}),Err(HelmholtzError::Cancelled)));
-    let geometry=Prepared::new(&surface,1.0,budget(),||false).unwrap();
+    assert!(matches!(Prepared::new(&surface,0.8,budget(),||{calls+=1;calls==3}),Err(HelmholtzError::Cancelled)));
+    let geometry=Prepared::new(&surface,0.8,budget(),||false).unwrap();
     let v=vec![C64::ONE;surface.areas().len()];let first=geometry.solve_batch(0.5,medium(),&[&v],||false).unwrap();
     let mut invalid=v.clone();invalid[3]=C64::new(f64::NAN,0.0);
     assert!(geometry.solve_batch(0.5,medium(),&[&v,&invalid],||false).is_err());

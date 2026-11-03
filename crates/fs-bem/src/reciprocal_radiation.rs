@@ -109,9 +109,9 @@ impl<'s> Prepared<'s> {
             || !highest_k.is_finite() || highest_k<=0.0 {
             return Err(bad("invalid reciprocal geometry/frequency/work envelope"));
         }
-        // Same area-based wavelength floor as the collocation owner.
-        let ppw=TAU/highest_k/surface.areas().iter().copied().fold(0.0_f64,f64::max).sqrt();
-        if !ppw.is_finite() || ppw<MIN_PANELS_PER_WAVELENGTH {
+        // Same longest-edge wavelength floor as the collocation owner.
+        let ppw=crate::helmholtz::admit_resolution(surface,highest_k)?;
+        if !ppw.is_finite() {
             return Err(HelmholtzError::TooCoarse{panels_per_wavelength:ppw});
         }
         let (facets,vertices,widths,length)=facets(surface)?;

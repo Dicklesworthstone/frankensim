@@ -364,6 +364,17 @@ everywhere: this is screening, not a viscous truth source.
   shape mismatch, singular; optional geometry preparation additionally reports
   cache-byte budget, allocation, and cancellation refusals.
 
+Wavelength resolution uses the longest retained triangle edge, including on
+graded and highly anisotropic meshes. A tiny panel area cannot admit a long
+edge spanning an unresolved acoustic phase. `SpherePanels::resolution_length`
+and `OpenPanels::resolution_length` cache this geometric scale once; dense,
+matrix-free, complex/molecular, penetrable-fluid and reciprocal closed/open
+surface paths share it. Complex waves retain the existing conservative `|k|`
+criterion, resolving attenuation as well as phase. Centroid-only surfaces have
+no recoverable aspect ratio and retain `sqrt(maximum area)` as an explicitly
+shape-regular estimate. Six panels per wavelength remains a necessary floor,
+not a bound on solution error or a replacement for refinement.
+
 ### `helmholtz::iterative` (IRP M2.5-W5c)
 
 The optional `IterativeOptions::directional` (M2.5-W5b) selects the directional

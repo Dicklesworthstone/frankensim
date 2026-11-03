@@ -150,9 +150,9 @@ pub(crate) fn dense_workers() -> usize {
 /// callers back to one factorization per field.
 pub const MAX_RADIATION_FIELDS_PER_BATCH: usize = 256;
 
-/// Minimum panels per wavelength before the solver refuses: below ~6 the
-/// centroid-collocation solution degrades silently, so the boundary is a
-/// named refusal instead.
+/// Minimum panels per wavelength, using the greatest retained triangle edge.
+/// Centroid-only panels retain their shape-regular square-root-area estimate.
+/// This is a necessary spatial-resolution floor, not an accuracy certificate.
 pub const MIN_PANELS_PER_WAVELENGTH: f64 = 6.0;
 
 const ROOM_TEMPERATURE_K: f64 = 293.15;
@@ -976,14 +976,6 @@ fn triangle_far_phase(k: f64, direction: [f64; 3], triangle: [[f64; 3]; 3]) -> C
     integral
 }
 
-fn characteristic_panel_size(surface: &SpherePanels) -> f64 {
-    let mut max_area = 0.0f64;
-    for &a in surface.areas() {
-        max_area = max_area.max(a);
-    }
-    max_area.sqrt()
-}
-
 // Also used before a reusable geometry table allocates or integrates anything.
 pub(crate) fn admit_resolution(surface: &SpherePanels, k: f64) -> Result<f64, HelmholtzError> {
     admit_resolution_with_cap(surface, k, MAX_DENSE_PANELS)
@@ -1006,8 +998,11 @@ fn admit_resolution_with_cap(surface: &SpherePanels, k: f64, maximum_panels: usi
         return Err(HelmholtzError::WorkCap { panels: n });
     }
     let wavelength = 2.0 * core::f64::consts::PI / k;
-    let ppw = wavelength / characteristic_panel_size(surface);
-    if ppw < MIN_PANELS_PER_WAVELENGTH {
+    let size = surface.resolution_length();
+    let ppw = wavelength / size;
+    // Compare k directly to the boundary so an exactly authored six-panel
+    // frequency is not refused by the reciprocal diagnostic's roundoff.
+    if k > core::f64::consts::TAU / (MIN_PANELS_PER_WAVELENGTH * size) {
         return Err(HelmholtzError::TooCoarse {
             panels_per_wavelength: ppw,
         });
@@ -2788,8 +2783,8 @@ mod tests {
 
     fn thin_box_surface() -> SpherePanels {
         // A closed plate-sized boundary with opposing skins 1 mm apart.
-        // Six divisions across each skin leave both near and far interactions;
-        // the coarse wavelength guard still admits the 1640 Hz endpoint.
+        // Six divisions across each skin leave both near and far interactions
+        // and resolve the longest edge through the 820 Hz test endpoint.
         let extents = [0.30, 0.24, 0.001];
         let divisions = [6, 6, 1];
         let mut triangles = Vec::new();
@@ -3206,7 +3201,10 @@ mod tests {
             }
         }
         let field_refs: Vec<&[C64]> = fields.iter().map(Vec::as_slice).collect();
-        for frequency in [40.0, 1640.0] {
+        // The old area-only guard admitted 1640 Hz on these long diagonals.
+        // Retain the same bending modes on a resolved band without increasing
+        // this quadrature regression's matrix size or weakening its power gate.
+        for frequency in [40.0, 820.0] {
             let k = core::f64::consts::TAU * frequency / medium.sound_speed;
             let solutions =
                 solve_radiation_batch(&surface, k, medium, &field_refs, Formulation::PlainCbie)
@@ -3270,7 +3268,9 @@ mod tests {
             density: 1.2,
             sound_speed: 343.0,
         };
-        let k = core::f64::consts::TAU * 1640.0 / medium.sound_speed;
+        // Receiver-quadrature comparison at a wavelength-resolved frequency;
+        // the source mesh and its >2% centroid falsifier stay unchanged.
+        let k = core::f64::consts::TAU * 820.0 / medium.sound_speed;
         let velocity: Vec<_> = surface
             .centroids()
             .iter()
@@ -3524,10 +3524,11 @@ mod tests {
     fn burton_miller_sign_tracks_cbie_accuracy_off_resonance() {
         // G2 + G3: away from interior resonances plain CBIE is exact in the
         // continuum, so a consistent coupling must not add discretization
-        // error. Measured on the pulsating sphere (icosphere-2, 320 panels):
+        // error. Previously measured on the pulsating sphere (icosphere-2, 320 panels):
         // production/CBIE 0.58, 0.60, 0.78 and mutation/production 2.8, 3.2,
         // 2.7 at ka = 2, 2.5, 4. Under refinement to icosphere-3 at ka = 2.5
         // the production error falls 6.9x (CBIE 3.8x, mutation 2.7x).
+        // The ka=4 case now uses icosphere-3 to resolve its longest edges.
         let err = |surface: &SpherePanels, ka: f64, formulation: Formulation| -> f64 {
             let n = surface.centroids().len();
             let sol = solve_radiation(
@@ -3542,10 +3543,12 @@ mod tests {
             (mean_impedance(&sol, surface) - z_ref).abs() / z_ref.abs()
         };
         let coarse = SpherePanels::icosphere(1.0, 2).expect("icosphere-2");
+        let fine = SpherePanels::icosphere(1.0, 3).expect("icosphere-3");
         for ka in [2.0, 2.5, 4.0] {
-            let bm = err(&coarse, ka, Formulation::BurtonMiller);
-            let cbie = err(&coarse, ka, Formulation::PlainCbie);
-            let mutated = err(&coarse, ka, Formulation::BurtonMillerWrongAlphaSign);
+            let surface = if ka > 3.0 { &fine } else { &coarse };
+            let bm = err(surface, ka, Formulation::BurtonMiller);
+            let cbie = err(surface, ka, Formulation::PlainCbie);
+            let mutated = err(surface, ka, Formulation::BurtonMillerWrongAlphaSign);
             assert!(
                 bm < cbie,
                 "ka={ka}: production {bm:.3e} must beat plain CBIE {cbie:.3e}"
@@ -3558,7 +3561,6 @@ mod tests {
                 "{{\"suite\":\"fs-bem-helmholtz\",\"case\":\"alpha-sign-off-resonance\",\"ka\":{ka},\"bm_rel\":{bm:.4e},\"cbie_rel\":{cbie:.4e},\"mutation_rel\":{mutated:.4e}}}"
             );
         }
-        let fine = SpherePanels::icosphere(1.0, 3).expect("icosphere-3");
         let ratio = err(&coarse, 2.5, Formulation::BurtonMiller)
             / err(&fine, 2.5, Formulation::BurtonMiller);
         assert!(
@@ -4639,7 +4641,7 @@ mod tests {
         // The flat-panel discretization SHIFTS the sphere's first
         // interior Dirichlet resonance away from the continuum ka = pi
         // (centroids sit at radius < 1), so the claim is scanned over
-        // the resonance neighborhood: somewhere in ka in [3.0, 3.35]
+        // the resolved resonance neighborhood: somewhere in ka in [3.0, 3.22]
         // plain CBIE's bound must spike visibly above Burton-Miller's
         // at the same ka and above its own off-resonance value.
         // Measured on this mesh (2026-08-08): the CBIE bound peaks near
@@ -4664,7 +4666,7 @@ mod tests {
         // Stage 1: coarse scan locates the discrete resonance.
         let mut coarse_ka = 0.0f64;
         let mut coarse_peak = 0.0f64;
-        for step in 0..=14u32 {
+        for step in 0..=8u32 {
             let ka = 3.0 + 0.025 * f64::from(step);
             let cbie = cond(ka, Formulation::PlainCbie);
             assert!(cbie.is_finite());
@@ -4679,6 +4681,9 @@ mod tests {
         let mut peak_cbie = coarse_peak;
         for step in 0..=20u32 {
             let ka = coarse_ka - 0.025 + 0.0025 * f64::from(step);
+            if ka > 3.22 {
+                continue;
+            }
             let cbie = cond(ka, Formulation::PlainCbie);
             if cbie > peak_cbie {
                 peak_cbie = cbie;

@@ -162,12 +162,7 @@ fn modal_loading_caps() {
     ));
 
     let sphere = SpherePanels::icosphere(1.0, 0).unwrap();
-    let size = sphere
-        .areas()
-        .iter()
-        .copied()
-        .fold(0.0_f64, f64::max)
-        .sqrt();
+    let size = sphere.resolution_length();
     let k6 = TAU / (6.0 * size);
     let field = vec![C64::ONE; sphere.areas().len()];
     assert!(
@@ -292,7 +287,7 @@ fn modal_loading_bitwise_repeat() {
 
 #[test]
 fn bem_source_batches_preserve_all_257_fields_bitwise() {
-    let surface = SpherePanels::icosphere(1.0, 0).unwrap();
+    let surface = SpherePanels::icosphere(0.5, 0).unwrap();
     let mut shapes = vec![vec![0.0; surface.areas().len()]; 257];
     shapes[0].fill(1.0);
     shapes[256].fill(-0.5);

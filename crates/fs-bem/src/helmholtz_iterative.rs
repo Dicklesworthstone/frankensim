@@ -16,8 +16,8 @@
 
 use super::triangle_rule::{NearRule, triangle_rule_pair};
 use super::{
-    Formulation, GL4_W, GL4_X, HelmholtzError, MAX_DENSE_PANELS, MIN_PANELS_PER_WAVELENGTH, Medium,
-    PanelRule, RadiationSolution, alpha_for, characteristic_panel_size, evaluate_radiated_power,
+    Formulation, GL4_W, GL4_X, HelmholtzError, MAX_DENSE_PANELS, Medium,
+    PanelRule, RadiationSolution, admit_iterative_resolution, alpha_for, evaluate_radiated_power,
     kernels, self_terms, surface_fingerprint, triangle_is_near, triangle_self_terms,
     triangle_weak_influence, triangle_weak_influence_with_rule,
 };
@@ -647,14 +647,7 @@ pub(crate) fn admit(
             });
         }
     }
-    let ppw = 2.0 * core::f64::consts::PI / (k * characteristic_panel_size(surface));
-    if ppw < MIN_PANELS_PER_WAVELENGTH {
-        return Err(HelmholtzError::TooCoarse {
-            panels_per_wavelength: ppw,
-        }
-        .into());
-    }
-    Ok(ppw)
+    Ok(admit_iterative_resolution(surface, k)?)
 }
 
 fn poll(gate: &CancelGate) -> Result<(), IterativeError> {

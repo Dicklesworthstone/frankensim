@@ -30,6 +30,7 @@ pub struct OpenPanels {
     vertices: Vec<Point>,
     triangles: Vec<[usize; 3]>,
     boundary: Vec<bool>,
+    resolution_length: f64,
 }
 impl OpenPanels {
     /// Reject closed components, duplicate faces, inconsistent orientation,
@@ -47,6 +48,7 @@ impl OpenPanels {
         let mut edges = BTreeMap::<(usize, usize), Vec<(usize, usize, usize)>>::new();
         let mut faces = BTreeSet::new();
         let mut incident = vec![Vec::new(); vertices.len()];
+        let mut resolution_length = 0.0_f64;
         for (f, t) in triangles.iter().enumerate() {
             if t.iter().any(|&i| i >= vertices.len()) {
                 return Err(bad("open screen vertex index"));
@@ -63,6 +65,9 @@ impl OpenPanels {
             {
                 return Err(bad("degenerate or duplicate open screen face"));
             }
+            resolution_length = resolution_length.max(crate::panel3d::triangle_diameter(
+                t.map(|index| vertices[index]),
+            ));
             for a in 0..3 {
                 let i = t[a];
                 let j = t[(a + 1) % 3];
@@ -145,6 +150,7 @@ impl OpenPanels {
             vertices,
             triangles,
             boundary,
+            resolution_length,
         })
     }
     pub fn vertices(&self) -> &[Point] {
@@ -152,6 +158,11 @@ impl OpenPanels {
     }
     pub fn triangles(&self) -> &[[usize; 3]] {
         &self.triangles
+    }
+    /// Greatest triangle edge, cached from the original geometry. Wavelength
+    /// admission uses this span even for highly graded or slender cells.
+    pub const fn resolution_length(&self) -> f64 {
+        self.resolution_length
     }
     pub fn is_free_edge_vertex(&self, i: usize) -> bool {
         self.boundary[i]
@@ -323,7 +334,7 @@ impl<'a> PreparedScreen<'a> {
                 normal.map(|v| v / area2),
             )?);
         }
-        let size = facets.iter().map(|f| f.area).fold(0.0_f64, f64::max).sqrt();
+        let size = surface.resolution_length();
         let ppw = TAU / highest_k / size;
         // Compare the frequency to the declared boundary directly: an exact
         // f6 input must not refuse after a reciprocal round-trip loses an ulp.
