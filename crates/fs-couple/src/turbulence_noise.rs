@@ -44,6 +44,13 @@
 //!
 //! With no `aspiration_noise` key the island never touches any of this and a performance is bit-identical to
 //! one written before the key existed.
+//!
+//! THE VOICE JET NOISE ([`JetNoiseCard`], [`GlottalJetNoise`]): the second opt-in glottal source, beside the one above and
+//! not a replacement for it. It is Stevens' form (a series pressure source proportional to the pressure drop across the
+//! constriction) with Verge's measured fraction and band from a flue jet, applied to the glottal jet as an extrapolation;
+//! see [`JetNoiseCard`] for the law, what each part rests on, and the label a page must carry. It uses the band-limited
+//! core [`BandedGaussian`] under its own kernel id [`GLOTTAL_JET_NOISE_KERNEL`] and, like the flue's `jet_noise` row, five
+//! required fields and no default.
 
 use fs_math::det;
 use fs_rand::{Stream, StreamKey};
@@ -284,6 +291,130 @@ impl GlottalAspiration {
     }
 }
 
+/// Kernel id of the voice's jet-noise stream in `fs_rand`'s `(seed, kernel, tile)` key: "gjet". It is neither the
+/// aspiration stream ("glot") nor the flue's jet-noise stream ("jetn"), so a card may carry both voice rows.
+pub const GLOTTAL_JET_NOISE_KERNEL: u32 = 0x676a_6574;
+
+/// The voice's opt-in jet-noise card: `jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>`, every field required, no default.
+///
+/// THE LAW (the form is Stevens', the constant is Verge's, and putting the two on the glottis is an EXTRAPOLATION).
+/// A pressure source in series with the glottal channel, proportional to the pressure drop across the constriction, of rms
+/// `gain * rho U_j^2 / 2` over the band `St_h = f h / U_j` in `[st_lo, st_hi]`, shut while `Re_h = U_j h / nu` is below
+/// `re_on`. `U_j = Q / (L h)` is the speed of the glottal jet (`Q` the glottal flow, `L` the fold length, `h` the gap), so
+/// `Re_h = Q / (L nu)`: the gap cancels and the gate is a flow threshold. The form, a sound-pressure source proportional to
+/// the pressure drop across a constriction with weak dependence on its area, is Stevens (1971, JASA 50:1180); Krane (2005,
+/// JASA 118:410) derives the same `p' ~ rho U^2` for plane-wave radiation in a tube. The CONSTANT, band and gate are
+/// Verge's measurement (PhD thesis, TU Eindhoven 1995, sec. 5.5, Fig. 5.15a): a flue jet at a labium, slit 1 mm,
+/// `gain` 1.3e-3 (0.92e-3 for the other analyser line width, +-3 dB), `St_h` 0.045-0.115, not determinable below
+/// `Re_h` about 1700. No source measures any of it on a glottis, and the page that shows a render says so (MB's label:
+/// "constriction noise from a flue-jet measurement (Verge 1995: flue jet at a labium, slit 1 mm), applied to the glottal
+/// jet as an extrapolation; Stevens 1971 gives the form (a pressure source proportional to the pressure drop), not this
+/// constant"). The numbers are the card's; nothing here supplies, tunes or reads one from a recording.
+///
+/// MEASURED SHORTFALL (SunnySnow, 2026-11-03, rendered on the 14 straight-tone site cards with this constant): the noise the
+/// law adds is about 53-64 dB under the harmonic power on the F4 notes (grader hnr, ours side, before and after), against a
+/// total inter-harmonic power 28-33 dB under it in the recordings the grader compares with; no number from those recordings
+/// enters the code. So at Verge's constant the law is about 20-30 dB too weak on the glottis: it leaves the grader's
+/// spectral flux low (F4-a 0.37 to 0.51 against 2.8) and the hnr far from the recordings' (F4-a 72 to 58 dB against 28). It
+/// is kept as the opt-in place for a constriction constant that is measured on a constriction like this one; only the
+/// constant, band and gate would change, with their source.
+///
+/// The jet speed cannot exceed the Bernoulli speed of the whole driving pressure, `sqrt(2 p_drive / rho)`; the caller
+/// passes that bound and `U_j` is clamped to it (a numerically tiny gap with a finite flow would otherwise give an
+/// unbounded speed). With no `jet_noise` key the island never touches any of this and a performance is bit-identical to
+/// one written before the key existed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JetNoiseCard {
+    /// Declared seed of the noise stream.
+    pub seed: u64,
+    /// rms of the series pressure as a fraction of `rho U_j^2 / 2` [-]. No default.
+    pub gain: f64,
+    /// Lower edge of the band in `St_h = f h / U_j` [-].
+    pub strouhal_lo: f64,
+    /// Upper edge of the band in `St_h` [-].
+    pub strouhal_hi: f64,
+    /// `Re_h = U_j h / nu` below which the source is shut [-].
+    pub reynolds_onset: f64,
+}
+
+impl JetNoiseCard {
+    /// Refuse a card whose fields cannot be used.
+    ///
+    /// # Errors
+    /// A named reason: the gain must be finite and positive, the band `0 < st_lo < st_hi` finite, the onset finite and non-negative.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(self.gain.is_finite() && self.gain > 0.0) {
+            return Err("jet_noise gain must be finite and positive");
+        }
+        if !(self.strouhal_lo.is_finite() && self.strouhal_hi.is_finite() && self.strouhal_lo > 0.0 && self.strouhal_hi > self.strouhal_lo) {
+            return Err("jet_noise needs a Strouhal band 0 < ST_LO < ST_HI");
+        }
+        if !(self.reynolds_onset.is_finite() && self.reynolds_onset >= 0.0) {
+            return Err("jet_noise reynolds onset must be finite and non-negative");
+        }
+        Ok(())
+    }
+}
+
+/// The glottal jet-noise source of one island: the card, its band-limited stream and the last step's flow and gap.
+#[derive(Clone, Debug)]
+pub struct GlottalJetNoise {
+    card: JetNoiseCard,
+    noise: BandedGaussian,
+    last_flow_m3_s: f64,
+    last_gap_m: f64,
+}
+
+impl GlottalJetNoise {
+    /// The source for `card`.
+    ///
+    /// # Errors
+    /// The reason [`JetNoiseCard::validate`] gives.
+    pub fn new(card: JetNoiseCard) -> Result<Self, &'static str> {
+        card.validate()?;
+        Ok(Self {
+            noise: BandedGaussian::new(card.seed, GLOTTAL_JET_NOISE_KERNEL),
+            card,
+            last_flow_m3_s: 0.0,
+            last_gap_m: 0.0,
+        })
+    }
+
+    /// The card.
+    #[must_use]
+    pub const fn card(&self) -> &JetNoiseCard {
+        &self.card
+    }
+
+    /// The series pressure [Pa] of this step from the last step's flow and gap (the law is quasi-steady in the island's
+    /// own previous step, one mechanics step of lag and no implicit loop, as READING 4 of the aspiration source).
+    /// `fold_length_m` is `L`, `max_speed_m_s` the Bernoulli bound `sqrt(2 p_drive / rho)` on the jet speed, `rho` and
+    /// `mu` the gas density and dynamic viscosity. The stream advances by exactly one white sample per call, gate open
+    /// or shut, so its index never depends on how long the gate was shut.
+    pub fn pressure_pa(&mut self, fold_length_m: f64, max_speed_m_s: f64, rho: f64, mu: f64, dt: f64) -> f64 {
+        let (q, h) = (self.last_flow_m3_s, self.last_gap_m);
+        if !(q > 0.0 && h > 0.0 && fold_length_m > 0.0 && max_speed_m_s > 0.0 && rho > 0.0 && mu > 0.0) {
+            let _ = self.noise.skip();
+            return 0.0;
+        }
+        let speed = (q / (fold_length_m * h)).min(max_speed_m_s);
+        let reynolds = speed * h * rho / mu;
+        if !(reynolds >= self.card.reynolds_onset) {
+            let _ = self.noise.skip();
+            return 0.0;
+        }
+        let per_hz = speed / h;
+        let w = self.noise.step(self.card.strouhal_lo * per_hz, self.card.strouhal_hi * per_hz, dt);
+        self.card.gain * 0.5 * rho * speed * speed * w
+    }
+
+    /// Remember this step's flow [m^3/s] and gap [m] for the next call of [`Self::pressure_pa`].
+    pub fn record(&mut self, flow_m3_s: f64, gap_m: f64) {
+        self.last_flow_m3_s = flow_m3_s;
+        self.last_gap_m = gap_m;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,5 +600,114 @@ mod tests {
         assert_eq!(run(7, FLUE_JET_NOISE_KERNEL), run(7, FLUE_JET_NOISE_KERNEL));
         assert_ne!(run(7, FLUE_JET_NOISE_KERNEL), run(8, FLUE_JET_NOISE_KERNEL));
         assert_ne!(run(7, FLUE_JET_NOISE_KERNEL), run(7, GLOTTAL_NOISE_KERNEL), "the flue's kernel keeps its stream apart from the glottal one");
+    }
+
+    const RHO: f64 = 1.15;
+    const MU: f64 = 1.9e-5;
+
+    fn jet_card() -> JetNoiseCard {
+        JetNoiseCard { seed: 21, gain: 1.3e-3, strouhal_lo: 0.045, strouhal_hi: 0.115, reynolds_onset: 1700.0 }
+    }
+
+    /// Gauntlet G3. The series pressure's rms is `gain rho U_j^2 / 2` at the jet speed `Q / (L h)`, so it goes as the
+    /// square of the speed (the pressure-drop-proportional form).
+    #[test]
+    fn glottal_jet_noise_rms_is_gain_times_the_dynamic_pressure_and_goes_as_the_square_of_the_jet_speed() {
+        let (l, h, dt) = (0.014, 0.8e-3, 1.0 / 192_000.0);
+        let rms_at = |speed: f64| {
+            let mut s = GlottalJetNoise::new(jet_card()).unwrap();
+            s.record(speed * l * h, h);
+            for _ in 0..4096 {
+                s.pressure_pa(l, 1.0e3, RHO, MU, dt);
+            }
+            let n = 1usize << 17;
+            let ss: f64 = (0..n).map(|_| { let p = s.pressure_pa(l, 1.0e3, RHO, MU, dt); p * p }).sum();
+            (ss / n as f64).sqrt()
+        };
+        let u = 40.0;
+        let expected = 1.3e-3 * 0.5 * RHO * u * u;
+        let measured = rms_at(u);
+        assert!((measured / expected - 1.0).abs() < 0.04, "rms {measured} against gain rho U^2 / 2 = {expected}");
+        let doubled = rms_at(2.0 * u);
+        assert!((doubled / measured - 4.0).abs() < 0.25, "twice the speed must give four times the rms, got {}", doubled / measured);
+    }
+
+    /// With `Re_h = U_j h / nu` and `U_j = Q / (L h)` the gap cancels: the gate is a flow threshold `Q = Re_on L nu`.
+    #[test]
+    fn glottal_jet_noise_gate_is_a_flow_threshold_because_the_gap_cancels() {
+        let (l, dt) = (0.014, 1.0 / 192_000.0);
+        let q_on = 1700.0 * l * (MU / RHO);
+        for h in [0.2e-3, 0.6e-3, 1.5e-3] {
+            let mut shut = GlottalJetNoise::new(jet_card()).unwrap();
+            shut.record(0.99 * q_on, h);
+            assert!((0..64).all(|_| shut.pressure_pa(l, 1.0e3, RHO, MU, dt) == 0.0), "below the flow threshold at gap {h}");
+            let mut open = GlottalJetNoise::new(jet_card()).unwrap();
+            open.record(1.01 * q_on, h);
+            assert!((0..64).any(|_| open.pressure_pa(l, 1.0e3, RHO, MU, dt) != 0.0), "above the flow threshold at gap {h}");
+        }
+        // No flow, no gap, no driving pressure, or no fold: no jet and no noise.
+        let mut none = GlottalJetNoise::new(jet_card()).unwrap();
+        none.record(2.0 * q_on, 0.0);
+        assert_eq!(none.pressure_pa(l, 1.0e3, RHO, MU, dt), 0.0);
+        none.record(2.0 * q_on, 1e-3);
+        assert_eq!(none.pressure_pa(l, 0.0, RHO, MU, dt), 0.0, "a zero drive bound means no jet");
+    }
+
+    /// The jet cannot be faster than the Bernoulli speed of the whole driving pressure: a tiny gap with a finite flow must
+    /// not give an unbounded speed. Ungated here (onset 0) so the clamp alone is read.
+    #[test]
+    fn glottal_jet_noise_speed_is_bounded_by_the_bernoulli_speed_of_the_drive() {
+        let (l, dt, vmax) = (0.014, 1.0 / 192_000.0, 50.0);
+        let card = JetNoiseCard { reynolds_onset: 0.0, ..jet_card() };
+        let mut s = GlottalJetNoise::new(card).unwrap();
+        s.record(5.0e-4, 0.3e-3); // raw speed Q / (L h) = 119 m/s, above the bound
+        for _ in 0..4096 {
+            s.pressure_pa(l, vmax, RHO, MU, dt);
+        }
+        let n = 1usize << 16;
+        let xs: Vec<f64> = (0..n).map(|_| s.pressure_pa(l, vmax, RHO, MU, dt)).collect();
+        let rms = (xs.iter().map(|x| x * x).sum::<f64>() / n as f64).sqrt();
+        let expected = 1.3e-3 * 0.5 * RHO * vmax * vmax;
+        assert!((rms / expected - 1.0).abs() < 0.05, "rms {rms} against the clamped {expected}");
+        // A gap so small that the clamped jet is nowhere near turbulent is shut by the gate (Re_h on the CLAMPED speed).
+        let mut tiny = GlottalJetNoise::new(jet_card()).unwrap();
+        tiny.record(5.0e-4, 1.0e-9);
+        assert!((0..64).all(|_| tiny.pressure_pa(l, vmax, RHO, MU, dt) == 0.0));
+    }
+
+    #[test]
+    fn the_jet_noise_card_without_a_usable_field_is_refused_and_the_stream_advances_one_sample_per_step() {
+        let ok = jet_card();
+        assert!(ok.validate().is_ok());
+        for bad in [
+            JetNoiseCard { gain: 0.0, ..ok },
+            JetNoiseCard { gain: f64::NAN, ..ok },
+            JetNoiseCard { strouhal_lo: 0.0, ..ok },
+            JetNoiseCard { strouhal_lo: 0.115, strouhal_hi: 0.045, ..ok },
+            JetNoiseCard { strouhal_hi: f64::INFINITY, ..ok },
+            JetNoiseCard { reynolds_onset: -1.0, ..ok },
+        ] {
+            assert!(GlottalJetNoise::new(bad).is_err(), "{bad:?}");
+        }
+        let (l, dt) = (0.014, 1.0 / 192_000.0);
+        let q_on = 1700.0 * l * (MU / RHO);
+        let (mut open, mut shut) = (GlottalJetNoise::new(ok).unwrap(), GlottalJetNoise::new(ok).unwrap());
+        open.record(2.0 * q_on, 1e-3);
+        shut.record(0.1 * q_on, 1e-3);
+        for _ in 0..50 {
+            open.pressure_pa(l, 1.0e3, RHO, MU, dt);
+            shut.pressure_pa(l, 1.0e3, RHO, MU, dt);
+        }
+        assert_eq!(open.noise.white.index(), shut.noise.white.index(), "one white sample per call, gate open or shut");
+        assert!(open.noise.white.index() > 0);
+        let run = |seed| {
+            let mut s = GlottalJetNoise::new(JetNoiseCard { seed, ..ok }).unwrap();
+            s.record(2.0 * q_on, 1e-3);
+            (0..64).map(|_| s.pressure_pa(l, 1.0e3, RHO, MU, dt).to_bits()).collect::<Vec<u64>>()
+        };
+        assert_eq!(run(7), run(7));
+        assert_ne!(run(7), run(8));
+        assert_ne!(GLOTTAL_JET_NOISE_KERNEL, GLOTTAL_NOISE_KERNEL);
+        assert_ne!(GLOTTAL_JET_NOISE_KERNEL, FLUE_JET_NOISE_KERNEL);
     }
 }

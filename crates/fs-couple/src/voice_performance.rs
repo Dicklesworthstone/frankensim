@@ -39,7 +39,19 @@
 //! tension_modulation <rate_hz> <relative_amplitude>  (optional; vibrato)
 //! fold_mapping bilateral                             (optional; the fold line is one fold of a pair)
 //! aspiration_noise <seed> <xi_pa_s3_per_m6> [<re_crit>]   (optional; turbulence noise at the glottis)
+//! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>         (optional; constriction noise of the glottal jet, Verge's fraction)
 //! ```
+//!
+//! `jet_noise` is a second opt-in glottal source, beside `aspiration_noise` and not a replacement for it, and the two may
+//! be on one card: a series pressure source of rms `gain * rho U_j^2 / 2` over `St_h = f h / U_j` in `[st_lo, st_hi]`,
+//! shut while `Re_h = U_j h / nu` (which is `Q / (L nu)`) is below `re_on`, with `U_j = Q / (L h)` the glottal jet speed
+//! from the island's own previous-step flow and gap, bounded by the Bernoulli speed of the driving pressure. Every field
+//! is required. The form is Stevens' (1971), the constant, band and gate are Verge's (1995, a flue jet at a labium), and
+//! applying them to the glottis is an extrapolation that any page showing a render must say (see
+//! [`crate::turbulence_noise::JetNoiseCard`] for the law, the label and the measured shortfall: at this constant the noise
+//! it adds is about 20-30 dB too weak to close the flux or hnr gap on the F4 notes). It is added to the step's drive in series with the
+//! glottal channel exactly as the aspiration source is. Without the key nothing is added and a performance is
+//! bit-identical to one written before the key existed; a gate that never opens adds exactly zero.
 //!
 //! `aspiration_noise` adds a seeded turbulence pressure source in series with the glottal channel, driven by the
 //! island's own flow and aperture (the law, its sources and the four readings it takes of them are in
@@ -75,7 +87,7 @@ use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighM
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::tract::{TractChart, TractSection};
-use crate::turbulence_noise::{AspirationCard, GlottalAspiration, RE_CRIT_SONDHI_SCHROETER};
+use crate::turbulence_noise::{AspirationCard, GlottalAspiration, GlottalJetNoise, JetNoiseCard, RE_CRIT_SONDHI_SCHROETER};
 use fs_duct::Termination;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
@@ -129,6 +141,9 @@ pub struct VoiceDescription {
     pub tension_modulation: Option<(f64, f64)>,
     /// Opt-in glottal aspiration noise ([`crate::turbulence_noise`]); `None` adds nothing.
     pub aspiration_noise: Option<AspirationCard>,
+    /// Opt-in glottal jet noise (Verge's fraction on the glottal jet, an extrapolation; [`crate::turbulence_noise::JetNoiseCard`]);
+    /// `None` adds nothing.
+    pub jet_noise: Option<JetNoiseCard>,
 }
 
 fn field(rest: &[&str], i: usize, what: &str) -> Result<f64, String> {
@@ -212,6 +227,7 @@ impl VoiceDescription {
         let mut subglottal: Vec<(f64, f64)> = Vec::new();
         let mut tension_modulation = None;
         let mut aspiration_noise = None;
+        let mut jet_noise = None;
         let mut fold_mapping = None;
         let mut fold_damping_upper = None;
         for line in lines {
@@ -389,6 +405,19 @@ impl VoiceDescription {
                     card.validate().map_err(str::to_string)?;
                     once(&mut aspiration_noise, card, key)?;
                 }
+                "jet_noise" => {
+                    // Every field is required: the gain, the band and the onset are a source's measured numbers (Verge 1995 for a flue
+                    // jet), and the card, not this code, says which it uses and where they come from.
+                    arity(&rest, 5, key)?;
+                    let seed = whole(&rest, 0, "jet_noise seed")?;
+                    let gain = field(&rest, 1, "jet_noise gain")?;
+                    let strouhal_lo = field(&rest, 2, "jet_noise ST_LO")?;
+                    let strouhal_hi = field(&rest, 3, "jet_noise ST_HI")?;
+                    let reynolds_onset = field(&rest, 4, "jet_noise RE_ON")?;
+                    let card = JetNoiseCard { seed, gain, strouhal_lo, strouhal_hi, reynolds_onset };
+                    card.validate().map_err(str::to_string)?;
+                    once(&mut jet_noise, card, key)?;
+                }
                 "fold_mapping" => {
                     arity(&rest, 1, key)?;
                     if rest[0] != "bilateral" {
@@ -442,6 +471,7 @@ impl VoiceDescription {
             subglottal,
             tension_modulation,
             aspiration_noise,
+            jet_noise,
         })
     }
 
@@ -528,11 +558,16 @@ impl VoiceDescription {
             Some(card) => Some(GlottalAspiration::new(card).map_err(str::to_string)?),
             None => None,
         };
+        let jet_noise = match self.jet_noise {
+            Some(card) => Some(GlottalJetNoise::new(card).map_err(str::to_string)?),
+            None => None,
+        };
         Ok(VoicePerformance {
             island,
             mouth,
             receiver,
             aspiration,
+            jet_noise,
             gas_density: gas.density,
             gas_viscosity: gas.dynamic_viscosity,
             fold_length_m: self.fold.fold_length_m,
@@ -639,6 +674,8 @@ pub struct VoicePerformance {
     tension_modulation: Option<(f64, f64)>,
     /// Opt-in aspiration source, with the gas properties and fold length its law needs.
     aspiration: Option<GlottalAspiration>,
+    /// Opt-in glottal jet-noise source (Verge's fraction on the glottal jet, an extrapolation).
+    jet_noise: Option<GlottalJetNoise>,
     gas_density: f64,
     gas_viscosity: f64,
     fold_length_m: f64,
@@ -702,6 +739,22 @@ impl VoicePerformance {
                     .map_err(|e| format!("fold tension refused: {e:?}"))?;
             }
             let mut drive = self.schedule.at(t);
+            if let Some(source) = self.jet_noise.as_mut() {
+                // The jet cannot be faster than the Bernoulli speed of the whole driving pressure. A series source like the
+                // aspiration one (the loop sees p_sub + p_n); zero is not added, so a shut gate leaves the drive bit for bit
+                // what it was.
+                let max_speed = if drive > 0.0 { det::sqrt(2.0 * drive / self.gas_density) } else { 0.0 };
+                let noise = source.pressure_pa(
+                    self.fold_length_m,
+                    max_speed,
+                    self.gas_density,
+                    self.gas_viscosity,
+                    1.0 / f64::from(self.mechanics_rate),
+                );
+                if noise != 0.0 {
+                    drive += noise;
+                }
+            }
             if let Some(source) = self.aspiration.as_mut() {
                 // A series pressure source downstream of the folds: the loop sees p_sub + p_n. Zero is not added, so a
                 // shut gate leaves the drive bit for bit what it was.
@@ -716,6 +769,9 @@ impl VoicePerformance {
                 .map_err(|e| format!("glottal island refused: {e:?}"))?;
             if let Some(source) = self.aspiration.as_mut() {
                 source.record(frame.flow_m3_s, self.fold_length_m * frame.gap_m.max(0.0));
+            }
+            if let Some(source) = self.jet_noise.as_mut() {
+                source.record(frame.flow_m3_s, frame.gap_m.max(0.0));
             }
             let flow = self
                 .mouth
@@ -1251,6 +1307,73 @@ mod tests {
         let rms_from_plain = |x: &[f64]| (x.iter().zip(&plain).map(|(a, b)| (a - b) * (a - b)).sum::<f64>() / x.len() as f64).sqrt();
         let loud = render(&fixture("aspiration_noise 7 4e-4\n"));
         assert!(rms_from_plain(&loud) > 1.5 * rms_from_plain(&gated), "a 4x gain must move the output further");
+    }
+
+    #[test]
+    fn jet_noise_parses_and_is_refused_by_name() {
+        let parse = |extra: &str| VoiceDescription::from_bytes(fixture(extra).as_bytes());
+        let ok = parse("jet_noise 7 1.3e-3 0.045 0.115 1700\n").expect("parses");
+        assert_eq!(
+            ok.jet_noise,
+            Some(JetNoiseCard { seed: 7, gain: 1.3e-3, strouhal_lo: 0.045, strouhal_hi: 0.115, reynolds_onset: 1700.0 })
+        );
+        assert_eq!(parse("").expect("parses").jet_noise, None);
+        for (extra, needle) in [
+            ("jet_noise\n", "takes 5 fields"),
+            ("jet_noise 7 1.3e-3 0.045 0.115\n", "takes 5 fields"),
+            ("jet_noise 7 1.3e-3 0.045 0.115 1700 9\n", "takes 5 fields"),
+            ("jet_noise x 1.3e-3 0.045 0.115 1700\n", "not a non-negative integer"),
+            ("jet_noise 7 x 0.045 0.115 1700\n", "not a number"),
+            ("jet_noise 7 nan 0.045 0.115 1700\n", "must be finite"),
+            ("jet_noise 7 0 0.045 0.115 1700\n", "gain must be finite and positive"),
+            ("jet_noise 7 -1e-3 0.045 0.115 1700\n", "gain must be finite and positive"),
+            ("jet_noise 7 1.3e-3 0.115 0.045 1700\n", "Strouhal band"),
+            ("jet_noise 7 1.3e-3 0 0.115 1700\n", "Strouhal band"),
+            ("jet_noise 7 1.3e-3 0.045 0.115 -1\n", "reynolds onset"),
+            ("jet_noise 7 1.3e-3 0.045 0.115 1700\njet_noise 8 1.3e-3 0.045 0.115 1700\n", "only appear once"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    /// Gauntlet G0 (a card without the row, or with a gate that never opens, is bit-identical to one written before the
+    /// row existed), G3 (the gate, the seed, the gain) and a planted negative (a source that ignored its gate would speak
+    /// from the first flow).
+    #[test]
+    fn jet_noise_is_silent_when_its_gate_never_opens_and_otherwise_gated_seeded_and_scaled_by_its_gain() {
+        let plain = render(&fixture(""));
+        let shut = render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 1e12\n"));
+        assert!(
+            plain.iter().zip(&shut).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "a gate that never opens must leave the output bit-identical to no row"
+        );
+        let gated = render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 300\n"));
+        assert!(gated.iter().all(|v| v.is_finite()));
+        let first_gated = first_difference(&plain, &gated).expect("a jet above the onset flow reaches the output");
+        // Planted negative: an onset of zero opens at the first flow, so its first difference comes far earlier.
+        let ungated = render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 0\n"));
+        let first_ungated = first_difference(&plain, &ungated).expect("an ungated source speaks");
+        assert!(
+            first_ungated + 50 < first_gated,
+            "the gated source must stay silent below its onset flow: ungated first difference at {first_ungated}, gated at {first_gated}"
+        );
+        let again = render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 300\n"));
+        assert!(gated.iter().zip(&again).all(|(a, b)| a.to_bits() == b.to_bits()), "the same seed must repeat bit for bit");
+        assert_ne!(gated, render(&fixture("jet_noise 8 1.3e-3 0.045 0.115 300\n")), "another seed must give another noise");
+        let rms_from_plain = |x: &[f64]| (x.iter().zip(&plain).map(|(a, b)| (a - b) * (a - b)).sum::<f64>() / x.len() as f64).sqrt();
+        let loud = render(&fixture("jet_noise 7 5.2e-3 0.045 0.115 300\n"));
+        assert!(rms_from_plain(&loud) > 1.5 * rms_from_plain(&gated), "a 4x gain must move the output further");
+    }
+
+    #[test]
+    fn jet_noise_and_aspiration_noise_stand_on_one_card_with_streams_of_their_own() {
+        let both = render(&fixture("aspiration_noise 7 1e-4\njet_noise 7 1.3e-3 0.045 0.115 300\n"));
+        assert!(both.iter().all(|v| v.is_finite()));
+        let aspiration = render(&fixture("aspiration_noise 7 1e-4\n"));
+        let jet = render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 300\n"));
+        assert_ne!(both, aspiration, "the jet row must add to a card that has aspiration");
+        assert_ne!(both, jet, "the aspiration row must add to a card that has the jet row");
     }
 
     /// The radiated f0's peak swing at the gesture rate with no key, at `a = 0.04` and at `a = 0.08`, and the largest
