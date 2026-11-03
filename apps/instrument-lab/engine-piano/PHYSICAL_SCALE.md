@@ -154,11 +154,29 @@ timing probes and playback copies and composes with `stringStretching`, source
 string materials, source gas, and all three mechanical clocks. Omitting it uses
 the reference owner's existing estimated pads.
 
-The model remains finite-footprint viscous drag, with the live engine's declared
-quadrature and silent-bank approximation. Falling damper action and felt impact
-are separate physical models. The silent bank retains its current underdamped
-transition domain: a supplied drag that exceeds it refuses during preparation,
-with the affected key reported. No drag is clamped to make the file pass.
+Each station now uses the complete retained string velocity: active partials
+and a remaining sympathetic-bank tail share one contact, including the chord's
+bridge motion. Its exact rank-one viscous flow mixes those partials and applies
+the reciprocal bridge impulse. Modal combinations that leave the physical
+station still dissipate no heat. Pre/post station sweeps reverse order around
+the mechanical step; shape, ownership and coefficient tables are prepared
+before those sweeps, with no audio-step allocation. Exact nonnegative station
+heat is booked in `damper_loss_j`, separately from conservative coupling work.
+
+Finite nonnegative pad drag is no longer restricted by the silent oscillator's
+underdamped transition domain. Strong pads use the same exact dissipative
+flow without clipping their drag. The bank's separate intrinsic-loss transition
+retains its existing domain and reports an affected key if that intrinsic
+model is not admitted.
+
+The model remains finite-footprint viscous drag with the declared quadrature.
+Falling damper action and felt impact are separate physical models. The
+bank's conservative string/board exchange still follows an explicit bridge
+trajectory, with its signed numerical work in `coupling_j`. The existing
+bank-off path is unchanged. Independent analytic station tests cover nodal
+cancellation, reciprocal recoil, integrated viscous heat, and modal ownership;
+native engine execution and WASM cost/quality measurements are still required
+before claiming new performance or audio-comparison results.
 Rebuild WASM with `engine-piano/build-wasm.sh`;
 the factory requires `supportsDamperSpecification()` before forwarding this
 selection. `info().damperSpecificationSelected` reports an explicitly supplied
@@ -207,8 +225,9 @@ The silent bank keeps its existing explicit linear-bridge trajectory. Gas drag
 acts on absolute modal velocity there too: in the bank's relative-to-chord
 coordinate it supplies the constant force `-gas_rate * beta * bridge_velocity`.
 The original damped transition advances that forced equation by an equilibrium
-shift. Gas work and pad work use their distinct absolute and relative velocity
-integrals, and the same transfer enters the existing coupling-work account.
+shift. Gas work uses that trajectory's absolute-velocity integral and enters
+the existing coupling-work account. Pad heat comes from the separate shared
+station flow, including its reciprocal bridge reaction.
 
 This is the existing sampled, linear, unconfined, circular-cylinder approximation
 on retained absolute-velocity modes. It does not add fluid inertia, viscous

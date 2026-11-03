@@ -7,6 +7,11 @@
 //!   its bank partials to the dynamic set, returning them when it retires, and a re-strike.
 use fs_live_piano::{Config, Description, LivePiano};
 
+// The library deliberately excludes the embedded reference's unit tests.
+// Exercise the actual small production station flow without enabling that suite.
+#[path = "../src/shared_pad.rs"]
+mod shared_pad;
+
 const RATE: u32 = 48_000;
 
 fn render(p: &mut LivePiano, seconds: f64) -> Vec<f32> {
@@ -83,7 +88,7 @@ fn the_books_close_with_the_bank_exchange_booked() {
     let l = p.close_ledger();
     println!("{l:?}");
     assert!(l.residual_j.abs() < 1.0e-9 * l.input_j, "residual {:e} of {:e} J", l.residual_j, l.input_j);
-    // Measured 5.5e-4 of the input.
+    // Bound the remaining explicit conservative exchange independently of closure.
     assert!(l.coupling_j.abs() < 2.0e-3 * l.input_j, "coupling {:e} of {:e} J", l.coupling_j, l.input_j);
     assert!(l.damper_loss_j > 0.0 && p.take_error().is_none());
 }
@@ -119,7 +124,7 @@ fn silent_strings_use_supplied_pads_above_the_estimated_break_and_the_same_pedal
     let b = render(&mut moved, 0.08);
     let c = render(&mut free, 0.08);
     assert!(render(&mut raised, 0.08) == c, "a fully raised supplied pad acts as a free row");
-    assert!(half_pedal.grant_for(89).is_none(), "the padded string must still be owned by the silent bank");
+    assert_eq!(half_pedal.sounding_keys(), 1, "the padded string must still be owned by the silent bank");
     assert!(half_pedal.ledger.damper_loss_j > 0.0, "an unplayed pad above MIDI 88 must dissipate bridge-driven motion");
     assert_eq!(half_pedal.ledger.damper_loss_j.to_bits(), quarter_drag.ledger.damper_loss_j.to_bits());
     assert!(moved.ledger.damper_loss_j > 0.0 && b != a, "the bank must use the supplied station geometry");
@@ -131,7 +136,7 @@ fn silent_strings_use_supplied_pads_above_the_estimated_break_and_the_same_pedal
     let before = half_pedal.stored_energy_j();
     half_pedal.silent_key_down(89).unwrap();
     half_pedal.apply_pending_notes();
-    assert!(half_pedal.grant_for(89).is_some());
+    assert_eq!(half_pedal.sounding_keys(), 2);
     assert!((half_pedal.stored_energy_j() - before).abs() < 1e-10 * half_pedal.ledger.input_j);
     half_pedal.set_sostenuto(true);
     half_pedal.note_off(89);
@@ -149,18 +154,89 @@ fn silent_strings_use_supplied_pads_above_the_estimated_break_and_the_same_pedal
 }
 
 #[test]
-fn a_supplied_pad_cannot_silently_overdamp_the_silent_bank_approximation() {
+fn a_strong_supplied_pad_is_passive_and_can_lift_while_its_string_stays_in_the_bank() {
     let mut desc = Description::embedded().unwrap().truncated(4).unwrap();
-    desc.courses.retain(|c| c.midi == 57);
+    desc.courses.retain(|c| [57, 60].contains(&c.midi));
     let length = desc.courses[0].length_m;
     let mut cfg = Config::live(RATE);
     cfg.max_partials = 16;
-    cfg.damper_specification = Some(format!("frankensim-piano-dampers-v1\npad,57,{},{},1000000\n",
-        0.31 * length, 0.39 * length));
-    // The active pad's exact viscous flows admit this physical source. The
-    // silent bank keeps its existing underdamped transition domain and refuses.
-    assert!(LivePiano::new(&desc, cfg.clone()).is_ok());
+    cfg.duplex = false;
     cfg.silent_bank_hz = 600.0;
-    let error = LivePiano::new(&desc, cfg).err().unwrap();
-    assert!(error.contains("silent-bank partial would be overdamped"), "{error}");
+    cfg.retire_ringing_j = 0.0;
+    cfg.retire_damped_j = 0.0;
+    cfg.damper_specification = Some(format!(
+        "frankensim-piano-dampers-v1\npad,57,{},{},1000000\nfree,60\n",
+        0.31 * length, 0.39 * length));
+    // This same physical pad was admitted for active strings but refused
+    // by the bank's former per-partial underdamped approximation.
+    let mut piano = LivePiano::new(&desc, cfg).unwrap();
+    piano.note_on(60, 2.0).unwrap();
+    let out = render(&mut piano, 0.08);
+    assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|v| *v != 0.0));
+    assert_eq!(piano.sounding_keys(), 1, "the strongly damped key must remain in the bank");
+    assert!(piano.bank_modes() > 0);
+    let heat = piano.ledger.damper_loss_j;
+    assert!(heat.is_finite() && heat > 0.0);
+
+    piano.set_sustain(1.0).unwrap();
+    render(&mut piano, 0.02);
+    assert_eq!(piano.ledger.damper_loss_j, heat, "lifting the pad stops its heat");
+    let ledger = piano.close_ledger();
+    assert!(ledger.residual_j.abs() < 1e-8 * ledger.input_j, "{ledger:?}");
+    assert!(heat <= ledger.input_j + ledger.coupling_j.max(0.0) + 1e-8 * ledger.input_j);
+    assert!(piano.take_error().is_none());
+}
+
+#[test]
+fn one_pad_follows_a_string_split_between_active_modes_and_a_bank_tail() {
+    let mut desc = Description::embedded().unwrap().truncated(4).unwrap();
+    desc.courses.retain(|c| [45, 57].contains(&c.midi));
+    let length = desc.courses[0].length_m;
+    let mut cfg = Config::live(RATE);
+    cfg.max_partials = 16;
+    cfg.course_mode_budget = 48;
+    cfg.duplex = false;
+    cfg.silent_bank_hz = 1_200.0;
+    cfg.retire_ringing_j = 0.0;
+    cfg.retire_damped_j = 0.0;
+    cfg.damper_specification = Some(format!(
+        "frankensim-piano-dampers-v1\npad,45,{},{},0.7\nfree,57\n",
+        0.31 * length, 0.39 * length));
+    let mut piano = LivePiano::new(&desc, cfg).unwrap();
+    piano.note_on(57, 2.0).unwrap();
+    render(&mut piano, 0.08);
+
+    // The unplayed bass string already rings. Transfer only its first partial
+    // per string; its remaining bank modes still belong to the SAME pad.
+    let before = piano.stored_energy_j();
+    let bank_before = piano.bank_modes();
+    let dynamic_before = piano.dynamic_modes();
+    piano.set_quality(1, 1_200.0, 2_400).unwrap();
+    piano.silent_key_down(45).unwrap();
+    piano.apply_pending_notes();
+    assert_eq!(piano.sounding_keys(), 2);
+    assert_eq!(piano.grant_for(45).unwrap().0, 1);
+    assert_eq!(bank_before - piano.bank_modes(), piano.dynamic_modes() - dynamic_before);
+    assert!(piano.bank_modes() > 0, "the sympathetic string must retain a bank tail");
+    assert!((piano.stored_energy_j() - before).abs() < 1e-10 * piano.ledger.input_j);
+
+    piano.set_sostenuto(true);
+    piano.note_off(45);
+    let held_heat = piano.ledger.damper_loss_j;
+    render(&mut piano, 0.02);
+    assert_eq!(piano.ledger.damper_loss_j, held_heat);
+
+    let mut raised = piano.clone();
+    piano.set_sostenuto(false);
+    let damped = render(&mut piano, 0.04);
+    let free = render(&mut raised, 0.04);
+    assert!(damped.iter().all(|v| v.is_finite()) && free.iter().all(|v| v.is_finite()));
+    assert_ne!(damped, free, "the shared finite pad must reach the physical motion");
+    assert!(piano.ledger.damper_loss_j > held_heat);
+    assert_eq!(raised.ledger.damper_loss_j, held_heat);
+    for engine in [&mut piano, &mut raised] {
+        let ledger = engine.close_ledger();
+        assert!(ledger.residual_j.abs() < 1e-8 * ledger.input_j, "{ledger:?}");
+        assert!(engine.take_error().is_none());
+    }
 }

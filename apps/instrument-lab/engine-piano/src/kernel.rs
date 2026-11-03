@@ -53,6 +53,10 @@ use fs_material::{Uniaxial, WoolFelt};
 use fs_math::{c64::C64, det};
 use std::f64::consts::{PI, TAU};
 
+#[path = "shared_pad.rs"]
+mod shared_pad;
+use self::shared_pad::{ModalVelocity, PadPoint};
+
 /// Idealized backcheck/rest gap, as in the reference engine.
 const CATCH_DISTANCE: f64 = 0.020;
 /// Reference launch clearance below the string (engine.rs `arm`).
@@ -129,10 +133,9 @@ pub struct Config {
     pub felt_pack_hammers: bool,
     /// Silent strings. Every partial up to this frequency of every string that is not
     /// sounding moves, as a bank of damped modes driven by the bridge (0: the rigid-chord
-    /// image alone). Their dampers and intrinsic losses act per partial; they exchange
-    /// work with the board through an explicit step, booked in `Ledger::coupling_j`.
-    /// Against attaching the same partials as dynamic strings, an A3 strike differs by
-    /// -48 dB with the dampers down and -54 dB under the sustain pedal (embedded board).
+    /// image alone). Intrinsic losses act per partial; each physical pad station acts
+    /// on all retained partials of its string and reacts on the bridge. Conservative
+    /// exchange with the board uses an explicit step, booked in `Ledger::coupling_j`.
     pub silent_bank_hz: f64,
     /// Geometric string extension: the reference's complete `--string-stretching` file
     /// (`linear`, `stretch` or `waves` per key of the scale; see `crate::stretch`). It acts
@@ -142,43 +145,47 @@ pub struct Config {
 }
 
 /// One partial of a silent string in the bank: the completed-square coordinate z of
-/// mode `k` (unit mass; the same table entry the dynamic set uses when its key
-/// sounds), its velocity, its intrinsic loss rate and its pad's drag, and, for the
-/// pad engagement its course last held, the exact damped transition of (z - beta b, v)
-/// over one step with the bridge held and the pad's share of its loss.
+/// mode k (unit mass; the same table entry the dynamic set uses when its key
+/// sounds), its velocity and its exact intrinsic-loss transition. Physical pad
+/// stations act separately on the combined active prefix and bank tail.
 #[derive(Clone, Debug)]
 struct BankMode {
     k: usize,
     w2: f64,
     beta: f64,
-    c_int: f64,
-    /// Gas part of c_int: acts on absolute z', unlike material strain and pad loss.
+    /// Gas part of the intrinsic loss: acts on absolute z', unlike material strain.
     c_gas: f64,
-    c_pad: f64,
     z: f64,
     v: f64,
     p: [f64; 4],
-    share: f64,
 }
 
-/// The bank partials of one string segment, `bank[start..end]`, lowest first. While the
-/// segment sounds, the dynamic set owns its first `taken` of them (handed over with
-/// their state); the bank keeps the rest.
+impl ModalVelocity for BankMode {
+    fn velocity(&self) -> f64 { self.v }
+    fn add_velocity(&mut self, increment: f64) { self.v += increment; }
+}
+
+/// The bank partials of one string segment, bank[start..end], lowest first. While
+/// the segment sounds, the dynamic set owns its first taken of them (handed over
+/// with their state); the bank keeps the rest.
 #[derive(Clone, Debug)]
 struct BankSeg {
     seg: usize,
     start: usize,
     end: usize,
     taken: usize,
+    /// Physical stations over the bank's complete retained prefix. If an active
+    /// prefix leaves a bank tail, these stations act on both owners together.
+    pad: Vec<PadPoint>,
 }
 
-/// The bank partials of one course: its segments, the pad engagement its transitions
-/// hold (`NAN` = none yet), and the bridge displacement at its last step.
+/// The bank partials of one course and its bridge row's squared norm and last
+/// displacement in the current loaded basis.
 #[derive(Clone, Debug)]
 struct BankCourse {
     ci: usize,
     segs: Vec<BankSeg>,
-    damping: f64,
+    gl_norm2: f64,
     b: f64,
 }
 
@@ -1401,16 +1408,6 @@ struct CourseDamper {
 }
 
 #[derive(Clone)]
-struct PadPoint {
-    shape: Vec<f64>,
-    lift: f64,
-    norm_string: f64,
-    /// expm1(-drag*norm*dt)/norm for the current engagement; refreshed cold.
-    coef: f64,
-    norm: f64,
-}
-
-#[derive(Clone)]
 struct ASeg {
     seg: usize,
     off: usize,
@@ -1435,6 +1432,9 @@ struct ASeg {
     pad_pack: Vec<f64>,
     /// Pad Gram matrix `g_t . g_j`, row-major `pad.len()` squared (same rule).
     pad_gram: Vec<f64>,
+    /// A bank tail shares this string's physical pad; its combined station
+    /// flow replaces the active-only pad flow until the tail is taken back.
+    shared_bank_pad: bool,
     /// A post-half damper flow not yet applied to `v` (`damp_fused`): its pad
     /// coefficients `owe` and the pad speeds `g_t . v` it leaves behind `dn`.
     owed: bool,
@@ -1973,9 +1973,9 @@ impl LivePiano {
                 }
             }
         }
-        // The silent-string bank: every partial up to `silent_bank_hz` of every string, with
-        // the same intrinsic loss rate the dynamic set's flows use and its pad's drag on that
-        // partial (the stations of `make_aseg`, one partial at a time).
+        // The silent-string bank: every partial up to silent_bank_hz of every string,
+        // with the dynamic set's intrinsic loss law. A physical pad couples the complete
+        // retained prefix, including any modes subsequently owned by the dynamic set.
         if !cfg.silent_bank_hz.is_finite() || cfg.silent_bank_hz < 0.0 || cfg.silent_bank_hz > cfg.partial_band_hz {
             return Err("silent bank band must lie in [0, partial band]".into());
         }
@@ -1990,29 +1990,32 @@ impl LivePiano {
                     let first = bank_modes.len();
                     let pad = if seg.duplex { None } else { course_dampers[ci].as_ref() };
                     let root = det::sqrt(seg.modal_mass_kg);
-                    for (p, k) in (seg.off..seg.off + seg.n_max).enumerate() {
+                    for k in seg.off..seg.off + seg.n_max {
                         if m.omega[k] > top {
                             break;
                         }
-                        let c_pad = pad.map_or(0.0, |pad| {
-                            pad.fractions.iter().map(|&fraction| {
-                                let shape = det::sin((p + 1) as f64 * PI * fraction) / root;
-                                pad.drag_ns_m / pad.fractions.len() as f64 * shape * shape
-                            }).sum()
-                        });
                         let c_int = losses[k].mass_rate + losses[k].strain_rate;
-                        if c_int + c_pad >= 1.9 * m.omega[k] {
-                            return Err(format!("key {}: a silent-bank partial would be overdamped", c.midi));
+                        if c_int >= 1.9 * m.omega[k] {
+                            return Err(format!("key {}: a silent-bank intrinsic mode would be overdamped", c.midi));
                         }
                         let c_gas = string_gas_drag_rates.get(k).copied().unwrap_or(0.0);
-                        bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], c_int, c_gas, c_pad, z: 0.0, v: 0.0, p: [1.0, 0.0, 0.0, 1.0], share: 0.0 });
+                        bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], c_gas, z: 0.0, v: 0.0,
+                            p: damped_transition(m.w2[k], c_int, dt) });
                     }
                     if bank_modes.len() > first {
-                        course_segs.push(BankSeg { seg: si, start: first, end: bank_modes.len(), taken: 0 });
+                        let n = bank_modes.len() - first;
+                        let points = pad.map_or_else(Vec::new, |pad| pad.fractions.iter().map(|&fraction| {
+                            let shape: Vec<f64> = (1..=n).map(|p| det::sin(p as f64 * PI * fraction) / root).collect();
+                            let lift = fraction - shape.iter().zip(&m.beta[seg.off..seg.off + n])
+                                .map(|(g, b)| g * b).sum::<f64>();
+                            let norm_string = shape.iter().map(|g| g * g).sum::<f64>();
+                            PadPoint { shape, lift, norm_string, coef: 0.0, norm: 0.0 }
+                        }).collect());
+                        course_segs.push(BankSeg { seg: si, start: first, end: bank_modes.len(), taken: 0, pad: points });
                     }
                 }
                 if !course_segs.is_empty() {
-                    bank_courses.push(BankCourse { ci, segs: course_segs, damping: f64::NAN, b: 0.0 });
+                    bank_courses.push(BankCourse { ci, segs: course_segs, gl_norm2: 0.0, b: 0.0 });
                 }
             }
         }
@@ -2428,7 +2431,7 @@ impl LivePiano {
             #[cfg(target_arch = "wasm32")]
             pair: self.segs[si].pair,
             seg: si, off, n, duplex: self.segs[si].duplex, member: self.segs[si].member, beta2, mek, w_schur, loss_w, sum_c4,
-            endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, pad_pack, pad_gram,
+            endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, pad_pack, pad_gram, shared_bank_pad: false,
             owed: false, owe: [0.0; 4], dn: [0.0; 4], force: 0.0, src: 0.0, stretch,
         }
     }
@@ -2533,7 +2536,6 @@ impl LivePiano {
                     }
                     handed = seg.taken;
                     seg.taken = 0;
-                    course.damping = f64::NAN;
                 }
                 let range = s.off..s.off + s.n;
                 let mut e = 0.0;
@@ -2615,6 +2617,12 @@ impl LivePiano {
         // Per-key bookkeeping (display shape table is populated lazily in snapshot()).
         for slot in 0..self.active.len() {
             let ac = &mut self.active[slot];
+            for s in &mut ac.segs {
+                s.shared_bank_pad = bank_of[s.seg].is_some_and(|(bi, j)| {
+                    let seg = &self.bank_courses[bi].segs[j];
+                    seg.taken < seg.end - seg.start
+                });
+            }
             ac.modes = ac.segs.iter().map(|s| s.n).sum();
             match ac.segs.iter().find(|s| !s.duplex).map(|s| (s.n, s.off)) {
                 Some((n, off)) => {
@@ -2676,11 +2684,13 @@ impl LivePiano {
             return Err("loaded soundboard mode unresolved or above output band".into());
         }
         self.phi = phi;
-        for (bi, course) in self.bank_courses.iter().enumerate() {
+        for (bi, course) in self.bank_courses.iter_mut().enumerate() {
             let g = &self.g_st[course.ci * r..(course.ci + 1) * r];
             for j in 0..r {
                 self.bank_gl[bi * r + j] = (0..r).map(|i| g[i] * self.phi[i * r + j]).sum();
             }
+            let gl = &self.bank_gl[bi * r..(bi + 1) * r];
+            course.gl_norm2 = dot(gl, gl);
         }
         // New loaded coordinates of the same physical motion: Phi^T M x.
         let mut mq = vec![0.0; r];
@@ -3059,6 +3069,18 @@ impl LivePiano {
                 }
             }
         }
+        for course in &mut self.bank_courses {
+            let drag_ns_m = self.keys[course.ci].damper.as_ref().map_or(0.0, |pad| pad.drag_ns_m);
+            for seg in &mut course.segs {
+                if seg.taken == seg.end - seg.start || seg.pad.is_empty() {
+                    continue;
+                }
+                let drag = drag_ns_m * engagement / seg.pad.len() as f64;
+                for p in &mut seg.pad {
+                    p.prepare(drag, course.gl_norm2, half_dt);
+                }
+            }
+        }
     }
 
     /// Exact rank-one viscous flows of every engaged pad point for half a
@@ -3100,6 +3122,13 @@ impl LivePiano {
                 let s = &mut ac.segs[if reverse { nseg - 1 - sindex } else { sindex }];
                 let np = s.pad.len();
                 let v = &mut self.v[s.off..s.off + s.n];
+                if s.shared_bank_pad {
+                    if s.owed {
+                        settle_owed(s, v);
+                        s.owed = false;
+                    }
+                    continue;
+                }
                 let g2 = ac.gl_norm2;
                 loss += match np {
                     0 => 0.0,
@@ -3144,6 +3173,53 @@ impl LivePiano {
         loss
     }
 
+    /// Physical finite-pad half-flow for every segment with a bank tail. The
+    /// active prefix and the untaken bank partials form one contact velocity;
+    /// the same station impulse acts on both and on the moving bridge. Station,
+    /// segment and course order all reverse in the post half. Only the final
+    /// bridge update costs O(board modes) per course, as in damp.
+    fn damp_bank(&mut self, reverse: bool) -> f64 {
+        if self.sustain >= 1.0 {
+            return 0.0;
+        }
+        let mut loss = 0.0;
+        let count = self.bank_courses.len();
+        for index in 0..count {
+            let ci = if reverse { count - 1 - index } else { index };
+            let course = &self.bank_courses[ci];
+            if self.lifted(course.ci) {
+                continue;
+            }
+            let gl = &self.bank_gl[ci * self.r..(ci + 1) * self.r];
+            let mut bridge_speed = dot(gl, &self.bvel);
+            let mut push = 0.0;
+            let nseg = course.segs.len();
+            for sindex in 0..nseg {
+                let seg = &course.segs[if reverse { nseg - 1 - sindex } else { sindex }];
+                if seg.taken == seg.end - seg.start || seg.pad.is_empty() {
+                    continue;
+                }
+                let off = self.segs[seg.seg].off;
+                let active = &mut self.v[off..off + seg.taken];
+                let tail = &mut self.bank[seg.start + seg.taken..seg.end];
+                let np = seg.pad.len();
+                for pindex in 0..np {
+                    let p = &seg.pad[if reverse { np - 1 - pindex } else { pindex }];
+                    let (impulse, heat) = p.apply(active, tail, bridge_speed);
+                    bridge_speed += course.gl_norm2 * impulse;
+                    push += impulse;
+                    loss += heat;
+                }
+            }
+            if push != 0.0 {
+                for (v, g) in self.bvel.iter_mut().zip(gl) {
+                    *v += g * push;
+                }
+            }
+        }
+        loss
+    }
+
     /// One mechanical step = one audio sample. Returns pressure [Pa].
     pub fn step(&mut self) -> f64 {
         if !self.pending_on.is_empty() {
@@ -3158,6 +3234,7 @@ impl LivePiano {
             self.active[slot].age += 1;
         }
         let mut damper_loss = self.damp(false);
+        damper_loss += self.damp_bank(false);
         let mut string_loss = 0.0;
         let mut board_loss = 0.0;
 
@@ -3325,12 +3402,11 @@ impl LivePiano {
                 string_loss += 0.5 * (old - *v) * (old + *v);
             }
         }
-        damper_loss += self.damp(true);
         if !self.bank_courses.is_empty() {
-            let (strings, pads) = self.step_bank();
-            string_loss += strings;
-            damper_loss += pads;
+            string_loss += self.step_bank();
         }
+        damper_loss += self.damp_bank(true);
+        damper_loss += self.damp(true);
         if self.stretching {
             string_loss += self.step_stretch();
         }
@@ -3695,48 +3771,34 @@ impl LivePiano {
     /// bridge moved from where the last one left it to where this one did; taking that
     /// motion as linear, each partial's motion relative to its chord, u = z - beta b,
     /// obeys u'' + c u' + w^2 u = -g beta rate, where g is gas drag on absolute
-    /// velocity z'=u'+beta rate. Source material strain and pad losses act on u'.
+    /// velocity z'=u'+beta rate. Source material strain loss acts on u'.
     /// The effective-scale legacy loss retains its original relative approximation.
     /// The existing exact damped transition is shifted by -g beta rate/w^2.
     /// Their reaction w^2 beta z (the rest of the coupling is
     /// in the loaded pencil) then kicks the board's velocity.
     ///
-    /// Two approximations. Each partial feels its pad on its own (a dynamic string's pad
-    /// also couples its partials to each other and drags its chord). And the exchange with
-    /// the board is explicit: z did not move while the board did, and the board feels z
-    /// only from the next step. Every change of the bank's energy that is not its loss,
-    /// with the kicks' kinetic energy, is that exchange's work, booked in
-    /// `Ledger::coupling_j`. Per partial that change is
+    /// Pad flows surround the full mechanical step and couple every retained partial
+    /// to the bridge (damp_bank). Conservative exchange remains explicit: z did not
+    /// move while the board did, and the board feels z only from the next step.
+    /// Every change of the bank's energy that is not its loss, with the kicks' kinetic
+    /// energy, is that exchange's work, booked in Ledger::coupling_j. Per partial:
     ///   (v1^2 + w^2 u1^2)/2 - (v0^2 + w^2 u0^2)/2 + loss - w^2 beta^2 (b^2 - b0^2)/2
     ///   = beta rate (du1 - du0) + g beta rate (z1-z0)
     ///     - w^2 beta^2 (b^2 - b0^2)/2,
-    /// since v = du + beta rate on both sides. Pad heat uses the relative
-    /// velocity integral; physical gas heat uses the absolute one, exactly.
-    /// Returns (string loss, damper loss) [J].
-    fn step_bank(&mut self) -> (f64, f64) {
+    /// since v = du + beta rate on both sides. Physical gas heat uses the
+    /// absolute velocity integral. Returns intrinsic string loss [J].
+    fn step_bank(&mut self) -> f64 {
         let r = self.r;
         let dt = self.dt;
-        let engagement = (1.0 - self.sustain).powi(2);
-        let (mut string_loss, mut damper_loss) = (0.0, 0.0);
+        let mut string_loss = 0.0;
         let mut exchange = -0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
         for i in 0..self.bank_courses.len() {
-            let damping = if self.lifted(self.bank_courses[i].ci) { 0.0 } else { engagement };
             let gl = &self.bank_gl[i * r..(i + 1) * r];
             let b = dot(gl, &self.bq);
             let course = &mut self.bank_courses[i];
             let (b0, rate) = (course.b, (b - course.b) / dt);
             course.b = b;
-            if course.damping != damping {
-                course.damping = damping;
-                for seg in &course.segs {
-                    for m in &mut self.bank[seg.start + seg.taken..seg.end] {
-                        let pad = damping * m.c_pad;
-                        m.p = damped_transition(m.w2, m.c_int + pad, dt);
-                        m.share = if pad == 0.0 { 0.0 } else { pad / (m.c_int + pad) };
-                    }
-                }
-            }
-            let (mut force, mut loss, mut pad_loss, mut drive, mut stiffness) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            let (mut force, mut loss, mut drive, mut stiffness) = (0.0, 0.0, 0.0, 0.0);
             let mut gas_drive = 0.0;
             for seg in &course.segs {
                 for m in &mut self.bank[seg.start + seg.taken..seg.end] {
@@ -3752,16 +3814,13 @@ impl LivePiano {
                     let relative_change = 0.5 * (du * du - du1 * du1 + m.w2 * (u * u - u1 * u1));
                     if m.c_gas == 0.0 {
                         loss += relative_change;
-                        pad_loss += m.share * relative_change;
                     } else {
                         // c*integral(u'^2) = H_rel(0)-H_rel(1)-g*B*delta_u.
                         // Add 2*g*B*delta_u+g*B^2*dt for gas on z'=u'+B.
                         // The same extra term closes the existing explicit
                         // bridge-exchange ledger; it is not extra dissipated heat.
-                        let relative_work = gas_force * (u1 - u);
                         let extra = gas_force * (u1 - u + m.beta * (b - b0));
                         loss += relative_change + extra;
-                        pad_loss += m.share * (relative_change - relative_work);
                         gas_drive += extra;
                     }
                     m.z = m.beta * b + u1;
@@ -3772,8 +3831,7 @@ impl LivePiano {
                     force += wb * m.z;
                 }
             }
-            damper_loss += pad_loss;
-            string_loss += loss - pad_loss;
+            string_loss += loss;
             exchange += rate * drive - 0.5 * stiffness * (b * b - b0 * b0);
             if gas_drive != 0.0 { exchange += gas_drive; }
             if force != 0.0 {
@@ -3784,7 +3842,7 @@ impl LivePiano {
             }
         }
         self.ledger.coupling_j += exchange + 0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
-        (string_loss, damper_loss)
+        string_loss
     }
 
     /// Mechanical energy now stored in strings (the silent-string bank's too), board,
