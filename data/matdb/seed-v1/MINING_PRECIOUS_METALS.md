@@ -21,10 +21,11 @@ literal numerical rows. Historical molar masses are retained. Ionic entropy
 is conventional, referenced to H+(aq) = 0; uncertainty remains unstated.
 
 These profiles use the existing `source-elemental-reference-nbs1989` NBS
-reference-family selector. The separate 1989 erratum and corrected CSV could
-not be independently checked for these four rows; their numerical provenance
-is specifically the cited 1982 table. This qualification is retained in each
-pack's source observations. No JANAF, USGS or USBM evaluation is relabelled.
+reference-family selector. All four imported properties and the source phases
+were independently checked against [NIST's corrected CSV with the 1989 errata](https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv)
+and match the cited original table rows, including printed numerical precision.
+Each pack records both sources. The selector does not imply that the underlying
+rows were re-evaluated in 1989. No JANAF, USGS or USBM evaluation is relabelled.
 
 ## Conserved equations and finite stocks
 

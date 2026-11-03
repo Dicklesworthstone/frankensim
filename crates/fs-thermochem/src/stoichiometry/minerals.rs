@@ -67,6 +67,18 @@
 //! individual-ion rows in NBS Table 14:S. It is the second acid dissociation,
 //! not a declaration that molecular sulfuric acid is completely dissociated
 //! at arbitrary concentration or that metal-sulfate complexes are absent.
+//! Free-cyanide peroxide oxidation and the separate cyanate-hydrolysis endpoint
+//! follow EPA 530-R-94-037, section 3.6, printed page 10:
+//! <https://archive.epa.gov/epawaste/nonhaz/industrial/special/web/pdf/cyanide.pdf>.
+//! OCN[-](aq) explicitly names cyanate, not its fulminate isomer; EPA writes
+//! the same cyanate ion as CNO-. The hydrolysis endpoint retains NH4+ and CO3(2-)
+//! separately. Subsequent ammonium/carbonate protonation requires the original
+//! coupled acid/base owner, not an assertion that the endpoint determines pH.
+//! Peroxide decomposition follows EPA/600/2-90/006, section 1, equation 1:
+//! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=20007M9S.TXT>.
+//! Gas and dissolved oxygen are distinct declared endpoints. These equations
+//! supply no catalyst kinetics, metal-complex destruction, total/WAD cyanide
+//! conversion, nitrogen removal, oxygen-transfer rate or plant treatment claim.
 //! Magnesite calcination and magnetite oxidation retain the crystalline/gas
 //! endpoints of JANAF C-079, Mg-008, C-095, Fe-032, Fe-030 and O-029:
 //! <https://janaf.nist.gov/>. Their standard reaction heats do not determine
@@ -188,6 +200,21 @@ pub enum MineralReaction {
     /// 2 Ag(CN)2-(aq) + Zn(s) -> 2 Ag(s) + Zn(CN)4(2-)(aq).
     /// One zinc stock can be shared with the gold endpoint in ReactionNetwork.
     SilverCyanideCementationWithZinc,
+    /// CN-(aq) + H2O2(aq) -> OCN-(aq, cyanate) + H2O(l).
+    /// Free cyanide only; bound metal-cyanide ligands are different inventories.
+    CyanidePeroxideOxidation,
+    /// OCN-(aq) + 2 H2O(l) -> NH4+(aq) + CO3(2-)(aq).
+    /// Declared hydrolysis endpoint; acid/base speciation remains separate.
+    CyanateHydrolysisAmmoniumCarbonate,
+    /// NH4+(aq) -> NH3(aq) + H+(aq).
+    /// Conventional ammonium dissociation, compatible with the NBS source family.
+    AmmoniumDissociation,
+    /// 2 H2O2(aq) -> 2 H2O(l) + O2(g).
+    /// A competing peroxide demand; no decomposition rate is supplied.
+    HydrogenPeroxideDecomposition,
+    /// 2 H2O2(aq) -> 2 H2O(l) + O2(aq).
+    /// Finite dissolved-oxygen endpoint, separate from gas evolution/transfer.
+    HydrogenPeroxideDecompositionDissolvedOxygen,
     /// HCN(aq) -> H+(aq) + CN[-](aq).
     /// HCN is the neutral undissociated solute, not the ionized source component.
     HydrogenCyanideDissociation,
@@ -490,6 +517,53 @@ impl MineralReaction {
                     ("HCN(aq)", &[1, 1, 1], 0, -1),
                     ("H+(aq)", &[1, 0, 0], 1, 1),
                     ("CN[-](aq)", &[0, 1, 1], -1, 1),
+                ],
+            ),
+            Self::CyanidePeroxideOxidation => (
+                "cyanide-peroxide-oxidation",
+                &["C", "N", "H", "O"],
+                &[
+                    ("CN[-](aq)", &[1, 1, 0, 0], -1, -1),
+                    ("H2O2(aq)", &[0, 0, 2, 2], 0, -1),
+                    ("OCN[-](aq)", &[1, 1, 0, 1], -1, 1),
+                    ("H2O(l)", &[0, 0, 2, 1], 0, 1),
+                ],
+            ),
+            Self::CyanateHydrolysisAmmoniumCarbonate => (
+                "cyanate-hydrolysis-ammonium-carbonate",
+                &["C", "N", "H", "O"],
+                &[
+                    ("OCN[-](aq)", &[1, 1, 0, 1], -1, -1),
+                    ("H2O(l)", &[0, 0, 2, 1], 0, -2),
+                    ("NH4[+](aq)", &[0, 1, 4, 0], 1, 1),
+                    ("CO3[2-](aq)", &[1, 0, 0, 3], -2, 1),
+                ],
+            ),
+            Self::AmmoniumDissociation => (
+                "ammonium-dissociation",
+                &["N", "H"],
+                &[
+                    ("NH4[+](aq)", &[1, 4], 1, -1),
+                    ("NH3(aq)", &[1, 3], 0, 1),
+                    ("H+(aq)", &[0, 1], 1, 1),
+                ],
+            ),
+            Self::HydrogenPeroxideDecomposition => (
+                "hydrogen-peroxide-decomposition",
+                &["H", "O"],
+                &[
+                    ("H2O2(aq)", &[2, 2], 0, -2),
+                    ("H2O(l)", &[2, 1], 0, 2),
+                    ("O2(g)", &[0, 2], 0, 1),
+                ],
+            ),
+            Self::HydrogenPeroxideDecompositionDissolvedOxygen => (
+                "hydrogen-peroxide-decomposition-dissolved-oxygen",
+                &["H", "O"],
+                &[
+                    ("H2O2(aq)", &[2, 2], 0, -2),
+                    ("H2O(l)", &[2, 1], 0, 2),
+                    ("O2(aq)", &[0, 2], 0, 1),
                 ],
             ),
             Self::WaterDissociation => (

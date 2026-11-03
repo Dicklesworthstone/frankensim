@@ -1,7 +1,7 @@
 frankensim.matdb-manifest.v3
 pack_id	tetracyanozincate-ion-aqueous-nbs1989
 redistribution	permitted	Attributed numerical facts and original notes only; no source document or table layout is redistributed
-citation	Wagman et al. (1982), The NBS Tables of Chemical Thermodynamic Properties, Journal of Physical and Chemical Reference Data 11 Supplement 2, Table 33:Zn (prepared 1967), printed page 2-143, Zn(CN)4[2-] aqueous ion row; conventions pp. 2-20 to 2-22. Literal original table: https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf. NIST reference-family distribution with 1989 errata: https://doi.org/10.18434/M32124; digitization methods https://doi.org/10.6028/jres.125.007; accessed 2026-11-03
+citation	Wagman et al. (1982), The NBS Tables of Chemical Thermodynamic Properties, Journal of Physical and Chemical Reference Data 11 Supplement 2, Table 33:Zn (prepared 1967), printed page 2-143, Zn(CN)4[2-] aqueous ion row; conventions pp. 2-20 to 2-22. Literal original table: https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf. NIST reference-family distribution with 1989 errata: https://doi.org/10.18434/M32124; independently checked corrected CSV https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv; digitization methods https://doi.org/10.6028/jres.125.007; accessed 2026-11-03
 license	Attributed-Numerical-Facts-Only-No-Source-Document-License
 source	nbs1989-standard-reference	properties.tsv	material-tsv-v1
 property	mass	molar-mass	dimensional

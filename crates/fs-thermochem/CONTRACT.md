@@ -10,6 +10,35 @@ The immutable accessors let coupled process owners verify specific transfer
 models, including the neutral monovalent-counterion/gold-cyanide pair, while
 retaining the original reaction conservation certificate.
 
+## Finite peroxide treatment and the ammonia acid/base family
+
+`MineralReaction` adds free-CN oxidation by aqueous peroxide, cyanate hydrolysis
+to ammonium/carbonate, ammonium dissociation, and separate peroxide-decomposition
+endpoints for gas and dissolved oxygen. All five equations pass the original
+exact atom/charge admission. Cyanate's `OCN[-](aq)` identity stays distinct from
+the fulminate isomer; aqueous peroxide/ammonia are not pure-liquid/gas aliases.
+Four matched NBS packs supply sixteen literal M/H/G/S facts, checked against
+original table images and the corrected 1989 CSV. Source-state selectors,
+ionic entropy conventions and unstated uncertainty remain explicit.
+
+The `cyanide_treatment` example admits oxidation and decomposition against one
+finite peroxide stock, then hydrolysis against completed first-stage cyanate
+and water. Both stages and all source diagnostics must succeed before accepted
+output is printed. Original network rules reject reagent overdraw and same-stage
+product borrowing. Independent direct-Gibbs and H−TS results remain visible.
+Nitrogen stays in the named species; prescribed extents establish no rate,
+WAD/total-cyanide removal, catalyst demand, water-quality result or operating
+heat duty.
+
+Its separate `speciate` mode binds source-backed ammonium, carbonate and
+uncomplexed-cyanide families to the same aqueous pH owner. Caller analytical
+totals, explicit spectators and unit-activity amount are required. NBS unit
+molality uses solvent mass, not solution volume. This ideal fixed-solvent
+result is not a finite-solvent H/O ledger and does not silently equilibrate
+residual cyanate/peroxide, metal complexes or gas loss. Actual-pack integration
+tests cover source rows, five reaction sums, finite-stage limits, mass closure
+and coupled family/charge/mass-action balances.
+
 ## Coupled finite metal/ligand competition and aqueous pH
 
 `acid_base::complexation::IdealLigandSystem` couples one original neutral
@@ -80,8 +109,8 @@ electrum activity model.
 The original `ReactionNetwork` admits both cementation extents against one
 initial zinc stock, with no clipping, inferred priority or same-stage product
 borrowing. Actual NBS packs supply point-state standard enthalpy and independent
-Gibbs diagnostics. Literal 1982-row provenance and the unverified separate
-1989-erratum qualification are retained in the four new material profiles.
+Gibbs diagnostics. Literal 1982-row values were independently checked against
+the corrected 1989 CSV; both source references remain in the four profiles.
 Ionic entropy remains conventional; source disagreements and unstated
 uncertainty are not reconciled. No plant recovery, rate, side-reaction demand,
 deaeration, filtration or operating heat duty follows from these endpoints.
