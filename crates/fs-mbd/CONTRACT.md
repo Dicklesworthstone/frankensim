@@ -1816,12 +1816,15 @@ joint reactions enforcing `A qddot = 0`. Constant affine gear/lock relations
 therefore remain compatible with the native midpoint position/rate updates.
 Initial, stage and final row residuals are admitted; no position repair is added.
 
-Caller effort is evaluated before reactions are added, at native elapsed times
-zero and half-duration. The first callback sees the virtual constrained rates
-under midpoint inertia. Independent stage powers keep caller actuator work
-separate from reaction work; the retained original native actuator-work receipt
-continues to include their sum. Original generalized-effort limits admit the
-combined actuator and constraint load.
+Caller effort is evaluated at native elapsed times zero and half-duration.
+The first callback sees the virtual constrained rates under midpoint inertia.
+One original ABA evaluates each caller effort; a native inverse-mass response
+adds the ideal reaction directly to its joint acceleration. There is no second
+dynamics pass. Motor effort limits admit the caller alone, while real state
+limits still apply to the resulting constrained motion. The native receipt
+now separates `actuator_work` from signed `constraint_work`, both using the
+same actual midpoint rates. Passive reaction work never becomes actuation or
+damping loss.
 
 Separate complete-window caps count absolute parameter and reaction work.
 The last transfer receives only each remaining allowance, including reaction
@@ -1838,7 +1841,10 @@ The focused G1 tests compare driven nonuniform inertia against scalar reduced
 gear equations and analytic reaction torques, then state-dependent damping
 against closed-form motion and separately integrated work. Both use 8/16/32
 steps over one second; empty-row equivalence, gross work and midpoint cancellation
-are also exercised. This remains a constant ideal-joint model, excluding
+are also exercised. A locked finite slider independently checks 60 N passive
+reaction with a 0.1 N motor rating, complete carrier recoil and external work;
+a finite tangency defect checks separate signed reaction work and its budget.
+This remains a constant ideal-joint model, excluding
 time-dependent ratios, constraint engagement, backlash and general contact.
 
 ## Full-inertia rigid RATTLE projection
@@ -4906,3 +4912,42 @@ and cancellation. All eight and 39 affected original regressions pass. This
 owner covers constant affine gears/locks; activation impulses, backlash,
 varying ratios, nonlinear point loops and general nonholonomic constraints
 remain separate work. Original midpoint phase and geometric limits remain.
+
+## Free implicit motion with existing gears and locks
+
+`articulated::motion::spatial_loads::implicit::constraints` connects the
+original constant affine joint rows to free implicit midpoint motion, including
+world and axial loads, diagonal/full passive 6x6 bushings, and smooth actuator
+feedback. The native free inverse-mass responses retain the finite carrier
+inertia. A bounded row-space solve supplies ideal reactions; the original
+momentum-coordinate equations reconstruct the actual carrier recoil and never
+add internal reactions to external spatial impulse.
+
+Each nonlinear trial evaluates the caller force laws and loaded ABA once.
+Native inverse-mass probes form the row mobility, using the original normalized
+prepared factorization. Numerical derivative probes may leave the affine
+manifold, while native configuration limits and independently checked initial,
+accepted midpoint and endpoint row residuals remain authoritative. No
+constraint projection or clipped residual is substituted for the equations.
+Empty rows reproduce the original implicit result exactly.
+
+The shared free-motion receipt now separates signed `constraint_work` from
+genuine `actuator_work`, connection work/storage, damping loss and external
+work. The implicit finalizer uses the existing compensated product reduction
+and double-double work arithmetic for caller efforts, reactions, gravity and
+body work before rounding the public accounts. Existing distance/ball-loop
+entries retain their original callback signatures and solver ownership.
+
+Eight independent cases check geared-rotor reduced inertia 110/9, carrier
+recoil and external world force/torque; a coaxial translation/spin gear with
+reduced inertia 13/7, full K/C coupling, feedback and both carrier recoils;
+diagonal/full equivalence; real motor versus passive-reaction admission;
+row-scaling equivalence; finite signed reaction work; degeneracy and
+configuration/rate refusal; and cancellation. The native distance, spherical
+point-loop and bilateral-feedback regressions also exercise the shared
+implicit owner. These are existing constant affine gear/lock relations;
+activation, backlash, changing ratios, and joint composition with nonlinear
+point-loop constraints remain separate models.
+
+Focused native validation passes 72 cases across 12 integration targets,
+including ten new physical/refusal cases and 62 original regressions.

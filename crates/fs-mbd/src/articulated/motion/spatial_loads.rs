@@ -92,8 +92,8 @@ pub struct SpatialMotionStep {
     /// Connection work + actual stored-energy change + quadrature loss, in J.
     /// This finite-step storage/work defect is not physical dissipation.
     pub connection_work_residual: f64,
-    /// Actual change of kinetic+connection energy plus loss, minus external
-    /// and actuator work, in J. No exact finite-step passivity is implied.
+    /// Actual kinetic+connection energy change plus loss, minus external,
+    /// actuator and constraint work, J; no exact finite-step passivity is implied.
     pub mechanical_work_residual: f64,
 }
 

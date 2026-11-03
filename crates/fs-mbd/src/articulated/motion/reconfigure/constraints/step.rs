@@ -12,13 +12,14 @@ use super::{
     PreparedJointConstraints, admit_constraints, apply_rows, transfer_inertia_constrained,
     validate_controls,
 };
+use crate::articulated::ArticulatedModel;
 use crate::articulated::motion::{
     FreeFloatingMotionError, FreeFloatingMotionLoads, FreeFloatingMotionState,
-    FreeFloatingMotionStep, step_free_floating_with_effort,
+    FreeFloatingMotionStep, step_free_floating_with_effort_and_reaction, sum_products,
 };
-use crate::articulated::{ArticulatedModel, free_floating_forward_dynamics};
 use core::fmt;
 use fs_ga::Vec3;
+use fs_math::dd::Dd;
 use std::cell::RefCell;
 
 /// Internal reactions evaluated at one actual native motion stage.
@@ -43,7 +44,7 @@ pub struct ConstraintReactionStage {
 #[derive(Debug)]
 pub struct ConstrainedInertiaMotionStep {
     pub first_transfer: ConstrainedInertiaReconfiguration,
-    /// Original native receipt. Its actuator work includes constraint reactions.
+    /// Original native receipt with separate caller actuator and constraint work.
     pub motion: FreeFloatingMotionStep,
     pub final_transfer: ConstrainedInertiaReconfiguration,
     /// Start and midpoint reactions, in native evaluation order.
@@ -145,8 +146,9 @@ impl From<FreeFloatingMotionError> for ConstrainedInertiaMotionError {
 /// limits. Their tensors sample elapsed times zero, half-duration and duration.
 /// The initial and final constrained transfers surround one original native step
 /// at midpoint inertia. The row mobility is rebuilt at each ACTUAL stage
-/// configuration, and reaction effort is added internally after caller effort.
-/// Native effort limits admit the combined actuator and constraint load.
+/// configuration. One original ABA evaluates genuine caller efforts; its joint
+/// acceleration receives the native ideal reaction response. Motor effort limits
+/// apply to the caller alone. Passive reactions never consume a motor rating.
 ///
 /// Smooth prescribed tensors, O(duration²)-accurate midpoint samples, smooth
 /// resolved loads and adequate mechanical-mode resolution give second-order
@@ -237,17 +239,8 @@ pub fn advance_with_effort(
         effort,
         &mut cancelled,
     )?;
-    let middle =
-        smooth_reactions
-            .get(1)
-            .ok_or(ConstrainedInertiaMotionError::InvalidAccounting(
-                "missing native midpoint reaction",
-            ))?;
-    let smooth_reaction_work_j = finite(duration * middle.power_w, "smooth reaction work")?;
-    let caller_actuator_work_j = finite(
-        duration * middle.caller_actuator_power_w,
-        "caller actuator work",
-    )?;
+    let smooth_reaction_work_j = finite(motion.constraint_work, "smooth reaction work")?;
+    let caller_actuator_work_j = finite(motion.actuator_work, "caller actuator work")?;
     let used_reaction = finite(
         first_transfer.reaction_work_j.abs() + smooth_reaction_work_j.abs(),
         "partial gross reaction work",
@@ -350,54 +343,68 @@ fn constrained_motion(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(FreeFloatingMotionStep, Vec<ConstraintReactionStage>), ConstrainedInertiaMotionError> {
     let cancellation = RefCell::new(cancelled);
-    let mut failure = None;
+    let failure = RefCell::new(None);
     let mut reactions = Vec::with_capacity(2);
-    let motion = step_free_floating_with_effort(
+    let mut caller = |elapsed, stage: &FreeFloatingMotionState, efforts: &mut [f64]| {
+        let mut checkpoint = || (*cancellation.borrow_mut())();
+        if let Err(error) = admit_constraints(
+            rows,
+            &stage.joint_position,
+            &stage.joint_velocity,
+            &mut checkpoint,
+        ) {
+            *failure.borrow_mut() = Some(error);
+            return Err(FreeFloatingMotionError::InvalidLoad(
+                "constraint stage admission",
+            ));
+        }
+        effort(elapsed, stage, efforts)?;
+        if !rows.is_empty() && checkpoint() {
+            *failure.borrow_mut() = Some(ConstraintError::Cancelled);
+            return Err(FreeFloatingMotionError::Cancelled);
+        }
+        Ok(())
+    };
+    let mut reaction = |elapsed,
+                        stage: &FreeFloatingMotionState,
+                        efforts: &[f64],
+                        acceleration: &mut [f64],
+                        stop: &mut dyn FnMut() -> bool| {
+        let mut checkpoint = || stop();
+        match reaction_stage(
+            model,
+            stage,
+            elapsed,
+            efforts,
+            acceleration,
+            rows,
+            minimum_reciprocal_condition,
+            &mut checkpoint,
+        ) {
+            Ok((reaction, power)) => {
+                reactions.push(reaction);
+                Ok(power)
+            }
+            Err(error) => {
+                // The native hook has a narrower error type. Preserve the
+                // original typed cause without publishing a partial step.
+                *failure.borrow_mut() = Some(error);
+                Err(FreeFloatingMotionError::InvalidLoad(
+                    "constraint reaction solve",
+                ))
+            }
+        }
+    };
+    let motion = step_free_floating_with_effort_and_reaction(
         model,
         state,
         loads,
         duration,
-        |elapsed, stage, efforts| {
-            let mut checkpoint = || (*cancellation.borrow_mut())();
-            if let Err(error) = admit_constraints(
-                rows,
-                &stage.joint_position,
-                &stage.joint_velocity,
-                &mut checkpoint,
-            ) {
-                failure = Some(error);
-                return Err(FreeFloatingMotionError::InvalidLoad(
-                    "constraint stage admission",
-                ));
-            }
-            effort(elapsed, stage, efforts)?;
-            match reaction_stage(
-                model,
-                stage,
-                loads,
-                elapsed,
-                efforts,
-                rows,
-                minimum_reciprocal_condition,
-                &mut checkpoint,
-            ) {
-                Ok(reaction) => {
-                    reactions.push(reaction);
-                    Ok(())
-                }
-                Err(error) => {
-                    // The native callback has a narrower error type. Retain
-                    // the actual typed cause and restore it before returning.
-                    failure = Some(error);
-                    Err(FreeFloatingMotionError::InvalidLoad(
-                        "constraint reaction solve",
-                    ))
-                }
-            }
-        },
-        || (*cancellation.borrow_mut())(),
+        &mut caller,
+        &mut reaction,
+        &mut || (*cancellation.borrow_mut())(),
     );
-    if let Some(error) = failure {
+    if let Some(error) = failure.into_inner() {
         return Err(error.into());
     }
     Ok((motion?, reactions))
@@ -407,45 +414,35 @@ fn constrained_motion(
 fn reaction_stage(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
-    loads: FreeFloatingMotionLoads<'_>,
     elapsed_s: f64,
-    efforts: &mut [f64],
+    efforts: &[f64],
+    acceleration: &mut [f64],
     rows: &[JointConstraint],
     minimum_reciprocal_condition: f64,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<ConstraintReactionStage, ConstraintError> {
-    let caller_actuator_power_w = efforts
-        .iter()
-        .zip(&state.joint_velocity)
-        .map(|(effort, rate)| effort * rate)
-        .sum::<f64>();
+) -> Result<(ConstraintReactionStage, Dd), ConstraintError> {
+    let caller_actuator_power_w = sum_products(
+        efforts.iter().copied(),
+        state.joint_velocity.iter().copied(),
+    )
+    .to_f64();
     if !caller_actuator_power_w.is_finite() {
         return Err(ConstraintError::Invalid("caller actuator power overflow"));
     }
     if rows.is_empty() {
-        return Ok(ConstraintReactionStage {
-            elapsed_s,
-            multipliers: Vec::new(),
-            joint_effort: vec![0.0; efforts.len()],
-            power_w: 0.0,
-            caller_actuator_power_w,
-            reciprocal_condition: 1.0,
-        });
+        return Ok((
+            ConstraintReactionStage {
+                elapsed_s,
+                multipliers: Vec::new(),
+                joint_effort: vec![0.0; efforts.len()],
+                power_w: 0.0,
+                caller_actuator_power_w,
+                reciprocal_condition: 1.0,
+            },
+            Dd::ZERO,
+        ));
     }
-    if cancelled() {
-        return Err(ConstraintError::Cancelled);
-    }
-    let free = free_floating_forward_dynamics(
-        model,
-        state.base,
-        &state.joint_position,
-        &state.joint_velocity,
-        efforts,
-        loads.gravity_world,
-        loads.external_body_wrench,
-    )
-    .map_err(|error| ConstraintError::Reconfiguration(ReconfigurationError::Dynamics(error)))?;
-    let rhs = apply_rows(rows, &free.generalized_acceleration, cancelled)?
+    let rhs = apply_rows(rows, acceleration, cancelled)?
         .into_iter()
         .map(|value| -value)
         .collect::<Vec<_>>();
@@ -457,28 +454,33 @@ fn reaction_stage(
         cancelled,
     )?;
     let response = prepared.solve_response(&rhs, cancelled)?;
-    let power_w = response
-        .joint_effort
-        .iter()
-        .zip(&state.joint_velocity)
-        .map(|(reaction, rate)| reaction * rate)
-        .sum::<f64>();
+    let power = sum_products(
+        response.joint_effort.iter().copied(),
+        state.joint_velocity.iter().copied(),
+    );
+    let power_w = power.to_f64();
     if !power_w.is_finite() {
         return Err(ConstraintError::Invalid(
             "constraint reaction power overflow",
         ));
     }
-    for (effort, reaction) in efforts.iter_mut().zip(&response.joint_effort) {
-        *effort += reaction;
+    // Do not pass ideal reactions back through the motor effort validator or
+    // repeat ABA. The original response includes carrier recoil, recovered by
+    // the native momentum map at the resulting joint rates.
+    for (value, delta) in acceleration.iter_mut().zip(&response.joint_delta) {
+        *value += delta;
     }
-    Ok(ConstraintReactionStage {
-        elapsed_s,
-        multipliers: response.multipliers,
-        joint_effort: response.joint_effort,
-        power_w,
-        caller_actuator_power_w,
-        reciprocal_condition: prepared.reciprocal_condition,
-    })
+    Ok((
+        ConstraintReactionStage {
+            elapsed_s,
+            multipliers: response.multipliers,
+            joint_effort: response.joint_effort,
+            power_w,
+            caller_actuator_power_w,
+            reciprocal_condition: prepared.reciprocal_condition,
+        },
+        power,
+    ))
 }
 
 fn finite(value: f64, what: &'static str) -> Result<f64, ConstrainedInertiaMotionError> {

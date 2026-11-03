@@ -102,15 +102,18 @@ pub struct FreeFloatingMotionStep {
     /// Actual angular change minus independent midpoint external impulse.
     /// Computed before rounding the complete change or source account.
     pub angular_momentum_residual_world: Vec3,
-    /// Midpoint actuator effort/rate work, in joules.
+    /// Midpoint caller actuator effort/rate work, in joules.
     pub actuator_work: f64,
+    /// Signed midpoint ideal joint-reaction work; zero without a reaction owner.
+    /// Finite admitted tangency defects remain visible, never damping loss.
+    pub constraint_work: f64,
     /// Midpoint body-wrench work plus uniform-gravity work along the computed
     /// COM increment, retaining displacements below the absolute pose's ulp.
     pub external_work: f64,
     /// Midpoint work of internal spatial connections, in joules; zero in the
     /// held-wrench API. Their storage and loss are owned by the connection lane.
     pub internal_body_work: f64,
-    /// Actual kinetic change minus actuator/external/internal work, in joules.
+    /// Actual kinetic change minus actuator/constraint/external/internal work, J.
     /// This is numerical integration error, not a physical dissipation channel.
     pub kinetic_work_residual: f64,
 }
@@ -270,7 +273,65 @@ pub fn step_free_floating_with_effort(
 type EffortLaw<'a> = dyn FnMut(f64, &FreeFloatingMotionState, &mut [f64]) -> Result<(), FreeFloatingMotionError>
     + 'a;
 
+/// Internal reaction after one native ABA, without changing caller efforts.
+/// The carrier response remains owned by physical momentum reconstruction.
+type ReactionLaw<'a> = dyn FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &[f64],
+        &mut [f64],
+        &mut dyn FnMut() -> bool,
+    ) -> Result<Dd, FreeFloatingMotionError>
+    + 'a;
+
+#[allow(clippy::too_many_arguments)]
+fn step_free_floating_with_effort_and_reaction(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: FreeFloatingMotionLoads<'_>,
+    duration: f64,
+    effort: &mut EffortLaw<'_>,
+    reaction: &mut ReactionLaw<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<FreeFloatingMotionStep, FreeFloatingMotionError> {
+    Ok(step_evaluated_with_reaction(
+        model,
+        state,
+        loads,
+        duration,
+        cancelled,
+        |map, base, cancelled| {
+            Ok(EvaluatedStage {
+                body_wrench: Cow::Borrowed(loads.external_body_wrench),
+                load: map.loads(base, loads, cancelled)?,
+            })
+        },
+        Some(effort),
+        Some(reaction),
+    )?
+    .step)
+}
+
 fn step_evaluated<'a, C: FnMut() -> bool>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: FreeFloatingMotionLoads<'a>,
+    duration: f64,
+    cancelled: &mut C,
+    evaluate: impl FnMut(
+        &MomentumMap,
+        FreeFloatingBaseState,
+        &mut C,
+    ) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError>,
+    effort: Option<&mut EffortLaw<'_>>,
+) -> Result<EvaluatedStep, FreeFloatingMotionError> {
+    step_evaluated_with_reaction(
+        model, state, loads, duration, cancelled, evaluate, effort, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_evaluated_with_reaction<'a, C: FnMut() -> bool>(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
     loads: FreeFloatingMotionLoads<'a>,
@@ -282,6 +343,7 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
         &mut C,
     ) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError>,
     mut effort: Option<&mut EffortLaw<'_>>,
+    mut reaction: Option<&mut ReactionLaw<'_>>,
 ) -> Result<EvaluatedStep, FreeFloatingMotionError> {
     poll(cancelled)?;
     if !duration.is_finite() || duration <= 0.0 {
@@ -326,7 +388,7 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
         law(0.0, state, stage_effort.to_mut())?;
         poll(cancelled)?;
     }
-    let initial_dynamics = free_floating_forward_dynamics(
+    let mut initial_dynamics = free_floating_forward_dynamics(
         model,
         state.base,
         &state.joint_position,
@@ -335,6 +397,25 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
         loads.gravity_world,
         &initial_stage.body_wrench,
     )?;
+    if let Some(law) = reaction.as_deref_mut() {
+        poll(cancelled)?;
+        let power = law(
+            0.0,
+            state,
+            &stage_effort,
+            &mut initial_dynamics.generalized_acceleration,
+            cancelled,
+        )?;
+        poll(cancelled)?;
+        validate_slice(
+            &initial_dynamics.generalized_acceleration,
+            "free_floating_motion.initial_constrained_acceleration",
+        )?;
+        validate_slice(
+            &[power.to_f64()],
+            "free_floating_motion.initial_constraint_power",
+        )?;
+    }
     let initial_load = initial_stage.load;
     let half = 0.5 * duration;
     let midpoint_coordinates = MomentumCoordinates {
@@ -368,7 +449,7 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
         law(half, &midpoint, stage_effort.to_mut())?;
         poll(cancelled)?;
     }
-    let midpoint_dynamics = free_floating_forward_dynamics(
+    let mut midpoint_dynamics = free_floating_forward_dynamics(
         model,
         midpoint.base,
         &midpoint.joint_position,
@@ -377,6 +458,28 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
         loads.gravity_world,
         &midpoint_stage.body_wrench,
     )?;
+    let constraint_power = if let Some(law) = reaction.as_deref_mut() {
+        poll(cancelled)?;
+        let power = law(
+            half,
+            &midpoint,
+            &stage_effort,
+            &mut midpoint_dynamics.generalized_acceleration,
+            cancelled,
+        )?;
+        poll(cancelled)?;
+        validate_slice(
+            &midpoint_dynamics.generalized_acceleration,
+            "free_floating_motion.midpoint_constrained_acceleration",
+        )?;
+        validate_slice(
+            &[power.to_f64()],
+            "free_floating_motion.midpoint_constraint_power",
+        )?;
+        power
+    } else {
+        Dd::ZERO
+    };
     let midpoint_load = midpoint_stage.load;
     let linear_impulse = midpoint_load.force_world.scale(duration);
     let external_impulse = midpoint_load.external_impulse(
@@ -453,17 +556,24 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
         Dd::from_f64(duration) * Dd::from_f64(midpoint_load.body_wrench_power) + gravity_work;
     let internal_body_work_dd =
         Dd::from_f64(duration) * Dd::from_f64(midpoint_load.internal_body_power);
+    let constraint_work_dd = Dd::from_f64(duration) * constraint_power;
     let actuator_work = actuator_work_dd.to_f64();
+    let constraint_work = constraint_work_dd.to_f64();
     let external_work = external_work_dd.to_f64();
     let internal_body_work = internal_body_work_dd.to_f64();
     let dissipated_energy = duration * midpoint_load.dissipation_power;
-    let kinetic_work_residual =
-        (kinetic_change - actuator_work_dd - external_work_dd - internal_body_work_dd).to_f64();
+    let kinetic_work_residual = (kinetic_change
+        - actuator_work_dd
+        - constraint_work_dd
+        - external_work_dd
+        - internal_body_work_dd)
+        .to_f64();
     validate_vec3(linear_impulse, "free_floating_motion.linear_impulse")?;
     validate_slice(
         &[
             kinetic_change.to_f64(),
             actuator_work,
+            constraint_work,
             external_work,
             internal_body_work,
             dissipated_energy,
@@ -489,6 +599,7 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
             linear_momentum_residual_world: momentum_residual.force,
             angular_momentum_residual_world: momentum_residual.torque,
             actuator_work,
+            constraint_work,
             external_work,
             internal_body_work,
             kinetic_work_residual,

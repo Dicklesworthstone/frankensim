@@ -18,15 +18,20 @@
 /// Regular rigid distance and spherical/ball loops with position and velocity closure.
 pub mod distance;
 
+/// Constant ideal joint locks and gear relations with native carrier recoil.
+pub mod constraints;
+
 use super::super::{
     ArticulatedModel, BaseState, EffortLaw, EvaluatedStep, FreeFloatingBaseState,
     FreeFloatingMotionError, FreeFloatingMotionState, FreeFloatingMotionStep,
     MAX_FREE_FLOATING_STEP_LINKS, MomentumCoordinates, MomentumFrame, MomentumMap, Se3, StageLoad,
     Twist, Vec3, advance, forward_kinematics, free_floating_forward_dynamics,
     free_floating_momentum, momentum_from_kinematics, physical_increments, poll, rotate,
-    validate_external_wrenches, validate_forward_dynamics_header, validate_slice, validate_vec3,
+    sum_products, validate_external_wrenches, validate_forward_dynamics_header, validate_slice,
+    validate_vec3,
 };
 use super::{SpatialMotionLoads, SpatialMotionStep, bushing, evaluate, finish_with_bushings};
+use crate::articulated::motion::reconfigure::constraints::ConstraintError;
 use crate::articulated::{ArticulatedError, JointKind};
 use fs_ga::GaError;
 use fs_math::dd::Dd;
@@ -100,6 +105,8 @@ pub enum ImplicitSpatialError {
     Invalid(&'static str),
     /// Original model, state, load, geometric, limit or cancellation refusal.
     Motion(FreeFloatingMotionError),
+    /// Original affine-row, native mobility or ideal-reaction admission refused.
+    Constraint(ConstraintError),
     /// The bounded residual work was exhausted, including on final verification.
     EvaluationBudget {
         /// Residual evaluations already consumed.
@@ -126,6 +133,11 @@ impl std::error::Error for ImplicitSpatialError {}
 impl From<FreeFloatingMotionError> for ImplicitSpatialError {
     fn from(value: FreeFloatingMotionError) -> Self {
         Self::Motion(value)
+    }
+}
+impl From<ConstraintError> for ImplicitSpatialError {
+    fn from(value: ConstraintError) -> Self {
+        Self::Constraint(value)
     }
 }
 impl From<ArticulatedError> for ImplicitSpatialError {
@@ -257,6 +269,30 @@ pub(super) fn step_with_bushings_and_effort<B: bushing::BushingLaw>(
     duration: f64,
     config: ImplicitSpatialConfig,
     effort: Option<&mut EffortLaw<'_>>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
+    step_with_bushings_effort_and_reaction(
+        model, state, loads, bushings, duration, config, effort, None, cancelled,
+    )
+}
+
+type ReactionLaw<'a> = dyn FnMut(
+        &FreeFloatingMotionState,
+        &mut [f64],
+        &mut dyn FnMut() -> bool,
+    ) -> Result<Dd, ImplicitSpatialError>
+    + 'a;
+
+#[allow(clippy::too_many_arguments)]
+fn step_with_bushings_effort_and_reaction<B: bushing::BushingLaw>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    effort: Option<&mut EffortLaw<'_>>,
+    reaction: Option<&mut ReactionLaw<'_>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
     poll(&mut cancelled)?;
@@ -335,6 +371,7 @@ pub(super) fn step_with_bushings_and_effort<B: bushing::BushingLaw>(
         Vec::new()
     };
     let effort = RefCell::new((effort, effort_values));
+    let reaction = RefCell::new(reaction);
     let evaluate_stage = |x: &[f64]| {
         let mut cancel = cancelled.borrow_mut();
         poll(&mut *cancel)?;
@@ -349,7 +386,13 @@ pub(super) fn step_with_bushings_and_effort<B: bushing::BushingLaw>(
         let mut effort = effort.borrow_mut();
         let (law, values) = &mut *effort;
         let stage_effort = law.as_deref_mut().map(|law| (law, values.as_mut_slice()));
-        equations.evaluate_with_effort(x, stage_effort, &mut *cancel)
+        let mut reaction = reaction.borrow_mut();
+        equations.evaluate_with_effort_and_reaction(
+            x,
+            stage_effort,
+            reaction.as_deref_mut(),
+            &mut *cancel,
+        )
     };
     let problem = FallibleFiniteDifference::new(n + 3, config.difference_step, |x: &[f64]| {
         evaluate_stage(x).map(|stage| stage.residual)
@@ -536,20 +579,37 @@ fn finish_midpoint<B: bushing::BushingLaw>(
     let external_impulse = external_impulse.checked_wrench("implicit_spatial.impulse")?;
     let momentum_change = momentum_change.checked_wrench("implicit_spatial.change")?;
     let momentum_residual = momentum_residual.checked_wrench("implicit_spatial.residual")?;
-    let actuator_work = duration * midpoint.actuator_power;
-    let external_work = duration * load.body_wrench_power
-        + initial_map.mass() * loads.held.gravity_world.dot(center_displacement);
-    let internal_body_work = duration * load.internal_body_power;
+    let dt = Dd::from_f64(duration);
+    let actuator_work_dd = dt * midpoint.actuator_power;
+    let constraint_work_dd = dt * midpoint.constraint_power;
+    let gravity = loads.held.gravity_world;
+    let gravity_work_dd = Dd::from_f64(initial_map.mass())
+        * sum_products(
+            [gravity.x, gravity.y, gravity.z],
+            [
+                center_displacement.x,
+                center_displacement.y,
+                center_displacement.z,
+            ],
+        );
+    let external_work_dd = dt * Dd::from_f64(load.body_wrench_power) + gravity_work_dd;
+    let internal_body_work_dd = dt * Dd::from_f64(load.internal_body_power);
+    let actuator_work = actuator_work_dd.to_f64();
+    let constraint_work = constraint_work_dd.to_f64();
+    let external_work = external_work_dd.to_f64();
+    let internal_body_work = internal_body_work_dd.to_f64();
     let kinetic_work_residual = (kinetic_change
-        - Dd::from_f64(actuator_work)
-        - Dd::from_f64(external_work)
-        - Dd::from_f64(internal_body_work))
-    .to_f64();
+        - actuator_work_dd
+        - constraint_work_dd
+        - external_work_dd
+        - internal_body_work_dd)
+        .to_f64();
     validate_vec3(linear_impulse, "implicit_spatial.linear_impulse")?;
     validate_slice(
         &[
             kinetic_change.to_f64(),
             actuator_work,
+            constraint_work,
             external_work,
             internal_body_work,
             kinetic_work_residual,
@@ -576,6 +636,7 @@ fn finish_midpoint<B: bushing::BushingLaw>(
                 linear_momentum_residual_world: momentum_residual.force,
                 angular_momentum_residual_world: momentum_residual.torque,
                 actuator_work,
+                constraint_work,
                 external_work,
                 internal_body_work,
                 kinetic_work_residual,
@@ -605,7 +666,8 @@ struct MidpointEvaluation {
     center_base: Vec3,
     trial_angular: Vec3,
     load: StageLoad,
-    actuator_power: f64,
+    actuator_power: Dd,
+    constraint_power: Dd,
     residual: Vec<f64>,
 }
 
@@ -622,6 +684,16 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
         &self,
         x: &[f64],
         effort: Option<(&mut EffortLaw<'_>, &mut [f64])>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MidpointEvaluation, ImplicitSpatialError> {
+        self.evaluate_with_effort_and_reaction(x, effort, None, cancelled)
+    }
+
+    fn evaluate_with_effort_and_reaction(
+        &self,
+        x: &[f64],
+        effort: Option<(&mut EffortLaw<'_>, &mut [f64])>,
+        reaction: Option<&mut ReactionLaw<'_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MidpointEvaluation, ImplicitSpatialError> {
         let n = self.model.dof_count();
@@ -679,7 +751,7 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
         } else {
             self.loads.held.generalized_force
         };
-        let dynamics = free_floating_forward_dynamics(
+        let mut dynamics = free_floating_forward_dynamics(
             self.model,
             state.base,
             &state.joint_position,
@@ -688,6 +760,18 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
             self.loads.held.gravity_world,
             &stage.body_wrench,
         )?;
+        let constraint_power = if let Some(law) = reaction {
+            poll(cancelled)?;
+            let power = law(&state, &mut dynamics.generalized_acceleration, cancelled)?;
+            poll(cancelled)?;
+            validate_slice(
+                &dynamics.generalized_acceleration,
+                "implicit_spatial.constrained_acceleration",
+            )?;
+            power
+        } else {
+            Dd::ZERO
+        };
         let mut residual: Vec<_> = state
             .joint_velocity
             .iter()
@@ -699,12 +783,14 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
         let angular = (omega - state.base.twist_body.angular).scale(1.0 / self.scales[n]);
         residual.extend([angular.x, angular.y, angular.z]);
         validate_slice(&residual, "implicit_spatial.equations")?;
-        let actuator_power = generalized_force
-            .iter()
-            .zip(&state.joint_velocity)
-            .map(|(effort, rate)| effort * rate)
-            .sum::<f64>();
-        validate_slice(&[actuator_power], "implicit_spatial.actuator_power")?;
+        let actuator_power = sum_products(
+            generalized_force.iter().copied(),
+            state.joint_velocity.iter().copied(),
+        );
+        validate_slice(
+            &[actuator_power.to_f64(), constraint_power.to_f64()],
+            "implicit_spatial.stage_power",
+        )?;
         poll(cancelled)?;
         Ok(MidpointEvaluation {
             state,
@@ -712,6 +798,7 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
             trial_angular: omega,
             load: stage.load,
             actuator_power,
+            constraint_power,
             residual,
         })
     }

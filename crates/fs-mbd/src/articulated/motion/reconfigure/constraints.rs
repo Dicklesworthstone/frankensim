@@ -531,6 +531,7 @@ pub(in crate::articulated::motion) fn admit_constraints(
 #[derive(Clone, Copy)]
 enum ConstraintBoundary {
     Free,
+    FreeTrial,
     PrescribedTrial,
 }
 
@@ -575,6 +576,26 @@ impl<'a> PreparedJointConstraints<'a> {
         )
     }
 
+    /// Free-carrier row mobility at an actual nonlinear trial configuration.
+    /// Trial probes retain native model/configuration admission but may lie off
+    /// the affine manifold; the motion owner admits actual accepted row states.
+    pub(in crate::articulated::motion) fn free_trial(
+        model: &ArticulatedModel,
+        joint_position: &[f64],
+        rows: &'a [JointConstraint],
+        minimum_reciprocal_condition: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConstraintError> {
+        Self::for_boundary(
+            model,
+            joint_position,
+            rows,
+            minimum_reciprocal_condition,
+            ConstraintBoundary::FreeTrial,
+            cancelled,
+        )
+    }
+
     /// Constant rows remain meaningful away from their affine manifold during
     /// nonlinear probes. Actual initial and accepted states are admitted by the
     /// constrained motion owner. Native joint configuration limits still apply.
@@ -607,7 +628,10 @@ impl<'a> PreparedJointConstraints<'a> {
         poll(cancelled)?;
         validate_condition_floor(minimum_reciprocal_condition)?;
         match boundary {
-            ConstraintBoundary::Free => validate_compatible_models(model, model)?,
+            ConstraintBoundary::Free | ConstraintBoundary::FreeTrial => {
+                validate_compatible_models(model, model)?;
+                model.validate_configuration(joint_position)?;
+            }
             ConstraintBoundary::PrescribedTrial => {
                 if model.link_count() > MAX_FREE_FLOATING_STEP_LINKS {
                     return Err(ReconfigurationError::TooManyLinks {
@@ -648,12 +672,14 @@ impl<'a> PreparedJointConstraints<'a> {
         for (column, constraint) in rows.iter().enumerate() {
             poll(cancelled)?;
             let delta = match boundary {
-                ConstraintBoundary::Free => free_floating_impulse_delta(
-                    model,
-                    joint_position,
-                    &constraint.coefficients,
-                    &zero_body_impulses,
-                )?,
+                ConstraintBoundary::Free | ConstraintBoundary::FreeTrial => {
+                    free_floating_impulse_delta(
+                        model,
+                        joint_position,
+                        &constraint.coefficients,
+                        &zero_body_impulses,
+                    )?
+                }
                 ConstraintBoundary::PrescribedTrial => {
                     prescribed_base_impulse_delta(
                         model,

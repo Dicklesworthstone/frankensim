@@ -10,9 +10,12 @@ use fs_mbd::articulated::motion::reconfigure::constraints::{
     ConstraintControls, ConstraintCoordinate, ConstraintError, JointConstraint,
 };
 use fs_mbd::articulated::motion::reconfigure::{ReconfigurationControls, step as free_step};
-use fs_mbd::articulated::motion::{FreeFloatingMotionLoads, FreeFloatingMotionState};
+use fs_mbd::articulated::motion::{
+    FreeFloatingMotionError, FreeFloatingMotionLoads, FreeFloatingMotionState,
+};
 use fs_mbd::articulated::{
-    ArticulatedModel, FreeFloatingBaseState, JointModel, Link, SpatialInertia,
+    ArticulatedError, ArticulatedModel, FreeFloatingBaseState, JointLimits, JointModel, Link,
+    SpatialInertia,
 };
 use std::cell::Cell;
 
@@ -470,4 +473,199 @@ fn empty_rows_gross_work_and_midpoint_cancellation_keep_atomic_semantics() {
     ));
     assert_eq!(stages, vec![0., 0.005]);
     assert_eq!(initial, retained);
+}
+
+fn locked_slider() -> (ArticulatedModel, FreeFloatingMotionState, JointConstraint) {
+    let model = ArticulatedModel::new(vec![
+        Link::new(
+            "carrier",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            sphere(3., 2.),
+        ),
+        Link::new(
+            "locked slider",
+            Some(0),
+            Se3::identity(),
+            JointModel::prismatic(
+                Vec3::new(1., 0., 0.),
+                Some(JointLimits::new(-1., 1., 0.1, 0.1).unwrap()),
+            )
+            .unwrap(),
+            sphere(2., 1.),
+        ),
+    ])
+    .unwrap();
+    let state = FreeFloatingMotionState {
+        base: FreeFloatingBaseState::new(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(1., 0., 0.)),
+        ),
+        joint_position: vec![0.2],
+        joint_velocity: vec![0.],
+    };
+    let row = JointConstraint {
+        coordinate: ConstraintCoordinate::Length,
+        coefficients: vec![1.],
+        position: 0.2,
+        position_tolerance: 1e-9,
+        velocity_tolerance: 1e-9,
+    };
+    (model, state, row)
+}
+
+fn lock_controls() -> ConstraintControls<'static> {
+    ConstraintControls {
+        reconfiguration: ReconfigurationControls {
+            joint_momentum_tolerances: &[1e-9],
+            ..controls(0.).reconfiguration
+        },
+        ..controls(0.)
+    }
+}
+
+#[test]
+fn passive_lock_transmits_external_force_without_consuming_motor_effort() {
+    let (model, initial, row) = locked_slider();
+    let saved = initial.clone();
+    let force = Wrench::new(Vec3::default(), Vec3::new(100., 0., 0.));
+    let loads = FreeFloatingMotionLoads {
+        generalized_force: &[0.],
+        external_body_wrench: &[Wrench::default(), force],
+        gravity_world: Vec3::default(),
+    };
+    let dt = 0.2;
+    let mut stages = Vec::new();
+    let result = advance_with_effort(
+        &model,
+        &model,
+        &model,
+        &initial,
+        loads,
+        dt,
+        &[row.clone()],
+        lock_controls(),
+        |elapsed, stage, efforts| {
+            stages.push(elapsed);
+            assert_eq!(efforts, &[0.]);
+            close(stage.joint_velocity[0], 0.);
+            Ok(())
+        },
+        || false,
+    )
+    .unwrap();
+    // The locked total mass is 5 kg. Its 100 N external load produces 20 m/s²
+    // carrier acceleration and -60 N at the passive joint, despite its 0.1 N
+    // actuator rating. The unconstrained 50 m/s² joint response is never an
+    // admitted physical trajectory.
+    assert_eq!(stages, vec![0., dt / 2.]);
+    for reaction in &result.smooth_reactions {
+        close(reaction.joint_effort[0], -60.);
+        close(reaction.power_w, 0.);
+        close(reaction.caller_actuator_power_w, 0.);
+    }
+    let endpoint = result.state_after();
+    close(endpoint.base.twist_body.linear.x, 5.);
+    close(endpoint.base.world_from_base.translation().x, 0.6);
+    close(endpoint.joint_position[0], 0.2);
+    close(endpoint.joint_velocity[0], 0.);
+    close(result.motion.linear_momentum_change_world.x, 20.);
+    close(result.motion.external_linear_impulse_world.x, 20.);
+    close(result.motion.angular_momentum_change_world.norm(), 0.);
+    close(result.motion.actuator_work, 0.);
+    close(result.motion.constraint_work, 0.);
+    close(result.motion.external_work, 60.);
+    close(result.motion.kinetic_energy_change, 60.);
+    close(result.motion.kinetic_work_residual, 0.);
+    close(result.kinetic_work_residual, 0.);
+    assert_eq!(initial, saved);
+    let refusal = advance_with_effort(
+        &model,
+        &model,
+        &model,
+        &initial,
+        loads,
+        dt,
+        &[row],
+        lock_controls(),
+        |_, _, efforts| {
+            efforts[0] = 0.2;
+            Ok(())
+        },
+        || false,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        refusal,
+        ConstrainedInertiaMotionError::Motion(FreeFloatingMotionError::Dynamics(
+            ArticulatedError::JointEffortLimitViolation { .. }
+        ))
+    ));
+}
+
+#[test]
+fn finite_tangency_defect_retains_signed_work_separate_from_actuation() {
+    let (model, mut initial, mut row) = locked_slider();
+    initial.joint_velocity[0] = 0.02;
+    row.position_tolerance = 0.01;
+    row.velocity_tolerance = 0.1;
+    let saved = initial.clone();
+    let loads = FreeFloatingMotionLoads {
+        generalized_force: &[0.],
+        external_body_wrench: &[
+            Wrench::default(),
+            Wrench::new(Vec3::default(), Vec3::new(100., 0., 0.)),
+        ],
+        gravity_world: Vec3::default(),
+    };
+    let controls = ConstraintControls {
+        maximum_reaction_work_j: 0.3,
+        ..lock_controls()
+    };
+    let result = advance(
+        &model,
+        &model,
+        &model,
+        &initial,
+        loads,
+        0.2,
+        &[row.clone()],
+        controls,
+        || false,
+    )
+    .unwrap();
+    // The admitted 0.02 m/s row defect has actual signed power -60*.02 W.
+    // External work is 100*(3+.02)*.2 J; physical kinetic gain is 60.16 J.
+    close(result.motion.actuator_work, 0.);
+    close(result.caller_actuator_work_j, 0.);
+    close(result.motion.constraint_work, -0.24);
+    close(result.smooth_reaction_work_j, -0.24);
+    close(result.absolute_reaction_work_j, 0.24);
+    close(result.motion.external_work, 60.4);
+    close(result.motion.kinetic_energy_change, 60.16);
+    close(result.motion.kinetic_work_residual, 0.);
+    close(result.kinetic_work_residual, 0.);
+    close(result.state_after().joint_velocity[0], 0.02);
+    close(result.state_after().joint_position[0], 0.204);
+    let refusal = advance(
+        &model,
+        &model,
+        &model,
+        &initial,
+        loads,
+        0.2,
+        &[row],
+        ConstraintControls {
+            maximum_reaction_work_j: 0.1,
+            ..controls
+        },
+        || false,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        refusal,
+        ConstrainedInertiaMotionError::ReactionWorkBudget { .. }
+    ));
+    assert_eq!(initial, saved);
 }
