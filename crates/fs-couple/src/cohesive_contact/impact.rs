@@ -153,12 +153,31 @@ pub(super) fn admit_motions(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ImpactError> {
     poll(cancelled)?;
-    if motions.is_empty()
-        || motions.len() != preconditioners.len()
-        || motions.len() > maximum_bodies
-    {
+    if motions.len() != preconditioners.len() {
         return Err(ImpactError::Invalid(
-            "bounded bodies and one native preconditioner each required",
+            "one native preconditioner per original body required",
+        ));
+    }
+    admit_states(
+        motions,
+        maximum_bodies,
+        maximum_workspace_entries,
+        cancelled,
+    )
+}
+
+// Shared accepted-state admission also serves held-force contact, whose native
+// midpoint owner retains its own preconditioning and needs no impulse adapter.
+pub(super) fn admit_states(
+    motions: &[&CohesiveMotion<'_, '_>],
+    maximum_bodies: usize,
+    maximum_workspace_entries: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ImpactError> {
+    poll(cancelled)?;
+    if motions.is_empty() || motions.len() > maximum_bodies {
+        return Err(ImpactError::Invalid(
+            "bounded nonempty original bodies required",
         ));
     }
     if motions

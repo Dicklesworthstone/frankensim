@@ -17984,6 +17984,57 @@ this adapter does not invent sustained reactions or claim a general
 Moreau--Jean method. Instantaneous losses remain separate from material
 fracture, viscosity and internal friction, with no automatic heat partition.
 
+### Sustained contact on original cohesive midpoint evolution
+
+`cohesive_contact::trajectory::sustained::step_candidate` supplies the finite
+loaded-contact step that the transient impact trajectory deliberately refuses.
+It solves simultaneous normal reactions and Coulomb forces for already active,
+nonpenetrating, normal-stationary contacts. Fixed sparse traces in a declared
+orthonormal frame remain power conjugate: each trial scatters `B^T lambda` into
+the original reduced mean forces, then advances every original `CohesiveMotion`
+to one common endpoint with its native midpoint/material-path owner. Complete
+inertia, stiffness, native bonded damage, viscosity and internal friction enter
+the response. No frozen mass-only mobility stands in for finite-step mechanics.
+
+The shared `fs-contact::sustained` force law and original Newton/FGMRES solve
+couple all declared contacts through that actual response. Numerical N/m
+scales and force perturbations are explicit conditioning controls; forces and
+physical states are never projected. Warm starts reuse force guesses only.
+Every response starts from unchanged accepted bodies; obsolete trial histories
+are released, and the last successful solve callback is a fresh native replay.
+Force/path bit identity is checked before the replay's actual original body
+steps become the candidate. Native body calls, residuals, Newton work, trace
+storage, retained histories and force applicability have explicit budgets.
+
+The independent audit checks actual nonnegative gaps and normal forces,
+midpoint trace kinematics, loaded endpoint stationarity or separating release,
+normal complementarity, the Coulomb disk and actual sliding direction. A
+positive-capacity sliding reversal or false zero-slip reflection refuses and
+requires interval refinement. The declared straight displacement path and
+nonnegative endpoints admit the fixed affine gap throughout this numerical
+interval; they do not certify exact continuous nonlinear motion.
+
+With relative trace increment `s=B Delta u+h*c`, contact body work is
+`lambda dot s-h*c dot lambda`, prescribed-surface work is `-h*c dot lambda`,
+and dry-friction loss is `-lambda_t dot s_t`. Original authored force work,
+prescribed jump work, kinetic/bulk/cohesive storage, fracture, viscosity and
+internal friction are retained separately. The full first law and absolute
+native/contact defects must pass. Signed and absolute normal constraint work
+remain visible numerical defects; they are never renamed friction or heat.
+No partial native state publishes on a refusal or cancellation.
+
+This is local continuation on the original material branch for one bounded
+interval, with fixed geometry and prescribed affine surface motion. Incoming
+impacts and new-contact discovery retain their original owners. It does not
+claim global frictional uniqueness, general Painleve resolution, automatic
+stop-event discovery, a general Moreau--Jean method, or a thermal partition.
+Generalized momentum/work follows the supplied traces; Cartesian force/torque
+conservation additionally requires the caller's actual geometric point maps.
+Focused core and audit tests cover cold support/stick/slide/breakaway solves,
+full coupled inertia, elastic storage, shared contacts, moving surfaces and
+physical refusals. Real damaged-cohesive-body integration cases are retained
+for the complete native runtime build.
+
 ## Finite cohesive patch load line
 
 `cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.

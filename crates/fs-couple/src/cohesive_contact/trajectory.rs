@@ -10,8 +10,9 @@
 //! over this interval. Positive activation distances are explicit spatial
 //! approximations. Maximum-step and activation-distance refinement are needed
 //! for trajectory accuracy; this is not exact-flow collision detection or a
-//! general sustained-contact integrator. Loaded rest and unresolved progress
-//! refuse, without projection, artificial support or repeated zero-time kicks.
+//! general sustained-contact integrator. The transient entrypoint refuses loaded
+//! rest and unresolved progress; [`sustained`] instead solves held contact forces
+//! through the original native mechanics for already active contacts.
 //! Generalized work follows the supplied traces; Cartesian force/torque claims
 //! additionally require the caller's actual geometric point maps.
 
@@ -28,6 +29,9 @@ use super::impact::{self, ImpactError};
 
 mod geometry;
 pub use geometry::GeometryError;
+
+/// Coupled held-force contact on the original cohesive midpoint response.
+pub mod sustained;
 
 /// Constant reduced force and the original prescribed jump offsets at the
 /// requested interval endpoint. Offsets evolve affinely from accepted native

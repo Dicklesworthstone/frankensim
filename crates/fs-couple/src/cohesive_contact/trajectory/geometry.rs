@@ -270,7 +270,7 @@ pub(super) fn shorter_step(
     Ok(next)
 }
 
-fn admit_trace(
+pub(super) fn admit_trace(
     terms: &[TraceTerm],
     reference_positions: &[&[f64]],
     cancelled: &mut impl FnMut() -> bool,
@@ -296,7 +296,7 @@ fn admit_trace(
     Ok(())
 }
 
-fn validate_vectors(
+pub(super) fn validate_vectors(
     values: &[&[f64]],
     reference_positions: &[&[f64]],
     cancelled: &mut impl FnMut() -> bool,
@@ -323,7 +323,7 @@ fn validate_vectors(
     Ok(())
 }
 
-fn coordinate(values: &[&[f64]], term: &TraceTerm) -> Result<f64, GeometryError> {
+pub(super) fn coordinate(values: &[&[f64]], term: &TraceTerm) -> Result<f64, GeometryError> {
     values
         .get(term.body)
         .and_then(|body| body.get(term.dof))
@@ -334,12 +334,12 @@ fn coordinate(values: &[&[f64]], term: &TraceTerm) -> Result<f64, GeometryError>
 }
 
 #[derive(Default)]
-struct Sum {
+pub(super) struct Sum {
     value: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, value: f64) -> Result<(), GeometryError> {
+    pub(super) fn add(&mut self, value: f64) -> Result<(), GeometryError> {
         finite(value, "affine trace contribution")?;
         let next = finite(self.value + value, "affine trace sum")?;
         let residual = if self.value.abs() >= value.abs() {
@@ -351,7 +351,7 @@ impl Sum {
         self.value = next;
         Ok(())
     }
-    fn total(self) -> Result<f64, GeometryError> {
+    pub(super) fn total(self) -> Result<f64, GeometryError> {
         finite(self.value + self.correction, "affine trace result")
     }
 }
