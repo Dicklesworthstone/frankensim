@@ -198,7 +198,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         })
     }
 
-    fn admittance_matrices(
+    pub(super) fn admittance_matrices(
         &self,
         admittances: &[BoundaryAdmittance],
         cancelled: &mut impl FnMut() -> bool,

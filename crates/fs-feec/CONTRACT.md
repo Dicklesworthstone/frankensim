@@ -1595,3 +1595,40 @@ Homogeneous thermoviscous and molecular wall/volume models are not silently
 reused for these spatially varying fluids. Assembly and harmonic operations
 poll cancellation; modal cancellation brackets the existing single-window
 modal owner, which has no internal callback.
+
+### Broadband heterogeneous pressure waves
+
+`heterogeneous::time` advances the same full spatial operator in pressure
+potential `psi` [Pa s] and actual pressure `p = psi_dot` [Pa]. With the frozen
+original density, velocity is `-grad(psi)/rho`, and the physical equations are
+`M_beta p_dot + C_Y p + K_rho psi = b_in`. Storage is therefore
+`(p^T M_beta p + psi^T K_rho psi)/2` joules. A pressure/pressure-rate mechanical
+energy surrogate is not used. Every original hierarchical coordinate remains
+live, with no modal truncation, dense mass inverse or subsequent material query.
+
+Fixed-step implicit midpoint prepares one symmetrically equilibrated sparse
+`M_beta + h C_Y/2 + h^2 K_rho/4` factor through the original LDLT owner.
+Admission defaults to 4096 pressure DOFs and 64 MiB of native factor/front
+payload; sparse assembly, symbolic analysis and runtime overhead are additional.
+Real nonnegative boundary admittance is instantaneous and memoryless. Reactive
+or frequency-dependent impedance requires a causal state and is not admitted.
+Inward velocity traces use the original face projection at the step midpoint.
+
+Returned candidates preserve the caller's state on refusal. Independent
+double-double residuals of the original physical equations, at most two
+corrections through the same factor, and a signed physical work balance admit
+each step. Input work and boundary dissipation use the same midpoint pressure
+with their original forms. Energy change is evaluated as a symmetric bilinear
+difference; its tolerance scales with actual work and evaluated roundoff,
+without a fixed SI floor or an invented heat channel. Cancellation polls bracket
+the existing trace/factor/solve owners and occur between sparse rows; those
+owners have no internal callback.
+
+Focused regressions specify exact polynomial compression and pressure work at
+two amplitude scales, rigid/zero-state behavior, actual Cayley phase and its
+second-order time convergence, a broadband density-interface pulse with
+independent reflection/transmission amplitudes and delay, and resource/source
+binding refusals. These new tests have not been executed in the current
+environment; pinned rustfmt parsing and source/API review do not replace native
+validation. Midpoint stability does not certify phase accuracy: time-step,
+geometry, h/p and material quadrature refinement remain separate obligations.

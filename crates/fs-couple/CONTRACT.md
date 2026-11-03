@@ -205,6 +205,15 @@ both physical matrices, including inverse-density interface coupling, with no
 homogeneous reference-fluid substitution. Region maps and source failures remain
 explicit. Changing an original source requires preparing a new frozen binding.
 
+Both spatial source bindings expose the original operator's sparse transient
+pressure-potential evolution as well as its harmonic and modal consumers.
+`fluid_interface_pulse` launches a compact oblique packet across a conforming
+original cold/hot gas or IF97-water interface, exports actual nodal pressure and
+potential, and reports physical acoustic energy and boundary work at every step.
+Its exterior local impedances are exact only for normal plane waves. The example
+requires independent spatial and time-step refinement; source thermodynamics,
+interfaces and bulk coefficients remain frozen throughout the pulse.
+
 ## Actual curved TET10 contact through native momentum owners
 
 `inelastic_impact::surface::quadratic::QuadraticSolidContactSurface` binds the

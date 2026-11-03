@@ -43,10 +43,13 @@ pub use harmonic::{
     PreparedHeterogeneous, VelocityTrace,
 };
 
+/// Broadband evolution in the original pressure-potential coordinates.
+pub mod time;
+
 /// Largest admitted number of one-dimensional Gauss points per Duffy axis.
 pub const MAX_QUADRATURE_ORDER: usize = 16;
 
-/// Refusals of modal and full harmonic pressure solves.
+/// Refusals of modal, harmonic and transient pressure solves.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeterogeneousError {
     /// The original geometry, trace or modal owner refused.
@@ -70,6 +73,14 @@ pub enum HeterogeneousError {
         observed: f64,
         /// Requested tolerance.
         limit: f64,
+    },
+    /// A transient candidate did not balance physical storage, source work
+    /// and independently integrated boundary dissipation.
+    EnergyBalance {
+        /// Signed energy-change-plus-loss-minus-input residual [J].
+        observed_j: f64,
+        /// Admitted absolute defect, including evaluated roundoff [J].
+        limit_j: f64,
     },
 }
 
