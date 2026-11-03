@@ -642,9 +642,30 @@ struct Boundary<'a> {
 }
 impl Boundary<'_> {
     fn validate_extras(&self, chemical_extra: &QueryPoint) -> Result<()> {
-        for (axis, value) in self.extra.axes() {
+        self.transfer.validate_extras(chemical_extra, self.extra)
+    }
+    fn rate(&self, state: &CyanidationState) -> Result<(f64, QueryPoint)> {
+        self.transfer.rate_at_conditions(
+            &state.conditions,
+            state.dissolved_oxygen,
+            self.pressure,
+            Amount::new(self.saturation),
+            self.extra,
+        )
+    }
+}
+
+impl OxygenTransfer {
+    // Shared source admission for batch and continuous liquid owners. The caller
+    // supplies its actual chemical coordinates, never a synthetic batch state.
+    pub(super) fn validate_extras(
+        &self,
+        chemical_extra: &QueryPoint,
+        extra: &QueryPoint,
+    ) -> Result<()> {
+        for (axis, value) in extra.axes() {
             require(
-                self.extra.axis_quantities().contains_key(axis)
+                extra.axis_quantities().contains_key(axis)
                     && !owned_axes()
                         .iter()
                         .chain(transfer_axes().iter())
@@ -655,36 +676,43 @@ impl Boundary<'_> {
                 require(
                     existing == value
                         && chemical_extra.axis_quantities().get(axis)
-                            == self.extra.axis_quantities().get(axis),
+                            == extra.axis_quantities().get(axis),
                     "shared additional source coordinates must agree",
                 )?;
             }
         }
         Ok(())
     }
-    fn rate(&self, state: &CyanidationState) -> Result<(f64, QueryPoint)> {
-        let mut point = state.conditions.clone();
-        for (axis, value) in self.extra.axes() {
-            point = point.with_quantity(axis, self.extra.axis_quantities()[axis], *value)?;
+    pub(super) fn rate_at_conditions(
+        &self,
+        chemical_conditions: &QueryPoint,
+        dissolved_oxygen: Amount,
+        pressure: Pressure,
+        saturation: Amount,
+        extra: &QueryPoint,
+    ) -> Result<(f64, QueryPoint)> {
+        let mut point = chemical_conditions.clone();
+        for (axis, value) in extra.axes() {
+            point = point.with_quantity(axis, extra.axis_quantities()[axis], *value)?;
         }
         point = point
             .with_quantity(
                 OXYGEN_PARTIAL_PRESSURE_AXIS,
                 QuantitySpec::dimensional(Pressure::DIMS),
-                self.pressure.value(),
+                pressure.value(),
             )?
             .with_quantity(
                 SATURATION_CONCENTRATION_AXIS,
                 QuantitySpec::dimensional(AmountConcentration::DIMS),
-                quotient(self.saturation, state.conditions.axes()[VOLUME_AXIS])?,
+                quotient(saturation.value(), chemical_conditions.axes()[VOLUME_AXIS])?,
             )?;
-        for (axis, &(minimum, maximum)) in self.transfer.source.validity.bounds() {
+        for (axis, &(minimum, maximum)) in self.source.validity.bounds() {
             let value = *point.axes().get(axis).ok_or(CyanidationError::Invalid(
                 "missing original transfer source condition",
             ))?;
             require(
                 point.axis_quantities().get(axis)
-                    == self.transfer.source.validity.axis_quantities().get(axis),
+                    == self.source.validity.axis_quantities().get(axis),
                 "transfer source condition has wrong quantity",
             )?;
             if value < minimum || value > maximum {
@@ -696,8 +724,8 @@ impl Boundary<'_> {
                 });
             }
         }
-        let difference = self.saturation - state.dissolved_oxygen.value();
-        let magnitude = product(self.transfer.coefficient.value(), difference.abs())?;
+        let difference = saturation.value() - dissolved_oxygen.value();
+        let magnitude = product(self.coefficient.value(), difference.abs())?;
         Ok((
             if difference < 0.0 {
                 -magnitude

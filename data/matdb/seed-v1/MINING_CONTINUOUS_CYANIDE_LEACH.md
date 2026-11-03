@@ -130,10 +130,92 @@ agreement with equivalent batch chemistry, reaction-plus-transport accounts,
 finite copper competition, feed/flow changes, source ownership and atomic
 refusal. These are implementation checks, not plant validation.
 
-Oxygen enters only through the initial liquid and feed. Gas exchange, carbon
+The base `CyanidationCstr` receives oxygen through the initial liquid and feed.
+The aeration extension below adds a separately declared gas boundary. Carbon
 adsorption/CIL, solids slip, liberation, competing-metal dissolution/redox,
 mineral precipitation, variable volume, thermal feedback and finite solvent
 H/O balance remain separate models. The single tank is not a fitted tank train
 or an RTD deconvolution result. Finite hydrated-lime preparation is available
 in [MINING_LIME_EQUILIBRIUM.md](MINING_LIME_EQUILIBRIUM.md); carrying that solid
 phase inside a flowing leach requires its own phase-transport balance.
+
+## Add prescribed-pressure oxygen exchange
+
+`flow::aeration::AeratedCyanidationCstr::from_tank(tank, transfer)` attaches
+the existing `cyanide_leach::aeration::OxygenTransfer` to this continuous tank.
+It preserves the original local kinetic card, charge, elapsed time and all
+previous liquid/reaction accounts, including an already advanced tank.
+The inner tank remains read-only through `tank()`.
+
+Advance with
+`advance(duration, flow, &feed, oxygen_partial_pressure, &transfer_conditions, numerics, cancelled)`.
+The maintained gas reservoir contributes to the dissolved-oxygen balance:
+
+```text
+dn_O2/dt = Q*C_O2,in - Q*n_O2/V + kLa*(n_sat - n_O2) - r_Au/4
+n_sat   = n_ref*K*p_O2/p_ref
+```
+
+The original NBS gas/liquid formation-Gibbs sources supply K. The original,
+independent transfer card supplies kLa and its applicability; local leach
+kinetics retain their own source. See
+[MINING_OXYGEN_TRANSFER.md](MINING_OXYGEN_TRANSFER.md) for the source/activity
+conventions and the transfer-law reference. The activity-reference amount
+remains distinct from physical liquid volume.
+
+Feed, flow and pressure can change between calls. A stopped liquid flow leaves
+gas exchange and reaction active. Setting pO2 to zero declares a zero-oxygen
+reservoir that can strip liquid oxygen; it does not disable gas contact.
+The reservoir has prescribed pressure, with no inferred finite gas supply or
+aerator-power calculation.
+
+`AeratedFlowAdvance.flow` retains the liquid/reaction report.
+`oxygen_in` and `oxygen_out` separately report gross gas exchange during the
+interval, with corresponding cumulative fields. These amounts are integrated
+independently of liquid inlet/outlet and Au consumption. All participate in
+the reported interval and cumulative oxygen/component balances; the original
+charge and liquid streams are never altered to absorb a gas imbalance.
+The result retains the original transfer source and final admitted
+`transfer_conditions`.
+
+Symmetric exact liquid transport and exact gas relaxation surround the
+existing reaction integration. Raw full/two-half differences control stocks,
+liquid exports, Au progress and both gross gas amounts without a smooth-order
+divisor at flux reversals. The L1 estimate and work limits use
+`FlowNumerics`; its relative scale includes the component and gas-exchange
+amounts. Choose explicit tolerances for the trace inventory of interest.
+Source checks and cancellation cover evaluated stages, and refused advances
+publish no partial history. The numerical estimate remains separate from
+source uncertainty, model error and a continuous-path validity enclosure.
+
+### Run the coupled actual-source example
+
+```bash
+continuous_oxygen_pack_dir=$(mktemp -d)
+for pack in hydrogen-cyanide-aqueous-nbs1989 hydrogen-ion-aqueous-nbs1989 cyanide-ion-aqueous-nbs1989 hydroxide-ion-aqueous-nbs1989 water-liquid-nbs1989-thermochemistry oxygen-gas-nbs1989-thermochemistry oxygen-aqueous-nbs1989-thermochemistry; do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
+    --out "$continuous_oxygen_pack_dir/$pack.fsmatpk"
+done
+
+cargo run -p fs-material --example continuous_aerated_gold_leach -- \
+  --materials "$continuous_oxygen_pack_dir"
+
+cargo test -p fs-material cyanide_leach::flow::aeration::tests
+```
+
+The example starts with zero initial and feed dissolved oxygen; explicit gas
+uptake supports gold dissolution. It then changes throughput and gas pressure,
+stops liquid flow while stripping oxygen, and restarts with changed cyanide
+feed. Its local k=0.005 m6/(mol2 s), kLa=0.02/s, source validity boxes and
+operating schedule are authored numerical inputs, not measured calibration.
+It prints the seven original pack receipts, liquid/gas oxygen accounts,
+dissolved-gold inventory and export, pH/free CN and material-balance residuals.
+
+Tests compare nonreacting flow/gas behavior with an independently solved
+unsplit ODE, including uptake-to-stripping reversal within one interval.
+They also check zero-transfer and zero-flow limits, gas-enabled reaction,
+finite copper competition, preattachment history, changed schedules and
+atomic source/input/work/cancellation refusal. The extension retains the
+fixed-temperature, single-tank scope and does not add carbon adsorption,
+finite-headspace dynamics, phase precipitation or a tank-train model.

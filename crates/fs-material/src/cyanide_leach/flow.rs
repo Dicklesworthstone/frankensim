@@ -30,6 +30,9 @@ use fs_qty::VolumetricFlowRate;
 use fs_thermochem::stoichiometry::thermodynamics::acid_base::complexation::IdealLigandSystem;
 use std::collections::BTreeMap;
 
+/// Continuous leaching with a source-declared maintained oxygen reservoir.
+pub mod aeration;
+
 /// Independent local authority, distinct from the original batch-age law.
 pub const LOCAL_CYANIDATION_LAW: &str = "local-speciated-gold-cyanidation";
 const FORBIDDEN_AXES: [&str; 5] = [
@@ -885,6 +888,16 @@ impl Problem<'_> {
         time: f64,
         work: &mut Work<'_, impl FnMut() -> bool>,
     ) -> Result<()> {
+        self.transport_admitted(state, h, time, work, &mut |_| Ok(()))
+    }
+    fn transport_admitted(
+        &self,
+        state: &mut Trial,
+        h: f64,
+        time: f64,
+        work: &mut Work<'_, impl FnMut() -> bool>,
+        admit: &mut impl FnMut(&CyanidationFlowState) -> Result<()>,
+    ) -> Result<()> {
         if self.flow.value() == 0.0 || h == 0.0 {
             return Ok(());
         }
@@ -927,7 +940,7 @@ impl Problem<'_> {
             state.raw[i] = after;
             state.outlet[i] = add(state.outlet[i], exported)?;
         }
-        evaluate(self.layout, &state.raw, time, work)?;
+        admit(&evaluate(self.layout, &state.raw, time, work)?)?;
         Ok(())
     }
     fn reacted(&self, initial: &[f64], gold: f64) -> Result<Vec<f64>> {
@@ -956,14 +969,22 @@ impl Problem<'_> {
         end: f64,
         work: &mut Work<'_, impl FnMut() -> bool>,
     ) -> Result<()> {
+        self.reaction_admitted(state, start, end, work, &mut |_| Ok(()))
+    }
+    fn reaction_admitted(
+        &self,
+        state: &mut Trial,
+        start: f64,
+        end: f64,
+        work: &mut Work<'_, impl FnMut() -> bool>,
+        admit: &mut impl FnMut(&CyanidationFlowState) -> Result<()>,
+    ) -> Result<()> {
         let h = end - start;
         let middle = start.midpoint(end);
-        let rate = |gold: f64, time: f64, work: &mut Work<'_, _>| -> Result<f64> {
-            Ok(
-                evaluate(self.layout, &self.reacted(&state.raw, gold)?, time, work)?
-                    .rate
-                    .value(),
-            )
+        let mut rate = |gold: f64, time: f64, work: &mut Work<'_, _>| -> Result<f64> {
+            let solution = evaluate(self.layout, &self.reacted(&state.raw, gold)?, time, work)?;
+            admit(&solution)?;
+            Ok(solution.rate.value())
         };
         let a = rate(0.0, start, work)?;
         let b = rate(product(product(h, 0.5)?, a)?, middle, work)?;
@@ -978,7 +999,7 @@ impl Problem<'_> {
         .into_iter())?;
         let gold = product(h, average)?;
         state.raw = self.reacted(&state.raw, gold)?;
-        evaluate(self.layout, &state.raw, end, work)?;
+        admit(&evaluate(self.layout, &state.raw, end, work)?)?;
         state.gold = add(state.gold, gold)?;
         Ok(())
     }

@@ -1,5 +1,49 @@
 # fs-material — CONTRACT
 
+## Continuous gold leaching with oxygen uptake and stripping
+
+`cyanide_leach::flow::aeration::AeratedCyanidationCstr` attaches the original
+prescribed-pressure `OxygenTransfer` to an admitted `CyanidationCstr`, including
+a tank already advanced without gas. The original charge, stream inventories,
+local kinetic card, aqueous chemistry, finite competing-metal chemistry,
+elapsed clock and prior liquid/reaction accounts remain intact.
+
+For fixed temperature, solution volume and activity basis, dissolved molecular
+oxygen follows `dn/dt = Q*C_in - Q*n/V + kLa*(n_sat-n) - r_Au/4`.
+The retained gas/liquid Gibbs sources determine
+`n_sat = n_ref*K*p_O2/p_ref`; the independent original transfer card supplies
+kLa and its validity. Feed, flow and prescribed oxygen partial pressure may
+change between advances. Stopping liquid flow permits gas exchange and
+dissolution to continue. Neither solubility nor transfer data calibrate the
+separate local gold-dissolution coefficient.
+
+The shared transfer-source evaluator checks actual DO, pO2, saturation,
+temperature, volume, absolute process clock and additional declared conditions
+at evaluated liquid, gas and reaction stages. It cannot overwrite owned
+chemical coordinates or turn the local leach card into a batch-age law.
+Original source owners, receipts and final admitted conditions remain
+accessible. The inner tank is exposed read-only so external advancement cannot
+silently bypass its gas accounts.
+
+Symmetric exact positive liquid transport and gas relaxation surround the
+existing RK4 reaction step. Gross gas uptake and stripping are accumulated
+independently of liquid inlet/outlet and Au consumption. Raw full/two-half
+differences control an L1 amount estimate over stocks, exports, Au progress and
+both gas totals; no smooth-order divisor is assumed at flux reversals.
+The relative allowance scales with all admitted amounts and a gas-exchange
+scale, so trace-O2 accuracy requires appropriate explicit tolerances.
+These estimates exclude source uncertainty, equilibrium tolerance and model
+error; evaluated-stage validity is not a continuous-path enclosure.
+
+Interval and cumulative component/O2 balances include both explicit gas
+accounts without modifying the original charge or liquid streams. All checks
+and the final cancellation checkpoint must pass before publishing an advance.
+No clipping, balance repair, inferred gas-supply capacity, aerator power,
+finite headspace, temperature feedback, carbon adsorption or tank-train claim
+is made. Focused cases include the independent unsplit flow/gas solution with
+a within-interval flux reversal, the zero-transfer/zero-flow limits, gas-enabled
+reaction from zero liquid oxygen, finite copper competition and atomic refusal.
+
 ## Continuous speciated gold leaching
 
 `cyanide_leach::flow::CyanidationCstr` advances one full, fixed-volume,
