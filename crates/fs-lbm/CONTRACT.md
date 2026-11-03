@@ -10055,3 +10055,52 @@ Implicit midpoint remains passive but is not L-stable: unresolved stiff
 films may reverse relative velocity during a tick, so physical relaxation
 still needs time resolution. Existing model cutoffs, positive-gap
 admission, 64-plane limit, no contact and no film-heat destination remain.
+
+## Native curved D3Q19 wall geometry and momentum
+
+`CurvedWall3` binds canonically ordered original wall links to their actual
+fluid-side fractions and caches the opposite fluid donor for fractions below
+one half. `from_level_set` checks all native occupancy signs and brackets every
+voxel-wall intersection with explicit root tolerance/iteration limits. The
+callback's continuity and single crossing on each link remain caller geometry
+obligations; no SDF/topology certificate is inferred. An unresolved short-link
+gap, stale donor, mismatched mask or exhausted root budget refuses.
+
+`BoundaryGrid3::step_with_curved_walls` uses the original four collision laws,
+Guo source frame and pull table, then applies linear Bouzidi-Firdaouss-Lallemand
+interpolation only at selected links. Surface velocity is sampled once per
+link at its actual intersection. Exactly-halfway geometry retains the original
+population and wall-exchange arithmetic. Sparse geometry/cursors and reusable
+post/next fields avoid a dense distance/velocity field or fresh per-step
+population allocation after warmup.
+
+The SAME incoming population is used for both streaming and the shared wall
+momentum convention. Actual population impulse, boundary-relative impulse and
+velocity-times-mass correction remain separate; torque uses the off-lattice
+intersection, and work uses that same wall velocity. Unselected walls, held
+fluid forcing and native periodic angular transport are separately counted.
+Interpolation mass drift is measured, never renormalized into a false swept
+volume. Every candidate population and load passes finite-state/cancellation
+checks before one final swap. Late refusal publishes neither fluid nor loads.
+
+This is fixed-occupancy curved geometry with prescribed surface kinematics,
+including tangential rotation of invariant spheres/cylinders. It neither
+advances a solid pose nor remaps newly covered/uncovered fluid. Existing
+moving-body owners remain authoritative for evolving immersed geometry.
+Regularized reservoir faces refuse in this entrypoint. There is no general
+GCL, full-solver Galilean-invariance, calibrated body-drag, complete fluid-energy
+or global second-order convergence claim.
+
+Six native regressions pass, covering original halfway bit compatibility and
+global momentum accounts for BGK/TRT/central-moment/reduced-cumulant collision,
+both interpolation branches, actual generated sphere torque/work, periodic
+transport, malformed/missing donors and late cancellation. Fractional planar
+Couette recovers its physical-wall linear profile within 2e-10. Resolved
+cylindrical Couette relative velocity errors are 0.01472427871037479 on 24x24x4
+and 0.007795637138649035 on 48x48x4, under respective 2%/1% budgets; this measured
+pair does not establish asymptotic order. A 2.3-cell inner radius is outside
+that accuracy envelope (about 12.4% error). The ten existing native finite
+wall-rotor regressions also pass after sharing the incoming-population momentum
+helper. These are direct original numerical-owner checks with only unused
+runtime/pool and unrelated module wrappers omitted; full workspace Cargo,
+DSR, cross-ISA and performance gates were not executed.

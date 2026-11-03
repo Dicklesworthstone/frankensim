@@ -356,7 +356,10 @@ impl BoundaryGrid3 {
     /// Each crossed face contributes only its own coordinate jump. The free
     /// displacement c_q has zero cross product with its momentum, so this also
     /// handles diagonal double wraps without choosing an arbitrary seam owner.
-    fn periodic_momentum_transport(&self, gate: &CancelGate) -> Result<PeriodicMomentumTransport3> {
+    pub(super) fn periodic_momentum_transport(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<PeriodicMomentumTransport3> {
         let dims = self.dimensions();
         let mut report = PeriodicMomentumTransport3::default();
         for face in Face3::ALL {

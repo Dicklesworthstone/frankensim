@@ -26,6 +26,8 @@ mod profile;
 pub use profile::{BoundaryProfileError3, InletFlux3, VelocityProfileReport3};
 mod forcing;
 pub use forcing::{BoundaryForcingError3, RigidFrame3};
+mod curved;
+pub use curved::{CurvedWall3, CurvedWallLink3, CurvedWallStep3};
 mod rotor;
 pub use rotor::{
     WallRotor3, WallRotorError3, WallRotorExchange3, WallRotorResponse3, WallRotorsExchange3,
@@ -402,7 +404,8 @@ pub struct BoundaryLink3 {
 /// terms close `wall_impulse + fluid_population_impulse =
 /// wall_velocity_mass_impulse`; the same identity holds for angular impulse.
 /// Thus moving mass is not mistaken for an equal-and-opposite contact force.
-/// Torque uses the halfway intersection measured from the requested origin;
+/// Torque uses the actual intersection (halfway for ordinary native walls),
+/// measured from the requested origin;
 /// cell centers have coordinates `[x+0.5, y+0.5, z+0.5]`, as in voxelization.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[must_use]
@@ -436,9 +439,24 @@ impl WallMomentumExchange3 {
         velocity: [f64; 3],
         origin: [f64; 3],
     ) {
+        let incoming = wall_population(outgoing, rho, link.direction, velocity);
+        self.add_population_link(link, outgoing, incoming, velocity, 0.5, origin);
+    }
+
+    // Both ordinary and interpolated streaming pass their actual incoming
+    // population through this one relative/population momentum convention.
+    #[allow(clippy::too_many_arguments)]
+    fn add_population_link(
+        &mut self,
+        link: BoundaryLink3,
+        outgoing: f64,
+        incoming: f64,
+        velocity: [f64; 3],
+        fraction: f64,
+        origin: [f64; 3],
+    ) {
         let q = link.direction;
         let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
-        let incoming = wall_population(outgoing, rho, q, velocity);
         let mass_change = incoming - outgoing;
         let fluid = e.map(|component| component * (outgoing + incoming));
         let moving_mass = velocity.map(|component| component * mass_change);
@@ -446,7 +464,7 @@ impl WallMomentumExchange3 {
             (-e[axis] - velocity[axis]) * outgoing - (e[axis] - velocity[axis]) * incoming
         });
         let offset = core::array::from_fn::<_, 3, _>(|axis| {
-            link.cell[axis] as f64 + 0.5 - 0.5 * e[axis] - origin[axis]
+            link.cell[axis] as f64 + 0.5 - fraction * e[axis] - origin[axis]
         });
         for axis in 0..3 {
             let b = (axis + 1) % 3;
@@ -1920,8 +1938,18 @@ impl BoundaryGrid3 {
     }
 
     fn try_collide(&mut self) -> Result<(), BoundaryStepError3> {
+        self.try_collide_with_gate(None)
+    }
+
+    fn try_collide_with_gate(
+        &mut self,
+        gate: Option<&CancelGate>,
+    ) -> Result<(), BoundaryStepError3> {
         let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
+            if gate.is_some_and(CancelGate::is_requested) {
+                return Err(BoundaryStepError3::Cancelled);
+            }
             for lane in 0..TILE_CELLS {
                 if self.solid[tile] & (1u64 << lane) != 0 {
                     continue;

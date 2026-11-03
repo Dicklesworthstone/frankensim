@@ -34,6 +34,7 @@ pub use boundary::{
     BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3,
     BoundaryLink3, BoundaryProfileError3, BoundarySgsError3, BoundarySgsReport3, BoundarySpec3,
     BoundaryStepError3, CarrierFaceExchange3, CarrierLubricationExchange3, CarrierLubricationFace3,
+    CurvedWall3, CurvedWallLink3, CurvedWallStep3,
     D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, DryBodiesExchange3, DryBodyCouplingConfig3,
     DryBodyExchange3, DryLubricatedCarriersExchange3, DryLubricatedPlanesExchange3,
     DryLubricatedSurfacesExchange3, Face3, FaceBoundary3, FiniteLubricationPlane3, FiniteMassWall3,
