@@ -1,5 +1,30 @@
 # CONTRACT: fs-couple
 
+## Whole-material quadratic volume admission
+
+`inelastic_impact::surface::quadratic::volume` binds a prepared volume check to
+the original immutable TET10 surface owner and its complete element incidence.
+Preparation admits every complete reference map once. Subsequent affine path
+queries retain every original node and check every element through the original
+`fs-query` quadratic-volume owner, with one cell-work allowance shared across
+the mesh and bounded per-element frontier storage. Preparation clones neither
+coordinates nor material histories.
+
+A positive result covers closed material domains, including edges and vertices;
+positive corner geometry, face samples or quadrature samples are insufficient.
+An unresolved result retains the earliest uncertified interval, canonical
+element ID, material-coordinate bounds and scaled determinant bounds. Those
+determinants use each element's own normalization and are not physical cubic
+metres. Cancellation, invalid complete coordinate images, exhausted work and
+unresolved reference geometry cannot return admission. Local orientation alone
+does not establish global absence of material self-intersection.
+
+Focused native regression source covers a hidden internal fold with unchanged
+corners, a reference fold missed by the existing sampled checks, and a
+two-element isochoric curved path with shared work limits. Source/format and
+independent analytic checks passed. Native compilation and execution remain
+unverified under the current workspace resource blocker.
+
 ## Material carriers shared by moving film patches
 
 `MaterialFilmCarrierSi` binds each physical registry body to its original

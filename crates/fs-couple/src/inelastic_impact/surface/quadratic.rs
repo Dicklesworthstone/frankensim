@@ -38,6 +38,9 @@ pub mod mechanical;
 /// Whole-path bounds for explicitly declared affine nodal and sphere motion.
 pub mod path;
 
+/// Whole-element regularity of the original quadratic material maps.
+pub mod volume;
+
 /// Bounded geometry controls; all distances are in metres.
 #[derive(Clone, Copy, Debug)]
 pub struct QuadraticSolidSurfaceControls {

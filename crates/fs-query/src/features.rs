@@ -19,6 +19,9 @@
 use crate::{ContactInflation, QueryError};
 use fs_exec::Cx;
 
+/// Complete material-domain tetrahedron queries.
+pub mod tetrahedra;
+
 /// Cached triangle topology and current-coordinate distance queries.
 pub mod triangles;
 

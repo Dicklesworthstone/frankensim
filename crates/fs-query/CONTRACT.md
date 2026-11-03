@@ -1,5 +1,33 @@
 # fs-query — CONTRACT
 
+## Complete quadratic volume orientation along declared motion
+
+`tetrahedron::quadratic::quadratic_tetrahedron_orientation` admits a TET10
+material map only when its Jacobian stays strictly positive over the complete
+closed material simplex and every fraction of the declared affine ten-node
+path. It retains the native 01,12,02,03,13,23 midside order. Endpoint-relative
+coordinates remove common translation; a reported power-of-two length
+normalizes the determinant without forming a potentially overflowing cube.
+
+Directed Jacobian-entry hulls provide the fast admission path. When their
+independent ranges lose necessary correlations, the original determinant is
+bounded in cubic simplex × cubic time Bernstein form. Multinomial and binomial
+weights use directed division by exact integers. A bounded earliest-first
+frontier refines material cells and time windows. Point counterexamples may
+refuse admission but never certify a domain. `Unresolved` retains the earliest
+uncertified interval, material-coordinate bounds and determinant bounds; it is
+not an asserted fold time. Work, frontier storage, cancellation, numerical range
+and parameter-resolution failures remain explicit refusals.
+
+The result proves local orientation of the authored coordinate path. It does
+not prove global injectivity, absence of overlap between separate material
+regions, or the underlying continuum trajectory. Native regression source
+covers hidden fixed-corner folds, endpoint-positive intermediate collapse,
+curved isochoric shear, correlation-sensitive Bernstein admission, translation,
+scale and bounded refusal. Pinned parser/format checks and independent
+exact-rational determinant/Jacobian identities passed; native compilation and
+execution remain unverified under the workspace resource blocker.
+
 ## Curved quadratic boundary distance and declared motion
 
 `triangle::quadratic` queries the complete six-node Lagrange triangle, including
