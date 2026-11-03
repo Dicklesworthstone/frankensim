@@ -8,6 +8,8 @@
 pub mod boussinesq;
 /// Source-resolved shear-dependent viscosity on the same thermal/flow path.
 pub mod rheology;
+/// Local and dynamic channel SGS with the original material query epochs.
+pub mod sgs3;
 
 use super::{HeatBalance, HeatSourceLimits, MaterialSlab, ThermalLbm, ThermalLbm3, ThermalSourceError};
 use crate::material::{MaterialLbmError, plan_scaling_from_material};
@@ -71,6 +73,8 @@ pub enum MaterialTransportError {
     },
     /// Existing source, physical-unit or heat-balance admission failed.
     Thermal(ThermalSourceError),
+    /// Original subgrid transport, ratio or Mach admission failed.
+    Subgrid(crate::thermal::sources::sgs3::ThermalSgsError),
     /// Cancellation observed before publication.
     Cancelled,
 }
@@ -82,6 +86,7 @@ impl core::fmt::Display for MaterialTransportError {
             Self::RheologyConvergence { cell, iterations, relaxation_defect } => write!(f,
                 "material rheology at cell {cell} did not converge in {iterations} iterations (relaxation defect {relaxation_defect})"),
             Self::Thermal(e) => write!(f, "material transport: {e}"),
+            Self::Subgrid(e) => write!(f, "material transport: {e}"),
             Self::Cancelled => write!(f, "material transport cancelled"),
         }
     }
@@ -89,6 +94,14 @@ impl core::fmt::Display for MaterialTransportError {
 impl std::error::Error for MaterialTransportError {}
 impl From<ThermalSourceError> for MaterialTransportError {
     fn from(e: ThermalSourceError) -> Self { Self::Thermal(e) }
+}
+impl From<crate::thermal::sources::sgs3::ThermalSgsError> for MaterialTransportError {
+    fn from(error: crate::thermal::sources::sgs3::ThermalSgsError) -> Self {
+        match error {
+            crate::thermal::sources::sgs3::ThermalSgsError::Cancelled => Self::Cancelled,
+            error => Self::Subgrid(error),
+        }
+    }
 }
 fn poll(gate: &CancelGate) -> Result<(), MaterialTransportError> {
     if gate.is_requested() { Err(MaterialTransportError::Cancelled) } else { Ok(()) }
@@ -366,6 +379,27 @@ fn candidate_with_prepared_input<S: Slab<D, Q>, F, const D: usize, const Q: usiz
     slab: &MaterialSlab<S>, input: super::Inputs<D>, applied: &[TransportSample<F>],
     gate: &CancelGate, prepare: impl FnOnce(&mut S),
 ) -> Result<(S, HeatBalance), MaterialTransportError> {
+    candidate_with_transport::<S, F, D, Q>(
+        slab, input, applied, gate, prepare,
+        |trial, input, molecular| {
+            source_step_transport_mapped::<S, D, Q, _>(
+                trial, &input.heat, &input.force, input.limits, Some(molecular),
+                |_, raw| input.balance(raw),
+            ).map_err(MaterialTransportError::from)
+        },
+    )
+}
+
+// Molecular sampling, rate construction and the complete tentative state stay
+// with one owner. A closure may augment these fresh molecular rates through the
+// same source/heat transaction; it cannot publish before material admission.
+fn candidate_with_transport<S: Slab<D, Q>, F, const D: usize, const Q: usize>(
+    slab: &MaterialSlab<S>, input: super::Inputs<D>, applied: &[TransportSample<F>],
+    gate: &CancelGate, prepare: impl FnOnce(&mut S),
+    step: impl FnOnce(
+        &mut S, &super::Inputs<D>, RelaxationField<'_>,
+    ) -> Result<HeatBalance, MaterialTransportError>,
+) -> Result<(S, HeatBalance), MaterialTransportError> {
     let (cells, plane) = slab.lattice.layout()?;
     if applied.len() != cells - 2 * plane
         || applied.iter().enumerate().any(|(i, s)| s.cell != plane + i)
@@ -387,10 +421,9 @@ fn candidate_with_prepared_input<S: Slab<D, Q>, F, const D: usize, const Q: usiz
     // tentative grids coexist; max_cells is a cell budget, not a byte budget.
     let (mut trial, _) = slab.lattice.snapshot();
     prepare(&mut trial);
-    let heat = source_step_transport_mapped::<S, D, Q, _>(
-        &mut trial, &input.heat, &input.force, input.limits,
-        Some(RelaxationField { momentum: &momentum, thermal: &thermal }),
-        |_, raw| input.balance(raw),
+    let heat = step(
+        &mut trial, &input,
+        RelaxationField { momentum: &momentum, thermal: &thermal },
     )?;
     Ok((trial, heat))
 }

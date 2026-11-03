@@ -238,6 +238,26 @@ pub(in crate::material::forcing) fn candidate_with_buoyancy<
     applied: &[super::TransportSample<F>], config: BoussinesqConfig<D>,
     gate: &CancelGate, density: impl Fn(&F) -> f64,
 ) -> Result<(S, super::HeatBalance), MaterialTransportError> {
+    project_force::<S, F, D, Q>(
+        slab, &mut input, forces, applied, config, gate, density,
+    )?;
+    // Replace, rather than superpose, the legacy beta*(T-Tref) contribution.
+    let (mut trial, heat) = candidate_with_prepared_input::<S, F, D, Q>(
+        slab, input, applied, gate, |candidate| candidate.set_coefficient(0.0),
+    )?;
+    trial.set_coefficient(slab.lattice.coefficient());
+    Ok((trial, heat))
+}
+
+// Material, electrical and SGS candidates share the original force projection.
+// The accepted force history is untouched until the numerical step consumes
+// this new load. Density comes from an already admitted source sample.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn project_force<S: Slab<D, Q>, F, const D: usize, const Q: usize>(
+    slab: &MaterialSlab<S>, input: &mut super::super::Inputs<D>, forces: &[[f64; D]],
+    applied: &[super::TransportSample<F>], config: BoussinesqConfig<D>,
+    gate: &CancelGate, density: impl Fn(&F) -> f64,
+) -> Result<(), MaterialTransportError> {
     let units = slab.force_units;
     for value in applied {
         poll(gate)?;
@@ -250,12 +270,7 @@ pub(in crate::material::forcing) fn candidate_with_buoyancy<
                 })?;
         }
     }
-    // Replace, rather than superpose, the legacy beta*(T-Tref) contribution.
-    let (mut trial, heat) = candidate_with_prepared_input::<S, F, D, Q>(
-        slab, input, applied, gate, |candidate| candidate.set_coefficient(0.0),
-    )?;
-    trial.set_coefficient(slab.lattice.coefficient());
-    Ok((trial, heat))
+    Ok(())
 }
 
 impl MaterialSlab<ThermalLbm> {

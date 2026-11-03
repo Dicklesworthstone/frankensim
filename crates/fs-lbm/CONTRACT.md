@@ -2828,6 +2828,39 @@ equivalence, budgets, cancellation/retry, endpoint refusal and both SI thermal
 orientations. This remains exploratory, resolved-wall Boussinesq transport;
 it supplies no total-energy or developed turbulent-channel/DNS qualification.
 
+### Source-resolved molecular transport with thermal SGS
+
+`MaterialSlab<ThermalLbm3>` now composes source-resolved transport with both
+local SGS and independently fitted channel momentum/heat. The
+`step_with_material_transport_and_sgs` and
+`step_with_material_transport_and_channel_sgs` methods use one original
+material query per fluid cell at the accepted temperature and one at the
+candidate endpoint. Their concrete source records, SI heat balance and SGS
+report return together as `MaterialSgsTransportStep`.
+
+Fresh `mu/rho0` and `k/(rho0*Cp0)` rates enter the existing SGS preparation
+and provide its molecular-ratio bounds. Augmented rates are step-local and
+never replace retained material properties or accumulate across steps. The
+accepted Guo force frame supplies the incoming velocity. Original stationary
+wall transport, source splitting, independently measured wall heat, endpoint
+Mach admission and final material publication retain their existing owners.
+
+The corresponding `step_with_boussinesq_material_transport_and_sgs` and
+`step_with_boussinesq_material_transport_and_channel_sgs` methods also use
+that same sample's density in `(rho_source(T)-rho0)*gravity`. This replaces
+the legacy beta contribution on the tentative step. Both material epochs
+must satisfy the authored density/Cp departure bounds; reference inertia and
+sensible storage stay fixed. Refusal or cancellation publishes no partial
+state. Endpoint sampling checks source support, not implicit convergence.
+The coefficients remain explicit, and no modeled dissipation heat or
+total-energy qualification is introduced.
+
+Five focused regressions are included for native-step equivalence, evolving
+molecular transport, independent channel heat, shared source/force ownership,
+ratio bounds and endpoint/cancellation rollback. These additions were
+source-reviewed; their native build and execution were unavailable during
+implementation.
+
 ### No-claim boundaries (3-D coupled ports)
 
 - Single-threaded correctness-first reference rung: no SIMD/tile/parallel
