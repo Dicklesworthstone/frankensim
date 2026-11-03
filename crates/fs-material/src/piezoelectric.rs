@@ -27,6 +27,8 @@ use crate::state_point::{
 
 /// Reversible caloric response of the original coupled compliance block.
 pub mod thermal;
+/// Source-bound three-dimensional stress-charge tensors and frame transforms.
+pub mod tensor;
 
 /// Axial `s33^E` [1/Pa], with other stresses zero and electric field fixed.
 pub const COMPLIANCE_33_E_PROPERTY: &str = "piezoelectric_compliance_33_at_constant_field";

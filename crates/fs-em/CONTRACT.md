@@ -2989,3 +2989,33 @@ typechecked against the complete EM dependency graph here. An independent
 normal-incidence film reference confirms the latter fixture's 19.7507815275 W
 absorption and Simpson errors 2.89e-3, 1.02e-5 and 6.34e-7 W for 8,32,64
 intervals; this separate reference is not execution of the Rust film owner.
+
+## Tetrahedral dielectric and polarization weak forms
+
+`electrostatic::tetrahedral::TetDielectricOperator` prepares the full P1
+dielectric matrix on the original `TetComplex`: `K = d0^T M_epsilon d0`.
+It uses checked Whitney geometry, the native weighted-Hodge interval SPD
+admission and native deterministic sparse products. Every cell has an explicit
+absolute symmetric permittivity tensor in the mesh frame. These numerical
+inputs do not themselves establish measured-material authority; a coupled
+material owner retains its source, frame transform and applicability domain.
+
+The same cell gradients and positive reference volumes compute polarization
+load `b_P = sum V grad(N).P`, electric field `E = -grad(phi)` and displacement
+`D = epsilon E + P`. The nodal equation is `K phi = q_free + b_P`, and the
+free-charge reaction is `K phi - b_P`. Voltage differences are formed before
+field multiplication, preserving constant-potential gauge invariance.
+Coefficients and reconstructed fields remain separate across material jumps.
+Preparation is reused across load cases; field/load evaluations take linear
+work and retain no evolving state.
+
+Node/cell and geometric-quality bounds are admitted before assembly. Invalid
+connectivity, isolated nodes, degenerate cells, nonfinite arithmetic and
+unproved SPD weights refuse. Cancellation polls surround native batched
+geometry/sparse products and occur during cell admission, weighted assembly
+and field recovery; no interruption inside those native batch calls is claimed.
+No partial operator or response is returned on refusal. Electrode conditions,
+mechanical coupling, convergence, source authority and actual field solving
+belong to consumers. This primitive adds no conduction, nonlinear dielectric,
+dispersion, moving geometry, mesh-overlap certification or continuum error bound.
+Focused synthetic G1/G3 tests are in `tests/tetrahedral_electrostatic.rs`.

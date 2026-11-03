@@ -4740,6 +4740,49 @@ derivatives, open/short stiffness, signed/zero coupling, SI-sized synthetic
 coefficients, and whole-block/source-domain refusal. Actual coupled motion,
 charge and native circuit composition belong to `fs-couple::piezoelectric`.
 
+### Full reciprocal piezoelectric tensors
+
+`piezoelectric::tensor::TensorPiezoelectric` resolves a complete stress-charge
+law from one original material card/query: all 36 `C^E` components [Pa], 18
+signed `e` components [C/m²], 9 absolute `epsilon^S` components [F/m], and
+density. Source names declare Mandel order `[xx,yy,zz,sqrt(2)xy,sqrt(2)yz,
+sqrt(2)zx]`; the explicit nonzero source frame is shared by all three blocks.
+Zero coefficients and symmetry mates must be supplied. Engineering-Voigt `e`,
+strain-charge `d`, stress-free permittivity and scalar longitudinal properties
+are not interchangeable with these roles. Every selected source receipt and
+fixed external condition is retained; dynamic-coordinate support cannot be
+silently frozen.
+
+The complementary `resolve_strain_charge` ingress retains all 64 original
+datasheet-form `s^E`, `d`, absolute `epsilon^T` and density roles. Names remain
+explicitly Mandel: engineering `d` shear columns divide by sqrt(2), and each
+compliance shear index divides by sqrt(2). Native scaled solves derive
+`C=(s^E)^-1`, `e=d C` and `epsilon^S=epsilon^T-d C d^T` once. The complete Schur
+complement must remain SPD; positive separate `s^E` and `epsilon^T` do not
+suffice. Original compliance, coupling, permittivity and source receipts remain
+unchanged in the retained bundle. Focused synthetic tests reconstruct both
+original strain-charge equations, compare the common energy, and reject an
+unstable Schur complement with individually positive source blocks.
+
+Native, diagonally scaled Cholesky admission checks symmetric positive
+definiteness of `C^E` and `epsilon^S` once. The complete storage is
+`W(S,D)=S.C^E.S/2+(D-eS).(epsilon^S)^-1.(D-eS)/2`; its gradients provide stress
+and electric field. Field-controlled evaluation returns the same storage at
+`D=eS+epsilon^S E`, not electric enthalpy. Local fixed-D stiffness
+`C^D=C^E+e^T(epsilon^S)^-1 e` is prepared once. Responses allocate no heap
+storage or matrix inverses. Proper frame transformations rotate stiffness,
+coupling and permittivity with their respective tensor ranks; source identity
+survives and the mapped law identity includes the transformation and values.
+
+G0/G1/G3 synthetic tests in `tests/piezoelectric_tensor.rs` check independent
+stress-charge equations, charge-energy derivatives, open/short and signed
+coupling limits, simultaneous specimen/tensor rotation, source completeness,
+units, support and unstable-block/reflection refusal. The constitutive work is
+bounded by fixed 6/3-dimensional operations. No field solve, boundary-specific
+open-circuit condition, strain/field amplitude envelope, nonlinearity,
+hysteresis, damping, thermal update or experimental validation is claimed by
+this fixed-condition material owner; physical consumers own those operations.
+
 ## Explicit liquid source admission for evolving shear rate
 
 `ResolvedLiquidSurfaceState::try_for_shear_rate_evolution` retains the original

@@ -17,6 +17,8 @@ pub mod network;
 pub mod relaxation;
 /// Reversible nonlinear dielectrics, mixed electrode controls and bias tangents.
 pub mod nonlinear;
+/// Three-dimensional dielectric weak forms and polarization loads on native P1 tetrahedra.
+pub mod tetrahedral;
 
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
