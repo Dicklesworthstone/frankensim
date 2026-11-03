@@ -4050,10 +4050,31 @@ constraint. It does not assign pressure a mass or silently project an
 incompatible velocity. All solve, input, budget, balance and cancellation
 refusals leave the accepted motion unchanged.
 
+`MixedViscoTetMotion::constrained_impulse_candidate` supplies the separate
+exact-incompressible path through the existing shared P2/P1 pressure-impulse
+owner. Each original accepted quadrature deformation supplies its endpoint
+cofactor; the shared native mass/pressure KKT solve retains the original
+supports, weak volume rows, physical scales and sparse budgets. Internal
+pressure impulse has independently gated zero resultant, torque and work.
+Its Pa s multipliers are reported separately and never overwrite physical
+pressure or any material history. The finite-compliance formulation returns
+the typed `FiniteCompliancePressureImpulse` refusal from this entry.
+
+The incoming velocity must already meet the caller's weak-volume-rate allowance.
+A velocity accepted through backward-Euler position chords is not automatically
+tangent-compatible; the event refuses a large pre-existing rate defect instead
+of concealing it through a dissipative projection. A pressure-impulse gauge is
+admitted only for a true connected constant null mode. Shared pressure and
+mass accounting gate the actual rounded successor before the same atomic
+complete-history transfer used by the finite-compliance entry.
+
 The focused `mixed_visco_dynamics/impulse.rs` regressions use independent
 rational P2 integrals and signed corner loads, deformed angular impulse,
 moving-support work, nonzero retained pressure and relaxed Maxwell histories,
 subsequent native motion, typed formulation refusal and transactional retry.
+The exact-mode extension checks an independently integrated pressure impulse
+on an already stretched, relaxed body, retained translation and Maxwell
+continuation, and incompatible velocity/gauge/factor-budget refusals.
 Native execution remains pending the existing dependency-build blocker; this
 addition is not a completed Cargo or DSR gate.
 

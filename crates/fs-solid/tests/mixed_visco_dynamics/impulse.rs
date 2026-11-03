@@ -444,3 +444,243 @@ fn exact_pressure_and_failed_impulses_preserve_the_complete_accepted_motion() {
         assert!(exact.solid().pressure_pa().iter().all(|p| *p == 0.0));
     });
 }
+
+fn constrained_controls() -> fs_solid::hyper3::mixed::visco::dynamics::MixedImpulseControls {
+    let mut balance = impulse_controls();
+    balance.solve.tolerance = 1e-11;
+    fs_solid::hyper3::mixed::visco::dynamics::MixedImpulseControls {
+        balance,
+        velocity_scale_m_s: 1.0,
+        pressure_impulse_scale_pa_s: 1.0,
+        work_scale_j: 1.0,
+        maximum_assembly_bytes: 2 * 1024 * 1024,
+        maximum_factor_bytes: 2 * 1024 * 1024,
+        maximum_relative_volume_rate_per_s: 1e-10,
+    }
+}
+
+#[test]
+fn exact_pressure_kick_retains_relaxed_stretched_memory_and_native_continuation() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(1e300, true); // The unused bulk penalty must remain unused.
+        let stretch: f64 = 1.02;
+        let held: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .flat_map(|(i, x)| {
+                (0..3).filter_map(move |c| {
+                    if c == 0 {
+                        Some((3 * i, (stretch - 1.0) * x[0]))
+                    } else {
+                        (x[c] == 0.0).then_some((3 * i + c, 0.0))
+                    }
+                })
+            })
+            .collect();
+        let mut accepted = solid(
+            &nodes,
+            &elements,
+            &material,
+            VolumetricTreatment::ExactIncompressible,
+            cx,
+        );
+        for dt in [0.0, HOLD] {
+            accepted = accepted
+                .advance(
+                    dt,
+                    &held,
+                    &[],
+                    [0.0; 3],
+                    None,
+                    settings(),
+                    controls().material,
+                    cx,
+                )
+                .unwrap()
+                .solid;
+        }
+        assert!(
+            accepted
+                .quadrature_states()
+                .iter()
+                .all(|s| s.dissipated > 0.0)
+        );
+        assert!(accepted.pressure_pa().iter().any(|p| p.abs() > 0.01));
+        let old_v = [0.02, 0.01, -0.01];
+        let delta = [0.03, -0.02, 0.01];
+        let motion = MixedViscoTetMotion::try_new(
+            accepted,
+            &[DENSITY],
+            &vec![old_v; nodes.len()],
+            MASS_BYTES,
+            cx,
+        )
+        .unwrap();
+        let gradients = [
+            [-1.0, -1.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let cofactor = [1.0 / stretch, stretch.sqrt(), stretch.sqrt()];
+        let pressure_impulse = 0.7;
+        let mut applied = Vec::new();
+        for (a, &node) in elements[0].iter().enumerate() {
+            let row_mass = DENSITY * VOLUME * if a < 4 { -0.05 } else { 0.2 };
+            for c in 0..3 {
+                // Independent affine geometry: integral grad(N_corner)=0;
+                // integral grad(N_edge)=V*(grad(L_i)+grad(L_j)).
+                let volume = if a < 4 {
+                    0.0
+                } else {
+                    let [i, j] = TET10_EDGES[a - 4];
+                    VOLUME * cofactor[c] * (gradients[i][c] + gradients[j][c])
+                };
+                applied.push((
+                    3 * node + c,
+                    row_mass * delta[c] + pressure_impulse * volume,
+                ));
+            }
+        }
+        let event = motion
+            .constrained_impulse_candidate(
+                &[],
+                &applied,
+                None,
+                [0.0; 3],
+                constrained_controls(),
+                cx,
+            )
+            .unwrap();
+        retained(&motion, &event.motion);
+        assert_eq!(event.impulse.kkt_inertia.positive, 30);
+        assert_eq!(event.impulse.kkt_inertia.negative, 4);
+        for v in event.motion.velocity_mps() {
+            for c in 0..3 {
+                near(v[c], old_v[c] + delta[c], 2e-9);
+            }
+        }
+        for p in &event.impulse.pressure_impulses_pa_s {
+            near(*p, pressure_impulse, 2e-8);
+        }
+        for rate in event
+            .impulse
+            .volume_rate_before_m3_s
+            .iter()
+            .chain(&event.impulse.volume_rate_after_m3_s)
+        {
+            near(
+                *rate,
+                0.0,
+                constrained_controls().maximum_relative_volume_rate_per_s * VOLUME,
+            );
+        }
+        for c in 0..3 {
+            near(
+                event.impulse.external.linear_kg_m_s[c],
+                DENSITY * VOLUME * delta[c],
+                2e-11,
+            );
+            near(event.impulse.pressure.linear_kg_m_s[c], 0.0, 2e-11);
+            near(event.impulse.pressure.angular_kg_m2_s[c], 0.0, 2e-11);
+        }
+        let kinetic_change = 0.5
+            * DENSITY
+            * VOLUME
+            * (0..3)
+                .map(|c| (old_v[c] + delta[c]).powi(2) - old_v[c].powi(2))
+                .sum::<f64>();
+        near(event.impulse.external_work_j, kinetic_change, 2e-10);
+        near(event.impulse.pressure_work_j, 0.0, 1e-11);
+        near(
+            event.impulse.momentum.kinetic_change_j,
+            kinetic_change,
+            2e-10,
+        );
+
+        let dt = 0.01;
+        let next = event
+            .motion
+            .advance(dt, &[], &[], [0.0; 3], None, settings(), controls(), cx)
+            .unwrap();
+        for (before, after) in motion
+            .solid()
+            .quadrature_states()
+            .iter()
+            .zip(next.motion.solid().quadrature_states())
+        {
+            let original = material
+                .step_remainder_response(before, &after.deformation_gradient, dt)
+                .unwrap();
+            assert_eq!(*after, original.state);
+        }
+        near(next.motion.solid().time_s(), HOLD + dt, 1e-15);
+        work_identity(&next);
+    });
+}
+
+#[test]
+fn constrained_entry_refuses_wrong_material_incompatible_rates_gauges_and_budgets() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(10.0 * MU, true);
+        let motion = |treatment, velocity: &[[f64; 3]]| {
+            MixedViscoTetMotion::try_new(
+                solid(&nodes, &elements, &material, treatment, cx),
+                &[DENSITY],
+                velocity,
+                MASS_BYTES,
+                cx,
+            )
+            .unwrap()
+        };
+        let zero = vec![[0.0; 3]; nodes.len()];
+        let finite = motion(VolumetricTreatment::OriginalMaterial, &zero);
+        assert!(matches!(
+            finite.constrained_impulse_candidate(
+                &[],
+                &[],
+                None,
+                [0.0; 3],
+                constrained_controls(),
+                cx
+            ),
+            Err(MixedViscoTetError::FiniteCompliancePressureImpulse)
+        ));
+        let expansion: Vec<_> = nodes.iter().map(|x| x.map(|value| 0.02 * value)).collect();
+        let incompatible = motion(VolumetricTreatment::ExactIncompressible, &expansion);
+        let history = incompatible.solid().quadrature_states().to_vec();
+        assert!(
+            incompatible
+                .constrained_impulse_candidate(&[], &[], None, [0.0; 3], constrained_controls(), cx)
+                .is_err()
+        );
+        assert_eq!(incompatible.velocity_mps(), expansion);
+        assert_eq!(incompatible.solid().quadrature_states(), history);
+        let exact = motion(VolumetricTreatment::ExactIncompressible, &zero);
+        let applied = [(0, 0.001)];
+        assert!(
+            exact
+                .constrained_impulse_candidate(
+                    &[],
+                    &applied,
+                    Some(elements[0][0]),
+                    [0.0; 3],
+                    constrained_controls(),
+                    cx
+                )
+                .is_err()
+        );
+        let mut limited = constrained_controls();
+        limited.maximum_factor_bytes = 1;
+        assert!(
+            exact
+                .constrained_impulse_candidate(&[], &applied, None, [0.0; 3], limited, cx)
+                .is_err()
+        );
+        assert_eq!(exact.velocity_mps(), zero);
+        assert_eq!(exact.solid().time_s(), 0.0);
+        assert!(exact.solid().pressure_pa().iter().all(|p| *p == 0.0));
+    });
+}

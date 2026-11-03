@@ -7,6 +7,8 @@
 //! endpoint-work defect and numerical kinetic loss remain separate.
 //! Finite-compliance motion also admits instantaneous nodal impulses through
 //! this same consistent mass, retaining pressure and every material history.
+//! Exact incompressibility has a separate pressure-constrained impulse entry
+//! using the original weak-volume derivative at the accepted geometry.
 //!
 //! Exact pressure constrains endpoint volume weakly; velocity is the native
 //! backward-Euler displacement chord, not a separate tangent projection. A
@@ -26,10 +28,11 @@ use super::{
 use crate::inertia::{BackwardEulerInertia, ReferenceMass};
 
 pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
+pub use crate::hyper3::mixed::impulse::{MixedImpulseControls, MixedImpulseReport};
 pub use crate::inertia::{InertialEnergy, SolidImpulseControls, SolidImpulseReport};
 
 mod impulse;
-pub use impulse::MixedViscoMotionImpulse;
+pub use impulse::{MixedViscoConstrainedImpulse, MixedViscoMotionImpulse};
 
 /// Immutable accepted displacement, continuous pressure, memory and velocity.
 #[derive(Debug)]

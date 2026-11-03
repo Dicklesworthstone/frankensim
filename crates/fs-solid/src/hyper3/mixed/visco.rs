@@ -93,6 +93,8 @@ pub enum MixedViscoTetError {
     Native(MixedUpError),
     /// A mass-only impulse cannot enforce the exact pressure constraint.
     ExactIncompressibleImpulse,
+    /// Finite-compliance material uses the mass-only impulse entry instead.
+    FiniteCompliancePressureImpulse,
     EnergyGate {
         quantity: &'static str,
         value_j: f64,
@@ -112,6 +114,10 @@ impl core::fmt::Display for MixedViscoTetError {
             Self::ExactIncompressibleImpulse => write!(
                 f,
                 "exact-incompressible impulses require a constrained pressure solve"
+            ),
+            Self::FiniteCompliancePressureImpulse => write!(
+                f,
+                "pressure-constrained impulses require exact-incompressible motion"
             ),
             Self::EnergyGate {
                 quantity,
