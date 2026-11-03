@@ -1670,3 +1670,50 @@ An independent modal test covers nF/pF/fF matrices and the same dynamics beside
 a held 1 F capacitor with 10^8 C charge, checking terminal KCL and physical work.
 
 
+
+## Continuous full-state harmonic scattering
+
+`harmonic::scattering::ScatteringModel` consumes an admitted original
+`HarmonicModel` and closes every selected power port before factorization.
+For original input u and output y, positive output/input reference Z, and peak
+exp(-i omega t) waves, `u=(2a-y)/Z` and `b=y-a`. Its full descriptor operator
+is `A_closed=A-sum G_p G_p^T W/Z_p`; all differential and algebraic
+coordinates, mutual terms, physical storage and material memory remain.
+No bare component impedance or descriptor mass is inverted. An otherwise
+singular bare resonance can have a finite physically loaded wave response.
+
+The original R and nonlinear-equilibrium resisting tangent remain the physical
+loss owners. Reference feedback is accounted as boundary work, never added to
+internal material heating. Returned responses restore actual input u and
+original port powers. Each selected port independently reports incident and
+outgoing wave amplitudes, their cycle-mean powers, conjugate physical work,
+and signed power defect. Whole-system physical and wave balances are separate.
+The original physical equations are rechecked with actual u, original J-R
+and original effort, in addition to the closed solve's residual.
+
+Preparation moves the existing model without copying its original matrices.
+Fixed port-output rows assemble closure once; each frequency uses the existing
+shared scaled complex LU and reuses that factor for multiple drives. The
+additional budget bounds all selected ports, closure/output workspace and
+work. Its conservative peak added payload is 8*n*k+256*k+64*m bytes and work
+is 2*n*n*(k+1)+n*m+k*k+8*m, where n is complete state dimension, m original
+source ports, and k selected wave ports. These are additional to the consumed
+model's existing dense resources and exclude allocator overhead/process RSS.
+Cancellation is polled during preparation, physical observation and shared
+factor/solve work; no accepted physical history is advanced.
+
+Input arrays retain original port order: selected slots are incident output
+waves a; other slots are ordinary original inputs u. Reference units are y/u:
+pressure/volume-flow impedance for an acoustic port, velocity/force admittance
+for a mechanical force input. Zero incident waves impose matched feedback at
+the chosen reference. This choice does not infer a physical radiation law or
+validate an evanescent characteristic. Source bands, continuum resolution,
+finite-amplitude validity and actual boundary model authority remain with
+the source. Equilibrium images retain incremental small-signal semantics.
+No interval certificate, spectral completeness or measured-data claim follows.
+
+`tests/harmonic_scattering.rs` checks an exactly singular bare oscillator
+with and without physical damping, full mutually coupled two-body response and
+ordinary forcing against an independent 2x2 mechanical solve, unequal-reference
+reciprocity, original hereditary state/heat, constrained descriptor RLC response,
+factor reuse, resources and cancellation (G0/G1/G3/G4).
