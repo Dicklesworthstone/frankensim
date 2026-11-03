@@ -28,6 +28,11 @@
 //! L(x) profiles. It retains this same cone/cabinet model and uses one magnetic
 //! energy for nonlinear force, reluctance force and reciprocal back EMF. The
 //! original [`TsDriver`] keeps its exact linear held-input propagation.
+//!
+//! [`harmonic::BaffledTsDriver`] supplies the complementary continuous-frequency
+//! response with the shared full circular-piston radiation impedance. It uses
+//! this same coil, suspension, cavity and panel assembly without the compact
+//! load's fixed resistance or added mass.
 
 use fs_material::gas::{GasSpec, GasState};
 use fs_phs::linear_exact::{
@@ -35,6 +40,7 @@ use fs_phs::linear_exact::{
 };
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, StepRecord};
 
+pub mod harmonic;
 mod magnetic;
 pub use magnetic::thermal;
 pub use magnetic::{MagneticCoilSample, MagneticTsDriver, VoiceCoilMagnetics};
@@ -349,6 +355,27 @@ fn assemble_driver(
     exterior_gas: &GasState,
     cavity_gas: Option<&GasState>,
 ) -> Result<DriverAssembly, SpeakerError> {
+    assemble_driver_with_radiation(
+        card,
+        box_volume_m3,
+        panel,
+        exterior_gas,
+        cavity_gas,
+        true,
+    )
+}
+
+// The harmonic owner inserts the complete frequency-dependent radiation
+// impedance in the same mechanical equation. Its own imaginary part already
+// contains the fluid inertia, so no compact added mass may be counted twice.
+fn assemble_driver_with_radiation(
+    card: TsCard,
+    box_volume_m3: Option<f64>,
+    panel: Option<PanelMode>,
+    exterior_gas: &GasState,
+    cavity_gas: Option<&GasState>,
+    compact_radiation: bool,
+) -> Result<DriverAssembly, SpeakerError> {
     card.validate()?;
     exterior_gas
         .validate_coherence()
@@ -382,9 +409,17 @@ fn assemble_driver(
     // small frequency-independent resistance class (disclosed
     // approximation).
     let a_eff = (card.sd_m2 / core::f64::consts::PI).sqrt();
-    let m_air = 8.0 * exterior_gas.density * a_eff.powi(3) / 3.0;
+    let m_air = if compact_radiation {
+        8.0 * exterior_gas.density * a_eff.powi(3) / 3.0
+    } else {
+        0.0
+    };
     let m_tot = card.mms_kg + m_air;
-    let r_rad = exterior_gas.density * exterior_gas.sound_speed * card.sd_m2 * 0.05;
+    let r_rad = if compact_radiation {
+        exterior_gas.density * exterior_gas.sound_speed * card.sd_m2 * 0.05
+    } else {
+        0.0
+    };
     let k_susp = 1.0 / card.cms_m_per_n;
     // State: [phi_Le, x_cone, p_cone] (+ [x_p, p_p] with a panel).
     let n = if panel.is_some() { 5 } else { 3 };
@@ -395,9 +430,16 @@ fn assemble_driver(
     if let (Some(vb), Some(gas)) = (box_volume_m3, cavity_gas) {
         let k_box_scale = gas.density * gas.sound_speed * gas.sound_speed / vb;
         if let Some(p) = panel {
-            if !(p.frequency_hz > 0.0 && p.mass_kg > 0.0 && p.area_m2 > 0.0) {
+            if ![p.frequency_hz, p.mass_kg, p.area_m2, p.damping_ratio]
+                .iter()
+                .all(|v| v.is_finite())
+                || !(p.frequency_hz > 0.0
+                    && p.mass_kg > 0.0
+                    && p.area_m2 > 0.0
+                    && p.damping_ratio >= 0.0)
+            {
                 return Err(SpeakerError::Invalid {
-                    what: "panel mode values must be positive",
+                    what: "panel needs finite positive frequency, mass and area, and nonnegative damping",
                 });
             }
             // Cavity term (Sd x - Sp xp)^2 * rho c^2 / 2V couples

@@ -6719,6 +6719,24 @@ None.
   modeled and silent linear forte is the lie the refusal prevents.
   Card = authored datasheet-class Estimate; low-ka piston load
   disclosed; cabinet IR packs are FORBIDDEN and absent.
+  `speaker::harmonic::BaffledTsDriver` is the continuous-frequency companion:
+  the shared full Bessel/Struve piston impedance loads the original coil,
+  suspension, optional cavity and panel equations at each actual frequency.
+  Its reactive part supplies the fluid inertia once; neither the transient
+  owner's fixed radiation resistance nor its compact added mass is retained.
+  The original `fs-phs::harmonic` solver owns resource admission, cancellation,
+  equilibration and equation residuals. Peak phasors use exp(-i omega t).
+  Electrical supply, coil/suspension/panel heat and exported acoustic power
+  are independently reported; pointwise equivalent inertia is not published
+  as stored acoustic energy or promoted to a causal transient load.
+  Cone pressure uses signed circular-piston directivity, half-space normalization
+  and physical propagation phase. Caller limits bound the far-field kernel's
+  range/phase approximation; no relative-pressure bound at a null is claimed.
+  G1/G3 tests compare an independent circuit reduction, low/high-frequency
+  piston limits, panel antiresonance, reciprocal power, and hemisphere-integrated
+  acoustic intensity. This bounded linear infinite-baffle model supplies no
+  panel radiation, cone breakup, mutual exterior loading, room, nonlinear
+  excursion or experimentally validated driver data.
   `TsDriver::new_with_media` and `MagneticTsDriver::new_with_media` retain
   distinct exterior and sealed-cavity gas snapshots. Exterior gas owns the
   original radiation load and pressure observer; cavity `rho*c^2/V` owns
