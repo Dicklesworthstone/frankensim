@@ -75,7 +75,9 @@ use material::NsfCellMaterial;
 mod material;
 pub use material::{NamedMixtureNsfGas, NsfGasMedium, ThermochemicalNsfGas};
 mod sgs;
-pub use sgs::{NsfDynamicThermalSgsConfig, NsfSgsConfig, NsfSgsTransport};
+pub use sgs::{
+    NsfChannelDynamicThermalSgsConfig, NsfDynamicThermalSgsConfig, NsfSgsConfig, NsfSgsTransport,
+};
 mod open;
 pub use open::{MAX_NSF_RESERVOIR_APERTURES, NsfOpenState, NsfReservoirAperture,
     NsfReservoirExchange, NsfReservoirFlow, NsfReservoirTileState};

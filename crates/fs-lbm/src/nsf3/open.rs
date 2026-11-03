@@ -598,6 +598,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         high: bool,
         state: Option<NsfOpenState>,
     ) -> Result<(), NsfError> {
+        if self.dynamic_sgs.is_some() {
+            return Err(NsfError::Input("dynamic SGS requires its original closed topology"));
+        }
         if self.open.is_some() {
             return Err(NsfError::Input(
                 "prescribed reservoir and characteristic faces are exclusive",

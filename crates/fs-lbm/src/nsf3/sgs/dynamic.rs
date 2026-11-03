@@ -7,6 +7,10 @@
 //! low-Mach gradient-diffusion closure, not a complete compressible SGS model.
 
 use super::*;
+use crate::sgs3::dynamic::channel::{
+    ChannelDynamicScalar, ChannelDynamicScalarConfig, ChannelDynamicSgs, ChannelDynamicSgsConfig,
+    ScalarWall,
+};
 use crate::sgs3::dynamic::scalar::{DynamicScalarConfig, PeriodicDynamicScalar};
 use crate::sgs3::dynamic::{DynamicSgsConfig, DynamicSgsError, PeriodicDynamicSgs};
 use std::sync::Mutex;
@@ -26,16 +30,47 @@ impl NsfDynamicThermalSgsConfig {
     }
 }
 
+/// Independent plane-averaged momentum and heat fits for a resolved channel.
+/// The two homogeneous directions are periodic; no test filter crosses a wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NsfChannelDynamicThermalSgsConfig {
+    pub momentum: ChannelDynamicSgsConfig,
+    pub heat: ChannelDynamicScalarConfig,
+}
+
+impl NsfChannelDynamicThermalSgsConfig {
+    pub fn validate(self) -> Result<(), NsfError> {
+        self.momentum.validate().map_err(NsfError::DynamicSgs)?;
+        self.heat.validate().map_err(NsfError::DynamicSgs)
+    }
+}
+
 struct Workspace {
     momentum: PeriodicDynamicSgs,
     heat: PeriodicDynamicScalar,
 }
 
+struct ChannelWorkspace {
+    momentum: ChannelDynamicSgs,
+    heat: ChannelDynamicScalar,
+}
+
+enum DynamicState {
+    Periodic {
+        config: NsfDynamicThermalSgsConfig,
+        workspace: Mutex<Workspace>,
+    },
+    Channel {
+        config: NsfChannelDynamicThermalSgsConfig,
+        normal_axis: usize,
+        workspace: Mutex<ChannelWorkspace>,
+    },
+}
+
 pub(in crate::nsf3) struct DynamicTransport {
-    config: NsfDynamicThermalSgsConfig,
-    // One lock around the serial nonlocal fit preserves the grid's Sync
-    // contract for existing parallel cell/face loops. No lock is taken per cell.
-    workspace: Mutex<Workspace>,
+    // Each variant pairs its own controls and filter geometry. One lock around
+    // the serial fit preserves Sync for the original parallel cell/face loops.
+    state: DynamicState,
     bytes: usize,
 }
 
@@ -104,10 +139,103 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .ok_or(NsfError::Input("NSF dynamic workspace capacity overflow"))?;
         admit(bytes)?;
         self.dynamic_sgs = Some(DynamicTransport {
-            config,
-            workspace: Mutex::new(Workspace { momentum, heat }),
+            state: DynamicState::Periodic {
+                config,
+                workspace: Mutex::new(Workspace { momentum, heat }),
+            },
             bytes,
         });
+        self.refresh_dynamic_transport()?;
+        Ok(self)
+    }
+
+    /// Fit momentum and heat separately on each homogeneous channel plane.
+    /// Exactly one axis must have halfway walls, and every axis needs at least
+    /// three cells. All cells must be fluid. The three wall-normal centers also
+    /// support one-sided differentiation of the Favre-filtered adiabatic scalar.
+    /// The original stationary or translating tangential wall velocities and
+    /// adiabatic/isothermal thermal condition supply the boundary derivatives
+    /// on every preparation, including an accepted-time wall-velocity update.
+    ///
+    /// This resolved-wall exploratory closure adds no wall function. Modeled
+    /// heat acts only on interior shared faces; wall conduction remains the
+    /// original molecular half-cell law. Moving-wall work uses the original
+    /// total stress and energy ledger. Gas sources, bulk relaxation, Guo force
+    /// correction and the original temperature/Mach/viscosity bounds remain
+    /// authoritative. Open boundaries and interior solids are unsupported.
+    /// The reusable numerical workspace costs 200 nominal bytes per fluid cell.
+    pub fn with_channel_dynamic_thermal_sgs(
+        mut self,
+        config: NsfChannelDynamicThermalSgsConfig,
+        maximum_workspace_bytes: usize,
+    ) -> Result<Self, NsfError> {
+        config.validate()?;
+        if self.sgs.is_some() || self.dynamic_sgs.is_some() {
+            return Err(NsfError::Input(
+                "attach dynamic SGS to a molecular NSF grid",
+            ));
+        }
+        let mut walls = self
+            .spec
+            .periodic
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, periodic)| (!periodic).then_some(axis));
+        let normal_axis = walls.next().ok_or(NsfError::Input(
+            "channel dynamic NSF SGS requires one wall axis",
+        ))?;
+        if walls.next().is_some()
+            || self.spec.dims.iter().any(|&n| n < 3)
+            || self.solid.iter().any(|solid| *solid)
+            || self.open.is_some()
+            || self.reservoir_faces.iter().flatten().any(Option::is_some)
+            || !self.reservoir_apertures.is_empty()
+        {
+            return Err(NsfError::Input(
+                "channel dynamic NSF SGS requires fluid walls and two periodic axes",
+            ));
+        }
+        let admit = |required| {
+            if required > maximum_workspace_bytes {
+                Err(NsfError::DynamicSgs(DynamicSgsError::WorkspaceBytes {
+                    required,
+                    maximum: maximum_workspace_bytes,
+                }))
+            } else {
+                Ok(())
+            }
+        };
+        let required = ChannelDynamicSgs::required_bytes(self.n)
+            .and_then(|momentum| {
+                momentum
+                    .checked_add(ChannelDynamicScalar::required_bytes(self.n)?)
+                    .ok_or(DynamicSgsError::Invalid("NSF channel workspace overflow"))
+            })
+            .map_err(NsfError::DynamicSgs)?;
+        admit(required)?;
+        let momentum =
+            ChannelDynamicSgs::new(self.spec.dims, 1.0, normal_axis, maximum_workspace_bytes)
+                .map_err(NsfError::DynamicSgs)?;
+        let heat = ChannelDynamicScalar::new(self.spec.dims, normal_axis, maximum_workspace_bytes)
+            .map_err(NsfError::DynamicSgs)?;
+        let bytes = momentum
+            .workspace_bytes()
+            .checked_add(heat.workspace_bytes())
+            .ok_or(NsfError::Input("NSF channel workspace capacity overflow"))?;
+        admit(bytes)?;
+        self.dynamic_sgs = Some(DynamicTransport {
+            state: DynamicState::Channel {
+                config,
+                normal_axis,
+                workspace: Mutex::new(ChannelWorkspace { momentum, heat }),
+            },
+            bytes,
+        });
+        self.refresh_dynamic_transport()?;
+        Ok(self)
+    }
+
+    fn refresh_dynamic_transport(&mut self) -> Result<(), NsfError> {
         let (rho, mom) = self.macro_fields(&self.f);
         let velocity = self.velocity_field(&rho, &mom, &self.force);
         let transport = self.sgs_field(&rho, &velocity, &self.theta, &self.material, None)?;
@@ -132,12 +260,23 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.div = div;
         self.wall_out = wall;
         self.open_out = open;
-        Ok(self)
+        Ok(())
     }
 
-    /// Exact controls; molecular-only and local algebraic closures return None.
+    /// Periodic controls; other closure geometries return None.
     pub fn dynamic_thermal_sgs_config(&self) -> Option<NsfDynamicThermalSgsConfig> {
-        self.dynamic_sgs.as_ref().map(|dynamic| dynamic.config)
+        match &self.dynamic_sgs.as_ref()?.state {
+            DynamicState::Periodic { config, .. } => Some(*config),
+            DynamicState::Channel { .. } => None,
+        }
+    }
+
+    /// Channel controls; other closure geometries return None.
+    pub fn channel_dynamic_thermal_sgs_config(&self) -> Option<NsfChannelDynamicThermalSgsConfig> {
+        match &self.dynamic_sgs.as_ref()?.state {
+            DynamicState::Channel { config, .. } => Some(*config),
+            DynamicState::Periodic { .. } => None,
+        }
     }
 
     /// Actual retained numerical capacities of the two dynamic filter buffers.
@@ -153,25 +292,83 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         material: &[Option<NsfCellMaterial>],
     ) -> Result<Vec<NsfSgsTransport>, NsfError> {
         let dynamic = self.dynamic_sgs.as_ref().expect("admitted dynamic NSF fit");
-        let config = dynamic.config;
-        let mut workspace = dynamic
-            .workspace
-            .lock()
-            .map_err(|_| NsfError::Input("dynamic NSF workspace lock poisoned"))?;
-        let Workspace { momentum, heat } = &mut *workspace;
         // NSF3 already owns lattice-unit density, physical velocity (including
         // half-force) and temperature. No staging or separate velocity sweep.
-        momentum
-            .prepare_with_scalar(
-                config.momentum,
-                config.heat,
-                rho,
-                velocity,
-                theta,
-                heat,
-                || false,
-            )
-            .map_err(NsfError::DynamicSgs)?;
+        match &dynamic.state {
+            DynamicState::Periodic { config, workspace } => {
+                let mut workspace = workspace
+                    .lock()
+                    .map_err(|_| NsfError::Input("dynamic NSF workspace lock poisoned"))?;
+                let Workspace { momentum, heat } = &mut *workspace;
+                momentum
+                    .prepare_with_scalar(
+                        config.momentum,
+                        config.heat,
+                        rho,
+                        velocity,
+                        theta,
+                        heat,
+                        || false,
+                    )
+                    .map_err(NsfError::DynamicSgs)?;
+                self.dynamic_transport_field(
+                    rho,
+                    theta,
+                    material,
+                    momentum.viscosities(),
+                    heat.diffusivities(),
+                    config.momentum.maximum_eddy_to_molecular,
+                )
+            }
+            DynamicState::Channel {
+                config,
+                normal_axis,
+                workspace,
+            } => {
+                let mut workspace = workspace
+                    .lock()
+                    .map_err(|_| NsfError::Input("channel NSF workspace lock poisoned"))?;
+                let ChannelWorkspace { momentum, heat } = &mut *workspace;
+                let scalar_wall = match self.spec.wall {
+                    WallThermal::Adiabatic => ScalarWall::ZeroGradient,
+                    WallThermal::Isothermal(kelvin) => {
+                        ScalarWall::Value(self.law.theta_of_kelvin(kelvin))
+                    }
+                };
+                momentum
+                    .prepare_with_scalar(
+                        config.momentum,
+                        config.heat,
+                        rho,
+                        velocity,
+                        self.edge_velocity[*normal_axis],
+                        theta,
+                        [scalar_wall; 2],
+                        heat,
+                        || false,
+                    )
+                    .map_err(NsfError::DynamicSgs)?;
+                self.dynamic_transport_field(
+                    rho,
+                    theta,
+                    material,
+                    momentum.viscosities(),
+                    heat.diffusivities(),
+                    config.momentum.maximum_eddy_to_molecular,
+                )
+            }
+        }
+    }
+
+    fn dynamic_transport_field(
+        &self,
+        rho: &[f64],
+        theta: &[f64],
+        material: &[Option<NsfCellMaterial>],
+        eddy_viscosity: &[f64],
+        heat_diffusivity: &[f64],
+        maximum_eddy_to_molecular: f64,
+    ) -> Result<Vec<NsfSgsTransport>, NsfError> {
         (0..self.n)
             .map(|i| {
                 let local = material.get(i).and_then(Option::as_ref);
@@ -182,13 +379,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         cell: i,
                     }));
                 }
-                let eddy = momentum.viscosities()[i];
+                let eddy = eddy_viscosity[i];
                 let ratio = eddy / molecular;
-                if !ratio.is_finite() || ratio > config.momentum.maximum_eddy_to_molecular {
+                if !ratio.is_finite() || ratio > maximum_eddy_to_molecular {
                     return Err(NsfError::Sgs(SgsError::ViscosityRatioExceeded {
                         cell: i,
                         ratio,
-                        maximum: config.momentum.maximum_eddy_to_molecular,
+                        maximum: maximum_eddy_to_molecular,
                     }));
                 }
                 if molecular + eddy > MAX_VERIFIED_LATTICE_VISCOSITY {
@@ -200,7 +397,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 let cp_over_r = local.map_or(self.law.gamma / (self.law.gamma - 1.0), |m| {
                     m.state.specific_heat_cp / self.law.gas_constant
                 });
-                let conductivity = rho[i] * cp_over_r * heat.diffusivities()[i];
+                let conductivity = rho[i] * cp_over_r * heat_diffusivity[i];
                 if !(conductivity.is_finite() && conductivity >= 0.0) {
                     return Err(NsfError::Input("nonfinite dynamic NSF heat conductivity"));
                 }
@@ -242,7 +439,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         } else {
             f64::INFINITY
         };
-        let maximum = dynamic.config.heat.maximum_diffusivity_to_molecular;
+        let maximum = match &dynamic.state {
+            DynamicState::Periodic { config, .. } => config.heat.maximum_diffusivity_to_molecular,
+            DynamicState::Channel { config, .. } => config.heat.maximum_diffusivity_to_molecular,
+        };
         if !ratio.is_finite() || ratio > maximum {
             Err(NsfError::SgsHeatRatio {
                 cell,
@@ -257,3 +457,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod channel_tests;

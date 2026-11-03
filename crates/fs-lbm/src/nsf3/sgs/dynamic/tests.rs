@@ -64,6 +64,13 @@ fn rest(_: [usize; 3]) -> (f64, [f64; 3], f64) {
     (1.0, [0.0; 3], 293.15)
 }
 
+fn periodic_workspace(grid: &NsfGrid3<D3q27>) -> std::sync::MutexGuard<'_, Workspace> {
+    let DynamicState::Periodic { workspace, .. } = &grid.dynamic_sgs.as_ref().unwrap().state else {
+        panic!("expected the periodic workspace");
+    };
+    workspace.lock().unwrap()
+}
+
 #[test]
 fn g1_dynamic_nsf_uses_force_corrected_velocity_and_current_nasa_heat_capacity() {
     let gas = ThermochemicalNsfGas::new(
@@ -275,13 +282,7 @@ fn g1_g5_dynamic_nsf_reuses_buffers_and_keeps_original_energy_and_worker_bits() 
     let mut parallel = make(3);
     let energy = serial.total_energy_j();
     let allocation = {
-        let work = serial
-            .dynamic_sgs
-            .as_ref()
-            .unwrap()
-            .workspace
-            .lock()
-            .unwrap();
+        let work = periodic_workspace(&serial);
         (
             work.momentum.viscosities().as_ptr(),
             work.heat.diffusivities().as_ptr(),
@@ -295,13 +296,7 @@ fn g1_g5_dynamic_nsf_reuses_buffers_and_keeps_original_energy_and_worker_bits() 
         assert!(step.residual_rel < 1e-12);
         assert!((serial.total_energy_j() / energy - 1.0).abs() < 2e-12);
         assert_eq!(step.wall_heat_j, 0.0);
-        let work = serial
-            .dynamic_sgs
-            .as_ref()
-            .unwrap()
-            .workspace
-            .lock()
-            .unwrap();
+        let work = periodic_workspace(&serial);
         assert_eq!(work.momentum.viscosities().as_ptr(), allocation.0);
         assert_eq!(work.heat.diffusivities().as_ptr(), allocation.1);
     }
@@ -311,13 +306,11 @@ fn g1_g5_dynamic_nsf_reuses_buffers_and_keeps_original_energy_and_worker_bits() 
     let transport = serial.sgs_transport.clone();
     let ledger = serial.cumulative_ledger();
     let steps = serial.steps();
-    serial
-        .dynamic_sgs
-        .as_mut()
-        .unwrap()
-        .config
-        .heat
-        .maximum_diffusivity_to_molecular = 0.0;
+    let DynamicState::Periodic { config, .. } = &mut serial.dynamic_sgs.as_mut().unwrap().state
+    else {
+        panic!("expected periodic controls");
+    };
+    config.heat.maximum_diffusivity_to_molecular = 0.0;
     assert!(matches!(serial.step(), Err(NsfError::SgsHeatRatio { .. })));
     assert_eq!(serial.state_hash(), hash);
     assert_eq!(serial.sgs_transport, transport);

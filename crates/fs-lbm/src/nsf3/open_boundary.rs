@@ -262,6 +262,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         mut self,
         open: NsfCharacteristicAxis,
     ) -> Result<Self, NsfError> {
+        if self.dynamic_sgs.is_some() {
+            return Err(NsfError::Input("dynamic SGS requires its original closed topology"));
+        }
         if self.reservoir_faces.iter().flatten().any(Option::is_some) {
             return Err(NsfError::Input(
                 "characteristic and prescribed reservoir faces are exclusive",

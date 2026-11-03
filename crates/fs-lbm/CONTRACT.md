@@ -2404,6 +2404,34 @@ step allocation-free or add whole-step cancellation. The existing low-Mach,
 temperature and stability qualifications remain in force; no DNS, wall-model,
 shock or complete compressible SGS-energy claim is added.
 
+`NsfGrid3::with_channel_dynamic_thermal_sgs(NsfChannelDynamicThermalSgsConfig,
+maximum_bytes)` extends that same native transport/energy owner to an entirely
+fluid plane channel: exactly one halfway-wall axis, two periodic axes and at
+least three cells on every axis. Its paired channel momentum/scalar workspace
+also requires 200 nominal bytes per cell. Current stationary or tangentially
+moving wall velocities and the original uniform isothermal or adiabatic wall
+condition enter each fit. Adiabatic physical scalar derivatives and the
+Favre-filtered scalar's one-sided normal derivatives remain distinct, as
+specified by the shared channel model.
+
+The original material heat capacity, Guo velocity, independent molecular bulk
+rate, interior shared-face conductivity and conservative total-energy owner
+remain authoritative. Modeled wall heat flux remains zero under the original
+molecular half-cell conduction law. Moving-wall traction/work instead retains
+the original adjacent-cell total-stress approximation, which is first order
+for developing flow; this does not explicitly impose zero SGS viscosity at
+the geometric wall or establish its near-wall asymptotic accuracy. Wall-speed
+changes refresh transport and energy history transactionally. Attaching open
+faces or characteristic boundaries after either dynamic closure refuses before
+mutation, retaining the admitted filter topology.
+
+Four focused native channel regressions cover current source heat capacity and
+force/wall data, heat-only planes, molecular wall conduction, shared-face
+admission, moving-wall energy, worker identity, workspace reuse, refused-step
+rollback, zero controls and topology/budget refusals. The periodic regressions
+retain their original physical assertions. Interior solids, spatially varying
+wall data, wall functions and channel DNS calibration remain outside this path.
+
 ### Evolving Mann turbulence on an original reservoir aperture
 
 With `turbulent-inflow`, `NsfEvolvingMannInflow` consumes the original full-tensor
