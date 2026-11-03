@@ -48,7 +48,8 @@ fn scales(law: &SourceMaugisSphereContact) -> (f64, f64) {
 fn fixture(lambda: f64, stiffness: f64) -> MaugisSpringFixture {
     let law = model(lambda);
     let (d0, p0) = scales(&law);
-    MaugisSpringFixture::new(law, stiffness * p0 / d0).unwrap()
+    MaugisSpringFixture::new(law, stiffness * p0 / d0)
+        .unwrap_or_else(|error| panic!("lambda={lambda}, stiffness={stiffness}: {error:?}"))
 }
 fn close(a: f64, b: f64, scale: f64, tolerance: f64) {
     assert!(
@@ -174,6 +175,40 @@ fn finite_loading_stiffness_moves_the_fold_between_control_limits() {
         p0,
         1e-9,
     );
+}
+
+#[test]
+fn cancellation_conditioned_snap_landing_retains_force_and_refuses_unresolved_stiffness() {
+    let f = fixture(1000.0, 1000.0);
+    let (d0, p0) = scales(f.contact());
+    let landing = f.onset().after();
+    let contact = landing.equilibrium();
+    let a = contact.contact_response().unwrap().contact_radius_m;
+    let hertz_indentation = a * a / f.contact().effective_radius_m();
+    // The original indentation subtracts the adhesive deflection from this
+    // much larger Hertz term. K*|delta| alone misses that conditioning.
+    assert!(hertz_indentation > 1000.0 * contact.indentation_m().abs());
+    assert!(landing.equilibrium_residual_n().abs() <= landing.equilibrium_allowance_n());
+    assert!(landing.equilibrium_allowance_n() < 1e-8 * p0);
+    close(
+        landing.stage_displacement_m(),
+        contact.indentation_m() + contact.normal_force_n() / f.stiffness_n_per_m(),
+        d0,
+        4e-15,
+    );
+    assert_eq!(
+        landing.equilibrium_residual_n(),
+        contact.normal_force_n()
+            - f.stiffness_n_per_m() * (landing.stage_displacement_m() - contact.indentation_m())
+    );
+    // At this stiffness the operand-derived allowance reaches the adhesion
+    // load scale. It must refuse rather than admit arbitrary force mismatch.
+    assert!(matches!(
+        MaugisSpringFixture::new(f.contact().clone(), 1e13 * p0 / d0),
+        Err(MaugisFixtureError::Contact(MaugisError::Unrepresentable {
+            field: "resolved loading-spring force equilibrium"
+        }))
+    ));
 }
 
 #[test]

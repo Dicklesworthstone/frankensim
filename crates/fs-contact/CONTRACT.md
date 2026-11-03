@@ -1920,6 +1920,14 @@ allocate nothing. Shared radius-to-energy evaluation avoids a second branch
 inversion. Indistinguishable branch limits, unresolved equilibrium, invalid
 source domains and snap landings beyond the original envelope refuse.
 
+The force-equilibrium residual remains unmodified. Its exposed arithmetic
+admission allowance includes the original indentation operands before their
+subtraction, amplified by the loading stiffness; a small final indentation does
+not imply small roundoff in its elastic and adhesive components. This allowance
+is not a certified physical error bound. Connected states refuse when it reaches
+the original load scale `max(pi*W*R, abs(F))`, instead of admitting an unresolved
+spring through an arbitrarily large allowance.
+
 An explicit initial phase selects metastable history. Monotone proposals
 localize jumps at fixed stage, retain actual spring storage, and expose the
 decrease of total spring/contact potential as a separate release. Continuous

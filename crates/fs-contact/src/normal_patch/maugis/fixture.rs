@@ -73,6 +73,7 @@ pub struct MaugisFixtureResponse {
     total_potential_j: f64,
     stage_tangent_n_per_m: Option<f64>,
     equilibrium_residual_n: f64,
+    equilibrium_allowance_n: f64,
 }
 impl MaugisFixtureResponse {
     /// Unmodified original source, real contact area and elastic/surface energy.
@@ -104,6 +105,13 @@ impl MaugisFixtureResponse {
     #[must_use]
     pub const fn equilibrium_residual_n(&self) -> f64 {
         self.equilibrium_residual_n
+    }
+    /// Arithmetic admission allowance for the force-equilibrium residual, N.
+    /// Includes conditioning of the original indentation operands amplified by
+    /// K; this is not a certified physical or interval error bound.
+    #[must_use]
+    pub const fn equilibrium_allowance_n(&self) -> f64 {
+        self.equilibrium_allowance_n
     }
     /// Reciprocal resultant conjugate to STAGE motion; tip ports are distinct.
     pub fn stage_port(
@@ -583,7 +591,18 @@ impl Branches {
             }
             Some((self.law.force_scale_n / self.law.indentation_scale_m) * (s.ps / slope))
         };
-        self.response(equilibrium, stage, tangent, Some(s.t))
+        // Near zero indentation the two original displacement terms can be
+        // much larger than their difference. Multiplying that difference by
+        // K amplifies their arithmetic error, even when K*|delta| is small.
+        let indentation_operand_scale_m =
+            (s.a * s.a + (4.0 / 3.0) * self.law.lambda * s.l) * self.law.indentation_scale_m;
+        self.response(
+            equilibrium,
+            stage,
+            tangent,
+            Some(s.t),
+            indentation_operand_scale_m,
+        )
     }
     fn noncontact(&self, stage: f64) -> Result<MaugisFixtureResponse, MaugisFixtureError> {
         self.validate_stage(stage)?;
@@ -596,15 +615,18 @@ impl Branches {
             })?;
         let zero = kernel::state(self.law.lambda, 0.0)?;
         let beta = (8.0 / (3.0 * PI)) * self.law.lambda;
-        let (c, delta) = if stage == n.touch_stage_m {
-            (zero.c, n.touch_indentation_m)
+        let (c, delta, indentation_operand_scale_m) = if stage == n.touch_stage_m {
+            (zero.c, n.touch_indentation_m, n.touch_indentation_m.abs())
         } else {
             let offset = ((stage - n.minimum_stage_m) / self.law.indentation_scale_m) / n.quadratic;
             let c = n.fold_radius + (2.0 * offset).sqrt();
             let delta = -self.law.interaction_range_m
                 - 0.5 * beta * beta * self.law.indentation_scale_m
                 + 0.5 * (c - beta).powi(2) * self.law.indentation_scale_m;
-            (c, delta)
+            let operand_scale = self.law.interaction_range_m
+                + 0.5 * beta * beta * self.law.indentation_scale_m
+                + 0.5 * (c - beta).powi(2) * self.law.indentation_scale_m;
+            (c, delta, operand_scale)
         };
         let equilibrium =
             self.law
@@ -622,12 +644,24 @@ impl Branches {
                     * (self.law.force_scale_n / self.law.indentation_scale_m),
             )
         };
-        self.response(equilibrium, stage, tangent, None)
+        self.response(
+            equilibrium,
+            stage,
+            tangent,
+            None,
+            indentation_operand_scale_m,
+        )
     }
     fn detached(&self, stage: f64) -> Result<MaugisFixtureResponse, MaugisFixtureError> {
         self.validate_stage(stage)?;
         let equilibrium = self.law.evaluate_detached(stage)?;
-        self.response(equilibrium, stage, equilibrium.tangent_n_per_m(), None)
+        self.response(
+            equilibrium,
+            stage,
+            equilibrium.tangent_n_per_m(),
+            None,
+            stage.abs(),
+        )
     }
     fn connected(&self, stage: f64) -> Result<MaugisFixtureResponse, MaugisFixtureError> {
         if self.noncontact.is_some_and(|n| stage < n.touch_stage_m) {
@@ -642,26 +676,27 @@ impl Branches {
         stage: f64,
         tangent: Option<f64>,
         contact_coordinate: Option<f64>,
+        indentation_operand_scale_m: f64,
     ) -> Result<MaugisFixtureResponse, MaugisFixtureError> {
         let force = equilibrium.normal_force_n();
         let extension = force / self.stiffness;
         let spring_energy_j = (0.5 * force) * extension;
         let total_potential_j = equilibrium.potential_j() + spring_energy_j;
         let residual = force - self.stiffness * (stage - equilibrium.indentation_m());
+        let force_scale = self.law.force_scale_n.max(force.abs());
         let tolerance = 256.0
             * f64::EPSILON
-            * self
-                .law
-                .force_scale_n
-                .max(force.abs())
+            * force_scale
                 .max((self.stiffness * stage).abs())
-                .max((self.stiffness * equilibrium.indentation_m()).abs());
+                .max((self.stiffness * equilibrium.indentation_m()).abs())
+                .max(self.stiffness * indentation_operand_scale_m);
         if [
             extension,
             spring_energy_j,
             total_potential_j,
             residual,
             tolerance,
+            indentation_operand_scale_m,
         ]
         .iter()
         .any(|x| !x.is_finite())
@@ -669,6 +704,12 @@ impl Branches {
             || residual.abs() > tolerance
         {
             return Err(unrepresentable("finite-stiffness equilibrium and storage"));
+        }
+        // A wider conditioned allowance must not conceal a spring whose force
+        // is no longer distinguishable at the original physical load scale.
+        // Detached states have no spring extension or transmitted force.
+        if equilibrium.phase() != MaugisPhase::Detached && tolerance >= force_scale {
+            return Err(unrepresentable("resolved loading-spring force equilibrium"));
         }
         Ok(MaugisFixtureResponse {
             equilibrium,
@@ -678,6 +719,7 @@ impl Branches {
             total_potential_j,
             stage_tangent_n_per_m: tangent,
             equilibrium_residual_n: residual,
+            equilibrium_allowance_n: tolerance,
         })
     }
     fn work(
