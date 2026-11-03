@@ -32,6 +32,7 @@ use crate::spec::{
     PowerDissipation, ProjectSpec, RadiatingSurface, RadiationSpatialModel, RequirementDirection,
     RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
     SolverSettings, SurfaceOffset, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit,
+    TransientBoundaryTarget, TransientBoundarySchedule, TransientBoundaryStep,
     TransientEnthalpy, TransientEnthalpyKnot, TransientInitialTemperature,
     TransientPhaseConductivity, TransientPowerStep, TransientRegionCapacity,
     TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent, Versions,
@@ -744,6 +745,20 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
                     kw("source"), text(&schedule.source), kw("steps"), list(steps)]));
             }
             time.extend([kw("power-schedules"), list(schedules)]);
+        }
+        if !transient.boundary_schedules.is_empty() {
+            let mut schedules = vec![sym("boundary-schedules")];
+            for schedule in &transient.boundary_schedules {
+                let mut steps = vec![sym("steps")];
+                for step in &schedule.steps {
+                    steps.push(list(vec![sym("step"), kw("until"), qty(step.until)?,
+                        kw("value"), qty(step.value)?]));
+                }
+                schedules.push(list(vec![sym("schedule"), kw("target"), text(&schedule.target),
+                    kw("kind"), sym(schedule.kind.name()), kw("source"), text(&schedule.source),
+                    kw("steps"), list(steps)]));
+            }
+            time.extend([kw("boundary-schedules"), list(schedules)]);
         }
         declaration.push(list(time));
     }
@@ -2884,7 +2899,7 @@ fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTra
         return None;
     };
     let pairs = read_pairs(body, "transient", &["initial-temperature", "horizon", "max-step",
-        "max-steps", "energy-tolerance", "capacities", "enthalpy", "power-schedules"], out);
+        "max-steps", "energy-tolerance", "capacities", "enthalpy", "power-schedules", "boundary-schedules"], out);
     let max_steps = match field(&pairs, "max-steps") {
         Some(Node { kind: NodeKind::Int(value), .. }) => u32::try_from(*value).unwrap_or_default(),
         _ => 0,
@@ -2933,6 +2948,8 @@ fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTra
         energy_tolerance: expect_qty(field(&pairs, "energy-tolerance"), "transient.energy-tolerance", out),
         capacities,
         enthalpy: field(&pairs, "enthalpy").and_then(|node| read_enthalpy(node, out)),
+        boundary_schedules: field(&pairs, "boundary-schedules")
+            .map_or_else(Vec::new, |node| read_transient_boundary_schedules(node, out)),
         power_schedules: field(&pairs, "power-schedules")
             .map_or_else(Vec::new, |node| read_transient_power_schedules(node, out)),
     })
@@ -3807,4 +3824,56 @@ fn read_outputs(body: &[Node], out: &mut Vec<Violation>) -> Vec<OutputRequest> {
         });
     }
     outputs
+}
+
+fn read_transient_boundary_schedules(
+    node: &Node, out: &mut Vec<Violation>,
+) -> Vec<TransientBoundarySchedule> {
+    let malformed = |out: &mut Vec<Violation>, what: &str| out.push(Violation {
+        code: "project-malformed-clause", what: what.to_string(),
+        fix: "declare boundary schedules with target, kind, source and held steps".to_string(),
+    });
+    let Some(("boundary-schedules", schedules)) = section_name(node) else {
+        malformed(out, "transient.boundary-schedules must be a (boundary-schedules ...) list");
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for schedule in schedules {
+        let Some(("schedule", body)) = section_name(schedule) else {
+            malformed(out, "boundary history rows must be (schedule ...) declarations");
+            continue;
+        };
+        let fields = read_pairs(body, "transient.boundary-schedule",
+            &["target", "kind", "source", "steps"], out);
+        let kind = match field(&fields, "kind").map(|node| &node.kind) {
+            Some(NodeKind::Symbol(name)) if name == "fixed-temperature" => TransientBoundaryTarget::FixedTemperature,
+            Some(NodeKind::Symbol(name)) if name == "heat-flux" => TransientBoundaryTarget::HeatFlux,
+            Some(NodeKind::Symbol(name)) if name == "convection-temperature" => TransientBoundaryTarget::ConvectionTemperature,
+            _ => {
+                malformed(out, "unsupported prescribed boundary history kind");
+                continue;
+            }
+        };
+        let mut steps = Vec::new();
+        match field(&fields, "steps").and_then(section_name) {
+            Some(("steps", rows)) => for row in rows {
+                let Some(("step", body)) = section_name(row) else {
+                    malformed(out, "boundary history intervals must be (step ...) declarations");
+                    continue;
+                };
+                let fields = read_pairs(body, "transient.boundary-step", &["until", "value"], out);
+                steps.push(TransientBoundaryStep {
+                    until: expect_qty(field(&fields, "until"), "transient.boundary-step.until", out),
+                    value: expect_qty(field(&fields, "value"), "transient.boundary-step.value", out),
+                });
+            },
+            _ => malformed(out, "boundary history requires a (steps ...) list"),
+        }
+        result.push(TransientBoundarySchedule {
+            target: expect_str(field(&fields, "target"), "transient.boundary-schedule.target", out),
+            kind, source: expect_str(field(&fields, "source"), "transient.boundary-schedule.source", out),
+            steps,
+        });
+    }
+    result
 }

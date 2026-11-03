@@ -3089,3 +3089,33 @@ Steady/transient output retains the declared principal keys and axes and
 both solved/final [kx, ky, kz] fields. Legacy scalar entries are null when the
 three components differ. Source support, all-component nonlinear consistency,
 energy admission and atomic output publication remain mandatory.
+
+## Held thermal boundary histories in the cooling product
+
+Native .fsim cooling now lowers sourced prescribed temperature, signed heat
+flux and prescribed convection-reference histories through the existing
+`ThermalBoundaryHistory` and `TimeSignal::Table(Hold)` owners. Both original
+capacity and total-enthalpy marches sample at each interval start. Coarse and
+fine grids land on every boundary and power switch; the new value applies to
+the following interval. The same step boundary enters existing contact,
+radiation, natural-convection and airflow composition on distinct patches.
+
+Declared initial temperature or regional enthalpy stays unchanged, including
+the original initial sampled peak. Initial incompatibility and later
+prescribed jumps retain the native discrete storage reaction. Sources,
+intervals and the sampling convention are retained in the ordinary transient
+receipt. No missing tail, interpolated reservoir or fan dynamics are inferred.
+
+Forward uncertainty and design children preserve the declared histories and
+observe the real native sampled peak. Coordinates overwritten by a schedule
+refuse as static uncertainty controls. The single native trajectory-adjoint
+admission refuses scheduled boundaries until reverse reconstruction carries
+their actual per-step operators; nominal mean calibration therefore cannot
+publish a frozen-boundary gradient.
+
+Focused existing-workflow regressions cover prescribed cycles with exact
+storage/reaction energy and initial peaks, signed-flux surface-area energy,
+unchanged Robin coefficients, canonical source identity, shared power/boundary
+switches, and native probability/calibration consumers. All changed Rust
+sources passed the pinned formatter's syntax parser through stdin. Native
+builds and these regressions were not executed in the full-disk environment.

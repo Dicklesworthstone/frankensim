@@ -23,6 +23,7 @@ fn fixture() -> Fixture {
             volumetric_heat_capacity: QtyAny::new(100.0, dims::VOLUMETRIC_HEAT_CAPACITY),
             source: "synthetic heat capacity for transient-peak probability regression".into(),
         }).collect(),
+        boundary_schedules: Vec::new(),
         enthalpy: None, power_schedules: Vec::new(),
     });
     std::fs::write(fixture.sources.join("cooling-reference.fsim"),
@@ -103,4 +104,69 @@ fn g4_g5_peak_recovery_uses_retained_trajectories_without_reopening_sources() {
     std::fs::rename(&split.sources, split.dir.join("original-inputs-relocated")).unwrap();
     let result = split.resume(prefix.str_field("run").unwrap(), None, fs_cli::exit::SUCCESS);
     assert_eq!(split.report(&result).0, expected);
+}
+
+#[test]
+fn g1_boundary_cycles_reach_native_probability_peaks_and_refuse_frozen_mean_calibration() {
+    let mut fixture = fixture();
+    let card = fixture.project.materials.as_ref().unwrap()[0].card.clone();
+    let setup = fixture.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.boundaries[0].condition = fs_project::ThermalBoundaryCondition::FixedTemperature {
+        temperature: QtyAny::new(300.0, dims::TEMPERATURE),
+    };
+    let time = setup.transient.as_mut().unwrap();
+    time.initial_temperature = TransientInitialTemperature::FromRegionalEnthalpy;
+    time.capacities.clear();
+    time.enthalpy = Some(fs_project::TransientEnthalpy {
+        max_newton_iterations: 32, max_backtracks: 24,
+        materials: vec![fs_project::TransientRegionEnthalpy {
+            region: "air".into(),
+            material_card_identity: fs_blake3::ContentHash::from_hex(&card).unwrap(),
+            source: "synthetic sensible chart for native boundary-cycle sampling".into(),
+            reference_density: QtyAny::new(10.0, dims::DENSITY),
+            initial_specific_enthalpy: QtyAny::new(0.0, dims::SPECIFIC_ENTHALPY),
+            knots: [(-500.0, 243.15), (1000.0, 393.15)].into_iter()
+                .map(|(h, temperature)| fs_project::TransientEnthalpyKnot {
+                    specific_enthalpy: QtyAny::new(h, dims::SPECIFIC_ENTHALPY),
+                    temperature: QtyAny::new(temperature, dims::TEMPERATURE),
+                    liquid_mass_fraction: 0.0,
+                }).collect(),
+            phase_conductivity: None,
+        }],
+    });
+    time.boundary_schedules = vec![fs_project::TransientBoundarySchedule {
+        target: setup.boundaries[0].target.clone(),
+        kind: fs_project::TransientBoundaryTarget::FixedTemperature,
+        source: "manufactured thermal cycle for native sampled-peak consumers".into(),
+        steps: [(0.5, 300.0), (1.0, 340.0), (2.0, 300.0)].into_iter()
+            .map(|(until, value)| fs_project::TransientBoundaryStep {
+                until: QtyAny::new(until, dims::TIME),
+                value: QtyAny::new(value, dims::TEMPERATURE),
+            }).collect(),
+    }];
+    std::fs::write(fixture.sources.join("cooling-reference.fsim"),
+        fs_project::print_sexpr(&fixture.project).unwrap()).unwrap();
+    let source = STUDY.replace(":samples 4", ":samples 2")
+        .replace("temperature-max", "temperature-peak")
+        .replace(":target convection-temperature :entity \"air\"", ":target initial-specific-enthalpy :entity \"air\"")
+        .replace(":low 294K :high 300K", ":low -1.5J/kg :high 18.5J/kg");
+    std::fs::write(fixture.sources.join("study.fsim"), &source).unwrap();
+    let completed = fixture.study(None, fs_cli::exit::SUCCESS);
+    let (_, report) = fixture.report(&completed);
+    assert_eq!(rows(&report).len(), 2);
+    for row in rows(&report) {
+        assert!((row.f64_field("value_k").unwrap() - 340.0).abs() < 1e-10,
+            "the native child must retain the hot intermediate boundary state");
+    }
+    let controlled = source.replace(":version 1",
+        ":version 3 :mean-control (nominal-adjoint :max-solves 1)");
+    std::fs::write(fixture.sources.join("study.fsim"), controlled).unwrap();
+    let refused = fixture.study(None, fs_cli::exit::REFUSED);
+    let (_, report) = fixture.report(&refused);
+    assert!(rows(&report).is_empty());
+    let control = report.get("mean_control").unwrap();
+    assert_eq!(control.str_field("status"), Some("refused"));
+    assert_eq!(control.get("gradient"), Some(&JsonValue::Null));
+    assert!(control.get("calibration").unwrap().str_field("failure").unwrap()
+        .contains("per-step reverse operators"));
 }

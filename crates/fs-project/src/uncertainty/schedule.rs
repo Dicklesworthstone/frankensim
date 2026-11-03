@@ -84,6 +84,7 @@ mod tests {
                 region: row.region.clone(), volumetric_heat_capacity: QtyAny::new(100.0, dims::VOLUMETRIC_HEAT_CAPACITY),
                 source: "synthetic capacity".into(),
             }).collect(), enthalpy: None,
+            boundary_schedules: Vec::new(),
             power_schedules: vec![TransientRegionPower {
                 region: "air".into(), source: "synthetic delivered pulse".into(),
                 steps: [(0.25, 8.0), (0.75, 0.0), (2.0, 2.0)].into_iter()

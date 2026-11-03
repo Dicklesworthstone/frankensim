@@ -404,6 +404,19 @@ pub fn migrate_envelope(
         });
     }
     if declared_version > 0
+        && declared_version < 16
+        && decoded.spec.cooling.as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .is_some_and(|transient| !transient.boundary_schedules.is_empty())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates prescribed thermal boundary histories"),
+            hint: "declare sourced boundary histories in a current-version project; migration preserves historical boundary values".to_string(),
+        });
+    }
+    if declared_version > 0
         && declared_version < 13
         && decoded
             .spec

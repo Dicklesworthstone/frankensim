@@ -3812,3 +3812,20 @@ corners require the existing smoothness admission; the method does not invent
 a derivative at a refused kink. Automatic history tapes, differentiation of
 adaptive/event decisions, geometry and caloric-chart parameter gradients are
 outside this interface.
+
+## Bind original lowered boundaries to scenario histories
+
+`ThermalBoundaryHistory::from_boundary` accepts the original mesh and its
+already-lowered thermal boundary, retaining face assignments, row kinds and
+shared-vertex Dirichlet precedence. It reconstructs the partition through the
+existing boundary builder and then uses the original history admission and
+sampling owner. Geometry selectors are not rerun. Callers must keep the
+original mesh and boundary together; the face-count check is not a geometric
+identity proof.
+
+The native cooling consumer uses this seam for prescribed temperature,
+signed heat flux and independent Robin reference-temperature histories.
+Sampling rebuilds the original prescribed-node lift. Existing capacity and
+total-enthalpy solvers retain their old physical state and account prescribed
+jumps through their existing boundary-node storage reactions. This interface
+adds no boundary-aware trajectory adjoint or temporal accuracy claim.

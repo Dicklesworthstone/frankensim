@@ -2368,6 +2368,7 @@ fn transient_project() -> ProjectSpec {
             source: "manufactured constant capacity for numerical verification".to_string(),
         }).collect(),
         enthalpy: None,
+        boundary_schedules: Vec::new(),
         power_schedules: Vec::new(),
     });
     spec
@@ -3383,3 +3384,75 @@ fn g0_v14_migration_preserves_uniform_initial_state_and_refuses_regional_payload
 
 #[path = "project/enclosure.rs"]
 mod enclosure;
+
+fn transient_boundary_project() -> ProjectSpec {
+    use fs_project::{TransientBoundarySchedule, TransientBoundaryStep, TransientBoundaryTarget};
+    let mut spec = transient_project();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.boundaries[0].condition = ThermalBoundaryCondition::Convection {
+        coefficient: QtyAny::new(10.0, fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT),
+        reference_temperature: kelvin(293.15),
+    };
+    let policy = setup.transient.as_mut().unwrap();
+    policy.max_step.value = 6.0;
+    policy.max_steps = 12;
+    policy.boundary_schedules = vec![TransientBoundarySchedule {
+        target: setup.boundaries[0].target.clone(),
+        kind: TransientBoundaryTarget::ConvectionTemperature,
+        source: "authored chamber thermal cycle".into(),
+        steps: [(3.0, 290.0), (7.0, 310.0), (10.0, 300.0)].into_iter()
+            .map(|(until, value)| TransientBoundaryStep {
+                until: QtyAny::new(until, fs_project::spec::dims::TIME), value: kelvin(value),
+            }).collect(),
+    }];
+    policy.power_schedules = vec![fs_project::TransientRegionPower {
+        region: setup.regions[0].region.clone(), source: "independent workload switch".into(),
+        steps: [2.0, 10.0].into_iter().map(|until| fs_project::TransientPowerStep {
+            until: QtyAny::new(until, fs_project::spec::dims::TIME),
+            watts: QtyAny::new(2.0, fs_project::spec::dims::POWER),
+        }).collect(),
+    }];
+    spec.envelope.as_mut().unwrap().ambient_lo.value = 280.0;
+    spec.envelope.as_mut().unwrap().ambient_hi.value = 315.0;
+    spec
+}
+
+#[test]
+fn g0_thermal_history_roundtrips_with_source_identity_and_a_shared_power_boundary_grid() {
+    let spec = transient_boundary_project();
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let text = print_sexpr(&spec).unwrap();
+    assert!(text.contains(":boundary-schedules (boundary-schedules"));
+    assert_eq!(parse_sexpr(&text).unwrap().spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).unwrap()).unwrap().spec, spec);
+    assert_eq!(spec.cooling.as_ref().unwrap().conduction.as_ref().unwrap()
+        .transient.as_ref().unwrap().coarse_step_ends_s().unwrap(), [2.0, 3.0, 7.0, 10.0]);
+    let mut changed = spec.clone();
+    changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap().boundary_schedules[0].source.push_str(" revised");
+    assert_ne!(canonical_hash(text.as_bytes()), canonical_hash(print_sexpr(&changed).unwrap().as_bytes()));
+    assert!(!print_sexpr(&transient_project()).unwrap().contains("boundary-schedules"));
+    let older = text.replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 15", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 15", 1);
+    assert_eq!(parse_sexpr_migrating(&older).unwrap_err().code, "fsim-migration-payload");
+}
+
+#[test]
+fn g0_thermal_history_refuses_missing_tail_wrong_owner_units_and_unbudgeted_switches() {
+    for variant in ["tail", "units", "order", "kind", "target", "duplicate", "source", "envelope", "work"] {
+        let mut spec = transient_boundary_project();
+        let policy = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient.as_mut().unwrap();
+        match variant {
+            "tail" => policy.boundary_schedules[0].steps.last_mut().unwrap().until.value = 9.0,
+            "units" => policy.boundary_schedules[0].steps[0].value.dims = fs_project::spec::dims::POWER,
+            "order" => policy.boundary_schedules[0].steps[1].until.value = 3.0,
+            "kind" => policy.boundary_schedules[0].kind = fs_project::TransientBoundaryTarget::HeatFlux,
+            "target" => policy.boundary_schedules[0].target = "missing".into(),
+            "duplicate" => policy.boundary_schedules.push(policy.boundary_schedules[0].clone()),
+            "source" => policy.boundary_schedules[0].source.clear(),
+            "envelope" => policy.boundary_schedules[0].steps[0].value.value = 279.0,
+            _ => policy.max_steps = 11,
+        }
+        assert!(spec.validate().iter().any(|v| v.code.starts_with("project-conduction-transient")), "{variant}");
+    }
+}

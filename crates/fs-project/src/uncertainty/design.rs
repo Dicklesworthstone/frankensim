@@ -245,6 +245,7 @@ mod tests {
                 source: "synthetic storage".into(),
             }).collect(),
             enthalpy: None,
+            boundary_schedules: Vec::new(),
             power_schedules: vec![TransientRegionPower { region: "air".into(),
                 source: "authored delivered-power replacement".into(),
                 steps: vec![TransientPowerStep { until: QtyAny::new(1.0, dims::TIME),

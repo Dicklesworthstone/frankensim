@@ -34,7 +34,7 @@ fn time(spec: &mut ProjectSpec) -> &mut fs_project::ConductionTransient {
         .unwrap()
 }
 
-fn project(density: f64, horizon: f64, knots: &[(f64, f64, f64)]) -> ProjectSpec {
+pub(super) fn project(density: f64, horizon: f64, knots: &[(f64, f64, f64)]) -> ProjectSpec {
     let mut spec = conduction_fixture_project(7, &tetra_stl());
     transient_product::declaration(&mut spec, 100.0, horizon);
     let identity = fs_blake3::ContentHash::from_hex(&fixture_card_identity().0).unwrap();

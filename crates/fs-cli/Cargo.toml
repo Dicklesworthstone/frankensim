@@ -46,6 +46,7 @@ fs-project = { path = "../fs-project" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-report = { path = "../fs-report" }
+fs-scenario = { path = "../fs-scenario" }
 fs-session = { path = "../fs-session" }
 fs-solver = { path = "../fs-solver" }
 fs-topols = { path = "../fs-topols" }

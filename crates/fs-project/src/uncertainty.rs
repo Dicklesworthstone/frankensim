@@ -652,6 +652,18 @@ fn validate_project(project: &ProjectSpec) -> Result<()> {
     else { Ok(()) }
 }
 fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) -> Result<()> {
+    // The held history replaces this original static coordinate. Sampling its
+    // unused placeholder would silently manufacture a zero-effect input.
+    if project.cooling.as_ref().and_then(|c| c.conduction.as_ref())
+        .and_then(|c| c.transient.as_ref()).is_some_and(|time|
+            time.boundary_schedules.iter().any(|row| row.target == parameter.entity
+                && matches!((row.kind, parameter.target),
+                    (crate::TransientBoundaryTarget::FixedTemperature, Target::FixedTemperature)
+                    | (crate::TransientBoundaryTarget::HeatFlux, Target::HeatFlux)
+                    | (crate::TransientBoundaryTarget::ConvectionTemperature, Target::ConvectionTemperature))))
+    {
+        return Err(error("the selected static boundary coordinate is replaced by its declared thermal history"));
+    }
     if parameter.target.contact_axis().is_some() {
         return contact_inputs::apply(project, parameter, value);
     }

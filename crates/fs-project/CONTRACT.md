@@ -754,3 +754,26 @@ temperature bound is implied.
   safety-factor derivation, recompute compliance, or upgrade the lower-layer
   evidence color. A scoping admission preserves `Indeterminate`; it is not
   compliance-signoff authority.
+
+## Prescribed thermal boundary histories in native cooling
+
+The existing transient declaration admits optional sourced
+`boundary-schedules`. Each history names one original boundary and one of
+`fixed-temperature`, `heat-flux`, or `convection-temperature`. Kelvin values
+are positive; signed outward flux uses W/m². Strictly increasing held intervals
+cover the exact horizon. A reference-temperature history requires an original
+prescribed convection law and retains its coefficient; natural and airflow
+owners cannot be replaced by this field.
+
+Boundary and regional power switches share the original event-aligned coarse
+grid and combined coarse/fine work cap. The optional empty field is omitted
+canonically, preserving previous project identities; declared sources and
+values participate in canonical identity. Historical pre-v16 envelopes cannot
+carry these histories. This extends the current project declaration without a
+new solver or receipt schema.
+
+Native uncertainty/design sampling preserves histories on immutable child
+projects. Static coordinates replaced by an authored history refuse as random
+inputs; other inputs, including the retained convection coefficient, remain
+available. Structural admission does not validate the physical data or imply
+a continuous-time extremum or a derivative of the scheduled trajectory.

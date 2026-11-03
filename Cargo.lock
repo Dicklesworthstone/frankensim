@@ -1200,6 +1200,7 @@ dependencies = [
  "fs-qty",
  "fs-rep-mesh",
  "fs-report",
+ "fs-scenario",
  "fs-session",
  "fs-solver",
  "fs-topols",

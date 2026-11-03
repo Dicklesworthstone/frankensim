@@ -124,9 +124,41 @@ impl<'m> ThermalBoundaryHistory<'m> {
         initial_time_s: f64,
     ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
-        crate::require_finite("initial boundary time", initial_time_s)?;
         let mesh = builder.mesh;
-        let partition = builder.finish()?;
+        Self::bind(cx, mesh, builder.finish()?, environment, histories, initial_time_s)
+    }
+
+    /// Attach histories to the original already-lowered face partition.
+    /// The caller supplies the same mesh used to build that boundary; no
+    /// selector is rerun and shared Dirichlet precedence stays unchanged.
+    pub fn from_boundary(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh, boundary: &ThermalBoundary,
+        environment: &Environment, histories: Vec<ThermalRegionHistory>,
+        initial_time_s: f64,
+    ) -> Result<Self, ConductionError> {
+        poll(cx, 0)?;
+        if boundary.face_region.len() != mesh.boundary().len() {
+            return Err(ConductionError::ScenarioRow {
+                region: "boundary-history".into(),
+                what: "retained thermal partition differs from the supplied mesh".into(),
+                fix: "keep the original mesh and its lowered boundary together".into(),
+            });
+        }
+        let partition = ThermalBoundaryBuilder {
+            mesh, names: boundary.names.clone(), conditions: boundary.conditions.clone(),
+            face_region: boundary.face_region.clone(),
+            adiabatic_remainder: boundary.adiabatic_remainder != 0,
+        }.finish()?;
+        Self::bind(cx, mesh, partition, environment, histories, initial_time_s)
+    }
+
+    fn bind(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh, partition: ThermalBoundary,
+        environment: &Environment, histories: Vec<ThermalRegionHistory>,
+        initial_time_s: f64,
+    ) -> Result<Self, ConductionError> {
+        poll(cx, 0)?;
+        crate::require_finite("initial boundary time", initial_time_s)?;
         let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(histories.len());
         for (at, history) in histories.into_iter().enumerate() {

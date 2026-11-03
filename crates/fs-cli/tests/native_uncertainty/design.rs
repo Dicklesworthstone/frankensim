@@ -32,6 +32,7 @@ fn add_transient(fixture: &mut Fixture, initial: f64) {
             source: "synthetic storage for native power design integration".into(),
         }).collect(),
         enthalpy: None,
+        boundary_schedules: Vec::new(),
         power_schedules: Vec::new(),
     });
 }

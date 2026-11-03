@@ -36,6 +36,7 @@ fn fixture() -> Fixture {
             })
             .collect(),
         enthalpy: None,
+        boundary_schedules: Vec::new(),
         power_schedules: Vec::new(),
     });
     fixture.project.solver.as_mut().unwrap().tolerance_rel = 1e-10;

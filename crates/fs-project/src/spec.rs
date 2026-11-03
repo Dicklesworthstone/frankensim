@@ -873,6 +873,59 @@ pub struct TransientRegionPower {
     pub steps: Vec<TransientPowerStep>,
 }
 
+/// The original prescribed boundary coordinate replaced by a held history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransientBoundaryTarget {
+    /// Absolute prescribed temperature, K.
+    FixedTemperature,
+    /// Signed outward heat flux, W/m².
+    HeatFlux,
+    /// Absolute reference temperature of an existing prescribed Robin law, K.
+    ConvectionTemperature,
+}
+
+impl TransientBoundaryTarget {
+    /// Canonical declaration name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::FixedTemperature => "fixed-temperature",
+            Self::HeatFlux => "heat-flux",
+            Self::ConvectionTemperature => "convection-temperature",
+        }
+    }
+
+    /// Dimensions of every value in this history.
+    pub const fn dims(self) -> Dims {
+        match self {
+            Self::FixedTemperature | Self::ConvectionTemperature => dims::TEMPERATURE,
+            Self::HeatFlux => dims::HEAT_FLUX,
+        }
+    }
+}
+
+/// One held boundary interval, with the same physical endpoint convention as power.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientBoundaryStep {
+    /// Strictly increasing seconds; the final endpoint equals the horizon.
+    pub until: QtyAny,
+    /// Absolute temperature or signed outward flux, according to the owner.
+    pub value: QtyAny,
+}
+
+/// Sourced held values on one original boundary. Geometry and boundary kind stay fixed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientBoundarySchedule {
+    /// Exact name of one original prescribed boundary.
+    pub target: String,
+    /// Physical coordinate replaced by this history; the law kind stays fixed.
+    pub kind: TransientBoundaryTarget,
+    /// Engineering basis retained in canonical project identity.
+    pub source: String,
+    /// Values apply from the preceding endpoint through this interval. Both
+    /// time grids land on every switch; no new value is backdated across it.
+    pub steps: Vec<TransientBoundaryStep>,
+}
+
 /// Physical initial-temperature declaration for transient conduction (schema v15).
 ///
 /// A uniform quantity remains an assertion that every regional initial enthalpy
@@ -916,6 +969,8 @@ pub struct ConductionTransient {
     /// Optional sourced power histories (schema v12). Empty preserves the
     /// static workload. Every switch is a coarse and fine time-grid boundary.
     pub power_schedules: Vec<TransientRegionPower>,
+    /// Optional prescribed boundary histories. Empty retains static values.
+    pub boundary_schedules: Vec<TransientBoundarySchedule>,
 }
 
 /// Explicit inputs required to lower project geometry into a conduction
@@ -2180,7 +2235,7 @@ impl ProjectSpec {
                     enclosure::validate(conduction, enclosure, out);
                 }
                 if let Some(transient) = &conduction.transient {
-                    Self::check_transient(conduction, transient, out);
+                    Self::check_transient(conduction, transient, self.envelope.as_ref(), out);
                 }
             }
         }
@@ -2190,6 +2245,7 @@ impl ProjectSpec {
     fn check_transient(
         conduction: &ConductionSetup,
         transient: &ConductionTransient,
+        envelope: Option<&Envelope>,
         out: &mut Vec<Violation>,
     ) {
         match transient.initial_temperature {
@@ -2331,6 +2387,45 @@ impl ProjectSpec {
                     "project-conduction-transient-enthalpy-coverage",
                     "transient enthalpy declarations do not exactly cover conduction regions",
                     "declare one sourced enthalpy model for every conduction region",
+                ));
+            }
+        }
+        let mut boundary_targets = BTreeSet::new();
+        for schedule in &transient.boundary_schedules {
+            let mut matches = conduction.boundaries.iter()
+                .filter(|boundary| boundary.target == schedule.target);
+            let boundary = matches.next();
+            let admitted = boundary.is_some_and(|boundary| matches!(
+                (schedule.kind, &boundary.condition),
+                (TransientBoundaryTarget::FixedTemperature, ThermalBoundaryCondition::FixedTemperature { .. })
+                    | (TransientBoundaryTarget::HeatFlux, ThermalBoundaryCondition::HeatFlux { .. })
+                    | (TransientBoundaryTarget::ConvectionTemperature, ThermalBoundaryCondition::Convection { .. })
+            ));
+            if !admitted || matches.next().is_some()
+                || !boundary_targets.insert(schedule.target.as_str())
+            {
+                out.push(violation(
+                    "project-conduction-transient-boundary-target",
+                    format!("boundary schedule for `{}` is repeated, unknown or changes the original law", schedule.target),
+                    "schedule one coordinate on each original prescribed temperature, heat-flux or convection boundary",
+                ));
+            }
+            if schedule.source.trim().is_empty() {
+                out.push(violation(
+                    "project-conduction-transient-boundary-source",
+                    format!("boundary schedule for `{}` has no source", schedule.target),
+                    "retain the engineering basis of the prescribed boundary history",
+                ));
+            }
+            if schedule.kind == TransientBoundaryTarget::ConvectionTemperature
+                && envelope.is_some_and(|envelope| schedule.steps.iter().any(|step|
+                    step.value.value < envelope.ambient_lo.value
+                        || step.value.value > envelope.ambient_hi.value))
+            {
+                out.push(violation(
+                    "project-conduction-transient-boundary-envelope",
+                    format!("convection history for `{}` leaves the declared ambient envelope", schedule.target),
+                    "declare an ambient envelope that covers every prescribed reservoir state",
                 ));
             }
         }

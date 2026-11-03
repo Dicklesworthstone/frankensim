@@ -64,6 +64,8 @@ mod transient_enthalpy_convection_adjoint;
 #[path = "solve/transient_enthalpy_material_adjoint.rs"]
 mod transient_enthalpy_material_adjoint;
 
+#[path = "solve/transient_boundary.rs"]
+mod transient_boundary;
 #[path = "solve/transient_workload.rs"]
 mod transient_workload;
 #[path = "solve/transient_radiation.rs"]

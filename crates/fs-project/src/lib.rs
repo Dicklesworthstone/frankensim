@@ -97,6 +97,7 @@ pub use spec::{
     RadiatingSurface, RadiationSpatialModel, RequirementDirection, RequirementSeverity, RequirementSource,
     RequirementSourceKind, RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings,
     SurfaceOffset, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
+    TransientBoundarySchedule, TransientBoundaryStep, TransientBoundaryTarget,
     TransientEnthalpyKnot, TransientInitialTemperature, TransientPhaseConductivity, TransientPowerStep,
     TransientRegionCapacity, TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent,
     Versions, requirement_source_reviews,

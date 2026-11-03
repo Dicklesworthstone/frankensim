@@ -31,6 +31,8 @@ use super::{
 };
 
 mod adjoint;
+mod boundary_history;
+use boundary_history::BoundaryHistory;
 mod conjugate;
 mod enthalpy;
 mod enclosure;
@@ -363,6 +365,7 @@ fn march(
     policy: &ConductionTransient,
     ends_s: &[f64],
     workload: Option<&Workload<'_>>,
+    boundary_history: Option<&BoundaryHistory<'_>>,
     linear: LinearConfig,
     nonlinear: Option<NonlinearStepConfig>,
     radiation: Option<&radiation::LoweredRadiation>,
@@ -423,7 +426,9 @@ fn march(
         let source = workload
             .map(|history| history.source(cx, problem.mesh, labels, time, deadline))
             .transpose()?;
+        let boundary = boundary_history.map(|history| history.at(cx, time)).transpose()?;
         let step_problem = ConductionProblem {
+            boundary: boundary.as_ref().unwrap_or(problem.boundary),
             source: source.as_ref().unwrap_or(problem.source),
             ..problem
         };
@@ -943,6 +948,7 @@ pub(super) fn solve(
     let enclosure = radiation.map(|lowering| lowering.bind_enclosure(cx, problem))
         .transpose().map_err(lower)?.flatten();
     let workload = Workload::bind(cx, spec, policy, problem.mesh, labels, region_ids, deadline)?;
+    let boundary_history = BoundaryHistory::bind(cx, spec, policy, problem, deadline)?;
     let coarse = march(
         cx,
         &engine,
@@ -951,6 +957,7 @@ pub(super) fn solve(
         policy,
         &grids.coarse,
         workload.as_ref(),
+        boundary_history.as_ref(),
         linear,
         nonlinear,
         radiation,
@@ -971,6 +978,7 @@ pub(super) fn solve(
         policy,
         &grids.fine,
         workload.as_ref(),
+        boundary_history.as_ref(),
         linear,
         nonlinear,
         radiation,
@@ -1095,7 +1103,7 @@ pub(super) fn solve(
     let coarse_max_step = number(TimeGrids::largest_step(&grids.coarse))?;
     let fine_max_step = number(TimeGrids::largest_step(&grids.fine))?;
     let uniform_step = |steps: usize| {
-        if workload.is_none() {
+        if workload.is_none() && boundary_history.is_none() {
             number(policy.horizon.value / steps as f64)
         } else {
             Ok("null".to_string())
@@ -1104,8 +1112,11 @@ pub(super) fn solve(
     let sampled_peak_receipt = fine.sampled_peak.receipt(
         goal_region_name, fine_steps, policy.horizon.value,
     )?;
+    let boundary_history_fragment = boundary_history.as_ref()
+        .map(|history| format!(",\"boundary_history\":{}", history.receipt))
+        .unwrap_or_default();
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}{adjoint_fragment}}}",
+        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt}{boundary_history_fragment},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}{adjoint_fragment}}}",
         number(initial_temperature)?,
         number(policy.horizon.value)?,
         policy.max_steps,

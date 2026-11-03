@@ -256,6 +256,43 @@ impl ConductionTransient {
                 ));
             }
         }
+        for schedule in &self.boundary_schedules {
+            if schedule.steps.is_empty() || schedule.steps.len() > cap {
+                return Err(invalid(
+                    "project-conduction-transient-boundary-steps",
+                    format!("boundary history for `{}` must fit the original step allowance", schedule.target),
+                    "declare nonempty held intervals within the combined coarse/fine work cap",
+                ));
+            }
+            let mut previous = 0.0;
+            for step in &schedule.steps {
+                let until = step.until.value;
+                if step.until.dims != dims::TIME || !until.is_finite()
+                    || until <= previous || until > horizon
+                    || step.value.dims != schedule.kind.dims()
+                    || !step.value.value.is_finite()
+                    || (schedule.kind != crate::TransientBoundaryTarget::HeatFlux && step.value.value <= 0.0)
+                {
+                    return Err(invalid(
+                        "project-conduction-transient-boundary-step",
+                        format!("boundary history for `{}` has an invalid interval or physical value", schedule.target),
+                        "use increasing seconds, positive absolute kelvin or finite signed outward W/m²",
+                    ));
+                }
+                if switches.len() == cap && !switches.contains(&until.to_bits()) {
+                    return Err(work_limit());
+                }
+                switches.insert(until.to_bits());
+                previous = until;
+            }
+            if previous != horizon {
+                return Err(invalid(
+                    "project-conduction-transient-boundary-horizon",
+                    format!("boundary history for `{}` ends at {previous} s instead of {horizon} s", schedule.target),
+                    "cover the entire original horizon; no reservoir or heat-flux tail is inferred",
+                ));
+            }
+        }
         let mut endpoints = Vec::with_capacity(cap);
         let mut start = 0.0;
         for bits in switches {

@@ -31,6 +31,7 @@ fn fixture(enthalpy: bool) -> Fixture {
             source: "synthetic contact-control storage".into(),
         }).collect(),
         enthalpy: None,
+        boundary_schedules: Vec::new(),
         power_schedules: Vec::new(),
     };
     if enthalpy {

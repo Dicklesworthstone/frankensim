@@ -243,6 +243,7 @@ fn march(
     initial_goal_k: f64,
     ends_s: &[f64],
     workload: Option<&Workload<'_>>,
+    boundary_history: Option<&BoundaryHistory<'_>>,
     config: EnthalpyStepConfig,
     radiation: Option<&radiation::LoweredRadiation>,
     enclosure: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
@@ -300,7 +301,9 @@ fn march(
         let source = workload
             .map(|history| history.source(cx, problem.mesh, labels, time, deadline))
             .transpose()?;
+        let boundary = boundary_history.map(|history| history.at(cx, time)).transpose()?;
         let step_problem = ConductionProblem {
+            boundary: boundary.as_ref().unwrap_or(problem.boundary),
             source: source.as_ref().unwrap_or(problem.source),
             ..problem
         };
@@ -957,6 +960,7 @@ pub(super) fn solve(
         .and_then(|&index| initial_temperatures.get(index)).copied()
         .ok_or_else(|| bad("initial enthalpy peak has no selected regional chart"))?;
     let workload = Workload::bind(cx, spec, policy, problem.mesh, labels, region_ids, deadline)?;
+    let boundary_history = BoundaryHistory::bind(cx, spec, policy, problem, deadline)?;
     let coarse = march(
         cx,
         &engine,
@@ -966,6 +970,7 @@ pub(super) fn solve(
         initial_goal_k,
         &grids.coarse,
         workload.as_ref(),
+        boundary_history.as_ref(),
         config,
         radiation,
         enclosure.as_ref(),
@@ -1000,6 +1005,7 @@ pub(super) fn solve(
         initial_goal_k,
         &grids.fine,
         workload.as_ref(),
+        boundary_history.as_ref(),
         config,
         radiation,
         enclosure.as_ref(),
@@ -1175,8 +1181,11 @@ pub(super) fn solve(
     let sampled_peak_receipt = fine.sampled_peak.receipt(
         goal_region_name, grids.fine.len(), policy.horizon.value,
     )?;
+    let boundary_history_fragment = boundary_history.as_ref()
+        .map(|history| format!(",\"boundary_history\":{}", history.receipt))
+        .unwrap_or_default();
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_state\":{initial_state},\"initial_temperature_k\":{initial_temperature_receipt},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"retained_history_update_limit\":{retained_newton_history_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_forward_and_adjoint_krylov_limit\":{total_forward_and_adjoint_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment}{airflow_receipt_fragment}{adjoint_fragment},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_state\":{initial_state},\"initial_temperature_k\":{initial_temperature_receipt},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt}{boundary_history_fragment},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"retained_history_update_limit\":{retained_newton_history_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_forward_and_adjoint_krylov_limit\":{total_forward_and_adjoint_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment}{airflow_receipt_fragment}{adjoint_fragment},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         number(policy.horizon.value)?,
         grids.coarse.len(),
         grids.fine.len(),

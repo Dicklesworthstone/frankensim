@@ -51,6 +51,7 @@ fn sampled_peak_is_explicit_and_requires_a_transient_base() {
             volumetric_heat_capacity: QtyAny::new(100.0, crate::spec::dims::VOLUMETRIC_HEAT_CAPACITY),
             source: "synthetic storage for sampled-peak admission".into(),
         }).collect(),
+        boundary_schedules: Vec::new(),
         enthalpy: None, power_schedules: Vec::new(),
     });
     let bound = study.bind(&project).unwrap();
@@ -366,4 +367,39 @@ fn copula_requires_an_explicit_law_and_a_finite_matrix_for_every_parameter() {
     assert!(UncertaintyStudy::parse(&constants.replace(":correlation independent",
         ":correlation (gaussian-copula :latent-correlation ((1)))")).is_err(),
         "constant marginals still occupy their declared latent coordinate");
+}
+
+#[test]
+fn thermal_histories_reject_overwritten_static_coordinates_but_preserve_forward_sampling() {
+    let mut project = base();
+    let mut time = crate::parse_sexpr_migrating(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../data/reference-project/cooling-transient.fsim"))).unwrap().decoded.spec
+        .cooling.unwrap().conduction.unwrap().transient.unwrap();
+    let setup = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    time.capacities[0].region = setup.regions[0].region.clone();
+    time.boundary_schedules = vec![crate::TransientBoundarySchedule {
+        target: "air".into(), kind: crate::TransientBoundaryTarget::ConvectionTemperature,
+        source: "authored chamber cycle".into(),
+        steps: [(1.0, 295.0), (2.0, 300.0)].into_iter().map(|(until, value)|
+            crate::TransientBoundaryStep {
+                until: QtyAny::new(until, crate::spec::dims::TIME),
+                value: QtyAny::new(value, crate::spec::dims::TEMPERATURE),
+            }).collect(),
+    }];
+    setup.transient = Some(time);
+    assert!(UncertaintyStudy::parse(STUDY).unwrap().bind(&project).is_err(),
+        "the authored reference history replaces the static reference coordinate");
+    let source = STUDY.replace("convection-temperature", "convection-coefficient")
+        .replace("294K", "4W/m^2/K").replace("300K", "8W/m^2/K");
+    let bound = UncertaintyStudy::parse(&source).unwrap().bind(&project).unwrap();
+    for parameters in [[4.0, 4.0], [6.0, 8.0], [4.0, 4.0]] {
+        let sampled = bound.sample_project(&parameters).unwrap();
+        let actual = sampled.cooling.as_ref().unwrap().conduction.as_ref().unwrap();
+        assert_eq!(actual.transient, project.cooling.as_ref().unwrap().conduction.as_ref().unwrap().transient);
+        let ThermalBoundaryCondition::Convection { coefficient, .. } = actual.boundaries[0].condition
+            else { panic!("original Robin owner"); };
+        assert_eq!(coefficient.value, parameters[1]);
+        assert_eq!(sampled.power.as_ref().unwrap()[0].watts.value, parameters[0]);
+    }
+    assert_eq!(bound.base(), &project);
 }
