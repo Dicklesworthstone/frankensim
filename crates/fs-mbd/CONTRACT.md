@@ -136,7 +136,9 @@ a newly supplied physical operating point, not just another sample speed.
 
 `harmonic_response` uses `exp(+i omega t)` and native cancellable complex LU
 on `K - omega^2 M + i omega(C + Omega G)`. Row equilibration precedes the solve;
-the accepted residual and signed mean powers use the original separate matrix
+compensated inertial products retain the original binary coefficients' detuning
+at narrow resonances, including mutual inertia and signed driving frequencies.
+The accepted residual and signed mean powers use the original separate matrix
 actions. Singular resonance refuses without a damping floor or pole shift.
 Mean source, bearing-velocity, stiffness, gyroscopic and inertial powers are
 reported separately. Cross-coupled/active work is not called heat. Equilibrium

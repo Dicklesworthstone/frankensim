@@ -87,6 +87,129 @@ fn jeffcott_unbalance_matches_complex_amplitude_phase_and_bearing_work() {
 }
 
 #[test]
+fn g1_narrow_resonance_keeps_detuning_of_the_original_binary_coefficients() {
+    // A manufactured conditioning stress, not measured bearing parameters.
+    // Binary64 3.1 = 6980579422424269 / 2^51, so the EXACT supplied pencil
+    // has 310 - 10^2*M = -5/2^49. Rounding 10*M first instead gives 31,
+    // erases that detuning, and manufactures q = -16i instead of the value
+    // below. Separate large inertia/stiffness residuals cannot detect this.
+    let force = 5.0 / 562_949_953_421_312.0;
+    let damping = 1.0 / 18_014_398_509_481_984.0;
+    for coordinate_scale in [0.25_f64, 1.0, 8.0] {
+        let scale2 = coordinate_scale * coordinate_scale;
+        let model = RotorBearingModel::new(
+            1,
+            &[3.1 * scale2],
+            &[damping * scale2],
+            &[310.0 * scale2],
+            &[0.0],
+            || false,
+        )
+        .unwrap();
+        for frequency in [-10.0, 10.0] {
+            let response = model
+                .at_speed(0.0, || false)
+                .unwrap()
+                .harmonic_response(
+                    frequency,
+                    &[C64::from_re(force * coordinate_scale)],
+                    1e-12,
+                    || false,
+                )
+                .unwrap();
+            let reference = C64::new(-256.0 / 257.0, -frequency.signum() * 16.0 / 257.0);
+            complex(
+                response.displacement[0].scale(coordinate_scale),
+                reference,
+                2e-14,
+            );
+            complex(
+                response.velocity[0].scale(coordinate_scale),
+                C64::new(-frequency * reference.im, frequency * reference.re),
+                2e-14,
+            );
+            let expected_power = 0.5 * force * (-frequency * reference.im);
+            assert!(
+                (response.mean_input_power_w / expected_power - 1.0).abs() < 2e-14,
+                "the resonance must retain actual input work"
+            );
+            assert!(
+                (response.mean_velocity_force_power_w / expected_power - 1.0).abs() < 2e-14,
+                "the actual bearing loss must balance the input"
+            );
+        }
+    }
+    // With zero loss this same exact pencil is detuned and nonsingular.
+    // It must not be refused as a manufactured lossless pole.
+    let conservative =
+        RotorBearingModel::new(1, &[3.1], &[0.0], &[310.0], &[0.0], || false).unwrap();
+    let response = conservative
+        .at_speed(0.0, || false)
+        .unwrap()
+        .harmonic_response(10.0, &[C64::from_re(force)], 1e-12, || false)
+        .unwrap();
+    complex(response.displacement[0], C64::from_re(-1.0), 2e-14);
+    assert_eq!(response.mean_input_power_w, 0.0);
+    assert_eq!(response.mean_velocity_force_power_w, 0.0);
+}
+
+#[test]
+fn g1_coupled_narrow_resonance_keeps_mutual_inertia_and_signed_gyroscopic_terms() {
+    // Independently exact binary-rational detuning, with r = 5/2^53:
+    // K - 10^2 M = r * [[-16,-1],[-1,-16]]. At spin=2 and omega=10,
+    // omega*C = r*I and omega*Omega*G = r*[[0,-1/2],[1/2,0]].
+    // Off-diagonal compensation matters just as much as the diagonal one.
+    let r = 5.0 / 9_007_199_254_740_992.0;
+    let damping = 1.0 / 18_014_398_509_481_984.0;
+    let gyro = 1.0 / 72_057_594_037_927_936.0;
+    let model = RotorBearingModel::new(
+        2,
+        &[3.1, 0.1, 0.1, 1.1],
+        &[damping, 0.0, 0.0, damping],
+        &[310.0, 10.0, 10.0, 110.0],
+        &[0.0, -gyro, gyro, 0.0],
+        || false,
+    )
+    .unwrap();
+    for sign in [-1.0, 1.0] {
+        let dimensionless_force = [C64::ONE, C64::new(0.0, -0.5 * sign)];
+        let operator = [
+            C64::new(-16.0, sign),
+            C64::new(-1.0, -0.5 * sign),
+            C64::new(-1.0, 0.5 * sign),
+            C64::new(-16.0, sign),
+        ];
+        let determinant = operator[0] * operator[3] - operator[1] * operator[2];
+        let reference = [
+            (operator[3] * dimensionless_force[0] - operator[1] * dimensionless_force[1])
+                / determinant,
+            (operator[0] * dimensionless_force[1] - operator[2] * dimensionless_force[0])
+                / determinant,
+        ];
+        let response = model
+            .at_speed(2.0, || false)
+            .unwrap()
+            .harmonic_response(
+                sign * 10.0,
+                &dimensionless_force.map(|f| f.scale(r)),
+                1e-12,
+                || false,
+            )
+            .unwrap();
+        for (actual, expected) in response.displacement.iter().zip(reference) {
+            complex(*actual, expected, 2e-14);
+        }
+        assert!(response.relative_residual <= 1e-12);
+        let power_scale = response.mean_input_power_w.abs();
+        assert!(
+            (response.mean_input_power_w - response.mean_velocity_force_power_w).abs()
+                <= 2e-14 * power_scale
+        );
+        assert!(response.mean_gyroscopic_power_w.abs() <= 2e-14 * power_scale);
+    }
+}
+
+#[test]
 fn gyroscopic_splitting_and_signed_whirl_match_circular_mode_equations() {
     let (mass, stiffness, gyro) = (1.0, 4.0, 0.5);
     let model = isotropic(mass, 0.0, stiffness, gyro);

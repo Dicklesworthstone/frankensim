@@ -697,8 +697,14 @@ impl RotorOperatingPoint<'_> {
             let mut row_scale = 0.0_f64;
             for j in 0..m.n {
                 let ij = i * m.n + j;
+                // Keep the rounding residual of omega*M: at a narrow
+                // resonance it can exceed the entire physical loss term.
+                // A final FMA alone compensates only the SECOND product and
+                // would silently solve a different K - omega^2 M pencil.
+                let product = finite(w * m.mass[ij])?;
+                let product_error = w.mul_add(m.mass[ij], -product);
                 let entry = C64::new(
-                    finite((-w).mul_add(w * m.mass[ij], m.stiffness[ij]))?,
+                    finite((-w).mul_add(product, m.stiffness[ij]) - w * product_error)?,
                     finite(w * self.velocity_operator[ij])?,
                 );
                 row_scale = row_scale.max(finite(entry.abs())?);
