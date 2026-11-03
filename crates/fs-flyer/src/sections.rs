@@ -16,6 +16,55 @@ use crate::Refusal;
 use fs_airfoil::fit::{BsplineAxis, ResidualSurface};
 use fs_airfoil::table::{CoefficientTable, ConventionBlock, RegimePatch, SurfaceKind};
 use fs_airfoil::{flat_plate_separated, thin_airfoil};
+use fs_math::det;
+use fs_wing::nonlinear::StripRegime;
+
+/// Shared quasi-steady section regime for the aircraft's existing Estimated
+/// thin-airfoil/flat-plate model. Both force channels must use the same weight
+/// at the same solved effective incidence, including twist and induction.
+fn separated_weight(alpha_rad: f64) -> (f64, StripRegime) {
+    let magnitude = alpha_rad.abs();
+    if magnitude <= 0.30 {
+        (0.0, StripRegime::Attached)
+    } else if magnitude < 0.45 {
+        let t = (magnitude - 0.30) / 0.15;
+        (t * t * (3.0 - 2.0 * t), StripRegime::Blended)
+    } else {
+        (1.0, StripRegime::Separated)
+    }
+}
+
+pub(crate) fn section_lift(alpha_rad: f64, camber: f64) -> (f64, StripRegime) {
+    let (weight, regime) = separated_weight(alpha_rad);
+    let attached = core::f64::consts::TAU * (alpha_rad + 2.0 * camber);
+    if regime == StripRegime::Attached {
+        return (attached, regime);
+    }
+    let separated = fs_airfoil::FLAT_PLATE_CD90 * det::sin(alpha_rad) * det::cos(alpha_rad);
+    if regime == StripRegime::Separated {
+        (separated, regime)
+    } else {
+        (attached * (1.0 - weight) + separated * weight, regime)
+    }
+}
+
+/// Non-lifting profile plus separated pressure drag, without induced drag.
+/// The existing flat-plate normal force Cn=Cd90*sin(alpha), Ca=0 transforms
+/// to Cd=Cd90*sin²(alpha). This must accompany its separated lift channel:
+/// leaving the attached Cd in place discards the plate's pressure work.
+pub(crate) fn section_profile_drag(alpha_rad: f64, attached_cd: f64) -> f64 {
+    let (weight, regime) = separated_weight(alpha_rad);
+    if regime == StripRegime::Attached {
+        return attached_cd;
+    }
+    let sin_alpha = det::sin(alpha_rad);
+    let separated = fs_airfoil::FLAT_PLATE_CD90 * sin_alpha * sin_alpha;
+    if regime == StripRegime::Separated {
+        separated
+    } else {
+        attached_cd * (1.0 - weight) + separated * weight
+    }
+}
 
 /// Evidence-lineage metadata every dataset carries (E4.1 DONE-WHEN).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,5 +240,54 @@ pub fn cl_3d(ds: &SectionDataset, alpha_rad: f64, log10_re: f64, ar: f64) -> Res
         let t = (a - attached_limit) / (full_sep - attached_limit);
         let s = t * t * (3.0 - 2.0 * t);
         Ok(cl_attached * (1.0 - s) + cl_sep * s)
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::{section_lift, section_profile_drag};
+    use fs_wing::nonlinear::StripRegime;
+
+    #[test]
+    fn g0_separated_lift_and_drag_recover_the_same_plate_normal_force() {
+        for alpha in [-1.2_f64, -0.7, -0.45, 0.45, 0.7, 1.2] {
+            let (cl, regime) = section_lift(alpha, 0.05);
+            let cd = section_profile_drag(alpha, 0.015);
+            let (cn, ca) = fs_airfoil::wind_to_body(cl, cd, alpha);
+            assert_eq!(regime, StripRegime::Separated);
+            assert!((cn - fs_airfoil::FLAT_PLATE_CD90 * alpha.sin()).abs() < 1e-12);
+            assert!(
+                ca.abs() < 1e-12,
+                "a separated plate carries no suction force"
+            );
+            assert!(
+                cd > 0.0,
+                "profile work must dissipate in both incidence directions"
+            );
+        }
+    }
+
+    #[test]
+    fn g0_drag_blend_is_even_continuous_and_keeps_the_attached_baseline() {
+        let cd0 = 0.015;
+        for alpha in [0.0, 0.15, 0.30] {
+            assert_eq!(section_profile_drag(alpha, cd0).to_bits(), cd0.to_bits());
+        }
+        let mut last = cd0;
+        for k in 0..=300 {
+            let alpha = 0.30 + 0.15 * f64::from(k) / 300.0;
+            let cd = section_profile_drag(alpha, cd0);
+            assert_eq!(cd, section_profile_drag(-alpha, cd0));
+            assert!(cd >= last);
+            last = cd;
+        }
+        for boundary in [0.30, 0.45] {
+            assert!(
+                (section_profile_drag(boundary - 1e-8, cd0)
+                    - section_profile_drag(boundary + 1e-8, cd0))
+                .abs()
+                    < 5e-8
+            );
+        }
     }
 }

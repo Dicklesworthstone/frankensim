@@ -54,6 +54,8 @@ pub struct HarmonicAerodynamics {
     /// Actual source operator at this state when skew transport is selected.
     pub skew_transport: Option<[SkewTransport; 2]>,
     pub gamma: Vec<f64>,
+    /// Effective section incidences [rad] at the accepted wing circulation.
+    pub strip_alpha_eff_rad: Vec<f64>,
     pub strip_velocity_mps: Vec<[f64; 3]>,
     pub wing_lift_n: f64,
     pub wing_residual: f64,
@@ -66,6 +68,7 @@ impl AerodynamicSolution for HarmonicAerodynamics {
     fn load_fields(&self) -> AerodynamicFields<'_> {
         AerodynamicFields {
             gamma: &self.gamma,
+            strip_alpha_eff_rad: &self.strip_alpha_eff_rad,
             strip_velocity_mps: Some(&self.strip_velocity_mps),
             thrust_n: self.propellers.map(|prop| prop.thrust_n),
             torque_nm: self.propellers.map(|prop| prop.torque_nm),
@@ -249,6 +252,7 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
             wake_rate: [left, right],
             skew_transport,
             gamma: wing.gamma,
+            strip_alpha_eff_rad: wing.strip_alpha_eff_rad,
             strip_velocity_mps: wing.strip_velocity_mps,
             wing_lift_n: wing.lift_n,
             wing_residual: wing.residual,

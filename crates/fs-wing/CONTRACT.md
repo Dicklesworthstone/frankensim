@@ -48,6 +48,15 @@ once per solve and reuse iteration scratch, retaining the original product/sum
 order. `nonlinear_battery` adds uniform exact-equivalence, mirrored nonuniform
 loading/local lift, and wash-vector/refusal tests. Existing goldens are unchanged.
 
+`NonlinearReport::alpha_eff_rad` retains each strip's effective incidence at the
+accepted circulation. It reuses the prepared trailing-sheet coefficients once
+after convergence, with the same local flow and geometric twist as the lift
+closure. Section drag/moment consumers can therefore use the accepted incidence
+without a second solve, repeated Biot–Savart construction, or ambiguous inversion
+of a stalled lift coefficient. G0 checks invert a linear section law from the
+returned circulation under nonuniform inflow and twist and verify that the
+reported incidence includes a nonzero induction correction.
+
 ### Noncontracting alternating strip modes
 
 The nonlinear owner also detects two successive residual-vector reversals

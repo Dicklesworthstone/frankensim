@@ -36,6 +36,7 @@ struct WingAtInduction {
     disk_velocity_mps: [[f64; 3]; 2],
     disk_axial_mps: [f64; 2],
     gamma: Vec<f64>,
+    strip_alpha_eff_rad: Vec<f64>,
     strip_velocity_mps: Vec<[f64; 3]>,
     lift_n: f64,
     residual: f64,
@@ -66,6 +67,8 @@ pub struct DynamicAerodynamics {
     pub oblique: Option<[ObliqueLoads; 2]>,
     /// Wing circulation at this physical wash state [m²/s].
     pub gamma: Vec<f64>,
+    /// Effective section incidences [rad] at the accepted wing circulation.
+    pub strip_alpha_eff_rad: Vec<f64>,
     /// Incident plus vector prop wash used for circulation and panel forces.
     pub strip_velocity_mps: Vec<[f64; 3]>,
     /// Native wing lift [N].
@@ -78,6 +81,7 @@ impl AerodynamicSolution for DynamicAerodynamics {
     fn load_fields(&self) -> AerodynamicFields<'_> {
         AerodynamicFields {
             gamma: &self.gamma,
+            strip_alpha_eff_rad: &self.strip_alpha_eff_rad,
             strip_velocity_mps: Some(&self.strip_velocity_mps),
             thrust_n: self.propellers.map(|prop| prop.thrust_n),
             torque_nm: self.propellers.map(|prop| prop.torque_nm),
@@ -295,6 +299,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             disk_velocity_mps,
             disk_axial_mps,
             gamma: wing.gamma,
+            strip_alpha_eff_rad: wing.alpha_eff_rad,
             strip_velocity_mps,
             lift_n: wing.total_lift_n,
             residual: wing.residual,
@@ -353,6 +358,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             propellers: [propeller(0)?, propeller(1)?],
             oblique,
             gamma: wing.gamma,
+            strip_alpha_eff_rad: wing.strip_alpha_eff_rad,
             strip_velocity_mps: wing.strip_velocity_mps,
             wing_lift_n: wing.lift_n,
             wing_residual: wing.residual,

@@ -129,6 +129,9 @@ pub struct CoupledStep {
     /// Converged per-panel circulations (the washed solve's Γ — the
     /// moment build-up consumes these; not part of the golden payload).
     pub gamma: Vec<f64>,
+    /// Accepted effective section incidences [rad], including twist and the
+    /// wing solver's trailing-sheet induction. Paired with `gamma`.
+    pub strip_alpha_eff_rad: Vec<f64>,
     /// Accepted local strip velocities including prop wash in distributed
     /// mode; force assembly must use these with `gamma`. Legacy mode is None.
     pub strip_velocity_mps: Option<Vec<[f64; 3]>>,
@@ -350,7 +353,13 @@ fn coupled_step_impl(
     let mut unrelaxed_done = false;
     // One evaluation of the fixed-point map G(x): wing under slipstream x,
     // disk inflows, BEMT, momentum slipstream.
-    type EvalOut = ([f64; 2], [f64; 2], [f64; 2], [BemtPower; 2], f64, Vec<f64>);
+    type EvalOut = (
+        [f64; 2],
+        [f64; 2],
+        [f64; 2],
+        [BemtPower; 2],
+        fs_wing::nonlinear::NonlinearReport,
+    );
     let evaluate = |x: &[f64; 2]| -> Result<EvalOut, Refusal> {
         let du: Vec<f64> = if spatial.is_none() {
             wash.iter()
@@ -431,10 +440,10 @@ fn coupled_step_impl(
             let t_term = sol.thrust_n / (2.0 * rho * disk_area);
             g[k] = momentum_disk_root(v_disk, t_term)?;
         }
-        Ok((g, thrust, torque, power, wing.total_lift_n, wing.gamma))
+        Ok((g, thrust, torque, power, wing))
     };
     loop {
-        let (g, thrust, torque, power, lift, gamma) = evaluate(&x)?;
+        let (g, thrust, torque, power, wing) = evaluate(&x)?;
         let r = [g[0] - x[0], g[1] - x[1]];
         // det doctrine: sqrt is IEEE-exact; hypot is platform libm and
         // broke native-vs-wasm digest identity (E6.2 measurement).
@@ -453,8 +462,9 @@ fn coupled_step_impl(
                 thrust_n: thrust,
                 torque_nm: torque,
                 power,
-                wing_lift_n: lift,
-                gamma,
+                wing_lift_n: wing.total_lift_n,
+                gamma: wing.gamma,
+                strip_alpha_eff_rad: wing.alpha_eff_rad,
                 strip_velocity_mps: incident.map(|flow| {
                     flow.strip_velocity_mps
                         .iter()

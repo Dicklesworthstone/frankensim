@@ -64,6 +64,47 @@ fn flat_closure(_s: usize, alpha: f64) -> (f64, StripRegime) {
 }
 
 #[test]
+fn g0_accepted_incidence_closes_section_circulation_in_local_flow() {
+    let (panels, mut strips) = biplane();
+    let velocity = freestream(0.12);
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let mut incident = vec![velocity; strips.len()];
+    for (s, strip) in strips.iter_mut().enumerate() {
+        strip.twist_rad = 0.02 + 0.001 * s as f64;
+        incident[s][0] += 0.1 * s as f64;
+        incident[s][2] += 0.02 * s as f64;
+    }
+    let result = solve_nonlinear_with_incident(
+        &op,
+        &panels,
+        &strips,
+        velocity,
+        RHO,
+        &flat_closure,
+        &incident,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.alpha_eff_rad.len(), strips.len());
+    let mut max_induction = 0.0_f64;
+    for (s, strip) in strips.iter().enumerate() {
+        let speed = (incident[s][0].powi(2) + incident[s][2].powi(2)).sqrt();
+        let circulation: f64 = strip.panel_indices.iter().map(|&j| result.gamma[j]).sum();
+        // Independent inversion of Gamma=-Vc*cl/2 and cl=2*pi*alpha.
+        // A geometric-only angle would omit the live induced-alpha term.
+        let from_circulation = -circulation / (std::f64::consts::PI * speed * strip.chord_m);
+        assert!((result.alpha_eff_rad[s] - from_circulation).abs() < 1e-10);
+        let geometric = incident[s][2].atan2(incident[s][0]) + strip.twist_rad;
+        max_induction = max_induction.max((result.alpha_eff_rad[s] - geometric).abs());
+    }
+    assert!(
+        max_induction > 0.01,
+        "the effective-angle check must exercise induction"
+    );
+}
+
+#[test]
 fn uniform_incident_field_matches_the_legacy_solve_exactly() {
     let (panels, strips) = biplane();
     let velocity = freestream(0.05);

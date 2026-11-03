@@ -102,6 +102,30 @@ unrepresentable mass properties. The input principal moments remain declared
 data or the documented reference calibration; a rotation does not validate
 that calibration or supply missing geometry, moving masses or deformation.
 
+## Section pressure drag through stall
+
+Longitudinal flight, distributed roll/yaw moments, and the native six-DOF
+propulsion assembly consume the same effective strip incidence returned by
+`fs-wing`. Steady coupling, evolving axial wakes and first-harmonic wakes carry
+that incidence with their accepted circulation; it includes geometric twist and
+trailing-sheet induction exactly once. Profile drag uses the existing section
+law's smooth transition over `|alpha_eff|=0.30..0.45 rad`: the declared attached
+`cd0_wing` blends to `Cd90*sin²(alpha_eff)`, the wind-axis drag projection of
+`fs-airfoil`'s separated flat-plate normal force. Lift uses that same transition.
+Fully separated flow therefore carries pressure drag instead of retaining the
+attached drag floor. Induced drag remains the separately owned classical term.
+
+The force opposes each strip's accepted chord-plane relative velocity; its
+moment uses the same physical strip arm. Local relative work is nonpositive in
+both incidence directions. Attached-regime arithmetic is unchanged. G0 tests
+check plate force decomposition, even positive drag and continuous transitions,
+then reconstruct drag and work in an actual separated aircraft load solve.
+The attached coefficient, transition angles, constant quarter-chord moment and
+flat-plate continuation remain Estimated model choices. This change supplies
+the missing drag channel of that model; it does not establish historical
+deep-stall validity, Reynolds-dependent viscous section data or resolved wake
+pressure drag.
+
 ## Finite-strip rotational fluid inertia
 
 `addedmass::assemble_analytic_strip` integrates each finite uniform strip's
@@ -1411,3 +1435,4 @@ stage-density coherence through midpoint/warp/lateral loads, homogeneous
 equivalence, profile-domain refusal before motion publication, complete source
 encoding, and checkpoint/replay continuation. Source/parser review is distinct
 from native execution, which remains unverified for this addition.
+

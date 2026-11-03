@@ -51,8 +51,7 @@ impl DistributedLateralLoads {
         LateralMomentsNm {
             roll_nm: (self.circulation.roll_nm + self.profile_drag.roll_nm)
                 + self.propellers.roll_nm,
-            yaw_nm: (self.circulation.yaw_nm + self.profile_drag.yaw_nm)
-                + self.propellers.yaw_nm,
+            yaw_nm: (self.circulation.yaw_nm + self.profile_drag.yaw_nm) + self.propellers.yaw_nm,
         }
     }
 }
@@ -76,27 +75,41 @@ impl OpenLoopDesign {
         delta_canard_rad: f64,
         rho_kg_m3: f64,
     ) -> Result<DistributedLateralLoads, Refusal> {
-        if !rho_kg_m3.is_finite() || rho_kg_m3 <= 0.0
+        if !rho_kg_m3.is_finite()
+            || rho_kg_m3 <= 0.0
             || !delta_canard_rad.is_finite()
-            || !self.cd0_wing.is_finite() || self.cd0_wing < 0.0
+            || !self.cd0_wing.is_finite()
+            || self.cd0_wing < 0.0
             || !self.cg_m.iter().all(|v| v.is_finite())
             || !loads.thrust_n.iter().all(|v| v.is_finite())
         {
             return Err(invalid("invalid density, geometry, drag or thrust"));
         }
-        let local = loads.coupled.strip_velocity_mps.as_ref()
-            .ok_or_else(|| invalid("distributed moments require the accepted local force velocities"))?;
+        let local = loads.coupled.strip_velocity_mps.as_ref().ok_or_else(|| {
+            invalid("distributed moments require the accepted local force velocities")
+        })?;
         let (panels, strips) = self.layout(delta_canard_rad)?;
-        if loads.coupled.gamma.len() != panels.len() || local.len() != strips.len()
+        if loads.coupled.gamma.len() != panels.len()
+            || local.len() != strips.len()
+            || loads.coupled.strip_alpha_eff_rad.len() != strips.len()
             || !loads.coupled.gamma.iter().all(|v| v.is_finite())
+            || !loads
+                .coupled
+                .strip_alpha_eff_rad
+                .iter()
+                .all(|v| v.is_finite())
         {
-            return Err(invalid("circulation or strip velocities do not match the aircraft layout"));
+            return Err(invalid(
+                "circulation or strip velocities do not match the aircraft layout",
+            ));
         }
         let mut result = DistributedLateralLoads::default();
-        for (strip, &velocity) in strips.iter().zip(local) {
+        for (s, (strip, &velocity)) in strips.iter().zip(local).enumerate() {
             let speed2 = velocity[0] * velocity[0] + velocity[2] * velocity[2];
-            if !velocity.iter().all(|v| v.is_finite()) || velocity[0] <= 0.0
-                || !speed2.is_finite() || speed2 <= 0.0
+            if !velocity.iter().all(|v| v.is_finite())
+                || velocity[0] <= 0.0
+                || !speed2.is_finite()
+                || speed2 <= 0.0
             {
                 return Err(invalid("invalid accepted strip velocity"));
             }
@@ -111,25 +124,45 @@ impl OpenLoopDesign {
                 let fz_a = velocity[0] * seg[1];
                 let fz_b = velocity[1] * seg[0];
                 let scale = rho_kg_m3 * loads.coupled.gamma[j];
-                result.circulation.add_force(arm, [
-                    scale * (fx_a - fx_b), scale * (fy_a - fy_b), scale * (fz_a - fz_b),
-                ]);
+                result.circulation.add_force(
+                    arm,
+                    [
+                        scale * (fx_a - fx_b),
+                        scale * (fy_a - fy_b),
+                        scale * (fz_a - fz_b),
+                    ],
+                );
             }
             let front = &panels[strip.panel_indices[0]];
             let arm = std::array::from_fn(|a| 0.5 * (front.a[a] + front.b[a]) - self.cg_m[a]);
             let width = (front.b[1] - front.a[1]).abs();
-            let drag = 0.5 * rho_kg_m3 * speed2 * strip.chord_m * width * self.cd0_wing;
+            let cd = crate::sections::section_profile_drag(
+                loads.coupled.strip_alpha_eff_rad[s],
+                self.cd0_wing,
+            );
+            let drag = 0.5 * rho_kg_m3 * speed2 * strip.chord_m * width * cd;
             let speed = speed2.sqrt();
-            result.profile_drag.add_force(arm, [
-                -drag * (velocity[0] / speed), 0.0, -drag * (velocity[2] / speed),
-            ]);
+            result.profile_drag.add_force(
+                arm,
+                [
+                    -drag * (velocity[0] / speed),
+                    0.0,
+                    -drag * (velocity[2] / speed),
+                ],
+            );
         }
         for (disk, &thrust) in self.disks.iter().zip(&loads.thrust_n) {
             let arm = std::array::from_fn(|a| disk.center_m[a] - self.cg_m[a]);
             result.propellers.add_force(arm, [thrust, 0.0, 0.0]);
         }
-        if ![result.circulation, result.profile_drag, result.propellers, result.net()]
-            .iter().all(|v| v.is_finite())
+        if ![
+            result.circulation,
+            result.profile_drag,
+            result.propellers,
+            result.net(),
+        ]
+        .iter()
+        .all(|v| v.is_finite())
         {
             return Err(invalid("nonfinite distributed lateral moment"));
         }
@@ -141,6 +174,9 @@ fn invalid(message: &str) -> Refusal {
     Refusal {
         code: "distributed-loads-invalid",
         message: message.into(),
-        ranked_repairs: vec!["use the original distributed solve, layout, density and accepted force velocities".into()],
+        ranked_repairs: vec![
+            "use the original distributed solve, layout, density and accepted force velocities"
+                .into(),
+        ],
     }
 }

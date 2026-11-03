@@ -366,6 +366,73 @@ fn g0_real_coupled_force_matches_existing_symmetric_aerodynamics_and_signed_port
 }
 
 #[test]
+fn g3_separated_drag_is_shared_by_longitudinal_lateral_and_six_dof_loads() {
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    let a = aero_assembly(design.gross_mass_kg);
+    let model = GearedPropulsion::new(&design, &a, mounts()).unwrap();
+    let alpha = 0.50_f64;
+    let speed = 13.86;
+    let canard = 0.10;
+    let mut rigid = rigid();
+    rigid.pos_m = ZERO;
+    rigid.vel_mps = [speed * alpha.cos(), 0.0, speed * alpha.sin()];
+    let state = a.state_from_speed(rigid, 0.0, 40.0).unwrap();
+    let evaluation = model
+        .evaluate(
+            &state,
+            PropulsionInputs {
+                canard_rad: canard,
+                ..inputs()
+            },
+            &|point| Ok([0.0, 0.0, -0.02 * point[1]]),
+            None,
+        )
+        .unwrap();
+    let longitudinal = design
+        .force_buildup_with_incident(
+            speed,
+            alpha,
+            canard,
+            40.0,
+            0.0,
+            inputs().density_kg_m3,
+            None,
+            &|point| Ok([rigid.vel_mps[0], 0.0, rigid.vel_mps[2] + 0.02 * point[1]]),
+        )
+        .unwrap();
+    assert!(
+        evaluation
+            .coupled
+            .strip_alpha_eff_rad
+            .iter()
+            .any(|x| x.abs() > 0.30)
+    );
+    for (left, right) in evaluation
+        .coupled
+        .strip_alpha_eff_rad
+        .iter()
+        .zip(&longitudinal.coupled.strip_alpha_eff_rad)
+    {
+        assert!((left - right).abs() < 1e-12);
+    }
+    let weight = design.gross_mass_kg * 9.80665;
+    let expected = [
+        longitudinal.force_n[0] + weight * alpha.sin(),
+        longitudinal.force_n[1],
+        longitudinal.force_n[2] - weight * alpha.cos(),
+    ];
+    assert!((v(expected) - v(evaluation.aerodynamic_force_body_n)).norm() < 1e-8);
+    assert!((longitudinal.moment_y_nm - evaluation.loads.carrier.moment_nm[1]).abs() < 1e-8);
+    let lateral = design
+        .distributed_lateral_loads(&longitudinal, canard, inputs().density_kg_m3)
+        .unwrap();
+    assert!(lateral.profile_drag.yaw_nm.abs() > 0.01);
+    assert!((lateral.net().roll_nm - evaluation.loads.carrier.moment_nm[0]).abs() < 1e-8);
+    assert!((lateral.net().yaw_nm - evaluation.loads.carrier.moment_nm[2]).abs() < 1e-8);
+}
+
+#[test]
 fn g3_real_asymmetric_aerodynamics_drive_all_motion_and_close_external_momentum() {
     let mut design = wright_openloop_v1();
     design.coupling = CANDIDATE_B;

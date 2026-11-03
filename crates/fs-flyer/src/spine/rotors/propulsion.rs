@@ -20,7 +20,7 @@ use crate::propcoupling::{
 use fs_ga::Vec3;
 use fs_math::det;
 use fs_wing::Panel;
-use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, StripRegime, StripSpec};
+use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, StripSpec};
 
 #[path = "propulsion/dynamic.rs"]
 pub mod dynamic;
@@ -119,6 +119,7 @@ struct AerodynamicStage<'a> {
 
 struct AerodynamicFields<'a> {
     gamma: &'a [f64],
+    strip_alpha_eff_rad: &'a [f64],
     strip_velocity_mps: Option<&'a [[f64; 3]]>,
     thrust_n: [f64; 2],
     torque_nm: [f64; 2],
@@ -133,6 +134,7 @@ impl AerodynamicSolution for CoupledStep {
     fn load_fields(&self) -> AerodynamicFields<'_> {
         AerodynamicFields {
             gamma: &self.gamma,
+            strip_alpha_eff_rad: &self.strip_alpha_eff_rad,
             strip_velocity_mps: self.strip_velocity_mps.as_deref(),
             thrust_n: self.thrust_n,
             torque_nm: self.torque_nm,
@@ -426,23 +428,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         let op = InfluenceOperator::build(&panels, freestream, rho).map_err(wing_error)?;
         let camber = design.camber_ratio;
         // Same existing OpenLoopDesign attached/separated section closure.
-        let closure = |_strip: usize, a: f64| -> (f64, StripRegime) {
-            let attached = core::f64::consts::TAU * (a + 2.0 * camber);
-            let magnitude = a.abs();
-            if magnitude <= 0.30 {
-                (attached, StripRegime::Attached)
-            } else if magnitude < 0.45 {
-                let t = (magnitude - 0.30) / 0.15;
-                let blend = t * t * (3.0 - 2.0 * t);
-                let separated = 1.98 * det::sin(a) * det::cos(a);
-                (
-                    attached * (1.0 - blend) + separated * blend,
-                    StripRegime::Blended,
-                )
-            } else {
-                (1.98 * det::sin(a) * det::cos(a), StripRegime::Separated)
-            }
-        };
+        let closure = |_strip: usize, a: f64| crate::sections::section_lift(a, camber);
         let mut strip_velocity = Vec::with_capacity(strips.len());
         for strip in &strips {
             let panel = &panels[strip.panel_indices[0]];
@@ -493,7 +479,11 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             let q = 0.5 * rho * section_speed2;
             let width = (panel.b[1] - panel.a[1]).abs();
             moment.y += q * strip.chord_m * strip.chord_m * width * cm0;
-            let drag = q * strip.chord_m * width * design.cd0_wing;
+            let cd = crate::sections::section_profile_drag(
+                fields.strip_alpha_eff_rad[s],
+                design.cd0_wing,
+            );
+            let drag = q * strip.chord_m * width * cd;
             let profile_force = Vec3::new(
                 -drag * v[0] / section_speed,
                 0.0,

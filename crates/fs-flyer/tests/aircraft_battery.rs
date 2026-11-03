@@ -13,6 +13,56 @@ fn jlog(case: &str, payload: &str) {
 const RHO: f64 = 1.294;
 
 #[test]
+fn g0_separated_profile_drag_reaches_the_actual_aircraft_force_and_work() {
+    let mut design = wright_openloop_v1();
+    design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
+    let alpha = 0.50_f64;
+    let canard = 0.10;
+    let speed = 13.86;
+    let loads = design
+        .force_buildup(speed, alpha, canard, 40.0, 0.0, RHO)
+        .unwrap();
+    let (panels, strips) = design.layout(canard).unwrap();
+    let q = 0.5 * RHO * speed * speed;
+    let mut expected = 0.0;
+    let mut attached_only = 0.0;
+    let mut separated_count = 0;
+    for (s, strip) in strips.iter().enumerate() {
+        let a = loads.coupled.strip_alpha_eff_rad[s];
+        let weight = if a.abs() <= 0.30 {
+            0.0
+        } else if a.abs() >= 0.45 {
+            1.0
+        } else {
+            let t = (a.abs() - 0.30) / 0.15;
+            t * t * (3.0 - 2.0 * t)
+        };
+        separated_count += usize::from(weight > 0.0);
+        // Independent normal-force -> drag projection of the flat plate,
+        // using the final induced incidence rather than geometric alpha.
+        let pressure_drag = 1.98 * a.sin().powi(2);
+        let cd = design.cd0_wing * (1.0 - weight) + pressure_drag * weight;
+        let panel = panels[strip.panel_indices[0]];
+        let area = strip.chord_m * (panel.b[1] - panel.a[1]).abs();
+        expected += q * area * cd;
+        attached_only += q * area * design.cd0_wing;
+    }
+    assert!(separated_count > 0);
+    assert!(
+        expected > 2.0 * attached_only,
+        "missing separated drag must be measurable"
+    );
+    let parasite = design.ledger.evaluate(RHO, speed).unwrap().total_parasite_n;
+    let profile = loads.drag_n - parasite - loads.induced_drag_n;
+    assert!((profile - expected).abs() < 1e-9);
+    let weight = design.gross_mass_kg * 9.80665;
+    let aero_x = loads.force_n[0] - loads.thrust_n.iter().sum::<f64>() + weight * alpha.sin();
+    let aero_z = loads.force_n[2] - weight * alpha.cos();
+    let dissipated_power = -speed * (aero_x * alpha.cos() + aero_z * alpha.sin());
+    assert!((dissipated_power - speed * loads.drag_n).abs() < 1e-7);
+}
+
+#[test]
 fn local_canard_gust_changes_pitch_and_uses_local_force_velocity() {
     let mut design = wright_openloop_v1();
     design.coupling = fs_flyer::propcoupling::CANDIDATE_B;

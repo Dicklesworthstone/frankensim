@@ -88,6 +88,10 @@ pub struct NonlinearReport {
     pub branch_id: String,
     /// Per-strip regimes.
     pub regimes: Vec<StripRegime>,
+    /// Effective incidence [rad] at the accepted circulation, in strip order.
+    /// Includes geometric twist and trailing-sheet induction exactly once.
+    /// Section drag/moment consumers use this same incidence as the lift law.
+    pub alpha_eff_rad: Vec<f64>,
     /// Total lift [N] (Kutta–Joukowsky, −z component).
     pub total_lift_n: f64,
 }
@@ -558,6 +562,22 @@ fn solve_nonlinear_impl(
             "raise the strip resolution or check the closure's regularity",
         ));
     }
+    // Reuse the prepared trailing-sheet operator at the accepted gamma.
+    // Reconstructing incidence from cl loses its sign/branch near stall, while
+    // using only geometric incidence silently drops the induction correction.
+    let alpha_eff_rad = strips
+        .iter()
+        .enumerate()
+        .map(|(s, strip)| {
+            let mut w = 0.0;
+            for (j, coefficient) in downwash[s].iter().enumerate() {
+                let term = gamma[j] * coefficient;
+                w += term;
+            }
+            let (incident, induction_speed, _) = section_flow[s];
+            incident + strip.twist_rad + w / induction_speed
+        })
+        .collect();
     // Branch identity: the regime pattern, content-hashed.
     let mut pattern = Vec::with_capacity(strips.len());
     for r in &regimes {
@@ -593,6 +613,7 @@ fn solve_nonlinear_impl(
         iterations,
         branch_id,
         regimes,
+        alpha_eff_rad,
         total_lift_n: total,
     })
 }

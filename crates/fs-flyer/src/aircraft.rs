@@ -12,7 +12,8 @@
 //!     tier: induced drag is NOT in these forces and is carried as the
 //!     declared classical term CL²/(π·AR·e) — documented, Estimated),
 //!   - per-strip section quarter-chord moments (thin-airfoil cm₀),
-//!   - wing profile drag (declared cd₀), the parasite LEDGER (E4.6a-i),
+//!   - wing profile drag (declared attached cd₀, the same flat-plate
+//!     continuation as the lift law), the parasite LEDGER (E4.6a-i),
 //!   - thrust at the disk lines, gravity at the CG reference.
 //!
 //! Trim: damped Newton on r(V, α, δc, ω) = (ΣFx, ΣFz, ΣMy,
@@ -34,7 +35,7 @@ use crate::propcoupling::{
 use fs_airscrew::{BladeStation, Rotor};
 use fs_blake3::hash_domain;
 use fs_math::det;
-use fs_wing::nonlinear::{InfluenceOperator, StripRegime, StripSpec};
+use fs_wing::nonlinear::{InfluenceOperator, StripSpec};
 use fs_wing::{Panel, SurfaceId, flat_surface};
 
 /// Trim iteration cap.
@@ -60,7 +61,8 @@ pub struct OpenLoopDesign {
     pub canard_z_m: [f64; 2],
     /// Wing/canard section camber ratio (Estimated 1/20 class).
     pub camber_ratio: f64,
-    /// Wing profile drag coefficient (declared Estimated).
+    /// Attached wing/canard profile drag coefficient (declared Estimated).
+    /// The separated branch uses the same flat-plate law as section lift.
     pub cd0_wing: f64,
     /// Oswald-class span-efficiency for the induced term (Estimated).
     pub oswald_e: f64,
@@ -507,20 +509,7 @@ impl OpenLoopDesign {
         let op = InfluenceOperator::build(&panels, fs_v, rho_kg_m3).map_err(map_err)?;
         // Section closure: thin airfoil + flat-plate blend (E4.0 window).
         let camber = self.camber_ratio;
-        let closure = move |_s: usize, a: f64| -> (f64, StripRegime) {
-            let attached = core::f64::consts::TAU * (a + 2.0 * camber);
-            let abs = a.abs();
-            if abs <= 0.30 {
-                (attached, StripRegime::Attached)
-            } else if abs < 0.45 {
-                let t = (abs - 0.30) / 0.15;
-                let s = t * t * (3.0 - 2.0 * t);
-                let sep = 1.98 * det::sin(a) * det::cos(a);
-                (attached * (1.0 - s) + sep * s, StripRegime::Blended)
-            } else {
-                (1.98 * det::sin(a) * det::cos(a), StripRegime::Separated)
-            }
-        };
+        let closure = move |_s: usize, a: f64| crate::sections::section_lift(a, camber);
         // The disks spin at the trim's omega state (fixed control =
         // fixed THROTTLE; the prop speed is set by torque balance).
         let disks = [
@@ -647,7 +636,11 @@ impl OpenLoopDesign {
             let c = st.chord_m;
             let cm_term = q * c * c * width * cm0;
             m_y += cm_term;
-            let dp = q * c * width * self.cd0_wing;
+            let cd = crate::sections::section_profile_drag(
+                coupled.strip_alpha_eff_rad[s],
+                self.cd0_wing,
+            );
+            let dp = q * c * width * cd;
             d_prof += dp;
             let mid = [
                 0.5 * (p0.a[0] + p0.b[0]) - self.cg_m[0],
