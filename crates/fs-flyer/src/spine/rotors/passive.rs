@@ -26,6 +26,10 @@ use fs_time::lie::gyrostat::{
     },
 };
 
+#[path = "passive/impulse.rs"]
+mod impulse;
+pub use impulse::ShaftImpulse;
+
 /// Fixed, independent spring/drag laws on the existing relative shaft phases.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShaftProperties<const N: usize> {

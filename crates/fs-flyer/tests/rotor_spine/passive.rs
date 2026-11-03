@@ -302,3 +302,6 @@ fn g0_native_admission_and_late_refusal_preserve_the_complete_accepted_state() {
         state
     );
 }
+
+#[path = "passive/impulse.rs"]
+mod impulse;

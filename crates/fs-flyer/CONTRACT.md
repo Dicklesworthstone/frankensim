@@ -1736,3 +1736,15 @@ velocity, dynamic swirl memory, radial pressure/contraction, reversed-flow
 closure, combination with harmonic wake models, historical calibration or
 whole-aircraft/fluid conservation theorem. Native original-module checks
 are distinct from full-workspace Cargo, cross-platform or real-time gates.
+
+
+## Impulses in prepared passive shaft motion
+
+Prepared `ShaftMotion` also accepts instantaneous carrier and independent-shaft
+impulses through `apply_impulse`. It updates the retained native canonical
+momentum and actual Flyer velocity while preserving pose, relative phase, spring
+potential and the prepared spring/drag model for subsequent continuous steps.
+The event retains native actual-impulse and kinetic-increment receipts and
+separate motor, aerodynamic and carrier work. Original Flyer transfer checks
+and late-refusal atomicity apply. No collision/restitution law, shaft-lock mode,
+time advance or event-to-heat allocation is inferred.
