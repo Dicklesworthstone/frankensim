@@ -777,6 +777,24 @@ near-trapped ill-conditioned circuits can therefore refuse. These are steady
 prescribed partitions: changing liberation, capacity, reagent conditions or
 residence with recycle requires separately qualified models.
 
+## Source-backed aqueous calcite acid demand and heat
+
+The three aqueous USGS profiles for H+, Ca2+ and HCO3- complete the existing
+calcite bicarbonate reaction with a compatible reference set. The executable
+`mineral_processing --reaction calcite-bicarbonate-neutralization` accepts
+calcite, hydrogen-ion, calcium-ion and bicarbonate-ion packs in that order,
+followed by kilograms of actually reacted pure calcite. The standard result
+is -25.5 kJ/mol extent at 298.15 K and 1 bar. Exact atoms/charge, source
+molar-mass conversions and all four formation-enthalpy receipts remain
+inspectable. The associated integration test also closes an explicitly
+acid-limited inventory and refuses reagent overdraw.
+
+See [the aqueous reference table and runnable example](MINERAL_THERMOCHEMISTRY.md#aqueous-references-for-calcite-neutralization)
+for the 13 new claims, conventional ionic entropy, source uncertainty
+magnitudes, and net-ionic versus commercial-reagent distinction. These
+reference-state quantities do not select process pH, predict dissolution
+kinetics, or substitute for the separate dissolved-CO2 endpoint.
+
 ## Focused verification
 
 Normal workspace commands for these slices:
@@ -787,6 +805,7 @@ cargo test -p fs-material comminution
 cargo test -p fs-material slurry::
 cargo test -p fs-material recovery::
 cargo test -p xtask --test mining_slurry_sources
+cargo test -p xtask --test mining_aqueous_sources
 cargo test -p fs-thermochem stoichiometry::tests
 ```
 

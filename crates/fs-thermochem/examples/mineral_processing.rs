@@ -4,7 +4,9 @@
 //! cao.fsmatpk water.fsmatpk caoh2.fsmatpk 56.077`
 //! Select another endpoint by prefixing `--reaction magnesite-calcination` or
 //! `--reaction magnetite-oxidation`; pack arguments must match that equation's
-//! explicit source identities. Copper oxide reduction modes take four packs.
+//! explicit source identities. Copper oxide reduction and calcite bicarbonate
+//! neutralization modes take four packs. The calcite endpoint uses compatible
+//! USGS aqueous-ion reference data, with bicarbonate retained in solution.
 //! `--help` lists every supported reaction and required pack order.
 //! Or explicit malachite inventory accounting, with all four inputs in moles:
 //! `cargo run -p fs-thermochem --example mineral_processing -- \
@@ -27,22 +29,25 @@ use fs_thermochem::{
 };
 
 const REFERENCE: &str = "source-elemental-reference-janaf";
+const USGS_REFERENCE: &str = "source-elemental-reference-usgs-b2131";
 
 struct ReactionCase {
     reaction: MineralReaction,
+    reference: &'static str,
     packs: &'static [&'static str],
     species: &'static [&'static str],
     phase_axes: &'static [&'static str],
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 6] = [
+const REACTIONS: [&str; 7] = [
     "lime-hydration",
     "magnesite-calcination",
     "magnetite-oxidation",
     "cuprous-oxide-oxidation",
     "cupric-oxide-reduction",
     "cuprous-oxide-reduction",
+    "calcite-bicarbonate-neutralization",
 ];
 const USAGE: &str = "usage: mineral_processing [--reaction NAME] PACK... REACTED_PURE_REACTANT_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
 
@@ -50,6 +55,7 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
     Ok(match name {
         "lime-hydration" => ReactionCase {
             reaction: MineralReaction::LimeHydration,
+            reference: REFERENCE,
             packs: &[
                 "calcium-oxide-solid-nist-mining",
                 "water-liquid-janaf-mining",
@@ -65,6 +71,7 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
         },
         "magnesite-calcination" => ReactionCase {
             reaction: MineralReaction::MagnesiteCalcination,
+            reference: REFERENCE,
             packs: &[
                 "magnesite-solid-janaf-mining",
                 "magnesium-oxide-solid-janaf-mining",
@@ -80,6 +87,7 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
         },
         "magnetite-oxidation" => ReactionCase {
             reaction: MineralReaction::MagnetiteOxidationToHematite,
+            reference: REFERENCE,
             packs: &[
                 "magnetite-solid-janaf-mining",
                 "oxygen-gas-janaf-mining",
@@ -95,6 +103,7 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
         },
         "cuprous-oxide-oxidation" => ReactionCase {
             reaction: MineralReaction::CuprousOxideOxidation,
+            reference: REFERENCE,
             packs: &[
                 "copper-i-oxide-solid-janaf-mining",
                 "oxygen-gas-janaf-mining",
@@ -110,6 +119,7 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
         },
         "cupric-oxide-reduction" => ReactionCase {
             reaction: MineralReaction::CupricOxideCarbonMonoxideReduction,
+            reference: REFERENCE,
             packs: &[
                 "copper-ii-oxide-solid-janaf-mining",
                 "carbon-monoxide-gas-janaf-mining",
@@ -127,6 +137,7 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
         },
         "cuprous-oxide-reduction" => ReactionCase {
             reaction: MineralReaction::CuprousOxideCarbonMonoxideReduction,
+            reference: REFERENCE,
             packs: &[
                 "copper-i-oxide-solid-janaf-mining",
                 "carbon-monoxide-gas-janaf-mining",
@@ -141,6 +152,24 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-gas",
             ],
             equation: "Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g)",
+        },
+        "calcite-bicarbonate-neutralization" => ReactionCase {
+            reaction: MineralReaction::CalciteBicarbonateNeutralization,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "calcite-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "calcium-ion-aqueous-usgs-b2131",
+                "bicarbonate-ion-aqueous-usgs-b2131",
+            ],
+            species: &["CaCO3(s)", "H+(aq)", "Ca[2+](aq)", "HCO3[-](aq)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "CaCO3(calcite) + H+(aq) -> Ca[2+](aq) + HCO3[-](aq), bicarbonate endpoint",
         },
         _ => return Err(format!("unknown reaction {name:?}; use --help for source order").into()),
     })
@@ -161,7 +190,11 @@ fn load(path: &Path, expected_id: &str) -> Result<NormalizedPack, Box<dyn Error>
     Ok(pack)
 }
 
-fn reference_point(phase_axis: &str) -> Result<QueryPoint, MatDbError> {
+fn reference_point(
+    reference: &str,
+    phase_axis: &str,
+    pack_id: &str,
+) -> Result<QueryPoint, MatDbError> {
     let mut point = QueryPoint::new()
         .with_quantity(
             "temperature",
@@ -178,13 +211,33 @@ fn reference_point(phase_axis: &str) -> Result<QueryPoint, MatDbError> {
         )?;
     for (axis, value) in [
         ("source-standard-state", 1.0),
-        (REFERENCE, 1.0),
-        ("source-pure-species", 1.0),
+        (reference, 1.0),
         ("engineering-reference-model", 1.0),
         ("source-specimen-qualified", 0.0),
         (phase_axis, 1.0),
     ] {
         point = point.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)?;
+    }
+    // Aqueous ions use the source's hypothetical unit-activity, infinite-
+    // dilution standard state. They are not pure isolated-ion solutions.
+    let state_axes: &[&str] = if phase_axis == "source-phase-aqueous" {
+        &[
+            "source-individual-ion",
+            "source-aqueous-unit-activity-infinite-dilution",
+            "source-ionic-reference-hydrogen-zero",
+        ]
+    } else {
+        &["source-pure-species"]
+    };
+    for axis in state_axes {
+        point = point.with_quantity(*axis, QuantitySpec::dimensional(Dims::NONE), 1.0)?;
+    }
+    if pack_id == "calcite-solid-usgs-b2131-thermochemistry" {
+        point = point.with_quantity(
+            "source-phase-calcite",
+            QuantitySpec::dimensional(Dims::NONE),
+            1.0,
+        )?;
     }
     Ok(point)
 }
@@ -278,14 +331,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let points = case
         .phase_axes
         .iter()
-        .map(|phase| reference_point(phase))
+        .zip(case.packs)
+        .map(|(phase, pack)| reference_point(case.reference, phase, pack))
         .collect::<Result<Vec<_>, _>>()?;
     let sources = (0..packs.len())
         .map(|i| FormationEnthalpySource {
             species: &species[i],
             pack: &packs[i],
             at: &points[i],
-            reference_axis: REFERENCE,
+            reference_axis: case.reference,
         })
         .collect::<Vec<_>>();
     let reaction = case.reaction.build()?;
@@ -360,7 +414,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     for pack in &packs {
         println!("source pack: {} ({})", pack.pack_id(), pack.content_hash());
     }
-    println!("Negative enthalpy is exothermic. Source uncertainty is unstated.");
+    println!("Negative enthalpy is exothermic. Source confidence probabilities are unstated.");
+    println!(
+        "Reported source uncertainty magnitudes, where available, are not a propagated reaction interval."
+    );
     println!(
         "This uses actually reacted pure material; it does not predict conversion, plant temperature, kiln fuel duty or operating reagent doses."
     );

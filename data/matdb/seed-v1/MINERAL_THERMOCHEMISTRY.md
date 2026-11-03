@@ -1,6 +1,6 @@
 # Reactive mineral thermochemistry
 
-These five profiles add 18 claims through the existing `matdb-pack` compiler
+The five solid-phase profiles below add 18 claims through the existing `matdb-pack` compiler
 and catalog. They complement mineral density and hardness references with
 phase-specific molar quantities needed for thermal and chemical accounting.
 
@@ -55,7 +55,7 @@ enthalpy and entropy, with explicitly attributed
 [WebBook molar mass](https://webbook.nist.gov/cgi/cbook.cgi?ID=C14808607&Mask=2).
 Both JANAF profiles require `source-elemental-reference-janaf=1`.
 
-All profiles require typed temperature and pressure, `source-phase-solid=1`,
+All solid-phase profiles above require typed temperature and pressure, `source-phase-solid=1`,
 `source-pure-species=1`, `source-standard-state=1`,
 `engineering-reference-model=1`, and `source-specimen-qualified=0`. The
 additional phase selectors are `source-phase-calcite=1`,
@@ -63,7 +63,7 @@ additional phase selectors are `source-phase-calcite=1`,
 `source-phase-gypsum=1`, or `source-phase-anhydrite=1` respectively.
 Each profile's own elemental-reference selector is mandatory.
 
-These records do not supply aqueous-ion properties, dissolution/oxidation
+These solid-phase records do not supply aqueous-ion properties, dissolution/oxidation
 rates, decomposition boundaries, equilibrium conversion or plant recovery.
 Reaction heat needs a complete, compatible set of participant formation data;
 an isolated mineral enthalpy is not a heat-of-leaching prediction.
@@ -92,3 +92,70 @@ column convention. All nine Cp knots and the exact 1000 K endpoint are checked;
 1000.01 K refuses. Formation enthalpy and entropy still apply only at 298.15 K.
 The new sulfate records alone do not predict scale growth, hydrate stability,
 dehydration rate or a complete reaction heat without compatible participants.
+
+## Aqueous references for calcite neutralization
+
+Three additional profiles supply 13 claims from the same USGS Bulletin 2131
+reference convention as calcite. The primary rows are on printed pages 7, 6,
+and 15 of the [report](https://pubs.usgs.gov/bul/2131/report.pdf), respectively.
+All values below apply at 298.15 K and 100000 Pa.
+
+| Profile | Molar mass, kg/mol | Formation enthalpy, J/mol | Conventional ionic entropy, J/(mol K) |
+| --- | ---: | ---: | ---: |
+| `hydrogen-ion-aqueous-usgs-b2131` | 0.001008 | 0 | 0 |
+| `calcium-ion-aqueous-usgs-b2131` | 0.040078 | -543000 | -56.2 |
+| `bicarbonate-ion-aqueous-usgs-b2131` | 0.061017 | -689900 | 98.4 |
+
+The source defines aqueous `m=1` as the hypothetical ideal state at unit
+activity with ions at infinite dilution. It is not a measured finite-
+concentration solution. Claims require `source-phase-aqueous=1`,
+`source-aqueous-unit-activity-infinite-dilution=1`,
+`source-ionic-reference-hydrogen-zero=1`, `source-individual-ion=1`, and
+`source-elemental-reference-usgs-b2131=1`, in addition to the typed reference
+temperature, pressure, standard-state and engineering-reference selectors.
+Individual ions do not carry a `source-pure-species` assertion.
+
+Entropy is named `conventional-standard-molar-entropy`, distinctly from the
+solid-phase `standard-molar-entropy` property. The H+ zeros define the ionic
+reference; calcium's negative conventional entropy is retained. Calcium and
+bicarbonate also expose the source's reported uncertainty magnitudes as
+dimensioned metadata: 1000 and 200 J/mol for formation enthalpy, and 1.0 and
+0.5 J/(mol K) for conventional entropy. The compilation's calorimetric
+convention is twice the standard deviation of the mean; it supplies no
+universal confidence probability or covariance for these rows. Main claims
+therefore retain `Unstated` uncertainty. No certified reaction interval is
+invented from these magnitudes.
+
+Together with the existing calcite pack, these sources close the declared
+bicarbonate endpoint:
+
+`CaCO3(calcite) + H+(aq) -> Ca[2+](aq) + HCO3[-](aq)`
+
+The existing exact atom/charge balance and source-backed formation-enthalpy
+consumer give **-25500 J/mol of reaction extent**. For 100.087 kg of actually
+reacted pure calcite, this is 1000 mol extent and **-25.5 MJ**. It consumes
+1.008 kg H+ and forms 40.078 kg calcium ions and 61.017 kg bicarbonate ions.
+These are net ionic quantities, not the mass of a commercial acid solution.
+
+Compile each profile using the existing `cargo run -p xtask -- matdb-pack
+--manifest .../manifest.tsv --out ...fsmatpk` command, then run:
+
+```bash
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --reaction calcite-bicarbonate-neutralization \
+  /tmp/mining-materials/calcite-solid-usgs-b2131-thermochemistry.fsmatpk \
+  /tmp/mining-materials/hydrogen-ion-aqueous-usgs-b2131.fsmatpk \
+  /tmp/mining-materials/calcium-ion-aqueous-usgs-b2131.fsmatpk \
+  /tmp/mining-materials/bicarbonate-ion-aqueous-usgs-b2131.fsmatpk 100.087
+cargo test -p xtask --test mining_aqueous_sources
+```
+
+The integration checks compile all four actual packs, verify source receipts,
+preserve the ionic convention, and exercise an acid-limited inventory: 10 mol
+calcite plus 6 mol H+ permits at most 6 mol extent, leaving 4 mol calcite and
+giving -153000 J at that ceiling. Overdrawn inventory refuses. This is an
+availability bound, not a predicted conversion or dissolution rate. The
+two-proton dissolved-CO2 endpoint remains a different reaction requiring its
+own complete source set; bicarbonate data are not relabeled as CO2(aq).
+Finite-concentration activities, heat of mixing, pH selection, gas transfer
+and thermal plant behavior require additional models.
