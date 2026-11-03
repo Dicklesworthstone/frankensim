@@ -56,6 +56,10 @@ pub struct PreparedLayerIllumination<'s, 'm> {
     polarization: Polarization,
     incidence_cosine: f64,
     admittance_s: [f64; 2],
+    // Original exterior momentum coefficients, prepared once per angle.
+    momentum_normal_over_omega: [f64; 2],
+    momentum_normal_difference: f64,
+    momentum_parallel_over_omega: f64,
     // Outgoing-face major, incoming-face minor, in physical tangential E units.
     scattering: [[C64; 2]; 2],
     // layer -> even/odd loss mode -> left/right input; each contracted mode
@@ -195,11 +199,26 @@ impl<'m> PlanarDielectricLayers<'m> {
         {
             return Err(bad("two-sided field or heat transfer is unrepresentable"));
         }
+        let inverse_speed = det::sqrt(linear_electric_permittivity(self.incident)?)
+            * det::sqrt(linear_magnetic_permeability(self.incident)?);
+        let momentum_normal_over_omega = [inverse_speed * c, inverse_speed * q.re];
+        let momentum_normal_difference = super::super::momentum::normal_difference(
+            inverse_speed,
+            c,
+            q,
+            self.exit_wave.epsilon_ratio.re,
+            self.exit_wave.mu_ratio,
+        );
+        let momentum_parallel_over_omega =
+            inverse_speed * det::sqrt((1.0 - c) * (1.0 + c));
         let prepared = PreparedLayerIllumination {
             stack: self,
             polarization,
             incidence_cosine: c,
             admittance_s,
+            momentum_normal_over_omega,
+            momentum_normal_difference,
+            momentum_parallel_over_omega,
             scattering,
             loss_modes,
             interior_inputs: inputs,
@@ -238,21 +257,22 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
         self.scattering
     }
 
-    /// Net cycle-mean Maxwell force per film area [Pa] under simultaneous
+    /// Cycle-mean stack/interface Maxwell stress resultant [Pa] under simultaneous
     /// coherent illumination of both faces. The original x/z incidence plane
     /// has k_x >= 0; both sources share this tangential wavevector while their
     /// normal wavevectors have opposite signs. Source phase can change the
     /// force, including its normal sign, even at fixed incoming powers.
     ///
-    /// Requires the same original lossless exterior at both faces. The load
-    /// excludes exterior striction/pressure, transients, finite edges and
-    /// mechanical work feedback. It is not an additional absorbed-heat input.
+    /// Each face uses its own original lossless exterior Maxwell stress.
+    /// Refraction contributes even for a transparent, impedance-matched
+    /// interface. The load excludes material striction/pressure, transients,
+    /// finite edges and mechanical work feedback. It is not another heat input.
     /// Allocation-free, O(layers), with the original positive layer-loss modes.
     pub fn radiation_pressure(
         &self,
         incoming_tangential_e_v_m: [C64; 2],
     ) -> Result<[f64; 3], ReflectionError> {
-        self.stack.admit_momentum_exterior()?;
+        self.stack.admit_refracting_momentum_exterior()?;
         let mut heat = [0.0; MAX_LAYERS];
         let response = self.evaluate(
             incoming_tangential_e_v_m,
@@ -266,19 +286,18 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
                     + Dd::from_f64(modes[1][s].norm_sq());
             }
         }
-        let normal_power = super::super::momentum::two_sided_normal(
+        let normal_pressure = super::super::momentum::two_sided_normal(
             incoming_tangential_e_v_m,
             self.scattering,
-            self.admittance_s[0],
+            self.admittance_s,
+            self.momentum_normal_over_omega,
+            self.momentum_normal_difference,
             diagonal.map(Dd::to_f64),
         );
-        let inverse_speed = det::sqrt(linear_electric_permittivity(self.stack.incident)?)
-            * det::sqrt(linear_magnetic_permeability(self.stack.incident)?);
-        let sine = det::sqrt((1.0 - self.incidence_cosine) * (1.0 + self.incidence_cosine));
         let pressure = [
-            inverse_speed * sine * response.power.absorbed_w_m2,
+            self.momentum_parallel_over_omega * response.power.absorbed_w_m2,
             0.0,
-            inverse_speed * self.incidence_cosine * normal_power,
+            normal_pressure,
         ];
         if pressure.iter().any(|f| !f.is_finite()) {
             return Err(bad("coherent radiation pressure is unrepresentable"));

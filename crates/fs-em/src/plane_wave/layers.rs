@@ -171,8 +171,8 @@ impl<'a> PlanarDielectricLayers<'a> {
         self.layers.get(index).map(|layer| layer.wave.epsilon_f_m)
     }
 
-    // A net film force needs the same original homogeneous exterior on both
-    // faces. Equal index alone does not establish its constitutive/source law.
+    // Finite-window stress keeps one homogeneous exterior for its declared
+    // field-momentum convention. Equal index alone is not source identity.
     pub(super) fn admit_momentum_exterior(&self) -> Result<(), ReflectionError> {
         match self.exit {
             DielectricResponse::Lossless(exit) if exit.identity() == self.incident.identity() => {
@@ -184,14 +184,44 @@ impl<'a> PlanarDielectricLayers<'a> {
         }
     }
 
-    /// Cycle-mean force per film area [Pa] under a left-incident plane wave.
+    // Cycle-mean exterior stress can use each half-space's own original
+    // lossless constitutive law. The finite-window stress owner keeps
+    // its stronger homogeneous-source admission and storage convention.
+    pub(super) fn admit_refracting_momentum_exterior(&self) -> Result<(), ReflectionError> {
+        let epsilon = self.exit_wave.epsilon_f_m;
+        if epsilon.im != 0.0 || epsilon.re <= 0.0 {
+            return Err(bad(
+                "cycle-mean radiation force requires a positive lossless exit",
+            ));
+        }
+        Ok(())
+    }
+
+    // (k_z,left - Re(k_z,right))/omega without cancellation when the
+    // original refractive indices are almost equal. No new material solve.
+    pub(super) fn momentum_normal_difference(&self, cosine: f64, exit_kz: C64) -> f64 {
+        super::momentum::normal_difference(
+            self.wave_number / self.omega,
+            cosine,
+            C64::new(
+                exit_kz.re / self.wave_number,
+                exit_kz.im / self.wave_number,
+            ),
+            self.exit_wave.epsilon_ratio.re,
+            self.exit_wave.mu_ratio,
+        )
+    }
+
+    /// Cycle-mean stack/interface electromagnetic stress resultant [Pa].
     /// The incidence plane is x/z, k_x >= 0 and z points into the films. The
     /// explicit source is a peak tangential E [V/m] on the existing TE/TM axis.
     ///
-    /// Both exteriors must retain the same original lossless source. This is
-    /// the electromagnetic Maxwell load of the complete stack; exterior
-    /// striction/pressure, transient momentum storage, edge forces and motion
-    /// feedback are excluded. Do not add this load to another EM force on the
+    /// Each exterior retains its own original positive lossless source. The
+    /// materials may differ: transmitted refraction carries normal momentum
+    /// even without reflection or absorption. This includes the exterior
+    /// interfaces of an empty stack. The declared Maxwell load excludes
+    /// material striction/pressure, transient momentum storage, edge forces
+    /// and motion feedback. Do not add this load to another EM force on the
     /// same body. The original positive loss modes preserve weak absorption.
     pub fn radiation_pressure(
         &self,
@@ -199,7 +229,7 @@ impl<'a> PlanarDielectricLayers<'a> {
         polarization: Polarization,
         incident_tangential_e_v_m: C64,
     ) -> Result<[f64; 3], ReflectionError> {
-        self.admit_momentum_exterior()?;
+        self.admit_refracting_momentum_exterior()?;
         if !finite(incident_tangential_e_v_m) {
             return Err(bad("radiation-pressure source must be finite"));
         }
@@ -215,7 +245,12 @@ impl<'a> PlanarDielectricLayers<'a> {
         let sine = det::sqrt((1.0 - incidence_cosine) * (1.0 + incidence_cosine));
         let force = super::momentum::one_sided(
             [speed_inverse * sine, 0.0, speed_inverse * incidence_cosine],
+            self.momentum_normal_difference(
+                incidence_cosine,
+                response.exit_normal_wavenumber_rad_m,
+            ),
             power * response.reflected_power_fraction,
+            power * response.transmitted_power_fraction,
             power * response.absorbed_power_fraction,
         );
         if !power.is_finite() || force.iter().any(|f| !f.is_finite()) {

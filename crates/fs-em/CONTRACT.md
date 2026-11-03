@@ -2100,28 +2100,40 @@ contact laws require their own physical state and closure.
 
 `PlanarDielectricLayers::radiation_pressure` and
 `PreparedLayerIllumination::radiation_pressure` return the cycle-mean net
-electromagnetic force per film area in Pa, including oblique incidence and
-coherent illumination from both faces. Both exterior half-spaces must use the
-same original lossless material snapshot. The exterior stress is
+electromagnetic stack/interface stress resultant per area in Pa, including
+oblique incidence and coherent illumination from both faces. Each exterior
+half-space retains its own original positive lossless constitutive law at the
+query frequency; the two materials may differ. The exterior stress is
 `<T_ij> = Re(epsilon E_i E_j* + mu H_i H_j*)/2
 - delta_ij (epsilon |E|² + mu |H|²)/4` with the existing peak phasors.
 The complete finite stack may contain the original lossy/metallic films.
-This adopts the homogeneous exterior Maxwell stress, as in the static force
-owners; material striction and ambient mechanical pressure are not inferred.
+Each face uses its own epsilon and mu in that declared Maxwell stress.
+The resultant includes the interface of an empty stack and can be nonzero
+without reflection or absorption. Material striction, ambient mechanical
+pressure and a microscopic field/material momentum partition are not inferred.
+Lossy exterior half-spaces refuse; loss inside the original finite films remains
+admitted. Finite-window stress retains its separate homogeneous-source gate.
 
-One-sided normal momentum uses `k_z*(2 P_reflected + P_absorbed)/omega`;
+One-sided normal momentum uses
+`[k_z,left*(2 P_reflected + P_absorbed)
++ (k_z,left-Re(k_z,right))*P_transmitted]/omega`;
 tangential momentum uses `k_parallel*P_absorbed/omega`. Physical absorption
 comes from the original positive loss modes, so weak force is retained when
 subtracting incident and transmitted powers would erase it. Two-sided normal
-force contracts the positive one-sided diagonal responses and the actual
-complex scattering cross terms; changing relative source phase can reverse
-its sign. This force is not another thermal credit.
+force contracts the positive one-sided diagonal responses, each exterior's
+own admittance and normal wavevector, and the actual complex scattering cross
+terms; changing relative source phase can reverse its sign. Transmission's
+refractive contribution has the same signed coefficient for either incident
+face. A rationalized squared-index difference with a fused product retains
+weak refraction when subtracting rounded normal wavevectors would erase it.
+Prepared two-sided operators cache these momentum coefficients once per angle.
+This force is not another thermal credit.
 
 `PlanarAngularSpectrum::radiation_force` returns net newtons over the declared
-periodic cell. Each cached Fourier mode retains its original reflected and
-absorbed watts and direction; Parseval orthogonality removes cross-mode terms
-only in this full-cell integral. The original workspace budget includes the
-two additional f64 values per mode. Queries are allocation-free O(points),
+periodic cell. Each cached Fourier mode retains its original reflected,
+transmitted and absorbed watts and direction; Parseval orthogonality removes
+cross-mode terms only in this full-cell integral. The original workspace budget
+includes these three f64 values per mode. Queries are allocation-free O(points),
 with no new FFT or constitutive solve. `AngularSpectrumCoherence` sums the
 original factor forces as second moments, allocation-free O(factors*points).
 Both poll cancellation in bounded batches and publish no partial result.
@@ -2129,8 +2141,10 @@ These are operation/storage bounds, not measured throughput.
 
 Focused regressions cover slab resonances, oblique absorption, coherent force
 reversal, independent six-field exterior-stress integration, propagation-plane
-invariance, ensemble/darkness limits and source/cancellation refusal. The two
-new production momentum-kernel tests executed natively with the original
+invariance, ensemble/darkness limits and source/cancellation refusal. Refracting
+fixtures additionally cover impedance-matched transmission, unequal exterior
+Maxwell stresses, coherent inputs, Brewster incidence, critical incidence and
+TIR. The production momentum-kernel tests executed natively with the original
 fs-math dependency; the full source-backed integration regressions have not
 executed in this environment. This does not provide local force density,
 periodic-cell torque, finite-edge scattering, transient momentum storage or
@@ -2393,9 +2407,9 @@ native source columns and synthesize every spatial/polarization contribution
 before applying the same local dielectric loss used by the one-sided owner.
 Counterbeam phase therefore changes spatial heat without deriving weak loss
 from an incident-minus-outgoing remainder. Integrated radiation force reuses
-the original homogeneous-exterior Maxwell-stress law and requires the same
-original lossless exterior source on both sides; force is not another heat
-or mechanical-work credit.
+each original lossless exterior's Maxwell-stress law, including refractive
+momentum between unlike materials; force is not another heat or mechanical-work
+credit.
 
 Preparation costs O(points*layers) work/storage, explicitly bounded before
 allocation. It borrows the original beam and FFT plans and retains both native

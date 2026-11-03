@@ -192,7 +192,7 @@ impl<'b, 's, 'm> AngularSpectrumCoherence<'b, 's, 'm> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<[f64; 3], AngularSpectrumError> {
         poll(&mut cancelled)?;
-        self.source().admit_momentum_exterior()?;
+        self.source().admit_refracting_momentum_exterior()?;
         let mut sums = [Dd::ZERO; 3];
         for factor in self.factors {
             let force = factor.radiation_force(&mut cancelled)?;

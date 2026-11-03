@@ -88,7 +88,10 @@ fn coherent_counterbeams_match_direct_fourier_maxwell_fields_at_both_faces() {
     assert!(std::ptr::eq(dual.source(), &stack));
     assert_eq!(dual.power().film_absorbed_w, 0.0);
     assert_eq!(dual.layer_absorbed_power_w(0), None);
+    let force = dual.radiation_force(|| false).unwrap();
+    assert_eq!([force[0], force[1]], [0.0; 2]);
     for distance in [0.0, 0.7, 9.0] {
+        let mut integrated_stress = [0.0; 3];
         for side in [
             DualSide::IncomingLeft,
             DualSide::OutgoingLeft,
@@ -196,6 +199,25 @@ fn coherent_counterbeams_match_direct_fourier_maxwell_fields_at_both_faces() {
                     complex_near(actual.magnetic_a_per_m()[i][c], h[i][c], 3e-12);
                 }
             }
+            // Integrate the independently reconstructed fields above, with
+            // each face's own constitutive law. No scattering-power shortcut.
+            let exterior = match side {
+                DualSide::TotalLeft => Some((1.0, 1.0, -1.0)),
+                DualSide::TotalRight => Some((2.25, 0.8, 1.0)),
+                _ => None,
+            };
+            if let Some((epsilon, mu, normal)) = exterior {
+                for i in 0..16 {
+                    let energy = 0.25 * (epsilon * e[i].iter().map(|z| z.norm_sq()).sum::<f64>()
+                        + mu * h[i].iter().map(|z| z.norm_sq()).sum::<f64>());
+                    for c in 0..3 {
+                        let traction = 0.5 * (epsilon * (e[i][c] * e[i][2].conj()).re
+                            + mu * (h[i][c] * h[i][2].conj()).re)
+                            - if c == 2 { energy } else { 0.0 };
+                        integrated_stress[c] += normal * traction * g.spacing_m[0] * g.spacing_m[1];
+                    }
+                }
+            }
             let p = dual.power();
             let expected = match side {
                 DualSide::IncomingLeft => p.incoming_w[0],
@@ -211,11 +233,12 @@ fn coherent_counterbeams_match_direct_fourier_maxwell_fields_at_both_faces() {
                 1e-10 * (p.incoming_w[0] + p.incoming_w[1]),
             );
         }
+        let scale =
+            (dual.power().incoming_w[0] + dual.power().incoming_w[1]) * (1.0 + 1.8_f64.sqrt());
+        for c in 0..3 {
+            near(force[c], integrated_stress[c], 3e-11 * scale);
+        }
     }
-    assert!(
-        dual.radiation_force(|| false).is_err(),
-        "different exterior sources do not acquire a mechanical stress law"
-    );
 }
 
 #[test]
@@ -329,6 +352,75 @@ fn counterbeam_phase_drives_original_interior_heat_and_exterior_maxwell_force() 
         heats[0] > 3.0 * heats[2],
         "source phase must change actual absorbed heat"
     );
+}
+
+#[test]
+fn refracting_absorbing_counterbeams_match_each_face_maxwell_stress() {
+    let left = material(E, M);
+    let right = material(2.25 * E, 0.8 * M);
+    let film = finite_layers::debye(3.0 * E, 4.0 * E, 1.0, 1.0);
+    let omega = 1e9;
+    let inverse_speed = (E * M).sqrt();
+    let stack = PlanarDielectricLayers::try_new(
+        &left,
+        DielectricResponse::Lossless(&right),
+        omega,
+        &[DielectricLayer {
+            response: DielectricResponse::Debye(&film),
+            thickness_m: 0.3 / (omega * inverse_speed),
+        }],
+    )
+    .unwrap();
+    let g = grid(8.0 / (omega * inverse_speed));
+    let area = 16.0 * g.spacing_m[0] * g.spacing_m[1];
+    let incoming = vec![[C64::ZERO, C64::new(0.8, 0.2)]; 16];
+    let beam = PlanarAngularSpectrum::prepare(&stack, g, &incoming, limits(), || false).unwrap();
+    let mut observed = [0.0; 2];
+    let mut scale = 0.0;
+    for (phase_index, phi) in [0.0, core::f64::consts::PI].into_iter().enumerate() {
+        let right_input = vec![[C64::ZERO, phase(phi).scale(0.7)]; 16];
+        let dual = beam
+            .prepare_illumination(&right_input, dual_limits(), || false)
+            .unwrap();
+        let power = dual.power();
+        assert!(power.film_absorbed_w > 0.0);
+        scale = (power.incoming_w[0] + power.incoming_w[1]) * inverse_speed;
+        let force = dual.radiation_force(|| false).unwrap();
+        assert_eq!([force[0], force[1]], [0.0; 2]);
+        near(
+            force[2],
+            inverse_speed * (power.incoming_w[0] + power.outgoing_w[0])
+                - (1.8_f64).sqrt() * inverse_speed * (power.incoming_w[1] + power.outgoing_w[1]),
+            2e-12 * scale,
+        );
+        for distance in [0.0, 0.3] {
+            let mut integral = [0.0; 3];
+            for (side, epsilon, mu, normal) in [
+                (DualSide::TotalLeft, E, M, -1.0),
+                (DualSide::TotalRight, 2.25 * E, 0.8 * M, 1.0),
+            ] {
+                let field = dual.field(side, distance, || false).unwrap();
+                for i in 0..16 {
+                    let e = field.electric_v_per_m()[i];
+                    let h = field.magnetic_a_per_m()[i];
+                    let energy = 0.25
+                        * (epsilon * e.iter().map(|z| z.norm_sq()).sum::<f64>()
+                            + mu * h.iter().map(|z| z.norm_sq()).sum::<f64>());
+                    for c in 0..3 {
+                        let stress = 0.5
+                            * (epsilon * (e[c] * e[2].conj()).re + mu * (h[c] * h[2].conj()).re)
+                            - if c == 2 { energy } else { 0.0 };
+                        integral[c] += normal * stress * area / 16.0;
+                    }
+                }
+            }
+            for c in 0..3 {
+                near(force[c], integral[c], 2e-12 * scale);
+            }
+        }
+        observed[phase_index] = force[2];
+    }
+    assert!((observed[0] - observed[1]).abs() > 1e-3 * scale);
 }
 
 #[test]
@@ -489,6 +581,7 @@ fn counterbeam_refuses_lossy_or_nonpropagating_right_exterior_even_when_dark() {
     };
     let input = vec![[C64::ONE, C64::ZERO]; 4];
     let beam = PlanarAngularSpectrum::prepare(&stack, g, &input, limits(), || false).unwrap();
+    assert!(beam.radiation_force(|| false).is_ok());
     assert!(
         beam.prepare_illumination(&[[C64::ZERO; 2]; 4], dual_limits(), || false)
             .is_err()
@@ -506,6 +599,7 @@ fn counterbeam_refuses_lossy_or_nonpropagating_right_exterior_even_when_dark() {
         || false,
     )
     .unwrap();
+    assert!(beam.radiation_force(|| false).is_err());
     assert!(
         beam.prepare_illumination(&vec![[C64::ZERO; 2]; 16], dual_limits(), || false)
             .is_err()

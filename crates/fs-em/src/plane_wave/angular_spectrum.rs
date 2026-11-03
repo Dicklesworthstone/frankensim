@@ -175,6 +175,7 @@ struct Mode {
     transmitted_e_te_tm: [C64; 2],
     transmitted_h_te_tm: [C64; 2],
     reflected_power_w: f64,
+    transmitted_power_w: f64,
     absorbed_power_w: f64,
 }
 
@@ -348,8 +349,9 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                 let reflected_power_w =
                     te_power * te.reflected_power_fraction + tm_power * tm.reflected_power_fraction;
                 power.reflected_w += reflected_power_w;
-                power.transmitted_w += te_power * te.transmitted_power_fraction
+                let transmitted_power_w = te_power * te.transmitted_power_fraction
                     + tm_power * tm.transmitted_power_fraction;
+                power.transmitted_w += transmitted_power_w;
                 let absorbed_power_w =
                     te_power * te.absorbed_power_fraction + tm_power * tm.absorbed_power_fraction;
                 power.film_absorbed_w += absorbed_power_w;
@@ -364,6 +366,7 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                     transmitted_e_te_tm,
                     transmitted_h_te_tm,
                     reflected_power_w,
+                    transmitted_power_w,
                     absorbed_power_w,
                 });
             }

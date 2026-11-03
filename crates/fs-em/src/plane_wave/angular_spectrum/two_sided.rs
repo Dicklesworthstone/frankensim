@@ -427,16 +427,16 @@ impl<'b, 's, 'm> PreparedAngularSpectrumIllumination<'b, 's, 'm> {
     }
 
     /// Net cycle-mean force [N] on the stack over the whole periodic cell.
-    /// Uses the existing homogeneous-exterior Maxwell stress and positive loss
-    /// modes; requires the SAME original lossless exterior material at both
-    /// faces. No FFT, allocation, striction or mechanical-work credit is added.
+    /// Uses each original lossless exterior's Maxwell stress and positive
+    /// film-loss modes, including transmitted refraction between unlike media.
+    /// No FFT, allocation, striction or mechanical-work credit is added.
     /// The retained native loss contractions cost O(points * layers).
     pub fn radiation_force(
         &self,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<[f64; 3], AngularSpectrumError> {
         poll(&mut cancelled)?;
-        self.source().admit_momentum_exterior()?;
+        self.source().admit_refracting_momentum_exterior()?;
         let grid = self.grid();
         let area =
             (grid.width as f64 * grid.spacing_m[0]) * (grid.height as f64 * grid.spacing_m[1]);
