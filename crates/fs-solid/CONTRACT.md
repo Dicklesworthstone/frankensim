@@ -609,6 +609,17 @@ thermal/phase refresh; a closed body's reference field must be retained.
 Native modal regression moves density toward the free vertex at identical
 total mass/stiffness and verifies the analytic eigenvalue ratio `2/3`.
 
+`HyperTetProblem::reference_mass_matrix_with_nodal_density` carries that same
+exact P1 density integration into finite-strain mechanics. It assembles in the
+original node/element order, retains supported coordinates, and admits finite
+positive nodal density and representable mass under the native mesh, budget
+and cancellation checks. The matrix is reference inventory, held through
+deformation. It does not refresh density from current volume or infer a
+constitutive field from inertia. G0/G1/G3 regressions in
+`tests/hyper3_reference_density.rs` cover cubic moments, centroid, kinetic
+energy against independent quadrature, positive definiteness, scalar bit
+parity, shared-vertex/permuted assembly and refusal boundaries.
+
 `tet10::QuadraticTetProblem::assemble_with_reference_density` carries graded
 reference inertia into the same native quadratic stiffness/mass pencil. Each
 element supplies four positive corner densities, interpolated with P1 reference

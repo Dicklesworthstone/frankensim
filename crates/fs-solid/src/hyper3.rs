@@ -722,6 +722,86 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         Ok(mass)
     }
 
+    /// Assemble the full consistent mass for a positive P1 reference density.
+    ///
+    /// Supply one density [kg/m³] per original mesh node. The shared inertia
+    /// kernel integrates `rho * N_a * N_b` exactly, preserving the density's
+    /// first and second moments instead of replacing it by a cell mean.
+    /// Supported DOFs remain in this full matrix. The constitutive law still
+    /// owns elastic response; the supplied density owns the original inventory.
+    /// Retain this matrix through deformation: a current-density or current-
+    /// volume substitution would change the mass of the closed specimen.
+    ///
+    /// # Errors
+    /// Invalid mesh, density, budget, unrepresentable mass, an unreferenced
+    /// node, or cancellation. No partial matrix is returned.
+    pub fn reference_mass_matrix_with_nodal_density(
+        &self,
+        reference_nodal_density_kg_m3: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Csr, HyperTetError> {
+        checkpoint(cx)?;
+        let elements = self.validate()?;
+        if reference_nodal_density_kg_m3.len() != self.nodes_m.len() {
+            return Err(HyperTetError::InvalidInput {
+                what: "one finite positive reference density is required per node".into(),
+            });
+        }
+        for (node, &density) in reference_nodal_density_kg_m3.iter().enumerate() {
+            if node % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if !density.is_finite() || density <= 0.0 {
+                return Err(HyperTetError::InvalidInput {
+                    what: "nodal reference densities must be finite and positive".into(),
+                });
+            }
+        }
+        let dofs = 3 * self.nodes_m.len();
+        let mut coo = Coo::new(dofs, dofs);
+        let mut total_mass_kg = 0.0;
+        for element in &elements {
+            checkpoint(cx)?;
+            let local = crate::inertia::p1_tet_nodal_mass(
+                element.volume,
+                element
+                    .nodes
+                    .map(|node| reference_nodal_density_kg_m3[node]),
+            )
+            .map_err(inertia_error)?;
+            total_mass_kg += local.mass_kg;
+            if !total_mass_kg.is_finite() {
+                return Err(HyperTetError::InvalidInput {
+                    what: "total reference mass is not representable".into(),
+                });
+            }
+            for (a, &node_a) in element.nodes.iter().enumerate() {
+                for (b, &node_b) in element.nodes.iter().enumerate() {
+                    for component in 0..3 {
+                        coo.push(
+                            3 * node_a + component,
+                            3 * node_b + component,
+                            local.coefficients[a][b],
+                        );
+                    }
+                }
+            }
+        }
+        let mass = coo.assemble();
+        for row in 0..dofs {
+            if row % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if mass.get(row, row) <= 0.0 || mass.row(row).1.iter().any(|value| !value.is_finite()) {
+                return Err(HyperTetError::InvalidInput {
+                    what: "every node requires finite positive reference inertia".into(),
+                });
+            }
+        }
+        checkpoint(cx)?;
+        Ok(mass)
+    }
+
     /// Full dead-load vector at unit load, N, on the reference mesh.
     ///
     /// # Errors
