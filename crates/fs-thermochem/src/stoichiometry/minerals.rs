@@ -173,6 +173,18 @@ pub enum MineralReaction {
     /// Ca2+(aq) + 2 H2O(l) -> Ca(OH)2(s) + 2 H+(aq).
     /// The selected crystalline source controls the solid identity; no rate is implied.
     CalciumHydroxidePrecipitation,
+    /// Ca2+(aq) + SO4(2-)(aq) + 2 H2O(l) -> CaSO4.2H2O(s).
+    /// Selected gypsum phase with explicit hydrate waters and free-ion sulfate.
+    GypsumPrecipitation,
+    /// Ca2+(aq) + SO4(2-)(aq) -> CaSO4(s, anhydrite).
+    /// Anhydrite and gypsum are separate declared phases, never interchangeable.
+    AnhydritePrecipitation,
+    /// CaSO4(s, anhydrite) + 2 H2O(l) -> CaSO4.2H2O(s, gypsum).
+    /// Hydration bookkeeping does not imply a rate or automatic phase selection.
+    AnhydriteHydration,
+    /// Ca(OH)2(s) + 2 H+(aq) + SO4(2-)(aq) -> CaSO4.2H2O(s).
+    /// Declared acid-neutralization endpoint; total sulfate/pH need other owners.
+    GypsumPrecipitationWithHydratedLime,
     /// Cu2CO3(OH)2(s) + 4 H+ -> 2 Cu2+ + CO2(aq) + 3 H2O(l).
     /// Stoichiometric dissolved-copper endpoint, not an ore-recovery prediction.
     MalachiteAcidLeach,
@@ -413,6 +425,44 @@ impl MineralReaction {
                     ("H2O(l)", &[0, 2, 1], 0, -2),
                     ("Ca(OH)2(s)", &[1, 2, 2], 0, 1),
                     ("H+(aq)", &[0, 1, 0], 1, 2),
+                ],
+            ),
+            Self::GypsumPrecipitation => (
+                "gypsum-precipitation",
+                &["Ca", "S", "H", "O"],
+                &[
+                    ("Ca[2+](aq)", &[1, 0, 0, 0], 2, -1),
+                    ("SO4[2-](aq)", &[0, 1, 0, 4], -2, -1),
+                    ("H2O(l)", &[0, 0, 2, 1], 0, -2),
+                    ("CaSO4.2H2O(s)", &[1, 1, 4, 6], 0, 1),
+                ],
+            ),
+            Self::AnhydritePrecipitation => (
+                "anhydrite-precipitation",
+                &["Ca", "S", "O"],
+                &[
+                    ("Ca[2+](aq)", &[1, 0, 0], 2, -1),
+                    ("SO4[2-](aq)", &[0, 1, 4], -2, -1),
+                    ("CaSO4(s)", &[1, 1, 4], 0, 1),
+                ],
+            ),
+            Self::AnhydriteHydration => (
+                "anhydrite-hydration-gypsum",
+                &["Ca", "S", "H", "O"],
+                &[
+                    ("CaSO4(s)", &[1, 1, 0, 4], 0, -1),
+                    ("H2O(l)", &[0, 0, 2, 1], 0, -2),
+                    ("CaSO4.2H2O(s)", &[1, 1, 4, 6], 0, 1),
+                ],
+            ),
+            Self::GypsumPrecipitationWithHydratedLime => (
+                "gypsum-from-hydrated-lime-sulfate",
+                &["Ca", "S", "H", "O"],
+                &[
+                    ("Ca(OH)2(s)", &[1, 0, 2, 2], 0, -1),
+                    ("H+(aq)", &[0, 0, 1, 0], 1, -2),
+                    ("SO4[2-](aq)", &[0, 1, 0, 4], -2, -1),
+                    ("CaSO4.2H2O(s)", &[1, 1, 4, 6], 0, 1),
                 ],
             ),
             Self::MalachiteAcidLeach => (
