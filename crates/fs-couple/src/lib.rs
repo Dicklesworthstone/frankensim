@@ -72,6 +72,8 @@ pub mod finite_gas_thermal;
 #[cfg(feature = "superfluid")]
 pub mod superfluid;
 pub mod finite_solid;
+/// Native rigid impacts on finite plastic or viscoelastic material histories.
+pub mod inelastic_impact;
 /// Original signed frame modes and power-conjugate physical vibration ports.
 pub mod frame_vibration;
 pub mod flue_loop;

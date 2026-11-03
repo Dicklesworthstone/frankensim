@@ -1,5 +1,33 @@
 # CONTRACT: fs-couple
 
+## Rigid impacts against solids with material memory
+
+`inelastic_impact::{plastic_rigid_impact_candidate,visco_rigid_impact_candidate}`
+compose one frictionless rigid/material-point impact using the original
+`fs-contact` Newton restitution law. The native finite plastic or viscoelastic
+owner supplies its current barycentric witness/velocity, supported directional
+mobility and work-conjugate impulse distribution. Graded reference density and
+the full consistent mass remain active. The rigid owner supplies its current
+material-point kinematics, complete body inertia tensor, effective mass and
+actual represented linear/angular momentum jump.
+
+The normal points from solid to rigid, with equal and opposite impulses through
+the original witnesses. Negative gaps refuse, even inside the activation
+tolerance. Off-normal witness separation refuses rather than relocating a
+contact point. Both candidates retain configuration, source bindings, material
+history and physical time. A failed geometry, solver, physical balance or
+cancellation gate leaves both accepted states intact.
+
+The combined report checks actual restitution speed, total linear and angular
+momentum about the requested origin, body-local defects, conjugate contact work
+and kinetic change plus contact loss minus signed moving-support work. Contact
+loss is reported separately and is not deposited as heat. Independent native
+regressions in `tests/inelastic_impact.rs` exercise graded edge-point mobility,
+full off-diagonal rigid inertia, moving supports, elastic/inelastic restitution,
+and retained plastic/Maxwell histories. This is a bounded single-contact event;
+collision detection, event-time localization, simultaneous manifolds, friction
+and persistent-contact evolution retain their existing owners.
+
 ## Physical pressure from an explicitly selected lumped duct
 
 `acoustic_realize::duct_observer::BaffledDuctObserver` also admits the existing
