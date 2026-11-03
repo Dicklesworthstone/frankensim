@@ -11,6 +11,7 @@
 //! report 20200002378, equations (8)-(10), without its extra compressible terms.
 
 use super::*;
+use crate::kinematics::{FlowKinematics3, KinematicsError, KinematicsWorkspace3};
 use crate::sgs3::{SgsConfig, SgsError, SgsModel, eddy_viscosity};
 
 mod dynamic;
@@ -49,6 +50,55 @@ pub struct NsfSgsTransport {
 }
 
 impl<L: Lattice3<27>> NsfGrid3<L> {
+    /// Resolved lattice-unit vorticity and full velocity gradients at the
+    /// current accepted epoch. Reuses the native SGS stencil without enabling
+    /// a closure: moving walls, characteristic face traces and full-spacing
+    /// reservoir ghosts retain their own physical locations and velocities.
+    /// Curl is taken AFTER the current per-cell half-force correction.
+    ///
+    /// The reusable field is x-fastest; solid entries are `None`. Convert a
+    /// sample with `sample.to_physical(self.law().dt_s)` for SI quantities.
+    pub fn kinematics<'a>(
+        &self,
+        gate: &fs_exec::CancelGate,
+        workspace: &'a mut KinematicsWorkspace3,
+    ) -> Result<&'a [Option<FlowKinematics3>], KinematicsError> {
+        workspace.admit(self.spec.dims, gate)?;
+        for cell in 0..self.n {
+            if cell % 64 == 0 {
+                crate::kinematics::checkpoint(gate)?;
+            }
+            workspace.velocity[cell] = if self.solid[cell] {
+                [0.0; 3]
+            } else {
+                let (rho, momentum) = raw_moments::<L>(&self.f[cell]);
+                let u = half_force_velocity(rho, momentum, self.force[cell]);
+                if !(rho.is_finite() && rho > 0.0) || u.iter().any(|v| !v.is_finite()) {
+                    return Err(KinematicsError::InvalidState {
+                        cell: self.at(cell),
+                    });
+                }
+                u
+            };
+        }
+        for cell in 0..self.n {
+            if cell % 64 == 0 {
+                crate::kinematics::checkpoint(gate)?;
+            }
+            workspace.field[cell] = if self.solid[cell] {
+                None
+            } else {
+                Some(FlowKinematics3::from_gradient(self.sgs_gradient(
+                    cell,
+                    &workspace.velocity,
+                    self.open_faces.as_ref(),
+                ))?)
+            };
+        }
+        crate::kinematics::checkpoint(gate)?;
+        Ok(&workspace.field)
+    }
+
     /// Attach an explicit exploratory closure and restart the current
     /// conservative flux history. Periodic faces, stationary solids and
     /// stationary/moving halfway walls, characteristic faces and their localized

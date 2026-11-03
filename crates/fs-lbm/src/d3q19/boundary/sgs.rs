@@ -10,6 +10,7 @@ use super::{
     Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force, collision_kernel3,
     effective_wall_velocity,
 };
+use crate::kinematics::{FlowKinematics3, KinematicsError, KinematicsWorkspace3};
 use crate::lattice3::{D3q19, ViscousLattice3};
 use crate::sgs3::{SgsConfig, SgsError, SgsReport, SgsWorkspace3, eddy_viscosity};
 use fs_exec::{CancelGate, KernelRunner};
@@ -73,6 +74,56 @@ fn checkpoint(gate: &CancelGate) -> Result<(), BoundaryStepError3> {
 }
 
 impl BoundaryGrid3 {
+    /// Resolved lattice-unit kinematics from the accepted physical velocity,
+    /// without choosing or enabling turbulence. Uses the same moving-wall,
+    /// periodic and open-face gradient as native SGS. A half-cell wall uses
+    /// its actual velocity; on-site velocity/pressure boundaries retain their
+    /// original one-sided/zero-normal-gradient conventions.
+    ///
+    /// Output is x-fastest, independently of the native tile layout, with
+    /// `None` at solids. Both sweeps reuse the workspace without allocations.
+    pub fn kinematics<'a>(
+        &self,
+        gate: &CancelGate,
+        workspace: &'a mut KinematicsWorkspace3,
+    ) -> Result<&'a [Option<FlowKinematics3>], KinematicsError> {
+        workspace.admit(self.dimensions(), gate)?;
+        for tile in 0..self.f[0].len() {
+            crate::kinematics::checkpoint(gate)?;
+            for lane in 0..TILE_CELLS {
+                let native = tile * TILE_CELLS + lane;
+                if self.solid[tile] & (1u64 << lane) != 0 {
+                    workspace.velocity[native] = [0.0; 3];
+                    continue;
+                }
+                let p = self.coords(tile, lane);
+                let (rho, momentum) = self.raw_moments(p[0], p[1], p[2]);
+                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                let velocity = core::array::from_fn(|a| (momentum[a] + 0.5 * force[a]) / rho);
+                if !(rho.is_finite() && rho > 0.0) || velocity.iter().any(|v| !v.is_finite()) {
+                    return Err(KinematicsError::InvalidState { cell: p });
+                }
+                workspace.velocity[native] = velocity;
+            }
+        }
+        for tile in 0..self.f[0].len() {
+            crate::kinematics::checkpoint(gate)?;
+            for lane in 0..TILE_CELLS {
+                let p = self.coords(tile, lane);
+                let cell = (p[2] * self.ny + p[1]) * self.nx + p[0];
+                workspace.field[cell] = if self.solid[tile] & (1u64 << lane) != 0 {
+                    None
+                } else {
+                    Some(FlowKinematics3::from_gradient(
+                        self.sgs_gradient(p, &workspace.velocity),
+                    )?)
+                };
+            }
+        }
+        crate::kinematics::checkpoint(gate)?;
+        Ok(&workspace.field)
+    }
+
     /// Allocate the velocity/density/collision cache once. Prepared collisions
     /// use this owner's native `tile * TILE_CELLS + lane` order.
     pub fn sgs_workspace(&self) -> Result<SgsWorkspace3<CollisionModel3>, BoundarySgsError3> {

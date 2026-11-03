@@ -2101,6 +2101,46 @@ rates, molecular-ratio limits, byte limits and exploratory-use admission stay
 in force. This adds no moving/open wall model, material-wrapper API, thermal
 energy owner or turbulent-DNS qualification.
 
+### Resolved vorticity on native three-dimensional flow owners
+
+`Grid3::kinematics`, `ForcedGrid3::kinematics`,
+`BoundaryGrid3::kinematics` and `NsfGrid3::kinematics` expose the full resolved
+velocity gradient independently of an SGS closure. Every adapter samples the
+accepted half-force-corrected velocity once and reuses its original native
+SGS/rheology stencil: centered periodic/interior differences, quadratic
+halfway-wall reconstruction, and the owner's existing on-site or characteristic
+open-face/reservoir convention. `ForcedGrid3` retains its accepted spatial
+force epoch. NSF uses accepted characteristic traces and distinguishes
+full-spacing reservoir ghosts from half-cell walls.
+
+`kinematics::FlowKinematics3` defines `gradient[i][j] = du_i/dx_j`, signed
+`curl(u)`, `|curl(u)|²/2` enstrophy density, full divergence,
+`Q = (Omega:Omega - S:S)/2` rotation excess and `(omega dot grad)u`
+stretching/tilting. Curl is twice rigid-body angular velocity; pure strain has
+zero curl, and simple shear has nonzero curl but zero Q. Enstrophy is neither
+density-weighted nor volume-integrated. These invariants are local resolved
+quantities, not a coherent-vortex certificate or a full material vorticity
+derivative: baroclinic generation, compressible dilation and viscous terms are
+not folded into the stretching value. Native output uses lattice units;
+`to_physical(dt_s)` divides the tensor by the actual positive timestep, giving
+curl/divergence in s^-1 and quadratic invariants in s^-2. Cell size cancels.
+
+`KinematicsWorkspace3::new(dimensions, maximum_bytes)` admits both numerical
+buffers before allocation. Repeated sampling allocates no buffers, polls
+cancellation at most every 64 cells and returns a canonical x-fastest field
+with `None` for solid cells, independent of the tile-major D3Q19 storage.
+Wrong workspace shape, invalid states, nonfinite invariants and cancellation
+refuse without changing the flow. Scratch is consumable only from a successful
+sampling call and is rebuilt on retry. No new collision, transport, closure,
+resolution or physical-validation envelope is claimed.
+
+`tests/kinematics.rs` checks G0 rotation/strain/shear/stretching identities and
+SI conversion, G1 all-axis Couette and quadratic Poiseuille wall curl with
+spatial forcing, a three-rung three-dimensional Taylor--Green curl convergence
+ladder on both D3Q19 and D3Q27, analytic viscous enstrophy decay of the exact
+two-dimensional Taylor--Green solution extruded in z, NSF moving-wall and
+characteristic-throughflow sampling, solid exclusion and bounded refusal/retry.
+
 ### Moving/open D3Q19 boundaries and turbulent wall loads
 
 `BoundaryGrid3::{sgs_workspace, prepare_sgs, step_with_sgs,

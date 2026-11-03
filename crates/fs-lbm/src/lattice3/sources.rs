@@ -99,6 +99,17 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         macro_cell::<L, Q>(pop, self.forces[cell], cell, self.grid.budget.maximum_mach)
     }
 
+    /// Full resolved gradients in the accepted spatial force frame. Reusing
+    /// the unforced grid alone would omit `F_n/(2 rho)` and its curl.
+    pub fn kinematics<'a>(
+        &self,
+        gate: &CancelGate,
+        workspace: &'a mut crate::kinematics::KinematicsWorkspace3,
+    ) -> Result<&'a [Option<crate::kinematics::FlowKinematics3>], crate::kinematics::KinematicsError> {
+        self.grid
+            .kinematics_with_forces(gate, workspace, Some(&self.forces))
+    }
+
     /// Advance with current-epoch collision coefficients and a force field at
     /// the NEXT time. A failure leaves force history, populations and step count
     /// unchanged. The supplied endpoint vector is consumed, never partly kept.

@@ -24,6 +24,7 @@ pub mod core2;
 pub mod d3q19;
 pub mod d3q27;
 pub mod freesurface;
+pub mod kinematics;
 pub mod lattice3;
 pub mod material;
 pub mod nsf3;

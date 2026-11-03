@@ -1,6 +1,7 @@
 //! SGS integration through the existing per-cell collision owner.
 
 use super::{Grid3, GridError3, Lattice3, coordinates, macro_cell};
+use crate::kinematics::{FlowKinematics3, KinematicsError, KinematicsWorkspace3};
 use crate::sgs3::{
     SgsConfig, SgsError, SgsLattice3, SgsReport, SgsStepError, SgsWorkspace3, eddy_viscosity,
 };
@@ -209,6 +210,56 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
 // One velocity-gradient stencil for molecular rheology and exploratory SGS.
 // The caller supplies the same-time, force-centered macroscopic velocity.
 impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
+    /// Resolved full gradients and vorticity of the accepted, force-centered
+    /// state, without enabling an SGS closure. The returned lattice-unit
+    /// field is x-fastest with `None` at solids. Reuses the rheology/SGS
+    /// second-order stencil and its stationary halfway-wall geometry.
+    pub fn kinematics<'a>(
+        &self,
+        gate: &CancelGate,
+        workspace: &'a mut KinematicsWorkspace3,
+    ) -> Result<&'a [Option<FlowKinematics3>], KinematicsError> {
+        self.kinematics_with_forces(gate, workspace, None)
+    }
+
+    pub(super) fn kinematics_with_forces<'a>(
+        &self,
+        gate: &CancelGate,
+        workspace: &'a mut KinematicsWorkspace3,
+        forces: Option<&[[f64; 3]]>,
+    ) -> Result<&'a [Option<FlowKinematics3>], KinematicsError> {
+        workspace.admit(self.dims, gate)?;
+        for cell in 0..self.f.len() {
+            if cell % 64 == 0 {
+                crate::kinematics::checkpoint(gate)?;
+            }
+            workspace.velocity[cell] = if self.solid[cell] {
+                [0.0; 3]
+            } else {
+                let force = forces.map_or(self.force, |f| f[cell]);
+                macro_cell::<L, Q>(&self.f[cell], force, cell, self.budget.maximum_mach)
+                    .map_err(|_| KinematicsError::InvalidState {
+                        cell: coordinates(cell, self.dims),
+                    })?
+                    .1
+            };
+        }
+        for cell in 0..self.f.len() {
+            if cell % 64 == 0 {
+                crate::kinematics::checkpoint(gate)?;
+            }
+            workspace.field[cell] = if self.solid[cell] {
+                None
+            } else {
+                Some(FlowKinematics3::from_gradient(
+                    self.velocity_gradient(cell, &workspace.velocity),
+                )?)
+            };
+        }
+        crate::kinematics::checkpoint(gate)?;
+        Ok(&workspace.field)
+    }
+
     fn velocity_neighbour(
         &self,
         mut p: [usize; 3],
