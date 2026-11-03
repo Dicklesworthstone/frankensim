@@ -11,6 +11,8 @@ use crate::dynamics::piston::{Piston, PistonError};
 use crate::multicomponent::{Boundaries, Boundary};
 use fs_qty::Time;
 
+mod molecular;
+
 /// One atomic chemistry/pressure/two-wall step on actual moving cell volumes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReactiveInertialWallsStep {

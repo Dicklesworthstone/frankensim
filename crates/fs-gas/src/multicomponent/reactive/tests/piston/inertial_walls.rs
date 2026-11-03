@@ -2,6 +2,8 @@
 use super::*;
 use crate::dynamics::inertial_walls::{InertialWallLoad, InertialWallsControl};
 
+mod molecular;
+
 fn wall_controls() -> InertialWallsControl {
     let control = piston_controls();
     InertialWallsControl {

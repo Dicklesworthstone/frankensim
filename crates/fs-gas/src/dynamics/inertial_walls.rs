@@ -114,6 +114,26 @@ pub struct InertialWallsStep<R = StepReport> {
 }
 
 impl<R> InertialWallsStep<R> {
+    pub(crate) fn map_gas<S>(self, map: impl FnOnce(R) -> S) -> InertialWallsStep<S> {
+        InertialWallsStep {
+            gas: map(self.gas),
+            velocity_before_m_s: self.velocity_before_m_s,
+            velocity_after_m_s: self.velocity_after_m_s,
+            midpoint_velocity_m_s: self.midpoint_velocity_m_s,
+            displacement_m: self.displacement_m,
+            gas_impulse_n_s: self.gas_impulse_n_s,
+            kinetic_energy_change_j: self.kinetic_energy_change_j,
+            external_force_work_j: self.external_force_work_j,
+            exterior_pressure_work_j: self.exterior_pressure_work_j,
+            momentum_residual_n_s: self.momentum_residual_n_s,
+            combined_momentum_residual_n_s: self.combined_momentum_residual_n_s,
+            mechanical_energy_residual_j: self.mechanical_energy_residual_j,
+            total_energy_residual_j: self.total_energy_residual_j,
+            iterations: self.iterations,
+            gas_trials: self.gas_trials,
+        }
+    }
+
     fn residual_norm(&self) -> f64 {
         self.momentum_residual_n_s[0]
             .abs()
@@ -311,11 +331,11 @@ impl Euler1d {
 // Only these original extensive exchanges enter the shared wall mechanics.
 // The complete species/source report remains on the accepted result.
 pub(crate) struct MechanicalExchange {
-    duration_s: f64,
-    momentum_change: f64,
-    energy_change: f64,
-    boundary_impulse: [f64; 2],
-    boundary_work: [f64; 2],
+    pub(crate) duration_s: f64,
+    pub(crate) momentum_change: f64,
+    pub(crate) energy_change: f64,
+    pub(crate) boundary_impulse: [f64; 2],
+    pub(crate) boundary_work: [f64; 2],
 }
 
 impl From<&StepReport> for MechanicalExchange {
@@ -427,8 +447,26 @@ pub(crate) fn mechanical_report<R>(
 pub(crate) fn solve<R>(
     initial: [f64; 2],
     controls: InertialWallsControl,
-    mut trial: impl FnMut([f64; 2]) -> Result<InertialWallsStep<R>, PistonError>,
+    trial: impl FnMut([f64; 2]) -> Result<InertialWallsStep<R>, PistonError>,
 ) -> Result<InertialWallsStep<R>, PistonError> {
+    solve_with(initial, controls, trial, |error| {
+        matches!(
+            error,
+            PistonError::Cancelled
+                | PistonError::Gas(Error::Allocation)
+                | PistonError::MixtureGas(crate::multicomponent::Error::Allocation)
+        )
+    })
+}
+
+/// Same two-speed root with original composing-owner errors retained.
+/// Terminal cancellation, allocation and duration refusals must not backtrack.
+pub(crate) fn solve_with<R, E: From<PistonError>>(
+    initial: [f64; 2],
+    controls: InertialWallsControl,
+    mut trial: impl FnMut([f64; 2]) -> Result<InertialWallsStep<R>, E>,
+    terminal: impl Fn(&E) -> bool,
+) -> Result<InertialWallsStep<R>, E> {
     let mut speed = initial;
     let mut current = trial(speed)?;
     for iteration in 0..=controls.maximum_iterations {
@@ -444,7 +482,8 @@ pub(crate) fn solve<R>(
             return Err(PistonError::Balance {
                 momentum_residual_n_s: momentum,
                 energy_residual_j: energy,
-            });
+            }
+            .into());
         }
         if iteration == controls.maximum_iterations {
             break;
@@ -464,7 +503,8 @@ pub(crate) fn solve<R>(
                 return Err(PistonError::NotConverged {
                     iterations: iteration,
                     impulse_residual_n_s: norm,
-                });
+                }
+                .into());
             }
             let value = trial(probe)?;
             for row in 0..2 {
@@ -484,10 +524,11 @@ pub(crate) fn solve<R>(
             }
         }
         let mut accepted = None;
-        let mut last = PistonError::NotConverged {
+        let mut last: E = PistonError::NotConverged {
             iterations: iteration,
             impulse_residual_n_s: norm,
-        };
+        }
+        .into();
         for _ in 0..8 {
             let proposed = core::array::from_fn(|i| speed[i] + factor * correction[i]);
             if proposed == speed || factor <= 0.0 {
@@ -503,15 +544,7 @@ pub(crate) fn solve<R>(
                         break;
                     }
                     Ok(_) => {}
-                    Err(PistonError::Cancelled) => return Err(PistonError::Cancelled),
-                    Err(PistonError::Gas(Error::Allocation)) => {
-                        return Err(PistonError::Gas(Error::Allocation));
-                    }
-                    Err(PistonError::MixtureGas(crate::multicomponent::Error::Allocation)) => {
-                        return Err(PistonError::MixtureGas(
-                            crate::multicomponent::Error::Allocation,
-                        ));
-                    }
+                    Err(error) if terminal(&error) => return Err(error),
                     Err(error) => last = error,
                 }
             }
@@ -522,7 +555,8 @@ pub(crate) fn solve<R>(
     Err(PistonError::NotConverged {
         iterations: controls.maximum_iterations,
         impulse_residual_n_s: current.residual_norm(),
-    })
+    }
+    .into())
 }
 
 fn newton_correction(

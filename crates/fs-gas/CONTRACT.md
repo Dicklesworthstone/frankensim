@@ -1442,9 +1442,44 @@ unequal-wall reactive recoil with an independent energy-gauge comparison,
 accepted-duration replay using moved source volumes, postcompression source
 refusal and cancellation/retry after prior motion. They parsed with the
 pinned formatter but have not been compiled or run in the constrained
-editing environment. Molecular transport and thermal walls remain separate
-owners. Existing chemistry/splitting and unequal-caloric-contact limits
+editing environment. This chemistry-only entry does not advance molecular
+transport or thermal walls. Existing chemistry/splitting and unequal-caloric-contact limits
 remain; no general accuracy, entropy or combustion-validity claim is added.
+
+### Molecular stress and finite heat at both inertial gas ends
+
+`ReactingEuler1d::step_with_inertial_walls_and_dissipation` composes the
+original D/C/A/C/D stages inside the simultaneous two-speed root.
+`step_with_inertial_walls_dissipation_and_heat` adds the original finite
+end-store or prescribed-reservoir H stages around that same composition.
+Every proposal starts from accepted owners; second halves use actual moved
+volumes. The identical candidate velocities supply pressure work, viscous
+gradients and molecular stress work at BOTH finite walls.
+
+Each wall receives its full pressure-plus-viscous impulse. Native acceptance
+checks both impulse/work equations and combined gas-plus-walls momentum.
+Chemical gas energy uses actual species-reference changes once. Total
+energy adds both kinetic changes, original finite-store energy differences
+and represented exterior/load work, then subtracts prescribed reservoir
+heat. Conductive heat never enters mechanical work, and thermal storage
+adds no duplicate translating mass. Original material caloric conventions
+and source domains remain authoritative.
+
+The existing two-speed solver retains its original frozen/mixture wrapper
+and arithmetic; a private generic-error seam preserves source refusals.
+Shortened acoustic intervals terminate every root proposal and restart
+all stages at one common duration. No field/source clone is made per
+proposal. Gas, geometry, clock, both velocities, molecular binding and
+thermal stores publish together after physical acceptance and a final poll.
+
+Four authored regressions cover unequal-wall viscous/chemical recoil and
+source-gauge invariance, independent sequential finite-heat and complete
+energy oracles, replay after acoustic shortening, and cancellation/retry
+after prior motion with both finite stores and geometry bindings retained.
+They parse with the pinned formatter; native compilation/execution was
+unavailable in this resource-constrained session. Existing source, explicit
+parabolic, chemistry/splitting and unequal-caloric-contact limitations apply;
+this composition supplies no general accuracy, entropy or FSI theorem.
 
 ### Pressure-driven inertia of a resolved gas end wall
 
