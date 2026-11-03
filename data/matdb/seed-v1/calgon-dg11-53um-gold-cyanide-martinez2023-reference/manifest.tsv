@@ -1,0 +1,24 @@
+frankensim.matdb-manifest.v3
+pack_id	calgon-dg11-53um-gold-cyanide-martinez2023-reference
+redistribution	permitted	CC BY 4.0 primary research; attributed numerical facts and original qualification notes
+citation	Martinez-Penunuri et al. (2023), Thermodynamic and Kinetic Aspects of Gold Adsorption in Micrometric Activated Carbon and the Impact of Their Loss in Adsorption, Desorption, and Reactivation Plants, Materials 16(14):4961, sections 2.1, 2.4, 2.7.1 and 3.2, Tables 1-3; https://doi.org/10.3390/ma16144961; https://www.mdpi.com/1996-1944/16/14/4961/pdf?version=1689143462; accessed 2026-11-03
+license	CC-BY-4.0
+source	calgon-dg11-53um-isotherm	properties.tsv	material-tsv-v1
+property	qmax	langmuir-saturation-mass-loading	dimensional
+property	kl	langmuir-affinity-mass-basis	dimensional
+property	half	langmuir-half-saturation-mass-concentration	dimensional
+property	r2	langmuir-linearized-fit-r-squared	dimensional
+property	ce	observed-equilibrium-gold-mass-concentration	dimensional
+property	qe	observed-gold-mass-loading	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	ph_lower	source-reported-pH-lower	dimensional
+axis	ph_upper	source-reported-pH-upper	dimensional
+axis	ph_known	source-exact-pH-known	dimensional
+axis	particle	source-carbon-sieve-size	dimensional
+axis	nacn	source-nacn-preparation-mass-concentration	dimensional
+axis	sample	source-calgon-dg11-hb184an4	dimensional
+axis	dry	source-dry-carbon-mass-basis-established	dimensional
+axis	scope	source-synthetic-gold-cyanide-medium	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	fit	source-published-langmuir-fit	dimensional
+axis	carbon_mass	source-carbon-mass	dimensional

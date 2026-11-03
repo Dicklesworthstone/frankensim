@@ -1,0 +1,170 @@
+frankensim.matdb-source.v1
+observation	material	Calgon DG-11 coconut-shell carbon, lot HB184AN-4, mortar-ground 53 um sieve fraction	Sections 2.1 and 2.4; Tables 1-3	Laboratory synthetic cyanide medium: NaCN 1000 mg/L, pH 10.5-11, 25 C, initial Au 10 mg/L and nominal solution volume 0.5 L. Reported carbon masses are not explicitly established as dry mass; exact pH per case is unreported. The reported pH interval is retained as source-context endpoints, not a constant response across pH.
+observation	fit	Published mass-basis Langmuir fit	Table 2, 53 um row; Eq. 10	qmax=39.5257 mg Au/g carbon, KL=3.9531 L/mg Au, R2=0.9737. These are fitted parameters; the article generally favors Freundlich. Parameter uncertainties are unstated.
+observation	conversion	Reciprocal affinity expressed as half-saturation mass concentration	Authored algebraic conversion of Eq. 10, c_half=1/KL	0.2529660266626192 mg Au/L is derived from the printed KL, not another measurement. All stored loading and concentration quantities retain the source mass basis.
+observation	observations	Four separate equilibrium summaries	Table 3, 53 um rows	At carbon masses 0.010, 0.050, 0.125 and 0.250 g, Ce=[9.258,5.766,1.837,0.244] mg/L and qe=[37.100,42.340,32.652,19.512] mg/g. No interpolation is supplied.
+observation	limitations	Qualified equilibrium-fit reference	Tables 2-3; source interpretation	One observed loading exceeds fitted qmax. This is not a measured hard site capacity, dry-mass qualification, plant-carbon calibration, competitive isotherm, or kinetic law. No pseudo-second-order constant is converted to a local linear-driving-force coefficient.
+scalar	qmax	material,fit,limitations	qmax	39.5257	mg/g	tabulated
+uncertainty	qmax	unstated	-	-	-	-
+validity	qmax	temperature	298.15	298.15	K
+validity	qmax	ph_lower	10.5	10.5	1
+validity	qmax	ph_upper	11.0	11.0	1
+validity	qmax	ph_known	0	0	1
+validity	qmax	particle	53	53	um
+validity	qmax	nacn	1000	1000	mg/L
+validity	qmax	sample	1	1	1
+validity	qmax	dry	0	0	1
+validity	qmax	scope	1	1	1
+validity	qmax	reference	1	1	1
+validity	qmax	fit	1	1	1
+scalar	kl	material,fit,limitations	kl	3.9531	L/mg	tabulated
+uncertainty	kl	unstated	-	-	-	-
+validity	kl	temperature	298.15	298.15	K
+validity	kl	ph_lower	10.5	10.5	1
+validity	kl	ph_upper	11.0	11.0	1
+validity	kl	ph_known	0	0	1
+validity	kl	particle	53	53	um
+validity	kl	nacn	1000	1000	mg/L
+validity	kl	sample	1	1	1
+validity	kl	dry	0	0	1
+validity	kl	scope	1	1	1
+validity	kl	reference	1	1	1
+validity	kl	fit	1	1	1
+scalar	half	material,fit,conversion,limitations	half	0.2529660266626192	mg/L	tabulated
+uncertainty	half	unstated	-	-	-	-
+validity	half	temperature	298.15	298.15	K
+validity	half	ph_lower	10.5	10.5	1
+validity	half	ph_upper	11.0	11.0	1
+validity	half	ph_known	0	0	1
+validity	half	particle	53	53	um
+validity	half	nacn	1000	1000	mg/L
+validity	half	sample	1	1	1
+validity	half	dry	0	0	1
+validity	half	scope	1	1	1
+validity	half	reference	1	1	1
+validity	half	fit	1	1	1
+scalar	r2	material,fit,limitations	r2	0.9737	1	tabulated
+uncertainty	r2	unstated	-	-	-	-
+validity	r2	temperature	298.15	298.15	K
+validity	r2	ph_lower	10.5	10.5	1
+validity	r2	ph_upper	11.0	11.0	1
+validity	r2	ph_known	0	0	1
+validity	r2	particle	53	53	um
+validity	r2	nacn	1000	1000	mg/L
+validity	r2	sample	1	1	1
+validity	r2	dry	0	0	1
+validity	r2	scope	1	1	1
+validity	r2	reference	1	1	1
+validity	r2	fit	1	1	1
+scalar	ce-010	material,observations,limitations	ce	9.258	mg/L	tabulated
+uncertainty	ce-010	unstated	-	-	-	-
+validity	ce-010	temperature	298.15	298.15	K
+validity	ce-010	ph_lower	10.5	10.5	1
+validity	ce-010	ph_upper	11.0	11.0	1
+validity	ce-010	ph_known	0	0	1
+validity	ce-010	particle	53	53	um
+validity	ce-010	nacn	1000	1000	mg/L
+validity	ce-010	sample	1	1	1
+validity	ce-010	dry	0	0	1
+validity	ce-010	scope	1	1	1
+validity	ce-010	reference	1	1	1
+validity	ce-010	fit	0	0	1
+validity	ce-010	carbon_mass	0.010	0.010	g
+scalar	qe-010	material,observations,limitations	qe	37.100	mg/g	tabulated
+uncertainty	qe-010	unstated	-	-	-	-
+validity	qe-010	temperature	298.15	298.15	K
+validity	qe-010	ph_lower	10.5	10.5	1
+validity	qe-010	ph_upper	11.0	11.0	1
+validity	qe-010	ph_known	0	0	1
+validity	qe-010	particle	53	53	um
+validity	qe-010	nacn	1000	1000	mg/L
+validity	qe-010	sample	1	1	1
+validity	qe-010	dry	0	0	1
+validity	qe-010	scope	1	1	1
+validity	qe-010	reference	1	1	1
+validity	qe-010	fit	0	0	1
+validity	qe-010	carbon_mass	0.010	0.010	g
+scalar	ce-050	material,observations,limitations	ce	5.766	mg/L	tabulated
+uncertainty	ce-050	unstated	-	-	-	-
+validity	ce-050	temperature	298.15	298.15	K
+validity	ce-050	ph_lower	10.5	10.5	1
+validity	ce-050	ph_upper	11.0	11.0	1
+validity	ce-050	ph_known	0	0	1
+validity	ce-050	particle	53	53	um
+validity	ce-050	nacn	1000	1000	mg/L
+validity	ce-050	sample	1	1	1
+validity	ce-050	dry	0	0	1
+validity	ce-050	scope	1	1	1
+validity	ce-050	reference	1	1	1
+validity	ce-050	fit	0	0	1
+validity	ce-050	carbon_mass	0.050	0.050	g
+scalar	qe-050	material,observations,limitations	qe	42.340	mg/g	tabulated
+uncertainty	qe-050	unstated	-	-	-	-
+validity	qe-050	temperature	298.15	298.15	K
+validity	qe-050	ph_lower	10.5	10.5	1
+validity	qe-050	ph_upper	11.0	11.0	1
+validity	qe-050	ph_known	0	0	1
+validity	qe-050	particle	53	53	um
+validity	qe-050	nacn	1000	1000	mg/L
+validity	qe-050	sample	1	1	1
+validity	qe-050	dry	0	0	1
+validity	qe-050	scope	1	1	1
+validity	qe-050	reference	1	1	1
+validity	qe-050	fit	0	0	1
+validity	qe-050	carbon_mass	0.050	0.050	g
+scalar	ce-125	material,observations,limitations	ce	1.837	mg/L	tabulated
+uncertainty	ce-125	unstated	-	-	-	-
+validity	ce-125	temperature	298.15	298.15	K
+validity	ce-125	ph_lower	10.5	10.5	1
+validity	ce-125	ph_upper	11.0	11.0	1
+validity	ce-125	ph_known	0	0	1
+validity	ce-125	particle	53	53	um
+validity	ce-125	nacn	1000	1000	mg/L
+validity	ce-125	sample	1	1	1
+validity	ce-125	dry	0	0	1
+validity	ce-125	scope	1	1	1
+validity	ce-125	reference	1	1	1
+validity	ce-125	fit	0	0	1
+validity	ce-125	carbon_mass	0.125	0.125	g
+scalar	qe-125	material,observations,limitations	qe	32.652	mg/g	tabulated
+uncertainty	qe-125	unstated	-	-	-	-
+validity	qe-125	temperature	298.15	298.15	K
+validity	qe-125	ph_lower	10.5	10.5	1
+validity	qe-125	ph_upper	11.0	11.0	1
+validity	qe-125	ph_known	0	0	1
+validity	qe-125	particle	53	53	um
+validity	qe-125	nacn	1000	1000	mg/L
+validity	qe-125	sample	1	1	1
+validity	qe-125	dry	0	0	1
+validity	qe-125	scope	1	1	1
+validity	qe-125	reference	1	1	1
+validity	qe-125	fit	0	0	1
+validity	qe-125	carbon_mass	0.125	0.125	g
+scalar	ce-250	material,observations,limitations	ce	0.244	mg/L	tabulated
+uncertainty	ce-250	unstated	-	-	-	-
+validity	ce-250	temperature	298.15	298.15	K
+validity	ce-250	ph_lower	10.5	10.5	1
+validity	ce-250	ph_upper	11.0	11.0	1
+validity	ce-250	ph_known	0	0	1
+validity	ce-250	particle	53	53	um
+validity	ce-250	nacn	1000	1000	mg/L
+validity	ce-250	sample	1	1	1
+validity	ce-250	dry	0	0	1
+validity	ce-250	scope	1	1	1
+validity	ce-250	reference	1	1	1
+validity	ce-250	fit	0	0	1
+validity	ce-250	carbon_mass	0.250	0.250	g
+scalar	qe-250	material,observations,limitations	qe	19.512	mg/g	tabulated
+uncertainty	qe-250	unstated	-	-	-	-
+validity	qe-250	temperature	298.15	298.15	K
+validity	qe-250	ph_lower	10.5	10.5	1
+validity	qe-250	ph_upper	11.0	11.0	1
+validity	qe-250	ph_known	0	0	1
+validity	qe-250	particle	53	53	um
+validity	qe-250	nacn	1000	1000	mg/L
+validity	qe-250	sample	1	1	1
+validity	qe-250	dry	0	0	1
+validity	qe-250	scope	1	1	1
+validity	qe-250	reference	1	1	1
+validity	qe-250	fit	0	0	1
+validity	qe-250	carbon_mass	0.250	0.250	g
