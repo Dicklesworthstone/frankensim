@@ -430,3 +430,6 @@ fn unloaded_contact_releases_into_original_free_flight() {
 
 #[path = "tests/arrival.rs"]
 mod arrival;
+
+#[path = "tests/transitions.rs"]
+mod transitions;

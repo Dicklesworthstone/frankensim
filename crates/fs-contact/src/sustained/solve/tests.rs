@@ -359,3 +359,127 @@ fn admission_refuses_unbounded_workspace_before_any_mechanical_evaluation() {
     assert!(matches!(error, SolveError::WorkspaceBudget { .. }));
     assert_eq!(calls, 0);
 }
+
+#[test]
+fn strict_normal_feasibility_reevaluates_force_instead_of_clamping_the_gap() {
+    let initial = 20.0_f64.next_down();
+    let mut calls = Vec::new();
+    let report = solve(
+        &[0.0],
+        &[scales()],
+        &[[initial, 0.0, 0.0]],
+        controls(),
+        &mut |forces, _| {
+            calls.push(forces.to_vec());
+            Ok::<_, &'static str>(vec![particle_path(forces[0], 0.0, 0.0)])
+        },
+        &mut || false,
+    )
+    .unwrap();
+    assert!(report.feasibility_refinements > 0);
+    assert!(report.paths_m[0][0] >= 0.0);
+    assert!(report.forces_n[0][0] >= 20.0);
+    assert_eq!(
+        report.paths_m[0],
+        particle_path(report.forces_n[0], 0.0, 0.0)
+    );
+    assert_eq!(calls.last(), Some(&report.forces_n));
+    assert_eq!(report.response_evaluations, calls.len());
+    assert!(report.maximum_residual_n <= controls().force_residual_tolerance_n);
+}
+
+#[test]
+fn feasibility_polishing_keeps_the_original_response_budget_and_source_error() {
+    let initial = [[20.0_f64.next_down(), 0.0, 0.0]];
+    let mut limited = controls();
+    // Initial Newton residual and first final replay consume both calls.
+    limited.maximum_response_evaluations = 2;
+    let mut calls = 0;
+    let failed = solve(
+        &[0.0],
+        &[scales()],
+        &initial,
+        limited,
+        &mut |forces, _| {
+            calls += 1;
+            Ok::<_, &'static str>(vec![particle_path(forces[0], 0.0, 0.0)])
+        },
+        &mut || false,
+    );
+    assert!(matches!(
+        failed,
+        Err(SolveError::ResponseBudget {
+            evaluations: 2,
+            maximum: 2
+        })
+    ));
+    assert_eq!(calls, 2);
+
+    let mut calls = 0;
+    let failed = solve(
+        &[0.0],
+        &[scales()],
+        &initial,
+        controls(),
+        &mut |forces, _| {
+            calls += 1;
+            if calls == 3 {
+                return Err("original force correction refused");
+            }
+            Ok(vec![particle_path(forces[0], 0.0, 0.0)])
+        },
+        &mut || false,
+    );
+    assert!(matches!(
+        failed,
+        Err(SolveError::Response("original force correction refused"))
+    ));
+    assert_eq!(calls, 3);
+}
+
+#[test]
+fn an_unresponsive_penetrating_source_is_never_turned_into_an_admissible_gap() {
+    let mut calls = 0;
+    let failed = solve(
+        &[0.0],
+        &[scales()],
+        &[[1.0, 0.0, 0.0]],
+        controls(),
+        &mut |_, _| {
+            calls += 1;
+            Ok::<_, &'static str>(vec![[-1.0e-15, 0.0, 0.0]])
+        },
+        &mut || false,
+    );
+    assert!(matches!(
+        failed,
+        Err(SolveError::Feasibility {
+            gap_m,
+            refinements: 0,
+            ..
+        }) if gap_m == -1.0e-15
+    ));
+    // An actual force probe demonstrates that this source cannot open.
+    assert_eq!(calls, 3);
+}
+
+#[test]
+fn near_zero_tensile_trial_is_replaced_only_by_a_fresh_zero_force_response() {
+    let mut last = None;
+    let report = solve(
+        &[0.0],
+        &[scales()],
+        &[[-1.0e-12, 0.0, 0.0]],
+        controls(),
+        &mut |forces, _| {
+            last = Some(forces[0]);
+            Ok::<_, &'static str>(vec![[1.0, 0.0, 0.0]])
+        },
+        &mut || false,
+    )
+    .unwrap();
+    assert_eq!(report.forces_n[0], [0.0; 3]);
+    assert_eq!(report.paths_m[0], [1.0, 0.0, 0.0]);
+    assert_eq!(last, Some(report.forces_n[0]));
+    assert_eq!(report.feasibility_refinements, 1);
+}

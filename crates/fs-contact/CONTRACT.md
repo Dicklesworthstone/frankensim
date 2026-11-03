@@ -2186,13 +2186,33 @@ difference crosses the contact projection itself. Initial forces are explicit
 warm starts. Original source errors, cancellation, non-finite responses and
 bounded work/workspace failures refuse without substituting a physical state.
 
-A successful solve always replays the original response at its returned forces
-and independently checks the force residual. The receiving owner must still
-audit actual nonpenetration, contact modes, unresolved velocity reversals,
+A successful solve always replays the original response at its returned forces,
+requires nonnegative actual normal gaps and normal forces, and independently
+checks the unchanged force residual. If numerical Newton convergence leaves a
+candidate on the penetrating side, bounded force-space refinement measures the
+original response's diagonal normal sensitivity and updates one violating
+normal-force coordinate. Every correction reevaluates all contacts through the
+complete coupled response. Natural-map conditioning scales are not substituted
+for mechanical mobility; no state, velocity or returned gap is projected.
+
+Sensitivity probes and corrections spend the original response budget, with a
+hard limit of 64 corrections. A contact-local correction grows only if that
+contact's actual negative gap has not changed. Nonpositive sensitivities,
+unrepresentable corrections, source failures and exhausted budgets refuse.
+The original Newton receipt remains unmodified; the separate
+`feasibility_refinements` count identifies this additional numerical work.
+The final original response must satisfy the same full force-law residual
+bound, so refinement cannot silently weaken Coulomb or complementarity gates.
+
+The receiving owner still audits contact modes, unresolved velocity reversals,
 conjugate contact work, original material loss, and complete energy balance
-before adoption. Numerical convergence alone is not physical admission. This is
-a local nonlinear continuation interface, not a uniqueness or arbitrary
-Painleve-regime theorem, a general impact integrator, or a geometry/CCD owner.
+before adoption. The original cohesive regressions include a mass-coupled
+arrival with simultaneous impulses and an independent cold post-impact support
+solve, retaining strict actual nonpenetration throughout. Cached diagonal
+sensitivities remain a local numerical strategy: adverse coupling or changing
+nonlinear response can refuse. Numerical convergence alone is not physical
+admission, uniqueness, an arbitrary Painleve-regime theorem, a general impact
+integrator, or a geometry/CCD owner.
 
 Focused exact-source tests exercise loaded rest, static/sliding/breakaway
 friction, full off-diagonal inertia, shared contacts, elastic midpoint storage,

@@ -25,6 +25,10 @@ mod tests;
 /// Hard bound keeping contact-space work between cancellation polls small.
 pub const MAX_CONTACTS: usize = 21;
 
+/// Bounded force-space polishing after numerical convergence. Every attempt
+/// still spends the caller's original mechanical-response allowance.
+pub const MAX_FEASIBILITY_REFINEMENTS: usize = 64;
+
 /// Bounded numerical controls; no field changes the physical contact law.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SolveControls {
@@ -78,6 +82,10 @@ pub struct SolveReport {
     pub maximum_residual_n: f64,
     /// Original mechanical response calls actually spent, including replay.
     pub response_evaluations: usize,
+    /// Fresh original-response corrections needed to obtain nonnegative
+    /// normal forces and actual endpoint gaps. The Newton receipt above
+    /// remains the unmodified nonlinear solve before this feasibility polish.
+    pub feasibility_refinements: usize,
 }
 
 /// First source refusal or numerical failure; no Clone bound on source errors.
@@ -148,6 +156,14 @@ pub enum SolveError<E> {
     },
     /// Original solver stopped without numerical convergence.
     NotConverged(NewtonReport),
+    /// Bounded actual-force polishing could not obtain nonnegative geometry.
+    /// No force/position/gap is published by this refusal.
+    Feasibility {
+        contact: usize,
+        gap_m: f64,
+        normal_force_n: f64,
+        refinements: usize,
+    },
     /// Fresh final response failed the caller's force-residual gate.
     Residual {
         /// Recomputed maximum absolute residual in N.
@@ -210,6 +226,15 @@ impl<E: fmt::Display> fmt::Display for SolveError<E> {
                 f,
                 "sustained-force solver did not converge: {:?}",
                 report.diagnosis
+            ),
+            Self::Feasibility {
+                contact,
+                gap_m,
+                normal_force_n,
+                refinements,
+            } => write!(
+                f,
+                "contact {contact} remains infeasible after {refinements} original-response corrections: gap {gap_m} m, normal force {normal_force_n} N"
             ),
             Self::Residual {
                 maximum_residual_n,
@@ -590,6 +615,12 @@ fn admit<E>(
 /// then checked against `force_residual_tolerance_n`. This replay is the last
 /// successful response call: a caller may retain its complete original body
 /// candidates, verify exact force/path identity, and independently audit them.
+/// Negative actual normal gaps or normal forces trigger bounded force-space
+/// corrections, followed by another complete original response. Diagonal
+/// normal sensitivities come from original mechanical force probes; all
+/// contact interactions remain in every subsequent response. No returned path
+/// is clamped. The final fresh response must pass the unchanged residual gate
+/// and be nonpenetrating. All probes spend the same response budget.
 /// Numerical convergence alone does not authorize physical state adoption.
 ///
 /// # Errors
@@ -642,39 +673,127 @@ pub fn solve<E>(
     if !run.report.converged {
         return Err(SolveError::NotConverged(run.report));
     }
-    let paths_m = problem.evaluate_paths(&nonlinear.x);
-    if let Some(error) = problem.take_failure() {
-        return Err(error);
-    }
-    let paths_m = paths_m.expect("successful response retains its paths");
-    let blocks = problem.blocks_at(&nonlinear.x, &paths_m);
-    if let Some(error) = problem.take_failure() {
-        return Err(error);
-    }
-    let maximum_residual_n = blocks
-        .expect("successful law evaluation retains its blocks")
-        .iter()
-        .flat_map(|block| &block.residual_n)
-        .copied()
-        .map(f64::abs)
-        .fold(0.0, f64::max);
-    if maximum_residual_n > controls.force_residual_tolerance_n {
-        return Err(SolveError::Residual {
-            maximum_residual_n,
-            tolerance_n: controls.force_residual_tolerance_n,
-            nonlinear: run.report,
-        });
-    }
+    let mut candidate = nonlinear.x.clone();
+    let mut feasibility_refinements = 0;
+    let mut normal_sensitivity = vec![None; friction_coefficients.len()];
+    let mut previous_negative_gap = vec![None; friction_coefficients.len()];
+    let mut growth = vec![1.0_f64; friction_coefficients.len()];
+    let (paths_m, maximum_residual_n) = loop {
+        // Each candidate, including an adjusted contact force, is evaluated
+        // from the caller's unchanged original mechanical predecessor.
+        let paths_m = problem.evaluate_paths(&candidate);
+        if let Some(error) = problem.take_failure() {
+            return Err(error);
+        }
+        let paths_m = paths_m.expect("successful response retains its paths");
+        let blocks = problem.blocks_at(&candidate, &paths_m);
+        if let Some(error) = problem.take_failure() {
+            return Err(error);
+        }
+        let maximum_residual_n = blocks
+            .expect("successful law evaluation retains its blocks")
+            .iter()
+            .flat_map(|block| &block.residual_n)
+            .copied()
+            .map(f64::abs)
+            .fold(0.0, f64::max);
+        let infeasible = paths_m
+            .iter()
+            .enumerate()
+            .find(|(i, path)| path[0] < 0.0 || candidate[3 * i] < 0.0);
+        // The converged Newton candidate must already satisfy the force gate.
+        // Numerical correction probes can lie outside it, just like Newton's
+        // own stencils. No final feasible candidate escapes the same gate.
+        if (feasibility_refinements == 0 || infeasible.is_none())
+            && maximum_residual_n > controls.force_residual_tolerance_n
+        {
+            return Err(SolveError::Residual {
+                maximum_residual_n,
+                tolerance_n: controls.force_residual_tolerance_n,
+                nonlinear: run.report,
+            });
+        }
+        let Some((index, path)) = infeasible else {
+            break (paths_m, maximum_residual_n);
+        };
+        let normal = candidate[3 * index];
+        if feasibility_refinements >= MAX_FEASIBILITY_REFINEMENTS {
+            return Err(SolveError::Feasibility {
+                contact: index,
+                gap_m: path[0],
+                normal_force_n: normal,
+                refinements: feasibility_refinements,
+            });
+        }
+        if normal < 0.0 {
+            // This is a new force trial, never a modification of an accepted
+            // body or a returned path. The following complete response decides
+            // whether zero normal force is physically admissible.
+            candidate[3 * index] = 0.0;
+            feasibility_refinements += 1;
+            continue;
+        }
+        let sensitivity = if let Some(value) = normal_sensitivity[index] {
+            value
+        } else {
+            // Measure actual normal mobility. Natural-map conditioning scales
+            // are not mechanical stiffnesses and cannot supply this correction.
+            let mut shifted = candidate.clone();
+            shifted[3 * index] = (normal + controls.difference_step_n).max(normal.next_up());
+            let force_delta = shifted[3 * index] - normal;
+            if !force_delta.is_finite() || force_delta <= 0.0 {
+                return Err(SolveError::NonFinite(
+                    "unrepresentable normal-force stencil",
+                ));
+            }
+            let shifted_paths = problem.evaluate_paths(&shifted);
+            if let Some(error) = problem.take_failure() {
+                return Err(error);
+            }
+            let shifted_paths = shifted_paths.expect("successful normal-force stencil");
+            let value = (shifted_paths[index][0] - path[0]) / force_delta;
+            if !value.is_finite() || value <= 0.0 {
+                return Err(SolveError::Feasibility {
+                    contact: index,
+                    gap_m: path[0],
+                    normal_force_n: normal,
+                    refinements: feasibility_refinements,
+                });
+            }
+            normal_sensitivity[index] = Some(value);
+            value
+        };
+        // Update one violating force coordinate, then reevaluate all contacts.
+        // Coupling is retained by the complete original response. Growth is
+        // local and used only when this contact's actual gap has not changed;
+        // it never carries a large factor into a newly violated contact.
+        if previous_negative_gap[index] == Some(path[0]) {
+            growth[index] *= 2.0;
+        } else {
+            growth[index] = 1.0;
+        }
+        previous_negative_gap[index] = Some(path[0]);
+        let correction = growth[index] * (-path[0] / sensitivity);
+        let next = (normal + correction).next_up().max(normal.next_up());
+        if !next.is_finite() || next <= normal {
+            return Err(SolveError::NonFinite(
+                "unrepresentable unilateral force correction",
+            ));
+        }
+        candidate[3 * index] = next;
+        feasibility_refinements += 1;
+    };
     if !problem.poll() {
         return Err(problem
             .take_failure()
             .expect("failed poll retains its cause"));
     }
     Ok(SolveReport {
-        forces_n: force_triples(&nonlinear.x),
+        forces_n: force_triples(&candidate),
         paths_m,
         nonlinear: run.report,
         maximum_residual_n,
         response_evaluations: problem.evaluations.get(),
+        feasibility_refinements,
     })
 }
