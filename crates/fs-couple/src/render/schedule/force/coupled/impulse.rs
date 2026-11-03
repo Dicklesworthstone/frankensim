@@ -11,7 +11,7 @@ use super::{
     poll,
 };
 use fs_exec::CancelGate;
-use fs_math::eft::two_sum;
+use fs_math::dd::Dd;
 
 /// Accepted external work at one instantaneous momentum transfer.
 /// This is separate from the preceding finite-time frame and port window.
@@ -107,12 +107,14 @@ impl CoupledModalSystem {
                     });
                 }
                 worst = worst.max(relative);
-                let mean = f64::midpoint(before, after);
-                kinetic.add(finite(change * mean)?)?;
-                work.add(finite(impulses[index] * mean)?)?;
+                // Keep the half-ULP mean and each product's rounding tail:
+                // opposite large works can leave only the quadratic kick energy.
+                let mean = Dd::from_f64(0.5 * before) + Dd::from_f64(0.5 * after);
+                kinetic.add(Dd::from_f64(change) * mean)?;
+                work.add(Dd::from_f64(impulses[index]) * mean)?;
                 // Subtract before multiplying: large kinetic backgrounds or
                 // cancelling modal works cannot hide a lost momentum input.
-                defect.add(finite(residual * mean)?)?;
+                defect.add(Dd::from_f64(residual) * mean)?;
                 self.impulse_states[index] = crate::modal_acoustic_time::ModalAcousticState {
                     velocity_m_sqrt_kg_per_s: after,
                     ..*old
@@ -197,21 +199,18 @@ impl CoupledModalSystem {
     }
 }
 
-// Signed work may cancel between modes. Retain each rounding remainder in a
-// fixed coordinate order without allocating a second trajectory or workspace.
+// Keep products and signed component reductions in the same extended value;
+// compensation after rounding a midpoint/product cannot recover its lost work.
 #[derive(Default)]
-struct Sum {
-    value: f64,
-    remainder: f64,
-}
+struct Sum(Dd);
 impl Sum {
-    fn add(&mut self, term: f64) -> Result<(), ModalCouplingError> {
-        let (value, remainder) = two_sum(self.value, term);
-        self.value = finite(value)?;
-        self.remainder = finite(self.remainder + remainder)?;
+    fn add(&mut self, term: Dd) -> Result<(), ModalCouplingError> {
+        self.0 = self.0 + term;
+        finite(self.0.hi)?;
+        finite(self.0.lo)?;
         Ok(())
     }
     fn value(self) -> Result<f64, ModalCouplingError> {
-        finite(self.value + self.remainder)
+        finite(self.0.to_f64())
     }
 }

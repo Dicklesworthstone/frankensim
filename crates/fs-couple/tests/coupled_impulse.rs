@@ -84,6 +84,143 @@ fn close(actual: f64, expected: f64) {
     );
 }
 
+fn counterwork_model(large_velocity: f64) -> ModalAcousticTimeModel {
+    let mut model = ModalAcousticTimeModel::try_new_with_free_coordinates(
+        2000,
+        vec![
+            ModalAcousticMode {
+                angular_frequency_rad_s: 0.0,
+                damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::ZERO,
+            };
+            3
+        ],
+        ModalAcousticTimeBudget {
+            maximum_abs_displacement_m_sqrt_kg: 1e20,
+            maximum_abs_velocity_m_sqrt_kg_per_s: 1e20,
+            maximum_total_energy_j: 1e40,
+            ..ModalAcousticTimeBudget::audible_reference()
+        },
+    )
+    .unwrap();
+    model
+        .restore_states(
+            &[large_velocity, 0.0, large_velocity].map(|velocity_m_sqrt_kg_per_s| {
+                ModalAcousticState {
+                    displacement_m_sqrt_kg: 0.0,
+                    velocity_m_sqrt_kg_per_s,
+                }
+            }),
+        )
+        .unwrap();
+    model
+}
+
+#[test]
+fn coupled_work_preserves_quadratic_energy_before_midpoint_and_product_rounding() {
+    let gate = CancelGate::new_clock_free();
+    // First case: the first endpoint mean falls halfway between f64 values.
+    // Second case: both large means are exact, but multiplying either by six
+    // rounds away two joules. Compensating only the final sum fixes neither.
+    for (large, kick, expected_work) in [
+        ((1u64 << 55) as f64, 8.0, 64.5),
+        ((1u64 << 52) as f64, 6.0, 36.5),
+    ] {
+        for use_prepared in [false, true] {
+            let mut cfg = config();
+            cfg.maximum_total_energy_j = 1e40;
+            let models = vec![counterwork_model(large)];
+            let mut system = if use_prepared {
+                CoupledModalSystem::new_prepared(models, vec![], cfg, prepared(), &gate)
+            } else {
+                CoupledModalSystem::new(models, vec![], cfg, &gate)
+            }
+            .unwrap();
+            let before = states(&system);
+            let impulse = [kick, 1.0, -kick];
+            let receipt = system.apply_modal_impulse(&impulse, &gate).unwrap();
+            // Unit modal masses: v dot J cancels, leaving |J|²/2 exactly.
+            assert_eq!(receipt.kinetic_energy_change_j, expected_work);
+            assert_eq!(receipt.external_work_j, expected_work);
+            assert_eq!(receipt.work_residual_j, 0.0);
+            assert_eq!(receipt.maximum_relative_momentum_residual, 0.0);
+            for ((after, old), input) in states(&system).iter().zip(&before).zip(impulse) {
+                assert_eq!(after.displacement_m_sqrt_kg, old.displacement_m_sqrt_kg);
+                assert_eq!(
+                    after.velocity_m_sqrt_kg_per_s - old.velocity_m_sqrt_kg_per_s,
+                    input
+                );
+            }
+            // Reversing the actual transfer extracts the same energy rather
+            // than manufacturing another positive quadratic-energy deposit.
+            let reverse = system
+                .apply_modal_impulse(&impulse.map(|j| -j), &gate)
+                .unwrap();
+            assert_eq!(reverse.kinetic_energy_change_j, -expected_work);
+            assert_eq!(reverse.external_work_j, -expected_work);
+            assert_eq!(reverse.work_residual_j, 0.0);
+            assert_eq!(states(&system), before);
+            assert_eq!(system.samples_rendered(), 0);
+            assert!(system.last_frame().is_none());
+        }
+    }
+}
+
+#[test]
+fn independent_scheduled_work_preserves_midpoint_and_product_tails() {
+    for (large, kick, expected_work) in [
+        ((1u64 << 55) as f64, 8.0, 64.5),
+        ((1u64 << 52) as f64, 6.0, 36.5),
+    ] {
+        let voice = RenderVoice::ModalString(
+            ModalStringVoice::new(counterwork_model(large), vec![0.0; 3]).unwrap(),
+        );
+        let events = [1.0, -1.0]
+            .into_iter()
+            .enumerate()
+            .flat_map(|(sample, sign)| {
+                [kick, 1.0, -kick]
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(mode, input)| ModalImpulse {
+                        sample: sample as u64,
+                        voice: 0,
+                        mode,
+                        impulse_n_s_per_sqrt_kg: sign * input,
+                    })
+            })
+            .collect();
+        let mut render = ScheduledRenderer::new(RenderContext::new(vec![voice], 2), vec![], 0)
+            .unwrap()
+            .with_modal_impulses(
+                events,
+                ImpulseBudget {
+                    max_events: 6,
+                    max_staged_modes: 6,
+                },
+            )
+            .unwrap();
+        render.block(&mut [0.0; 2]).unwrap();
+        assert_eq!(
+            render
+                .receipts()
+                .iter()
+                .map(|receipt| receipt.kinetic_energy_change_j)
+                .collect::<Vec<_>>(),
+            [expected_work, -expected_work]
+        );
+        assert_eq!(
+            render
+                .modal_states(0)
+                .unwrap()
+                .iter()
+                .map(|state| state.velocity_m_sqrt_kg_per_s)
+                .collect::<Vec<_>>(),
+            [large, 0.0, large]
+        );
+    }
+}
+
 #[test]
 fn reciprocal_physical_impulse_matches_two_mass_solution_at_two_sample_rates() {
     let gate = CancelGate::new_clock_free();

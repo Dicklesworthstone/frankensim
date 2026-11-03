@@ -285,9 +285,10 @@ impl ImpulseRenderer {
                             return Err(control("modal impulse is below representable velocity resolution"));
                         }
                         candidate.velocity_m_sqrt_kg_per_s = after;
-                        // Opposite modal works must not swallow a smaller
-                        // retained contribution between them in basis order.
-                        work = work + Dd::from_f64((after - before) * f64::midpoint(before, after));
+                        // Retain the endpoint mean and product tails before
+                        // opposite modal works cancel across the complete event.
+                        let mean = Dd::from_f64(0.5 * before) + Dd::from_f64(0.5 * after);
+                        work = work + Dd::from_f64(after - before) * mean;
                     }
                     event.work_j = work.to_f64();
                     if !event.work_j.is_finite() || !work.lo.is_finite() {
