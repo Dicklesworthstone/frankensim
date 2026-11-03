@@ -3561,3 +3561,37 @@ Default-feature compilation and all six existing heat tests also passed.
 These are native fallback builds against compatible cached dependencies;
 DSR and required sibling checkouts were unavailable. They do not establish
 a full workspace verdict or measured-material validation.
+
+### Finite support inertia in the original network wall transaction
+
+`NetworkWallOperator::with_finite_supports` binds optional independent
+`SlidingSupport` masses/velocities in the original branch/cell order. Selected
+supports replace prescribed wall motion, retain authored or source-refreshed
+resistance, and use the original exact reduced-mass recoil mechanics. All slip
+loss thermalizes once in gas sensible energy. The existing local,
+material-caloric, shared-thermal and conduction owner then advances heat with
+drag disabled; no thermal inventory is copied or reconstructed. Both material
+transport endpoint checks use actual support-relative slip, and the accepted
+contact retains the returned support velocity.
+
+Support candidates follow the same begin-trial, source-half, retry and publish
+lifecycle as gas and walls. Workspaces allocate at attachment; stepping adds no
+allocations or clock. Read-only support states and per-cell `SupportExchange`
+receipts retain actual complete support endpoint impulse/kinetic change and
+accumulated friction-only gas impulse/energy. Independent dimensional momentum
+and energy budgets reject before publication.
+`NetworkWallReport.mechanical_work_to_gas_j` includes finite-support work as
+internal exchange with that support; the support receipt closes this additional
+kinetic storage. Branch axes are not summed.
+
+Each selected cell has its own mechanical support; identical descriptors do not
+share inertia. Shared thermal storage remains separate. The feature does not
+move geometry, evolve plenum bulk momentum, infer friction coefficients or
+supply multi-cell rigid support dynamics. The all-to-gas slip heat partition is
+explicit; other heat partitions require a jointly coupled thermal owner.
+Five selected-source native tests cover independent analytic recoil/heat
+balance, both halves and endpoint accounting, cancellation/retry,
+material-relative domain checks/Galilean boosts, and unselected identity and
+admission. Two additional full network/shared-thermal source tests were authored
+and parsed but not executed in the delivery environment; no full Cargo,
+material or advection pass is claimed.

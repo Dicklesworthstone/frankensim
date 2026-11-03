@@ -24,6 +24,9 @@ use fs_qty::Time;
 
 mod caloric;
 
+mod recoil;
+pub use recoil::SupportExchange;
+
 mod shared;
 use shared::SharedWalls;
 pub use shared::{
@@ -47,8 +50,10 @@ pub use conduction::{MaterialWallConduction, PhaseWallConductionSource, WallCond
 /// Heat is positive into gas. Stationary-wall drag retains total gas energy:
 /// `drag_heating_j` is kinetic energy converted to sensible energy, not an
 /// additional heat input. Prescribed sliding walls exchange mechanical work
-/// with the gas. Gas plus finite-wall energy changes equal external reservoir
-/// heat plus that drive work, up to the separately retained numerical residual.
+/// with the gas. Finite sliding supports instead exchange their own kinetic
+/// energy; their separate accepted receipts close that internal work account.
+/// Gas plus finite-wall thermal energy changes equal reservoir heat plus wall
+/// mechanical work, up to the separately retained numerical residual.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NetworkWallReport {
     /// Total duration covered by the wall operator [s].
@@ -60,12 +65,13 @@ pub struct NetworkWallReport {
     pub wall_energy_change_j: f64,
     /// Heat into gas from prescribed-temperature reservoirs only [J].
     pub external_heat_to_gas_j: f64,
-    /// Mechanical work entering gas from prescribed sliding-wall drives [J].
-    /// The drives receive the opposite work; this is separate from heat.
+    /// Mechanical work entering gas from prescribed drives or finite supports [J].
+    /// The wall receives opposite work. For finite supports this is internal;
+    /// their accepted `SupportExchange` reports the actual kinetic change.
     pub mechanical_work_to_gas_j: f64,
     /// Relative-slip kinetic energy thermalized by wall drag [J].
     pub drag_heating_j: f64,
-    /// Gas-plus-wall energy changes minus reservoir heat and drive work [J].
+    /// Gas-plus-thermal-wall energy changes minus reservoir heat and wall work [J].
     pub energy_residual_j: f64,
     /// Largest absolute original implicit thermal-equation residual [J].
     pub maximum_thermal_residual_j: f64,
@@ -116,6 +122,7 @@ pub struct NetworkWallOperator<'law> {
     transport: Option<CircularWallTransport>,
     caloric: Vec<Option<MaterialWallCaloric<'law>>>,
     shared: Option<SharedWalls<'law>>,
+    supports: Option<recoil::FiniteSupports>,
     #[cfg(feature = "material")]
     conduction: Option<Vec<Option<BoundWallConduction>>>,
 }
@@ -212,6 +219,7 @@ impl<'law> NetworkWallOperator<'law> {
             transport: None,
             caloric: allocated(count, None)?,
             shared: None,
+            supports: None,
             #[cfg(feature = "material")]
             conduction: None,
         };
@@ -294,6 +302,9 @@ impl<'law> NetworkWallOperator<'law> {
         if let Some(shared) = &mut self.shared {
             shared.begin_trial(cancelled)?;
         }
+        if let Some(supports) = &mut self.supports {
+            supports.begin_trial(cancelled)?;
+        }
         poll(cancelled)?;
         self.trial_active = true;
         Ok(())
@@ -369,6 +380,10 @@ impl<'law> NetworkWallOperator<'law> {
                     energy: values[n + 1],
                 };
                 let contact = self.candidate_contacts[index];
+                let contact = match &self.supports {
+                    Some(supports) => supports.contact(index, contact),
+                    None => contact,
+                };
                 #[cfg(feature = "material")]
                 let contact = self.film_contact(index, contact);
                 let contact = match self.transport.as_mut() {
@@ -382,15 +397,45 @@ impl<'law> NetworkWallOperator<'law> {
                     )?,
                     None => contact,
                 };
+                let motion = match &mut self.supports {
+                    Some(supports) => supports.prepare(
+                        index,
+                        &self.gas,
+                        state,
+                        shape.mesh.volumes()[i],
+                        duration,
+                        contact.drag,
+                        controls,
+                        cancelled,
+                    )?,
+                    None => None,
+                };
+                let thermal_state = motion.map_or(state, |motion| Cell {
+                    momentum: motion.gas.momentum,
+                    energy: motion.gas.energy,
+                    ..state
+                });
+                let thermal_contact = if motion.is_some() {
+                    WallContact {
+                        drag: WallDrag::None,
+                        ..contact
+                    }
+                } else {
+                    contact
+                };
                 let update = self.exchange_for(
                     index,
-                    state,
+                    thermal_state,
                     shape.mesh.volumes()[i],
                     duration,
-                    contact,
+                    thermal_contact,
                     controls,
                     &mut *cancelled,
                 )?;
+                let update = match motion {
+                    Some(motion) => recoil::finish(update, motion, contact.drag, controls)?,
+                    None => update,
+                };
                 if let Some(transport) = self.transport.as_mut() {
                     // A frozen-coefficient source step must also leave an
                     // endpoint supported by the original material/domain.
@@ -559,6 +604,9 @@ impl<'law> NetworkWallOperator<'law> {
             self.last_report = Some(report);
             if let Some(shared) = &mut self.shared {
                 shared.commit();
+            }
+            if let Some(supports) = &mut self.supports {
+                supports.commit();
             }
         }
         self.trial_active = false;
