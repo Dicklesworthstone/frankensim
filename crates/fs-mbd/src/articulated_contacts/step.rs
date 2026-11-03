@@ -5,6 +5,8 @@
 //! every base and joint. Geometry must admit the complete candidate path; the
 //! independent endpoint gap checks are not continuous collision detection.
 
+pub mod mixed;
+
 use super::friction::{
     ArticulatedFrictionalContact, ArticulatedFrictionalContactResult,
     resolve_articulated_frictional_contacts,
@@ -453,15 +455,29 @@ pub fn step_articulated_frictional_contacts<P, E>(
                     * (Dd::from_f64(states_after[system_index].joint_position[dof])
                         - Dd::from_f64(system.state.joint_position[dof]));
         }
+        if system.loads.gravity_world == Vec3::default() {
+            continue;
+        }
+        poll(&mut cancelled)?;
+        let first_shape = relative_kinematics(system.model, &system.state.joint_position)
+            .map_err(|error| dynamics(system_index, error))?;
+        poll(&mut cancelled)?;
+        let last_shape =
+            relative_kinematics(system.model, &states_after[system_index].joint_position)
+                .map_err(|error| dynamics(system_index, error))?;
         for (link_index, link) in system.model.links().iter().enumerate() {
             if link_index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
             let local_com = link.inertia().center_of_mass();
-            let first_pose = before[system_index].world_from_link[link_index];
-            let last_pose = after[system_index].world_from_link[link_index];
-            let displacement = com_displacement(first_pose, last_pose, local_com)
-                .map_err(|error| dynamics(system_index, error.into()))?;
+            let displacement = com_displacement(
+                system.state.base.world_from_base,
+                states_after[system_index].base.world_from_base,
+                first_shape.world_from_link[link_index],
+                last_shape.world_from_link[link_index],
+                local_com,
+            )
+            .map_err(|error| dynamics(system_index, error.into()))?;
             let force = system.loads.gravity_world.scale(link.inertia().mass());
             let force = [force.x, force.y, force.z].map(Dd::from_f64);
             for (dx, force) in displacement.into_iter().zip(force) {
@@ -721,15 +737,38 @@ fn impulse_pairing(impulse: Wrench, before: Twist, after: Twist) -> Dd {
             sum + Dd::from_f64(source) * (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new))
         })
 }
-// Keep local COM rotation separate from absolute link translation. Combining
-// them first can erase real displacement beside a large coordinate offset.
-fn com_displacement(first: Se3, last: Se3, local_com: Vec3) -> Result<[Dd; 3], fs_ga::GaError> {
+// Original shape FK about its own base retains joint arms even when adding
+// them to a distant world translation would erase a real joint displacement.
+fn relative_kinematics(
+    model: &ArticulatedModel,
+    joints: &[f64],
+) -> Result<Kinematics, ArticulatedError> {
+    let zero = vec![0.0; model.dof_count()];
+    forward_kinematics(model, BaseState::stationary(Se3::identity()), joints, &zero)
+}
+
+// Keep base translation, relative link origin and local COM rotation separate.
+// Combining them before subtraction loses physical displacement at large offsets.
+fn com_displacement(
+    first: Se3,
+    last: Se3,
+    first_shape: Se3,
+    last_shape: Se3,
+    local_com: Vec3,
+) -> Result<[Dd; 3], fs_ga::GaError> {
     let mut displacement = [Dd::ZERO; 3];
     for (first, last) in [
         (first.translation(), last.translation()),
         (
-            first.rotation().rotate(local_com)?,
-            last.rotation().rotate(local_com)?,
+            first.rotation().rotate(first_shape.translation())?,
+            last.rotation().rotate(last_shape.translation())?,
+        ),
+        (
+            first
+                .rotation()
+                .rotate(first_shape.rotation().rotate(local_com)?)?,
+            last.rotation()
+                .rotate(last_shape.rotation().rotate(local_com)?)?,
         ),
     ] {
         for ((sum, old), new) in displacement
