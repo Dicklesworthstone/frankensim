@@ -37,6 +37,9 @@ pub mod supported;
 /// Simultaneous normal impacts on the original complete-coordinate trajectory.
 pub mod impact;
 
+/// Simultaneous Coulomb impacts through the same original mass and trajectory.
+pub mod frictional_impact;
+
 mod impulse;
 pub use impulse::{LinearSolidImpulseError, LinearSolidImpulseReport};
 

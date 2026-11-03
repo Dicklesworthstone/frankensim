@@ -5485,3 +5485,45 @@ common velocity boost, redundant/locked contact sets, cancellation/resource
 refusal, and a late full-system work refusal with unchanged accepted state.
 Geometry/event discovery, friction, sustained-contact integration and conversion
 of contact loss to physical heat remain outside this instantaneous normal law.
+
+
+### Simultaneous Coulomb impacts on complete solid trajectories
+
+`ExactLinearSolid::apply_frictional_impacts` and
+`CompleteSpectralSolid::apply_frictional_impacts` admit up to 21 declared
+normal-first orthonormal contact frames through the existing simultaneous
+Signorini–Coulomb owner. Each frame supplies three original-coordinate
+covectors, a stable identity, an opposing-surface velocity, friction
+coefficient and explicit normal endpoint law. Geometry owns the frame,
+shape functions, event time and contact-set completeness.
+
+The prepared inverse or complete spectral basis supplies every entry of
+the full 3N-by-3N Delassus matrix. Normal/shear and intercontact coupling
+remain in one original non-associated Coulomb solve. No sequential
+normal/friction clipping, physical compliance, modal truncation, new
+factorization or prepared-operator clone is introduced.
+
+An original native impulse trial precedes publication. Actual represented
+velocity independently checks predicted kinematics, normal complementarity,
+the Coulomb cone, final-slip traction and tangential duality using the
+original contact tolerances. Original-mass momentum and native work gates
+remain active. Opposing-surface work, relative midpoint work and applied
+work close independently with compensated arithmetic. Total impact loss
+is not added again to native viscosity or assigned a heat destination.
+
+Stable contact IDs determine transpose and work accumulation order.
+Explicit adapter workspace and response-product limits accompany the
+contact solver's separately bounded iterations and capacity. Cancellation
+or any failed law, momentum, velocity or work gate preserves physical and
+modal state, positions, clock, preparation and cumulative accounts.
+
+The native determinacy and total-work witnesses remain authoritative:
+redundant impulses are checked representatives, not unique individual
+loads or local source/heat allocations. Geometry/event discovery,
+sustained contact and physical heat partition remain separate owners.
+
+Focused G1/G3/G4 regression definitions cover coupled sticking/sliding and
+analytic all-mode continuation, independent P1 consistent-mass world
+linear/angular impulse, redundant contacts under boosts and tangent-frame
+rotation, and late native-readback refusal with unchanged-state retry.
+Native compilation and test execution remain outstanding.
