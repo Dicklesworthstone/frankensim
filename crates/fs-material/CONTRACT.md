@@ -1,5 +1,38 @@
 # fs-material — CONTRACT
 
+## Explicit Landau two-fluid material response
+
+`superfluid::TwoFluidState` admits immutable, explicitly supplied SI density,
+temperature, superfluid fraction, specific entropy, Cp, adiabatic sound speed,
+signed thermal expansion and normal viscosity. Normal and superfluid fractions
+must both be positive. Entropy/Cp use the total mass basis. Thermodynamic
+compressibility and Cv follow the same inputs; the two finite-expansion Landau
+sound roots use a scaled discriminant and a product-derived small root.
+`SoundModes` reports fast/slow speeds without assuming mode polarization.
+
+Component velocities retain separate mass and entropy currents. Heat current
+is relative to the barycentric frame, `rho_s*s*T*(v_n-v_s)`, with no advected
+enthalpy or pressure-work duplication. Kinetic storage splits into barycentric
+and relative motion; the relative inertia is `rho_n*rho_s/rho`.
+Thermomechanical acceleration follows `dmu=dp/rho-s*dT` and its reciprocal
+normal momentum equation. Normal momentum diffusivity uses `mu_n/rho_n`.
+
+Explicit linear drag and isotropic Gorter-Mellink drag have exact homogeneous
+frozen-state updates, opposite impulses and one nonnegative dissipated-energy
+density. That heat is returned for a thermal owner to accept once; this update
+does not evolve temperature or silently discard/re-add kinetic energy.
+Deterministic `fs_math::det::expm1` resolves weak linear drag without cancellation.
+
+The full state implements neither ordinary Newtonian transport nor scalar
+acoustics. `first_sound_projection` explicitly retains the original state and
+implements `FluidAcoustics` only for zero-expansion, in-phase density waves.
+This approximation excludes the entropy mode and classical thermoviscous walls.
+No phase diagram, zero-temperature endpoint, vortex topology/nucleation,
+critical velocity, turbulent onset, nonlinear spatial evolution, or generic
+helium property fit is inferred. Focused G0/G1/G3 tests cover thermodynamic
+identities, both modes, fountain balance, currents, Galilean boosts, opposite
+friction impulses, analytic decay, semigroup/heat closure and admission limits.
+
 ## Continuous gold leaching with oxygen uptake and stripping
 
 `cyanide_leach::flow::aeration::AeratedCyanidationCstr` attaches the original
