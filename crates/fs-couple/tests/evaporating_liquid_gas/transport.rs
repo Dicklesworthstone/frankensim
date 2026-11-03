@@ -1,4 +1,7 @@
 //! Actual finite-gas plumbing changes native phase transfer and thermal state.
+#[path = "transport/reactive.rs"]
+mod reactive;
+
 use super::*;
 use crate::conduction::{film, joint_controls, thermal_controls, with_wall};
 use fs_couple::liquid_gas::evaporation::{

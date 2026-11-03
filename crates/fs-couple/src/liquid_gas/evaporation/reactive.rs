@@ -178,7 +178,7 @@ impl<'s, 'm, 'catalog, 'b> ReactiveConductingLiquidGasCandidate<'s, 'm, 'catalog
 // Only the existing original reports implement this accounting seam. In
 // particular, chemical production of the volatile species is not mistaken for
 // a phase mass defect: the phase report begins at the reacted inventory.
-trait PhaseAccount {
+pub(super) trait PhaseAccount {
     fn duration_s(&self) -> f64;
     fn mass_residual_kg(&self) -> f64;
     fn absolute_mass_defect_kg(&self) -> f64;
@@ -239,6 +239,24 @@ impl PhaseAccount for ConductingLiquidGasReport {
     }
     fn absolute_mass_defect_kg(&self) -> f64 {
         self.phase.absolute_mass_defect_kg
+    }
+    fn energy_residual_j(&self) -> f64 {
+        self.energy_residual_j
+    }
+    fn absolute_energy_defect_j(&self) -> f64 {
+        self.absolute_energy_defect_j
+    }
+}
+
+impl<R> PhaseAccount for ReactiveLiquidPhaseReport<R> {
+    fn duration_s(&self) -> f64 {
+        self.duration_s
+    }
+    fn mass_residual_kg(&self) -> f64 {
+        self.mass_residual_kg
+    }
+    fn absolute_mass_defect_kg(&self) -> f64 {
+        self.absolute_mass_defect_kg
     }
     fn energy_residual_j(&self) -> f64 {
         self.energy_residual_j

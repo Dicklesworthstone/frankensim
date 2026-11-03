@@ -6,7 +6,11 @@ use super::{
         ConductingLiquidGasReport, advance_liquid_surfaces_with_gas_and_radiative_conduction,
     },
     multiple::DistributedLiquidGasSolve,
+    reactive::{
+        PhaseAccount, ReactiveLiquidPhaseError, ReactiveLiquidPhaseReport, ReactiveLiquidPhaseSolve,
+    },
 };
+use crate::cavity_phs::piston::reactive::GasReaction;
 use fs_exec::CancelGate;
 use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceCellHeat, MaterialFreeSurfaceEnthalpy3,
@@ -35,6 +39,7 @@ use std::collections::BTreeMap;
 pub enum TransportingLiquidGasError {
     Transport(GasTransportError),
     Coupled(EvaporatingLiquidGasError),
+    Reactive(ReactiveLiquidPhaseError),
     Invalid(&'static str),
     MassBalance {
         absolute_defect_kg: f64,
@@ -69,15 +74,24 @@ impl From<EvaporatingLiquidGasError> for TransportingLiquidGasError {
     }
 }
 
+impl From<ReactiveLiquidPhaseError> for TransportingLiquidGasError {
+    fn from(value: ReactiveLiquidPhaseError) -> Self {
+        match value {
+            ReactiveLiquidPhaseError::Cancelled => Self::Cancelled,
+            value => Self::Reactive(value),
+        }
+    }
+}
+
 /// Both original stage reports and the complete source-relative budget.
 /// Transport entropy is local to its closed gas stage; it is not a claim about
 /// the subsequent open gas/liquid thermal subsystem.
 #[derive(Clone, Debug)]
-pub struct TransportingLiquidGasReport {
+pub struct TransportingLiquidGasReport<R = ConductingLiquidGasReport> {
     pub duration_s: f64,
     pub atmosphere_id: u64,
     pub transport: GasTransportStep,
-    pub coupled: ConductingLiquidGasReport,
+    pub coupled: R,
     pub mass_residual_kg: f64,
     pub absolute_mass_defect_kg: f64,
     pub energy_residual_j: f64,
@@ -85,14 +99,14 @@ pub struct TransportingLiquidGasReport {
 }
 
 /// Every finite gas node, native liquid and finite wall publishes together.
-pub struct TransportingLiquidGasCandidate<'s, 'm, 'catalog, 'b> {
+pub struct TransportingLiquidGasCandidate<'s, 'm, 'catalog, 'b, R = ConductingLiquidGasReport> {
     liquid: MaterialFreeSurfaceEnthalpy3<'s, 'm>,
     parcels: BTreeMap<u64, ClosedGasParcel>,
     catalog: &'catalog ThermochemicalGasModel,
     bodies: Vec<FreeSurfaceThermalBody<'b>>,
-    report: TransportingLiquidGasReport,
+    report: TransportingLiquidGasReport<R>,
 }
-impl<'s, 'm, 'catalog, 'b> TransportingLiquidGasCandidate<'s, 'm, 'catalog, 'b> {
+impl<'s, 'm, 'catalog, 'b, R> TransportingLiquidGasCandidate<'s, 'm, 'catalog, 'b, R> {
     pub fn liquid(&self) -> &MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         &self.liquid
     }
@@ -108,7 +122,7 @@ impl<'s, 'm, 'catalog, 'b> TransportingLiquidGasCandidate<'s, 'm, 'catalog, 'b> 
     pub fn bodies(&self) -> &[FreeSurfaceThermalBody<'b>] {
         &self.bodies
     }
-    pub const fn report(&self) -> &TransportingLiquidGasReport {
+    pub const fn report(&self) -> &TransportingLiquidGasReport<R> {
         &self.report
     }
     pub fn into_parts(
@@ -118,7 +132,7 @@ impl<'s, 'm, 'catalog, 'b> TransportingLiquidGasCandidate<'s, 'm, 'catalog, 'b> 
         BTreeMap<u64, ClosedGasParcel>,
         &'catalog ThermochemicalGasModel,
         Vec<FreeSurfaceThermalBody<'b>>,
-        TransportingLiquidGasReport,
+        TransportingLiquidGasReport<R>,
     ) {
         (
             self.liquid,
@@ -188,6 +202,162 @@ pub fn advance_liquid_surfaces_with_gas_transport<'s, 'm, 'catalog, 'b>(
     with_viscous_heating: bool,
     gate: &CancelGate,
 ) -> Result<TransportingLiquidGasCandidate<'s, 'm, 'catalog, 'b>, Error> {
+    transporting_candidate(
+        liquid,
+        parcels,
+        atmosphere_id,
+        paths,
+        endpoints,
+        transport_controls,
+        phase_controls.mass_tolerance_kg,
+        phase_controls.energy_tolerance_j,
+        gate,
+        |transported, gas_controls| {
+            advance_liquid_surfaces_with_gas_and_radiative_conduction(
+                liquid,
+                transported,
+                catalog,
+                surfaces,
+                bodies,
+                faces,
+                heat,
+                contacts,
+                interfaces,
+                exposed,
+                radiation,
+                phase_controls,
+                thermal_controls,
+                gas_controls,
+                maximum_density_excursion,
+                with_viscous_heating,
+                gate,
+            )
+            .map(|candidate| candidate.into_parts())
+            .map_err(Error::from)
+        },
+    )
+}
+
+impl GasReaction {
+    /// Transport the original complete gas network, then react its nominated
+    /// atmosphere and run native phase, radiation, conduction and flow once.
+    ///
+    /// The exact transported parcel enters the original reactive phase owner.
+    /// Chemical species production belongs to its stoichiometric report; it is
+    /// not a violation of the transport or phase-only constituent balances.
+    /// Formation energy, transported partial enthalpy and phase latent heat are
+    /// never applied again as external heat. All finite gas nodes, walls and
+    /// native liquid publish together only after the ACTUAL final gas map passes
+    /// the original transport endpoint driving-force checks.
+    ///
+    /// Transport endpoint controls and reactive caloric controls remain distinct
+    /// explicit stage inputs. The reaction temperature-departure limit starts at
+    /// the transported atmosphere. Its mass/energy tolerances also bound the
+    /// complete interval after adding the original absolute transport defects.
+    ///
+    /// This is a first-order transport/chemistry/phase/conduction split over one
+    /// native timestep, not a simultaneous reaction-transport solve. Incoming
+    /// species can react in the subsequent chemical stage; newly received mass
+    /// cannot fund another path inside the preceding transport snapshot.
+    /// Fixed volumes, stationary geometry and all original source/pressure/
+    /// caloric/history refusals remain. No compression work, jet momentum or
+    /// combined mechanical-energy/entropy theorem is supplied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transporting_evaporating_liquid_candidate<'s, 'm, 'catalog, 'b>(
+        &'catalog self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        atmosphere_id: u64,
+        paths: GasTransportPaths<'_>,
+        endpoints: &BTreeMap<u64, GasEnergySolve>,
+        surfaces: &[LiquidGasEvaporationSurface<'_>],
+        bodies: &[FreeSurfaceThermalBody<'b>],
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        exposed: &[FreeSurfaceGasFace],
+        radiation: &[FreeSurfaceRadiationFace],
+        transport_controls: GasTransportSolve,
+        phase_controls: DistributedLiquidGasSolve,
+        thermal_controls: FreeSurfaceConductionControls,
+        maximum_density_excursion: Option<f64>,
+        with_viscous_heating: bool,
+        controls: ReactiveLiquidPhaseSolve,
+        gate: &CancelGate,
+    ) -> Result<
+        TransportingLiquidGasCandidate<
+            's,
+            'm,
+            'catalog,
+            'b,
+            ReactiveLiquidPhaseReport<ConductingLiquidGasReport>,
+        >,
+        Error,
+    > {
+        transporting_candidate(
+            liquid,
+            parcels,
+            atmosphere_id,
+            paths,
+            endpoints,
+            transport_controls,
+            controls.mass_tolerance_kg,
+            controls.energy_tolerance_j,
+            gate,
+            |transported, _transport_endpoint_controls| {
+                self.radiative_conducting_evaporating_liquid_candidate(
+                    liquid,
+                    transported,
+                    surfaces,
+                    bodies,
+                    faces,
+                    heat,
+                    contacts,
+                    interfaces,
+                    exposed,
+                    radiation,
+                    phase_controls,
+                    thermal_controls,
+                    maximum_density_excursion,
+                    with_viscous_heating,
+                    controls,
+                    gate,
+                )
+                .map(|candidate| candidate.into_parts())
+                .map_err(Error::from)
+            },
+        )
+    }
+}
+
+/// Both original entry points share the same network transaction and aggregate
+/// source-relative account. Only original owner reports implement PhaseAccount.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn transporting_candidate<'s, 'm, 'catalog, 'b, R: PhaseAccount>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    atmosphere_id: u64,
+    paths: GasTransportPaths<'_>,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    transport_controls: GasTransportSolve,
+    mass_tolerance_kg: f64,
+    energy_tolerance_j: f64,
+    gate: &CancelGate,
+    coupling: impl FnOnce(
+        &ClosedGasParcel,
+        GasEnergySolve,
+    ) -> Result<
+        (
+            MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+            ClosedGasParcel,
+            &'catalog ThermochemicalGasModel,
+            Vec<FreeSurfaceThermalBody<'b>>,
+            R,
+        ),
+        Error,
+    >,
+) -> Result<TransportingLiquidGasCandidate<'s, 'm, 'catalog, 'b, R>, Error> {
     poll(gate)?;
     if !parcels.contains_key(&atmosphere_id) {
         return Err(Error::Invalid(
@@ -197,12 +367,9 @@ pub fn advance_liquid_surfaces_with_gas_transport<'s, 'm, 'catalog, 'b>(
     let gas_controls = *endpoints.get(&atmosphere_id).ok_or(Error::Invalid(
         "native atmosphere requires its original gas endpoint controls",
     ))?;
-    if [
-        phase_controls.mass_tolerance_kg,
-        phase_controls.energy_tolerance_j,
-    ]
-    .into_iter()
-    .any(|value| !value.is_finite() || value < 0.0)
+    if [mass_tolerance_kg, energy_tolerance_j]
+        .into_iter()
+        .any(|value| !value.is_finite() || value < 0.0)
     {
         return Err(Error::Invalid(
             "complete gas/liquid mass and energy allowances must be finite and nonnegative",
@@ -221,27 +388,9 @@ pub fn advance_liquid_surfaces_with_gas_transport<'s, 'm, 'catalog, 'b>(
     let transported = next_parcels.get(&atmosphere_id).ok_or(Error::Invalid(
         "original gas transport lost the native atmosphere node",
     ))?;
-    let candidate = advance_liquid_surfaces_with_gas_and_radiative_conduction(
-        liquid,
-        transported,
-        catalog,
-        surfaces,
-        bodies,
-        faces,
-        heat,
-        contacts,
-        interfaces,
-        exposed,
-        radiation,
-        phase_controls,
-        thermal_controls,
-        gas_controls,
-        maximum_density_excursion,
-        with_viscous_heating,
-        gate,
-    )?;
-    let (next_liquid, next_gas, catalog, next_bodies, coupled) = candidate.into_parts();
-    if coupled.phase.duration_s.to_bits() != duration_s.to_bits()
+    let (next_liquid, next_gas, catalog, next_bodies, coupled) =
+        coupling(transported, gas_controls)?;
+    if coupled.duration_s().to_bits() != duration_s.to_bits()
         || transport.duration_s.to_bits() != duration_s.to_bits()
         || liquid.accepted_steps().checked_add(1) != Some(next_liquid.accepted_steps())
         || next_gas.volume_m3().to_bits() != parcels[&atmosphere_id].volume_m3().to_bits()
@@ -271,10 +420,10 @@ pub fn advance_liquid_surfaces_with_gas_transport<'s, 'm, 'catalog, 'b>(
         .map(|row| row.energy_residual_j.abs())
         .sum::<f64>()
         .max(original.total_energy_residual_j.abs());
-    let mass_residual_kg = original.total_mass_residual_kg + coupled.phase.mass_residual_kg;
-    let absolute_mass_defect_kg = transport_mass_defect + coupled.phase.absolute_mass_defect_kg;
-    let energy_residual_j = original.total_energy_residual_j + coupled.energy_residual_j;
-    let absolute_energy_defect_j = transport_energy_defect + coupled.absolute_energy_defect_j;
+    let mass_residual_kg = original.total_mass_residual_kg + coupled.mass_residual_kg();
+    let absolute_mass_defect_kg = transport_mass_defect + coupled.absolute_mass_defect_kg();
+    let energy_residual_j = original.total_energy_residual_j + coupled.energy_residual_j();
+    let absolute_energy_defect_j = transport_energy_defect + coupled.absolute_energy_defect_j();
     if [
         mass_residual_kg,
         absolute_mass_defect_kg,
@@ -288,16 +437,16 @@ pub fn advance_liquid_surfaces_with_gas_transport<'s, 'm, 'catalog, 'b>(
             "complete gas plumbing/phase/thermal account is unrepresentable",
         ));
     }
-    if absolute_mass_defect_kg > phase_controls.mass_tolerance_kg {
+    if absolute_mass_defect_kg > mass_tolerance_kg {
         return Err(Error::MassBalance {
             absolute_defect_kg: absolute_mass_defect_kg,
-            tolerance_kg: phase_controls.mass_tolerance_kg,
+            tolerance_kg: mass_tolerance_kg,
         });
     }
-    if absolute_energy_defect_j > phase_controls.energy_tolerance_j {
+    if absolute_energy_defect_j > energy_tolerance_j {
         return Err(Error::EnergyBalance {
             absolute_defect_j: absolute_energy_defect_j,
-            tolerance_j: phase_controls.energy_tolerance_j,
+            tolerance_j: energy_tolerance_j,
         });
     }
     poll(gate)?;

@@ -27,7 +27,7 @@ mod gas_data;
 
 // Equal-mass manufactured isomers. The volatile uses the existing authored
 // phase fixture; this is neither an empirical water mechanism nor combustion.
-fn reaction(rate: f64, release_j_mol: f64) -> GasReaction {
+pub(super) fn reaction(rate: f64, release_j_mol: f64) -> GasReaction {
     let reference = -13.4e6 * M;
     let (a, ta) = gas_data::component("carrier", M, reference + release_j_mol);
     let (b, tb) = gas_data::component("water", M, reference);
@@ -67,7 +67,7 @@ fn reaction(rate: f64, release_j_mol: f64) -> GasReaction {
     GasReaction::new(catalog, kinetics).unwrap()
 }
 
-fn reactive_controls() -> ReactiveLiquidPhaseSolve {
+pub(super) fn reactive_controls() -> ReactiveLiquidPhaseSolve {
     ReactiveLiquidPhaseSolve {
         reaction: GasReactionSolve {
             gas: controls().phase.gas.gas,

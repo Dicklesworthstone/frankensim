@@ -24781,3 +24781,35 @@ composition and cooling, closing/reopening, shared control/work budgets, cold
 preflight and atomic late refusal/cancellation. Rustfmt parsing and source/API
 review passed; native test execution remains blocked by missing constellation
 sibling checkouts in the current environment.
+
+### Reacting native liquid on the original gas transport network
+
+`GasReaction::transporting_evaporating_liquid_candidate` connects the original
+complete gas transport snapshot to the existing radiative reactive phase and
+conduction owner. The exact transported atmosphere supplies chemical inventory
+and caloric state. Chemistry, phase, finite-wall heat and native liquid flow
+share one retained timestep; the original complete gas map, liquid and walls
+publish together after the actual final map passes transport driving-force and
+source admission.
+
+The nonreactive and reactive entries share one network/candidate/accounting
+implementation. Their generic report retains the original coupled report, including reaction
+stoichiometry. Chemical constituent changes
+are not treated as phase or transport mass defects. Original total mass and
+source-relative energy residuals join with absolute local defects before the
+whole-interval gate. Formation energy, latent heat and transferred partial
+enthalpy receive no additional heat credit.
+
+Network endpoint and chemical caloric controls remain separate explicit stage
+inputs. Reactive mass/energy tolerances bound the enclosing interval; its
+temperature-departure limit remains relative to the transported atmosphere.
+This is an explicit first-order transport/chemistry/phase/conduction split,
+with fixed gas volumes and the existing geometry, source and attached-history
+restrictions. It adds no simultaneous reaction-transport solution, compression
+work, jet momentum or combined entropy/mechanical-energy theorem.
+
+Authored regressions in `tests/evaporating_liquid_gas/transport/reactive.rs`
+check transported composition reaching chemistry, complete species changes
+against original stoichiometry, whole-inventory thermal energy, finite walls,
+radiation and pressure, chemical driving-force reversal rollback, and
+empty-path/caloric-control agreement with the original reactive owner.
