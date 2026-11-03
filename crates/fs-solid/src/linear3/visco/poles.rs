@@ -20,8 +20,11 @@ mod load;
 use load::PreparedPortLoad;
 pub use load::{ViscoPolePortBudget, ViscoPolePortLoad, ViscoPolePortResponse};
 mod dynamic;
-use dynamic::PreparedDynamicLoad;
-pub use dynamic::{ViscoPoleDynamicBudget, ViscoPoleDynamicLoad, ViscoPoleDynamicResponse};
+use dynamic::{DynamicLoadSource, PreparedDynamicLoad};
+pub use dynamic::{
+    ViscoPoleDescriptorLoad, ViscoPoleDynamicBudget, ViscoPoleDynamicLoad,
+    ViscoPoleDynamicResponse,
+};
 
 mod response;
 pub use response::{
@@ -43,7 +46,8 @@ pub struct ViscoPoleBudget {
     pub maximum_evaluations: usize,
     /// Positive fixed balancing scale [1/s], independent of contour nodes.
     pub reference_rate_per_s: f64,
-    /// Blockwise coefficient-scaled residual ceiling in EACH physical family.
+    /// Blockwise coefficient-scaled residual ceiling in EACH physical family;
+    /// every algebraic load constraint must also meet it individually.
     pub physical_residual_tolerance: f64,
 }
 
@@ -247,14 +251,36 @@ impl ViscoElements {
         load_budget: ViscoPoleDynamicBudget,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
-        self.prepare_poles(budget, None, Some((load, load_budget)), cx)
+        self.prepare_poles(budget, None, Some((DynamicLoadSource::Ode(load), load_budget)), cx)
+    }
+
+    /// Couple an original constrained quadratic impedance without solving away
+    /// any load state or reaction. E=diag(I_diff,0) and e=[Q_diff*z_diff,z_alg]
+    /// retain exact algebraic rows in the same hereditary polynomial as the
+    /// body and every Maxwell strain. The load receives B^T*u' and the body
+    /// receives -B*G^T*e. No E, isolated load impedance or constraint is inverted.
+    ///
+    /// Finite poles and forced responses use the existing shared numerical
+    /// owners. This does not classify descriptor index or certify a complete
+    /// spectrum including infinite eigenvalues. Redundant/singular systems
+    /// remain explicit preparation or numerical refusals, without regularization.
+    pub fn prepare_resonance_poles_with_descriptor_load(
+        &self,
+        load: ViscoPoleDescriptorLoad<'_>,
+        budget: ViscoPoleBudget,
+        load_budget: ViscoPoleDynamicBudget,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
+        self.prepare_poles(
+            budget, None, Some((DynamicLoadSource::Descriptor(load), load_budget)), cx,
+        )
     }
 
     fn prepare_poles(
         &self,
         budget: ViscoPoleBudget,
         load: Option<(ViscoPolePortLoad<'_>, ViscoPolePortBudget)>,
-        dynamic: Option<(ViscoPoleDynamicLoad<'_>, ViscoPoleDynamicBudget)>,
+        dynamic: Option<(DynamicLoadSource<'_>, ViscoPoleDynamicBudget)>,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
         checkpoint(cx)?;
@@ -288,7 +314,7 @@ impl ViscoElements {
             .checked_add(
                 dynamic
                     .as_ref()
-                    .map_or(0, |(load, _)| load.system.state_dim()),
+                    .map_or(0, |(load, _)| load.state_dim()),
             )
             .ok_or_else(|| invalid("joint hereditary/load dimension overflow"))?;
         if m == 0
@@ -485,11 +511,27 @@ impl PreparedViscoPoles<'_> {
     pub fn memory_sites(&self) -> &[ViscoMemorySite] {
         &self.sites
     }
-    /// Original independent load-state suffix; no load state is condensed out.
+    /// Original independent load-state suffix, including algebraic reactions.
+    /// No load coordinate is condensed out.
     pub fn dynamic_load_range(&self) -> Option<core::ops::Range<usize>> {
         self.dynamic_load
             .as_ref()
             .map(|_| self.body_dimension()..self.dimension)
+    }
+
+    /// Original differential load coordinates; empty for a purely algebraic
+    /// impedance. The following reaction coordinates carry no stored energy.
+    pub fn dynamic_load_differential_range(&self) -> Option<core::ops::Range<usize>> {
+        self.dynamic_load.as_ref().map(|load| {
+            self.body_dimension()..self.body_dimension() + load.differential_dim()
+        })
+    }
+
+    /// Original algebraic load reactions; empty for an ordinary ODE load.
+    pub fn dynamic_load_algebraic_range(&self) -> Option<core::ops::Range<usize>> {
+        self.dynamic_load.as_ref().map(|load| {
+            self.body_dimension() + load.differential_dim()..self.dimension
+        })
     }
 
     fn body_dimension(&self) -> usize {
@@ -586,6 +628,8 @@ impl PreparedViscoPoles<'_> {
         }
         let mut numerators = [0.0_f64; 3];
         let mut denominators = [0.0_f64; 3];
+        let algebraic_start = self.dynamic_load_algebraic_range().map_or(n, |r| r.start);
+        let mut algebraic_residual = 0.0_f64;
         for i in 0..n {
             poll(cancelled)?;
             let mut sum = C64::ZERO;
@@ -614,8 +658,16 @@ impl PreparedViscoPoles<'_> {
             };
             numerators[group] = numerators[group].max(sum.abs());
             denominators[group] = denominators[group].max(envelope);
+            if i >= algebraic_start {
+                let row = if envelope == 0.0 {
+                    if sum.abs() == 0.0 { 0.0 } else { f64::INFINITY }
+                } else {
+                    sum.abs() / envelope
+                };
+                algebraic_residual = algebraic_residual.max(row);
+            }
         }
-        let residual: [f64; 3] = core::array::from_fn(|i| {
+        let mut residual: [f64; 3] = core::array::from_fn(|i| {
             if denominators[i] == 0.0 {
                 if numerators[i] == 0.0 {
                     0.0
@@ -626,6 +678,8 @@ impl PreparedViscoPoles<'_> {
                 numerators[i] / denominators[i]
             }
         });
+        // A large dimensional dynamic row cannot mask a small constraint row.
+        residual[2] = residual[2].max(algebraic_residual);
         let tolerance = self.budget.physical_residual_tolerance;
         if residual.iter().any(|&r| !r.is_finite() || r > tolerance) {
             return Err(ViscoPoleError::PhysicalResidual {

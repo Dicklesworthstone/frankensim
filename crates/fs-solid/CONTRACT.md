@@ -4772,3 +4772,12 @@ invalid-band, resource and cancellation refusal; and subsequent factor reuse.
 Native compilation of the complete `fs-solid` crate and the four new tests,
 nine existing `visco_harmonic` tests and four existing `visco_dynamic_poles`
 tests passed. These are focused native checks, not a workspace or DSR gate.
+
+
+### Original constrained dynamic attachments
+
+`prepare_resonance_poles_with_descriptor_load` accepts original quadratic `DescriptorPortHamiltonian` loads through `ViscoPoleDescriptorLoad`. It retains `E=diag(I_diff,0)`, effort `e=[Q_diff*z_diff,z_alg]`, every differential state, every zero-storage multiplier, and every original Maxwell strain. Velocity input `B^T*u'` and opposing force `-B*G^T*e` preserve power conjugacy. No descriptor matrix, isolated load impedance or constraint is inverted or regularized.
+
+Finite poles and forced harmonic response reuse the existing prepared pencil and shared numerical owners. Original state ranges distinguish differential states and reactions. Multipliers contribute to port power and full mutual resistance heat but never acquire stored energy. Every original algebraic row independently passes the physical residual gate, including same-factor harmonic refinement. An all-differential descriptor preserves ODE arithmetic and state order. Full source bands, state/port/payload/work limits and cancellation apply. Exact quadratic storage is required; descriptor index and infinite-spectrum completeness are not certified; redundant or singular constraints remain explicit refusals.
+
+Native full `fs-solid` compilation and all 12 focused regressions passed: four descriptor tests, four original joint harmonic tests and four original dynamic-pole tests, using the actual source and cached production dependency artifacts. This focused validation is not a full workspace Cargo gate or a descriptor-index/infinite-spectrum certificate.

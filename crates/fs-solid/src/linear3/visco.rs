@@ -43,7 +43,7 @@ mod poles;
 pub use poles::{
     PreparedViscoPoles, ViscoJointHarmonicBudget, ViscoJointHarmonicError,
     ViscoJointHarmonicFactor, ViscoJointHarmonicLoad, ViscoJointHarmonicResponse, ViscoMemorySite,
-    ViscoPole, ViscoPoleBudget, ViscoPoleDynamicBudget, ViscoPoleDynamicLoad,
+    ViscoPole, ViscoPoleBudget, ViscoPoleDescriptorLoad, ViscoPoleDynamicBudget, ViscoPoleDynamicLoad,
     ViscoPoleDynamicResponse, ViscoPoleError, ViscoPolePortBudget, ViscoPolePortLoad,
     ViscoPolePortResponse, ViscoPoleSpectrum,
 };

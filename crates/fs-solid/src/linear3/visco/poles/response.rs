@@ -46,7 +46,8 @@ impl std::error::Error for ViscoJointHarmonicError {}
 /// Original peak load phasors and independently observed cycle means.
 #[derive(Clone, Debug)]
 pub struct ViscoJointHarmonicLoad {
-    /// Every original independent load coordinate; empty for an attached K/C/M law.
+    /// Every original differential load state and algebraic reaction; empty for
+    /// an attached K/C/M law. Prepared source ranges identify the two blocks.
     pub state: Vec<C64>,
     pub displacement: Vec<C64>,
     pub flow: Vec<C64>,
@@ -387,6 +388,8 @@ impl ViscoJointHarmonicFactor<'_, '_> {
         }
         let mut numerators = [0.0_f64; 3];
         let mut denominators = [0.0_f64; 3];
+        let algebraic_start = model.dynamic_load_algebraic_range().map_or(n, |r| r.start);
+        let mut algebraic_residual = 0.0_f64;
         let mut correction = vec![C64::ZERO; n];
         for i in 0..n {
             poll(cancelled)?;
@@ -418,11 +421,16 @@ impl ViscoJointHarmonicFactor<'_, '_> {
             };
             numerators[group] = numerators[group].max(defect.abs());
             denominators[group] = denominators[group].max(envelope);
+            if i >= algebraic_start {
+                algebraic_residual = algebraic_residual.max(ratio(defect.abs(), envelope));
+            }
         }
-        Ok((
-            core::array::from_fn(|i| ratio(numerators[i], denominators[i])),
-            correction,
-        ))
+        let mut residual: [f64; 3] =
+            core::array::from_fn(|i| ratio(numerators[i], denominators[i]));
+        // Include every original constraint in the same-factor refinement
+        // gate, even beside much larger differential rows in different units.
+        residual[2] = residual[2].max(algebraic_residual);
+        Ok((residual, correction))
     }
 }
 

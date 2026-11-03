@@ -3,7 +3,7 @@ use super::{PreparedViscoPoles, ViscoPoleError, cap, checkpoint, finite, invalid
 use fs_exec::Cx;
 use fs_la::eigen::{MAX_EIGEN_UNPOLLED_SCALAR_WORK, admit_jacobi_eigh};
 use fs_math::c64::C64;
-use fs_phs::PortHamiltonian;
+use fs_phs::{DescriptorPortHamiltonian, PortHamiltonian};
 
 /// A physical impedance law z'=(J-R)Qz+Gv, effort=G^T*Qz.
 /// Every state and full mutual entry survives, including unobservable states.
@@ -21,10 +21,40 @@ pub struct ViscoPoleDynamicLoad<'a> {
     pub band_rad_s: (f64, f64),
 }
 
+/// An original constrained impedance with E=diag(I_diff,0) and
+/// effort coordinates e=[Q_diff*z_diff,z_alg]. Algebraic entries are physical
+/// constraint reactions, not displacement or stored-energy coordinates.
+/// Every original differential state and multiplier enters the joint pencil.
+#[derive(Clone, Copy)]
+pub struct ViscoPoleDescriptorLoad<'a> {
+    /// Exact quadratic descriptor owner in its original differential/algebraic
+    /// order. Nonlinear storage and storage on multipliers are refused.
+    pub system: &'a DescriptorPortHamiltonian,
+    /// Row-major free_displacements*load_ports B. Input is B^T*u' and the
+    /// opposing nodal force is -B*G^T*e, including algebraic reactions.
+    pub force_map: &'a [f64],
+    /// Declared continuation support [rad/s], applied conservatively to |s|.
+    pub band_rad_s: (f64, f64),
+}
+
+pub(super) enum DynamicLoadSource<'a> {
+    Ode(ViscoPoleDynamicLoad<'a>),
+    Descriptor(ViscoPoleDescriptorLoad<'a>),
+}
+impl DynamicLoadSource<'_> {
+    pub(super) fn state_dim(&self) -> usize {
+        match self {
+            Self::Ode(load) => load.system.state_dim(),
+            Self::Descriptor(load) => load.system.state_dim(),
+        }
+    }
+}
+
 /// Additional original-load preparation resources; total pencil/solver limits
 /// remain in ViscoPoleBudget and the shared numerical solver options.
 #[derive(Clone, Copy, Debug)]
 pub struct ViscoPoleDynamicBudget {
+    /// All original differential states AND algebraic multipliers.
     pub maximum_states: usize,
     pub maximum_ports: usize,
     /// Load matrices, projections, PSD scratch and physical observations.
@@ -37,14 +67,16 @@ pub struct ViscoPoleDynamicBudget {
 /// They are not cycle averages and contain no inferred or fitted heat.
 #[derive(Clone, Debug)]
 pub struct ViscoPoleDynamicResponse {
-    /// Original state order of the source pHS load, also in physical_vector's suffix.
+    /// Original differential states followed by any algebraic reactions, also
+    /// in physical_vector's suffix. Use the prepared source's ranges to split.
     pub state: Vec<C64>,
     pub displacement: Vec<C64>,
     pub flow: Vec<C64>,
     pub effort: Vec<C64>,
     /// Re(z^H*Qz)/2 [J].
     pub storage_j: f64,
-    /// Re((Qz)^H*R*(Qz)) [W], independently evaluated from the original R.
+    /// Re(e^H*R*e) [W], with e=[Q_diff*z_diff,z_alg]. Algebraic
+    /// resistance contributes real heat, even though multipliers store none.
     pub dissipation_w: f64,
     /// Re(flow^H*effort) [W], positive INTO the dynamic load.
     pub absorbed_power_w: f64,
@@ -62,6 +94,7 @@ pub struct ViscoPoleDynamicResponse {
 pub(super) struct PreparedDynamicLoad {
     coordinates: usize,
     states: usize,
+    differential_states: usize,
     ports: usize,
     force_map: Vec<f64>,
     q: Vec<f64>,
@@ -76,14 +109,29 @@ impl PreparedDynamicLoad {
         self.ports
     }
 
+    pub(super) fn differential_dim(&self) -> usize {
+        self.differential_states
+    }
+
     pub(super) fn new(
         coordinates: usize,
-        load: ViscoPoleDynamicLoad<'_>,
+        load: DynamicLoadSource<'_>,
         budget: ViscoPoleDynamicBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, ViscoPoleError> {
         checkpoint(cx)?;
-        let (k, p) = (load.system.state_dim(), load.system.port_dim());
+        let (k, differential_states, p, j, r, g, storage, force_map, band) = match load {
+            DynamicLoadSource::Ode(load) => {
+                let (j, r, g) = load.system.structure();
+                (load.system.state_dim(), load.system.state_dim(), load.system.port_dim(),
+                    j, r, g, load.system.storage(), load.force_map, load.band_rad_s)
+            }
+            DynamicLoadSource::Descriptor(load) => {
+                let (j, r, g) = load.system.structure();
+                (load.system.state_dim(), load.system.differential_dim(), load.system.port_dim(),
+                    j, r, g, load.system.storage(), load.force_map, load.band_rad_s)
+            }
+        };
         if k == 0 || p == 0 {
             return Err(invalid(
                 "independent load requires states and physical ports",
@@ -108,12 +156,12 @@ impl PreparedDynamicLoad {
         let mp = coordinates
             .checked_mul(p)
             .ok_or_else(|| invalid("force map extent overflow"))?;
-        if load.force_map.len() != mp
-            || load.force_map.iter().any(|v| !v.is_finite())
-            || !load.band_rad_s.0.is_finite()
-            || load.band_rad_s.0 < 0.0
-            || !load.band_rad_s.1.is_finite()
-            || load.band_rad_s.1 < load.band_rad_s.0
+        if force_map.len() != mp
+            || force_map.iter().any(|v| !v.is_finite())
+            || !band.0.is_finite()
+            || band.0 < 0.0
+            || !band.1.is_finite()
+            || band.1 < band.0
         {
             return Err(invalid(
                 "finite complete dynamic force map and ordered band required",
@@ -145,9 +193,7 @@ impl PreparedDynamicLoad {
         )?;
         admit_jacobi_eigh(k)
             .map_err(|_| invalid("dynamic load PSD workspace exceeds shared capacity"))?;
-        let part = load
-            .system
-            .storage()
+        let part = storage
             .quadratic_part()
             .ok_or_else(|| invalid("dynamic load has no declared quadratic storage"))?;
         if !part.exact || part.matrix.len() != kk || part.matrix.iter().any(|v| !v.is_finite()) {
@@ -155,16 +201,33 @@ impl PreparedDynamicLoad {
                 "dynamic load must supply its complete finite quadratic law",
             ));
         }
-        let (j, r, g) = load.system.structure();
+        if differential_states < k {
+            for i in 0..k {
+                checkpoint(cx)?;
+                for col in 0..k {
+                    if (i >= differential_states || col >= differential_states)
+                        && part.matrix[i * k + col] != 0.0
+                    {
+                        return Err(invalid("algebraic load reactions cannot carry storage"));
+                    }
+                }
+            }
+        }
         super::load::admit_coefficient(&part.matrix, k, "dynamic storage", cx)?;
         super::load::admit_coefficient(r, k, "dynamic resistance", cx)?;
         let mut generator = vec![0.0; kk];
         for i in 0..k {
             checkpoint(cx)?;
             for col in 0..k {
-                generator[i * k + col] = (0..k).fold(0.0, |sum, row| {
-                    (j[i * k + row] - r[i * k + row]).mul_add(part.matrix[row * k + col], sum)
-                });
+                generator[i * k + col] = if col < differential_states {
+                    (0..k).fold(0.0, |sum, row| {
+                        (j[i * k + row] - r[i * k + row]).mul_add(part.matrix[row * k + col], sum)
+                    })
+                } else {
+                    // The algebraic coordinate IS an effort: W_alg=I,
+                    // while E_alg=0 and Q_alg=0. Never use Q as W here.
+                    j[i * k + col] - r[i * k + col]
+                };
             }
         }
         if generator.iter().any(|v| !v.is_finite()) {
@@ -176,13 +239,14 @@ impl PreparedDynamicLoad {
         Ok(Self {
             coordinates,
             states: k,
+            differential_states,
             ports: p,
-            force_map: load.force_map.to_vec(),
+            force_map: force_map.to_vec(),
             q: part.matrix,
             r: r.to_vec(),
             g: g.to_vec(),
             generator,
-            band_rad_s: load.band_rad_s,
+            band_rad_s: band,
         })
     }
 
@@ -204,15 +268,21 @@ impl PreparedDynamicLoad {
                 });
             }
             for j in 0..k {
-                a[0][i * n + at + j] = (0..k).fold(0.0, |sum, row| {
-                    coupling[i * k + row].mul_add(self.q[row * k + j], sum)
-                });
+                a[0][i * n + at + j] = if j < self.differential_states {
+                    (0..k).fold(0.0, |sum, row| {
+                        coupling[i * k + row].mul_add(self.q[row * k + j], sum)
+                    })
+                } else {
+                    coupling[i * k + j]
+                };
                 a[1][(at + j) * n + i] = -coupling[i * k + j];
             }
         }
         for i in 0..k {
             checkpoint(cx)?;
-            a[1][(at + i) * n + at + i] = 1.0;
+            if i < self.differential_states {
+                a[1][(at + i) * n + at + i] = 1.0;
+            }
             for j in 0..k {
                 a[0][(at + i) * n + at + j] = -self.generator[i * k + j];
             }
@@ -233,8 +303,14 @@ impl PreparedDynamicLoad {
         let mut storage = 0.0;
         for i in 0..k {
             poll(cancelled)?;
-            gradient[i] = (0..k).fold(C64::ZERO, |sum, j| sum + state[j].scale(self.q[i * k + j]));
-            storage += 0.5 * inner(state[i], gradient[i]);
+            if i < self.differential_states {
+                gradient[i] = (0..k).fold(C64::ZERO, |sum, j| sum + state[j].scale(self.q[i * k + j]));
+                storage += 0.5 * inner(state[i], gradient[i]);
+            } else {
+                // Constraint reactions enter port power and resistance, but
+                // contribute no storage and receive no artificial inertia.
+                gradient[i] = state[i];
+            }
         }
         let mut loss = 0.0;
         for i in 0..k {
