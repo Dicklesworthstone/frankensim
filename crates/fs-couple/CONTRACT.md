@@ -24034,3 +24034,71 @@ a moving-support mass/spring/damper attachment, the two split resonances and
 their joint contour discovery, original mutual force-port coupling, a pure load
 pole at an isolated component resonance with zero net signed volume coupling,
 and dimension/band/port/cancellation refusals (G0/G1/G3).
+
+## Continuous original-state rational modal resonance
+
+`mm_line::continuous::rational::analysis::PreparedRationalModalAnalysis`
+provides continuous forced response, isolated finite pole refinement and
+contour discovery for the original complete modal Galerkin duct and an
+already admitted `ModalRationalLoad`. Its direct constructor supports zero,
+invertible and mixed-rank direct impedance matrices; the existing time-domain
+runtime's mixed-rank limitation does not apply to this analysis. The existing
+`RationalModalLine::prepare_analysis` adapter reads its original physical
+sources without reading, changing or resetting accepted trajectory state.
+
+The retained descriptor coordinates are every duct displacement and canonical
+pressure momentum, every original real rational pole coordinate, and every
+outward mouth-flow multiplier. The last group has no storage. The original
+equations are `x' = A_d x + G_in (2a-P_in)/Z0 - G_out U`,
+`z' = A_l z + B_l U`, and `P_out = C_l z + D_l U`. No direct matrix, bare
+impedance or descriptor mass is inverted, and no epsilon resistance is added.
+Mutual mode coupling and zero-transfer-residue internal states remain present.
+
+All harmonic queries use peak `exp(-i omega t)` phasors, with `s=-i omega`,
+and obey the original real-frequency load band. One shared `fs-la` complex LU
+serves all incident modal drives at a frequency. Poles and spectra use the
+same entire descriptor pencil and the shared `fs-la` Newton/Beyn owners.
+Their complex continuation is the selected rational model, not an independent
+exterior measurement or an exact fractional/material law. A pole separately
+reports whether `|Im(s)|` lies in the original source band. Infinite roots and
+unresolved repeated/defective modes are not reported as resolved finite poles.
+The contour's argument count, rank, nested quadrature and conditioning reports
+are numerical evidence, not interval bounds or a completeness certificate.
+
+Constant reversible row/column conditioning changes no physical state.
+Acceptance independently evaluates the unclosed original duct, memory and
+pressure-continuity equations. Its tolerance is a rowwise backward error in
+the fixed numerical coordinate chart: the denominator includes the original
+right-hand side and the **split** absolute coefficient envelope times the
+scaled state infinity norm. Opposing body/interface coefficients and `sE`
+are not cancelled in that envelope. This definition remains meaningful when
+contour discovery gives roundoff-sized components in an exactly dark physical
+block; no state is clipped or projected to zero. Nonfinite accumulations,
+resource violations, failed original residuals and cancellation refuse.
+
+Observations independently retain all inlet/mouth pressure and volume-flow
+phasors, duct storage, incident/reflected wave power, duct-side mouth work and
+original rational-load work. Harmonic quadratic quantities are cycle means;
+free-pole quantities are complex-envelope forms. The independent duct balance
+is `2 Re(s) H_duct - inlet_work + mouth_work`; the interface defect compares
+duct pressure work against `C_l z + D_l U` work. Generic rational coordinates
+have no supplied physical storage matrix: their signed work is never called
+heat and duct energy is never described as total coupled energy.
+
+The prepared image admits the complete dimension (at most 1024), numerical
+payload and preparation/factor/observation work before allocation. Pole and
+contour numerical work has its own shared-owner limits; their explicit
+iteration/node controls also bound callback assembly counts. Source identity,
+fit/passivity reports, spatial/radial resolution and runtime clock remain
+unchanged. Neither the runtime clock nor its held-wave states enter the pencil.
+
+G0/G1/G3/G4 evidence in `tests/rational_modal_analysis.rs` covers zero and
+mixed-rank two-mode mouths against independent continuous cylindrical transfer
+equations, including evanescent propagation and mutual impedance; second-order
+refinement at 4/8/16 axial elements; the loaded decay pole against the analytic
+`Z(s)+Z0=0` pole over 1/2/4 elements; a finite pole exactly at an unobservable
+original material pole; regular joint response at an exact bare duct mode;
+bitwise clock/history independence; the existing runtime adapter; factor reuse;
+and source-band, resource and cancellation refusals. This evidence does not
+qualify nonlinear flow, evolving gas, continuum BEM accuracy, arbitrary fit
+passivity between samples, or the full repository build.

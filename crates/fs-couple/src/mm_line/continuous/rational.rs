@@ -24,6 +24,10 @@ use fs_phs::linear_exact::{DenseExponentialBudget, ScatteringPortRecord, split_q
 use fs_phs::{PhsError, PortHamiltonian, PreparedStepError};
 use fs_vfit::mimo::load::{MimoLoadError, PreparedMimoLoad};
 
+/// Continuous response and finite resonances of the original joint descriptor.
+#[path = "rational/analysis.rs"]
+pub mod analysis;
+
 /// Source, numerical, constraint or transactional refusal; no history is reset.
 #[derive(Debug)]
 pub enum RationalModalError {
