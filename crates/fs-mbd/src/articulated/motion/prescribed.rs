@@ -18,7 +18,10 @@ use super::super::{
     validate_external_wrenches, validate_forward_dynamics_header, validate_slice, validate_twist,
     validate_wrench,
 };
-use super::{FreeFloatingMotionError, FreeFloatingMotionLoads, MAX_FREE_FLOATING_STEP_LINKS};
+use super::{
+    FreeFloatingMotionError, FreeFloatingMotionLoads, MAX_FREE_FLOATING_STEP_LINKS, components,
+    kinetic_link_increment, sum_products,
+};
 use fs_ga::{GaError, Se3, Vec3, Wrench};
 use fs_math::dd::Dd;
 use std::borrow::Cow;
@@ -536,16 +539,6 @@ fn advance(
         .collect()
 }
 
-fn sum_products(a: impl IntoIterator<Item = f64>, b: impl IntoIterator<Item = f64>) -> Dd {
-    a.into_iter().zip(b).fold(Dd::ZERO, |sum, (a, b)| {
-        sum + Dd::from_f64(a) * Dd::from_f64(b)
-    })
-}
-
-fn components(v: Vec3) -> [f64; 3] {
-    [v.x, v.y, v.z]
-}
-
 fn increments(
     model: &ArticulatedModel,
     before: &Kinematics,
@@ -589,24 +582,7 @@ fn increments(
         let new = after.body_twist[i];
         let pose0 = before.world_from_link[i];
         let pose1 = after.world_from_link[i];
-        // Translational polarization in world axes prevents changing body frames
-        // from manufacturing work from a large common inertial translation.
-        let v0 = pose0
-            .rotation()
-            .rotate(old.linear + old.angular.cross(center))?;
-        let v1 = pose1
-            .rotation()
-            .rotate(new.linear + new.angular.cross(center))?;
-        let delta_v = v1 - v0;
-        let mean_v = v0.scale(0.5) + v1.scale(0.5);
-        let delta_w = new.angular - old.angular;
-        let mean_w = old.angular.scale(0.5) + new.angular.scale(0.5);
-        kinetic = kinetic
-            + Dd::from_f64(inertia.mass()) * sum_products(components(delta_v), components(mean_v))
-            + sum_products(
-                components(inertia.inertia_com().apply(delta_w)),
-                components(mean_w),
-            );
+        kinetic = kinetic + kinetic_link_increment(inertia, pose0, old, pose1, new)?;
         if let Some((first, last)) = &relative {
             let arm0 = state
                 .base

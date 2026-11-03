@@ -17,9 +17,12 @@ pub mod bushing;
 
 use super::{
     ArticulatedModel, Cow, EvaluatedStage, FreeFloatingBaseState, FreeFloatingMotionError,
-    FreeFloatingMotionLoads, FreeFloatingMotionState, FreeFloatingMotionStep, MomentumMap, Vec3,
-    Wrench, poll, step_evaluated, validate_slice, validate_vec3,
+    FreeFloatingMotionLoads, FreeFloatingMotionState, FreeFloatingMotionStep, MomentumMap,
+    StageLoadAccumulator, Vec3, Wrench, poll, step_evaluated, validate_external_wrenches,
+    validate_slice, validate_vec3,
 };
+use fs_ga::Twist;
+use fs_math::dd::Dd;
 
 /// Combined point-load/connection bound; evaluations poll every 64 entries.
 pub const MAX_SPATIAL_MOTION_LOADS: usize = 16384;
@@ -272,10 +275,27 @@ fn evaluate<'a>(
     loads: SpatialMotionLoads<'a>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError> {
-    // The original external load account is evaluated before adding internal
-    // forces. Thus central connection rounding cannot become an external source.
-    let mut load = map.loads(base, loads.held, cancelled)?;
-    let mut wrenches = loads.held.external_body_wrench.to_vec();
+    evaluate_accumulated(map, base, loads, cancelled)?.finish()
+}
+
+/// Retain signed low components across held, world, axial and bushing owners.
+/// Rounding between these layers could erase a load before a later load cancels
+/// its large counterpart, changing the actual ABA acceleration.
+fn evaluate_accumulated(
+    map: &MomentumMap,
+    base: FreeFloatingBaseState,
+    loads: SpatialMotionLoads<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SpatialStage, FreeFloatingMotionError> {
+    // Internal attachments never enter the external impulse account.
+    let mut load = map.loads_accumulated(base, loads.held, cancelled)?;
+    let mut wrenches: Vec<_> = loads
+        .held
+        .external_body_wrench
+        .iter()
+        .copied()
+        .map(WrenchAccumulator::from_wrench)
+        .collect();
     let rotation = base.world_from_base.rotation();
     for (i, applied) in loads.world_points.iter().enumerate() {
         if i % 64 == 0 {
@@ -296,14 +316,16 @@ fn evaluate<'a>(
         let force_base = rotation.inverse().rotate(applied.force_world)?;
         let couple_base = rotation.inverse().rotate(applied.couple_world)?;
         add_wrench(map, &mut wrenches, point, force_base, couple_base)?;
-        load.force_world = load.force_world + applied.force_world;
-        load.torque_com_world = load.torque_com_world
-            + rotation
-                .rotate(position - map.center_base)?
-                .cross(applied.force_world)
-            + applied.couple_world;
-        load.body_wrench_power +=
-            applied.force_world.dot(velocity) + applied.couple_world.dot(angular);
+        load.add_force(applied.force_world);
+        load.add_torque_cross(
+            rotation.rotate(position - map.center_base)?,
+            applied.force_world,
+        );
+        load.add_torque(applied.couple_world);
+        load.add_external_pairing(
+            Wrench::new(applied.couple_world, applied.force_world),
+            Twist::new(angular, velocity),
+        );
     }
     for (i, connection) in loads.connections.iter().enumerate() {
         if i % 64 == 0 {
@@ -322,39 +344,116 @@ fn evaluate<'a>(
         let force = direction.scale(magnitude);
         add_wrench(map, &mut wrenches, c.a, force, Vec3::default())?;
         add_wrench(map, &mut wrenches, c.b, force.scale(-1.0), Vec3::default())?;
-        load.internal_body_power -= magnitude * rate;
-        load.dissipation_power += c.damping_ns_per_m * rate * rate;
-        load.stored_energy += storage(c, length);
+        load.add_internal_power(-magnitude * rate);
+        load.add_dissipation(c.damping_ns_per_m * rate * rate);
+        load.add_storage(storage(c, length));
     }
-    validate_vec3(load.force_world, "spatial_motion.force")?;
-    validate_vec3(load.torque_com_world, "spatial_motion.torque")?;
-    validate_slice(
-        &[
-            load.body_wrench_power,
-            load.internal_body_power,
-            load.dissipation_power,
-            load.stored_energy,
-        ],
-        "spatial_motion.stage_energy",
-    )?;
-    Ok(EvaluatedStage {
-        body_wrench: Cow::Owned(wrenches),
+    Ok(SpatialStage {
+        body_wrench: wrenches,
         load,
     })
 }
 
+/// One bounded buffer replaces the original per-link wrench buffer. All
+/// constitutive evaluations use the same buffer and round once, immediately
+/// before the native dynamics consumes the complete physical load.
+struct SpatialStage {
+    body_wrench: Vec<WrenchAccumulator>,
+    load: StageLoadAccumulator,
+}
+
+impl SpatialStage {
+    fn finish<'a>(self) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError> {
+        let wrenches: Vec<_> = self
+            .body_wrench
+            .into_iter()
+            .map(WrenchAccumulator::finish)
+            .collect();
+        let load = self.load.finish();
+        validate_external_wrenches(&wrenches)?;
+        validate_vec3(load.force_world, "spatial_motion.force")?;
+        validate_vec3(load.torque_com_world, "spatial_motion.torque")?;
+        validate_slice(
+            &[
+                load.body_wrench_power,
+                load.internal_body_power,
+                load.dissipation_power,
+                load.stored_energy,
+            ],
+            "spatial_motion.stage_energy",
+        )?;
+        Ok(EvaluatedStage {
+            body_wrench: Cow::Owned(wrenches),
+            load,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WrenchAccumulator {
+    torque: [Dd; 3],
+    force: [Dd; 3],
+}
+
+impl WrenchAccumulator {
+    fn from_wrench(wrench: Wrench) -> Self {
+        Self {
+            torque: [wrench.torque.x, wrench.torque.y, wrench.torque.z].map(Dd::from_f64),
+            force: [wrench.force.x, wrench.force.y, wrench.force.z].map(Dd::from_f64),
+        }
+    }
+
+    fn finish(self) -> Wrench {
+        let [tx, ty, tz] = self.torque.map(Dd::to_f64);
+        let [fx, fy, fz] = self.force.map(Dd::to_f64);
+        Wrench::new(Vec3::new(tx, ty, tz), Vec3::new(fx, fy, fz))
+    }
+
+    fn add_moment(&mut self, arm: Vec3, force: Vec3) {
+        // Keep both products until reduction: large lever arms can have a
+        // small, fully resolvable moment.
+        let products = [
+            [arm.y, force.z, arm.z, force.y],
+            [arm.z, force.x, arm.x, force.z],
+            [arm.x, force.y, arm.y, force.x],
+        ];
+        for (sum, [a, b, c, d]) in self.torque.iter_mut().zip(products) {
+            *sum = *sum + Dd::from_f64(a) * Dd::from_f64(b) - Dd::from_f64(c) * Dd::from_f64(d);
+        }
+    }
+}
+
 fn add_wrench(
     map: &MomentumMap,
-    wrenches: &mut [Wrench],
+    wrenches: &mut [WrenchAccumulator],
     point: MaterialPoint,
     force_base: Vec3,
     couple_base: Vec3,
 ) -> Result<(), FreeFloatingMotionError> {
     let inverse = map.shape.world_from_link[point.link].rotation().inverse();
     let force = inverse.rotate(force_base)?;
-    let torque = point.point_body.cross(force) + inverse.rotate(couple_base)?;
-    let old = wrenches[point.link];
-    wrenches[point.link] = Wrench::new(old.torque + torque, old.force + force);
+    let couple = inverse.rotate(couple_base)?;
+    let target = &mut wrenches[point.link];
+    for (sum, value) in target.force.iter_mut().zip([force.x, force.y, force.z]) {
+        *sum = *sum + Dd::from_f64(value);
+    }
+    target.add_moment(point.point_body, force);
+    for (sum, value) in target.torque.iter_mut().zip([couple.x, couple.y, couple.z]) {
+        *sum = *sum + Dd::from_f64(value);
+    }
+    Ok(())
+}
+
+/// Add the bushing's A-frame transport moment independently of its free couple.
+fn add_transport_moment(
+    map: &MomentumMap,
+    wrenches: &mut [WrenchAccumulator],
+    link: usize,
+    arm_base: Vec3,
+    force_base: Vec3,
+) -> Result<(), FreeFloatingMotionError> {
+    let inverse = map.shape.world_from_link[link].rotation().inverse();
+    wrenches[link].add_moment(inverse.rotate(arm_base)?, inverse.rotate(force_base)?);
     Ok(())
 }
 

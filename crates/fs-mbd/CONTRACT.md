@@ -4224,3 +4224,21 @@ changes, large common translation, inherited rotating-point capture after
 native flight, identity and atomic refusal. This is instantaneous rigid
 sticking, without contact discovery, finite-volume flow, slosh, continuous
 mass flux, thermodynamic mixing or a complete fluid/body energy model.
+
+### Momentum retained across native motion and load assembly
+
+Free-flight momentum reconstruction and the spatial-load assembly shared by
+free and prescribed motion use compensated linear/angular reductions. Held link wrenches, world
+point loads, axial connections, and finite bushings retain their low components
+until the complete per-link force/couple reaches native dynamics. Shape momentum
+remains compensated while combining with or subtracting from base momentum.
+Point moments retain both cross-product terms; attachment transport moments and
+free couples remain separate through assembly.
+
+Explicit free-flight and prescribed kinetic-work increments use shared link
+COM/central-spin polarization. Explicit free-flight gravity work uses the computed
+displacement before adding the world origin. These are floating-point accuracy improvements, not exact conservation
+claims for unrepresentable state increments or arbitrary timesteps. The existing
+integrator, constitutive laws, admission, and cancellation boundaries remain in
+force. `articulated_load_reduction` exercises actual supported/free trajectories,
+off-center moments, and held/world/axial/bushing cancellation.

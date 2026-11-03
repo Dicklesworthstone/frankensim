@@ -728,20 +728,19 @@ fn elongated_fixed_tree_retains_transverse_orbital_inertia_and_applied_momentum(
                 gravity_world: Vec3::default(),
             };
             let duration = 0.5;
-            let step = step_free_floating(
-                &model,
-                &still(vec![], vec![]),
-                loads,
-                duration,
-                || false,
-            )
-            .unwrap();
+            let step =
+                step_free_floating(&model, &still(vec![], vec![]), loads, duration, || false)
+                    .unwrap();
             vector(
                 step.state_after.base.twist_body.angular,
                 vector_on(torque * duration / longitudinal_inertia, 0.0),
                 2e-12,
             );
-            vector(step.momentum_after.linear_momentum_world, Vec3::default(), 2e-12);
+            vector(
+                step.momentum_after.linear_momentum_world,
+                Vec3::default(),
+                2e-12,
+            );
             vector(
                 step.momentum_after.angular_momentum_world,
                 vector_on(torque * duration, 0.0),
@@ -749,5 +748,223 @@ fn elongated_fixed_tree_retains_transverse_orbital_inertia_and_applied_momentum(
             );
             impulse_balance(&step, 2e-11);
         }
+    }
+}
+
+/// G1/G3: large opposing held loads leave a small force and free couple.
+/// Each permutation and rigid world frame must produce the same actual motion.
+#[test]
+fn cancelling_link_loads_retain_their_resolvable_resultant_and_recoil() {
+    let model = ArticulatedModel::new(
+        (0..3)
+            .map(|i| {
+                Link::new(
+                    format!("rigid-{i}"),
+                    if i == 0 { None } else { Some(0) },
+                    Se3::identity(),
+                    JointModel::FIXED,
+                    sphere(1.0, 1.0),
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+    let big = 2.0_f64.powi(54);
+    let duration = 0.25;
+    for frame in [
+        Se3::identity(),
+        Se3::from_parts(
+            rotation(Vec3::new(0.3, -0.2, 0.1)),
+            Vec3::new(4.0, -3.0, 2.0),
+        )
+        .unwrap(),
+    ] {
+        let axis = frame.rotation().rotate(Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        for values in [[big, 1.0, -big], [big, -big, 1.0], [1.0, big, -big]] {
+            let wrenches =
+                values.map(|v| Wrench::new(Vec3::new(0.0, 0.0, v), Vec3::new(0.0, 0.0, v)));
+            let mut state = still(vec![], vec![]);
+            state.base = FreeFloatingBaseState::stationary(frame);
+            let step = step_free_floating(
+                &model,
+                &state,
+                FreeFloatingMotionLoads {
+                    generalized_force: &[],
+                    external_body_wrench: &wrenches,
+                    gravity_world: Vec3::default(),
+                },
+                duration,
+                || false,
+            )
+            .unwrap();
+            vector(
+                step.momentum_after.linear_momentum_world,
+                axis.scale(duration),
+                2e-13,
+            );
+            vector(
+                step.momentum_after.angular_momentum_world,
+                axis.scale(duration) + frame.translation().cross(axis.scale(duration)),
+                2e-12,
+            );
+            vector(
+                step.center_of_mass_world_after,
+                frame.translation() + axis.scale(duration * duration / 6.0),
+                2e-13,
+            );
+            vector(
+                step.state_after.base.twist_body.angular,
+                Vec3::new(0.0, 0.0, duration / 3.0),
+                2e-13,
+            );
+            close(step.external_work, duration * duration / 3.0, 2e-13);
+            close(step.kinetic_work_residual, 0.0, 3e-13);
+            impulse_balance(&step, 2e-12);
+        }
+    }
+}
+
+/// G1: the small total momentum exists in the admitted native state even
+/// though the separately summed shape momentum cannot represent it in f64.
+#[test]
+fn counter_moving_shape_keeps_small_com_motion_under_a_large_base_boost() {
+    let model = ArticulatedModel::new(vec![
+        Link::new(
+            "base",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            sphere(1.0, 1.0),
+        ),
+        Link::new(
+            "slider-a",
+            Some(0),
+            Se3::identity(),
+            JointModel::prismatic(Vec3::new(1.0, 0.0, 0.0), None).unwrap(),
+            sphere(1.0, 1.0),
+        ),
+        Link::new(
+            "slider-b",
+            Some(0),
+            Se3::identity(),
+            JointModel::prismatic(Vec3::new(1.0, 0.0, 0.0), None).unwrap(),
+            sphere(1.0, 1.0),
+        ),
+    ])
+    .unwrap();
+    let speed = 2.0_f64.powi(52);
+    let duration = 1.0 / speed;
+    let state = FreeFloatingMotionState {
+        base: FreeFloatingBaseState::new(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(speed, 0.0, 0.0)),
+        ),
+        joint_position: vec![0.0, 0.0],
+        joint_velocity: vec![-speed, -2.0 * speed + 1.0],
+    };
+    let step = step_free_floating(
+        &model,
+        &state,
+        FreeFloatingMotionLoads {
+            generalized_force: &[0.0; 2],
+            external_body_wrench: &[Wrench::default(); 3],
+            gravity_world: Vec3::default(),
+        },
+        duration,
+        || false,
+    )
+    .unwrap();
+    vector(
+        step.momentum_before.linear_momentum_world,
+        Vec3::new(1.0, 0.0, 0.0),
+        0.0,
+    );
+    vector(
+        step.momentum_after.linear_momentum_world,
+        Vec3::new(1.0, 0.0, 0.0),
+        0.0,
+    );
+    close(step.center_of_mass_world_after.x, duration / 3.0, 1e-30);
+    close(step.state_after.base.twist_body.linear.x, speed, 0.0);
+    close(step.kinetic_work_residual, 0.0, 0.0);
+}
+
+/// G1/G3: a torque changes spin while a large orthogonal kinetic reservoir
+/// remains unchanged. Subtracting the two total energies would lose all work.
+#[test]
+fn spin_work_survives_a_large_unchanged_translation_energy() {
+    let model = ArticulatedModel::new(vec![Link::new(
+        "body",
+        None,
+        Se3::identity(),
+        JointModel::FIXED,
+        sphere(1.0, 1.0),
+    )])
+    .unwrap();
+    let duration = 2.0_f64.powi(-30);
+    let state = FreeFloatingMotionState {
+        base: FreeFloatingBaseState::new(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(0.0, 0.0, 2.0_f64.powi(30))),
+        ),
+        joint_position: vec![],
+        joint_velocity: vec![],
+    };
+    let step = step_free_floating(
+        &model,
+        &state,
+        FreeFloatingMotionLoads {
+            generalized_force: &[],
+            external_body_wrench: &[Wrench::new(
+                Vec3::new(0.0, 0.0, 2.0_f64.powi(28)),
+                Vec3::default(),
+            )],
+            gravity_world: Vec3::default(),
+        },
+        duration,
+        || false,
+    )
+    .unwrap();
+    close(step.state_after.base.twist_body.angular.z, 0.25, 1e-15);
+    close(step.external_work, 0.03125, 1e-15);
+    close(step.kinetic_work_residual, 0.0, 1e-15);
+}
+
+/// G1/G3: gravity pairs with the integrator's COM displacement before adding
+/// it to a far-away absolute pose, where that small displacement rounds away.
+#[test]
+fn gravity_work_retains_small_com_increments_far_from_the_origin() {
+    let model = ArticulatedModel::new(vec![Link::new(
+        "body",
+        None,
+        Se3::identity(),
+        JointModel::FIXED,
+        sphere(1.0, 1.0),
+    )])
+    .unwrap();
+    for origin in [0.0, 2.0_f64.powi(50)] {
+        let state = FreeFloatingMotionState {
+            base: FreeFloatingBaseState::new(
+                Se3::from_parts(So3::identity(), Vec3::new(0.0, origin, 0.0)).unwrap(),
+                Twist::new(Vec3::default(), Vec3::new(0.0, 1.0 / 1024.0, 0.0)),
+            ),
+            joint_position: vec![],
+            joint_velocity: vec![],
+        };
+        let step = step_free_floating(
+            &model,
+            &state,
+            FreeFloatingMotionLoads {
+                generalized_force: &[],
+                external_body_wrench: &[Wrench::default()],
+                gravity_world: Vec3::new(0.0, 1.0 / 512.0, 0.0),
+            },
+            1.0,
+            || false,
+        )
+        .unwrap();
+        close(step.state_after.base.twist_body.linear.y, 3.0 / 1024.0, 0.0);
+        close(step.external_work, 2.0_f64.powi(-18), 0.0);
+        close(step.kinetic_work_residual, 0.0, 0.0);
     }
 }

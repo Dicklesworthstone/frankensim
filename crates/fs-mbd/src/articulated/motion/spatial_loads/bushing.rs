@@ -19,13 +19,13 @@ pub mod coupled;
 
 use super::super::{
     ArticulatedModel, EvaluatedStage, FreeFloatingMotionError, FreeFloatingMotionState,
-    MAX_FREE_FLOATING_STEP_LINKS, MomentumMap, Se3, StageLoad, Vec3, Wrench, poll, step_evaluated,
-    validate_external_wrenches, validate_slice, validate_twist, validate_vec3,
+    MAX_FREE_FLOATING_STEP_LINKS, MomentumMap, Se3, StageLoadAccumulator, Vec3, Wrench, poll,
+    step_evaluated, validate_slice, validate_twist, validate_vec3,
 };
 use super::implicit::{ImplicitSpatialConfig, ImplicitSpatialError, ImplicitSpatialStep};
 use super::{
-    MaterialPoint, SpatialMotionLoads, SpatialMotionStep, add_wrench, finish_with_bushings,
-    position_base, shape_point_velocity,
+    MaterialPoint, SpatialMotionLoads, SpatialMotionStep, SpatialStage, WrenchAccumulator,
+    add_transport_moment, add_wrench, finish_with_bushings, position_base, shape_point_velocity,
 };
 use fs_ga::{So3Tangent, so3_left_jacobian_inverse};
 
@@ -119,22 +119,24 @@ fn evaluate_forces<B: BushingLaw>(
     validate_twist(state.base.twist_body, "bushing.base_twist")?;
     admit_bushings(model, bushings, &mut cancelled)?;
     let map = MomentumMap::new(model, state, &mut cancelled)?;
-    let mut body_wrench = vec![Wrench::new(Vec3::default(), Vec3::default()); model.link_count()];
-    let mut load = StageLoad {
-        force_world: Vec3::default(),
-        torque_com_world: Vec3::default(),
-        body_wrench_power: 0.0,
-        internal_body_power: 0.0,
-        dissipation_power: 0.0,
-        stored_energy: 0.0,
+    let mut stage = SpatialStage {
+        body_wrench: vec![WrenchAccumulator::from_wrench(Wrench::default()); model.link_count()],
+        load: StageLoadAccumulator::default(),
     };
-    accumulate(&map, bushings, &mut body_wrench, &mut load, &mut cancelled)?;
+    accumulate(
+        &map,
+        bushings,
+        &mut stage.body_wrench,
+        &mut stage.load,
+        &mut cancelled,
+    )?;
+    let stage = stage.finish()?;
     poll(&mut cancelled)?;
     Ok(BushingForces {
-        body_wrench,
-        stored_energy: load.stored_energy,
-        internal_power: load.internal_body_power,
-        dissipation_power: load.dissipation_power,
+        body_wrench: stage.body_wrench.into_owned(),
+        stored_energy: stage.load.stored_energy,
+        internal_power: stage.load.internal_body_power,
+        dissipation_power: stage.load.dissipation_power,
     })
 }
 
@@ -333,17 +335,17 @@ pub(super) fn evaluate<'a, B: BushingLaw>(
     bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError> {
-    let mut stage = super::evaluate(map, base, loads, cancelled)?;
+    let mut stage = super::evaluate_accumulated(map, base, loads, cancelled)?;
     if !bushings.is_empty() {
         accumulate(
             map,
             bushings,
-            stage.body_wrench.to_mut(),
+            &mut stage.body_wrench,
             &mut stage.load,
             cancelled,
         )?;
     }
-    Ok(stage)
+    stage.finish()
 }
 
 pub(super) struct Strain {
@@ -382,8 +384,8 @@ fn strain(map: &MomentumMap, b: BushingGeometry) -> Result<Strain, FreeFloatingM
 fn accumulate<B: BushingLaw>(
     map: &MomentumMap,
     bushings: &[B],
-    wrenches: &mut [Wrench],
-    load: &mut StageLoad,
+    wrenches: &mut [WrenchAccumulator],
+    load: &mut StageLoadAccumulator,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), FreeFloatingMotionError> {
     for (i, law) in bushings.iter().enumerate() {
@@ -414,13 +416,8 @@ fn accumulate<B: BushingLaw>(
         let couple = s
             .frame_a_rotation
             .rotate(inverse_jacobian.transpose().apply(log_force))?;
-        add_wrench(
-            map,
-            wrenches,
-            point(b.a),
-            force,
-            s.delta_base.cross(force) + couple,
-        )?;
+        add_wrench(map, wrenches, point(b.a), force, couple)?;
+        add_transport_moment(map, wrenches, b.a.link, s.delta_base, force)?;
         add_wrench(
             map,
             wrenches,
@@ -428,19 +425,11 @@ fn accumulate<B: BushingLaw>(
             force.scale(-1.0),
             couple.scale(-1.0),
         )?;
-        load.internal_body_power -= force_a.dot(translation_rate) + log_force.dot(rotation_rate);
-        load.dissipation_power += response.dissipation_power;
-        load.stored_energy += response.stored_energy;
+        load.add_internal_power(-force_a.dot(translation_rate));
+        load.add_internal_power(-log_force.dot(rotation_rate));
+        load.add_dissipation(response.dissipation_power);
+        load.add_storage(response.stored_energy);
     }
-    validate_external_wrenches(wrenches)?;
-    validate_slice(
-        &[
-            load.internal_body_power,
-            load.dissipation_power,
-            load.stored_energy,
-        ],
-        "bushing.energy",
-    )?;
     Ok(())
 }
 

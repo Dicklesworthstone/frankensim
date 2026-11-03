@@ -31,11 +31,13 @@ pub mod inventory;
 use super::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, FreeFloatingBaseState,
     Kinematics, SpatialInertia, forward_kinematics, free_floating_forward_dynamics,
-    free_floating_momentum, solve_floating_base_system, validate_external_wrenches,
-    validate_forward_dynamics_header, validate_slice, validate_twist, validate_vec3,
+    free_floating_momentum, momentum_from_kinematics, solve_floating_base_system,
+    validate_external_wrenches, validate_forward_dynamics_header, validate_slice, validate_twist,
+    validate_vec3,
 };
 use core::fmt;
 use fs_ga::{GaError, Mat3, Se3, So3, So3Tangent, Twist, Vec3, Wrench};
+use fs_math::dd::Dd;
 use std::borrow::Cow;
 
 /// Maximum model size admitted by one cancellable smooth-flight step.
@@ -87,7 +89,8 @@ pub struct FreeFloatingMotionStep {
     pub external_angular_impulse_world: Vec3,
     /// Midpoint actuator effort/rate work, in joules.
     pub actuator_work: f64,
-    /// Midpoint body-wrench work plus exact uniform-gravity displacement work.
+    /// Midpoint body-wrench work plus uniform-gravity work along the computed
+    /// COM increment, retaining displacements below the absolute pose's ulp.
     pub external_work: f64,
     /// Midpoint work of internal spatial connections, in joules; zero in the
     /// held-wrench API. Their storage and loss are owned by the connection lane.
@@ -289,12 +292,17 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
     let initial_map = MomentumMap::new(model, state, cancelled)?;
     let initial = initial_map.coordinates(state.base)?;
     poll(cancelled)?;
-    let momentum_before = free_floating_momentum(
+    let kinematics_before = forward_kinematics(
         model,
-        state.base,
+        BaseState::prescribed(
+            state.base.world_from_base,
+            state.base.twist_body,
+            Twist::zero(),
+        ),
         &state.joint_position,
         &state.joint_velocity,
     )?;
+    let momentum_before = momentum_from_kinematics(model, &kinematics_before)?;
     poll(cancelled)?;
     let initial_stage = evaluate(&initial_map, state.base, cancelled)?;
     let mut stage_effort = Cow::Borrowed(loads.generalized_force);
@@ -361,10 +369,10 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
             .center_world
             .cross(midpoint_load.force_world))
     .scale(duration);
+    let center_displacement =
+        (initial.linear_world + linear_impulse.scale(0.5)).scale(duration / initial_map.mass());
     let final_coordinates = MomentumCoordinates {
-        center_world: initial.center_world
-            + (initial.linear_world + linear_impulse.scale(0.5))
-                .scale(duration / initial_map.mass()),
+        center_world: initial.center_world + center_displacement,
         linear_world: initial.linear_world + linear_impulse,
         angular_com_world: initial.angular_com_world
             + midpoint_load.torque_com_world.scale(duration),
@@ -386,30 +394,39 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
     let final_map = MomentumMap::new(model, &state_after, cancelled)?;
     state_after.base = final_map.reconstruct(final_rotation, final_coordinates)?;
     poll(cancelled)?;
-    let momentum_after = free_floating_momentum(
+    let kinematics_after = forward_kinematics(
         model,
-        state_after.base,
+        BaseState::prescribed(
+            state_after.base.world_from_base,
+            state_after.base.twist_body,
+            Twist::zero(),
+        ),
         &state_after.joint_position,
         &state_after.joint_velocity,
     )?;
-    let actuator_work = duration
-        * stage_effort
-            .iter()
-            .zip(&midpoint.joint_velocity)
-            .map(|(force, rate)| force * rate)
-            .sum::<f64>();
-    let gravity_work = initial_map.mass()
-        * loads
-            .gravity_world
-            .dot(final_coordinates.center_world - initial.center_world);
-    let external_work = duration * midpoint_load.body_wrench_power + gravity_work;
-    let internal_body_work = duration * midpoint_load.internal_body_power;
+    let momentum_after = momentum_from_kinematics(model, &kinematics_after)?;
+    let kinetic_change =
+        kinetic_increment(model, &kinematics_before, &kinematics_after, cancelled)?;
+    let actuator_work_dd = Dd::from_f64(duration)
+        * sum_products(
+            stage_effort.iter().copied(),
+            midpoint.joint_velocity.iter().copied(),
+        );
+    let gravity_work = Dd::from_f64(initial_map.mass())
+        * sum_products(
+            components(loads.gravity_world),
+            components(center_displacement),
+        );
+    let external_work_dd =
+        Dd::from_f64(duration) * Dd::from_f64(midpoint_load.body_wrench_power) + gravity_work;
+    let internal_body_work_dd =
+        Dd::from_f64(duration) * Dd::from_f64(midpoint_load.internal_body_power);
+    let actuator_work = actuator_work_dd.to_f64();
+    let external_work = external_work_dd.to_f64();
+    let internal_body_work = internal_body_work_dd.to_f64();
     let dissipated_energy = duration * midpoint_load.dissipation_power;
-    let kinetic_work_residual = momentum_after.kinetic_energy
-        - momentum_before.kinetic_energy
-        - actuator_work
-        - external_work
-        - internal_body_work;
+    let kinetic_work_residual =
+        (kinetic_change - actuator_work_dd - external_work_dd - internal_body_work_dd).to_f64();
     validate_vec3(linear_impulse, "free_floating_motion.linear_impulse")?;
     validate_vec3(angular_impulse, "free_floating_motion.angular_impulse")?;
     validate_slice(
@@ -453,8 +470,8 @@ struct MomentumCoordinates {
 struct MomentumMap {
     center_base: Vec3,
     locked: SpatialInertia,
-    shape_linear_base: Vec3,
-    shape_angular_com_base: Vec3,
+    shape_linear_base: VectorSum,
+    shape_angular_com_base: VectorSum,
     shape: Kinematics,
 }
 
@@ -489,22 +506,24 @@ impl MomentumMap {
             joint_position,
             joint_velocity,
         )?;
-        let mut mass = 0.0;
-        let mut center_base = Vec3::default();
+        let mut mass = Dd::ZERO;
+        let mut center = VectorSum::default();
         for (i, link) in model.links.iter().enumerate() {
             if i % 64 == 0 {
                 poll(cancelled)?;
             }
-            let next_mass = mass + link.inertia.mass();
-            let center = shape.world_from_link[i].transform_point(link.inertia.center_of_mass())?;
-            center_base =
-                center_base + (center - center_base).scale(link.inertia.mass() / next_mass);
-            mass = next_mass;
+            mass = mass + Dd::from_f64(link.inertia.mass());
+            let point = shape.world_from_link[i].transform_point(link.inertia.center_of_mass())?;
+            let weight = Dd::from_f64(link.inertia.mass()) / mass;
+            for (mean, value) in center.0.iter_mut().zip(components(point)) {
+                *mean = *mean + (Dd::from_f64(value) - *mean) * weight;
+            }
         }
+        let center_base = center.finish();
         validate_vec3(center_base, "free_floating_motion.center_base")?;
-        let mut inertia = Mat3 { m: [0.0; 9] };
-        let mut shape_linear_base = Vec3::default();
-        let mut shape_angular_com_base = Vec3::default();
+        let mut inertia = [Dd::ZERO; 9];
+        let mut shape_linear_base = VectorSum::default();
+        let mut shape_angular_com_base = VectorSum::default();
         for (i, link) in model.links.iter().enumerate() {
             if i % 64 == 0 {
                 poll(cancelled)?;
@@ -529,22 +548,36 @@ impl MomentumMap {
                     } else {
                         -r_array[row] * r_array[column]
                     };
-                    inertia.m[row * 3 + column] += rotated_inertia.m[row * 3 + column]
-                        + link.inertia.mass() * orbital;
+                    let entry = &mut inertia[row * 3 + column];
+                    *entry = *entry
+                        + Dd::from_f64(rotated_inertia.m[row * 3 + column])
+                        + Dd::from_f64(link.inertia.mass()) * Dd::from_f64(orbital);
                 }
             }
             let velocity = shape.body_twist[i];
             let linear = rotation
                 .rotate(velocity.linear + velocity.angular.cross(link.inertia.center_of_mass()))?
                 .scale(link.inertia.mass());
-            shape_linear_base = shape_linear_base + linear;
-            shape_angular_com_base = shape_angular_com_base
-                + rotation.rotate(link.inertia.inertia_com().apply(velocity.angular))?
-                + r.cross(linear);
+            shape_linear_base.add(linear);
+            shape_angular_com_base
+                .add(rotation.rotate(link.inertia.inertia_com().apply(velocity.angular))?);
+            shape_angular_com_base.add_cross(r, linear);
         }
-        validate_vec3(shape_linear_base, "free_floating_motion.shape_linear")?;
-        validate_vec3(shape_angular_com_base, "free_floating_motion.shape_angular")?;
-        let locked = SpatialInertia::new(mass, Vec3::default(), inertia)?;
+        validate_vec3(
+            shape_linear_base.finish(),
+            "free_floating_motion.shape_linear",
+        )?;
+        validate_vec3(
+            shape_angular_com_base.finish(),
+            "free_floating_motion.shape_angular",
+        )?;
+        let locked = SpatialInertia::new(
+            mass.to_f64(),
+            Vec3::default(),
+            Mat3 {
+                m: inertia.map(Dd::to_f64),
+            },
+        )?;
         Ok(Self {
             center_base,
             locked,
@@ -563,16 +596,20 @@ impl MomentumMap {
         base: FreeFloatingBaseState,
     ) -> Result<MomentumCoordinates, FreeFloatingMotionError> {
         let rotation = base.world_from_base.rotation();
-        let linear_base = (base.twist_body.linear
-            + base.twist_body.angular.cross(self.center_base))
-        .scale(self.mass())
-            + self.shape_linear_base;
-        let angular_com_base =
-            self.locked.inertia_com().apply(base.twist_body.angular) + self.shape_angular_com_base;
+        // Preserve the residual of a moving base and counter-moving shape.
+        // Rounding shape momentum before the combination can erase real recoil.
+        let mut velocity = VectorSum::from(base.twist_body.linear);
+        velocity.add_cross(base.twist_body.angular, self.center_base);
+        let mut linear_base = self.shape_linear_base;
+        for (sum, value) in linear_base.0.iter_mut().zip(velocity.0) {
+            *sum = *sum + value * Dd::from_f64(self.mass());
+        }
+        let mut angular_com_base = self.shape_angular_com_base;
+        angular_com_base.add_matrix_product(self.locked.inertia_com(), base.twist_body.angular);
         let result = MomentumCoordinates {
             center_world: base.world_from_base.transform_point(self.center_base)?,
-            linear_world: rotation.rotate(linear_base)?,
-            angular_com_world: rotation.rotate(angular_com_base)?,
+            linear_world: rotation.rotate(linear_base.finish())?,
+            angular_com_world: rotation.rotate(angular_com_base.finish())?,
         };
         validate_coordinates(result)?;
         Ok(result)
@@ -586,15 +623,25 @@ impl MomentumMap {
         validate_coordinates(coordinates)?;
         let inverse = rotation.inverse();
         let rhs = Wrench::new(
-            inverse.rotate(coordinates.angular_com_world)? - self.shape_angular_com_base,
-            inverse.rotate(coordinates.linear_world)? - self.shape_linear_base,
+            self.shape_angular_com_base
+                .subtract_from(inverse.rotate(coordinates.angular_com_world)?),
+            self.shape_linear_base
+                .subtract_from(inverse.rotate(coordinates.linear_world)?),
         );
         // Fixed qdot: this is the LOCKED composite inertia, not the ABA Schur
         // inertia that allows the joints to accelerate under a base wrench.
         let solved = solve_floating_base_system(&self.locked.matrix()?, rhs)?;
+        // At the system COM the locked inertia is block diagonal. Recover
+        // translation by the physical scalar mass, without the rotational
+        // block's scaling and Cholesky roundoff contaminating a large boost.
+        let linear = Vec3::new(
+            rhs.force.x / self.mass(),
+            rhs.force.y / self.mass(),
+            rhs.force.z / self.mass(),
+        );
         let twist = Twist::new(
             solved.angular,
-            solved.linear - solved.angular.cross(self.center_base),
+            linear - solved.angular.cross(self.center_base),
         );
         validate_twist(twist, "free_floating_motion.reconstructed_twist")?;
         let position = coordinates.center_world - rotation.rotate(self.center_base)?;
@@ -610,10 +657,18 @@ impl MomentumMap {
         loads: FreeFloatingMotionLoads<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<StageLoad, FreeFloatingMotionError> {
+        Ok(self.loads_accumulated(base, loads, cancelled)?.finish())
+    }
+
+    fn loads_accumulated(
+        &self,
+        base: FreeFloatingBaseState,
+        loads: FreeFloatingMotionLoads<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StageLoadAccumulator, FreeFloatingMotionError> {
         let rotation = base.world_from_base.rotation();
-        let mut force_world = loads.gravity_world.scale(self.mass());
-        let mut torque_com_world = Vec3::default();
-        let mut body_wrench_power = 0.0;
+        let mut accumulated = StageLoadAccumulator::default();
+        accumulated.add_force(loads.gravity_world.scale(self.mass()));
         for (i, wrench) in loads.external_body_wrench.iter().enumerate() {
             if i % 64 == 0 {
                 poll(cancelled)?;
@@ -623,32 +678,203 @@ impl MomentumMap {
             // Translate by the local COM arm before rotation, avoiding loss of
             // lever-arm precision when the entire system is far from the origin.
             let arm = rotation.rotate(pose.translation() - self.center_base)?;
-            force_world = force_world + force;
-            torque_com_world = torque_com_world
-                + rotation.rotate(pose.rotation().rotate(wrench.torque)?)?
-                + arm.cross(force);
+            accumulated.add_force(force);
+            accumulated.add_torque(rotation.rotate(pose.rotation().rotate(wrench.torque)?)?);
+            accumulated.add_torque_cross(arm, force);
             let velocity = pose
                 .inverse()?
                 .adjoint()
                 .apply_twist(base.twist_body)
                 .plus(self.shape.body_twist[i]);
-            body_wrench_power += wrench.pairing(velocity);
+            accumulated.add_external_pairing(*wrench, velocity);
         }
-        validate_vec3(force_world, "free_floating_motion.force_world")?;
-        validate_vec3(torque_com_world, "free_floating_motion.torque_com_world")?;
+        let total = accumulated.finish();
+        validate_vec3(total.force_world, "free_floating_motion.force_world")?;
+        validate_vec3(
+            total.torque_com_world,
+            "free_floating_motion.torque_com_world",
+        )?;
         validate_slice(
-            &[body_wrench_power],
+            &[total.body_wrench_power],
             "free_floating_motion.body_wrench_power",
         )?;
-        Ok(StageLoad {
-            force_world,
-            torque_com_world,
-            body_wrench_power,
-            internal_body_power: 0.0,
-            dissipation_power: 0.0,
-            stored_energy: 0.0,
-        })
+        Ok(accumulated)
     }
+}
+
+/// Fixed-size compensated reductions retain physically small resultant momentum
+/// until all opposing contributions have arrived. No per-link heap is required.
+#[derive(Clone, Copy, Default)]
+struct VectorSum([Dd; 3]);
+
+impl From<Vec3> for VectorSum {
+    fn from(value: Vec3) -> Self {
+        Self(components(value).map(Dd::from_f64))
+    }
+}
+
+impl VectorSum {
+    fn add(&mut self, value: Vec3) {
+        for (sum, value) in self.0.iter_mut().zip(components(value)) {
+            *sum = *sum + Dd::from_f64(value);
+        }
+    }
+
+    fn add_cross(&mut self, arm: Vec3, force: Vec3) {
+        let arm = components(arm).map(Dd::from_f64);
+        let force = components(force).map(Dd::from_f64);
+        for axis in 0..3 {
+            let a = (axis + 1) % 3;
+            let b = (axis + 2) % 3;
+            self.0[axis] = self.0[axis] + arm[a] * force[b] - arm[b] * force[a];
+        }
+    }
+
+    fn add_matrix_product(&mut self, matrix: Mat3, value: Vec3) {
+        let value = components(value).map(Dd::from_f64);
+        for row in 0..3 {
+            for (column, value) in value.iter().enumerate() {
+                self.0[row] = self.0[row] + Dd::from_f64(matrix.m[3 * row + column]) * *value;
+            }
+        }
+    }
+
+    fn subtract_from(self, value: Vec3) -> Vec3 {
+        let mut difference = Self::from(value);
+        for (component, value) in difference.0.iter_mut().zip(self.0) {
+            *component = *component - value;
+        }
+        difference.finish()
+    }
+
+    fn finish(self) -> Vec3 {
+        Vec3::new(self.0[0].to_f64(), self.0[1].to_f64(), self.0[2].to_f64())
+    }
+}
+
+/// Kept through held, world-point and attachment evaluation before rounding.
+/// The finalized StageLoad remains the same small native stage interface.
+#[derive(Clone, Copy, Default)]
+struct StageLoadAccumulator {
+    force_world: VectorSum,
+    torque_com_world: VectorSum,
+    body_wrench_power: Dd,
+    internal_body_power: Dd,
+    dissipation_power: Dd,
+    stored_energy: Dd,
+}
+
+impl StageLoadAccumulator {
+    fn add_force(&mut self, force: Vec3) {
+        self.force_world.add(force);
+    }
+
+    fn add_torque(&mut self, torque: Vec3) {
+        self.torque_com_world.add(torque);
+    }
+
+    fn add_torque_cross(&mut self, arm: Vec3, force: Vec3) {
+        self.torque_com_world.add_cross(arm, force);
+    }
+
+    fn add_external_pairing(&mut self, wrench: Wrench, velocity: Twist) {
+        self.body_wrench_power =
+            self.body_wrench_power + sum_products(wrench.to_array(), velocity.to_array());
+    }
+
+    fn add_internal_power(&mut self, power: f64) {
+        self.internal_body_power = self.internal_body_power + Dd::from_f64(power);
+    }
+
+    fn add_dissipation(&mut self, power: f64) {
+        self.dissipation_power = self.dissipation_power + Dd::from_f64(power);
+    }
+
+    fn add_storage(&mut self, energy: f64) {
+        self.stored_energy = self.stored_energy + Dd::from_f64(energy);
+    }
+
+    fn finish(self) -> StageLoad {
+        StageLoad {
+            force_world: self.force_world.finish(),
+            torque_com_world: self.torque_com_world.finish(),
+            body_wrench_power: self.body_wrench_power.to_f64(),
+            internal_body_power: self.internal_body_power.to_f64(),
+            dissipation_power: self.dissipation_power.to_f64(),
+            stored_energy: self.stored_energy.to_f64(),
+        }
+    }
+}
+
+fn components(value: Vec3) -> [f64; 3] {
+    [value.x, value.y, value.z]
+}
+
+fn sum_products(a: impl IntoIterator<Item = f64>, b: impl IntoIterator<Item = f64>) -> Dd {
+    a.into_iter().zip(b).fold(Dd::ZERO, |sum, (a, b)| {
+        sum + Dd::from_f64(a) * Dd::from_f64(b)
+    })
+}
+
+/// Polarization avoids subtracting two large total kinetic energies. COM
+/// translation uses world axes; central spin uses the fixed material inertia.
+fn kinetic_link_increment(
+    inertia: SpatialInertia,
+    pose_before: Se3,
+    before: Twist,
+    pose_after: Se3,
+    after: Twist,
+) -> Result<Dd, GaError> {
+    let center = inertia.center_of_mass();
+    let v0 = pose_before
+        .rotation()
+        .rotate(before.linear + before.angular.cross(center))?;
+    let v1 = pose_after
+        .rotation()
+        .rotate(after.linear + after.angular.cross(center))?;
+    let mut spin_change = VectorSum::default();
+    spin_change.add_matrix_product(inertia.inertia_com(), after.angular - before.angular);
+    let mut energy = Dd::ZERO;
+    for ((old, new), delta) in components(v0)
+        .into_iter()
+        .zip(components(v1))
+        .zip(components(v1 - v0))
+    {
+        let mean = Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new);
+        energy = energy + Dd::from_f64(inertia.mass()) * Dd::from_f64(delta) * mean;
+    }
+    for ((old, new), impulse) in components(before.angular)
+        .into_iter()
+        .zip(components(after.angular))
+        .zip(spin_change.0)
+    {
+        let mean = Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new);
+        energy = energy + impulse * mean;
+    }
+    Ok(energy)
+}
+
+fn kinetic_increment(
+    model: &ArticulatedModel,
+    before: &Kinematics,
+    after: &Kinematics,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Dd, FreeFloatingMotionError> {
+    let mut energy = Dd::ZERO;
+    for (i, link) in model.links.iter().enumerate() {
+        if i % 64 == 0 {
+            poll(cancelled)?;
+        }
+        energy = energy
+            + kinetic_link_increment(
+                link.inertia,
+                before.world_from_link[i],
+                before.body_twist[i],
+                after.world_from_link[i],
+                after.body_twist[i],
+            )?;
+    }
+    Ok(energy)
 }
 
 #[derive(Clone, Copy)]
