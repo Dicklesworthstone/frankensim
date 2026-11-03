@@ -163,6 +163,17 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedPlanes<'a, 
             .rebind_uniform_fluid_force_si(force_density_n_m3, gate)
     }
 
+    /// Hold a dense x-fastest spatial fluid volume force [N/m^3], added to the
+    /// uniform force. Preserves fluid/body/plane state and the accepted clock.
+    pub fn rebind_fluid_force_field_si(
+        &mut self,
+        force_density_n_m3: &[[f64; 3]],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.assembly
+            .rebind_fluid_force_field_si(force_density_n_m3, gate)
+    }
+
     /// Held external fluid volume force [N/m^3].
     pub fn uniform_fluid_force_density_n_m3(&self) -> Result<[f64; 3], Error> {
         self.assembly.uniform_fluid_force_density_n_m3()

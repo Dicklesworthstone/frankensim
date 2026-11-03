@@ -79,6 +79,52 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
             .map_err(Error::Flow)
     }
 
+    /// Replace a spatial fluid volume-force field [N/m^3] on the existing owner.
+    ///
+    /// The dense field covers the complete grid in x-fastest order:
+    /// `(z * ny + y) * nx + x`. Every value must convert to a finite lattice
+    /// force. Static-solid slots are ignored by the native sampler; partially
+    /// occupied body cells remain fluid cells. The field is ADDED to the held
+    /// uniform force; a zero field switches off only the spatial contribution.
+    ///
+    /// This prepares a piecewise-held load for following simultaneous fluid/body
+    /// steps. The Guo transform preserves actual fluid density, momentum and full
+    /// force-corrected stress without advancing time or changing body states.
+    /// Dry-body owners retain their existing midpoint interior-force and torque
+    /// subtraction. Authored solid loads are separate; this field does not infer
+    /// a solid pressure traction or a hydrostatic buoyancy correction.
+    ///
+    /// Cancellation, a malformed field, conversion failure or native refusal
+    /// leaves accepted populations, forces, body history and clocks intact.
+    /// Sampling allocates only the native force proposal and reuses population
+    /// scratch; no second lattice-sized converted field is constructed.
+    pub fn rebind_fluid_force_field_si(
+        &mut self,
+        force_density_n_m3: &[[f64; 3]],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        let [nx, ny, nz] = self.grid.dimensions();
+        if force_density_n_m3.len() != nx * ny * nz {
+            return Err(Error::Invalid(
+                "fluid force field must cover the whole grid",
+            ));
+        }
+        let scale = self.fluid_force_scale()?;
+        for chunk in force_density_n_m3.chunks(64) {
+            poll(gate)?;
+            for &force in chunk {
+                convert(force, scale)?;
+            }
+        }
+        self.grid
+            .rebind_force_field_with_gate(
+                |[x, y, z]| force_density_n_m3[(z * ny + y) * nx + x].map(|f| f * scale),
+                gate,
+            )
+            .map_err(Error::Flow)
+    }
+
     /// Observe the held external fluid volume force [N/m^3].
     pub fn uniform_fluid_force_density_n_m3(&self) -> Result<[f64; 3], Error> {
         convert(

@@ -7829,7 +7829,19 @@ selected scaling shape remain intact; the next step applies the new held force.
 spatial shape. Smooth endpoint histories use `step_with_endpoint_force_scale`
 and its pooled counterpart, which own the old/new force timing explicitly.
 
-Both operations use existing collision scratch, allocate no new population or
+`BoundaryGrid3::rebind_force_field_with_gate` replaces the spatial held load
+through that same Guo transformation while retaining the uniform contribution.
+It samples in x-fastest order, skips static solids and includes partially
+occupied moving-body cells. The proposal allocates one native force field and
+reuses collision scratch. A late invalid sample, unphysical population or
+cancellation publishes neither field nor populations. Unchanged cell forces
+retain population bits. The new field also becomes the shape selected by the
+existing force-scale API; the legacy field setter and rebind entry delegate to
+the same checked sampler. Focused native-source tests cover nonunit-density
+stress preservation, actual switched/reversed collision impulses, ordering,
+solid exclusion and exact retry after late refusal.
+
+The uniform operations use existing collision scratch, allocate no new population or
 force field, poll cancellation at each native tile and publish only after the
 last check. A late unphysical cell preserves all accepted populations/forcing.
 An unchanged uniform force preserves population bits. Regularized open boundaries

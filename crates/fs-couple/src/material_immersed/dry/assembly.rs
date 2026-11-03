@@ -210,6 +210,18 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
             .rebind_uniform_fluid_force_si(force_density_n_m3, gate)
     }
 
+    /// Hold a dense x-fastest spatial fluid volume force [N/m^3], added to the
+    /// uniform force. All body states and accepted time remain intact; the
+    /// simultaneous dry solve subtracts each body's interior source once.
+    pub fn rebind_fluid_force_field_si(
+        &mut self,
+        force_density_n_m3: &[[f64; 3]],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.native
+            .rebind_fluid_force_field_si(force_density_n_m3, gate)
+    }
+
     /// Held external fluid volume force [N/m^3].
     pub fn uniform_fluid_force_density_n_m3(&self) -> Result<[f64; 3], Error> {
         self.native.uniform_fluid_force_density_n_m3()

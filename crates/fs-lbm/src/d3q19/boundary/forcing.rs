@@ -1,11 +1,11 @@
-//! Atomic uniform flow preparation and held-force changes in the original Guo frame.
+//! Atomic flow preparation and held-force changes in the original Guo frame.
 
 use super::*;
 
 mod frame;
 pub use frame::RigidFrame3;
 
-/// Refusal before a uniform flow or force-frame proposal is published.
+/// Refusal before a flow or force-frame proposal is published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundaryForcingError3 {
     /// Cancellation at a lattice-tile boundary or before publication.
@@ -168,6 +168,105 @@ impl BoundaryGrid3 {
     /// Held uniform volume-force density, excluding any per-cell contribution.
     pub const fn uniform_force_density(&self) -> [f64; 3] {
         self.force
+    }
+
+    /// Replace a spatial held volume-force density without an instantaneous impulse.
+    ///
+    /// Samples fluid cells in x-fastest order, skipping static solids. The field
+    /// is ADDED to the unchanged uniform force. Partially occupied immersed-body
+    /// cells remain fluid cells; their existing coupling owns any fictitious
+    /// interior-force subtraction. A zero field disables the spatial contribution.
+    ///
+    /// The original Guo source transform preserves each cell's physical density,
+    /// momentum and full force-corrected stress. No time advances and no work is
+    /// supplied. The following collision applies the newly held load. This also
+    /// selects the new spatial shape used by `set_force_field_scale`.
+    ///
+    /// One force-field allocation holds the sampled proposal; existing collision
+    /// scratch holds populations. Cancellation or any late refusal publishes
+    /// neither. An unchanged cell preserves its population bits. Callbacks may
+    /// still panic, but even then accepted fields and populations remain intact.
+    pub fn rebind_force_field_with_gate(
+        &mut self,
+        force: impl FnMut([usize; 3]) -> [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryForcingError3> {
+        let field = self.sample_force_field_with_gate(force, gate)?;
+        for tile in 0..self.f[0].len() {
+            poll(gate)?;
+            for lane in 0..TILE_CELLS {
+                let mut populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
+                if self.solid[tile] & (1u64 << lane) == 0 {
+                    let previous = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                    let next = cell_force(self.force, Some(&field), tile, lane);
+                    if previous != next {
+                        let cell = self.coords(tile, lane);
+                        admit_populations(&populations, cell)?;
+                        let (rho, momentum) = self.raw_moments(cell[0], cell[1], cell[2]);
+                        let velocity = core::array::from_fn(|axis| {
+                            (momentum[axis] + 0.5 * previous[axis]) / rho
+                        });
+                        if !velocity.iter().all(|value| value.is_finite()) {
+                            return Err(BoundaryForcingError3::Unphysical { cell });
+                        }
+                        crate::thermal::forcing::reframe3(
+                            &mut populations,
+                            velocity,
+                            previous,
+                            next,
+                        );
+                        admit_populations(&populations, cell)?;
+                    }
+                }
+                for (proposed, value) in self.post.iter_mut().zip(populations) {
+                    proposed[tile].0[lane] = value;
+                }
+            }
+        }
+        poll(gate)?;
+        core::mem::swap(&mut self.f, &mut self.post);
+        self.force_field = Some(field);
+        self.force_field_shape = None;
+        Ok(())
+    }
+
+    pub(super) fn sample_force_field_with_gate(
+        &self,
+        mut force: impl FnMut([usize; 3]) -> [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<Vec<[f64; 3]>, BoundaryForcingError3> {
+        poll(gate)?;
+        if !self.collision_model.supports_body_force() {
+            return Err(BoundaryForcingError3::Invalid(
+                "the selected collision model does not admit body forcing",
+            ));
+        }
+        let mut field = vec![[0.0; 3]; self.f[0].len() * TILE_CELLS];
+        for z in 0..self.nz {
+            for y in 0..self.ny {
+                for x in 0..self.nx {
+                    if ((z * self.ny + y) * self.nx + x).is_multiple_of(TILE_CELLS) {
+                        poll(gate)?;
+                    }
+                    if self.is_solid(x, y, z) {
+                        continue;
+                    }
+                    let cell = [x, y, z];
+                    let value = force(cell);
+                    if !value
+                        .iter()
+                        .zip(self.force)
+                        .all(|(local, uniform)| local.is_finite() && (local + uniform).is_finite())
+                    {
+                        return Err(BoundaryForcingError3::Unphysical { cell });
+                    }
+                    let (tile, lane) = self.addr(x, y, z);
+                    field[tile * TILE_CELLS + lane] = value;
+                }
+            }
+        }
+        poll(gate)?;
+        Ok(field)
     }
 
     /// Replace the uniform part of a held volume-force density, in lattice units.

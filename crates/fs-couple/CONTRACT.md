@@ -23039,7 +23039,19 @@ authored dry-body traction `V_original*f`; periodic perturbation pressure cannot
 recover it. That physical solid force is distinct from the fictitious-fluid
 subtraction and is not a duplicate fluid deposit.
 
-There is no mutable grid escape hatch, extra lattice-sized force allocation,
+`rebind_fluid_force_field_si` accepts a dense x-fastest field in N/m^3,
+one vector per original grid cell, and adds it to the retained uniform load.
+It selects a piecewise-held spatial history on the same native owner. All SI
+conversions are admitted before native publication; static solids receive no
+samples, while partially occupied body cells retain the field. The existing
+dry solver subtracts their midpoint interior force and torque exactly once.
+Rebinding preserves physical density, momentum, full force-corrected stress,
+body/plane history and accepted time. A zero field disables only the spatial
+component. The spatial proposal allocates one native force field and reuses
+collision scratch without a second converted field. Dry single-body, assembly
+and prescribed-plane owners forward to this same operation.
+
+There is no mutable grid escape hatch,
 pressure-inlet/outlet closure, variable-density law or finite driving reservoir.
 The older excess-inertia settling approximation retains its quiescent-release
 scope; these arbitrary-flow ports are not added to that approximation without

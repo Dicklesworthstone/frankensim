@@ -211,6 +211,18 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
             .rebind_uniform_fluid_force_si(force_density_n_m3, gate)
     }
 
+    /// Hold a dense x-fastest spatial fluid volume force [N/m^3], added to the
+    /// uniform force. Preserves accepted fluid momentum/stress and dry-body
+    /// history; the native dry correction owns interior force/torque subtraction.
+    pub fn rebind_fluid_force_field_si(
+        &mut self,
+        force_density_n_m3: &[[f64; 3]],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.native
+            .rebind_fluid_force_field_si(force_density_n_m3, gate)
+    }
+
     /// Held external fluid volume force [N/m^3], observed in original source units.
     pub fn uniform_fluid_force_density_n_m3(&self) -> Result<[f64; 3], Error> {
         self.native.uniform_fluid_force_density_n_m3()
