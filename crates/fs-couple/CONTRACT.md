@@ -23594,3 +23594,47 @@ truncation certificate or startup, moving-material or nonlinear response claim.
 fluid ports, an independent full two-port feedback oracle, material/load power
 separation, single-component assembly parity, whole-film strain refusal,
 pointwise passivity, source/resource refusals and cancellation (G0/G1/G3/G4).
+
+## Prepared tensor material continuation at accepted instants
+
+`tensor_material::prepared::PreparedTensorHistory::rebind_materials`
+continues an accepted complete-coordinate state on a replacement prepared
+operator. `PreparedTensorMaterialChangeBudget` gives an explicit maximum
+absolute externally supplied coefficient work. The candidate reports signed
+equilibrium and Maxwell storage changes and a replacement history; the original
+accepted history remains unchanged on success and refusal.
+
+Reference mass, original point order and volumes, strain columns, heat ownership,
+ordered branch counts and the positive step duration remain fixed. Both endpoints
+must have zero eigenstrain. Original branch identity and material applicability
+belong to the source-binding caller; the numerical API cannot authorize replacing
+an unrelated internal variable merely because its dimensions match. The new
+material must admit the accepted displacement and remaining step capacity.
+
+The state retains complete displacement-history vectors, so changed tensor
+factor rank requires no inverse, pseudoinverse, spectral cutoff or strain reset.
+One old relaxation-time group may split by copying its exact history. Several
+old groups may acquire the same new time only when all their complete accepted
+histories compare exactly equal. An incompatible collision returns the typed
+`MemoryCollision` refusal rather than averaging history or fitting damping.
+Held/affine preparation and its numerical force scale may change because those
+caches carry no accepted physical history.
+
+Displacement, momentum, velocity, time, accepted steps, initial energy and
+compensated force-work/heat accounts survive. A distinct compensated signed
+parameter-work account records the fixed-state storage change. Stiffness and
+original factor-row differences evaluate that work without subtracting unchanged
+kinetic storage. Pure relaxation-time or Kelvin-viscosity changes have zero
+instantaneous coefficient work and create no instantaneous heat. Both held and
+affine cumulative balances include parameter work. A finite source allowance,
+replacement-domain admission, original physical energy balance and cancellation
+are checked before returning a complete candidate.
+
+Focused native evidence: three new continuation tests plus the six held and
+three affine prepared regressions pass. The continuation cases compare real
+post-change motion, spring history and independently integrated physical heat
+with the analytic three-exponential Zener solution; exercise positive/negative
+coefficient work and changed factor rank; split and merge equal histories; refuse
+unequal-history collisions; and preserve accepted state under mass/map/clock,
+work-budget and cancellation refusals. This is prescribed endpoint coefficient
+evolution, not a solved thermal expansion, entropy or heat-feedback model.

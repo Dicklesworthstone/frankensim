@@ -247,9 +247,12 @@ impl PreparedTensorHistory<'_> {
             supplied_work_j,
             dissipated_j,
             cumulative_work_j: work_j,
+            cumulative_parameter_work_j: self.parameter_work_j,
             cumulative_dissipated_j: heat_j,
             balance_error_j: supplied_work_j - dissipated_j - change,
-            cumulative_balance_error_j: work_j - heat_j - (after.total() - self.initial_energy_j),
+            cumulative_balance_error_j: work_j + self.parameter_work_j
+                - heat_j
+                - (after.total() - self.initial_energy_j),
         };
         for defect_j in [energy.balance_error_j, energy.cumulative_balance_error_j] {
             if !defect_j.is_finite() || defect_j.abs() > body.controls.maximum_work_error_j {

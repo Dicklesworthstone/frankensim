@@ -11,7 +11,8 @@
 //! The original fs-phs flow and positive source-square kernels are prepared once.
 //! Warm calls use bounded contractions and source-domain checks, independently
 //! integrate held or affine-force work and grouped physical heat, and publish atomically.
-//! Material properties, geometry, force ports and the positive clock stay fixed.
+//! Geometry, force ports and the positive clock stay fixed. An explicit material
+//! continuation preserves original branch history and accounts coefficient work.
 
 use super::{Inertia, InitialMemory, TensorMaterialError};
 use fs_exec::CancelGate;
@@ -22,7 +23,9 @@ use fs_phs::{PhsError, PreparedStepError};
 
 mod affine;
 mod prepare;
+mod rebind;
 pub use affine::PreparedTensorAffineStep;
+pub use rebind::{PreparedTensorMaterialChange, PreparedTensorMaterialChangeBudget};
 
 /// Explicit whole-owner resource and physical numerical allowances. No defaults.
 #[derive(Clone, Copy, Debug)]
@@ -49,9 +52,27 @@ pub struct PreparedTensorControls {
 #[derive(Debug)]
 pub enum PreparedTensorError {
     Invalid(&'static str),
-    Budget { required: u128, maximum: u128 },
-    Operator { defect: f64, allowance: f64 },
-    Energy { defect_j: f64, allowance_j: f64 },
+    Budget {
+        required: u128,
+        maximum: u128,
+    },
+    Operator {
+        defect: f64,
+        allowance: f64,
+    },
+    Energy {
+        defect_j: f64,
+        allowance_j: f64,
+    },
+    /// Equal replacement times cannot erase distinct accepted prehistories.
+    MemoryCollision {
+        relaxation_time_s: f64,
+    },
+    /// Signed externally supplied coefficient work exceeds its source allowance.
+    ParameterWork {
+        work_j: f64,
+        allowance_j: f64,
+    },
     Original(TensorMaterialError),
     Propagation(PhsError),
     Cancelled,
@@ -143,6 +164,8 @@ pub struct PreparedTensorEnergy {
     pub supplied_work_j: f64,
     pub dissipated_j: f64,
     pub cumulative_work_j: f64,
+    /// Signed coefficient work from accepted material changes, distinct from heat.
+    pub cumulative_parameter_work_j: f64,
     pub cumulative_dissipated_j: f64,
     /// W - D - Delta H, using a stable original-coordinate energy increment.
     pub balance_error_j: f64,
@@ -278,6 +301,8 @@ impl PreparedTensorBody {
             initial_energy_j: energy.total(),
             work_j: 0.0,
             work_correction_j: 0.0,
+            parameter_work_j: 0.0,
+            parameter_work_correction_j: 0.0,
             heat_j: 0.0,
             heat_correction_j: 0.0,
         })
@@ -408,6 +433,8 @@ pub struct PreparedTensorHistory<'a> {
     initial_energy_j: f64,
     work_j: f64,
     work_correction_j: f64,
+    parameter_work_j: f64,
+    parameter_work_correction_j: f64,
     heat_j: f64,
     heat_correction_j: f64,
 }
@@ -441,11 +468,17 @@ impl PreparedTensorHistory<'_> {
     pub fn supplied_work_j(&self) -> f64 {
         self.work_j
     }
+    /// Signed external coefficient work; material changes never deposit it as heat.
+    pub fn parameter_work_j(&self) -> f64 {
+        self.parameter_work_j
+    }
     pub fn dissipated_heat_j(&self) -> f64 {
         self.heat_j
     }
     pub fn balance_residual_j(&self) -> f64 {
-        self.energy.total() - self.initial_energy_j + self.heat_j - self.work_j
+        self.energy.total() - self.initial_energy_j + self.heat_j
+            - self.work_j
+            - self.parameter_work_j
     }
 
     /// Exact held-force interval of this fixed source. Finite force jumps are
@@ -548,9 +581,12 @@ impl PreparedTensorHistory<'_> {
             supplied_work_j,
             dissipated_j,
             cumulative_work_j: work_j,
+            cumulative_parameter_work_j: self.parameter_work_j,
             cumulative_dissipated_j: heat_j,
             balance_error_j: supplied_work_j - dissipated_j - change,
-            cumulative_balance_error_j: work_j - heat_j - (after.total() - self.initial_energy_j),
+            cumulative_balance_error_j: work_j + self.parameter_work_j
+                - heat_j
+                - (after.total() - self.initial_energy_j),
         };
         for defect_j in [energy.balance_error_j, energy.cumulative_balance_error_j] {
             if !defect_j.is_finite() || defect_j.abs() > body.controls.maximum_work_error_j {
