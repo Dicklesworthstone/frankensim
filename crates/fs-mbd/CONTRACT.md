@@ -5520,3 +5520,42 @@ retained-group rigidity, extreme inventory/inertia ratios, source/budget/input
 refusal, unrepresented actual endpoint rates, and terminal cancellation.
 Pinned formatter parsing and source/algebra checks are not native numerical
 conformance: compilation and these tests remained unrun in this environment.
+
+
+## Mixed spherical scenes with accelerating plane boundaries
+
+`articulated_contacts::trajectory::mixed::spheres::planes::advance_mixed_sphere_scene`
+automatically discovers sphere-pair and sphere/plane encounters in one native
+mixed free/prescribed trajectory. `AcceleratingPlane` supplies a fixed normal
+and a constant world material acceleration; its tangential velocity represents
+conveyor motion. Every body pair and sphere/plane pair has an explicit material
+law. The complete normal plane gap is quadratic, so the original ballistic
+owner and interior extrema checks detect entries hidden between separated
+endpoints. Body pairs retain the original accelerated swept-sphere owner.
+
+All nearby features at an event enter one original mixed Coulomb solve. Plane
+work uses the actual event-time material velocity, and native free recoil,
+actuator transmission, prescribed support reaction and signed work remain in
+the original physical accounts. Accepted endpoints also pass the original
+body-pair path owner at zero duration, preventing a different floating norm or
+rounded integrated pose from admitting a state that the next window rejects.
+Bounded earlier-time retries change the candidate event duration; no gap,
+position, velocity, normal or impulse is projected to pass admission.
+
+`MixedSphereSceneResult::planes_after` rebases the original plane commands to
+the accepted endpoint for repeated native continuation. Stable typed contact
+keys distinguish body pairs from plane contacts. The old pair-only entry uses
+the same event loop and retains its physical semantics. Existing bounds on
+systems, links, contact count, events, native steps and geometry queries remain;
+additional endpoint-owner checks consume the query budget. Up to 21 planes are
+admitted, without silently dropping contacts when an active-set cap is reached.
+
+The underlying enclosing carrier-sphere, coincident link-origin/COM, fixed or
+revolute joint, and admitted centre-command restrictions still apply. Results
+are floating analytic observations, not interval-certified CCD. Rotating
+planes, arbitrary offset articulated surfaces, persistent contact, Zeno repair
+and thermal loss partition remain outside this API. The focused tests in
+`tests/articulated_mixed_sphere_planes.rs` cover analytic acceleration/conveyor
+work, hidden entry and grazing, mixed simultaneous contact, covariance and
+permutation, repeated continuation, resource/refusal atomicity and pair-only
+compatibility.

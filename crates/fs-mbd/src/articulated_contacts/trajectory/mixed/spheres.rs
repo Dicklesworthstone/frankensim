@@ -8,6 +8,8 @@
 //! distance extrema. This is floating analytic geometry, not an interval tube
 //! or an arbitrary articulated collision certificate.
 
+pub mod planes;
+
 use super::{
     ArticulatedTrajectoryConfig, ArticulatedTrajectoryError, ArticulatedTrajectoryMomentum,
     Impulses, MixedArticulatedTrajectoryEventResult, MixedArticulatedTrajectoryResult,
@@ -32,6 +34,10 @@ use fs_contact::swept_sphere::accelerated::{AcceleratedSphereInput, sphere_path}
 use fs_contact::swept_sphere::{SweptSphereError, SweptSphereInput};
 use fs_ga::{GaError, Se3, So3, So3Tangent, Twist, Vec3};
 use fs_math::dd::Dd;
+use planes::{
+    AcceleratingPlane, MixedSphereSceneContactKey, MixedSphereSceneEventGeometry,
+    MixedSphereSceneResult, PreparedPlanes, SpherePlaneLaw,
+};
 
 type Impact =
     ArticulatedFrictionalContactResult<FrictionalContactResult, MixedArticulatedImpulseResponse>;
@@ -88,9 +94,21 @@ pub enum MixedSphereError {
         time: f64,
         error: SweptSphereError,
     },
+    PlanePath {
+        sphere: u64,
+        plane: u64,
+        time: f64,
+        error: fs_contact::ballistic::BallisticContactError,
+    },
     /// Near-rest inward contact needs a sustained-contact owner.
     UnresolvedContact {
         pair: [u64; 2],
+        time: f64,
+    },
+    /// Near-rest inward plane contact needs a sustained-contact owner.
+    UnresolvedPlaneContact {
+        sphere: u64,
+        plane: u64,
         time: f64,
     },
     /// No nonpenetrating native endpoint/witness was found in 64 time neighbours.
@@ -184,10 +202,68 @@ pub fn advance_mixed_sphere_contacts(
     laws: &[SpherePairLaw],
     start_time_s: f64,
     controls: MixedSphereControls,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<MixedSphereResult, MixedSphereError> {
+    let scene = advance_scene(
+        systems,
+        spheres,
+        laws,
+        &[],
+        &[],
+        start_time_s,
+        controls,
+        cancelled,
+    )?;
+    let event_geometry = scene
+        .event_geometry
+        .into_iter()
+        .map(|event| {
+            let pairs = event
+                .contacts
+                .into_iter()
+                .map(|key| match key {
+                    MixedSphereSceneContactKey::SpherePair(pair) => Ok(pair),
+                    MixedSphereSceneContactKey::SpherePlane { .. } => Err(
+                        MixedSphereError::Invalid("plane appeared in a pair-only scene"),
+                    ),
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(MixedSphereEventGeometry {
+                pairs,
+                maximum_gap_m: event.maximum_gap_m,
+            })
+        })
+        .collect::<Result<_, MixedSphereError>>()?;
+    Ok(MixedSphereResult {
+        trajectory: scene.trajectory,
+        event_geometry,
+        smooth_steps_attempted: scene.smooth_steps_attempted,
+        geometry_queries: scene.geometry_queries,
+        minimum_gap_m: scene.minimum_gap_m,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_scene(
+    systems: &[System<'_>],
+    spheres: &[ContactSphere],
+    laws: &[SpherePairLaw],
+    planes: &[AcceleratingPlane],
+    plane_laws: &[SpherePlaneLaw],
+    start_time_s: f64,
+    controls: MixedSphereControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<MixedSphereSceneResult, MixedSphereError> {
     poll(&mut cancelled)?;
-    let (pairs, commands) = admit(systems, spheres, laws, start_time_s, controls)?;
+    let (pairs, commands) = admit(
+        systems,
+        spheres,
+        laws,
+        start_time_s,
+        controls,
+        !planes.is_empty(),
+    )?;
+    let plane_geometry = PreparedPlanes::admit(spheres, planes, plane_laws, pairs.len())?;
     let mut states: Vec<_> = systems.iter().map(|system| system.state.clone()).collect();
     let origin = controls.trajectory.angular_origin_world;
     let before = super::momentum(systems, &states, origin, 0.0, &mut cancelled)?;
@@ -223,6 +299,20 @@ pub fn advance_mixed_sphere_contacts(
                 if encounter.is_none_or(|(earliest, _)| hit.time_s < earliest) {
                     encounter = Some((hit.time_s, pair.id));
                 }
+            }
+        }
+        if let Some(hit) = plane_geometry.encounter(
+            spheres,
+            &states,
+            &commands,
+            elapsed,
+            horizon,
+            controls,
+            &mut work,
+            &mut cancelled,
+        )? {
+            if encounter.is_none_or(|(earliest, _)| hit.0 < earliest) {
+                encounter = Some(hit);
             }
         }
         let mut duration = encounter.map_or(horizon, |(time, _)| time);
@@ -267,6 +357,7 @@ pub fn advance_mixed_sphere_contacts(
                 systems,
                 spheres,
                 &pairs,
+                &plane_geometry,
                 &commands,
                 &states,
                 candidate,
@@ -352,8 +443,8 @@ pub fn advance_mixed_sphere_contacts(
                 time_s: clock,
                 impact,
             });
-            event_geometry.push(MixedSphereEventGeometry {
-                pairs: observation.pairs,
+            event_geometry.push(MixedSphereSceneEventGeometry {
+                contacts: observation.keys,
                 maximum_gap_m: observation.maximum_gap,
             });
         }
@@ -369,10 +460,12 @@ pub fn advance_mixed_sphere_contacts(
         work.accepted,
         origin,
     )?;
+    let planes_after = plane_geometry.endpoints(elapsed)?;
     poll(&mut cancelled)?;
-    Ok(MixedSphereResult {
+    Ok(MixedSphereSceneResult {
         trajectory,
         event_geometry,
+        planes_after,
         smooth_steps_attempted: work.smooth,
         geometry_queries: work.geometry,
         minimum_gap_m: minimum_gap,
@@ -385,10 +478,12 @@ fn admit(
     laws: &[SpherePairLaw],
     clock: f64,
     controls: MixedSphereControls,
+    allow_single: bool,
 ) -> Result<(Vec<Pair>, Vec<CentreCommand>), MixedSphereError> {
     super::event_schedule(systems.len(), &[], controls.trajectory)?;
     super::admit_states(systems, clock)?;
-    if systems.len() < 2
+    if systems.is_empty()
+        || (systems.len() < 2 && !allow_single)
         || systems.len() != spheres.len()
         || !(1..=21).contains(&controls.maximum_pairs)
         || controls.maximum_events > 64
@@ -615,7 +710,7 @@ fn support_path(
 
 struct Observation {
     contacts: Vec<ArticulatedFrictionalContact>,
-    pairs: Vec<[u64; 2]>,
+    keys: Vec<MixedSphereSceneContactKey>,
     minimum_gap: f64,
     maximum_gap: f64,
 }
@@ -625,6 +720,7 @@ fn observe(
     systems: &[System<'_>],
     spheres: &[ContactSphere],
     pairs: &[Pair],
+    planes: &PreparedPlanes,
     commands: &[CentreCommand],
     before: &[State],
     after: &[State],
@@ -661,7 +757,7 @@ fn observe(
     }
     let mut observation = Observation {
         contacts: Vec::new(),
-        pairs: Vec::new(),
+        keys: Vec::new(),
         minimum_gap: f64::INFINITY,
         maximum_gap: 0.0,
     };
@@ -677,8 +773,24 @@ fn observe(
         )?;
         let relative = base(&after[pair.first]).world_from_base.translation()
             - base(&after[pair.second]).world_from_base.translation();
-        let gap = relative.x.hypot(relative.y).hypot(relative.z)
-            - (spheres[pair.first].radius_m + spheres[pair.second].radius_m);
+        // Admit the ACTUAL native endpoint through the same geometry owner
+        // that starts the next interval. Its deterministic norm can differ by
+        // an ULP from std::hypot, and the native centre subtraction need not
+        // equal the analytic path's rounded endpoint. Retry an earlier time
+        // rather than publish a state the next original query would penetrate.
+        work.query(controls)?;
+        let endpoint = match sphere_path(path_input(pair, spheres, after, commands, 0.0)?) {
+            Ok(path) => path,
+            Err(SweptSphereError::InitialPenetration) => return Ok(None),
+            Err(error) => {
+                return Err(MixedSphereError::Path {
+                    pair: pair.ids(),
+                    time: elapsed + duration,
+                    error,
+                });
+            }
+        };
+        let gap = endpoint.minimum_gap;
         if !gap.is_finite() || !path.minimum_gap.is_finite() {
             return Err(MixedSphereError::Invalid(
                 "nonfinite complete sphere path gap",
@@ -760,10 +872,28 @@ fn observe(
                     }
                 }
                 observation.contacts.push(contact);
-                observation.pairs.push(pair.ids());
+                observation
+                    .keys
+                    .push(MixedSphereSceneContactKey::SpherePair(pair.ids()));
                 observation.maximum_gap = observation.maximum_gap.max(gap).max(material_gap);
             }
         }
+    }
+    if !planes.observe(
+        spheres,
+        before,
+        after,
+        commands,
+        &kinematics,
+        duration,
+        elapsed,
+        event_pair.is_some(),
+        controls,
+        work,
+        cancelled,
+        &mut observation,
+    )? {
+        return Ok(None);
     }
     if event_pair.is_some_and(|id| !observation.contacts.iter().any(|contact| contact.id == id)) {
         return Ok(None);
