@@ -1,4 +1,9 @@
-//! Full-state lossless Galerkin image of the continuous m=0 modal owner.
+//! Full-state Galerkin image of the continuous m=0 modal owner.
+//!
+//! Lossless assembly can retain original molecular relaxation through
+//! [ModalGalerkin::with_molecular_relaxation], without reducing any spatial
+//! mode. That attachment supplies real bulk absorption and original thermal
+//! memory; it does not introduce wall viscothermal physics.
 //!
 //! Let C=(R'/R)A be the ORIGINAL Riccati coupling and P=q_dot. Its equations
 //! give U=-(S/rho)(q'-Cq). The weak equation is M q_ddot + K q = B U_in,
@@ -27,6 +32,9 @@ use fs_la::factor::cholesky;
 use fs_material::gas::GasState;
 use fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM;
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage};
+
+mod molecular;
+pub use molecular::ModalMolecularBudget;
 
 /// Actual boundary on every retained far-end mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +98,7 @@ pub struct ModalGalerkinSource {
     inverse_mass: Vec<f64>,
     inlet_reference: f64,
     mouth_reference: f64,
+    molecular: Option<molecular::MolecularSource>,
 }
 impl ModalGalerkinSource {
     /// Original continuous radius and slope owner.
@@ -138,11 +147,13 @@ impl ModalGalerkinSource {
     pub fn radial_eigenvalues(&self) -> &[f64] {
         &self.radial_eigenvalues
     }
-    /// Number of potential coordinates; canonical state has twice this length.
+    /// Number of potential coordinates; the acoustic canonical prefix has twice
+    /// this length. Molecular temperature/reservoir blocks follow that prefix.
     pub fn coordinates(&self) -> usize {
         self.nodes.len() * self.modes.0
     }
-    /// Row-major consistent M in the full retained spatial basis.
+    /// Row-major consistent M in the full retained spatial basis. With molecular
+    /// memory this is the frozen pressure mass, with original geometry retained.
     pub fn mass(&self) -> &[f64] {
         &self.mass
     }
@@ -180,7 +191,7 @@ impl ModalGalerkin {
     pub const fn source(&self) -> &ModalGalerkinSource {
         &self.source
     }
-    /// Full physical system; R is exactly zero for this lossless image.
+    /// Full physical system; R is exactly zero before molecular attachment.
     pub const fn system(&self) -> &PortHamiltonian {
         &self.system
     }
@@ -496,6 +507,7 @@ fn assemble(
             inverse_mass,
             inlet_reference,
             mouth_reference,
+            molecular: None,
         },
         system,
     })

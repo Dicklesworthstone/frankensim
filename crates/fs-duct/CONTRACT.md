@@ -3062,3 +3062,12 @@ thermal relaxation mode and heat; an independently derived gas-loaded
 compliant-wall pole and work; live contour quadrature refinement; prepared,
 one-shot and repeated-result parity; and probe, budget, band and cancellation
 refusals without source changes.
+
+
+### Original molecular relaxation in the complete multimodal duct
+
+`ModalGalerkin::with_molecular_relaxation` attaches an evaluated original `RelaxationState` to every retained axial/radial pressure coordinate. It preserves the full spatial stiffness, geometry, original gas state and physical face maps. The canonical acoustic prefix remains `[q; p]`, with `p=M_inf*P` using the original frozen bulk modulus; source mass and inverse-mass accessors report this actual map. One unit-storage thermal coordinate per spatial coordinate and every positive original reservoir follow the acoustic prefix. Equal relaxation times remain separate, zero-capacity processes remain identifiable in the borrowed-law metadata, and an empty law leaves all original matrices bitwise intact.
+
+With `M_inf=L*L^T`, `x=L^T*P`, `a=sqrt(R/cv_inf)` and `b_j=sqrt(C_j/cp_inf)`, each original process dissipates `sum_i |z_ji-b_j*(y_i+a*x_i)|^2/tau_j`. The symmetric positive-semidefinite resistance is assembled from those original slips. This realizes the source's complete caloric compliance `1/K(s)=(1-R/cp(s))/(rho*R*T)`, including coupled dispersion and absorption, without fitting modal damping or merging reservoirs. Instantaneous and harmonic heat observers independently evaluate each original process; harmonic inputs are peak phasors and heat carries the cycle-mean factor one half.
+
+Complete state/payload/work and existing exact-flow capacity are admitted before dense allocation; cancellation, finite constitutive coefficients and positive frozen pressure mass remain required. Repeated attachment, a different gas, or nonuniform regional material is refused. Uniform regional copies are accepted. This is frozen adiabatic molecular absorption; it does not model higher-mode viscothermal walls, Stokes--Kirchhoff losses, or evolving gas/species fields. Four regressions compare constant/flared two-mode weak equations to the original caloric source, independently verify heat, converge damped poles under spatial refinement, retain equal-rate reservoirs, and exercise original-source/resource/cancellation refusals.
