@@ -7512,7 +7512,17 @@ energy audit, glottal dynamics, or a completed M3.1-W7 player-airway realization
 `NetworkDrivingPoint::realize_line` realizes that driving point as a
 characteristic line. It uses the same ladder, Fourier convention and
 4x-oversampled passivity gate as `realize_line`, and samples
-`R = (Z - zc)/(Z + zc)` from the network solve. The nominal round trip is twice
+the wave response from `reflection` or `reflection_coupled`. Their positive
+real source reference imposes `p + zc U = 2` and returns `(p - zc U)/2` for a
+unit incident pressure wave. This equals `R = (Z - zc)/(Z + zc)` wherever Z
+exists, but retains finite reflection at lossless input-flow nodes without
+forming infinite impedance, adding damping or shifting frequency. The
+`reflection_regional` and `reflection_coupled_regional` queries use the same
+physical boundary closure with the original per-edge/exterior materials;
+`realize_line_regional` samples that closure too. Exact closed half-wave and
+open quarter-wave pole tests, independent travel phase, finite-Z equivalence
+and coupled/regional substitutions are in `driving_point::network::tests`.
+The nominal round trip is twice
 the longest shortest axial path from the active port, computed with the
 single-duct arithmetic. A network solve may refuse the realizer's
 1e-3 rad/s DC probe as ill-conditioned. Below the largest rung's first bin,
@@ -7528,6 +7538,16 @@ the existing reed and compact-jet observer on that line. The active port's edge
 radius sets the source impedance. This is a frozen-geometry FIR line. It is not
 M2.2-W3c's DG network, a moving-geometry line, or a radiated far field from the
 openings.
+
+The shared line ladder has a bounded fallback when its converged Nyquist-tapered
+taps fail passivity: the same physical samples are inverse-transformed without
+a taper or precursor folding at the current and preceding resolutions. Both
+must have finite samples, taps and energy, real DC/Nyquist endpoints within
+the existing arithmetic tolerance, fitting delay, and acceptable tail and
+4x-oversampled passivity. Their first-three-peak count must agree and movement
+must meet the original convergence tolerance. The receipt records those two untapered rungs.
+This preserves resolved lossless pulse reflections without artificial damping;
+active or unresolved noncausal returns still refuse.
 
 Tests in `driving_point::ladder_tests`:
 - `network_line_matches_the_duct_line_for_one_edge`: same rung, taps within

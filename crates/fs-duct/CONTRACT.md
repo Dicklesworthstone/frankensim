@@ -3169,3 +3169,29 @@ thermal expansion and in-phase component motion; it cannot supply second sound
 or classical thermoviscous wall losses. `tests/superfluid_projection.rs` checks
 matched-load propagation, an independently known standing wave and native DG
 energy storage, original-state retention, and refusal of nonzero expansion.
+
+### Prepared coherent network reflection and transmission
+
+`network::scattering::PreparedNetworkScattering` prepares a frequency-specific
+wave matrix through the original source/network/load boundary solve, including
+its retained-wave fallback at open-circuit impedance poles. Each declared
+`WavePort` supplies a positive real reference R in Pa s/m³. For peak pressure
+waves, p=a+b and U=(a-b)/R with U into the graph, so the existing source law
+p+R U=2a directly supplies every reflection/transmission column. One prepared
+factorization serves all columns. Undeclared external ports must have explicit
+scalar or coupled loads; an unexcited wave port retains its reference load.
+
+The cached pressure and power-normalized matrices use canonical label order.
+Power normalization uses a/sqrt(R), giving cycle-mean power |a/sqrt(R)|²/2;
+unequal reference impedances therefore do not turn pressure transmission above
+one into a false power-gain claim. Allocation-free coherent application retains
+cross-port phases and compensated sums and publishes no partial output on a
+refusal. Original gas/regional material laws, propagation, loads, source work,
+32-port limit and solve-conditioning bounds remain authoritative. No complex
+reference impedance, time-varying connection, passivity projection or inferred
+experimental validation is supplied.
+
+G1/G3 tests in `src/network/scattering/tests.rs` compare exact lossless pipe
+transmission at impedance poles, unequal-reference reciprocal unitary matrices,
+regional three-way junction amplitudes, coherent power with viscothermal and
+exterior losses, canonical reordering, and transactional input refusal.

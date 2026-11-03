@@ -112,7 +112,8 @@ pub struct LineRealization {
     pub peak_shift_cents: f64,
     /// Explicit pole and bulk-delay states attached to the realization.
     pub pole_states: Vec<PoleState>,
-    /// Full rung history traversed by the ladder.
+    /// Rungs of the accepted tap construction. An untapered fallback records
+    /// its own two measured rungs, never a mixed tapered/untapered comparison.
     pub rungs_tried: Vec<LineRung>,
 }
 
@@ -515,6 +516,68 @@ pub(crate) fn analyze_reflectance_ir(
     (max_r_abs, peaks)
 }
 
+// A Nyquist window can make an already causal lossless response nonpassive
+// between its sample bins. Try the original samples without that alteration,
+// but only after the ordinary construction has failed its passivity gate.
+// Both rungs must independently fit the delay, tail and unchanged power bound;
+// their first three peaks must converge. No source is queried again, no gain
+// is repaired, and no negative-time precursor is folded into positive time.
+fn untapered_reflectance_pair(
+    r_pos: &[C64],
+    n_fft: usize,
+    dt: f64,
+    geo_delay: f64,
+    ladder: &LineLadder,
+) -> Option<(Vec<f64>, Vec<LineRung>)> {
+    if n_fft < 512 || n_fft as f64 * 0.5 <= geo_delay + 2.0
+        || r_pos.iter().any(|z| !z.re.is_finite() || !z.im.is_finite())
+        || r_pos[0].im != 0.0 || r_pos.last()?.im.abs() > PASSIVITY_TOL
+    {
+        return None;
+    }
+    let mut rungs = Vec::with_capacity(2);
+    let mut previous_peaks: Vec<f64> = Vec::new();
+    for stride in [2, 1] {
+        let n = n_fft / stride;
+        let samples: Vec<_> = r_pos.iter().step_by(stride).copied().collect();
+        let ir = realize_reflectance_ir_with_rolloff(
+            &samples, &vec![C64::ONE; samples.len()], n, false,
+        );
+        if ir.iter().any(|h| !h.is_finite()) {
+            return None;
+        }
+        let total: f64 = ir.iter().map(|h| h * h).sum();
+        if !total.is_finite() {
+            return None;
+        }
+        let tail: f64 = ir[3 * (n / 4)..].iter().map(|h| h * h).sum();
+        let tail_energy = if total > 0.0 { tail / total } else { 0.0 };
+        let (peak_reflection, peaks) = analyze_reflectance_ir(&ir, dt, geo_delay);
+        if !peak_reflection.is_finite() || peak_reflection > 1.0 + PASSIVITY_TOL
+            || !tail_energy.is_finite() || tail_energy >= ladder.tail_tol
+        {
+            return None;
+        }
+        let peak_shift_cents = if rungs.is_empty() {
+            f64::INFINITY
+        } else if previous_peaks.is_empty() && peaks.is_empty() {
+            0.0
+        } else if previous_peaks.len() != peaks.len() {
+            f64::INFINITY
+        } else {
+            previous_peaks.iter().zip(&peaks).take(3)
+                .map(|(&a, &b)| (1200.0 * (b / a).log2()).abs())
+                .fold(0.0_f64, f64::max)
+        };
+        rungs.push(LineRung { n_fft: n, tail_energy, peak_shift_cents });
+        if stride == 1 {
+            return (peak_shift_cents < ladder.peak_tol_cents).then_some((ir, rungs));
+        }
+        previous_peaks = peaks;
+    }
+    None
+}
+
 /// Realize a causal characteristic line via the convergence ladder [`LineLadder`],
 /// returning both the [`DelayedFilter`] and the [`LineRealization`] receipt.
 ///
@@ -733,6 +796,19 @@ where
 
         if converged {
             if max_r_abs > 1.0 + PASSIVITY_TOL {
+                if let Some((raw, raw_rungs)) =
+                    untapered_reflectance_pair(&r_pos, n_fft, dt, geo_delay, ladder)
+                {
+                    let last = raw_rungs.last().expect("two untapered rungs admitted");
+                    let realization = LineRealization {
+                        n_fft, tail_energy: last.tail_energy,
+                        peak_shift_cents: last.peak_shift_cents,
+                        pole_states, rungs_tried: raw_rungs,
+                    };
+                    let filter = DelayedFilter::from_impulse_response(dt, raw)
+                        .map_err(DrivingPointError::Discrete)?;
+                    return Ok((filter, realization));
+                }
                 return Err(DrivingPointError::Invalid {
                     what: "converged characteristic line violates 4x-oversampled passivity",
                 });

@@ -784,6 +784,115 @@ fn network_line_matches_the_duct_line_for_one_edge() {
     );
 }
 
+/// G2: actual network realization crosses closed half-wave and open quarter-
+/// wave input poles ON its FFT grid. A resolved lossless return remains a
+/// signed delayed pulse; the Nyquist window cannot force artificial damping.
+#[test]
+fn network_line_lossless_reflection_survives_pole_bins_and_window() {
+    use fs_duct::network::NetworkMedia;
+    use fs_material::gas_species::input::GasRecord;
+    let gas = air20(); let delay = 16.0;
+    let length = 0.5 * delay * gas.sound_speed / f64::from(RATE_HZ);
+    let radius = 0.006;
+    let zc = gas.characteristic_impedance / (core::f64::consts::PI * radius * radius);
+    let net = DuctNetwork {
+        nodes: vec![network_port("in"), network_port("out")],
+        edges: vec![network_edge("bore", 0, 1, vec![cylinder(radius, length)])],
+    };
+    let media = NetworkMedia::new(&net,
+        vec![("bore".into(), GasRecord::Legacy(gas))], GasRecord::Legacy(gas)).unwrap();
+    let ladder = LineLadder { max_taps: 4096, ..LineLadder::default() };
+    for (load, sign) in [(NetworkLoad::Closed, 1.0), (NetworkLoad::PressureRelease, -1.0)] {
+        let point = NetworkDrivingPoint::new(net.clone(), "in".into(),
+            vec![PortTermination { label: "out".into(), load }], network_schema()).unwrap();
+        let (uniform, receipt) = point
+            .realize_line(&gas, LossModel::Lossless, RATE_HZ, zc, &ladder, None).unwrap();
+        let (regional, regional_receipt) = point
+            .realize_line_regional(&media, LossModel::Lossless, RATE_HZ, zc, &ladder, None).unwrap();
+        assert_eq!(receipt, regional_receipt);
+        assert_eq!(receipt.rungs_tried.len(), 2);
+        assert!(receipt.tail_energy < ladder.tail_tol);
+        assert!(receipt.peak_shift_cents < ladder.peak_tol_cents);
+        let taps = line_taps(&uniform, receipt.n_fft);
+        assert_eq!(taps, line_taps(&regional, receipt.n_fft));
+        for (sample, &value) in taps.iter().enumerate() {
+            let expected = if sample == delay as usize { sign } else { 0.0 };
+            assert!((value-expected).abs() < 3e-11, "sample {sample}: {value} != {expected}");
+        }
+        let (peak, _) = analyze_reflectance_ir(&taps, 1.0/f64::from(RATE_HZ), delay);
+        assert!(peak <= 1.0 + super::PASSIVITY_TOL);
+    }
+}
+
+/// G0: an active return or a wave that wraps from negative time cannot use the
+/// untapered fallback. These are actual rejection gates, not gain correction.
+#[test]
+fn untapered_reflection_keeps_active_and_noncausal_refusals() {
+    let n = 512; let delay = 16.0;
+    for (gain, direction) in [(1.01, 1.0), (1.0, -1.0)] {
+        let spectrum: Vec<_> = (0..=n/2).map(|bin| {
+            let phase = direction * core::f64::consts::TAU * bin as f64 * delay / n as f64;
+            C64::new(phase.cos(), phase.sin()).scale(gain)
+        }).collect();
+        assert!(super::untapered_reflectance_pair(&spectrum, n,
+            1.0/f64::from(RATE_HZ), delay, &LineLadder::default()).is_none());
+    }
+    let mut nonfinite = vec![C64::ONE; n/2 + 1];
+    nonfinite[3] = C64::new(0.0, f64::NAN);
+    assert!(super::untapered_reflectance_pair(&nonfinite, n,
+        1.0/f64::from(RATE_HZ), delay, &LineLadder::default()).is_none());
+}
+
+/// G3: matching an existing peak does not establish convergence when the next
+/// rung resolves another peak. A four-sample delay followed by a stable causal
+/// all-pass boundary has |R|=1 and negligible tails on both rungs, so only the
+/// unequal nonempty peak counts must refuse this candidate.
+#[test]
+fn untapered_reflection_rejects_a_new_nonempty_peak() {
+    let n = 512;
+    let geometry_delay = 4.0;
+    let dt = 1.0 / f64::from(RATE_HZ);
+    let ladder = LineLadder::default();
+    // R(z)=z^4*(a+z)/(1+a*z), z=exp(+i omega dt). Choose the stable
+    // all-pass pole so its second impedance peak straddles the two sampled
+    // searches' upper cutoff. This changes no acceptance tolerance.
+    let theta = 0.89965 * core::f64::consts::PI;
+    let phase = 2.0 * core::f64::consts::TAU - geometry_delay * theta;
+    let ratio = (0.5 * phase).tan() / (0.5 * theta).tan();
+    let a = (1.0 - ratio) / (1.0 + ratio);
+    assert!(a > 0.0 && a < 1.0);
+    let spectrum: Vec<_> = (0..=n / 2)
+        .map(|bin| {
+            let angle = core::f64::consts::TAU * bin as f64 / n as f64;
+            let z = C64::new(angle.cos(), angle.sin());
+            let delay = C64::new(
+                (geometry_delay * angle).cos(),
+                (geometry_delay * angle).sin(),
+            );
+            delay * (C64::from_re(a) + z) * (C64::ONE + z.scale(a)).recip()
+        })
+        .collect();
+    let mut measured = Vec::new();
+    for stride in [2, 1] {
+        let samples: Vec<_> = spectrum.iter().step_by(stride).copied().collect();
+        let taps = super::realize_reflectance_ir_with_rolloff(
+            &samples, &vec![C64::ONE; samples.len()], n / stride, false,
+        );
+        let total: f64 = taps.iter().map(|h| h * h).sum();
+        let tail: f64 = taps[3 * taps.len() / 4..].iter().map(|h| h * h).sum();
+        let (maximum, peaks) = analyze_reflectance_ir(&taps, dt, geometry_delay);
+        assert!(maximum <= 1.0 + super::PASSIVITY_TOL);
+        assert!(tail / total < ladder.tail_tol);
+        measured.push(peaks);
+    }
+    assert_eq!((measured[0].len(), measured[1].len()), (1, 2));
+    let shared_shift = (1200.0 * (measured[1][0] / measured[0][0]).log2()).abs();
+    assert!(shared_shift < ladder.peak_tol_cents);
+    assert!(super::untapered_reflectance_pair(
+        &spectrum, n, dt, geometry_delay, &ladder,
+    ).is_none());
+}
+
 /// G0: a constant one-port coupled termination realizes the SISO line bitwise,
 /// and the coupled declaration is enforced in both directions.
 #[test]
