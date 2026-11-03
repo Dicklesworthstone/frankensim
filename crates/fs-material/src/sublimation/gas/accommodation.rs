@@ -101,14 +101,46 @@ impl ThermalAccommodation {
         surface_temperature_k: f64,
         area_m2: f64,
         duration_s: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReflectedHeatStep, GasSurfaceError> {
+        self.evaluate_inner(Some(binding), gas, surface_temperature_k, area_m2, duration_s, cancelled)
+    }
+
+    /// Reflected heat and weighted encounter masses for a sealed surface.
+    ///
+    /// Every active original species has zero sticking probability. This uses
+    /// the identical source-caloric and exposure evaluation as [`Self::evaluate`]
+    /// without inventing a volatile binding or withdrawing any gas mass. An
+    /// explicitly declared Maxwell-scattering consumer may reuse these same
+    /// weighted masses for tangential momentum exchange; an arbitrary thermal
+    /// accommodation coefficient alone does not specify that angular law.
+    pub fn evaluate_sealed(
+        &self,
+        gas: &ClosedGasParcel,
+        surface_temperature_k: f64,
+        area_m2: f64,
+        duration_s: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReflectedHeatStep, GasSurfaceError> {
+        self.evaluate_inner(None, gas, surface_temperature_k, area_m2, duration_s, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_inner(
+        &self,
+        binding: Option<&GasSurfaceBinding>,
+        gas: &ClosedGasParcel,
+        surface_temperature_k: f64,
+        area_m2: f64,
+        duration_s: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReflectedHeatStep, GasSurfaceError> {
         poll(&mut cancelled)?;
         let gas_temperature_k = gas.state().state().temperature;
         self.admit_temperatures(surface_temperature_k, gas_temperature_k)?;
         if !nonnegative(area_m2) || !nonnegative(duration_s)
-            || !binding.accommodation_coefficient.is_finite()
-            || !(0.0..=1.0).contains(&binding.accommodation_coefficient)
+            || binding.is_some_and(|binding| !binding.accommodation_coefficient.is_finite()
+                || !(0.0..=1.0).contains(&binding.accommodation_coefficient))
         {
             return Err(invalid("finite nonnegative molecular exposure and valid sticking required"));
         }
@@ -124,9 +156,8 @@ impl ThermalAccommodation {
             poll(&mut cancelled)?;
             let alpha = *self.coefficients.get(component.species())
                 .ok_or(invalid("thermal accommodation is missing an active original gas species"))?;
-            let nonsticking = if component.species() == &binding.species {
-                1.0 - binding.accommodation_coefficient
-            } else { 1.0 };
+            let nonsticking = binding.filter(|binding| component.species() == &binding.species)
+                .map_or(1.0, |binding| 1.0 - binding.accommodation_coefficient);
             let mut accommodated_incident_mass_kg = 0.0;
             let mut specific_energy_change_j_kg = 0.0;
             let mut heat_into_gas_j = 0.0;

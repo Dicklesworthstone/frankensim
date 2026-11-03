@@ -46,7 +46,7 @@ impl MovingGasParcel {
         Self::from_momentum(parcel, momentum)
     }
 
-    fn from_momentum(
+    pub(crate) fn from_momentum(
         parcel: ClosedGasParcel,
         momentum_kg_m_s: [f64; 3],
     ) -> Result<Self, EvaporatingLiquidGasError> {

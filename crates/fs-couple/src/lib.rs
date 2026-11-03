@@ -90,6 +90,8 @@ pub mod stokes_motion;
 pub mod liquid_gas;
 /// Conservative matter and momentum transfer between original finite liquid owners.
 pub mod liquid_transfer;
+/// Finite gas and rigid-wall molecular shear with original caloric feedback.
+pub mod molecular_shear;
 pub mod material_assembly;
 /// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
 pub mod material_circuit;

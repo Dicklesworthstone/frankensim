@@ -1,5 +1,41 @@
 # CONTRACT: fs-couple
 
+## Finite gas and rigid wall under molecular shear
+
+`molecular_shear::step_candidate` exchanges tangential momentum between the
+existing `MovingGasParcel` and an original finite-mass rigid wall bound to its
+enthalpy/phase chart. An explicit Maxwell reflection model supplies the same
+species encounter masses and caloric reflected heat through the original
+`ThermalAccommodation::evaluate_sealed` owner. There is no volatile placeholder,
+mass transfer, replacement gas inventory or independent heat-capacity model.
+
+For total accommodated encounter mass C and reduced mass mu, the original
+relative velocity relaxes by exp(-C/mu). The reciprocal impulse and integrated
+wall displacement follow that same exact frozen-coefficient solution. Relative
+kinetic loss D enters each original caloric store as D/2, in addition to the
+reciprocal original reflected heat. This split follows the Maxwell crossing
+energy moments; neither kinetic loss nor source heat is counted twice. Actual
+native wall impulse, represented gas momentum and each original thermal store
+are independently checked using exchange-scale budgets. Large common velocity,
+energy datum or normal pressure cannot enlarge the conservation allowance.
+
+The plane is fixed normally and the wall cannot spin. Complete molecular normal
+pressure, separate gas/wall confinement impulses and the patch's rotational
+guide reaction are explicit and do zero work. The material patch arm is body
+fixed and translates with the wall. All crossed caloric segments must retain
+constant density, so latent plateaus are supported when they require no missing
+expansion/normal-boundary work. Duration, endpoint temperature changes, species
+and original chart-knot work are bounded. One original gas heat reconstruction
+produces a joint gas/wall candidate; any late refusal or cancellation publishes
+neither endpoint.
+
+Temperature-dependent encounters and reflected heat are frozen over each
+interval, so trajectory accuracy requires time refinement. The homogeneous
+gas owner supplies no spatial transport, gas spin or unrestricted angular
+closure. Focused regressions specify unequal-mass relaxation, variable calorics
+and latent storage, full support/guide loads, sealed-owner parity, specular
+limits, stiff coupling, inertial covariance and atomic source/budget refusal.
+
 ## Forced superfluid momentum and original caloric heating
 
 `superfluid::advance_forced_closed_friction_heat` composes the authored component
