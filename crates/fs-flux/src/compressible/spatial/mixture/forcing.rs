@@ -202,7 +202,7 @@ pub(super) fn kick_field(
         // Inputs are original or already source-admitted RK states. The mass
         // remains the compensated species sum, never a separately evolved rho.
         let rho = sum(row[..n].iter().copied());
-        let next = kick::<Error>(
+        let next = kick::<Error, 3>(
             force,
             i,
             rho,

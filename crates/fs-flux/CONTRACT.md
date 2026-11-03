@@ -1312,7 +1312,35 @@ moving geometry, reciprocal moving-wall FSI, a shock adjoint, physical shock
 thickness or experimental validation. The full EOS-specific fully discrete
 entropy/invariant-domain and moving-domain programs remain separate work.
 
-### Conservative body forcing on the original three-dimensional owners
+### Conservative body forcing on the original Cartesian owners
+
+The planar `Euler2d::step_with_forcing` now supplies the same physical source
+law and symmetric source/advection/source composition on its original SSP RK2
+transaction. `BodyForce2d` distinguishes uniform or per-cell acceleration
+[m/s²] from force density [N/m³]; acceleration multiplies the density of each
+current source stage. The existing 2-D face closure, reconstruction, boundary
+loads and retry policy remain the transport owner. The 2-D and 3-D source
+types and kick arithmetic share one dimension-generic implementation, including
+the frozen, mixture and reactive 3-D consumers.
+
+Planar `StepReport::source_change` exposes body impulse and signed mechanical
+work separately from its per-face boundary exchange. Source-only work is the
+represented momentum increment dotted with midpoint velocity, so braking
+removes kinetic energy without becoming artificial internal heating. Source
+calorics, Mach admission at accepted/kicked/RK cell states, both advective
+face CFL checks and the final kicked-cell acoustic CFL all apply before atomic
+publication. An exactly zero authored source follows the ordinary step after
+validating source shape, controls and scratch.
+
+`ForcingWorkspace2d` admits and reuses one 32-byte conservative state per cell,
+with checked required bytes and actual capacity admission. Source loops and
+retries allocate no additional arrays. Focused regressions cover unequal
+density acceleration versus volumetric forcing, variable-Cp signed work,
+spatial source fields, zero-source bit equality, force-driven Mach/CFL retries,
+budget refusal and final-checkpoint cancellation/replay. This planar entry is
+for frozen inviscid gas; it does not yet add forced planar molecular/mixture
+composition. The same held-source and hydrostatic no-claim boundaries below
+apply.
 
 `Euler3d::step_with_forcing` composes source half step, original SSP RK2
 advection and source half step inside the existing retry/publication owner.

@@ -176,7 +176,7 @@ fn g1_heterogeneous_kick_uses_each_density_and_does_not_turn_rounded_impulse_int
         }
         close(source.work, expected_work, 2e-13);
     }
-    let rounded = kick::<Error>(
+    let rounded = kick::<Error, 3>(
         BodyForce3d::UniformForceDensity([0.25, 0.0, 0.0]),
         0,
         1.0,

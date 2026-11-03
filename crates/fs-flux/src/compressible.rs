@@ -13,7 +13,11 @@ pub use fs_gas::dynamics::{Error, FrozenGas, Reconstruction, StepControl};
 use fs_gas::dynamics::{MAX_EULER_CELLS, NormalConserved, NormalFaceFlux, NormalPrimitive};
 use fs_qty::Time;
 
+mod body_force;
 mod cartesian;
+/// Conservative acceleration and body-force work on the planar time owner.
+pub mod forcing;
+pub use forcing::{BodyForce2d, ForceChange2d, ForceControl2d, ForcingWorkspace2d};
 /// Evolving canonical species in the same conservative Cartesian discretization.
 pub mod mixture;
 /// Original-source Fourier heat transport and complete planar Newtonian stress.
@@ -319,7 +323,7 @@ pub type BoundaryImpulse = Totals;
 pub struct StepReport {
     /// Actual accepted duration [s].
     pub elapsed: Time,
-    /// Largest two-direction face CFL across both stages.
+    /// Largest two-direction face CFL; forced steps also admit the kicked endpoint.
     pub maximum_cfl: f64,
     /// Number of rejected, halved attempts.
     pub halvings: usize,
@@ -335,7 +339,9 @@ pub struct StepReport {
     pub after: Totals,
     /// Net transfer into the domain, integrated over both stages.
     pub boundary_change: Totals,
-    /// `after - before - boundary_change`.
+    /// Applied body impulse and mechanical work, separate from boundary transfer.
+    pub source_change: ForceChange2d,
+    /// `after - before - boundary_change - source_change`.
     pub conservation_residual: Totals,
 }
 
@@ -449,6 +455,48 @@ impl Euler2d {
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.step_impl(maximum_duration, controls, None, cancelled)
+    }
+
+    /// Symmetric source/advection/source evolution with the original EOS and
+    /// retry transaction. Acceleration uses each source stage's mass density;
+    /// force density is an independent load in N/m³. The held source adds its
+    /// midpoint kinetic work, preserving source-only internal energy to
+    /// floating-point accuracy.
+    ///
+    /// Every retry restarts from the accepted state. Cancellation or refusal
+    /// preserves cells, clock, boundary loads and the last report. The supplied
+    /// workspace is reused. A zero source retains ordinary-step semantics.
+    /// This explicit split is not hydrostatic well balancing or an implicit
+    /// velocity-dependent force model. Time-varying loads are held per interval.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        force: BodyForce2d<'_>,
+        force_controls: ForceControl2d,
+        workspace: &mut ForcingWorkspace2d,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        force_controls.admit::<Error>()?;
+        let active = force.admit::<Error>(self.states.len(), &mut cancelled)?;
+        workspace.admit(self.states.len())?;
+        if !active {
+            return self.step(maximum_duration, controls, cancelled);
+        }
+        self.step_impl(
+            maximum_duration, controls, Some((force, force_controls, workspace)), cancelled,
+        )
+    }
+
+    fn step_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        mut forcing: Option<(BodyForce2d<'_>, ForceControl2d, &mut ForcingWorkspace2d)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -462,12 +510,16 @@ impl Euler2d {
         let mut rate: f64 = 0.0;
         for (p, q) in self.work.primitive.iter_mut().zip(&self.states) {
             *p = q.primitive(&self.gas, &mut cancelled)?;
+            if let Some((_, force_controls, _)) = &forcing {
+                force_controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+            }
             rate = rate.max(
                 (p.velocity[0].abs() + p.sound_speed) / self.grid.spacing[0]
                     + (p.velocity[1].abs() + p.sound_speed) / self.grid.spacing[1],
             );
         }
         let before = checked_totals(&self.states, self.grid.cell_volume(), &mut cancelled)?;
+        let mut source_change = ForceChange2d::default();
         let accepted = cartesian::advance(
             maximum_duration.value(),
             self.time,
@@ -475,6 +527,15 @@ impl Euler2d {
             controls,
             &mut cancelled,
             |dt, reconstruction, cancelled| {
+                if let Some((force, force_controls, workspace)) = forcing.as_mut() {
+                    let (stats, source) = forcing::attempt(
+                        &self.gas, &self.grid, self.boundaries, &self.states,
+                        &mut self.work, workspace, *force, *force_controls,
+                        dt, controls.cfl, reconstruction, cancelled,
+                    )?;
+                    source_change = source;
+                    return Ok(stats);
+                }
                 attempt(
                     &self.gas,
                     &self.grid,
@@ -484,6 +545,7 @@ impl Euler2d {
                     dt,
                     controls.cfl,
                     reconstruction,
+                    None,
                     cancelled,
                 )
             },
@@ -507,6 +569,7 @@ impl Euler2d {
         let a = after.array();
         let b = before.array();
         let c = boundary_change.array();
+        let source = [0.0, source_change.impulse[0], source_change.impulse[1], source_change.work];
         let report = StepReport {
             elapsed: Time::new(dt),
             maximum_cfl: stats.rate * dt,
@@ -517,9 +580,12 @@ impl Euler2d {
             before,
             after,
             boundary_change,
-            conservation_residual: Totals::from_array(std::array::from_fn(|k| a[k] - b[k] - c[k])),
+            source_change,
+            conservation_residual: Totals::from_array(std::array::from_fn(|k| {
+                a[k] - b[k] - c[k] - source[k]
+            })),
         };
-        if !a.into_iter().chain(b).chain(c).all(f64::is_finite) {
+        if !a.into_iter().chain(b).chain(c).chain(source).all(f64::is_finite) {
             return Err(Error::Invalid(
                 "unrepresentable Cartesian extensive balance",
             ));
@@ -544,6 +610,7 @@ fn attempt(
     dt: f64,
     cfl: f64,
     reconstruction: Reconstruction,
+    force_controls: Option<ForceControl2d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     cartesian::rk2(cancelled, |final_stage, cancelled| {
@@ -557,6 +624,7 @@ fn attempt(
             &mut work.x_flux,
             &mut work.y_flux,
             reconstruction,
+            force_controls,
             cancelled,
         )?;
         cartesian::check_cfl::<Error>(stats.rate * dt, cfl)?;
@@ -571,6 +639,7 @@ fn attempt(
                 &mut work.candidate,
                 dt,
                 final_stage,
+                force_controls,
                 cancelled,
             )?;
         } else {
@@ -584,6 +653,7 @@ fn attempt(
                 &mut work.stage,
                 dt,
                 false,
+                force_controls,
                 cancelled,
             )?;
         }
@@ -611,11 +681,15 @@ fn spatial(
     x_flux: &mut [NormalFaceFlux],
     y_flux: &mut [NormalFaceFlux],
     reconstruction: Reconstruction,
+    force_controls: Option<ForceControl2d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     let mut stats = StageStats::default();
     for (p, q) in primitive.iter_mut().zip(states) {
         *p = q.primitive(gas, &mut *cancelled)?;
+        if let Some(controls) = force_controls {
+            controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+        }
     }
     stats.limited = cartesian::slopes::<Error>(
         grid,
@@ -767,6 +841,7 @@ fn update(
     output: &mut [State],
     dt: f64,
     final_stage: bool,
+    force_controls: Option<ForceControl2d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), Error> {
     cartesian::update::<4, Error, _>(
@@ -789,7 +864,10 @@ fn update(
         cancelled,
         |k, row, cancelled| {
             output[k] = State::from_array([row[0], row[1], row[2], row[3]]);
-            output[k].primitive(gas, &mut *cancelled)?;
+            let primitive = output[k].primitive(gas, &mut *cancelled)?;
+            if let Some(controls) = force_controls {
+                controls.admit_velocity::<Error>(primitive.velocity, primitive.sound_speed)?;
+            }
             Ok(())
         },
     )
