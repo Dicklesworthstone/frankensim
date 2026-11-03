@@ -26629,3 +26629,38 @@ formation-reference invariance, shared gross withdrawal and newly arriving
 species, and atomic source/drift/cancellation refusal. Scoped Rustfmt parsing
 and direct API/source review passed. Native compilation and execution remain
 unverified because the required sibling manifests are unavailable.
+
+### Adaptive finite molecular exchange with original inventory reuse
+
+`molecular_exchange::trajectory::advance_candidate` advances a complete pair
+window through the original fixed-step owner. Each trial compares one full
+step with two native half steps and retains only the accepted half steps.
+Both finite temperatures, compositions and bulk velocities are resampled in
+each proposal. Local error follows both gas temperatures/pressures, every
+original interface-catalog species (including zero initial mass) and each
+velocity increment. Common inertial drift cannot enlarge the velocity error
+allowance. The canonical material inventory is queried once per gas/state;
+fixed-step withdrawal and joint mass checks reuse the same public inventory
+owner instead of rebuilding it inside per-species loops.
+
+Separate finite limits control initial/minimum/maximum intervals, attempted
+intervals and accepted history. A shorter final remainder must advance the
+physical clock exactly. Only local error or typed duration/gross-withdrawal
+limits request a shorter trial; source, kinetic/caloric and conservation
+refusals retain their physical meaning. Cancellation or budget exhaustion
+publishes neither partial gas nor partial accepted history.
+
+Whole-window accounts use compensated accepted-only sums for both gross
+directions, original relative caloric coordinates, bulk kinetic changes,
+signed transferred mass/momentum and mass/momentum/energy residuals. These
+residuals never subtract gross formation-energy totals. The estimator remains
+first order and local; no global error or continuous source-domain enclosure
+is claimed. It converges the shared-aperture operator. Entropy/passivity and
+isolated closed-vessel equilibration require the remaining wall/face and gas
+transport operators; timestep refinement alone cannot supply their physics.
+
+Focused native-owner fixtures specify temporal refinement, accepted-only
+accounts, changing source samples, newly arriving species and bounded work,
+minimum-step and late-cancellation refusal. Scoped Rustfmt parsing and source/API
+review are available; native compilation and execution remain unverified with
+the missing constellation sibling manifests.

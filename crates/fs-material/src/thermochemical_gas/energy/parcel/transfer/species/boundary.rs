@@ -288,10 +288,18 @@ impl ClosedGasParcel {
         Ok(Self::from_isochoric(parcel))
     }
 
+    /// Canonical active-species masses from the original composition and mass.
+    /// Query once when inspecting several species: the original conversion and
+    /// representability checks are shared with every finite species transfer.
+    /// Absent species are not inserted into this inventory.
+    pub fn species_inventory_kg(&self) -> Result<BTreeMap<SpeciesId, f64>, GasEnergyError> {
+        inventory(self.model(), self.mass_kg())
+    }
+
     /// Actual species inventory from the original mixture composition and mass.
     /// An absent active species has exactly zero mass, including after depletion.
     pub fn species_mass_kg(&self, id: &SpeciesId) -> Result<f64, GasEnergyError> {
-        Ok(inventory(self.model(), self.mass_kg())?
+        Ok(self.species_inventory_kg()?
             .get(id)
             .copied()
             .unwrap_or(0.0))

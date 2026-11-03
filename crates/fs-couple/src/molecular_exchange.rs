@@ -12,6 +12,11 @@
 //! gas-flow solver. Other boundary pressure/support forces and moving-volume
 //! work require their own owners. Equal counterflow still transfers normal
 //! momentum; an aperture alone does not supply a whole vessel's wall balance.
+//! Entropy/passivity or isolated-vessel equilibration requires the remaining
+//! boundary operators; reducing this stage's timestep does not supply them.
+
+/// Adaptive finite-pair trajectories through the same physical transaction.
+pub mod trajectory;
 
 use crate::liquid_gas::evaporation::momentum::{
     MovingGasParcel,
@@ -32,6 +37,7 @@ use fs_material::thermochemical_gas::energy::{
 };
 use fs_math::dd::Dd;
 use fs_thermochem::SpeciesId;
+use std::collections::BTreeMap;
 
 /// One shared aperture and energy frame, in the SAME axes as both gas momenta.
 /// The original gas state has no position or independently transformable frame.
@@ -298,6 +304,14 @@ pub fn step_candidate(
         ));
     }
     let catalog = interface.momentum_interface().interface().gas_catalog();
+    let original_inventory = if exchange.species.is_empty() {
+        [BTreeMap::new(), BTreeMap::new()]
+    } else {
+        [
+            gases[0].parcel().species_inventory_kg()?,
+            gases[1].parcel().species_inventory_kg()?,
+        ]
+    };
     let mass_rounding_allowance = controls.gas[0]
         .gas
         .mass_tolerance_kg
@@ -319,7 +333,10 @@ pub fn step_candidate(
         for side in 0..2 {
             let mass = row.mass_kg[side];
             if mass > 0.0 {
-                let available = gases[side].parcel().species_mass_kg(&row.species)?;
+                let available = original_inventory[side]
+                    .get(&row.species)
+                    .copied()
+                    .unwrap_or(0.0);
                 if !positive(available) {
                     return Err(Error::Invalid(
                         "outgoing molecular species lost its original inventory",
@@ -444,6 +461,14 @@ pub fn step_candidate(
         final_relative,
         &mut cancelled,
     )?;
+    let next_inventory = if exchange.species.is_empty() {
+        [BTreeMap::new(), BTreeMap::new()]
+    } else {
+        [
+            next[0].parcel().species_inventory_kg()?,
+            next[1].parcel().species_inventory_kg()?,
+        ]
+    };
     let mut mass_residual = Dd::ZERO;
     let mut momentum_residual = [Dd::ZERO; 3];
     let mut energy_residual = stream_energy_residual;
@@ -469,8 +494,19 @@ pub fn step_candidate(
         poll(&mut cancelled)?;
         let mut residual = Dd::ZERO;
         for side in 0..2 {
-            residual = residual + Dd::from_f64(next[side].parcel().species_mass_kg(&row.species)?)
-                - Dd::from_f64(gases[side].parcel().species_mass_kg(&row.species)?);
+            residual = residual
+                + Dd::from_f64(
+                    next_inventory[side]
+                        .get(&row.species)
+                        .copied()
+                        .unwrap_or(0.0),
+                )
+                - Dd::from_f64(
+                    original_inventory[side]
+                        .get(&row.species)
+                        .copied()
+                        .unwrap_or(0.0),
+                );
         }
         let limit = allowance(
             controls.mass_absolute_kg,

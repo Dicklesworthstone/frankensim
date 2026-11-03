@@ -12118,3 +12118,15 @@ thermal/tangential energy and datum crosswalks, tiny signed drift and positive
 tails, orientation/scaling invariance and atomic source/cancellation refusal.
 Rustfmt parsing and direct API review are available; native compilation and
 execution remain blocked before Rust compilation by missing sibling manifests.
+
+### Reusable original gas species inventory
+
+`ClosedGasParcel::species_inventory_kg` exposes the SAME canonical active-species
+inventory and representability checks used by the original finite material
+owners. `species_mass_kg` delegates to it and retains exact zero for absent
+species. Coupled molecular withdrawal checks and accepted-state balances query
+each original/final gas inventory once; adaptive comparisons query each trial
+state once. Per-species lookups no longer repeat full composition conversion
+and allocation, and no independent mass-fraction model or approximate cache is
+introduced. Existing finite-species and conservation cases exercise the shared
+values; no runtime performance measurement is claimed.
