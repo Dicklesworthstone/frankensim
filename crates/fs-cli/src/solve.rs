@@ -264,7 +264,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// source-backed physical residual/heat gates without frozen-contact bounds.
 /// Version 94 carries the accepted contact temperature field into each next
 /// natural/airflow response on the same mesh instead of restarting it cold.
-pub const SOLVE_DRIVER_VERSION: u32 = 94;
+/// Version 95 aligns both transient grids to prescribed boundary switches,
+/// including trajectories with no regional power schedule.
+pub const SOLVE_DRIVER_VERSION: u32 = 95;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

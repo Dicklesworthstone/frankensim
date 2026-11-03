@@ -2,7 +2,8 @@
 use super::*;
 use fs_project::{
     ConductionTransient, TransientBoundarySchedule, TransientBoundaryStep,
-    TransientBoundaryTarget, TransientInitialTemperature, spec::dims,
+    TransientBoundaryTarget, TransientInitialTemperature, TransientPowerStep,
+    TransientRegionPower, spec::dims,
 };
 #[allow(dead_code)]
 #[path = "../../src/json_read.rs"]
@@ -114,9 +115,17 @@ fn g1_signed_boundary_heat_pulses_deliver_the_original_surface_area_energy() {
             &[(0.25, 2.0), (0.75, -1.0), (1.0, 3.0)]);
         let (conduction, _) = run(&spec);
         let history = conduction.get("transient").unwrap();
-        for grid in ["coarse", "fine"] {
-            for row in history.get(grid).unwrap().as_array().unwrap() {
+        // Boundary-only switches must reach the fine grid even without a
+        // regional source schedule. A uniform six-step grid misses both.
+        for (grid, expected_ends) in [
+            ("coarse", &[0.25, 0.75, 1.0][..]),
+            ("fine", &[0.125, 0.25, 0.5, 0.75, 0.875, 1.0][..]),
+        ] {
+            let rows = history.get(grid).unwrap().as_array().unwrap();
+            assert_eq!(rows.len(), expected_ends.len(), "{grid}");
+            for (row, &expected_end) in rows.iter().zip(expected_ends) {
                 let end = n(row, "time_s");
+                close(end, expected_end, 0.0);
                 let flux = if end <= 0.25 { 2.0 } else if end <= 0.75 { -1.0 } else { 3.0 };
                 close(n(row, "net_input_w"), -area * flux, 2e-8);
                 close(n(row, "stored_energy_change_j"), -area * flux * n(row, "dt_s"), 2e-7);
@@ -126,6 +135,59 @@ fn g1_signed_boundary_heat_pulses_deliver_the_original_surface_area_energy() {
         close(n(energy, "stored_change_j"), -0.75 * area, 2e-6);
         close(n(energy, "integrated_net_input_j"), -0.75 * area, 2e-7);
         assert!(n(energy, "maximum_step_residual_j") <= 1e-6);
+    }
+}
+
+#[test]
+fn g1_source_and_boundary_pulses_share_one_nested_physical_time_grid() {
+    let area = (3.0 + 3.0_f64.sqrt()) / 2.0;
+    for enthalpy in [false, true] {
+        let mut spec = project(enthalpy);
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+            ThermalBoundaryCondition::HeatFlux { outward_flux: QtyAny::new(99.0, dims::HEAT_FLUX) };
+        schedule(&mut spec, TransientBoundaryTarget::HeatFlux,
+            &[(0.25, 2.0), (0.75, -1.0), (1.0, 3.0)]);
+        time(&mut spec).power_schedules = vec![TransientRegionPower {
+            region: "air".into(),
+            source: "manufactured regional heat pulse with a coincident boundary switch".into(),
+            steps: [(0.5, 4.0), (0.75, 0.0), (1.0, 2.0)].iter()
+                .map(|&(until, watts)| TransientPowerStep {
+                    until: QtyAny::new(until, dims::TIME),
+                    watts: QtyAny::new(watts, dims::POWER),
+                }).collect(),
+        }];
+        let (conduction, field) = run(&spec);
+        let history = conduction.get("transient").unwrap();
+        for (grid, expected_ends) in [
+            ("coarse", &[0.25, 0.5, 0.75, 1.0][..]),
+            ("fine", &[0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0][..]),
+        ] {
+            let rows = history.get(grid).unwrap().as_array().unwrap();
+            assert_eq!(rows.len(), expected_ends.len(), "{grid}");
+            for (row, &end) in rows.iter().zip(expected_ends) {
+                close(n(row, "time_s"), end, 0.0);
+                let watts = if end <= 0.5 { 4.0 } else if end <= 0.75 { 0.0 } else { 2.0 };
+                let flux = if end <= 0.25 { 2.0 } else if end <= 0.75 { -1.0 } else { 3.0 };
+                let net_w = watts - area * flux;
+                close(n(row, "source_w"), watts, 2e-8);
+                close(n(row, "net_input_w"), net_w, 2e-8);
+                close(n(row, "stored_energy_change_j"), net_w * n(row, "dt_s"), 2e-7);
+            }
+        }
+        // Source energy is 4 W * 0.5 s + 2 W * 0.25 s; prescribed outward
+        // boundary energy is A * (2 * 0.25 - 1 * 0.5 + 3 * 0.25) J/m².
+        let expected_j = 2.5 - 0.75 * area;
+        let energy = history.get("energy").unwrap();
+        close(n(energy, "stored_change_j"), expected_j, 2e-6);
+        close(n(energy, "integrated_net_input_j"), expected_j, 2e-7);
+        assert!(n(energy, "maximum_step_residual_j") <= 1e-6);
+        let temperatures = field.get("temperature").unwrap().as_array().unwrap();
+        // Both storage declarations give this tetrahedron 10 J/K total,
+        // distributed equally over its four lumped nodal masses.
+        assert_eq!(temperatures.len(), 4);
+        let mean_k = temperatures.iter().map(|value| value.as_f64().unwrap()).sum::<f64>()
+            / temperatures.len() as f64;
+        close(10.0 * (mean_k - 293.15), expected_j, 2e-6);
     }
 }
 

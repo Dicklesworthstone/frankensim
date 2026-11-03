@@ -24,8 +24,9 @@ impl TimeGrids {
             .coarse_step_ends_s()
             .map_err(|error| bad(error.what))?;
         let mut fine = Vec::with_capacity(coarse.len() * 2);
-        if policy.power_schedules.is_empty() {
-            // Preserve the original uniform-grid arithmetic for static loads.
+        if policy.power_schedules.is_empty() && policy.boundary_schedules.is_empty() {
+            // Preserve uniform-grid arithmetic only when no source or boundary
+            // event can make the admitted coarse intervals nonuniform.
             let count = coarse.len() * 2;
             for ordinal in 1..=count {
                 fine.push(if ordinal == count {
