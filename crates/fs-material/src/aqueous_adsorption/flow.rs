@@ -24,17 +24,19 @@
 
 use super::kinetics::SorbentState;
 use super::{
-    AdsorbentLoading, AqueousAdsorptionError, AqueousLangmuir, CONCENTRATION_AXIS,
+    AdsorbentLoading, AqueousAdsorptionError, AqueousLangmuir, CONCENTRATION_AXIS, LangmuirLoading,
     TEMPERATURE_AXIS, concentration_spec, divide, fractions, multiply, nonnegative, positive,
     temperature_spec,
 };
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint};
 use fs_qty::{
-    Amount, AmountConcentration, Dimensionless, Frequency, Mass, QuantitySpec, Temperature, Time,
-    Volume, VolumetricFlowRate,
+    Amount, AmountConcentration, Dimensionless, Frequency, Mass, Qty, QuantitySpec, Temperature,
+    Time, Volume, VolumetricFlowRate,
 };
 use std::sync::Arc;
 
+/// Signed analytical-element loading change per unit dry mass and time [mol/(kg s)].
+pub type AdsorbentLoadingRate = Qty<0, -1, -1, 0, 0, 1>;
 /// Original local transfer law; deliberately distinct from the finite-batch law.
 pub const LOCAL_LDF_LAW: &str = "local-aqueous-langmuir-linear-driving-force";
 /// Constant loading-relaxation rate, in inverse seconds.
@@ -87,6 +89,26 @@ pub struct LocalLangmuirTransfer {
     source: ConstitutiveModelCard,
     rate: Frequency,
 }
+/// Source-admitted instantaneous transfer under the original local kinetic law.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalLangmuirRate {
+    model: LocalLangmuirTransfer,
+    /// Original isotherm response at the actual solution concentration.
+    pub equilibrium: LangmuirLoading,
+    /// Actual current analytical-element loading [mol/kg dry adsorbent].
+    pub loading: AdsorbentLoading,
+    /// Signed loading derivative [mol/(kg s)]; negative denotes desorption.
+    pub loading_rate: AdsorbentLoadingRate,
+    /// Complete point admitted independently by both original source owners.
+    pub conditions: QueryPoint,
+}
+impl LocalLangmuirRate {
+    /// Original isotherm and independent local-rate owner with unchanged source cards.
+    pub fn model(&self) -> &LocalLangmuirTransfer {
+        &self.model
+    }
+}
+
 impl LocalLangmuirTransfer {
     /// Bind one finite nonnegative typed rate to the original isotherm.
     /// Both cards retain their own applicability and additional conditions.
@@ -161,6 +183,77 @@ impl LocalLangmuirTransfer {
     /// Declared constant inverse-second rate; zero disables adsorption transfer.
     pub const fn rate(&self) -> Frequency {
         self.rate
+    }
+
+    /// Evaluate signed `dq/dt = k*(q_eq(c)-q)` at the actual current state.
+    ///
+    /// Concentration, semantic absolute temperature, loading and solution volume
+    /// belong to this owner; extra conditions cannot override them. Both original
+    /// source domains apply, including when the declared rate is zero. This is
+    /// a local derivative, not a finite-time integration or a charged-species
+    /// transfer declaration. The calling process must conserve its inventories.
+    pub fn rate_at(
+        &self,
+        concentration: AmountConcentration,
+        loading: AdsorbentLoading,
+        solution_volume: Volume,
+        temperature: Temperature,
+        conditions: &QueryPoint,
+    ) -> Result<LocalLangmuirRate> {
+        require(
+            owned_axes()
+                .iter()
+                .all(|(axis, _, _)| !conditions.axes().contains_key(*axis)),
+            "caller cannot override actual concentration, temperature, loading or volume",
+        )?;
+        nonnegative(loading.value(), "actual loading must be nonnegative")?;
+        positive(solution_volume.value(), "solution volume must be positive")?;
+        let capacity = self.equilibrium.capacity().value();
+        require(
+            loading.value() <= capacity,
+            "actual loading exceeds source capacity",
+        )?;
+        let point = conditions
+            .clone()
+            .with_quantity(
+                LOADING_AXIS,
+                QuantitySpec::dimensional(AdsorbentLoading::DIMS),
+                loading.value(),
+            )?
+            .with_quantity(
+                VOLUME_AXIS,
+                QuantitySpec::dimensional(Volume::DIMS),
+                solution_volume.value(),
+            )?;
+        let equilibrium = self
+            .equilibrium
+            .loading_at(concentration, temperature, &point)?;
+        self.admit(&equilibrium.conditions)?;
+        // Near saturation the vacant form retains a desorption tail that would
+        // disappear if the rounded occupied target were subtracted from q_max.
+        let vacant = capacity - loading.value();
+        let difference = if loading.value() > vacant
+            && equilibrium.loading.value() > equilibrium.vacant_loading.value()
+        {
+            vacant - equilibrium.vacant_loading.value()
+        } else {
+            equilibrium.loading.value() - loading.value()
+        };
+        let magnitude = multiply(self.rate.value(), difference.abs(), "local loading rate")?;
+        let loading_rate = if magnitude == 0.0 {
+            0.0
+        } else if difference < 0.0 {
+            -magnitude
+        } else {
+            magnitude
+        };
+        Ok(LocalLangmuirRate {
+            model: self.clone(),
+            loading,
+            loading_rate: AdsorbentLoadingRate::new(loading_rate),
+            conditions: equilibrium.conditions.clone(),
+            equilibrium,
+        })
     }
 
     fn admit(&self, point: &QueryPoint) -> Result<()> {

@@ -1,5 +1,8 @@
 //! G0/G1/G3 analytical flow/adsorption limits and complete metal accounts.
 use super::*;
+
+#[path = "tests/instantaneous.rs"]
+mod instantaneous;
 use crate::aqueous_adsorption::{
     AQUEOUS_LANGMUIR_LAW, CAPACITY_PARAMETER, HALF_SATURATION_PARAMETER,
     kinetics::{

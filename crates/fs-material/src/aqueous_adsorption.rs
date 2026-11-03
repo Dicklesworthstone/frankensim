@@ -98,6 +98,29 @@ pub struct AqueousLangmuir {
     half_saturation: AmountConcentration,
 }
 
+/// Source-admitted isotherm response at instantaneous solution conditions.
+/// This is a local loading target, not a finite-contact inventory solution.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LangmuirLoading {
+    model: AqueousLangmuir,
+    /// Actual aqueous analytical-element concentration [mol/m³].
+    pub concentration: AmountConcentration,
+    /// Actual absolute temperature with the original semantic source coordinate.
+    pub temperature: Temperature,
+    /// Equilibrium loading per unit dry adsorbent mass [mol/kg].
+    pub loading: AdsorbentLoading,
+    /// Equilibrium vacant capacity [mol/kg], evaluated independently of loading.
+    pub vacant_loading: AdsorbentLoading,
+    /// Complete actual source point, including explicitly supplied extra conditions.
+    pub conditions: QueryPoint,
+}
+impl LangmuirLoading {
+    /// Original isotherm, analytical-element identity and immutable source card.
+    pub fn model(&self) -> &AqueousLangmuir {
+        &self.model
+    }
+}
+
 /// Equilibrium of one complete, finite contact; binary64 balances are not certificates.
 #[derive(Clone, Debug)]
 pub struct AdsorptionContact {
@@ -209,6 +232,63 @@ impl AqueousLangmuir {
     /// Original half-saturation solution concentration, mol/m³.
     pub fn half_saturation(&self) -> AmountConcentration {
         self.half_saturation
+    }
+
+    /// Evaluate the original isotherm at the current solution concentration.
+    ///
+    /// This owner supplies actual concentration and semantic absolute temperature;
+    /// caller overrides refuse. Every additional original source condition must
+    /// be supplied explicitly. Occupied and vacant loadings use the original
+    /// stable fractions, retaining a representable vacant tail when the occupied
+    /// loading rounds to capacity. No liquid inventory, finite-contact balance,
+    /// kinetic coefficient or changed source authority is inferred.
+    pub fn loading_at(
+        &self,
+        concentration: AmountConcentration,
+        temperature: Temperature,
+        conditions: &QueryPoint,
+    ) -> Result<LangmuirLoading> {
+        nonnegative(
+            concentration.value(),
+            "instantaneous concentration must be nonnegative",
+        )?;
+        positive(temperature.value(), "absolute temperature must be positive")?;
+        if [CONCENTRATION_AXIS, TEMPERATURE_AXIS]
+            .iter()
+            .any(|axis| conditions.axes().contains_key(*axis))
+        {
+            return Err(AqueousAdsorptionError::Invalid(
+                "caller cannot override actual concentration or temperature",
+            ));
+        }
+        let query = conditions
+            .clone()
+            .with_quantity(
+                CONCENTRATION_AXIS,
+                concentration_spec(),
+                concentration.value(),
+            )?
+            .with_quantity(TEMPERATURE_AXIS, temperature_spec(), temperature.value())?;
+        self.admit(&query)?;
+        let (occupied, vacant) = fractions(concentration.value(), self.half_saturation.value())?;
+        let loading = multiply(
+            self.capacity.value(),
+            occupied,
+            "instantaneous equilibrium loading",
+        )?;
+        let vacant_loading = multiply(
+            self.capacity.value(),
+            vacant,
+            "instantaneous equilibrium vacant loading",
+        )?;
+        Ok(LangmuirLoading {
+            model: self.clone(),
+            concentration,
+            temperature,
+            loading: AdsorbentLoading::new(loading),
+            vacant_loading: AdsorbentLoading::new(vacant_loading),
+            conditions: query,
+        })
     }
 
     /// Solve one ideal equilibrium contact at fixed volume and dry adsorbent mass.
