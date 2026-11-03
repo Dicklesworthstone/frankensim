@@ -13,6 +13,9 @@ use crate::dynamics::piston::{
 };
 use fs_qty::Time;
 
+mod two_chambers;
+pub use two_chambers::SharedPistonGasReport;
+
 impl MixtureEuler1d {
     /// Advance evolving species, resolved pressure waves and one inertial piston.
     ///

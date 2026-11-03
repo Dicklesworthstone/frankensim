@@ -14,8 +14,9 @@ use super::{
 };
 use fs_qty::Time;
 
-/// Inertial right wall. Its position and area belong to the gas mesh alone.
-/// Positive axial velocity expands the gas interval.
+/// Inertial axial wall. Its position and area belong to the gas geometry.
+/// Positive axial velocity expands a chamber on its left and compresses a
+/// chamber on its right. A shared-piston owner binds both interface endpoints.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Piston {
     mass_kg: f64,
@@ -195,8 +196,9 @@ pub struct PistonStep<R = StepReport> {
     /// Accepted gas impulse ON the piston [N s]: pressure plus any molecular
     /// wall stress explicitly included by the composing owner.
     pub gas_impulse_n_s: f64,
-    /// Opposite of the left-face impulse on the gas, delivered to its fixed
-    /// support [N s]. This reaction does no work but carries momentum.
+    /// Opposite of the gas impulse at fixed supports [N s]. A one-chamber
+    /// owner reports its left support; a shared-piston owner sums both outer
+    /// supports. These reactions do no work but carry momentum.
     pub fixed_wall_impulse_n_s: f64,
     /// Independently measured change of wall kinetic energy [J].
     pub kinetic_energy_change_j: f64,

@@ -1047,6 +1047,49 @@ motion, exact replay and original source-interval refusal; and admission of
 the rigid thermal-work/drag convention. These tests are unexecuted under this
 session's worker resource limit; no native build or solver result is claimed.
 
+### Two resolved gas chambers sharing an inertial piston
+
+`MixtureEuler1d::step_with_shared_piston` couples the original evolving
+multicomponent fields on BOTH sides of one impermeable inertial wall. Each
+chamber retains its own source, canonical species axis, caloric domain and
+resolution. Their constant cross sections, shared interface coordinates and
+physical clocks must match. The wall has negligible axial thickness; both
+outer ends are fixed and reflecting. Positive axial motion expands the left
+volume and compresses the right volume.
+
+Each proposal in the original midpoint-speed root evaluates both original
+moving-volume RK2 fields at one common duration from their accepted states.
+The pressure on each side is its resolved moving-wall wave pressure, never
+an imposed opposing reservoir or a guessed whole-chamber pressure law.
+Piston impulse is the opposite of the summed interface gas impulses. The
+very same face exchanges supply gas work; total gas energy plus piston
+kinetic change equals the applied additional-force work. Fixed support
+reaction is the opposite of BOTH outer gas impulses, with zero support work.
+`SharedPistonGasReport` retains the two separate original conservation and
+boundary reports, including their independent species balances and gauges.
+The outer `PistonStep` sums fixed support reactions; exterior-pressure work
+is zero because both gas sides are already represented.
+
+The initial timestep obeys both relative acoustic limits and both possible
+mesh-contraction limits over the authored speed bracket. A refused stage or
+root halves and restarts the complete two-field proposal. Each original
+field reuses its candidate/RK/geometry workspace; no source tables or full
+fields are cloned per velocity proposal. After the last cancellation poll,
+both extensive fields, meshes, equal clocks and piston velocity publish
+together. Shared candidate endpoints must represent exactly one position.
+`gas_trials` counts paired proposals, each requiring two original field solves.
+
+Four authored G1/G3/G4 regressions cover equal-pressure rest with different
+gases and independent opposing p*A*dt impulses; unequal-pressure waves in
+both directions, source-energy gauge invariance and full work/support balance;
+fine-side CFL shortening with replay of both prescribed moving fields; and
+late cancellation, continuation plus incompatible geometry/clock refusals.
+Native compilation, formatting and runtime execution remain unverified after
+the delivery executor became unavailable. This is sealed adiabatic Euler
+transport, without advancement of separately bound chemistry, molecular or
+thermal owners. Original unequal-caloric contact and boundary-order limits
+remain; there is no general FSI stability or multidimensional-rung claim.
+
 ## Characteristic compact-reservoir boundaries
 
 Frozen Euler `Boundary::Reservoir` retains a stationary conservative state in
