@@ -153,6 +153,52 @@ fn unresolved_tones_beat_in_observer_time_instead_of_adding_powers() {
 }
 
 #[test]
+fn nearly_cancelling_carriers_retain_positive_weak_beat_energy() {
+    for (separation_hz, duration) in [(2.0_f64.powi(-20), 0.0001), (2.0_f64.powi(-30), 0.0011)] {
+        let lines = [
+            HarmonicFieldLine {
+                frequency_hz: 1000.0,
+                pressure_pa: C64::ONE,
+                particle_velocity_m_s: [C64::from_re(1.0 / 400.0)],
+            },
+            HarmonicFieldLine {
+                frequency_hz: 1000.0 + separation_hz,
+                pressure_pa: -C64::ONE,
+                particle_velocity_m_s: [C64::from_re(-1.0 / 400.0)],
+            },
+        ];
+        // Integrate the stable real beat waveform rather than subtracting two
+        // almost equal cosines or using the production frequency-pair kernel.
+        let n = 20_000;
+        let mut expected = 0.0;
+        for step in 0..=n {
+            let t = duration * f64::from(step) / f64::from(n);
+            let pressure = 2.0
+                * (TAU * (1000.0 + 0.5 * separation_hz) * t).sin()
+                * (PI * separation_hz * t).sin();
+            let weight = if step == 0 || step == n {
+                1.0
+            } else if step % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            expected += weight * pressure * pressure / (3.0 * f64::from(n));
+        }
+        let actual = prepare(&lines)
+            .observe_window(HarmonicWindow::new(0.0, duration).unwrap())
+            .unwrap();
+        assert!(actual.mean_square_pressure_pa2 > 0.0);
+        assert!(
+            (actual.mean_square_pressure_pa2 / expected - 1.0).abs() < 5e-7,
+            "beat energy {:?} versus {expected:e}",
+            actual.mean_square_pressure_pa2
+        );
+        assert!((actual.mean_intensity_w_m2[0] / (expected / 400.0) - 1.0).abs() < 5e-7);
+    }
+}
+
+#[test]
 fn common_clock_shift_preserves_the_finite_observation() {
     let lines = [
         HarmonicFieldLine {

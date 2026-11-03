@@ -36,6 +36,9 @@ use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 
+mod plane;
+pub use plane::{IdealAcousticPlane, IdealPlaneBoundary, PreparedHalfSpaceObserver};
+
 /// Applicability of the prescribed three-dimensional source transfer.
 pub const COMPACT_FIELD_SCOPE: &str = "Prescribed compact 3D volume flow [m³/s] and force on fluid [N]; \
 homogeneous stationary lossless free-space observation, with no source-size validation, \
@@ -203,6 +206,30 @@ impl PreparedCompactSourceObserver {
         k: C64,
         molecular: Option<RelaxationState>,
     ) -> Result<Self, AeroacError> {
+        Self::prepare_cancellable(
+            acoustic,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            max_sources,
+            k,
+            molecular,
+            &mut || false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_cancellable(
+        acoustic: FluidAcousticState,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        max_sources: usize,
+        k: C64,
+        molecular: Option<RelaxationState>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        plane::poll(cancelled)?;
         if source_positions_m.len() > max_sources {
             return Err(invalid("compact source count exceeds preparation budget"));
         }
@@ -226,6 +253,7 @@ impl PreparedCompactSourceObserver {
             .try_reserve_exact(source_positions_m.len())
             .map_err(|_| invalid("compact transfer allocation exceeds available memory"))?;
         for source in source_positions_m {
+            plane::poll(cancelled)?;
             if source.iter().any(|v| !v.is_finite()) {
                 return Err(nonfinite("compact source position"));
             }
@@ -289,6 +317,7 @@ impl PreparedCompactSourceObserver {
                 field,
             });
         }
+        plane::poll(cancelled)?;
         Ok(Self {
             acoustic,
             molecular,

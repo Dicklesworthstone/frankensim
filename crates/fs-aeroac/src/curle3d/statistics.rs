@@ -8,7 +8,8 @@ use fs_math::{c64::C64, dd::Dd};
 pub struct CoherenceBudget {
     /// Maximum number of independent factors, including empty factors.
     pub max_modes: usize,
-    /// Maximum factor count times prepared source count; overflow refuses.
+    /// Maximum source-path/factor products; overflow refuses. Free-field
+    /// observers count one path per source, ideal half-space observers two.
     pub max_source_mode_pairs: usize,
 }
 
@@ -27,7 +28,7 @@ pub struct CompactFieldStatistics {
     pub active_intensity_w_m2: [f64; 3],
     /// Im(E[p conj(u)])/2 [W/m²], in exp(-i omega t) convention.
     pub reactive_intensity_w_m2: [f64; 3],
-    /// Prescribed-source and free-field model boundaries.
+    /// Prescribed-source and propagation-model boundaries.
     pub scope: &'static str,
 }
 

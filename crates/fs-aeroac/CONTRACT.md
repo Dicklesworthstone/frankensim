@@ -169,6 +169,37 @@ material scaling and domain/representability refusals.
   pressure-null velocity, separated-source and mixed-mechanism interference,
   standing waves, complex partial coherence against dense algebra, material
   density scaling, dynamic-range residuals and bounded admission.
+- `PreparedCompactSourceObserver::with_plane` adds an `IdealAcousticPlane` to
+  the original lossless or molecular-relaxation owner. The resulting
+  `PreparedHalfSpaceObserver` solves one infinite rigid (`u.n=0`) or ideal
+  pressure-release (`p=0`) plane by the exact image Green function. For inward
+  unit normal n the image volume flow is `s Q` and image force is
+  `s (I-2nn^T) F`, with s=+1/-1 respectively. It reflects dipole orientation as
+  well as position. Both pressure and every near-field velocity component
+  retain their direct/reflected path phase before intensity or variance is
+  formed. Even mutually independent physical sources each interfere with
+  their own reflected field; an image is never an independent noise source.
+  The normal selects the fluid half-space; sources lie strictly inside it,
+  receivers may lie on the plane, and unrepresentable image geometry refuses.
+  Preparation bounds both paths per source and precomputes force reflection
+  in the cached transfer. Applications are allocation-free O(N), or O(N r)
+  for r explicitly authored coherence factors; the coherence work budget
+  counts both paths. Cancellable preparation/application polls per source or
+  factor and publishes no partial result. `evaluate_harmonic_line` feeds the
+  existing finite-window and ensemble observations without a second delay.
+  The original material, equilibrium and phase-delay distinction, source
+  geometry, clock, and force/volume units survive. This is an ideal half-space
+  boundary solution for prescribed point sources, not finite-source validation,
+  a finite-impedance ground approximation, wall-edge diffraction, a room solver,
+  source feedback or measured-SPL qualification. See Allen & Berkley, JASA 65
+  (1979), 943–950, doi:10.1121/1.382599, for the image construction; the force
+  reflection follows by differentiating its Green function in source position.
+  `tests/compact_interference/plane.rs` checks both exact boundary conditions
+  for all four source components, analytic reflection notches and delays,
+  near-field momentum, rigid coordinate changes, complex partial coherence,
+  molecular absorption/dispersion, finite-window beats, quiet cancellation
+  residuals, cancellation and work/domain refusals. The `plane_interference`
+  example prints physical pressure and energy flux through this same owner.
 - `observation::PreparedHarmonicField` observes deterministic lines on a common
   receiver clock over an explicit rectangular interval. The existing 2D/3D
   prepared observers export `evaluate_harmonic_line` with the propagation delay

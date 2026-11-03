@@ -21,9 +21,13 @@ pub mod moving;
 /// Analytic whole-sphere power of coherent compact-source arrays.
 pub mod power;
 mod statistics;
-pub use array::{CoherentCompactField, CompactSourcePhasor, PreparedCompactSourceObserver};
+pub use array::{
+    CoherentCompactField, CompactSourcePhasor, IdealAcousticPlane, IdealPlaneBoundary,
+    PreparedCompactSourceObserver, PreparedHalfSpaceObserver,
+};
 pub use power::{
-    CompactRadiatedPower, PreparedCompactRadiatedPower, RadiatedPowerBudget, RadiatedPowerModeBudget,
+    CompactRadiatedPower, PreparedCompactRadiatedPower, RadiatedPowerBudget,
+    RadiatedPowerModeBudget,
 };
 pub use statistics::{CoherenceBudget, CompactFieldStatistics};
 

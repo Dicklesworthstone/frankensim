@@ -14,6 +14,9 @@ use fs_math::c64::C64;
 use fs_thermochem::SpeciesId;
 use std::f64::consts::{PI, TAU};
 
+#[path = "compact_interference/plane.rs"]
+mod plane;
+
 fn medium(rho: f64, c: f64) -> FluidAcousticState {
     FluidAcousticState::try_new(rho, c).unwrap()
 }
