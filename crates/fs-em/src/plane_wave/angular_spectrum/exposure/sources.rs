@@ -4,6 +4,7 @@
 //! source kinds. Native modal fields are summed before the six spatial FFTs.
 
 use super::*;
+use crate::plane_wave::DielectricResponse;
 
 #[derive(Clone, Copy)]
 pub(super) enum ExposureLines<'b, 's, 'm> {
@@ -24,6 +25,26 @@ pub(super) enum ExposureSide {
 }
 
 impl ExposureSide {
+    /// The observed half-space owns the constitutive coefficients. A lossless
+    /// left observation is valid even when a different or lossy medium is on
+    /// the right. Finite-window right observations require the original
+    /// nondispersive law; a zero loss at one frequency is not that law.
+    pub(super) fn momentum_material<'m>(
+        self,
+        source: &PlanarDielectricLayers<'m>,
+    ) -> Result<&'m fs_material::state_point::ResolvedMaterialStatePoint, ReflectionError> {
+        use AngularSpectrumIlluminationSide as I;
+        match self.illumination() {
+            I::IncomingLeft | I::OutgoingLeft | I::TotalLeft => Ok(source.incident_material()),
+            I::IncomingRight | I::OutgoingRight | I::TotalRight => match source.exit_response() {
+                DielectricResponse::Lossless(material) => Ok(material),
+                _ => Err(ReflectionError::Invalid(
+                    "finite-window momentum requires an original lossless nondispersive observation medium",
+                )),
+            },
+        }
+    }
+
     fn illumination(self) -> AngularSpectrumIlluminationSide {
         use AngularSpectrumIlluminationSide as I;
         match self {

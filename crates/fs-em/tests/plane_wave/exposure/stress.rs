@@ -483,17 +483,16 @@ fn g4_stress_admission_cancellation_darkness_and_replay() {
             .all(|p| p.maxwell_stress_pa == [[0.0; 3]; 3])
     );
     assert_eq!(zero.integrated_stress_n(), [[0.0; 3]; 3]);
-    let mismatched =
+    let refracting =
         PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&other), 2.0, &[])
             .unwrap();
-    let wrong_lines = [constant(&mismatched, [C64::ONE, C64::ZERO])];
-    let wrong = AngularSpectrumExposure::try_new(&wrong_lines[0], &wrong_lines, limits(), || false)
-        .unwrap();
-    assert!(
-        wrong
-            .stress_field(Side::Incident, 0.0, window, stress_limits(), || false)
-            .is_err()
-    );
+    let different_lines = [constant(&refracting, [C64::ONE, C64::ZERO])];
+    let different = AngularSpectrumExposure::try_new(
+        &different_lines[0], &different_lines, limits(), || false,
+    ).unwrap();
+    for side in [Side::Incident, Side::Transmitted] {
+        assert!(different.stress_field(side, 0.0, window, stress_limits(), || false).is_ok());
+    }
     let momentum_exact = AngularSpectrumExposureMomentumLimits {
         maximum_workspace_bytes: bank.momentum_workspace_bytes().unwrap(),
     };
@@ -519,12 +518,14 @@ fn g4_stress_admission_cancellation_darkness_and_replay() {
     ).unwrap();
     assert_eq!(dark_momentum.momentum_per_depth_n_s_m(), [0.0; 3]);
     assert_eq!(dark_momentum.momentum_rate_per_depth_n_m(), [0.0; 3]);
-    assert!(wrong.momentum_field(
-        Side::Incident, 0.0, window,
-        AngularSpectrumExposureMomentumLimits {
-            maximum_workspace_bytes: wrong.momentum_workspace_bytes().unwrap(),
-        }, || false,
-    ).is_err());
+    for side in [Side::Incident, Side::Transmitted] {
+        assert!(different.momentum_field(
+            side, 0.0, window,
+            AngularSpectrumExposureMomentumLimits {
+                maximum_workspace_bytes: different.momentum_workspace_bytes().unwrap(),
+            }, || false,
+        ).is_ok());
+    }
 
 }
 

@@ -2858,8 +2858,12 @@ are combined before any product. Deterministic means retain carrier and beat
 terms, while proper factors remove sum terms only through their authored zero
 pseudocovariance. Every average uses the supplied normalized shutter.
 
-Both exteriors must retain the same original homogeneous lossless material,
-with its original epsilon and mu, as for the existing cycle-mean force owner.
+Each observed exterior supplies its original homogeneous, lossless,
+nondispersive material and its own epsilon and mu. The left and right
+materials may differ, including distinct electric and magnetic responses.
+Left-side observations remain valid when the exit is lossy or dispersive;
+right-side observations then refuse. A zero loss at one frequency is not
+treated as an instantaneous constitutive law for a finite window.
 This electromagnetic stress excludes mechanical medium pressure,
 electrostriction and magnetostriction. Results expose local pascals, traction
 on validated unit normals, and continuous integrals over the original
@@ -3176,8 +3180,11 @@ The original exposure and real/proper ensemble owners expose momentum_field
 and illumination_momentum_field beside their Maxwell-stress queries. They
 return the explicitly named Minkowski density <D cross B> in N s/m³ and
 <d(D cross B)/dt> in N/m³, using the same original homogeneous lossless
-exterior epsilon and mu. In vacuum this is the electromagnetic momentum
-S/c². A material exterior does not thereby acquire an inferred mechanical,
+observation-side exterior epsilon and mu. Each half-space retains its own
+original lossless nondispersive law; the two materials need not be identical.
+Lossy/dispersive exit laws refuse right-side queries while leaving valid
+left-side observations available. In vacuum this is the electromagnetic
+momentum S/c². A material exterior does not thereby acquire an inferred mechanical,
 striction or moving-body momentum law.
 
 The complete vector fields retain both physical faces, polarization, spatial
@@ -3234,3 +3241,21 @@ was zero. The Rust regressions are authored but unexecuted: no native
 execution environment is available. These checks do not certify the full
 Maxwell owner, a material force law or a repository-wide quality gate.
 
+
+### Finite-window momentum across distinct exterior materials
+
+The common exposure-side selector binds every stress and Minkowski query to
+the actual observed material, including all incoming/outgoing/total variants
+and the real/proper ensemble owners. Source identity across a frequency bank
+is still enforced by original exposure preparation. No constitutive source,
+permittivity or permeability is reconstructed from a rounded refractive index.
+
+Three source-bound regression groups exercise electrically and magnetically
+distinct interfaces with independent Fresnel/tensor/momentum formulas,
+both-face real/proper illumination and observation-side refusal for Debye
+and ohmic exits. Their finite-window rate references differentiate the actual
+real fields. Right-side refusals leave the valid left observations unchanged.
+The changed Rust was parsed with the pinned rustfmt, and the new regression
+module was formatted; independent analytic checks were evaluated. Native compilation and tests remain unexecuted
+because the shared build disk is full and memory is under pressure. This extends
+field observations, not a material mechanical-force or striction law.

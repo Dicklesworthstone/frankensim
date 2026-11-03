@@ -171,22 +171,9 @@ impl<'a> PlanarDielectricLayers<'a> {
         self.layers.get(index).map(|layer| layer.wave.epsilon_f_m)
     }
 
-    // Finite-window stress keeps one homogeneous exterior for its declared
-    // field-momentum convention. Equal index alone is not source identity.
-    pub(super) fn admit_momentum_exterior(&self) -> Result<(), ReflectionError> {
-        match self.exit {
-            DielectricResponse::Lossless(exit) if exit.identity() == self.incident.identity() => {
-                Ok(())
-            }
-            _ => Err(bad(
-                "radiation force requires the same original lossless exterior on both faces",
-            )),
-        }
-    }
-
-    // Cycle-mean exterior stress can use each half-space's own original
-    // lossless constitutive law. The finite-window stress owner keeps
-    // its stronger homogeneous-source admission and storage convention.
+    // Cycle-mean exterior stress can use each half-space's original
+    // lossless response at this frequency. Finite-window observations select
+    // their own half-space and require its original nondispersive law.
     pub(super) fn admit_refracting_momentum_exterior(&self) -> Result<(), ReflectionError> {
         let epsilon = self.exit_wave.epsilon_f_m;
         if epsilon.im != 0.0 || epsilon.re <= 0.0 {

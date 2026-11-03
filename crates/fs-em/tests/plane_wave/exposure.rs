@@ -1,4 +1,5 @@
 //! G1/G3 finite-window vector interference through the actual film operator.
+mod exterior_momentum;
 mod heat_spectrum;
 mod integrated_heat;
 mod statistics;

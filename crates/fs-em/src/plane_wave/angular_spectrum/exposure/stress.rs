@@ -99,8 +99,10 @@ impl AngularSpectrumExposure<'_, '_, '_> {
     }
 
     /// Real-field Maxwell stress, including all carrier, beat, polarization
-    /// and standing-wave terms. The two exterior half-spaces must retain the
-    /// same original lossless material, as for the cycle-mean force owner.
+    /// and standing-wave terms. The observed half-space supplies its original
+    /// lossless nondispersive material. The two exterior materials may differ;
+    /// each field uses its own permittivity and permeability. A left query
+    /// remains valid with a lossy/dispersive exit; right queries then refuse.
     ///
     /// O(L*N + F*N*log N + F²*N). Each admitted N*F² pair unit entails
     /// twelve local and at most twenty-four modal temporal contractions.
@@ -285,8 +287,7 @@ where
     if !distance.is_finite() || distance < 0.0 {
         return Err(bad("stress field distance must be finite and nonnegative"));
     }
-    anchor.source().admit_momentum_exterior()?;
-    let medium = anchor.source().incident_material();
+    let medium = side.momentum_material(anchor.source())?;
     let epsilon = linear_electric_permittivity(medium).map_err(ReflectionError::from)?;
     let mu = linear_magnetic_permeability(medium).map_err(ReflectionError::from)?;
     let n = anchor.modes.len();

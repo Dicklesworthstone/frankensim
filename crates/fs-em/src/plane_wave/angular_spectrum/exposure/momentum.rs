@@ -85,10 +85,11 @@ impl AngularSpectrumExposure<'_, '_, '_> {
     }
 
     /// Observe original incoming/reflected/total/transmitted exterior fields.
-    /// Both exteriors must retain the same source-identical lossless medium,
-    /// as for the original Maxwell-stress owner. Complete Cartesian fields
-    /// interfere before products; no cycle average or phase independence is
-    /// assumed. No new film solve or constitutive sampling per frequency is
+    /// The observed half-space supplies its original lossless nondispersive
+    /// medium, which may differ from the other exterior. Right queries refuse
+    /// a lossy/dispersive exit; left queries retain their own valid law.
+    /// Complete Cartesian fields interfere before products; no cycle average
+    /// or phase independence is assumed. No new film solve or constitutive sampling per frequency is
     /// performed. Work is O(L*N + F*N*log N + F^2*N).
     pub fn momentum_field(
         &self,
@@ -236,8 +237,7 @@ where
     if !distance.is_finite() || distance < 0.0 {
         return Err(bad("momentum field distance must be finite and nonnegative"));
     }
-    anchor.source().admit_momentum_exterior()?;
-    let medium = anchor.source().incident_material();
+    let medium = side.momentum_material(anchor.source())?;
     let epsilon = linear_electric_permittivity(medium).map_err(ReflectionError::from)?;
     let mu = linear_magnetic_permeability(medium).map_err(ReflectionError::from)?;
     let n = anchor.modes.len();
