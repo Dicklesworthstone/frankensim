@@ -33,6 +33,9 @@ pub use geometry::GeometryError;
 /// Coupled held-force contact on the original cohesive midpoint response.
 pub mod sustained;
 
+/// Mixed free motion, impacts and sustained contact with resolved sliding stops.
+pub mod evolution;
+
 /// Constant reduced force and the original prescribed jump offsets at the
 /// requested interval endpoint. Offsets evolve affinely from accepted native
 /// offsets; a shorter trial receives its own correct physical endpoint.
@@ -125,6 +128,7 @@ pub enum TrajectoryError {
     Cancelled,
     Geometry(GeometryError),
     Impact(ImpactError),
+    Sustained(sustained::SegmentError),
     Body {
         body: usize,
         error: DynamicsError,
@@ -195,6 +199,32 @@ pub fn advance_candidate_controlled<'m, 'a>(
     preconditioners: &[&dyn Precond],
     duration_s: f64,
     controls: TrajectoryControls,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<TrajectoryCandidate<'m, 'a>, TrajectoryError> {
+    advance_shared(
+        motions,
+        contacts,
+        loads,
+        preconditioners,
+        duration_s,
+        controls,
+        None,
+        cancelled,
+    )
+}
+
+// Both public owners use the same native free steps, impact ordering, geometry,
+// original material state and whole-window accounting. The supported lane adds
+// held forces only while a contact is active and normally stationary.
+#[allow(clippy::too_many_arguments)]
+fn advance_shared<'m, 'a>(
+    motions: &[&CohesiveMotion<'m, 'a>],
+    contacts: &[FrictionalContact<'_>],
+    loads: &[BodyLoad<'_>],
+    preconditioners: &[&dyn Precond],
+    duration_s: f64,
+    controls: TrajectoryControls,
+    mut evolution: Option<&mut evolution::State<'_>>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<TrajectoryCandidate<'m, 'a>, TrajectoryError> {
     admit(
@@ -299,6 +329,9 @@ pub fn advance_candidate_controlled<'m, 'a>(
                 contact: r.contact,
             });
             current = event.motions;
+            if let Some(supported) = evolution.as_deref_mut() {
+                supported.after_impact();
+            }
             sampled = sample(
                 contacts,
                 &reference_positions,
@@ -345,6 +378,86 @@ pub fn advance_candidate_controlled<'m, 'a>(
                     time_s,
                     trial_step_s: dt_s,
                 });
+            }
+            if let Some(supported) = evolution.as_deref_mut() {
+                if let Some(mut segment) = supported.trial(
+                    &current,
+                    contacts,
+                    &sampled,
+                    loads,
+                    &initial_offsets,
+                    start_s,
+                    actual_duration_s,
+                    trial_target_s,
+                    controls,
+                    &mut work,
+                    cancelled,
+                )? {
+                    let actual_target_s = segment.step.report.target_time_s;
+                    let actual_dt_s = finite(actual_target_s - time_s)?;
+                    if actual_dt_s <= 0.0 || actual_target_s > trial_target_s {
+                        return Err(TrajectoryError::Invalid(
+                            "sustained segment must end inside its requested interval",
+                        ));
+                    }
+                    if actual_dt_s < controls.minimum_step_s && actual_target_s != target_s {
+                        return Err(TrajectoryError::NoProgress {
+                            time_s,
+                            trial_step_s: actual_dt_s,
+                        });
+                    }
+                    let positions: Vec<_> = segment
+                        .step
+                        .bodies
+                        .iter()
+                        .map(|step| step.motion.state().displacements_m())
+                        .collect();
+                    let velocities: Vec<_> = segment
+                        .step
+                        .bodies
+                        .iter()
+                        .map(|step| step.motion.velocity_m_s())
+                        .collect();
+                    let endpoint = geometry::sample(
+                        contacts,
+                        &reference_positions,
+                        &positions,
+                        &velocities,
+                        actual_target_s - start_s,
+                        cancelled,
+                    )?;
+                    // Open and separating contacts were absent from the held
+                    // force solve. They still constrain every accepted path.
+                    if endpoint.gaps_m.iter().any(|gap| *gap < 0.0) {
+                        rejected_trials += 1;
+                        refinements += 1;
+                        if refinements > controls.maximum_refinements_per_step {
+                            return Err(TrajectoryError::Refinement {
+                                time_s,
+                                attempts: refinements,
+                            });
+                        }
+                        h = geometry::shorter_step(
+                            contacts,
+                            &sampled.gaps_m,
+                            &endpoint.gaps_m,
+                            actual_dt_s,
+                        )?;
+                        continue;
+                    }
+                    balance.add_sustained(&segment.step)?;
+                    supported.accept(time_s, &mut segment, contacts)?;
+                    minimum_gap_m = minimum_gap_m.min(endpoint.minimum_gap_m);
+                    current = segment
+                        .step
+                        .bodies
+                        .into_iter()
+                        .map(|step| step.motion)
+                        .collect();
+                    sampled = endpoint;
+                    accepted_steps += 1;
+                    break;
+                }
             }
             let fraction = finite((trial_target_s - start_s) / actual_duration_s)?;
             let mut stages = Vec::with_capacity(current.len());
@@ -653,8 +766,15 @@ struct Balance {
 }
 impl Balance {
     fn add_smooth(&mut self, step: &DynamicsStep<'_, '_>) -> Result<(), TrajectoryError> {
+        self.add_body(step, step.external_work_j)
+    }
+    fn add_body(
+        &mut self,
+        step: &DynamicsStep<'_, '_>,
+        authored_work_j: f64,
+    ) -> Result<(), TrajectoryError> {
         for value in [
-            step.external_work_j,
+            authored_work_j,
             step.prescribed_jump_work_j,
             -(step.kinetic_after_j - step.kinetic_before_j),
             -(step.bulk_stored_after_j - step.bulk_stored_before_j),
@@ -665,7 +785,7 @@ impl Balance {
         ] {
             self.closure.add(value)?;
         }
-        self.external.add(step.external_work_j)?;
+        self.external.add(authored_work_j)?;
         self.prescribed.add(step.prescribed_jump_work_j)?;
         self.kinetic
             .add(finite(step.kinetic_after_j - step.kinetic_before_j)?)?;
@@ -677,6 +797,25 @@ impl Balance {
         self.viscous.add(step.viscous_dissipated_j)?;
         self.friction.add(step.friction_dissipated_j)?;
         self.smooth_defect.add(step.energy_residual_j.abs())
+    }
+    fn add_sustained(
+        &mut self,
+        step: &sustained::SustainedCandidate<'_, '_>,
+    ) -> Result<(), TrajectoryError> {
+        if step.bodies.len() != step.report.body_work.len() {
+            return Err(TrajectoryError::Invalid(
+                "complete sustained body work required",
+            ));
+        }
+        for (body, work) in step.bodies.iter().zip(&step.report.body_work) {
+            // Native external work includes the solved contact force. Use the
+            // independently evaluated authored work here so contact exchange
+            // enters the whole-window first law exactly once below.
+            self.add_body(body, work.authored_work_j)?;
+        }
+        self.contact_work.add(step.report.audit.surface_work_j)?;
+        self.closure.add(step.report.audit.surface_work_j)?;
+        self.closure.add(-step.report.audit.friction_loss_j)
     }
     fn add_impact(
         &mut self,

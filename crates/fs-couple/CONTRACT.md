@@ -18175,6 +18175,44 @@ moving surfaces, two-body momentum and false midpoint reflections. Native
 damaged-body cases exercise stopping followed by rest or opposite breakaway,
 moving-wall entrainment and coupled pair momentum through the original owners.
 
+### Mixed free, impact and supported cohesive trajectories
+
+`cohesive_contact::trajectory::evolution::advance_candidate` advances a whole
+requested window through the existing transient loop and original physical
+owners. Incoming contacts enter the simultaneous native Coulomb impact owner.
+Already active, normal-stationary contacts enter the stop-aware sustained
+segment; separating or open contacts resume native free motion. A completed
+relative sliding stop ends a segment, and the next actual force solve determines
+sticking or opposite breakaway under the continuing authored loads. The
+existing transient-only API retains its original route.
+
+All declared contacts remain in the actual endpoint geometry checks, including
+those omitted from the current sustained force solve. A penetrating proposal
+shortens the duration and recomputes mechanics from unchanged predecessors.
+Original interface offsets follow their affine physical time path across both
+ordinary substeps and shortened stopping intervals. Warm forces are numerical
+guesses in stable original contact order; an impact clears them.
+
+The wrapped report separates sustained Coulomb loss from native material
+friction and instantaneous impact loss. Independently evaluated authored work
+replaces native total force work in the shared window account, then prescribed
+surface work and dry-friction loss enter exactly once. Original storage and
+material losses retain their meanings. Sums of absolute native, contact,
+friction, normal-constraint and segment energy defects must also pass the
+whole-window gate. Geometrically rejected successful probes spend work but add
+no motion or loss. Native body/residual/Newton, contact solve/response, retained
+event and workspace budgets apply across the entire window; publication is
+atomic for all original histories.
+
+The geometry and numerical-path limits of both existing owners remain. A
+positive activation-distance impact is not silently relabeled as zero-gap
+support: its unchanged normal-kinematic/work gates can refuse that handoff.
+Transverse directional crossings are not invented stopping events. This does
+not certify exact-flow event discovery, arbitrary frictional uniqueness or a
+general Moreau--Jean scheme. Native regression cases cover sliding to sustained
+rest, stopping then genuine opposite breakaway, zero-gap plastic impact followed
+by loaded support, and contact release followed by free flight.
+
 ## Finite cohesive patch load line
 
 `cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.
