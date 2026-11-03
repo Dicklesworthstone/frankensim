@@ -1,0 +1,78 @@
+frankensim.matdb-source.v1
+observation	identity	Copper(II) ion Cu2+(aq), conventional aqueous reference	https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/12/	The printed page 6 Cu2+ row gives formula weight 63.546 g/mol for the individual dissolved ion with charge +2. This is not Cu+(aq), copper metal, total dissolved copper, a copper-sulfate ion pair, a hydrated salt or an ore specimen. The source's rounded formula weight is retained.
+observation	reference-values	Literal copper(II) enthalpy and conventional ionic entropy	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/12/full/max/0/default.jpg	The source gives formation enthalpy +64.9 kJ/mol and conventional ionic entropy -98.0 J/(mol K). The positive enthalpy and negative entropy signs are retained. Ionic entropy uses the H+(aq) zero convention and is not an absolute entropy. The neighboring Cu+ row's +71.7 kJ/mol enthalpy belongs to a different oxidation state.
+observation	gibbs-reference	Literal copper(II) standard formation Gibbs energy	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/12/full/max/0/default.jpg	The Cu2+(aq) row separately prints formation Gibbs energy +65.1 kJ/mol, with uncertainty magnitude 0.1 kJ/mol. It is distinct from the +64.9 kJ/mol formation enthalpy and is not computed by subtracting temperature times the conventional species entropy. The source elemental reference and H+(aq)-zero convention are both retained. No universal confidence probability or cross-species covariance is supplied.
+observation	reported-uncertainty	Source magnitudes without a fabricated probability model	USGS Bulletin 2131 printed pages 3 and 6	The source prints uncertainty magnitudes 1.0 kJ/mol for formation enthalpy and 4.0 J/(mol K) for conventional ionic entropy. Page 3 describes the calorimetric convention as twice the standard deviation of the mean, without a universal coverage probability or covariance for the compiled rows. Dimensional metadata preserve these two magnitudes; all claims retain Unstated uncertainty. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.
+observation	scope	USGS point state and aqueous reference convention	USGS Bulletin 2131 printed pages iv, 1 and 3	All claims apply at 298.15 K and 100000 Pa. The source's m=1 denotes a hypothetical ideal aqueous unit-activity state referred to infinite dilution, not a measured finite-concentration 1 mol/kg solution. Both the USGS elemental reference and H+(aq)-zero convention are required. The individual ion has no source-pure-species assertion. Activity coefficients, speciation, heat of mixing, electrolyte transport, current efficiency and electrode kinetics are not supplied.
+scalar	molar-mass	identity,scope	mass	63.546	g/mol	tabulated
+scalar	formation-enthalpy	identity,reference-values,reported-uncertainty,scope	hf	64.9	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,gibbs-reference,scope	gf	65.1	kJ/mol	tabulated
+scalar	conventional-entropy	identity,reference-values,reported-uncertainty,scope	s0	-98.0	J/mol/K	tabulated
+scalar	formation-uncertainty	reported-uncertainty,scope	hf_uncertainty	1.0	kJ/mol	tabulated
+scalar	entropy-uncertainty	reported-uncertainty,scope	s_uncertainty	4.0	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	conventional-entropy	unstated	-	-	-	-
+uncertainty	formation-uncertainty	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	conventional-entropy	temperature	298.15	298.15	K
+validity	formation-uncertainty	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	conventional-entropy	pressure	100000	100000	Pa
+validity	formation-uncertainty	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	conventional-entropy	standard	1	1	1
+validity	formation-uncertainty	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	conventional-entropy	convention	1	1	1
+validity	formation-uncertainty	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	conventional-entropy	phase	1	1	1
+validity	formation-uncertainty	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	conventional-entropy	aqueous	1	1	1
+validity	formation-uncertainty	aqueous	1	1	1
+validity	entropy-uncertainty	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	conventional-entropy	ionic	1	1	1
+validity	formation-uncertainty	ionic	1	1	1
+validity	entropy-uncertainty	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	conventional-entropy	identity	1	1	1
+validity	formation-uncertainty	identity	1	1	1
+validity	entropy-uncertainty	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	conventional-entropy	reference	1	1	1
+validity	formation-uncertainty	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	conventional-entropy	specimen	0	0	1
+validity	formation-uncertainty	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1

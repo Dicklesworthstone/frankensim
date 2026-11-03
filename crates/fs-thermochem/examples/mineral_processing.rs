@@ -16,6 +16,8 @@
 //! Repeated `--activity 'SPECIES=VALUE'` arguments imply `--gibbs` and evaluate
 //! the local reaction Gibbs energy only when every active activity is supplied.
 //! Both routes can be requested; independently rounded source values can differ.
+//! Copper electrowinning also reports its signed reversible cell potential from
+//! the direct Gibbs route; this does not supply an operating cell voltage.
 //! Or explicit malachite inventory accounting, with all four inputs in moles:
 //! `cargo run -p fs-thermochem --example mineral_processing -- \
 //! --malachite-inventory 10 12 100 3`
@@ -35,7 +37,8 @@ use fs_qty::{Amount, Dimensionless, Dims, Mass, MolarMass, QuantitySpec};
 use fs_thermochem::{
     MassAmountBasis, SpeciesId,
     stoichiometry::{
-        FormationEnthalpySource, minerals::MineralReaction, thermodynamics::FormationGibbsSource,
+        FormationEnthalpySource, electrolysis::ElectrolysisReaction, minerals::MineralReaction,
+        thermodynamics::FormationGibbsSource,
     },
 };
 
@@ -51,13 +54,14 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 15] = [
+const REACTIONS: [&str; 16] = [
     "lime-hydration",
     "magnesite-calcination",
     "magnetite-oxidation",
     "cuprous-oxide-oxidation",
     "cupric-oxide-reduction",
     "cuprous-oxide-reduction",
+    "copper-electrowinning",
     "pyrite-roasting",
     "pyrite-oxidation-ferrous",
     "ferrous-oxidation-ferric",
@@ -171,6 +175,26 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-gas",
             ],
             equation: "Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g)",
+        },
+        "copper-electrowinning" => ReactionCase {
+            reaction: MineralReaction::CopperElectrowinning,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "copper-ii-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+                "copper-solid-usgs-b2131",
+                "oxygen-gas-usgs-b2131",
+                "hydrogen-ion-aqueous-usgs-b2131",
+            ],
+            species: &["Cu[2+](aq)", "H2O(l)", "Cu(s)", "O2(g)", "H+(aq)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-liquid",
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-aqueous",
+            ],
+            equation: "2 Cu[2+](aq) + 2 H2O(l) -> 2 Cu(s) + O2(g) + 4 H+(aq), oxygen-evolving electrowinning endpoint",
         },
         "pyrite-roasting" => ReactionCase {
             reaction: MineralReaction::PyriteRoastingToHematite,
@@ -589,6 +613,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!(
             "Activity Gibbs energy is dG/dxi at the supplied state, not the total change for a finite reaction extent. No equilibrium composition, reaction rate or conversion is predicted."
         );
+        println!(
+            "For copper-electrowinning, --gibbs also reports E = -Delta G/(nF), with two electrons per Cu and four per written equation. The signed reversible potential is not an operating voltage or an efficiency-scaled voltage."
+        );
         return Ok(());
     }
     if args
@@ -643,29 +670,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(standard) => standard.enthalpy().clone(),
         None => reaction.standard_enthalpy_change(&sources)?,
     };
-    let gibbs = if options.gibbs {
-        let sources = (0..packs.len())
-            .map(|i| FormationGibbsSource {
-                species: &species[i],
-                pack: &packs[i],
-                at: &points[i],
-                reference_axis: case.reference,
-            })
-            .collect::<Vec<_>>();
-        Some(reaction.standard_gibbs_change(&sources)?)
-    } else {
-        None
-    };
-    let activity_evaluation = if options.activities.is_empty() {
-        None
-    } else {
-        Some(
-            gibbs
-                .as_ref()
-                .ok_or("activities require a standard Gibbs evaluation")?
-                .at_activities(&options.activities)?,
-        )
-    };
     let mut molar_masses = Vec::with_capacity(packs.len());
     for (pack, point) in packs.iter().zip(&points) {
         let answer = pack.claims().query_typed(
@@ -679,9 +683,79 @@ fn main() -> Result<(), Box<dyn Error>> {
         pack.claims().verify_receipt(&answer.receipt)?;
         molar_masses.push(MolarMass::new(answer.evidence.value.value));
     }
+    let (gibbs, cell_potential) = if options.gibbs {
+        let sources = (0..packs.len())
+            .map(|i| FormationGibbsSource {
+                species: &species[i],
+                pack: &packs[i],
+                at: &points[i],
+                reference_axis: case.reference,
+            })
+            .collect::<Vec<_>>();
+        if case.reaction == MineralReaction::CopperElectrowinning {
+            let model = ElectrolysisReaction::new(
+                reaction.clone(),
+                species[2].clone(),
+                molar_masses[2],
+                2,
+            )?;
+            (None, Some(model.standard_potential(&sources)?))
+        } else {
+            (Some(reaction.standard_gibbs_change(&sources)?), None)
+        }
+    } else {
+        (None, None)
+    };
+    let standard_gibbs = cell_potential
+        .as_ref()
+        .map(|standard| standard.gibbs())
+        .or(gibbs.as_ref());
+    let activity_potential = if options.activities.is_empty() {
+        None
+    } else {
+        cell_potential
+            .as_ref()
+            .map(|standard| standard.at_activities(&options.activities))
+            .transpose()?
+    };
+    let activity_gibbs = if options.activities.is_empty() || cell_potential.is_some() {
+        None
+    } else {
+        Some(
+            standard_gibbs
+                .ok_or("activities require a standard Gibbs evaluation")?
+                .at_activities(&options.activities)?,
+        )
+    };
+    let activity_evaluation = activity_potential
+        .as_ref()
+        .map(|evaluation| evaluation.gibbs())
+        .or(activity_gibbs.as_ref());
     let extent =
         reaction.extent_from_reacted_mass(&species[0], Mass::new(reacted_kg), molar_masses[0])?;
     let amounts = reaction.amounts(extent)?;
+    let enthalpy_change = heat.at_extent(extent)?;
+    let mut converted_amounts = Vec::with_capacity(amounts.len());
+    let mut consumed_mass = 0.0;
+    let mut formed_mass = 0.0;
+    for amount in &amounts {
+        let index = species
+            .iter()
+            .position(|id| id == &amount.term.species)
+            .ok_or("reaction participant lacks an associated source")?;
+        let mass = MassAmountBasis::from_amount(amount.amount, molar_masses[index])?;
+        let direction = if amount.term.coefficient < 0 {
+            consumed_mass += mass.mass().value();
+            "consumed"
+        } else {
+            formed_mass += mass.mass().value();
+            "formed"
+        };
+        converted_amounts.push((index, amount.amount, mass.mass(), direction));
+    }
+    if !consumed_mass.is_finite() || !formed_mass.is_finite() {
+        return Err("summed source-molar-mass conversion is not representable".into());
+    }
 
     println!("{}, 298.15 K, 100000 Pa", case.equation);
     if case.phase_axes[0] == "source-phase-aqueous" {
@@ -700,30 +774,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         "reaction extent [mol of written equation]: {}",
         extent.value()
     );
-    let mut consumed_mass = 0.0;
-    let mut formed_mass = 0.0;
-    for amount in &amounts {
-        let index = species
-            .iter()
-            .position(|id| id == &amount.term.species)
-            .ok_or("reaction participant lacks an associated source")?;
-        let mass = MassAmountBasis::from_amount(amount.amount, molar_masses[index])?;
-        let direction = if amount.term.coefficient < 0 {
-            consumed_mass += mass.mass().value();
-            "consumed"
-        } else {
-            formed_mass += mass.mass().value();
-            "formed"
-        };
+    for (index, amount, mass, direction) in converted_amounts {
         println!(
             "{} {direction}: {} mol, {} kg",
             case.species[index],
-            amount.amount.value(),
-            mass.mass().value()
+            amount.value(),
+            mass.value()
         );
-    }
-    if !consumed_mass.is_finite() || !formed_mass.is_finite() {
-        return Err("summed source-molar-mass conversion is not representable".into());
     }
     println!(
         "Source-molar-mass residual, formed minus consumed [kg]: {}",
@@ -736,10 +793,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "standard reaction enthalpy [J/mol extent]: {}",
         heat.molar().value()
     );
-    println!(
-        "standard enthalpy change [J]: {}",
-        heat.at_extent(extent)?.value()
-    );
+    println!("standard enthalpy change [J]: {}", enthalpy_change.value());
     if let Some(standard) = equilibrium {
         println!(
             "caloric-derived standard-state route (--equilibrium): Delta G = Delta H - T Delta S"
@@ -764,7 +818,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "These constants use the selected standard states; activities, pH and equilibrium composition require separate inputs and models."
         );
     }
-    if let Some(standard) = &gibbs {
+    if let Some(standard) = standard_gibbs {
         println!("tabulated formation-Gibbs route (--gibbs):");
         println!(
             "standard reaction Gibbs energy [J/mol extent]: {}",
@@ -778,6 +832,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(value) = standard.equilibrium_constant() {
             println!("K [dimensionless]: {}", value.value());
         }
+    }
+    if let Some(standard) = &cell_potential {
+        let model = standard.model();
+        println!(
+            "declared electrons per {} product: {}; per written equation: {}",
+            model.product().as_str(),
+            model.electrons_per_product(),
+            model.electrons_per_equation()
+        );
+        println!(
+            "source deposited-product molar mass [kg/mol]: {}",
+            model.molar_mass().value()
+        );
+        println!(
+            "signed standard reversible cell potential [V]: {}",
+            standard.potential().value()
+        );
     }
     if options.equilibrium && options.gibbs {
         println!(
@@ -808,6 +879,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         println!(
             "Negative dG/dxi favors the written forward direction at these activities; this is not the total Gibbs change over the finite reacted extent."
+        );
+    }
+    if let Some(evaluation) = &activity_potential {
+        println!(
+            "signed reversible cell potential at supplied activities [V]: {}",
+            evaluation.potential().value()
+        );
+    }
+    if cell_potential.is_some() {
+        println!(
+            "A negative signed potential identifies an externally driven written reaction. Reversing its sign gives the reversible opposing voltage, not the actual operating voltage; no efficiency factor is applied."
+        );
+        println!(
+            "Overpotentials, electrical resistance, current efficiency and side reactions require additional models."
         );
     }
     for pack in &packs {

@@ -14,6 +14,9 @@
 //! Faraday and copper-cell context: Beukes and Badenhorst (2009),
 //! <https://www.saimm.co.za/Journal/v109n06p343.pdf>.
 
+/// Reversible potentials bound to the original equation and electron basis.
+pub mod potential;
+
 use super::{
     ConservedReaction, ReactionBalanceError, faraday_yield, nonnegative, product, representable,
 };

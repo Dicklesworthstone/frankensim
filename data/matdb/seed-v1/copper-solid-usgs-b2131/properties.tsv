@@ -1,0 +1,55 @@
+frankensim.matdb-source.v1
+observation	identity	Solid elemental copper in its standard reference state	https://digital.library.unt.edu/ark:/67531/metadc1114954/m1/12/	The printed page 6 COPPER (REFERENCE STATE), Cu row gives formula weight 63.546 g/mol. It identifies pure elemental solid copper, not molten copper, a dissolved ion, a copper alloy, a copper oxide or a qualified cathode specimen. The source's rounded formula weight is retained.
+observation	reference-values	Literal copper elemental-reference thermochemistry	https://digital.library.unt.edu/iiif/ark:/67531/metadc1114954/m1/12/full/max/0/default.jpg	The source separately prints zero standard formation enthalpy, zero standard formation Gibbs energy and standard molar entropy 33.14 J/(mol K). Formation zeros follow the elemental reference convention; they do not assert zero chemical potential change for a copper reaction or zero heat of melting. The standard entropy belongs to neutral solid copper and is not an ionic entropy.
+observation	reported-uncertainty	Printed copper entropy uncertainty magnitude	USGS Bulletin 2131 printed pages 3 and 6	The printed entropy uncertainty magnitude is 0.03 J/(mol K), retained as dimensional metadata. No uncertainty magnitude is printed for the elemental formation zeros. The source supplies no universal confidence probability or reaction covariance. All claims retain Unstated uncertainty; no independent Gaussian model, exact statistical bound or certified cell-energy interval is inferred.
+observation	scope	USGS source-reference point and phase restrictions	USGS Bulletin 2131 printed pages iv, 1 and 3	All claims are restricted to 298.15 K and 100000 Pa, pure solid copper and the USGS B2131 elemental reference. Other copper evaluations retain their own reference identity. No cathode morphology, impurity content, heat-capacity curve, arbitrary-temperature Gibbs model, electrode overpotential, electrical resistance, current efficiency or deposition rate is supplied.
+scalar	molar-mass	identity,scope	mass	63.546	g/mol	tabulated
+scalar	formation-enthalpy	identity,reference-values,scope	hf	0.0	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,reference-values,scope	gf	0.0	kJ/mol	tabulated
+scalar	standard-entropy	identity,reference-values,reported-uncertainty,scope	s0	33.14	J/mol/K	tabulated
+scalar	entropy-uncertainty	reported-uncertainty,scope	s_uncertainty	0.03	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	entropy-uncertainty	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1

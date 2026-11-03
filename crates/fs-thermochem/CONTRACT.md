@@ -128,6 +128,28 @@ log-only range limits, retained receipts and missing/mismatched reference
 conditions. The formulas follow IUPAC S05915 (standard equilibrium constant)
 and A00115 (relative activity); numerical checks do not calibrate a plant.
 
+### Source-bound reversible electrochemical potential
+
+`stoichiometry::electrolysis::ElectrolysisReaction::standard_potential` evaluates
+formation-Gibbs sources on its own original conserved reaction, then computes
+the signed typed voltage `E° = -Delta_r G°/(n F)`. The electron count is the
+original productive-species association times its written-equation coefficient;
+counts that cannot convert exactly to binary64 refuse. The result retains the
+original electrolysis model, standard Gibbs evidence and receipts. Its
+`at_activities` method reuses the same complete positive dimensionless activity
+admission and reports local `E = -Delta_r G/(n F)` without changing the source
+or electron convention.
+
+For the USGS copper/water/oxygen/proton set, the four-electron written copper
+electrowinning equation gives `Delta_r G° = 344000 J/mol` and
+`E° = -0.891327190438547 V`. With proton activity 0.01 and all other activities
+one, the potential is `-0.7730084910689824 V`. The sign follows the written
+direction; the opposing magnitude is a reversible thermodynamic requirement,
+not an operating cell voltage. Current efficiency, resistance, overpotential,
+side reactions and finite-extent work are not inferred. The original
+charge-driven inventory/yield API remains separate. See
+`data/matdb/seed-v1/MINING_ELECTROWINNING.md` for the source set and runnable case.
+
 ### Shared finite reagent inventories and source-bound heat
 
 `stoichiometry::network::ReactionNetwork` joins admitted equations while
