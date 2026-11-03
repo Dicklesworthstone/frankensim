@@ -1,5 +1,8 @@
 //! Native dynamic gravity: independent trajectory, mass moments and atomic refusal.
 //! These manufactured conservative fields are numerical oracles, not material data.
+#[path = "gravity/split.rs"]
+mod split;
+
 use super::*;
 use fs_couple::finite_solid::contact::step::free::FreeFlightControls;
 use fs_couple::finite_solid::gravity::StationaryGravity;
@@ -31,7 +34,7 @@ fn graded_density(rho: [f64; 4]) -> Arc<TetrahedralDensityBody> {
     let context = point(300.0);
     let bindings: Vec<_> = (0..4)
         .map(|node| DensityVertexBinding {
-            position_m: vector(NODES[node]),
+            position_m: fs_ga::Vec3::new(NODES[node][0], NODES[node][1], NODES[node][2]),
             material: &cards[node],
             point: &context,
             selection: MaterialPropertySelection::SingleClaimOnly,
@@ -280,7 +283,23 @@ fn evolving_tidal_gravity_matches_scalar_motion_original_p1_moments_and_pressure
                         pressure,
                         energy_momentum,
                     );
-                    let mut limits = controls(if energy_momentum { 2e-9 } else { 1e-2 });
+                    // The independent trajectory also fixes the signed work
+                    // defect. Ordinary midpoint is not energy conserving for
+                    // the nonlinear material, especially at this stiff step.
+                    let dx = expected_q - stretch;
+                    let expected_work = held[0].1 * dx - pressure * VOLUME * dx
+                        + potential(stretch)
+                        - potential(expected_q);
+                    let expected_defect =
+                        0.5 * mass * (expected_v - velocity) * (expected_v + velocity)
+                            + strain_energy(expected_q, 1.0)
+                            - strain_energy(stretch, 1.0)
+                            - expected_work;
+                    let mut limits = controls(if energy_momentum {
+                        2e-9
+                    } else {
+                        expected_defect.abs() + 1e-8
+                    });
                     // A doubled/missing tidal tangent does not converge within
                     // this native Newton budget for the deliberately stiff field.
                     limits.solve.max_newton_iterations = 6;
@@ -291,6 +310,17 @@ fn evolving_tidal_gravity_matches_scalar_motion_original_p1_moments_and_pressure
                         limits.solve.newton.globalization = fs_solver::Globalization::TrustRegion(
                             fs_solver::TrustRegionConfig::default(),
                         );
+                    }
+                    if !energy_momentum && expected_defect.abs() > 1e-7 {
+                        let mut tight = limits;
+                        tight.energy_tolerance_j = 0.5 * expected_defect.abs();
+                        assert!(matches!(
+                            body.step_candidate_with_pressure(
+                                h, &held, [0.0; 3], pressure, tight, cx,
+                            ),
+                            Err(FiniteSolidError::Energy { .. })
+                        ));
+                        assert_eq!(body.native_state(), &before);
                     }
                     let (next, report) = if energy_momentum {
                         body.step_energy_momentum_candidate_with_pressure(
@@ -303,6 +333,7 @@ fn evolving_tidal_gravity_matches_scalar_motion_original_p1_moments_and_pressure
                     assert_eq!(body.native_state(), &before);
                     near(next.native_state().q[0] + 1.0, expected_q, 2e-9);
                     near(next.native_state().v[0], expected_v, 2e-8);
+                    near(report.integration_defect_j, expected_defect, 2e-8);
                     let gravity = report.gravity.as_ref().unwrap();
                     near(gravity.potential_before_j, potential(stretch), 2e-11);
                     near(gravity.potential_after_j, potential(expected_q), 2e-8);
@@ -418,7 +449,7 @@ impl PointGravityField for Limited {
 }
 
 #[test]
-fn inadmissible_endpoint_frame_and_unsupported_split_refuse_without_state_loss() {
+fn inadmissible_endpoint_and_frame_refuse_without_smooth_or_split_state_loss() {
     with_cx(|_, cx| {
         let material = bind(&source_card(6.0, 1.0, false, false));
         let source = Limited {
@@ -460,10 +491,16 @@ fn inadmissible_endpoint_frame_and_unsupported_split_refuse_without_state_loss()
                 .is_err()
         );
         assert_eq!(body.native_state(), &before);
+        let (kicked, kick) = body
+            .force_kick_candidate(0.2, &[], [0.0; 3], [0.0; 3], Default::default(), cx)
+            .unwrap();
+        let before_drift = kicked.native_state().clone();
         assert!(
-            body.force_kick_candidate(0.01, &[], [0.0; 3], [0.0; 3], Default::default(), cx,)
+            kicked
+                .contact_drift_candidate(&kick, controls(1e-9), cx)
                 .is_err()
         );
+        assert_eq!(kicked.native_state(), &before_drift);
         assert_eq!(body.native_state(), &before);
         // The retained field is still usable after the refused candidates.
         let (next, _) = body
@@ -536,7 +573,17 @@ impl PointGravityField for QuadraticAcceleration {
             acceleration_world_m_s2: Vec3::new(self.coefficient * x.x * x.x, 0.0, 0.0),
             specific_potential_j_kg: -self.coefficient * x.x * x.x * x.x / 3.0,
             acceleration_gradient_s2: Mat3 {
-                m: [2.0 * self.coefficient * x.x, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                m: [
+                    2.0 * self.coefficient * x.x,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
             },
         }
         .validate()
@@ -585,9 +632,7 @@ fn nonlinear_field_retains_its_potential_work_defect_and_refuses_a_tight_energy_
         let new = next.native_state().q[0] + 1.0;
         // Exact reference integral of rho*N_1^3 = mass/20 = 0.05 kg.
         let cubic_mass = 0.05;
-        let potential = |stretch: f64| {
-            -source.coefficient * cubic_mass * stretch.powi(3) / 3.0
-        };
+        let potential = |stretch: f64| -source.coefficient * cubic_mass * stretch.powi(3) / 3.0;
         let gravity = report.gravity.as_ref().unwrap();
         near(gravity.potential_before_j, potential(old), 2e-10);
         near(gravity.potential_after_j, potential(new), 2e-10);

@@ -1,6 +1,7 @@
 //! First-order force/contact/drift composition on the ORIGINAL numerical owners.
 //!
-//! Hyper3 evaluates original elastic, held referential and uniform closed-pressure forces.
+//! Hyper3 evaluates original elastic, held referential, uniform closed-pressure
+//! and bound stationary-gravity forces at the same initial configuration.
 //! The existing impulse owner applies h(F_external - F_internal) using the full
 //! supported consistent mass. A caller then resolves simultaneous contact at
 //! this unchanged configuration. Finally the original generalized-alpha owner
@@ -10,7 +11,7 @@
 //! The retained native history entry is the ACTUAL implicit solve of that
 //! kinetic subflow; it is not a full-solid midpoint-equilibrium receipt. The
 //! endpoint acceleration is subsequently recomputed by the original mass solve
-//! and original elastic/current-pressure forces. It describes the smooth force component only;
+//! and original elastic/current-pressure/current-gravity forces. It describes the smooth force component only;
 //! contact impulses remain measures and are not disguised as smooth forces.
 //!
 //! The caller must admit the whole coupled geometric path, including omitted
@@ -40,15 +41,19 @@ pub struct FiniteSolidForceKick<'a> {
     pub duration_s: f64,
     /// Original consistent-mass impulse receipt, including stationary supports.
     pub impulse: FiniteSolidImpulse,
-    /// Held external force times h, at the actual initial current positions.
+    /// Held loads, pressure and native gravity times h, at the initial positions.
     pub source_impulse: FiniteSolidMomentum,
     /// Minus original elastic force times h. Objectivity requires zero resultant
     /// and moment; their measured residuals pass the requested impulse gates.
     pub internal_impulse: FiniteSolidMomentum,
-    /// Total held-load kick work, including the separately retained pressure part.
+    /// Total source kick work, including the separate pressure and gravity parts.
     pub source_impulse_work_j: f64,
     /// Actual pressure impulse paired with the mean velocity across this kick.
     pub pressure_impulse_work_j: f64,
+    /// Actual native gravity impulse paired with the mean kick velocity.
+    pub gravity_impulse_work_j: f64,
+    /// Original reference-mass quadrature potential, when gravity is bound.
+    pub gravity_potential_before_j: Option<f64>,
     pub internal_impulse_work_j: f64,
     /// Native combined-impulse work minus separately accumulated source and
     /// internal work. This measured floating-point decomposition defect is
@@ -79,6 +84,8 @@ struct ForceKickBinding {
     origin_m: [f64; 3],
     source_work_j: f64,
     pressure_work_j: f64,
+    gravity_work_j: f64,
+    gravity_potential_before_j: Option<f64>,
     internal_work_j: f64,
     strain_before_j: f64,
     kick_work_residual_j: f64,
@@ -92,7 +99,7 @@ pub struct FiniteSolidContactDrift {
     /// SecondOrderState.history. This is not a full elastic midpoint step.
     pub time: ImplicitStepTelemetry,
     /// Original mass solve for smooth endpoint acceleration under the same held
-    /// loads and endpoint elastic/pressure forces; excludes the contact impulse measure.
+    /// loads and endpoint elastic/pressure/gravity forces; excludes contact measures.
     pub endpoint_acceleration: SolveReport,
     pub before: FiniteSolidMomentum,
     pub after: FiniteSolidMomentum,
@@ -105,21 +112,27 @@ pub struct FiniteSolidContactDrift {
     pub kinetic_change_j: f64,
     pub strain_before_j: f64,
     pub strain_after_j: f64,
-    /// Held referential load work plus original uniform-pressure -p Delta V work.
+    /// Held-load work, uniform-pressure -p Delta V and native gravity potential work.
     pub source_displacement_work_j: f64,
     /// Original closed-pressure work, already included in total source work.
     pub pressure_work_j: f64,
+    /// Original gravity potential decrease, already included in total source work.
+    pub gravity_work_j: f64,
+    /// Endpoint reference-mass quadrature potential, when gravity is bound.
+    pub gravity_potential_after_j: Option<f64>,
     /// All external kick work minus all external displacement work.
     pub source_splitting_work_j: f64,
     /// Pressure kick work minus -p Delta V, gated separately from dead-load work.
     pub pressure_splitting_work_j: f64,
+    /// Gravity kick work minus potential work, independently bounded in magnitude.
+    pub gravity_splitting_work_j: f64,
     /// Strain-energy change plus minus-elastic-force kick work.
     pub elastic_splitting_work_j: f64,
     /// Sum of the two signed split defects, actual kick work residual and drift
     /// kinetic change. Contact storage/loss belongs to the separate impact map.
     pub integration_defect_j: f64,
-    /// Sum of their absolute magnitudes, separating dead-load and pressure work.
-    /// Opposing source/pressure/elastic errors cannot
+    /// Sum of their absolute magnitudes, separating dead load, pressure and gravity.
+    /// Opposing source/pressure/gravity/elastic errors cannot
     /// cancel this per-solid admission gate.
     pub absolute_integration_defect_j: f64,
 }
@@ -127,7 +140,7 @@ pub struct FiniteSolidContactDrift {
 impl<'a> FiniteSolidBody<'a> {
     /// Stage a force kick without advancing q, physical time or native history.
     ///
-    /// Held loads and original internal forces act at the initial current
+    /// Held loads, bound gravity and original internal forces act at the initial current
     /// configuration. This primitive must be followed by the contact map and
     /// `contact_drift_candidate`; it is not a complete mechanical timestep.
     /// Pressure-bound bodies retain their explicit-pressure refusal on this entry.
@@ -191,11 +204,6 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidForceKick<'a>), FiniteSolidError> {
         checkpoint(cx)?;
-        if self.gravity.is_some() {
-            return Err(invalid(
-                "stationary gravity requires the native coupled step; split gravity work is not supported",
-            ));
-        }
         if !duration_s.is_finite() || duration_s <= 0.0 {
             return Err(invalid("force kick requires a finite positive interval"));
         }
@@ -206,6 +214,25 @@ impl<'a> FiniteSolidBody<'a> {
             .prepared
             .external_force_n(nodal_forces_n, body_force_n_m3, cx)?;
         let internal = self.prepared.internal_force(&displacement, cx)?;
+        let gravity = self
+            .gravity
+            .as_ref()
+            .map(|gravity| gravity.evaluate(&self.prepared, &displacement, cx))
+            .transpose()?;
+        let gravity_potential_before_j = gravity.as_ref().map(|load| load.potential_energy_j);
+        let gravity_impulse = gravity
+            .map(|load| {
+                let mut impulse = load.force_n;
+                for (dof, value) in impulse.iter_mut().enumerate() {
+                    if dof % 4096 == 0 {
+                        checkpoint(cx)?;
+                    }
+                    *value *= duration_s;
+                }
+                finite(&impulse)?;
+                Ok::<_, FiniteSolidError>(impulse)
+            })
+            .transpose()?;
         let pressure_impulse = pressure
             .as_ref()
             .map(|(surface, value)| {
@@ -232,10 +259,13 @@ impl<'a> FiniteSolidBody<'a> {
                 let dof = 3 * node + axis;
                 source[dof] = duration_s * external[dof];
                 elastic[dof] = -duration_s * internal[dof];
-                let applied_source = match &pressure_impulse {
+                let mut applied_source = match &pressure_impulse {
                     Some(pressure) => source[dof] + pressure[dof],
                     None => source[dof],
                 };
+                if let Some(gravity) = &gravity_impulse {
+                    applied_source += gravity[dof];
+                }
                 *value = applied_source + elastic[dof];
             }
             finite(&impulse)?;
@@ -265,6 +295,18 @@ impl<'a> FiniteSolidBody<'a> {
             finite(&source_impulse.linear_kg_m_s)?;
             finite(&source_impulse.angular_kg_m2_s)?;
         }
+        if let Some(gravity) = &gravity_impulse {
+            // External gravity may supply both a resultant and a tidal moment.
+            // Only elastic and closed uniform-pressure forces have a zero
+            // resultant/moment gate; supports stay on the native impulse owner.
+            let momentum = moments(&positions, gravity, origin_m, cx)?;
+            for axis in 0..3 {
+                source_impulse.linear_kg_m_s[axis] += momentum.linear_kg_m_s[axis];
+                source_impulse.angular_kg_m2_s[axis] += momentum.angular_kg_m2_s[axis];
+            }
+            finite(&source_impulse.linear_kg_m_s)?;
+            finite(&source_impulse.angular_kg_m2_s)?;
+        }
         let internal_impulse = moments(&positions, &elastic, origin_m, cx)?;
         if magnitude(internal_impulse.linear_kg_m_s) > controls.linear_tolerance_kg_m_s
             || magnitude(internal_impulse.angular_kg_m2_s) > controls.angular_tolerance_kg_m2_s
@@ -284,11 +326,17 @@ impl<'a> FiniteSolidBody<'a> {
         let pressure_impulse_work_j = pressure_impulse
             .as_ref()
             .map_or(0.0, |pressure| dot(pressure, &average_v));
-        let source_impulse_work_j = if pressure_impulse.is_some() {
+        let gravity_impulse_work_j = gravity_impulse
+            .as_ref()
+            .map_or(0.0, |gravity| dot(gravity, &average_v));
+        let mut source_impulse_work_j = if pressure_impulse.is_some() {
             dead_load_impulse_work_j + pressure_impulse_work_j
         } else {
             dead_load_impulse_work_j
         };
+        if gravity_impulse.is_some() {
+            source_impulse_work_j += gravity_impulse_work_j;
+        }
         let internal_impulse_work_j = dot(&elastic, &average_v);
         let work_decomposition_residual_j =
             impulse.impulse_work_j - (source_impulse_work_j + internal_impulse_work_j);
@@ -303,6 +351,7 @@ impl<'a> FiniteSolidBody<'a> {
         finite(&[
             source_impulse_work_j,
             pressure_impulse_work_j,
+            gravity_impulse_work_j,
             dead_load_impulse_work_j,
             internal_impulse_work_j,
             work_decomposition_residual_j,
@@ -325,6 +374,8 @@ impl<'a> FiniteSolidBody<'a> {
             origin_m,
             source_work_j: dead_load_impulse_work_j,
             pressure_work_j: pressure_impulse_work_j,
+            gravity_work_j: gravity_impulse_work_j,
+            gravity_potential_before_j,
             internal_work_j: internal_impulse_work_j,
             strain_before_j,
             kick_work_residual_j: impulse.work_residual_j,
@@ -337,6 +388,8 @@ impl<'a> FiniteSolidBody<'a> {
             internal_impulse,
             source_impulse_work_j,
             pressure_impulse_work_j,
+            gravity_impulse_work_j,
+            gravity_potential_before_j,
             internal_impulse_work_j,
             work_decomposition_residual_j,
             linear_decomposition_residual_kg_m_s,
@@ -397,11 +450,6 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidContactDrift), FiniteSolidError> {
         checkpoint(cx)?;
-        if self.gravity.is_some() {
-            return Err(invalid(
-                "stationary gravity requires the native coupled step; split gravity work is not supported",
-            ));
-        }
         if !Arc::ptr_eq(&self.prepared, &kick.prepared)
             || self.state.q != kick.initial_q
             || self.state.t != kick.initial_t
@@ -449,7 +497,7 @@ impl<'a> FiniteSolidBody<'a> {
             .iter()
             .map(|&dof| kick.external_force_n[dof])
             .collect();
-        let operator = DynamicOperator::new(
+        let mut operator = DynamicOperator::new(
             &self.prepared,
             &self.free_mass,
             &self.free,
@@ -459,6 +507,7 @@ impl<'a> FiniteSolidBody<'a> {
                 .map(|(surface, value)| (surface.as_ref(), TetPressure::Uniform(*value))),
             cx,
         );
+        operator.gravity = self.gravity.as_ref();
         let acceleration = second_order_acceleration(
             &operator,
             &candidate.state.q,
@@ -539,12 +588,42 @@ impl<'a> FiniteSolidBody<'a> {
             None => 0.0,
         };
         let pressure_splitting_work_j = binding.pressure_work_j - pressure_work_j;
-        let source_splitting_work_j = if kick.pressure.is_some() {
+        let mut source_splitting_work_j = if kick.pressure.is_some() {
             source_displacement_work_j += pressure_work_j;
             dead_load_splitting_work_j + pressure_splitting_work_j
         } else {
             dead_load_splitting_work_j
         };
+        // The source remains the same immutable body binding as the kick's
+        // prepared material. Caller-editable receipt fields never supply work.
+        let gravity_potential_after_j = self
+            .gravity
+            .as_ref()
+            .map(|gravity| {
+                gravity
+                    .evaluate(&self.prepared, &after_u, cx)
+                    .map(|load| load.potential_energy_j)
+            })
+            .transpose()?;
+        let gravity_work_j = match (
+            binding.gravity_potential_before_j,
+            gravity_potential_after_j,
+        ) {
+            (Some(before), Some(after)) => {
+                (fs_math::dd::Dd::from_f64(before) - fs_math::dd::Dd::from_f64(after)).to_f64()
+            }
+            (None, None) => 0.0,
+            _ => {
+                return Err(invalid(
+                    "contact drift requires its original gravity binding",
+                ));
+            }
+        };
+        let gravity_splitting_work_j = binding.gravity_work_j - gravity_work_j;
+        if gravity_potential_after_j.is_some() {
+            source_displacement_work_j += gravity_work_j;
+            source_splitting_work_j += gravity_splitting_work_j;
+        }
         let elastic_splitting_work_j =
             (strain_after_j - binding.strain_before_j) + binding.internal_work_j;
         let integration_defect_j = source_splitting_work_j
@@ -554,6 +633,7 @@ impl<'a> FiniteSolidBody<'a> {
             + kinetic_change_j;
         let absolute_integration_defect_j = dead_load_splitting_work_j.abs()
             + pressure_splitting_work_j.abs()
+            + gravity_splitting_work_j.abs()
             + elastic_splitting_work_j.abs()
             + binding.kick_work_residual_j.abs()
             + binding.decomposition_residual_j.abs()
@@ -562,8 +642,10 @@ impl<'a> FiniteSolidBody<'a> {
             kinetic_change_j,
             source_displacement_work_j,
             pressure_work_j,
+            gravity_work_j,
             source_splitting_work_j,
             pressure_splitting_work_j,
+            gravity_splitting_work_j,
             dead_load_splitting_work_j,
             elastic_splitting_work_j,
             integration_defect_j,
@@ -590,8 +672,11 @@ impl<'a> FiniteSolidBody<'a> {
             strain_after_j,
             source_displacement_work_j,
             pressure_work_j,
+            gravity_work_j,
+            gravity_potential_after_j,
             source_splitting_work_j,
             pressure_splitting_work_j,
+            gravity_splitting_work_j,
             elastic_splitting_work_j,
             integration_defect_j,
             absolute_integration_defect_j,

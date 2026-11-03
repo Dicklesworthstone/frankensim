@@ -41,18 +41,29 @@ stage-force and potential work to quadrature roundoff. Nonlinear fields retain
 a separate signed quadrature defect and the existing mechanical energy gate;
 that numerical defect is never physical heat.
 
-Field-domain, frame, cancellation and accounting failures publish no candidate.
-The first-order force/contact/drift split explicitly refuses a bound field until
-it has a matching split work law. Callers must not duplicate the bound field in
-held nodal or body loads. Moving-source power, field rebinding, self-gravity and a
-new time integrator are outside this binding.
+The existing first-order force/contact/drift composition retains the same bound
+field. Native gravity at the initial configuration supplies its consistent-mass
+kick, external impulse/moment and mean-velocity work. Contact impulses may then
+change velocity without changing the field or reference mass. The original
+kinetic subflow advances configuration and time, and the native force/mass owner
+restores endpoint acceleration with gravity at the new configuration. Original
+potential decrease supplies gravity displacement work exactly once. Its mismatch
+with kick work has a separate signed account and contributes its absolute value
+to the existing split gate; opposing dead-load, pressure and elastic errors cannot
+cancel it. Private kick bindings retain this accounting even if public diagnostic
+fields are edited. These are first-order subflows requiring timestep refinement,
+not an exact forced trajectory or a new contact law.
 
-Six focused regressions cover free fall and global impulse/moment balance,
-stiff tidal-field motion with original graded mass and pressure, impulse
-continuation, nonlinear potential-work defects, domain/split refusal and
-cancellation. They were added but not executed: the native dependency closure
-compiled through the original solid owner, then the execution environment
-disconnected before the candidate coupling build returned.
+Field-domain, frame, cancellation and accounting failures publish no candidate.
+Callers must not duplicate the bound field in held nodal or body loads.
+Moving-source power, field rebinding and self-gravity remain outside this binding.
+
+Focused native regressions cover free fall and global impulse/moment balance,
+stiff tidal motion with original graded mass and pressure, impulse and split
+continuation, independently computed numerical work defects, noncancelling split
+gates, source-domain exits, edited diagnostic receipts and cancellation. Ordinary
+midpoint material work defects are checked against independent scalar energy
+accounting; the energy/momentum path retains its tighter energy gate.
 
 
 ## Finite gas and rigid wall under molecular shear
@@ -1630,8 +1641,9 @@ Focused fixtures cover physical quarter-turn anisotropic recoil, full world-rota
 
 ## Sustained mixed contact through original force and kinetic subflows
 
-`finite_solid::split` supplies the original prepared hyperelastic, held dead-load
-and explicit uniform-pressure forces to the existing consistent-mass impulse owner. After a separately
+`finite_solid::split` supplies the original prepared hyperelastic, held dead-load,
+explicit uniform-pressure and bound stationary-gravity forces to the existing
+consistent-mass impulse owner. After a separately
 admitted mixed contact event, the original generalized-alpha owner advances the
 mass-only kinetic subflow and records its genuine solve/time/history receipt.
 The original mass and force owners recompute smooth endpoint acceleration;
