@@ -58,6 +58,17 @@ CoupledPropAirframeStep (Aitken candidate A).
   iteration count includes probes and bisections. No global root search,
   tolerance increase or arbitrary selection among stalled-section roots is
   introduced; ambiguous or unresolved continuation refuses.
+- The evaluation-96 finish retains its original bisection arithmetic. If a
+  slow passage through the section blend first satisfies the same local
+  criteria later, eligibility is rechecked against the actual remaining
+  evaluation budget. That late finish interpolates the physical sign bracket
+  with normalized residual weights; only finite, strictly interior proposals
+  are admitted, otherwise it bisects. The original slope, monotonicity, force
+  balance, velocity tolerance and wake-domain gates remain authoritative.
+  Probes and interpolation each consume one of the same 120 evaluations;
+  eligibility at evaluation 120 cannot trigger another probe. This improves
+  local continuation without promising to resolve every valid root within the
+  fixed budget.
 - A non-real trial quadratic target is not proof that the nonlinear station
   equation has no physical root: section loading changes with induction.
   Such a trial only proposes a bounded half-retreat toward `w=-V/2`, sharing

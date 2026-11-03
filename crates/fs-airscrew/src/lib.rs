@@ -566,14 +566,17 @@ impl StationProblem<'_> {
                 return Err(self.refusal("station-did-not-converge", "non-real trial target remains unresolved at the normal-flow boundary",
                     "resolve the station continuation or supply an applicable wake closure; this failed iterate does not establish absence of another physical root"));
             }
-            // Preserve the ordinary warm-started path. Reserve the final 24
-            // evaluations only when recent contraction predicts it will miss
-            // the unchanged tolerance, and a small local bracket is justified.
-            if evaluations == MAX_STATION_ITERS - 24
+            // Preserve the ordinary warm-started path and its original
+            // evaluation-96/bisection finish. A slow passage through the
+            // section blend can enter the same admissible local neighborhood
+            // later; recheck it using only the budget still available.
+            if (MAX_STATION_ITERS - 24..MAX_STATION_ITERS).contains(&evaluations)
                 && let (Some(a), Some(b)) = (older, previous)
-                && let Some((probe, slope)) = self.local_probe(a, b, sample, 24)
+                && let Some((probe, slope)) =
+                    self.local_probe(a, b, sample, (MAX_STATION_ITERS - evaluations) as i32)
             {
-                return self.finish_local(sample, probe, slope, evaluations);
+                let late_finish = evaluations > MAX_STATION_ITERS - 24;
+                return self.finish_local(sample, probe, slope, evaluations, late_finish);
             }
             older = previous;
             previous = Some(sample);
@@ -636,6 +639,7 @@ impl StationProblem<'_> {
         probe: f64,
         slope: f64,
         mut evaluations: u32,
+        late_finish: bool,
     ) -> Result<(StationSample, u32), Refusal> {
         let end = self.evaluate(probe)?;
         evaluations += 1;
@@ -666,7 +670,26 @@ impl StationProblem<'_> {
             (end, start)
         };
         while evaluations < MAX_STATION_ITERS {
-            let sample = self.evaluate(left.w + 0.5 * (right.w - left.w))?;
+            let midpoint = left.w + 0.5 * (right.w - left.w);
+            let next = if late_finish {
+                // The physical sign bracket and monotonicity checks remain
+                // authoritative. Interpolation saves evaluations in a late,
+                // smooth local neighborhood; it never extrapolates to another
+                // branch. Normalize residuals before subtracting opposite
+                // signs so a representable weight cannot overflow.
+                let scale = left.balance.abs().max(right.balance.abs());
+                let a = left.balance / scale;
+                let b = right.balance / scale;
+                let secant = left.w + (right.w - left.w) * (a / (a - b));
+                if secant.is_finite() && left.w < secant && secant < right.w {
+                    secant
+                } else {
+                    midpoint
+                }
+            } else {
+                midpoint
+            };
+            let sample = self.evaluate(next)?;
             evaluations += 1;
             let roundoff = 64.0
                 * f64::EPSILON
