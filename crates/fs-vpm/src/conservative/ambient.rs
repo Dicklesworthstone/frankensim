@@ -392,7 +392,7 @@ impl HalfFlow {
     // rounding weight*dt first can erase resolvable subnormal-time transport.
     // Weight one takes the original arithmetic exactly.
     #[allow(clippy::float_cmp)]
-    fn weighted(flow: AffineFlow2, dt: f64, weight: f64) -> Result<Self, VpmError> {
+    pub(super) fn weighted(flow: AffineFlow2, dt: f64, weight: f64) -> Result<Self, VpmError> {
         let product = |value| {
             let half = half_product(value, dt);
             if weight == 1.0 {

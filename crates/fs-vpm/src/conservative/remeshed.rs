@@ -1,10 +1,11 @@
-//! Conservative viscous evolution with explicitly scheduled regular remeshing.
+//! Conservative evolution with explicitly scheduled regular remeshing.
 //!
-//! Original D/2-A-D/2 steps, prescribed affine flows and the original M4' remap
-//! share one execution account. Target grids, padding, resolution, cadence and
-//! optional held flow per interval are authored data.
+//! Original viscous steps or reversible inviscid compositions, prescribed
+//! affine flows and the original M4' remap share one execution account. Target
+//! grids, padding, resolution, cadence and held flows are authored data.
 
 use super::ambient::{AffineFlow2, AmbientMomentChange, HalfFlow};
+use super::{CompositionOrder, composition::Composition};
 use fs_math::dd::Dd;
 
 use crate::{
@@ -39,7 +40,7 @@ pub struct RemeshedVpmBudget {
     pub max_input_particles: usize,
     /// Maximum nodes in any authored grid, including zero-strength support.
     pub max_grid_particles: usize,
-    /// Maximum total original D/2-A-D/2 steps.
+    /// Maximum total physical integration steps.
     pub max_steps: usize,
     /// Maximum total original pair visits over all changing grid sizes.
     pub max_pair_evaluations: u64,
@@ -84,7 +85,8 @@ pub struct AmbientRemeshedVpmRun {
     /// PSE/remap errors remain separate; these are not fluid/body momentum or
     /// pressure-work receipts for an infinite prescribed background.
     pub ambient_moment_change: AmbientMomentChange,
-    /// Two visits per current grid node and active-source evolution step.
+    /// Two visits per current grid node and active-source evolution step,
+    /// or four with the optional fourth-order inviscid composition.
     /// Included in `run.work_units`, independent of pair/remap visits.
     pub source_particle_updates: u64,
 }
@@ -152,7 +154,18 @@ pub fn simulate_with_cx(
     schedule: RemeshSchedule<'_>,
     budget: RemeshedVpmBudget,
 ) -> Result<RemeshedVpmRun, RemeshedVpmError> {
-    run(cx, particles, dt, steps, core, law, schedule, None, budget).map(|result| result.run)
+    run(
+        cx,
+        particles,
+        dt,
+        steps,
+        core,
+        Evolution::Viscous(law),
+        schedule,
+        None,
+        budget,
+    )
+    .map(|result| result.run)
 }
 
 /// Evolve the same scheduled trajectory in piecewise held affine backgrounds.
@@ -197,11 +210,113 @@ pub fn simulate_with_affine_flows_cx(
         dt,
         steps,
         core,
-        law,
+        Evolution::Viscous(law),
         schedule,
         Some(flows),
         budget,
     )
+}
+
+/// Evolve an inviscid cloud with the selected order between authored remaps.
+///
+/// `Second` recovers the original zero-viscosity trajectory and execution
+/// receipt. `Fourth` uses three signed symmetric exact-pair sweeps per positive
+/// physical step, retaining the same vortex-impulse invariants without another
+/// cloud buffer. The original M4' remap runs only after complete positive-time
+/// intervals, never inside a signed composition. There is no viscosity
+/// parameter: irreversible diffusion cannot enter a negative internal stage.
+///
+/// Time, support, memory, cancellation and atomic-publication rules are the
+/// same as [`simulate_with_cx`]. The fourth-order claim concerns inviscid time
+/// integration between fixed remap endpoints; changing the remap cadence or
+/// grid introduces its separate spatial error and is not a global fourth-order
+/// convergence claim. Zero time still executes the authored remaps.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_with_order_cx(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    dt: f64,
+    steps: usize,
+    core: f64,
+    order: CompositionOrder,
+    schedule: RemeshSchedule<'_>,
+    budget: RemeshedVpmBudget,
+) -> Result<RemeshedVpmRun, RemeshedVpmError> {
+    run(
+        cx,
+        particles,
+        dt,
+        steps,
+        core,
+        Evolution::Inviscid(order),
+        schedule,
+        None,
+        budget,
+    )
+    .map(|result| result.run)
+}
+
+/// Evolve selected-order inviscid steps in the scheduled held affine fields.
+///
+/// The flow list and remap boundaries follow [`simulate_with_affine_flows_cx`].
+/// `Second` is its exact zero-viscosity path. `Fourth` composes the existing
+/// reversible pair and affine maps with signed internal times, merging adjacent
+/// maps of the same held field into four source passes per physical step.
+/// Weighted maps are prepared once per active interval with constant stack
+/// storage. All three pair sweeps finish before any remap or source change.
+///
+/// For each positive-time interval with N grid nodes and S steps, `Fourth`
+/// charges `3*S*N*(N-1)` pair visits and, if its source is nonzero, `4*S*N`
+/// source visits. The one whole-run account and original two-bank payload bound
+/// include every interval and remap. Zero sources add no work or moment change.
+/// Source moment changes remain separate from remap error. The same temporal
+/// versus spatial convergence qualification as [`simulate_with_order_cx`]
+/// applies, including at discontinuities between authored held fields.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_with_affine_flows_order_cx(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    dt: f64,
+    steps: usize,
+    core: f64,
+    order: CompositionOrder,
+    schedule: RemeshSchedule<'_>,
+    flows: &[AffineFlow2],
+    budget: RemeshedVpmBudget,
+) -> Result<AmbientRemeshedVpmRun, RemeshedVpmError> {
+    run(
+        cx,
+        particles,
+        dt,
+        steps,
+        core,
+        Evolution::Inviscid(order),
+        schedule,
+        Some(flows),
+        budget,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Evolution {
+    Viscous(PseDiffusion),
+    Inviscid(CompositionOrder),
+}
+
+impl Evolution {
+    fn order(self) -> CompositionOrder {
+        match self {
+            Self::Viscous(_) => CompositionOrder::Second,
+            Self::Inviscid(order) => order,
+        }
+    }
+
+    fn pair_sweeps(self) -> u64 {
+        match self {
+            Self::Viscous(law) if law.kinematic_viscosity_m2_s() > 0.0 => 3,
+            _ => self.order().sweeps() as u64,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -211,7 +326,7 @@ fn run(
     dt: f64,
     steps: usize,
     core: f64,
-    law: PseDiffusion,
+    evolution: Evolution,
     schedule: RemeshSchedule<'_>,
     flows: Option<&[AffineFlow2]>,
     budget: RemeshedVpmBudget,
@@ -222,7 +337,16 @@ fn run(
     if !core.is_finite() || core < 0.0 {
         return Err(invalid_scalar("core", core, None).into());
     }
-    let plan = Plan::new(cx, particles.len(), dt, steps, law, schedule, flows, budget)?;
+    let plan = Plan::new(
+        cx,
+        particles.len(),
+        dt,
+        steps,
+        evolution,
+        schedule,
+        flows,
+        budget,
+    )?;
     let mut accountant = AdmittedBudget::admit_ambient(cx, plan.work)?;
     accountant.checkpoint("fs-vpm.remeshed-admission", cx)?;
     let first = workspace(plan.max_grid)?;
@@ -250,18 +374,30 @@ fn run(
     let mut remeshes = 1;
     let mut meter = WorkMeter::default();
     let mut pairs = 0;
+    let composition = Composition::new(evolution.order());
     let mut source = None;
     let mut source_updates = 0;
     let mut source_moments = [Dd::ZERO; 3];
     for step in 0..steps {
         if step % schedule.every_steps == 0 {
             source = match flows.map(|flows| flows[step / schedule.every_steps]) {
-                Some(flow) if dt > 0.0 && !flow.is_zero() => Some(HalfFlow::new(flow, dt)?),
+                Some(flow) if dt > 0.0 && !flow.is_zero() => Some((
+                    match evolution {
+                        Evolution::Viscous(_) => HalfFlow::new(flow, dt)?,
+                        Evolution::Inviscid(_) => {
+                            HalfFlow::weighted(flow, dt, composition.weights()[0])?
+                        }
+                    },
+                    composition
+                        .bridge_weight()
+                        .map(|weight| HalfFlow::weighted(flow, dt, weight))
+                        .transpose()?,
+                )),
                 _ => None,
             };
         }
-        if let Some(source) = &source {
-            source.apply(
+        if let Some((half, _)) = &source {
+            half.apply(
                 &mut cloud.particles,
                 &mut source_moments,
                 &mut meter,
@@ -270,19 +406,51 @@ fn run(
             )?;
             source_updates += cloud.particles.len() as u64;
         }
-        super::viscous::step(
-            &mut cloud.particles,
-            &cloud.areas_m2,
-            dt,
-            core,
-            law,
-            &mut pairs,
-            &mut meter,
-            &mut accountant,
-            cx,
-        )?;
-        if let Some(source) = &source {
-            source.apply(
+        match evolution {
+            Evolution::Viscous(law) => super::viscous::step(
+                &mut cloud.particles,
+                &cloud.areas_m2,
+                dt,
+                core,
+                law,
+                &mut pairs,
+                &mut meter,
+                &mut accountant,
+                cx,
+            )?,
+            Evolution::Inviscid(_) => {
+                if dt > 0.0 {
+                    for (index, &weight) in composition.weights().iter().enumerate() {
+                        if index > 0
+                            && let Some((_, Some(bridge))) = &source
+                        {
+                            bridge.apply(
+                                &mut cloud.particles,
+                                &mut source_moments,
+                                &mut meter,
+                                &mut accountant,
+                                cx,
+                            )?;
+                            source_updates += cloud.particles.len() as u64;
+                        }
+                        super::weighted_symmetric_sweep(
+                            &mut cloud.particles,
+                            dt,
+                            core,
+                            weight,
+                            &mut pairs,
+                            &mut meter,
+                            &mut accountant,
+                            cx,
+                        )?;
+                    }
+                }
+                meter.unit(&mut accountant, cx, "fs-vpm.conservative-step", || Ok(()))?;
+                meter.boundary(&mut accountant, cx, "fs-vpm.conservative-step-complete")?;
+            }
+        }
+        if let Some((half, _)) = &source {
+            half.apply(
                 &mut cloud.particles,
                 &mut source_moments,
                 &mut meter,
@@ -395,7 +563,7 @@ impl Plan {
         inputs: usize,
         dt: f64,
         steps: usize,
-        law: PseDiffusion,
+        evolution: Evolution,
         schedule: RemeshSchedule<'_>,
         flows: Option<&[AffineFlow2]>,
         budget: RemeshedVpmBudget,
@@ -430,11 +598,7 @@ impl Plan {
             }
             .into());
         }
-        let sweeps = if law.kinematic_viscosity_m2_s() > 0.0 {
-            3
-        } else {
-            1
-        };
+        let sweeps = evolution.pair_sweeps();
         let (mut previous, mut max_grid, mut pairs) = (inputs, 0, 0_u64);
         let mut source_updates = 0_u64;
         let (mut remesh_work, mut deposits) = (0_u128, 0_u128);
@@ -464,7 +628,9 @@ impl Plan {
                     if flows.is_some_and(|flows| !flows[index].is_zero()) {
                         source_updates = (nodes as u64)
                             .checked_mul(interval as u64)
-                            .and_then(|visits| visits.checked_mul(2))
+                            .and_then(|visits| {
+                                visits.checked_mul(evolution.order().source_passes())
+                            })
                             .and_then(|visits| source_updates.checked_add(visits))
                             .ok_or(VpmError::PlanOverflow {
                                 resource: "scheduled affine source visits",

@@ -223,9 +223,11 @@ This avoids erasing resolvable motion when `dt` is subnormal but circulation or
 source velocity is large. Both distinct signed affine maps are prepared before
 evolution. Unrepresentable internal maps or updates refuse atomically, including
 a nonzero source coefficient that underflows to zero. Negative internal stages
-are admitted only by the reversible inviscid/source path. Viscous/PSE and
-scheduled remeshing APIs retain their original nonnegative-time methods; a
-fourth-order request cannot carry a diffusion law.
+are admitted only by the reversible inviscid/source path. Viscous/PSE evolution
+and remapping retain their original nonnegative-time methods; a fourth-order
+request cannot carry a diffusion law. Scheduled inviscid evolution can select
+this composition between its original positive-time remap boundaries, as
+specified below.
 
 For `N` particles and `S` nonzero-time physical steps, Fourth admits exactly
 `3*S*N*(N-1)` pair visits, plus `4*N*S` source visits when the held affine field
@@ -503,7 +505,7 @@ impulse conservation after remeshing. The whole-plane diffusion equation has
 rather than an invariant second moment at nonzero circulation. This bounded 2-D
 operation does not implement 3-D remeshing or close the deferred FMM epic.
 
-## Scheduled remeshed viscous evolution
+## Scheduled remeshed evolution
 
 `conservative::remeshed::simulate_with_cx` evolves the complete 2-D trajectory
 with the original conservative viscous step and M4' remap owners. The borrowed
@@ -571,6 +573,53 @@ windows and changing anisotropic resolution. Independent piecewise affine moment
 laws cover signed zero-net circulation, while whole-source work, exact combined
 payload, inactive-source parity and late source/support/cancellation refusals
 exercise the shared transaction and deterministic retry.
+
+### Selected-order inviscid trajectories
+
+`conservative::remeshed::simulate_with_order_cx` and
+`simulate_with_affine_flows_order_cx` accept `CompositionOrder` in place of a
+diffusion law. They use the same scheduled-remesh transaction, original two
+particle/area banks, exact pair owner, signed composition coefficients and
+affine source maps. `Second` preserves the original zero-viscosity particles,
+moment changes, work/memory receipts and checkpoint sequence exactly. Existing
+viscous entry points continue to call the unchanged D/2-A-D/2 owner.
+
+`Fourth` completes all three signed pair sweeps within each positive physical
+step. For an active held field, adjacent source maps combine into the same
+four passes as the standalone affine owner; both distinct weighted maps are
+prepared once on entering the interval. There are no added cloud buffers,
+per-step maps, allocations or dependencies. The original M4' remap runs once
+after each complete authored interval, including the final partial interval.
+Neither a negative substep nor a partial composition can trigger remapping,
+change the held source or invoke irreversible PSE diffusion.
+
+For interval `k`, Fourth admits `3*S_k*G_k*(G_k-1)` pair visits and, for an
+active field, `4*S_k*G_k` source visits. Total work remains the exact sum of
+those visits, the original remap work `R` and `S` physical step units. The
+largest target still determines the original two-bank payload cap. Inactive
+fields or zero time add no source visits; zero time still performs all authored
+remaps and zero steps only the initial remap. Signed source moment increments
+accumulate in the original double-double account over all intervals; remap
+interpolation error remains distinct. Whole-run budget admission, bounded
+cancellation and late failure with no partial publication cover every signed
+stage and endpoint remap.
+
+Fourth-order temporal convergence applies to the reversible evolution between
+fixed remap endpoints with each field held. Changing spatial resolution or the
+number/timing of remaps changes the discretization separately; an arbitrary
+changing schedule has no automatic fourth-order global claim. This extension
+does not infer adaptive timesteps or meshes, a boundary reaction, 3-D diffusion
+or a closed-system momentum account for prescribed ambient flow.
+
+`tests/remeshed_order.rs` (G0/G1/G3/G4) compares changing-grid trajectories with
+explicit existing-owner composition, checks signed zero-net impulse and an
+independent piecewise affine first-moment law, and demonstrates fourth-order
+time refinement with fixed initial/final remaps against an independently
+refined full-ODE RK4 reference. Equal-pair-work comparisons check the practical
+accuracy benefit. Tests also cover exact original/inactive receipts, changing
+quadrature, complete signed-stage work and two-bank admission, late source-map
+and support refusal, and cancellation inside a coalesced source bridge, the
+negative-time pair stage and the final remap, followed by deterministic retry.
 
 ## Three-dimensional impulse and conservative coarsening
 
