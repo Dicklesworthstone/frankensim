@@ -10597,3 +10597,32 @@ The six focused population-balance tests cover independent two-class and
 multiclass balances, every dry/element/water account, throughput/residence
 response, source admission and invalid kinetic declarations. The executable
 `continuous_ball_mill` example uses explicitly synthetic rates and distributions.
+
+## Simultaneous shared-reagent batch kinetics
+
+`reaction_batch::network::BilinearBatchNetwork` joins 1..=32 original bilinear
+models sharing one explicitly named consumed reagent. Every other reactant is
+unique; no product can feed a reactant in this scope. Rates use the same staged
+inventory and fixed volume/temperature. Original model cards, mappings and
+conserved equations remain attached to the completed result.
+
+RK4 step doubling advances reaction extents simultaneously in canonical
+reaction-ID order. Every trial inventory is reconstructed by `ReactionNetwork`
+from the original stocks and total extents. Inputs and all source conditions
+are checked at actual concentrations and absolute elapsed times, including the
+full requested duration. Positive initial reactants remain positive for finite
+time; invalid trials shrink the step, with no recovery clipping or priority.
+
+Callers provide a maximum step, absolute/relative accumulated local-error
+estimate budget and at most 65536 attempts. Reported error estimates are not
+certified global bounds. Source departure, exhausted work, unrepresentable
+progress or invalid topology returns no partial batch and does not mutate input.
+Scaled RK weights preserve positive subnormal rates; unrepresentable positive
+error estimates refuse. This is not a stiff solver, equilibrium/speciation
+model, calibrated ore response, temperature feedback or reaction feedback loop.
+
+Focused tests compare to independent closed forms, exercise unequal proton
+coefficients, preserve permutation invariance, and cover finite shared acid,
+source-time support, numerical range and atomic refusal. The executable
+`competing_mineral_leaching` uses explicitly synthetic CuO/calcite kinetic cards
+with the source-defined neutral carbonic endpoint for the gangue reaction.

@@ -21,6 +21,10 @@
 //! separate models. Element/charge conservation comes from the original
 //! [`ConservedReaction`]; binary64 progression is not an interval certificate.
 
+/// Simultaneous finite-batch competition for one explicitly shared reagent.
+#[path = "reaction_batch/network.rs"]
+pub mod network;
+
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint};
 use fs_math::det;
 use fs_qty::{Amount, AmountConcentration, Qty, QuantitySpec, Temperature, Time, Volume};

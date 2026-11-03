@@ -489,6 +489,34 @@ enthalpy. This combines a declared kinetic model with real standard-state
 thermochemistry; it does not infer calibration, mixing heat, finite-solution
 activities, coupled reaction competition or plant temperature.
 
+### Simultaneous mineral competition for a shared reagent
+
+`fs_material::reaction_batch::network::BilinearBatchNetwork` advances several
+original bilinear reaction models against one actual shared reagent stock.
+This makes gangue consumption reduce the acid available to valuable minerals
+throughout the calculation. Models retain their own kinetic cards and validity;
+each numerical stage uses the same inventory and absolute elapsed time.
+
+```bash
+cargo run -p fs-material --example competing_mineral_leaching
+```
+
+The example starts with 10 mol CuO, 10 mol calcite and 12 mol H+ in 1 m3 at
+298.15 K, and advances 30 seconds. Both equations consume two protons per
+mineral formula unit; calcite uses the explicit neutral carbonic component
+basis described in [carbonate leaching](MINING_CARBONATE_LEACHING.md). Rates
+are authored examples, not measured ore constants. The returned `NetworkAdvance`
+retains each reaction's extent, gross consumption/production and complete
+remaining inventory for subsequent source-backed heat or process calculations.
+
+The caller controls maximum time step, work and estimated extent error.
+Unsupported source states or exhausted budgets return no partial result.
+The bounded model requires one shared consumed reagent, a distinct other
+reactant per equation, and no product-to-reactant feedback. It holds volume,
+temperature and coefficients fixed; it does not infer pH, speciation, thermal
+feedback or a calibrated recovery. Step-doubling estimates remain numerical
+estimates, not certified global bounds.
+
 ## Ball-mill energy and throughput
 
 `fs_material::comminution` implements the uncorrected
