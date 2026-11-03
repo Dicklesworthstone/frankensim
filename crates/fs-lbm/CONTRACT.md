@@ -55,6 +55,41 @@ and actual forced collision, Newtonian/uniform-field reduction, phase/slot
 association, rollback and fallible-kernel limiting behavior. No advected
 material label, inferred mixture law, thermal owner or yield history is added.
 
+## Exploratory Smagorinsky transport on the native sparse free surface
+
+`FreeSurface3::prepare_sgs` and `step_with_sgs` accept explicit shared
+`SgsConfig` controls and a reusable `FreeSurfaceSgsWorkspace3`. This path
+requires native BGK and Smagorinsky; WALE and Vreman need information absent
+from a symmetric local moment and refuse. Acceptance use, invalid controls,
+and excess eddy/molecular viscosity refuse without changing accepted flow.
+The zero coefficient follows the original native collision path bit for bit.
+
+The shared Guo half-source correction uses each wet cell's actual retained
+force and physical velocity. Removing the stress trace yields `tau*S_dev`;
+the shared Smagorinsky closure then supplies `K = tau*nu_t`. The rationalized
+positive root of `tau*(tau-tau_molecular) = 3*K` determines current relaxation
+without a lagged viscosity or a stencil through gas. This follows Chiappini,
+Water 12 (2020), 1212, equations (6)-(8), doi:10.3390/w12041212, restricted to
+deviatoric shear. The native BGK collision still ties shear/bulk relaxation.
+
+Morton-key/lane cache entries survive sparse slot changes; newly wet cells
+are resolved on the next preparation. Only one native candidate is cloned.
+Its original collision, gas reconstruction, capillarity, mass exchange and
+conversion finish before publication, so native or cancellation refusal
+preserves every accepted component. Scratch is consumable only on success.
+`FreeSurfaceSgsReport3` describes the pre-step input: instantaneous resolved
+and modeled shear dissipation are weighted by native bounded liquid fill.
+Empty interface ghosts and unlocated carry add no liquid dissipation. No
+diagnostic power is added as heat to this isothermal owner.
+
+Four focused G0/G1/G4/G5 regressions in `d3q19::freesurface3::sgs::tests`
+cover independently reconstructed forced populations and actual collision,
+trace exclusion, all three zero-control conversion trajectories, active mass
+conservation/replay, viscosity/usage refusal, cancellation and new wet cells
+after sparse activation. This is an exploratory constitutive integration,
+not a turbulent-flow calibration, subgrid interface or entrainment model,
+wall-damping law, resolved heat equation, or free-surface energy certificate.
+
 ## Source-caloric molecular viscous self-heating
 
 With `enthalpy-coupling`, `MaterialChtFluid` exposes
@@ -2136,8 +2171,14 @@ eddy/molecular ratio cap refuse; no clipping or silent laminar fallback occurs.
 The filter widths are cached once; gradient/closure sweeps allocate no buffers
 and poll cancellation every 64 cells.
 
-Every coupled energy step consumes `rho cp nu_t / Pr_t`, with fixed `Pr_t=0.9`,
-from that step's projected flow. Returned eddy fields expose the same closure.
+Every coupled energy step consumes `rho cp nu_t / Pr_t` from that step's
+projected flow. `SimpleConfig::turbulent_prandtl` independently declares the
+positive finite heat-diffusion ratio (default 0.9), without changing the
+momentum model or molecular material. `FvFlow` retains it for subsequent heat
+solves and exports. The cooling scene exposes `solver.turbulent_prandtl` for
+LVEL and transient SGS and reports the actual retained value. The constant
+ratio remains an authored model assumption, not a universal material law;
+see [NASA Wind-US Prandtl controls](https://www.grc.nasa.gov/www/winddocs/user/keywords/prandtl.html).
 A caller-supplied nonzero eddy-conductivity field refuses instead of being
 combined or overwritten. No SGS dissipation heating, turbulent scalar-variance
 equation, equilibrium thermal wall law, calibrated turbulent channel profile,
@@ -2160,7 +2201,7 @@ Material edges retain harmonic transmission, and no-slip half-cell wall
 traction remains molecular. Source snapshots never absorb the eddy field,
 so a constitutive refresh cannot compound turbulent viscosity. The projected
 eddy field supplies exactly one separate gradient heat flux with reference
-`rho*Cp` and `Pr_t=0.9`. Neither molecular nor modeled mechanical loss is
+`rho*Cp` and the original `flow.turbulent_prandtl`. Neither molecular nor modeled mechanical loss is
 deposited as heat. Source density/Cp bounds, first-order feedback, cancellation
 and exploratory SGS restrictions remain in force; equilibrium LVEL and a
 second authored eddy-conductivity field still refuse. The focused source/SGS
@@ -2181,7 +2222,7 @@ snapshots or source storage. Fluid h(T) owns actual storage and conservative
 donor heat; solid source integrals, contacts, reservoirs, radiation, local
 nonlinear gates, work bounds and atomic refusal remain in force. In the source-enthalpy
 entries, gradient diffusion uses the current source caloric derivative and
-Pr_t=0.9. The linear-Cp fluid entry retains its declared reference conversion. These entries select no new dissipation-heating or
+the original `flow.turbulent_prandtl`. The linear-Cp fluid entry retains its declared reference conversion. These entries select no new dissipation-heating or
 wall model. First-order feedback and exploratory SGS restrictions apply;
 zero SGS recovers the corresponding original march. The caloric-solids
 regressions specify joint source-mu(T) momentum/heat response, independent
@@ -2189,7 +2230,8 @@ enthalpy conservation, constant-Cp reductions and late source refusal; these
 new whole-crate tests remain unexecuted under the current host memory limit.
 
 For the explicit source-enthalpy SGS marches, each native caloric trial
-rebuilds `k_t = rho0 * Cp_source(T_trial) * nu_t / 0.9` from the immutable
+rebuilds `k_t = rho0 * Cp_source(T_trial) * nu_t / Pr_t` from the immutable
+original Prandtl control and
 accepted eddy field. It never compounds a prior thermal trial's conductivity.
 Only fluid cells receive this conversion; original h(T) continues to own
 storage and donor-cell advective heat. After each candidate, native individual
@@ -3570,8 +3612,8 @@ correlation, not a measurement of a particular grille).
 
 `Turbulence::Lvel` adds the algebraic LVEL closure (Agonafer, Gan-Li &
 Spalding 1996), the electronics-cooling model for fan-driven flows on
-coarse voxel meshes: per fluid cell, the wall distance `L` (exact Euclidean
-transform to the nearest solid voxel or wall-type domain face; openings,
+coarse voxel meshes: per fluid cell, the wall distance `L` (Euclidean distance
+to the nearest solid voxel box or wall-type domain plane; openings,
 inlets and symmetry planes do not count) and the local speed relative to that
 wall give `Re_L = V L / nu`, which Spalding's unified law of the wall (`k` 0.41, `E`
 8.6) inverts for `u+`. Interior diffusion uses the profile's tangent
@@ -3580,13 +3622,23 @@ wall give `Re_L = V L / nu`, which Spalding's unified law of the wall (`k` 0.41,
 `rho u_tau^2` of the law of the wall at any first-cell `y+` (using the
 tangent at the wall over-predicted the friction by 61 % and the Nusselt
 number by 43 % at Re_Dh 2e4). Both are under-relaxed by one half per sweep.
-`FvFlow::eddy_conductivity` gives the energy equation `rho c_p nu_t / 0.9`
+`FvFlow::eddy_conductivity` gives the energy equation `rho c_p nu_t / Pr_t`
 (the secant value in wall-adjacent cells); `fv_natural_convection` applies
-the same closure. The cooling-cht scene selects it with
-`solver.turbulence: "lvel"`.
+the same closure and the positive `SimpleConfig::turbulent_prandtl` (default
+0.9). The cooling-cht scene selects it with `solver.turbulence: "lvel"` and
+may declare `solver.turbulent_prandtl` independently.
 
-The distance transform retains the selected domain-wall identity and its
-prescribed velocity; internal solid voxels remain stationary. LVEL evaluates
+The separable linear-time distance transform minimizes squared distance to
+the actual cell intervals, including on graded grids and at obstacle corners.
+Selecting the nearest solid centre and then measuring only that box is not
+equivalent: a regression with unequal widths previously returned 2.5 m for a
+surface 1.5 m away. A direct box/plane oracle covers graded and uniform cells,
+all domain-wall selections and unit scaling. The same minimizing feature
+retains the selected domain-wall identity and its prescribed velocity;
+internal solid voxels remain stationary. A native closure regression checks
+that a nearer wide solid retains its stationary frame even when a moving
+domain wall's ghost centre is nearer. This advances `CHT_SEMANTICS_VERSION`
+to 5. LVEL evaluates
 `|u - u_wall| L / nu` in that wall's translating frame, consistent with
 [Spalding wall functions](https://cpp.openfoam.org/v13/nutUSpaldingWallFunctionFvPatchScalarField_8C_source.html).
 Both tangent momentum viscosity and secant wall/heat transport use this same

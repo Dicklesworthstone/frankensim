@@ -46,6 +46,8 @@ use super::sparse::{SparseError3, SparseGrid3, demorton3, morton3};
 use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
 
 pub mod rheology;
+/// Explicit local Smagorinsky exploration on the original wet-cell trajectory.
+pub mod sgs;
 
 mod initial;
 pub use initial::FreeSurfaceInitialCell3;

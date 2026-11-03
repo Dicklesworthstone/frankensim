@@ -274,21 +274,29 @@ pub(crate) fn force_corrected_shear_rate3(
     force: [f64; 3],
     tau: f64,
 ) -> f64 {
+    shear_rate_from_stress3(force_corrected_stress3(f, rho, u, force), rho, tau)
+}
+
+/// Non-equilibrium second moment in the actual Guo source frame, packed as
+/// xx, yy, zz, xy, xz, yz. The caller decides whether the constitutive law
+/// consumes the full symmetric strain or its deviatoric part.
+pub(crate) fn force_corrected_stress3(
+    f: &[f64; Q3],
+    rho: f64,
+    u: [f64; 3],
+    force: [f64; 3],
+) -> [f64; 6] {
     let [sxx, syy, szz, sxy, sxz, syz] = nonequilibrium_stress3(f, &equilibrium3(rho, u));
     // Apply the exact source second moment directly: six scalar corrections
     // replace a full D3Q19 source construction and second population pass.
-    shear_rate_from_stress3(
-        [
-            sxx + u[0] * force[0],
-            syy + u[1] * force[1],
-            szz + u[2] * force[2],
-            sxy + 0.5 * (u[0] * force[1] + u[1] * force[0]),
-            sxz + 0.5 * (u[0] * force[2] + u[2] * force[0]),
-            syz + 0.5 * (u[1] * force[2] + u[2] * force[1]),
-        ],
-        rho,
-        tau,
-    )
+    [
+        sxx + u[0] * force[0],
+        syy + u[1] * force[1],
+        szz + u[2] * force[2],
+        sxy + 0.5 * (u[0] * force[1] + u[1] * force[0]),
+        sxz + 0.5 * (u[0] * force[2] + u[2] * force[0]),
+        syz + 0.5 * (u[1] * force[2] + u[2] * force[1]),
+    ]
 }
 
 /// Update every fluid cell's τ from its local shear rate under `law` —
