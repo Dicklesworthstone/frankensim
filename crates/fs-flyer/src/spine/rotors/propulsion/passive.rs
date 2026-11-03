@@ -6,10 +6,13 @@
 use super::super::passive::{ShaftMotion, ShaftStep};
 use super::super::{RotorAssembly, RotorState, RotorTorques};
 use super::{
-    CoupledStep, DiskAxes, OpenLoopDesign, PropellerMount, PropulsionGeometry, Refusal,
-    StageEnvironment, TICK_HZ, reject, surfaces::LiftingSurfaces,
+    AerodynamicSolution, AerodynamicStage, CoupledStep, DiskAxes, OpenLoopDesign,
+    PropellerMount, PropulsionGeometry, Refusal, StageEnvironment, TICK_HZ, reject,
+    surfaces::LiftingSurfaces,
 };
+use crate::propcoupling::swirl::{CoupledSwirlStep, WarmStart};
 use crate::spine::{Loads, admitted_state_and_rotation};
+use fs_airscrew::swirl::Controls;
 
 /// Actual environment and independent motor ports at an aerodynamic stage.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,7 +29,7 @@ pub struct ShaftInputs<const N: usize> {
 
 /// The shared aerodynamic solution with independently owned shaft ports.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ShaftEvaluation<const N: usize> {
+pub struct ShaftEvaluation<const N: usize, S = CoupledStep> {
     /// World force and body moment about the assembly COM, excluding axial
     /// propeller torque; that torque belongs only to `torques.aerodynamic_nm`.
     pub carrier: Loads,
@@ -36,18 +39,18 @@ pub struct ShaftEvaluation<const N: usize> {
     pub aerodynamic_force_body_n: [f64; 3],
     /// Signed absolute L/R physical propeller rates from axial momentum [rad/s].
     pub propeller_absolute_speed_rad_s: [f64; 2],
-    /// The original converged two-way wing/BEMT solution.
-    pub coupled: CoupledStep,
+    /// The same accepted native two-way wing/rotor solution as the loads.
+    pub coupled: S,
 }
 
 /// Accepted spring/drag motion and its two actual aerodynamic evaluations.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ShaftPropulsionStep<const N: usize> {
+pub struct ShaftPropulsionStep<const N: usize, S = CoupledStep> {
     pub motion: ShaftStep<N>,
     /// Prediction loads; their mechanical work and heat are not accepted.
-    pub initial: ShaftEvaluation<N>,
+    pub initial: ShaftEvaluation<N, S>,
     /// Real midpoint loads used by the accepted native full interval.
-    pub midpoint: ShaftEvaluation<N>,
+    pub midpoint: ShaftEvaluation<N, S>,
 }
 
 /// Two aerodynamic disks attached to independent passive shafts and one carrier.
@@ -145,6 +148,18 @@ impl<'a, const N: usize> ShaftPropulsion<'a, N> {
                 "nonfinite warm induction",
             ));
         }
+        self.evaluate_with(state, inputs, wind_world, |stage| {
+            self.geometry.equilibrium(stage, warm)
+        })
+    }
+
+    fn evaluate_with<S: AerodynamicSolution>(
+        &self,
+        state: &RotorState<N>,
+        inputs: ShaftInputs<N>,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        solve: impl FnOnce(AerodynamicStage<'_>) -> Result<S, Refusal>,
+    ) -> Result<ShaftEvaluation<N, S>, Refusal> {
         let (rigid, rotation) =
             admitted_state_and_rotation(&self.assembly.reduced_body, &state.rigid, 1.0 / TICK_HZ)?;
         if !state
@@ -174,7 +189,7 @@ impl<'a, const N: usize> ShaftPropulsion<'a, N> {
                 gravity_world_mps2: inputs.gravity_world_mps2,
             },
             wind_world,
-            |stage| self.geometry.equilibrium(stage, warm),
+            solve,
         )?;
         Ok(ShaftEvaluation {
             carrier: result.carrier,
@@ -205,12 +220,46 @@ impl<'a, const N: usize> ShaftPropulsion<'a, N> {
         t_s: f64,
         angular_origin_world: [f64; 3],
         warm: Option<[f64; 2]>,
-        mut inputs: C,
+        inputs: C,
         wind_world: W,
     ) -> Result<ShaftPropulsionStep<N>, Refusal>
     where
         C: FnMut(f64, &RotorState<N>) -> Result<ShaftInputs<N>, Refusal>,
         W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        let mut stage_warm = warm;
+        self.step_with(
+            motion,
+            t_s,
+            angular_origin_world,
+            inputs,
+            wind_world,
+            |state, inputs, wind| {
+                let evaluation = self.evaluate(state, inputs, wind, stage_warm)?;
+                stage_warm = Some(evaluation.coupled.w_slip);
+                Ok(evaluation)
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with<S, C, W, E>(
+        &self,
+        motion: &mut ShaftMotion<N>,
+        t_s: f64,
+        angular_origin_world: [f64; 3],
+        mut inputs: C,
+        wind_world: W,
+        mut evaluate: E,
+    ) -> Result<ShaftPropulsionStep<N, S>, Refusal>
+    where
+        C: FnMut(f64, &RotorState<N>) -> Result<ShaftInputs<N>, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+        E: FnMut(
+            &RotorState<N>,
+            ShaftInputs<N>,
+            &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        ) -> Result<ShaftEvaluation<N, S>, Refusal>,
     {
         if motion.assembly() != self.assembly {
             return Err(reject(
@@ -220,15 +269,12 @@ impl<'a, const N: usize> ShaftPropulsion<'a, N> {
         }
         let mut initial = None;
         let mut midpoint = None;
-        let mut stage_warm = warm;
         let accepted = motion.advance_with(t_s, angular_origin_world, |time, state| {
-            let evaluation = self.evaluate(
+            let evaluation = evaluate(
                 state,
                 inputs(time, state)?,
                 &|point| wind_world(time, point),
-                stage_warm,
             )?;
-            stage_warm = Some(evaluation.coupled.w_slip);
             let loads = (evaluation.carrier, evaluation.torques);
             if initial.is_none() {
                 initial = Some(evaluation);
@@ -244,5 +290,92 @@ impl<'a, const N: usize> ShaftPropulsion<'a, N> {
             initial: initial.expect("successful native initial load evaluation"),
             midpoint: midpoint.expect("successful native midpoint load evaluation"),
         })
+    }
+}
+
+/// Native annular axial/angular wake momentum on independent passive shafts.
+///
+/// The selected rotor law changes the actual thrust, circulation and signed
+/// aerodynamic torque. Springs, bearing drag, carrier recoil and absolute
+/// shaft work remain owned by the same prepared `ShaftMotion`. Selecting this
+/// model does not impose an ideal gear or change ordinary `ShaftPropulsion`.
+pub struct SwirlShaftPropulsion<'p, 'a, const N: usize> {
+    propulsion: &'p ShaftPropulsion<'a, N>,
+    controls: Controls,
+}
+
+impl<'p, 'a, const N: usize> SwirlShaftPropulsion<'p, 'a, N> {
+    /// Select the existing native bounded swirl law on an admitted assembly.
+    /// The rotor solver admits its controls before publishing any load state.
+    #[must_use]
+    pub fn new(propulsion: &'p ShaftPropulsion<'a, N>, controls: Controls) -> Self {
+        Self {
+            propulsion,
+            controls,
+        }
+    }
+
+    /// Evaluate both original annular momentum equations at each shaft's
+    /// actual signed absolute speed. Required torque reaches its external
+    /// shaft port once, retaining counter-rotation and regenerative power.
+    ///
+    /// Wing and mutual-disk wash retain the original axial actuator-disk
+    /// field. Numerical annulus seeds add no physical wake storage.
+    ///
+    /// # Errors
+    /// The shared assembly/material-air admission and native wing, swirl and
+    /// coupling refusals pass through without changing mechanical state.
+    pub fn evaluate(
+        &self,
+        state: &RotorState<N>,
+        inputs: ShaftInputs<N>,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        warm: Option<&WarmStart>,
+    ) -> Result<ShaftEvaluation<N, CoupledSwirlStep>, Refusal> {
+        self.propulsion
+            .evaluate_with(state, inputs, wind_world, |stage| {
+                self.propulsion
+                    .geometry
+                    .swirling(stage, self.controls, warm)
+            })
+    }
+
+    /// Advance the independent shafts and carrier from real initial and
+    /// predicted-midpoint wing/swirl loads. Only a complete accepted stage
+    /// becomes the next numerical branch seed. Mechanical momentum, spring
+    /// storage, motor work and bearing heat come from the native full step.
+    ///
+    /// # Errors
+    /// Inventory mismatch refuses before callbacks. Initial, midpoint and
+    /// accepted-step failures preserve both stored mechanical states; caller
+    /// callback side effects remain outside that transaction. This steady
+    /// aerodynamic model adds no full fluid/body energy closure claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step<C, W>(
+        &self,
+        motion: &mut ShaftMotion<N>,
+        t_s: f64,
+        angular_origin_world: [f64; 3],
+        warm: Option<&WarmStart>,
+        inputs: C,
+        wind_world: W,
+    ) -> Result<ShaftPropulsionStep<N, CoupledSwirlStep>, Refusal>
+    where
+        C: FnMut(f64, &RotorState<N>) -> Result<ShaftInputs<N>, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        let mut stage_warm = warm.cloned();
+        self.propulsion.step_with(
+            motion,
+            t_s,
+            angular_origin_world,
+            inputs,
+            wind_world,
+            |state, inputs, wind| {
+                let evaluation = self.evaluate(state, inputs, wind, stage_warm.as_ref())?;
+                stage_warm = Some(evaluation.coupled.warm_start());
+                Ok(evaluation)
+            },
+        )
     }
 }

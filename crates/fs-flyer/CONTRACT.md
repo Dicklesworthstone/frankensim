@@ -714,6 +714,27 @@ real two-stage stepping after an impulse, independently reconstructed physical
 momentum and work, refusal/retry, and the distinct numerical admission domains
 of continuous forces and explicit event impulses.
 
+`propulsion::passive::SwirlShaftPropulsion` explicitly selects the existing
+native annular axial/angular momentum law on the same independent shaft owner.
+It shares the geared swirl geometry dispatch and the passive admission,
+force/torque assembly and transactional midpoint advance. Each shaft's actual
+signed absolute rate drives its own accepted rotor solve; aerodynamic torque
+enters that shaft's external port exactly once, including counter-rotation and
+regenerative windmilling. The accepted annular solutions remain attached to
+the same forces and torques in `ShaftEvaluation<N, CoupledSwirlStep>`.
+The default payload of `ShaftEvaluation` and `ShaftPropulsionStep` remains
+the ordinary axial `CoupledStep`.
+
+Only a complete accepted aerodynamic stage supplies the next numerical warm
+seed; it adds no physical wake inertia. Springs, bearing heat, motor work and
+absolute aerodynamic shaft work retain the native mechanical owner. The G0/G1/G3
+regressions in `tests/passive_propulsion.rs` target identical-state axial/canted
+geared parity, independent post-impulse midpoint momentum and energy accounting,
+zero-motor windmilling into free shaft storage, bounded solver refusal and
+midpoint rollback/retry. Wing and mutual-disk wash remain the original axial
+actuator-disk field; no dynamic swirl, helical wake transport, or whole-fluid
+energy closure is added.
+
 ### Ideal gears and real propeller/airframe motion
 
 `spine::rotors::geared` admits one ideal relative gear coordinate and 1–64

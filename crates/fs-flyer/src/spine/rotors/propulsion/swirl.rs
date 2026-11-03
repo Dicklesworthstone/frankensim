@@ -7,8 +7,8 @@
 //! reaction torque is added to the carrier a second time.
 
 use super::{
-    AerodynamicFields, AerodynamicSolution, GearedLoads, GearedPropulsion, GearedState, GearedStep,
-    PropulsionInputs, Refusal, geared, reject,
+    AerodynamicFields, AerodynamicSolution, AerodynamicStage, GearedLoads, GearedPropulsion,
+    GearedState, GearedStep, PropulsionGeometry, PropulsionInputs, Refusal, geared, reject,
 };
 use crate::propcoupling::swirl::{self as coupling, CoupledSwirlStep, WarmStart};
 use fs_airscrew::swirl::Controls;
@@ -81,40 +81,7 @@ impl<'p, 'a, const N: usize> SwirlPropulsion<'p, 'a, N> {
     ) -> Result<SwirlEvaluation<N>, Refusal> {
         let p = self.propulsion;
         let result = p.evaluate_with(state, inputs, wind_world, |stage| {
-            if let Some(frames) = stage.section_frames {
-                return coupling::coupled_step_with_section_frames(
-                    &p.spatial_axes
-                        .expect("custom surfaces require spatial disks"),
-                    stage.op,
-                    stage.panels,
-                    stage.strips,
-                    stage.closure,
-                    frames,
-                    &p.design.rotor,
-                    stage.disks,
-                    stage.freestream,
-                    stage.rho,
-                    &p.design.coupling,
-                    self.controls,
-                    warm,
-                    stage.incident,
-                );
-            }
-            coupling::coupled_step(
-                p.spatial_axes,
-                stage.op,
-                stage.panels,
-                stage.strips,
-                stage.closure,
-                &p.design.rotor,
-                stage.disks,
-                stage.freestream,
-                stage.rho,
-                &p.design.coupling,
-                self.controls,
-                warm,
-                stage.incident,
-            )
+            p.geometry().swirling(stage, self.controls, warm)
         })?;
         Ok(SwirlEvaluation {
             loads: result.loads,
@@ -180,5 +147,52 @@ impl<'p, 'a, const N: usize> SwirlPropulsion<'p, 'a, N> {
             midpoint: midpoint
                 .ok_or_else(|| reject("swirl-coupling-invalid", "missing midpoint stage"))?,
         })
+    }
+}
+
+impl PropulsionGeometry<'_> {
+    // Both mechanical owners consume the same accepted annular momentum solve.
+    // This helper selects the native wing geometry without touching its laws.
+    pub(super) fn swirling(
+        &self,
+        stage: AerodynamicStage<'_>,
+        controls: Controls,
+        warm: Option<&WarmStart>,
+    ) -> Result<CoupledSwirlStep, Refusal> {
+        if let Some(frames) = stage.section_frames {
+            return coupling::coupled_step_with_section_frames(
+                &self
+                    .spatial_axes
+                    .expect("custom surfaces require spatial disks"),
+                stage.op,
+                stage.panels,
+                stage.strips,
+                stage.closure,
+                frames,
+                &self.design.rotor,
+                stage.disks,
+                stage.freestream,
+                stage.rho,
+                &self.design.coupling,
+                controls,
+                warm,
+                stage.incident,
+            );
+        }
+        coupling::coupled_step(
+            self.spatial_axes,
+            stage.op,
+            stage.panels,
+            stage.strips,
+            stage.closure,
+            &self.design.rotor,
+            stage.disks,
+            stage.freestream,
+            stage.rho,
+            &self.design.coupling,
+            controls,
+            warm,
+            stage.incident,
+        )
     }
 }
