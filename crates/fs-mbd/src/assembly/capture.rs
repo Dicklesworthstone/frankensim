@@ -11,6 +11,9 @@ use super::{
 };
 use crate::{MassProperties, Pose, RigidBodyState, Vec3};
 
+mod batch;
+pub use batch::capture_point_masses;
+
 /// Incoming mass at an explicitly identified material point, in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointMassCapture {
@@ -32,8 +35,9 @@ pub struct PointMassCaptureResult {
     /// New COM relative to the old COM [m]. Subtract this from every original
     /// body point before continuing with the returned native state.
     pub center_shift_body_m: Vec3,
-    /// Internal impulse received by the original body [N s]. The incoming
-    /// parcel receives its negative; this is not the composite momentum gain.
+    /// Aggregate internal impulse received by the original body [N s]. The
+    /// incoming parcels collectively receive its negative; this is not the
+    /// composite momentum gain.
     pub captured_impulse_world_ns: Vec3,
     /// Nonnegative mechanical energy removed by sticking [J]. Its thermal
     /// destination is caller-owned; no energy is silently credited to a fluid.

@@ -4459,6 +4459,44 @@ moving support catches, mobile roots, branched response, full off-centre inertia
 world-frame and inertial-boost covariance, loaded gravity continuation and
 atomic refusal.
 
+## Simultaneous point-parcel capture
+
+`assembly::capture::capture_point_masses` attaches many zero-intrinsic-inertia
+parcels from one original body geometry and velocity snapshot. It reuses
+`PointMassCapture` and `PointMassCaptureResult`; the returned internal impulse is
+the aggregate impulse on the original body, and the returned loss covers the
+entire event. Every input arm uses the original COM. Subtract the single
+returned COM shift from existing body points before native continuation.
+
+Four bounded linear scans use fixed-order compensated mass, first-moment,
+inertia, and momentum reductions. Inertia is assembled from positive
+parallel-axis contributions about the final COM, avoiding subtraction of two
+large global tensors. The original full native inertia owner is admitted once;
+all-central input retains its prepared principal frame, and a singleton uses
+the original optimized capture path. Batch reduction has constant auxiliary
+storage and no dense parcel mobility matrix. Native tensor admission retains
+its own existing bounded allocation; no throughput benchmark is claimed.
+
+The final rigid field shares translation and rotation across every parcel.
+Its sticking loss is the positive mass-metric residual of the original body's
+translation and central spin plus every parcel's velocity. Independently
+adding single-hit losses against the unchanged original body would omit this
+shared recoil. The endpoint audit reconstructs actual native linear momentum,
+spin plus orbital momentum and common-frame kinetic energy, with the actual
+COM displacement, first-moment defect and polarized spin changes.
+
+The part budget counts the original body and every descriptor, including
+zero mass, before scanning; each positive parcel consumes an impulse slot.
+Empty/all-zero input is a validated identity. Individually sub-ULP masses may
+be captured when their compensated aggregate is represented. Invalid inputs,
+unrepresented aggregate addition, failed balances and bounded cancellation
+leave borrowed state unchanged. Six G0/G1/G3/G4 regression groups cover shared
+translation, analytic COM/full-inertia/spin changes, corotation, covariance and
+permutation, correctly rebased sequential equivalence, singleton receipt
+identity, large boosts, lost geometry, aggregate mass and atomic refusal.
+Physical inventory, contact/event discovery, finite parcel extent, continuous
+mass flow and the destination of removed mechanical energy remain caller-owned.
+
 ## Continuous bidirectional particle momentum on the native translating body
 
 `RocketState::advance_with_particle_exchange` admits simultaneous held incoming
