@@ -6,12 +6,18 @@
 //! <https://goldbook.iupac.org/terms/view/A00115>.
 //! Direct formation-Gibbs claims retain their elemental and ionic references;
 //! a formation enthalpy minus an absolute species entropy is not a substitute.
+//! The separate [`caloric`] route combines conserved REACTION enthalpy and
+//! entropy sums. It retains both source properties and does not manufacture
+//! per-species formation-Gibbs claims or replace directly tabulated values.
 //!
 //! The caller supplies dimensionless activities relative to each retained
 //! standard state, including solvent and mineral activities. No concentration,
 //! pH, activity coefficient, equilibrium composition, rate or conversion is
 //! inferred. A gas activity is a fugacity ratio; identifying it with p/p° needs
 //! an additional ideal-gas assumption. This module does not impose that EOS.
+
+/// Standard reaction properties derived from matched enthalpy and entropy sources.
+pub mod caloric;
 
 use std::collections::BTreeMap;
 

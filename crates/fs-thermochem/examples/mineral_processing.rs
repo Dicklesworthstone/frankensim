@@ -8,6 +8,8 @@
 //! neutralization modes take four packs. The calcite endpoint uses compatible
 //! USGS aqueous-ion reference data, with bicarbonate retained in solution.
 //! `--help` lists every supported reaction and required pack order.
+//! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
+//! entropy, Gibbs energy and log equilibrium constants at the same source state.
 //! Or explicit malachite inventory accounting, with all four inputs in moles:
 //! `cargo run -p fs-thermochem --example mineral_processing -- \
 //! --malachite-inventory 10 12 100 3`
@@ -54,7 +56,7 @@ const REACTIONS: [&str; 12] = [
     "pyrite-to-acid",
     "calcite-bicarbonate-neutralization",
 ];
-const USAGE: &str = "usage: mineral_processing [--reaction NAME] PACK... REACTED_PURE_REACTANT_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
+const USAGE: &str = "usage: mineral_processing [--equilibrium] [--reaction NAME] PACK... REACTED_PURE_REACTANT_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
 
 fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
     Ok(match name {
@@ -406,16 +408,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         return Ok(());
     }
+    let show_equilibrium = args.first().is_some_and(|arg| arg == "--equilibrium");
+    let args = if show_equilibrium {
+        &args[1..]
+    } else {
+        args.as_slice()
+    };
     if args
         .first()
         .is_some_and(|arg| arg == "--malachite-inventory")
     {
-        return malachite_inventory(&args);
+        if show_equilibrium {
+            return Err("--equilibrium requires a complete source-pack reaction mode".into());
+        }
+        return malachite_inventory(args);
     }
     let (case, args) = if args.len() >= 2 && args[0] == "--reaction" {
         (case(&args[1])?, &args[2..])
     } else if args.len() == 4 {
-        (case("lime-hydration")?, args.as_slice())
+        (case("lime-hydration")?, args)
     } else {
         return Err(USAGE.into());
     };
@@ -453,7 +464,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Vec<_>>();
     let reaction = case.reaction.build()?;
-    let heat = reaction.standard_enthalpy_change(&sources)?;
+    let equilibrium = if show_equilibrium {
+        Some(reaction.standard_equilibrium(&sources)?)
+    } else {
+        None
+    };
+    let heat = match &equilibrium {
+        Some(standard) => standard.enthalpy().clone(),
+        None => reaction.standard_enthalpy_change(&sources)?,
+    };
     let mut molar_masses = Vec::with_capacity(packs.len());
     for (pack, point) in packs.iter().zip(&points) {
         let answer = pack.claims().query_typed(
@@ -521,6 +540,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         "standard enthalpy change [J]: {}",
         heat.at_extent(extent)?.value()
     );
+    if let Some(standard) = equilibrium {
+        println!(
+            "standard reaction entropy [J/(mol extent K)]: {}",
+            standard.molar_entropy().value()
+        );
+        println!(
+            "standard reaction Gibbs energy [J/mol extent]: {}",
+            standard.molar_gibbs().value()
+        );
+        println!(
+            "ln K (dimensionless standard activities): {}",
+            standard.log_equilibrium_constant().value()
+        );
+        println!(
+            "log10 K (dimensionless standard activities): {}",
+            standard.log_equilibrium_constant().value() / core::f64::consts::LN_10
+        );
+        println!(
+            "These constants use the selected standard states; activities, pH and equilibrium composition require separate inputs and models."
+        );
+    }
     for pack in &packs {
         println!("source pack: {} ({})", pack.pack_id(), pack.content_hash());
     }

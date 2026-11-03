@@ -358,7 +358,7 @@ caller-declared extent of 3 mol. The final inventory contains 7 mol malachite,
 An extent above 3 mol refuses. This is a declared material-flow calculation;
 the availability bound does not predict reaction progress or a commercial dose.
 
-`MineralReaction::build` provides nineteen explicit endpoint choices:
+`MineralReaction::build` provides explicit endpoint choices, including:
 
 | Reference | What the equation accounts for |
 | --- | --- |
@@ -381,6 +381,7 @@ the availability bound does not predict reaction progress or a commercial dose.
 | `SulfurDioxideOxidation` | Consumes 0.5 mol O2 and forms one mol SO3 per mol SO2 |
 | `SulfurTrioxideHydration` | One mol water per mol SO3, forming pure liquid acid |
 | `PyriteToHematiteAndSulfuricAcid` | Net declared endpoint: 3.75 mol O2 and two mol water per mol pyrite, forming 0.5 mol hematite and two mol pure acid |
+| `CopperElectrowinning` | Productive pathway consumes one mol Cu2+ and one mol water per mol deposited Cu, forming 0.5 mol O2 and two mol H+; two electrons per deposited Cu |
 
 Pyrite equations use integer multiples of two/four FeS2; an extent is per
 equation as written. These endpoints follow the primary references cited in
@@ -949,6 +950,99 @@ magnitudes, and net-ionic versus commercial-reagent distinction. These
 reference-state quantities do not select process pH, predict dissolution
 kinetics, or substitute for the separate dissolved-CO2 endpoint.
 
+## Aqueous pyrite oxidation and the iron redox cycle
+
+The compatible USGS pyrite, oxygen, liquid-water, ferrous-ion and sulfate
+profiles complete `PyriteOxidationFerrous` with the existing hydrogen-ion
+source. `mineral_processing --reaction pyrite-oxidation-ferrous` reports the
+six-source amount, mass and heat balance. One mole of pyrite at this declared
+endpoint consumes 3.5 mol oxygen and one mol water, and produces one mol Fe2+,
+two mol sulfate and two mol H+. The standard heat is -1452.4 kJ/mol pyrite.
+See [the source values, uncertainty conventions and runnable pack commands](MINING_ACID_GENERATION.md).
+
+## Source-bound equilibrium constants and chemical driving force
+
+The `stoichiometry::thermodynamics::caloric` source route exposes
+`ConservedReaction::standard_equilibrium`, which uses the same explicit
+`FormationEnthalpySource` associations as the reaction-heat calculation and
+also resolves entropy from each original pack. It returns standard reaction
+enthalpy, entropy, Gibbs energy and the natural logarithm of the dimensionless
+equilibrium constant at the common source temperature and pressure:
+
+`Delta G° = Delta H° - T Delta S°`, `ln K = -Delta G°/(R T)`.
+
+These relations follow the [IUPAC Gibbs-energy definition](https://goldbook.iupac.org/terms/view/G02629)
+and [standard equilibrium constant](https://goldbook.iupac.org/terms/view/S05915).
+The original enthalpy and entropy rounding is retained. Independently rounded
+formation-Gibbs tables need not yield an identical number. The adjacent
+`standard_gibbs_change` method consumes direct formation-Gibbs claims; neither
+method substitutes a species formation enthalpy minus its absolute entropy
+for a formation-Gibbs datum. The caloric route combines exactly conserved
+reaction sums, so elemental and common ionic reference contributions cancel.
+
+Charged aqueous species require `conventional-standard-molar-entropy` and
+source-declared hydrogen-zero, individual-ion and unit-activity/infinite-dilution
+qualifiers. Negative conventional ionic entropies are retained. The selected
+enthalpy and entropy claims must agree on phase, polymorph and solution
+convention. Every input receipt and uncertainty remains inspectable; no
+propagated confidence interval or temperature extrapolation is added.
+
+`ReactionEquilibrium::at_log_activities` accepts one explicit natural-log
+activity per active species and evaluates `Delta G = Delta G° + R T ln Q`.
+The coefficients come from the original conserved equation. Unit-activity
+phases are supplied explicitly with log activity zero. The API refuses missing,
+duplicate, nonfinite or unrepresentable inputs and does not infer activities
+from concentrations, solve speciation, choose pH or predict reaction rates.
+Logarithmic K remains available when exponentiating it would exceed binary64;
+the optional `equilibrium_constant()` conversion refuses that range loss.
+
+Prefix any supported source-pack CLI invocation with `--equilibrium`:
+
+```bash
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --equilibrium --reaction pyrite-oxidation-ferrous \
+  "$acid_pack_dir/pyrite-solid-usgs-b2131-thermochemistry.fsmatpk" \
+  "$acid_pack_dir/oxygen-gas-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/water-liquid-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/iron-ii-ion-aqueous-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/sulfate-ion-aqueous-usgs-b2131.fsmatpk" \
+  "$acid_pack_dir/hydrogen-ion-aqueous-usgs-b2131.fsmatpk" 119.979
+```
+
+Use the pack-building loop in the acid-generation guide first. The selected
+rows give -1822.05 J/(mol K) reaction entropy and -2361555.7925 J/mol standard
+Gibbs energy per written two-pyrite equation. These are reference-state
+quantities; process-water activities and finite conversion remain separate.
+
+## Finite-inventory electrowinning
+
+`stoichiometry::electrolysis::ElectrolysisReaction` connects the existing
+Faraday amount identity to an original conserved reaction and finite reagent
+stocks. `advance_charge` accepts integrated charge; `advance_current` accepts
+constant current and elapsed time. Both require an explicit current efficiency,
+deposited product, molar mass and electron count. They advance every modeled
+species atomically and refuse charge-driven reagent overdraw without clipping
+the requested efficiency.
+
+`MineralReaction::CopperElectrowinning` supplies the net productive endpoint
+`2 Cu2+(aq) + 2 H2O(l) -> 2 Cu(s) + O2(g) + 4 H+(aq)`: two electrons per
+deposited copper atom and four per written equation. The result retains the
+model, passed/productive/unallocated charge, extent, product amount/mass and
+modeled final inventory. Unallocated charge has unspecified side chemistry;
+its water, oxygen and proton effects are not inferred.
+
+```bash
+cargo run -p fs-thermochem --example electrowinning
+cargo run -p fs-thermochem --example electrowinning -- \
+  --charge 3600000 0.95 1000 10000
+```
+
+Both authored cases deposit approximately 1.126219474 kg copper using an
+explicit 0.063546 kg/mol mass basis. The example also reports the remaining
+dissolved copper, modeled water/oxygen/proton inventory and unallocated
+charge. Cell voltage, electrical energy, transport limitations, efficiency
+calibration and side-reaction balances require their own inputs and models.
+
 ## Focused verification
 
 Normal workspace commands for these slices:
@@ -960,7 +1054,9 @@ cargo test -p fs-material slurry::
 cargo test -p fs-material recovery::
 cargo test -p xtask --test mining_slurry_sources
 cargo test -p xtask --test mining_aqueous_sources
+cargo test -p xtask --test mining_acid_generation --test mining_equilibrium
 cargo test -p fs-thermochem stoichiometry::tests
+cargo test -p fs-thermochem stoichiometry::electrolysis
 ```
 
 The source/consumer tests exercise the actual compiler, canonical decoding,
