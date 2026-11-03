@@ -3,6 +3,8 @@
 //! their center of pressure is supplied analytically, not discovered by the solver.
 #[path = "frictional_contact_step/elliptic.rs"]
 mod elliptic;
+#[path = "frictional_contact_step/momentum.rs"]
+mod momentum;
 
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, NormalVelocityLaw};
 use fs_exec::CancelGate;

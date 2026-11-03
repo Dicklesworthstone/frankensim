@@ -19,6 +19,7 @@ use crate::{
 };
 use fs_contact::frictional_multicontact::{FrictionalContactError, FrictionalContactResult};
 use fs_exec::CancelGate;
+use fs_math::dd::Dd;
 
 /// Independent phase and complete-step acceptance gates.
 #[derive(Clone, Copy, Debug)]
@@ -172,6 +173,10 @@ pub struct RigidContactStepReport<P, R = FrictionalContactResult> {
 ///
 /// The mandatory admission callback runs on staged states and must not publish
 /// external history. Its receipt publishes only with the accepted native bodies.
+/// Momentum and energy gates compose actual native increments from each phase;
+/// large common translation or orbital momentum cannot swallow a small contact
+/// response by subtraction of scene totals. Unrepresentable applied impulses
+/// and drift errors remain subject to the original absolute tolerances.
 #[allow(clippy::too_many_arguments)]
 pub fn step_rigid_frictional_contacts<P, E>(
     bodies: &mut [RigidBodyState],
@@ -244,70 +249,116 @@ fn step_with<F: Copy, R: ImpactResponse, I, P, E>(
         ));
     }
     let initial_gaps = gaps(bodies, properties, contacts, 0.0, false, gate)?;
-    let (before_energy, before_linear, before_angular) =
-        super::totals_with::<R, I>(bodies, properties, gate)?;
+    let (before_energy, _, _) = super::totals_with::<R, I>(bodies, properties, gate)?;
     let mut kicked = Vec::with_capacity(bodies.len());
-    let mut force_work = 0.0;
-    let mut torque_work = 0.0;
-    let mut applied_linear = Vec3::ZERO;
-    let mut applied_angular = Vec3::ZERO;
+    let mut force_work = Dd::ZERO;
+    let mut torque_work = Dd::ZERO;
+    let mut kick_change = Dd::ZERO;
+    let mut linear_residual = [Dd::ZERO; 3];
+    let mut angular_residual = [Dd::ZERO; 3];
     for ((&body, &property), &wrench) in bodies.iter().zip(properties).zip(wrenches) {
         poll(gate)?;
         wrench.validate()?;
         let force = wrench
             .force_world
             .add(gravity.acceleration_world().scale(property.mass()));
-        // Original native force-impulse owner, at the real COM.
-        let receipt = body.apply_force_at_body_point(property, Vec3::ZERO, force, dt_s)?;
-        let after_force = receipt.impulse.state_after;
+        // Apply both resultants through the original atomic native owner. Its
+        // increment/impulse residual exposes kicks lost by rounded state addition
+        // so the original acceptance gates can refuse an unresolved update.
+        let force_impulse = force.scale(dt_s);
         let torque_impulse = wrench.torque_body.scale(dt_s);
-        let next = RigidBodyState::new(
-            after_force.pose(),
-            after_force.linear_momentum_world(),
-            after_force.angular_momentum_body().add(torque_impulse),
-        )?;
-        let omega_before =
-            property.angular_velocity_body_checked(after_force.angular_momentum_body())?;
+        let receipt = body.apply_momentum_impulse(property, force_impulse, torque_impulse)?;
+        let next = receipt.state_after;
+        let velocity_mid = body
+            .center_of_mass_velocity_world(property)?
+            .scale(0.5)
+            .add(next.center_of_mass_velocity_world(property)?.scale(0.5));
+        let omega_before = property.angular_velocity_body_checked(body.angular_momentum_body())?;
         let omega_after = property.angular_velocity_body_checked(next.angular_momentum_body())?;
-        force_work += receipt.impulse.work.impulse_work_j;
-        torque_work += torque_impulse.dot(omega_before.add(omega_after).scale(0.5));
-        applied_linear = applied_linear.add(receipt.impulse.impulse_world);
-        applied_angular = applied_angular
-            .add(
-                body.pose()
-                    .position_world()
-                    .cross(receipt.impulse.impulse_world),
-            )
-            .add(
-                body.pose()
-                    .orientation()
-                    .rotate_body_to_world(torque_impulse),
-            );
+        force_work = force_work + Dd::from_f64(force_impulse.dot(velocity_mid));
+        torque_work = torque_work
+            + Dd::from_f64(torque_impulse.dot(omega_before.scale(0.5).add(omega_after.scale(0.5))));
+        kick_change = kick_change + Dd::from_f64(receipt.work.kinetic_energy_change_j);
+        super::add_vector(&mut linear_residual, receipt.linear_residual_world);
+        super::add_vector(
+            &mut angular_residual,
+            body.pose()
+                .position_world()
+                .cross(receipt.linear_residual_world),
+        );
+        super::add_vector(
+            &mut angular_residual,
+            body.pose()
+                .orientation()
+                .rotate_body_to_world(receipt.angular_residual_body),
+        );
         kicked.push(next);
     }
-    let (kick_energy, _, _) = super::totals_with::<R, I>(&kicked, properties, gate)?;
-    let kick_residual = kick_energy - before_energy - force_work - torque_work;
+    let kick_residual = (kick_change - force_work - torque_work).to_f64();
     if !kick_residual.is_finite() || kick_residual.abs() > controls.work_energy_tolerance_j {
         return Err(RigidContactStepError::Audit(
             "native force/torque impulse work failed",
         ));
     }
     let impact = apply_impact(&mut kicked, properties, contacts, controls.impact, gate)?;
-    let (_, drift_linear_before, drift_angular_before) =
-        super::totals_with::<R, I>(&kicked, properties, gate)?;
+    super::add_vector(&mut linear_residual, impact.linear_momentum_residual_ns);
+    super::add_vector(&mut angular_residual, impact.angular_momentum_residual_nms);
     let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
     let mut endpoint = Vec::with_capacity(kicked.len());
+    let mut drift_energy = Dd::ZERO;
+    let mut drift_linear = [Dd::ZERO; 3];
+    let mut drift_angular = [Dd::ZERO; 3];
     for (&body, &property) in kicked.iter().zip(properties) {
         poll(gate)?;
-        endpoint.push(
-            integrator
-                .step(body, property, Wrench::ZERO, dt_s)?
-                .state_after,
+        let after = integrator
+            .step(body, property, Wrench::ZERO, dt_s)?
+            .state_after;
+        let dp = after
+            .linear_momentum_world()
+            .sub(body.linear_momentum_world());
+        let dl = after
+            .angular_momentum_body()
+            .sub(body.angular_momentum_body());
+        let velocity_mid = body
+            .center_of_mass_velocity_world(property)?
+            .scale(0.5)
+            .add(after.center_of_mass_velocity_world(property)?.scale(0.5));
+        let omega_mid = property
+            .angular_velocity_body_checked(body.angular_momentum_body())?
+            .scale(0.5)
+            .add(
+                property
+                    .angular_velocity_body_checked(after.angular_momentum_body())?
+                    .scale(0.5),
+            );
+        drift_energy =
+            drift_energy + Dd::from_f64(dp.dot(velocity_mid)) + Dd::from_f64(dl.dot(omega_mid));
+        super::add_vector(&mut drift_linear, dp);
+        // Delta(x cross p) = x_before cross delta_p + delta_x cross p_after.
+        // Unlike subtracting two orbital totals, this retains small exchange
+        // alongside a large unchanged origin/translation contribution.
+        let dx = after
+            .pose()
+            .position_world()
+            .sub(body.pose().position_world());
+        super::add_vector(&mut drift_angular, body.pose().position_world().cross(dp));
+        super::add_vector(&mut drift_angular, dx.cross(after.linear_momentum_world()));
+        super::add_vector(
+            &mut drift_angular,
+            after
+                .pose()
+                .orientation()
+                .rotate_body_to_world(after.angular_momentum_body())
+                .sub(
+                    body.pose()
+                        .orientation()
+                        .rotate_body_to_world(body.angular_momentum_body()),
+                ),
         );
+        endpoint.push(after);
     }
     let endpoint_gaps = gaps(&endpoint, properties, contacts, dt_s, true, gate)?;
-    let (after_energy, after_linear, after_angular) =
-        super::totals_with::<R, I>(&endpoint, properties, gate)?;
+    let (after_energy, _, _) = super::totals_with::<R, I>(&endpoint, properties, gate)?;
     let force_displacement_work: f64 = bodies
         .iter()
         .zip(&endpoint)
@@ -325,20 +376,24 @@ fn step_with<F: Copy, R: ImpactResponse, I, P, E>(
                 )
         })
         .sum();
+    let total_energy = (kick_change + Dd::from_f64(impact.kinetic_change_j) + drift_energy
+        - force_work
+        - torque_work
+        - Dd::from_f64(impact.support_work_j)
+        + Dd::from_f64(impact.contact.physical().dissipated_energy))
+    .to_f64();
+    for axis in 0..3 {
+        linear_residual[axis] = linear_residual[axis] + drift_linear[axis];
+        angular_residual[axis] = angular_residual[axis] + drift_angular[axis];
+    }
+    let linear_residual = super::rounded_vector(linear_residual);
+    let angular_residual = super::rounded_vector(angular_residual);
+    let drift_linear = super::rounded_vector(drift_linear);
+    let drift_angular = super::rounded_vector(drift_angular);
+    let drift_energy = drift_energy.to_f64();
+    let force_work = force_work.to_f64();
+    let torque_work = torque_work.to_f64();
     let force_splitting_work = force_work - force_displacement_work;
-    let drift_energy = after_energy - impact.kinetic_after_j;
-    let drift_angular = after_angular.sub(drift_angular_before);
-    let total_energy =
-        after_energy - before_energy - force_work - torque_work - impact.support_work_j
-            + impact.contact.physical().dissipated_energy;
-    let linear_residual = after_linear
-        .sub(before_linear)
-        .sub(applied_linear)
-        .sub(impact.support_impulse_ns);
-    let angular_residual = after_angular
-        .sub(before_angular)
-        .sub(applied_angular)
-        .sub(impact.support_angular_impulse_nms);
     if [
         before_energy,
         after_energy,
@@ -349,7 +404,7 @@ fn step_with<F: Copy, R: ImpactResponse, I, P, E>(
         drift_energy,
         total_energy,
         super::magnitude(drift_angular),
-        super::magnitude(after_linear.sub(drift_linear_before)),
+        super::magnitude(drift_linear),
         super::magnitude(linear_residual),
         super::magnitude(angular_residual),
     ]
@@ -357,8 +412,7 @@ fn step_with<F: Copy, R: ImpactResponse, I, P, E>(
     .any(|x| !x.is_finite())
         || drift_energy.abs() > controls.drift_energy_tolerance_j
         || super::magnitude(drift_angular) > controls.drift_angular_momentum_tolerance_nms
-        || super::magnitude(after_linear.sub(drift_linear_before))
-            > controls.linear_momentum_tolerance_ns
+        || super::magnitude(drift_linear) > controls.linear_momentum_tolerance_ns
         || total_energy.abs() > controls.work_energy_tolerance_j
         || super::magnitude(linear_residual) > controls.linear_momentum_tolerance_ns
         || super::magnitude(angular_residual) > controls.angular_momentum_tolerance_nms
