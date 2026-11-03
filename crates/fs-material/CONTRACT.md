@@ -8183,6 +8183,22 @@ dynamics; no thermal evolution, prestress, bending or acoustic radiation is infe
 
 ## Shared fluid acoustic response
 
+`fluid_acoustics::thermoviscous::absorption::ClassicalBulkAbsorption` prepares
+classical longitudinal absorption from one original `ThermoviscousFluid`
+evaluation and an explicitly supplied nonnegative bulk viscosity. It uses
+`alpha = omega^2 [4 mu/3 + zeta + kappa(1/Cv - 1/Cp)]/(2 rho c^3)` for pressure
+amplitude, with the same density, adiabatic sound speed, transport and calorics
+as the original liquid or real gas. No ideal-gas state, atmospheric default,
+bulk viscosity from shear viscosity, or molecular-relaxation data is inferred.
+The frozen owner performs no per-frequency material queries and exposes
+`omega*tau` for weak-loss admission. DC is exactly zero; invalid frequencies
+and unrepresentable positive losses refuse. G1/G3 tests cover the independent
+specific-heat formula, separate bulk/shear/thermal effects, frequency scaling
+and the existing gas classical limit. This is a uniform Newtonian weak-loss
+model with constant bulk viscosity over the caller's supported band, not a
+dispersion, phase-change, wall-loss or experimental-validation claim. Adding
+resolved relaxation already included in the supplied bulk viscosity is invalid.
+
 `fluid_acoustics::FluidAcoustics` admits one immutable acoustic snapshot with
 positive finite density, adiabatic sound speed, bulk modulus `K_s = rho c²`,
 compressibility `1/K_s` and plane-wave impedance `rho c`. Gas adapters reuse the
