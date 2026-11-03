@@ -34,7 +34,9 @@ use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 /// Shared physical kinetic-work account; numerical loss is never plastic heat.
 pub use crate::inertia::InertialEnergy;
 pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
-pub use crate::inertia::{SolidPointKinematics, SolidPointMobility, TetImpulsePoint};
+pub use crate::inertia::{
+    SolidPointKinematics, SolidPointMobility, SolidPointMobilityMatrix, TetImpulsePoint,
+};
 
 /// Separate material-work and inertial time-discretization tolerances.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -241,6 +243,52 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
             cx,
         )
         .map_err(|error| FinitePlasticTetError::from(inertia_error(error)))
+    }
+
+    /// Complete simultaneous cross-point/direction mobility [1/kg].
+    /// Each row uses a unit world direction and the original supported mass.
+    /// Storage includes the bounded matrix, native solve reports and one mass
+    /// response at a time; all constitutive histories remain borrowed.
+    pub fn point_mobility_matrix_per_kg(
+        &self,
+        held: &[usize],
+        rows: &[(TetImpulsePoint, [f64; 3])],
+        maximum_rows: usize,
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobilityMatrix, FinitePlasticTetError> {
+        crate::inertia::point::mobility_matrix(
+            &self.mass,
+            self.solid.state.tetrahedra,
+            held,
+            rows,
+            maximum_rows,
+            controls,
+            cx,
+        )
+        .map_err(|error| FinitePlasticTetError::from(inertia_error(error)))
+    }
+
+    /// Apply all material-point impulses in one native velocity update.
+    /// Cross terms enter the same kinetic-work account. Repeated contributions
+    /// reach the original compensated nodal accumulator before solving.
+    pub fn point_impulses_candidate(
+        &self,
+        held: &[usize],
+        impulses: &[(TetImpulsePoint, [f64; 3])],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FinitePlasticMotionImpulse<'a, L>, FinitePlasticTetError> {
+        let entries = crate::inertia::point::distributions(
+            self.solid.state.tetrahedra,
+            self.velocity_mps.len(),
+            impulses,
+            controls,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
     }
 
     /// Apply a world impulse at the current material point through B^T.

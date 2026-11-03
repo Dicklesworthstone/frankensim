@@ -21,7 +21,9 @@ use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 
 pub use crate::inertia::InertialEnergy;
 pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
-pub use crate::inertia::{SolidPointKinematics, SolidPointMobility, TetImpulsePoint};
+pub use crate::inertia::{
+    SolidPointKinematics, SolidPointMobility, SolidPointMobilityMatrix, TetImpulsePoint,
+};
 
 /// Independent budgets for material work and numerical kinetic damping.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -206,6 +208,52 @@ impl<'a> FiniteViscoTetMotion<'a> {
             cx,
         )
         .map_err(|error| FiniteViscoTetError::from(inertia_error(error)))
+    }
+
+    /// Complete simultaneous cross-point/direction mobility [1/kg].
+    /// Each row uses a unit world direction and the original supported mass.
+    /// Only sparse point rows, the bounded result and one full response at a
+    /// time are retained; no constitutive history is copied by this query.
+    pub fn point_mobility_matrix_per_kg(
+        &self,
+        held: &[usize],
+        rows: &[(TetImpulsePoint, [f64; 3])],
+        maximum_rows: usize,
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobilityMatrix, FiniteViscoTetError> {
+        crate::inertia::point::mobility_matrix(
+            &self.mass,
+            self.solid.tetrahedra,
+            held,
+            rows,
+            maximum_rows,
+            controls,
+            cx,
+        )
+        .map_err(|error| FiniteViscoTetError::from(inertia_error(error)))
+    }
+
+    /// Apply all material-point impulses in one native velocity update.
+    /// The original mass accounts for every cross term, support reaction and
+    /// signed work; compensated accumulation retains small net nodal impulses.
+    pub fn point_impulses_candidate(
+        &self,
+        held: &[usize],
+        impulses: &[(TetImpulsePoint, [f64; 3])],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteViscoMotionImpulse<'a>, FiniteViscoTetError> {
+        let entries = crate::inertia::point::distributions(
+            self.solid.tetrahedra,
+            self.velocity_mps.len(),
+            impulses,
+            controls,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
     }
 
     /// Apply a world impulse through the transpose of the material-point trace.

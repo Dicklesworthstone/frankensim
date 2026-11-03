@@ -397,6 +397,137 @@ fn free_rigid_spin_uses_consistent_angular_inertia_and_failed_events_preserve_hi
 }
 
 #[test]
+fn simultaneous_point_mobility_keeps_cross_terms_and_one_supported_work_account() {
+    with_cx(|cx| {
+        let law = material(true);
+        let old_v: [[f64; 3]; 4] =
+            std::array::from_fn(|i| [0.02 + 0.03 * i as f64, -0.01 + 0.02 * i as f64, 0.04]);
+        let motion =
+            FiniteViscoTetMotion::try_new_with_nodal_density(relaxed(&law, cx), &RHO, &old_v, cx)
+                .unwrap();
+        let a = TetImpulsePoint {
+            tetrahedron: 0,
+            weights: [0.1, 0.2, 0.3, 0.4],
+        };
+        let b = TetImpulsePoint {
+            tetrahedron: 0,
+            weights: [0.0, 0.5, 0.5, 0.0],
+        };
+        let axes: [[f64; 3]; 2] = [[0.6, 0.8, 0.0], [0.0, 1.0, 0.0]];
+        let rows = [(a, axes[0]), (b, axes[1])];
+        let strengths = [0.03, -0.02];
+        let loads = [
+            (a, axes[0].map(|v| strengths[0] * v)),
+            (b, axes[1].map(|v| strengths[1] * v)),
+        ];
+        let origin = [-0.2, 0.3, 0.4];
+        // Independent inverse columns of the cubic-simplex graded mass. These
+        // two traces share a nonzero off-diagonal response even at distinct points.
+        let inverse_a = [-370.0, -160.0, 482.0, 908.0].map(|v| v / 1775.0);
+        let inverse_b = [-304.0, 260.0, 548.0, -304.0].map(|v| v / 710.0);
+        let held: Vec<_> = (0..12).filter(|&d| d != 4).collect();
+        for supports in [&[][..], held.as_slice()] {
+            let constrained = !supports.is_empty();
+            let expected = if constrained {
+                [
+                    0.16 * 0.16 / 1.5,
+                    0.16 * 0.5 / 1.5,
+                    0.16 * 0.5 / 1.5,
+                    0.5 * 0.5 / 1.5,
+                ]
+            } else {
+                [
+                    2194.0 / 8875.0,
+                    644.0 / 8875.0,
+                    644.0 / 8875.0,
+                    202.0 / 355.0,
+                ]
+            };
+            let matrix = motion
+                .point_mobility_matrix_per_kg(supports, &rows, 2, impulse_controls(), cx)
+                .unwrap();
+            assert_eq!(matrix.dimension, 2);
+            assert_eq!(matrix.solves.len(), 2);
+            assert!(matrix.solves.iter().all(|s| s.converged_euclidean()));
+            for (&actual, &value) in matrix.matrix_per_kg.iter().zip(&expected) {
+                close(actual, value, 1e-13);
+            }
+            let event = motion
+                .point_impulses_candidate(supports, &loads, origin, impulse_controls(), cx)
+                .unwrap();
+            for i in 0..4 {
+                for c in 0..3 {
+                    let change = if constrained {
+                        if i == 1 && c == 1 {
+                            (0.16 * strengths[0] + 0.5 * strengths[1]) / 1.5
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        inverse_a[i] * loads[0].1[c] + inverse_b[i] * loads[1].1[c]
+                    };
+                    close(
+                        event.motion.velocity_mps()[i][c],
+                        old_v[i][c] + change,
+                        1e-13,
+                    );
+                }
+            }
+            let mut work = 0.0;
+            let mut torque = [0.0; 3];
+            for (i, &(point, axis)) in rows.iter().enumerate() {
+                let before = motion.point_kinematics(point, cx).unwrap();
+                let after = event.motion.point_kinematics(point, cx).unwrap();
+                let predicted = expected[2 * i] * strengths[0] + expected[2 * i + 1] * strengths[1];
+                let actual: f64 = (0..3)
+                    .map(|c| axis[c] * (after.velocity_mps[c] - before.velocity_mps[c]))
+                    .sum();
+                close(actual, predicted, 1e-14);
+                work += strengths[i]
+                    * (0..3)
+                        .map(|c| axis[c] * before.velocity_mps[c])
+                        .sum::<f64>()
+                    + 0.5 * strengths[i] * predicted;
+                let t = cross(
+                    std::array::from_fn(|c| before.position_m[c] - origin[c]),
+                    loads[i].1,
+                );
+                for c in 0..3 {
+                    torque[c] += t[c];
+                }
+            }
+            close(event.impulse.applied_work_j, work, 1e-14);
+            close(
+                event.impulse.kinetic_change_j,
+                work + event.impulse.support_work_j,
+                1e-14,
+            );
+            for c in 0..3 {
+                close(event.impulse.applied.angular_kg_m2_s[c], torque[c], 1e-14);
+            }
+            assert_eq!(
+                event.motion.solid().element_states(),
+                motion.solid().element_states()
+            );
+            assert_eq!(event.motion.solid().time_s(), HOLD);
+        }
+        assert!(
+            motion
+                .point_mobility_matrix_per_kg(&[], &rows, 1, impulse_controls(), cx)
+                .is_err()
+        );
+        let mut limited = impulse_controls();
+        limited.maximum_workspace_components = 0;
+        assert!(
+            motion
+                .point_impulses_candidate(&[], &loads, origin, limited, cx)
+                .is_err()
+        );
+        assert_eq!(motion.velocity_mps(), old_v);
+    });
+}
+
+#[test]
 fn interior_point_trace_and_supported_mobility_share_the_exact_graded_mass() {
     with_cx(|cx| {
         let law = material(true);

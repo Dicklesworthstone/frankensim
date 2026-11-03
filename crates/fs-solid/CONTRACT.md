@@ -3119,6 +3119,27 @@ state. The native visco impulse regression checks an interior point against
 independent cubic-simplex mass inversion, including negative consistent-mass
 nodal responses, supported mobility, deformed torque and conjugate point work.
 
+The same owners expose `point_mobility_matrix_per_kg` and
+`point_impulses_candidate` for simultaneous contact. Every row/column pair of
+`B M_ff^-1 B^T` retains its full coupling through the original supported mass.
+One checked response is retained at a time; no dense mass inverse or material
+history copy is needed to build mobility. Caller row and workspace limits
+bound the matrix, trace maps and solve reports before allocation. The returned
+matrix is not silently symmetrized or clamped; the contact-law owner admits it
+with its own numerical tolerances. All point loads reach the compensated nodal
+accumulator together and produce one native velocity, support and work account.
+
+Hot Tet4 and Hex8 motion expose the same five point operations. Tet4 uses the
+original barycentric trace; `HexImpulsePoint` supplies reference coordinates
+in `[-1,1]^3` for the original trilinear trace. Physical
+deformed coordinates determine position, velocity and torque even when the
+Hex8 constitutive owner uses mean dilatation. Original density, thermal source
+families, temperatures, quadrature histories and free/internal storage survive
+unchanged. Tet4 requires its reference inertia to be bound first. Focused native
+regressions compare complete two-point matrices with independent simplex and
+tensor-product inverses, including oblique directions, nonvertex points,
+supported responses, summed work and unchanged thermal/material state.
+
 ### Exact-incompressible pressure impulses
 
 `mixed::conservative::ConservativeTetSolid::impulse_candidate` solves the
@@ -3143,9 +3164,9 @@ velocity admissibility. The impulse preserves geometry, density, material
 points, stored pressure and time, and adds external/support work to the
 existing conservative trajectory ledger. `tests/mixed_conservative.rs` checks
 independent P2 mass moments, pressure loading, rotated geometry, supported
-gauge reactions and continuation. This entry point requires the exact-
-incompressible conservative formulation; it does not change mixed viscoelastic
-motion or introduce a compressibility approximation.
+gauge reactions and continuation. The exact-incompressible branch uses this
+pressure solve; finite-compliance conservative formulations retain their
+original mass-only response and supply no pressure impulse.
 
 ### Reference-aware finite-deformation response
 
@@ -4074,7 +4095,9 @@ moving-support work, nonzero retained pressure and relaxed Maxwell histories,
 subsequent native motion, typed formulation refusal and transactional retry.
 The exact-mode extension checks an independently integrated pressure impulse
 on an already stretched, relaxed body, retained translation and Maxwell
-continuation, and incompatible velocity/gauge/factor-budget refusals.
+continuation, and incompatible velocity/gauge/factor-budget refusals. A genuine
+pressure-gauge regression also checks cancelling applied and moving-support
+work with unchanged kinetic energy and retained relaxation history.
 Native execution remains pending the existing dependency-build blocker; this
 addition is not a completed Cargo or DSR gate.
 

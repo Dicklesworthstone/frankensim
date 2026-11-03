@@ -554,8 +554,9 @@ fn exact_pressure_kick_retains_relaxed_stretched_memory_and_native_continuation(
             )
             .unwrap();
         retained(&motion, &event.motion);
-        assert_eq!(event.impulse.kkt_inertia.positive, 30);
-        assert_eq!(event.impulse.kkt_inertia.negative, 4);
+        let inertia = event.impulse.kkt_inertia.unwrap();
+        assert_eq!(inertia.positive, 30);
+        assert_eq!(inertia.negative, 4);
         for v in event.motion.velocity_mps() {
             for c in 0..3 {
                 near(v[c], old_v[c] + delta[c], 2e-9);
@@ -682,5 +683,110 @@ fn constrained_entry_refuses_wrong_material_incompatible_rates_gauges_and_budget
         assert_eq!(exact.velocity_mps(), zero);
         assert_eq!(exact.solid().time_s(), 0.0);
         assert!(exact.solid().pressure_pa().iter().all(|p| *p == 0.0));
+    });
+}
+
+const EXACT_STRETCH: f64 = 1.04;
+
+fn relaxed_exact<'a>(
+    nodes: &'a [[f64; 3]],
+    elements: &'a [[usize; 10]],
+    material: &'a ViscoHyperelastic,
+    cx: &Cx<'_>,
+) -> MixedViscoTetSolid<'a> {
+    let held: Vec<_> = nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(node, p)| {
+            (0..3).filter_map(move |c| {
+                if c == 0 {
+                    Some((3 * node, (EXACT_STRETCH - 1.0) * p[0]))
+                } else {
+                    (p[c] == 0.0).then_some((3 * node + c, 0.0))
+                }
+            })
+        })
+        .collect();
+    let mut value = solid(
+        nodes,
+        elements,
+        material,
+        VolumetricTreatment::ExactIncompressible,
+        cx,
+    );
+    for dt in [0.0, HOLD] {
+        value = value
+            .advance(
+                dt,
+                &held,
+                &[],
+                [0.0; 3],
+                None,
+                settings(),
+                controls().material,
+                cx,
+            )
+            .unwrap()
+            .solid;
+    }
+    assert!(value.quadrature_states().iter().all(|s| s.dissipated > 0.0));
+    assert!(value.pressure_pa().iter().any(|p| p.abs() > 0.01));
+    value
+}
+
+#[test]
+fn constrained_impulse_keeps_moving_support_work_and_a_true_pressure_gauge() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(1e300, true);
+        let old_velocity = [0.1, 0.0, 0.0];
+        let motion = MixedViscoTetMotion::try_new(
+            relaxed_exact(&nodes, &elements, &material, cx),
+            &[DENSITY],
+            &vec![old_velocity; nodes.len()],
+            MASS_BYTES,
+            cx,
+        )
+        .unwrap();
+        // Three tangent edge directions leave one true constant-pressure gauge.
+        let free: Vec<_> = (0..3)
+            .map(|c| {
+                let edge = TET10_EDGES
+                    .iter()
+                    .position(|e| e.contains(&0) && e.contains(&(c + 1)))
+                    .unwrap();
+                3 * elements[0][4 + edge] + c
+            })
+            .collect();
+        let held: Vec<_> = (0..3 * nodes.len()).filter(|d| !free.contains(d)).collect();
+        let load = [(free[0], 0.1)];
+        let event = motion
+            .constrained_impulse_candidate(
+                &held,
+                &load,
+                Some(elements[0][0]),
+                [0.0; 3],
+                constrained_controls(),
+                cx,
+            )
+            .unwrap();
+        retained(&motion, &event.motion);
+        for v in event.motion.velocity_mps() {
+            for c in 0..3 {
+                near(v[c], old_velocity[c], 1e-10);
+            }
+        }
+        // B[:,edge01.x]=V/(5*s)*[1,-1,0,0], with lambda0 fixed to zero.
+        near(
+            event.impulse.pressure_impulses_pa_s[1],
+            -3.0 * EXACT_STRETCH,
+            2e-8,
+        );
+        near(event.impulse.external_work_j, 0.01, 1e-11);
+        near(event.impulse.momentum.support_work_j, -0.01, 1e-11);
+        near(event.impulse.momentum.support.linear_kg_m_s[0], -0.1, 1e-11);
+        near(event.impulse.momentum.kinetic_change_j, 0.0, 1e-11);
+        near(event.impulse.pressure_work_j, 0.0, 1e-11);
+        assert_eq!(motion.velocity_mps(), vec![old_velocity; nodes.len()]);
     });
 }

@@ -7,10 +7,11 @@ use fs_material::plastic::finite::thermal::{
 };
 use fs_material::plastic::finite::{FiniteJ2Limits, FiniteJ2Parameters};
 use fs_solid::hyper3::plastic::FinitePlasticStepControls;
-use fs_solid::hyper3::plastic::hex::dynamics::FiniteThermoplasticHexMotion;
+use fs_solid::hyper3::plastic::hex::dynamics::{FiniteThermoplasticHexMotion, HexImpulsePoint};
 use fs_solid::hyper3::plastic::hex::{FiniteHexFormulation, FiniteThermoplasticHexSolid};
 use fs_solid::hyper3::plastic::thermal::{
     FiniteThermoplasticControls, FiniteThermoplasticTetSolid, SolidImpulseControls,
+    SolidPointMobilityMatrix, TetImpulsePoint,
 };
 use fs_solid::plastic3::IncrementSettings;
 use fs_solid::plastic3::hex::HexAssemblyBudget;
@@ -497,6 +498,373 @@ fn g1_hot_hex_impulse_keeps_all_quadrature_memory_and_moving_support_work() {
             );
             close(next.balance_error_j, 0.0, 2e-6);
             close(next.motion.reference_mass_kg(), RHO[0], 1e-13);
+        }
+    });
+}
+
+fn point_matrix(actual: &SolidPointMobilityMatrix, expected: [[f64; 2]; 2]) {
+    assert_eq!(actual.dimension, 2);
+    assert_eq!(actual.solves.len(), 2);
+    assert!(
+        actual
+            .solves
+            .iter()
+            .all(|solve| solve.converged_euclidean())
+    );
+    for i in 0..2 {
+        for j in 0..2 {
+            close(actual.matrix_per_kg[2 * i + j], expected[i][j], 1e-11);
+        }
+    }
+}
+
+fn point_work(
+    v: [f64; 3],
+    impulses: [[f64; 3]; 2],
+    amplitudes: [f64; 2],
+    matrix: [[f64; 2]; 2],
+) -> f64 {
+    let linear: f64 = (0..3)
+        .map(|c| v[c] * (impulses[0][c] + impulses[1][c]))
+        .sum();
+    linear
+        + 0.5
+            * (0..2)
+                .map(|i| {
+                    (0..2)
+                        .map(|j| amplitudes[i] * matrix[i][j] * amplitudes[j])
+                        .sum::<f64>()
+                })
+                .sum::<f64>()
+}
+
+fn hot_stretch() -> [f64; 3] {
+    let d = HOT - 300.0;
+    let thermal = 3e-4 * d + 0.5e-7 * d * d;
+    [
+        (thermal + PLASTIC).exp(),
+        (thermal - 0.5 * PLASTIC).exp(),
+        (thermal - 0.5 * PLASTIC).exp(),
+    ]
+}
+
+#[test]
+fn g1_hot_tet_material_points_share_cross_mobility_and_one_impulse_transaction() {
+    with_cx(false, |cx| {
+        let points = [
+            TetImpulsePoint {
+                tetrahedron: 0,
+                weights: [0.1, 0.2, 0.3, 0.4],
+            },
+            TetImpulsePoint {
+                tetrahedron: 0,
+                weights: [0.25; 4],
+            },
+        ];
+        let directions = [[0.6, 0.8, 0.0], [0.0, 1.0, 0.0]];
+        let rows = [(points[0], directions[0]), (points[1], directions[1])];
+        let amplitudes = [0.03, 0.01];
+        let impulses: [[f64; 3]; 2] =
+            std::array::from_fn(|i| directions[i].map(|n| amplitudes[i] * n));
+        let applied = [(points[0], impulses[0]), (points[1], impulses[1])];
+        let v0 = [0.03, 0.1, -0.02];
+        let solid = hot_tet(cx);
+        assert!(solid.point_kinematics(points[0], cx).is_err());
+        let solid = solid.with_inertia(&RHO, &[v0; 4], cx).unwrap();
+        let origin = [-0.2, 0.3, 0.4];
+        let stretch = hot_stretch();
+        let positions: [[f64; 3]; 2] =
+            std::array::from_fn(|i| std::array::from_fn(|c| points[i].weights[c + 1] * stretch[c]));
+        for i in 0..2 {
+            for c in 0..3 {
+                close(
+                    solid.point_kinematics(points[i], cx).unwrap().position_m[c],
+                    positions[i][c],
+                    1e-12,
+                );
+            }
+        }
+        let held: Vec<_> = (0..12).filter(|&d| d != 4).collect();
+        for fixed in [&[][..], held.as_slice()] {
+            let restrained = !fixed.is_empty();
+            // Uniform unit-total-mass Tet4: M^-1=20 I-4 11'.
+            let matrix = if restrained {
+                [[0.256, 0.4], [0.4, 0.625]]
+            } else {
+                [[2.0, 0.8], [0.8, 1.0]]
+            };
+            point_matrix(
+                &solid
+                    .point_mobility_matrix_per_kg(fixed, &rows, 2, impulse_controls(), cx)
+                    .unwrap(),
+                matrix,
+            );
+            close(
+                solid
+                    .point_directional_inverse_mass_per_kg(
+                        fixed,
+                        points[0],
+                        directions[0],
+                        impulse_controls(),
+                        cx,
+                    )
+                    .unwrap()
+                    .inverse_mass_per_kg,
+                matrix[0][0],
+                1e-12,
+            );
+            let event = solid
+                .point_impulses_candidate(fixed, &applied, origin, impulse_controls(), cx)
+                .unwrap();
+            let single_delta = (0.2 * impulses[0][1] + 0.25 * impulses[1][1]) / 0.1;
+            for i in 0..4 {
+                for c in 0..3 {
+                    let delta = if restrained {
+                        if i == 1 && c == 1 { single_delta } else { 0.0 }
+                    } else {
+                        (0..2)
+                            .map(|p| (20.0 * points[p].weights[i] - 4.0) * impulses[p][c])
+                            .sum()
+                    };
+                    close(
+                        event.solid.velocity_mps().unwrap()[i][c],
+                        v0[c] + delta,
+                        1e-12,
+                    );
+                }
+            }
+            let expected_work = point_work(v0, impulses, amplitudes, matrix);
+            let expected_kinetic = if restrained {
+                v0[1] * 0.25 * single_delta + 0.5 * 0.1 * single_delta * single_delta
+            } else {
+                expected_work
+            };
+            close(event.impulse.applied_work_j, expected_work, 1e-13);
+            close(event.impulse.kinetic_change_j, expected_kinetic, 1e-13);
+            close(
+                event.impulse.support_work_j,
+                expected_kinetic - expected_work,
+                1e-13,
+            );
+            for c in 0..3 {
+                let torque: f64 = (0..2)
+                    .map(|p| {
+                        cross(
+                            std::array::from_fn(|axis| positions[p][axis] - origin[axis]),
+                            impulses[p],
+                        )[c]
+                    })
+                    .sum();
+                close(event.impulse.applied.angular_kg_m2_s[c], torque, 1e-13);
+            }
+            assert_eq!(event.solid.temperatures_k(), solid.temperatures_k());
+            assert_eq!(event.solid.element_states(), solid.element_states());
+            assert_eq!(event.solid.internal_energy_j(), solid.internal_energy_j());
+            assert_eq!(event.solid.free_energy_j(), solid.free_energy_j());
+        }
+        assert!(
+            solid
+                .point_mobility_matrix_per_kg(&[], &rows, 1, impulse_controls(), cx)
+                .is_err()
+        );
+        assert_eq!(solid.velocity_mps().unwrap(), [v0; 4]);
+    });
+}
+
+#[test]
+fn g1_hot_hex_material_point_mobility_uses_original_tensor_mass_in_both_formulations() {
+    with_cx(false, |cx| {
+        let points = [
+            HexImpulsePoint {
+                hexahedron: 0,
+                reference_coordinates: [0.2, -0.4, 0.6],
+            },
+            HexImpulsePoint {
+                hexahedron: 0,
+                reference_coordinates: [-0.6, 0.2, 0.0],
+            },
+        ];
+        let directions = [[0.6, 0.8, 0.0], [0.0, 1.0, 0.0]];
+        let rows = [(points[0], directions[0]), (points[1], directions[1])];
+        let amplitudes = [0.03, 0.01];
+        let impulses: [[f64; 3]; 2] =
+            std::array::from_fn(|i| directions[i].map(|n| amplitudes[i] * n));
+        let applied = [(points[0], impulses[0]), (points[1], impulses[1])];
+        let weights: [[f64; 8]; 2] = std::array::from_fn(|p| {
+            std::array::from_fn(|i| {
+                (0..3)
+                    .map(|c| {
+                        0.5 * (1.0
+                            + (2.0 * HEX_NODES[i][c] - 1.0) * points[p].reference_coordinates[c])
+                    })
+                    .product()
+            })
+        });
+        let free_matrix: [[f64; 2]; 2] = std::array::from_fn(|i| {
+            std::array::from_fn(|j| {
+                let dot: f64 = (0..3).map(|c| directions[i][c] * directions[j][c]).sum();
+                // Tensor product of the exact one-dimensional linear mass inverse.
+                dot / RHO[0]
+                    * (0..3)
+                        .map(|c| {
+                            1.0 + 3.0
+                                * points[i].reference_coordinates[c]
+                                * points[j].reference_coordinates[c]
+                        })
+                        .product::<f64>()
+            })
+        });
+        let supported_matrix = std::array::from_fn(|i| {
+            std::array::from_fn(|j| {
+                weights[i][1] * directions[i][1] * weights[j][1] * directions[j][1] / hex_mass(1, 1)
+            })
+        });
+        let v0 = [0.03, 0.1, -0.02];
+        let origin = [-0.2, 0.3, 0.4];
+        let positions: [[f64; 3]; 2] = std::array::from_fn(|p| {
+            std::array::from_fn(|c| {
+                0.5 * (1.0 + points[p].reference_coordinates[c]) * hot_stretch()[c]
+            })
+        });
+        for formulation in [
+            FiniteHexFormulation::Standard,
+            FiniteHexFormulation::MeanDilatation,
+        ] {
+            let motion =
+                FiniteThermoplasticHexMotion::try_new(hot_hex(formulation, cx), &RHO, &[v0; 8], cx)
+                    .unwrap();
+            for p in 0..2 {
+                for c in 0..3 {
+                    close(
+                        motion.point_kinematics(points[p], cx).unwrap().position_m[c],
+                        positions[p][c],
+                        1e-12,
+                    );
+                }
+            }
+            let held: Vec<_> = (0..24).filter(|&d| d != 4).collect();
+            for fixed in [&[][..], held.as_slice()] {
+                let restrained = !fixed.is_empty();
+                let matrix = if restrained {
+                    supported_matrix
+                } else {
+                    free_matrix
+                };
+                point_matrix(
+                    &motion
+                        .point_mobility_matrix_per_kg(fixed, &rows, 2, impulse_controls(), cx)
+                        .unwrap(),
+                    matrix,
+                );
+                close(
+                    motion
+                        .point_directional_inverse_mass_per_kg(
+                            fixed,
+                            points[0],
+                            directions[0],
+                            impulse_controls(),
+                            cx,
+                        )
+                        .unwrap()
+                        .inverse_mass_per_kg,
+                    matrix[0][0],
+                    1e-12,
+                );
+                let event = motion
+                    .point_impulses_candidate(fixed, &applied, origin, impulse_controls(), cx)
+                    .unwrap();
+                let single_delta = (weights[0][1] * impulses[0][1]
+                    + weights[1][1] * impulses[1][1])
+                    / hex_mass(1, 1);
+                for i in 0..8 {
+                    for c in 0..3 {
+                        let delta = if restrained {
+                            if i == 1 && c == 1 { single_delta } else { 0.0 }
+                        } else {
+                            (0..2)
+                                .map(|p| {
+                                    impulses[p][c] / RHO[0]
+                                        * (0..3)
+                                            .map(|axis| {
+                                                1.0 + 3.0
+                                                    * (2.0 * HEX_NODES[i][axis] - 1.0)
+                                                    * points[p].reference_coordinates[axis]
+                                            })
+                                            .product::<f64>()
+                                })
+                                .sum()
+                        };
+                        close(event.motion.velocity_mps()[i][c], v0[c] + delta, 1e-12);
+                    }
+                }
+                let expected_work = point_work(v0, impulses, amplitudes, matrix);
+                let expected_kinetic = if restrained {
+                    v0[1] * (RHO[0] / 8.0) * single_delta
+                        + 0.5 * hex_mass(1, 1) * single_delta * single_delta
+                } else {
+                    expected_work
+                };
+                close(event.impulse.applied_work_j, expected_work, 1e-13);
+                close(event.impulse.kinetic_change_j, expected_kinetic, 1e-13);
+                close(
+                    event.impulse.support_work_j,
+                    expected_kinetic - expected_work,
+                    1e-13,
+                );
+                for c in 0..3 {
+                    let torque: f64 = (0..2)
+                        .map(|p| {
+                            cross(
+                                std::array::from_fn(|axis| positions[p][axis] - origin[axis]),
+                                impulses[p],
+                            )[c]
+                        })
+                        .sum();
+                    close(event.impulse.applied.angular_kg_m2_s[c], torque, 1e-13);
+                }
+                assert_eq!(
+                    event.motion.solid().temperatures_k(),
+                    motion.solid().temperatures_k()
+                );
+                assert_eq!(
+                    event.motion.solid().quadrature_states(),
+                    motion.solid().quadrature_states()
+                );
+                assert_eq!(
+                    event.motion.solid().internal_energy_j(),
+                    motion.solid().internal_energy_j()
+                );
+                assert_eq!(
+                    event.motion.solid().free_energy_j(),
+                    motion.solid().free_energy_j()
+                );
+                assert_eq!(event.motion.solid().formulation(), formulation);
+            }
+            for bad in [
+                HexImpulsePoint {
+                    hexahedron: 1,
+                    ..points[0]
+                },
+                HexImpulsePoint {
+                    reference_coordinates: [1.01, 0.0, 0.0],
+                    ..points[0]
+                },
+            ] {
+                assert!(motion.point_kinematics(bad, cx).is_err());
+                assert!(
+                    motion
+                        .point_impulse_candidate(
+                            &[],
+                            bad,
+                            impulses[0],
+                            origin,
+                            impulse_controls(),
+                            cx
+                        )
+                        .is_err()
+                );
+            }
+            assert_eq!(motion.velocity_mps(), [v0; 8]);
         }
     });
 }

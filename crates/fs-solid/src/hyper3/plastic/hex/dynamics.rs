@@ -36,7 +36,10 @@ pub use crate::inertia::InertialEnergy;
 
 /// Impulses on the same full/mean-dilatation thermal-plastic solid and mass.
 pub mod impulse;
-pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
+pub use crate::inertia::{
+    HexImpulsePoint, SolidImpulseControls, SolidImpulseReport, SolidMomentum, SolidPointKinematics,
+    SolidPointMobility, SolidPointMobilityMatrix,
+};
 pub use impulse::FiniteThermoplasticHexMotionImpulse;
 
 /// Complete accepted finite solid, velocity and immutable original mass.

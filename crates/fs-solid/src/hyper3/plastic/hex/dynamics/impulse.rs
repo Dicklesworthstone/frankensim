@@ -13,6 +13,110 @@ pub struct FiniteThermoplasticHexMotionImpulse<
 }
 
 impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexMotion<'a, L> {
+    /// Physical trilinear position/velocity at an original material point.
+    /// Mean-dilatation constitutive coordinates never replace this geometry.
+    pub fn point_kinematics(
+        &self,
+        point: HexImpulsePoint,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointKinematics, FiniteThermoplasticHexError> {
+        crate::inertia::point::hex_kinematics(
+            point,
+            self.solid.hexahedra,
+            self.solid.nodes_m,
+            &self.solid.displacement_m,
+            &self.velocity_mps,
+            cx,
+        )
+        .map_err(inertia_error)
+    }
+
+    /// Directional mobility [1/kg] on the original supported Hex8 mass.
+    pub fn point_directional_inverse_mass_per_kg(
+        &self,
+        held: &[usize],
+        point: HexImpulsePoint,
+        direction: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobility, FiniteThermoplasticHexError> {
+        crate::inertia::point::hex_directional_mobility(
+            &self.mass,
+            self.solid.hexahedra,
+            held,
+            point,
+            direction,
+            controls,
+            cx,
+        )
+        .map_err(inertia_error)
+    }
+
+    /// Complete cross-point/direction mobility B M_ff^-1 B^T [1/kg].
+    /// Original trilinear point rows retain their full shared-body coupling.
+    pub fn point_mobility_matrix_per_kg(
+        &self,
+        held: &[usize],
+        rows: &[(HexImpulsePoint, [f64; 3])],
+        maximum_rows: usize,
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobilityMatrix, FiniteThermoplasticHexError> {
+        crate::inertia::point::hex_mobility_matrix(
+            &self.mass,
+            self.solid.hexahedra,
+            held,
+            rows,
+            maximum_rows,
+            controls,
+            cx,
+        )
+        .map_err(inertia_error)
+    }
+
+    /// Apply a world impulse through the transpose of the physical point trace.
+    /// No temperature, constitutive history, storage or material time changes.
+    pub fn point_impulse_candidate(
+        &self,
+        held: &[usize],
+        point: HexImpulsePoint,
+        impulse_world: [f64; 3],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermoplasticHexMotionImpulse<'a, L>, FiniteThermoplasticHexError> {
+        let entries = crate::inertia::point::hex_distribution(
+            point,
+            self.solid.hexahedra,
+            self.velocity_mps.len(),
+            impulse_world,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
+    }
+
+    /// Accumulate every material-point impulse before one native mass solve.
+    /// Thermal, physical and assumed quadrature histories are all retained.
+    pub fn point_impulses_candidate(
+        &self,
+        held: &[usize],
+        impulses: &[(HexImpulsePoint, [f64; 3])],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermoplasticHexMotionImpulse<'a, L>, FiniteThermoplasticHexError> {
+        let entries = crate::inertia::point::hex_distributions(
+            self.solid.hexahedra,
+            self.velocity_mps.len(),
+            impulses,
+            controls,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
+    }
+
     /// Propose a zero-duration velocity jump through the original Hex8 mass.
     ///
     /// Impulses are full nodal world components [kg m/s]; repeated entries sum.

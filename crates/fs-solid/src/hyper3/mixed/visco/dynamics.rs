@@ -27,8 +27,8 @@ use super::{
 };
 use crate::inertia::{BackwardEulerInertia, ReferenceMass};
 
-pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
 pub use crate::hyper3::mixed::impulse::{MixedImpulseControls, MixedImpulseReport};
+pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
 pub use crate::inertia::{InertialEnergy, SolidImpulseControls, SolidImpulseReport};
 
 mod impulse;

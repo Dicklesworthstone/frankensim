@@ -323,35 +323,7 @@ pub(crate) fn admit_impulses(
     controls: SolidImpulseControls,
     cx: &Cx<'_>,
 ) -> Result<(Vec<bool>, Vec<f64>), InertiaError> {
-    if n % 3 != 0
-        || [
-            controls.linear_tolerance_kg_m_s,
-            controls.angular_tolerance_kg_m2_s,
-            controls.work_tolerance_j,
-        ]
-        .iter()
-        .any(|x| !x.is_finite() || *x <= 0.0)
-        || !controls.solve.tolerance.is_finite()
-        || controls.solve.tolerance <= 0.0
-        || controls.solve.tolerance >= 1.0
-    {
-        return Err(invalid(
-            "positive finite impulse tolerances and a relative solve tolerance below one required",
-        ));
-    }
-    // Include native solver histories as well as fixed vectors. Both the
-    // response solve and post-solve account fit this conservative common cap.
-    let required = n
-        .checked_mul(48)
-        .and_then(|vectors| {
-            controls
-                .solve
-                .max_iterations
-                .checked_add(1)
-                .and_then(|history| history.checked_mul(4))
-                .and_then(|history| vectors.checked_add(history))
-        })
-        .ok_or_else(|| invalid("impulse workspace size overflow"))?;
+    let required = workspace_components(n, controls)?;
     if required > controls.maximum_workspace_components {
         return Err(invalid("impulse exceeds its workspace component cap"));
     }
@@ -387,6 +359,41 @@ pub(crate) fn admit_impulses(
         applied.push(finite(resultant.to_f64())?);
     }
     Ok((held, applied))
+}
+
+/// Common native solve/accounting bound, also used before point-map allocation.
+pub(super) fn workspace_components(
+    n: usize,
+    controls: SolidImpulseControls,
+) -> Result<usize, InertiaError> {
+    if n % 3 != 0
+        || [
+            controls.linear_tolerance_kg_m_s,
+            controls.angular_tolerance_kg_m2_s,
+            controls.work_tolerance_j,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x <= 0.0)
+        || !controls.solve.tolerance.is_finite()
+        || controls.solve.tolerance <= 0.0
+        || controls.solve.tolerance >= 1.0
+    {
+        return Err(invalid(
+            "positive finite impulse tolerances and a relative solve tolerance below one required",
+        ));
+    }
+    // Include native solver histories as well as fixed vectors. Both the
+    // response solve and post-solve account fit this conservative common cap.
+    n.checked_mul(48)
+        .and_then(|vectors| {
+            controls
+                .solve
+                .max_iterations
+                .checked_add(1)
+                .and_then(|history| history.checked_mul(4))
+                .and_then(|history| vectors.checked_add(history))
+        })
+        .ok_or_else(|| invalid("impulse workspace size overflow"))
 }
 
 struct FreeMass<'a, 'cx> {

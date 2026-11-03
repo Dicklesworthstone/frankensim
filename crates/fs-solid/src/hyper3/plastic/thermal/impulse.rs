@@ -10,6 +10,122 @@ pub struct FiniteThermoplasticTetImpulse<'a, L: FiniteThermalJ2Material = Affine
 }
 
 impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
+    fn impulse_motion(&self) -> Result<&ThermalMotion, FiniteThermoplasticTetError> {
+        self.motion.as_ref().ok_or_else(|| {
+            invalid("finite thermal impulse requires already bound reference inertia").into()
+        })
+    }
+
+    /// Current physical material-point position and work-conjugate velocity.
+    /// Requires previously bound inertia; quasistatic motion is not inferred.
+    pub fn point_kinematics(
+        &self,
+        point: TetImpulsePoint,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointKinematics, FiniteThermoplasticTetError> {
+        checkpoint(cx)?;
+        let motion = self.impulse_motion()?;
+        crate::inertia::point::kinematics(
+            point,
+            self.state.tetrahedra,
+            self.state.nodes_m,
+            &self.state.displacement_m,
+            &motion.velocity_mps,
+            cx,
+        )
+        .map_err(|error| FiniteThermoplasticTetError::from(inertia_error(error)))
+    }
+
+    /// Directional mobility [1/kg] from the retained supported reference mass.
+    /// Temperature, thermal expansion and plastic volume never refresh inertia.
+    pub fn point_directional_inverse_mass_per_kg(
+        &self,
+        held: &[usize],
+        point: TetImpulsePoint,
+        direction: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobility, FiniteThermoplasticTetError> {
+        checkpoint(cx)?;
+        crate::inertia::point::directional_mobility(
+            &self.impulse_motion()?.mass,
+            self.state.tetrahedra,
+            held,
+            point,
+            direction,
+            controls,
+            cx,
+        )
+        .map_err(|error| FiniteThermoplasticTetError::from(inertia_error(error)))
+    }
+
+    /// Complete cross-point/direction mobility B M_ff^-1 B^T [1/kg].
+    /// Rows retain caller order and the same physical point trace as impulses.
+    pub fn point_mobility_matrix_per_kg(
+        &self,
+        held: &[usize],
+        rows: &[(TetImpulsePoint, [f64; 3])],
+        maximum_rows: usize,
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobilityMatrix, FiniteThermoplasticTetError> {
+        checkpoint(cx)?;
+        crate::inertia::point::mobility_matrix(
+            &self.impulse_motion()?.mass,
+            self.state.tetrahedra,
+            held,
+            rows,
+            maximum_rows,
+            controls,
+            cx,
+        )
+        .map_err(|error| FiniteThermoplasticTetError::from(inertia_error(error)))
+    }
+
+    /// Apply one material-point impulse through the exact transpose trace.
+    /// Thermal/plastic history and both stored energies remain unchanged.
+    pub fn point_impulse_candidate(
+        &self,
+        held: &[usize],
+        point: TetImpulsePoint,
+        impulse_world: [f64; 3],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermoplasticTetImpulse<'a, L>, FiniteThermoplasticTetError> {
+        let entries = crate::inertia::point::distribution(
+            point,
+            self.state.tetrahedra,
+            self.state.nodes_m.len(),
+            impulse_world,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
+    }
+
+    /// Apply all material-point impulses together on the original mass.
+    /// Shared nodes accumulate before the one native velocity solve; this does
+    /// not replace a simultaneous contact law with sequential pairwise events.
+    pub fn point_impulses_candidate(
+        &self,
+        held: &[usize],
+        impulses: &[(TetImpulsePoint, [f64; 3])],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermoplasticTetImpulse<'a, L>, FiniteThermoplasticTetError> {
+        let entries = crate::inertia::point::distributions(
+            self.state.tetrahedra,
+            self.state.nodes_m.len(),
+            impulses,
+            controls,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
+    }
+
     /// Propose a zero-duration velocity jump using the already bound mass.
     ///
     /// Impulses are full nodal world components [kg m/s]; repeated entries sum.
@@ -37,9 +153,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
         cx: &Cx<'_>,
     ) -> Result<FiniteThermoplasticTetImpulse<'a, L>, FiniteThermoplasticTetError> {
         checkpoint(cx)?;
-        let motion = self.motion.as_ref().ok_or_else(|| {
-            invalid("finite thermal impulse requires already bound reference inertia")
-        })?;
+        let motion = self.impulse_motion()?;
         let state = &self.state;
         let mut positions_m = Vec::with_capacity(state.nodes_m.len());
         for (node, (reference, displacement)) in
