@@ -14,12 +14,15 @@ use fs_material::evaporation::gas::chamber::heat::GasLiquidChamberHeatSolve;
 use super::multiple::{
     DistributedLiquidGasReport, DistributedLiquidGasSolve, LiquidGasHeatSurface,
     advance_liquid_surfaces_with_gas, advance_liquid_surfaces_with_gas_and_heat,
+    advance_liquid_surfaces_with_pressurized_gas,
+    advance_liquid_surfaces_with_pressurized_gas_and_heat,
 };
 use super::{
     CancelGate, ClosedGasParcel, EvaporatingLiquidGasError, EvaporatingLiquidGasReport,
     EvaporatingLiquidGasSolve, GasFilmHeatSolve, LiquidGasEvaporationSurface,
     MaterialFreeSurfaceEnthalpy3, ThermochemicalGasModel, advance_liquid_with_gas,
-    advance_liquid_with_gas_and_heat,
+    advance_liquid_with_gas_and_heat, advance_liquid_with_pressurized_gas,
+    advance_liquid_with_pressurized_gas_and_heat,
 };
 
 /// Chemistry and complete-interval limits, in addition to the original phase
@@ -292,6 +295,151 @@ impl GasReaction {
                 reacted,
                 self.catalog(),
                 surfaces,
+                phase,
+                heat,
+                gate,
+            )
+            .map(|candidate| candidate.into_parts())
+        })
+    }
+
+    /// React, exchange phase mass and energy, then apply the resulting gas
+    /// pressure during the SAME native flow step.
+    ///
+    /// The original chemical and phase owners determine the final finite-gas
+    /// composition, mass and temperature. Its actual EOS pressure drives the
+    /// existing native missing-link reconstruction; neither initial nor
+    /// chemistry-only pressure is substituted. The phase pressure receipt
+    /// begins after chemistry and records the pressure actually applied.
+    ///
+    /// Every exposed native gas link must share this one well-mixed, explicitly
+    /// fixed-volume parcel. The original pressure owner requires a fixed
+    /// pressure reference, stationary geometry and a density excursion in
+    /// (0,1). Phase transfer retains the original mass/enthalpy account and
+    /// single native clock. Pressure loading adds no inferred caloric heat;
+    /// this fixed-volume split does not model sealed-vessel displacement,
+    /// gas compression work or a combined mechanical-energy theorem.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pressurized_evaporating_liquid_candidate<'s, 'm>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &ClosedGasParcel,
+        surface: LiquidGasEvaporationSurface<'_>,
+        maximum_density_excursion: f64,
+        phase: EvaporatingLiquidGasSolve,
+        controls: ReactiveLiquidPhaseSolve,
+        gate: &CancelGate,
+    ) -> Result<
+        ReactiveLiquidPhaseCandidate<'s, 'm, '_, EvaporatingLiquidGasReport>,
+        ReactiveLiquidPhaseError,
+    > {
+        self.native_phase_candidate(liquid, gas, controls, gate, |reacted| {
+            advance_liquid_with_pressurized_gas(
+                liquid,
+                reacted,
+                self.catalog(),
+                surface,
+                maximum_density_excursion,
+                phase,
+                gate,
+            )
+            .map(|candidate| candidate.into_parts())
+        })
+    }
+
+    /// Include reciprocal sensible heat in the original phase transaction,
+    /// then load native flow with the post-heat/post-phase gas EOS pressure.
+    /// All scope and admission limits of
+    /// [`Self::pressurized_evaporating_liquid_candidate`] remain in force.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pressurized_evaporating_liquid_heat_candidate<'s, 'm>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &ClosedGasParcel,
+        surface: LiquidGasEvaporationSurface<'_>,
+        heat_transfer_coefficient_w_m2_k: f64,
+        maximum_density_excursion: f64,
+        phase: EvaporatingLiquidGasSolve,
+        heat: GasFilmHeatSolve,
+        controls: ReactiveLiquidPhaseSolve,
+        gate: &CancelGate,
+    ) -> Result<
+        ReactiveLiquidPhaseCandidate<'s, 'm, '_, EvaporatingLiquidGasReport>,
+        ReactiveLiquidPhaseError,
+    > {
+        self.native_phase_candidate(liquid, gas, controls, gate, |reacted| {
+            advance_liquid_with_pressurized_gas_and_heat(
+                liquid,
+                reacted,
+                self.catalog(),
+                surface,
+                heat_transfer_coefficient_w_m2_k,
+                maximum_density_excursion,
+                phase,
+                heat,
+                gate,
+            )
+            .map(|candidate| candidate.into_parts())
+        })
+    }
+
+    /// React one common gas, exchange all original native phase surfaces,
+    /// and use the one joint endpoint pressure for one native flow step.
+    /// Joint donor limits and canonical surface ordering remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pressurized_evaporating_liquid_surfaces_candidate<'s, 'm>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &ClosedGasParcel,
+        surfaces: &[LiquidGasEvaporationSurface<'_>],
+        maximum_density_excursion: f64,
+        phase: DistributedLiquidGasSolve,
+        controls: ReactiveLiquidPhaseSolve,
+        gate: &CancelGate,
+    ) -> Result<
+        ReactiveLiquidPhaseCandidate<'s, 'm, '_, DistributedLiquidGasReport>,
+        ReactiveLiquidPhaseError,
+    > {
+        self.native_phase_candidate(liquid, gas, controls, gate, |reacted| {
+            advance_liquid_surfaces_with_pressurized_gas(
+                liquid,
+                reacted,
+                self.catalog(),
+                surfaces,
+                maximum_density_excursion,
+                phase,
+                gate,
+            )
+            .map(|candidate| candidate.into_parts())
+        })
+    }
+
+    /// Compose chemistry, joint reciprocal heat and phase transfer, then load
+    /// every exposed native gas link with the SAME final gas pressure.
+    /// Each original owner shares the retained interval and publishes only
+    /// through the complete candidate; per-patch clocks are never advanced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pressurized_evaporating_liquid_surfaces_heat_candidate<'s, 'm>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &ClosedGasParcel,
+        surfaces: &[LiquidGasHeatSurface<'_>],
+        maximum_density_excursion: f64,
+        phase: DistributedLiquidGasSolve,
+        heat: GasLiquidChamberHeatSolve,
+        controls: ReactiveLiquidPhaseSolve,
+        gate: &CancelGate,
+    ) -> Result<
+        ReactiveLiquidPhaseCandidate<'s, 'm, '_, DistributedLiquidGasReport>,
+        ReactiveLiquidPhaseError,
+    > {
+        self.native_phase_candidate(liquid, gas, controls, gate, |reacted| {
+            advance_liquid_surfaces_with_pressurized_gas_and_heat(
+                liquid,
+                reacted,
+                self.catalog(),
+                surfaces,
+                maximum_density_excursion,
                 phase,
                 heat,
                 gate,

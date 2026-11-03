@@ -15,6 +15,7 @@ use fs_exec::CancelGate;
 use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceEnthalpyError, FreeSurfaceEnthalpyReport, FreeSurfaceMassExchange,
     FreeSurfaceMassExchangeControls, FreeSurfaceMassExchangeReport, MaterialFreeSurfaceEnthalpy3,
+    conduction::FreeSurfaceFiniteGasPressureLoad,
 };
 use fs_material::evaporation::gas::{
     GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasFilmHeatSolve,
@@ -92,6 +93,10 @@ pub struct EvaporatingLiquidGasReport {
     pub heat: Option<GasFilmHeatStep>,
     pub mass_exchange: FreeSurfaceMassExchangeReport,
     pub flow: FreeSurfaceEnthalpyReport,
+    /// Present when the actual post-heat/phase gas EOS loads the native flow.
+    /// The initial pressure is before this phase transaction, and the physical
+    /// gas volume remains fixed even though liquid and vapor masses change.
+    pub pressure: Option<FreeSurfaceFiniteGasPressureLoad>,
     /// Actual native liquid change in its retained caloric datum [J].
     pub native_liquid_enthalpy_change_j: f64,
     /// Native heat/phase endpoint minus the original candidate's sensible
@@ -147,6 +152,68 @@ fn poll(gate: &CancelGate) -> Result<(), EvaporatingLiquidGasError> {
     }
 }
 
+fn admit_pressure(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>,
+    maximum_density_excursion: Option<f64>,
+) -> Result<(), EvaporatingLiquidGasError> {
+    if let Some(maximum) = maximum_density_excursion {
+        if !maximum.is_finite() || maximum <= 0.0 || maximum >= 1.0 {
+            return Err(EvaporatingLiquidGasError::Invalid(
+                "finite-gas pressure bound must be finite and in (0,1)",
+            ));
+        }
+        if liquid.flow().scaling().reference_pressure_pa().is_none() {
+            return Err(EvaporatingLiquidGasError::Invalid(
+                "finite-gas traction requires an explicit fixed pressure reference",
+            ));
+        }
+        if liquid.flow().lattice().geometry_epoch() != 0 {
+            return Err(EvaporatingLiquidGasError::Invalid(
+                "fixed-volume gas traction does not admit moving solid geometry",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn advance_flow(
+    liquid: &mut MaterialFreeSurfaceEnthalpy3<'_, '_>,
+    initial_gas: &ClosedGasParcel,
+    gas: &ClosedGasParcel,
+    maximum_density_excursion: Option<f64>,
+    gate: &CancelGate,
+) -> Result<
+    (
+        FreeSurfaceEnthalpyReport,
+        Option<FreeSurfaceFiniteGasPressureLoad>,
+    ),
+    EvaporatingLiquidGasError,
+> {
+    if let Some(maximum_density_excursion) = maximum_density_excursion {
+        if gas.volume_m3() != initial_gas.volume_m3() {
+            return Err(EvaporatingLiquidGasError::Invalid(
+                "phase exchange changed the original fixed gas volume",
+            ));
+        }
+        let pressure = FreeSurfaceFiniteGasPressureLoad {
+            initial_pressure_pa: initial_gas.state().state().pressure,
+            applied_pressure_pa: gas.state().state().pressure,
+            volume_m3: gas.volume_m3(),
+            maximum_density_excursion,
+        };
+        // Phase and sensible heat already updated the original native h. Only
+        // the existing pressure/momentum/transport owner runs here; no second
+        // thermal deposition, gas energy debit or native timestep is added.
+        let flow =
+            liquid.step_with_heat_and_gas_pressure(&[], gate, maximum_density_excursion, |_| {
+                pressure.applied_pressure_pa
+            })?;
+        Ok((flow, Some(pressure)))
+    } else {
+        Ok((liquid.step(gate)?, None))
+    }
+}
+
 /// Advance phase transfer and original native flow over ONE retained timestep.
 ///
 /// The phase owner supplies all Stefan-film, latent, vapor-sensible and gas
@@ -177,7 +244,44 @@ pub fn advance_liquid_with_gas<'s, 'm, 'catalog>(
     controls: EvaporatingLiquidGasSolve,
     gate: &CancelGate,
 ) -> Result<EvaporatingLiquidGasCandidate<'s, 'm, 'catalog>, EvaporatingLiquidGasError> {
-    advance_native(liquid, gas, catalog, surface, controls, None, gate)
+    advance_native(liquid, gas, catalog, surface, controls, None, None, gate)
+}
+
+/// Phase transfer followed by native traction from the SAME finite gas.
+///
+/// The actual post-phase composition and temperature determine one EOS
+/// pressure, held over the following original native flow/enthalpy step. Every
+/// exposed gas link must communicate with this one well-mixed atmosphere; the
+/// caller owns that connectivity and the explicitly fixed physical gas volume.
+/// Liquid fill is never used to invent a gas-volume change. The scaling must
+/// carry a fixed pressure reference, solids must be stationary, and the native
+/// combined gas/capillary density-excursion bound remains authoritative.
+///
+/// This retains the phase-only entry's source, mass, caloric and attached-owner
+/// limits and its first-order split. It adds normal gas loading, but does not
+/// add evaporation recoil, gas momentum, compression work or a total mechanical
+/// energy closure. Pressure never becomes an additional heat source. A late
+/// pressure refusal discards the same complete private gas/liquid candidate.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_liquid_with_pressurized_gas<'s, 'm, 'catalog>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surface: LiquidGasEvaporationSurface<'_>,
+    maximum_density_excursion: f64,
+    controls: EvaporatingLiquidGasSolve,
+    gate: &CancelGate,
+) -> Result<EvaporatingLiquidGasCandidate<'s, 'm, 'catalog>, EvaporatingLiquidGasError> {
+    advance_native(
+        liquid,
+        gas,
+        catalog,
+        surface,
+        controls,
+        None,
+        Some(maximum_density_excursion),
+        gate,
+    )
 }
 
 /// Reciprocal sensible film heat, phase exchange and native flow on ONE clock.
@@ -213,6 +317,37 @@ pub fn advance_liquid_with_gas_and_heat<'s, 'm, 'catalog>(
         surface,
         controls,
         Some((heat_transfer_coefficient_w_m2_k, heat_controls)),
+        None,
+        gate,
+    )
+}
+
+/// Reciprocal sensible heat and phase transfer with their actual EOS traction.
+///
+/// All limits of [`advance_liquid_with_pressurized_gas`] apply. Sensible heat
+/// and phase exchange each run on the retained native timestep, then their
+/// common gas endpoint supplies one pressure-loaded native flow step. Neither
+/// the transferred heat nor vapor-carried energy is applied again during flow.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_liquid_with_pressurized_gas_and_heat<'s, 'm, 'catalog>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surface: LiquidGasEvaporationSurface<'_>,
+    heat_transfer_coefficient_w_m2_k: f64,
+    maximum_density_excursion: f64,
+    controls: EvaporatingLiquidGasSolve,
+    heat_controls: GasFilmHeatSolve,
+    gate: &CancelGate,
+) -> Result<EvaporatingLiquidGasCandidate<'s, 'm, 'catalog>, EvaporatingLiquidGasError> {
+    advance_native(
+        liquid,
+        gas,
+        catalog,
+        surface,
+        controls,
+        Some((heat_transfer_coefficient_w_m2_k, heat_controls)),
+        Some(maximum_density_excursion),
         gate,
     )
 }
@@ -225,10 +360,12 @@ fn advance_native<'s, 'm, 'catalog>(
     surface: LiquidGasEvaporationSurface<'_>,
     controls: EvaporatingLiquidGasSolve,
     heat_controls: Option<(f64, GasFilmHeatSolve)>,
+    maximum_density_excursion: Option<f64>,
     gate: &CancelGate,
 ) -> Result<EvaporatingLiquidGasCandidate<'s, 'm, 'catalog>, EvaporatingLiquidGasError> {
     type Error = EvaporatingLiquidGasError;
     poll(gate)?;
+    admit_pressure(liquid, maximum_density_excursion)?;
     if [controls.mass_tolerance_kg, controls.energy_tolerance_j]
         .iter()
         .any(|x| !x.is_finite() || *x < 0.0)
@@ -365,7 +502,13 @@ fn advance_native<'s, 'm, 'catalog>(
     let native_phase_caloric_defect_j =
         projection.final_mass_kg * stored_delta_h - source_relative_storage;
     poll(gate)?;
-    let flow = next_liquid.step(gate)?;
+    let (flow, pressure) = advance_flow(
+        &mut next_liquid,
+        gas,
+        &next_gas,
+        maximum_density_excursion,
+        gate,
+    )?;
     let native_transport_mass = flow.mass_after_kg - flow.mass_before_kg;
     let native_mass = mass_exchange.mass_change_kg + native_transport_mass;
     let mass_residual_kg = native_mass + (next_gas.mass_kg() - gas.mass_kg());
@@ -423,6 +566,7 @@ fn advance_native<'s, 'm, 'catalog>(
             heat: film_heat,
             mass_exchange,
             flow,
+            pressure,
             native_liquid_enthalpy_change_j,
             native_phase_caloric_defect_j,
             mass_residual_kg,

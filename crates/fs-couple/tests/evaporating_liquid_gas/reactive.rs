@@ -1,5 +1,8 @@
 //! Manufactured chemistry drives phase transfer on the original native clock.
 
+#[path = "reactive/pressure.rs"]
+mod pressure;
+
 use super::*;
 use fs_couple::cavity_phs::piston::reactive::{GasReaction, GasReactionSolve};
 use fs_couple::liquid_gas::evaporation::multiple::{

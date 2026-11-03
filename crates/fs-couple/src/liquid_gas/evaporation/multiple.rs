@@ -21,10 +21,11 @@ use fs_material::evaporation::gas::chamber::{
 
 use super::{
     CancelGate, ClosedGasParcel, EvaporatingLiquidGasError, EvaporationError,
-    FreeSurfaceEnthalpyReport, FreeSurfaceMassExchange, FreeSurfaceMassExchangeControls,
-    FreeSurfaceMassExchangeReport, GasEvaporationError, GasFilmHeatSolve,
-    LiquidGasEvaporationSurface, LiquidSurfaceState, MaterialFreeSurfaceEnthalpy3, RefCell,
-    ThermochemicalGasModel, poll,
+    FreeSurfaceEnthalpyReport, FreeSurfaceFiniteGasPressureLoad, FreeSurfaceMassExchange,
+    FreeSurfaceMassExchangeControls, FreeSurfaceMassExchangeReport, GasEvaporationError,
+    GasFilmHeatSolve, LiquidGasEvaporationSurface, LiquidSurfaceState,
+    MaterialFreeSurfaceEnthalpy3, RefCell, ThermochemicalGasModel, admit_pressure, advance_flow,
+    poll,
 };
 
 type Error = EvaporatingLiquidGasError;
@@ -79,6 +80,8 @@ pub struct DistributedLiquidGasReport {
     pub surfaces: Vec<NativeLiquidGasSurfaceStep>,
     pub mass_exchange: FreeSurfaceMassExchangeReport,
     pub flow: FreeSurfaceEnthalpyReport,
+    /// Actual common post-heat/phase EOS pressure used by the one native step.
+    pub pressure: Option<FreeSurfaceFiniteGasPressureLoad>,
     pub native_liquid_enthalpy_change_j: f64,
     pub native_phase_caloric_defect_j: f64,
     pub mass_residual_kg: f64,
@@ -197,6 +200,36 @@ pub fn advance_liquid_surfaces_with_gas<'s, 'm, 'catalog>(
         surfaces.iter().copied().map(|surface| (surface, None)),
         controls,
         None,
+        None,
+        gate,
+    )
+}
+
+/// Joint phase transfer and native loading from the resulting common gas EOS.
+///
+/// All patches share one donor and one final gas caloric solve, followed by
+/// one pressure-loaded flow step. The fixed-volume, connected-atmosphere,
+/// stationary-solid and mechanical-energy scope is exactly that of
+/// [`super::advance_liquid_with_pressurized_gas`]. Surface ordering does not
+/// change the common pressure or create an independent pressure per patch.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_liquid_surfaces_with_pressurized_gas<'s, 'm, 'catalog>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surfaces: &[LiquidGasEvaporationSurface<'_>],
+    maximum_density_excursion: f64,
+    controls: DistributedLiquidGasSolve,
+    gate: &CancelGate,
+) -> Result<DistributedLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
+    advance_native(
+        liquid,
+        gas,
+        catalog,
+        surfaces.iter().copied().map(|surface| (surface, None)),
+        controls,
+        None,
+        Some(maximum_density_excursion),
         gate,
     )
 }
@@ -239,6 +272,45 @@ pub fn advance_liquid_surfaces_with_gas_and_heat<'s, 'm, 'catalog>(
         }),
         controls,
         Some(heat_controls),
+        None,
+        gate,
+    )
+}
+
+/// Joint reciprocal sensible heat, phase transfer and the SAME gas pressure.
+///
+/// The original heat/chamber owners supply one final finite atmosphere and
+/// actual native h at every patch. Its resulting EOS pressure then loads the
+/// original native momentum/enthalpy transport once, with no extra heat debit,
+/// native interval or per-patch gas. All physical and admission limits of
+/// [`advance_liquid_surfaces_with_pressurized_gas`] remain in force.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_liquid_surfaces_with_pressurized_gas_and_heat<'s, 'm, 'catalog>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surfaces: &[LiquidGasHeatSurface<'_>],
+    maximum_density_excursion: f64,
+    controls: DistributedLiquidGasSolve,
+    heat_controls: GasLiquidChamberHeatSolve,
+    gate: &CancelGate,
+) -> Result<DistributedLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
+    advance_native(
+        liquid,
+        gas,
+        catalog,
+        surfaces.iter().map(|surface| {
+            (
+                surface.surface,
+                Some((
+                    surface.heat_transfer_coefficient_w_m2_k,
+                    surface.heat_controls,
+                )),
+            )
+        }),
+        controls,
+        Some(heat_controls),
+        Some(maximum_density_excursion),
         gate,
     )
 }
@@ -256,9 +328,11 @@ fn advance_native<'s, 'm, 'catalog, 'surface>(
     >,
     controls: DistributedLiquidGasSolve,
     heat_controls: Option<GasLiquidChamberHeatSolve>,
+    maximum_density_excursion: Option<f64>,
     gate: &CancelGate,
 ) -> Result<DistributedLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
     poll(gate)?;
+    admit_pressure(liquid, maximum_density_excursion)?;
     if [controls.mass_tolerance_kg, controls.energy_tolerance_j]
         .into_iter()
         .any(|x| !x.is_finite() || x < 0.0)
@@ -539,7 +613,13 @@ fn advance_native<'s, 'm, 'catalog, 'surface>(
         });
     }
     poll(gate)?;
-    let flow = next_liquid.step(gate)?;
+    let (flow, pressure) = advance_flow(
+        &mut next_liquid,
+        gas,
+        &next_gas,
+        maximum_density_excursion,
+        gate,
+    )?;
     let native_transport_mass = flow.mass_after_kg - flow.mass_before_kg;
     absolute_mass.add(native_transport_mass.abs())?;
     let native_mass = mass_exchange.mass_change_kg + native_transport_mass;
@@ -606,6 +686,7 @@ fn advance_native<'s, 'm, 'catalog, 'surface>(
             surfaces: reports,
             mass_exchange,
             flow,
+            pressure,
             native_liquid_enthalpy_change_j,
             native_phase_caloric_defect_j,
             mass_residual_kg,

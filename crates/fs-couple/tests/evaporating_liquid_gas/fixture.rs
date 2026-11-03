@@ -207,10 +207,29 @@ pub fn with_liquid<R>(
     with_liquid_interfaces(datum, &[(INTERFACE, fill, 300.0)], run)
 }
 
+pub fn with_liquid_pressure<R>(
+    datum: f64,
+    fill: f64,
+    pressure_reference: Option<f64>,
+    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
+    with_liquid_interfaces_pressure(datum, &[(INTERFACE, fill, 300.0)], pressure_reference, run)
+}
+
 /// Explicit initial fill and temperature for each authored native interface.
 pub fn with_liquid_interfaces<R>(
     datum: f64,
     interfaces: &[([usize; 3], f64, f64)],
+    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
+    with_liquid_interfaces_pressure(datum, interfaces, None, run)
+}
+
+/// Original native fixture with an explicitly declared gas pressure datum.
+pub fn with_liquid_interfaces_pressure<R>(
+    datum: f64,
+    interfaces: &[([usize; 3], f64, f64)],
+    pressure_reference: Option<f64>,
     run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
     let card = liquid_card();
@@ -274,8 +293,12 @@ pub fn with_liquid_interfaces<R>(
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        let flow = plan_free_surface_from_material(&source, 0.001, DT, 0.1)
-            .unwrap()
+        let scaling = plan_free_surface_from_material(&source, 0.001, DT, 0.1).unwrap();
+        let scaling = match pressure_reference {
+            Some(reference) => scaling.with_pressure_reference(reference).unwrap(),
+            None => scaling,
+        };
+        let flow = scaling
             .free_surface3_from_cells(
                 MaterialFreeSurfaceDomain3 {
                     cells: [8; 3],

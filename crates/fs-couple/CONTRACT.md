@@ -2359,6 +2359,19 @@ nucleation or phase-front overflow/exhaustion remap. Existing
 solved-surface stress and dynamic-contact histories retain their native refusal
 boundary. Exposure is held during this one interval and re-admitted on the next.
 
+`advance_liquid_with_pressurized_gas` and its `_and_heat` variant, plus the
+corresponding `advance_liquid_surfaces_with_pressurized_gas` routes, pass the
+actual post-exchange finite-gas EOS pressure to the original native
+`step_with_heat_and_gas_pressure` owner during that same flow step. The original
+gas pressure receipt records the phase-initial pressure, applied endpoint
+pressure, fixed physical volume and explicit density-excursion allowance.
+All exposed links must belong to the same caller-declared well-mixed atmosphere.
+A fixed pressure reference, finite allowance in (0,1), stationary solid geometry
+and the original per-link density/pressure gates remain required. Pressure is
+mechanical loading, never an extra heat debit; sealed-vessel displacement,
+compression work, recoil and a global mechanical-energy theorem remain outside
+this fixed-volume split. Late pressure refusal discards both phase endpoints.
+
 `liquid_gas::evaporation::reactive` connects `GasReaction` to the single- and
 multiple-surface phase owners, each with an optional reciprocal sensible-heat
 route. Chemistry uses the same retained native timestep at conserved total
@@ -2371,12 +2384,25 @@ geometry, mass-representability and attached-owner limits remain active.
 Chemical-intermediate and final temperature bounds plus sums of absolute
 chemical/phase/native mass and energy defects gate atomic publication.
 Cancellation or refusal preserves every accepted owner. This is a first-order
-reaction/heat/phase/flow split with a well-mixed fixed-volume gas; it adds no gas
-traction, sealed-vessel displacement, flame or global entropy theorem. Five
+reaction/heat/phase/flow split with a well-mixed fixed-volume gas. The original
+unpressurized entries add no gas traction, sealed-vessel displacement, flame or
+global entropy theorem. Five
 G1/G3/G4 regressions in `tests/evaporating_liquid_gas/reactive.rs` cover chemical
 reversal of phase direction, independent whole inventories, all four routes,
 original-owner agreement, continuing species, equilibrium/zero-heat limits,
 canonical surface ordering and rollback.
+
+The four `GasReaction::pressurized_evaporating_liquid*_candidate` entries compose
+the same chemical transaction with the original pressurized single/multiple
+phase owners, including their sensible-heat variants. Chemistry changes the
+actual composition before phase transfer; pressure uses the final mass and
+temperature after every exchange. The phase pressure receipt starts after
+chemistry, and one native interval advances. Native pressure and reactive
+pressure regressions check original-owner equivalence, a pressure-response
+oracle, opposing surface transfers, canonical order, conservation and exact
+retry after late pressure rejection. These routes retain the same fixed-volume
+and first-order physical limits; numerical regressions require native execution
+and do not establish empirical constitutive validation.
 
 ## Assembled shell adhesive dissipation
 

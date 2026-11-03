@@ -24,6 +24,8 @@ use fs_thermal::evaporation::{EvaporationError, EvaporationLaw, GasFilm, surface
 mod fixture;
 #[path = "evaporating_liquid_gas/multiple.rs"]
 mod multiple;
+#[path = "evaporating_liquid_gas/pressure.rs"]
+mod pressure;
 #[path = "evaporating_liquid_gas/reactive.rs"]
 mod reactive;
 use fixture::*;
