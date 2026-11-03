@@ -22,7 +22,7 @@ mod local;
 pub use local::{LocalMaterialWall, MaterialWallDg, RegionalMaterialWallDg};
 pub use local::finite_gas::{
     FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgLoss, FiniteGasDgSolve,
-    FiniteGasDgStep,
+    FiniteGasDgStep, FiniteGasDgHeatBudget,
 };
 pub(crate) use local::finite_gas::{
     admit_controls as admit_finite_gas_controls, field as finite_gas_field,

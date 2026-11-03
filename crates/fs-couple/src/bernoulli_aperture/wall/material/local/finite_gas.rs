@@ -69,6 +69,40 @@ pub struct FiniteGasDgSolve {
     pub loss: FiniteGasDgLoss,
 }
 
+/// Separate preparation allowances for the two original gas-loss observations.
+/// Each allowance covers its complete native trajectory, including every wall
+/// and thermal memory. Work can use both allowances; caches are prepared,
+/// evaluated and released sequentially, never retained together by this owner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FiniteGasDgHeatBudget {
+    /// Complete molecular source observation, including its cold preparation.
+    pub molecular: DenseExponentialBudget,
+    /// Complete fluid-viscosity source observation and its cold preparation.
+    pub viscous: DenseExponentialBudget,
+}
+
+/// Original source integrals, kept distinct through every internal transfer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct FiniteGasDgInternalHeat {
+    pub molecular_heat_j: f64,
+    pub viscous_heat_j: f64,
+}
+
+impl FiniteGasDgInternalHeat {
+    pub(crate) fn total_j<E>(self) -> Result<f64, FiniteGasDgError<E>> {
+        let total = self.molecular_heat_j + self.viscous_heat_j;
+        if !self.molecular_heat_j.is_finite() || self.molecular_heat_j < 0.0
+            || !self.viscous_heat_j.is_finite() || self.viscous_heat_j < 0.0
+            || !total.is_finite()
+        {
+            return Err(FiniteGasDgError::Invalid(
+                "internal heat requires finite nonnegative original source integrals",
+            ));
+        }
+        Ok(total)
+    }
+}
+
 /// One original gas/thermal/flow owner's complete candidate at a trial work.
 // The callback owns its physical process and never mutates accepted external owners.
 #[derive(Clone, Debug, PartialEq)]
@@ -412,6 +446,63 @@ fn prepare_viscous_heated<C: FnMut() -> bool>(
         }, cancelled)
 }
 
+/// Observe both sources on one unchanged state and held-input interval. The
+/// molecular and velocity-slip owners retain their independent positive rows;
+/// neither source is computed by subtracting the other from total energy loss.
+pub(crate) fn prepare_internal_heat<E, C: FnMut() -> bool>(
+    duct: &DgDuct, state: &DgState, propagator: &DgPropagator,
+    ports: &[PortInput], controls: FiniteGasDgSolve,
+    budgets: FiniteGasDgHeatBudget, cancelled: &mut C,
+) -> Result<FiniteGasDgInternalHeat, FiniteGasDgError<E>> {
+    check(cancelled)?;
+    admit_controls(controls)?;
+    let has_molecular = duct.molecular_relaxation().is_some()
+        || duct.molecular_relaxation_field().is_some();
+    if has_molecular && !matches!(controls.loss, FiniteGasDgLoss::UniformMolecularDiffusion { .. }) {
+        return Err(FiniteGasDgError::Invalid(
+            "molecular heating requires the original molecular-diffusion refresh owner",
+        ));
+    }
+    let molecular_heat_j = if has_molecular {
+        let channel = duct.prepare_molecular_heat(propagator, budgets.molecular, cancelled)
+            .map_err(native)?;
+        channel.integrated_heat_j(state, ports, cancelled).map_err(native)?
+    } else { 0.0 };
+    // The molecular cache has left scope before the viscous cache is allocated.
+    let viscous_heat_j = if duct.has_viscothermal_memory() {
+        let channel = duct.prepare_viscous_heat(propagator, budgets.viscous, cancelled)
+            .map_err(native)?;
+        channel.integrated_heat_j(state, ports, cancelled).map_err(native)?
+    } else { 0.0 };
+    let heat = FiniteGasDgInternalHeat { molecular_heat_j, viscous_heat_j };
+    heat.total_j()?;
+    check(cancelled)?;
+    Ok(heat)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_viscous_molecular_heated<C: FnMut() -> bool>(
+    duct: &DgDuct, state: &DgState, propagator: &DgPropagator,
+    gas: &ClosedGasParcel, ports: &[PortInput], external_heat_j: f64,
+    gas_solve: GasEnergySolve, controls: FiniteGasDgSolve,
+    budgets: FiniteGasDgHeatBudget, cancelled: &mut C,
+) -> Result<Candidate<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
+    let heat = prepare_internal_heat(duct, state, propagator, ports, controls, budgets, cancelled)?;
+    let internal_heat_j = heat.total_j()?;
+    let total_heat = if internal_heat_j == 0.0 { external_heat_j }
+        else { external_heat_j + internal_heat_j };
+    if !external_heat_j.is_finite() || !total_heat.is_finite() {
+        return Err(FiniteGasDgError::Invalid("external and original gas-loss heat must have a finite sum"));
+    }
+    prepare(duct, state, propagator, gas, ports, controls,
+        heat.molecular_heat_j, heat.viscous_heat_j,
+        |old, _, work, cancel| {
+            let mut background = heated(old, total_heat, work, gas_solve, cancel)?;
+            background.supplied_heat_j = external_heat_j;
+            Ok(background)
+        }, cancelled)
+}
+
 impl MaterialWallDg {
     /// Advance the native sample and a finite source gas atomically.
     ///
@@ -539,6 +630,36 @@ impl MaterialWallDg {
         *gas = candidate.gas;
         Ok(candidate.step)
     }
+
+    /// Deposit both original fluid-viscosity and molecular-relaxation heat in
+    /// one finite-gas sample, using the same accepted state and held ports.
+    /// Each source is integrated once before the existing caloric/work solve;
+    /// the native propagator advances exactly once. Reports retain both source
+    /// integrals and remove their sum once from exported acoustic dissipation.
+    ///
+    /// Each source has its own explicit preparation budget. An absent source
+    /// needs no cache or budget; all retained sources use the complete native
+    /// state (at most 128 coordinates each), without projection or truncation.
+    /// Molecular history requires `UniformMolecularDiffusion`; without it the
+    /// existing viscothermal or lossless refresh owner applies. Thermal-wall,
+    /// solid and boundary losses stay exported. The existing fixed-volume,
+    /// well-mixed first-order partition and source/temperature gates still apply.
+    /// Any refusal preserves gas, wall binding, acoustic state and propagator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_finite_gas_viscous_molecular_heat_controlled<C: FnMut() -> bool>(
+        &mut self, state: &mut DgState, propagator: &mut DgPropagator,
+        gas: &mut ClosedGasParcel, ports: &[PortInput], heat_j: f64,
+        gas_solve: GasEnergySolve, controls: FiniteGasDgSolve,
+        budgets: FiniteGasDgHeatBudget, cancelled: &mut C,
+    ) -> Result<FiniteGasDgStep<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
+        let candidate = prepare_viscous_molecular_heated(&self.duct, state, propagator,
+            gas, ports, heat_j, gas_solve, controls, budgets, cancelled)?;
+        self.duct = candidate.duct;
+        *state = candidate.state;
+        *propagator = candidate.propagator;
+        *gas = candidate.gas;
+        Ok(candidate.step)
+    }
 }
 
 impl RegionalMaterialWallDg {
@@ -622,6 +743,24 @@ impl RegionalMaterialWallDg {
     ) -> Result<FiniteGasDgStep<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
         let candidate = prepare_viscous_heated(&self.duct, state, propagator, gas,
             ports, heat_j, gas_solve, controls, heat_budget, cancelled)?;
+        self.duct = candidate.duct;
+        *state = candidate.state;
+        *propagator = candidate.propagator;
+        *gas = candidate.gas;
+        Ok(candidate.step)
+    }
+
+    /// The same joint gas-loss heating transaction with every original regional
+    /// wall source and Kelvin/Maxwell history retained. See the uniform method.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_finite_gas_viscous_molecular_heat_controlled<C: FnMut() -> bool>(
+        &mut self, state: &mut DgState, propagator: &mut DgPropagator,
+        gas: &mut ClosedGasParcel, ports: &[PortInput], heat_j: f64,
+        gas_solve: GasEnergySolve, controls: FiniteGasDgSolve,
+        budgets: FiniteGasDgHeatBudget, cancelled: &mut C,
+    ) -> Result<FiniteGasDgStep<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
+        let candidate = prepare_viscous_molecular_heated(&self.duct, state, propagator,
+            gas, ports, heat_j, gas_solve, controls, budgets, cancelled)?;
         self.duct = candidate.duct;
         *state = candidate.state;
         *propagator = candidate.propagator;

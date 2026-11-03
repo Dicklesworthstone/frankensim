@@ -5,6 +5,8 @@ mod transport;
 mod molecular_heat;
 #[path = "finite_gas/viscous_heat.rs"]
 mod viscous_heat;
+#[path = "finite_gas/combined_heat.rs"]
+mod combined_heat;
 use super::*;
 use fs_couple::bernoulli_aperture::wall::material::{
     FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgLoss, FiniteGasDgSolve,

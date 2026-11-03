@@ -22,7 +22,7 @@ fn solve() -> FiniteGasDgSolve {
         ..controls(false)
     }
 }
-fn declaration(active: bool) -> RelaxationAbsorption {
+pub(super) fn declaration(active: bool) -> RelaxationAbsorption {
     RelaxationAbsorption::new(
         ["A", "B"]
             .into_iter()
@@ -51,7 +51,7 @@ fn declaration(active: bool) -> RelaxationAbsorption {
     )
     .unwrap()
 }
-fn molecular_duct(diffusion: bool, active: bool) -> DgDuct {
+pub(super) fn molecular_duct(diffusion: bool, active: bool) -> DgDuct {
     let duct = if diffusion {
         DgDuct::new_with_gas_field(
             &fs_duct::Duct {
