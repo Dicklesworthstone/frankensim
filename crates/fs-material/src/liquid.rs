@@ -8,6 +8,8 @@
 //! chemistry-name default, corrosion model, or experimental-accuracy claim.
 
 pub mod surface;
+/// Liquid miscibility, conservative phase inventories and composition-resolved transport.
+pub mod solution;
 mod thermal;
 pub use thermal::ResolvedLiquidExpansion;
 

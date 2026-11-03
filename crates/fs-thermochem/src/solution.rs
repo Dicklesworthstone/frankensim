@@ -19,6 +19,10 @@ use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use fs_math::det::{exp, expm1, ln, sqrt};
 use fs_qty::Temperature;
 
+/// Maximum absolute sum error admitted for an independently represented pair.
+/// Inputs within this floating-point roundoff budget are normalized together.
+pub const BINARY_COMPOSITION_SUM_TOLERANCE_V1: f64 = 8.0 * f64::EPSILON;
+
 /// Refusal of an invalid or unrepresentable liquid-mixture state.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BinarySolutionErrorV1 {
@@ -161,9 +165,21 @@ impl BinaryRegularSolutionV1 {
         temperature: Temperature,
         mole_fraction_a: f64,
     ) -> Result<BinarySolutionStateV1, BinarySolutionErrorV1> {
-        fraction(mole_fraction_a)?;
+        self.evaluate_composition(temperature, [mole_fraction_a, 1.0 - mole_fraction_a])
+    }
+
+    /// Evaluate independently represented component mole fractions in species order.
+    /// The sum must be within [`BINARY_COMPOSITION_SUM_TOLERANCE_V1`] of one.
+    /// Both entries are normalized together; a real trace is never reconstructed
+    /// by subtracting its rounded dominant component from one.
+    pub fn evaluate_composition(
+        &self,
+        temperature: Temperature,
+        mole_fractions: [f64; 2],
+    ) -> Result<BinarySolutionStateV1, BinarySolutionErrorV1> {
+        let fractions = normalized_fractions(mole_fractions)?;
         let chi = self.chi(temperature)?;
-        self.state(temperature, [mole_fraction_a, 1.0 - mole_fraction_a], chi)
+        self.state(temperature, fractions, chi)
     }
 
     fn state(
@@ -216,7 +232,16 @@ impl BinaryRegularSolutionV1 {
             )?,
             log_activity_coefficients: activity,
             reduced_chemical_potentials: chemical,
-            thermodynamic_factor: finite(1.0 - 2.0 * (chi * xy), "thermodynamic factor")?,
+            // Equivalent for a normalized pair, but preserves the curvature
+            // sign near chi=2 without subtracting two nearly equal numbers.
+            thermodynamic_factor: finite(
+                if chi == 0.0 {
+                    1.0
+                } else {
+                    (x - y) * (x - y) - 2.0 * ((chi - 2.0) * xy)
+                },
+                "thermodynamic factor",
+            )?,
         })
     }
 
@@ -297,11 +322,47 @@ impl BinaryRegularSolutionV1 {
         options: BinaryCoexistenceOptionsV1,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<BinaryPhaseEquilibriumV1, BinarySolutionErrorV1> {
+        let mut result = self.equilibrate_composition(
+            temperature,
+            [overall_mole_fraction_a, 1.0 - overall_mole_fraction_a],
+            options,
+            &mut cancelled,
+        )?;
+        // Preserve this scalar API's exact first-coordinate binodal endpoint.
+        // Paired callers instead retain and compare the actual dilute component.
+        if result.coexistence.as_ref().is_some_and(|coexistence| {
+            overall_mole_fraction_a == coexistence.upper_a.mole_fractions[0]
+        }) {
+            result.phases[0] = BinaryEquilibriumPhaseV1 {
+                state: result.feed,
+                fraction_of_total_moles: 1.0,
+            };
+            result.phase_count = 1;
+            result.feed_stability = BinaryMixingStabilityV1::Binodal;
+        }
+        if cancelled() {
+            return Err(BinarySolutionErrorV1::Cancelled);
+        }
+        Ok(result)
+    }
+
+    /// Equilibrate independently represented, normalized component mole fractions.
+    /// Trace inventories survive even when the other component rounds to one.
+    /// Binodal comparisons and lever distances use each original minority
+    /// fraction, not a subtraction from its rounded dominant counterpart.
+    pub fn equilibrate_composition(
+        &self,
+        temperature: Temperature,
+        overall_mole_fractions: [f64; 2],
+        options: BinaryCoexistenceOptionsV1,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<BinaryPhaseEquilibriumV1, BinarySolutionErrorV1> {
         options.validate()?;
         if cancelled() {
             return Err(BinarySolutionErrorV1::Cancelled);
         }
-        let feed = self.evaluate(temperature, overall_mole_fraction_a)?;
+        let feed = self.evaluate_composition(temperature, overall_mole_fractions)?;
+        let [x, y] = feed.mole_fractions;
         let phase = BinaryEquilibriumPhaseV1 {
             state: feed,
             fraction_of_total_moles: 1.0,
@@ -311,33 +372,33 @@ impl BinaryRegularSolutionV1 {
             phases: [phase; 2],
             phase_count: 1,
             coexistence: None,
-            feed_stability: if feed.chi == 2.0 && overall_mole_fraction_a == 0.5 {
+            feed_stability: if feed.chi == 2.0 && x == 0.5 && y == 0.5 {
                 BinaryMixingStabilityV1::Critical
             } else {
                 BinaryMixingStabilityV1::Stable
             },
         };
-        if overall_mole_fraction_a > 0.0
-            && overall_mole_fraction_a < 1.0
+        if x > 0.0
+            && y > 0.0
             && let Some(coexistence) = self.coexistence(temperature, options, &mut cancelled)?
         {
-            let lo = coexistence.lower_a.mole_fractions[0];
-            let hi = coexistence.upper_a.mole_fractions[0];
-            let x = overall_mole_fraction_a;
-            if x == lo || x == hi {
+            let dilute = coexistence.lower_a.mole_fractions[0];
+            // hi-x equals y-dilute mathematically; only the latter retains an
+            // independently represented dilute excess in a nearly pure feed.
+            let low_distance = y - dilute;
+            let high_distance = x - dilute;
+            if low_distance == 0.0 || high_distance == 0.0 {
                 result.feed_stability = BinaryMixingStabilityV1::Binodal;
-            } else if x > lo && x < hi {
-                let low_amount = (hi - x) / (hi - lo);
-                let high_amount = (x - lo) / (hi - lo);
-                let sum = low_amount + high_amount;
+            } else if low_distance > 0.0 && high_distance > 0.0 {
+                let distance_sum = low_distance + high_distance;
                 result.phases = [
                     BinaryEquilibriumPhaseV1 {
                         state: coexistence.lower_a,
-                        fraction_of_total_moles: low_amount / sum,
+                        fraction_of_total_moles: low_distance / distance_sum,
                     },
                     BinaryEquilibriumPhaseV1 {
                         state: coexistence.upper_a,
-                        fraction_of_total_moles: high_amount / sum,
+                        fraction_of_total_moles: high_distance / distance_sum,
                     },
                 ];
                 result.phase_count = 2;
@@ -537,6 +598,17 @@ fn fraction(value: f64) -> Result<(), BinarySolutionErrorV1> {
             "mole fraction outside [0,1]",
         ))
     }
+}
+fn normalized_fractions(values: [f64; 2]) -> Result<[f64; 2], BinarySolutionErrorV1> {
+    fraction(values[0])?;
+    fraction(values[1])?;
+    let sum = values[0] + values[1];
+    if (sum - 1.0).abs() > BINARY_COMPOSITION_SUM_TOLERANCE_V1 {
+        return Err(BinarySolutionErrorV1::Invalid(
+            "component mole fractions do not sum to one",
+        ));
+    }
+    Ok([values[0] / sum, values[1] / sum])
 }
 fn ln_complement(x: f64) -> f64 {
     // The other component may round to one while x remains a real trace.

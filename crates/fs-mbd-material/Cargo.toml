@@ -40,6 +40,7 @@ fs-tribo = { path = "../fs-tribo" }
 fs-alloc = { path = "../fs-alloc" }
 fs-modal = { path = "../fs-modal" }
 fs-evidence = { path = "../fs-evidence" }
+fs-thermochem = { path = "../fs-thermochem" }
 
 [lints]
 workspace = true

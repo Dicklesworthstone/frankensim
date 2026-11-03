@@ -397,3 +397,208 @@ fn g4_invalid_input_work_bounds_and_cancellation_do_not_publish_partial_states()
     );
     assert_eq!(eq(&law, 300.0, 0.5), eq(&law, 300.0, 0.5));
 }
+
+#[test]
+fn g0_paired_composition_retains_real_trace_in_both_component_orders() {
+    let law = model(0.0, 0.0);
+    for trace in [1.5e-16_f64, 1e-100_f64] {
+        let mut energies = [0.0; 2];
+        for (minor, fractions) in [[trace, 1.0 - trace], [1.0 - trace, trace]]
+            .into_iter()
+            .enumerate()
+        {
+            let state = law
+                .evaluate_composition(Temperature::new(300.0), fractions)
+                .unwrap();
+            near(state.mole_fractions()[minor], trace, 4.0 * f64::EPSILON, 0.0);
+            assert!(state.reduced_chemical_potentials()[minor].is_some());
+            near(
+                state.reduced_chemical_potentials()[minor].unwrap(),
+                trace.ln(),
+                5e-15,
+                0.0,
+            );
+            let independent = R * 300.0
+                * (trace * trace.ln() + (1.0 - trace) * (-trace).ln_1p());
+            near(state.mixing_gibbs_j_per_mol(), independent, 5e-15, 0.0);
+            energies[minor] = state.mixing_gibbs_j_per_mol();
+            let equilibrium = law
+                .equilibrate_composition(
+                    Temperature::new(300.0),
+                    fractions,
+                    BinaryCoexistenceOptionsV1::default(),
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(equilibrium.phases().len(), 1);
+            near(
+                equilibrium.phases()[0].mole_fractions()[minor],
+                trace,
+                4.0 * f64::EPSILON,
+                0.0,
+            );
+        }
+        assert_eq!(energies[0], energies[1]);
+    }
+    // The originally reported material failure: 1-x_A overstated B by 48%.
+    let amounts = [1.0, 1.5e-16];
+    let total = amounts[0] + amounts[1];
+    let fractions = [amounts[0] / total, amounts[1] / total];
+    let state = law
+        .evaluate_composition(Temperature::new(300.0), fractions)
+        .unwrap();
+    near(state.mole_fractions()[1], fractions[1], 4.0 * f64::EPSILON, 0.0);
+}
+
+#[test]
+fn g0_paired_composition_admission_pure_critical_and_binodal_endpoints() {
+    let law = model(3.0, 0.0);
+    for invalid in [
+        [0.0, 0.0],
+        [0.3, 0.6],
+        [1.0, 1.0],
+        [-0.1, 1.0],
+        [f64::NAN, 1.0],
+        [0.0, f64::INFINITY],
+    ] {
+        assert!(
+            law.evaluate_composition(Temperature::new(300.0), invalid)
+                .is_err()
+        );
+    }
+    let rounded = law
+        .evaluate_composition(
+            Temperature::new(300.0),
+            [0.3, 0.7 + 2.0 * f64::EPSILON],
+        )
+        .unwrap();
+    near(
+        rounded.mole_fractions().iter().sum(),
+        1.0,
+        0.0,
+        2.0 * f64::EPSILON,
+    );
+    for pure in [[0.0, 1.0], [1.0, 0.0]] {
+        let equilibrium = law
+            .equilibrate_composition(
+                Temperature::new(300.0),
+                pure,
+                BinaryCoexistenceOptionsV1::default(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(equilibrium.phases().len(), 1);
+        assert_eq!(equilibrium.phases()[0].mole_fractions(), pure);
+    }
+    let critical = model(2.0, 0.0);
+    assert!(
+        critical
+            .evaluate_composition(
+                Temperature::new(300.0),
+                [0.5, 0.5 + f64::EPSILON],
+            )
+            .unwrap()
+            .thermodynamic_factor()
+            >= 0.0
+    );
+    assert_eq!(
+        critical
+            .equilibrate_composition(
+                Temperature::new(300.0),
+                [0.5, 0.5],
+                BinaryCoexistenceOptionsV1::default(),
+                || false,
+            )
+            .unwrap()
+            .feed_stability(),
+        BinaryMixingStabilityV1::Critical
+    );
+    let coexistence = law
+        .coexistence(
+            Temperature::new(300.0),
+            BinaryCoexistenceOptionsV1::default(),
+            || false,
+        )
+        .unwrap()
+        .unwrap();
+    for endpoint in [coexistence.lower_a(), coexistence.upper_a()] {
+        let paired = law
+            .equilibrate_composition(
+                Temperature::new(300.0),
+                endpoint.mole_fractions(),
+                BinaryCoexistenceOptionsV1::default(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(paired.phases().len(), 1);
+        assert_eq!(paired.feed_stability(), BinaryMixingStabilityV1::Binodal);
+        assert_eq!(
+            eq(&law, 300.0, endpoint.mole_fraction_a()).feed_stability(),
+            BinaryMixingStabilityV1::Binodal
+        );
+    }
+    assert_eq!(
+        law.equilibrate_composition(
+            Temperature::new(300.0),
+            [0.4, 0.6],
+            BinaryCoexistenceOptionsV1::default(),
+            || true,
+        ),
+        Err(BinarySolutionErrorV1::Cancelled)
+    );
+}
+
+#[test]
+fn g1_paired_dilute_lever_rule_conserves_species_and_exchange_symmetry() {
+    let law = model(30.0, 0.0);
+    let coexistence = law
+        .coexistence(
+            Temperature::new(300.0),
+            BinaryCoexistenceOptionsV1::default(),
+            || false,
+        )
+        .unwrap()
+        .unwrap();
+    let dilute = coexistence.lower_a().mole_fraction_a();
+    let minority = dilute * 1.0001;
+    // This small excess is real even if rich-side scalar subtraction cannot
+    // distinguish the feed from the binodal's first-component coordinate.
+    let feeds = [[1.0 - minority, minority], [minority, 1.0 - minority]];
+    let mut results = Vec::new();
+    for fractions in feeds {
+        let equilibrium = law
+            .equilibrate_composition(
+                Temperature::new(300.0),
+                fractions,
+                BinaryCoexistenceOptionsV1::default(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(equilibrium.phases().len(), 2);
+        assert!(
+            equilibrium
+                .phases()
+                .iter()
+                .all(|phase| phase.fraction_of_total_moles() > 0.0)
+        );
+        for i in 0..2 {
+            let recovered: f64 = equilibrium
+                .phases()
+                .iter()
+                .map(|phase| phase.fraction_of_total_moles() * phase.mole_fractions()[i])
+                .sum();
+            near(recovered, equilibrium.feed().mole_fractions()[i], 8e-15, 0.0);
+        }
+        results.push(equilibrium);
+    }
+    assert_eq!(
+        results[0].phases()[0].fraction_of_total_moles(),
+        results[1].phases()[1].fraction_of_total_moles()
+    );
+    near(
+        results[0].mixing_gibbs_j_per_mol(),
+        results[1].mixing_gibbs_j_per_mol(),
+        3e-15,
+        0.0,
+    );
+}

@@ -29,6 +29,17 @@ derivatives, pure and trace limits, equal chemical potentials, component
 conservation, critical limits, temperature-driven mixing/demixing, species
 exchange and original Maxwell–Stefan flux/drag-entropy equations.
 
+`evaluate_composition` and `equilibrate_composition` accept both independently
+represented mole fractions, with an explicit `8*f64::EPSILON` sum-roundoff
+budget and common normalization. A dilute component is retained even when its
+dominant partner rounds to one. Binodal comparisons and phase amounts use the
+actual minority distances `x_B-x_binodal` and `x_A-x_binodal`, preserving a
+finite minority phase that subtraction of rich-side coordinates would erase.
+The scalar APIs delegate and retain their original pure/binodal endpoint
+conventions. Paired-composition regressions cover the unequal-inventory trace
+case, both species orders, common normalization, critical/pure/binodal states,
+finite dilute phase amounts, and component conservation.
+
 The constitutive model does not infer empirical pair parameters, pressure
 dependence, electrolyte or unequal-size corrections, interfacial tension,
 nucleation kinetics or a spatial phase-field evolution. Its free-energy form

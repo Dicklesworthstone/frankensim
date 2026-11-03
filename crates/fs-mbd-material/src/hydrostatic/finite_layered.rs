@@ -18,6 +18,7 @@ use fs_mbd::{Gravity, RigidBodyState};
 
 mod bodies;
 mod density_change;
+mod miscibility;
 pub use bodies::FiniteTankBodiesInterface;
 pub use density_change::{FiniteLayerDensityChange, FiniteLayeredTankDensityChange};
 

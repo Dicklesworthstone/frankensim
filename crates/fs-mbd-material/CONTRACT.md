@@ -938,6 +938,29 @@ independent shared volume/energy and cross-body loading, each body's force/torqu
 potential gradient, both collective heave modes with time refinement, exact
 singleton parity, collective-only overflow, frozen sources and batch rollback.
 
+### Binary liquid miscibility in finite tanks
+
+`FiniteLayeredHydrostaticTank::from_binary_equilibrium` consumes the actual
+one- or two-phase inventory from `fs-material`'s source-resolved binary liquid
+equilibrium. A homogeneous solution supplies one layer; coexistence supplies two
+composition-dependent liquid states, ordered by their sourced density. The
+original phase owners and property receipts are borrowed directly. Their
+conserved masses remain exact rather than being reconstructed by multiplying
+the resolved density and derived volume. Amount-based lever fractions are never
+treated as mass or volume fractions. The original finite-tank volume solver,
+buoyancy/potential calculation and native body integrator remain the owners of
+geometry and mechanical evolution.
+
+The equilibrium temperature, composition and source context remain frozen over
+the mechanical accounting window. Hydrostatic pressure does not re-evaluate
+the coexistence law. Temperature/composition changes require a newly evaluated
+equilibrium and tank; constructing these states does not account for thermal
+work, finite-rate mixing, entrainment, capillarity or fluid inertia. Focused
+synthetic-source regressions check a temperature-induced one/two-phase change,
+unequal-molar-mass species conservation, density sorting, exact retained phase
+masses, independently calculated interface heights and buoyancy, changed native
+motion and cancellation before publication.
+
 ### Conserved finite immiscible layers
 
 `FiniteLayeredHydrostaticTank` retains one checked source snapshot and one

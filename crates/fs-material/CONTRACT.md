@@ -11761,3 +11761,42 @@ Three focused G0/G3 groups passed on the native material test executable: fixed/
 
 Scope: stationary rigid geometry, additive per-species calorics and external thermostats. Temperature evolution, sorption heat capacity, thermal conduction, excess-mixture energy and entropy production are not claimed by this held-temperature account.
 
+## Binary liquid miscibility and shared phase transport
+
+`liquid::solution::BinaryLiquidSolutionLaw` binds the L1
+`BinaryRegularSolutionV1` to one original liquid-property bundle. The first
+species' composition coordinate must explicitly carry the mole-fraction
+semantic kind. Temperature and composition refresh together; pressure and every
+other coordinate remain fixed, and every selected property claim stays pinned.
+The caller supplies compatible species-pair parameters, component molar masses
+and mixture-property data. Neither a material label nor a density determines
+miscibility.
+
+`equilibrate` returns one homogeneous liquid or two coexistence phases with
+their actual compositions. The molar lever rule is converted to separate
+component amounts, mass and source-derived volume for each phase. Small
+component allocations are evaluated directly, with the larger allocation
+retained as the complement of the original inventory. Conservation holds to
+floating-point roundoff. The smaller feed mole fraction is normalized directly
+and retained by the thermodynamic owner instead of being recovered by subtracting
+from one. A nonzero component that vanishes in the source's scalar first-species
+coordinate refuses. Invalid or unrepresentable inventories, a source
+failure in either phase, and cancellation publish no partial equilibrium.
+
+Every `ResolvedBinaryLiquidPhase` implements `FluidTransport` and
+`ThermalFluidTransport` using its own density, heat capacity, conductivity and
+viscosity source evaluations. Kinematic viscosity is converted with that same
+phase's density. The actual molar concentration is available to the existing
+Maxwell-Stefan driving-force path. No pure-fluid property average, additive
+volume assumption or invented expansion coefficient is introduced. A
+two-phase equilibrium intentionally has no homogeneous transport tuple.
+
+G0/G3 tests in `tests/liquid_miscibility.rs` cover temperature-driven splitting
+and remixing, unequal molar masses, independent species/mass/volume balances,
+source claim retention, nonlinear composition tables, pure limits, wrong
+composition basis, unsupported sources and atomic cancellation. Fixtures are
+synthetic numerical checks, not measured pair fits. The constitutive scope is
+isothermal bulk binary liquid equilibrium at fixed pressure; it excludes
+vapor/solid phases, finite-rate mixing, nucleation, capillary interfaces,
+spatial phase separation and a coupled caloric evolution.
+
