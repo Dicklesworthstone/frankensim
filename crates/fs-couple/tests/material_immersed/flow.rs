@@ -2,8 +2,8 @@
 use super::*;
 use fs_couple::material_immersed::dry::{ResolvedImmersedBodies, ResolvedImmersedBody};
 use fs_couple::material_immersed::settling::SubmergedSphere;
-use fs_couple::material_immersed::FaceBoundarySi;
-use fs_lbm::d3q19::{BoundaryGrid3, DryBodyCouplingConfig3, Face3, FaceBoundary3};
+use fs_couple::material_immersed::{FaceBoundarySi, InletFluxSi};
+use fs_lbm::d3q19::{BoundaryGrid3, BoundaryProfileError3, DryBodyCouplingConfig3, Face3, FaceBoundary3};
 
 fn fields(grid: &BoundaryGrid3) -> Vec<[f64; Q3]> {
     let [nx, ny, nz] = grid.dimensions();
@@ -563,4 +563,94 @@ fn live_si_reservoir_targets_keep_history_and_supply_measured_native_momentum() 
         bodies
     );
     assert_eq!(model.accepted_steps(), steps);
+}
+
+#[test]
+fn spatial_si_inlets_continue_material_body_momentum_and_clear_without_reset() {
+    let liquid = fluid(3.0, 3e-4);
+    let source = body(6.0);
+    let gate = CancelGate::new_clock_free();
+    let faces = [
+        FaceBoundarySi::Periodic, FaceBoundarySi::Periodic,
+        FaceBoundarySi::Periodic, FaceBoundarySi::Periodic,
+        FaceBoundarySi::Velocity { velocity_m_s: [0.0, 0.0, 0.0002] },
+        FaceBoundarySi::Pressure { perturbation_pa: 0.0 },
+    ];
+    let mut model = RetainedFluidSpheres::new(
+        &liquid, domain().with_boundaries(faces),
+        [AdditionalMaterialSphere::new(&source, RADIUS).unwrap(); 2],
+        initial(), film(), &gate,
+    )
+    .unwrap();
+    let _ = model.step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate).unwrap();
+    let before = fields(model.grid());
+    let bodies = [model.state_si(0).unwrap(), model.state_si(1).unwrap()];
+    let steps = model.accepted_steps();
+    let mut calls = 0;
+    let report = model.set_velocity_profile_si(
+        Face3::ZMin, InletFluxSi::MeanNormalVelocity(-0.0004), &gate,
+        |position| {
+            calls += 1;
+            close(position[2], 0.5 * DX, 0.0);
+            Ok([
+                0.00002 * (position[1] / DX - 4.0),
+                0.0,
+                0.00025 + 0.0001 * (position[0] / DX - 4.0),
+            ])
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 64);
+    close(report.prescribed_mean_velocity_lu[2] * DX / DT, 0.0004, 2e-18);
+    assert_eq!(fields(model.grid()), before);
+    assert_eq!([model.state_si(0).unwrap(), model.state_si(1).unwrap()], bodies);
+    assert_eq!(model.accepted_steps(), steps);
+    for _ in 0..8 {
+        let p0 = physical_momentum_si(&model);
+        let m0 = model.grid().total_mass();
+        let receipt = model.step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate).unwrap();
+        let p1 = physical_momentum_si(&model);
+        for axis in 0..3 {
+            close(
+                p1[axis] - p0[axis],
+                model.impulse_ns(receipt.coupling.open.impulse[axis]
+                    + receipt.coupling.walls.fluid_population_impulse[axis]
+                    + receipt.coupling.forcing.impulse[axis]).unwrap(),
+                2e-16,
+            );
+        }
+        close(model.grid().total_mass() - m0, receipt.coupling.open.mass_change, 3e-10);
+        assert!(receipt.coupling.open.reconstructed_cells > 0);
+    }
+    assert!((0..2).any(|i| (0..3).any(|axis|
+        (model.state_si(i).unwrap().angular_momentum_body_kg_m2_s[axis]
+            - bodies[i].angular_momentum_body_kg_m2_s[axis]).abs() > 1e-16
+    )));
+    let accepted = fields(model.grid());
+    let states = [model.state_si(0).unwrap(), model.state_si(1).unwrap()];
+    let steps = model.accepted_steps();
+    let profile = model.grid().velocity_profile(Face3::ZMin).unwrap().to_vec();
+    assert!(matches!(
+        model.set_velocity_profile_si(
+            Face3::ZMin, InletFluxSi::MeanNormalVelocity(-0.00075), &gate,
+            |_| Ok([0.00075, 0.0, 0.0]),
+        ),
+        Err(MaterialImmersedError::Profile(BoundaryProfileError3::InvalidVelocity { .. })),
+    ));
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert_eq!(
+        model.clear_velocity_profile(Face3::ZMin, &cancelled),
+        Err(MaterialImmersedError::Profile(BoundaryProfileError3::Cancelled)),
+    );
+    assert_eq!(model.grid().velocity_profile(Face3::ZMin).unwrap(), profile);
+    model.clear_velocity_profile(Face3::ZMin, &gate).unwrap();
+    assert!(model.grid().velocity_profile(Face3::ZMin).is_none());
+    assert_eq!(fields(model.grid()), accepted);
+    assert_eq!([model.state_si(0).unwrap(), model.state_si(1).unwrap()], states);
+    assert_eq!(model.accepted_steps(), steps);
+    let FaceBoundary3::Velocity { velocity } = model.grid().boundaries().face(Face3::ZMin)
+    else { panic!("clearing changed the face kind"); };
+    assert_eq!([velocity[0], velocity[1]], [0.0; 2]);
+    close(velocity[2] * DX / DT, 0.0002, 2e-18);
 }

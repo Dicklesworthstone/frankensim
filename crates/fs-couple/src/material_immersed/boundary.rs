@@ -28,6 +28,19 @@ pub enum FaceBoundarySi {
     },
 }
 
+/// Control of the prescribed trace's signed outward-normal mean velocity.
+/// This constrains the velocity profile, not density-weighted mass transport.
+/// The accepted interval's native `open` receipt measures actual exchange.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InletFluxSi {
+    /// Retain the complete sampled profile, including its bulk flow.
+    Unconstrained,
+    /// Shift every normal component to impose this plane mean [m/s].
+    /// Inflow is negative on either face. Mixed wall/open seams are refused
+    /// because their partial reconstruction cannot impose all velocity moments.
+    MeanNormalVelocity(f64),
+}
+
 impl FaceBoundarySi {
     /// A stationary wall with the original halfway bounce-back law.
     #[must_use]
@@ -123,4 +136,39 @@ pub(super) fn lattice_boundaries<F: FluidTransport + ?Sized>(
     let boundaries = BoundarySpec3::new(faces);
     boundaries.try_validate().map_err(Error::Flow)?;
     Ok(boundaries)
+}
+
+/// Convert a spatial SI trace on the same source-owned grid and fixed dx/dt.
+/// Numerical admission and both reusable profile buffers belong to the native owner.
+pub(super) fn set_velocity_profile_si<F: FluidTransport + ?Sized>(
+    grid: &mut BoundaryGrid3,
+    scaling: &MaterialScaling<'_, F>,
+    maximum_speed_m_s: f64,
+    face: Face3,
+    flux: InletFluxSi,
+    gate: &CancelGate,
+    mut sample: impl FnMut([f64; 3]) -> Result<[f64; 3], BoundaryProfileError3>,
+) -> Result<VelocityProfileReport3, Error> {
+    if gate.is_requested() {
+        return Err(Error::Profile(BoundaryProfileError3::Cancelled));
+    }
+    let flux = match flux {
+        InletFluxSi::Unconstrained => InletFlux3::Unconstrained,
+        InletFluxSi::MeanNormalVelocity(mean) => {
+            InletFlux3::MeanNormal(scaling.velocity_lattice(mean)?)
+        }
+    };
+    let maximum_speed_lu = scaling.velocity_lattice(maximum_speed_m_s)?;
+    grid.set_velocity_profile_with_speed_limit(face, flux, maximum_speed_lu, gate, |cell| {
+        let position = convert(cell.map(|i| i as f64 + 0.5), scaling.cell_size_m())
+            .map_err(|error| BoundaryProfileError3::Source(error.to_string()))?;
+        let value = sample(position)?;
+        let component = |v| {
+            scaling
+                .velocity_lattice(v)
+                .map_err(|error| BoundaryProfileError3::Source(error.to_string()))
+        };
+        Ok([component(value[0])?, component(value[1])?, component(value[2])?])
+    })
+    .map_err(Error::Profile)
 }

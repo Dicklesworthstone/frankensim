@@ -229,6 +229,24 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedSurfaces<'a
         self.assembly.rebind_open_boundaries_si(faces, gate)
     }
 
+    /// Hold physical cell-center inlet velocities [m/s] with the original
+    /// source-scaled speed admission and native reservoir momentum accounting.
+    /// Returned profile diagnostics retain their explicit lattice units.
+    pub fn set_velocity_profile_si(
+        &mut self,
+        face: Face3,
+        flux: InletFluxSi,
+        gate: &CancelGate,
+        sample: impl FnMut([f64; 3]) -> Result<[f64; 3], BoundaryProfileError3>,
+    ) -> Result<VelocityProfileReport3, Error> {
+        self.assembly.set_velocity_profile_si(face, flux, gate, sample)
+    }
+
+    /// Restore the held uniform face target without advancing accepted state.
+    pub fn clear_velocity_profile(&mut self, face: Face3, gate: &CancelGate) -> Result<(), Error> {
+        self.assembly.clear_velocity_profile(face, gate)
+    }
+
     /// Hold a uniform external fluid volume force [N/m^3], with no immediate impulse.
     pub fn rebind_uniform_fluid_force_si(
         &mut self,

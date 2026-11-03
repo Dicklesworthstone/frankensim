@@ -831,3 +831,69 @@ fn live_target_refusals_preserve_profiles_populations_and_previous_controls() {
     grid.rebind_open_boundaries(BoundarySpec3::new(changed), &gate).unwrap();
     assert_eq!(snapshot(&grid), accepted);
 }
+
+#[test]
+fn spatial_inlet_shear_reaches_body_spin_and_closes_actual_open_momentum() {
+    let gate = CancelGate::new_clock_free();
+    let origin = [-2.0, 6.0, -3.0];
+    let boundary = BoundarySpec3::new([
+        FaceBoundary3::Periodic, FaceBoundary3::Periodic,
+        FaceBoundary3::Periodic, FaceBoundary3::Periodic,
+        FaceBoundary3::Velocity { velocity: [0.0, 0.0, 0.01] },
+        FaceBoundary3::Pressure { density: 1.0 },
+    ]);
+    let mut fractions = vec![0.0; N * N * N];
+    for z in 3..5 {
+        for y in 3..5 {
+            for x in 3..5 {
+                fractions[(z * N + y) * N + x] = 0.4;
+            }
+        }
+    }
+    for collision in models() {
+        let mut grid = BoundaryGrid3::with_collision_model(N, N, N, collision, [0.0; 3], boundary);
+        let mut rigid = body([4.0; 3]);
+        rigid.velocity = [0.0; 3];
+        rigid.angular_velocity = [0.0; 3];
+        rigid.inertia_world = [[1.3, 0.0, 0.0], [0.0, 1.7, 0.0], [0.0, 0.0, 2.0]];
+        let initial = rigid;
+        grid.set_velocity_profile_with_speed_limit(
+            Face3::ZMin, InletFlux3::MeanNormal(-0.01), 0.02, &gate,
+            |[x, _, _]| Ok([0.0, 0.0, 0.012 + 0.001 * (x as f64 - 3.5)]),
+        )
+        .unwrap();
+        let mut reservoir_impulse = 0.0;
+        for _ in 0..8 {
+            let before = snapshot(&grid);
+            let old = rigid;
+            let receipt = grid
+                .step_with_partial_saturation_body(
+                    &fractions, &mut rigid, [0.0; 6], origin, &gate,
+                )
+                .unwrap();
+            let (mass, fluid) = fluid_change(&before, &grid, origin);
+            let solid = body_change(old, rigid, origin);
+            close(mass, receipt.open.mass_change, 2e-12);
+            for axis in 0..3 {
+                close(
+                    fluid[axis] + solid[axis],
+                    receipt.open.impulse[axis] + receipt.walls.fluid_population_impulse[axis]
+                        + receipt.forcing.impulse[axis],
+                    4e-12,
+                );
+                close(
+                    fluid[axis + 3] + solid[axis + 3],
+                    receipt.open.angular_impulse[axis]
+                        + receipt.walls.fluid_population_angular_impulse[axis]
+                        + receipt.periodic.angular_momentum_change[axis]
+                        + receipt.forcing.angular_impulse[axis],
+                    3e-11,
+                );
+            }
+            reservoir_impulse += receipt.open.impulse[2].abs();
+        }
+        assert!(reservoir_impulse > 0.01);
+        assert!(rigid.velocity[2] > initial.velocity[2] + 1e-5);
+        assert!(rigid.angular_velocity[1] < -1e-6, "{collision:?}: {rigid:?}");
+    }
+}

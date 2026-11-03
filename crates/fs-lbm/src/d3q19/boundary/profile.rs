@@ -30,7 +30,10 @@ pub enum BoundaryProfileError3 {
     MixedWallSeam,
     /// The requested mean is nonfinite or outside the existing low-Mach bound.
     InvalidMean,
-    /// A sampled or corrected velocity violates the existing low-Mach bound.
+    /// The caller's additional speed limit is nonfinite or negative.
+    InvalidSpeedLimit,
+    /// A sampled or corrected velocity violates low-Mach admission or the
+    /// caller's additional bound on the final prescribed trace.
     InvalidVelocity { cell: [usize; 3] },
     /// An open node has a solid first-interior neighbor.
     InvalidInterior { cell: [usize; 3] },
@@ -106,6 +109,40 @@ impl BoundaryGrid3 {
         &mut self,
         face: Face3,
         flux: InletFlux3,
+        gate: &CancelGate,
+        sample: impl FnMut([usize; 3]) -> Result<[f64; 3], BoundaryProfileError3>,
+    ) -> Result<VelocityProfileReport3, BoundaryProfileError3> {
+        self.set_velocity_profile_inner(face, flux, None, gate, sample)
+    }
+
+    /// Replace a trace with an additional inclusive speed bound in lattice
+    /// units. The bound applies to FINAL velocities after mean-normal control;
+    /// it cannot be bypassed by individually admissible source samples.
+    /// Existing low-Mach admission still applies to samples and corrected values.
+    ///
+    /// This shares the original two reusable plane buffers and atomic publication.
+    /// Refusal retains the complete previous trace and accepted populations.
+    /// A zero limit admits only a quiescent corrected trace.
+    pub fn set_velocity_profile_with_speed_limit(
+        &mut self,
+        face: Face3,
+        flux: InletFlux3,
+        maximum_speed_lu: f64,
+        gate: &CancelGate,
+        sample: impl FnMut([usize; 3]) -> Result<[f64; 3], BoundaryProfileError3>,
+    ) -> Result<VelocityProfileReport3, BoundaryProfileError3> {
+        check(gate)?;
+        if !maximum_speed_lu.is_finite() || maximum_speed_lu < 0.0 {
+            return Err(BoundaryProfileError3::InvalidSpeedLimit);
+        }
+        self.set_velocity_profile_inner(face, flux, Some(maximum_speed_lu), gate, sample)
+    }
+
+    fn set_velocity_profile_inner(
+        &mut self,
+        face: Face3,
+        flux: InletFlux3,
+        maximum_speed_lu: Option<f64>,
         gate: &CancelGate,
         mut sample: impl FnMut([usize; 3]) -> Result<[f64; 3], BoundaryProfileError3>,
     ) -> Result<VelocityProfileReport3, BoundaryProfileError3> {
@@ -196,7 +233,11 @@ impl BoundaryGrid3 {
                     value[axis] += sign * correction;
                 }
                 let speed2 = speed_squared(*value);
-                if !value.iter().all(|v| v.is_finite()) || speed2 >= 0.03 {
+                if !value.iter().all(|v| v.is_finite())
+                    || speed2 >= 0.03
+                    || maximum_speed_lu
+                        .is_some_and(|limit| value[0].hypot(value[1]).hypot(value[2]) > limit)
+                {
                     return Err(BoundaryProfileError3::InvalidVelocity { cell });
                 }
                 max_speed2 = max_speed2.max(speed2);

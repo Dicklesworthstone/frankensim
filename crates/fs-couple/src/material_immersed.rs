@@ -9,9 +9,10 @@
 
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{
-    BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3, BoundarySpec3,
-    CollisionError3, FaceBoundary3, MovingPartialSaturationBodiesExchange3,
-    MovingPartialSaturationBody3, PartialSaturationError3, SphereLubrication3, TILE,
+    BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3,
+    BoundaryProfileError3, BoundarySpec3, CollisionError3, Face3, FaceBoundary3, InletFlux3,
+    MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3, PartialSaturationError3,
+    SphereLubrication3, TILE, VelocityProfileReport3,
 };
 use fs_lbm::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_material};
 use fs_material::fluid_transport::FluidTransport;
@@ -27,7 +28,7 @@ mod flow;
 /// Ordinary heavy solids with source-derived displaced-fluid inertia and gravity.
 pub mod settling;
 use ellipsoid::NativeEllipsoid3;
-pub use boundary::{FaceBoundarySi, ImmersedBoundaryDomain};
+pub use boundary::{FaceBoundarySi, ImmersedBoundaryDomain, InletFluxSi};
 pub use ellipsoid::{AdditionalMaterialEllipsoid, RetainedFluidEllipsoids};
 
 /// Source, physical-unit, geometry or native step refusal.
@@ -45,6 +46,8 @@ pub enum MaterialImmersedError {
     Relaxation(CollisionError3),
     /// Original face admission, flow preparation or conservative Guo rebinding refused.
     Flow(BoundaryForcingError3),
+    /// Original spatial trace sampling, final-speed admission or cancellation refused.
+    Profile(BoundaryProfileError3),
 }
 impl core::fmt::Display for MaterialImmersedError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

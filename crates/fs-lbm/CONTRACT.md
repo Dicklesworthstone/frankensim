@@ -9575,6 +9575,17 @@ solver parity against independently constructed native grids for all four
 admitted collision models, physical force-frame preservation, independent
 mass/linear/angular inventory, spatial-profile precedence and atomic refusal.
 
+`BoundaryGrid3::set_velocity_profile_with_speed_limit` adds an inclusive
+caller limit on the final corrected velocity trace. The ordinary profile entry
+retains its previous arithmetic and admission. Both entries share the same
+deterministic sampling, original low-Mach checks and two reusable plane
+buffers. The added bound is checked after mean-normal correction and before
+publication; invalid limits or corrected overspeed preserve the full previous
+profile and populations. No new per-step field, collision law or momentum
+receipt is introduced. The spatial-shear regression in
+`tests/open_partial_saturation3.rs` exercises actual body spin and independent
+mass, linear and angular inventories with all four admitted collision models.
+
 ### Moving finite film carriers on the dry sphere/fluid clock
 
 `MovingLubricationSurface3::{Prescribed, Finite}` and the moving/dry

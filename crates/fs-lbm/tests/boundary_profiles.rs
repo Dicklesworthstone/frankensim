@@ -225,3 +225,56 @@ fn refused_or_cancelled_update_keeps_the_entire_previous_trace() {
         BoundaryProfileError3::MixedWallSeam
     );
 }
+
+#[test]
+fn bounded_profiles_admit_only_final_corrected_speeds_and_refuse_atomically() {
+    let gate = CancelGate::new_clock_free();
+    let mut domain = grid(0, false);
+    domain
+        .set_velocity_profile(Face3::XMin, InletFlux3::Unconstrained, &gate, |_| {
+            Ok([0.02, 0.0, 0.0])
+        })
+        .unwrap();
+    let before = domain.velocity_profile(Face3::XMin).unwrap().to_vec();
+    let populations = bits(&domain);
+    // Each sample is below 0.05, but imposing the normal mean makes its full
+    // speed sqrt(0.04^2 + 0.04^2) exceed that bound while remaining low-Mach.
+    let error = domain
+        .set_velocity_profile_with_speed_limit(
+            Face3::XMin, InletFlux3::MeanNormal(-0.04), 0.05, &gate,
+            |_| Ok([0.01, 0.04, 0.0]),
+        )
+        .unwrap_err();
+    assert!(matches!(error, BoundaryProfileError3::InvalidVelocity { .. }));
+    assert_eq!(domain.velocity_profile(Face3::XMin).unwrap(), before);
+    assert_eq!(bits(&domain), populations);
+    for limit in [-1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            domain.set_velocity_profile_with_speed_limit(
+                Face3::XMin, InletFlux3::Unconstrained, limit, &gate,
+                |_| panic!("invalid limit must refuse before sampling"),
+            ),
+            Err(BoundaryProfileError3::InvalidSpeedLimit),
+        );
+    }
+    assert_eq!(domain.velocity_profile(Face3::XMin).unwrap(), before);
+    // The original entry retains its original admission and arithmetic.
+    let report = domain
+        .set_velocity_profile(
+            Face3::XMin, InletFlux3::MeanNormal(-0.04), &gate,
+            |_| Ok([0.01, 0.04, 0.0]),
+        )
+        .unwrap();
+    assert!(report.maximum_speed_squared_lu > 0.05 * 0.05);
+    // An offset source may exceed the extra bound when the final trace does
+    // not: only the original low-Mach rule applies before mean correction.
+    let report = domain
+        .set_velocity_profile_with_speed_limit(
+            Face3::XMin, InletFlux3::MeanNormal(-0.02), 0.05, &gate,
+            |_| Ok([0.1, 0.0, 0.0]),
+        )
+        .unwrap();
+    assert!(report.maximum_speed_squared_lu < 0.05 * 0.05);
+    assert!((report.prescribed_mean_velocity_lu[0] - 0.02).abs() < 2e-16);
+    assert_eq!(bits(&domain), populations);
+}

@@ -248,3 +248,157 @@ fn si_faces_drive_identical_native_fluid_body_and_reservoir_momentum() {
         "the inlet must accelerate the actual immersed body"
     );
 }
+
+fn profile_faces(axis: usize, upper: bool) -> [FaceBoundarySi; 6] {
+    let mut faces = [FaceBoundarySi::Periodic; 6];
+    faces[2 * axis + usize::from(upper)] = FaceBoundarySi::Velocity {
+        velocity_m_s: [0.0; 3],
+    };
+    faces[2 * axis + usize::from(!upper)] = FaceBoundarySi::Pressure {
+        perturbation_pa: 0.0,
+    };
+    faces
+}
+
+fn profile_velocity(position: [f64; 3], axis: usize, sign: f64) -> [f64; 3] {
+    let mut value = [0.0; 3];
+    value[axis] = -sign * (1.0 / 2048.0 + position[(axis + 1) % 3] / 256.0);
+    value[(axis + 1) % 3] = position[(axis + 2) % 3] / 1024.0;
+    value
+}
+
+fn populations(grid: &BoundaryGrid3) -> Vec<[f64; fs_lbm::d3q19::Q3]> {
+    (0..512)
+        .map(|i| grid.populations(i % 8, (i / 8) % 8, i / 64))
+        .collect()
+}
+
+#[test]
+fn si_profiles_use_physical_cell_centers_and_outward_mean_on_every_face() {
+    let fluid = fluid();
+    let domain = domain();
+    let gate = CancelGate::new_clock_free();
+    let scaling = plan_scaling_from_material(
+        &fluid, domain.cell_size_m, domain.timestep_s, domain.maximum_speed_m_s,
+    )
+    .unwrap();
+    let speed_unit = domain.cell_size_m / domain.timestep_s;
+    let mean = -1.0 / 1024.0;
+    for axis in 0..3 {
+        for upper in [false, true] {
+            let face = Face3::ALL[2 * axis + usize::from(upper)];
+            let sign = f64::from(face.normal()[axis]);
+            let boundary = domain.with_boundaries(profile_faces(axis, upper))
+                .lattice_boundaries(&scaling).unwrap();
+            let mut actual = BoundaryGrid3::new(8, 8, 8, scaling.flow().tau, [0.0; 3], boundary);
+            let mut reference = BoundaryGrid3::new(8, 8, 8, scaling.flow().tau, [0.0; 3], boundary);
+            let before = populations(&actual);
+            let mut positions = Vec::new();
+            let report = set_velocity_profile_si(
+                &mut actual, &scaling, domain.maximum_speed_m_s, face,
+                InletFluxSi::MeanNormalVelocity(mean), &gate,
+                |position| {
+                    positions.push(position);
+                    Ok(profile_velocity(position, axis, sign))
+                },
+            )
+            .unwrap();
+            // Independent dimensions, without the material conversion helpers.
+            let expected = reference.set_velocity_profile_with_speed_limit(
+                face, InletFlux3::MeanNormal(mean / speed_unit),
+                domain.maximum_speed_m_s / speed_unit, &gate,
+                |cell| Ok(profile_velocity(
+                    cell.map(|i| (i as f64 + 0.5) * domain.cell_size_m), axis, sign,
+                ).map(|v| v / speed_unit)),
+            )
+            .unwrap();
+            assert_eq!(report, expected);
+            assert_eq!(actual.velocity_profile(face), reference.velocity_profile(face));
+            assert_eq!(positions.len(), 64);
+            let mut first = [0.5 * domain.cell_size_m; 3];
+            let mut last = [7.5 * domain.cell_size_m; 3];
+            first[axis] = if upper { 7.5 } else { 0.5 } * domain.cell_size_m;
+            last[axis] = first[axis];
+            assert_eq!(positions[0], first);
+            assert_eq!(positions[63], last);
+            assert!((sign * report.prescribed_mean_velocity_lu[axis] * speed_unit - mean).abs() < 1e-17);
+            assert_eq!(populations(&actual), before);
+            actual.step();
+            reference.step();
+            assert_eq!(populations(&actual), populations(&reference));
+        }
+    }
+}
+
+#[test]
+fn si_profile_corrected_overspeed_source_failure_and_cancel_keep_previous_trace() {
+    let fluid = fluid();
+    let domain = domain();
+    let gate = CancelGate::new_clock_free();
+    let scaling = plan_scaling_from_material(
+        &fluid, domain.cell_size_m, domain.timestep_s, domain.maximum_speed_m_s,
+    )
+    .unwrap();
+    let boundary = domain.with_boundaries(profile_faces(2, false))
+        .lattice_boundaries(&scaling).unwrap();
+    let mut grid = BoundaryGrid3::new(8, 8, 8, scaling.flow().tau, [0.0; 3], boundary);
+    let maximum = domain.maximum_speed_m_s;
+    set_velocity_profile_si(
+        &mut grid, &scaling, maximum, Face3::ZMin, InletFluxSi::Unconstrained,
+        &gate, |_| Ok([0.0, 0.0, maximum / 4.0]),
+    )
+    .unwrap();
+    let profile = grid.velocity_profile(Face3::ZMin).unwrap().to_vec();
+    let before = populations(&grid);
+    // The raw tangent and requested normal mean are each below the bound.
+    // Their corrected vector is not: the native owner must refuse before swap.
+    let error = set_velocity_profile_si(
+        &mut grid, &scaling, maximum, Face3::ZMin,
+        InletFluxSi::MeanNormalVelocity(-0.75 * maximum), &gate,
+        |_| Ok([0.75 * maximum, 0.0, 0.0]),
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Profile(BoundaryProfileError3::InvalidVelocity { .. })));
+    assert_eq!(grid.velocity_profile(Face3::ZMin).unwrap(), profile);
+    let reason = BoundaryProfileError3::Source("coherent inlet field refused".into());
+    let mut calls = 0;
+    assert_eq!(
+        set_velocity_profile_si(
+            &mut grid, &scaling, maximum, Face3::ZMin, InletFluxSi::Unconstrained,
+            &gate, |_| {
+                calls += 1;
+                if calls == 20 { Err(reason.clone()) } else { Ok([0.0; 3]) }
+            },
+        ),
+        Err(Error::Profile(reason)),
+    );
+    assert!(matches!(
+        set_velocity_profile_si(
+            &mut grid, &scaling, maximum, Face3::ZMin, InletFluxSi::Unconstrained,
+            &gate, |_| Ok([f64::NAN, 0.0, 0.0]),
+        ),
+        Err(Error::Profile(BoundaryProfileError3::Source(_))),
+    ));
+    let cancelled = CancelGate::new_clock_free();
+    assert_eq!(
+        set_velocity_profile_si(
+            &mut grid, &scaling, maximum, Face3::ZMin, InletFluxSi::Unconstrained,
+            &cancelled, |_| {
+                cancelled.request();
+                Ok([0.0; 3])
+            },
+        ),
+        Err(Error::Profile(BoundaryProfileError3::Cancelled)),
+    );
+    assert_eq!(grid.velocity_profile(Face3::ZMin).unwrap(), profile);
+    assert_eq!(populations(&grid), before);
+    // Failed proposals left the same two-buffer owner reusable.
+    set_velocity_profile_si(
+        &mut grid, &scaling, maximum, Face3::ZMin,
+        InletFluxSi::MeanNormalVelocity(-maximum / 4.0), &gate,
+        |_| Ok([0.0, 0.0, maximum / 2.0]),
+    )
+    .unwrap();
+    assert_eq!(grid.velocity_profile(Face3::ZMin).unwrap(), profile);
+    assert_eq!(populations(&grid), before);
+}

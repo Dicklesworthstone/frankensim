@@ -27354,6 +27354,31 @@ refusal, and six actual native body/fluid steps. Independently authored native
 faces reproduce every population, body state and reservoir receipt exactly,
 and the prescribed inlet accelerates the immersed body.
 
+Accepted material immersed owners also expose `set_velocity_profile_si` and
+`clear_velocity_profile` through the same retained-fluid, settling, dry-body,
+assembly, prescribed-plane and moving-surface interfaces, including shared
+finite-carrier surfaces. Sampling receives fixed world/grid cell centers in
+metres and returns velocity in m/s. Original source-owned scaling, native
+regularized reconstruction and the two reusable plane buffers remain
+authoritative. No converted volume field is allocated.
+`InletFluxSi::MeanNormalVelocity` specifies a signed outward plane mean in m/s;
+inflow is negative on either face. This is a prescribed velocity constraint,
+not density-weighted mass-flow or exact population-flux control. Mixed
+wall/open seams retain the original mean-control refusal.
+
+The source-scaled speed bound applies to the final corrected trace before
+the native buffer swap. Source, conversion, low-Mach, corrected-speed and
+cancellation refusals preserve the previous complete profile. Updates and
+clearing advance no accepted state; the following interval's shared `open`
+receipt owns actual reservoir mass and linear/angular momentum once.
+Profile diagnostics return the native explicitly named lattice units so no
+fallible conversion follows publication. Callers retain coherent-field time,
+spectral resolution and physical inflow validation. Focused native tests cover
+all face orientations, corrected-speed refusal, source/cancellation retry and
+nonuniform shear driving body translation/spin with independent six-component
+momentum balance; the full source-backed continuation/clear regression is in
+`tests/material_immersed/flow.rs`.
+
 ### Inertial ambient capture and complete molecular momentum
 
 `GasRocketState::advance_effusion_exchange_with_ambient` adds prescribed

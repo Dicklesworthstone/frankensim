@@ -70,6 +70,52 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
             .map_err(Error::Flow)
     }
 
+    /// Hold a spatial inlet velocity profile in the fixed world/grid frame.
+    ///
+    /// The callback receives physical cell centers [m] in deterministic z/y/x
+    /// order and returns velocity [m/s] or the original profile source error.
+    /// It runs once per active fluid face node during this call. The caller owns
+    /// the field's time and samples new traces at native tick boundaries.
+    ///
+    /// Native mean-normal control and reconstruction are reused. The FINAL
+    /// corrected trace must satisfy the source-scaled scenario speed bound;
+    /// samples and corrected values also retain the original low-Mach bound.
+    /// Two plane buffers are reused, without a volume-sized converted field.
+    ///
+    /// This advances no populations, body state, force frame or accepted time.
+    /// The following interval's shared `open` receipt owns actual reservoir
+    /// mass and linear/angular momentum. Refusal or cancellation retains the
+    /// entire previous trace. The returned diagnostics are IN LATTICE UNITS,
+    /// with explicit `_lu` field names; no fallible conversion follows publication.
+    pub fn set_velocity_profile_si(
+        &mut self,
+        face: Face3,
+        flux: InletFluxSi,
+        gate: &CancelGate,
+        sample: impl FnMut([f64; 3]) -> Result<[f64; 3], BoundaryProfileError3>,
+    ) -> Result<VelocityProfileReport3, Error> {
+        boundary::set_velocity_profile_si(
+            &mut self.grid,
+            &self.scaling,
+            self.maximum_speed_m_s,
+            face,
+            flux,
+            gate,
+            sample,
+        )
+    }
+
+    /// Clear a held spatial trace and restore its current uniform face target.
+    /// Cancellation preserves the profile. Populations and body history change
+    /// only when a later native interval applies that target.
+    pub fn clear_velocity_profile(&mut self, face: Face3, gate: &CancelGate) -> Result<(), Error> {
+        if gate.is_requested() {
+            return Err(Error::Profile(BoundaryProfileError3::Cancelled));
+        }
+        self.grid.clear_velocity_profile(face);
+        Ok(())
+    }
+
     /// Replace an externally authored uniform fluid volume force [N/m^3].
     ///
     /// This is a force on represented fluid only. The load is held for
