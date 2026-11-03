@@ -188,6 +188,9 @@ pub struct MultiFrictionFrame {
     /// One when a stop's actual endpoint missed its unchanged tolerance and the
     /// step was solved again with headroom; zero on every step that passed first.
     pub obstacle_resolves: usize,
+    /// One when a friction port's actual endpoint missed its unchanged tolerance
+    /// and the step was solved again with headroom; zero on every step that passed first.
+    pub port_resolves: usize,
     /// Jointly accepted nonlinear storage and reaction convergence, when bound.
     /// Refused trials leave this report and every port report unchanged.
     pub nonlinear: Option<super::nonlinear::NonlinearFrictionDiagnostics>,
@@ -252,6 +255,16 @@ pub struct MultiFrictionModalSystem {
     active_set_budget: usize,
     // Accepted steps solved again after a stop's actual-endpoint miss.
     obstacle_resolves: usize,
+    // The same for a friction port: whether the last staging refused at a port's
+    // actual endpoint (reading clears it), whether this trial is the re-solve with
+    // headroom, and the accepted steps that needed it.
+    port_endpoint_missed: bool,
+    port_headroom: bool,
+    port_resolves: usize,
+    // Test only: slip offsets [m] added to the next staged ports' constitutive slip
+    // (one per port checked, popped from the back), to plant an endpoint miss.
+    #[cfg(test)]
+    staging_slip_nudges: Vec<f64>,
     // Each port's accepted slip work by its step's place in a stuck run, and
     // the length of the run its last accepted step belongs to (0: not stuck).
     stick_work: Vec<StickConstraintWork>,
@@ -364,11 +377,16 @@ impl MultiFrictionModalSystem {
             friction_residual: None, endpoint_line: true,
             shear_layers: vec![None; p], mindlin_contacts: vec![None; p],
             active_set_budget: 4 * p + 16, obstacle_resolves: 0,
+            port_endpoint_missed: false, port_headroom: false, port_resolves: 0,
+            #[cfg(test)] staging_slip_nudges: Vec::new(),
             stick_work: vec![StickConstraintWork::default(); p], stuck_runs: vec![0; p] })
     }
     /// Accepted steps whose stop missed at its actual endpoint and was solved
     /// again with headroom, then passed the unchanged tolerance.
     #[must_use] pub fn obstacle_resolves(&self) -> usize { self.obstacle_resolves }
+    /// Accepted steps whose friction port missed at its actual endpoint and was
+    /// solved again with headroom, then passed the unchanged tolerance.
+    #[must_use] pub fn port_resolves(&self) -> usize { self.port_resolves }
     /// Each port's slip work over the accepted samples, in port order.
     #[must_use] pub fn stick_constraint_work(&self) -> &[StickConstraintWork] { &self.stick_work }
     /// Accepted components in their original basis and order.
@@ -697,6 +715,7 @@ impl MultiFrictionModalSystem {
         for contact in self.mindlin_contacts.iter_mut().flatten() { contact.publish(); }
         if let Some(obstacles) = &mut self.obstacles { obstacles.publish(); }
         self.obstacle_resolves += accepted.obstacle_resolves;
+        self.port_resolves += accepted.port_resolves;
         book_stick_work(&mut self.stick_work, &mut self.stuck_runs, &self.staged_ports);
         // Reuse the accepted port allocation through repeated constitutive
         // trials. No fallible work follows mechanical publication.
@@ -933,8 +952,12 @@ impl MultiFrictionModalSystem {
                 contact.check(slip, self.tractions[i], drive.normal_force_n, self.sample_period_s(),
                     self.points[i].config, self.iterations[i])
             } else {
-                scalar::check(&self.points[i].port.law, self.points[i].config,
-                    self.sample_period_s(), drive, self.tractions[i], slip, slip, self.regimes[i], self.iterations[i]).map(|_| ())
+                // All of the tolerance on a first attempt; half of it when the step is being
+                // solved again after an actual-endpoint miss, so the sweep keeps converging
+                // until its prediction leaves room for the endpoint's different rounding.
+                let share = if self.port_headroom { 0.5 } else { 1.0 };
+                scalar::check_within(&self.points[i].port.law, self.points[i].config,
+                    self.sample_period_s(), drive, self.tractions[i], slip, slip, self.regimes[i], self.iterations[i], share).map(|_| ())
             };
             if let Err(error) = checked {
                 if failure.is_none() { failure = Some(error); }
@@ -953,21 +976,34 @@ impl MultiFrictionModalSystem {
     // is the same step solved again from the accepted state with headroom and
     // checked with the UNCHANGED tolerance; it refuses if it misses again. A
     // step that passes the first time is unchanged.
+    //
+    // A friction port is the same. The sweep stops at the first sweep whose ports
+    // all pass the per-port test, so an accepted prediction can sit at the edge of
+    // the tolerance, and the actual endpoint's slip, rounded along another path,
+    // can then miss by a few ulps times the law's slope (about 2e5 N/m for the
+    // hyperbolic law). Only after such a staging miss is the step solved again from
+    // the accepted state with the sweep's per-port test at half the tolerance, and
+    // staged against the UNCHANGED tolerance; a second miss refuses.
     fn stage_multiple(&mut self, external: &[f64], drives: &[FrictionDrive],
         obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
         -> Result<MultiFrictionFrame, ModalFrictionError>
     {
         let first = self.stage_multiple_once(external, drives, obstacle_offsets, gate);
-        let Some(obstacles) = self.obstacles.as_mut() else { return first; };
-        if !obstacles.take_endpoint_miss() { return first; }
-        obstacles.set_headroom(true);
+        let port_miss = std::mem::take(&mut self.port_endpoint_missed);
+        let stop_miss = self.obstacles.as_mut().is_some_and(obstacles::ObstacleSet::take_endpoint_miss);
+        if !port_miss && !stop_miss { return first; }
+        if let Some(obstacles) = &mut self.obstacles { obstacles.set_headroom(stop_miss); }
+        self.port_headroom = port_miss;
         let second = self.stage_multiple_once(external, drives, obstacle_offsets, gate);
         if let Some(obstacles) = &mut self.obstacles {
             obstacles.set_headroom(false);
             obstacles.take_endpoint_miss();
         }
+        self.port_headroom = false;
+        self.port_endpoint_missed = false;
         let mut frame = second?;
-        frame.obstacle_resolves = 1;
+        frame.obstacle_resolves = usize::from(stop_miss);
+        frame.port_resolves = usize::from(port_miss);
         Ok(frame)
     }
 
@@ -1097,8 +1133,22 @@ impl MultiFrictionModalSystem {
                 self.regimes[i] = ModalFrictionRegime::Microslip;
                 (frame.dissipated_j, 0.0, residual, None, Some(frame))
             } else {
-                let (loss, port_declared, residual) = scalar::check(&self.points[i].port.law, self.points[i].config,
-                    dt, drive, self.tractions[i], line_slip, slip, self.regimes[i], self.iterations[i])?;
+                #[cfg(test)]
+                let line_slip = match self.staging_slip_nudges.pop() {
+                    Some(nudge) => finite(line_slip + nudge)?,
+                    None => line_slip,
+                };
+                let checked = scalar::check(&self.points[i].port.law, self.points[i].config,
+                    dt, drive, self.tractions[i], line_slip, slip, self.regimes[i], self.iterations[i]);
+                let (loss, port_declared, residual) = match checked {
+                    Ok(checked) => checked,
+                    Err(error) => {
+                        // Named so that stage_multiple solves this step once more with headroom.
+                        self.port_endpoint_missed = matches!(error,
+                            ModalFrictionError::Network(ModalCouplingError::ContactSolve { .. }));
+                        return Err(error);
+                    },
+                };
                 (loss, port_declared, residual, None, None)
             };
             // An entry step starts the run's account at zero: its own slip is
@@ -1186,7 +1236,7 @@ impl MultiFrictionModalSystem {
             obstacle_residual_loss_j: residual_loss, energy_tolerance_j: tolerance, sweeps,
             friction_residual_energy_j: friction_residual_energy,
             friction_residual_loss_j: friction_residual_loss,
-            active_set_rescues: rescues, obstacle_resolves: 0,
+            active_set_rescues: rescues, obstacle_resolves: 0, port_resolves: 0,
             nonlinear: None, ports: Vec::new(),
         })
     }

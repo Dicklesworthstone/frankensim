@@ -129,6 +129,17 @@ pub(super) fn check(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
     drive: FrictionDrive, traction: f64, line_slip: f64, distance: f64, regime: ModalFrictionRegime,
     iterations: usize) -> Result<(f64, f64, f64), ModalFrictionError>
 {
+    check_within(law, config, dt, drive, traction, line_slip, distance, regime, iterations, 1.0)
+}
+
+/// [`check`] with the sliding force residual bounded by `share` of the declared
+/// tolerance: all of it (1.0) at the actual endpoint, half of it on a prediction
+/// solved with headroom. The sticking-slip bound is not scaled.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_within(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
+    drive: FrictionDrive, traction: f64, line_slip: f64, distance: f64, regime: ModalFrictionRegime,
+    iterations: usize, share: f64) -> Result<(f64, f64, f64), ModalFrictionError>
+{
     let speed = finite(line_slip/dt)?;
     let mut constitutive_residual_n = 0.0;
     let work = finite(traction*distance)?;
@@ -150,7 +161,7 @@ pub(super) fn check(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
             let expected = finite(law.kinetic_coefficient(speed.abs())?
                 *drive.normal_force_n*speed.signum())?;
             constitutive_residual_n = finite(traction-expected)?;
-            let tolerance = force_tolerance(config, traction, expected)?;
+            let tolerance = share*force_tolerance(config, traction, expected)?;
             if constitutive_residual_n.abs() > tolerance {
                 return Err(ModalCouplingError::ContactSolve { residual_n: constitutive_residual_n,
                     tolerance_n: tolerance, iterations }.into());

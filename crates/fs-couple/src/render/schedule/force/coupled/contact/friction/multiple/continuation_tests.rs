@@ -653,3 +653,117 @@ fn g4c_a_mindlin_contact_on_one_port_keeps_the_whole_bank_on_the_displacement_li
         assert!(frame.ports.iter().all(|port| port.end_slip_speed_m_s.is_none()));
     }
 }
+
+// A friction port that misses at its ACTUAL endpoint (MagentaBadger 16225; the
+// stops' pexfp.299 pattern, extended to ports). The sweep stops at the first sweep
+// whose ports pass the per-port test, so a prediction can sit at the edge of the
+// tolerance; the endpoint's slip is rounded along another path, and the
+// hyperbolic law's slope (about 2e5 N/m on a bow station) turns a few ulps of slip
+// into a force residual of the size of the tolerance. Gauntlet: G0 (the staging
+// check keeps the unchanged tolerance; a second miss refuses), G3 (a step that
+// passes the first time is unchanged).
+fn hyperbolic() -> FrictionLaw {
+    FrictionLaw::Hyperbolic {
+        static_mu: 1.2,
+        kinetic_mu: 0.35,
+        characteristic_speed: 0.02,
+    }
+}
+// Port 0 driven fast enough to slide on the first step (at 0.2 m/s the light mode sticks:
+// it needs 0.96 N against a 1.2 N cone), so a slip error at its staging check is a
+// force-law miss and not a sticking-tolerance miss.
+fn sliding_drives() -> [FrictionDrive; 2] {
+    [
+        FrictionDrive { speed_m_s: 1.0, normal_force_n: 1.0 },
+        FrictionDrive { speed_m_s: -0.15, normal_force_n: 1.0 },
+    ]
+}
+
+#[test]
+fn the_per_port_test_at_half_the_tolerance_refuses_what_the_full_tolerance_accepts() {
+    let law = hyperbolic();
+    let mut system = system(law.clone());
+    let drives = two_drives();
+    let dt = system.sample_period_s();
+    // Port 0 slides at 0.05 m/s with a traction 0.9 of its tolerance off the law.
+    let speed = 0.05;
+    let expected = law.kinetic_coefficient(speed).unwrap() * drives[0].normal_force_n;
+    let cfg = system.points[0].config;
+    let residual = 0.9 * (cfg.force_absolute_tolerance_n + cfg.force_relative_tolerance * expected)
+        / (1.0 - 0.9 * cfg.force_relative_tolerance);
+    let traction = expected + residual;
+    let tolerance = scalar::force_tolerance(cfg, traction, expected).unwrap();
+    assert!(
+        (residual / tolerance - 0.9).abs() < 1e-6,
+        "seeded {}",
+        residual / tolerance
+    );
+    system.tractions[0] = traction;
+    system.regimes[0] = ModalFrictionRegime::Sliding;
+    let line0: f64 = system.line(0)[0];
+    system.free_slip[0] = speed * dt + line0 * traction;
+    assert!(system.first_port_failure(&drives, None).unwrap().is_none());
+    system.port_headroom = true;
+    let failure = system.first_port_failure(&drives, None).unwrap();
+    match failure {
+        Some(ModalFrictionError::Network(ModalCouplingError::ContactSolve {
+            residual_n,
+            tolerance_n,
+            ..
+        })) => {
+            assert!((tolerance_n / (0.5 * tolerance) - 1.0).abs() < 1e-6, "{tolerance_n}");
+            assert!(residual_n.abs() > tolerance_n);
+        }
+        other => panic!("expected the half-tolerance refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_port_that_misses_at_its_actual_endpoint_is_solved_again_with_headroom_and_passes() {
+    let drives = sliding_drives();
+    let probe = system(hyperbolic()).step(&[0.0, 0.0], &drives).unwrap().ports[0].regime;
+    assert_eq!(probe, ModalFrictionRegime::Sliding, "the planted miss needs a sliding port");
+    let mut system = system(hyperbolic());
+    // A slip error of 1e-12 m at port 0's staging check moves its residual by about
+    // 9e-10 N (slope N mu' / dt) against a tolerance of about 4e-11 N: a miss at the actual endpoint.
+    system.staging_slip_nudges = vec![1e-12];
+    let frame = system.step(&[0.0, 0.0], &drives).unwrap().clone();
+    assert_eq!(frame.ports[0].regime, ModalFrictionRegime::Sliding);
+    assert_eq!(frame.port_resolves, 1);
+    assert_eq!(frame.obstacle_resolves, 0);
+    assert_eq!(system.port_resolves(), 1);
+    assert!(system.staging_slip_nudges.is_empty());
+    assert!(!system.port_headroom && !system.port_endpoint_missed);
+    // The accepted step passes the UNCHANGED tolerance at its actual endpoint.
+    let port = &frame.ports[0];
+    let tolerance = scalar::force_tolerance(system.points[0].config, port.traction_n,
+        port.traction_n - port.constitutive_residual_n).unwrap();
+    assert!(port.constitutive_residual_n.abs() <= tolerance);
+    // A step that passes the first time is not re-solved and is not counted.
+    let frame = system.step(&[0.0, 0.0], &drives).unwrap();
+    assert_eq!(frame.port_resolves, 0);
+    assert_eq!(system.port_resolves(), 1);
+    assert_eq!(system.samples_rendered(), 2);
+}
+
+#[test]
+fn a_port_that_misses_again_after_the_headroom_re_solve_still_refuses() {
+    let drives = sliding_drives();
+    let mut system = system(hyperbolic());
+    system.staging_slip_nudges = vec![1e-12, 1e-12];
+    let error = system.step(&[0.0, 0.0], &drives).unwrap_err();
+    assert!(
+        matches!(error, ModalFrictionError::Network(ModalCouplingError::ContactSolve { .. })),
+        "{error:?}"
+    );
+    // Today's refusal text, with the friction network's prefix.
+    assert!(error.to_string().contains("modal contact residual"), "{error}");
+    // The refusal publishes nothing, leaves no flag behind, and the step can be retried.
+    assert_eq!(system.samples_rendered(), 0);
+    assert_eq!(system.port_resolves(), 0);
+    assert!(system.staging_slip_nudges.is_empty());
+    assert!(!system.port_headroom && !system.port_endpoint_missed);
+    let frame = system.step(&[0.0, 0.0], &drives).unwrap();
+    assert_eq!(frame.port_resolves, 0);
+    assert_eq!(system.samples_rendered(), 1);
+}

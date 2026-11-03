@@ -1198,6 +1198,8 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         summary.clipped_samples,summary.full_scale_pa);
     // Steps whose stop missed its tolerance at the actual endpoint and passed it after a headroom re-solve.
     eprintln!("obstacle_resolves={}",ready.performance.bank().system().obstacle_resolves());
+    // Steps whose friction port missed its tolerance at the actual endpoint and passed it after a headroom re-solve.
+    eprintln!("port_resolves={}",ready.performance.bank().system().port_resolves());
     // The stick constraint's numerical dissipation on each driven port (MagentaBadger 8297, 8306): the interior sum
     // must absorb, and is flagged when it injects or exceeds the entry steps' work. Positions 2 and 3 of the stuck
     // runs, inside interior_J, precede the creep correction and are printed so a growth in them shows.
