@@ -409,11 +409,9 @@ fn lbm_108_refinement() {
             println!("y={y:.1} u={u:.6e} want={want:.6e}");
         }
     }
-    // FIRST-ORDER interface handoff: the residual deviation is
-    // concentrated at the level jump (2.5% measured, decaying toward
-    // both walls) — consistent with published first-order couplings
-    // at this resolution. The post-collision second-order transfer is
-    // the recorded successor (see CONTRACT).
+    // FIRST-ORDER temporal handoff remains despite conservative directional
+    // reflux. Keep the existing accuracy band; conservation alone does not
+    // establish a higher convergence order (see CONTRACT).
     verdict(
         "lbm-108-poiseuille-through-interface",
         worst / peak < 0.04,
@@ -495,9 +493,9 @@ fn lbm_108_refinement() {
     }
     // Compare effective decay RATES (slopes of ln KE): raw KE ratios
     // compound the rate error exponentially and say nothing physical.
-    // The two-grid interface adds first-order dissipation (5.6%
-    // measured on the rate) — honesty-labeled; the second-order
-    // transfer is the recorded successor alongside the Poiseuille row.
+    // Conservative directional reflux reduces the interface discrepancy but
+    // does not establish second-order temporal transfer. Keep the original
+    // rate, monotonicity and curve-accuracy gates.
     let rate_a = (kes[0].0 / kes[3].0).ln() / 30.0;
     let rate_b = (kes[0].1 / kes[3].1).ln() / 30.0;
     let rate_dev = (rate_a / rate_b - 1.0).abs();

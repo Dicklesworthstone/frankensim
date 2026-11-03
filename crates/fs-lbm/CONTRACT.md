@@ -2933,11 +2933,27 @@ Their presence does not claim native execution or empirical gas validation.
   dimensionless groups and emitting a full `dx`/`dt` unit conversion with
   Evidence provenance is the fuller deliverable.
 - Grid refinement is the TWO-LEVEL 1:2 channel coupling with Dupuis–Chopard
-  non-equilibrium rescaling and a FIRST-ORDER interface handoff: measured
-  2.5% steady Poiseuille deviation at the level jump and 5.6% extra shear-
-  wave decay rate — honesty-labeled in lbm-108; the post-collision
-  (Filippova–Hänel-style) second-order transfer, general octree topologies,
-  and dwr-adaptivity-driven refinement signals are recorded successors.
+  non-equilibrium rescaling and a FIRST-ORDER temporal interface handoff.
+  Actual postcollision populations crossing the ownership plane now enter
+  a reused directional flux register. Both fine substeps carry their original
+  one-quarter cell-volume weight; the resulting mismatch changes only the
+  owned coarse interface row before restriction. Interpolation to the two
+  adjacent coarse centres preserves the line of action of every directional
+  transfer, closing mass, linear momentum and interface torque without a
+  global velocity correction. A scalar residence-time register also corrects
+  coarse acceleration for mass crossing at the first and second fine substeps'
+  quarter- and three-quarter-interval times. Its local Guo-frame update preserves
+  physical nonequilibrium stress; fine collision impulses and prescribed
+  external force keep their native owners. Wall loads and angular transport
+  through the periodic cut remain external exchanges. Compact-pulse/origin/
+  locality, variable-density acceleration and independent force-plus-wall
+  regressions cover these accounts. A focused actual-kernel
+  execution of the unchanged lbm-108 test gives about 0.33% peak Poiseuille
+  error and 0.26% shear-decay-rate discrepancy at its original resolution;
+  its acceptance bands are unchanged. No second-order, energy-conservation
+  or arbitrary-flow stability claim follows. Post-collision second-order
+  transfer, general octree topologies and DWR-driven adaptation remain
+  separate successors.
 - Legacy dense contact-line fixtures remain MODEL-BRACKETED (neutral vs wetting
   fill ghosts; lbm-107 reports the sensitivity band). The opt-in dense 2-D and
   sparse 3-D planar equilibrium-angle closures retain their separate, bounded

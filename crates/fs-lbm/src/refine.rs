@@ -12,6 +12,17 @@
 //! transformed to the physical population frame before rescaling and back to
 //! the receiving level's frame afterward, keeping physical velocity and
 //! viscous stress continuous when the lattice force changes with resolution.
+//! Each direction's actual streamed interface populations are also matched
+//! over the complete coarse step: fine-cell volume is one quarter of coarse
+//! volume, and both fine substeps debit/credit adjacent coarse cells along the
+//! original lattice direction. Their interpolation also preserves the transfer
+//! lever arm, avoiding an artificial interface torque. This local reflux needs
+//! no global velocity correction. A scalar residence-time register corrects
+//! coarse acceleration for mass crossing at the two fine-substep midpoints;
+//! its local Guo-frame update preserves physical nonequilibrium stress.
+//! The first-order temporal handoff remains.
+//! Wall/body-force impulse and angular transport through the periodic cut
+//! remain separate physical exchanges, not quantities removed by reflux.
 
 use crate::core2::{Cell, Grid};
 use crate::{Q, equilibrium};
@@ -33,6 +44,12 @@ pub struct RefinedChannel {
     /// Fine fluid rows owned.
     pub own_f: usize,
     scratch: Vec<[f64; Q]>,
+    /// Difference between the coarse prediction and the actual fine-stream
+    /// exchange, in coarse population units. Reused on every coarse interval.
+    reflux: Vec<[f64; Q]>,
+    /// Coarse mass times its fine-substep residence-time correction. The native
+    /// coarse acceleration converts this scalar into impulse at publication.
+    source_mass_reflux: Vec<f64>,
 }
 
 /// Transfer a pre-collision population between Guo force frames. The physical
@@ -118,6 +135,8 @@ impl RefinedChannel {
             own_c,
             own_f,
             scratch: Vec::new(),
+            reflux: vec![[0.0; Q]; nx_c],
+            source_mass_reflux: vec![0.0; nx_c],
         }
     }
 
@@ -222,6 +241,75 @@ impl RefinedChannel {
         }
     }
 
+    /// Retain the exact populations crossing the coarse ownership boundary.
+    /// These contributions will be replaced by the two fine streams, rather
+    /// than assuming that moment-preserving ghost interpolation matches flux.
+    fn record_coarse_exchange(&mut self) {
+        let nx = self.coarse.nx;
+        for x in 0..nx {
+            self.reflux[x] = [0.0; Q];
+            self.source_mass_reflux[x] = 0.0;
+            for (q, &(ex, ey)) in crate::E.iter().enumerate() {
+                if ey > 0 {
+                    // Removed from this owned cell toward the fine level.
+                    self.reflux[x][q] = self.scratch[self.coarse.idx(x, self.own_c)][q];
+                } else if ey < 0 {
+                    // Entered this owned cell from the predicted coarse ghost.
+                    let source_x = shifted_x(x, -ex, nx);
+                    self.reflux[x][q] = -self.scratch[self.coarse.idx(source_x, self.own_c + 1)][q];
+                }
+            }
+        }
+    }
+
+    /// Fine crossing populations are authoritative. One fine population has
+    /// 1/4 the extensive mass and momentum of a coarse population; accumulating
+    /// both substeps already accounts for the 1:2 time ratio. No extra factor
+    /// of two or tau rescaling belongs in this conservative stream account.
+    /// Coarse and fine owned centres are 1.5 fine widths apart vertically.
+    /// Interpolate the coarse transfer point along that SAME lattice link;
+    /// weights preserve its first spatial moment as well as mass. Otherwise
+    /// debiting only the containing coarse cell creates an interface torque.
+    fn record_fine_exchange(&mut self, source_time_weight: f64) {
+        let nx = self.fine.nx;
+        let accelerated = self.coarse.g != [0.0; 2];
+        for x in 0..nx {
+            for (q, &(ex, ey)) in crate::E.iter().enumerate() {
+                let value = if ey > 0 {
+                    let source_x = shifted_x(x, -ex, nx);
+                    self.scratch[self.fine.idx(source_x, 1)][q]
+                } else if ey < 0 {
+                    self.scratch[self.fine.idx(x, 2)][q]
+                } else {
+                    continue;
+                };
+                // Fine owned x = x+1/2; coarse centres are 2*i+1. The
+                // collinear coarse point has x_c = x+1/2 - 1.5*ex*ey.
+                // Its coarse-index offset is an exact quarter integer.
+                let offset = 2 * (x % 2) as i32 - 1 - 3 * ex * ey;
+                let low = shifted_x(x / 2, offset.div_euclid(4), self.coarse.nx);
+                let high_weight = 0.25 * f64::from(offset.rem_euclid(4));
+                let delta = -0.25 * f64::from(ey) * value;
+                let high = shifted_x(low, 1, self.coarse.nx);
+                for (coarse_x, weight) in [(low, 1.0 - high_weight), (high, high_weight)] {
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let mass = weight * delta;
+                    self.reflux[coarse_x][q] += mass;
+                    // Coarse Guo forcing uses an endpoint trapezoid, placing
+                    // every transferred mass at half the coarse interval.
+                    // Fine links cross at quarter or three-quarter time.
+                    // Correct ONLY that coarse mass-residence impulse at its
+                    // original spatial footprint, with its native acceleration.
+                    if accelerated {
+                        self.source_mass_reflux[coarse_x] += source_time_weight * mass;
+                    }
+                }
+            }
+        }
+    }
+
     /// One coarse step (two fine sub-steps) with the full transfer
     /// cycle.
     pub fn step(&mut self) {
@@ -235,7 +323,9 @@ impl RefinedChannel {
         let ghost_backup: Vec<[f64; Q]> = (0..self.coarse.nx)
             .map(|x| self.coarse.f[self.coarse.idx(x, self.own_c + 1)])
             .collect();
-        self.coarse.step(&mut self.scratch);
+        self.coarse.collide_into(&mut self.scratch);
+        self.record_coarse_exchange();
+        self.coarse.stream_from(&self.scratch);
         for (x, g) in ghost_backup.into_iter().enumerate() {
             let i = self.coarse.idx(x, self.own_c + 1);
             self.coarse.f[i] = g;
@@ -253,10 +343,50 @@ impl RefinedChannel {
             })
             .collect();
         self.set_fine_ghosts(&g_t);
-        self.fine.step(&mut self.scratch);
+        self.fine.collide_into(&mut self.scratch);
+        self.record_fine_exchange(0.25);
+        self.fine.stream_from(&self.scratch);
         self.set_fine_ghosts(&g_half);
-        self.fine.step(&mut self.scratch);
+        self.fine.collide_into(&mut self.scratch);
+        self.record_fine_exchange(-0.25);
+        self.fine.stream_from(&self.scratch);
+        // Restore exactly the directional coarse/fine mismatch at the owned
+        // interface, before restriction prepares the next interval's ghosts.
+        // The population register is only transport. The separate acceleration
+        // register corrects the coarse source's residence time, without another
+        // collision or applying either fine impulse twice.
+        for x in 0..self.coarse.nx {
+            let cell = self.coarse.idx(x, self.own_c);
+            for q in 0..Q {
+                self.coarse.f[cell][q] += self.reflux[x][q];
+            }
+            let impulse = self.coarse.g.map(|g| g * self.source_mass_reflux[x]);
+            if impulse != [0.0; 2] {
+                self.apply_source_reflux(cell, impulse);
+            }
+        }
         self.restrict();
+    }
+
+    /// Shift physical momentum while keeping `f + S(u,F)/2 - feq(rho,u)`
+    /// unchanged. An odd population increment alone would turn the source-time
+    /// correction into artificial nonequilibrium stress at nonzero velocity.
+    fn apply_source_reflux(&mut self, cell: usize, impulse: [f64; 2]) {
+        let state = self.coarse.moments(cell);
+        let velocity = core::array::from_fn(|a| state.u[a] + impulse[a] / state.rho);
+        let force = core::array::from_fn(|a| {
+            self.coarse.g[a].mul_add(state.rho, self.coarse.fext[cell][a])
+        });
+        let before = equilibrium(state.rho, state.u[0], state.u[1]);
+        let after = equilibrium(state.rho, velocity[0], velocity[1]);
+        let f = &mut self.coarse.f[cell];
+        crate::thermal::forcing::reframe2(f, state.u, force, [0.0; 2]);
+        for q in 0..Q {
+            f[q] += after[q] - before[q];
+        }
+        crate::thermal::forcing::reframe2(f, velocity, [0.0; 2], force);
+        // Both the equilibrium difference and source transform have zero mass.
+        f[0] += state.rho - f.iter().sum::<f64>();
     }
 
     /// The x-velocity profile across the WHOLE channel at physical
@@ -331,10 +461,278 @@ impl RefinedChannel {
     }
 }
 
+/// One periodic lattice link without signed-coordinate casts.
+fn shifted_x(x: usize, direction: i32, nx: usize) -> usize {
+    match direction {
+        -1 if x == 0 => nx - 1,
+        -1 => x - 1,
+        1 if x + 1 == nx => 0,
+        1 => x + 1,
+        _ => x,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{CS2, E, W};
+
+    // Owned-cell physical inventory in fine-cell length/area units. Ghosts
+    // never belong to either inventory; velocity includes each native force.
+    fn inventory(channel: &RefinedChannel, origin: [f64; 2]) -> [f64; 6] {
+        let mut sum = [0.0; 6];
+        for (grid, start, end, width, y0) in [
+            (&channel.coarse, 1, channel.own_c + 1, 2.0, -2.0),
+            (
+                &channel.fine,
+                2,
+                channel.own_f + 2,
+                1.0,
+                2.0 * channel.own_c as f64 - 2.0,
+            ),
+        ] {
+            for y in start..end {
+                for x in 0..grid.nx {
+                    let m = grid.moments(grid.idx(x, y));
+                    let mass = width * width * m.rho;
+                    let p = m.u.map(|v| mass * v);
+                    let r = [
+                        width * (x as f64 + 0.5) - origin[0],
+                        y0 + width * (y as f64 + 0.5) - origin[1],
+                    ];
+                    sum[0] += mass;
+                    sum[1] += p[0];
+                    sum[2] += p[1];
+                    sum[3] += r[0] * p[1] - r[1] * p[0];
+                    sum[4] += mass * r[0];
+                    sum[5] += mass * r[1];
+                }
+            }
+        }
+        sum
+    }
+
+    /// G0/G3: a smooth compact pulse crosses the level jump, while neither
+    /// outer walls nor the periodic cut see the disturbance in these steps.
+    /// Both angular and linear momentum must survive a shifted moment origin.
+    /// Checking untouched coarse rows also falsifies a global velocity repair.
+    #[test]
+    fn reflux_preserves_owned_mass_and_both_momenta() {
+        for (rho, tau, sign, origin) in [(0.4, 0.6, 1.0, [0.0; 2]), (1.7, 1.1, -1.0, [3.25, -5.5])]
+        {
+            let mut channel = RefinedChannel::new(16, 8, 16, tau, 0.0);
+            let pulse = |s: f64| {
+                if s.abs() < 1.0 {
+                    (1.0 - s * s).powi(2)
+                } else {
+                    0.0
+                }
+            };
+            for (grid, width, y0) in [
+                (&mut channel.coarse, 2.0, -2.0),
+                (&mut channel.fine, 1.0, 14.0),
+            ] {
+                for y in 0..grid.ny {
+                    for x in 0..grid.nx {
+                        let xp = width * (x as f64 + 0.5);
+                        let yp = y0 + width * (y as f64 + 0.5);
+                        let t = pulse((xp - 15.0) / 5.0) * pulse((yp - 16.0) / 6.0);
+                        let i = grid.idx(x, y);
+                        grid.f[i] =
+                            equilibrium(rho * (1.0 + 0.03 * t), sign * 0.04 * t, -sign * 0.02 * t);
+                    }
+                }
+            }
+            let before = inventory(&channel, origin);
+            let mut coarse_only = channel.coarse.clone();
+            coarse_only.step(&mut Vec::new());
+            channel.step();
+            for y in 1..channel.own_c {
+                for x in 0..channel.coarse.nx {
+                    let i = channel.coarse.idx(x, y);
+                    assert_eq!(channel.coarse.f[i], coarse_only.f[i]);
+                }
+            }
+            channel.step();
+            let after = inventory(&channel, origin);
+            for a in 0..4 {
+                assert!(
+                    (after[a] - before[a]).abs() < 3e-10 * rho,
+                    "inventory {a}: {} -> {}",
+                    before[a],
+                    after[a]
+                );
+            }
+        }
+    }
+
+    /// G1: native collisions own the body impulse, exactly once per local
+    /// timestep. Independently stepped outer-wall neighbourhoods supply the
+    /// only boundary impulse; they cannot see the refinement plane this soon.
+    #[test]
+    fn reflux_retains_physical_force_and_wall_impulse_account() {
+        for (rho, tau, acceleration) in [(0.4, 0.6, 0.002), (1.7, 1.1, -0.003)] {
+            let mut channel = RefinedChannel::new(8, 8, 16, tau, acceleration);
+            let external = -0.35 * rho * acceleration;
+            for (grid, scale) in [(&mut channel.coarse, 1.0), (&mut channel.fine, 0.5)] {
+                for i in 0..grid.f.len() {
+                    grid.fext[i] = [scale * external, 0.0];
+                    if grid.flags[i] != Cell::Wall {
+                        grid.f[i] = forced_state(
+                            rho,
+                            [0.025, 0.0],
+                            [[0.0; 2]; 2],
+                            grid.tau[i],
+                            grid.g,
+                            grid.fext[i],
+                        );
+                    }
+                }
+            }
+            let before = inventory(&channel, [0.0; 2]);
+            let mut coarse_wall = channel.coarse.clone();
+            let mut fine_wall = channel.fine.clone();
+            let coarse_mask: Vec<_> = coarse_wall.flags.iter().map(|f| *f == Cell::Wall).collect();
+            let fine_mask: Vec<_> = fine_wall.flags.iter().map(|f| *f == Cell::Wall).collect();
+            let mut scratch = Vec::new();
+            let mut wall_impulse = [0.0; 2];
+            for interval in 1..=2 {
+                let wall = coarse_wall.step_with_wall_momentum(&mut scratch, &coarse_mask);
+                for a in 0..2 {
+                    wall_impulse[a] += 4.0 * wall.wall_impulse[a];
+                }
+                for _ in 0..2 {
+                    let wall = fine_wall.step_with_wall_momentum(&mut scratch, &fine_mask);
+                    for a in 0..2 {
+                        wall_impulse[a] += wall.wall_impulse[a];
+                    }
+                }
+                channel.step();
+                let after = inventory(&channel, [0.0; 2]);
+                let area = (4 * channel.coarse.nx * channel.own_c + channel.fine.nx * channel.own_f)
+                    as f64;
+                let supplied = interval as f64 * area * (rho * acceleration + external);
+                assert!((after[0] - before[0]).abs() < 3e-10 * rho);
+                for a in 0..2 {
+                    let expected = if a == 0 { supplied } else { 0.0 };
+                    let defect = after[a + 1] - before[a + 1] + wall_impulse[a] - expected;
+                    assert!(defect.abs() < 3e-10 * rho, "axis {a}: {defect}");
+                }
+            }
+        }
+    }
+
+    /// G1/G3: nonuniform density crosses the level jump at unequal rates in
+    /// the two fine substeps. Constant physical acceleration has the known
+    /// whole-domain impulse M*g*dt, irrespective of this internal mass motion.
+    /// Symmetry holds the horizontal mass centroid fixed, so its body torque
+    /// is known as well. Wall impulses/torques come from independent native
+    /// neighbourhoods before the pulse can reach either physical wall.
+    #[test]
+    fn accelerated_density_pulse_closes_impulse_and_torque() {
+        for (rho, acceleration, direction) in [(0.6, 0.003, 1.0), (1.4, -0.002, -1.0)] {
+            let origin = [3.25, -5.5];
+            let mut channel = RefinedChannel::new(16, 8, 16, 0.8, 0.0);
+            channel.coarse.g = [0.0, acceleration];
+            channel.fine.g = [0.0, 0.5 * acceleration];
+            let pulse = |s: f64| {
+                if s.abs() < 1.0 {
+                    (1.0 - s * s).powi(2)
+                } else {
+                    0.0
+                }
+            };
+            for (grid, width, y0) in [
+                (&mut channel.coarse, 2.0, -2.0),
+                (&mut channel.fine, 1.0, 14.0),
+            ] {
+                for y in 0..grid.ny {
+                    for x in 0..grid.nx {
+                        let xp = width * (x as f64 + 0.5);
+                        let yp = y0 + width * (y as f64 + 0.5);
+                        let t = pulse((xp - 15.0) / 5.0) * pulse((yp - 16.0) / 6.0);
+                        let i = grid.idx(x, y);
+                        grid.f[i] = forced_state(
+                            rho * (1.0 + 0.03 * t),
+                            [0.0, direction * 0.025 * t],
+                            [[0.0; 2]; 2],
+                            grid.tau[i],
+                            grid.g,
+                            [0.0; 2],
+                        );
+                    }
+                }
+            }
+            let before = inventory(&channel, origin);
+            let mut walls = [channel.coarse.clone(), channel.fine.clone()];
+            let masks: [Vec<bool>; 2] =
+                core::array::from_fn(|k| walls[k].flags.iter().map(|f| *f == Cell::Wall).collect());
+            let velocities: [Vec<[f64; 2]>; 2] =
+                core::array::from_fn(|k| vec![[0.0; 2]; walls[k].f.len()]);
+            let mut scratch = Vec::new();
+            let mut wall_impulse = [0.0; 3];
+            for interval in 1..=2 {
+                for (k, width, x0, y0, steps) in [(0, 2.0, 1.0, -1.0, 1), (1, 1.0, 0.5, 14.5, 2)] {
+                    let local_origin = [(origin[0] - x0) / width, (origin[1] - y0) / width];
+                    for _ in 0..steps {
+                        let wall = walls[k].step_with_moving_wall_momentum(
+                            &mut scratch,
+                            &masks[k],
+                            &velocities[k],
+                            local_origin,
+                        );
+                        for a in 0..2 {
+                            wall_impulse[a] += width * width * wall.wall_impulse[a];
+                        }
+                        wall_impulse[2] += width * width * width * wall.wall_angular_impulse;
+                    }
+                }
+                channel.step();
+                let after = inventory(&channel, origin);
+                let supplied = interval as f64 * acceleration;
+                for (actual, expected) in [
+                    (after[0] - before[0], 0.0),
+                    (after[1] - before[1] + wall_impulse[0], 0.0),
+                    (after[2] - before[2] + wall_impulse[1], before[0] * supplied),
+                    (after[3] - before[3] + wall_impulse[2], before[4] * supplied),
+                ] {
+                    assert!(
+                        (actual - expected).abs() < 4e-10 * rho,
+                        "{actual} != {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// G0: residence-time impulse must not masquerade as viscous stress.
+    #[test]
+    fn source_residence_shift_preserves_physical_nonequilibrium() {
+        let mut channel = RefinedChannel::new(4, 4, 8, 0.8, 0.0);
+        channel.coarse.g = [0.003, -0.001];
+        let i = channel.coarse.idx(2, channel.own_c);
+        channel.coarse.fext[i] = [0.007, 0.002];
+        let rho = 1.3;
+        let u = [0.04, -0.03];
+        let strain = [[0.001, 0.002], [0.002, -0.0005]];
+        channel.coarse.f[i] = forced_state(
+            rho,
+            u,
+            strain,
+            channel.tau_c,
+            channel.coarse.g,
+            channel.coarse.fext[i],
+        );
+        let impulse = [0.004, -0.002];
+        channel.apply_source_reflux(i, impulse);
+        assert_state(
+            &channel.coarse,
+            i,
+            rho,
+            core::array::from_fn(|a| u[a] + impulse[a] / rho),
+            strain,
+        );
+    }
 
     // Independent Hermite stress reconstruction followed by the Guo
     // half-source transform. D is the symmetric lattice velocity gradient.
