@@ -109,12 +109,17 @@ solid NaOH/NaCN do not supply aqueous ion formation properties. Commercial
 purity, slurry composition, solvation and heat of dilution remain separate.
 
 The [reactive mineral thermochemistry guide](MINERAL_THERMOCHEMISTRY.md)
-documents 18 additional claims for calcite, pyrite, alpha-quartz, gypsum and
-anhydrite, including bounded calcite/pyrite Cp curves and nine literal anhydrite
+documents solid-phase reference data for calcite, dolomite, pyrite, alpha-quartz,
+gypsum and anhydrite, including bounded carbonate/pyrite Cp curves and nine literal anhydrite
 Cp points through 1000 K. It preserves their separate USGS and JANAF reference
 conventions and reuses the existing quartz caloric profile. Gypsum's hydrated
 reference is distinct from anhydrite and from commercial wallboard records;
 no missing gypsum Cp, aqueous properties or dehydration kinetics are inferred.
+Compatible USGS H⁺, Ca²⁺, Mg²⁺ and bicarbonate profiles supply aqueous data
+and close the calcite and dolomite bicarbonate-neutralization heat balances.
+The executable `mineral_processing` consumer reports both net ionic acid demand
+and standard reaction heat from those actual source packs; see the guide for
+pack order, the 298.15 K reference state and the separate Cp domains.
 
 ### Carbonate calcination and iron-oxide oxidation
 

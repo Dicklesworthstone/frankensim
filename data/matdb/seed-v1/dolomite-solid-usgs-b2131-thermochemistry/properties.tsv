@@ -1,0 +1,72 @@
+frankensim.matdb-source.v1
+observation	identity	Rhombohedral dolomite CaMg(CO3)2, pure solid reference	USGS Bulletin 2131 printed pages 25 and 269	Both tables list formula weight 184.401 g/mol. Page 269 identifies rhombohedral dolomite and a 298.15-1100 K table; this pack retains only 298.15-500 K. It does not identify dolomitic ore composition, nonstoichiometric carbonate, porosity, moisture or a producer specimen.
+observation	reference-values	Dolomite standard reference values at 298.15 K	USGS Bulletin 2131 printed page 25, dolomite row	The selected point table gives formation enthalpy -2324.5 kJ/mol and absolute entropy 155.2 J/(mol K), with the reported uncertainty magnitudes retained separately. These are point claims at 298.15 K and 100000 Pa. Entropy comes from page 25; it is not silently replaced by the more finely printed 155.18 J/(mol K) in the separate temperature table on page 269.
+observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 25	The dolomite row reports magnitudes 1.5 kJ/mol for formation enthalpy and 0.3 J/(mol K) for entropy. Page 3 describes the calorimetric uncertainty convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. The two dimensional metadata claims retain the reported magnitudes. Main claims keep Unstated confidence semantics; these magnitudes are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.
+observation	caloric	Selected literal USGS dolomite heat capacities	USGS Bulletin 2131 printed page 269, dolomite temperature table	Cp in J/(mol K) is 157.51 at 298.15 K, 158.06 at 300 K, 183.54 at 400 K and 201.89 at 500 K. Divide these entries by 0.184401 kg/mol for the mass-specific knots. Linear interpolation is an authored approximation with unstated source and interpolation uncertainty; no additional measured temperatures are invented. The source heat-content column is (H(T)-H(298.15))/T in J/(mol K), with 0.97 at 300 K and 43.61 at 400 K; these are not unscaled enthalpy increments.
+observation	scope	USGS B2131 elemental reference convention at one bar	USGS Bulletin 2131 printed pages 1 and 3	The source specifies 100000 Pa, stable condensed elemental forms and ideal elemental gases at the stated temperature. Page 1 states that elemental data combine JANAF, CODATA and separate USGS calcium measurements. The required source-elemental-reference-usgs-b2131=1 selector preserves this convention; it does not assert identity with a JANAF evaluation. The pack alone does not supply aqueous species properties, activity coefficients, equilibrium conversion, dissolution rate, mineral liberation, or specimen-specific acid demand.
+scalar	molar-mass	identity,scope	mass	184.401	g/mol	constant
+scalar	formation-enthalpy	identity,reference-values,reported-uncertainty,scope	hf	-2324.5	kJ/mol	tabulated
+scalar	standard-entropy	identity,reference-values,reported-uncertainty,scope	s0	155.2	J/mol/K	tabulated
+scalar	formation-uncertainty	reported-uncertainty,scope	hf_uncertainty	1.5	kJ/mol	tabulated
+scalar	entropy-uncertainty	reported-uncertainty,scope	s_uncertainty	0.3	J/mol/K	tabulated
+curve	specific-heat	identity,caloric,scope	cp	temperature	K	J/kg/K	298.15:854.171072824984549,300:857.153703071024552,400:995.330827923926563,500:1094.84221885998431	linear
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	formation-uncertainty	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+uncertainty	specific-heat	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	500	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	formation-uncertainty	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	specific-heat	temperature	298.15	500	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	formation-uncertainty	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	specific-heat	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	formation-uncertainty	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	specific-heat	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	formation-uncertainty	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	specific-heat	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	formation-uncertainty	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	specific-heat	phase	1	1	1
+validity	molar-mass	polymorph	1	1	1
+validity	formation-enthalpy	polymorph	1	1	1
+validity	standard-entropy	polymorph	1	1	1
+validity	formation-uncertainty	polymorph	1	1	1
+validity	entropy-uncertainty	polymorph	1	1	1
+validity	specific-heat	polymorph	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	formation-uncertainty	pure	1	1	1
+validity	entropy-uncertainty	pure	1	1	1
+validity	specific-heat	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	formation-uncertainty	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	specific-heat	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	formation-uncertainty	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1
+validity	specific-heat	specimen	0	0	1

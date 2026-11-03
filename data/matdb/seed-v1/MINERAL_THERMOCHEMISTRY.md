@@ -1,12 +1,13 @@
 # Reactive mineral thermochemistry
 
-The five solid-phase profiles below add 18 claims through the existing `matdb-pack` compiler
+The six solid-phase profiles below supply reference data through the existing `matdb-pack` compiler
 and catalog. They complement mineral density and hardness references with
 phase-specific molar quantities needed for thermal and chemical accounting.
 
 | Profile | Molar mass, kg/mol | Formation enthalpy at 298.15 K, J/mol | Standard entropy, J/(mol K) | Cp domain |
 | --- | ---: | ---: | ---: | --- |
 | `calcite-solid-usgs-b2131-thermochemistry` | 0.100087 | −1207400 | 91.71 | 298.15–500 K |
+| `dolomite-solid-usgs-b2131-thermochemistry` | 0.184401 | −2324500 | 155.2 | 298.15–500 K |
 | `pyrite-solid-janaf-thermochemistry` | 0.119967 | −171544 | 52.916 | 298.15–500 K |
 | `quartz-alpha-janaf-standard-reference` | 0.0600843 | −910857 | 41.463 | No new Cp claim |
 | `gypsum-solid-usgs-b2131-thermochemistry` | 0.172172 | −2023000 | 193.8 | Not supplied |
@@ -18,6 +19,8 @@ J/(kg K) with the selected source's formula weight. Their piecewise-linear
 interpolation is an authored approximation with unstated uncertainty. Quartz
 already has a NIST alpha-quartz caloric profile; this increment supplies only
 its missing standard reference quantities instead of duplicating that curve.
+Dolomite similarly retains four Cp observations and separately dimensioned
+metadata for the source's reported enthalpy and entropy uncertainty magnitudes.
 
 ## Source identities and conventions
 
@@ -59,6 +62,7 @@ All solid-phase profiles above require typed temperature and pressure, `source-p
 `source-pure-species=1`, `source-standard-state=1`,
 `engineering-reference-model=1`, and `source-specimen-qualified=0`. The
 additional phase selectors are `source-phase-calcite=1`,
+`source-phase-dolomite=1`,
 `source-phase-pyrite=1`, `source-phase-quartz-alpha=1`,
 `source-phase-gypsum=1`, or `source-phase-anhydrite=1` respectively.
 Each profile's own elemental-reference selector is mandatory.
@@ -95,7 +99,7 @@ dehydration rate or a complete reaction heat without compatible participants.
 
 ## Aqueous references for calcite neutralization
 
-Three additional profiles supply 13 claims from the same USGS Bulletin 2131
+Three additional profiles supply aqueous data from the same USGS Bulletin 2131
 reference convention as calcite. The primary rows are on printed pages 7, 6,
 and 15 of the [report](https://pubs.usgs.gov/bul/2131/report.pdf), respectively.
 All values below apply at 298.15 K and 100000 Pa.
@@ -159,3 +163,57 @@ two-proton dissolved-CO2 endpoint remains a different reaction requiring its
 own complete source set; bicarbonate data are not relabeled as CO2(aq).
 Finite-concentration activities, heat of mixing, pH selection, gas transfer
 and thermal plant behavior require additional models.
+
+## Dolomite gangue neutralization and heating
+
+`dolomite-solid-usgs-b2131-thermochemistry` and
+`magnesium-ion-aqueous-usgs-b2131` add 11 claims from the same
+[USGS Bulletin 2131](https://pubs.usgs.gov/bul/2131/report.pdf) convention.
+The dolomite point quantities come from printed page 25; Mg²⁺ comes from page 8.
+Dolomite's formula mass is 184.401 g/mol. The magnesium profile supplies
+24.305 g/mol, formation enthalpy −467.0 kJ/mol, and conventional ionic entropy
+−137.0 J/(mol K), all at 298.15 K and 100000 Pa. It requires the same aqueous
+unit-activity, infinite-dilution and H⁺ zero selectors as calcium. Its negative
+ionic entropy is not relabeled as an absolute entropy.
+
+The source's reported uncertainty magnitudes are retained as dimensional
+metadata: 1.5 kJ/mol and 0.3 J/(mol K) for dolomite, and 0.6 kJ/mol and
+4.0 J/(mol K) for Mg²⁺. The claims retain `Unstated` confidence semantics.
+No independent Gaussian uncertainties or propagated reaction intervals are
+inferred from these magnitudes.
+
+Together with the existing H⁺, Ca²⁺ and bicarbonate profiles, these records
+complete the declared gangue acid-consumption endpoint:
+
+`CaMg(CO3)2(dolomite) + 2 H+(aq) -> Ca[2+](aq) + Mg[2+](aq) + 2 HCO3[-](aq)`
+
+The source-backed reaction enthalpy is **−65300 J/mol of reaction extent**.
+For 184.401 kg of actually reacted pure dolomite, the consumer reports
+**−65.3 MJ**, consumes 2.016 kg H⁺ and forms 40.078 kg Ca²⁺, 24.305 kg Mg²⁺
+and 122.034 kg bicarbonate. For an inventory of 10 mol dolomite and 6 mol H⁺,
+the existing exact stoichiometry allows at most 3 mol extent, leaves 7 mol
+dolomite and gives −195900 J at that ceiling. This acid-limited amount is
+an availability bound, not a predicted reaction rate or equilibrium endpoint.
+
+Compile the five profiles with `xtask matdb-pack`, then run:
+
+```bash
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --reaction dolomite-bicarbonate-neutralization \
+  /tmp/mining-materials/dolomite-solid-usgs-b2131-thermochemistry.fsmatpk \
+  /tmp/mining-materials/hydrogen-ion-aqueous-usgs-b2131.fsmatpk \
+  /tmp/mining-materials/calcium-ion-aqueous-usgs-b2131.fsmatpk \
+  /tmp/mining-materials/magnesium-ion-aqueous-usgs-b2131.fsmatpk \
+  /tmp/mining-materials/bicarbonate-ion-aqueous-usgs-b2131.fsmatpk 184.401
+cargo test -p xtask --test mining_dolomite_sources
+```
+
+Dolomite also supplies Cp at 298.15, 300, 400 and 500 K from printed page 269:
+157.51, 158.06, 183.54 and 201.89 J/(mol K), normalized by 0.184401 kg/mol.
+The authored linear interpolation gives 185248.45 J for 2 kg heated from
+300 to 400 K. The independently printed heat-content column gives 186040.21 J,
+a difference of about 0.426%. The 0.5% regression tolerance describes the
+coarse interpolation; it is not certified uncertainty. Page 25's point
+entropy of 155.2 is retained separately from page 269's more finely printed
+155.18 J/(mol K). The Cp domain ends at 500 K; decomposition, dissolution
+kinetics and off-reference reaction heat require separate models.

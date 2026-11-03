@@ -5,8 +5,9 @@
 //! Select another endpoint by prefixing `--reaction magnesite-calcination` or
 //! `--reaction magnetite-oxidation`; pack arguments must match that equation's
 //! explicit source identities. Copper oxide reduction and calcite bicarbonate
-//! neutralization modes take four packs. The calcite endpoint uses compatible
-//! USGS aqueous-ion reference data, with bicarbonate retained in solution.
+//! neutralization modes take four packs; dolomite bicarbonate neutralization
+//! takes five. The carbonate endpoints use compatible USGS aqueous-ion
+//! reference data, with bicarbonate retained in solution.
 //! `--help` lists every supported reaction and required pack order.
 //! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
 //! entropy, Gibbs energy and log equilibrium constants at the same source state.
@@ -42,7 +43,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 12] = [
+const REACTIONS: [&str; 13] = [
     "lime-hydration",
     "magnesite-calcination",
     "magnetite-oxidation",
@@ -55,6 +56,7 @@ const REACTIONS: [&str; 12] = [
     "sulfur-trioxide-hydration",
     "pyrite-to-acid",
     "calcite-bicarbonate-neutralization",
+    "dolomite-bicarbonate-neutralization",
 ];
 const USAGE: &str = "usage: mineral_processing [--equilibrium] [--reaction NAME] PACK... REACTED_PURE_REACTANT_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
 
@@ -273,6 +275,32 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
             ],
             equation: "CaCO3(calcite) + H+(aq) -> Ca[2+](aq) + HCO3[-](aq), bicarbonate endpoint",
         },
+        "dolomite-bicarbonate-neutralization" => ReactionCase {
+            reaction: MineralReaction::DolomiteBicarbonateNeutralization,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "dolomite-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "calcium-ion-aqueous-usgs-b2131",
+                "magnesium-ion-aqueous-usgs-b2131",
+                "bicarbonate-ion-aqueous-usgs-b2131",
+            ],
+            species: &[
+                "CaMg(CO3)2(s)",
+                "H+(aq)",
+                "Ca[2+](aq)",
+                "Mg[2+](aq)",
+                "HCO3[-](aq)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "CaMg(CO3)2(dolomite) + 2 H+(aq) -> Ca[2+](aq) + Mg[2+](aq) + 2 HCO3[-](aq), bicarbonate endpoint",
+        },
         _ => return Err(format!("unknown reaction {name:?}; use --help for source order").into()),
     })
 }
@@ -337,6 +365,13 @@ fn reference_point(
     if pack_id == "calcite-solid-usgs-b2131-thermochemistry" {
         point = point.with_quantity(
             "source-phase-calcite",
+            QuantitySpec::dimensional(Dims::NONE),
+            1.0,
+        )?;
+    }
+    if pack_id == "dolomite-solid-usgs-b2131-thermochemistry" {
+        point = point.with_quantity(
+            "source-phase-dolomite",
             QuantitySpec::dimensional(Dims::NONE),
             1.0,
         )?;
