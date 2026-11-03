@@ -357,3 +357,51 @@ spatial modes, swirl, flapping/cyclic pitch, radial-flow section forces,
 wake contraction, ground effect, transported skewed far-wake geometry and
 physical calibration remain outside the model. Native verification is not
 a full Cargo/DSR, cross-platform, browser or real-time gate.
+
+## Coupled steady axial and angular annular momentum
+
+`swirl::bemt_solve` explicitly selects two-component steady induction on
+the original `Rotor` geometry and section law. It solves
+`dT/dr = 4 pi rho F r (V+w) w` and
+`dQ/dr = 4 pi rho F r^2 (V+w) u`, with actual blade-relative velocity
+`(V+w, Omega r-u)`. The same Prandtl factor enters both equations. These
+are the propeller-sign forms of Moriarty and Hansen,
+[NREL/TP-500-36881](https://www.nlr.gov/docs/fy05osti/36881.pdf),
+equations (9) and (10); the kinematics also appear in NASA's
+[high-lift propeller design presentation](https://ntrs.nasa.gov/citations/20160007767),
+slides 11 and 13. Tangential induction changes the solved blade loads;
+it is not calculated afterward from unchanged axial-model forces.
+
+The `Solution` uses the existing thrust/required-torque and CT/CQ/J
+conventions. Every accepted station exposes both actual induced velocities,
+blade loads, original dimensional momentum fluxes and their unrepaired
+residuals. Power separates `V T`, `sum(w dT)`, `sum((u/r) dQ)`, and
+section profile drag from the signed shaft input `Omega Q`. Swirl power
+is angular wake transfer, not rotor heating. Its floating-point power
+closure remains a section-model identity, not whole-fluid passivity.
+
+Bounded local Newton iteration admits at most 256 original force evaluations
+per station, counting Jacobian probes and rejected line-search trials.
+Separate relative force and torque gates use only a 16-epsilon original
+section-force floor at physical zero crossings. No momentum residual is
+replaced, normalized to zero, or assigned to dissipation. Explicit station
+seeds support branch continuation; cold starts scale with local rotational
+speed and neighboring stations inherit angular velocity. There is no
+global stalled-root uniqueness claim or tolerance escalation.
+
+Positive density and shaft speed, nonnegative incident axial speed, positive
+disk throughflow, forward blade-relative rotation, the native section-angle
+domain and ordinary braking `a <= 0.4` remain admission requirements.
+Signed windmilling and torque-free rotation are supported. Invalid geometry,
+controls, seeds, arithmetic, physical branches and exhausted iteration refuse
+without returning a partial rotor. Existing `bemt_solve` and its goldens retain
+their original no-swirl behavior; this separate API supersedes only the
+absence of a steady angular-momentum option.
+
+Six tests in `tests/swirl_momentum.rs` independently reconstruct blade forces,
+Prandtl losses and both SI momentum balances, including manufactured hover
+and braking equilibria, torque-free windmilling, the weak-loading no-swirl
+limit, density/speed scaling, actual swirl-induced force changes, and bounded
+and inadmissible solves. They do not establish transient swirl, resolved
+helical wake, radial pressure, contraction, skew-flow swirl, compressibility,
+historical rotor calibration, full-workspace or cross-platform validation.

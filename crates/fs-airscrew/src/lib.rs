@@ -23,6 +23,7 @@ use fs_math::det;
 
 pub mod dynamic_inflow;
 pub mod oblique;
+pub mod swirl;
 
 /// Station-count cap (refusals at cap AND cap+1).
 pub const MAX_STATIONS: usize = 64;
