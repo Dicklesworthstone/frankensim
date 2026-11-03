@@ -21932,6 +21932,98 @@ stationary support reactions, continuation and transactional retry. This
 remains an isolated frozen-pose event, not persistent contact, collision
 discovery or a simultaneous-contact island.
 
+## Coulomb friction in isolated native rod/rigid impacts
+
+`rod_motion::RodMotion::apply_rigid_frictional_impact` resolves the normal and
+both tangent impulses together through the existing full three-dimensional
+contact law. Its published `RodRigidFrictionalContact`,
+`RodRigidFrictionalControls`, `RodRigidFrictionalReport` and
+`RodRigidFrictionalError` API remains intact. The explicit coefficient is
+resolved by the caller for this instantaneous event. Original contact-frame
+admission supplies the same axes for observations and reciprocal impulses.
+
+The complete symmetric three-by-three mobility retains eccentric arms, full
+tensors, normal/tangent cross terms and supported rod coordinates. The report
+retains separate original rod and rigid mobilities and the actual world
+impulse. Nonzero tangential impulses require collocated original witnesses
+within the declared geometry tolerance; no midpoint relocates either source.
+The actual relative work is checked independently against the original contact
+owner's work as well as actual native kinetic change and total impact loss.
+
+Normal, frictional and aggregate rod/body events now share original point
+preparation and an all-node native momentum/work audit. Compensated relative
+translation is formed once before projecting onto contact axes. The audit
+checks actual stored linear and angular increments, stationary support forces
+and couples, measured endpoint velocities and polarized kinetic work. It keeps
+small loss against large common drift and refuses an unresolved native impulse
+even when an angular response remains representable.
+
+Both continuing states publish after final cancellation and balance checks.
+No-op states retain their bits; accepted events retain original geometry,
+material history, clocks, step count and compensated drift remainder.
+Constitutive iteration, passivity and determinacy refusals remain with
+`fs_contact::frictional_multicontact::solve_frictional_contacts`. Total
+mechanical loss does not imply a thermal partition, persistent friction history,
+coefficient evolution, collision discovery or contact duration.
+
+The original four friction test groups remain intact. Additional independent
+spatial-mass sticking, large-common-drift loss and rotational-approach refusal
+fixtures exercise the shared preparation and audit together with the
+simultaneous normal-contact extension.
+
+## Simultaneous native rod and finite rigid-body normal impacts
+
+`rod_motion::RodMotion::apply_rigid_normal_impacts` resolves a localized set of
+normal contacts between one original native rod and one finite rigid body.
+Each witness keeps its own original material-node attachment, body-frame rigid
+arm, normal, proximity and restitution. The complete Delassus matrix includes
+the shared finite body's translation and full tensor rotation. Contacts on the
+same rod node also share its admitted translational coordinates and full
+central tensor response, including eccentric material-node offsets. Different
+rod nodes retain their original independent instantaneous inertia.
+
+Inverse-inertia actions are prepared once per contact direction. Matrix
+assembly then has quadratic contact-sized work and storage, without a full rod
+matrix or repeated factorization. The adapter checks its 64-contact limit and
+the original caller variable cap before allocation. Cancellation is polled
+through preparation, assembly, native staging and publication.
+
+The existing `fs_contact::multicontact::solve_normal_impacts` owns the globally
+coupled normal complementarity and declared restitution. Initially separating
+but geometrically active rows remain in the solve; another row can make them
+close. Restitution choices that inject assembled kinetic energy refuse. Contact
+ordering does not replace the simultaneous law with a sequential collision
+scheme. The original PSD determinacy witness is retained: a `UniqueVelocity`
+result has a representative impulse vector, not unique local contact loads or
+heat allocations.
+
+All selected impulses act through one original `apply_point_impulses` call.
+Their equal and opposite world actions and body-frame moments accumulate with
+compensation into one native rigid `apply_momentum_impulse` call. The moment
+uses the same rounded physical impulse passed to the rod. The shared native
+audit checks actual stored changes across all affected rod nodes, original
+stationary support reactions, finite-body linear/angular momentum, every
+post-event relative normal speed, and compensated pair kinetic change against
+relative impulse work and the original contact loss.
+
+Both continuing states publish only after final cancellation and all physical
+acceptance bounds pass. Poses, material history, physical clocks, accepted-step
+counts and compensated drift state are preserved. An empty or all-zero event
+still admits the original controls and returns unchanged states without native
+impulse receipts. No collision discovery, event timing, penetration repair,
+friction law, multiple rigid participants or thermal loss destination is
+inferred.
+
+`tests/rod_motion/rigid_impact/multiple.rs` checks analytic two-attachment
+collisions at plastic, partial and elastic restitution; falsifies sequential
+pair treatment; checks initially separating activation and contact permutation;
+compares eccentric same-node response to an independent six-by-six spatial
+mass solve with full rigid tensors and rotated/boosted geometry; retains
+redundant-load determinacy and stationary support reactions; and exercises
+native continuation, passivity refusal, budgets, cancellation, retry and no-ops.
+This extends the native flexible-body transfer in `frankensim-b8bxd.9.3` while
+keeping the existing contact owner responsible for the constitutive law.
+
 ## Source-backed ellipsoidal fluid carriers
 
 `material_immersed::RetainedFluidEllipsoids` binds one centered uniform

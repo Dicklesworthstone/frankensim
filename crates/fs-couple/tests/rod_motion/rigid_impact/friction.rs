@@ -2,6 +2,7 @@
 
 use super::*;
 use fs_contact::frictional_multicontact::FrictionalContactConfig;
+use fs_couple::rod_motion::impulse::RodPointImpulse;
 use fs_couple::rod_motion::rigid_impact::friction::{
     RodRigidFrictionalContact, RodRigidFrictionalControls, RodRigidFrictionalError,
     RodRigidFrictionalReport,
@@ -463,4 +464,273 @@ fn inactive_cancelled_and_late_refused_friction_events_leave_both_states_unchang
         retry.0.linear_momenta_kg_m_s()
     );
     assert_eq!(first.1, retry.1);
+}
+
+fn friction_controls() -> RodRigidFrictionalControls {
+    RodRigidFrictionalControls {
+        impact: impact_controls(),
+        contact: FrictionalContactConfig {
+            maximum_contacts: 1,
+            velocity_tolerance: 1e-12,
+            impulse_tolerance: 1e-12,
+            complementarity_tolerance: 1e-12,
+            energy_tolerance: 1e-12,
+            ..Default::default()
+        },
+    }
+}
+fn friction_witness(mu: f64, restitution: f64) -> RodRigidFrictionalContact {
+    RodRigidFrictionalContact {
+        geometry: witness(1, restitution),
+        tangent_world: [0.0, 1.0, 0.0],
+        friction_coefficient: mu,
+    }
+}
+fn matrix_vector(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|i| (0..3).map(|j| m[i][j] * v[j]).sum())
+}
+
+#[test]
+fn full_spatial_mass_cross_terms_match_independent_dense_solve_in_rotated_frames() {
+    let gate = CancelGate::new();
+    let model = Arc::new(
+        eccentric_source()
+            .into_spatial_motion_model(RodRootBoundary::Free, &gate)
+            .unwrap(),
+    );
+    let node = model.inertia()[1];
+    let center = node.center_of_mass_body_m();
+    let tensor = node.inertia_com_body_kg_m2();
+    let rod_mass = fs_mbd::articulated::SpatialInertia::new(
+        node.mass_kg(),
+        Vec3::new(center[0], center[1], center[2]),
+        Mat3 {
+            m: std::array::from_fn(|c| tensor[c / 3][c % 3]),
+        },
+    )
+    .unwrap()
+    .matrix()
+    .unwrap();
+    let rod_factor = fs_la::factor::lu(&rod_mass.m, 6).unwrap();
+    let body_tensor = Mat3 {
+        m: [0.07, 0.01, -0.004, 0.01, 0.09, 0.006, -0.004, 0.006, 0.08],
+    };
+    let mass = MassProperties::from_inertia_tensor(2.4, BodyVec::ZERO, body_tensor).unwrap();
+    let body_factor = fs_la::factor::lu(&body_tensor.m, 3).unwrap();
+    let rod_arm = [0.03, -0.06, 0.04];
+    let body_arm = [0.1, -0.08, 0.06];
+    let mut response = [[0.0; 6]; 3];
+    let mut mobility = [[0.0; 3]; 3];
+    for j in 0..3 {
+        let direction = std::array::from_fn(|c| f64::from(c == j));
+        let torque = cross(rod_arm, direction);
+        response[j] = [
+            torque[0],
+            torque[1],
+            torque[2],
+            direction[0],
+            direction[1],
+            direction[2],
+        ];
+        rod_factor.solve(&mut response[j]);
+        let rod_flow = add(
+            [response[j][3], response[j][4], response[j][5]],
+            cross([response[j][0], response[j][1], response[j][2]], rod_arm),
+        );
+        let mut body_omega = cross(body_arm, direction);
+        body_factor.solve(&mut body_omega);
+        let body_flow = add(
+            direction.map(|x| x / mass.mass()),
+            cross(body_omega, body_arm),
+        );
+        for i in 0..3 {
+            mobility[i][j] = rod_flow[i] + body_flow[i];
+        }
+    }
+    assert!(
+        mobility[0][1].abs() > 1e-3,
+        "fixture must exercise coupled directions"
+    );
+    let impulse = [1.0, -0.03, 0.02];
+    let relative = matrix_vector(mobility, impulse).map(|x| -x);
+    assert!(relative[0] < 0.0);
+    let rod_omega = [0.2, -0.1, 0.3];
+    let body_omega = [-0.3, 0.1, 0.2];
+    let body_velocity = [0.1, 0.2, -0.05];
+    let rod_velocity = sub(
+        add(relative, add(body_velocity, cross(body_omega, body_arm))),
+        cross(rod_omega, rod_arm),
+    );
+    let jump: [f64; 6] = std::array::from_fn(|i| (0..3).map(|j| response[j][i] * impulse[j]).sum());
+    for (q, translation, boost) in [
+        (So3::identity(), [0.0; 3], [0.0; 3]),
+        (
+            So3::exp(So3Tangent::new(Vec3::new(0.4, -0.2, 0.3))).unwrap(),
+            [0.7, -0.2, 0.1],
+            [0.4, -0.3, 0.2],
+        ),
+    ] {
+        for angle in [0.0_f64, 0.7] {
+            let basis = [
+                [1.0, 0.0, 0.0],
+                [0.0, angle.cos(), angle.sin()],
+                [0.0, -angle.sin(), angle.cos()],
+            ];
+            let mut pose = model.initial_pose();
+            for i in 0..2 {
+                pose.positions_m[i] = add(rotate(q, pose.positions_m[i]), translation);
+                pose.frames[i] = q;
+            }
+            let rod = SpatialRodMotion::new_spatial(
+                model.clone(),
+                pose,
+                &[add(rotate(q, rod_velocity), boost); 2],
+                &[rod_omega; 2],
+                0.0,
+                1e-12,
+                &gate,
+            )
+            .unwrap();
+            let position = add(
+                rotate(q, sub(add([0.8, 0.0, 0.0], rod_arm), body_arm)),
+                translation,
+            );
+            let rigid = RigidBodyState::new(
+                Pose::new(vector(position), orientation(q)).unwrap(),
+                vector(add(rotate(q, body_velocity), boost)).scale(mass.mass()),
+                mass.angular_momentum_body_checked(vector(body_omega))
+                    .unwrap(),
+            )
+            .unwrap();
+            let contact = RodRigidFrictionalContact {
+                geometry: RodRigidNormalContact {
+                    point_body_m: rod_arm,
+                    rigid_arm_body_m: body_arm,
+                    normal_world: rotate(q, basis[0]),
+                    ..witness(1, 0.0)
+                },
+                tangent_world: rotate(q, basis[1]),
+                friction_coefficient: 0.15,
+            };
+            let (next, finite, report) = rod
+                .apply_rigid_frictional_impact(rigid, mass, contact, friction_controls(), &gate)
+                .unwrap();
+            for i in 0..3 {
+                for j in 0..3 {
+                    let expected: f64 = (0..3)
+                        .flat_map(|a| {
+                            (0..3).map(move |b| basis[i][a] * mobility[a][b] * basis[j][b])
+                        })
+                        .sum();
+                    near(
+                        report.rod_inverse_mass_kg_inverse[i][j]
+                            + report.rigid_inverse_mass_kg_inverse[i][j],
+                        expected,
+                        3e-11,
+                    );
+                }
+            }
+            let world_impulse = report
+                .frame_world
+                .iter()
+                .zip(report.contact.impulses[0])
+                .fold([0.0; 3], |s, (axis, j)| add(s, axis.map(|x| x * j)));
+            vector_near(world_impulse, rotate(q, impulse), 4e-11);
+            vector_near(report.relative_velocity_after_m_s, [0.0; 3], 4e-11);
+            vector_near(
+                next.velocities_m_s().unwrap()[1],
+                add(
+                    rotate(q, add(rod_velocity, [jump[3], jump[4], jump[5]])),
+                    boost,
+                ),
+                4e-11,
+            );
+            vector_near(
+                next.angular_velocities_body_rad_s().unwrap()[1],
+                add(rod_omega, [jump[0], jump[1], jump[2]]),
+                4e-11,
+            );
+            vector_near(
+                array(finite.linear_momentum_world()),
+                sub(array(rigid.linear_momentum_world()), rotate(q, impulse)),
+                4e-11,
+            );
+            vector_near(
+                array(finite.angular_momentum_body()),
+                sub(
+                    array(rigid.angular_momentum_body()),
+                    cross(body_arm, impulse),
+                ),
+                4e-11,
+            );
+            near(report.energy_residual_j, 0.0, 4e-11);
+        }
+    }
+}
+
+#[test]
+fn small_frictional_loss_survives_large_common_translation() {
+    let gate = CancelGate::new();
+    let common = 1_073_741_824.0;
+    let base = free_rod([common, common, 0.0]);
+    let m = base.model().inertia()[1].mass_kg();
+    let mut bounds = friction_controls();
+    bounds.impact.impulse.work_tolerance_j = 1e-6;
+    bounds.impact.velocity_tolerance_m_s = 1e-6;
+    let (rod, _) = base
+        .apply_point_impulses(
+            &[RodPointImpulse {
+                node: 1,
+                point_body_m: [0.0; 3],
+                linear_world_n_s: [-1.0, 1.0, 0.0],
+                couple_world_nm_s: [0.0; 3],
+            }],
+            bounds.impact.impulse,
+            &gate,
+        )
+        .unwrap();
+    let mass = inertia(m);
+    let rigid = RigidBodyState::new(
+        Pose::new(BodyVec::new(0.8, 0.0, 0.0), UnitQuaternion::IDENTITY).unwrap(),
+        BodyVec::new(m * common + 1.0, m * common - 1.0, 0.0),
+        BodyVec::ZERO,
+    )
+    .unwrap();
+    let (next, finite, report) = rod
+        .apply_rigid_frictional_impact(rigid, mass, friction_witness(0.25, 0.0), bounds, &gate)
+        .unwrap();
+    near(report.contact.dissipated_energy, 1.4375 / m, 2e-10);
+    near(report.kinetic_energy_change_j, -1.4375 / m, 2e-10);
+    near(report.work_energy_residual_j, 0.0, 2e-10);
+    let before =
+        rod.observe([0.0; 3]).unwrap().kinetic_energy_j + rigid.kinetic_energy(mass).unwrap();
+    let after =
+        next.observe([0.0; 3]).unwrap().kinetic_energy_j + finite.kinetic_energy(mass).unwrap();
+    assert!(((after - before) - report.kinetic_energy_change_j).abs() > 0.1);
+}
+
+#[test]
+fn rotational_approach_cannot_be_hidden_as_noop_by_common_translation() {
+    let gate = CancelGate::new();
+    let base = free_rod([0.0; 3]);
+    let model = Arc::new(base.model().clone());
+    let rod = RodMotion::new(
+        model.clone(),
+        model.initial_pose(),
+        &[[1e20, 0.0, 0.0]; 2],
+        &[[0.0, 0.0, 1.0]; 2],
+        0.0,
+        &gate,
+    )
+    .unwrap();
+    let mass = inertia(model.inertia()[1].mass_kg());
+    let rigid = body(mass, [0.8, 0.1, 0.0], [1e20, 0.0, 0.0]);
+    let mut contact = friction_witness(0.2, 0.4);
+    contact.geometry.point_body_m = [0.0, 0.1, 0.0];
+    assert!(matches!(
+        rod.apply_rigid_frictional_impact(rigid, mass, contact, friction_controls(), &gate),
+        Err(RodRigidFrictionalError::Impact(RodRigidImpactError::Rod(
+            RodMotionError::ImpulseBalance { .. }
+        )))
+    ));
 }

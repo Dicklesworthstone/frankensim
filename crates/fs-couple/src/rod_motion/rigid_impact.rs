@@ -1,12 +1,15 @@
-//! Isolated normal impacts between a native rod attachment and a finite body.
+//! Reciprocal impacts between native rod attachments and a finite body.
 //!
 //! The collision owner supplies an oriented pair of material witnesses. This
-//! frozen-pose event uses the existing scalar contact law and both participants'
-//! original impulse owners. It does not select simultaneous contacts, advance
-//! time, repair penetration or turn restitution loss into thermal heat.
+//! frozen-pose event uses the existing contact laws and both participants'
+//! original impulse owners. It does not advance time, repair penetration or
+//! turn restitution/friction loss into thermal heat.
 
-/// Full normal/tangential Coulomb impacts on the same continuing participants.
+/// Coupled normal and two-direction Coulomb impulses at one original attachment.
 pub mod friction;
+
+/// Simultaneous normal impacts sharing the original rod and finite rigid body.
+pub mod multiple;
 
 use super::impulse::{RodImpulseControls, RodImpulseReport, RodPointImpulse};
 use super::{
@@ -71,6 +74,42 @@ pub struct RodRigidImpactReport {
     pub rigid_impulse: Option<ImpulseReceipt>,
 }
 
+/// Actual pair changes after the original impulse owners have staged a response.
+/// The same audit applies to scalar, frictional and aggregate point impulses.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RodRigidImpulseBalance {
+    pub kinetic_energy_change_j: f64,
+    pub relative_impulse_work_j: f64,
+    pub work_energy_residual_j: f64,
+    pub energy_residual_j: f64,
+    pub linear_momentum_residual_n_s: [f64; 3],
+    pub angular_momentum_residual_nm_s: [f64; 3],
+}
+
+pub(super) struct PreparedRodRigidPoint {
+    pub(super) node: usize,
+    pub(super) normal_world: [f64; 3],
+    pub(super) central_arm_body_m: [f64; 3],
+    pub(super) gap_m: f64,
+    pub(super) separation_world_m: [f64; 3],
+    pub(super) rod_inverse_mass_kg_inverse: f64,
+    pub(super) rigid_inverse_mass_kg_inverse: f64,
+    pub(super) relative_velocity_world_m_s: [Dd; 3],
+}
+
+/// Constitutive targets and aggregate native body response, without a second
+/// mechanics update. Relative work uses the original impulse/velocity pairing.
+pub(super) struct RigidImpulseAudit {
+    pub(super) before: RigidBodyState,
+    pub(super) after: RigidBodyState,
+    pub(super) inertia: MassProperties,
+    pub(super) expected_linear_world_n_s: [f64; 3],
+    pub(super) expected_angular_body_nm_s: [f64; 3],
+    pub(super) relative_work_j: Dd,
+    pub(super) dissipated_energy_j: f64,
+    pub(super) velocity_defect_m_s: f64,
+}
+
 #[derive(Debug)]
 pub enum RodRigidImpactError {
     Invalid(&'static str),
@@ -103,7 +142,7 @@ impl From<NormalImpactError> for RodRigidImpactError {
 }
 impl core::fmt::Display for RodRigidImpactError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "rod/rigid normal impact: {self:?}")
+        write!(f, "rod/rigid impact: {self:?}")
     }
 }
 impl std::error::Error for RodRigidImpactError {}
@@ -132,89 +171,25 @@ impl<I: RodMotionInertia> RodMotion<I> {
         controls: RodRigidImpactControls,
         gate: &CancelGate,
     ) -> Result<(Self, RigidBodyState, RodRigidImpactReport), RodRigidImpactError> {
-        checkpoint(gate)?;
-        if !controls.geometry_tolerance_m.is_finite()
-            || controls.geometry_tolerance_m < 0.0
-            || [
-                controls.velocity_tolerance_m_s,
-                controls.impulse.linear_tolerance_n_s,
-                controls.impulse.angular_tolerance_nm_s,
-                controls.impulse.work_tolerance_j,
-            ]
-            .iter()
-            .any(|x| !x.is_finite() || *x <= 0.0)
-        {
-            return Err(RodRigidImpactError::Invalid(
-                "invalid impact acceptance bounds",
-            ));
-        }
-        finite(&controls.impulse.balance_origin_m)?;
-        finite(&witness.point_body_m)?;
-        let node = witness.node;
-        let k = *self
-            .kinetics
-            .get(node)
-            .ok_or(RodRigidImpactError::Invalid("absent rod node"))?;
-        let frame = self.pose.frames[node];
-        let body_arm = vector(witness.rigid_arm_body_m);
-        let body_mobility = rigid.directional_effective_mass(
-            rigid_inertia,
-            body_arm,
-            vector(witness.normal_world),
-        )?;
-        let normal = components(body_mobility.unit_direction_world);
-        let normal_body = rotate(frame.inverse(), normal)?;
-        let central_arm = sub(witness.point_body_m, k.center);
-        let torque_axis = cross(central_arm, normal_body);
-        let mut rod_mobility = 0.0;
-        for c in 0..3 {
-            if !self.model.fixed_positions()[node][c] {
-                rod_mobility += normal[c] * normal[c] / k.mass;
-            }
-        }
-        if !self.model.fixed_frames()[node] {
-            rod_mobility += dot(torque_axis, k.omega(torque_axis)?);
-        }
-        if !rod_mobility.is_finite() || rod_mobility < 0.0 {
-            return Err(RodRigidImpactError::Invalid(
-                "unrepresentable rod point mobility",
-            ));
-        }
-        let body_before = rigid.point_kinematics(rigid_inertia, body_arm)?;
-        let point = add(
-            self.pose.positions_m[node],
-            rotate(frame, witness.point_body_m)?,
-        );
-        let separation = sub(point, components(body_before.point_world));
-        finite(&separation)?;
-        let gap = dot(normal, separation);
-        let tangent = std::array::from_fn(|c| separation[c] - gap * normal[c]);
-        if norm(tangent) > controls.geometry_tolerance_m {
-            return Err(RodRigidImpactError::Invalid(
-                "contact witnesses must share their normal line",
-            ));
-        }
-        let speed = self.relative_normal_speed(
-            node,
-            central_arm,
-            rigid,
-            rigid_inertia,
-            witness.rigid_arm_body_m,
-            normal,
-        )?;
+        let prepared = self.prepare_rigid_point(rigid, rigid_inertia, witness, controls, gate)?;
+        let node = prepared.node;
+        let normal = prepared.normal_world;
+        let gap = prepared.gap_m;
+        let speed = project_velocity(normal, prepared.relative_velocity_world_m_s)?;
         let contact = solve_normal_impact(NormalImpactInput {
             gap,
             activation_tolerance: witness.activation_tolerance_m,
             relative_normal_speed: speed,
-            inverse_effective_mass: rod_mobility + body_mobility.inverse_mass_kg_inverse,
+            inverse_effective_mass: prepared.rod_inverse_mass_kg_inverse
+                + prepared.rigid_inverse_mass_kg_inverse,
             restitution: witness.restitution,
         })?;
         let mut report = RodRigidImpactReport {
             contact,
             gap_m: gap,
             unit_normal_world: normal,
-            rod_inverse_mass_kg_inverse: rod_mobility,
-            rigid_inverse_mass_kg_inverse: body_mobility.inverse_mass_kg_inverse,
+            rod_inverse_mass_kg_inverse: prepared.rod_inverse_mass_kg_inverse,
+            rigid_inverse_mass_kg_inverse: prepared.rigid_inverse_mass_kg_inverse,
             relative_normal_speed_before_m_s: speed,
             relative_normal_speed_after_m_s: speed,
             endpoint_velocity_residual_m_s: 0.0,
@@ -244,66 +219,234 @@ impl<I: RodMotionInertia> RodMotion<I> {
         )?;
         let rigid_report = rigid.apply_impulse_at_body_point(
             rigid_inertia,
-            body_arm,
+            vector(witness.rigid_arm_body_m),
             vector(impulse.map(|x| -x)),
         )?;
         let next_rigid = rigid_report.state_after;
         checkpoint(gate)?;
-        let after_speed = next_rod.relative_normal_speed(
-            node,
-            central_arm,
-            next_rigid,
-            rigid_inertia,
-            witness.rigid_arm_body_m,
+        let after_speed = project_velocity(
             normal,
+            next_rod.relative_point_velocity(
+                node,
+                prepared.central_arm_body_m,
+                next_rigid,
+                rigid_inertia,
+                witness.rigid_arm_body_m,
+            )?,
         )?;
         report.relative_normal_speed_after_m_s = after_speed;
         report.endpoint_velocity_residual_m_s = after_speed - contact.relative_normal_speed_after;
-
-        let actual = audit_native_pair(
-            self,
-            &next_rod,
-            rigid,
-            rigid_inertia,
-            &rigid_report,
-            &rod_report,
-            node,
-            impulse,
-            controls.impulse,
-        )?;
-        let kinetic = actual.kinetic_energy_change_j;
         let relative_work = dd(contact.normal_impulse) * (dd(speed) + dd(after_speed)) * dd(0.5);
-        report.kinetic_energy_change_j = kinetic.to_f64();
-        report.relative_impulse_work_j = relative_work.to_f64();
-        report.work_energy_residual_j = (kinetic - relative_work).to_f64();
-        report.energy_residual_j = (kinetic + dd(contact.dissipated_energy)).to_f64();
+        let balance = self.audit_rigid_impulse(
+            &next_rod,
+            &rod_report,
+            RigidImpulseAudit {
+                before: rigid,
+                after: next_rigid,
+                inertia: rigid_inertia,
+                expected_linear_world_n_s: impulse.map(|x| -x),
+                expected_angular_body_nm_s: components(rigid_report.angular_impulse_body),
+                relative_work_j: relative_work,
+                dissipated_energy_j: contact.dissipated_energy,
+                velocity_defect_m_s: report.endpoint_velocity_residual_m_s.abs(),
+            },
+            controls,
+            gate,
+        )?;
+        report.kinetic_energy_change_j = balance.kinetic_energy_change_j;
+        report.relative_impulse_work_j = balance.relative_impulse_work_j;
+        report.work_energy_residual_j = balance.work_energy_residual_j;
+        report.energy_residual_j = balance.energy_residual_j;
+        report.linear_momentum_residual_n_s = balance.linear_momentum_residual_n_s;
+        report.angular_momentum_residual_nm_s = balance.angular_momentum_residual_nm_s;
+        report.rod_impulse = Some(rod_report);
+        report.rigid_impulse = Some(rigid_report);
+        checkpoint(gate)?;
+        Ok((next_rod, next_rigid, report))
+    }
 
-        report.linear_momentum_residual_n_s = actual.linear_momentum_residual_n_s;
-        report.angular_momentum_residual_nm_s = actual.angular_momentum_residual_nm_s;
+    pub(super) fn prepare_rigid_point(
+        &self,
+        rigid: RigidBodyState,
+        inertia: MassProperties,
+        witness: RodRigidNormalContact,
+        controls: RodRigidImpactControls,
+        gate: &CancelGate,
+    ) -> Result<PreparedRodRigidPoint, RodRigidImpactError> {
+        checkpoint(gate)?;
+        validate_controls(controls)?;
+        finite(&witness.point_body_m)?;
+        let node = witness.node;
+        let k = *self
+            .kinetics
+            .get(node)
+            .ok_or(RodRigidImpactError::Invalid("absent rod node"))?;
+        let frame = self.pose.frames[node];
+        let body_arm = vector(witness.rigid_arm_body_m);
+        let body_mobility =
+            rigid.directional_effective_mass(inertia, body_arm, vector(witness.normal_world))?;
+        let normal = components(body_mobility.unit_direction_world);
+        let normal_body = rotate(frame.inverse(), normal)?;
+        let central_arm = sub(witness.point_body_m, k.center);
+        let torque_axis = cross(central_arm, normal_body);
+        let mut rod_mobility = 0.0;
+        for c in 0..3 {
+            if !self.model.fixed_positions()[node][c] {
+                rod_mobility += normal[c] * normal[c] / k.mass;
+            }
+        }
+        if !self.model.fixed_frames()[node] {
+            rod_mobility += dot(torque_axis, k.omega(torque_axis)?);
+        }
+        if !rod_mobility.is_finite() || rod_mobility < 0.0 {
+            return Err(RodRigidImpactError::Invalid(
+                "unrepresentable rod point mobility",
+            ));
+        }
+        let body_before = rigid.point_kinematics(inertia, body_arm)?;
+        let point = add(
+            self.pose.positions_m[node],
+            rotate(frame, witness.point_body_m)?,
+        );
+        let separation = sub(point, components(body_before.point_world));
+        finite(&separation)?;
+        let gap = dot(normal, separation);
+        let tangent = std::array::from_fn(|c| separation[c] - gap * normal[c]);
+        if norm(tangent) > controls.geometry_tolerance_m {
+            return Err(RodRigidImpactError::Invalid(
+                "contact witnesses must share their normal line",
+            ));
+        }
+        let relative_velocity = self.relative_point_velocity(
+            node,
+            central_arm,
+            rigid,
+            inertia,
+            witness.rigid_arm_body_m,
+        )?;
+        Ok(PreparedRodRigidPoint {
+            node,
+            normal_world: normal,
+            central_arm_body_m: central_arm,
+            gap_m: gap,
+            separation_world_m: separation,
+            rod_inverse_mass_kg_inverse: rod_mobility,
+            rigid_inverse_mass_kg_inverse: body_mobility.inverse_mass_kg_inverse,
+            relative_velocity_world_m_s: relative_velocity,
+        })
+    }
+
+    /// Audit the actual stored increments of every affected native node and
+    /// the shared finite body. Aggregate events must pass their SUMMED body
+    /// impulse, rather than sequentially publishing per-contact body states.
+    pub(super) fn audit_rigid_impulse(
+        &self,
+        next_rod: &Self,
+        rod_report: &RodImpulseReport,
+        body: RigidImpulseAudit,
+        controls: RodRigidImpactControls,
+        gate: &CancelGate,
+    ) -> Result<RodRigidImpulseBalance, RodRigidImpactError> {
+        let mut kinetic = dd(0.0);
+        let mut linear = [dd(0.0); 3];
+        let mut angular = [dd(0.0); 3];
+        let origin = controls.impulse.balance_origin_m;
+        for node in 0..self.linear.len() {
+            checkpoint(gate)?;
+            let support = &rod_report.support_impulses[node];
+            if self.linear[node] == next_rod.linear[node]
+                && self.spin[node] == next_rod.spin[node]
+                && support.linear_n_s == [0.0; 3]
+                && support.angular_nm_s == [0.0; 3]
+            {
+                continue;
+            }
+            let k = self.kinetics[node];
+            let frame = self.pose.frames[node];
+            let dp = difference(next_rod.linear[node], self.linear[node]);
+            let ds = difference(next_rod.spin[node], self.spin[node]);
+            let old_omega = k.omega(self.spin[node])?;
+            let next_omega = k.omega(next_rod.spin[node])?;
+            for c in 0..3 {
+                kinetic = kinetic
+                    + dp[c] * (dd(self.linear[node][c]) + dd(next_rod.linear[node][c])) * dd(0.5)
+                        / dd(k.mass)
+                    + ds[c] * (dd(old_omega[c]) + dd(next_omega[c])) * dd(0.5);
+                linear[c] = linear[c] + dp[c] - dd(support.linear_n_s[c]);
+            }
+            let node_arm = sub(self.pose.positions_m[node], origin);
+            let centroid_arm = add(node_arm, rotate(frame, k.center)?);
+            let orbital = cross_dd(centroid_arm, dp);
+            let spin_world = rotate(frame, ds.map(Dd::to_f64))?;
+            let support_orbital = cross_dd(node_arm, support.linear_n_s.map(dd));
+            for c in 0..3 {
+                angular[c] = angular[c] + orbital[c] + dd(spin_world[c])
+                    - support_orbital[c]
+                    - dd(support.angular_nm_s[c]);
+            }
+        }
+        let p = components(body.before.linear_momentum_world());
+        let next_p = components(body.after.linear_momentum_world());
+        let spin = components(body.before.angular_momentum_body());
+        let next_spin = components(body.after.angular_momentum_body());
+        let dp = difference(next_p, p);
+        let ds = difference(next_spin, spin);
+        let omega = components(
+            body.inertia
+                .angular_velocity_body_checked(body.before.angular_momentum_body())?,
+        );
+        let next_omega = components(
+            body.inertia
+                .angular_velocity_body_checked(body.after.angular_momentum_body())?,
+        );
+        let arm = sub(components(body.before.pose().position_world()), origin);
+        let orbital = cross_dd(arm, dp);
+        let spin_world = components(
+            body.before
+                .pose()
+                .orientation()
+                .rotate_body_to_world(vector(ds.map(Dd::to_f64))),
+        );
+        for c in 0..3 {
+            kinetic = kinetic
+                + dp[c] * (dd(p[c]) + dd(next_p[c])) * dd(0.5) / dd(body.inertia.mass())
+                + ds[c] * (dd(omega[c]) + dd(next_omega[c])) * dd(0.5);
+            linear[c] = linear[c] + dp[c];
+            angular[c] = angular[c] + orbital[c] + dd(spin_world[c]);
+        }
+        let report = RodRigidImpulseBalance {
+            kinetic_energy_change_j: kinetic.to_f64(),
+            relative_impulse_work_j: body.relative_work_j.to_f64(),
+            work_energy_residual_j: (kinetic - body.relative_work_j).to_f64(),
+            energy_residual_j: (kinetic + dd(body.dissipated_energy_j)).to_f64(),
+            linear_momentum_residual_n_s: linear.map(Dd::to_f64),
+            angular_momentum_residual_nm_s: angular.map(Dd::to_f64),
+        };
+        let body_linear_error =
+            std::array::from_fn(|c| (dp[c] - dd(body.expected_linear_world_n_s[c])).to_f64());
+        let body_spin_error =
+            std::array::from_fn(|c| (ds[c] - dd(body.expected_angular_body_nm_s[c])).to_f64());
+        finite(&report.linear_momentum_residual_n_s)?;
+        finite(&report.angular_momentum_residual_nm_s)?;
+        finite(&body_linear_error)?;
+        finite(&body_spin_error)?;
         finite(&[
-            report.endpoint_velocity_residual_m_s,
+            body.velocity_defect_m_s,
             report.kinetic_energy_change_j,
             report.relative_impulse_work_j,
             report.work_energy_residual_j,
             report.energy_residual_j,
         ])?;
-        let linear_defect = actual.linear_defect_n_s;
-        let angular_defect = actual.angular_defect_nm_s;
-        let velocity_defect = report.endpoint_velocity_residual_m_s.abs();
+        let linear_defect = norm(report.linear_momentum_residual_n_s).max(norm(body_linear_error));
+        let angular_defect = norm(report.angular_momentum_residual_nm_s).max(norm(body_spin_error));
+        let velocity_defect = body.velocity_defect_m_s.abs();
         let work_defect = report
             .energy_residual_j
             .abs()
             .max(report.work_energy_residual_j.abs());
-        if [
-            linear_defect,
-            angular_defect,
-            velocity_defect,
-            work_defect,
-            report.kinetic_energy_change_j,
-            report.relative_impulse_work_j,
-        ]
-        .iter()
-        .any(|x| !x.is_finite())
+        if [linear_defect, angular_defect, velocity_defect, work_defect]
+            .iter()
+            .any(|x| !x.is_finite())
             || linear_defect > controls.impulse.linear_tolerance_n_s
             || angular_defect > controls.impulse.angular_tolerance_nm_s
             || velocity_defect > controls.velocity_tolerance_m_s
@@ -316,21 +459,18 @@ impl<I: RodMotionInertia> RodMotion<I> {
                 work_defect_j: work_defect,
             });
         }
-        report.rod_impulse = Some(rod_report);
-        report.rigid_impulse = Some(rigid_report);
         checkpoint(gate)?;
-        Ok((next_rod, next_rigid, report))
+        Ok(report)
     }
 
-    fn relative_normal_speed(
+    pub(super) fn relative_point_velocity(
         &self,
         node: usize,
         central_arm: [f64; 3],
         rigid: RigidBodyState,
         inertia: MassProperties,
         rigid_arm: [f64; 3],
-        normal: [f64; 3],
-    ) -> Result<f64, RodRigidImpactError> {
+    ) -> Result<[Dd; 3], RodRigidImpactError> {
         let k = self.kinetics[node];
         let rod_rotational = rotate(
             self.pose.frames[node],
@@ -346,116 +486,48 @@ impl<I: RodMotionInertia> RodMotion<I> {
         let rigid_p = components(rigid.linear_momentum_world());
         // Subtract common translation before adding rotation: constructing two
         // large absolute point velocities would erase small angular motion.
-        let mut speed = dd(0.0);
-        for c in 0..3 {
-            speed = speed
-                + dd(normal[c])
-                    * (dd(self.linear[node][c]) / dd(k.mass) - dd(rigid_p[c]) / dd(inertia.mass())
-                        + dd(rod_rotational[c])
-                        - dd(rigid_rotational[c]));
-        }
-        let speed = speed.to_f64();
-        finite(&[speed])?;
-        Ok(speed)
+        let velocity: [Dd; 3] = std::array::from_fn(|c| {
+            dd(self.linear[node][c]) / dd(k.mass) - dd(rigid_p[c]) / dd(inertia.mass())
+                + dd(rod_rotational[c])
+                - dd(rigid_rotational[c])
+        });
+        finite(&velocity.map(Dd::to_f64))?;
+        Ok(velocity)
     }
-}
-
-/// Law-neutral balance of the two ORIGINAL native impulse updates. Normal and
-/// frictional contacts share actual stored increments, eccentric support moments
-/// and compensated work; no commanded-impulse loss identity replaces this audit.
-struct NativePairAudit {
-    kinetic_energy_change_j: Dd,
-    linear_momentum_residual_n_s: [f64; 3],
-    angular_momentum_residual_nm_s: [f64; 3],
-    linear_defect_n_s: f64,
-    angular_defect_nm_s: f64,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn audit_native_pair<I: RodMotionInertia>(
-    rod: &RodMotion<I>,
-    next_rod: &RodMotion<I>,
-    rigid: RigidBodyState,
-    rigid_inertia: MassProperties,
-    rigid_report: &ImpulseReceipt,
-    rod_report: &RodImpulseReport,
-    node: usize,
-    impulse: [f64; 3],
-    controls: RodImpulseControls,
-) -> Result<NativePairAudit, RodRigidImpactError> {
-    let k = rod.kinetics[node];
-    let frame = rod.pose.frames[node];
-    let next_rigid = rigid_report.state_after;
-    let rod_dp = difference(next_rod.linear[node], rod.linear[node]);
-    let rod_ds = sub(next_rod.spin[node], rod.spin[node]);
-    let body_p = components(rigid.linear_momentum_world());
-    let next_body_p = components(next_rigid.linear_momentum_world());
-    let body_dp = difference(next_body_p, body_p);
-    let body_spin = components(rigid.angular_momentum_body());
-    let next_body_spin = components(next_rigid.angular_momentum_body());
-    let body_ds = sub(next_body_spin, body_spin);
-    let old_omega = k.omega(rod.spin[node])?;
-    let next_omega = k.omega(next_rod.spin[node])?;
-    let body_omega = components(rigid_report.point_kinematics_before.angular_velocity_body);
-    let next_body_omega = components(rigid_report.point_kinematics_after.angular_velocity_body);
-    let mut kinetic = dd(0.0);
-    for c in 0..3 {
-        kinetic = kinetic
-            + rod_dp[c] * (dd(rod.linear[node][c]) + dd(next_rod.linear[node][c])) * dd(0.5)
-                / dd(k.mass)
-            + body_dp[c] * (dd(body_p[c]) + dd(next_body_p[c])) * dd(0.5)
-                / dd(rigid_inertia.mass())
-            + (dd(next_rod.spin[node][c]) - dd(rod.spin[node][c]))
-                * (dd(old_omega[c]) + dd(next_omega[c]))
-                * dd(0.5)
-            + (dd(next_body_spin[c]) - dd(body_spin[c]))
-                * (dd(body_omega[c]) + dd(next_body_omega[c]))
-                * dd(0.5);
-    }
-    let support = &rod_report.support_impulses[node];
-    let linear =
-        std::array::from_fn(|c| (rod_dp[c] + body_dp[c] - dd(support.linear_n_s[c])).to_f64());
-    let origin = controls.balance_origin_m;
-    let node_arm = sub(rod.pose.positions_m[node], origin);
-    let centroid_arm = add(node_arm, rotate(frame, k.center)?);
-    let rigid_arm = sub(components(rigid.pose().position_world()), origin);
-    let rod_spin_world = rotate(frame, rod_ds)?;
-    let rigid_spin_world = components(
-        rigid
-            .pose()
-            .orientation()
-            .rotate_body_to_world(vector(body_ds)),
-    );
-    let rod_orbital = cross_dd(centroid_arm, rod_dp);
-    let body_orbital = cross_dd(rigid_arm, body_dp);
-    let support_orbital = cross_dd(node_arm, support.linear_n_s.map(dd));
-    let angular = std::array::from_fn(|c| {
-        (rod_orbital[c] + body_orbital[c] + dd(rod_spin_world[c]) + dd(rigid_spin_world[c])
-            - support_orbital[c]
-            - dd(support.angular_nm_s[c]))
-        .to_f64()
-    });
-    let body_linear_error = std::array::from_fn(|c| (body_dp[c] + dd(impulse[c])).to_f64());
-    let expected_spin = components(rigid_report.angular_impulse_body);
-    let body_spin_error = std::array::from_fn(|c| {
-        (dd(next_body_spin[c]) - dd(body_spin[c]) - dd(expected_spin[c])).to_f64()
-    });
-    finite(&linear)?;
-    finite(&angular)?;
-    finite(&body_linear_error)?;
-    finite(&body_spin_error)?;
-    finite(&[kinetic.to_f64()])?;
-    Ok(NativePairAudit {
-        kinetic_energy_change_j: kinetic,
-        linear_momentum_residual_n_s: linear,
-        angular_momentum_residual_nm_s: angular,
-        linear_defect_n_s: norm(linear).max(norm(body_linear_error)),
-        angular_defect_nm_s: norm(angular).max(norm(body_spin_error)),
-    })
 }
 
 fn dd(x: f64) -> Dd {
     Dd::from_f64(x)
+}
+pub(super) fn validate_controls(
+    controls: RodRigidImpactControls,
+) -> Result<(), RodRigidImpactError> {
+    if !controls.geometry_tolerance_m.is_finite()
+        || controls.geometry_tolerance_m < 0.0
+        || [
+            controls.velocity_tolerance_m_s,
+            controls.impulse.linear_tolerance_n_s,
+            controls.impulse.angular_tolerance_nm_s,
+            controls.impulse.work_tolerance_j,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x <= 0.0)
+    {
+        return Err(RodRigidImpactError::Invalid(
+            "invalid impact acceptance bounds",
+        ));
+    }
+    finite(&controls.impulse.balance_origin_m)?;
+    Ok(())
+}
+pub(super) fn project_velocity(
+    axis: [f64; 3],
+    velocity: [Dd; 3],
+) -> Result<f64, RodRigidImpactError> {
+    let speed = (dd(axis[0]) * velocity[0] + dd(axis[1]) * velocity[1] + dd(axis[2]) * velocity[2])
+        .to_f64();
+    finite(&[speed])?;
+    Ok(speed)
 }
 fn difference(a: [f64; 3], b: [f64; 3]) -> [Dd; 3] {
     std::array::from_fn(|c| dd(a[c]) - dd(b[c]))
