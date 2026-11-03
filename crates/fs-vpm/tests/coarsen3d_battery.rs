@@ -184,7 +184,8 @@ fn caps_and_determinism() {
         coarsen_oldest(&mut wake, 0).unwrap_err().code,
         "coarsen-invalid"
     );
-    // Determinism golden over the coarsened digest.
+    // Determinism golden over the coarsened digest. The six-moment rule
+    // intentionally changes strengths to retain angular as well as linear impulse.
     let run = || {
         let mut w = built_wake(32);
         coarsen_oldest(&mut w, 8).unwrap();
@@ -197,7 +198,7 @@ fn caps_and_determinism() {
     // Separate area/circulation normalization changes final rounding in this pin.
     // Independent impulse/frame/refusal oracles validate the merge physics.
     assert_eq!(
-        a, "26d8bfdb64df343cc9e3a7a4940dc528471c96dae8e1a49d70f5154f1ba15f82",
+        a, "00c5b0211bad7fff5c468d964ad619371b777bb04a70e42daf8a2d965f56cc25",
         "coarsen golden moved — determinism regression or an \
          intentional merge-rule change requiring the golden-bump protocol"
     );
@@ -430,12 +431,12 @@ fn sheared_planar_wake(length_scale: f64) -> FilamentWake {
         WakeRateCertificate {
             shed_hz: 120.0,
             n_stations: 3,
-            max_rows: 12,
+            max_rows: 24,
         },
-        nodes(6),
+        nodes(12),
     )
     .unwrap();
-    wake.rows = (0..6)
+    wake.rows = (0..12)
         .map(|i| ShedRow {
             nodes: nodes(i),
             gamma: vec![
@@ -444,7 +445,7 @@ fn sheared_planar_wake(length_scale: f64) -> FilamentWake {
                 0.5 - 0.03 * i as f64,
             ],
             core2_m2: 0.0,
-            age_ticks: (6 - i) as f64,
+            age_ticks: (12 - i) as f64,
         })
         .collect();
     wake
@@ -454,12 +455,14 @@ fn sheared_planar_wake(length_scale: f64) -> FilamentWake {
 fn g0_g3_nonuniform_width_multiple_pairs_preserve_each_physical_strip() {
     for scale in [1e-6, 1.0, 1e6] {
         let mut wake = sheared_planar_wake(scale);
+        // A nonuniform planar strip has three moment constraints; retain
+        // sufficient rows on both repeated merges, rather than discarding J.
         let before: Vec<_> = (0..3).map(|s| strip_impulse(&wake, s)).collect();
-        coarsen_oldest(&mut wake, 2).unwrap();
+        coarsen_oldest(&mut wake, 6).unwrap();
         for s in 0..3 {
             vector_near(strip_impulse(&wake, s), before[s]);
         }
-        coarsen_oldest(&mut wake, 1).unwrap();
+        coarsen_oldest(&mut wake, 3).unwrap();
         for s in 0..3 {
             vector_near(strip_impulse(&wake, s), before[s]);
         }
@@ -512,10 +515,11 @@ fn g0_nonrepresentable_vector_impulse_refuses_without_partial_coarsening() {
 #[test]
 fn circulation_survives_overflowing_and_underflowing_dimensional_impulse_products() {
     // The circulation and every geometric coordinate are representable even
-    // when Gamma * area is not. The analytical one-span merge has strength
-    // (2/3) * (Gamma_a + Gamma_b), independent of either physical scale.
+    // when Gamma * area or its angular counterpart is not. The conservative
+    // oldest-boundary construction retains equal Gamma without a unit cutoff;
+    // opposite strengths carry a pure angular impulse that one row cannot retain.
     for (length, strength) in [(1e-60, 1e-240), (1e-60, 1e-200), (1e60, 1e200)] {
-        for sign in [1.0, -1.0] {
+        for signs in [[1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]] {
             let nodes = |x| vec![[x * length, 0.0, 0.0], [x * length, length, 0.0]];
             let mut wake = FilamentWake::new(
                 WakeRateCertificate {
@@ -529,19 +533,28 @@ fn circulation_survives_overflowing_and_underflowing_dimensional_impulse_product
             wake.rows = (0..2)
                 .map(|r| ShedRow {
                     nodes: nodes(r as f64),
-                    gamma: vec![if r == 0 { strength } else { sign * strength }],
+                    gamma: vec![signs[r] * strength],
                     core2_m2: 0.0,
                     age_ticks: (2 - r) as f64,
                 })
                 .collect();
+            if signs[0] != signs[1] {
+                let original = wake.clone();
+                assert_eq!(
+                    coarsen_oldest(&mut wake, 1).unwrap_err().code,
+                    "coarsen-impulse-unrepresentable"
+                );
+                assert_eq!(wake, original);
+                continue;
+            }
             coarsen_oldest(&mut wake, 1).unwrap();
-            let expected = (2.0 / 3.0) * (1.0 + sign);
+            let expected = signs[0];
             let actual = wake.rows[0].gamma[0] / strength;
             assert!(
                 (actual - expected).abs() < 2e-14,
-                "length {length:e}, strength {strength:e}, sign {sign}: {actual} != {expected}"
+                "length {length:e}, strength {strength:e}, signs {signs:?}: {actual} != {expected}"
             );
-            assert!((wake.rows[0].core2_m2 / (length * length) - 0.25).abs() < 2e-14);
+            assert!((wake.rows[0].core2_m2 / (length * length) - 0.5).abs() < 2e-14);
         }
     }
 }

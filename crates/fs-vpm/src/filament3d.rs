@@ -26,6 +26,10 @@ use fs_blake3::hash_domain;
 mod advection;
 pub use advection::SelfInducedShed;
 
+#[path = "filament3d/impulse.rs"]
+mod impulse;
+pub(crate) use impulse::ring_angular_impulse;
+
 /// Typed refusal (workspace convention; the 3-D filament lane's own —
 /// the 2-D lane keeps its `VpmError`, untouched).
 #[derive(Clone, Debug, PartialEq, Eq)]

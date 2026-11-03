@@ -6,11 +6,13 @@
 //!   1. Kelvin closure — the merged wake is still a closed quad
 //!      lattice (structural; the per-cell oracle re-runs on it),
 //!   2. connectivity — n_stations + 1 nodes per row, loops closed,
-//!   3. full vector hydrodynamic impulse — each merged quad retains
-//!      γ_a A_a + γ_b A_b to floating-point roundoff, where A is its
-//!      oriented vector area. Incompatible pairs use a minimum-change
-//!      stationwise correction, or refuse if its vector target is unrepresentable,
-//!   4. merged nodes use the pair's absolute-circulation weights,
+//!   3. full vector linear AND angular hydrodynamic impulse, separately
+//!      retained per station to floating-point roundoff. A minimum-change
+//!      circulation correction may redistribute between retained rows;
+//!      unrepresentable candidate geometries refuse without changing the wake,
+//!   4. oldest-node geometry when every pair exactly retains both moments
+//!      (including a constant-circulation straight sheet); otherwise the
+//!      pair's absolute-circulation-weighted node geometry,
 //!   5. the squared core smoothing scale includes all three components
 //!      of geometric separation (not a resolved viscous second moment),
 //!   6. symmetry — a y-symmetric wake coarsens to a y-symmetric wake.
@@ -18,13 +20,14 @@
 //! The mixed-norm error metric (near-probe velocity RMS delta +
 //! far-probe delta) is REPORTED per coarsen — never forced to vanish.
 
-use crate::filament3d::{FilamentWake, Refusal, ShedRow, ring_vector_area};
+use crate::filament3d::{FilamentWake, Refusal, ShedRow};
 
 mod impulse;
 
-/// Stationwise fallback's maximum vector-impulse residual divided by the sum
-/// of that station's original unsigned panel impulses. This is a floating-point
-/// allowance, not a continuum error estimate; it has no dimensional floor.
+/// Maximum relative residual for EACH of linear and angular impulse, divided
+/// by the station's original unsigned panel moments of that kind. Angular
+/// moments use a common local origin. This is a floating-point allowance, not
+/// a continuum error estimate; it has no dimensional floor.
 pub const COARSEN_IMPULSE_RELATIVE_ROUNDOFF: f64 = 512.0 * f64::EPSILON;
 
 /// The reported coarsening error metric (mixed norm).
@@ -38,9 +41,9 @@ pub struct CoarsenMetric {
     pub rows_before: usize,
     /// Rows after.
     pub rows_after: usize,
-    /// At least one incompatible station used the aggregate-impulse fallback,
-    /// which can redistribute circulation among its retained rows. The others
-    /// retain the original pairwise-preserving results.
+    /// At least one station used the six-moment circulation correction,
+    /// redistributing circulation among its retained rows to preserve both
+    /// linear and angular impulse.
     pub used_stationwise_correction: bool,
 }
 
@@ -66,8 +69,9 @@ fn pair_weights(a: &ShedRow, b: &ShedRow) -> (f64, f64) {
 ///
 /// # Errors
 /// Invalid pair counts or source geometry/cores/ages, an attached far-field
-/// interface, or retained station geometry unable to represent all three
-/// components of its original impulse. Nonfinite candidate metrics also refuse.
+/// interface, or the bounded pairwise/weighted-station constructions cannot
+/// retain all six linear/angular impulse components. This is not a search
+/// over arbitrary replacement geometries. Nonfinite candidate metrics refuse.
 /// Every refusal leaves the wake unchanged.
 pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric, Refusal> {
     let count = k
@@ -129,8 +133,12 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
     let far_before = wake.induced_velocity(far);
     let rows_before = wake.rows.len();
 
-    // Pass 1: all merged node lines, so each candidate quad's actual
-    // successor geometry is known before circulation is chosen.
+    // Try the oldest boundaries first: constant-strength straight filament
+    // subdivisions telescope exactly there, including a single retained row.
+    // Every pair/station must pass both moment gates before this geometry wins.
+    let oldest_gamma = impulse::pairwise_oldest(wake, k)?;
+    // All candidate node lines precede the station solve, so it uses the
+    // actual successor geometry of every retained quad.
     let mut merged_nodes: Vec<Vec<[f64; 3]>> = Vec::with_capacity(k);
     let mut pair_w: Vec<(f64, f64)> = Vec::with_capacity(k);
     for pair in 0..k {
@@ -139,7 +147,9 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
         let (wa, wb) = pair_weights(a, b);
         let wt = wa + wb;
         pair_w.push((wa, wb));
-        merged_nodes.push(
+        merged_nodes.push(if oldest_gamma.is_some() {
+            a.nodes.clone()
+        } else {
             a.nodes
                 .iter()
                 .zip(b.nodes.iter())
@@ -150,60 +160,24 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
                         (wa / wt) * na[2] + (wb / wt) * nb[2],
                     ]
                 })
-                .collect(),
-        );
+                .collect()
+        });
     }
     // One row-wide smoothing scale, measured at the same middle node as
     // the existing reduced core model, now using its full 3-D separation.
     let mid = n / 2;
-    // Pass 2: solve Γ_new A_new = Γ_a A_a + Γ_b A_b for each station.
-    // Preserve this fast path's original results. Only incompatible stations
-    // subsequently redistribute circulation across their retained panels.
+    // Build the unpublished proposal. The weighted-geometry path solves its
+    // full station moments after core/age bookkeeping, before publishing rows.
     let mut merged: Vec<ShedRow> = Vec::with_capacity(k);
-    let mut stationwise = vec![false; n];
     for pair in 0..k {
         let a = &wake.rows[2 * pair];
         let b = &wake.rows[2 * pair + 1];
         let (wa, wb) = pair_w[pair];
         let wt = wa + wb;
-        let next_old = wake
-            .rows
-            .get(2 * pair + 2)
-            .map_or(&wake.line_nodes, |row| &row.nodes);
         let nodes_new = &merged_nodes[pair];
-        let next_new = if pair + 1 < k {
-            &merged_nodes[pair + 1]
-        } else if count < wake.rows.len() {
-            &wake.rows[count].nodes
-        } else {
-            &wake.line_nodes
-        };
-        let area = |old: &[[f64; 3]], new: &[[f64; 3]], s: usize| {
-            ring_vector_area(new[s], new[s + 1], old[s + 1], old[s])
-        };
-        let mut gamma = Vec::with_capacity(n);
-        for s in 0..n {
-            let value = match merged_circulation(
-                a.gamma[s],
-                area(&a.nodes, &b.nodes, s),
-                b.gamma[s],
-                area(&b.nodes, next_old, s),
-                area(nodes_new, next_new, s),
-            ) {
-                Ok(value) => value,
-                Err(error)
-                    if matches!(
-                        error.code,
-                        "coarsen-impulse-unrepresentable" | "coarsen-degenerate"
-                    ) =>
-                {
-                    stationwise[s] = true;
-                    0.0 // Replaced only inside the unpublished station proposal.
-                }
-                Err(error) => return Err(error),
-            };
-            gamma.push(value);
-        }
+        let gamma = oldest_gamma
+            .as_ref()
+            .map_or_else(|| vec![0.0; n], |values| values[pair].clone());
         let separation2 = |source: [f64; 3]| -> f64 {
             (0..3)
                 .map(|c| (source[c] - nodes_new[mid][c]).powi(2))
@@ -240,10 +214,11 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
             age_ticks,
         });
     }
-    let used_stationwise_correction = stationwise.iter().any(|&needed| needed);
-    if used_stationwise_correction {
-        impulse::preserve(wake, &mut merged, &stationwise)?;
-    }
+    let used_stationwise_correction = if oldest_gamma.is_some() {
+        false
+    } else {
+        impulse::preserve(wake, &mut merged)?
+    };
     // Move untouched rows and their node/circulation buffers into the trial.
     // Keep the original prefix for rollback. No callback or fallible operation
     // observes this temporary state before the metric check below.
@@ -321,75 +296,6 @@ fn unrepresentable(message: &str) -> Refusal {
             "retain these rows or rescale to representable geometry and circulation".into(),
         ],
     }
-}
-
-fn merged_circulation(
-    gamma_a: f64,
-    area_a: [f64; 3],
-    gamma_b: f64,
-    area_b: [f64; 3],
-    area_new: [f64; 3],
-) -> Result<f64, Refusal> {
-    let refuse = || Refusal {
-        code: "coarsen-impulse-unrepresentable",
-        message: "one coarse quad cannot retain the original vector impulse".into(),
-        ranked_repairs: vec!["retain these rows or choose a geometrically compatible pair".into()],
-    };
-    if area_a
-        .iter()
-        .chain(&area_b)
-        .chain(&area_new)
-        .any(|x| !x.is_finite())
-        || !gamma_a.is_finite()
-        || !gamma_b.is_finite()
-    {
-        return Err(refuse());
-    }
-    // Normalize both dimensions separately. Neither a world-axis spacing nor
-    // an absolute area/impulse cutoff may decide whether a merge is physical.
-    let area_scale = area_a
-        .iter()
-        .chain(&area_b)
-        .chain(&area_new)
-        .map(|x| x.abs())
-        .fold(0.0_f64, f64::max);
-    let pivot = (0..3)
-        .max_by(|&i, &j| area_new[i].abs().total_cmp(&area_new[j].abs()))
-        .expect("three area components");
-    if area_scale == 0.0 || area_new[pivot] == 0.0 {
-        return Err(Refusal {
-            code: "coarsen-degenerate",
-            message: "the represented coarse quad has zero oriented area".into(),
-            ranked_repairs: vec!["retain the original nondegenerate wake cells".into()],
-        });
-    }
-    let gamma_scale = gamma_a.abs().max(gamma_b.abs());
-    if gamma_scale == 0.0 {
-        return Ok(0.0);
-    }
-    let a = area_a.map(|x| x / area_scale);
-    let b = area_b.map(|x| x / area_scale);
-    let c = area_new.map(|x| x / area_scale);
-    let ga = gamma_a / gamma_scale;
-    let gb = gamma_b / gamma_scale;
-    let target: [f64; 3] = core::array::from_fn(|i| ga * a[i] + gb * b[i]);
-    let strength = target[pivot] / c[pivot];
-    let represented = c.map(|x| strength * x);
-    let scale = (0..3)
-        .map(|i| (ga * a[i]).abs() + (gb * b[i]).abs() + represented[i].abs())
-        .fold(0.0_f64, f64::max);
-    let roundoff = 128.0 * f64::EPSILON * scale;
-    if !strength.is_finite()
-        || !scale.is_finite()
-        || (0..3).any(|i| (represented[i] - target[i]).abs() > roundoff)
-    {
-        return Err(refuse());
-    }
-    let gamma = strength * gamma_scale;
-    if !gamma.is_finite() || (strength != 0.0 && gamma == 0.0) {
-        return Err(refuse());
-    }
-    Ok(gamma)
 }
 
 /// Legacy streamwise-integrated circulation: Σ over rows of γ[s]·Δx_row,

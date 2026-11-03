@@ -346,67 +346,94 @@ operation does not implement 3-D remeshing or close the deferred FMM epic.
 `FilamentWake::hydrodynamic_impulse_per_density` reports the complete closed
 wake's geometric hydrodynamic impulse divided by uniform fluid density:
 `sum Gamma * oriented_vector_area`, in m^4/s. Multiplication by density gives
-kg m/s. Quad orientation matches the published physical-edge convention,
-positive along the newer row's left-to-right span. Local coordinate differences
-and compensated accumulation reduce translation and cancellation error.
-The checked accessor rejects invalid geometry, unrepresentable results, and
+kg m/s. Quad orientation matches the physical-edge convention, positive along
+the newer row's left-to-right span. Local coordinate differences and compensated
+accumulation reduce translation and cancellation error.
+
+`hydrodynamic_angular_impulse_per_density(origin)` reports the corresponding
+geometric angular impulse about an explicit origin, in m^5/s (kg m^2/s after
+multiplication by density). For localized vorticity this is
+`J = -1/2 integral |x-origin|^2 omega dV`; each closed filament contributes
+`-Gamma/2 integral |x-origin|^2 dx`. See Carpenter and Guha, *Physical Review
+Fluids* **5**, 064702 (2020), [doi:10.1103/PhysRevFluids.5.064702](https://doi.org/10.1103/PhysRevFluids.5.064702).
+The exact straight-edge contribution is
+`-Gamma/6 * (b-a) * (|a-origin|^2 + (a-origin).(b-origin) + |b-origin|^2)`.
+The implementation evaluates an equivalent symmetric triangle decomposition
+near each ring, then transports its moment using the existing vector-area
+owner. A small ring far from world zero therefore avoids cancellation between
+squared world coordinates. Moving the origin by `a` obeys
+`J(origin+a) = J(origin) - a cross I`.
+
+Both checked accessors reject invalid geometry, unrepresentable results, and
 an attached near/far interface: the retained near sources alone are open.
-This is neither angular momentum nor momentum inside an arbitrary finite
-fluid control volume.
+The angular query also rejects a nonfinite origin. These are localized-vorticity
+geometric moments, not momentum or angular momentum inside an arbitrary finite
+fluid control volume. Their definitions do not depend on the reduced core
+smoothing scale.
 
-`coarsen_oldest` now uses the actual three-dimensional quad areas at every
-station to solve `Gamma_new A_new = Gamma_a A_a + Gamma_b A_b`. It checks all
-three components against a vector-wide floating-point roundoff scale.
-Area and circulation are normalized separately before combining their products.
-A representable merged circulation is retained even when the dimensional
-`Gamma * area` intermediate would overflow, underflow, or lose accuracy in the
-subnormal range. The coarse representation still refuses incompatible vectors.
-Rotated or transverse wakes and small length units no longer depend on an
-x-spacing assumption or a fixed dimensional spacing cutoff. A single merged
-circulation cannot reproduce a vector outside its new quad's area direction;
-an incompatible pair now triggers a fallback for that span station alone.
-Already-admitted inputs and unflagged stations retain the original pairwise
-results and arithmetic. The fallback starts with each pair's closest scalar
-representation, then uses the native rectangular SVD for the minimum Euclidean
-circulation change across the station's retained panels. It preserves that
-station's **aggregate** vector impulse, not each replaced pair's impulse;
-no impulse is transferred between stations. `CoarsenMetric` exposes this choice
-as `used_stationwise_correction`.
+`coarsen_oldest` retains all three components of BOTH linear and angular
+impulse separately at every span station. It first tries retaining each pair's
+oldest node line, with the actual successor boundary. Every original pair and
+station must then be representable by the actual returned scalar circulation
+under both moment gates. This fast construction telescopes a constant-strength
+straight filament exactly, including two rows merged into one; an already
+conservative common circulation is retained bit for bit. Equal strengths alone
+do not admit warped geometry.
 
-Separate area/circulation scales and compensated sums precede the fallback.
-Its actual returned strengths must reproduce the original station impulse within
-`512 * f64::EPSILON` times the sum of original unsigned panel impulses, without
-a dimensional floor. Singular modes below `64 * EPSILON` times the largest
-singular value are omitted only if that same residual check passes. Targets
-outside the retained station geometry still refuse with
-`coarsen-impulse-unrepresentable`; one retained panel cannot generally represent
-a warped pair. Zero-circulation degenerate panels carry zero impulse. Invalid
-counts, geometry, ages, cores, or nonfinite candidate metrics refuse without
-publishing a changed wake. Untouched node/circulation buffers and the lifting
-line are reused; a failed metric restores the original rows and their buffers.
+If that bounded pairwise construction fails, node positions use the original
+absolute-circulation weights. Each station starts with its pairs' closest
+linear-impulse scalar representations, then applies the native rectangular SVD
+to find the minimum Euclidean circulation change satisfying its six moments.
+The station's aggregate moments are preserved; circulation may redistribute
+among retained rows, but impulse is not exchanged with other stations.
+`CoarsenMetric::used_stationwise_correction` identifies this correction.
+The matrix has six fixed columns, padded when fewer rows are retained; its
+factorization does not form a Gram matrix or square the condition number.
+
+Coordinates are differenced about a common station-local origin and normalized
+by a local length before area or cubic products. Linear and angular moment
+blocks and circulation are then scaled separately. Representable circulation
+can therefore survive even when a dimensional `Gamma * area` or angular-moment
+product would overflow or underflow. Translation, transverse convection, and
+length/circulation units do not introduce a world-axis or dimensional cutoff.
+
+The actual dimensional strengths must pass two independent residual gates:
+each moment's vector defect is bounded by `512 * f64::EPSILON` times the sum
+of that station's original unsigned panel moments of the same kind. Angular
+moments use the common local origin. Neither gate has a dimensional floor, and
+a vanishing signed target does not erase its unsigned budget. Singular modes
+below `64 * EPSILON` times the largest singular value are omitted only if both
+original-target checks still pass.
+
+Failure of these bounded oldest-pairwise/weighted-stationwise constructions
+returns `coarsen-impulse-unrepresentable` and retains the original wake. This
+is not a search over arbitrary replacement geometries: even a planar unequal-
+strength pair can require more retained rows on the tested candidates. A pair
+with zero net linear impulse may still carry nonzero angular impulse and cannot
+be discarded. Zero-circulation degenerate panels carry neither moment.
+Invalid counts, geometry, ages, cores, or nonfinite candidate metrics likewise
+refuse without publishing a changed wake. Untouched node/circulation buffers
+and the lifting line are reused; metric refusal restores original buffers.
 Attached near/far boundaries retain their existing refusal.
 
-Merged node positions use absolute-circulation weights. The row-wide core
-smoothing scale uses the middle node's separation in all three coordinates.
-That geometric smoothing model does not establish conservation of every
-viscous second moment on warped rows. The legacy `station_impulse` remains
-streamwise-integrated circulation; only suitable parallel span lines make it
-proportional to a physical impulse component. No angular-impulse or energy
-conservation claim follows from this coarsener.
+The row-wide core smoothing scale includes all three components of middle-node
+separation, and age retains the original absolute-circulation weighting.
+This smoothing model does not establish conservation of every viscous second
+moment or energy. The legacy `station_impulse` remains streamwise-integrated
+circulation; only suitable parallel span lines make it proportional to a
+physical impulse component. Fixed world-space probe metrics remain sampled
+velocity differences, not rotation-invariant error norms.
 
-The focused momentum/coarsening tests use independent polygon edge integrals,
-an analytic rectangular ring, proper rotations and translations, transverse
-and rescaled wakes, near/far source accounting, and atomic refusal of warped
-or malformed inputs. Existing topology, viscosity and field tests retain
-their own source-model checks.
-Additional physical-edge integrals isolate each span on sheared, nonuniform-width
-wakes through repeated coarsening and length rescaling. A late incompatible pair
-checks atomic refusal after an earlier pair is prepared. Analytical rectangular
-pairs check independently scaled area/circulation, including signed cancellation.
-The stationwise fallback tests integrate actual emitted segments for a curved
-full-rank sheet and reject incompatible stations even when their global impulses
-cancel. Fixed world-space probe metrics remain sampled velocity differences,
-not rotation-invariant error norms.
+`tests/coarsen_angular.rs` independently integrates physical edges with exact
+quadratic Gauss quadrature. An analytic rectangle detects the old 25% angular
+impulse defect while checking useful one-row coarsening. Twisted six-direction
+geometry exercises the full station solve, rotations and translations; a ring
+at a `2^40` world offset checks local-origin accuracy. Refusal tests include a
+pure-angular source with zero linear impulse. Straight refinement and combined
+near/far physical edges retain both moments. Existing coarsening, topology,
+viscosity, image and field tests retain their own Kelvin, symmetry, unequal-
+strength age/core weighting, unit-scaling, deterministic and atomicity oracles,
+with enough retained rows to represent the additional angular constraints.
 
 ## Self-induced attached near-wake motion
 

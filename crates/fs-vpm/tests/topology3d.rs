@@ -221,7 +221,7 @@ fn g0_coarsening_preserves_each_station_under_rotations_and_origin_changes() {
     let original = wake(16, true);
     let mut reference = original.clone();
     assert!(
-        !coarsen_oldest(&mut reference, 4)
+        coarsen_oldest(&mut reference, 4)
             .unwrap()
             .used_stationwise_correction
     );
@@ -238,7 +238,7 @@ fn g0_coarsening_preserves_each_station_under_rotations_and_origin_changes() {
         // The exact axis swap has ZERO world-x spacing and used to refuse.
         let before = station_impulse_vectors(&w);
         let metric = coarsen_oldest(&mut w, 4).unwrap();
-        assert!(!metric.used_stationwise_correction);
+        assert!(metric.used_stationwise_correction);
         assert!(metric.near_rms_mps.is_finite() && metric.far_delta_mps.is_finite());
         for (actual, expected) in station_impulse_vectors(&w).into_iter().zip(before) {
             near(actual, expected);
@@ -254,9 +254,9 @@ fn g0_coarsening_preserves_each_station_under_rotations_and_origin_changes() {
 }
 
 fn curved_wake() -> FilamentWake {
-    let mut original = wake(8, true);
+    let mut original = wake(14, true);
     for (r, row) in original.rows.iter_mut().enumerate() {
-        let t = (8 - r) as f64;
+        let t = (14 - r) as f64;
         for (s, p) in row.nodes.iter_mut().enumerate() {
             let s = s as f64;
             *p = [
@@ -285,11 +285,11 @@ fn g0_curved_sheet_preserves_three_axis_impulse_without_trading_between_stations
         let before = station_impulse_vectors(&w);
         assert!(before.iter().all(|v| v.iter().all(|x| x.abs() > 1e-3)));
         assert!(
-            coarsen_oldest(&mut w, 3)
+            coarsen_oldest(&mut w, 6)
                 .unwrap()
                 .used_stationwise_correction
         );
-        assert_eq!(w.rows.len(), 5);
+        assert_eq!(w.rows.len(), 8);
         for (actual, expected) in station_impulse_vectors(&w).into_iter().zip(before) {
             near(actual, expected);
         }
@@ -298,32 +298,33 @@ fn g0_curved_sheet_preserves_three_axis_impulse_without_trading_between_stations
 }
 
 #[test]
-fn g0_stationwise_fallback_preserves_unflagged_station_bits() {
+fn g0_stationwise_correction_does_not_couple_planar_and_curved_stations() {
     let mut mixed = curved_wake();
     for (r, row) in mixed.rows.iter_mut().enumerate() {
-        let x = -((8 - r) as f64);
+        let x = -((14 - r) as f64);
         for (s, node) in row.nodes.iter_mut().take(2).enumerate() {
             *node = [x, s as f64 - 1.5, 1.0];
         }
     }
     // Same strengths mean the original row-centroid weights are identical.
-    // Flattening the other stations supplies a wholly pairwise-admissible
-    // independent run, with identical geometry at station zero.
+    // Flattening the other stations supplies an independent rank-two solve
+    // with identical geometry at station zero. Its answer must not depend on
+    // the higher-rank solves at the neighboring curved stations.
     let mut planar = mixed.clone();
     for (r, row) in planar.rows.iter_mut().enumerate() {
-        let x = -((8 - r) as f64);
+        let x = -((14 - r) as f64);
         for (s, node) in row.nodes.iter_mut().enumerate() {
             *node = [x, s as f64 - 1.5, 1.0];
         }
     }
     let before = station_impulse_vectors(&mixed);
     assert!(
-        !coarsen_oldest(&mut planar, 3)
+        coarsen_oldest(&mut planar, 6)
             .unwrap()
             .used_stationwise_correction
     );
     assert!(
-        coarsen_oldest(&mut mixed, 3)
+        coarsen_oldest(&mut mixed, 6)
             .unwrap()
             .used_stationwise_correction
     );
@@ -394,7 +395,7 @@ fn g0_zero_circulation_coincident_rows_coarsen_without_inventing_impulse() {
         row.gamma.fill(0.0);
     }
     let metric = coarsen_oldest(&mut w, 1).unwrap();
-    assert!(metric.used_stationwise_correction);
+    assert!(!metric.used_stationwise_correction);
     assert_eq!(metric.near_rms_mps, 0.0);
     assert_eq!(metric.far_delta_mps, 0.0);
     assert_eq!(station_impulse_vectors(&w), vec![[0.0; 3]; 2]);

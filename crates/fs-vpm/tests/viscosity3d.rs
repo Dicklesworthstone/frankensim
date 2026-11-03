@@ -126,12 +126,17 @@ fn g0_near_wake_and_retained_exact_segments_use_the_same_core() {
     near.shed(&[2.0], [-0.2, 0.0, 0.0]).unwrap();
     let p = [0.1, 0.0, 1.1];
     let inviscid = near.induced_velocity(p);
-    for row in &mut near.rows { row.core2_m2 = 0.09; }
+    for row in &mut near.rows {
+        row.core2_m2 = 0.09;
+    }
     // Independent closed ring: the line closes the two physical trailing
     // filaments and the starting span has opposite circulation.
     let c = near.rows[0].nodes[1];
     let d = near.rows[0].nodes[0];
-    let cell = cell_from_segs(vec![(a, b, 2.0), (b, c, 2.0), (c, d, 2.0), (d, a, 2.0)], 0.09);
+    let cell = cell_from_segs(
+        vec![(a, b, 2.0), (b, c, 2.0), (c, d, 2.0), (d, a, 2.0)],
+        0.09,
+    );
     assert!(difference(near.induced_velocity(p), cell.exact(p)) < 1e-14);
     assert!(norm(near.induced_velocity(p)) < norm(inviscid));
 }
@@ -421,9 +426,11 @@ fn g0_coarsening_retains_weighted_age_and_aggregation_uses_it() {
     let mut near = wake();
     near.rows[0].gamma[0] = 1.0;
     near.rows[1].gamma[0] = 3.0;
-    fs_vpm::coarsen3d::coarsen_oldest(&mut near, 1).unwrap();
+    // Two retained rows can preserve both moments despite unequal strengths;
+    // the first pair must still retain its nontrivial 1:3 age weighting.
+    fs_vpm::coarsen3d::coarsen_oldest(&mut near, 2).unwrap();
     assert!((near.rows[0].age_ticks - 6.25).abs() < 1e-14);
-    assert_eq!(near.rows[1].age_ticks, 5.0);
+    assert_eq!(near.rows[1].age_ticks, 4.5);
     let expected = near.rows[0].core2_m2 + 0.02 * near.rows[0].age_ticks;
     let far = FarField::aggregate(
         &mut near,
@@ -440,7 +447,7 @@ fn g0_coarsening_retains_weighted_age_and_aggregation_uses_it() {
             .all(|c| (*c - expected).abs() < 1e-14)
     );
     assert_eq!(
-        near.rows[0].age_ticks, 4.0,
+        near.rows[0].age_ticks, 3.0,
         "row removal is not elapsed time"
     );
 }
