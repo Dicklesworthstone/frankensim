@@ -24,6 +24,8 @@
 pub mod accommodation;
 /// Finite solid inventory and fusion energy on the original equilibrium chart.
 pub mod equilibrium;
+/// Reciprocal molecular loads on explicitly stationary, supported surfaces.
+pub mod momentum;
 
 /// Joint exchange of heterogeneous surfaces against one evolving gas snapshot.
 pub mod chamber;

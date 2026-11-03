@@ -228,7 +228,7 @@ pub(in crate::sublimation::gas) fn prepare(
     })
 }
 
-pub(super) fn phase_reports(
+pub(in crate::sublimation::gas) fn phase_reports(
     surfaces: &[GasChamberSurface<'_>], calorics: &BTreeMap<u64, SharpMeltingCaloric<'_>>,
     endpoint: &GasChamberCandidate<'_>, mass_tolerance: f64,
     cancelled: &mut impl FnMut() -> bool,

@@ -5903,6 +5903,37 @@ withdrawal, energy-reference invariance and atomic refusal. All 18 actual-source
 joint/scalar/species-boundary tests passed with the original gas reconstruction.
 
 
+### Reciprocal molecular loads on supported chamber surfaces
+
+`sublimation::gas::momentum` composes force and torque impulses with the ORIGINAL
+joint chamber candidate, optional sharp fusion charts and explicitly declared
+Maxwell reflection. An internal observation seam consumes the same accepted
+gross emission/sticking masses and original temperatures without replaying
+constitutive sources. Retained gas partial pressures are cached once; canonical
+compensated sums retain carrier pressure and opposing surface wrenches. The
+declared unit normals, exposed-area centroids and common moment origin are
+checked against the exact selected surface roster.
+
+Emission, sticking and incident-plus-reflected nonsticking molecules contribute
+separately. At equal-temperature equilibrium or a sealed surface, zero net
+phase transfer still gives the complete pressure load. Carrier species exert
+pressure even without phase exchange. `MaxwellReflection` explicitly declares
+the diffuse fractions and shares those exact fractions with the original
+reflected-heat owner; arbitrary energy accommodation is not reinterpreted as
+an angular scattering law. Phase, fusion, heat and mechanical accounts escape
+only after the original chamber and final cancellation gates succeed.
+
+These are stationary supported patches in the zero-drift local Maxwellian gas
+frame. Support work is zero; reciprocal gas impulses are boundary transfers,
+not endpoint bulk momentum or kinetic energy in `ClosedGasParcel`. The caller
+must not add ambient pressure or molecular kinetic heat a second time. Moving
+surfaces, spatial gas transport, adaptive load histories and rotational guide
+dynamics require their own owners. Six integration regressions cover original
+candidate equivalence and source-call counts, equilibrium/carrier loads,
+Maxwell heat consistency, frame/origin covariance, sharp fusion and atomic
+zero-exposure/late-refusal behavior.
+
+
 ### Adaptive closed-chamber histories
 
 `sublimation::gas::chamber::advance::advance_chamber_adaptive` compares one joint

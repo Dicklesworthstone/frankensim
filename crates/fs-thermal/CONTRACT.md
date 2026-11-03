@@ -318,6 +318,26 @@ equal sticking and specular nonsticking reflection; it supplies no gas-film,
 diffuse thermal accommodation, Knudsen-layer or moving-geometry model.
 
 
+### Molecular normal momentum and explicit Maxwell reflection
+
+`sublimation::molecular::momentum` supplies allocation-free half-space momentum
+moments for the SAME admitted gross mass streams. The crossing-molecule mean
+normal speed is `sqrt(pi*R_specific*T/2)`; emission and sticking loads add even
+when net phase transfer is zero. Reflected nonsticking molecules are a distinct
+account, including carrier species. Explicit Maxwell diffuse fractions retain
+incident mass and reemit that fraction at the surface temperature; the rest
+reflects specularly. A thermal accommodation measurement alone does not select
+an angular scattering model. At equal temperatures the complete load recovers
+the original gas pressure independently of the sticking probability.
+
+Finite input, probability, overflow and nonzero-underflow admission applies.
+These moments add neither heat nor a second ambient-pressure load. Their
+stationary surface and zero-drift local Maxwellian assumptions do not supply
+moving-wall, continuum-stress or gas bulk-momentum evolution. Six regressions
+cover independent Gaussian quadrature, equilibrium and sealed limits, vacuum
+recoil, zero-net counterflow, Maxwell reflection and extreme-scale refusal.
+
+
 ## Original thermal storage for external solid/gas coupling
 
 `enthalpy::sublimation::external` exposes the original pending events, work

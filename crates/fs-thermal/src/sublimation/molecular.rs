@@ -23,6 +23,9 @@ use super::{
     properties,
 };
 
+/// Half-range momentum moments and explicitly declared Maxwell reflection.
+pub mod momentum;
+
 /// Opposing mass fluxes per unit exposed area [kg/(m² s)].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MolecularMassFlux {

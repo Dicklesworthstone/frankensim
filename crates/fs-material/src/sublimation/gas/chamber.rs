@@ -304,6 +304,25 @@ fn advance_chamber<'catalog>(
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
     controls: GasChamberSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
+    advance_chamber_observed(surfaces, accommodation, calorics, gas, catalog,
+        duration_s, controls, |_, _| Ok(()), cancelled)
+}
+
+// A composing physical owner may consume the SAME admitted gross streams.
+// Its private candidate is published only after this complete chamber succeeds.
+// The default no-op monomorphizes away; no source or phase-rate replay occurs.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(super) fn advance_chamber_observed<'catalog>(
+    surfaces: &[GasChamberSurface<'_>],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    calorics: Option<&BTreeMap<u64, mixed::SharpMeltingCaloric<'_>>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasChamberSolve,
+    mut observe: impl FnMut(&GasChamberSurface<'_>, &super::SurfaceSnapshot) -> Result<(), GasSurfaceError>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
     poll(&mut cancelled)?;
@@ -448,6 +467,7 @@ fn advance_chamber<'catalog>(
             account.active_streams += 1;
             account.single_stream_energy_j = phase_energy;
         }
+        observe(surface, &snapshot)?;
         outputs.push(GasChamberSurfaceStep::new(surface.id, prepared));
     }
     let mut rows = Vec::with_capacity(species.len());
