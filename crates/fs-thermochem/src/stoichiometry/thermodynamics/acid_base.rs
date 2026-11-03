@@ -38,6 +38,8 @@ use std::{
 
 /// Finite shared ligand competition between source-bound aqueous metal families.
 pub mod complexation;
+/// Finite gas inventories coupled to the same aqueous charge and proton balance.
+pub mod gas_liquid;
 /// Coupled charge balance, acid/base families and one finite hydrolyzing solid.
 pub mod precipitation;
 #[path = "acid_base/solve.rs"]
@@ -55,6 +57,8 @@ pub enum AcidBaseError {
     Balance(ReactionBalanceError),
     /// Original shared-species identity admission.
     Network(ReactionNetworkError),
+    /// Original source-bound neutral gas/aqueous partition refused.
+    GasLiquid(super::gas_liquid::GasLiquidError),
     /// Invalid topology, activity basis, inventory or numerical limit.
     Invalid(&'static str),
     /// A required positive species or balance cannot be represented.
@@ -80,6 +84,11 @@ impl From<ReactionBalanceError> for AcidBaseError {
 impl From<ReactionNetworkError> for AcidBaseError {
     fn from(e: ReactionNetworkError) -> Self {
         Self::Network(e)
+    }
+}
+impl From<super::gas_liquid::GasLiquidError> for AcidBaseError {
+    fn from(e: super::gas_liquid::GasLiquidError) -> Self {
+        Self::GasLiquid(e)
     }
 }
 type Result<T> = core::result::Result<T, AcidBaseError>;

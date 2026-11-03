@@ -192,6 +192,52 @@ Six focused test groups cover independent finite-partition and activity laws,
 extensive scaling, determinism, zero inventories, logarithmic trace stocks,
 source/phase/reference refusals and numerical range loss.
 
+## Finite-headspace solubility coupled to aqueous pH
+
+`acid_base::gas_liquid::VolatileAcidBaseSystem` binds original
+`IdealGasLiquidPartition` owners to neutral members of the original
+`IdealAcidBaseSystem`. A neutral member may be the acid, the base or an
+intermediate protonation state. Each selected family has one gas identity;
+multiple volatile families share the same headspace and the same aqueous
+proton activity. Admission checks exact shared atom/charge definitions and
+identical original selected source answers/receipts, temperature, standard
+pressure and elemental reference convention. A gas identity cannot also be
+an aqueous spectator ion.
+
+Inputs explicitly distinguish a volatile family's **gas plus all aqueous
+forms** total from an unbound family's aqueous-only total. Headspace volume
+and the common amount at unit aqueous activity remain independent; no volume
+to molality conversion or counterion is inferred. At each trial pH, the
+original aqueous member fractions give the neutral fraction `alpha`, and
+`n_g/n_aqueous = alpha*V_g*p_ref/(n_ref*R*T*K)` closes the finite family.
+Ionization therefore changes dissolved uptake and gas partial pressure while
+the same original charge balance determines pH. The extra gas weight is
+neutral, preserving the monotonic charge residual. The implementation reuses
+the original single pH bisection, without nested equilibrium solves or
+per-iteration allocations. Original nonvolatile-family semantics are retained.
+
+The original complete aqueous result reports dissolved-only family totals.
+Per volatile family, the enclosing result retains gas and total aqueous
+amounts, partial pressure, the independently summed component balance, and
+the recomputed logarithmic gas/neutral mass-action residual. Both phase tails
+are represented independently, including a trace smaller than a subtraction
+from the dominant total can resolve; unrepresentable positive stocks refuse.
+Empty pools have zero gas and aqueous stocks with undefined gas mass action.
+Source, bracket, numerical budget and cancellation refusals publish no result.
+
+G0/G1/G3/G4 fixtures cover independent manufactured volatile-acid and
+volatile-base endpoints, base-promoted acid uptake with depletion of the same
+finite gas, multiple gases sharing pH and a nonvolatile buffer, extensive
+scaling, deterministic declaration order, positive trace stocks, empty pools,
+source/identity mismatch, invalid inputs, exhausted work and cancellation.
+These are ideal-model arithmetic checks, not measured-solubility validation.
+The common source temperature, ideal gas law and `a=n/n_ref` approximation
+remain fixed. This path adds no salting-out or other nonideal activity law,
+fixed-pressure bubble, thermal balance, transfer kinetics, finite solvent
+inventory, redox, complexation or precipitation. The phase distinctions and
+fixed-volume mass-action formulation follow the
+[USGS PHREEQC gas-component equations](https://wwwbrr.cr.usgs.gov/projects/GWC_coupled/phreeqc/html/final-10.html).
+
 ## Coupled pH and finite mineral precipitation
 
 `acid_base::precipitation::HydrolysisPrecipitation` composes the original

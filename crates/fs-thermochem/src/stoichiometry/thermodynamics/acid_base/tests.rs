@@ -11,6 +11,8 @@ use fs_matdb::{
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Amount, Dimensionless, Dims, QuantitySpec};
 
+#[path = "tests/gas_liquid.rs"]
+mod gas_liquid;
 #[path = "tests/precipitation.rs"]
 mod precipitation;
 

@@ -15,9 +15,36 @@ impl IdealAcidBaseSystem {
         spectators: &[SpectatorIon],
         amount_at_unit_activity: Amount,
         options: SpeciationOptions,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<AcidBaseSpeciation> {
+        self.speciate_partitioned(
+            totals,
+            spectators,
+            amount_at_unit_activity,
+            options,
+            &[],
+            cancelled,
+        )
+    }
+
+    // A finite neutral gas adds a zero-charge statistical weight to its
+    // analytical family. Charge remains monotone in pH, so the original ONE
+    // scalar solve closes gas partition and every aqueous family together.
+    pub(super) fn speciate_partitioned(
+        &self,
+        totals: &[(String, Amount)],
+        spectators: &[SpectatorIon],
+        amount_at_unit_activity: Amount,
+        options: SpeciationOptions,
+        gas_weights: &[Option<gas_liquid::GasWeight>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AcidBaseSpeciation> {
         poll(&mut cancelled)?;
+        if !gas_weights.is_empty() && gas_weights.len() != self.inner.families.len() {
+            return Err(AcidBaseError::Invalid(
+                "gas weights must match the family axis",
+            ));
+        }
         let basis = amount_at_unit_activity.value();
         if !basis.is_finite() || basis <= 0.0 {
             return Err(AcidBaseError::Invalid(
@@ -60,7 +87,7 @@ impl IdealAcidBaseSystem {
                 ));
             }
         }
-        let ordered: Vec<_> = self
+        let mut ordered: Vec<_> = self
             .inner
             .families
             .iter()
@@ -93,8 +120,17 @@ impl IdealAcidBaseSystem {
                 ));
             }
         }
-        let evaluate =
-            |ph, cancelled: &mut _| point(&self.inner, &ordered, &spectators, basis, ph, cancelled);
+        let evaluate = |ph, cancelled: &mut _| {
+            point(
+                &self.inner,
+                &ordered,
+                &spectators,
+                basis,
+                ph,
+                gas_weights,
+                cancelled,
+            )
+        };
         let lower = evaluate(bracket[0], &mut cancelled)?;
         let upper = evaluate(bracket[1], &mut cancelled)?;
         // Charge decreases strictly with pH: free H+ decreases, OH- increases,
@@ -135,6 +171,14 @@ impl IdealAcidBaseSystem {
             }
             accepted.ok_or(AcidBaseError::Budget)?
         };
+        // The original aqueous report owns only dissolved stocks, while the
+        // enclosing gas owner retains the finite cross-phase totals.
+        for (index, total) in ordered.iter_mut().enumerate() {
+            if let Some(Some(weight)) = gas_weights.get(index) {
+                let fractions = fractions(&self.inner.families[index], -answer.ph * LN_10)?;
+                *total = weight.partition(*total, fractions[weight.neutral])?[0];
+            }
+        }
         self.report(
             &ordered,
             spectators,
@@ -233,12 +277,14 @@ struct Point {
     charge: f64,
     unsigned_charge: f64,
 }
+#[allow(clippy::too_many_arguments)]
 fn point(
     layout: &Layout,
     totals: &[f64],
     spectators: &[SpectatorIon],
     basis: f64,
     ph: f64,
+    gas_weights: &[Option<gas_liquid::GasWeight>],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Point> {
     poll(cancelled)?;
@@ -254,9 +300,13 @@ fn point(
     let mut absolute = Sum::default();
     add_charge(&mut net, &mut absolute, n_h, 1)?;
     add_charge(&mut net, &mut absolute, n_oh, -1)?;
-    for (family, &total) in layout.families.iter().zip(totals) {
+    for (index, (family, &total)) in layout.families.iter().zip(totals).enumerate() {
         poll(cancelled)?;
         let fractions = fractions(family, ln_h)?;
+        let total = match gas_weights.get(index) {
+            Some(Some(weight)) => weight.partition(total, fractions[weight.neutral])?[0],
+            _ => total,
+        };
         for (j, &fraction) in fractions.iter().enumerate().take(family.species.len()) {
             let amount = member_amount(total, fraction)?;
             add_charge(
@@ -281,7 +331,7 @@ fn point(
     })
 }
 
-fn fractions(family: &AcidFamily, ln_h: f64) -> Result<[f64; MAX_DISSOCIATIONS + 1]> {
+pub(super) fn fractions(family: &AcidFamily, ln_h: f64) -> Result<[f64; MAX_DISSOCIATIONS + 1]> {
     let mut logs = [0.0; MAX_DISSOCIATIONS + 1];
     let mut maximum: f64 = 0.0;
     for (j, step) in family.steps.iter().enumerate() {
