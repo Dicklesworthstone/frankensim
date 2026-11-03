@@ -758,6 +758,34 @@ data, not measured gas validation. Existing source domains, neutral ideal-gas
 assumptions, diffusion omissions and each consuming solver's numerical limits
 remain in force.
 
+`MaterialBinaryTransport` supplies the complete molecular law directly from the
+original material gas and explicit `BinaryDiffusionMaterial` pair assignments.
+The original caloric source is compared in full; each unordered species pair
+must occur exactly once, including currently absent species. Pair cards retain
+their original external contexts and pin the selected binary-diffusivity claims
+at their declared reference T,p. Actual face T,p refresh those same claims;
+missing support refuses rather than switching to another source or estimating
+D from viscosity. Binary data have units m²/s and must be positive. Pair contexts
+cannot freeze mixture-composition coordinates or aliases of evolving T,p.
+Source axes and applicability bounds require supported static external meanings;
+untyped restrictions and frequency/field/rate support refuse. Unused context
+labels remain in the original query receipts, and declared external coordinates
+such as humidity remain fixed while T,p evolve.
+
+This law enters the existing axial, planar, spatial, finite-parcel and reacting
+owners through `TransportLaw`; it does not introduce another transport solver.
+The shared continuum owner retains its mass frame, pressure-driven separation,
+original partial-enthalpy flux and full energy accounting. The original
+`MaterialSoretDufourTransport` may wrap this law with independent cross data.
+Scalar viscosity/conductivity still come from the original material gas, and
+bulk viscosity remains explicit. Failed evaluations preserve the output and
+last complete pair receipts. Source queries allocate and carry their existing
+validity limits; this path is not an empirical validation or performance claim.
+G0/G1/G3/G4 tests in `material::tests::transport::binary` check unequal-mass
+composition/pressure diffusion and partial enthalpy against independent binary
+answers, conservative spatial mode refinement, data-only diffusivity changes,
+pair symmetry/coverage, source pinning and cancellation.
+
 ## Reusable finite-rate reactor for cell-wise chemistry
 
 `chemistry::IsochoricReactor` owns one original immutable kinetic mechanism and

@@ -6,8 +6,10 @@
 //! viscosity/conductivity outputs are explicitly unused. Bulk viscosity is an
 //! explicit nonnegative declaration, never inferred from either source.
 
+mod binary;
 /// Original molecular faces driving finite material gas inventories.
 pub mod parcel;
+pub use binary::MaterialBinaryTransport;
 mod thermal_cross;
 pub use thermal_cross::{
     MaterialSoretDufourTransport, ResolvedMaterialHeatsOfTransport, SpeciesHeatOfTransportMaterial,
