@@ -81,6 +81,25 @@ impl<'p, 'a, const N: usize> SwirlPropulsion<'p, 'a, N> {
     ) -> Result<SwirlEvaluation<N>, Refusal> {
         let p = self.propulsion;
         let result = p.evaluate_with(state, inputs, wind_world, |stage| {
+            if let Some(frames) = stage.section_frames {
+                return coupling::coupled_step_with_section_frames(
+                    &p.spatial_axes
+                        .expect("custom surfaces require spatial disks"),
+                    stage.op,
+                    stage.panels,
+                    stage.strips,
+                    stage.closure,
+                    frames,
+                    &p.design.rotor,
+                    stage.disks,
+                    stage.freestream,
+                    stage.rho,
+                    &p.design.coupling,
+                    self.controls,
+                    warm,
+                    stage.incident,
+                );
+            }
             coupling::coupled_step(
                 p.spatial_axes,
                 stage.op,

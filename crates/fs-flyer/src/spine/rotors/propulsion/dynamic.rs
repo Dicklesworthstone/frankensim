@@ -26,7 +26,7 @@ use fs_airscrew::dynamic_inflow::{InflowStep, RotorEvaluation, UniformAxialInflo
 use fs_airscrew::oblique::{AzimuthQuadrature, DiskFrame, ObliqueLoads, SpinDirection};
 use fs_wing::induced_velocity_free;
 use fs_wing::nonlinear::continuation::{self, ContinuationControls, WingContinuation};
-use fs_wing::nonlinear::solve_nonlinear_with_incident;
+use fs_wing::nonlinear::{solve_nonlinear_with_incident, solve_nonlinear_with_section_frames};
 
 /// Mean and first harmonic wakes coupled to the original aircraft/shaft motion.
 #[path = "dynamic/first_harmonic.rs"]
@@ -321,23 +321,21 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             })
             .collect::<Result<_, Refusal>>()?;
         let (wing, continuation) = if let Some((domain, previous)) = continuation {
-            let solved = continuation::solve_with_incident(
-                stage.op,
-                stage.panels,
-                stage.strips,
-                stage.freestream,
-                stage.rho,
-                stage.closure,
-                &strip_velocity_mps,
-                None,
-                previous,
-                domain,
-            )
-            .map_err(wing_error)?;
-            (solved.solution, Some(solved.continuation))
-        } else {
-            (
-                solve_nonlinear_with_incident(
+            let solved = if let Some(frames) = stage.section_frames {
+                continuation::solve_with_section_frames(
+                    stage.op,
+                    stage.panels,
+                    stage.strips,
+                    stage.freestream,
+                    stage.rho,
+                    stage.closure,
+                    frames,
+                    &strip_velocity_mps,
+                    previous,
+                    domain,
+                )
+            } else {
+                continuation::solve_with_incident(
                     stage.op,
                     stage.panels,
                     stage.strips,
@@ -346,8 +344,39 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
                     stage.closure,
                     &strip_velocity_mps,
                     None,
-                    None,
+                    previous,
+                    domain,
                 )
+            }
+            .map_err(wing_error)?;
+            (solved.solution, Some(solved.continuation))
+        } else {
+            (
+                if let Some(frames) = stage.section_frames {
+                    solve_nonlinear_with_section_frames(
+                        stage.op,
+                        stage.panels,
+                        stage.strips,
+                        stage.freestream,
+                        stage.rho,
+                        stage.closure,
+                        frames,
+                        &strip_velocity_mps,
+                        None,
+                    )
+                } else {
+                    solve_nonlinear_with_incident(
+                        stage.op,
+                        stage.panels,
+                        stage.strips,
+                        stage.freestream,
+                        stage.rho,
+                        stage.closure,
+                        &strip_velocity_mps,
+                        None,
+                        None,
+                    )
+                }
                 .map_err(wing_error)?,
                 None,
             )

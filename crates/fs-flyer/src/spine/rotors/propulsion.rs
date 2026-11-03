@@ -20,7 +20,8 @@ use crate::propcoupling::{
 use fs_ga::Vec3;
 use fs_math::det;
 use fs_wing::Panel;
-use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, StripSpec};
+use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, SectionFrame, StripSpec};
+use std::borrow::Cow;
 
 #[path = "propulsion/dynamic.rs"]
 pub mod dynamic;
@@ -31,6 +32,9 @@ use incident::StageIncidentAir;
 
 #[path = "propulsion/swirl.rs"]
 pub mod swirl;
+
+#[path = "propulsion/surfaces.rs"]
+pub mod surfaces;
 
 /// Blade handedness relative to a mounted rotor's declared positive spin axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +111,7 @@ pub struct GearedPropulsion<'a, const N: usize> {
     assembly: &'a GearedAssembly<N>,
     mounts: [PropellerMount; 2],
     spatial_axes: Option<DiskAxes>,
+    surfaces: Option<&'a surfaces::LiftingSurfaces<'a>>,
 }
 
 // Both wake models use exactly the same material-air sampling and body/shaft
@@ -117,6 +122,7 @@ struct AerodynamicStage<'a> {
     panels: &'a [Panel],
     strips: &'a [StripSpec],
     closure: SectionClosure<'a>,
+    section_frames: Option<&'a [SectionFrame]>,
     disks: &'a [PropDisk; 2],
     freestream: [f64; 3],
     rho: f64,
@@ -282,6 +288,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             assembly,
             mounts,
             spatial_axes,
+            surfaces: None,
         })
     }
 
@@ -294,8 +301,9 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
     ///
     /// The retained aerodynamic tier is quasi-steady: two-dimensional strip
     /// closures, axial disk inflow, straight wake, classical induced drag,
-    /// and the existing parasite ledger. It does not supply a rudder model,
-    /// disk harmonics/crossflow, added mass or a historical validity claim.
+    /// and the existing parasite ledger. Custom vertical/canted surfaces use
+    /// `with_lifting_surfaces`; this method does not supply disk harmonics,
+    /// added mass or a historical validity claim.
     ///
     /// # Errors
     /// Existing wing/BEMT/coupling refusals; `propulsion-state-invalid`;
@@ -313,9 +321,24 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                 "nonfinite warm induction",
             ));
         }
-        let result =
-            self.evaluate_with(state, inputs, wind_world, |stage| match self.spatial_axes {
-                Some(axes) => spatial::coupled_step(
+        let result = self.evaluate_with(state, inputs, wind_world, |stage| {
+            match (self.spatial_axes, stage.section_frames) {
+                (Some(axes), Some(frames)) => spatial::coupled_step_with_section_frames(
+                    &axes,
+                    stage.op,
+                    stage.panels,
+                    stage.strips,
+                    stage.closure,
+                    frames,
+                    &self.design.rotor,
+                    stage.disks,
+                    stage.freestream,
+                    stage.rho,
+                    &self.design.coupling,
+                    warm,
+                    stage.incident,
+                ),
+                (Some(axes), None) => spatial::coupled_step(
                     &axes,
                     stage.op,
                     stage.panels,
@@ -329,7 +352,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                     warm,
                     stage.incident,
                 ),
-                None => coupled_prop_airframe_step_with_incident(
+                (None, _) => coupled_prop_airframe_step_with_incident(
                     stage.op,
                     stage.panels,
                     stage.strips,
@@ -342,7 +365,8 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                     warm,
                     stage.incident,
                 ),
-            })?;
+            }
+        })?;
         Ok(PropulsionEvaluation {
             loads: result.loads,
             aerodynamic_force_body_n: result.aerodynamic_force_body_n,
@@ -406,20 +430,38 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         let speed2 = cg_air.dot(cg_air);
         let airspeed = speed2.sqrt();
         let alpha = det::atan2(freestream[2], freestream[0]);
-        if !airspeed.is_finite() || airspeed <= 1.0 || freestream[0] <= 0.0 || alpha.abs() >= 0.6 {
+        if !airspeed.is_finite()
+            || airspeed <= 1.0
+            || (self.surfaces.is_none() && (freestream[0] <= 0.0 || alpha.abs() >= 0.6))
+        {
             return Err(reject(
                 "propulsion-state-invalid",
                 "CG flow is outside the current forward-flight aerodynamic domain",
             ));
         }
         let rho = inputs.density_kg_m3;
-        let (panels, strips) = design.layout(inputs.canard_rad)?;
+        let (panels, strips) = match self.surfaces {
+            Some(model) => (
+                Cow::Borrowed(model.panels),
+                model.controlled_strips(inputs.canard_rad)?,
+            ),
+            None => {
+                let (panels, strips) = design.layout(inputs.canard_rad)?;
+                (Cow::Owned(panels), Cow::Owned(strips))
+            }
+        };
         let op = InfluenceOperator::build(&panels, freestream, rho).map_err(wing_error)?;
         let camber = design.camber_ratio;
         // Same existing OpenLoopDesign attached/separated section closure.
-        let closure = |_strip: usize, a: f64| crate::sections::section_lift(a, camber);
+        let closure = |strip: usize, a: f64| {
+            crate::sections::section_lift(
+                a,
+                self.surfaces
+                    .map_or(camber, |model| model.properties[strip].camber_ratio),
+            )
+        };
         let mut strip_velocity = Vec::with_capacity(strips.len());
-        for strip in &strips {
+        for strip in strips.iter() {
             let panel = &panels[strip.panel_indices[0]];
             strip_velocity.push(
                 air.sample(array((vec(panel.a) + vec(panel.b)).scale(0.5)))?
@@ -439,6 +481,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             panels: &panels,
             strips: &strips,
             closure: &closure,
+            section_frames: self.surfaces.map(|model| model.frames.as_slice()),
             disks: &disks,
             freestream,
             rho,
@@ -456,50 +499,71 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         })?;
         let mut circulatory = fs_wing::wrench::CirculatoryWrenchAccumulator::new(rho, design.cg_m)
             .map_err(wing_error)?;
+        let mut group_forces = self
+            .surfaces
+            .map(|model| vec![Vec3::default(); model.groups.len()]);
         for (s, strip) in strips.iter().enumerate() {
             for &j in &strip.panel_indices {
-                circulatory
+                let panel_load = circulatory
                     .add_panel(&panels[j], fields.gamma[j], local[s])
                     .map_err(wing_error)?;
+                if let (Some(model), Some(groups)) = (self.surfaces, group_forces.as_mut()) {
+                    let group = model.properties[s].induced_drag_group;
+                    groups[group] = groups[group] + panel_load.force;
+                }
             }
         }
         let circulatory_wrench = circulatory.total();
         let mut force = circulatory_wrench.force;
         let mut moment = circulatory_wrench.torque;
-        // The induced-drag screen uses transverse lift, not its body-z
-        // projection; the latter introduces a spurious cos(alpha)^2 factor.
-        let lift = wind_axis_lift(force, alpha);
-        let cm0 = -core::f64::consts::PI * camber;
-        for (s, strip) in strips.iter().enumerate() {
-            let panel = &panels[strip.panel_indices[0]];
-            let v = local[s];
-            let section_speed2 = v[0] * v[0] + v[2] * v[2];
-            let section_speed = section_speed2.sqrt();
-            let q = 0.5 * rho * section_speed2;
-            let width = (panel.b[1] - panel.a[1]).abs();
-            moment.y += q * strip.chord_m * strip.chord_m * width * cm0;
-            let cd = crate::sections::section_profile_drag(
-                fields.strip_alpha_eff_rad[s],
-                design.cd0_wing,
-            );
-            let drag = q * strip.chord_m * width * cd;
-            let profile_force = Vec3::new(
-                -drag * v[0] / section_speed,
-                0.0,
-                -drag * v[2] / section_speed,
-            );
-            let arm = (vec(panel.a) + vec(panel.b)).scale(0.5) - vec(design.cg_m);
-            force = force + profile_force;
-            moment = moment + arm.cross(profile_force);
-        }
-        let area = 2.0 * design.wing_span_m * design.wing_chord_m;
-        let aspect = design.wing_span_m * design.wing_span_m / (0.5 * area);
-        let dynamic_pressure = 0.5 * rho * speed2;
-        let cl = lift / (dynamic_pressure * area);
-        let induced_drag =
-            dynamic_pressure * area * cl * cl / (core::f64::consts::PI * aspect * design.oswald_e);
         let air_direction = cg_air.scale(1.0 / airspeed);
-        force = force - air_direction.scale(induced_drag);
+        if let Some(model) = self.surfaces {
+            let additional = model.additional_wrench(
+                rho,
+                cg_air,
+                design.cg_m,
+                &fields,
+                group_forces
+                    .as_deref()
+                    .expect("custom surface groups were prepared"),
+            )?;
+            force = force + additional.force;
+            moment = moment + additional.torque;
+        } else {
+            // The induced-drag screen uses transverse lift, not its body-z
+            // projection; the latter introduces a spurious cos(alpha)^2 factor.
+            let lift = wind_axis_lift(force, alpha);
+            let cm0 = -core::f64::consts::PI * camber;
+            for (s, strip) in strips.iter().enumerate() {
+                let panel = &panels[strip.panel_indices[0]];
+                let v = local[s];
+                let section_speed2 = v[0] * v[0] + v[2] * v[2];
+                let section_speed = section_speed2.sqrt();
+                let q = 0.5 * rho * section_speed2;
+                let width = (panel.b[1] - panel.a[1]).abs();
+                moment.y += q * strip.chord_m * strip.chord_m * width * cm0;
+                let cd = crate::sections::section_profile_drag(
+                    fields.strip_alpha_eff_rad[s],
+                    design.cd0_wing,
+                );
+                let drag = q * strip.chord_m * width * cd;
+                let profile_force = Vec3::new(
+                    -drag * v[0] / section_speed,
+                    0.0,
+                    -drag * v[2] / section_speed,
+                );
+                let arm = (vec(panel.a) + vec(panel.b)).scale(0.5) - vec(design.cg_m);
+                force = force + profile_force;
+                moment = moment + arm.cross(profile_force);
+            }
+            let area = 2.0 * design.wing_span_m * design.wing_chord_m;
+            let aspect = design.wing_span_m * design.wing_span_m / (0.5 * area);
+            let dynamic_pressure = 0.5 * rho * speed2;
+            let cl = lift / (dynamic_pressure * area);
+            let induced_drag = dynamic_pressure * area * cl * cl
+                / (core::f64::consts::PI * aspect * design.oswald_e);
+            force = force - air_direction.scale(induced_drag);
+        }
         let parasite_drag = design.ledger.evaluate(rho, airspeed)?.total_parasite_n;
         let parasite_force = air_direction.scale(-parasite_drag);
         force = force + parasite_force;

@@ -185,7 +185,18 @@ impl SectionFrame {
         })
     }
 
-    pub(super) fn admit_panel(self, panel: &Panel) -> Result<(), Refusal> {
+    /// Check that a panel belongs to this declared normal-section geometry.
+    ///
+    /// Its finite bound segment must follow the directed span, its control
+    /// point must lie aft in the chord/span lifting plane, and its unit
+    /// boundary-condition normal must be parallel to the incidence normal.
+    /// Either sign of that boundary-condition normal is admitted. Layout
+    /// owners can use this same check before constructing a coupled model.
+    ///
+    /// # Errors
+    /// `section-frame-invalid` for degenerate, nonfinite or incompatible
+    /// geometry; the frame and panel remain unchanged.
+    pub fn admit_panel(self, panel: &Panel) -> Result<(), Refusal> {
         if !panel
             .a
             .iter()

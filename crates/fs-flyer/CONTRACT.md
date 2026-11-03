@@ -846,6 +846,52 @@ interference and gimbal motion are absent. The finite 2R wash window remains
 an explicit model truncation, not a resolved far wake. Canted-mount support
 does not establish a crossflow validity envelope or historical calibration.
 
+### Explicit native lifting surfaces and section frames
+
+`propulsion::surfaces::LiftingSurfaces::new` admits borrowed panels, strips,
+per-strip `SectionProperties`, and declared `InducedDragGroup` references.
+`GearedPropulsion::new_spatial(...).with_lifting_surfaces(&surfaces)` selects
+that body-fixed layout in every steady, native-swirl, dynamic, harmonic and
+explicitly continued aerodynamic stage. The shared material-air sampler,
+physical wake transport, rotor/shaft ports and midpoint mechanical owner are
+retained. The original design still supplies rotors, disk positions, CG and
+the parasite ledger. Selecting no custom layout preserves the built-in path.
+
+Each admitted panel has exactly one strip owner; every strip has one declared
+drag group, and every group must be used. Bound rows in a strip share their
+physical plane, directed span, width and surface identity, with chordwise
+registration along the actual panel chord, including swept streamwise rows.
+Frames and true bound lengths are prepared once. The supplied strip chord is
+the physical chord normal to the bound span. Base strip twist receives
+`canard_gain * canard_rad` once; this is a section-polar incidence control,
+not physical panel or hinge articulation. Fixed incidences and zero control
+borrow the original strip layout without cloning its panel-index vectors.
+
+Complete local air and vector propeller wash reach the framed nonlinear owner
+before section projection. Full velocity and actual bound segments supply
+Kutta–Joukowsky force. Profile drag uses the accepted effective incidence,
+section-plane speed/direction and chord times true bound length; spanwise
+velocity cannot inflate the two-dimensional dynamic pressure. The camber
+pitching free couple follows the local span, including yaw couples for a
+vertical surface. Custom layouts require finite CG speed above 1 m/s and
+native local chordwise/disk-flow admission, without a hidden global body-x
+velocity or body-xz incidence restriction.
+
+Induced drag remains an explicitly declared classical engineering closure.
+For each group, sum only its circulatory forces, remove the component along
+CG relative wind, and apply `D = |F_perp|² / (q_CG * pi * e * span²)` opposite
+that wind at the CG. Reference area cancels algebraically. Grouping related
+biplane surfaces under one effective reference is distinct from assigning
+separate references to independent or opposing loads. No cross-group
+induced-drag interference, extra drag moment, or Trefftz-plane accuracy is
+claimed; mutual induced velocities remain in the coupled circulation solve.
+
+`tests/native_surface_wrench.rs` independently reconstructs complete canted,
+swept and vertical loads, grouped drag and a rotated local-forward scene.
+`tests/section_surface_stages.rs` checks the accepted section equation in all
+native wake lanes, explicit incidence-control ownership, and actual midpoint
+orbital/carrier/rotor momentum balance with vertical-surface forces.
+
 ## Canard hinge friction and stops
 
 `canardmech::step` solves one monotone scalar midpoint-velocity equation
