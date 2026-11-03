@@ -126,6 +126,47 @@ fn unequal_bulk_and_face_temperatures_change_real_disk_native_torque_and_complet
     assert_eq!(bodies, saved_bodies);
     assert_eq!((normal.clone(), state, shear.clone()), saved_sources);
 
+    let boosted_bodies = core::array::from_fn::<_, 2, _>(|i| {
+        RigidBodyState::new(
+            bodies[i].pose(),
+            bodies[i].linear_momentum_world().add(Vec3::new(
+                0.0,
+                0.0,
+                properties[i].mass() * 2.0_f64.powi(30),
+            )),
+            bodies[i].angular_momentum_body(),
+        )
+        .unwrap()
+    });
+    let boosted = prepare_rigid_adhesive_with_normal_refresh(
+        &boosted_bodies,
+        &properties,
+        RigidAdhesiveContact {
+            binding: binding(),
+            frame: frame(),
+            source: old_patch,
+        },
+        &normal,
+        state,
+        refreshed.clone(),
+        DT,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        boosted.report.mechanical.kinetic_before_j,
+        boosted.report.mechanical.kinetic_after_j
+    );
+    assert_eq!(
+        boosted.report.represented_storage_change_j,
+        candidate.report.represented_storage_change_j
+    );
+    assert_eq!(
+        boosted.report.energy_residual_j,
+        candidate.report.energy_residual_j
+    );
+
     // Independent zero-approach JKR relation: a^3 = 2*pi*W*R^2/E*.
     // Each E uses its own bulk temperature; W and tau use the actual face T.
     let reduced = 1.0 / (0.9375 / 0.9e6 + 0.9375 / 2.2e6);

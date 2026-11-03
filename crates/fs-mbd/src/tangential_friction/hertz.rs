@@ -10,9 +10,13 @@
 /// Simultaneous original Hertz patches with shared finite-body recoil.
 pub mod multiple;
 
-use super::{RigidContactBinding, RigidFrictionError, components, magnitude, poll, totals, vector};
+use super::{
+    ResultantImpulse, RigidContactBinding, RigidFrictionError, add_components, components,
+    magnitude, poll, rounded_components, totals, vector,
+};
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
 use fs_exec::CancelGate;
+use fs_math::dd::Dd;
 use fs_tribo::TriboError;
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::sliding_patch::contact::{
@@ -78,6 +82,8 @@ pub struct RigidHertzReport {
     pub spin_angular_impulse_world_nms: Vec3,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Actual native momentum increments contracted with midpoint velocities.
+    pub kinetic_change_j: f64,
     /// Actual point-force plus free-couple work on both finite bodies [J].
     pub midpoint_impulse_work_j: f64,
     /// Original Hertz local dissipation evaluated at actual native midpoint rates.
@@ -388,7 +394,7 @@ impl PreparedRigidHertzPair {
         let couple = axes[2].scale(resolved.spin_moment_nm);
         let impulse = force.scale(dt_s);
         let angular_impulse = couple.scale(dt_s);
-        let after = apply_pair_wrench(
+        let native_impulses = prepare_pair_wrench(
             before,
             pair_properties,
             arms,
@@ -396,6 +402,7 @@ impl PreparedRigidHertzPair {
             angular_impulse,
             gate,
         )?;
+        let after = native_impulses.bodies_after;
         let points_after = points(after, pair_properties, arms)?;
         let relative_before = relative_point(points_before);
         let relative_after = relative_point(points_after);
@@ -436,9 +443,10 @@ impl PreparedRigidHertzPair {
             .abs()
             .max((rate_after[1] - expected_after[1]).abs());
         let endpoint_spin_residual = (rate_after[2] - expected_after[2]).abs() / radius;
-        let (energy_before, linear_before, angular_before) = self.totals_before;
-        let (energy_after, linear_after, angular_after) = totals(&after, &pair_properties, gate)?;
-        let kinetic_change = energy_after - energy_before;
+        let energy_before = self.totals_before.0;
+        let energy_after = after[0].kinetic_energy(pair_properties[0])?
+            + after[1].kinetic_energy(pair_properties[1])?;
+        let kinetic_change = native_impulses.kinetic_change_j;
         // A passive midpoint alone permits a spurious coarse-step reversal.
         // Check the individual shear/spin ports at BOTH actual endpoints. Their
         // held-effort powers vary linearly in this frozen-configuration phase.
@@ -467,6 +475,7 @@ impl PreparedRigidHertzPair {
             spin_angular_impulse_world_nms: angular_impulse,
             kinetic_before_j: energy_before,
             kinetic_after_j: energy_after,
+            kinetic_change_j: kinetic_change,
             midpoint_impulse_work_j: midpoint_work,
             dissipated_energy_j: heat,
             work_energy_residual_j: kinetic_change - midpoint_work,
@@ -477,8 +486,8 @@ impl PreparedRigidHertzPair {
             native_spin_moment_residual_nm: moment_residual,
             endpoint_velocity_residual_m_s: endpoint_velocity_residual,
             endpoint_spin_residual_rad_s: endpoint_spin_residual,
-            linear_momentum_change_ns: linear_after.sub(linear_before),
-            angular_momentum_change_nms: angular_after.sub(angular_before),
+            linear_momentum_change_ns: native_impulses.linear_change_ns,
+            angular_momentum_change_nms: native_impulses.angular_change_nms,
             maximum_assisting_work_j: assisting_work,
         };
         let energy_residuals = [
@@ -630,21 +639,67 @@ pub(super) fn apply_pair_wrench(
     angular_impulse: Vec3,
     gate: &CancelGate,
 ) -> Result<[RigidBodyState; 2], RigidHertzError> {
+    Ok(prepare_pair_wrench(before, properties, arms, impulse, angular_impulse, gate)?.bodies_after)
+}
+
+/// Stack-only pair counterpart of the shared island's resultant application.
+/// A point-force moment and a central couple are summed before rounding either
+/// original angular momentum. Absolute kinetic totals do not enter the change.
+pub(super) struct PairImpulsePhase {
+    pub(super) bodies_after: [RigidBodyState; 2],
+    pub(super) kinetic_change_j: f64,
+    pub(super) linear_change_ns: Vec3,
+    pub(super) angular_change_nms: Vec3,
+}
+
+pub(super) fn prepare_pair_wrench(
+    before: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    arms: [Vec3; 2],
+    impulse: Vec3,
+    angular_impulse: Vec3,
+    gate: &CancelGate,
+) -> Result<PairImpulsePhase, RigidHertzError> {
     let mut after = before;
+    let mut kinetic_change = Dd::from_f64(0.0);
+    let mut linear = [Dd::from_f64(0.0); 3];
+    let mut angular = [Dd::from_f64(0.0); 3];
     for (i, sign) in [(0, 1.0), (1, -1.0)] {
         poll(gate)?;
-        let forced = before[i]
-            .apply_impulse_at_body_point(properties[i], arms[i], impulse.scale(sign))?
-            .state_after;
-        let body_couple = forced
-            .pose()
-            .orientation()
-            .rotate_world_to_body(angular_impulse.scale(sign));
-        after[i] = RigidBodyState::new(
-            forced.pose(),
-            forced.linear_momentum_world(),
-            forced.angular_momentum_body().add(body_couple),
+        let mut resultant = ResultantImpulse::default();
+        resultant.add(
+            before[i],
+            arms[i],
+            impulse.scale(sign),
+            angular_impulse.scale(sign),
+        );
+        let receipt = before[i].apply_momentum_impulse(
+            properties[i],
+            rounded_components(resultant.linear),
+            rounded_components(resultant.angular),
         )?;
+        kinetic_change = kinetic_change + Dd::from_f64(receipt.work.kinetic_energy_change_j);
+        add_components(&mut linear, receipt.linear_increment_world);
+        add_components(
+            &mut angular,
+            before[i]
+                .pose()
+                .position_world()
+                .cross(receipt.linear_increment_world),
+        );
+        add_components(
+            &mut angular,
+            before[i]
+                .pose()
+                .orientation()
+                .rotate_body_to_world(receipt.angular_increment_body),
+        );
+        after[i] = receipt.state_after;
     }
-    Ok(after)
+    Ok(PairImpulsePhase {
+        bodies_after: after,
+        kinetic_change_j: kinetic_change.to_f64(),
+        linear_change_ns: rounded_components(linear),
+        angular_change_nms: rounded_components(angular),
+    })
 }

@@ -149,6 +149,50 @@ fn axial(slip: f64, spin: f64) -> Fixture {
 }
 
 #[test]
+fn common_normal_velocity_preserves_pair_friction_loss() {
+    let f = axial(2.0, 0.0);
+    let mut reference_bodies = f.bodies;
+    let reference = f.advance(&mut reference_bodies, 0.01, controls()).unwrap();
+    let boost = 2.0_f64.powi(30);
+    let mut boosted_bodies = core::array::from_fn::<_, 2, _>(|k| {
+        RigidBodyState::new(
+            f.bodies[k].pose(),
+            f.bodies[k].linear_momentum_world().add(Vec3::new(
+                0.0,
+                0.0,
+                boost * f.properties[k].mass(),
+            )),
+            f.bodies[k].angular_momentum_body(),
+        )
+        .unwrap()
+    });
+    let boosted = f.advance(&mut boosted_bodies, 0.01, controls()).unwrap();
+    assert_eq!(reference.contact, boosted.contact);
+    assert_eq!(reference.kinetic_change_j, boosted.kinetic_change_j);
+    assert_eq!(boosted.kinetic_before_j, boosted.kinetic_after_j);
+    assert!(boosted.dissipated_energy_j > 0.01);
+    close(
+        boosted.kinetic_change_j,
+        -boosted.dissipated_energy_j,
+        2e-14,
+    );
+    for k in 0..2 {
+        assert_eq!(
+            reference_bodies[k].linear_momentum_world().x,
+            boosted_bodies[k].linear_momentum_world().x
+        );
+        assert_eq!(
+            reference_bodies[k].angular_momentum_body(),
+            boosted_bodies[k].angular_momentum_body()
+        );
+        assert_eq!(
+            boosted_bodies[k].linear_momentum_world().z,
+            boost * f.properties[k].mass()
+        );
+    }
+}
+
+#[test]
 fn moving_high_static_capacity_uses_kinetic_traction_through_true_arrest() {
     for (slip, spin) in [(1.0, 0.0), (0.0, 1.0)] {
         let mut f = axial(slip, spin);

@@ -36,7 +36,7 @@ pub struct RigidAdhesiveThermalNormalReport {
     /// Signed supply associated with changing the normal-law parameters, J.
     /// This is neither friction heat nor a thermodynamic entropy calculation.
     pub parameter_work_j: f64,
-    /// Independently differenced native kinetic plus normal potential energy, J.
+    /// Actual native kinetic increment plus the normal potential change, J.
     pub represented_storage_change_j: f64,
     /// Storage change + actual junction loss - parameter work, J.
     pub energy_residual_j: f64,
@@ -142,9 +142,7 @@ pub fn prepare_rigid_adhesive_with_normal_refresh(
     )?;
     let potential_change = after.reversible_energy_j - before.reversible_energy_j;
     let parameter_work = refreshed.parameter_work_j();
-    let total_before = mechanical.report.kinetic_before_j + before.reversible_energy_j;
-    let total_after = mechanical.report.kinetic_after_j + after.reversible_energy_j;
-    let storage_change = total_after - total_before;
+    let storage_change = mechanical.report.kinetic_change_j + potential_change;
     let residual = storage_change + mechanical.report.dissipated_energy_j - parameter_work;
     for balance in [
         potential_change - refreshed.potential_change_j(),

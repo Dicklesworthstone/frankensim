@@ -164,6 +164,16 @@ and shared Hertz solves with a common transverse/normal velocity. These are
 fixed-geometry impulse phases, not new normal-contact, pose-integration or
 constitutive laws; refusal still publishes no body or friction-history update.
 
+Individual Hertz and source-backed adhesive pairs also expose the native
+`kinetic_change_j` and use actual increments for their work and momentum
+balances. Their fixed two-body resultant update stays on the stack, combining
+the original point moment and central couple before rounding native momentum.
+Adhesive temperature refresh closes represented storage with this kinetic
+increment plus the normal-potential change; normal parameter work remains
+separate from junction heat. Common-normal-velocity regressions cover Hertz
+sliding, sourced adhesive spin and the real-source normal thermal refresh with
+unchanged physical controls.
+
 ## Linear rotor-bearing operating points
 
 The public `fs_mbd::rotordynamics` module exposes the original operating-point,

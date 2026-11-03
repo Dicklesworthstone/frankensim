@@ -117,6 +117,62 @@ fn axial(spin: f64) -> Fixture {
 }
 
 #[test]
+fn common_normal_translation_does_not_hide_source_owned_junction_heat() {
+    let (normal, shear) = common::sources(0.05, 3e6, STRENGTH);
+    let response = normal.evaluate_contact_load(0.0).unwrap();
+    let source = shear
+        .sliding_patch_dmt(normal.normal_state(), &response)
+        .unwrap();
+    let f = axial(1000.0);
+    let ia = f.properties[0].principal_inertia_body().z;
+    let ib = f.properties[1].principal_inertia_body().z;
+    let inverse = 1.0 / ia + 1.0 / ib;
+    let moment = (2.0 / 3.0) * STRENGTH * response.contact_area_m2 * response.contact_radius_m;
+    let dt = 0.25 * 1000.0 / (moment * inverse);
+    let run = |boost: f64| {
+        let mut bodies = core::array::from_fn::<_, 2, _>(|k| {
+            RigidBodyState::new(
+                f.bodies[k].pose(),
+                Vec3::new(0.0, 0.0, boost * f.properties[k].mass()),
+                f.bodies[k].angular_momentum_body(),
+            )
+            .unwrap()
+        });
+        let report = apply_rigid_adhesive(
+            &mut bodies,
+            &f.properties,
+            RigidAdhesiveContact {
+                binding: f.binding,
+                frame: f.frame,
+                source,
+            },
+            dt,
+            controls(),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        (bodies, report)
+    };
+    let reference = run(0.0);
+    let boosted = run(2.0_f64.powi(20));
+    assert_eq!(reference.1.contact, boosted.1.contact);
+    assert_eq!(reference.1.kinetic_change_j, boosted.1.kinetic_change_j);
+    assert_eq!(boosted.1.kinetic_before_j, boosted.1.kinetic_after_j);
+    assert!(boosted.1.dissipated_energy_j > 0.0);
+    close(
+        boosted.1.kinetic_change_j,
+        -boosted.1.dissipated_energy_j,
+        1e-33,
+    );
+    for k in 0..2 {
+        assert_eq!(
+            reference.0[k].angular_momentum_body(),
+            boosted.0[k].angular_momentum_body()
+        );
+    }
+}
+
+#[test]
 fn zero_and_tensile_normal_load_spin_both_finite_bodies_and_dissipate_only_relative_energy() {
     let (normal, shear) = common::sources(0.05, 3e6, STRENGTH);
     let pull_off =

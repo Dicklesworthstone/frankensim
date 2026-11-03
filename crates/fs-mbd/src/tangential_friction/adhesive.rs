@@ -38,8 +38,8 @@ use fs_tribo::adhesive::spinning::contact::{
 use fs_tribo::partial_slip::TangentFrame;
 
 use super::hertz::{
-    RigidHertzError, accepted_phase, apply_pair_wrench, points, relative_point, relative_spin,
-    scaled_response,
+    RigidHertzError, accepted_phase, apply_pair_wrench, points, prepare_pair_wrench,
+    relative_point, relative_spin, scaled_response,
 };
 use super::{RigidContactBinding, magnitude, poll, totals, vector};
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
@@ -81,6 +81,8 @@ pub struct RigidAdhesiveReport {
     pub kinetic_before_j: f64,
     /// Native pair kinetic energy after this sample.
     pub kinetic_after_j: f64,
+    /// Actual native momentum increments contracted with midpoint velocities.
+    pub kinetic_change_j: f64,
     /// Signed work of actual point and free-couple impulses.
     pub midpoint_impulse_work_j: f64,
     /// Original uniform-junction loss at actual midpoint motion, unpartitioned.
@@ -216,7 +218,12 @@ pub fn prepare_rigid_adhesive(
     let slip_before = [relative_before.dot(axes[0]), relative_before.dot(axes[1])];
     let spin_before = angular_before.dot(axes[2]);
     let radius = contact.source.patch().parameters().contact_radius_m;
-    let (energy_before, linear_before, momentum_before) = totals(&before, &properties, gate)?;
+    let energy_before = totals(&before, &properties, gate)?.0;
+    if !energy_before.is_finite() {
+        return Err(RigidAdhesiveError::Invalid(
+            "unrepresentable native pair kinetic energy",
+        ));
+    }
     if radius == 0.0 {
         // An attractive DMT gap has no solid junction, so arbitrary free motion
         // and separated material points cannot produce shear, torque or heat.
@@ -234,6 +241,7 @@ pub fn prepare_rigid_adhesive(
                 spin_after_rad_s: spin_before,
                 kinetic_before_j: energy_before,
                 kinetic_after_j: energy_before,
+                kinetic_change_j: 0.0,
                 midpoint_impulse_work_j: 0.0,
                 dissipated_energy_j: 0.0,
                 energy_residual_j: 0.0,
@@ -279,7 +287,9 @@ pub fn prepare_rigid_adhesive(
     let couple = axes[2].scale(resolved.spin_moment_nm);
     let impulse = force.scale(dt_s);
     let angular_impulse = couple.scale(dt_s);
-    let after = apply_pair_wrench(before, properties, arms, impulse, angular_impulse, gate)?;
+    let native_impulses =
+        prepare_pair_wrench(before, properties, arms, impulse, angular_impulse, gate)?;
+    let after = native_impulses.bodies_after;
     let endpoint = points(after, properties, arms)?;
     let relative_after = relative_point(endpoint);
     let angular_after = relative_spin(endpoint);
@@ -303,7 +313,8 @@ pub fn prepare_rigid_adhesive(
             (native.spin_moment_nm - resolved.spin_moment_nm).abs(),
         )
     };
-    let (energy_after, linear_after, momentum_after) = totals(&after, &properties, gate)?;
+    let energy_after =
+        after[0].kinetic_energy(properties[0])? + after[1].kinetic_energy(properties[1])?;
     let report = RigidAdhesiveReport {
         contact: Some(resolved),
         scaled_mobility_per_kg: Some(mobility),
@@ -315,13 +326,14 @@ pub fn prepare_rigid_adhesive(
         spin_after_rad_s: angular_after.dot(axes[2]),
         kinetic_before_j: energy_before,
         kinetic_after_j: energy_after,
+        kinetic_change_j: native_impulses.kinetic_change_j,
         midpoint_impulse_work_j: work,
         dissipated_energy_j: heat,
-        energy_residual_j: energy_after - energy_before + heat,
+        energy_residual_j: native_impulses.kinetic_change_j + heat,
         force_residual_n: force_residual,
         spin_moment_residual_nm: moment_residual,
-        linear_momentum_change_ns: linear_after.sub(linear_before),
-        angular_momentum_change_nms: momentum_after.sub(momentum_before),
+        linear_momentum_change_ns: native_impulses.linear_change_ns,
+        angular_momentum_change_nms: native_impulses.angular_change_nms,
     };
     let velocity_residual = (slip_midpoint[0] - resolved.slip_displacement_m[0] / dt_s)
         .abs()
@@ -329,13 +341,14 @@ pub fn prepare_rigid_adhesive(
     let spin_residual = (spin_midpoint - resolved.spin_angle_rad / dt_s).abs();
     let balances = [
         report.energy_residual_j,
-        energy_after - energy_before - work,
+        native_impulses.kinetic_change_j - work,
         work + resolved.contact_work_j,
         heat - resolved.dissipated_energy_j,
     ];
-    if balances
-        .into_iter()
-        .any(|x| !x.is_finite() || x.abs() > controls.energy_tolerance_j)
+    if !energy_after.is_finite()
+        || balances
+            .into_iter()
+            .any(|x| !x.is_finite() || x.abs() > controls.energy_tolerance_j)
         || !force_residual.is_finite()
         || force_residual > controls.contact.force_tolerance_n
         || !moment_residual.is_finite()
