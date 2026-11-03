@@ -341,6 +341,46 @@ impulse conservation after remeshing. The whole-plane diffusion equation has
 rather than an invariant second moment at nonzero circulation. This bounded 2-D
 operation does not implement 3-D remeshing or close the deferred FMM epic.
 
+## Scheduled remeshed viscous evolution
+
+`conservative::remeshed::simulate_with_cx` evolves the complete 2-D trajectory
+with the original conservative viscous step and M4' remap owners. The borrowed
+`RemeshSchedule` supplies a positive cadence `K` and exactly
+`1 + ceil(S/K)` target grids: initial, each complete interval, and the final
+partial interval. Zero steps performs the initial remap only; zero time still
+executes the authored grid changes. Each resulting grid supplies its own
+positive `dx*dy` quadrature before the next PSE step. Viscosity and the shared
+velocity core remain independent physical inputs.
+
+Targets may widen, move or change resolution. PSE generally fills old boundary
+nodes, so further remapping needs explicit padding for their nonzero stencils.
+The driver never clips those tails or infers a wall, strength threshold, moving
+window or adaptive-grid law. Decimal-grid changes recover a representable tiny
+offset relative to the nearest physical node if the origin-relative quotient
+rounds to an integer; offsets that actually underflow still refuse. This is
+local arithmetic, with no coordinate snapping or moment projection.
+
+One ambient account admits and charges the whole trajectory. If `N` is the
+borrowed input count and `G_k` the successive grid sizes, remap work is
+`R = 17*N + 2*G_0 + sum_{k>0}(17*G_(k-1) + 2*G_k)`. Each positive-time
+evolution interval adds its original `S_k*G_k*(G_k-1)` pair visits, multiplied
+by three for positive viscosity. Total work is `R + pair_visits + S`.
+`RemeshedVpmBudget` bounds input/grid counts, steps, total pairs/work and peak
+reserved payload before any allocation. At most two particle-plus-f64 banks
+are reserved once to the largest declared grid; a single initial-only remap
+needs one bank. All later remaps reuse them, with no intermediate trajectory
+copies or further allocations. Borrowed inputs/grids and allocator overhead
+are excluded from the stated payload bound. All stages poll the same account
+within 256 logical visits and publish only the final regular cloud.
+
+The composite inherits signed M4' interpolation and finite-cloud PSE errors.
+It does not make diffusion impulse-exact or positive, or claim second-order
+convergence for arbitrary changing remesh schedules. Cadence, spatial/kernel
+resolution, padding and physical timestep need separate refinement. The G0/G3/G4
+checks in `tests/remeshed_viscous.rs` compare explicit original-owner composition,
+zero-net inviscid impulse, changing quadrature, whole-run work and combined-bank
+admission, and late support/cancellation refusal with deterministic retry.
+
 ## Three-dimensional impulse and conservative coarsening
 
 `FilamentWake::hydrodynamic_impulse_per_density` reports the complete closed

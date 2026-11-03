@@ -19,6 +19,9 @@ use super::{
 mod viscous;
 pub use viscous::simulate_with_cx as simulate_viscous_with_cx;
 
+/// Checked viscous evolution over an authored sequence of regular remeshes.
+pub mod remeshed;
+
 /// Advance the inviscid cloud by symmetric exact-pair splitting under the
 /// existing local and ambient execution budgets.
 ///

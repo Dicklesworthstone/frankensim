@@ -122,17 +122,31 @@ impl CartesianGrid2 {
         if !coordinate.is_finite() || coordinate < 0.0 || coordinate > end {
             return Err(RemeshError::SupportOutsideGrid { particle, axis });
         }
-        let base = coordinate.floor() as usize;
-        let t = coordinate - base as f64;
+        let mut base = coordinate.floor() as usize;
+        let mut t = coordinate - base as f64;
+        let mut u = 1.0 - t;
         if t == 0.0 && self.coordinate(axis, base) != position {
-            // A distinct displacement can disappear in the normalization
-            // (notably when position/spacing underflows). It must not be
-            // published as an exact node or bypass the full-support check.
-            return Err(RemeshError::Invalid(
-                "particle offset is not representable in grid coordinates",
-            ));
+            // Subtract the nearby physical node before scaling: changing
+            // decimal grids can otherwise erase a perfectly representable
+            // small offset in the origin-relative quotient. Keep both local
+            // fractions when 1-small rounds to 1. Truly lost offsets refuse.
+            let offset = (position - self.coordinate(axis, base)) / self.spacing[axis];
+            if !offset.is_finite() || offset == 0.0 || offset.abs() >= 1.0 {
+                return Err(RemeshError::Invalid(
+                    "particle offset is not representable in grid coordinates",
+                ));
+            }
+            if offset > 0.0 {
+                t = offset;
+                u = 1.0 - offset;
+            } else {
+                base = base
+                    .checked_sub(1)
+                    .ok_or(RemeshError::SupportOutsideGrid { particle, axis })?;
+                u = -offset;
+                t = 1.0 - u;
+            }
         }
-        let u = 1.0 - t;
         let weights = [
             -0.5 * t * u * u,
             u * (1.0 + t - 1.5 * t * t),
@@ -238,7 +252,20 @@ pub fn remesh(
     budget: RemeshBudget,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RemeshedCloud2, RemeshError> {
-    poll(&mut cancelled)?;
+    remesh_with_progress(particles, grid, budget, None, |_| poll(&mut cancelled))
+}
+
+// Native composition seam. A caller can reuse its two admitted buffers and
+// charge completed logical visits to its original execution account. Neither
+// the stencil arithmetic nor the standalone cancellation order changes.
+pub(super) fn remesh_with_progress<E: From<RemeshError>>(
+    particles: &[VortexParticle],
+    grid: CartesianGrid2,
+    budget: RemeshBudget,
+    workspace: Option<(Vec<VortexParticle>, Vec<f64>)>,
+    mut checkpoint: impl FnMut(u64) -> Result<(), E>,
+) -> Result<RemeshedCloud2, E> {
+    checkpoint(0)?;
     limit(
         "input particles",
         particles.len() as u128,
@@ -255,8 +282,9 @@ pub fn remesh(
     let payload = grid.nodes as u128
         * (core::mem::size_of::<VortexParticle>() + core::mem::size_of::<f64>()) as u128;
     limit("live bytes", payload, budget.max_live_bytes as u128)?;
-    let mut output = Vec::new();
-    let mut scratch = Vec::new();
+    let (mut output, mut scratch) = workspace.unwrap_or_default();
+    output.clear();
+    scratch.clear();
     output
         .try_reserve_exact(grid.nodes)
         .map_err(|_| RemeshError::Allocation)?;
@@ -266,7 +294,7 @@ pub fn remesh(
     let mut completed = 0_u64;
     for y in 0..grid.shape[1] {
         for x in 0..grid.shape[0] {
-            tick(&mut completed, &mut cancelled)?;
+            tick(&mut completed, &mut checkpoint)?;
             output.push(VortexParticle::new(
                 [grid.coordinate(0, x), grid.coordinate(1, y)],
                 0.0,
@@ -275,11 +303,12 @@ pub fn remesh(
         }
     }
     for (particle, source) in particles.iter().enumerate() {
-        tick(&mut completed, &mut cancelled)?;
+        tick(&mut completed, &mut checkpoint)?;
         if !source.circulation.is_finite() || source.pos.iter().any(|p| !p.is_finite()) {
             return Err(RemeshError::Invalid(
                 "finite particle coordinates and circulation required",
-            ));
+            )
+            .into());
         }
         let (xs, ys) = if source.circulation == 0.0 {
             (([0; 4], [0.0; 4]), ([0; 4], [0.0; 4]))
@@ -291,7 +320,7 @@ pub fn remesh(
         };
         for j in 0..4 {
             for i in 0..4 {
-                tick(&mut completed, &mut cancelled)?;
+                tick(&mut completed, &mut checkpoint)?;
                 // Multiply circulation first: two tiny weights may underflow
                 // as a product even when their circulation deposit is finite.
                 let deposit = (source.circulation * xs.1[i]) * ys.1[j];
@@ -303,15 +332,15 @@ pub fn remesh(
         }
     }
     for (particle, area) in output.iter_mut().zip(&mut scratch) {
-        tick(&mut completed, &mut cancelled)?;
+        tick(&mut completed, &mut checkpoint)?;
         particle.circulation += *area;
         if !particle.circulation.is_finite() {
-            return Err(RemeshError::Invalid("unrepresentable remeshed circulation"));
+            return Err(RemeshError::Invalid("unrepresentable remeshed circulation").into());
         }
         *area = grid.area;
     }
     debug_assert_eq!(u128::from(completed), work);
-    poll(&mut cancelled)?;
+    checkpoint(completed)?;
     Ok(RemeshedCloud2 {
         particles: output,
         areas_m2: scratch,
@@ -356,9 +385,12 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), RemeshError> {
         Ok(())
     }
 }
-fn tick(completed: &mut u64, cancelled: &mut impl FnMut() -> bool) -> Result<(), RemeshError> {
+fn tick<E>(
+    completed: &mut u64,
+    checkpoint: &mut impl FnMut(u64) -> Result<(), E>,
+) -> Result<(), E> {
     if *completed % 256 == 0 {
-        poll(cancelled)?;
+        checkpoint(*completed)?;
     }
     *completed += 1;
     Ok(())

@@ -89,45 +89,17 @@ pub fn simulate_with_cx(
     meter.boundary(&mut accountant, cx, "fs-vpm.conservative-input-complete")?;
     let mut completed_pairs = 0;
     for _ in 0..steps {
-        if active_diffusion {
-            diffusion::symmetric_sweep(
-                &mut state,
-                areas_m2,
-                law,
-                dt,
-                0.25,
-                &mut completed_pairs,
-                &mut meter,
-                &mut accountant,
-                cx,
-            )?;
-        }
-        if active_advection {
-            super::symmetric_sweep(
-                &mut state,
-                dt,
-                core,
-                &mut completed_pairs,
-                &mut meter,
-                &mut accountant,
-                cx,
-            )?;
-        }
-        if active_diffusion {
-            diffusion::symmetric_sweep(
-                &mut state,
-                areas_m2,
-                law,
-                dt,
-                0.25,
-                &mut completed_pairs,
-                &mut meter,
-                &mut accountant,
-                cx,
-            )?;
-        }
-        meter.unit(&mut accountant, cx, "fs-vpm.conservative-step", || Ok(()))?;
-        meter.boundary(&mut accountant, cx, "fs-vpm.conservative-step-complete")?;
+        step(
+            &mut state,
+            areas_m2,
+            dt,
+            core,
+            law,
+            &mut completed_pairs,
+            &mut meter,
+            &mut accountant,
+            cx,
+        )?;
     }
     meter.flush(&mut accountant, "fs-vpm.conservative-finalize")?;
     let consumption = accountant.consumption();
@@ -150,4 +122,52 @@ pub fn simulate_with_cx(
         peak_live_bytes,
         budget: accountant.consumption(),
     })
+}
+
+// Shared in-place owner: scheduled remeshing must not copy the cloud or create
+// a new execution account between the original D/2-A-D/2 steps.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn step(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    dt: f64,
+    core: f64,
+    law: PseDiffusion,
+    completed_pairs: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+) -> Result<(), VpmError> {
+    let diffuse = dt > 0.0 && law.kinematic_viscosity_m2_s() > 0.0;
+    if diffuse {
+        diffusion::symmetric_sweep(
+            state,
+            areas,
+            law,
+            dt,
+            0.25,
+            completed_pairs,
+            meter,
+            accountant,
+            cx,
+        )?;
+    }
+    if dt > 0.0 {
+        super::symmetric_sweep(state, dt, core, completed_pairs, meter, accountant, cx)?;
+    }
+    if diffuse {
+        diffusion::symmetric_sweep(
+            state,
+            areas,
+            law,
+            dt,
+            0.25,
+            completed_pairs,
+            meter,
+            accountant,
+            cx,
+        )?;
+    }
+    meter.unit(accountant, cx, "fs-vpm.conservative-step", || Ok(()))?;
+    meter.boundary(accountant, cx, "fs-vpm.conservative-step-complete")
 }
