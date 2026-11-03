@@ -166,12 +166,13 @@ fn cauchy_green_invariants<T: Real>(f: &[T; 9]) -> (T, T) {
     (i1, tr_c2)
 }
 
-// The original coupled NH potential, evaluated in objective strain coordinates
-// near ANY rigid rotation. Directly subtracting I1-3 and ln(J) loses quadratic
-// storage at acoustic strain amplitudes even while the AD stress stays nonzero.
-fn neo_hookean_energy<T: Real>(f: &[T; 9], mu: f64, lambda: f64) -> T {
-    let j = det3(f);
-    let mut a = [T::zero(); 9]; // A = C-I = F^T F-I.
+// C-I near any rigid rotation, shared by the coupled and decoupled laws.
+// Retain the quadratic squares even when a column's leading square is one.
+fn small_objective_strain<T: Real>(f: &[T; 9], j: T) -> Option<[T; 9]> {
+    if !(j.value() > 0.0) {
+        return None;
+    }
+    let mut a = [T::zero(); 9];
     for i in 0..3 {
         let pivot = (1..3).fold(0, |p, k| {
             if f[3 * k + i].value().abs() > f[3 * p + i].value().abs() {
@@ -180,8 +181,6 @@ fn neo_hookean_energy<T: Real>(f: &[T; 9], mu: f64, lambda: f64) -> T {
                 p
             }
         });
-        // Cancel the unit diagonal against the largest square first. In a
-        // small simple shear the remaining square must not be added to 1.
         let lead = f[3 * pivot + i];
         let mut diagonal = lead.mul_add(lead, -T::one());
         for k in 0..3 {
@@ -196,26 +195,134 @@ fn neo_hookean_energy<T: Real>(f: &[T; 9], mu: f64, lambda: f64) -> T {
             a[3 * j + i] = value;
         }
     }
-    if j.value() > 0.0 && a.iter().all(|v| v.value().abs() <= 1.0 / 64.0) {
+    a.iter().all(|v| v.value().abs() <= 1.0 / 64.0).then_some(a)
+}
+
+// ln(1+d) and d-ln(1+d), without cancelling their first-order terms.
+// The caller bounds |d/(2+d)| < 0.073. The omitted atanh tail and its
+// first two derivatives are <1e-32, below f64 roundoff in this domain.
+fn small_log1p_and_remainder<T: Real>(d: T) -> (T, T) {
+    let s = d / (T::from_f64(2.0) + d);
+    let s2 = s * s;
+    let mut power = s;
+    let mut tail = T::zero();
+    for k in 1..16 {
+        power = power * s2;
+        tail = tail + power / T::from_f64(f64::from(2 * k + 1));
+    }
+    tail = T::from_f64(2.0) * tail;
+    (
+        T::from_f64(2.0) * s + tail,
+        d * d / (T::from_f64(2.0) + d) - tail,
+    )
+}
+
+// Real has no expm1 operation. This scalar-generic series retains the same
+// potential for AD; at |x| <= 1/8 its omitted term and first two derivatives
+// are below 3e-26. Outside that interval keep the original exponential.
+fn exp_minus_one<T: Real>(x: T) -> T {
+    if x.value().abs() > 0.125 {
+        return x.exp() - T::one();
+    }
+    let mut factorial = 20_922_789_888_000.0; // 16!, exactly representable.
+    let mut tail = T::from_f64(1.0 / factorial);
+    for degree in (2..16).rev() {
+        factorial /= f64::from(degree + 1);
+        tail = tail.mul_add(x, T::from_f64(1.0 / factorial));
+    }
+    x * (T::one() + x * tail)
+}
+
+struct IsochoricStrain<T> {
+    determinant_root: T,
+    full_trace: T,
+    full_quadratic: T,
+    full_cubic: T,
+    i1_minus_three: T,
+    i2_minus_three: T,
+}
+
+// Write C=m(I+B), with m=tr(C)/3 and tr(B)=0, before normalizing det(C).
+// Then det(I+B)=1+Q(B)+det(B), whose increment starts at quadratic order.
+// This avoids cancellation between volumetric and distortional strains,
+// including a tiny shear superposed on a much larger uniform dilation.
+fn small_isochoric_strain<T: Real>(a: &[T; 9]) -> IsochoricStrain<T> {
+    let three = T::from_f64(3.0);
+    let full_trace = a[0] + a[4] + a[8];
+    let mean = T::one() + full_trace / three;
+    let mut b = a.map(|entry| entry / mean);
+    let denominator = three * mean;
+    b[0] = ((a[0] - a[4]) + (a[0] - a[8])) / denominator;
+    b[4] = ((a[4] - a[0]) + (a[4] - a[8])) / denominator;
+    b[8] = -b[0] - b[4];
+    let quadratic = -T::from_f64(0.5)
+        * (b[0] * b[0]
+            + b[4] * b[4]
+            + b[8] * b[8]
+            + T::from_f64(2.0) * (b[1] * b[1] + b[2] * b[2] + b[5] * b[5]));
+    let (log_det, _) = small_log1p_and_remainder(quadratic + det3(&b));
+    let scale_increment = exp_minus_one(-log_det / three);
+    let square_increment = exp_minus_one(-T::from_f64(2.0) * log_det / three);
+    IsochoricStrain {
+        determinant_root: mean / (T::one() + scale_increment),
+        full_trace,
+        full_quadratic: a[0] * a[4] + a[0] * a[8] + a[4] * a[8]
+            - a[1] * a[3]
+            - a[2] * a[6]
+            - a[5] * a[7],
+        full_cubic: det3(a),
+        i1_minus_three: three * scale_increment,
+        i2_minus_three: three * square_increment + quadratic * (T::one() + square_increment),
+    }
+}
+
+// Rationalize I4/det(C)^(1/3)-1 using I4^3-det(C). Group equal orders
+// in C-I so axial fibres under pure dilation or unchanged by J=1 simple
+// shear retain zero strain and the declared inactive-side Hessian at zero.
+fn isochoric_structural_shift<T: Real>(shift: T, bar: &IsochoricStrain<T>) -> T {
+    let square = shift * shift;
+    let numerator = (T::from_f64(3.0) * shift - bar.full_trace)
+        + (T::from_f64(3.0) * square - bar.full_quadratic)
+        + (shift * square - bar.full_cubic);
+    let i4 = T::one() + shift;
+    let root = bar.determinant_root;
+    numerator / (root * (i4 * i4 + i4 * root + root * root))
+}
+
+// a^T(Cstar-I)a + (|a|^2-1). Keep the actual supplied direction norm:
+// the constructor's tolerance is an admission rule, not a normalization.
+fn structural_invariant_shift<T: Real>(strain: &[T; 9], direction: &[f64; 3]) -> T {
+    let norm_shift = direction.iter().fold(0.0, |sum, x| sum + x * x) - 1.0;
+    let mut shift = T::from_f64(norm_shift);
+    for i in 0..3 {
+        for j in 0..3 {
+            shift = T::from_f64(direction[i] * direction[j]).mul_add(strain[3 * i + j], shift);
+        }
+    }
+    shift
+}
+
+fn hgo_fibre_energy<T: Real>(strain: T, k1: f64, k2: f64) -> T {
+    if strain.value() > 0.0 {
+        T::from_f64(k1 / (2.0 * k2)) * exp_minus_one(T::from_f64(k2) * strain * strain)
+    } else {
+        T::zero()
+    }
+}
+
+// The original coupled NH potential, evaluated in objective strain coordinates
+// near ANY rigid rotation. Directly subtracting I1-3 and ln(J) loses quadratic
+// storage at acoustic strain amplitudes even while the AD stress stays nonzero.
+fn neo_hookean_energy<T: Real>(f: &[T; 9], mu: f64, lambda: f64) -> T {
+    let j = det3(f);
+    if let Some(a) = small_objective_strain(f, j) {
         let quadratic =
             a[0] * a[4] + a[0] * a[8] + a[4] * a[8] - a[1] * a[3] - a[2] * a[6] - a[5] * a[7];
         let cubic = det3(&a);
         let d = a[0] + a[4] + a[8] + quadratic + cubic; // det(C)-1.
-        let s = d / (T::from_f64(2.0) + d);
-        let s2 = s * s;
-        let mut power = s;
-        let mut tail = T::zero();
-        for k in 1..16 {
-            power = power * s2;
-            tail = tail + power / T::from_f64(f64::from(2 * k + 1));
-        }
-        tail = T::from_f64(2.0) * tail;
-        let log_c = T::from_f64(2.0) * s + tail;
-        let remainder = d * d / (T::from_f64(2.0) + d) - tail;
+        let (log_c, remainder) = small_log1p_and_remainder(d);
         // ln det(C)=2 ln J and tr(A)-ln det(C)=-Q(A)-det(A)
-        // +[d-ln(1+d)]. Here |s|<0.073; the omitted atanh tail and its
-        // first two derivatives are <1e-32, below f64 roundoff throughout
-        // this branch. AD differentiates this same stable expression.
+        // +[d-ln(1+d)]. AD differentiates this same stable expression.
         T::from_f64(0.5 * mu) * (-quadratic - cubic + remainder)
             + T::from_f64(0.125 * lambda) * log_c * log_c
     } else {
@@ -315,26 +422,15 @@ impl Hyperelastic {
     ///
     /// Requires an admissible F. Ogden's spectral lift carries the exact
     /// value, gradient and Hessian at the primal point, including repeated
-    /// stretches; derivatives above second order are not claimed. Neo-Hookean
-    /// storage uses the equivalent `C-I` expression near rigid rotations so
-    /// small elastic energies are not lost by subtraction of unit invariants.
+    /// stretches; derivatives above second order are not claimed. NH, MR,
+    /// and HGO use equivalent objective strain expressions near rigid
+    /// rotations so small stored energies survive unit-invariant subtraction.
     pub fn energy<T: Real>(&self, f: &[T; 9]) -> T {
         match &self.model {
             HyperelasticModel::NeoHookean { mu, lambda } => neo_hookean_energy(f, *mu, *lambda),
-            HyperelasticModel::MooneyRivlin { c10, c01, kappa } => {
-                let j = det3(f);
-                let (i1, tr_c2) = cauchy_green_invariants(f);
-                let i2 = T::from_f64(0.5) * (i1 * i1 - tr_c2);
-                let ln_j = j.ln();
-                // J^(−2/3) and J^(−4/3) via exp/ln (J > 0 enforced upstream).
-                let jm23 = (T::from_f64(-2.0 / 3.0) * ln_j).exp();
-                let jm43 = (T::from_f64(-4.0 / 3.0) * ln_j).exp();
-                let three = T::from_f64(3.0);
-                T::from_f64(*c10) * (jm23 * i1 - three)
-                    + T::from_f64(*c01) * (jm43 * i2 - three)
-                    + T::from_f64(0.5 * *kappa) * (j - T::one()) * (j - T::one())
-            }
-            HyperelasticModel::Ogden { .. } | HyperelasticModel::HolzapfelGasserOgden { .. } => {
+            HyperelasticModel::MooneyRivlin { .. }
+            | HyperelasticModel::Ogden { .. }
+            | HyperelasticModel::HolzapfelGasserOgden { .. } => {
                 self.isochoric_energy(f) + self.volumetric_energy(det3(f))
             }
         }
@@ -344,20 +440,25 @@ impl Hyperelastic {
     /// consumer. For full-invariant HGO the fibre part intentionally depends
     /// on J. This accessor does not add a bulk penalty.
     pub fn isochoric_energy<T: Real>(&self, f: &[T; 9]) -> T {
-        if let HyperelasticModel::NeoHookean { mu, .. } = &self.model {
-            return neo_hookean_energy(f, *mu, 0.0);
-        }
-        let j = det3(f);
-        let jm23 = (T::from_f64(-2.0 / 3.0) * j.ln()).exp();
-        let (i1, tr_c2) = cauchy_green_invariants(f);
         match &self.model {
-            HyperelasticModel::NeoHookean { .. } => unreachable!("handled above"),
+            HyperelasticModel::NeoHookean { mu, .. } => neo_hookean_energy(f, *mu, 0.0),
             HyperelasticModel::MooneyRivlin { c10, c01, .. } => {
-                let jm43 = (T::from_f64(-4.0 / 3.0) * j.ln()).exp();
+                let j = det3(f);
+                if let Some(a) = small_objective_strain(f, j) {
+                    let bar = small_isochoric_strain(&a);
+                    return T::from_f64(*c10) * bar.i1_minus_three
+                        + T::from_f64(*c01) * bar.i2_minus_three;
+                }
+                let ln_j = j.ln();
+                let jm23 = (T::from_f64(-2.0 / 3.0) * ln_j).exp();
+                let jm43 = (T::from_f64(-4.0 / 3.0) * ln_j).exp();
+                let (i1, tr_c2) = cauchy_green_invariants(f);
                 T::from_f64(*c10) * (jm23 * i1 - T::from_f64(3.0))
                     + T::from_f64(0.5 * c01) * (jm43 * (i1 * i1 - tr_c2) - T::from_f64(6.0))
             }
             HyperelasticModel::Ogden { terms, .. } => {
+                let j = det3(f);
+                let jm23 = (T::from_f64(-2.0 / 3.0) * j.ln()).exp();
                 let cbar = core::array::from_fn(|ij| {
                     let (i, k) = (ij / 3, ij % 3);
                     jm23 * (0..3).fold(T::zero(), |s, r| s + f[3 * r + i] * f[3 * r + k])
@@ -373,6 +474,31 @@ impl Hyperelastic {
                 invariants,
                 ..
             } => {
+                let j = det3(f);
+                if let Some(a) = small_objective_strain(f, j) {
+                    let bar = small_isochoric_strain(&a);
+                    let mut w = T::from_f64(*c10) * bar.i1_minus_three;
+                    if *k1 == 0.0 {
+                        return w;
+                    }
+                    let trace = match invariants {
+                        FibreInvariants::Isochoric => bar.i1_minus_three,
+                        FibreInvariants::Full => bar.full_trace,
+                    };
+                    for direction in fibres {
+                        let shift = structural_invariant_shift(&a, direction);
+                        let shift = match invariants {
+                            FibreInvariants::Isochoric => isochoric_structural_shift(shift, &bar),
+                            FibreInvariants::Full => shift,
+                        };
+                        let e = T::from_f64(*dispersion) * trace
+                            + T::from_f64(1.0 - 3.0 * dispersion) * shift;
+                        w = w + hgo_fibre_energy(e, *k1, *k2);
+                    }
+                    return w;
+                }
+                let jm23 = (T::from_f64(-2.0 / 3.0) * j.ln()).exp();
+                let (i1, _) = cauchy_green_invariants(f);
                 let scale = match invariants {
                     FibreInvariants::Isochoric => jm23,
                     FibreInvariants::Full => T::one(),
@@ -390,10 +516,7 @@ impl Hyperelastic {
                     }
                     let e = T::from_f64(*dispersion) * (scale * i1 - T::from_f64(3.0))
                         + T::from_f64(1.0 - 3.0 * dispersion) * (scale * i4 - T::one());
-                    if e.value() > 0.0 {
-                        w = w + T::from_f64(k1 / (2.0 * k2))
-                            * ((T::from_f64(*k2) * e * e).exp() - T::one());
-                    }
+                    w = w + hgo_fibre_energy(e, *k1, *k2);
                 }
                 w
             }

@@ -475,6 +475,199 @@ fn g3_small_strain_storage_remains_objective_after_finite_rotation() {
     }
 }
 
+#[test]
+fn g1_mooney_rivlin_retains_small_shear_storage_and_work() {
+    for (c10, c01) in [(2.1e5, 0.0), (0.0, 7.3e4), (2.1e5, 7.3e4)] {
+        let law = Hyperelastic::new(
+            HyperelasticModel::MooneyRivlin {
+                c10,
+                c01,
+                kappa: 8.2e6,
+            },
+            4.0,
+        )
+        .unwrap();
+        for amplitude in [0.2, 1e-3, 1e-8, 1e-12] {
+            for shear in [-amplitude, amplitude] {
+                let mut f = I;
+                f[1] = shear;
+                // J=1 and both isochoric invariant shifts equal gamma^2.
+                let modulus = 2.0 * (c10 + c01);
+                let energy = 0.5 * modulus * shear * shear;
+                close(law.energy(&f), energy, energy, 2e-13);
+                close(law.isochoric_energy(&f), energy, energy, 2e-13);
+                close(
+                    law.piola(&f).unwrap()[1],
+                    modulus * shear,
+                    modulus * amplitude,
+                    2e-13,
+                );
+                close(law.tangent(&f).unwrap()[1][1], modulus, modulus, 2e-13);
+                let step = amplitude * 1e-3;
+                let (mut plus, mut minus) = (f, f);
+                plus[1] += step;
+                minus[1] -= step;
+                close(
+                    (law.energy(&plus) - law.energy(&minus)) / (2.0 * step),
+                    modulus * shear,
+                    modulus * amplitude,
+                    2e-10,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_hgo_small_shear_resolves_fibre_storage_activation_and_work() {
+    for invariants in [FibreInvariants::Full, FibreInvariants::Isochoric] {
+        for dispersion in [0.0, 0.2] {
+            let law = hgo(vec![[0.6, 0.8, 0.0]], dispersion, invariants, 1e3);
+            for amplitude in [0.2, 1e-3, 1e-8, 1e-12] {
+                for shear in [-amplitude, amplitude] {
+                    let mut f = I;
+                    f[1] = shear;
+                    // For this J=1 path, I4-1=.96 gamma+.64 gamma^2.
+                    let linear = (1.0 - 3.0 * dispersion) * 0.96;
+                    let quadratic = dispersion + (1.0 - 3.0 * dispersion) * 0.64;
+                    let e = linear * shear + quadratic * shear * shear;
+                    let de = linear + 2.0 * quadratic * shear;
+                    let mut energy = C10 * shear * shear;
+                    let mut stress = 2.0 * C10 * shear;
+                    let mut tangent = 2.0 * C10;
+                    if e > 0.0 {
+                        let z = K2 * e * e;
+                        energy += K1 / (2.0 * K2) * z.exp_m1();
+                        stress += K1 * e * z.exp() * de;
+                        tangent += K1 * z.exp() * (de * de * (1.0 + 2.0 * z) + 2.0 * quadratic * e);
+                    }
+                    close(law.energy(&f), energy, energy, 3e-13);
+                    close(law.isochoric_energy(&f), energy, energy, 3e-13);
+                    close(law.piola(&f).unwrap()[1], stress, stress.abs(), 3e-13);
+                    close(law.tangent(&f).unwrap()[1][1], tangent, tangent, 3e-13);
+                    let step = amplitude * 1e-4;
+                    let (mut plus, mut minus) = (f, f);
+                    plus[1] += step;
+                    minus[1] -= step;
+                    close(
+                        (law.energy(&plus) - law.energy(&minus)) / (2.0 * step),
+                        stress,
+                        stress.abs(),
+                        2e-8,
+                    );
+                }
+            }
+        }
+        // I4=1 exactly for the axial x fibre on this shear path. Numerical
+        // normalization must not spuriously activate its tensile Hessian.
+        let axial = hgo(vec![[1.0, 0.0, 0.0]], 0.0, invariants, 1e3);
+        let matrix_only = hgo(vec![], 0.0, invariants, 1e3);
+        let mut f = I;
+        f[1] = 4e-4;
+        equal_laws(&axial, &matrix_only, &f, 1e3 * C10, 2e-14);
+    }
+}
+
+#[test]
+fn g1_small_dilation_preserves_matrix_fibre_invariant_distinction() {
+    let mr = Hyperelastic::new(
+        HyperelasticModel::MooneyRivlin {
+            c10: 2.1e5,
+            c01: 7.3e4,
+            kappa: 8.2e6,
+        },
+        4.0,
+    )
+    .unwrap();
+    let full = hgo(vec![[1.0, 0.0, 0.0]], 0.2, FibreInvariants::Full, 1e3);
+    let isochoric = hgo(vec![[1.0, 0.0, 0.0]], 0.2, FibreInvariants::Isochoric, 1e3);
+    for authored in [-1e-3, -1e-8, -1e-12, 1e-12, 1e-8, 1e-3] {
+        let stretch = 1.0 + authored;
+        let e = stretch - 1.0;
+        let f = diag([stretch; 3]);
+        // No matrix distortion or isochoric fibre stretch under pure dilation.
+        assert_eq!(mr.isochoric_energy(&f), 0.0);
+        assert_eq!(isochoric.isochoric_energy(&f), 0.0);
+        // Full structural invariants retain physical tensile fibre storage.
+        let strain = e * (2.0 + e);
+        let expected = if e > 0.0 {
+            K1 / (2.0 * K2) * (K2 * strain * strain).exp_m1()
+        } else {
+            0.0
+        };
+        close(full.isochoric_energy(&f), expected, expected, 3e-13);
+    }
+}
+
+#[test]
+fn g3_decoupled_small_strain_energy_is_objective_and_isochoric() {
+    let laws = [
+        Hyperelastic::new(
+            HyperelasticModel::MooneyRivlin {
+                c10: 2.1e5,
+                c01: 7.3e4,
+                kappa: 8.2e6,
+            },
+            4.0,
+        )
+        .unwrap(),
+        hgo(vec![[0.6, 0.8, 0.0]], 0.2, FibreInvariants::Isochoric, 1e3),
+    ];
+    for law in laws {
+        for q in [
+            rotation([0.0, 0.0, 1.0], 0.73),
+            rotation([0.0, 1.0, 0.0], 2.4),
+        ] {
+            for shear in [1e-4, 1e-8, 1e-12] {
+                let mut f = I;
+                f[1] = shear;
+                let reference = law.isochoric_energy(&f);
+                for dilation in [0.997, 1.0, 1.003] {
+                    let dilated = f.map(|entry| dilation * entry);
+                    let rotated = flat(matmul3(&q, &matrix(&dilated)));
+                    // QF has O(epsilon) absolute input error; its relative
+                    // effect on a strain gamma is O(epsilon/gamma).
+                    close(
+                        law.isochoric_energy(&rotated),
+                        reference,
+                        reference,
+                        64.0 * f64::EPSILON / shear,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_decoupled_stable_representations_preserve_consistent_tangents() {
+    let laws = [
+        Hyperelastic::new(
+            HyperelasticModel::MooneyRivlin {
+                c10: 2.1e5,
+                c01: 7.3e4,
+                kappa: 8.2e6,
+            },
+            4.0,
+        )
+        .unwrap(),
+        hgo(vec![[0.6, 0.8, 0.0]], 0.2, FibreInvariants::Full, 1e3),
+        hgo(vec![[0.6, 0.8, 0.0]], 0.2, FibreInvariants::Isochoric, 1e3),
+    ];
+    let boundary = det::sqrt(1.0 + 1.0 / 64.0);
+    for law in laws {
+        for side in [-1.0, 1.0] {
+            // The FD step crosses the objective-strain representation branch.
+            fd_tangent(&law, diag([boundary + side * 1e-8, 1.0, 1.0]));
+        }
+        fd_tangent(&law, [1.001, 0.002, 0.0, 0.0, 0.999, 0.001, 0.0, 0.0, 1.0]);
+    }
+    let fibre = hgo(vec![[1.0, 0.0, 0.0]], 0.0, FibreInvariants::Full, 1e3);
+    let stretch = det::sqrt(1.0 + det::sqrt(0.125 / K2));
+    // Also cross the expm1 representation branch with the same physical law.
+    fd_tangent(&fibre, diag([stretch, 1.0, 1.0]));
+}
+
 fn hgo_incompressible(lambda: f64, families: usize) -> f64 {
     let e = lambda * lambda - 1.;
     2. * C10 * (lambda * lambda - 1. / lambda)
