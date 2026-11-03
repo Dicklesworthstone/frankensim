@@ -234,3 +234,40 @@ fn zero_pressure_strips_oxygen_while_retaining_carbon_and_atomic_history() {
     assert_eq!(format!("{:?}", aerated.state()), before);
     assert_eq!(aerated.oxygen_out(), cumulative_out);
 }
+
+
+#[test]
+fn reagent_dose_preserves_aeration_accounts_and_clock() {
+    use crate::cyanide_leach::dosing::DissolvedSodiumReagent::SodiumCyanide;
+    let initial = fixture::charge(1.0);
+    let closed = cil(initial, 1.0);
+    let mut bath = AeratedCarbonInLeachBatch::from_batch(closed, transfer(0.3)).unwrap();
+    bath.advance(
+        Time::new(0.2),
+        Pressure::new(60_000.0),
+        &QueryPoint::new(),
+        numerics(1.0),
+        || false,
+    )
+    .unwrap();
+    let elapsed = bath.state().elapsed;
+    let gold = bath.state().solution.gold_dissolved;
+    let oxygen_in = bath.oxygen_in();
+    let oxygen_out = bath.oxygen_out();
+    let adsorbed = bath
+        .state()
+        .populations
+        .iter()
+        .map(|p| p.adsorbed)
+        .collect::<Vec<_>>();
+    let dose = bath
+        .dose_reagent(SodiumCyanide, Amount::new(0.2), 10_000_000, || false)
+        .unwrap();
+    assert_eq!(dose.state.elapsed, elapsed);
+    assert_eq!(dose.state.solution.gold_dissolved, gold);
+    assert_eq!(bath.oxygen_in(), oxygen_in);
+    assert_eq!(bath.oxygen_out(), oxygen_out);
+    for (state, before) in dose.state.populations.iter().zip(adsorbed) {
+        assert_eq!(state.adsorbed, before);
+    }
+}

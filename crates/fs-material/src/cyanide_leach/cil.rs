@@ -201,6 +201,33 @@ pub struct CarbonInLeachBatch {
     accumulated_error: f64,
 }
 
+/// One atomic accepted dissolved-reagent addition to an existing CIL state.
+#[derive(Clone, Debug)]
+pub struct CilDoseReceipt {
+    layout: Arc<CilLayout>,
+    pub reagent: dosing::DissolvedSodiumReagent,
+    pub delivered: Amount,
+    pub inputs: dosing::ReagentInputs,
+    /// Re-speciated common solution and unchanged instantaneous carbon stocks.
+    pub state: CilState,
+    pub conservation: CilConservation,
+    pub work: usize,
+}
+impl CilDoseReceipt {
+    pub fn model(&self) -> &GoldCyanidation {
+        &self.layout.leach.model
+    }
+    pub fn ion_pair(&self) -> &IonPairTransfer {
+        &self.layout.pair
+    }
+    pub fn models(&self) -> &[CarbonPopulation] {
+        &self.layout.populations
+    }
+    pub fn initial_charge(&self) -> &CyanidationCharge {
+        &self.layout.leach.charge
+    }
+}
+
 /// One atomic accepted advance with separate useful and preg-robbing transfers.
 #[derive(Clone, Debug)]
 pub struct CilAdvance {
@@ -405,6 +432,78 @@ impl CarbonInLeachBatch {
     /// Accepted reagent doses preceding attachment.
     pub fn reagent_inputs(&self) -> dosing::ReagentInputs {
         self.layout.leach.reagents
+    }
+
+    /// Add finite dissolved NaCN or NaOH equivalents at the retained clock.
+    ///
+    /// The dose changes neither sorbed loading nor gold progress instantaneously.
+    /// The actual aqueous state, optional metal competition and every carbon
+    /// source are re-admitted together before publication. Cyanide and sodium
+    /// additions extend the explicit CIL totals without rebasing the original
+    /// charge or clearing numerical history.
+    pub fn dose_reagent(
+        &mut self,
+        reagent: dosing::DissolvedSodiumReagent,
+        amount: Amount,
+        maximum_work: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CilDoseReceipt> {
+        let mut work = dosing::work(maximum_work, &mut cancelled)?;
+        let mut leach = dosing::prepare(&self.layout.leach, reagent, amount, &mut work)?;
+        if leach.charge.dissolved_oxygen.value() < product(0.25, leach.limit)? {
+            leach.limit = product(4.0, leach.charge.dissolved_oxygen.value())?;
+        }
+
+        let mut next = (*self.layout).clone();
+        next.leach = Arc::new(leach);
+        if reagent == dosing::DissolvedSodiumReagent::SodiumCyanide {
+            next.total_cyanide = sum([next.total_cyanide, amount.value()].into_iter())?;
+        }
+        next.total_counterion = sum([next.total_counterion, amount.value()].into_iter())?;
+
+        // Recheck the same no-hidden-counterion-limitation condition against the
+        // possibly expanded NaCN-driven cumulative gold ceiling. Preloaded carbon
+        // already owns one bound counterion per preloaded Au pair.
+        let preloaded = sum([
+            next.total_gold,
+            -next.leach.charge.accessible_gold.value(),
+            -next.leach.charge.gold_complex.value(),
+        ]
+        .into_iter())?;
+        let required_counterion = sum([
+            preloaded,
+            next.leach.charge.gold_complex.value(),
+            next.leach.limit,
+        ]
+        .into_iter())?;
+        ensure(
+            next.total_counterion >= required_counterion,
+            "insufficient counterion reserve after CIL reagent dose",
+        )?;
+
+        let mut stocks = Stocks::from_state(&self.state);
+        stocks.counterion = sum([stocks.counterion, amount.value()].into_iter())?;
+        let layout = Arc::new(next);
+        let state = evaluate_cil(
+            &layout,
+            self.state.elapsed.value(),
+            &stocks,
+            &mut work,
+        )?;
+        let conservation = conservation_cil(&layout, &state)?;
+        work.tick()?;
+        let receipt = CilDoseReceipt {
+            layout: layout.clone(),
+            reagent,
+            delivered: amount,
+            inputs: layout.leach.reagents,
+            state: state.clone(),
+            conservation,
+            work: work.used,
+        };
+        self.layout = layout;
+        self.state = state;
+        Ok(receipt)
     }
 
     /// Advance all dissolved, sorbed and vacant stocks together, or publish nothing.

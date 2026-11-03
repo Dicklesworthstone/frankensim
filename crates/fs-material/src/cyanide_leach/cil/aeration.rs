@@ -191,6 +191,22 @@ impl AeratedCarbonInLeachBatch {
         Amount::new(self.oxygen_out)
     }
 
+    /// Add dissolved NaCN or NaOH without resetting gas-transfer history.
+    ///
+    /// No gas pressure is retained between advances, so the next advance admits
+    /// its own pressure and transfer context against the newly re-speciated CIL
+    /// state. The gas source and cumulative in/out accounts remain unchanged.
+    pub fn dose_reagent(
+        &mut self,
+        reagent: dosing::DissolvedSodiumReagent,
+        amount: Amount,
+        maximum_work: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CilDoseReceipt> {
+        self.batch
+            .dose_reagent(reagent, amount, maximum_work, cancelled)
+    }
+
     /// Advance at fixed prescribed O2 partial pressure. A later call may change
     /// pressure. Source refusal, work exhaustion and cancellation publish no
     /// partial chemistry, carbon inventory, gas account or clock.

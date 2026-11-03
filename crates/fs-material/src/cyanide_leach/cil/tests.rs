@@ -893,3 +893,76 @@ fn attachment_rejects_insufficient_counterion_duplicate_ids_and_used_baths() {
             .is_err()
     );
 }
+
+
+#[test]
+fn live_cil_reagent_doses_respeciate_without_moving_carbon_or_progress() {
+    use crate::cyanide_leach::dosing::DissolvedSodiumReagent::{SodiumCyanide, SodiumHydroxide};
+
+    let initial = charge(1.0);
+    let mut bath = cil(initial, 1.0);
+    bath.advance(Time::new(0.2), numerics(1.0), || false)
+        .unwrap();
+    let before = bath.state().clone();
+    let before_inputs = bath.reagent_inputs();
+
+    let cyanide = bath
+        .dose_reagent(SodiumCyanide, Amount::new(0.2), 10_000_000, || false)
+        .unwrap();
+    assert_eq!(cyanide.state.elapsed, before.elapsed);
+    assert_eq!(
+        cyanide.state.solution.gold_dissolved,
+        before.solution.gold_dissolved
+    );
+    for (after, old) in cyanide.state.populations.iter().zip(&before.populations) {
+        assert_eq!(after.adsorbed, old.adsorbed);
+        assert_eq!(after.vacant_capacity, old.vacant_capacity);
+    }
+    assert!(
+        cyanide.state.solution.free_cyanide.value()
+            > before.solution.free_cyanide.value()
+    );
+    close(
+        cyanide.inputs.sodium_cyanide.value(),
+        before_inputs.sodium_cyanide.value() + 0.2,
+        2e-16,
+    );
+    close(
+        cyanide.inputs.sodium.value(),
+        before_inputs.sodium.value() + 0.2,
+        2e-16,
+    );
+    report_accounts(&CilAdvance {
+        layout: cyanide.layout.clone(),
+        state: cyanide.state.clone(),
+        interval_gold_dissolved: Amount::new(0.0),
+        interval_product_capture: Amount::new(0.0),
+        interval_preg_robbing_capture: Amount::new(0.0),
+        conservation: cyanide.conservation,
+        accepted_steps: 0,
+        rejected_steps: 0,
+        work: cyanide.work,
+        maximum_local_error: Amount::new(0.0),
+        accumulated_error_estimate: Amount::new(0.0),
+    });
+
+    let ph_before = bath.state().solution.speciation.ph.value();
+    let hydroxide = bath
+        .dose_reagent(SodiumHydroxide, Amount::new(0.1), 10_000_000, || false)
+        .unwrap();
+    assert!(hydroxide.state.solution.speciation.ph.value() > ph_before);
+    close(
+        hydroxide.inputs.sodium_hydroxide.value(),
+        before_inputs.sodium_hydroxide.value() + 0.1,
+        2e-16,
+    );
+    for residual in [
+        hydroxide.conservation.gold,
+        hydroxide.conservation.counterion,
+        hydroxide.conservation.dissolved_oxygen,
+        hydroxide.conservation.maximum_site_residual,
+    ] {
+        close(residual.value(), 0.0, 2e-12);
+    }
+    close(hydroxide.conservation.cyanide.value(), 0.0, 1e-8);
+}
