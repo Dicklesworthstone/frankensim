@@ -242,6 +242,7 @@ fn midpoint(
     let r = 0.25 * lambda * lambda;
     if work.factor_step != Some(dt) {
         work.factor_step = None;
+        work.boundary_inverse = [None; 2];
         for i in 0..n {
             if i % 128 == 0 {
                 poll(cancelled)?;

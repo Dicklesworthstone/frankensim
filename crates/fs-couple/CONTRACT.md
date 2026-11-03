@@ -1,5 +1,35 @@
 # CONTRACT: fs-couple
 
+## Reciprocal native superfluid piston
+
+The opt-in `superfluid::piston::advance_balanced_piston` connects the original
+two-fluid channel to the original `fs_mbd::RigidBodyIntegrator`. A centered,
+axially translating native body drives an impermeable end; the other end is
+already stationary. Normal and superfluid endpoint velocities share the
+mechanical midpoint velocity. Reference pressure is explicitly balanced by
+exterior pressure or preload; the computed loads are pressure perturbations.
+
+The channel's exact two-mode endpoint Schur response solves pressure and piston
+velocity reciprocally. Existing tridiagonal factors and cached endpoint inverse
+diagonals are reused. The fluid half-cell mass rho*A*dx/2 is tracked separately
+from the unchanged native body mass: the actual native body and that half cell
+share the adjacent-cell pressure impulse and its work. Native position advances
+through the same rigid-body integrator as native momentum. The opposite fixed
+support's impulse remains explicit although its work is zero.
+
+The combined wave, native body, half-cell and exported friction-heat balance
+must pass authored tolerances. The adapter preserves both owners on native,
+physical-domain, transfer or cancellation refusal, including the final
+checkpoint. A previously moving opposite end or counterflow at the piston
+refuses instead of silently deleting endpoint momentum. Axial motion, no spin,
+authored equilibrium position and small displacement are explicit admissions.
+
+This is a fixed-reference linear acoustic/mechanical composition. It does not
+supply moving geometry, arbitrary rotations, an unbalanced absolute-pressure
+load, or nonlinear thermal feedback. Friction heat remains available on the
+original channel and is included once in the combined account; this adapter
+does not silently deposit it in an unspecified thermal owner.
+
 ## Spatial plate and finite rigid-body normal impacts
 
 `plate_impact::PlateRigidImpact` localizes one frictionless normal event between

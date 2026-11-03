@@ -124,3 +124,7 @@ required-features = ["experimental-stokes-motion"]
 [[test]]
 name = "superfluid_heat"
 required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_piston"
+required-features = ["superfluid"]

@@ -27,9 +27,11 @@ use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 use fs_material::MaterialError;
 use fs_material::superfluid::TwoFluidState;
 
+mod boundary;
 mod modes;
 mod momentum;
 mod step;
+pub use boundary::{ChannelEnd, ImpermeableEndResponse};
 use modes::Modes;
 pub use momentum::{BodyForce, ComponentForceDensity, ForcedChannelStep};
 
@@ -199,6 +201,7 @@ struct SolveWorkspace {
     rhs: Vec<f64>,
     factor: TridiagonalWorkspace,
     factor_step: Option<f64>,
+    boundary_inverse: [Option<f64>; 2],
 }
 impl SolveWorkspace {
     fn new(n: usize) -> Result<Self, ChannelError> {
@@ -208,6 +211,7 @@ impl SolveWorkspace {
             rhs: filled(n)?,
             factor: TridiagonalWorkspace::new(n)?,
             factor_step: None,
+            boundary_inverse: [None; 2],
         })
     }
 }

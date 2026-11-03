@@ -3246,3 +3246,22 @@ report provides the latter correction for stationary ends. The frozen-reference
 linear model does not include advective momentum flux, density-dependent
 buoyancy, moving geometry, or arbitrary absolute-pressure loads.
 
+
+## Reciprocal impermeable-end response
+
+`TwoFluidChannel::impermeable_end_response` evaluates the current state's
+exact discrete relation p_mid=p_blocked−R*U_outward for either end, with the
+other end closed and both components sharing the moving velocity. It reuses
+the original midpoint/friction proposal and tridiagonal operators, caching
+the two endpoint inverse diagonals for each step size. Original linear
+residuals and finite positive response are checked before exposing the result.
+This query publishes no fields, clock or heat; both the blocked proposal and
+the eventual moving-boundary step retain the original physical admission.
+
+The response also returns the actual endpoint half-cell fluid mass rho*A*dx/2.
+That mass is absent from the channel's resolved interior kinetic storage and
+must participate in a native moving termination's momentum and energy. The
+`fs-couple::superfluid::piston` consumer does so explicitly while preserving
+native body mass. Pressure response is a perturbation about a balanced
+reference pressure, not an absolute load or a moving-mesh equation of state.
+

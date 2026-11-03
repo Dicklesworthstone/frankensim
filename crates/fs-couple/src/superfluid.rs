@@ -24,6 +24,9 @@ use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionSimulation, EnergyAudit, StepConfig,
 };
 
+/// Reciprocal pressure impulse and motion on the original native rigid-body owner.
+pub mod piston;
+
 /// Original thermal stepping controls plus explicit heat and combined-account gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionHeatControls {
