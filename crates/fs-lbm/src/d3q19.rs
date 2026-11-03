@@ -31,6 +31,8 @@ pub mod sparse;
 pub(crate) use fma::collision_kernel3;
 
 pub use boundary::{
+    CarrierFaceExchange3, CarrierLubricationExchange3, CarrierLubricationFace3,
+    SharedCarrierLubricationExchange3, SharedLubricationSurface3,
     DryLubricatedSurfacesExchange3, MovingFiniteLubricationPlane3, MovingFinitePlaneExchange3,
     MovingLubricatedSurfacesExchange3, MovingLubricationSurface3, MovingSurfaceExchange3,
     BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3,

@@ -304,6 +304,7 @@ fn zero_spin_retains_native_bits_and_local_speed_refuses_before_proposal() {
     finite.recoil = Some(finite_planes::FinitePlaneInput {
         body: body(AXIS),
         external: [0.0; 6],
+        carrier_anchor: None,
     });
     assert!(finite.with_axial_spin(0.01).is_err());
     assert_eq!(finite.with_axial_spin(0.0).unwrap(), finite);

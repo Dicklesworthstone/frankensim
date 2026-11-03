@@ -395,6 +395,7 @@ fn homogeneous_and_empty_surface_sets_retain_the_original_response_bits() {
     finite_geometry.recoil = Some(FinitePlaneInput {
         body: wall,
         external: load,
+        carrier_anchor: None,
     });
     let response = Response::new([0.0; 6]);
     for (mut surfaces, external, legacy) in [

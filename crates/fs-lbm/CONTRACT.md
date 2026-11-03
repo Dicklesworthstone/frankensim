@@ -9437,3 +9437,56 @@ rate domain whose valid initialization would fail from the reference guess.
 Nonpositive populations, unsupported sources, exhausted query bounds and
 cancellation return no candidate. The broader deforming/melting boundary,
 pressure-projection and elastic-history obligations remain open.
+
+### Multiple missing-film faces on one finite carrier
+
+`CarrierLubricationFace3`, `SharedLubricationSurface3` and
+`BoundaryGrid3::step_with_lubricated_partial_saturation_shared_carriers`
+attach several original planar film geometries to one separately supplied
+`PartialSaturationBody3`. A carrier owns one mass, center, full world inertia,
+translation/spin state and authored external impulse/couple. Face identity is
+explicit; equal floating-point body values do not infer shared inertia.
+Each carrier must own at least one face. Prescribed translation/axial-spin
+surfaces can participate in the same solve.
+
+Modes on different faces of one carrier now share the off-diagonal spatial
+mobility terms in the original simultaneous resistance matrix. All local face
+wrenches are accumulated before one carrier endpoint is solved. Its external
+load is applied once, and each face receives work at that common midpoint
+translation/spin. Canonical private first-face references must agree on the
+complete carrier and external load before matrix assembly. The original
+ungrouped response retains its arithmetic. Carrier factorization is reused
+across its faces; no additional physical film modes or second fluid stream
+are introduced.
+
+The public result separates `CarrierFaceExchange3` surface reactions from
+unique `CarrierLubricationExchange3` mechanical inventories. Per-face force,
+world-origin moment, free couple and work remain attributable, while carrier
+kinetic change, external work and complete momentum/work residuals appear
+once. Center-spin impulse is accumulated directly from local arms. The
+original composite plane-work field includes both finite-carrier work and
+prescribed actuator work; it is not all external reservoir work.
+
+All fallible face/carrier receipt assembly runs inside the original
+prepublication callback. Fluid populations, sphere states and carrier states
+publish together. Surface geometry remains immutable; refused geometry,
+inertia, bounds, allocation or cancellation yields no partial publication.
+The existing 64-surface/carrier ceilings, actual positive-gap checks, footpoint
+low-Mach admission and total film/scalar-mode budgets remain authoritative.
+
+This is the original frozen-geometry missing-film correction. It does not
+create resolved fluid boundaries, finite face extents, moving carrier
+trajectories, gyroscopic pose evolution, displaced-fluid closure, contact or
+a thermal destination for viscous loss. The original midpoint damping remains
+passive but is not L-stable; sharing inertia does not establish time accuracy
+for an unresolved stiff film.
+
+The final selected-source native run passed 18 tests: five new shared-inertia
+mechanics cases, three new public descriptor/unique-receipt cases, six existing
+spin cases and four existing mixed-surface cases. The independent cases cover
+cross-face resistance, full-inertia momentum/work, rigid-motion covariance,
+origin changes, prescribed surfaces, exact legacy continuation and malformed
+owner/cancellation refusal. Original response, Cholesky, DD arithmetic and
+cancellation code executed. The public entry point compiled against the exact
+original transition signature; populated-grid streaming/publication was not
+executed in this seam. No full Cargo/workspace verdict is claimed.

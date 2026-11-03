@@ -10,8 +10,15 @@ mod finite_planes;
 pub use finite_planes::{FiniteLubricationPlane3, FinitePlaneResponse3};
 mod surfaces;
 pub use surfaces::LubricationSurface3;
+mod carriers;
+pub use carriers::{
+    CarrierFaceExchange3, CarrierLubricationExchange3, CarrierLubricationFace3,
+    SharedCarrierLubricationExchange3, SharedLubricationSurface3,
+};
 mod pairs;
 pub(in crate::d3q19::boundary) mod planes;
+#[cfg(test)]
+mod shared_carrier_tests;
 #[cfg(test)]
 mod spinning_tests;
 pub use planes::{LubricatedPlanesExchange3, LubricationPlane3, PlaneLubricationExchange3};
@@ -403,6 +410,11 @@ pub(super) fn solve<const N: usize>(
     SphereLubricationExchange3<N>,
     Vec<PlaneLubricationExchange3>,
 )> {
+    let plane_owners = finite_planes::carrier_owners(planes, gate)?;
+    let shared_carriers = planes
+        .iter()
+        .enumerate()
+        .any(|(index, _)| plane_owners[index] != index);
     let mut pairs = Vec::new();
     let modes_per_film = if model.tangential_pairs.is_some()
         || planes.iter().any(|plane| plane.tangential.is_some())
@@ -508,11 +520,11 @@ pub(super) fn solve<const N: usize>(
         plane_free
             .try_reserve_exact(planes.len())
             .map_err(|_| invalid("finite-plane response allocation refused"))?;
-        for plane in planes {
+        for (index, plane) in planes.iter().enumerate() {
             checkpoint(gate)?;
             plane_free.push(match plane.recoil {
-                Some(input) => FreeResponse::finite_plane(input)?,
-                None => FreeResponse::default(),
+                Some(input) if plane_owners[index] == index => FreeResponse::finite_plane(input)?,
+                _ => FreeResponse::default(),
             });
         }
     }
@@ -654,10 +666,14 @@ pub(super) fn solve<const N: usize>(
                 bodies[pair.a].velocity[axis] - bodies[b].velocity[axis]
                     + 0.5 * (free[pair.a].increment[axis] - free[b].increment[axis])
             }
-            Counterpart::Plane { index, velocity, .. } => match planes[index].recoil {
+            Counterpart::Plane {
+                index, velocity, ..
+            } => match planes[index].recoil {
                 Some(input) => {
                     bodies[pair.a].velocity[axis] - input.body.velocity[axis]
-                        + 0.5 * (free[pair.a].increment[axis] - plane_free[index].increment[axis])
+                        + 0.5
+                            * (free[pair.a].increment[axis]
+                                - plane_free[plane_owners[index]].increment[axis])
                 }
                 None => {
                     bodies[pair.a].velocity[axis] - velocity[axis]
@@ -685,7 +701,8 @@ pub(super) fn solve<const N: usize>(
         if let Some((index, direction)) = pair.finite_plane() {
             let input = planes[index].recoil.expect("finite plane mode");
             let omega = core::array::from_fn(|axis| {
-                input.body.angular_velocity[axis] + 0.5 * plane_free[index].increment[axis + 3]
+                input.body.angular_velocity[axis]
+                    + 0.5 * plane_free[plane_owners[index]].increment[axis + 3]
             });
             impulse[i] += dot(direction.angular.expect("plane spin direction"), omega);
         }
@@ -700,9 +717,9 @@ pub(super) fn solve<const N: usize>(
             }
             if let (Some((a, direction_a)), Some((b, direction_b))) =
                 (pair.finite_plane(), other.finite_plane())
-                && a == b
+                && plane_owners[a] == plane_owners[b]
             {
-                entry += 0.5 * plane_free[a].mobility(direction_a, direction_b);
+                entry += 0.5 * plane_free[plane_owners[a]].mobility(direction_a, direction_b);
             }
             matrix[i * k + j] = entry;
         }
@@ -825,10 +842,24 @@ pub(super) fn solve<const N: usize>(
             }
         }
     }
-    for (index, plane) in planes.iter().enumerate() {
-        if let Some(input) = plane.recoil {
-            checkpoint(gate)?;
-            finite_planes::finish_response(input, &plane_free[index], &mut plane_reports[index])?;
+    if shared_carriers {
+        finite_planes::finish_shared_responses(
+            planes,
+            &plane_owners,
+            &plane_free,
+            &mut plane_reports,
+            gate,
+        )?;
+    } else {
+        for (index, plane) in planes.iter().enumerate() {
+            if let Some(input) = plane.recoil {
+                checkpoint(gate)?;
+                finite_planes::finish_response(
+                    input,
+                    &plane_free[index],
+                    &mut plane_reports[index],
+                )?;
+            }
         }
     }
     for pair in &pairs {
@@ -854,7 +885,9 @@ pub(super) fn solve<const N: usize>(
                     0.5 * ((bodies[pair.a].velocity[i] + proposed[pair.a].velocity[i])
                         - (bodies[b].velocity[i] + proposed[b].velocity[i]))
                 }
-                Counterpart::Plane { index, velocity, .. } => match plane_reports[index].finite_body {
+                Counterpart::Plane {
+                    index, velocity, ..
+                } => match plane_reports[index].finite_body {
                     Some(finite) => {
                         0.5 * ((bodies[pair.a].velocity[i] - planes[index].velocity[i])
                             + (proposed[pair.a].velocity[i] - finite.body_after.velocity[i]))

@@ -59,6 +59,7 @@ impl FiniteLubricationPlane3 {
             recoil: Some(FinitePlaneInput {
                 body: self.body,
                 external,
+                carrier_anchor: None,
             }),
             ..self.geometry
         })
@@ -112,6 +113,9 @@ pub struct FinitePlaneResponse3 {
 pub(super) struct FinitePlaneInput {
     pub body: PartialSaturationBody3,
     pub external: [f64; 6],
+    // Private shared-carrier bindings name their FIRST face. Equal body values
+    // alone never merge inertia. Legacy surfaces remain independent with None.
+    pub carrier_anchor: Option<usize>,
 }
 
 impl BoundaryGrid3 {
@@ -162,6 +166,7 @@ impl BoundaryGrid3 {
             recoil: Some(FinitePlaneInput {
                 body: planes[p].body,
                 external: plane_external[p],
+                carrier_anchor: None,
             }),
             ..planes[p].geometry
         });
@@ -320,6 +325,113 @@ pub(super) fn admit_point_speed(body: PartialSaturationBody3, point: [f64; 3]) -
         return Err(invalid(
             "finite-plane footpoint velocity exceeds low-Mach envelope",
         ));
+    }
+    Ok(())
+}
+
+// Shared identity is an explicit canonical first-face index, not floating
+// equality of geometry or inertia. Validate it before any matrix assembly.
+pub(super) fn carrier_owners(
+    planes: &[LubricationPlane3],
+    gate: &CancelGate,
+) -> Result<[usize; 64]> {
+    if planes.len() > 64 {
+        return Err(invalid("lubrication supports at most 64 carrier faces"));
+    }
+    let mut owners = core::array::from_fn(|i| i);
+    for (index, plane) in planes.iter().enumerate() {
+        checkpoint(gate)?;
+        let Some(input) = plane.recoil else { continue };
+        let Some(anchor) = input.carrier_anchor else {
+            continue;
+        };
+        if anchor > index {
+            return Err(invalid("shared carrier must name its first face"));
+        }
+        let canonical = planes[anchor]
+            .recoil
+            .ok_or_else(|| invalid("shared carrier anchor must own finite inertia"))?;
+        if canonical.carrier_anchor != Some(anchor)
+            || canonical.body != input.body
+            || canonical.external != input.external
+        {
+            return Err(invalid(
+                "shared carrier faces disagree on inertia or external load",
+            ));
+        }
+        owners[index] = anchor;
+    }
+    Ok(owners)
+}
+
+// Sum all face wrenches before solving ONE endpoint per carrier. Per-face
+// spin impulses and work remain local; the private shared-surface wrapper
+// projects the repeated endpoint metadata into a single public carrier receipt.
+// No old public plane entry point can construct a carrier_anchor.
+pub(super) fn finish_shared_responses(
+    planes: &[LubricationPlane3],
+    owners: &[usize; 64],
+    free: &[FreeResponse],
+    reports: &mut [PlaneLubricationExchange3],
+    gate: &CancelGate,
+) -> Result<()> {
+    let mut linear = [[Dd::ZERO; 3]; 64];
+    let mut spin = [[Dd::ZERO; 3]; 64];
+    for (index, report) in reports.iter().enumerate() {
+        checkpoint(gate)?;
+        if let Some(finite) = report.finite_body {
+            let owner = owners[index];
+            for i in 0..3 {
+                linear[owner][i] = linear[owner][i] + Dd::from_f64(report.impulse[i]);
+                spin[owner][i] = spin[owner][i] + Dd::from_f64(finite.spin_impulse[i]);
+            }
+        }
+    }
+    let mut complete = [None; 64];
+    for (index, plane) in planes.iter().enumerate() {
+        checkpoint(gate)?;
+        if let Some(input) = plane.recoil
+            && owners[index] == index
+        {
+            let mut response = PlaneLubricationExchange3 {
+                impulse: linear[index].map(Dd::to_f64),
+                finite_body: Some(FinitePlaneResponse3 {
+                    spin_impulse: spin[index].map(Dd::to_f64),
+                    ..FinitePlaneResponse3::initial(input.body)
+                }),
+                ..PlaneLubricationExchange3::default()
+            };
+            finish_response(input, &free[index], &mut response)?;
+            complete[index] = response.finite_body;
+        }
+    }
+    let mut work = [Dd::ZERO; 64];
+    for (index, report) in reports.iter_mut().enumerate() {
+        checkpoint(gate)?;
+        if let Some(local) = report.finite_body {
+            let owner = owners[index];
+            let full = complete[owner].expect("admitted shared carrier response");
+            report.work = dot(report.impulse, full.velocity_midpoint)
+                + dot(local.spin_impulse, full.angular_velocity_midpoint);
+            if !report.work.is_finite() {
+                return Err(invalid("shared carrier face work overflowed"));
+            }
+            work[owner] = work[owner] + Dd::from_f64(report.work);
+            report.finite_body = Some(FinitePlaneResponse3 {
+                spin_impulse: local.spin_impulse,
+                ..full
+            });
+        }
+    }
+    for (index, report) in reports.iter_mut().enumerate() {
+        checkpoint(gate)?;
+        if let Some(finite) = &mut report.finite_body {
+            finite.work_residual =
+                finite.kinetic_energy_change - finite.external_work - work[owners[index]].to_f64();
+            if !finite.work_residual.is_finite() {
+                return Err(invalid("shared carrier work balance overflowed"));
+            }
+        }
     }
     Ok(())
 }

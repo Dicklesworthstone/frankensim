@@ -28,6 +28,8 @@ mod forcing;
 pub use forcing::{BoundaryForcingError3, RigidFrame3};
 mod partial_saturation;
 pub use partial_saturation::{
+    CarrierFaceExchange3, CarrierLubricationExchange3, CarrierLubricationFace3,
+    SharedCarrierLubricationExchange3, SharedLubricationSurface3,
     FiniteLubricationPlane3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3, LubricationSurface3,
     OpenBoundaryMomentumTransport3, PartialSaturationBodiesExchange3, PartialSaturationBody3,
     PartialSaturationBodyExchange3, PartialSaturationBodyResponse3, PartialSaturationError3,
