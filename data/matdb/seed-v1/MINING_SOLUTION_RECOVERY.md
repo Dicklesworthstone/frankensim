@@ -56,9 +56,53 @@ Zero passed charge leaves the strip copper available for subsequent work.
 
 This operator tracks one analytical element. Aqueous species/charge balance,
 proton and extractant consumption, heat, contact kinetics, phase entrainment,
-stage efficiency, volume changes and multistage countercurrent convergence
-need their own admitted models. Binary64 balance residuals are numerical
+stage efficiency and volume changes need their own admitted models.
+Binary64 balance residuals are numerical
 diagnostics, not experimental uncertainty bounds or certificates.
+
+## Countercurrent extraction and stripping trains
+
+`fs_material::solvent_extraction::countercurrent::CountercurrentCascade`
+connects 1–64 ideal stages with constant positive aqueous and organic
+volumetric flows. Aqueous flow visits stages 1 through N; organic flow visits
+them in reverse. Each stage retains its own original isotherm, temperature
+and chemical context. Loaded organic can enter the train, and stripping
+retains the same organic-versus-aqueous concentration convention.
+
+For phase flows `A` and `O`, every stage satisfies
+`A*x[i-1] + O*y[i+1] = A*x[i] + O*y[i]` and `y[i] = F_i(x[i])`.
+These are the balances underlying the McCabe–Thiele construction; see
+[Srivastava, Werner and Honaker (2023), equation 4](https://doi.org/10.3390/mining3030031).
+A monotone backward shooting solve determines the coupled profile with
+explicit root/stage work budgets and cancellation. Source tables are never
+extrapolated; each accepted stage must admit its actual concentrations,
+temperature, chemical conditions and O/A flow ratio. This ratio equals the
+contacted-volume ratio over a common time interval; no stage hold-up is inferred.
+
+Results include all inlet/outlet streams, signed transfers, original stage
+specifications and independent per-stage and external mol/s balances.
+Every balance must meet the caller's absolute/relative allowance before the
+complete result is returned. Passing the external balance alone cannot hide
+a tighter internal-stage failure. Unsupported source conditions or exhausted
+budgets return an error without publishing a partial train.
+
+```bash
+cargo run -p fs-material --example mining_countercurrent_sx
+cargo test -p fs-material solvent_extraction
+```
+
+The example compares one to four extraction stages using explicitly authored
+isotherms. Its three-stage train transfers 11.2 mol/s analytical Cu into
+organic from a 12 mol/s aqueous feed. That actual loaded-organic stream feeds
+a three-stage stripping train, producing 8.4 mol/s in 0.25 m³/s aqueous flow
+(33.6 mol/m³), while 2.8 mol/s remains in organic. Eight new focused tests
+check finite-contact equivalence, independent geometric-series profiles,
+loaded solvent and stripping, nonlinear/flat/distinct stage sources, source
+refusal, flow scaling, positive trace streams and bounded failures.
+
+This is a steady ideal-stage calculation. Measured source isotherms,
+stage-efficiency and kinetic evidence are still needed for plant predictions;
+the authored example is not a copper-extractant calibration.
 
 ## Finite solution/carbon adsorption and desorption
 
@@ -148,3 +192,4 @@ equilibrium tests remain unchanged. These calculations are building blocks
 for finite-contact carbon recovery; they do not infer measured preg-robbing,
 aqueous speciation, simultaneous leaching, train flow, heat or calibrated
 CIP/CIL performance.
+

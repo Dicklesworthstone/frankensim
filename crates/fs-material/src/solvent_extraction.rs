@@ -22,6 +22,8 @@
 //! need their own source cards. Equilibrium concentration support applies to
 //! the solved endpoint, not to initially nonequilibrated feed concentrations.
 
+pub mod countercurrent;
+
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint};
 use fs_math::dd::Dd;
 use fs_qty::{
