@@ -16,6 +16,9 @@ mod planar;
 #[path = "stokes_motion/translating.rs"]
 mod translating;
 
+#[path = "stokes_motion/translating_planar.rs"]
+mod translating_planar;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

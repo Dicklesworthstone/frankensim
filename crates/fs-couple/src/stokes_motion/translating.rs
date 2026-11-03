@@ -14,6 +14,9 @@
 //! The guide supplies transverse forces and a couple explicitly. The reported
 //! body work identity does not establish whole-fluid passivity or viscous heat.
 
+/// Finite translation with both momentum components free and orientation restrained.
+pub mod planar;
+
 use fs_flux::ale::translating::{
     TranslatingAleError, TranslatingAleFlow, TranslatingAleState, TranslatingAleStep,
 };
