@@ -244,6 +244,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                     max_volume_events: settings.max_volume_events,
                 },
                 surface_samples, flight_samples,
+                &self.surface_camera().spatial_volume_emitters,
                 |event| {
                     let observed = match event {
                         CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {

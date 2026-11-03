@@ -40,6 +40,7 @@ use crate::gradient_index::event::{
 use crate::gradient_index::{
     GradientIndexError, GradientIndexField, HomogeneousIndexField, MAX_GRADIENT_INDEX_STEPS,
 };
+use crate::gradient_index::thermal::propagate_emission_to_boundary_with_control;
 use crate::instances::InstanceScene;
 use crate::instances::proximity::{BoundaryGeometry, ProximityError};
 use crate::polarization::Stokes;
@@ -50,6 +51,8 @@ pub mod bundle;
 
 /// Reciprocal scalar camera radiance through the same curved native paths.
 pub mod camera;
+
+type SpatialSources<'a> = [Option<camera::SpatialVolumeEmitter<'a>>];
 
 /// Molecular scattering through the same native curved surface traversal.
 #[cfg(feature = "volumes")]
@@ -121,6 +124,9 @@ pub struct CurvedPathResult {
     optical_path_length_m: f64,
     group_optical_path_length_m: Option<f64>,
     optical_depth: f64,
+    // Passive source accumulated with the original reciprocal Mueller prefix.
+    // Ordinary forward and isothermal-only paths retain exact zero here.
+    reduced_volume_emission: f64,
     surface_events: u32,
     termination: PathTermination,
     last_contact: Option<CurvedContact>,
@@ -411,6 +417,7 @@ impl<'a> CurvedPolarizedScene<'a> {
     ) -> Result<CurvedPathResult, CurvedSceneError> {
         self.trace_with_seed_events_mode(
             cx, beam, initial_medium, settings, seed, path_id, radiance_brushing,
+            &[],
             |event| match event {
                 CurvedTraceEvent::Arrival(path) => observe_surface(path),
                 CurvedTraceEvent::Departure { .. } => Ok(()),
@@ -428,6 +435,7 @@ impl<'a> CurvedPolarizedScene<'a> {
         seed: u64,
         path_id: u64,
         radiance_brushing: bool,
+        thermal_sources: &SpatialSources<'_>,
         observe_event: impl FnMut(CurvedTraceEvent<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
         self.trace_with_samples_events_mode(
@@ -443,6 +451,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                 core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
             },
             radiance_brushing,
+            thermal_sources,
             observe_event,
         )
     }
@@ -505,6 +514,7 @@ impl<'a> CurvedPolarizedScene<'a> {
         settings: CurvedTraceSettings,
         samples: impl FnMut(u32) -> [f64; 3],
         radiance_brushing: bool,
+        thermal_sources: &SpatialSources<'_>,
         observe_event: impl FnMut(CurvedTraceEvent<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
         self.trace_with_flights_events(
@@ -514,6 +524,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             settings,
             samples,
             radiance_brushing,
+            thermal_sources,
             observe_event,
             0,
             |_, _| Ok(None),
@@ -549,6 +560,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             settings,
             samples,
             radiance_brushing,
+            &[],
             |event| match event {
                 CurvedTraceEvent::Arrival(path) => observe_surface(path),
                 CurvedTraceEvent::Departure { .. } => Ok(()),
@@ -571,6 +583,7 @@ impl<'a> CurvedPolarizedScene<'a> {
         settings: CurvedTraceSettings,
         mut samples: impl FnMut(u32) -> [f64; 3],
         radiance_brushing: bool,
+        thermal_sources: &SpatialSources<'_>,
         mut observe_event: impl FnMut(CurvedTraceEvent<'_>) -> Result<(), CurvedSceneError>,
         max_volume_events: u32,
         mut flight: impl FnMut(usize, f64) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
@@ -606,6 +619,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             optical_path_length_m: 0.0,
             group_optical_path_length_m: Some(0.0),
             optical_depth: 0.0,
+            reduced_volume_emission: 0.0,
             surface_events: 0,
             termination: PathTermination::SurfaceLimit,
             last_contact: None,
@@ -661,17 +675,21 @@ impl<'a> CurvedPolarizedScene<'a> {
                 SceneMedium::GradientIndex { field, .. } => *field,
                 SceneMedium::Differentiable { field, .. } => *field,
             };
-            let segment = propagate_to_boundary_with_control(
-                field,
-                &mut oracle,
-                ray,
-                result.beam.frame().horizontal(),
-                wavelength,
-                segment_distance,
-                departure.take(),
-                event_options,
-                || cx.checkpoint().is_ok(),
-            )
+            let source = thermal_sources.get(result.medium).and_then(Option::as_ref);
+            let (segment, source_integral) = if let Some(source) = source {
+                propagate_emission_to_boundary_with_control(
+                    field, source.temperature_field(), source.absolute_radiance_tolerance(),
+                    &mut oracle, ray, result.beam.frame().horizontal(), wavelength,
+                    segment_distance, departure.take(), event_options,
+                    || cx.checkpoint().is_ok(),
+                )
+            } else {
+                propagate_to_boundary_with_control(
+                    field, &mut oracle, ray, result.beam.frame().horizontal(), wavelength,
+                    segment_distance, departure.take(), event_options,
+                    || cx.checkpoint().is_ok(),
+                ).map(|segment| (segment, 0.0))
+            }
             .map_err(|error| {
                 oracle.last_error().map_or(
                     CurvedSceneError::Propagation(error),
@@ -679,6 +697,20 @@ impl<'a> CurvedPolarizedScene<'a> {
                 )
             })?;
             let propagation = segment.propagation;
+            if source_integral != 0.0 {
+                // Use the full original Mueller intensity BEFORE this segment
+                // applies Beer. The integral already includes its own true-
+                // absorption survival; free-flight sampling supplies scattering.
+                let power = result.beam.power().i;
+                let direct = power * source_integral;
+                let emitted = if direct.is_finite() && direct > 0.0 { direct } else {
+                    fs_math::det::exp(fs_math::det::ln(power) + fs_math::det::ln(source_integral))
+                };
+                if !emitted.is_finite() || emitted <= 0.0 {
+                    return Err(CurvedSceneError::NumericalRange);
+                }
+                result.reduced_volume_emission = checked_add(result.reduced_volume_emission, emitted)?;
+            }
             remaining_steps = remaining_steps
                 .checked_sub(propagation.accepted_steps)
                 .and_then(|remaining| remaining.checked_sub(propagation.rejected_steps))

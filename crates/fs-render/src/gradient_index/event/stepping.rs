@@ -28,7 +28,7 @@ pub(crate) trait EventStepper {
     fn accept(&mut self, trial: Self::Trial) -> Result<(), GradientIndexError>;
 }
 
-pub(super) struct OpticalStepper<'a, F: GradientIndexField + ?Sized> {
+pub(in crate::gradient_index) struct OpticalStepper<'a, F: GradientIndexField + ?Sized> {
     field: &'a F,
     ray: Ray,
     wavelength_nm: f64,
@@ -41,7 +41,7 @@ pub(super) struct OpticalStepper<'a, F: GradientIndexField + ?Sized> {
 }
 
 impl<'a, F: GradientIndexField + ?Sized> OpticalStepper<'a, F> {
-    pub(super) fn new(
+    pub(in crate::gradient_index) fn new(
         field: &'a F,
         ray: Ray,
         axis: Vec3,

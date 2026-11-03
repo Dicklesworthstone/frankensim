@@ -294,6 +294,7 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
             seed,
             path_id,
             true,
+            &self.camera.spatial_volume_emitters,
             |event| match event {
                 CurvedTraceEvent::Arrival(path) => {
                     emission.observe(path)?;
@@ -334,6 +335,7 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
             settings.surfaces,
             surface_samples,
             true,
+            &self.camera.spatial_volume_emitters,
             |event| match event {
                 CurvedTraceEvent::Arrival(path) => {
                     emission.observe(path)?;

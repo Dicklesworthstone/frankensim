@@ -207,6 +207,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
                 camera_settings(settings),
                 seed,
                 path_id,
+                &self.surface_camera().spatial_volume_emitters,
                 |event| {
                     self.observe_event(cx, event, &mut emission, &mut fixtures, &mut connector)
                 },
@@ -250,6 +251,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
                 camera_settings(settings),
                 surface_samples,
                 flight_samples,
+                &self.surface_camera().spatial_volume_emitters,
                 |event| {
                     self.observe_event(cx, event, &mut emission, &mut fixtures, &mut connector)
                 },
@@ -294,6 +296,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
                 camera_settings(settings),
                 surface_samples,
                 flight_samples,
+                &self.surface_camera().spatial_volume_emitters,
                 |event| {
                     self.observe_event(cx, event, &mut emission, &mut fixtures, &mut connector)
                 },

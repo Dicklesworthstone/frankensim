@@ -826,6 +826,7 @@ fn g3_native_event_observer_retains_density_and_field_null_tracking() {
                     settings(),
                     |_| panic!("observer must not resample a surface"),
                     draws,
+                    &[],
                     |event| {
                         match event {
                             CurvedRayleighEvent::VolumeArrival { path, phase } => {
@@ -940,6 +941,7 @@ fn g3_native_event_observer_retains_refractive_surface_proposals() {
                     [0.3, 0.7, 0.999999]
                 },
                 |_| panic!("event observation must not introduce flight draws"),
+                &[],
                 |event| {
                     match event {
                         CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {

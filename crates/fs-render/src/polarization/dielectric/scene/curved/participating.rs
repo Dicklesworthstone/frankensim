@@ -577,6 +577,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         self.trace_events_observed(
             cx, beam, initial_medium, settings, seed, path_id,
+            &[],
             |event| match event {
                 CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
                     observe_vertex(CurvedRayleighVertex::Surface(path))
@@ -598,6 +599,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         settings: CurvedRayleighTraceSettings,
         seed: u64,
         path_id: u64,
+        thermal_sources: &super::SpatialSources<'_>,
         observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         let draws = |ordinal, domain| {
@@ -615,6 +617,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             |event| draws(event, 0x706f_6c32),
             |flight| draws(flight, 0x706f_6c34),
             true,
+            thermal_sources,
             observe_event,
         )
     }
@@ -682,6 +685,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         self.trace_with_samples_events_observed(
             cx, beam, initial_medium, settings, surface_samples, flight_samples,
+            &[],
             |event| match event {
                 CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
                     observe_vertex(CurvedRayleighVertex::Surface(path))
@@ -703,6 +707,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
         mut flight_samples: impl FnMut(u32) -> [f64; 3],
+        thermal_sources: &super::SpatialSources<'_>,
         observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         self.trace_with_tracking_samples_events_impl(
@@ -716,6 +721,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                 [draw[0], draw[1], draw[2], 0.0]
             },
             false,
+            thermal_sources,
             observe_event,
         )
     }
@@ -811,6 +817,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             surface_samples,
             flight_samples,
             heterogeneous_samples,
+            &[],
             |event| match event {
                 CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
                     observe_vertex(CurvedRayleighVertex::Surface(path))
@@ -836,6 +843,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
         flight_samples: impl FnMut(u32) -> [f64; 4],
+        thermal_sources: &super::SpatialSources<'_>,
         observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         self.trace_with_tracking_samples_events_impl(
@@ -846,6 +854,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             surface_samples,
             flight_samples,
             true,
+            thermal_sources,
             observe_event,
         )
     }
@@ -860,6 +869,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         surface_samples: impl FnMut(u32) -> [f64; 3],
         mut flight_samples: impl FnMut(u32) -> [f64; 4],
         heterogeneous_samples: bool,
+        thermal_sources: &super::SpatialSources<'_>,
         observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         cx.checkpoint()?;
@@ -884,6 +894,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             settings.surfaces,
             surface_samples,
             self.radiance_brushing,
+            thermal_sources,
             |event| (observe_event.borrow_mut())(CurvedRayleighEvent::Surface(event)),
             settings.max_volume_events,
             |medium, wavelength| {

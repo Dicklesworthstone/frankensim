@@ -497,7 +497,7 @@ differentiable lift). Pure Rust throughout.
   refuse. Numerical limits and indistinguishable
   native extinction/underflow are unresolved
   errors. This covers reciprocal isotropic stationary media and intensity-only
-  endpoints, not general polarized adjoints or nonisothermal volume sources. Terminal transport weight describes only the final continuation,
+  endpoints, not general polarized adjoints. Terminal transport weight describes only the final continuation,
   while returned radiance sums all encountered sources. Unresolved continuation,
   overflow and cancellation still return errors without publishing a partial sum.
   `camera::raster::CurvedCameraRaster` prepares the original physical
@@ -874,7 +874,7 @@ differentiable lift). Pure Rust throughout.
   numerical references and 3,000 exact planar-overlap comparisons passed; Rust
   compilation and regressions remain unexecuted without Rust/DSR/RCH. Charts
   lacking explicit area sampling or native departure authority, singular caustic
-  integration, nonisothermal volume emission and global optical-image
+  integration and global optical-image
   completeness remain outside scope.
 
 - `camera::IsothermalVolumeEmitter` explicitly binds a frozen temperature state
@@ -905,6 +905,39 @@ differentiable lift). Pure Rust throughout.
   collisions and null tracking. Spatially varying temperature and thermal
   direct-source sampling remain outside this isothermal capability.
 
+- `camera::SpatialVolumeEmitter` binds a borrowed, immutable `TemperatureField`
+  through `with_spatial_volume_emitters`. Its nonzero source identity and medium
+  ownership are explicit; overlapping spatial/isothermal laws refuse. The
+  original optical Dormand–Prince stages also integrate
+  `alpha_abs(s) * B_lambda(T(r(s))) * exp(-tau_abs(s))` in reduced radiance.
+  Temperature queries follow the same stage clearance/departure guards. The
+  embedded source estimate joins the native optical acceptance decision using
+  a positive per-step absolute reduced-radiance tolerance and the original
+  relative tolerance. Rejected increments are never published, the accepted
+  endpoint derivative is reused, and original optical, geometry, cancellation
+  and work budgets remain binding. Uniform optical samples stay prepared.
+  Before segment Beer attenuation, the native current Mueller intensity weights
+  its source integral; the common camera accumulator applies `n_camera²` once.
+  Physical and null collisions, boundaries, source MIS and every existing
+  ordinary/molecular/point/area/raster consumer retain those same semantics.
+  With `material-state`, `AxialGasTemperatureField` embeds an original
+  `fs_material::gas_field::AxialGasField` along an explicit world axis and queries
+  its source-resolved `state_at`; the original model and phase domains remain
+  authoritative. Cellwise reconstructions and axial extrapolation refuse.
+  Linear primitive station spans are continuous and piecewise smooth; callers
+  must resolve/refine those spans and all other source structure with the step
+  cap. Embedded estimates are not certified global error bounds or guarantees
+  across missed features. Unknown absorbing infinite thermal tails refuse;
+  globally transparent homogeneous paths skip temperature queries and preserve
+  the original analytic path. Empty bindings preserve existing bits, and
+  isothermal sources retain their closed-form fast path. Nine authored native
+  regressions cover adaptive source refinement, prepared-optics/FSAL reuse,
+  transparent/disabled equivalence, straight and GRIN temperature gradients,
+  phase/group and interface normalization, isothermal reduction, source-domain,
+  cancellation/work/infinite-tail refusals, polarized collisions and null/zero
+  scattering. Thermal direct-source sampling and energy feedback remain outside
+  these passive camera source bindings.
+
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original
   `CurvedRayleighScene` surface owner, checked by pointer identity. Native
@@ -916,9 +949,9 @@ differentiable lift). Pure Rust throughout.
   introduced. Samples retain real collision and free-flight counters. Zero
   scattering preserves surface-camera results bit for bit. Positive-majorant
   tails do not become vacuum because one density query is zero. All native
-  work/distance/volume/cancellation refusals propagate. Optional isothermal LTE
-  emission is accumulated on these same absorption legs. Nonisothermal sources,
-  general particle polarization inference and polarized camera adjoints remain
+  work/distance/volume/cancellation refusals propagate. Optional isothermal or
+  spatial LTE emission is accumulated on these same original absorption paths.
+  General particle polarization inference and polarized camera adjoints remain
   outside this consumer.
   `CurvedCameraRaster::sample_pixel_rayleigh` uses the same physical camera,
   spectral stratification and color integration, with separate per-wavelength

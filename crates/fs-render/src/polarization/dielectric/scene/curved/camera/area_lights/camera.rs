@@ -315,6 +315,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         let mut source_error = None;
         let result = self.camera.scene.trace_with_samples_events_mode(
             cx, beam, initial_medium, settings.surfaces, surface_samples, true,
+            &self.camera.spatial_volume_emitters,
             |event| {
                 let observed = match event {
                     CurvedTraceEvent::Arrival(path) => {

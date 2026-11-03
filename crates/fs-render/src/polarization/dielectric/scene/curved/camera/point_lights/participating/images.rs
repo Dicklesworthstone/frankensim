@@ -234,6 +234,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                 camera_settings(settings),
                 surface_samples,
                 flight_samples,
+                &self.owner.surface_camera().spatial_volume_emitters,
                 |event| {
                     let result = match event {
                         CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {

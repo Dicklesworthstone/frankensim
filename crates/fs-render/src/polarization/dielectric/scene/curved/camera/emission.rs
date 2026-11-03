@@ -26,6 +26,7 @@ pub(super) struct SurfaceEmission<'a, 's, 'm> {
     radiance: f64,
     error: Option<CameraRadianceError>,
     thermal: Option<ThermalEmission>,
+    spatial_emission: f64,
 }
 
 impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
@@ -36,6 +37,7 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
             radiance: 0.0,
             error: None,
             thermal: (!camera.volume_emitters.is_empty()).then(ThermalEmission::new),
+            spatial_emission: 0.0,
         }
     }
 
@@ -91,6 +93,14 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         path: &CurvedPathResult,
         terminal: bool,
     ) -> Result<(), CameraRadianceError> {
+        if !self.camera.spatial_volume_emitters.is_empty() {
+            let increment = finite_nonnegative(path.reduced_volume_emission - self.spatial_emission)?;
+            if increment != 0.0 {
+                let emitted = super::thermal::weighted_source(increment, self.initial_index, 1.0, 1.0)?;
+                self.radiance = finite_nonnegative(self.radiance + emitted)?;
+            }
+            self.spatial_emission = path.reduced_volume_emission;
+        }
         if let Some(thermal) = &mut self.thermal {
             let emitted = thermal.arrive(self.camera, self.initial_index, path, terminal)?;
             // Avoid changing even a retained zero's sign when no source emits.

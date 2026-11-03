@@ -30,6 +30,7 @@ use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 
 pub mod bundle;
 pub mod event;
+pub mod thermal;
 
 /// Version of the deterministic gradient-index propagation arithmetic.
 pub const GRADIENT_INDEX_SEMANTICS_VERSION: u32 = 2;
@@ -667,8 +668,29 @@ fn trial_step_guarded<F: GradientIndexField + ?Sized>(
     first_derivative: State,
     step: f64,
     track_group: bool,
+    admits_stage: impl FnMut(Point3, Vec3) -> bool,
+    field_evaluations: &mut u32,
+) -> Result<Trial, GradientIndexError> {
+    trial_step_guarded_observed(
+        field, origin, wavelength_nm, state, first_derivative, step, track_group,
+        admits_stage, field_evaluations, |_, _, _| Ok(()),
+    )
+}
+
+// Passive source integrals use these exact optical stages, after the same
+// geometric guard. The ordinary solver's no-op observer has no source work.
+#[allow(clippy::too_many_arguments)]
+fn trial_step_guarded_observed<F: GradientIndexField + ?Sized>(
+    field: &F,
+    origin: Point3,
+    wavelength_nm: f64,
+    state: &State,
+    first_derivative: State,
+    step: f64,
+    track_group: bool,
     mut admits_stage: impl FnMut(Point3, Vec3) -> bool,
     field_evaluations: &mut u32,
+    mut observe: impl FnMut(Point3, &State, GradientIndexSample) -> Result<(), GradientIndexError>,
 ) -> Result<Trial, GradientIndexError> {
     let mut k = [[0.0; 12]; 7];
     k[0] = first_derivative;
@@ -695,6 +717,7 @@ fn trial_step_guarded<F: GradientIndexField + ?Sized>(
         *field_evaluations += 1;
         let sample = field.sample(point, wavelength_nm)?;
         k[i + 1] = rhs(&stage, sample, track_group)?;
+        observe(point, &stage, sample)?;
         last_sample = Some(sample);
     }
     let mut error = [0.0; 12];

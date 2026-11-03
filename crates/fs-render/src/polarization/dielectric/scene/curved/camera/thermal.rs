@@ -22,6 +22,11 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_math::det;
 
+mod spatial;
+pub use spatial::{SpatialVolumeEmitter, TemperatureField};
+#[cfg(feature = "material-state")]
+pub use spatial::AxialGasTemperatureField;
+
 /// An explicit isothermal, isotropic local-thermodynamic-equilibrium source.
 /// The selected native medium owns refraction and true absorption; this
 /// binding uses that same absorption in Kirchhoff's law. It adds no opacity,
@@ -103,7 +108,9 @@ impl CurvedCameraScene<'_, '_> {
                     medium_index: emitter.medium_index,
                 };
                 let slot = slots.get_mut(emitter.medium_index).ok_or(invalid.clone())?;
-                if slot.is_some() {
+                if slot.is_some()
+                    || self.spatial_volume_emitters.get(emitter.medium_index).is_some_and(Option::is_some)
+                {
                     return Err(invalid);
                 }
                 *slot = Some(*emitter);
@@ -188,7 +195,7 @@ impl ThermalEmission {
     }
 }
 
-fn weighted_source(
+pub(super) fn weighted_source(
     source: f64,
     initial_index: f64,
     power: f64,

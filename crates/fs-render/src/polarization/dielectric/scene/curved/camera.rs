@@ -64,7 +64,9 @@ mod emission;
 use emission::SurfaceEmission;
 
 mod thermal;
-pub use thermal::IsothermalVolumeEmitter;
+pub use thermal::{IsothermalVolumeEmitter, SpatialVolumeEmitter, TemperatureField};
+#[cfg(feature = "material-state")]
+pub use thermal::AxialGasTemperatureField;
 
 /// Physical camera and spectral pixel integration over these native paths.
 pub mod raster;
@@ -317,6 +319,7 @@ pub struct CurvedCameraScene<'s, 'm> {
     emitters: Vec<Option<&'s SurfaceEmitter>>,
     environment: Option<EnvironmentRadiance<'s>>,
     volume_emitters: Vec<Option<IsothermalVolumeEmitter>>,
+    spatial_volume_emitters: Vec<Option<SpatialVolumeEmitter<'s>>>,
 }
 
 impl<'s, 'm> CurvedCameraScene<'s, 'm> {
@@ -376,6 +379,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
             emitters: slots,
             environment,
             volume_emitters: Vec::new(),
+            spatial_volume_emitters: Vec::new(),
         })
     }
 
@@ -406,6 +410,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
             seed,
             path_id,
             true,
+            &self.spatial_volume_emitters,
             |event| emission.observe_event(event),
         );
         let (path, emitted) = emission.finish(result)?;
@@ -438,6 +443,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
             settings,
             samples,
             true,
+            &self.spatial_volume_emitters,
             |event| emission.observe_event(event),
         );
         let (path, emitted) = emission.finish(result)?;
@@ -518,6 +524,11 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
                     return Err(CameraRadianceError::Unresolved(PathTermination::Escaped));
                 };
                 if material.absorption().extinction_per_m(wavelength)? > 0.0 {
+                    // Geometry proves this ray escapes, but a point query
+                    // cannot determine a varying temperature's infinite tail.
+                    if self.spatial_volume_emitters.get(path.medium_index()).is_some_and(Option::is_some) {
+                        return Err(CameraRadianceError::Unresolved(PathTermination::Escaped));
+                    }
                     tail_transmission = 0.0;
                 }
                 let emitted = if tail_transmission == 0.0 {

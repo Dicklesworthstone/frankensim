@@ -35,7 +35,7 @@ use super::*;
 
 mod stepping;
 pub(super) use stepping::EventStepper;
-use stepping::OpticalStepper;
+pub(super) use stepping::OpticalStepper;
 
 /// Hard cap on geometrical queries made by one boundary propagation request.
 pub const MAX_BOUNDARY_QUERIES: u32 = 1_000_000;

@@ -111,6 +111,7 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
             .scattering
             .for_camera()
             .trace_events_observed(cx, beam, initial_medium, settings, seed, path_id,
+                &self.camera.spatial_volume_emitters,
                 |event| emission.observe_rayleigh_event(event));
         let (path, emitted) = emission.finish_scattering(result)?;
         self.finish(cx, path, initial_index, emitted)
@@ -141,6 +142,7 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
             settings,
             surface_samples,
             flight_samples,
+            &self.camera.spatial_volume_emitters,
             |event| emission.observe_rayleigh_event(event),
         );
         let (path, emitted) = emission.finish_scattering(result)?;
@@ -172,6 +174,7 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
             settings,
             surface_samples,
             flight_samples,
+            &self.camera.spatial_volume_emitters,
             |event| emission.observe_rayleigh_event(event),
         );
         let (path, emitted) = emission.finish_scattering(result)?;

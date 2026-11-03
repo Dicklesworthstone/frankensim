@@ -426,10 +426,12 @@ fn g3_rough_transmitting_image_pixels_sum_original_spectral_branches() {
         .unwrap();
         let raster = CurvedCameraRaster::try_new(&physical, 3, 2).unwrap();
         let mut workspace = CurvedTransmittanceImageWorkspace::try_new(2, 3).unwrap();
-        let limits = image_settings();
-        // This seed chooses moderate receiver facets and transmits the two
-        // smooth slab contacts in every lane, so each camera visits the
-        // receiving surface once while both source image orders still count.
+        let mut limits = image_settings();
+        // The original camera may revisit the receiver. Both explicit source
+        // branches and their image sum use the same complete continuation;
+        // budgets and reference counts cover every admitted surface encounter.
+        limits.point_lights.max_connections = 2 * limits.point_lights.surfaces.max_surface_events;
+        limits.point_lights.max_trace_evaluations = 1024;
         let (seed, pixel, sample) = (91, 4, 9);
         let combined = raster
             .sample_pixel_rayleigh_image_lights(
@@ -483,7 +485,13 @@ fn g3_rough_transmitting_image_pixels_sum_original_spectral_branches() {
                 combined.pixel_sample().spectral_samples()[lane].path(),
                 ordinary.pixel_sample().spectral_samples()[lane].path()
             );
-            assert_eq!(combined.point_light_sample().connections()[lane], 2);
+            assert_eq!(
+                combined.point_light_sample().connections()[lane],
+                singles
+                    .iter()
+                    .map(|single| single.point_light_sample().connections()[lane])
+                    .sum::<u64>(),
+            );
         }
         let expected_xyz = core::array::from_fn::<_, 3, _>(|axis| {
             singles
