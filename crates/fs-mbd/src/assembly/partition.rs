@@ -183,6 +183,28 @@ impl AssemblyPartition {
             .release(parent, &grouped_impulses, controls, cancelled)
     }
 
+    /// Separate retained groups at prescribed relative linear and spin rates.
+    ///
+    /// Targets and reference_group use GROUP indices, in the original parent
+    /// assembly axes. Each group remains rigid, with its cached full inertia.
+    /// No leaf is released and re-latched, so no fictitious sticking loss or
+    /// leaf-level impulse work is introduced. The part cap still counts all
+    /// original material components; the impulse cap counts nonzero group pairs.
+    pub fn release_relative_twists(
+        &self,
+        parent: RigidBodyState,
+        reference_group: usize,
+        targets: &[super::ejection::RelativeSeparationTwist],
+        controls: super::ejection::RelativeSeparationControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::ejection::RelativeSeparationResult, super::ejection::RelativeSeparationError>
+    {
+        poll(&mut cancelled)?;
+        controls.assembly.validate(self.membership.len(), 0)?;
+        self.grouped
+            .release_relative_twists(parent, reference_group, targets, controls, cancelled)
+    }
+
     /// Recover all original material-body states from the groups' current
     /// states, in original component order. Groups may have translated and
     /// rotated independently since separation. Every body inherits its group's

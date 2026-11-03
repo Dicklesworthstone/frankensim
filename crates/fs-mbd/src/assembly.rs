@@ -23,6 +23,9 @@ pub mod release;
 /// Prepared separation into retained rigid subassemblies.
 pub mod partition;
 
+/// Finite-component separation at prescribed final relative linear/spin rates.
+pub mod ejection;
+
 /// Atomic local material transfer between finite moving rigid bodies.
 pub mod transfer;
 

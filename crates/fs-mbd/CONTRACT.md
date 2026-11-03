@@ -5472,3 +5472,51 @@ This remains a local smooth bilateral hinge between finite rigid bodies.
 Joint friction, motors, angular stops, backlash, impacts, fixed supports,
 arbitrary dependent constraints, nonlinear state enclosures, exact energy,
 global branches, symplecticity and the other integrator lanes remain unclaimed.
+
+## Finite rigid separation at prescribed relative linear and spin velocities
+
+The native assembly owner exposes
+ejection::RelativeSeparationTwist and RigidAssembly::release_relative_twists.
+Each component has a prescribed final COM velocity relative to a chosen
+reference component's FINAL rigid velocity field at that COM, plus a prescribed
+angular-velocity difference. Both vectors use the original assembly axes.
+The reference entry is exactly zero. All full intrinsic tensors, distinct
+component axes, COM arms, and the original composite inertia participate.
+
+One shared recoil solves linear and spin-plus-orbital momentum together:
+dv = -sum(m_i c_i)/M and
+dw = -I^-1 sum(r_i cross m_i c_i + J_i eta_i).
+The implementation subtracts an equivalent common rigid twist before fixed-order
+compensated reduction. The largest-mass component anchors linear data and the
+largest intrinsic principal moment anchors angular data. Small reactions can
+therefore survive an inventory or spin inertia dominated by one component.
+This is O(parts) work/storage with one cached native angular-mobility action,
+not a dense 6N constraint solve or independent sequential pair impulses.
+
+Equivalent star force/couple pairs against the reference enter the ORIGINAL
+native release owner. Point-force moments and intrinsic spin couples are
+distinct. The native aggregate per-body impulse work includes all cross terms,
+and every released body retains its original material coordinates and full
+mass properties. Zero commanded relative motion can still need impulse to
+follow the common recoil. Only nonzero solved pairs consume the impulse cap.
+
+The returned canonical momenta and represented COM poses determine the actual
+relative linear and angular rates. A common translational chart avoids hiding
+small velocity changes behind separately rounded laboratory velocities.
+Native momentum/work admission, both relative-rate tolerances, the available
+source-work limit, and final cancellation must all pass before publication.
+The source must explicitly debit the accepted mechanical work. Contact,
+actuator placement, fracture, finite-time forcing and thermal ownership remain
+caller responsibilities; the star wrench decomposition does not infer them.
+
+AssemblyPartition::release_relative_twists applies the same law to cached
+retained groups. It uses group indices and full group inertia, while the part
+cap still counts all original components. It never releases leaves and then
+re-latches them, avoiding fictitious sticking loss and incorrect separation work.
+
+Six focused G0/G3/G4 regressions cover independent linear/angular reduced-inertia
+and spin-orbit oracles, full-tensor frames and reference/component permutations,
+retained-group rigidity, extreme inventory/inertia ratios, source/budget/input
+refusal, unrepresented actual endpoint rates, and terminal cancellation.
+Pinned formatter parsing and source/algebra checks are not native numerical
+conformance: compilation and these tests remained unrun in this environment.
