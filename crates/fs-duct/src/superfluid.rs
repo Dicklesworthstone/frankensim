@@ -63,6 +63,22 @@ impl From<TridiagonalError> for ChannelError {
     }
 }
 
+/// A rejected channel proposal or the original thermal owner's refusal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HeatStepError<E> {
+    Channel(ChannelError),
+    Heat(E),
+}
+impl<E: core::fmt::Display> core::fmt::Display for HeatStepError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Channel(error) => error.fmt(f),
+            Self::Heat(error) => write!(f, "two-fluid heat acceptance: {error}"),
+        }
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for HeatStepError<E> {}
+
 /// Caller-selected bounds for the retained reference-state linearization.
 /// These do not assert phase stability, a critical velocity or source validity.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -368,7 +384,43 @@ impl TwoFluidChannel {
         friction: MutualFriction,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ChannelStep, ChannelError> {
-        self.advance(dt_s, boundary, friction, &mut cancelled)
+        let report = self.stage_step(dt_s, boundary, friction, &mut cancelled)?;
+        self.publish_step(report);
+        Ok(report)
+    }
+
+    /// Prepare the original thermal owner's candidate before publishing a wave step.
+    ///
+    /// The callback receives the proposed report and per-cell frictional joules.
+    /// It must return a private candidate without changing external accepted state.
+    /// A thermal refusal or the final cancellation drops that candidate and leaves
+    /// channel fields, clock and heat unchanged. On success the returned candidate
+    /// can be installed by an infallible assignment, completing an atomic coupled
+    /// transaction. This does not change the channel's frozen reference properties.
+    pub fn step_with_heat<T, E>(
+        &mut self,
+        dt_s: f64,
+        boundary: BoundaryVelocities,
+        friction: MutualFriction,
+        mut cancelled: impl FnMut() -> bool,
+        prepare_heat: impl FnOnce(&ChannelStep, &[f64]) -> Result<T, E>,
+    ) -> Result<(ChannelStep, T), HeatStepError<E>> {
+        let report = self
+            .stage_step(dt_s, boundary, friction, &mut cancelled)
+            .map_err(HeatStepError::Channel)?;
+        let candidate = prepare_heat(&report, &self.pending_heat_j).map_err(HeatStepError::Heat)?;
+        poll(&mut cancelled).map_err(HeatStepError::Channel)?;
+        self.publish_step(report);
+        Ok((report, candidate))
+    }
+
+    fn publish_step(&mut self, report: ChannelStep) {
+        // All arithmetic, capacity and cancellation checks precede this point.
+        // stage_step already admitted the cumulative sum; publication cannot fail.
+        core::mem::swap(&mut self.accepted, &mut self.pending);
+        core::mem::swap(&mut self.last_heat_j, &mut self.pending_heat_j);
+        self.time_s = report.time_s;
+        self.total_heat_j += report.mutual_friction_heat_j;
     }
 
     fn validate_pending(&self, cancelled: &mut impl FnMut() -> bool) -> Result<(), ChannelError> {

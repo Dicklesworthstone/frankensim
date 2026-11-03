@@ -1,5 +1,38 @@
 # CONTRACT: fs-couple
 
+## Superfluid mutual-friction heat on the original thermal timeline
+
+The opt-in `superfluid::advance_closed_friction_heat` composes the original
+closed `fs_duct::superfluid::TwoFluidChannel` with the original
+`fs_thermal::enthalpy::DepositionSimulation`. Both clocks must match. Ordered,
+unique, active `CellId` destinations route each new interval's dissipated
+joules exactly once; unrelated thermal cells retain their original contacts.
+
+The channel stages its wave endpoint and physical friction heat privately.
+Native thermal sources, contacts and events advance to that endpoint, then
+native `apply_heat_j` applies the new joules using the unchanged borrowed
+caloric laws and their material-domain checks. Caller-selected local,
+aggregate-transfer and combined-storage tolerances admit the represented
+energy increments. The original wave, thermal-march and heat-intake reports
+remain separate: the friction deposit is internal to the composed system,
+and the thermal march's supplied sources are not counted a second time.
+The combined residual uses the owners' original cell-relative residuals,
+preserving small heat increments against large thermal energy datums.
+
+Thermal refusal or cancellation, including the final checkpoint after the
+thermal candidate is prepared, preserves both accepted histories. An
+infallible assignment publishes the thermal candidate only after channel
+acceptance; retrying deposits no rejected or cumulative heat.
+
+This is a first-order endpoint heat split with a frozen wave reference.
+Finite thermal temperatures evolve through the caller's original caloric
+law; they do not relinearize the channel or replace its wave temperature
+perturbation. Geometry correspondence and heat destinations are explicitly
+authored. Closed ends exclude unhandled mass and entropy imports. No open-flow
+thermal transport or interface law is inferred. For a thermal law storing
+enthalpy, the account remains represented wave-plus-thermal storage rather
+than an unconditional total-internal-energy theorem.
+
 ## Impulses on continuing coupled modal systems
 
 `CoupledModalSystem::apply_modal_impulse` applies a simultaneous generalized

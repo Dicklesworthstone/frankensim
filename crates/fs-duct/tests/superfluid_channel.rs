@@ -360,3 +360,69 @@ fn sourced_helium_reference_drives_both_physical_wave_modes() {
         "the finite expansion must produce the physical pressure coupling"
     );
 }
+
+#[test]
+fn heat_owner_refusal_and_post_candidate_cancellation_do_not_publish_wave_state() {
+    use fs_duct::superfluid::HeatStepError;
+    use std::cell::Cell;
+
+    let mut duct = standing(32, material(0.3), 0.001, 0.001);
+    let before = snapshot(&duct);
+    let dt = 0.5 * duct.maximum_step_s();
+    let friction = MutualFriction::Linear {
+        gamma_kg_m3_s: 20.0,
+    };
+    let refused = duct.step_with_heat(
+        dt,
+        BoundaryVelocities::CLOSED,
+        friction,
+        || false,
+        |report, heat| {
+            assert!(report.mutual_friction_heat_j > 0.0);
+            assert_eq!(heat.len(), 32);
+            Err::<(), _>("thermal material domain")
+        },
+    );
+    assert_eq!(refused, Err(HeatStepError::Heat("thermal material domain")));
+    assert_eq!(snapshot(&duct), before);
+
+    let prepared = Cell::new(false);
+    let cancelled = duct.step_with_heat(
+        dt,
+        BoundaryVelocities::CLOSED,
+        friction,
+        || prepared.get(),
+        |_, heat| {
+            prepared.set(true);
+            Ok::<_, &'static str>(heat.iter().sum::<f64>())
+        },
+    );
+    assert!(
+        prepared.get(),
+        "cancellation must happen after preparing the external candidate"
+    );
+    assert_eq!(
+        cancelled,
+        Err(HeatStepError::Channel(ChannelError::Cancelled))
+    );
+    assert_eq!(snapshot(&duct), before);
+
+    let (report, heat_candidate) = duct
+        .step_with_heat(
+            dt,
+            BoundaryVelocities::CLOSED,
+            friction,
+            || false,
+            |_, heat| Ok::<_, &'static str>(heat.iter().sum::<f64>()),
+        )
+        .unwrap();
+    assert_eq!(duct.time_s(), dt);
+    assert!(
+        (heat_candidate - report.mutual_friction_heat_j).abs()
+            < 1e-13 * report.wave_energy_before_j
+    );
+    assert_eq!(
+        duct.cumulative_mutual_friction_heat_j(),
+        report.mutual_friction_heat_j
+    );
+}

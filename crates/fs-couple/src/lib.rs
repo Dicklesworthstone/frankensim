@@ -68,6 +68,9 @@ pub mod driving_point;
 pub mod fiber_ribbon;
 /// Finite source gas on the shared uniform-body thermal callback.
 pub mod finite_gas_thermal;
+/// Closed-channel superfluid dissipation on original finite thermal cells.
+#[cfg(feature = "superfluid")]
+pub mod superfluid;
 pub mod finite_solid;
 /// Original signed frame modes and power-conjugate physical vibration ports.
 pub mod frame_vibration;

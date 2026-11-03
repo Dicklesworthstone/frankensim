@@ -88,6 +88,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Closed-channel two-fluid friction heat on the original thermal timeline.
+superfluid = ["fs-duct/superfluid"]
 # Small-displacement implicit mechanics on the original mixed Stokes operator.
 experimental-stokes-motion = ["dep:fs-flux", "fs-flux/continuum"]
 # Coherent finite-film absorption on the original spatial thermal timeline.
@@ -117,3 +119,7 @@ required-features = ["cavitation"]
 [[test]]
 name = "stokes_motion"
 required-features = ["experimental-stokes-motion"]
+
+[[test]]
+name = "superfluid_heat"
+required-features = ["superfluid"]

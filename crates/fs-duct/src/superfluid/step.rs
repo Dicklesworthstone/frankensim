@@ -2,7 +2,7 @@ use super::*;
 use fs_material::superfluid::TwoFluidVelocity;
 
 impl TwoFluidChannel {
-    pub(super) fn advance(
+    pub(super) fn stage_step(
         &mut self,
         dt: f64,
         boundary: BoundaryVelocities,
@@ -137,11 +137,6 @@ impl TwoFluidChannel {
             ));
         }
         poll(cancelled)?;
-        // No fallible operation after this publication point.
-        core::mem::swap(&mut self.accepted, &mut self.pending);
-        core::mem::swap(&mut self.last_heat_j, &mut self.pending_heat_j);
-        self.time_s = next_time;
-        self.total_heat_j = total_heat;
         Ok(ChannelStep {
             time_s: next_time,
             wave_energy_before_j: before,
