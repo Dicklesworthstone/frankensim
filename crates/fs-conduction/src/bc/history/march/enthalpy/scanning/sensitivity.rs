@@ -12,7 +12,7 @@ mod fraction;
 
 use super::{ScanningEnthalpyRun, ScanStep, events, natural_only, patches_before, poll};
 use super::super::super::moving::sensitivity::{MovingHeatGradient, MovingHeatLinearization};
-use crate::{ConductionError, ConductionProblem, LinearConfig};
+use crate::{ConductionError, LinearConfig};
 use crate::transient::enthalpy::EnthalpyStepConfig;
 use crate::transient::enthalpy::adjoint::EnthalpyAdjointError;
 use crate::transient::enthalpy::heterogeneous::{HeterogeneousEnthalpyError,
@@ -217,8 +217,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
             else { self.run.problem.boundary.at(cx, end)? };
         natural_only(&boundary)?;
         let (source, _) = self.source_at(cx, end, left)?;
-        let problem = ConductionProblem { mesh, boundary: &boundary, source: &source,
-            material: self.run.problem.material, element_materials: self.run.problem.element_materials };
+        let problem = self.run.conduction_problem(&boundary, &source)?;
         let accepted = report.solution().clone();
         let transport = match &self.radiation {
             None => self.run.storage.linearize_accepted(cx, problem, self.run.problem.interfaces,

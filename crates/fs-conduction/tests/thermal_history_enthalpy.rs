@@ -5,6 +5,9 @@ mod support;
 #[path = "thermal_history_enthalpy/radiation.rs"]
 mod radiation;
 
+#[path = "thermal_history_enthalpy/source_conductivity.rs"]
+mod source_conductivity;
+
 use fs_blake3::ContentHash;
 use fs_conduction::bc::history::{ThermalBoundaryHistory, ThermalRegionHistory};
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};

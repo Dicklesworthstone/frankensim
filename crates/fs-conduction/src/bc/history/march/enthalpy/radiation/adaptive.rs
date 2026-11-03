@@ -1,7 +1,7 @@
 //! Latent-heat-aware adaptation of the retained radiative enthalpy trajectory.
 
 use super::{RadiativeEnthalpyHistoryRun, HeterogeneousEnthalpyError, EnthalpyStepConfig,
-    EnthalpyRadiationStepSolution, ConductionProblem, conduction, poll};
+    EnthalpyRadiationStepSolution, conduction, poll};
 use super::super::adaptive::{PhaseErrorTolerance, phase_error};
 use super::super::super::{events::{self, adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, select_step}}, radiation::patches_before};
@@ -34,9 +34,8 @@ impl RadiativeEnthalpyHistoryRun<'_, '_, '_> {
             self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
             let source = events::source_before(&self.run.problem.source, to, old.len()).map_err(conduction)?;
             let patches = patches_before(cx, &self.patches, to).map_err(conduction)?;
-            Ok(self.run.storage.advance_with_ambient_radiation(cx, ConductionProblem {
-                mesh: self.run.problem.boundary.mesh(), boundary: &boundary, source: &source,
-                material: self.run.problem.material, element_materials: self.run.problem.element_materials },
+            Ok(self.run.storage.advance_with_ambient_radiation(cx,
+                self.run.conduction_problem(&boundary, &source)?,
                 self.run.problem.interfaces, old, to - from, step, &patches, self.config)?)
         };
         let selected = select_step(cx, start, end, adaptive, conduction, |middle, end| {

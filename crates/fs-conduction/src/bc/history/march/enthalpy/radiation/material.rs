@@ -15,7 +15,7 @@ use super::super::super::events::{
     adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step},
 };
 use crate::{
-    ConductionError, ConductionProblem, MaterialAmbientRadiationPatch,
+    ConductionError, MaterialAmbientRadiationPatch,
     MaterialPointwiseAmbientRadiation, SURFACE_EMISSIVITY_PROPERTY, ScalarField,
     SurfaceEmissivity, TEMPERATURE_DIMS, ThermalBoundary,
 };
@@ -255,8 +255,7 @@ impl<'h, 'm, 'c> MaterialRadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
         let radiation = MaterialPointwiseAmbientRadiation::new(cx, mesh, boundary, &patches)
             .map_err(conduction)?;
         Ok(self.run.storage.advance_with_material_ambient_radiation(cx,
-            ConductionProblem { mesh, boundary, source, material: self.run.problem.material,
-                element_materials: self.run.problem.element_materials },
+            self.run.conduction_problem(boundary, source)?,
             self.run.problem.interfaces, old, dt_s, config, &radiation)?)
     }
 }

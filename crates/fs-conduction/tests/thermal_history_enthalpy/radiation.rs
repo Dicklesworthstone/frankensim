@@ -1,4 +1,5 @@
 //! Radiation changes latent storage without inventing a temperature rise.
+#[path = "radiation/material.rs"]
 mod material;
 
 use super::*;

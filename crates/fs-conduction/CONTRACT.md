@@ -3520,3 +3520,35 @@ tests were added but not executed in this recovered environment. Production
 and test sources pass pinned native rustfmt parsing, and independent source
 review covered the native source and radiation lifetime paths. Full Cargo,
 Clippy and DSR verification remains unperformed.
+
+## Original-source conductivity throughout enthalpy histories
+
+`EnthalpyHistoryRun::from_phase_materials` and
+`from_phase_materials_with_nodal_reference_density` retain the original
+`MaterialPhaseTransport` sources, exact caloric borrows and admitted material
+assignments. `PhaseEnthalpyHistoryProblem` supplies boundary, volumetric-source
+and interface histories without an unrelated conductivity tensor or additional
+phase multiplier. Initial h must satisfy both the original caloric chart and
+the admitted conductivity support.
+
+Plain, event-aligned and adaptive endpoints, fixed/material ambient radiation,
+material contact, scanning and accepted scan adjoints obtain their physical
+problem from the same retained storage owner. Original k(h_h) is integrated on
+the actual P1 enthalpy field at every Newton candidate, including interior
+source-knot crossings. Frozen k, averaged phase and averaged nodal k are not
+substituted for that source. Reference masses remain immutable, whether their
+declared inventory is scalar or P1. Refusals preserve accepted h/T/f, time and
+step allowance.
+
+Three focused G0/G1 regressions compare an independent nonlinear P1 latent
+moment equation, two enthalpy datums, scalar/P1 reference inventories, held
+source events, phase-only adaptive rejection and source/cancellation rollback.
+The actual updated library compiled natively against the matching cached
+dependency rlibs; all 16 thermal-history tests passed, including those three.
+The original material ambient and enclosure targets also passed 9 and 7 tests.
+A broken nested test-module path was corrected so the four earlier material
+ambient-history regressions actually execute. DSR and the required sibling
+checkouts were unavailable: these are focused native fallback results, not a
+full workspace/DSR verdict, a continuum Stefan bound or experimental validation.
+The existing stationary isotropic source interpretation and contact/radiation
+domain limits remain authoritative.

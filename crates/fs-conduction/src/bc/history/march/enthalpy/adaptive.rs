@@ -4,7 +4,6 @@ use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
     HeterogeneousEnthalpyError, conduction, invalid, poll};
 use super::super::events::{self, adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, component_error, select_step, temperature_error}};
-use crate::ConductionProblem;
 use fs_exec::Cx;
 
 /// Additional error coordinates for a primary-enthalpy trajectory.
@@ -65,9 +64,8 @@ impl EnthalpyHistoryRun<'_, '_, '_> {
             let boundary = events::boundary_before(cx, self.problem.boundary, to).map_err(conduction)?;
             self.storage.admit_prescribed_boundary(cx, &boundary)?;
             let source = events::source_before(&self.problem.source, to, old.len()).map_err(conduction)?;
-            Ok(self.storage.advance(cx, ConductionProblem { mesh: self.problem.boundary.mesh(),
-                boundary: &boundary, material: self.problem.material, element_materials: self.problem.element_materials,
-                source: &source }, self.problem.interfaces, old, to - from, step)?)
+            Ok(self.storage.advance(cx, self.conduction_problem(&boundary, &source)?,
+                self.problem.interfaces, old, to - from, step)?)
         };
         let selected = select_step(cx, start, end, adaptive, conduction, |middle, end| {
             let coarse = solve(&self.specific_h, start, end)?;

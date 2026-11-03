@@ -9,7 +9,7 @@ use super::{EnthalpyHistoryRun, conduction, invalid, natural_only, poll};
 use super::adaptive::{PhaseErrorTolerance, phase_error};
 use super::super::{events, radiation::{RadiationRegionHistory, admit_histories, patches_before}};
 use events::adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step};
-use crate::{AmbientRadiationConfig, ConductionProblem};
+use crate::AmbientRadiationConfig;
 use crate::interface::temperature::{ContactIterationConfig, TemperatureContacts};
 use crate::interface::temperature::enthalpy::ContactEnthalpyStep;
 use crate::transient::enthalpy::EnthalpyStepConfig;
@@ -189,8 +189,7 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         natural_only(&boundary)?;
         let source = if before { events::source_before(&self.run.problem.source, to, old.len()) }
             else { self.run.problem.source.at(to, old.len()) }.map_err(conduction)?;
-        let problem = ConductionProblem { mesh: history.mesh(), boundary: &boundary, source: &source,
-            material: self.run.problem.material, element_materials: self.run.problem.element_materials };
+        let problem = self.run.conduction_problem(&boundary, &source)?;
         match &self.radiation {
             None => Ok(self.contacts.advance_enthalpy(cx, &self.run.storage, problem,
                 old, to - from, step, self.coupling)?),

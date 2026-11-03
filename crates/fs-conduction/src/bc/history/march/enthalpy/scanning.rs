@@ -17,7 +17,7 @@ use super::super::moving::motion::ScanMotionLimit;
 use super::super::events::adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, select_step};
 use super::super::radiation::{RadiationRegionHistory, admit_histories, patches_before};
-use crate::{AmbientRadiationConfig, ConductionProblem, ScalarField};
+use crate::{AmbientRadiationConfig, ScalarField};
 use crate::transient::enthalpy::radiation::EnthalpyRadiationStepSolution;
 use fs_exec::Cx;
 use fs_scenario::signal::TimeSignal;
@@ -273,8 +273,7 @@ impl<'h, 'm, 'c> ScanningEnthalpyRun<'h, 'm, 'c> {
             else { self.run.problem.boundary.at(cx, end) }.map_err(conduction)?;
         natural_only(&boundary)?;
         let (source, deposition) = self.source_at(cx, end, left)?;
-        let problem = ConductionProblem { mesh: self.run.problem.boundary.mesh(), boundary: &boundary,
-            material: self.run.problem.material, element_materials: self.run.problem.element_materials, source: &source };
+        let problem = self.run.conduction_problem(&boundary, &source)?;
         let transport = match &self.radiation {
             None => ScanTransport::Conduction(self.run.storage.advance(cx, problem,
                 self.run.problem.interfaces, old, end - start, config)?),

@@ -14,7 +14,7 @@ pub mod material;
 use super::{EnthalpyHistoryRun, conduction, invalid, poll};
 use super::super::radiation::{RadiationRegionHistory, admit_histories, patches_before};
 use super::super::events;
-use crate::{AmbientRadiationConfig, ConductionProblem};
+use crate::AmbientRadiationConfig;
 use crate::transient::enthalpy::EnthalpyStepConfig;
 use crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyError;
 use crate::transient::enthalpy::radiation::EnthalpyRadiationStepSolution;
@@ -91,11 +91,9 @@ impl<'h, 'm, 'c> RadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
             poll(cx, at).map_err(conduction)?;
             patches.push(history.at(time_s).map_err(conduction)?);
         }
-        let solved = self.run.storage.advance_with_ambient_radiation(cx, ConductionProblem {
-            mesh: self.run.problem.boundary.mesh(), boundary: &boundary,
-            material: self.run.problem.material, element_materials: self.run.problem.element_materials,
-            source: &source,
-        }, self.run.problem.interfaces, &self.run.specific_h, dt_s, config, &patches, self.config)?;
+        let solved = self.run.storage.advance_with_ambient_radiation(cx,
+            self.run.conduction_problem(&boundary, &source)?, self.run.problem.interfaces,
+            &self.run.specific_h, dt_s, config, &patches, self.config)?;
         self.run.publish(cx, time_s, &solved.conduction)?;
         Ok(solved)
     }
@@ -126,11 +124,9 @@ impl<'h, 'm, 'c> RadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
         let source = events::source_before(&self.run.problem.source, end_time_s, self.run.specific_h.len())
             .map_err(conduction)?;
         let patches = patches_before(cx, &self.patches, end_time_s).map_err(conduction)?;
-        let report = self.run.storage.advance_with_ambient_radiation(cx, ConductionProblem {
-            mesh: self.run.problem.boundary.mesh(), boundary: &boundary,
-            material: self.run.problem.material, element_materials: self.run.problem.element_materials,
-            source: &source,
-        }, self.run.problem.interfaces, &self.run.specific_h, end_time_s-start_time_s,
+        let report = self.run.storage.advance_with_ambient_radiation(cx,
+            self.run.conduction_problem(&boundary, &source)?,
+            self.run.problem.interfaces, &self.run.specific_h, end_time_s-start_time_s,
             config, &patches, self.config)?;
         self.run.publish(cx, end_time_s, &report.conduction)?;
         Ok(events::HistoryEventStep { start_time_s, end_time_s, report })
