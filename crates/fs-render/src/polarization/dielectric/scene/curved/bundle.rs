@@ -63,11 +63,12 @@ impl BundleSurfaceSource {
     }
 }
 
-/// A numerical stopping section is not a scene boundary or optical interaction.
-/// Its medium is always an index into this exact immutable native scene.
+/// Explicit receiving intent retains the original native material and geometry.
+/// A volume section alone is numerical and contributes no optical interaction.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum BundleReceiver {
     Diffuse(u64),
+    Surface(u64),
     Volume {
         medium: usize,
         position_m: Point3,
@@ -153,6 +154,7 @@ pub struct CurvedBundlePathResult {
     medium_identity: Option<ContentHash>,
     termination: PathTermination,
     diffuse_receiver: bool,
+    surface_receiver: bool,
     volume_receiver: bool,
     surface_events: u32,
     last_contact: Option<CurvedContact>,
@@ -183,6 +185,12 @@ impl CurvedBundlePathResult {
     /// applied. An ordinary opaque blocker never sets this marker.
     pub const fn is_diffuse_receiver(&self) -> bool {
         self.diffuse_receiver
+    }
+    /// The selected native continuous scattering surface was reached before
+    /// its BSDF was evaluated. The bundle retains its actual approaching side
+    /// and original medium; no rough-scattering derivative was constructed.
+    pub const fn is_surface_receiver(&self) -> bool {
+        self.surface_receiver
     }
     /// The numerical section for a point in the selected original medium was
     /// reached. No surface interaction or event was added at that endpoint.
@@ -533,6 +541,7 @@ impl CurvedPolarizedScene<'_> {
             medium_identity: self.medium_identity(initial_medium),
             termination: PathTermination::SurfaceLimit,
             diffuse_receiver: false,
+            surface_receiver: false,
             volume_receiver: false,
             surface_events: 0,
             last_contact: None,
@@ -821,6 +830,41 @@ impl CurvedPolarizedScene<'_> {
             let arriving = result.bundle.propagation().propagation().ray;
             let incoming_medium = result.medium;
             let outgoing_tag = match binding.interaction {
+                interaction
+                    if matches!(receiver, Some(BundleReceiver::Surface(id))
+                        if id == instance.object_id()) =>
+                {
+                    let cosine = witness.normal.dot(arriving.dir);
+                    if !cosine.is_finite() || cosine == 0.0 {
+                        return Err(CurvedSceneError::InvalidContact.into());
+                    }
+                    let expected = match interaction {
+                        Interaction::DepolarizingDiffuse { medium, .. }
+                        | Interaction::BrushedConductor { medium, .. } => medium,
+                        Interaction::RoughConductor {
+                            medium, surface, ..
+                        } if !surface.is_delta() => medium,
+                        Interaction::Dielectric {
+                            outside,
+                            inside,
+                            surface,
+                        } if !surface.is_delta() => {
+                            if cosine < 0.0 { outside } else { inside }
+                        }
+                        _ => {
+                            return Err(CurvedBundleSceneError::UnsupportedInteraction {
+                                object_id: instance.object_id(),
+                            });
+                        }
+                    };
+                    require_medium(instance.object_id(), result.medium, expected)?;
+                    // Only the selected original endpoint bypasses scattering.
+                    // Its native contact, finite support, side and arriving
+                    // medium remain in the result and ordered path identity.
+                    result.termination = PathTermination::Opaque;
+                    result.surface_receiver = true;
+                    7
+                }
                 Interaction::Detector { reference_axis } => {
                     PolarizationFrame::try_new(arriving.dir, reference_axis)?;
                     result.detector_reference_axis = Some(reference_axis);
@@ -1210,3 +1254,4 @@ pub(super) fn append_contact(
 
 #[cfg(test)]
 mod tests;
+

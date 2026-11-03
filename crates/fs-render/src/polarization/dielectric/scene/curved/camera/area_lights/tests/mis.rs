@@ -148,3 +148,82 @@ fn g1_volume_area_pdf_uses_transverse_etendue_not_the_newton_section() {
     });
 }
 
+#[test]
+fn g1_rough_curved_receiver_uses_native_area_on_both_material_sides() {
+    use crate::dielectric::DielectricSurface;
+    use fs_geom::fixtures::SphereChart;
+
+    with_cx(|cx| {
+        let outside = glass(1.3, 0.2);
+        let inside = glass(1.7, 0.4);
+        let media = [SceneMedium::Homogeneous(&outside), SceneMedium::Homogeneous(&inside)];
+        let height = (1.0_f64 - 0.3 * 0.3).sqrt();
+        // The first source is outside the sphere; the second is at its centre.
+        // Neither connection crosses the rough interface: it is the receiver.
+        for (source_z, medium, target_z, native_cosine) in [
+            (0.0, 0, 3.0 - height, None),
+            (3.0, 1, 3.0 + height, Some(1.0)),
+        ] {
+            let geometry = InstanceScene::try_new(vec![source(source_z),
+                GeometryInstance::try_new(9,
+                    hash_domain("rough-receiver-mis-sphere", b"native"),
+                    SharedGeometry::chart(SphereChart {
+                        center: Point3::new(0.0, 0.0, 3.0), radius: 1.0,
+                    }), RigidTransform::identity()).unwrap(),
+            ]).unwrap();
+            let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![
+                SurfaceBinding { object_id: 2, interaction: Interaction::Opaque },
+                SurfaceBinding { object_id: 9, interaction: Interaction::Dielectric {
+                    outside: 0, inside: 1, surface: DielectricSurface::try_rough(0.3).unwrap(),
+                } },
+            ], 100_000).unwrap();
+            let emitter = SurfaceEmitter::new(2,
+                super::super::super::RadianceSpectrum::try_constant(4.0).unwrap(),
+                EmissionSides::Front);
+            let panel = CurvedAreaEmitter::try_new(cx, &scene, &emitter, 1).unwrap();
+            let sample = panel.sample_area([4.0 / 9.0, 0.5]).unwrap();
+            let point = Point3::new(0.3, 0.0, target_z);
+            let displacement = point.delta_from(sample.position_m());
+            let distance = displacement.norm();
+            let direction = displacement.scale(1.0 / distance);
+            let area_density = distance * distance / (AREA_FOR_TEST * direction.z);
+            let continuation_pdf = 0.17;
+            let expected_hit = continuation_pdf * continuation_pdf
+                / (area_density * area_density + continuation_pdf * continuation_pdf);
+            for section in [direction.scale(-1.0), Vec3::new(0.6, 0.0, -0.8)] {
+                let target = BundleConnectionTarget::try_surface_receiver(9, point, section, 2e-7)
+                    .unwrap();
+                let connected = scene.connect_bundle_from_surface_with_policy(cx,
+                    BundleConnectionLaunch {
+                        ray: Ray { origin: sample.position_m(), dir: direction },
+                        transverse_axis: Vec3::new(0.0, 1.0, 0.0), wavelength_nm: 550.0,
+                        normalized_source_stokes: Stokes::unpolarized(1.0), initial_medium: medium,
+                    }, BundleSurfaceSource::try_new(2, BoundarySide::Positive).unwrap(),
+                    target, options(), BundleBranchPolicy::Sequence(&[])).unwrap();
+                assert!(connected.path().is_surface_receiver());
+                assert_eq!(connected.path().medium_index(), medium);
+                assert_eq!(connected.path().bundle().reverse_branch_log_probability(), 0.0);
+                let contact = connected.path().last_contact().unwrap();
+                let cosine = contact.witness.normal.dot(direction).abs();
+                if let Some(expected) = native_cosine { near(cosine, expected, 2e-6); }
+                let projection = connected.receiver_projection(target, options().projection).unwrap();
+                near(projection.area_per_solid_angle_m2(), distance * distance / cosine, 3e-6);
+                let weights = panel.surface_mis_weights(sample, &connected, target,
+                    options().projection, continuation_pdf).unwrap();
+                near(weights.light_log_pdf_solid_angle().exp(), area_density, 3e-6);
+                near(weights.continuation_weight(), expected_hit, 3e-6);
+                near(weights.light_weight() + weights.continuation_weight(), 1.0, 1e-15);
+                let zero = panel.surface_mis_weights(sample, &connected, target,
+                    options().projection, 0.0).unwrap();
+                assert_eq!((zero.light_weight(), zero.continuation_weight()), (1.0, 0.0));
+                let diffuse_target = BundleConnectionTarget::try_diffuse_receiver(
+                    9, point, section, 2e-7).unwrap();
+                assert!(matches!(panel.surface_mis_weights(sample, &connected, diffuse_target,
+                    options().projection, continuation_pdf), Err(AreaEmitterError::SourceContactMismatch)));
+            }
+        }
+    });
+}
+
+const AREA_FOR_TEST: f64 = 0.27;
+

@@ -266,8 +266,10 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             position_m, normal, pdf_area_per_m2 })
     }
 
-    /// Incident spectral irradiance at an original detector/diffuse target, or
-    /// transverse irradiance at a native volume target. Each supplied seed must
+    /// Incident spectral irradiance at an original detector or scattering
+    /// surface, or transverse irradiance at a native volume target. Continuous
+    /// surface targets use their actual native tangent, including curved
+    /// receiving geometry. Each supplied seed must
     /// depart the explicitly selected source side. Both-sided radiance is per
     /// side: selecting a side introduces no factor of two or one-half.
     #[allow(clippy::too_many_arguments)]
@@ -381,6 +383,12 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             // receiving area is perpendicular to the actual arriving ray.
             let normal = if target.is_volume_receiver() {
                 bundle.propagation().propagation().ray.dir.scale(-1.0)
+            } else if target.is_surface_receiver() {
+                let contact = path.last_contact().ok_or(AreaEmitterError::SourceContactMismatch)?;
+                let normal = contact.witness.normal;
+                if normal.dot(bundle.propagation().propagation().ray.dir) > 0.0 {
+                    normal.scale(-1.0)
+                } else { normal }
             } else { target.normal() };
             let value = weighted_irradiance(bundle, normal, projection, radiance,
                 cosine, sample.pdf_area_per_m2, log_survival, ratio_zero)?;

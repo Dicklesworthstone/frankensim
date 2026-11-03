@@ -55,11 +55,12 @@ pub enum BundleBranchPolicy<'a> {
     Sequence(&'a [DielectricEvent]),
 }
 
-/// Target point on a named native planar receiver or in an original medium,
-/// with a section normal toward light.
+/// Target point on a named native receiver or in an original medium.
 /// Position tolerance is a numerical endpoint allowance, not an aperture or an
 /// error bound on irradiance. The scene supplies a surface receiver's finite
-/// aperture; a volume target instead validates the point's original medium.
+/// geometry; a volume target instead validates the point's original medium.
+/// Detector and legacy diffuse targets require a plane oriented toward light.
+/// General surface targets use their actual native tangent plane for area.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BundleConnectionTarget {
     object_id: u64,
@@ -74,6 +75,7 @@ pub struct BundleConnectionTarget {
 enum ReceiverKind {
     Detector,
     Diffuse,
+    Surface,
     Volume { medium: usize },
 }
 
@@ -129,6 +131,30 @@ impl BundleConnectionTarget {
         Ok(result)
     }
 
+    /// Receive incident power at an original continuous scattering surface,
+    /// including a rough dielectric or conductor and a depolarizing diffuse
+    /// surface. The selected native contact may be curved. No receiving BSDF,
+    /// Fresnel branch, reflectance or rough-scattering derivative is applied.
+    ///
+    /// The actual geometric approach side selects the dielectric's original
+    /// outside/inside medium and must agree with the arriving path. Each image
+    /// may reach either side; no receiver IOR is inferred from another leg.
+    /// `section_normal` fixes only the numerical residual coordinates. Area
+    /// and incidence use the retained contact's actual tangent normal, oriented
+    /// toward that image's source. A regular local chart and the full unsnapped
+    /// three-dimensional endpoint tolerance are still required.
+    pub fn try_surface_receiver(
+        object_id: u64,
+        position_m: Point3,
+        section_normal: Vec3,
+        position_tolerance_m: f64,
+    ) -> Result<Self, BundleConnectionError> {
+        let mut result =
+            Self::try_new(object_id, position_m, section_normal, position_tolerance_m)?;
+        result.kind = ReceiverKind::Surface;
+        Ok(result)
+    }
+
     /// Receive a source connection at a point in an original scene medium.
     /// `section_normal` defines only the numerical shooting section, oriented
     /// toward the source. The native geometry remains authoritative before it;
@@ -150,7 +176,7 @@ impl BundleConnectionTarget {
         Ok(result)
     }
 
-    /// Native surface identity for detector/diffuse targets. Volume targets
+    /// Native surface identity for detector and scattering targets. Volume targets
     /// have no object and return zero; use `volume_medium_index` for them.
     pub const fn object_id(self) -> u64 {
         self.object_id
@@ -170,6 +196,10 @@ impl BundleConnectionTarget {
         matches!(self.kind, ReceiverKind::Diffuse)
     }
 
+    pub const fn is_surface_receiver(self) -> bool {
+        matches!(self.kind, ReceiverKind::Surface)
+    }
+
     pub const fn is_volume_receiver(self) -> bool {
         matches!(self.kind, ReceiverKind::Volume { .. })
     }
@@ -185,6 +215,7 @@ impl BundleConnectionTarget {
         match self.kind {
             ReceiverKind::Detector => None,
             ReceiverKind::Diffuse => Some(super::BundleReceiver::Diffuse(self.object_id)),
+            ReceiverKind::Surface => Some(super::BundleReceiver::Surface(self.object_id)),
             ReceiverKind::Volume { medium } => Some(super::BundleReceiver::Volume {
                 medium,
                 position_m: self.position_m,
@@ -316,6 +347,25 @@ impl BundleConnection {
     }
     pub const fn query_work(&self) -> u64 {
         self.work.geometry
+    }
+
+    /// Project the retained incident bundle onto this receiver's physical
+    /// tangent plane. General surface targets use the original contact normal
+    /// facing the actual source arrival, independently of the numerical section.
+    /// The target's kind, native identity and full endpoint residual are checked
+    /// before exposing a receiving-area Jacobian.
+    pub fn receiver_projection(
+        &self,
+        target: BundleConnectionTarget,
+        options: ProjectionOptions,
+    ) -> Result<PlanarBundleProjection, BundleConnectionError> {
+        let received = arrival(self.path, target, options)?;
+        if received.position_error > target.position_tolerance_m {
+            return Err(BundleConnectionError::ContactResolution {
+                residual_m: received.position_error,
+            });
+        }
+        Ok(received.projection)
     }
 
     // Source-survival replay uses this SAME receiver admission and ordered
@@ -654,6 +704,7 @@ impl CurvedPolarizedScene<'_> {
         if let Some((planned, consumed)) = branch_plan {
             if (path.termination() == PathTermination::Detected
                 || path.is_diffuse_receiver()
+                || path.is_surface_receiver()
                 || path.is_volume_receiver())
                 && consumed != planned
             {
@@ -674,6 +725,9 @@ fn arrival(
         ReceiverKind::Diffuse => {
             path.termination() == PathTermination::Opaque && path.is_diffuse_receiver()
         }
+        ReceiverKind::Surface => {
+            path.termination() == PathTermination::Opaque && path.is_surface_receiver()
+        }
         ReceiverKind::Volume { medium } => {
             path.is_volume_receiver() && path.medium_index() == medium
         }
@@ -683,6 +737,9 @@ fn arrival(
             path.termination(),
         ));
     }
+    let bundle = path.bundle().propagation();
+    let endpoint = bundle.propagation().ray;
+    let mut projection_normal = target.normal;
     if !target.is_volume_receiver() {
         let contact = path
             .last_contact()
@@ -690,26 +747,33 @@ fn arrival(
         if contact.object_id != target.object_id {
             return Err(BundleConnectionError::WrongDetector);
         }
-        if contact.witness.departure_radius_m.is_none() {
-            return Err(BundleConnectionError::NonPlanarReceiver);
-        }
-        // Native planar normals and the supplied receiver orientation must agree
-        // to roundoff-scale angular resolution; either geometric orientation is valid.
-        if norm(cross(contact.witness.normal, target.normal)) > 1e-8
-            || contact
-                .witness
-                .surface_point
-                .delta_from(target.position_m)
-                .dot(target.normal)
-                .abs()
-                > target.position_tolerance_m
-        {
-            return Err(BundleConnectionError::ReceiverPlaneMismatch);
+        if target.is_surface_receiver() {
+            let native_normal = contact.witness.normal;
+            projection_normal = if native_normal.dot(endpoint.dir) > 0.0 {
+                native_normal.scale(-1.0)
+            } else {
+                native_normal
+            };
+        } else {
+            if contact.witness.departure_radius_m.is_none() {
+                return Err(BundleConnectionError::NonPlanarReceiver);
+            }
+            // Legacy planar receivers retain their authored orientation and
+            // plane agreement checks; either native orientation is valid.
+            if norm(cross(contact.witness.normal, target.normal)) > 1e-8
+                || contact
+                    .witness
+                    .surface_point
+                    .delta_from(target.position_m)
+                    .dot(target.normal)
+                    .abs()
+                    > target.position_tolerance_m
+            {
+                return Err(BundleConnectionError::ReceiverPlaneMismatch);
+            }
         }
     }
-    let bundle = path.bundle().propagation();
-    let endpoint = bundle.propagation().ray;
-    if endpoint.dir.dot(target.normal) >= 0.0 {
+    if !target.is_surface_receiver() && endpoint.dir.dot(target.normal) >= 0.0 {
         return Err(BundleConnectionError::BackFacingReceiver);
     }
     let delta = endpoint.origin.delta_from(target.position_m);
@@ -721,7 +785,7 @@ fn arrival(
     }
     Ok(Arrival {
         path,
-        projection: bundle.project_at_endpoint(target.normal, options)?,
+        projection: bundle.project_at_endpoint(projection_normal, options)?,
         residual,
         tangent_error,
         normal_error: delta.dot(target.normal).abs(),
@@ -788,3 +852,6 @@ mod diffuse_tests;
 
 #[cfg(test)]
 mod volume_tests;
+
+#[cfg(test)]
+mod surface_tests;

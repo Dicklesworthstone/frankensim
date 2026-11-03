@@ -645,8 +645,29 @@ differentiable lift). Pure Rust throughout.
   Aggregate work includes all authored seed searches and retained replays.
   Unresolved or ambiguous searches refuse; finite seeds do not establish
   image completeness. This incident-irradiance consumer does not add a second
-  emission term to camera continuation. Rough-receiver area MIS, singular caustic integration and coherent interference
-  remain outside it.
+  emission term to camera continuation. Singular caustic integration and
+  coherent interference remain outside it.
+
+- `BundleConnectionTarget::try_surface_receiver` stops at the original
+  continuous scattering material before its receiving BSDF or local branch
+  choice. Rough glass, rough/brushed conductors and diffuse surfaces retain
+  native geometry, including curved charts. The actual geometric approach side
+  selects the glass's original incident medium; equal IOR never substitutes for
+  that identity. The target normal defines numerical shooting coordinates only.
+  `BundleConnection::receiver_projection`, image parity/resolution and source
+  irradiance use the actual endpoint tangent facing that image's arrival.
+  Full unsnapped three-dimensional residuals, finite support, preceding smooth
+  refraction, opacity and complete branch plans remain authoritative. No
+  derivative through a rough scattering event is inferred.
+  `CurvedAreaEmitter::surface_mis_weights` converts the original area PDF into
+  receiver solid angle using native etendue and the actual light-side phase
+  index. Its competing PDF is the native continuous BSDF proposal, including
+  local reflection/transmission selection, times the original reverse smooth
+  branch probability. Physical Mueller power and absorption never substitute
+  for proposal probability. Five authored regressions cover curved receiving
+  derivatives/area on both sides, material/media admission, lens Fresnel/Beer
+  transport and complementary directional weights. Rust execution remains
+  unavailable in the implementation environment.
 
 - `camera::area_lights::camera::CurvedAreaLightCameraScene` composes
   original panel area samples with the native surface camera at declared

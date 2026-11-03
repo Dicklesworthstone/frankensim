@@ -368,6 +368,7 @@ impl CurvedRayleighScene<'_, '_, '_> {
         if let BundleBranchPolicy::Sequence(events) = policy
             && (replay.termination() == super::super::PathTermination::Detected
                 || replay.is_diffuse_receiver()
+                || replay.is_surface_receiver()
                 || replay.is_volume_receiver())
             && consumed != events.len()
         {

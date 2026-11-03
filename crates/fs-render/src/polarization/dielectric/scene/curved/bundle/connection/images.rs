@@ -442,13 +442,10 @@ impl CurvedPolarizedScene<'_> {
                                 error,
                             })?;
                     let projection = solution
-                        .path()
-                        .bundle()
-                        .propagation()
-                        .project_at_endpoint(target.normal(), connection.projection)
+                        .receiver_projection(target, connection.projection)
                         .map_err(|error| BundleImageError::Seed {
                             seed: seed_index,
-                            error: error.into(),
+                            error,
                         })?;
                     let candidate = BundleImage {
                         connection: solution,
@@ -612,11 +609,7 @@ pub(crate) fn connection_angular_resolution(
     target: BundleConnectionTarget,
     options: ProjectionOptions,
 ) -> Result<f64, BundleConnectionError> {
-    let projection = connection
-        .path()
-        .bundle()
-        .propagation()
-        .project_at_endpoint(target.normal(), options)?;
+    let projection = connection.receiver_projection(target, options)?;
     // area = sigma_max*sigma_min and condition = sigma_max/sigma_min.
     // Separate square roots avoid underflow in area/condition.
     let sigma_min =

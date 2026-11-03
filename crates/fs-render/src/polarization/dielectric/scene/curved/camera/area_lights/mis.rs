@@ -141,7 +141,55 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         power_weights(light_log_pdf, continuation_log_pdf)
     }
 
-    // Both endpoint kinds share source ownership, reciprocal etendue and the
+    /// Reciprocal directional weights at an original continuous surface BSDF.
+    /// The supplied PDF is the native camera sampler evaluated toward this
+    /// source image, including its local reflection/transmission selection.
+    /// It is independent of the physical polarized BSDF contraction.
+    ///
+    /// The actual native contact normal determines the receiving footprint
+    /// and cosine, on either geometric side. The target normal is only the
+    /// numerical shooting section and need not be the surface tangent. The
+    /// endpoint phase index belongs to the light's arriving medium, which may
+    /// differ from the camera's medium across a transmitting rough interface.
+    pub fn surface_mis_weights(
+        &self,
+        sample: AreaEmitterSample<'_>,
+        connection: &BundleConnection,
+        target: BundleConnectionTarget,
+        projection: ProjectionOptions,
+        continuation_pdf_solid_angle: f64,
+    ) -> Result<AreaImageMisWeights, AreaEmitterError> {
+        let path = connection.path();
+        let endpoint = path.bundle().propagation().propagation();
+        let contact = path.last_contact().ok_or(AreaEmitterError::SourceContactMismatch)?;
+        if !target.is_surface_receiver() || !path.is_surface_receiver()
+            || contact.object_id != target.object_id()
+            || norm(endpoint.ray.origin.delta_from(target.position_m()))
+                > target.position_tolerance_m()
+        {
+            return Err(AreaEmitterError::SourceContactMismatch);
+        }
+        if !continuation_pdf_solid_angle.is_finite() || continuation_pdf_solid_angle < 0.0 {
+            return Err(AreaEmitterError::NumericalRange);
+        }
+        let cosine = contact.witness.normal.dot(endpoint.ray.dir);
+        if !cosine.is_finite() || cosine == 0.0 {
+            return Err(AreaEmitterError::SourceContactMismatch);
+        }
+        let normal = if cosine > 0.0 { contact.witness.normal.scale(-1.0) }
+            else { contact.witness.normal };
+        let (light_log_pdf, reverse_log_probability) = self.image_log_densities(
+            sample, connection, normal, cosine.abs().min(1.0), projection,
+        )?;
+        let continuation_log_pdf = if continuation_pdf_solid_angle == 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            det::ln(continuation_pdf_solid_angle) + reverse_log_probability
+        };
+        power_weights(light_log_pdf, continuation_log_pdf)
+    }
+
+    // All endpoint kinds share source ownership, reciprocal etendue and the
     // exact reverse scalar interface proposal. Only their physical receiving
     // section and local continuous angular law differ.
     fn image_log_densities(
