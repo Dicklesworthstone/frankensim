@@ -72,3 +72,79 @@ fn g1_reciprocal_area_pdf_cancels_receiver_obliquity_and_common_host_index() {
         }
     });
 }
+
+#[test]
+fn g1_volume_area_pdf_uses_transverse_etendue_not_the_newton_section() {
+    with_cx(|cx| {
+        let point = Point3::new(0.3, 0.0, 2.0);
+        let distance = (0.3_f64 * 0.3 + 4.0).sqrt();
+        let direction = Vec3::new(0.3 / distance, 0.0, 2.0 / distance);
+        let geometry = InstanceScene::try_new(vec![source(0.0)]).unwrap();
+        let emitter = SurfaceEmitter::new(2,
+            super::super::super::RadianceSpectrum::try_constant(4.0).unwrap(),
+            EmissionSides::Front);
+        // An incoming camera ray along +X scatters toward the original source.
+        // Rayleigh's scalar PDF is independent of the transported Stokes power.
+        let cosine_phase = -direction.x;
+        let phase_pdf = 3.0 * (1.0 + cosine_phase * cosine_phase)
+            / (16.0 * core::f64::consts::PI);
+        let expected_light = distance * distance / (0.27 * direction.z);
+        let expected_continuation = phase_pdf * phase_pdf
+            / (expected_light * expected_light + phase_pdf * phase_pdf);
+        let mut first = None;
+        for (index, absorption) in [(1.0, 0.0), (1.7, 0.5)] {
+            let material = glass(index, absorption);
+            let media = [SceneMedium::Homogeneous(&material)];
+            let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media,
+                vec![SurfaceBinding { object_id: 2, interaction: Interaction::Opaque }],
+                100_000).unwrap();
+            let panel = CurvedAreaEmitter::try_new(cx, &scene, &emitter, 1).unwrap();
+            let sample = panel.sample_area([4.0 / 9.0, 0.5]).unwrap();
+            for normal in [direction.scale(-1.0), Vec3::new(0.6, 0.0, -0.8)] {
+                let target = BundleConnectionTarget::try_volume_receiver(0, point, normal, 2e-7)
+                    .unwrap();
+                let connected = scene.connect_bundle_from_surface_with_policy(
+                    cx,
+                    BundleConnectionLaunch {
+                        ray: Ray { origin: sample.position_m(), dir: direction },
+                        transverse_axis: Vec3::new(0.0, 1.0, 0.0),
+                        wavelength_nm: 550.0,
+                        normalized_source_stokes: Stokes::unpolarized(1.0),
+                        initial_medium: 0,
+                    },
+                    BundleSurfaceSource::try_new(2, BoundarySide::Positive).unwrap(),
+                    target, options(), BundleBranchPolicy::Sequence(&[]),
+                ).unwrap();
+                let weights = panel.volume_mis_weights(sample, &connected, target,
+                    options().projection, phase_pdf).unwrap();
+                near(weights.light_log_pdf_solid_angle().exp(), expected_light, 3e-6);
+                near(weights.continuation_log_pdf_solid_angle().exp(), phase_pdf, 3e-6);
+                near(weights.continuation_weight(), expected_continuation, 3e-6);
+                near(weights.light_weight() + weights.continuation_weight(), 1.0, 1e-15);
+                if let Some(previous) = first {
+                    near(weights.continuation_weight(), previous, 3e-6);
+                } else {
+                    first = Some(weights.continuation_weight());
+                }
+                let zero = panel.volume_mis_weights(sample, &connected, target,
+                    options().projection, 0.0).unwrap();
+                assert_eq!(zero.light_weight(), 1.0);
+                assert_eq!(zero.continuation_weight(), 0.0);
+                assert_eq!(zero.continuation_log_pdf_solid_angle(), f64::NEG_INFINITY);
+                for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+                    assert!(matches!(panel.volume_mis_weights(sample, &connected, target,
+                        options().projection, invalid), Err(AreaEmitterError::NumericalRange)));
+                }
+                let wrong_medium = BundleConnectionTarget::try_volume_receiver(1, point, normal, 2e-7)
+                    .unwrap();
+                assert!(matches!(panel.volume_mis_weights(sample, &connected, wrong_medium,
+                    options().projection, phase_pdf), Err(AreaEmitterError::SourceContactMismatch)));
+                let wrong_point = BundleConnectionTarget::try_volume_receiver(0,
+                    Point3::new(point.x + 0.1, point.y, point.z), normal, 2e-7).unwrap();
+                assert!(matches!(panel.volume_mis_weights(sample, &connected, wrong_point,
+                    options().projection, phase_pdf), Err(AreaEmitterError::SourceContactMismatch)));
+            }
+        }
+    });
+}
+

@@ -14,6 +14,15 @@
 //! reverse native scalar probabilities of its selected smooth interfaces.
 //! Absorption and Mueller power belong to radiance, not these proposals.
 //! These weights do not prove that finite authored seeds discover every image.
+//!
+//! Participating consumers use the same deterministic angular/branch scores
+//! at both ends of a connection, without scattering survival in the heuristic.
+//! The full continuation density would also contain no-collision survival;
+//! these scores do not claim to be that marginalized path density. A shared
+//! partition of unity still preserves the two estimators' expectation (PBRT 4e
+//! section 2.2.3). Source survival remains an independent radiance estimator.
+//! Inserting a noisy ratio-tracking estimate into this nonlinear heuristic
+//! would correlate its weight with source attenuation and bias the result.
 
 use super::{AreaEmitterError, AreaEmitterSample, CurvedAreaEmitter, cross, delta, norm};
 use crate::gradient_index::bundle::ProjectionOptions;
@@ -26,8 +35,9 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 /// Complementary power-heuristic weights for one regular optical image.
-/// Densities use the same receiver solid-angle measure. An image absent from
-/// a finite light catalog must instead retain emitter-hit weight one.
+/// Angular/branch scores use the same receiver solid-angle measure. They omit
+/// participating free-flight survival. An image absent from a finite light
+/// catalog must instead retain emitter-hit weight one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AreaImageMisWeights {
     light: f64,
@@ -49,6 +59,9 @@ impl AreaImageMisWeights {
         self.light_log_pdf
     }
 
+    /// Log of angular PDF times reverse smooth-interface branch probability.
+    /// In participating media this is a deterministic weighting score, not
+    /// the full suffix probability including no-collision survival.
     pub const fn continuation_log_pdf_solid_angle(&self) -> f64 {
         self.continuation_log_pdf
     }
@@ -65,6 +78,80 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         target: BundleConnectionTarget,
         projection: ProjectionOptions,
     ) -> Result<AreaImageMisWeights, AreaEmitterError> {
+        let path = connection.path();
+        let receiver = path.last_contact().ok_or(AreaEmitterError::SourceContactMismatch)?;
+        if !target.is_diffuse_receiver()
+            || !path.is_diffuse_receiver()
+            || receiver.object_id != target.object_id()
+        {
+            return Err(AreaEmitterError::SourceContactMismatch);
+        }
+        let cosine_receiver = -target.normal().dot(path.bundle().propagation().propagation().ray.dir);
+        if !cosine_receiver.is_finite() || cosine_receiver <= 0.0 {
+            return Err(AreaEmitterError::SourceContactMismatch);
+        }
+        let cosine_receiver = cosine_receiver.min(1.0);
+        let (light_log_pdf, reverse_log_probability) = self.image_log_densities(
+            sample, connection, target.normal(), cosine_receiver, projection,
+        )?;
+        let continuation_log_pdf = det::ln(cosine_receiver)
+            - det::ln(core::f64::consts::PI) + reverse_log_probability;
+        power_weights(light_log_pdf, continuation_log_pdf)
+    }
+
+    /// Deterministic angular partition at an original volume receiver.
+    /// `continuation_pdf_solid_angle` must be the native angular sampler's PDF
+    /// evaluated for the camera incoming direction and the reverse of this
+    /// connection's final direction. For a molecular vertex use the original
+    /// local `PhaseFunction::eval_cos`; polarized power is a separate factor.
+    ///
+    /// The physical receiving section is perpendicular to the actual arriving
+    /// ray. The target's arbitrary Newton section therefore cannot alter the
+    /// returned density. Neither collision rate nor scattering survival enters
+    /// these scores; participating consumers must use the same deterministic
+    /// weights for area sampling and a matching native emitter hit.
+    pub fn volume_mis_weights(
+        &self,
+        sample: AreaEmitterSample<'_>,
+        connection: &BundleConnection,
+        target: BundleConnectionTarget,
+        projection: ProjectionOptions,
+        continuation_pdf_solid_angle: f64,
+    ) -> Result<AreaImageMisWeights, AreaEmitterError> {
+        let path = connection.path();
+        let endpoint = path.bundle().propagation().propagation();
+        if !path.is_volume_receiver()
+            || target.volume_medium_index() != Some(path.medium_index())
+            || norm(endpoint.ray.origin.delta_from(target.position_m()))
+                > target.position_tolerance_m()
+        {
+            return Err(AreaEmitterError::SourceContactMismatch);
+        }
+        if !continuation_pdf_solid_angle.is_finite() || continuation_pdf_solid_angle < 0.0 {
+            return Err(AreaEmitterError::NumericalRange);
+        }
+        let (light_log_pdf, reverse_log_probability) = self.image_log_densities(
+            sample, connection, endpoint.ray.dir.scale(-1.0), 1.0, projection,
+        )?;
+        let continuation_log_pdf = if continuation_pdf_solid_angle == 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            det::ln(continuation_pdf_solid_angle) + reverse_log_probability
+        };
+        power_weights(light_log_pdf, continuation_log_pdf)
+    }
+
+    // Both endpoint kinds share source ownership, reciprocal etendue and the
+    // exact reverse scalar interface proposal. Only their physical receiving
+    // section and local continuous angular law differ.
+    fn image_log_densities(
+        &self,
+        sample: AreaEmitterSample<'_>,
+        connection: &BundleConnection,
+        receiver_normal: Vec3,
+        cosine_receiver: f64,
+        projection: ProjectionOptions,
+    ) -> Result<(f64, f64), AreaEmitterError> {
         if !core::ptr::eq(sample.emitter, self.emitter)
             || !core::ptr::eq(sample.instance, self.instance)
         {
@@ -72,13 +159,9 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         }
         let path = connection.path();
         let contact = path.source_contact().ok_or(AreaEmitterError::SourceContactMismatch)?;
-        let receiver = path.last_contact().ok_or(AreaEmitterError::SourceContactMismatch)?;
         let bundle = path.bundle();
         let geometric = bundle.propagation();
-        if !target.is_diffuse_receiver()
-            || !path.is_diffuse_receiver()
-            || receiver.object_id != target.object_id()
-            || contact.object_id != self.emitter.object_id()
+        if contact.object_id != self.emitter.object_id()
             || contact.geometry_identity != self.instance.geometry_identity()
             || contact.frame_identity != self.instance.frame_identity()
             || geometric.initial_ray().origin != sample.position_m
@@ -87,14 +170,10 @@ impl CurvedAreaEmitter<'_, '_, '_> {
             return Err(AreaEmitterError::SourceContactMismatch);
         }
         let cosine_source = contact.witness.normal.dot(geometric.initial_ray().dir).abs().min(1.0);
-        let cosine_receiver = -target.normal().dot(geometric.propagation().ray.dir);
-        if !cosine_source.is_finite() || cosine_source <= 0.0
-            || !cosine_receiver.is_finite() || cosine_receiver <= 0.0
-        {
+        if !cosine_source.is_finite() || cosine_source <= 0.0 {
             return Err(AreaEmitterError::SourceContactMismatch);
         }
-        let cosine_receiver = cosine_receiver.min(1.0);
-        let area = geometric.project_at_endpoint(target.normal(), projection)
+        let area = geometric.project_at_endpoint(receiver_normal, projection)
             .map_err(|error| AreaEmitterError::Refractive(error.into()))?
             .area_per_solid_angle_m2();
         let source_index = geometric.propagation().initial_sample.phase_index();
@@ -111,9 +190,7 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         let light_log_pdf = det::ln(sample.pdf_area_per_m2)
             + 2.0 * (det::ln(receiver_index) - det::ln(source_index))
             + det::ln(cosine_receiver) - det::ln(cosine_source) + det::ln(area);
-        let continuation_log_pdf = det::ln(cosine_receiver)
-            - det::ln(core::f64::consts::PI) + reverse_log_probability;
-        power_weights(light_log_pdf, continuation_log_pdf)
+        Ok((light_log_pdf, reverse_log_probability))
     }
 
     /// Recover the original represented area density at an actual native
@@ -245,4 +322,5 @@ fn power_weights(
     }
     Ok(AreaImageMisWeights { light, continuation, light_log_pdf, continuation_log_pdf })
 }
+
 

@@ -1,6 +1,8 @@
 use super::super::{CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings, SceneMedium};
 use super::{
-    CurvedDensityField, CurvedRayleighMedium, CurvedRayleighScene, CurvedRayleighTraceSettings,
+    CurvedDensityField, CurvedRayleighBinding, CurvedRayleighEvent, CurvedRayleighField,
+    CurvedRayleighMedium, CurvedRayleighSample, CurvedRayleighScene, CurvedRayleighTraceSettings,
+    CurvedTraceEvent,
 };
 use crate::charts::TriMesh;
 use crate::dielectric::{
@@ -722,5 +724,254 @@ fn g0_delta_tracking_refuses_density_majorant_violations() {
                 .trace(cx, input, 0, settings(), 19, 7)
                 .is_err()
         );
+    });
+}
+
+#[test]
+fn g3_native_event_observer_retains_density_and_field_null_tracking() {
+    struct Medium;
+    impl GradientIndexField for Medium {
+        fn sample(&self, _: Point3, _: f64) -> Result<GradientIndexSample, GradientIndexError> {
+            GradientIndexSample::try_new(1.4, Vec3::new(0.0, 0.0, 0.0), 0.2, Some(1.4))
+        }
+    }
+    impl CurvedDensityField for Medium {
+        fn density_kg_m3(
+            &self,
+            _: Point3,
+        ) -> Result<f64, crate::volumes::transport::VolumeTransportError> {
+            Ok(0.25)
+        }
+    }
+    impl CurvedRayleighField for Medium {
+        fn source_field_identity(&self) -> ContentHash {
+            ContentHash([183; 32])
+        }
+        fn scattering_majorant_per_m(
+            &self,
+            _: f64,
+        ) -> Result<f64, crate::volumes::transport::VolumeTransportError> {
+            Ok(1.0)
+        }
+        fn sample_scattering(
+            &self,
+            _: Point3,
+            _: f64,
+        ) -> Result<CurvedRayleighSample, crate::volumes::transport::VolumeTransportError> {
+            Ok(CurvedRayleighSample {
+                scattering_per_m: 0.25,
+                depolarization_ratio: 0.0,
+            })
+        }
+    }
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(9, 0, 1.0)]).unwrap();
+        let field = Medium;
+        let media = [SceneMedium::GradientIndex {
+            field: &field,
+            identity: ContentHash([183; 32]),
+        }];
+        let scene =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![detector(9)], 100_000)
+                .unwrap();
+        let spectrum = MassScatteringSpectrum::constant(1.0).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let density = CurvedRayleighMedium::try_new_heterogeneous(
+            &spectrum,
+            &field,
+            1.0,
+            ContentHash([184; 32]),
+            &phase,
+        )
+        .unwrap();
+        let input = scene
+            .launch_beam(
+                Point3::new(0.0, 0.0, 0.0),
+                frame(),
+                550.0,
+                0,
+                Stokes::unpolarized(1.0),
+            )
+            .unwrap();
+        let draws = |flight| match flight {
+            0 => [1.0 - (-0.2_f64).exp(), 0.5, 0.0, 0.8], // null at z=0.2
+            1 => [1.0 - (-0.3_f64).exp(), 0.5, 0.0, 0.1], // real at z=0.5
+            2 => [1.0 - 1e-12, 0.5, 0.0, 0.0],
+            _ => panic!("detector interrupts the third flight"),
+        };
+        for law in [
+            CurvedRayleighBinding::Density(density),
+            CurvedRayleighBinding::Field(&field),
+        ] {
+            let volumes = [Some(law)];
+            let scattering = CurvedRayleighScene::try_new_with_fields(cx, &scene, &volumes)
+                .unwrap();
+            let expected = scattering
+                .trace_with_tracking_samples(
+                    cx,
+                    input,
+                    0,
+                    settings(),
+                    |_| panic!("detector consumes no surface variate"),
+                    draws,
+                )
+                .unwrap();
+            let mut events = Vec::new();
+            let mut arriving = None;
+            let actual = scattering
+                .trace_with_tracking_samples_events_observed(
+                    cx,
+                    input,
+                    0,
+                    settings(),
+                    |_| panic!("observer must not resample a surface"),
+                    draws,
+                    |event| {
+                        match event {
+                            CurvedRayleighEvent::VolumeArrival { path, phase } => {
+                                events.push(0);
+                                close(path.beam().ray().origin.z, 0.5, 2e-9);
+                                close(path.beam().ray().origin.x, 0.0, 2e-9);
+                                close(
+                                    phase.eval_cos(0.0).unwrap(),
+                                    3.0 / (16.0 * core::f64::consts::PI),
+                                    1e-14,
+                                );
+                                arriving = Some(*path.beam());
+                            }
+                            CurvedRayleighEvent::VolumeDeparture {
+                                path,
+                                incoming_beam,
+                                phase,
+                                pdf,
+                            } => {
+                                events.push(1);
+                                assert_eq!(Some(incoming_beam), arriving);
+                                let native = phase.sample_polarized(incoming_beam, [0.5, 0.0])
+                                    .unwrap();
+                                assert_eq!(*path.beam(), native.beam);
+                                assert_eq!(pdf, native.pdf);
+                                close(pdf, 3.0 / (16.0 * core::f64::consts::PI), 1e-14);
+                                close(path.beam().ray().dir.x, 1.0, 1e-14);
+                                close(path.beam().power().i, (-0.1_f64).exp(), 2e-9);
+                                close(path.beam().power().q, (-0.1_f64).exp(), 2e-9);
+                            }
+                            CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
+                                events.push(2);
+                                assert_eq!(path.last_contact().unwrap().object_id, 9);
+                            }
+                            CurvedRayleighEvent::Surface(CurvedTraceEvent::Departure { .. }) => {
+                                panic!("detector has no continuation")
+                            }
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(events, [0, 1, 2]);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.volume_events(), 1);
+            assert_eq!(actual.free_flight_draws(), 3);
+            close(actual.path().traveled_m(), 1.5, 3e-7);
+            close(actual.path().beam().power().i, (-0.3_f64).exp(), 3e-7);
+        }
+    });
+}
+
+#[test]
+fn g3_native_event_observer_retains_refractive_surface_proposals() {
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(1, 2, 0.5), plane(9, 2, 1.0)]).unwrap();
+        let first = glass(1.0, 0.0);
+        let second = glass(1.5, 0.2);
+        let media = [
+            SceneMedium::Homogeneous(&first),
+            SceneMedium::Homogeneous(&second),
+        ];
+        let scene = CurvedPolarizedScene::try_new(
+            cx,
+            &geometry,
+            &media,
+            vec![
+                SurfaceBinding {
+                    object_id: 1,
+                    interaction: Interaction::Dielectric {
+                        inside: 0,
+                        outside: 1,
+                        surface: DielectricSurface::SMOOTH,
+                    },
+                },
+                detector(9),
+            ],
+            100_000,
+        )
+        .unwrap();
+        let volumes = [None, None];
+        let scattering = CurvedRayleighScene::try_new(cx, &scene, &volumes).unwrap();
+        let input = scene
+            .launch_beam(
+                Point3::new(0.0, 0.0, 0.0),
+                frame(),
+                550.0,
+                0,
+                Stokes::unpolarized(1.0),
+            )
+            .unwrap();
+        let expected = scattering
+            .trace_with_tracking_samples(
+                cx,
+                input,
+                0,
+                settings(),
+                |_| [0.3, 0.7, 0.999999],
+                |_| panic!("clear media consume no flight draw"),
+            )
+            .unwrap();
+        let mut events = Vec::new();
+        let mut incoming = None;
+        let actual = scattering
+            .trace_with_tracking_samples_events_observed(
+                cx,
+                input,
+                0,
+                settings(),
+                |event| {
+                    assert_eq!(event, 0);
+                    [0.3, 0.7, 0.999999]
+                },
+                |_| panic!("event observation must not introduce flight draws"),
+                |event| {
+                    match event {
+                        CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
+                            events.push(path.last_contact().unwrap().object_id);
+                            if path.surface_events() == 1 {
+                                incoming = Some(*path.beam());
+                                assert_eq!(path.medium_index(), 0);
+                            }
+                        }
+                        CurvedRayleighEvent::Surface(CurvedTraceEvent::Departure {
+                            path,
+                            incoming_beam,
+                            event,
+                            pdf,
+                            delta,
+                        }) => {
+                            events.push(2);
+                            assert_eq!(Some(incoming_beam), incoming);
+                            assert_eq!(path.medium_index(), 1);
+                            assert_eq!(event, crate::dielectric::DielectricEvent::Transmission);
+                            assert!(delta);
+                            close(pdf, 0.96, 1e-14);
+                        }
+                        _ => panic!("clear media produce no molecular event"),
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(events, [1, 2, 9]);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.volume_events(), 0);
+        assert_eq!(actual.free_flight_draws(), 0);
     });
 }

@@ -24,12 +24,14 @@
 //! global majorant.
 
 use super::{
-    CurvedPathResult, CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings,
+    CurvedPathResult, CurvedPolarizedScene, CurvedSceneError, CurvedTraceEvent, CurvedTraceSettings,
     CurvedVolumeFlight, MAX_POLARIZED_PATH_EVENTS, PolarizedBeam, SceneError, SceneMedium,
 };
 use crate::volumes::VolumeGrid;
 use crate::volumes::transport::VolumeTransportError;
-use crate::volumes::transport::scattering::polarized::PolarizedScatteringError;
+use crate::volumes::transport::scattering::polarized::{
+    PolarizedPhaseSample, PolarizedScatteringError,
+};
 use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
 use core::cell::{Cell, RefCell};
 use fs_blake3::{ContentHash, DomainHasher};
@@ -121,6 +123,10 @@ impl CurvedRayleighBinding<'_> {
         acceptance_sample: f64,
         sampled_majorant: Option<f64>,
         mut observe_accepted: impl FnMut(&PhaseFunction) -> Result<(), CurvedSceneError>,
+        mut observe_departure: impl FnMut(
+            &PhaseFunction,
+            PolarizedPhaseSample,
+        ) -> Result<(), CurvedSceneError>,
     ) -> Result<Option<PolarizedBeam>, CurvedSceneError> {
         match self {
             Self::Density(law) => {
@@ -128,12 +134,12 @@ impl CurvedRayleighBinding<'_> {
                     return Ok(None);
                 }
                 observe_accepted(law.phase)?;
-                Ok(Some(
-                    law.phase
-                        .sample_polarized(beam, samples)
-                        .map_err(scattering_error)?
-                        .beam,
-                ))
+                let next = law
+                    .phase
+                    .sample_polarized(beam, samples)
+                    .map_err(scattering_error)?;
+                observe_departure(law.phase, next)?;
+                Ok(Some(next.beam))
             }
             Self::Field(field) => {
                 if !acceptance_sample.is_finite() || !(0.0..1.0).contains(&acceptance_sample) {
@@ -164,12 +170,11 @@ impl CurvedRayleighBinding<'_> {
                     return Ok(None);
                 }
                 observe_accepted(&phase)?;
-                Ok(Some(
-                    phase
-                        .sample_polarized(beam, samples)
-                        .map_err(scattering_error)?
-                        .beam,
-                ))
+                let next = phase
+                    .sample_polarized(beam, samples)
+                    .map_err(scattering_error)?;
+                observe_departure(&phase, next)?;
+                Ok(Some(next.beam))
             }
         }
     }
@@ -399,6 +404,27 @@ pub(super) enum CurvedRayleighVertex<'a> {
     Volume {
         path: &'a CurvedPathResult,
         phase: &'a PhaseFunction,
+    },
+}
+
+/// Original surface and molecular proposals in physical path order. A real
+/// collision has one arrival followed by its successful sampled departure;
+/// rejected tracking candidates produce neither event. The phase PDF is the
+/// native solid-angle proposal, separate from the Mueller-weighted beam power.
+/// No inferred no-scatter density or extra survival weight is introduced.
+pub(super) enum CurvedRayleighEvent<'a> {
+    Surface(CurvedTraceEvent<'a>),
+    VolumeArrival {
+        path: &'a CurvedPathResult,
+        phase: &'a PhaseFunction,
+    },
+    VolumeDeparture {
+        /// Original path counters with the native outgoing beam. Its medium
+        /// and position are unchanged by this local molecular response.
+        path: &'a CurvedPathResult,
+        incoming_beam: PolarizedBeam,
+        phase: &'a PhaseFunction,
+        pdf: f64,
     },
 }
 impl CurvedRayleighPath {
@@ -723,9 +749,68 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         initial_medium: usize,
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
+        heterogeneous_samples: bool,
+        mut observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_tracking_samples_events_impl(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            flight_samples,
+            heterogeneous_samples,
+            |event| match event {
+                CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
+                    observe_vertex(CurvedRayleighVertex::Surface(path))
+                }
+                CurvedRayleighEvent::VolumeArrival { path, phase } => {
+                    observe_vertex(CurvedRayleighVertex::Volume { path, phase })
+                }
+                CurvedRayleighEvent::Surface(CurvedTraceEvent::Departure { .. })
+                | CurvedRayleighEvent::VolumeDeparture { .. } => Ok(()),
+            },
+        )
+    }
+
+    /// Observe the original sampled directions and proposal densities without
+    /// drawing a second phase or surface sample. Null candidates remain absent
+    /// from the physical-vertex stream; all original flight limits still apply.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_with_tracking_samples_events_observed(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
+        observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_tracking_samples_events_impl(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            flight_samples,
+            true,
+            observe_event,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_with_tracking_samples_events_impl(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut flight_samples: impl FnMut(u32) -> [f64; 4],
         heterogeneous_samples: bool,
-        observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
+        observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         cx.checkpoint()?;
         if settings.max_volume_events == 0 || settings.max_volume_events > MAX_POLARIZED_PATH_EVENTS
@@ -741,15 +826,15 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         // Native surface and molecular callbacks execute sequentially on this
         // stack. One observer retains cumulative source work in actual path
         // order without allocating a vertex history or retracing the camera.
-        let observe_vertex = RefCell::new(observe_vertex);
-        let (path, volume_events) = self.scene.trace_with_flights(
+        let observe_event = RefCell::new(observe_event);
+        let (path, volume_events) = self.scene.trace_with_flights_events(
             cx,
             beam,
             initial_medium,
             settings.surfaces,
             surface_samples,
             self.radiance_brushing,
-            |path| (observe_vertex.borrow_mut())(CurvedRayleighVertex::Surface(path)),
+            |event| (observe_event.borrow_mut())(CurvedRayleighEvent::Surface(event)),
             settings.max_volume_events,
             |medium, wavelength| {
                 let Some(law) = self.media.get(medium) else {
@@ -822,7 +907,20 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                     acceptance_sample,
                     sampled_majorant,
                     |phase| {
-                        (observe_vertex.borrow_mut())(CurvedRayleighVertex::Volume { path, phase })
+                        (observe_event.borrow_mut())(CurvedRayleighEvent::VolumeArrival {
+                            path,
+                            phase,
+                        })
+                    },
+                    |phase, next| {
+                        let mut departure = *path;
+                        departure.beam = next.beam;
+                        (observe_event.borrow_mut())(CurvedRayleighEvent::VolumeDeparture {
+                            path: &departure,
+                            incoming_beam: *path.beam(),
+                            phase,
+                            pdf: next.pdf,
+                        })
                     },
                 )
             },

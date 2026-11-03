@@ -608,6 +608,25 @@ differentiable lift). Pure Rust throughout.
   catalog. G1/G3 cases cover oblique receiving area, common refractive host,
   scalar versus polarized lens power and an asymmetric absorbing coating.
 
+- With `volumes`, the native molecular observer also retains successful
+  surface and molecular departures, including the original incoming beam,
+  sampled outgoing beam and scalar phase or surface proposal. Null tracking
+  candidates produce no physical vertex and do not reset a connection suffix.
+  Existing arrival-only consumers share the same driver and original random
+  draws, optical arithmetic and path limits.
+  `CurvedAreaEmitter::volume_mis_weights` uses the actual ray-transverse bundle
+  footprint, original endpoint phase indices and reverse smooth-interface
+  probabilities. An arbitrary numerical target section introduces no physical
+  receiver cosine. Participating consumers use complementary deterministic
+  angular/branch weights; these omit no-collision survival and do not claim
+  full marginalized path densities or variance-optimal volumetric weights.
+  Physical source survival remains independent of the nonlinear heuristic;
+  a noisy ratio-tracking estimate is never substituted into its denominator.
+  G1/G3 regressions cover oblique target-section invariance, common-index and
+  absorption independence, native refractive proposals, and unchanged density
+  and local-field paths through null and accepted collisions. These native
+  regressions are authored but unexecuted in the implementation environment.
+
 - `camera::area_lights::CurvedAreaEmitter` prepares area sampling on an
   original native panel and its exact `SurfaceEmitter`, directly from the
   surface scene or from an admitted camera emitter. Sources are one original
