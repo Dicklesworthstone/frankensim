@@ -119,7 +119,7 @@ pub(super) fn advance(
 
 // Exact Riccati decay of slip magnitude. Retain the removed fraction separately
 // so a resolved weak wall drive never becomes 1 - a rounded-to-one factor.
-fn combined_decay(linear: f64, quadratic: f64, slip: f64, dt: f64) -> (f64, f64) {
+pub(super) fn combined_decay(linear: f64, quadratic: f64, slip: f64, dt: f64) -> (f64, f64) {
     let exponent = linear * dt;
     let surviving = det::exp(-exponent);
     let removed = -det::expm1(-exponent);

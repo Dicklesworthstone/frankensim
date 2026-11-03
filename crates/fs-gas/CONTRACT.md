@@ -2169,6 +2169,26 @@ frame transformations and weak/strong limits; the mixture-network source test
 also checks actual species, temperature, support impulse and drive-work balances.
 No coefficient, transition law or applicability range is inferred.
 
+`exchange_cell_with_recoil` couples one original mixture cell to a finite
+`SlidingSupport` on the same axis at fixed gas volume and species mass. The
+existing exact linear/quadratic slip map uses the reduced mass m*M/(m+M), so
+both bodies respond to the same interval. Accepted gas impulse I gives the
+support -I, wall work I*(U0-I/(2*M)), and nonnegative slip loss
+-I*(s0+I/(2*reduced_mass)). An authored `gas_heat_fraction` partitions this
+loss; a nonzero wall share requires finite `WallThermal::Lumped` storage.
+The original caloric heat owner then advances the contact without resetting a
+flow clock. Returned gas/support endpoints and actual finite-wall storage must
+pass independent momentum and complete energy budgets before return.
+`RecoilUpdate` exposes both slip-heat shares; the original `WallCellReport`
+retains total slip loss and accounts for the wall share as heat leaving gas,
+so its sensible-energy identity remains additive. Inputs are immutable on
+refusal or cancellation. This owner binds one support to one gas amount;
+shared multi-cell inertia and moving geometry require their own coupled owner.
+G1 regressions cover reduced-mass analytic decay, subdivision, large mass ratios,
+frame covariance, heat fractions 0/0.5/1 with subsequent conduction, actual
+combined storage, and late cancellation. Friction coefficients and the heat
+fraction are authored; the thermal step retains its original first-order law.
+
 Thermal contacts may be adiabatic, a prescribed-temperature reservoir, or a
 finite lumped wall with explicit heat capacity in J/K. A contact's conductance
 is the complete exposed h*A in W/K. A safeguarded backward-Euler temperature

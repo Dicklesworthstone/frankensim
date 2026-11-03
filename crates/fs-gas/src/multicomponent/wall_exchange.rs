@@ -13,6 +13,10 @@ use fs_qty::{DynViscosity, Length, Time};
 
 mod drag;
 mod gas;
+mod recoil;
+pub use recoil::{
+    RecoilControl, RecoilLaw, RecoilUpdate, SlidingSupport, exchange_cell_with_recoil,
+};
 pub(crate) mod shared;
 use gas::MixtureCaloric;
 pub(crate) use gas::{WallGasCaloric, WallGasState};
@@ -388,7 +392,7 @@ pub struct WallCellReport {
     pub elapsed: Time,
     /// Opposite impulse on the wall/drive, in the local gas axis [N s].
     pub wall_impulse_ns: f64,
-    /// Mechanical work entering gas from the prescribed wall motion [J]. The
+    /// Mechanical work entering gas from wall motion [J]. The
     /// wall/drive receives its negative. Zero for a stationary wall; this is
     /// distinct from both heat transfer and internal slip dissipation.
     pub mechanical_work_to_gas_j: f64,
