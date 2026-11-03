@@ -152,6 +152,15 @@ pub struct HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
 }
 
 impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
+    /// Second-order SDIRK2 with the same original heterogeneous caloric charts,
+    /// frozen reference masses and optional complete source conductivity.
+    pub fn advance_sdirk2(&self, cx: &Cx<'_>, inputs: [super::sdirk::EnthalpySdirk2Input<'_>; 2],
+        old_h: &[f64], dt_s: f64, config: EnthalpyStepConfig)
+        -> Result<super::sdirk::EnthalpySdirk2Step, EnthalpyError>
+    {
+        self.inner.advance_sdirk2(cx, inputs, old_h, dt_s, config)
+    }
+
     /// Prepare `m_i = sum_(e containing i) rho_e * V_e / 4` and chart ownership.
     ///
     /// `element_material_ids` is in mesh tetrahedron order. Material indices

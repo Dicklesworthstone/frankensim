@@ -43,6 +43,8 @@ pub mod interference;
 pub mod adjoint;
 /// Error-controlled time integration of the same nonlinear enthalpy transport.
 pub mod adaptive;
+/// Second-order SDIRK stages on the same nonlinear enthalpy residual.
+pub mod sdirk;
 /// Implicit closed-enclosure radiation with complete physical enthalpy feedback.
 pub mod enclosure;
 /// Explicit heterogeneous phase charts and frozen reference densities.
@@ -813,9 +815,16 @@ impl StepContext<'_, '_, '_, '_> {
         config: EnthalpyStepConfig,
         source_j: Option<&'s [fs_math::dd::Dd]>,
     ) -> Result<(Vec<f64>, NewtonReport), EnthalpyError> {
+        self.solve_newton_from(config, source_j, None)
+    }
+
+    fn solve_newton_from<'s>(
+        &'s self, config: EnthalpyStepConfig,
+        source_j: Option<&'s [fs_math::dd::Dd]>, initial_guess: Option<&[f64]>,
+    ) -> Result<(Vec<f64>, NewtonReport), EnthalpyError> {
         // Resolve history and the initial tangent before shared Newton admits it.
         // A chart/domain refusal here retains its original typed error.
-        let initial_h = self.initial_values()?;
+        let initial_h = self.initial_values_from(initial_guess)?;
         let mut stage = self.stage(&initial_h)?;
         stage.source_j = source_j;
         let mut newton =
@@ -880,11 +889,19 @@ impl StepContext<'_, '_, '_, '_> {
     }
 
     fn initial_values(&self) -> Result<Vec<f64>, EnthalpyError> {
+        self.initial_values_from(None)
+    }
+
+    fn initial_values_from(&self, guess: Option<&[f64]>) -> Result<Vec<f64>, EnthalpyError> {
         // Validate even replaced boundary history before accepting its storage.
         if !self.problem.boundary.dirichlet().is_empty() {
             self.temperatures(self.old)?;
         }
-        let mut initial = self.old.to_vec();
+        let values = guess.unwrap_or(self.old);
+        if values.len() != self.old.len() {
+            return Err(EnthalpyError::InvalidInput("initial enthalpy guess has the wrong nodal shape"));
+        }
+        let mut initial = values.to_vec();
         for (index, &(vertex, temperature)) in self.problem.boundary.dirichlet().iter().enumerate()
         {
             if index % ASSEMBLY_TILE == 0 {

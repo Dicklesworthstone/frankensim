@@ -4,6 +4,8 @@ mod support;
 
 #[path = "enthalpy_transport/nodal_density.rs"]
 mod nodal_density;
+#[path = "enthalpy_transport/sdirk.rs"]
+mod sdirk;
 
 use fs_blake3::ContentHash;
 use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};

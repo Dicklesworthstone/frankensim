@@ -3668,3 +3668,41 @@ isothermal phase evolution, closed energy conservation, scheduled bath/heater
 changes, phase-only time-error rejection and continuation after a future bath
 refusal. All six phase-contact history tests and the twelve existing material
 enclosure radiation tests pass against the composed production library.
+
+## Second-order spatial primary-enthalpy stages
+
+`transient::enthalpy::sdirk` adds `advance_sdirk2` to the original uniform and
+heterogeneous enthalpy owners. Two `EnthalpySdirk2Input` records carry physical
+laws sampled at t+gamma*dt and t+dt, with gamma=1-1/sqrt(2). This is Alexander's
+two-stage stiffly accurate SDIRK2 method (SIAM J. Numer. Anal.14(6),1977,
+1006–1021; https://doi.org/10.1137/0714068). It reuses the existing reference
+mass, spatial assembly, exact material/contact/radiation tangents and bounded
+Newton/FGMRES solver. Source k(h_h), heterogeneous caloric charts, fixed and
+source-dependent contact, prescribed temperatures and original pointwise or
+material ambient/enclosure radiation participate at both actual stage states.
+Mean-temperature outer radiation iteration is explicitly outside this API.
+
+Both stages retain the real accepted old h. The first stage's authentic net
+nodal heat creates a dual-joule carry for the second residual. That carry is
+never queried as a fictitious caloric state or credited as external heating.
+The second solve starts from the real first-stage h. A valid stiff step may
+therefore succeed even when the usual algebraic effective-old-h expression
+lies outside the original source support. All actual stages and endpoints
+must still satisfy their original material domains and physical joule gates.
+
+`EnthalpySdirk2Stage` retains instantaneous physical powers, original material
+contact/radiation reports, prescribed-bath reactions and nonlinear work.
+`EnthalpySdirk2Step` separately integrates the tableau-weighted external heat
+and reconstructs original-to-final reference-mass storage. Independent global
+and nodal balances include the actual constrained-node reactions, with internal
+contact/conduction and closed reflection excluded from external heat. A failed
+second stage returns no accepted interval or fabricated backward-Euler receipt.
+
+Accuracy is second order in smooth admitted regimes. Phase/source corners and
+forcing jumps need event resolution/refinement. L-stability alone supplies no
+unconditional positivity, phase monotonicity or entropy theorem; the original
+BE adjoint is not a second-order trajectory adjoint. Focused native regressions
+check an independent spatial eigenmode and its second-order refinement, the
+exact SDIRK stability function, valid real stages with an out-of-domain
+algebraic carry, enthalpy datum shifts, cancellation/refusal/replay, and changing
+prescribed baths with independently integrated source and reservoir heat.

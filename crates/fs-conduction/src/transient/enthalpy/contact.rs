@@ -25,6 +25,9 @@ struct Tangent {
 
 struct CoupledProblem<'a, 'm, 'c, 'cx> {
     base: StepContext<'a, 'm, 'c, 'cx>,
+    // Prescribed stage carry in dual nodal joules; this is algebra, not a
+    // substituted thermodynamic history or an additional physical heat source.
+    source_j: Option<&'a [fs_math::dd::Dd]>,
     contacts: &'a TemperatureContacts<'a, 'a>,
     config: ContactEnthalpyNewtonConfig,
     physical: RefCell<Option<Physical>>,
@@ -113,7 +116,7 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
             .assemble(&temperature, scales.as_deref())
             .map_err(recoverable)?;
         context
-            .assembled_residual(h, &temperature, &system, output)
+            .assembled_residual_with_source(h, &temperature, &system, output, self.source_j)
             .map_err(recoverable)?;
         Ok(Physical {
             h: h.to_vec(),
@@ -314,7 +317,30 @@ impl EnthalpyBackwardEuler<'_, '_> {
         config: ContactEnthalpyNewtonConfig,
         pointwise_radiation: Option<PointwiseBoundary<'_>>,
     ) -> Result<(EnthalpyStepSolution, TemperatureContactEvaluation), EnthalpyError> {
+        let (h, report, physical) = self.solve_with_temperature_contacts(
+            cx, problem, contacts, old_h, dt_s, config, pointwise_radiation, None, None,
+        )?;
+        let context = StepContext { storage: self, cx, problem,
+            interfaces: Some(physical.frozen_interfaces()), old: old_h, dt: dt_s,
+            pointwise_radiation };
+        let accepted = context.finish(h, report, config.step.energy_tolerance_j)?;
+        poll(cx, accepted.newton.iterations)?;
+        Ok((accepted, physical))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn solve_with_temperature_contacts(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        contacts: &TemperatureContacts<'_, '_>, old_h: &[f64], dt_s: f64,
+        config: ContactEnthalpyNewtonConfig,
+        pointwise_radiation: Option<PointwiseBoundary<'_>>,
+        source_j: Option<&[fs_math::dd::Dd]>,
+        initial_guess: Option<&[f64]>,
+    ) -> Result<(Vec<f64>, NewtonReport, TemperatureContactEvaluation), EnthalpyError> {
         self.admit_step(cx, problem, old_h, dt_s, config.step)?;
+        if source_j.is_some_and(|source| source.len() != old_h.len()) {
+            return Err(EnthalpyError::InvalidInput("stage carry must match the original enthalpy mesh"));
+        }
         contacts.check_mesh(problem.mesh)?;
         contacts.check_material_curves(cx, |vertex| Some(self.curve_for_vertex(vertex)))?;
         let radiation_matches = match pointwise_radiation {
@@ -349,9 +375,10 @@ impl EnthalpyBackwardEuler<'_, '_> {
             dt: dt_s,
             pointwise_radiation,
         };
-        let initial = base.initial_values()?;
+        let initial = base.initial_values_from(initial_guess)?;
         let coupled = CoupledProblem {
             base,
+            source_j,
             contacts,
             config,
             physical: RefCell::new(None),
@@ -412,10 +439,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             .ok_or(EnthalpyError::InvalidInput(
                 "accepted contact enthalpy lost its physical source state",
             ))?;
-        let accepted = coupled
-            .context(physical.contacts.frozen_interfaces())
-            .finish(newton.x, run.report, config.step.energy_tolerance_j)?;
-        poll(cx, accepted.newton.iterations)?;
-        Ok((accepted, physical.contacts))
+        poll(cx, run.report.iterations)?;
+        Ok((newton.x, run.report, physical.contacts))
     }
 }
