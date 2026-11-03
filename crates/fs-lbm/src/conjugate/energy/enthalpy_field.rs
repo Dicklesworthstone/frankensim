@@ -35,8 +35,9 @@ impl AffineSpecificEnthalpy {
     }
 }
 
-/// One constant-density fluid's frozen caloric field for first-order upwind
-/// transport. Interior faces use the SAME upstream tangent on both sides, so
+/// One constant-density fluid's frozen caloric field for conservative upwind
+/// or limited linear enthalpy transport. Interior faces use the SAME upstream
+/// tangent and reconstruction on both sides, so
 /// `rho * Q * h_upstream` cancels between neighboring control volumes even when
 /// their Cp values differ. Molecular conduction remains the existing stencil.
 ///
@@ -66,9 +67,9 @@ impl AdvectiveEnthalpyField<'_> {
             field: "thermal.advective_enthalpy",
             reason: reason.into(),
         };
-        if config.scheme != ConvectionScheme::Upwind {
+        if !matches!(config.scheme, ConvectionScheme::Upwind | ConvectionScheme::EnthalpyMinmod) {
             return Err(invalid(
-                "sourced enthalpy transport requires first-order upwind",
+                "sourced enthalpy transport requires upwind or limited enthalpy reconstruction",
             ));
         }
         if self.cells.len() != domain.cell_count() || flow.dims() != domain.dims() {
@@ -132,6 +133,67 @@ impl AdvectiveEnthalpyField<'_> {
             }
         }
         super::super::poll(gate)
+    }
+
+    /// Half-cell changes in specific enthalpy for the positive x/y/z faces.
+    /// Compute once per frozen caloric image, outside matrix assembly/Krylov
+    /// work. Every face then shares its donor's same three cached offsets.
+    pub(crate) fn limited_offsets(
+        &self,
+        domain: &VoxelDomain,
+        gate: &CancelGate,
+    ) -> Result<Vec<[f64; 3]>, ChtError> {
+        let invalid = || ChtError::InvalidInput {
+            field: "thermal.advective_enthalpy",
+            reason: "limited enthalpy reconstruction is unrepresentable".into(),
+        };
+        if self.cells.len() != domain.cell_count() {
+            return Err(invalid());
+        }
+        let mut offsets = vec![[0.0; 3]; domain.cell_count()];
+        for (cell, changes) in offsets.iter_mut().enumerate() {
+            if cell.is_multiple_of(256) {
+                super::super::poll(gate)?;
+            }
+            let Some(center) = self.cells[cell] else { continue };
+            for (axis, change) in changes.iter_mut().enumerate() {
+                let (Some(left), Some(right)) = (
+                    domain.neighbor(cell, 2 * axis),
+                    domain.neighbor(cell, 2 * axis + 1),
+                ) else { continue };
+                let (Some(left_h), Some(right_h)) = (self.cells[left], self.cells[right])
+                else { continue };
+                let half = 0.5 * domain.widths(cell)[axis];
+                let left_distance = half + 0.5 * domain.widths(left)[axis];
+                let right_distance = half + 0.5 * domain.widths(right)[axis];
+                if !left_distance.is_finite() || left_distance <= 0.0
+                    || !right_distance.is_finite() || right_distance <= 0.0
+                {
+                    return Err(invalid());
+                }
+                let left_slope = (center.enthalpy_j_kg - left_h.enthalpy_j_kg) / left_distance;
+                let right_slope = (right_h.enthalpy_j_kg - center.enthalpy_j_kg) / right_distance;
+                if !left_slope.is_finite() || !right_slope.is_finite() {
+                    return Err(invalid());
+                }
+                // Compare signs directly: their product can overflow. A local
+                // extremum has zero slope; otherwise the smaller magnitude
+                // bounds both face traces by the adjacent source enthalpies.
+                let slope = if left_slope > 0.0 && right_slope > 0.0 {
+                    left_slope.min(right_slope)
+                } else if left_slope < 0.0 && right_slope < 0.0 {
+                    left_slope.max(right_slope)
+                } else {
+                    0.0
+                };
+                *change = half * slope;
+                if !change.is_finite() {
+                    return Err(invalid());
+                }
+            }
+        }
+        super::super::poll(gate)?;
+        Ok(offsets)
     }
 }
 

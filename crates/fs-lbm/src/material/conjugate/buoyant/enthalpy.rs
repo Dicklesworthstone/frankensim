@@ -13,7 +13,7 @@ use super::{
     SolidConductivityLaw, poll,
 };
 use crate::conjugate::{
-    AffineSpecificEnthalpy, ConvectionScheme, EnergyConfig, FlowField, SimpleConfig, SolidMaterial,
+    AdvectiveEnthalpyField, AffineSpecificEnthalpy, ConvectionScheme, EnergyConfig, FlowField, SimpleConfig, SolidMaterial,
     ThermalFace, ThermalSetup, VoxelDomain,
 };
 use crate::material::transport::boussinesq::BoussinesqConfig;
@@ -207,10 +207,10 @@ impl CaloricCoupling<'_> {
             || self.config.reference_temperature_k <= 0.0
             || !self.config.maximum_flux_defect_w.is_finite()
             || self.config.maximum_flux_defect_w < 0.0
-            || energy.scheme != ConvectionScheme::Upwind
+            || !matches!(energy.scheme, ConvectionScheme::Upwind | ConvectionScheme::EnthalpyMinmod)
         {
             return Err(MaterialBuoyancyError::Invalid(
-                "source enthalpy requires positive datum temperature, finite nonnegative flux tolerance and upwind energy transport",
+                "source enthalpy requires positive datum temperature, finite nonnegative flux tolerance and upwind or limited enthalpy transport",
             ));
         }
         Ok(())
@@ -303,17 +303,19 @@ impl CaloricCoupling<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn defects(
     domain: &VoxelDomain,
     flow: &FlowField,
     density: f64,
+    scheme: ConvectionScheme,
     temperatures: &[f64],
     applied: &[Option<AffineSpecificEnthalpy>],
     endpoint: &[Option<AffineSpecificEnthalpy>],
     gate: &CancelGate,
 ) -> Result<MaterialEnthalpyReport, MaterialBuoyancyError> {
     let mut cell_defects = vec![0.0; domain.cell_count()];
-    defect_field(domain, flow, density, temperatures, applied, endpoint, &mut cell_defects, gate)
+    defect_field(domain, flow, density, scheme, temperatures, applied, endpoint, &mut cell_defects, gate)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -321,6 +323,7 @@ fn defect_field(
     domain: &VoxelDomain,
     flow: &FlowField,
     density: f64,
+    scheme: ConvectionScheme,
     temperatures: &[f64],
     applied: &[Option<AffineSpecificEnthalpy>],
     endpoint: &[Option<AffineSpecificEnthalpy>],
@@ -329,6 +332,19 @@ fn defect_field(
 ) -> Result<MaterialEnthalpyReport, MaterialBuoyancyError> {
     let mut report = MaterialEnthalpyReport::default();
     cell_defects.fill(0.0);
+    // The original source owner re-evaluates BOTH the true caloric law and
+    // its limited traces. A converged tangent alone cannot accept a stale
+    // nonlocal reconstruction. Each image is reconstructed once per trial.
+    let offsets = if scheme == ConvectionScheme::EnthalpyMinmod {
+        Some((
+            AdvectiveEnthalpyField { cells: applied, boundary_j_kg: [None; 6] }
+                .limited_offsets(domain, gate)?,
+            AdvectiveEnthalpyField { cells: endpoint, boundary_j_kg: [None; 6] }
+                .limited_offsets(domain, gate)?,
+        ))
+    } else {
+        None
+    };
     for cell in 0..domain.cell_count() {
         poll(gate)?;
         for face in 0..6 {
@@ -349,9 +365,15 @@ fn defect_field(
             }; // Prescribed incoming h is already exact.
             let previous = applied[donor].expect("admitted fluid donor");
             let actual = endpoint[donor].expect("admitted fluid endpoint");
-            let difference = density
-                * volume_rate
-                * (actual.enthalpy_j_kg - previous.at_temperature(temperatures[donor]));
+            let mut specific_difference =
+                actual.enthalpy_j_kg - previous.at_temperature(temperatures[donor]);
+            if neighbor.is_some() && let Some((applied_offsets, endpoint_offsets)) = &offsets {
+                let donor_face = if volume_rate > 0.0 { face } else { face ^ 1 };
+                let sign = if donor_face % 2 == 0 { -1.0 } else { 1.0 };
+                specific_difference += sign
+                    * (endpoint_offsets[donor][face / 2] - applied_offsets[donor][face / 2]);
+            }
+            let difference = density * volume_rate * specific_difference;
             cell_defects[cell] += difference;
             if let Some(next) = neighbor {
                 cell_defects[next] -= difference;
@@ -384,8 +406,9 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// `caloric` and `resolve` must bind the same fluid and fixed source context.
     /// Each open face queries that same law at its declared inlet/backflow
     /// temperature. The borrowed source owner and both caloric epochs survive
-    /// in the returned result. Positive single-phase Cp and conservative upwind
-    /// transport are required; phase plateaux retain their separate h-state owner.
+    /// in the returned result. Positive single-phase Cp and conservative
+    /// source-enthalpy transport are required; phase plateaux retain their
+    /// separate h-state owner.
     /// The original transport resolver also admits every incident fluid cell
     /// at those boundary temperatures, including source support and both the
     /// reference-density and source-Cp departure bounds before solving flow.
@@ -518,6 +541,7 @@ mod tests {
             &domain,
             &flow,
             1.0,
+            ConvectionScheme::Upwind,
             &[300.0; 3],
             &applied,
             &endpoint,
@@ -528,5 +552,38 @@ mod tests {
         assert_eq!(report.maximum_cell_flux_defect_w, 0.4);
         assert_eq!(applied[0], endpoint[0]);
         assert_eq!(applied[2], endpoint[2]);
+    }
+
+    #[test]
+    fn limited_trace_defect_is_checked_even_when_every_caloric_tangent_is_exact() {
+        let domain = VoxelDomain::new(5, 1, 1, 1.0).unwrap();
+        let mut faces = [FlowFace::Wall; 6];
+        faces[0] = FlowFace::Fixed;
+        faces[1] = FlowFace::Fixed;
+        let flow = FlowField::from_face_velocity(
+            &domain, faces, |axis, _| if axis == 0 { 0.1 } else { 0.0 },
+        ).unwrap();
+        let tangent = |temperature_k| Some(AffineSpecificEnthalpy {
+            temperature_k,
+            enthalpy_j_kg: 2.0 * (temperature_k - 300.0),
+            heat_capacity_j_kg_k: 2.0,
+        });
+        let applied = [300.0; 5].map(tangent);
+        let temperatures = [300.0, 301.0, 302.0, 303.0, 304.0];
+        let endpoint = temperatures.map(tangent);
+        let gate = CancelGate::new();
+        // The exact affine caloric law has zero donor-value mismatch. Its old
+        // uniform reconstruction is nevertheless missing 1 J/kg on each
+        // interior outgoing face of this resolved linear enthalpy profile.
+        let donor = defects(&domain, &flow, 1.0, ConvectionScheme::Upwind,
+            &temperatures, &applied, &endpoint, &gate).unwrap();
+        assert_eq!(donor, MaterialEnthalpyReport::default());
+        let limited = defects(&domain, &flow, 1.0, ConvectionScheme::EnthalpyMinmod,
+            &temperatures, &applied, &endpoint, &gate).unwrap();
+        assert!((limited.maximum_face_flux_defect_w - 0.1).abs() < 1e-15);
+        assert!((limited.maximum_cell_flux_defect_w - 0.1).abs() < 1e-15);
+        let converged = defects(&domain, &flow, 1.0, ConvectionScheme::EnthalpyMinmod,
+            &temperatures, &endpoint, &endpoint, &gate).unwrap();
+        assert_eq!(converged, MaterialEnthalpyReport::default());
     }
 }

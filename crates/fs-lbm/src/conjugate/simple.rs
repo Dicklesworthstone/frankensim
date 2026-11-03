@@ -2224,6 +2224,12 @@ pub(super) fn admit(
     config: &SimpleConfig,
 ) -> Result<(), ChtError> {
     fluid.validate()?;
+    if config.scheme == ConvectionScheme::EnthalpyMinmod {
+        return Err(ChtError::InvalidInput {
+            field: "simple.scheme",
+            reason: "limited enthalpy reconstruction belongs to the caloric energy owner".into(),
+        });
+    }
     if config.turbulence == Turbulence::Lvel
         && domain.fluid_count() == domain.cell_count()
         && !config

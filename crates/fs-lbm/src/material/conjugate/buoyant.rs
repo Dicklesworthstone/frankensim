@@ -502,17 +502,18 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                         *face = ThermalFace::Temperature(backflow_temperature);
                     }
                 }
-                temperature = energy_config
-                    .solve_with_conductivity(
-                        domain,
-                        &self.properties,
-                        solids,
-                        &flow.field,
-                        &seed,
-                        &conductivity,
-                        gate,
+                temperature = if let Some(cells) = &caloric_applied {
+                    let boundary_j_kg = caloric.expect("original caloric owner")
+                        .boundaries(&seed, &self.transport, config.boussinesq, gate)?;
+                    energy_config.solve_with_enthalpy(
+                        domain, &self.properties, solids, &flow.field, &seed, &conductivity,
+                        AdvectiveEnthalpyField { cells, boundary_j_kg }, gate,
                     )?
-                    .temperature;
+                } else {
+                    energy_config.solve_with_conductivity(
+                        domain, &self.properties, solids, &flow.field, &seed, &conductivity, gate,
+                    )?
+                }.temperature;
                 applied = samples(
                     domain,
                     &self.transport,
@@ -538,7 +539,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             let caloric_endpoint = caloric.map(|law|
                 law.field(domain, &energy.temperature, &self.transport, config.boussinesq, gate)).transpose()?;
             let caloric_report = if let (Some(old), Some(next)) = (&caloric_applied, &caloric_endpoint) {
-                Some(enthalpy::defects(domain, &flow.field, self.transport.density_kg_m3(),
+                Some(enthalpy::defects(domain, &flow.field, self.transport.density_kg_m3(), energy_config.scheme,
                     &energy.temperature, old, next, gate)?)
             } else { None };
             let mut report = MaterialBuoyancyReport {

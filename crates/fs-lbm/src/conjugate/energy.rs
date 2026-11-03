@@ -443,6 +443,8 @@ struct Context<'a> {
     rho_c: f64,
     density: f64,
     enthalpy: Option<AdvectiveEnthalpyField<'a>>,
+    /// Frozen donor half-cell offsets, present only for limited enthalpy.
+    enthalpy_offsets: Option<Vec<[f64; 3]>>,
     scheme: ConvectionScheme,
 }
 
@@ -575,7 +577,12 @@ impl Context<'_> {
                 // exactly the same donor tangent, including its affine offset.
                 if mass != 0.0 {
                     let upstream = if mass > 0.0 { c } else { n };
-                    let h = field.cells[upstream].expect("admitted fluid donor");
+                    let mut h = field.cells[upstream].expect("admitted fluid donor");
+                    if let Some(offsets) = &self.enthalpy_offsets {
+                        let donor_face = if mass > 0.0 { f } else { f ^ 1 };
+                        let sign = if donor_face % 2 == 0 { -1.0 } else { 1.0 };
+                        h.enthalpy_j_kg += sign * offsets[upstream][axis];
+                    }
                     let rate = mass * h.heat_capacity_j_kg_k;
                     return FaceTerm {
                         diag: d + rate.max(0.0),
@@ -873,6 +880,12 @@ fn solve_energy_field(
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
     fluid.validate()?;
+    if config.scheme == ConvectionScheme::EnthalpyMinmod && enthalpy.is_none() {
+        return Err(ChtError::InvalidInput {
+            field: "energy.scheme",
+            reason: "limited enthalpy reconstruction requires its original caloric field".into(),
+        });
+    }
     if let Some(field) = enthalpy { field.validate(domain, flow, setup, config, gate)?; }
     for solid in solids {
         finite_positive("solid.conductivity_w_m_k", solid.conductivity_w_m_k)?;
@@ -1030,6 +1043,11 @@ fn solve_energy_field(
     let conductivity_temperature = nonlinear.and_then(|(_, temperature)| temperature);
     let compact = Compact::new(domain, solids, &k, setup, conductivity_temperature, compact_owner, gate)?;
     let face_contacts = face_contact::prepare(domain, flow, setup, &compact, gate)?;
+    let enthalpy_offsets = if config.scheme == ConvectionScheme::EnthalpyMinmod {
+        Some(enthalpy.expect("admitted caloric field").limited_offsets(domain, gate)?)
+    } else {
+        None
+    };
     let ctx = Context {
         domain,
         flow,
@@ -1042,6 +1060,7 @@ fn solve_energy_field(
         rho_c: fluid.volumetric_heat_capacity(),
         density: fluid.density_kg_m3,
         enthalpy,
+        enthalpy_offsets,
         scheme: config.scheme,
     };
     // Validate the actual native or frozen face law, not a different

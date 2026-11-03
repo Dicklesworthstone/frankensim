@@ -12,6 +12,16 @@ pub enum ConvectionScheme {
     PowerLaw,
     /// First-order upwind: `A(P) = 1`.
     Upwind,
+    /// Conservative limited linear reconstruction of source specific enthalpy.
+    ///
+    /// Available only with an `AdvectiveEnthalpyField`. The positive upwind
+    /// tangent matrix retains molecular diffusion; a frozen minmod face
+    /// correction is refreshed by the original nonlinear material owner.
+    /// Graded cell-centre distances define the slopes. Open boundaries and
+    /// cells without two fluid neighbours along an axis retain donor transport.
+    /// This is an energy scheme, not a momentum or temperature-only scheme.
+    /// It does not establish a multidimensional discrete maximum principle.
+    EnthalpyMinmod,
     /// Exponential fitting: `A(P) = |P| / expm1(|P|)`.
     ///
     /// Reproduces the source-free, constant-coefficient one-dimensional
@@ -26,7 +36,7 @@ pub enum ConvectionScheme {
 impl ConvectionScheme {
     pub(crate) fn weight(self, peclet: f64) -> f64 {
         match self {
-            Self::Upwind => 1.0,
+            Self::Upwind | Self::EnthalpyMinmod => 1.0,
             Self::PowerLaw => {
                 let t = 0.1_f64.mul_add(-peclet.abs(), 1.0).max(0.0);
                 let t2 = t * t;

@@ -107,12 +107,14 @@ impl EnergyConfig {
     /// caloric entries and inlet/backflow values must share one datum.
     ///
     /// The caller owns nonlinear material iteration and must check the true
-    /// chart's local face flux at the returned temperatures. This result audits
-    /// the supplied affine law, not convergence of the nonlinear chart.
+    /// chart's local face flux at the returned temperatures, including refreshed
+    /// limited traces when selected. This result audits the supplied affine
+    /// field and frozen reconstruction, not convergence of the nonlinear chart.
     ///
     /// # Errors
-    /// Requires first-order upwind, positive finite caloric tangents and local
-    /// volume conservation, in addition to `solve_with_conductivity` admission.
+    /// Requires upwind or limited enthalpy reconstruction, positive finite
+    /// caloric tangents and local volume conservation, in addition to
+    /// `solve_with_conductivity` admission.
     #[allow(clippy::too_many_arguments)]
     pub fn solve_with_enthalpy(
         &self,
@@ -231,16 +233,18 @@ impl EnergyConfig {
     /// thermal boundaries and physical sinks retain their ordinary owners.
     ///
     /// The advective field is a frozen caloric linearization: the caller owns
-    /// nonlinear iteration and must check the true chart's local face fluxes
-    /// and `m * delta(h)` at the accepted state. Interior transport uses the
+    /// nonlinear iteration and must check the true chart's local face fluxes,
+    /// refreshed limited traces and `m * delta(h)` at the accepted state.
+    /// Interior transport uses the
     /// donor's complete affine enthalpy, not local `Cp * T`. Boundary values use
     /// that same chart/datum at inlet or backflow temperature. The returned
     /// report audits this frozen law; it is not nonlinear closure evidence.
     ///
     /// # Errors
     /// In addition to [`Self::step_with_conductivity`] refusals, requires
-    /// [`super::ConvectionScheme::Upwind`], constant density, locally conservative
-    /// volume flow, a finite positive-Cp tangent on every fluid cell and exact
+    /// [`super::ConvectionScheme::Upwind`] or
+    /// [`super::ConvectionScheme::EnthalpyMinmod`], constant density, locally
+    /// conservative volume flow, a finite positive-Cp tangent on every fluid cell and exact
     /// supplied enthalpy on each open boundary. No state is mutated on refusal.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_enthalpy(
@@ -380,7 +384,7 @@ impl EnergySolution {
             }).collect(),
             face_contacts: self.face_contact_resistance_m2_k_w.clone(),
             // Isolate diffusion without subtracting large advective terms.
-            rho_c: 0.0, density: 0.0, enthalpy: None,
+            rho_c: 0.0, density: 0.0, enthalpy: None, enthalpy_offsets: None,
             scheme: super::ConvectionScheme::Upwind,
         };
         let before = context(self.conductivity.clone());

@@ -639,6 +639,12 @@ pub(crate) struct MaterialHeatStep<'a> {
 }
 
 impl MaterialHeatStep<'_> {
+    /// The exact native face scheme used by this thermal interval. Material
+    /// acceptance must re-evaluate that same source-enthalpy reconstruction.
+    pub(crate) fn convection_scheme(&self) -> super::ConvectionScheme {
+        self.energy.scheme
+    }
+
     /// Only validated compact aliases have zero native cell capacity.
     pub(crate) fn is_compact_cell(&self, cell: usize) -> bool {
         self.reference_capacity_j_k[cell] == 0.0

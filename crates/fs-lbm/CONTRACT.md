@@ -7690,9 +7690,9 @@ so transported energy is equal and opposite even when local Cp differs. Inlet
 and backflow values are explicit enthalpies at their declared temperature.
 Outflow has zero diffusion; Inflow retains the original half-cell diffusion.
 
-This entry requires first-order upwind, one constant positive density and
-locally volume-conservative flow, finite coefficients and impermeable solid
-faces. Reference FluidProperties Cp does not replace supplied caloric tangents.
+This entry supports first-order upwind and opt-in limited source-enthalpy
+reconstruction, with one constant positive density, locally volume-conservative
+flow, finite coefficients and impermeable solid faces. Reference FluidProperties Cp does not replace supplied caloric tangents.
 The original conductivity-only and constant-Cp entries retain their existing
 numerical scheme. Public VoxelDomain adjacency permits coupled material owners
 to audit the same physical faces without constructing another grid topology.
@@ -8115,3 +8115,51 @@ endpoint heating, physical admission under loose outer tolerances, native
 history/work budgets and joint fluid/source-solid energy accounting.
 They were source/API reviewed; parsing, compilation and native execution
 were unavailable in the delivery environment.
+
+## Limited source-enthalpy convection on the native finite-volume operator
+
+`ConvectionScheme::EnthalpyMinmod` opts an original source-caloric energy solve
+into conservative limited linear reconstruction. It is available on
+`solve_with_enthalpy`, `step_with_enthalpy`, and the existing steady and
+transient material-convection entrypoints. Temperature-only energy and momentum
+owners refuse this selection; no caloric chart is inferred from reference Cp.
+
+For each fluid cell and coordinate axis, minmod limits the two specific-enthalpy
+gradients using actual adjacent cell-centre distances. A donor half-width gives
+the face correction. Two fluid neighbours are required; boundaries, solid
+interfaces and unresolved one-cell directions retain donor transport. Both
+rows of an interior face use the same signed mass flux, donor tangent and
+correction, so the transfer has one credit and one debit. The existing positive
+upwind Cp matrix, molecular/contact diffusion, source terms, reservoir laws,
+reference mass and native caloric storage remain authoritative.
+
+Three offsets per cell are cached once for each frozen energy operator, outside
+its matrix and Krylov work. The original material iteration refreshes source h,
+Cp and the limiter. Independent acceptance re-evaluates the full reconstructed
+endpoint heat on every active face and net cell row, including the mismatch
+from a stale limiter when the caloric tangent itself is exact. Internal errors
+cannot cancel into a falsely accepted global energy balance. Original per-pass
+and whole-march work limits, cancellation, source support and physical gates
+remain in effect. Nonfinite reconstruction or face coefficients refuse.
+
+The same check is used by steady material convection and by native transient
+fluid/source-solid caloric owners, including implicit material feedback, SGS
+transport and molecular viscous heating where those owners are already
+admitted. Boundary enthalpy keeps the original inlet/backflow source and common
+datum. Existing thermostat and thermal-ledger corrections retain the original
+physical accounting. No new thermal clock, storage law or momentum solver is
+introduced.
+
+This is a limited spatial reconstruction of specific enthalpy; backward-Euler
+heat and existing coupled temporal orders do not change. Adjacent face traces
+are bounded by their source enthalpies at the reconstruction state. This is
+not a general maximum-principle, unconditional nonlinear-convergence or
+certified-error claim for multidimensional coupled sources. First-order
+boundary treatment and caller-selected mesh/time refinement remain explicit.
+Four regression sources cover an independent graded-mesh linear-enthalpy
+balance with signed flow, rest and common-datum shifts; a native nonlinear
+caloric march and independent stored-energy accounting; explicit refusal by
+noncaloric energy and momentum paths; and stale-limiter rejection even with an
+exact affine caloric law. Rust parsing, compilation and native numerical
+execution were unavailable in the delivery environment; source/API review
+does not establish those executed results.

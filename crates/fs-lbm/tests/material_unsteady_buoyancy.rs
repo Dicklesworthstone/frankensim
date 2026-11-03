@@ -342,3 +342,6 @@ fn g0_final_source_support_departure_and_cancellation_refuse_without_partial_out
     assert_eq!(setup, before);
     assert_eq!(initial, [300.0]);
 }
+
+#[path = "material_unsteady_buoyancy/limited_enthalpy.rs"]
+mod limited_enthalpy;

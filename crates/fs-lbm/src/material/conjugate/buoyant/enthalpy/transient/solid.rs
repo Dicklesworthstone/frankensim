@@ -339,6 +339,7 @@ fn joint_energy_step(
             domain,
             step.flow,
             reference.density_kg_m3(),
+            step.convection_scheme(),
             &next.temperature,
             &applied,
             &endpoint,

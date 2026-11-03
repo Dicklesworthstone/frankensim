@@ -399,6 +399,7 @@ fn energy_step(
             domain,
             step.flow,
             reference.density_kg_m3(),
+            step.convection_scheme(),
             &next.temperature,
             &applied,
             &endpoint,
@@ -518,7 +519,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// At every time step the original SIMPLEC BE/BDF2 momentum history uses
     /// the preceding accepted material density, viscosity and conductivity.
     /// On those same projected fluxes, bounded caloric iterations use positive
-    /// source secants for `rho0 V delta(h)/dt` and the original upwind h face
+    /// source secants for `rho0 V delta(h)/dt` and conservative source h face
     /// operator. Every trial retains the SAME old accepted temperature; no
     /// nonlinear iteration advances time. True local storage/face defects and
     /// the physical heat closure must all pass before accepting an endpoint.
@@ -536,7 +537,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     ///
     /// # Errors
     /// Refuses unsupported source endpoints/boundaries, nonpositive storage
-    /// secants, nonconservative or non-upwind transport, exhausted per-step or
+    /// secants, nonconservative or unsupported transport, exhausted per-step or
     /// whole-march work, physical-closure failure, and native solver errors.
     /// Cancellation or any refusal returns no partial march. Source callbacks
     /// are repeatable queries, never commit physical specimen history.
