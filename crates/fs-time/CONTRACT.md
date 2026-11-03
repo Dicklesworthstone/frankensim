@@ -320,6 +320,25 @@ where claimed below.
   The caller supplies the force at the initial physical time and applies any
   remaining state/velocity/forcing parameterization. They do not establish
   uniqueness of a singular-mass model or solve constrained DAE initialization.
+- `galpha::impulse::second_order_impulse` applies a prescribed instantaneous
+  generalized impulse through the original matrix-free mass: `M delta-v = J`.
+  The stored velocity change is independently checked component by component
+  against the requested impulse; large background momentum does not enlarge
+  that allowance. Signed work and kinetic increments use the mean endpoint
+  velocity and double-double reductions, without subtracting large energies.
+  The same initialization owner recomputes `M a+ = f+ - R(q,v+)`, including
+  nonlinear velocity resistance, before velocity and acceleration publish
+  together. Configuration, physical time, accepted step count and prior history
+  are retained. Two bounded mass solves and O(n) scratch reuse the native mass
+  preconditioner, with explicit workspace and transfer/work allowances. There
+  is no timestep-dependent force surrogate, mass lumping or new integrator.
+  The caller supplies independent coordinates with a constant symmetric SPD
+  physical mass; solve convergence is not a proof of that assumption. Supports
+  are stationary and already eliminated by the model. Collision laws, moving
+  supports, singular DAEs and impulse/event adjoints remain separate; smooth
+  trajectory replay must be split at the event. G1/G3/G4 tests cover full mass,
+  consistent damped restart and its analytic convergence, simultaneous cross
+  work, braking, lost stored increments, model refusal, capacity and cancellation.
 - `galpha::second_order_adjoint::trajectory::RecordedStructural` records and
   differentiates complete structural trajectories under a
   `StructuralTrajectoryModel` with time-dependent, parameterized loading.

@@ -177,7 +177,7 @@ impl<F: Fn(&[f64], &mut [f64]) -> Result<(), String>> LinearOp for MassAction<'_
     }
 }
 
-fn solve<F, P, C>(
+pub(super) fn solve<F, P, C>(
     rhs: &[f64],
     action: F,
     preconditioner: &P,

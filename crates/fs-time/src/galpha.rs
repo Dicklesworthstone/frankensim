@@ -13,6 +13,9 @@ use std::fmt;
 
 #[path = "galpha/adjoint.rs"]
 pub mod adjoint;
+/// Fixed-configuration momentum jumps with consistent post-impulse acceleration.
+#[path = "galpha/impulse.rs"]
+pub mod impulse;
 #[path = "galpha/initialization.rs"]
 pub mod initialization;
 #[path = "galpha/second_order_adjoint.rs"]

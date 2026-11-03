@@ -197,6 +197,74 @@ fn dense_run(plate: &PlateModel, p: [f64; 5]) -> (SecondOrderState, f64) {
 }
 
 #[test]
+fn spatial_plate_impulse_uses_original_cross_inertia_and_restarts_rayleigh_acceleration() {
+    use fs_time::galpha::impulse::{
+        ImpulseControls, impulse_workspace_components, second_order_impulse,
+    };
+    let plate = plate();
+    let p = [1.1, 0.9, 0.4, 0.03, 1.7];
+    let load = Load(p[4]);
+    let dynamics =
+        PlateDynamics::new(&plate, parameters(p), &load, budget(&plate), &mut || false).unwrap();
+    let mut state = initial(&dynamics);
+    let before = state.clone();
+    let impulse = [0.2, -0.03, 0.04];
+    let mass: Vec<_> = plate
+        .m
+        .to_dense()
+        .iter()
+        .map(|value| p[1] * value)
+        .collect();
+    let mut expected_jump = impulse;
+    lu(&mass, N).unwrap().solve(&mut expected_jump);
+    let expected_velocity: Vec<_> = before
+        .v
+        .iter()
+        .zip(expected_jump)
+        .map(|(v, dv)| v + dv)
+        .collect();
+    let mut force = [0.0; N];
+    load.forcing(state.t, &mut force).unwrap();
+    let config = initial_config();
+    let report = second_order_impulse(
+        &mut state,
+        &dynamics,
+        &impulse,
+        &force,
+        &dynamics.mass_preconditioner(),
+        ImpulseControls {
+            mass_solve: config,
+            absolute_impulse_tolerance: 1e-12,
+            relative_impulse_tolerance: 1e-12,
+            work_tolerance: 1e-12,
+        },
+        impulse_workspace_components(N, config).unwrap(),
+        &mut || false,
+    )
+    .unwrap();
+    close(&state.v, &expected_velocity);
+    close(&report.momentum_change, &impulse);
+    let stiffness = plate.k.to_dense();
+    let mut acceleration_rhs = [0.0; N];
+    for i in 0..N {
+        let elastic = p[0] * dot(&stiffness[N * i..N * (i + 1)], &before.q);
+        let viscous = p[2] * dot(&mass[N * i..N * (i + 1)], &expected_velocity)
+            + p[3] * p[0] * dot(&stiffness[N * i..N * (i + 1)], &expected_velocity);
+        acceleration_rhs[i] = force[i] - elastic - viscous;
+    }
+    lu(&mass, N).unwrap().solve(&mut acceleration_rhs);
+    close(&state.a, &acceleration_rhs);
+    let expected_work: f64 = (0..N)
+        .map(|i| impulse[i] * 0.5 * (before.v[i] + expected_velocity[i]))
+        .sum();
+    assert!((report.supplied_work - expected_work).abs() < 1e-13);
+    assert!((report.kinetic_energy_change - expected_work).abs() < 1e-13);
+    assert_eq!(state.q, before.q);
+    assert_eq!(state.t, before.t);
+    assert_eq!(state.steps, before.steps);
+}
+
+#[test]
 fn consistent_inertia_initialization_trajectory_and_all_parameter_adjoints_match_dense() {
     let plate = plate();
     let p = [1.1, 0.9, 0.4, 0.03, 1.7];
