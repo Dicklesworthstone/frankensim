@@ -834,29 +834,121 @@ impl Cheb1 {
         }
     }
 
-    /// Product via resampling at a grid resolving the sum of degrees.
+    /// Product of the retained polynomials on their common reference domain.
+    ///
+    /// Two DCT-III syntheses and one DCT-II analysis use a grid resolving the
+    /// sum of degrees, with O(N log N) work and O(N) temporary storage. No
+    /// physical-coordinate roundtrip or plateau truncation can erase a
+    /// generated harmonic. Constant factors scale coefficients directly.
     #[must_use]
     pub fn mul(&self, o: &Cheb1) -> Cheb1 {
         assert!(self.a == o.a && self.b == o.b, "domain mismatch");
-        let n = (self.coeffs.len() + o.coeffs.len())
-            .next_power_of_two()
+        let n = self
+            .coeffs
+            .len()
+            .checked_add(o.coeffs.len())
+            .and_then(usize::checked_next_power_of_two)
+            .expect("Chebyshev product grid overflows usize")
             .max(16);
-        let f = |x: f64| self.eval(x) * o.eval(x);
-        let coeffs = Cheb1::coeffs_at(&f, self.a, self.b, n);
-        // Truncate at plateau.
-        let maxc = coeffs
-            .iter()
-            .fold(0.0f64, |m, &c| m.max(c.abs()))
-            .max(f64::MIN_POSITIVE);
-        let keep = coeffs
-            .iter()
-            .rposition(|&c| c.abs() > PLATEAU_REL * maxc)
-            .map_or(1, |p| p + 1);
+        let coeffs = self
+            .product_coefficients(o, n, &mut || Ok(()))
+            .unwrap_or_else(|error| panic!("{error}"));
         Cheb1 {
             a: self.a,
             b: self.b,
-            coeffs: coeffs[..keep].to_vec(),
+            coeffs,
         }
+    }
+
+    // One arithmetic owner for classic and budgeted multiplication. The
+    // caller has admitted n; cancellation surrounds each bounded FFT tile
+    // and is polled during all coefficient/sample passes.
+    fn product_coefficients(
+        &self,
+        other: &Self,
+        n: usize,
+        checkpoint: &mut impl FnMut() -> Result<(), ChebError>,
+    ) -> Result<Vec<f64>, ChebError> {
+        let mut retained = |coeffs: &[f64]| -> Result<usize, ChebError> {
+            let mut len = 1;
+            for (index, &coefficient) in coeffs.iter().enumerate() {
+                if index.is_multiple_of(64) {
+                    checkpoint()?;
+                }
+                if coefficient != 0.0 {
+                    len = index + 1;
+                }
+            }
+            Ok(len)
+        };
+        let left_len = retained(&self.coeffs)?;
+        let right_len = retained(&other.coeffs)?;
+        if left_len == 1 || right_len == 1 {
+            let (constant, coefficients) = if left_len == 1 {
+                (self.coeffs[0], &other.coeffs[..right_len])
+            } else {
+                (other.coeffs[0], &self.coeffs[..left_len])
+            };
+            let mut product = Vec::with_capacity(coefficients.len());
+            for (index, &coefficient) in coefficients.iter().enumerate() {
+                if index.is_multiple_of(64) {
+                    checkpoint()?;
+                }
+                // The stored constant is doubled. Halve the larger factor
+                // first so a small harmonic is not lost before scaling, and
+                // a finite product is not rejected by a doubled intermediate.
+                let value = if constant.abs() >= coefficient.abs() {
+                    (0.5 * constant) * coefficient
+                } else {
+                    constant * (0.5 * coefficient)
+                };
+                if !value.is_finite() {
+                    return Err(ChebError::NonFinite {
+                        what: "Chebyshev product coefficient",
+                    });
+                }
+                product.push(value);
+            }
+            checkpoint()?;
+            return Ok(product);
+        }
+        let output_len = left_len + right_len - 1;
+        checkpoint()?;
+        let mut products = values_from_coeffs(&self.coeffs[..left_len], n);
+        checkpoint()?;
+        let right = values_from_coeffs(&other.coeffs[..right_len], n);
+        checkpoint()?;
+        for (index, (left, right)) in products.iter_mut().zip(right).enumerate() {
+            if index.is_multiple_of(64) {
+                checkpoint()?;
+            }
+            *left *= right;
+            if !left.is_finite() {
+                return Err(ChebError::NonFinite {
+                    what: "Chebyshev product sample",
+                });
+            }
+        }
+        checkpoint()?;
+        let mut coefficients = dct2(&products);
+        checkpoint()?;
+        let scale = 2.0 / n as f64;
+        for (index, value) in coefficients.iter_mut().enumerate() {
+            if index.is_multiple_of(64) {
+                checkpoint()?;
+            }
+            *value *= scale;
+            if !value.is_finite() {
+                return Err(ChebError::NonFinite {
+                    what: "Chebyshev product transform coefficient",
+                });
+            }
+        }
+        // Only the algebraic degree limit may remove transform coefficients;
+        // a weak retained high harmonic is not a numerical-noise declaration.
+        coefficients.truncate(output_len);
+        checkpoint()?;
+        Ok(coefficients)
     }
 
     /// Sign-changing, numerically isolated roots on a fixed reference grid,

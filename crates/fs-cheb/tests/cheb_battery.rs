@@ -9,6 +9,67 @@ use fs_cheb::{Cheb1, diff_matrix, dirichlet_laplace_eigs, lobatto_points};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[test]
+fn polynomial_products_preserve_harmonics_on_adjacent_physical_domains() {
+    // The original physical resampling rounded every first-kind point to an
+    // endpoint, turning T1^2 into 1, erasing T2 and tripling its integral.
+    let a = 1.0_f64;
+    let b = a.next_up();
+    let linear = Cheb1::from_coeffs(a, b, vec![0.0, 1.0]);
+    let square = linear.mul(&linear);
+    assert_eq!(square.domain(), (a, b));
+    assert_eq!(square.degree(), 2);
+    assert!((square.coeffs()[0] - 1.0).abs() < 2e-15);
+    assert!(square.coeffs()[1].abs() < 2e-15);
+    assert!((square.coeffs()[2] - 0.5).abs() < 2e-15);
+    assert!((square.integral() / (b - a) - 1.0 / 3.0).abs() < 2e-15);
+    let derivative = square.differentiate();
+    assert!((derivative.eval(a) * (b - a) + 4.0).abs() < 1e-13);
+    assert!((derivative.eval(b) * (b - a) - 4.0).abs() < 1e-13);
+}
+
+#[test]
+fn polynomial_products_generate_sum_and_difference_modes_independently_of_domain() {
+    let mut left = vec![0.0; 18];
+    left[17] = 1.0;
+    let mut right = vec![0.0; 14];
+    right[13] = 1.0;
+    let mut reference = None;
+    for (a, b) in [
+        (-1.0, 1.0),
+        (1.0, 1.0_f64.next_up()),
+        (-f64::MAX, f64::MAX),
+    ] {
+        let product = Cheb1::from_coeffs(a, b, left.clone())
+            .mul(&Cheb1::from_coeffs(a, b, right.clone()));
+        assert_eq!(product.degree(), 30);
+        for (k, &coefficient) in product.coeffs().iter().enumerate() {
+            let expected = if k == 4 || k == 30 { 0.5 } else { 0.0 };
+            assert!((coefficient - expected).abs() < 3e-14, "mode {k}");
+        }
+        let bits: Vec<u64> = product.coeffs().iter().map(|c| c.to_bits()).collect();
+        if let Some(previous) = &reference {
+            assert_eq!(&bits, previous);
+        }
+        reference = Some(bits);
+    }
+}
+
+#[test]
+fn constant_products_preserve_weak_retained_harmonics() {
+    let weak = Cheb1::from_coeffs(-2.0, 3.0, vec![2.0, 0.0, 0.0, 1e-100]);
+    let two = Cheb1::from_coeffs(-2.0, 3.0, vec![4.0]);
+    assert_eq!(weak.mul(&two).coeffs(), &[4.0, 0.0, 0.0, 2e-100]);
+    assert_eq!(two.mul(&weak), weak.mul(&two));
+    // Applying the stored c0/2 convention must not overflow first or halve
+    // the weak factor into zero before its representable multiplication.
+    let tiny = Cheb1::from_coeffs(-1.0, 1.0, vec![f64::from_bits(1)]);
+    let large = Cheb1::from_coeffs(-1.0, 1.0, vec![0.0, f64::MAX]);
+    let product = tiny.mul(&large);
+    assert_eq!(product.coeffs()[1], f64::from_bits(1) * (0.5 * f64::MAX));
+    assert!(product.coeffs()[1] > 0.0);
+}
+
+#[test]
 fn extreme_finite_domains_do_not_overflow_the_affine_map() {
     let a = -f64::MAX;
     let b = f64::MAX;

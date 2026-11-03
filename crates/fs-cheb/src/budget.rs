@@ -30,7 +30,7 @@ use fs_exec::Cx;
 
 /// Version of the budget/admission schema: bump when a cap default or
 /// a worst-case formula changes meaning.
-pub const CHEB_BUDGET_SCHEMA_VERSION: u32 = 2;
+pub const CHEB_BUDGET_SCHEMA_VERSION: u32 = 3;
 
 const F64_BYTES: u128 = core::mem::size_of::<f64>() as u128;
 const SAMPLE_POLL_STRIDE: usize = 64;
@@ -1651,9 +1651,8 @@ pub fn admit_pointwise_sum(
     })
 }
 
-/// Worst-case preflight for the resampled product: `n` first-kind
-/// samples (each one Clenshaw evaluation of BOTH factors), one DCT,
-/// and the plateau truncation scan, where
+/// Worst-case preflight for the retained-polynomial product: two DCT-III
+/// syntheses, one DCT-II analysis, and linear coefficient/sample passes, where
 /// `n = next_power_of_two(left + right).max(16)`.
 ///
 /// # Errors
@@ -1676,20 +1675,19 @@ pub fn admit_product(
         grid,
         budget.max_coefficients as u128,
     )?;
-    // Clenshaw is one pass per factor coefficient; the DCT is n·log2(n);
-    // scaling and the truncation scan are one pass each.
+    // Reuse the conservative transform-stage envelope, including strict
+    // twiddle construction. The three transforms dominate the linear scans.
     let log2_grid = u128::from(128 - grid.leading_zeros());
-    let ops = checked_sum(
+    let ops = checked_mul(
         "product work ops",
-        &[
-            checked_mul("product work ops", grid, combined)?,
-            checked_mul("product work ops", grid, log2_grid)?,
-            checked_mul("product work ops", grid, 2)?,
-        ],
+        checked_mul("product work ops", grid, log2_grid)?,
+        3 * ADAPTIVE_OPS_PER_GRID_STAGE,
     )?;
     cap_check("product work ops", ops, u128::from(budget.max_work_ops))?;
-    // Samples plus the transform output live at once.
-    let temp_bytes = checked_mul("product temp bytes", grid, 16)?;
+    // At the second synthesis: left samples + padded right coefficients +
+    // DCT complex data/scratch/twiddles/output. Include the FFT's optional
+    // six-step subplans and row buffers, not merely its real input/output.
+    let temp_bytes = checked_mul("product temp bytes", grid, 80)?;
     cap_check(
         "product temp bytes",
         temp_bytes,
@@ -1794,11 +1792,11 @@ impl Cheb1 {
     }
 
     /// Budgeted, cancellable product — the bitwise mirror of
-    /// [`Cheb1::mul`]: the same resampling grid, the same DCT and
-    /// plateau truncation, with admission preflighting samples, ops,
-    /// and temporaries, one poll per 64 sample evaluations inside the
-    /// shared checked sampler, and typed refusals for non-finite
-    /// samples or transform coefficients.
+    /// [`Cheb1::mul`]: the same reference-grid DCT synthesis/product/analysis,
+    /// preserving the known degree sum without plateau truncation. Admission
+    /// preflights samples, O(N log N) work and complete transform temporaries;
+    /// polls surround every transform and occur per 64 scalar coefficients or
+    /// samples. Non-finite samples and coefficients return typed refusals.
     ///
     /// # Errors
     /// [`ChebError`] — cap/overflow refusals before evaluation;
@@ -1815,27 +1813,10 @@ impl Cheb1 {
         same_domain(self, other)?;
         checkpoint(cx)?;
         let (a, b) = self.domain();
-        let f = |x: f64| self.eval(x) * other.eval(x);
-        let mut samples_spent = 0usize;
-        let coeffs = coeffs_at_checked(
-            &f,
-            a,
-            b,
-            admission.samples_admitted(),
-            cx,
-            &mut samples_spent,
-        )?;
+        let coeffs =
+            self.product_coefficients(other, admission.samples_admitted(), &mut || checkpoint(cx))?;
         checkpoint(cx)?;
-        let maxc = coeffs
-            .iter()
-            .fold(0.0f64, |m, &c| m.max(c.abs()))
-            .max(f64::MIN_POSITIVE);
-        let keep = coeffs
-            .iter()
-            .rposition(|&c| c.abs() > PLATEAU_REL * maxc)
-            .map_or(1, |p| p + 1);
-        checkpoint(cx)?;
-        Ok(Cheb1::from_coeffs(a, b, coeffs[..keep].to_vec()))
+        Ok(Cheb1::from_coeffs(a, b, coeffs))
     }
 
     /// Budgeted, cancellable derivative — the bitwise mirror of

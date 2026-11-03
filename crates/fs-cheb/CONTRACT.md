@@ -13,7 +13,7 @@ fs-ivl (interval root certification), and fs-exec (`Cx` for the
 budgeted, cancellable entry points).
 
 ## Budgets and admission (`budget` module, bead sj31i.55 slice 1)
-- `ChebBudget` (schema `CHEB_BUDGET_SCHEMA_VERSION = 2`, non-exhaustive,
+- `ChebBudget` (schema `CHEB_BUDGET_SCHEMA_VERSION = 3`, non-exhaustive,
   explicit caps: retained coefficients, total adaptive samples,
   collocation dimension, abstract work ops, peak temporary bytes) plus
   `admit_adaptive_build` / `admit_dirichlet_eigs` / `admit_root_scan`:
@@ -57,7 +57,7 @@ budgeted, cancellable entry points).
   Clenshaw twin with a caller poll before every nonconstant coefficient),
   `differentiate` (coefficient recurrence, domain chain rule), `integral`
   (even-coefficient formula), `add`,
-  `mul` (resample + rebuild), `roots` (fixed reference-grid sign scan +
+  `mul` (dealiased reference-grid DCT product), `roots` (fixed reference-grid sign scan +
   safeguarded reference-coordinate bisection/Newton polish for isolated,
   well-conditioned sign-changing roots).
 - `lobatto_points`, `diff_matrix` — Chebyshev–Lobatto collocation:
@@ -96,6 +96,18 @@ budgeted, cancellable entry points).
    final f64 result is itself unrepresentable remain an explicit no-claim.
 3. Plateau detection does NOT chase noise floors (tested with a
    deterministic ~1e-18 jitter fixture).
+   This construction rule does not truncate algebra of already retained
+   polynomials. `Cheb1::mul` and `mul_budgeted` share two DCT-III syntheses
+   and one DCT-II analysis on a grid resolving the degree sum, with O(N log N)
+   work and O(N) storage. They never map the product grid into physical
+   coordinates: even adjacent-f64 domain endpoints retain the original
+   reference polynomial and its generated sum/difference harmonics. Only
+   exact input zeros and the known output degree remove coefficients;
+   constant factors scale coefficients directly, preserving weak high modes.
+   Product admission includes all transform buffers and optional six-step
+   headroom, with polls at transform boundaries and every 64 scalar entries.
+   Transform rounding and unresolved content in the input interpolants remain
+   outside an exact-real or continuum-error claim.
 4. `diff_matrix` rows sum to exact zero (differentiation annihilates
    constants bitwise).
 5. Deterministic per ISA: all state is built on strict fs-math cos/sin

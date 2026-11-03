@@ -57,6 +57,56 @@ fn with_gate_cx<R>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
     })
 }
 
+#[test]
+fn retained_product_budget_shares_reference_harmonics_and_transform_admission() {
+    let a = 1.0_f64;
+    let b = a.next_up();
+    let linear = Cheb1::from_coeffs(a, b, vec![0.0, 1.0]);
+    let mut budget = ChebBudget::default();
+    let admission = fs_cheb::admit_product(2, 2, &budget).unwrap();
+    assert_eq!(admission.samples_admitted(), 16);
+    // Admit complete transform storage, not only the two real result arrays.
+    assert!(admission.temp_bytes_admitted() >= 64 * 16);
+    budget.max_temp_bytes = admission.temp_bytes_admitted();
+    budget.max_work_ops = admission.ops_admitted();
+    with_cx(false, |cx| {
+        let product = linear.mul_budgeted(&linear, &budget, cx).unwrap();
+        assert_eq!(product, linear.mul(&linear));
+        assert!((product.coeffs()[2] - 0.5).abs() < 2e-15);
+        assert!((product.integral() / (b - a) - 1.0 / 3.0).abs() < 2e-15);
+        budget.max_temp_bytes -= 1;
+        assert!(matches!(
+            linear.mul_budgeted(&linear, &budget, cx),
+            Err(ChebError::CapExceeded {
+                what: "product temp bytes",
+                ..
+            })
+        ));
+        budget.max_temp_bytes += 1;
+        budget.max_work_ops -= 1;
+        assert!(matches!(
+            linear.mul_budgeted(&linear, &budget, cx),
+            Err(ChebError::CapExceeded {
+                what: "product work ops",
+                ..
+            })
+        ));
+    });
+    let huge = Cheb1::from_coeffs(a, b, vec![f64::MAX]);
+    with_cx(false, |cx| {
+        assert!(matches!(
+            huge.mul_budgeted(&huge, &ChebBudget::default(), cx),
+            Err(ChebError::NonFinite { .. })
+        ));
+    });
+    with_cx(true, |cx| {
+        assert!(matches!(
+            linear.mul_budgeted(&linear, &ChebBudget::default(), cx),
+            Err(ChebError::Cancelled)
+        ));
+    });
+}
+
 /// cb-001 — admission boundaries: each cap refuses one-over and admits
 /// at-cap; `usize::MAX`-shaped requests refuse via CHECKED formulas
 /// before any allocation (no panic, no OOM, no saturation loop).
