@@ -112,16 +112,16 @@ fn momentum<const N: usize>(
                 let exterior = 1.0 - fields.iter().map(|s| s.fractions()[index]).sum::<f64>();
                 let f = grid.populations(x, y, z);
                 let force = grid.force_density(x, y, z);
-                let p: [f64; 3] = core::array::from_fn(|i| {
-                    exterior
-                        * ((0..Q3)
-                            .map(|q| {
-                                let e = [E3[q].0, E3[q].1, E3[q].2];
-                                f64::from(e[i]) * f[q]
-                            })
-                            .sum::<f64>()
-                            + 0.5 * force[i])
+                let density: [f64; 3] = core::array::from_fn(|i| {
+                    (0..Q3)
+                        .map(|q| {
+                            let e = [E3[q].0, E3[q].1, E3[q].2];
+                            f64::from(e[i]) * f[q]
+                        })
+                        .sum::<f64>()
+                        + 0.5 * force[i]
                 });
+                let p = density.map(|p| exterior * p);
                 let l = cross(
                     [
                         x as f64 + 0.5 - origin[0],
@@ -130,9 +130,22 @@ fn momentum<const N: usize>(
                     ],
                     p,
                 );
+                let first: [f64; 3] = core::array::from_fn(|i| {
+                    fields
+                        .iter()
+                        .map(|sampler| {
+                            sampler
+                                .cut_cell_first_moments()
+                                .iter()
+                                .find(|&&(cell, _)| cell == index)
+                                .map_or(0.0, |&(_, moment)| moment[i])
+                        })
+                        .sum()
+                });
+                let interior_cut = cross(first, density);
                 for i in 0..3 {
                     total[i] += p[i];
-                    total[i + 3] += l[i];
+                    total[i + 3] += l[i] - interior_cut[i];
                 }
             }
         }
@@ -174,6 +187,18 @@ fn forcing<const N: usize>(
                     full[i] += value;
                     for a in 0..N {
                         inside[a][i] += fields[a].fractions()[(z * ny + y) * nx + x] * value;
+                    }
+                }
+                for a in 0..N {
+                    if let Some(&(_, first)) = fields[a]
+                        .cut_cell_first_moments()
+                        .iter()
+                        .find(|&&(cell, _)| cell == (z * ny + y) * nx + x)
+                    {
+                        let cut_torque = cross(first, force);
+                        for i in 0..3 {
+                            inside[a][i + 3] += cut_torque[i];
+                        }
                     }
                 }
             }

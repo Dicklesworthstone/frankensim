@@ -199,14 +199,8 @@ impl BoundaryGrid3 {
                 &ShapeRef(shapes[a]),
                 gate,
             )?;
-            let (all, inside, slip) = self.dry_inventory(
-                false,
-                a == 0,
-                samplers[a].fractions(),
-                initial[a],
-                origin,
-                gate,
-            )?;
+            let (all, inside, slip) =
+                self.dry_inventory(false, a == 0, &samplers[a], initial[a], origin, gate)?;
             if a == 0 {
                 fluid_before = all;
             }
@@ -434,7 +428,7 @@ impl BoundaryGrid3 {
             let (all, inside, slip) = self.dry_inventory(
                 true,
                 a == 0,
-                samplers[a].fractions(),
+                &samplers[a],
                 current.bodies[a],
                 step.origin,
                 step.gate,
@@ -626,8 +620,7 @@ impl BoundaryGrid3 {
             None => {
                 let mut forcing = [[0.0; 6]; N];
                 for a in 0..N {
-                    forcing[a] =
-                        self.dry_interior_forcing(samplers[a].fractions(), step.origin, step.gate)?;
+                    forcing[a] = self.dry_interior_forcing(&samplers[a], step.origin, step.gate)?;
                 }
                 step.interior_forcing = Some(forcing);
                 forcing
@@ -644,14 +637,8 @@ impl BoundaryGrid3 {
                 &ShapeRef(step.shapes[a]),
                 step.gate,
             )?;
-            let (_, inside, speed) = self.dry_inventory(
-                true,
-                false,
-                samplers[a].fractions(),
-                bodies[a],
-                step.origin,
-                step.gate,
-            )?;
+            let (_, inside, speed) =
+                self.dry_inventory(true, false, &samplers[a], bodies[a], step.origin, step.gate)?;
             interior[a] = inside;
             slip[a] = speed;
             let delta = difference(

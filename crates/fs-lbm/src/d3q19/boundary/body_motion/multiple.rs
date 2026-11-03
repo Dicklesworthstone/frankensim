@@ -261,7 +261,7 @@ impl BoundaryGrid3 {
                 midpoint[a].orientation,
                 shapes[a],
                 Some((body.velocity, omega)),
-                Some(&mut samplers[a].fractions),
+                Some(samplers[a].output()),
                 gate,
             )?;
             let rotation = midpoint[a].orientation.matrix();

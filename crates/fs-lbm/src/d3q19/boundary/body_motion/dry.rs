@@ -7,7 +7,8 @@
 //! the SAME native drift/collision/stream/drift candidate, with the original
 //! positive dry mass and tensor. Inventories use physical Guo momentum; the
 //! imposed force on retained fictitious fluid is excluded from the dry body.
-//! Angular inventories and source moments use one fixed world origin.
+//! Angular inventories and source moments use one fixed world origin and the
+//! SAME occupied-subcell first moments; cut cells are not moved to cell centers.
 //!
 //! The fictitious-fluid correction follows the momentum accounting discussed
 //! by Breugem, JCP 231 (2012), doi:10.1016/j.jcp.2012.02.026, and Lacis, Taira
@@ -100,7 +101,8 @@ pub struct ImmersedMomentum3 {
     /// Population mass, weighted by occupancy for an interior inventory.
     pub mass: f64,
     /// Physical momentum `sum(f*c) + F/2`, followed by its angular momentum
-    /// about the requested fixed world origin. Interior uses endpoint occupancy.
+    /// about the requested fixed world origin. Interior uses endpoint occupancy
+    /// and its sampled first spatial moments within each cell.
     pub momentum: [f64; 6],
     /// Macroscopic kinetic energy sum rho |u|^2/2. This excludes thermal,
     /// acoustic/compressional and non-equilibrium population energy.
@@ -248,14 +250,8 @@ impl BoundaryGrid3 {
             core::array::from_fn(|i| initial.center[i] + 0.5 * initial.velocity[i]);
         let arm = core::array::from_fn(|i| midpoint[i] - moment_origin[i]);
         sampler.sample(initial.center, initial.orientation, shape, gate)?;
-        let (fluid_before, inside_before, slip_before) = self.dry_inventory(
-            false,
-            true,
-            sampler.fractions(),
-            initial,
-            moment_origin,
-            gate,
-        )?;
+        let (fluid_before, inside_before, slip_before) =
+            self.dry_inventory(false, true, sampler, initial, moment_origin, gate)?;
         let mut step = DryStep {
             shape,
             initial,
@@ -373,14 +369,8 @@ impl BoundaryGrid3 {
 
         // The last successful evaluation owns next. No Jacobian/backtrack is
         // performed after this acceptance; every fallible account precedes swap.
-        let (fluid_after, inside_after, slip_after) = self.dry_inventory(
-            true,
-            true,
-            sampler.fractions(),
-            current.body,
-            moment_origin,
-            gate,
-        )?;
+        let (fluid_after, inside_after, slip_after) =
+            self.dry_inventory(true, true, sampler, current.body, moment_origin, gate)?;
         if inside_after != current.interior || slip_after != current.slip {
             return Err(invalid(
                 "dry-body final streamed inventory changed after convergence",
@@ -560,21 +550,14 @@ impl BoundaryGrid3 {
         let forcing = match step.interior_forcing {
             Some(forcing) => forcing,
             None => {
-                let forcing =
-                    self.dry_interior_forcing(sampler.fractions(), step.origin, step.gate)?;
+                let forcing = self.dry_interior_forcing(sampler, step.origin, step.gate)?;
                 step.interior_forcing = Some(forcing);
                 forcing
             }
         };
         sampler.sample(body.center, body.orientation, step.shape, step.gate)?;
-        let (_, interior, slip) = self.dry_inventory(
-            true,
-            false,
-            sampler.fractions(),
-            body,
-            step.origin,
-            step.gate,
-        )?;
+        let (_, interior, slip) =
+            self.dry_inventory(true, false, sampler, body, step.origin, step.gate)?;
         let delta = difference(
             difference(interior.momentum, step.inside_before.momentum),
             forcing,
@@ -612,7 +595,7 @@ impl BoundaryGrid3 {
         &self,
         candidate: bool,
         all_fluid: bool,
-        fractions: &[f64],
+        sampler: &BodyFrameSampler3,
         body: MovingPartialSaturationBody3,
         origin: [f64; 3],
         gate: &CancelGate,
@@ -628,14 +611,21 @@ impl BoundaryGrid3 {
         let mut all = ImmersedMomentum3::default();
         let mut interior = ImmersedMomentum3::default();
         let mut slip_squared_mass = 0.0;
+        let mut cut_moments = sampler.first_moments.iter().peekable();
         for tile in 0..fields[0].len() {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
+                let cell = self.coords(tile, lane);
+                let index = (cell[2] * self.ny + cell[1]) * self.nx + cell[0];
+                let first_moment = if cut_moments.peek().is_some_and(|&&(i, _)| i == index) {
+                    cut_moments.next().expect("present cut-cell moment").1
+                } else {
+                    [0.0; 3]
+                };
                 if self.solid[tile] & (1u64 << lane) != 0 {
                     continue;
                 }
-                let cell = self.coords(tile, lane);
-                let epsilon = fractions[(cell[2] * self.ny + cell[1]) * self.nx + cell[0]];
+                let epsilon = sampler.fractions[index];
                 if !all_fluid && epsilon == 0.0 {
                     continue;
                 }
@@ -660,6 +650,11 @@ impl BoundaryGrid3 {
                 let center: [f64; 3] = cell.map(|x| x as f64 + 0.5);
                 let offset = core::array::from_fn(|i| center[i] - origin[i]);
                 let angular = cross(offset, momentum);
+                let interior_angular = if first_moment == [0.0; 3] {
+                    angular.map(|component| epsilon * component)
+                } else {
+                    quadrature::angular_integral(epsilon, first_moment, offset, momentum)
+                };
                 let kinetic = 0.5 * dot(momentum, momentum) / rho;
                 let quantities: [f64; 6] =
                     core::array::from_fn(|i| if i < 3 { momentum[i] } else { angular[i - 3] });
@@ -673,7 +668,11 @@ impl BoundaryGrid3 {
                     if all_fluid {
                         all.momentum[i] += quantities[i];
                     }
-                    interior.momentum[i] += epsilon * quantities[i];
+                    interior.momentum[i] += if i < 3 {
+                        epsilon * quantities[i]
+                    } else {
+                        interior_angular[i - 3]
+                    };
                 }
                 if epsilon > 0.0 {
                     let r = core::array::from_fn(|i| center[i] - body.center[i]);
@@ -712,7 +711,7 @@ impl BoundaryGrid3 {
     // this exact midpoint occupancy before producing the first candidate.
     fn dry_interior_forcing(
         &self,
-        fractions: &[f64],
+        sampler: &BodyFrameSampler3,
         origin: [f64; 3],
         gate: &CancelGate,
     ) -> Result<[f64; 6]> {
@@ -720,21 +719,32 @@ impl BoundaryGrid3 {
         if self.force == [0.0; 3] && self.force_field.is_none() {
             return Ok(total);
         }
+        let mut cut_moments = sampler.first_moments.iter().peekable();
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
+                let cell = self.coords(tile, lane);
+                let index = (cell[2] * self.ny + cell[1]) * self.nx + cell[0];
+                let first_moment = if cut_moments.peek().is_some_and(|&&(i, _)| i == index) {
+                    cut_moments.next().expect("present cut-cell moment").1
+                } else {
+                    [0.0; 3]
+                };
                 if self.solid[tile] & (1u64 << lane) != 0 {
                     continue;
                 }
-                let cell = self.coords(tile, lane);
-                let epsilon = fractions[(cell[2] * self.ny + cell[1]) * self.nx + cell[0]];
+                let epsilon = sampler.fractions[index];
                 if epsilon == 0.0 {
                     continue;
                 }
-                let impulse = cell_force(self.force, self.force_field.as_deref(), tile, lane)
-                    .map(|force| epsilon * force);
+                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                let impulse = force.map(|force| epsilon * force);
                 let arm = core::array::from_fn(|i| cell[i] as f64 + 0.5 - origin[i]);
-                let angular = cross(arm, impulse);
+                let angular = if first_moment == [0.0; 3] {
+                    cross(arm, impulse)
+                } else {
+                    quadrature::angular_integral(epsilon, first_moment, arm, force)
+                };
                 for i in 0..3 {
                     total[i] += impulse[i];
                     total[i + 3] += angular[i];

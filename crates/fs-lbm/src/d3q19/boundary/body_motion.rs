@@ -17,6 +17,7 @@ use super::{
 type Result<T> = core::result::Result<T, PartialSaturationError3>;
 
 mod multiple;
+mod quadrature;
 pub use multiple::{MovingLubricatedPlanesExchange3, MovingPartialSaturationBodiesExchange3};
 mod dry;
 pub use dry::{
@@ -89,19 +90,23 @@ impl BodyFrameShape3 for BodyFrameEllipsoid3 {
     }
 }
 
-/// Reusable deterministic subcell quadrature; one fraction buffer per body.
+/// Reusable deterministic subcell quadrature; one fraction buffer per body
+/// plus sparse first moments for asymmetric cut cells.
 ///
 /// Each cell uses `samples_per_axis^3` equally spaced midpoint samples. Values
 /// are raw occupancy counts, without volume renormalization or density repair.
 /// This is a finite-resolution volume estimate, not an exact intersection or
-/// a geometric-conservation certificate. Only this scratch buffer changes on
-/// rejected motion steps; the next call clears and rebuilds it.
+/// a geometric-conservation certificate. Only scratch changes on rejected
+/// motion steps; the next call clears and rebuilds it.
 #[derive(Debug)]
 pub struct BodyFrameSampler3 {
     dims: [usize; 3],
     samples_per_axis: usize,
     fractions: Vec<f64>,
+    first_moments: Vec<(usize, [f64; 3])>,
 }
+
+type SamplingOutput<'a> = (&'a mut [f64], &'a mut Vec<(usize, [f64; 3])>);
 
 impl BodyFrameSampler3 {
     /// Allocate one reusable field for this grid; admit 1 through 8 samples
@@ -129,6 +134,7 @@ impl BodyFrameSampler3 {
             dims,
             samples_per_axis,
             fractions,
+            first_moments: Vec::new(),
         })
     }
 
@@ -136,6 +142,20 @@ impl BodyFrameSampler3 {
     #[must_use]
     pub fn fractions(&self) -> &[f64] {
         &self.fractions
+    }
+
+    /// Nonzero `integral_inside (position - cell_center) dV` values, in
+    /// lattice length^4. Keys are row-major cell indices; entries follow the
+    /// grid's tile/lane traversal so population reductions can use a cursor.
+    /// These use the same midpoint occupancy as [`Self::fractions`], not a renormalized
+    /// or analytic body shape. Full, empty and symmetric cells need no entry.
+    #[must_use]
+    pub fn cut_cell_first_moments(&self) -> &[(usize, [f64; 3])] {
+        &self.first_moments
+    }
+
+    fn output(&mut self) -> SamplingOutput<'_> {
+        (&mut self.fractions, &mut self.first_moments)
     }
 
     /// Sample a pose independently of motion. Geometry outside the domain is
@@ -157,7 +177,7 @@ impl BodyFrameSampler3 {
             orientation,
             shape,
             None,
-            Some(&mut self.fractions),
+            Some(self.output()),
             gate,
         )
     }
@@ -327,7 +347,7 @@ impl BoundaryGrid3 {
             midpoint_orientation,
             shape,
             Some((initial.velocity, omega_before_exchange)),
-            Some(&mut sampler.fractions),
+            Some(sampler.output()),
             gate,
         )?;
         let rotation = midpoint_orientation.matrix();
@@ -551,7 +571,7 @@ fn sample_geometry(
     orientation: So3,
     shape: &(impl BodyFrameShape3 + ?Sized),
     velocity: Option<([f64; 3], [f64; 3])>,
-    mut fractions: Option<&mut [f64]>,
+    mut output: Option<SamplingOutput<'_>>,
     gate: &CancelGate,
 ) -> Result<f64> {
     checkpoint(gate)?;
@@ -562,7 +582,8 @@ fn sample_geometry(
     {
         return Err(invalid("body sampling center or support overflowed"));
     }
-    if let Some(field) = fractions.as_mut() {
+    if let Some((field, first_moments)) = output.as_mut() {
+        first_moments.clear();
         for tile in field.chunks_mut(TILE_CELLS) {
             checkpoint(gate)?;
             tile.fill(0.0);
@@ -585,6 +606,7 @@ fn sample_geometry(
                 visited += 1;
                 let cell = [x, y, z];
                 let mut covered = 0usize;
+                let mut first_moment = quadrature::FirstMoment3::default();
                 for sz in 0..samples {
                     for sy in 0..samples {
                         for sx in 0..samples {
@@ -600,7 +622,12 @@ fn sample_geometry(
                                     reason: "body-frame sample overflowed",
                                 });
                             }
-                            covered += usize::from(shape.contains(local));
+                            if shape.contains(local) {
+                                covered += 1;
+                                if output.is_some() {
+                                    first_moment.add(offset, samples);
+                                }
+                            }
                         }
                     }
                 }
@@ -614,12 +641,27 @@ fn sample_geometry(
                         });
                     }
                 }
-                if let Some(field) = fractions.as_mut() {
-                    field[(z * dims[1] + y) * dims[0] + x] = epsilon;
+                if let Some((field, first_moments)) = output.as_mut() {
+                    let index = (z * dims[1] + y) * dims[0] + x;
+                    field[index] = epsilon;
+                    let first = first_moment.finish(samples);
+                    if first != [0.0; 3] {
+                        first_moments
+                            .try_reserve(1)
+                            .map_err(|_| invalid("cut-cell moment allocation refused"))?;
+                        first_moments.push((index, first));
+                    }
                 }
                 volume += epsilon;
             }
         }
+    }
+    if let Some((_, first_moments)) = output.as_mut() {
+        // Sampling retains its original row-major arithmetic. Only the sparse
+        // boundary moments are ordered for the existing population traversal.
+        // Unstable sorting allocates no scratch; every cell key is unique.
+        first_moments
+            .sort_unstable_by_key(|&(index, _)| quadrature::cell_order(index, dims, crate::TILE));
     }
     checkpoint(gate)?;
     Ok(volume)

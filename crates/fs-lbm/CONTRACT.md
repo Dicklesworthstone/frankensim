@@ -8235,6 +8235,23 @@ retained fictitious fluid from the physical body's load. The midpoint source is
 reduced once from the first native candidate's existing sampled geometry and
 cached across Newton probes, without extra quadrature or population storage.
 
+Cut-cell angular inventories retain the occupied subvolume's first spatial
+moment `s = integral_inside (x - x_cell) dV` from exactly those midpoint samples.
+For cell momentum density `p`, the interior contribution is
+`epsilon * ((x_cell - origin) cross p) + s cross p`; midpoint imposed-force
+torque uses the identical geometry with `F` replacing `p`. Thus an asymmetric
+partial cell does not relocate its fluid momentum or force to the cell center.
+The first moment is a volume integral, not a centroid to multiply by occupancy
+again. Mass fractions and linear-momentum quadrature are unchanged. Integer
+sample-offset sums give exactly zero first moments for full and symmetric
+cells. Only nonzero cut-cell moments are stored, sorted into the native
+tile/lane order and consumed by cursors; no second grid-sized field or per-cell
+lookup is needed. The shared dry-body owner supplies this convention to
+single-body, simultaneous-body and lubricated-sphere paths. Changing the fixed
+origin shifts each moment by minus the origin displacement crossed with its
+linear inventory. These are moments of the declared finite-resolution
+quadrature, not an exact curved-surface or moving-boundary GCL claim.
+
 Full-pressure gravity uses the dry-body load `M_s*g` alongside the configured
 fluid source. Reduced-pressure gravity uses `(M_s-rho_f V)g` with the hydrostatic
 fluid source removed; these conventions must not be combined. An evolved force

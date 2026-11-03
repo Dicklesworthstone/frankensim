@@ -2,9 +2,9 @@
 use fs_exec::CancelGate;
 use fs_ga::{Mat3, So3, So3Tangent, Vec3};
 use fs_lbm::d3q19::{
-    BodyFrameEllipsoid3, BodyFrameSampler3, BoundaryGrid3, BoundarySpec3, DryBodyCouplingConfig3,
-    DryBodyExchange3, E3, FaceBoundary3, MovingPartialSaturationBody3, PartialSaturationError3, Q3,
-    equilibrium3,
+    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryGrid3, BoundarySpec3,
+    DryBodyCouplingConfig3, DryBodyExchange3, E3, FaceBoundary3, MovingPartialSaturationBody3,
+    PartialSaturationError3, Q3, equilibrium3,
 };
 use fs_time::lie::gyrostat::InertiaTensor3;
 
@@ -63,7 +63,7 @@ fn body(axes: [f64; 3], density: f64) -> MovingPartialSaturationBody3 {
 }
 fn momentum(
     grid: &BoundaryGrid3,
-    fractions: &[f64],
+    sampler: &BodyFrameSampler3,
     body: MovingPartialSaturationBody3,
     origin: [f64; 3],
 ) -> [f64; 6] {
@@ -74,18 +74,19 @@ fn momentum(
         for y in 0..N {
             for x in 0..N {
                 let f = grid.populations(x, y, z);
-                let exterior = 1.0 - fractions[(z * N + y) * N + x];
+                let index = (z * N + y) * N + x;
+                let exterior = 1.0 - sampler.fractions()[index];
                 let force = grid.force_density(x, y, z);
-                let p: [f64; 3] = core::array::from_fn(|i| {
-                    exterior
-                        * ((0..Q3)
-                            .map(|q| {
-                                let e = [E3[q].0, E3[q].1, E3[q].2];
-                                f64::from(e[i]) * f[q]
-                            })
-                            .sum::<f64>()
-                            + 0.5 * force[i])
+                let density: [f64; 3] = core::array::from_fn(|i| {
+                    (0..Q3)
+                        .map(|q| {
+                            let e = [E3[q].0, E3[q].1, E3[q].2];
+                            f64::from(e[i]) * f[q]
+                        })
+                        .sum::<f64>()
+                        + 0.5 * force[i]
                 });
+                let p = density.map(|p| exterior * p);
                 let angular = cross(
                     [
                         x as f64 + 0.5 - origin[0],
@@ -94,9 +95,15 @@ fn momentum(
                     ],
                     p,
                 );
+                let first = sampler
+                    .cut_cell_first_moments()
+                    .iter()
+                    .find(|&&(cell, _)| cell == index)
+                    .map_or([0.0; 3], |&(_, moment)| moment);
+                let interior_cut = cross(first, density);
                 for i in 0..3 {
                     total[i] += p[i];
-                    total[i + 3] += angular[i];
+                    total[i + 3] += angular[i] - interior_cut[i];
                 }
             }
         }
@@ -114,7 +121,7 @@ fn momentum(
 
 fn fluid_forcing(
     grid: &BoundaryGrid3,
-    fractions: &[f64],
+    sampler: &BodyFrameSampler3,
     origin: [f64; 3],
 ) -> ([f64; 6], [f64; 6]) {
     let (mut total, mut interior) = ([0.0; 6], [0.0; 6]);
@@ -133,7 +140,17 @@ fn fluid_forcing(
                 for i in 0..6 {
                     let value = if i < 3 { force[i] } else { moment[i - 3] };
                     total[i] += value;
-                    interior[i] += fractions[(z * N + y) * N + x] * value;
+                    interior[i] += sampler.fractions()[(z * N + y) * N + x] * value;
+                }
+                if let Some(&(_, first)) = sampler
+                    .cut_cell_first_moments()
+                    .iter()
+                    .find(|&&(cell, _)| cell == (z * N + y) * N + x)
+                {
+                    let cut_torque = cross(first, force);
+                    for i in 0..3 {
+                        interior[i + 3] += cut_torque[i];
+                    }
                 }
             }
         }
@@ -182,7 +199,7 @@ fn forced_dry_body_closes_physical_momentum_with_nonuniform_force_and_torque() {
             sampler
                 .sample(body.center, body.orientation, &shape, &gate)
                 .unwrap();
-            let before = momentum(&grid, sampler.fractions(), body, origin);
+            let before = momentum(&grid, &sampler, body, origin);
             let center = core::array::from_fn(|i| body.center[i] + 0.5 * body.velocity[i]);
             let (orientation, _) = body
                 .inertia
@@ -196,8 +213,7 @@ fn forced_dry_body_closes_physical_momentum_with_nonuniform_force_and_torque() {
             midpoint_sampler
                 .sample(center, orientation, &shape, &gate)
                 .unwrap();
-            let (full_force, inside_force) =
-                fluid_forcing(&grid, midpoint_sampler.fractions(), origin);
+            let (full_force, inside_force) = fluid_forcing(&grid, &midpoint_sampler, origin);
             let external = [2e-6, -3e-6, 4e-6, 5e-6, -2e-6, 3e-6];
             let external_torque = cross(
                 core::array::from_fn(|i| center[i] - origin[i]),
@@ -214,7 +230,7 @@ fn forced_dry_body_closes_physical_momentum_with_nonuniform_force_and_torque() {
                     &gate,
                 )
                 .unwrap();
-            let after = momentum(&grid, sampler.fractions(), body, origin);
+            let after = momentum(&grid, &sampler, body, origin);
             for i in 0..6 {
                 let authored = external[i] + if i < 3 { 0.0 } else { external_torque[i - 3] };
                 close(report.interior_forcing_impulse[i], inside_force[i], 2e-16);
@@ -268,7 +284,7 @@ fn force_on_fictitious_interior_is_not_an_external_physical_body_load() {
         .sample(body.center, body.orientation, &shape, &gate)
         .unwrap();
     assert_eq!(sampler.fractions()[(4 * N + 4) * N + 4], 1.0);
-    let before = momentum(&grid, sampler.fractions(), body, origin);
+    let before = momentum(&grid, &sampler, body, origin);
     let populations = snapshot(&grid);
     let report = grid
         .step_with_dry_partial_saturation_body(
@@ -281,7 +297,7 @@ fn force_on_fictitious_interior_is_not_an_external_physical_body_load() {
             &gate,
         )
         .unwrap();
-    let after = momentum(&grid, sampler.fractions(), body, origin);
+    let after = momentum(&grid, &sampler, body, origin);
     let torque = cross([4.5 - origin[0], 4.5 - origin[1], 4.5 - origin[2]], force);
     for i in 0..6 {
         let imposed = if i < 3 { force[i] } else { torque[i - 3] };
@@ -295,6 +311,99 @@ fn force_on_fictitious_interior_is_not_an_external_physical_body_load() {
     }
     assert!(body.velocity.iter().any(|v| v.abs() > 1e-8));
     assert_ne!(snapshot(&grid), populations);
+}
+
+#[test]
+fn asymmetric_cut_cell_keeps_interior_momentum_and_force_at_the_sampled_centroid() {
+    // A real uniform box occupying x=[4,4.5], y,z=[4,5]. Its COM is
+    // [4.25,4.5,4.5]; only the left half of one lattice cell is occupied.
+    struct HalfCellBox;
+    impl BodyFrameShape3 for HalfCellBox {
+        fn bounding_radius(&self) -> f64 {
+            0.75
+        }
+        fn contains(&self, point: Vec3) -> bool {
+            point.x.abs() <= 0.25 && point.y.abs() <= 0.5 && point.z.abs() <= 0.5
+        }
+    }
+    let velocity = [0.0, 0.002, 0.0];
+    let force = [0.0, 2e-6, 0.0];
+    let cell_center = [4.5; 3];
+    let gate = CancelGate::new();
+    for origin in [cell_center, [-0.4, 0.7, 1.2]] {
+        let mut grid = grid();
+        let populations = equilibrium3(1.0, velocity);
+        for z in 0..N {
+            for y in 0..N {
+                for x in 0..N {
+                    grid.set_populations(x, y, z, &populations);
+                }
+            }
+        }
+        grid.rebind_force_field(|cell| if cell == [4, 4, 4] { force } else { [0.0; 3] });
+        let mut body = MovingPartialSaturationBody3 {
+            center: [4.25, 4.5, 4.5],
+            orientation: So3::identity(),
+            mass: 1.0,
+            inertia: InertiaTensor3::new(Mat3 {
+                m: [
+                    1.0 / 6.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    5.0 / 48.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    5.0 / 48.0,
+                ],
+            })
+            .unwrap(),
+            velocity: [0.0; 3],
+            angular_momentum_body: Vec3::new(0.0, 0.0, 0.0),
+        };
+        let centroid_arm = core::array::from_fn(|i| body.center[i] - origin[i]);
+        let initial_p = velocity.map(|v| 0.5 * v);
+        let initial_angular = cross(centroid_arm, initial_p);
+        let interior_force = force.map(|f| 0.5 * f);
+        let interior_torque = cross(centroid_arm, interior_force);
+        let mut sampler = BodyFrameSampler3::new(&grid, 2).unwrap();
+        let report = grid
+            .step_with_dry_partial_saturation_body(
+                &mut sampler,
+                &HalfCellBox,
+                &mut body,
+                [0.0; 6],
+                origin,
+                DryBodyCouplingConfig3::default(),
+                &gate,
+            )
+            .unwrap();
+        close(report.interior[0].mass, 0.5, 2e-15);
+        for i in 0..3 {
+            close(report.interior[0].momentum[i], initial_p[i], 2e-15);
+            close(
+                report.interior[0].momentum[i + 3],
+                initial_angular[i],
+                2e-14,
+            );
+            close(report.interior_forcing_impulse[i], interior_force[i], 2e-18);
+            close(
+                report.interior_forcing_impulse[i + 3],
+                interior_torque[i],
+                2e-17,
+            );
+        }
+        for residual in report.combined_momentum_residual {
+            close(residual, 0.0, 3e-10);
+        }
+        if origin == cell_center {
+            // The baseline reports zero for both: a fraction at the cell
+            // center discards the quarter-cell centroid lever arm.
+            close(report.interior[0].momentum[5], -0.00025, 2e-15);
+            close(report.interior_forcing_impulse[5], -2.5e-7, 2e-18);
+        }
+    }
 }
 
 #[test]
@@ -398,7 +507,7 @@ fn neutrally_buoyant_uniform_translation_preserves_original_dry_momentum() {
     sampler
         .sample(body.center, body.orientation, &shape, &gate)
         .unwrap();
-    let before = momentum(&grid, sampler.fractions(), body, origin);
+    let before = momentum(&grid, &sampler, body, origin);
     let report = grid
         .step_with_dry_partial_saturation_body(
             &mut sampler,
@@ -420,7 +529,7 @@ fn neutrally_buoyant_uniform_translation_preserves_original_dry_momentum() {
     sampler
         .sample(body.center, body.orientation, &shape, &gate)
         .unwrap();
-    let after = momentum(&grid, sampler.fractions(), body, origin);
+    let after = momentum(&grid, &sampler, body, origin);
     for i in 0..6 {
         let boundary = if i < 3 {
             report.native.coupling.walls.fluid_population_impulse[i]
@@ -456,7 +565,7 @@ fn light_rise_heavy_sink_and_rotated_torque_close_actual_fixed_origin_momentum()
         sampler
             .sample(body.center, body.orientation, &shape, &gate)
             .unwrap();
-        let before = momentum(&grid, sampler.fractions(), body, origin);
+        let before = momentum(&grid, &sampler, body, origin);
         let report = grid
             .step_with_dry_partial_saturation_body(
                 &mut sampler,
@@ -484,7 +593,7 @@ fn light_rise_heavy_sink_and_rotated_torque_close_actual_fixed_origin_momentum()
         sampler
             .sample(body.center, body.orientation, &shape, &gate)
             .unwrap();
-        let after = momentum(&grid, sampler.fractions(), body, origin);
+        let after = momentum(&grid, &sampler, body, origin);
         for i in 0..6 {
             let boundary = if i < 3 {
                 report.native.coupling.walls.fluid_population_impulse[i]
