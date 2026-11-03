@@ -21627,6 +21627,26 @@ Focused manufactured fixtures check unequal-layer partition and temperature rise
 changing eta(T) across continuing steps, energy/entropy closure, zero-loss parity,
 prepared spatial loads, and late endpoint-source refusal.
 
+## Compensated translation on native rod trajectories
+
+Native rod drift retains one private world-coordinate translation remainder
+per material node. The existing error-free `fs_math::eft::two_sum` operations
+carry displacement below one coordinate ULP into subsequent intervals, instead
+of aborting valid bending/torsion continuation or discarding the same small
+motion repeatedly. Eccentric free rotation also retains roundoff in the
+centroid-to-material-node transport. Public poses and force evaluations remain
+at their rounded f64 coordinates; this compensation does not supply arbitrary
+precision geometry or erase the original numerical integration defect.
+
+Stationary supported coordinates do not drift. Original momentum updates,
+support reactions, finite/overflow admission, clock representability and energy
+gates remain authoritative. Clone/restart, instantaneous impulses and source
+refreshes retain the remainder with the same trajectory. A failed or cancelled
+candidate cannot consume it. The original reciprocal bending/torsion-strike
+continuation and a uniform-translation regression at one eighth of a coordinate
+ULP per interval verify physical continuation, accumulation, clone/restart,
+retention across an actual velocity impulse, and refusal followed by retry.
+
 ## Point impulses on continuing geometrically exact rods
 
 `rod_motion::RodMotion::apply_point_impulses` applies simultaneous terminal or

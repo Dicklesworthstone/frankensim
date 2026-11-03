@@ -481,6 +481,11 @@ pub struct RodMotion<I = RodNodalInertia> {
     model: Arc<PreparedRodMotion<I>>,
     kinetics: Arc<[KineticFrame]>,
     pose: RodMotionPose,
+    /// Unrepresented translation from compensated drift, in world axes [m].
+    /// The public pose remains its rounded f64 value; ordinary sub-ULP motion
+    /// accumulates here instead of aborting or disappearing at every interval.
+    /// Clones, impulses and source refreshes retain this integration history.
+    translation_remainder_m: Vec<[f64; 3]>,
     linear: Vec<[f64; 3]>,
     /// Central angular momentum expressed in the ORIGINAL material frame.
     spin: Vec<[f64; 3]>,
@@ -547,7 +552,8 @@ impl<I:RodMotionInertia> RodMotion<I> {
             spin[node]=k.spin(omega)?;
             kinetics.push(k);
         }
-        let state=Self {model,kinetics:Arc::from(kinetics),pose,linear,spin,response,time_s,steps:0};
+        let state=Self {model,kinetics:Arc::from(kinetics),pose,translation_remainder_m:vec![[0.0;3];n],
+            linear,spin,response,time_s,steps:0};
         state.observe([0.0;3])?;
         checkpoint(gate)?;Ok(state)
     }
@@ -653,18 +659,30 @@ impl<I:RodMotionInertia> RodMotion<I> {
                 let (frame,spin)=k.drift(old_frame,pi,dt)?;
                 candidate.pose.frames[node]=frame;candidate.spin[node]=spin;
             }
-            let correction=if k.eccentric() && !candidate.model.fixed_frames()[node] {
-                sub(rotate(old_frame,k.center)?,rotate(candidate.pose.frames[node],k.center)?)
-            } else {[0.0;3]};
+            let centroid_offsets=if k.eccentric() && !candidate.model.fixed_frames()[node] {
+                Some((rotate(old_frame,k.center)?,rotate(candidate.pose.frames[node],k.center)?))
+            } else {None};
             for c in 0..3 {
                 if !candidate.model.fixed_positions()[node][c] {
                     let drift=dt*(candidate.linear[node][c]/k.mass);
-                    let shift=if k.eccentric() {drift+correction[c]} else {drift};
-                    let old=candidate.pose.positions_m[node][c];let next=old+shift;
-                    if !shift.is_finite() || !next.is_finite() || (shift!=0.0 && next==old) {
+                    // Keep the rotating-centroid transport's subtraction and
+                    // addition remainders too. The material node must follow
+                    // the native COM drift, rather than accumulating a false
+                    // translation as its eccentric frame rotates.
+                    let (shift,shift_error)=if let Some((old_offset,new_offset))=centroid_offsets {
+                        let (correction,error)=fs_math::eft::two_sum(old_offset[c],-new_offset[c]);
+                        let (shift,roundoff)=fs_math::eft::two_sum(drift,correction);
+                        (shift,error+roundoff)
+                    } else {(drift,0.0)};
+                    let old=candidate.pose.positions_m[node][c];
+                    let (next,roundoff)=fs_math::eft::two_sum(old,shift);
+                    let remainder=candidate.translation_remainder_m[node][c]+(roundoff+shift_error);
+                    let (next,remainder)=fs_math::eft::two_sum(next,remainder);
+                    if !shift.is_finite() || !next.is_finite() || !remainder.is_finite() {
                         return Err(RodMotionError::Invalid("rod translation step is unrepresentable at this world position"));
                     }
                     candidate.pose.positions_m[node][c]=next;
+                    candidate.translation_remainder_m[node][c]=remainder;
                 }
             }
         }
