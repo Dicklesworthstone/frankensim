@@ -25,7 +25,8 @@ use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     nozzle::{GasNozzle, network::snapshot::SnapshotNozzleLink},
     snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS},
-    species::network::transport::{GasTransportError, GasTransportPaths},
+    species::{effusion::EffusiveInterface,
+        network::transport::{GasTransportError, GasTransportPaths, effusion::EffusionNetworkLink}},
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -66,12 +67,67 @@ pub struct FiniteGasTransportProgram {
     pub transport: FiniteGasDgTransportSolve,
 }
 
+/// An independently exposed thin molecular aperture between existing inventories.
+/// Its qualified interface remains fixed; controls change only exposed area.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FiniteGasEffusionLink {
+    pub id: u64,
+    pub parcels: [u64; 2],
+    pub interface: EffusiveInterface,
+    pub area_m2: f64,
+}
+
+/// Held exposed-area assignment on the original acoustic source clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasEffusionControl {
+    pub sample: u64,
+    pub id: u64,
+    /// Total exposed area of separately qualified apertures [m2]. Zero closes it.
+    /// This does not alter diameter, thickness or the original regime qualification.
+    pub area_m2: f64,
+}
+
+/// Molecular leakage paths sharing the existing finite transport transaction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FiniteGasEffusionProgram {
+    pub links: Vec<FiniteGasEffusionLink>,
+    /// May be unsorted; duplicate (sample, id) assignments are refused.
+    pub controls: Vec<GasEffusionControl>,
+}
+
+struct EffusionPlayback {
+    program: FiniteGasEffusionProgram,
+    held: Vec<f64>,
+    candidate: Vec<f64>,
+    next: usize,
+    candidate_next: usize,
+}
+impl EffusionPlayback {
+    fn prepare(&mut self, sample: u64) {
+        self.candidate.copy_from_slice(&self.held);
+        self.candidate_next = self.next;
+        while let Some(event) = self.program.controls.get(self.candidate_next)
+            .filter(|event| event.sample == sample)
+        {
+            let index = self.program.links.binary_search_by_key(&event.id, |link| link.id)
+                .expect("admitted original molecular aperture");
+            self.candidate[index] = event.area_m2;
+            self.candidate_next += 1;
+        }
+    }
+    fn accept(&mut self) {
+        std::mem::swap(&mut self.held, &mut self.candidate);
+        self.next = self.candidate_next;
+    }
+}
+
 pub(super) struct FiniteGasTransportPlayback {
     program: FiniteGasTransportProgram,
     parcels: BTreeMap<u64, ClosedGasParcel>,
     inputs: BTreeMap<u64, FiniteGasApertureTransportInput>,
     held: Vec<SnapshotNozzleLink>,
     candidate: Vec<SnapshotNozzleLink>,
+    effusion: Option<EffusionPlayback>,
     gate: Arc<CancelGate>,
     next: usize,
     candidate_next: usize,
@@ -119,6 +175,13 @@ impl FiniteGasTransportPlayback {
             self.candidate[index].nozzle = event.nozzle;
             self.candidate_next += 1;
         }
+        let effusion: Vec<EffusionNetworkLink<'_>> = self.effusion.as_mut().map_or_else(Vec::new, |state| {
+            state.prepare(sample);
+            state.program.links.iter().zip(&state.candidate)
+                .map(|(link, &area_m2)| EffusionNetworkLink {
+                    id: link.id, parcels: link.parcels, interface: &link.interface, area_m2,
+                }).collect()
+        });
         let power = self.program.source.controls.get(self.heat_next)
             .filter(|event| event.sample == sample)
             .map_or(self.held_power_w, |event| event.power_w);
@@ -131,7 +194,7 @@ impl FiniteGasTransportPlayback {
         let nodes = BTreeMap::from([(self.program.source_id, system.clone())]);
         finite_gas_scalar_aperture_transport_candidate_with_paths(
             &self.parcels, &nodes, &self.inputs,
-            GasTransportPaths { nozzles: &self.candidate, ..Default::default() },
+            GasTransportPaths { nozzles: &self.candidate, effusion: &effusion, ..Default::default() },
             system.aperture().spec().time_step_s, self.program.transport,
             &mut || self.gate.is_requested(),
         ).map_err(runtime)
@@ -154,6 +217,7 @@ impl FiniteGasTransportPlayback {
     pub(super) fn accept(&mut self, sample: u64) {
         std::mem::swap(&mut self.held, &mut self.candidate);
         self.next = self.candidate_next;
+        if let Some(effusion) = &mut self.effusion { effusion.accept(); }
         if let Some(event) = self.program.source.controls.get(self.heat_next)
             .filter(|event| event.sample == sample)
         {
@@ -272,6 +336,7 @@ impl AperturePerformance {
         let mut playback = FiniteGasTransportPlayback {
             held: program.nozzles.clone(), candidate: program.nozzles.clone(),
             program, parcels, inputs, gate, next: 0, candidate_next: 0,
+            effusion: None,
             heat_next: 0, held_power_w: 0.0, last: None,
             assignments, work: work as u64,
         };
@@ -288,6 +353,119 @@ impl AperturePerformance {
         }, force).map_err(GestureCompileError::Render)?;
         self.finite_transport = Some(playback);
         Ok(self)
+    }
+
+    /// Add qualified molecular leakage to an existing finite gas transport owner.
+    ///
+    /// Bind once before playback, after `with_finite_gas_transport`; its nozzle
+    /// list may be empty. Both molecular beams, species fractionation and their
+    /// crossing energy enter the SAME original-inventory and acoustic-work
+    /// transaction. Area assignments share the existing clock and control budgets.
+    /// Cancellation or late physical refusal publishes no gas, area or cursor.
+    ///
+    /// Each path is a separate fixed thin aperture with negligible reservoir
+    /// drift. Its authored collisional and source support remain mandatory after
+    /// thermal/acoustic feedback. It must not reuse a nozzle's physical exposed
+    /// area or reinterpret the performance source's Bernoulli acoustic aperture.
+    /// An area control exposes more qualified pores; it adds no moving-wall work.
+    pub fn with_finite_gas_effusion(mut self, mut program: FiniteGasEffusionProgram)
+        -> Result<Self, GestureCompileError>
+    {
+        if self.poisoned || self.system.aperture().accepted_steps() != 0 {
+            return Err(invalid("finite gas effusion must bind before playback"));
+        }
+        let (capacity, work_capacity) = self.remaining_control_budgets()?;
+        let playback = self.finite_transport.as_mut()
+            .ok_or_else(|| invalid("finite gas effusion requires the original finite transport owner"))?;
+        if playback.effusion.is_some() {
+            return Err(invalid("finite gas effusion must bind once"));
+        }
+        let count = program.links.len();
+        let events = program.controls.len();
+        let assignments = count.checked_add(events)
+            .ok_or_else(|| invalid("effusion control count overflow"))?;
+        if count == 0 || assignments > capacity
+            || count.checked_add(playback.program.nozzles.len())
+                .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS)
+        {
+            return Err(invalid("effusion paths and controls exceed shared storage limits"));
+        }
+        let levels = usize::BITS - events.saturating_sub(1).leading_zeros();
+        // Count both original species beams and their separate energy correction
+        // in the added preflight work, even when the first exposed area is zero.
+        let beam_work: u128 = program.links.iter()
+            .map(|link| (2 * link.interface.transmissions().len() + 1) as u128).sum();
+        let work = beam_work + 2 * count as u128
+            + events as u128 * (count as u128 + 4 * (u128::from(levels) + 1));
+        if work > u128::from(work_capacity) {
+            return Err(invalid("effusion paths and controls exceed shared work limits"));
+        }
+        program.links.sort_unstable_by_key(|link| link.id);
+        if program.links.windows(2).any(|pair| pair[0].id == pair[1].id) {
+            return Err(invalid("effusion paths require unique original identities"));
+        }
+        for link in &program.links {
+            if playback.gate.is_requested() {
+                return Err(GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Cancelled)));
+            }
+            if !link.area_m2.is_finite() || link.area_m2 < 0.0
+                || link.parcels[0] == link.parcels[1]
+                || link.parcels.iter().any(|id| !playback.parcels.contains_key(id))
+            {
+                return Err(invalid("effusion needs finite nonnegative area and distinct existing inventories"));
+            }
+        }
+        program.controls.sort_unstable_by_key(|event| (event.sample, event.id));
+        if program.controls.windows(2).any(|pair|
+            (pair[0].sample, pair[0].id) == (pair[1].sample, pair[1].id))
+        {
+            return Err(invalid("effusion may assign each (sample, aperture) only once"));
+        }
+        for event in &program.controls {
+            if playback.gate.is_requested() {
+                return Err(GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Cancelled)));
+            }
+            if event.sample >= self.config.samples || !event.area_m2.is_finite() || event.area_m2 < 0.0
+                || program.links.binary_search_by_key(&event.id, |link| link.id).is_err()
+            {
+                return Err(invalid("effusion controls require an existing path, nonnegative area and in-window sample"));
+            }
+        }
+        let held: Vec<_> = program.links.iter().map(|link| link.area_m2).collect();
+        playback.effusion = Some(EffusionPlayback {
+            candidate: held.clone(), held, program, next: 0, candidate_next: 0,
+        });
+        playback.assignments += assignments;
+        playback.work += work as u64;
+        let CoupledAperture::Dg(system) = &self.system else {
+            unreachable!("original finite transport requires DG");
+        };
+        let (_, pressure) = super::pressure_candidate(&self.controls, self.next, self.held_pressure_pa, 0);
+        let force = self.forces.as_ref().map_or(0.0, |forces| forces.candidate(0));
+        let _ = playback.preview(system, TubeDrive {
+            upstream_pressure_pa: pressure, body_flow_m3_s: 0.0,
+        }, force).map_err(GestureCompileError::Render)?;
+        Ok(self)
+    }
+
+    /// Original interface sources and canonical, sample-ordered area controls.
+    #[must_use]
+    pub fn finite_gas_effusion_program(&self) -> Option<&FiniteGasEffusionProgram> {
+        self.finite_transport.as_ref()?.effusion.as_ref().map(|state| &state.program)
+    }
+
+    /// Accepted areas in `finite_gas_effusion_program().links` ID order [m2].
+    #[must_use]
+    pub fn held_effusion_areas_m2(&self) -> &[f64] {
+        self.finite_transport.as_ref().and_then(|state| state.effusion.as_ref())
+            .map_or(&[], |state| &state.held)
+    }
+
+    /// Only area assignments committed with successfully observed source samples.
+    #[must_use]
+    pub fn applied_effusion_controls(&self) -> &[GasEffusionControl] {
+        self.finite_transport.as_ref().and_then(|state| state.effusion.as_ref())
+            .map_or(&[], |state| &state.program.controls[..state.next])
     }
 
     /// Actual accepted source and reservoir inventories, keyed by their IDs.

@@ -24444,3 +24444,31 @@ Source-band intersections, complete coordinate/payload/work budgets and cancella
 `solid_rational::PreparedSolidMimoResonance` borrows the admitted original `PreparedMimoLoad` and materializes its exact continuous real A/B/C/D/E under a separate allowance. All source coordinates, mutual terms, source band, clock, accepted history and continuous/sampled report classifications survive. The complete signed force map couples original solid velocity to original source effort through `ViscoPoleStateSpaceLoad`. Dimension/map checks precede realization allocation; the solid's complete-state, work, memory, source-band and physical residual owners remain in force.
 
 Harmonic forcing and free modes do not advance or reset the borrowed accepted history, use the digital mean-direct matrix, or infer source heat/storage from passivity reports. Signed per-port boundary work is explicit. Without an original physical storage witness, complete total-storage and total-dissipation accounts remain `None`; body storage, material heat and body-plus-boundary-work balance remain enforced. The generic solver owner is reused unchanged, and original numerical-continuation, physical-source and spatial-accuracy limits remain applicable.
+
+### Scheduled molecular leakage during finite-gas performance playback
+
+`AperturePerformance::with_finite_gas_effusion` attaches an owned
+`FiniteGasEffusionProgram` to the existing finite transport owner before
+playback. Fixed, source-qualified interfaces connect its original finite gas
+inventories; `GasEffusionControl` schedules their exposed areas on the accepted
+acoustic source clock. The existing nozzle program remains usable and may be
+empty. Molecular apertures and nozzles must describe distinct physical paths.
+
+Both directional species beams and their molecular crossing energy enter the
+same original-inventory update as other paths. The same source/thermal/acoustic
+transaction rebuilds each gas once, updates the source from its actual gas,
+pays parameter work and checks final qualification. Candidate areas and control
+cursors commit only with an accepted source sample. Late physical refusal or
+cancellation preserves accepted gas, source state, areas, controls and output.
+Original interface definitions are borrowed during preview; enabling this
+feature adds one bounded vector of borrowed path descriptors per sample.
+
+The source must satisfy the original fixed-thin-aperture, free-molecular and
+negligible-reservoir-drift assumptions. Area scheduling exposes qualified pores;
+it does not change pore diameter, add moving-wall work, reinterpret the sound
+source's Bernoulli aperture or establish a hard real-time guarantee. Focused
+tests compare every accepted state/report with direct native transport, cover
+composition and cooling, closing/reopening, shared control/work budgets, cold
+preflight and atomic late refusal/cancellation. Rustfmt parsing and source/API
+review passed; native test execution remains blocked by missing constellation
+sibling checkouts in the current environment.
