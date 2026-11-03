@@ -9,7 +9,10 @@ use fs_exec::Cx;
 use fs_sparse::{Coo, Csr};
 
 mod impulse;
+pub(crate) mod point;
+pub(crate) use impulse::moments as impulse_moments;
 pub use impulse::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
+pub use point::{SolidPointKinematics, SolidPointMobility, TetImpulsePoint};
 
 /// Inertia's contribution to the complete mechanical/thermal work balance.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -96,7 +99,9 @@ pub(crate) fn p1_tet_nodal_mass(
         || volume_m3 <= 0.0
         || rho.iter().any(|value| !value.is_finite() || *value <= 0.0)
     {
-        return Err(invalid("positive reference volume and nodal densities required"));
+        return Err(invalid(
+            "positive reference volume and nodal densities required",
+        ));
     }
     let uniform = rho.iter().all(|value| value.to_bits() == rho[0].to_bits());
     let scale = rho.into_iter().fold(0.0_f64, f64::max);
@@ -485,6 +490,11 @@ impl ReferenceMass {
 
     pub(crate) fn ndofs(&self) -> usize {
         self.matrix.nrows()
+    }
+
+    /// Borrow the admitted original matrix for a native constrained KKT solve.
+    pub(crate) fn matrix(&self) -> &Csr {
+        &self.matrix
     }
 
     /// The same immutable mass action used by momentum and acceleration loads.

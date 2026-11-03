@@ -34,6 +34,7 @@ use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 /// Shared physical kinetic-work account; numerical loss is never plastic heat.
 pub use crate::inertia::InertialEnergy;
 pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
+pub use crate::inertia::{SolidPointKinematics, SolidPointMobility, TetImpulsePoint};
 
 /// Separate material-work and inertial time-discretization tolerances.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -199,6 +200,70 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
     /// Total original mass, unchanged by current deformation or plastic flow.
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+
+    /// Current physical material-point position and work-conjugate velocity.
+    pub fn point_kinematics(
+        &self,
+        point: TetImpulsePoint,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointKinematics, FinitePlasticTetError> {
+        let state = &self.solid.state;
+        crate::inertia::point::kinematics(
+            point,
+            state.tetrahedra,
+            state.nodes_m,
+            &state.displacement_m,
+            &self.velocity_mps,
+            cx,
+        )
+        .map_err(|error| FinitePlasticTetError::from(inertia_error(error)))
+    }
+
+    /// Supported directional inverse mass at a material point [1/kg].
+    /// Uses the original consistent mass and a unit world direction. No material
+    /// evaluation, history clone, dense inverse or lumped mass is needed.
+    pub fn point_directional_inverse_mass_per_kg(
+        &self,
+        held: &[usize],
+        point: TetImpulsePoint,
+        direction: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobility, FinitePlasticTetError> {
+        crate::inertia::point::directional_mobility(
+            &self.mass,
+            self.solid.state.tetrahedra,
+            held,
+            point,
+            direction,
+            controls,
+            cx,
+        )
+        .map_err(|error| FinitePlasticTetError::from(inertia_error(error)))
+    }
+
+    /// Apply a world impulse at the current material point through B^T.
+    /// This is the exact transpose of `point_kinematics`' velocity trace, so
+    /// point work and torque use the same position and supported mass response.
+    pub fn point_impulse_candidate(
+        &self,
+        held: &[usize],
+        point: TetImpulsePoint,
+        impulse_world: [f64; 3],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FinitePlasticMotionImpulse<'a, L>, FinitePlasticTetError> {
+        let entries = crate::inertia::point::distribution(
+            point,
+            self.solid.state.tetrahedra,
+            self.velocity_mps.len(),
+            impulse_world,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
     }
 
     /// Apply an instantaneous nodal impulse through the original consistent mass.

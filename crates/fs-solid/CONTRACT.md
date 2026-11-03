@@ -3060,6 +3060,51 @@ material interval and deposits no heat. `tests/thermoplastic_impulse.rs`
 checks hot plastically set bodies, independent reference-mass/torque/work
 oracles, moving supports, state retention and subsequent native thermal motion.
 
+### Material-point mobility with inelastic memory
+
+The finite plastic and viscoelastic motion owners expose `TetImpulsePoint`,
+`point_kinematics`, `point_directional_inverse_mass_per_kg` and
+`point_impulse_candidate`. One admitted P1 barycentric trace B determines
+current position and velocity; its exact transpose distributes a world
+impulse. Nonnegative unit-sum weights admit interior, face, edge and vertex
+points, with only roundoff-sized sum normalization. Extrapolation refuses.
+The directional mobility is `n^T B M_ff^-1 B^T n` for a unit world direction,
+using the original cellwise or graded reference density and held velocity DOFs.
+It borrows the existing checked-CG mass response without cloning constitutive
+history or forming a dense inverse. A fully held trace has zero mobility.
+Only the accepted impulse candidate copies the complete unchanged material
+state. The native visco impulse regression checks an interior point against
+independent cubic-simplex mass inversion, including negative consistent-mass
+nodal responses, supported mobility, deformed torque and conjugate point work.
+
+### Exact-incompressible pressure impulses
+
+`mixed::conservative::ConservativeTetSolid::impulse_candidate` solves the
+original P2/P1 velocity and pressure-impulse KKT equations at the current
+configuration. The endpoint cofactor supplies the same weak volume derivative
+B as the native mixed geometry. Original consistent mass supplies M; native
+sparse LDL handles `[M_ff B_f^T; B_f 0]`. Explicit velocity, pressure-impulse
+and work scales preserve a symmetric dimensionless system, with assembly and
+factor budgets and a recomputed true residual. No second mass solve occurs.
+
+The multiplier is an impulse in Pa s, separate from the stored algorithmic
+pressure. Held velocities remain unchanged; full support impulses and work
+remain explicit. The report separates external, internal pressure and support
+contributions. Actual represented velocities must satisfy every original weak
+volume-rate row, including a removed gauge row. Pressure contributes neither
+net linear/angular momentum nor admitted work beyond explicit tolerances.
+A gauge is allowed only for a verified connected constant-pressure null mode;
+other rank deficiencies refuse. Incoming incompatible velocity refuses rather
+than silently receiving a dissipative projection. In particular, an earlier
+volume-constrained time step does not automatically guarantee endpoint tangent
+velocity admissibility. The impulse preserves geometry, density, material
+points, stored pressure and time, and adds external/support work to the
+existing conservative trajectory ledger. `tests/mixed_conservative.rs` checks
+independent P2 mass moments, pressure loading, rotated geometry, supported
+gauge reactions and continuation. This entry point requires the exact-
+incompressible conservative formulation; it does not change mixed viscoelastic
+motion or introduce a compressibility approximation.
+
 ### Reference-aware finite-deformation response
 
 `hyper3` evaluates energy, Piola force and tangent through the original

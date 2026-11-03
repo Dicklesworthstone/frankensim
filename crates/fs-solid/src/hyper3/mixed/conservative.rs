@@ -40,6 +40,8 @@ use crate::linear3::tet10::TET10_EDGES;
 pub use crate::inertia::InertialEnergy;
 
 mod assembly;
+mod impulse;
+pub use impulse::ConservativeTetImpulse;
 
 /// Explicit material/spatial formulation; no inferred bulk penalty or defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]

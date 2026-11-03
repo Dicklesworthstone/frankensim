@@ -41,6 +41,9 @@ pub mod visco;
 /// Objective discrete-gradient elasticity with conservative reference inertia.
 pub mod conservative;
 
+/// Fixed-configuration impulses with the original incompressibility constraint.
+pub mod impulse;
+
 /// Constitutive laws retain their spatial identity; no coefficients are averaged.
 #[derive(Debug)]
 pub enum MixedLawField<'a, L: MixedFiniteStrainPotential = Hyperelastic> {

@@ -416,3 +416,219 @@ fn g0_incompatible_initial_volume_and_redundant_pressure_rows_refuse_without_mut
         assert_eq!(state_bits(&accepted), before);
     });
 }
+
+fn impulse_controls() -> fs_solid::hyper3::mixed::impulse::MixedImpulseControls {
+    use fs_solid::hyper3::mixed::impulse::{MixedImpulseControls, SolidImpulseControls};
+    MixedImpulseControls {
+        balance: SolidImpulseControls {
+            solve: fs_solver::CheckedCgConfig {
+                tolerance: 1e-11,
+                max_iterations: 64,
+                max_corrections: 0,
+            },
+            maximum_workspace_components: 8192,
+            linear_tolerance_kg_m_s: 1e-10,
+            angular_tolerance_kg_m2_s: 1e-10,
+            work_tolerance_j: WORK_ALLOWANCE,
+        },
+        velocity_scale_m_s: 1.0,
+        pressure_impulse_scale_pa_s: 1.0,
+        work_scale_j: 1.0,
+        maximum_assembly_bytes: 2 * 1024 * 1024,
+        maximum_factor_bytes: 2 * 1024 * 1024,
+        maximum_relative_volume_rate_per_s: 1e-10,
+    }
+}
+
+#[test]
+fn g1_g3_pressure_impulse_removes_only_volume_loading_and_keeps_rigid_momentum() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(1e300);
+        let densities = [DENSITY];
+        let gradient = [
+            [-1.0, -1.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let translation = [0.2, -0.3, 0.1];
+        for rotated in [false, true] {
+            let rotate = |x: [f64; 3]| if rotated { [-x[1], x[0], x[2]] } else { x };
+            let displacement: Vec<_> = nodes
+                .iter()
+                .map(|&x| {
+                    let y = rotate(x);
+                    [y[0] + 0.3 - x[0], y[1] - 0.2 - x[1], y[2] + 0.7 - x[2]]
+                })
+                .collect();
+            let accepted = definition(&nodes, &elements, &material, &densities)
+                .prepare(&displacement, &vec![[0.0; 3]; nodes.len()], cx)
+                .unwrap();
+            let before = state_bits(&accepted);
+            let mut applied = Vec::new();
+            for (a, &node) in elements[0].iter().enumerate() {
+                // Exact P2 row mass is negative at corners. A uniform pressure
+                // impulse integrates to zero there, and V*(grad La+grad Lb) at
+                // an edge. These barycentric integrals do not use native B/M.
+                let row_mass = DENSITY * VOLUME * if a < 4 { -0.05 } else { 0.2 };
+                let volume_load = if a < 4 {
+                    [0.0; 3]
+                } else {
+                    let [i, j] = TET10_EDGES[a - 4];
+                    rotate(core::array::from_fn(|c| {
+                        VOLUME * (gradient[i][c] + gradient[j][c])
+                    }))
+                };
+                for c in 0..3 {
+                    applied.push((3 * node + c, row_mass * translation[c] + volume_load[c]));
+                }
+            }
+            let event = accepted
+                .impulse_candidate(&[], &applied, None, [0.0; 3], impulse_controls(), cx)
+                .unwrap();
+            assert_eq!(state_bits(&accepted), before);
+            assert_eq!(event.solid.displacement_m(), accepted.displacement_m());
+            assert_eq!(
+                event.solid.algorithmic_pressure_pa(),
+                accepted.algorithmic_pressure_pa()
+            );
+            assert_eq!(
+                event.solid.stored_energy_j().to_bits(),
+                accepted.stored_energy_j().to_bits()
+            );
+            assert_eq!(event.solid.time_s(), accepted.time_s());
+            assert!(event.impulse.momentum.solve.converged_euclidean());
+            for velocity in event.solid.velocity_mps() {
+                for c in 0..3 {
+                    near(velocity[c], translation[c], 2e-10);
+                }
+            }
+            for pressure in &event.impulse.pressure_impulses_pa_s {
+                near(*pressure, 1.0, 2e-9);
+            }
+            let (kinetic, linear, angular) = independent_motion(
+                &nodes,
+                &elements[0],
+                event.solid.displacement_m(),
+                event.solid.velocity_mps(),
+            );
+            let center = rotate([0.25; 3]);
+            let expected_angular = cross(
+                [center[0] + 0.3, center[1] - 0.2, center[2] + 0.7],
+                translation,
+            );
+            near(
+                kinetic,
+                0.5 * translation.iter().map(|v| v * v).sum::<f64>(),
+                1e-11,
+            );
+            for c in 0..3 {
+                near(linear[c], translation[c], 1e-11);
+                near(angular[c], expected_angular[c], 1e-11);
+                near(event.impulse.pressure.linear_kg_m_s[c], 0.0, 1e-11);
+                near(event.impulse.pressure.angular_kg_m2_s[c], 0.0, 1e-11);
+            }
+            near(event.impulse.pressure_work_j, 0.0, 1e-11);
+            near(event.impulse.external_work_j, kinetic, 1e-11);
+            // Continue the original conservative owner: an impulse's supplied
+            // energy must enter its cumulative work, without resetting time.
+            let step = event
+                .solid
+                .advance(0.01, &[], &[], [0.0; 3], settings(), WORK_ALLOWANCE, cx)
+                .unwrap();
+            near(step.energy.cumulative_balance_error_j, 0.0, WORK_ALLOWANCE);
+            near(
+                step.solid.total_energy_j(),
+                event.solid.total_energy_j(),
+                WORK_ALLOWANCE,
+            );
+            assert!(
+                accepted
+                    .impulse_candidate(&[], &applied, Some(0), [0.0; 3], impulse_controls(), cx)
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
+fn g1_supported_pressure_gauge_has_analytic_reactions_and_incompatible_events_refuse() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(60.0);
+        let densities = [DENSITY];
+        let definition = definition(&nodes, &elements, &material, &densities);
+        let zero = vec![[0.0; 3]; nodes.len()];
+        let accepted = definition.prepare(&zero, &zero, cx).unwrap();
+        let before = state_bits(&accepted);
+        // Only motion along the three edges leaving corner zero is free.
+        // Constant pressure is a true null mode on these tangent directions.
+        let free: Vec<_> = (0..3)
+            .map(|c| {
+                let edge = TET10_EDGES
+                    .iter()
+                    .position(|e| e.contains(&0) && e.contains(&(c + 1)))
+                    .unwrap();
+                3 * elements[0][4 + edge] + c
+            })
+            .collect();
+        let held: Vec<_> = (0..3 * nodes.len()).filter(|d| !free.contains(d)).collect();
+        let applied = [(free[0], 0.1)];
+        let event = accepted
+            .impulse_candidate(&held, &applied, Some(0), [0.0; 3], impulse_controls(), cx)
+            .unwrap();
+        for velocity in event.solid.velocity_mps().iter().flatten() {
+            near(*velocity, 0.0, 1e-11);
+        }
+        // B[:,edge01.x]=V/5*[1,-1,0,0], lambda0=0, so lambda1=-3 Pa s.
+        for (pressure, expected) in event
+            .impulse
+            .pressure_impulses_pa_s
+            .iter()
+            .zip([0.0, -3.0, 0.0, 0.0])
+        {
+            near(*pressure, expected, 1e-10);
+        }
+        near(event.impulse.momentum.support.linear_kg_m_s[0], -0.1, 1e-11);
+        near(event.impulse.pressure_work_j, 0.0, 1e-11);
+        assert!(
+            accepted
+                .impulse_candidate(&held, &applied, None, [0.0; 3], impulse_controls(), cx)
+                .is_err()
+        );
+        assert!(
+            accepted
+                .impulse_candidate(&[0, 0], &applied, None, [0.0; 3], impulse_controls(), cx)
+                .is_err()
+        );
+        let mut limited = impulse_controls();
+        limited.maximum_factor_bytes = 1;
+        assert!(
+            accepted
+                .impulse_candidate(&held, &applied, Some(0), [0.0; 3], limited, cx)
+                .is_err()
+        );
+        assert_eq!(state_bits(&accepted), before);
+
+        // Initial admission and event accuracy are explicit separate budgets.
+        // The event cannot quietly project away a pre-existing expansion rate.
+        let relaxed = ConservativeTetDefinition {
+            formulation: ConservativeFormulation::ExactIncompressible {
+                maximum_relative_volume_residual: 1e-9,
+                maximum_initial_relative_volume_rate_per_s: 1.0,
+                maximum_point_volume_work_defect: 1e-12,
+            },
+            ..definition
+        };
+        let expansion: Vec<_> = nodes.iter().map(|x| x.map(|v| 0.02 * v)).collect();
+        let incompatible = relaxed.prepare(&zero, &expansion, cx).unwrap();
+        let incompatible_before = state_bits(&incompatible);
+        assert!(
+            incompatible
+                .impulse_candidate(&[], &[], None, [0.0; 3], impulse_controls(), cx)
+                .is_err()
+        );
+        assert_eq!(state_bits(&incompatible), incompatible_before);
+    });
+}

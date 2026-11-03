@@ -1,6 +1,6 @@
 //! Instantaneous momentum transfer retains the original relaxed Maxwell body.
 use super::*;
-use fs_solid::hyper3::visco::dynamics::SolidImpulseControls;
+use fs_solid::hyper3::visco::dynamics::{SolidImpulseControls, TetImpulsePoint};
 use fs_solver::CheckedCgConfig;
 
 const RHO: [f64; 4] = [30.0, 150.0, 30.0, 30.0];
@@ -324,5 +324,204 @@ fn free_rigid_spin_uses_consistent_angular_inertia_and_failed_events_preserve_hi
             .is_err()
         );
         assert_eq!(fast.velocity_mps(), fast_velocity);
+    });
+}
+
+#[test]
+fn interior_point_trace_and_supported_mobility_share_the_exact_graded_mass() {
+    with_cx(|cx| {
+        let law = material(true);
+        let old_v: [[f64; 3]; 4] = std::array::from_fn(|i| {
+            let i = i as f64;
+            [0.02 + 0.03 * i, -0.01 + 0.02 * i, 0.04 - 0.01 * i]
+        });
+        let motion =
+            FiniteViscoTetMotion::try_new_with_nodal_density(relaxed(&law, cx), &RHO, &old_v, cx)
+                .unwrap();
+        let point = TetImpulsePoint {
+            tetrahedron: 0,
+            weights: [0.1, 0.2, 0.3, 0.4],
+        };
+        let direction: [f64; 3] = [0.6, 0.8, 0.0];
+        let impulse = 0.03;
+        let applied = direction.map(|n| impulse * n);
+        let origin = [-0.2, 0.3, 0.4];
+        let x: [[f64; 3]; 4] = std::array::from_fn(|i| {
+            std::array::from_fn(|c| NODES[i][c] + motion.solid().displacement_m()[i][c])
+        });
+        let before = motion.point_kinematics(point, cx).unwrap();
+        let position = [0.2 * (1.0 + EXTENSION), 0.3, 0.4];
+        let velocity = [0.08, 0.03, 0.02];
+        for c in 0..3 {
+            close(before.position_m[c], position[c], 1e-15);
+            close(before.velocity_mps[c], velocity[c], 1e-15);
+        }
+        // Each Cartesian mass block is A/12, with diagonal [10,18,10,10],
+        // off-diagonal 7 at the dense node and 5 between the other nodes.
+        // Exact inversion gives M^-1*w = [-370,-160,482,908]/1775.
+        // In particular, a point impulse produces negative nodal responses:
+        // neither lumping nor substituting the cell mean can pass this oracle.
+        let inverse_weights = [-370.0, -160.0, 482.0, 908.0].map(|x| x / 1775.0);
+        let free_mobility = 2194.0 / 8875.0;
+        let supported: Vec<_> = (0..12).filter(|&dof| dof != 4).collect();
+        for held in [&[][..], supported.as_slice()] {
+            let restrained = !held.is_empty();
+            let expected_mobility = if restrained {
+                (0.2 * direction[1]).powi(2) / 1.5
+            } else {
+                free_mobility
+            };
+            let mobility = motion
+                .point_directional_inverse_mass_per_kg(
+                    held,
+                    point,
+                    direction,
+                    impulse_controls(),
+                    cx,
+                )
+                .unwrap();
+            assert!(mobility.solve.converged_euclidean());
+            close(mobility.inverse_mass_per_kg, expected_mobility, 1e-13);
+            let event = motion
+                .point_impulse_candidate(held, point, applied, origin, impulse_controls(), cx)
+                .unwrap();
+            let expected: [[f64; 3]; 4] = std::array::from_fn(|i| {
+                std::array::from_fn(|c| {
+                    old_v[i][c]
+                        + if restrained {
+                            if i == 1 && c == 1 {
+                                impulse * 0.2 * direction[1] / 1.5
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            inverse_weights[i] * applied[c]
+                        }
+                })
+            });
+            for i in 0..4 {
+                for c in 0..3 {
+                    close(event.motion.velocity_mps()[i][c], expected[i][c], 1e-13);
+                }
+            }
+            let after = event.motion.point_kinematics(point, cx).unwrap();
+            assert_eq!(after.position_m, before.position_m);
+            let directional_change: f64 = (0..3)
+                .map(|c| direction[c] * (after.velocity_mps[c] - before.velocity_mps[c]))
+                .sum();
+            close(directional_change, impulse * expected_mobility, 1e-14);
+            let point_work: f64 = (0..3)
+                .map(|c| {
+                    applied[c]
+                        * (before.velocity_mps[c]
+                            + 0.5 * (after.velocity_mps[c] - before.velocity_mps[c]))
+                })
+                .sum();
+            close(event.impulse.applied_work_j, point_work, 1e-14);
+            let torque = cross(std::array::from_fn(|c| position[c] - origin[c]), applied);
+            for c in 0..3 {
+                close(event.impulse.applied.linear_kg_m_s[c], applied[c], 1e-14);
+                close(event.impulse.applied.angular_kg_m2_s[c], torque[c], 1e-14);
+            }
+            let initial_inventory = inventory(&x, &old_v, origin);
+            let final_inventory = inventory(&x, &expected, origin);
+            close(
+                event.impulse.kinetic_change_j,
+                final_inventory.2 - initial_inventory.2,
+                1e-14,
+            );
+            let expected_support_work: f64 = if restrained {
+                let delta = impulse * 0.2 * direction[1] / 1.5;
+                held.iter()
+                    .map(|&dof| {
+                        let i = dof / 3;
+                        let c = dof % 3;
+                        let dp = if c == 1 { mass(i, 1) * delta } else { 0.0 };
+                        old_v[i][c] * (dp - point.weights[i] * applied[c])
+                    })
+                    .sum()
+            } else {
+                0.0
+            };
+            close(event.impulse.support_work_j, expected_support_work, 1e-14);
+            close(
+                event.impulse.kinetic_change_j,
+                point_work + expected_support_work,
+                1e-14,
+            );
+            assert_eq!(
+                event.motion.solid().element_states(),
+                motion.solid().element_states()
+            );
+            assert_eq!(event.motion.solid().time_s(), HOLD);
+        }
+        // A fully restrained interior trace has zero mobility without changing
+        // its nonzero accepted material-point velocity.
+        let all: Vec<_> = (0..12).collect();
+        close(
+            motion
+                .point_directional_inverse_mass_per_kg(
+                    &all,
+                    point,
+                    direction,
+                    impulse_controls(),
+                    cx,
+                )
+                .unwrap()
+                .inverse_mass_per_kg,
+            0.0,
+            0.0,
+        );
+        for bad in [
+            TetImpulsePoint {
+                tetrahedron: 1,
+                ..point
+            },
+            TetImpulsePoint {
+                weights: [0.1, 0.2, 0.3, 0.3],
+                ..point
+            },
+            TetImpulsePoint {
+                weights: [-0.1, 0.2, 0.3, 0.6],
+                ..point
+            },
+            TetImpulsePoint {
+                weights: [f64::NAN, 0.2, 0.3, 0.5],
+                ..point
+            },
+        ] {
+            assert!(motion.point_kinematics(bad, cx).is_err());
+            assert!(
+                motion
+                    .point_directional_inverse_mass_per_kg(
+                        &[],
+                        bad,
+                        direction,
+                        impulse_controls(),
+                        cx,
+                    )
+                    .is_err()
+            );
+            assert!(
+                motion
+                    .point_impulse_candidate(&[], bad, applied, origin, impulse_controls(), cx,)
+                    .is_err()
+            );
+        }
+        for bad_direction in [[0.0; 3], [2.0, 0.0, 0.0]] {
+            assert!(
+                motion
+                    .point_directional_inverse_mass_per_kg(
+                        &[],
+                        point,
+                        bad_direction,
+                        impulse_controls(),
+                        cx,
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(motion.velocity_mps(), old_v);
+        assert_eq!(motion.point_kinematics(point, cx).unwrap(), before);
     });
 }

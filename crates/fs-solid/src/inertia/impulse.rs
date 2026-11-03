@@ -78,64 +78,47 @@ impl ReferenceMass {
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 3]>, SolidImpulseReport), InertiaError> {
         checkpoint(cx)?;
+        validate_motion(self.ndofs(), positions_m, velocity_mps, origin_m, cx)?;
+        let (mut candidate, solve) =
+            self.free_velocity_response(held_velocity_dofs, nodal_impulses_kg_m_s, controls, cx)?;
+        for (node, (next, before)) in candidate.iter_mut().zip(velocity_mps).enumerate() {
+            if node % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            for axis in 0..3 {
+                next[axis] = if next[axis] == 0.0 {
+                    before[axis]
+                } else {
+                    finite(before[axis] + next[axis])?
+                };
+            }
+        }
+        self.finish_impulse_candidate(
+            positions_m,
+            velocity_mps,
+            held_velocity_dofs,
+            nodal_impulses_kg_m_s,
+            origin_m,
+            controls,
+            candidate,
+            solve,
+            cx,
+        )
+    }
+
+    /// Supported velocity response without touching geometry or material history.
+    /// The original sparse M_ff is borrowed, never lumped or explicitly inverted.
+    pub(crate) fn free_velocity_response(
+        &self,
+        held_velocity_dofs: &[usize],
+        nodal_impulses_kg_m_s: &[(usize, f64)],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 3]>, SolveReport), InertiaError> {
+        checkpoint(cx)?;
         let n = self.ndofs();
-        if positions_m.len() != n / 3
-            || velocity_mps.len() != n / 3
-            || positions_m.iter().flatten().any(|x| !x.is_finite())
-            || velocity_mps.iter().flatten().any(|x| !x.is_finite())
-            || origin_m.iter().any(|x| !x.is_finite())
-            || [
-                controls.linear_tolerance_kg_m_s,
-                controls.angular_tolerance_kg_m2_s,
-                controls.work_tolerance_j,
-            ]
-            .iter()
-            .any(|x| !x.is_finite() || *x <= 0.0)
-            || !controls.solve.tolerance.is_finite()
-            || controls.solve.tolerance <= 0.0
-            || controls.solve.tolerance >= 1.0
-        {
-            return Err(invalid(
-                "complete finite positions/velocities, finite origin and positive impulse tolerances required",
-            ));
-        }
-        // The reduced operator borrows CSR rows. No dense inverse or second
-        // sparse matrix is built. Include the native solver's worst-case
-        // iteration histories, not only this owner's fixed-size vectors.
-        let required = n
-            .checked_mul(48)
-            .and_then(|vectors| {
-                controls
-                    .solve
-                    .max_iterations
-                    .checked_add(1)
-                    .and_then(|history| history.checked_mul(4))
-                    .and_then(|history| vectors.checked_add(history))
-            })
-            .ok_or_else(|| invalid("impulse workspace size overflow"))?;
-        if required > controls.maximum_workspace_components {
-            return Err(invalid("impulse exceeds its workspace component cap"));
-        }
-        let mut held = vec![false; n];
-        for (index, &dof) in held_velocity_dofs.iter().enumerate() {
-            if index % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            if dof >= n || held[dof] {
-                return Err(invalid("distinct in-range held velocity DOFs required"));
-            }
-            held[dof] = true;
-        }
-        let mut applied = vec![0.0; n];
-        for (index, &(dof, impulse)) in nodal_impulses_kg_m_s.iter().enumerate() {
-            if index % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            if dof >= n || !impulse.is_finite() {
-                return Err(invalid("finite in-range nodal impulses required"));
-            }
-            applied[dof] = finite(applied[dof] + impulse)?;
-        }
+        let (held, applied) =
+            admit_impulses(n, held_velocity_dofs, nodal_impulses_kg_m_s, controls, cx)?;
         let mut free = Vec::with_capacity(n - held_velocity_dofs.len());
         let mut reduced = vec![usize::MAX; n];
         let mut diagonal = Vec::with_capacity(free.capacity());
@@ -177,18 +160,57 @@ impl ReferenceMass {
                 solved.report
             )));
         }
-        let before_v = velocity_mps.as_flattened();
-        let mut candidate = velocity_mps.to_vec();
-        let after_v = candidate.as_flattened_mut();
+        let mut response = vec![[0.0; 3]; n / 3];
         for (row, (&dof, &change)) in free.iter().zip(&solved.x).enumerate() {
             if row % 256 == 0 {
                 checkpoint(cx)?;
             }
-            after_v[dof] = if change == 0.0 {
-                before_v[dof]
-            } else {
-                finite(before_v[dof] + change)?
-            };
+            response[dof / 3][dof % 3] = finite(change)?;
+        }
+        checkpoint(cx)?;
+        Ok((response, solved.report))
+    }
+
+    /// Audit the actual represented result of an existing native constrained
+    /// solve. Pressure or other internal impulses must be included in the
+    /// effective nodal right-hand side, with their separate physical account
+    /// retained by that constraint owner. This method performs no second solve.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finish_impulse_candidate(
+        &self,
+        positions_m: &[[f64; 3]],
+        velocity_mps: &[[f64; 3]],
+        held_velocity_dofs: &[usize],
+        nodal_effective_impulses: &[(usize, f64)],
+        origin_m: [f64; 3],
+        controls: SolidImpulseControls,
+        candidate: Vec<[f64; 3]>,
+        solve: SolveReport,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 3]>, SolidImpulseReport), InertiaError> {
+        checkpoint(cx)?;
+        let n = self.ndofs();
+        validate_motion(n, positions_m, velocity_mps, origin_m, cx)?;
+        validate_motion(n, positions_m, &candidate, origin_m, cx)?;
+        if !solve.converged_euclidean() {
+            return Err(invalid("impulse requires a converged native solve report"));
+        }
+        let (held, applied) = admit_impulses(
+            n,
+            held_velocity_dofs,
+            nodal_effective_impulses,
+            controls,
+            cx,
+        )?;
+        let before_v = velocity_mps.as_flattened();
+        let after_v = candidate.as_flattened();
+        for (row, &dof) in held_velocity_dofs.iter().enumerate() {
+            if row % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if before_v[dof].to_bits() != after_v[dof].to_bits() {
+                return Err(invalid("an impulse must preserve held velocities exactly"));
+            }
         }
         let mut delta_v = vec![0.0; n];
         let mut average_v = vec![0.0; n];
@@ -244,7 +266,7 @@ impl ReferenceMass {
         let before_p = self.action(before_v, cx)?;
         let after_p = self.action(after_v, cx)?;
         let report = SolidImpulseReport {
-            solve: solved.report,
+            solve,
             before: moments(positions_m, &before_p, origin_m, cx)?,
             after: moments(positions_m, &after_p, origin_m, cx)?,
             applied: moments(positions_m, &applied, origin_m, cx)?,
@@ -263,6 +285,95 @@ impl ReferenceMass {
         checkpoint(cx)?;
         Ok((candidate, report))
     }
+}
+
+fn validate_motion(
+    n: usize,
+    positions_m: &[[f64; 3]],
+    velocity_mps: &[[f64; 3]],
+    origin_m: [f64; 3],
+    cx: &Cx<'_>,
+) -> Result<(), InertiaError> {
+    if n % 3 != 0
+        || positions_m.len() != n / 3
+        || velocity_mps.len() != n / 3
+        || origin_m.iter().any(|x| !x.is_finite())
+    {
+        return Err(invalid(
+            "complete finite positions/velocities and finite origin required",
+        ));
+    }
+    for (node, (position, velocity)) in positions_m.iter().zip(velocity_mps).enumerate() {
+        if node % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        if position.iter().chain(velocity).any(|x| !x.is_finite()) {
+            return Err(invalid("finite positions and velocities required"));
+        }
+    }
+    Ok(())
+}
+
+fn admit_impulses(
+    n: usize,
+    held_velocity_dofs: &[usize],
+    nodal_impulses_kg_m_s: &[(usize, f64)],
+    controls: SolidImpulseControls,
+    cx: &Cx<'_>,
+) -> Result<(Vec<bool>, Vec<f64>), InertiaError> {
+    if n % 3 != 0
+        || [
+            controls.linear_tolerance_kg_m_s,
+            controls.angular_tolerance_kg_m2_s,
+            controls.work_tolerance_j,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x <= 0.0)
+        || !controls.solve.tolerance.is_finite()
+        || controls.solve.tolerance <= 0.0
+        || controls.solve.tolerance >= 1.0
+    {
+        return Err(invalid(
+            "positive finite impulse tolerances and a relative solve tolerance below one required",
+        ));
+    }
+    // Include native solver histories as well as fixed vectors. Both the
+    // response solve and post-solve account fit this conservative common cap.
+    let required = n
+        .checked_mul(48)
+        .and_then(|vectors| {
+            controls
+                .solve
+                .max_iterations
+                .checked_add(1)
+                .and_then(|history| history.checked_mul(4))
+                .and_then(|history| vectors.checked_add(history))
+        })
+        .ok_or_else(|| invalid("impulse workspace size overflow"))?;
+    if required > controls.maximum_workspace_components {
+        return Err(invalid("impulse exceeds its workspace component cap"));
+    }
+    let mut held = vec![false; n];
+    for (index, &dof) in held_velocity_dofs.iter().enumerate() {
+        if index % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        if dof >= n || held[dof] {
+            return Err(invalid("distinct in-range held velocity DOFs required"));
+        }
+        held[dof] = true;
+    }
+    let mut applied = vec![0.0; n];
+    for (index, &(dof, impulse)) in nodal_impulses_kg_m_s.iter().enumerate() {
+        if index % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        if dof >= n || !impulse.is_finite() {
+            return Err(invalid("finite in-range nodal impulses required"));
+        }
+        applied[dof] = finite(applied[dof] + impulse)?;
+    }
+    Ok((held, applied))
 }
 
 struct FreeMass<'a, 'cx> {
@@ -331,12 +442,19 @@ fn magnitude(vector: [f64; 3]) -> f64 {
     vector[0].hypot(vector[1]).hypot(vector[2])
 }
 
-fn moments(
+pub(crate) fn moments(
     positions: &[[f64; 3]],
     momentum: &[f64],
     origin_m: [f64; 3],
     cx: &Cx<'_>,
 ) -> Result<SolidMomentum, InertiaError> {
+    if positions.len().checked_mul(3) != Some(momentum.len())
+        || origin_m.iter().any(|value| !value.is_finite())
+    {
+        return Err(invalid(
+            "complete momentum field and finite moment origin required",
+        ));
+    }
     let mut linear = [0.0; 3];
     let mut angular = [0.0; 3];
     for (node, position) in positions.iter().enumerate() {

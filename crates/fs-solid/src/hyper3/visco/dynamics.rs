@@ -21,6 +21,7 @@ use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 
 pub use crate::inertia::InertialEnergy;
 pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
+pub use crate::inertia::{SolidPointKinematics, SolidPointMobility, TetImpulsePoint};
 
 /// Independent budgets for material work and numerical kinetic damping.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -165,6 +166,69 @@ impl<'a> FiniteViscoTetMotion<'a> {
     }
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+
+    /// Current physical material-point position and work-conjugate velocity.
+    pub fn point_kinematics(
+        &self,
+        point: TetImpulsePoint,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointKinematics, FiniteViscoTetError> {
+        crate::inertia::point::kinematics(
+            point,
+            self.solid.tetrahedra,
+            self.solid.nodes_m,
+            &self.solid.displacement_m,
+            &self.velocity_mps,
+            cx,
+        )
+        .map_err(|error| FiniteViscoTetError::from(inertia_error(error)))
+    }
+
+    /// Supported directional inverse mass at a material point [1/kg].
+    /// Uses the original consistent mass and a unit world direction. No material
+    /// evaluation, history clone, dense inverse or lumped mass is needed.
+    pub fn point_directional_inverse_mass_per_kg(
+        &self,
+        held: &[usize],
+        point: TetImpulsePoint,
+        direction: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobility, FiniteViscoTetError> {
+        crate::inertia::point::directional_mobility(
+            &self.mass,
+            self.solid.tetrahedra,
+            held,
+            point,
+            direction,
+            controls,
+            cx,
+        )
+        .map_err(|error| FiniteViscoTetError::from(inertia_error(error)))
+    }
+
+    /// Apply a world impulse through the transpose of the material-point trace.
+    /// Current point work and torque, original mass and all relaxation memory
+    /// are retained by the same native nodal impulse account.
+    pub fn point_impulse_candidate(
+        &self,
+        held: &[usize],
+        point: TetImpulsePoint,
+        impulse_world: [f64; 3],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteViscoMotionImpulse<'a>, FiniteViscoTetError> {
+        let entries = crate::inertia::point::distribution(
+            point,
+            self.solid.tetrahedra,
+            self.velocity_mps.len(),
+            impulse_world,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
     }
 
     /// Apply an instantaneous nodal impulse through the original consistent mass.
