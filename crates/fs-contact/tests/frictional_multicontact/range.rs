@@ -361,3 +361,97 @@ fn redundant_contact_cancellation_and_work_exhaustion_still_return_no_authority(
     let retry = solve(&contacts, &w);
     assert_eq!(first, retry);
 }
+
+#[test]
+fn exact_zero_tangent_mobility_captures_normal_motion_without_compliance() {
+    // A supported mass-two slider has no motion in one or both tangent
+    // directions. Zero physical rows remain in the three-coordinate solve.
+    for (tangent_diagonal, rank) in [([0.0, 0.0], 1), ([0.0, 1.0], 2), ([1.0, 0.0], 2)] {
+        let w = [
+            0.5,
+            0.0,
+            0.0,
+            0.0,
+            tangent_diagonal[0],
+            0.0,
+            0.0,
+            0.0,
+            tangent_diagonal[1],
+        ];
+        let out = solve(&[contact(1, [-1.0, 0.0, 0.0], 0.3)], &w);
+        close(out.impulses[0][0], 2.0);
+        close(out.impulses[0][1], 0.0);
+        close(out.impulses[0][2], 0.0);
+        for value in out.relative_velocities_after[0] {
+            close(value, 0.0);
+        }
+        close(out.relative_work, -1.0);
+        close(out.dissipated_energy, 1.0);
+        assert_eq!(out.minimum_normalized_pivot, 0.0);
+        let FrictionalContactDeterminacy::UniqueVelocity(witness) = &out.determinacy else {
+            panic!("constrained tangents cannot claim unique contact loads");
+        };
+        assert_eq!((witness.rank, witness.dimension), (rank, 3));
+        let work = out.impulse_work_witness.as_ref().unwrap();
+        assert_eq!(work.impulse_coordinates, [0, 1, 2]);
+        assert_eq!(work.rank, rank);
+        assert!(work.range_velocity_residual <= work.allowed_range_velocity_residual);
+    }
+}
+
+#[test]
+fn exact_zero_tangent_slip_keeps_the_native_impulse_work_admission() {
+    use fs_contact::frictional_multicontact::NormalVelocityLaw;
+    let w = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let mut c = contact(1, [-1.0, 2.0, -3.0], 0.0);
+    c.normal_law = NormalVelocityLaw::NewtonRestitution { coefficient: 0.5 };
+    let out = solve(&[c], &w);
+    for (actual, expected) in out.impulses[0].into_iter().zip([3.0, 0.0, 0.0]) {
+        close(actual, expected);
+    }
+    for (actual, expected) in out.relative_velocities_after[0]
+        .into_iter()
+        .zip([0.5, 2.0, -3.0])
+    {
+        close(actual, expected);
+    }
+    close(out.dissipated_energy, 0.75);
+    let work = out.impulse_work_witness.as_ref().unwrap();
+    assert_eq!(work.impulse_coordinates, [0]);
+    assert_eq!(work.rank, 1);
+    assert!(work.range_velocity_residual <= work.allowed_range_velocity_residual);
+
+    // Nonzero friction retains both tangent coordinates in the original
+    // work proof. This admission does not certify frictional null-space slip.
+    c.friction_coefficient = 0.3;
+    let error = solve_frictional_contacts(&[c], &w, Default::default(), || false).unwrap_err();
+    let FrictionalContactError::UnresolvedWork {
+        range_velocity_residual,
+        allowed,
+    } = error
+    else {
+        panic!("expected the unchanged work-determinacy refusal: {error:?}");
+    };
+    assert!(range_velocity_residual > allowed);
+}
+
+#[test]
+fn zero_diagonal_admission_requires_the_exact_original_row_and_column() {
+    let c = contact(1, [-1.0, 0.0, 0.0], 0.3);
+    for (upper, lower, diagonal) in [
+        (1e-300, 0.0, 0.0),
+        (0.0, 1e-300, 0.0),
+        (1e-300, 1e-300, 0.0),
+        (0.0, 0.0, -1e-300),
+    ] {
+        let w = [0.5, upper, 0.0, lower, diagonal, 0.0, 0.0, 0.0, 0.0];
+        assert!(matches!(
+            solve_frictional_contacts(&[c], &w, Default::default(), || false),
+            Err(FrictionalContactError::MobilityNotAdmitted(_))
+        ));
+    }
+    assert!(matches!(
+        solve_frictional_contacts(&[c], &[0.0; 9], Default::default(), || false),
+        Err(FrictionalContactError::MobilityNotAdmitted(_))
+    ));
+}

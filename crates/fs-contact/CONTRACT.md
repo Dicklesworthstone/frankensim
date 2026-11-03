@@ -1235,6 +1235,14 @@ mechanics owner still checks the actual event geometry and momentum response.
 
 `frictional_multicontact` separates numerical PSD/rank admission from physical Coulomb determinacy. It reuses original `fs-la` eigendecomposition, checks original-matrix spectral and orthogonality residuals and a separated numerical rank, and retains the unmodified mobility for every nonlinear, cone, complementarity and work check. No compliance or dropped physical row is introduced.
 
+An exactly zero diagonal is admitted only when its entire ORIGINAL row and
+column are exactly zero; negative diagonals and any nonzero coupling still
+refuse. This allows constrained tangent directions without fictitious motion.
+If both tangent self-mobilities vanish, the natural map uses the finite normal
+step as its common tangent numerical scale. The original zero mobility and
+Coulomb disk remain unchanged; positive tangent mobility retains the original
+step. Positive normal mobility is still required.
+
 `UniqueImpulses` retains the independent-row contraction result. When that
 sufficient bound fails, the same checked candidate energy criterion may admit
 the full positive spectrum without dropping any direction. Then
@@ -1271,6 +1279,13 @@ rigid rotation; individual redundant loads and source allocations stay
 representative. Focused regressions include an analytic two-contact family
 with identical velocity but losses ranging from zero to two joules, and
 zero-friction/mixed-coordinate work admission.
+
+Three added groups in `tests/frictional_multicontact/range.rs` cover normal
+capture with one or both exact-zero tangent directions, frictionless null-space
+slip with restitution, and refusal of tiny nonzero couplings or negative
+diagonals. The existing work witness remains necessary: frictional null-space
+slip whose work it cannot prove still returns `UnresolvedWork`. These three
+added groups were not executed in the constrained editing environment.
 
 Sixteen focused integration groups pass: the twelve earlier groups plus physical four-foot cube stick/threshold/oblique sliding with two independently constructed pressure allocations, independent tangent-frame covariance and permutation, an exact heterogeneous-friction example with two passive motions, and tiny heterogeneous-friction refusal. Three original analytic-action/preconditioner tests also pass. Native body motion follows for an actual mechanical Gram matrix; whole-workspace Cargo/DSR verification and broader Moreau-Jean scope remain separate.
 

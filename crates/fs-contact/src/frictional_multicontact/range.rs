@@ -137,10 +137,24 @@ fn admit_spectrum(
     let mut w = vec![0.0; d * d];
     for i in 0..d {
         poll(cancelled)?;
-        if original[i * d + i] <= 0.0 {
+        if original[i * d + i] < 0.0 {
             return Ok(None);
         }
+        if original[i * d + i] == 0.0 {
+            // A PSD matrix has an exactly zero row and column at an exactly
+            // zero diagonal. Admit constrained coordinates without assigning
+            // them compliance or tolerating even a small nonzero coupling.
+            if (0..d).any(|j| original[i * d + j] != 0.0 || original[j * d + i] != 0.0) {
+                return Ok(None);
+            }
+            continue;
+        }
         for j in 0..=i {
+            if original[j * d + j] == 0.0 {
+                // This earlier coordinate's entire row/column was checked.
+                // Avoid normalizing its exact zeros by a zero diagonal.
+                continue;
+            }
             let a = original[i * d + j];
             let b = original[j * d + i];
             let symmetry = (a / original[i * d + i].sqrt() / original[j * d + j].sqrt()

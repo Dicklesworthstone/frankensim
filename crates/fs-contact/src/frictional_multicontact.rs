@@ -411,7 +411,15 @@ pub fn solve_frictional_contacts(
         let a = 3 * k;
         let rn = 1.0 / matrix[a * d + a];
         // One common step preserves the Euclidean Coulomb disk in both axes.
-        let rt = 2.0 / (matrix[(a + 1) * d + a + 1] + matrix[(a + 2) * d + a + 2]);
+        let tangent_mobility = matrix[(a + 1) * d + a + 1] + matrix[(a + 2) * d + a + 2];
+        // For admitted exact-zero tangent rows, any positive finite natural-
+        // map step describes the same Coulomb law. Reuse the normal scale;
+        // the physical mobility remains exactly zero in those directions.
+        let rt = if tangent_mobility == 0.0 {
+            rn
+        } else {
+            2.0 / tangent_mobility
+        };
         if !rn.is_finite() || !rt.is_finite() || rn <= 0.0 || rt <= 0.0 {
             return Err(E::NonFinite);
         }
