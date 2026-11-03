@@ -4,7 +4,7 @@
 use fs_vpm::coarsen3d::{coarsen_oldest, station_impulse};
 use fs_vpm::farfield3d::{FarField, WakeCoreEvolutionMode, cell_from_segs};
 use fs_vpm::filament3d::{
-    FilamentWake, WakeRateCertificate, WakeSegment, segment_velocity_with_core,
+    FilamentWake, ShedRow, WakeRateCertificate, WakeSegment, segment_velocity_with_core,
 };
 use fs_vpm::images3d::{ImagePlane, ImageSystem, grounded_hybrid_velocity};
 use std::collections::BTreeMap;
@@ -92,6 +92,36 @@ fn impulse(segments: &[WakeSegment]) -> [f64; 3] {
         }
     }
     value
+}
+
+// Isolate a station's actual emitted closed rings. This deliberately does not
+// reuse the production quadrilateral-area or least-change reconstruction.
+fn station_impulse_vectors(wake: &FilamentWake) -> Vec<[f64; 3]> {
+    (0..wake.cert.n_stations)
+        .map(|s| {
+            let mut isolated = wake.clone();
+            for row in &mut isolated.rows {
+                for (other, gamma) in row.gamma.iter_mut().enumerate() {
+                    if other != s {
+                        *gamma = 0.0;
+                    }
+                }
+            }
+            impulse(&segments(&isolated, 0.0))
+        })
+        .collect()
+}
+
+fn rotated(p: [f64; 3], orientation: usize) -> [f64; 3] {
+    match orientation {
+        0 => p,
+        1 => [p[2], p[1], -p[0]],
+        _ => [
+            0.6 * p[0] - 0.8 * p[1],
+            0.48 * p[0] + 0.36 * p[1] - 0.8 * p[2],
+            0.64 * p[0] + 0.48 * p[1] + 0.6 * p[2],
+        ],
+    }
 }
 
 #[test]
@@ -184,6 +214,244 @@ fn g0_physical_source_impulse_matches_the_coarsening_invariant() {
     let after = segments(&w, 0.0);
     assert_closed(&after);
     near(impulse(&after), before);
+}
+
+#[test]
+fn g0_coarsening_preserves_each_station_under_rotations_and_origin_changes() {
+    let original = wake(16, true);
+    let mut reference = original.clone();
+    assert!(
+        !coarsen_oldest(&mut reference, 4)
+            .unwrap()
+            .used_stationwise_correction
+    );
+    for orientation in [1, 2] {
+        let mut w = original.clone();
+        for p in w
+            .line_nodes
+            .iter_mut()
+            .chain(w.rows.iter_mut().flat_map(|r| &mut r.nodes))
+        {
+            let value = rotated(*p, orientation);
+            *p = [value[0] + 2.0, value[1] - 3.0, value[2] + 4.0];
+        }
+        // The exact axis swap has ZERO world-x spacing and used to refuse.
+        let before = station_impulse_vectors(&w);
+        let metric = coarsen_oldest(&mut w, 4).unwrap();
+        assert!(!metric.used_stationwise_correction);
+        assert!(metric.near_rms_mps.is_finite() && metric.far_delta_mps.is_finite());
+        for (actual, expected) in station_impulse_vectors(&w).into_iter().zip(before) {
+            near(actual, expected);
+        }
+        assert_closed(&segments(&w, 0.0));
+        for (row, baseline) in w.rows.iter().zip(&reference.rows) {
+            assert!((row.core2_m2 - baseline.core2_m2).abs() < 2e-14);
+            for (gamma, expected) in row.gamma.iter().zip(&baseline.gamma) {
+                assert!((gamma - expected).abs() < 2e-13 * (1.0 + expected.abs()));
+            }
+        }
+    }
+}
+
+fn curved_wake() -> FilamentWake {
+    let mut original = wake(8, true);
+    for (r, row) in original.rows.iter_mut().enumerate() {
+        let t = (8 - r) as f64;
+        for (s, p) in row.nodes.iter_mut().enumerate() {
+            let s = s as f64;
+            *p = [
+                -t + 0.03 * t * s * s,
+                s - 1.5 + 0.02 * t * t * s,
+                1.0 + 0.1 * t * t + 0.04 * t * s * s,
+            ];
+        }
+    }
+    original
+}
+
+#[test]
+fn g0_curved_sheet_preserves_three_axis_impulse_without_trading_between_stations() {
+    let original = curved_wake();
+    for orientation in [0, 1, 2] {
+        let mut w = original.clone();
+        for p in w
+            .line_nodes
+            .iter_mut()
+            .chain(w.rows.iter_mut().flat_map(|r| &mut r.nodes))
+        {
+            let value = rotated(*p, orientation);
+            *p = [value[0] + 2.0, value[1] - 3.0, value[2] + 4.0];
+        }
+        let before = station_impulse_vectors(&w);
+        assert!(before.iter().all(|v| v.iter().all(|x| x.abs() > 1e-3)));
+        assert!(
+            coarsen_oldest(&mut w, 3)
+                .unwrap()
+                .used_stationwise_correction
+        );
+        assert_eq!(w.rows.len(), 5);
+        for (actual, expected) in station_impulse_vectors(&w).into_iter().zip(before) {
+            near(actual, expected);
+        }
+        assert_closed(&segments(&w, 0.0));
+    }
+}
+
+#[test]
+fn g0_stationwise_fallback_preserves_unflagged_station_bits() {
+    let mut mixed = curved_wake();
+    for (r, row) in mixed.rows.iter_mut().enumerate() {
+        let x = -((8 - r) as f64);
+        for (s, node) in row.nodes.iter_mut().take(2).enumerate() {
+            *node = [x, s as f64 - 1.5, 1.0];
+        }
+    }
+    // Same strengths mean the original row-centroid weights are identical.
+    // Flattening the other stations supplies a wholly pairwise-admissible
+    // independent run, with identical geometry at station zero.
+    let mut planar = mixed.clone();
+    for (r, row) in planar.rows.iter_mut().enumerate() {
+        let x = -((8 - r) as f64);
+        for (s, node) in row.nodes.iter_mut().enumerate() {
+            *node = [x, s as f64 - 1.5, 1.0];
+        }
+    }
+    let before = station_impulse_vectors(&mixed);
+    assert!(
+        !coarsen_oldest(&mut planar, 3)
+            .unwrap()
+            .used_stationwise_correction
+    );
+    assert!(
+        coarsen_oldest(&mut mixed, 3)
+            .unwrap()
+            .used_stationwise_correction
+    );
+    for (actual, reference) in mixed.rows.iter().zip(&planar.rows) {
+        assert_eq!(actual.gamma[0].to_bits(), reference.gamma[0].to_bits());
+    }
+    for (actual, expected) in station_impulse_vectors(&mixed).into_iter().zip(before) {
+        near(actual, expected);
+    }
+}
+
+fn incompatible_curved_pair(scale: f64) -> FilamentWake {
+    let line = |x: f64, z: f64| {
+        (0..3)
+            .map(|y| [scale * x, scale * f64::from(y), scale * z])
+            .collect()
+    };
+    let mut w = FilamentWake::new(
+        WakeRateCertificate {
+            shed_hz: 100.0,
+            n_stations: 2,
+            max_rows: 4,
+        },
+        line(0.0, 0.0),
+    )
+    .unwrap();
+    w.rows = vec![
+        ShedRow {
+            nodes: line(-2.0, 0.0),
+            gamma: vec![1.0, -1.0],
+            core2_m2: 0.01 * scale * scale,
+            age_ticks: 1.0,
+        },
+        ShedRow {
+            nodes: line(-1.0, 1.0),
+            gamma: vec![2.0, -2.0],
+            core2_m2: 0.01 * scale * scale,
+            age_ticks: 0.0,
+        },
+    ];
+    w
+}
+
+#[test]
+fn g0_incompatible_station_impulses_refuse_atomically_even_when_totals_cancel() {
+    for scale in [1e-12, 1.0, 1e12] {
+        let mut w = incompatible_curved_pair(scale);
+        let before = w.clone();
+        if scale == 1.0 {
+            let stations = station_impulse_vectors(&w);
+            near(stations[0], [1.0, 0.0, 3.0]);
+            near(stations[1], [-1.0, 0.0, -3.0]);
+            near(impulse(&segments(&w, 0.0)), [0.0; 3]);
+        }
+        assert_eq!(
+            coarsen_oldest(&mut w, 1).unwrap_err().code,
+            "coarsen-impulse-unrepresentable"
+        );
+        assert_eq!(w, before);
+    }
+}
+
+#[test]
+fn g0_zero_circulation_coincident_rows_coarsen_without_inventing_impulse() {
+    let mut w = incompatible_curved_pair(1.0);
+    for row in &mut w.rows {
+        row.nodes.clone_from(&w.line_nodes);
+        row.gamma.fill(0.0);
+    }
+    let metric = coarsen_oldest(&mut w, 1).unwrap();
+    assert!(metric.used_stationwise_correction);
+    assert_eq!(metric.near_rms_mps, 0.0);
+    assert_eq!(metric.far_delta_mps, 0.0);
+    assert_eq!(station_impulse_vectors(&w), vec![[0.0; 3]; 2]);
+}
+
+#[test]
+fn g0_metric_refusal_restores_the_wake_and_untouched_row_buffers_are_moved() {
+    for strength in [1.0, 1e300] {
+        let nodes = |x: f64| vec![[x, 0.0, x * 1e-13], [x, 1.0, x * 1e-13]];
+        let mut w = FilamentWake::new(
+            WakeRateCertificate {
+                shed_hz: 1.0,
+                n_stations: 1,
+                max_rows: 8,
+            },
+            nodes(4.0),
+        )
+        .unwrap();
+        w.rows = (0..4)
+            .map(|r| ShedRow {
+                nodes: nodes(f64::from(r)),
+                gamma: vec![strength],
+                core2_m2: 0.0,
+                age_ticks: f64::from(4 - r),
+            })
+            .collect();
+        let before = w.clone();
+        let original_rows = w.rows.as_ptr();
+        let original_line = w.line_nodes.as_ptr();
+        let tail_buffers: Vec<_> = w.rows[2..]
+            .iter()
+            .map(|row| (row.nodes.as_ptr(), row.gamma.as_ptr()))
+            .collect();
+        // This is the first near-ring probe: a finite distance from the
+        // unregularized trailing filament. The large-strength field itself
+        // overflows, independently of any squared-error norm calculation.
+        let field = w.induced_velocity([3.5, 0.0, 3e-13]);
+        let result = coarsen_oldest(&mut w, 1);
+        let tail_start = if strength == 1.0 {
+            assert!(field.iter().all(|v| v.is_finite()));
+            assert!(!result.unwrap().used_stationwise_correction);
+            1
+        } else {
+            assert!(field.iter().any(|v| !v.is_finite()));
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "coarsen-unrepresentable");
+            assert!(error.message.contains("probe"));
+            assert_eq!(w, before);
+            assert_eq!(w.rows.as_ptr(), original_rows);
+            2
+        };
+        assert_eq!(w.line_nodes.as_ptr(), original_line);
+        for (row, (nodes, gamma)) in w.rows[tail_start..].iter().zip(tail_buffers) {
+            assert_eq!(row.nodes.as_ptr(), nodes);
+            assert_eq!(row.gamma.as_ptr(), gamma);
+        }
+    }
 }
 
 #[test]

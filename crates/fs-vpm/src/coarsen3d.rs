@@ -8,7 +8,8 @@
 //!   2. connectivity — n_stations + 1 nodes per row, loops closed,
 //!   3. full vector hydrodynamic impulse — each merged quad retains
 //!      γ_a A_a + γ_b A_b to floating-point roundoff, where A is its
-//!      oriented vector area; unrepresentable warped pairs refuse,
+//!      oriented vector area. Incompatible pairs use a minimum-change
+//!      stationwise correction, or refuse if its vector target is unrepresentable,
 //!   4. merged nodes use the pair's absolute-circulation weights,
 //!   5. the squared core smoothing scale includes all three components
 //!      of geometric separation (not a resolved viscous second moment),
@@ -18,6 +19,13 @@
 //! far-probe delta) is REPORTED per coarsen — never forced to vanish.
 
 use crate::filament3d::{FilamentWake, Refusal, ShedRow, ring_vector_area};
+
+mod impulse;
+
+/// Stationwise fallback's maximum vector-impulse residual divided by the sum
+/// of that station's original unsigned panel impulses. This is a floating-point
+/// allowance, not a continuum error estimate; it has no dimensional floor.
+pub const COARSEN_IMPULSE_RELATIVE_ROUNDOFF: f64 = 512.0 * f64::EPSILON;
 
 /// The reported coarsening error metric (mixed norm).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,6 +38,10 @@ pub struct CoarsenMetric {
     pub rows_before: usize,
     /// Rows after.
     pub rows_after: usize,
+    /// At least one incompatible station used the aggregate-impulse fallback,
+    /// which can redistribute circulation among its retained rows. The others
+    /// retain the original pairwise-preserving results.
+    pub used_stationwise_correction: bool,
 }
 
 /// Absolute-circulation weights for one
@@ -54,8 +66,9 @@ fn pair_weights(a: &ShedRow, b: &ShedRow) -> (f64, f64) {
 ///
 /// # Errors
 /// Invalid pair counts or source geometry/cores/ages, an attached far-field
-/// interface, or a merged quad unable to represent all three components of
-/// the original impulse. Every refusal leaves the wake unchanged.
+/// interface, or retained station geometry unable to represent all three
+/// components of its original impulse. Nonfinite candidate metrics also refuse.
+/// Every refusal leaves the wake unchanged.
 pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric, Refusal> {
     let count = k
         .checked_mul(2)
@@ -144,9 +157,10 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
     // the existing reduced core model, now using its full 3-D separation.
     let mid = n / 2;
     // Pass 2: solve Γ_new A_new = Γ_a A_a + Γ_b A_b for each station.
-    // A scalar strength cannot match a vector in an incompatible direction;
-    // such warped pairs must remain resolved rather than lose impulse.
+    // Preserve this fast path's original results. Only incompatible stations
+    // subsequently redistribute circulation across their retained panels.
     let mut merged: Vec<ShedRow> = Vec::with_capacity(k);
+    let mut stationwise = vec![false; n];
     for pair in 0..k {
         let a = &wake.rows[2 * pair];
         let b = &wake.rows[2 * pair + 1];
@@ -169,13 +183,26 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
         };
         let mut gamma = Vec::with_capacity(n);
         for s in 0..n {
-            gamma.push(merged_circulation(
+            let value = match merged_circulation(
                 a.gamma[s],
                 area(&a.nodes, &b.nodes, s),
                 b.gamma[s],
                 area(&b.nodes, next_old, s),
                 area(nodes_new, next_new, s),
-            )?);
+            ) {
+                Ok(value) => value,
+                Err(error)
+                    if matches!(
+                        error.code,
+                        "coarsen-impulse-unrepresentable" | "coarsen-degenerate"
+                    ) =>
+                {
+                    stationwise[s] = true;
+                    0.0 // Replaced only inside the unpublished station proposal.
+                }
+                Err(error) => return Err(error),
+            };
+            gamma.push(value);
         }
         let separation2 = |source: [f64; 3]| -> f64 {
             (0..3)
@@ -213,8 +240,15 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
             age_ticks,
         });
     }
+    let used_stationwise_correction = stationwise.iter().any(|&needed| needed);
+    if used_stationwise_correction {
+        impulse::preserve(wake, &mut merged, &stationwise)?;
+    }
+    // Move untouched rows and their node/circulation buffers into the trial.
+    // Keep the original prefix for rollback. No callback or fallible operation
+    // observes this temporary state before the metric check below.
     let tail = wake.rows.split_off(count);
-    wake.rows = merged;
+    let original_prefix = std::mem::replace(&mut wake.rows, merged);
     wake.rows.extend(tail);
 
     let after: Vec<[f64; 3]> = probes.iter().map(|p| wake.induced_velocity(*p)).collect();
@@ -225,17 +259,68 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
             sum2 += (b[c] - a[c]) * (b[c] - a[c]);
         }
     }
-    let near_rms = (sum2 / probes.len() as f64).sqrt();
-    let fd = ((far_before[0] - far_after[0]).powi(2)
+    let mut near_rms = (sum2 / probes.len() as f64).sqrt();
+    let mut fd = ((far_before[0] - far_after[0]).powi(2)
         + (far_before[1] - far_after[1]).powi(2)
         + (far_before[2] - far_after[2]).powi(2))
     .sqrt();
+    // Preserve already-finite metric bits. Extreme but finite sampled fields
+    // can overflow their squared errors while the final norm remains finite.
+    if (!near_rms.is_finite() || !fd.is_finite())
+        && before
+            .iter()
+            .chain(&after)
+            .flatten()
+            .chain(&far_before)
+            .chain(&far_after)
+            .all(|value| value.is_finite())
+    {
+        if !near_rms.is_finite() {
+            let scale = (probes.len() as f64).sqrt();
+            near_rms = 0.0;
+            for (b, a) in before.iter().zip(&after) {
+                for c in 0..3 {
+                    let difference = b[c] - a[c];
+                    let scaled = if difference.is_finite() {
+                        difference / scale
+                    } else {
+                        b[c] / scale - a[c] / scale
+                    };
+                    near_rms = near_rms.hypot(scaled);
+                }
+            }
+        }
+        if !fd.is_finite() {
+            fd = (far_before[0] - far_after[0])
+                .hypot(far_before[1] - far_after[1])
+                .hypot(far_before[2] - far_after[2]);
+        }
+    }
+    if !near_rms.is_finite() || !fd.is_finite() {
+        let tail = wake.rows.split_off(k);
+        wake.rows = original_prefix;
+        wake.rows.extend(tail);
+        return Err(unrepresentable(
+            "coarsening probe velocity or error exceeds the numerical range",
+        ));
+    }
     Ok(CoarsenMetric {
         near_rms_mps: near_rms,
         far_delta_mps: fd,
         rows_before,
         rows_after: wake.rows.len(),
+        used_stationwise_correction,
     })
+}
+
+fn unrepresentable(message: &str) -> Refusal {
+    Refusal {
+        code: "coarsen-unrepresentable",
+        message: message.into(),
+        ranked_repairs: vec![
+            "retain these rows or rescale to representable geometry and circulation".into(),
+        ],
+    }
 }
 
 fn merged_circulation(

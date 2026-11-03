@@ -317,10 +317,27 @@ subnormal range. The coarse representation still refuses incompatible vectors.
 Rotated or transverse wakes and small length units no longer depend on an
 x-spacing assumption or a fixed dimensional spacing cutoff. A single merged
 circulation cannot reproduce a vector outside its new quad's area direction;
-such pairs refuse with `coarsen-impulse-unrepresentable` and retain the
-resolved wake. Invalid counts, geometry, ages, cores and degenerate candidate
-areas also refuse before any mutation. Attached near/far boundaries retain
-their existing coarsening refusal.
+an incompatible pair now triggers a fallback for that span station alone.
+Already-admitted inputs and unflagged stations retain the original pairwise
+results and arithmetic. The fallback starts with each pair's closest scalar
+representation, then uses the native rectangular SVD for the minimum Euclidean
+circulation change across the station's retained panels. It preserves that
+station's **aggregate** vector impulse, not each replaced pair's impulse;
+no impulse is transferred between stations. `CoarsenMetric` exposes this choice
+as `used_stationwise_correction`.
+
+Separate area/circulation scales and compensated sums precede the fallback.
+Its actual returned strengths must reproduce the original station impulse within
+`512 * f64::EPSILON` times the sum of original unsigned panel impulses, without
+a dimensional floor. Singular modes below `64 * EPSILON` times the largest
+singular value are omitted only if that same residual check passes. Targets
+outside the retained station geometry still refuse with
+`coarsen-impulse-unrepresentable`; one retained panel cannot generally represent
+a warped pair. Zero-circulation degenerate panels carry zero impulse. Invalid
+counts, geometry, ages, cores, or nonfinite candidate metrics refuse without
+publishing a changed wake. Untouched node/circulation buffers and the lifting
+line are reused; a failed metric restores the original rows and their buffers.
+Attached near/far boundaries retain their existing refusal.
 
 Merged node positions use absolute-circulation weights. The row-wide core
 smoothing scale uses the middle node's separation in all three coordinates.
@@ -339,6 +356,10 @@ Additional physical-edge integrals isolate each span on sheared, nonuniform-widt
 wakes through repeated coarsening and length rescaling. A late incompatible pair
 checks atomic refusal after an earlier pair is prepared. Analytical rectangular
 pairs check independently scaled area/circulation, including signed cancellation.
+The stationwise fallback tests integrate actual emitted segments for a curved
+full-rank sheet and reject incompatible stations even when their global impulses
+cancel. Fixed world-space probe metrics remain sampled velocity differences,
+not rotation-invariant error norms.
 
 ## Self-induced attached near-wake motion
 
