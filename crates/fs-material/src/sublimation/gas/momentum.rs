@@ -13,6 +13,9 @@
 //! h(T)-R*T/2 energy streams. Moving surfaces, Knudsen-layer drift, continuum
 //! stress and non-Maxwellian scattering need their own momentum/energy owners.
 
+/// Error-controlled complete-window impulses on the original adaptive chamber.
+pub mod history;
+
 use super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
 use super::chamber::{
     GasChamberCandidate, GasChamberSolve, GasChamberSurface, advance_chamber_observed,

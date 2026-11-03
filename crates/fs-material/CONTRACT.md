@@ -5934,6 +5934,35 @@ Maxwell heat consistency, frame/origin covariance, sharp fusion and atomic
 zero-exposure/late-refusal behavior.
 
 
+### Time-resolved molecular impulse on accepted adaptive histories
+
+`sublimation::gas::momentum::history` uses the ORIGINAL chamber step-doubling
+controller for both pure-solid and sharp-fusion trajectories, with optional
+explicit Maxwell reflection. Each interval compares the coarse mechanical
+impulse with the sum of the two fine impulses, in addition to all original
+mass, temperature and constituent-inventory checks. Independent SI tolerances
+apply to each surface's emitted, sticking, reflected and total normal impulse,
+its moment and the complete force/moment resultants. Large carrier pressure or
+opposing faces cannot hide an inaccurate recoil contribution.
+
+Only the accepted fine intervals enter compensated history sums. Rejected and
+coarse evaluations consume the original work budget but contribute no physical
+mass, heat or impulse. Generic private hooks share one original controller;
+existing public adaptive APIs retain zero-sized data and no-op hooks. The
+complete original endpoint, stream/conservation audit, optional whole-window
+fusion account and integrated loads publish together after final admission.
+Storage remains O(surface count), independent of accepted-step count.
+
+Frames, exposed solid areas and the moment origin remain fixed. This resolves
+supported-surface loads without adding bulk-gas momentum or moving mechanics.
+The estimator controls local temporal error, not a rigorous global quadrature
+bound; original mass/species/energy budgets still cover the complete window.
+Four regression groups cover source-call/original-path parity, independent
+analytic thermal-trajectory quadrature with load-driven refinement, exclusion
+of rejected-trial pressure, and sharp-fusion continuation plus atomic work,
+zero-duration and cancellation behavior.
+
+
 ### Adaptive closed-chamber histories
 
 `sublimation::gas::chamber::advance::advance_chamber_adaptive` compares one joint

@@ -312,7 +312,33 @@ fn advance_history_with_calorics<'catalog>(
     geometry: Option<&moving::MovingChamberGeometry>,
     calorics: Option<&BTreeMap<u64, SharpMeltingCaloric<'_>>>, gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: GasChamberAdvanceSolve,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasChamberAdvanceCandidate<'catalog>, GasChamberAdvanceError> {
+    advance_history_observed(surfaces, accommodation, geometry, calorics, gas, catalog,
+        duration_s, controls,
+        |rows, gas, duration, cancelled| {
+            evaluate_interval(rows, accommodation, geometry, calorics, gas, catalog,
+                duration, controls.step, cancelled).map(|(endpoint, heat)| (endpoint, heat, ()))
+        },
+        |_, _, _, _| Ok(0.0), |_, _, _, _| Ok(()), cancelled)
+}
+
+// One controller also owns error-controlled physical integrals. A composing
+// kernel returns private interval data from the same original snapshots;
+// compare sees the coarse probe and BOTH fine intervals, while accept is called
+// only after all state and integral tolerances pass. Existing APIs use zero-sized
+// data and no-op hooks, preserving their numerical path and cancellation polls.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(in crate::sublimation::gas) fn advance_history_observed<'catalog, Extra, C: FnMut() -> bool>(
+    surfaces: &[GasChamberSurface<'_>], accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    geometry: Option<&moving::MovingChamberGeometry>,
+    calorics: Option<&BTreeMap<u64, SharpMeltingCaloric<'_>>>, gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: GasChamberAdvanceSolve,
+    mut evaluate_interval: impl FnMut(&[GasChamberSurface<'_>], &ClosedGasParcel, f64, &mut C)
+        -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>, Extra), GasSurfaceError>,
+    mut compare_extra: impl FnMut(&Extra, &Extra, &Extra, &mut C) -> Result<f64, GasChamberAdvanceError>,
+    mut accept_extra: impl FnMut(&Extra, &Extra, f64, &mut C) -> Result<(), GasChamberAdvanceError>,
+    mut cancelled: C,
 ) -> Result<GasChamberAdvanceCandidate<'catalog>, GasChamberAdvanceError> {
     poll(&mut cancelled)?;
     if !duration_s.is_finite() || duration_s < 0.0
@@ -372,17 +398,17 @@ fn advance_history_with_calorics<'catalog>(
         let current_gas = endpoint.as_ref().map_or(gas, |value| value.gas());
         let mut evaluate = |rows: &[GasChamberSurface<'_>], gas: &ClosedGasParcel, duration| {
             evaluations += 1;
-            evaluate_interval(rows, accommodation, geometry, calorics, gas, catalog, duration, controls.step, &mut cancelled)
+            evaluate_interval(rows, gas, duration, &mut cancelled)
         };
         let trial = (|| {
             // A coarse trial is an error probe, never an accepted heat history.
-            let (coarse, _) = evaluate(&before, current_gas, dt)?;
-            let (first, first_heat) = evaluate(&before, current_gas, dt * 0.5)?;
+            let (coarse, _, coarse_extra) = evaluate(&before, current_gas, dt)?;
+            let (first, first_heat, first_extra) = evaluate(&before, current_gas, dt * 0.5)?;
             let middle: Vec<_> = first.surfaces().iter().map(|row| row.solid).collect();
-            let (second, second_heat) = evaluate(&with_states(&templates, &middle), first.gas(), dt * 0.5)?;
-            Ok::<_, GasSurfaceError>((coarse, first, first_heat, second, second_heat))
+            let (second, second_heat, second_extra) = evaluate(&with_states(&templates, &middle), first.gas(), dt * 0.5)?;
+            Ok::<_, GasSurfaceError>((coarse, coarse_extra, first, first_heat, first_extra, second, second_heat, second_extra))
         })();
-        let (coarse, first, first_heat, second, second_heat) = match trial {
+        let (coarse, coarse_extra, first, first_heat, first_extra, second, second_heat, second_extra) = match trial {
             Ok(value) => value,
             Err(GasSurfaceError::InventoryLimit { maximum_duration_s }) => {
                 rejected += 1;
@@ -398,11 +424,17 @@ fn advance_history_with_calorics<'catalog>(
         if let Some(geometry) = geometry {
             ratio = ratio.max(geometry.compare(&before, &coarse, &second, controls.relative_tolerance, &mut cancelled)?);
         }
+        let extra_ratio = compare_extra(&coarse_extra, &first_extra, &second_extra, &mut cancelled)?;
+        if !extra_ratio.is_finite() || extra_ratio < 0.0 {
+            return Err(GasChamberAdvanceError::Invalid("invalid physical integral error ratio"));
+        }
+        ratio = ratio.max(extra_ratio);
         if ratio > 1.0 {
             rejected += 1;
             dt = smaller_step(dt * 0.8 / fs_math::det::sqrt(ratio), dt, controls.minimum_dt_s)?;
             continue;
         }
+        accept_extra(&first_extra, &second_extra, extra_ratio, &mut cancelled)?;
         for ((sum, a), b) in sums.iter_mut().zip(first.surfaces()).zip(second.surfaces()) {
             poll(&mut cancelled)?;
             sum.add(a, first_heat.get(&a.id))?;
@@ -428,7 +460,7 @@ fn advance_history_with_calorics<'catalog>(
         Some(endpoint) => endpoint,
         None => {
             evaluations += 1;
-            evaluate_interval(&templates, accommodation, geometry, calorics, gas, catalog, 0.0, controls.step, &mut cancelled)?.0
+            evaluate_interval(&templates, gas, 0.0, &mut cancelled)?.0
         }
     };
     let mut solid_energy = Sum::default();
