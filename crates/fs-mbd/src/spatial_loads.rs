@@ -20,6 +20,9 @@
 /// Work-conjugate Cayley stepping of the original prepared spatial loads.
 pub mod midpoint;
 
+/// Momentum-conserving internal wrench impulses between original finite bodies.
+pub mod internal_impulse;
+
 use super::{
     AdvanceOutcome, DynamicsError, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState,
     StepReceipt, UnitQuaternion, Vec3, Wrench, finite_derived,

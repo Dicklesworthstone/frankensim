@@ -1,5 +1,40 @@
 # CONTRACT: fs-mbd
 
+## Native internal spatial-wrench impulse transfer
+
+`spatial_loads::internal_impulse::apply_internal_wrench_impulse` transfers a
+declared force/couple impulse between two original finite bodies at their actual
+material attachments. The second attachment receives `(J, C_B)`; the first
+receives `(-J, -C_B - (x_B-x_A) cross J)`. The arm term is the physical moment
+transport required for an internal connector between noncoincident points. It
+is applied before the original full-inertia momentum update; no state is
+projected and the existing independent point-impulse semantics remain intact.
+
+Each body retains its own native mass, full tensor, pose and momentum frames.
+Explicit dimensional gates check each commanded versus representable impulse,
+the pair's actual total linear and orbital-plus-spin angular change about a
+declared origin, and actual quadratic kinetic change against conjugate connector
+work. Constant-size double-double reductions retain the original transported
+central wrench, native frame conversion and actual endpoint differences. They
+avoid subtracting large rounded background momenta or energies. Opposite
+swallowed kicks, erased old momenta, and lost small free couples therefore
+refuse even when their net balance would appear to close. No heap storage is used.
+
+The connector can supply or recover mechanical energy. Its signed impulse work
+does not imply passivity, a motor constitutive law, frictional heat, a contact
+response or a finite-duration joint solve. Cancellation, nonfinite arithmetic
+and unresolved physical budgets return no changed body or partial account.
+
+Five focused G1/G3/G4 groups cover noncoincident full-inertia recoil and angular
+conservation about different origins, the coincident point-impulse limit, pure
+motor-couple spin exchange and energy recovery, rotated/translated/common-boost
+frames, a resolved 1 J transfer against large background energy, refusal of two
+swallowed 1 N s kicks, erased old linear/spin momentum, lost small free couples
+behind large attachment moments, frame-conversion losses, and every cancellation
+phase with deterministic retry.
+They pass in the bounded native source-selected lane against the unchanged
+original momentum owner. This is not a Cargo/DSR workspace validation claim.
+
 ## Supported finite rotational and translational attachments
 
 The supported spatial-motion entries also accept the original `SpatialBushing`
