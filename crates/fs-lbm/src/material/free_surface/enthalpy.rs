@@ -357,6 +357,24 @@ impl<'s> MaterialFreeSurface3<'s> {
         thermocapillary: Option<thermocapillary::ThermocapillarySurface>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
+        self.with_enthalpy_model_seeded(
+            law, caloric, controls, initial_h, buoyancy, rheology, thermocapillary, None, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_enthalpy_model_seeded<'m>(
+        self,
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        controls: FreeSurfaceEnthalpyControls,
+        initial_h: impl Fn([usize; 3]) -> f64,
+        buoyancy: Option<crate::material::transport::boussinesq::BoussinesqConfig<3>>,
+        rheology: Option<rheology::RheologyBinding>,
+        thermocapillary: Option<thermocapillary::ThermocapillarySurface>,
+        initial_tau: Option<&BTreeMap<[usize; 3], f64>>,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
         poll(gate)?;
         if controls.max_cells == 0
             || controls.max_cells > 262_144
@@ -436,6 +454,31 @@ impl<'s> MaterialFreeSurface3<'s> {
                 h.insert(location, initial_h(coordinates));
             }
         }
+        let mut initial_rheology = BTreeMap::new();
+        if let Some(guesses) = initial_tau {
+            if rheology.is_none() || guesses.len() != h.len() {
+                return Err(Error::Invalid("initial rheology guesses must cover the same wet source field"));
+            }
+            for &location in h.keys() {
+                poll(gate)?;
+                let coordinates = FreeSurface3::transport_coordinates(location)
+                    .ok_or(Error::Invalid("initial rheology guess has no resolved cell"))?;
+                let tau = *guesses.get(&coordinates)
+                    .filter(|tau| tau.is_finite() && **tau > 0.5)
+                    .ok_or(Error::Invalid("initial rheology relaxation is missing or inadmissible"))?;
+                let rate = self.lattice.transport_shear_rate(location, tau)? / self.scaling.timestep_s();
+                if !rate.is_finite() {
+                    return Err(Error::Invalid("initial rheology strain overflows physical units"));
+                }
+                // Only initial guesses. The original source solve below
+                // rechecks the actual native stress and replaces every entry
+                // before publication; no provisional sample escapes this owner.
+                initial_rheology.insert(location, rheology::FreeSurfaceRheologySample {
+                    shear_rate_per_s: rate, collision_tau: tau,
+                    iterations: 0, relaxation_defect: 0.0,
+                });
+            }
+        }
         let mut candidate = MaterialFreeSurfaceEnthalpy3 {
             flow: self,
             law,
@@ -448,7 +491,7 @@ impl<'s> MaterialFreeSurface3<'s> {
             phase_conduction: None,
             buoyancy,
             rheology,
-            rheology_samples: BTreeMap::new(),
+            rheology_samples: initial_rheology,
             wetting: None,
             thermocapillary,
             surface_temperature_forces: false,

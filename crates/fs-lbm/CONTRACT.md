@@ -5187,7 +5187,8 @@ energy, native speed, work and occupied-cell caps all gate publication. Unsuppor
 spin on a rank-deficient receiving grid requires refinement. Original Cx polls
 cover geometry, integration, correction, initialization and final publication.
 
-This is an already-liquid, stress-free, uniform-material isothermal transfer.
+This is an already-liquid, uniform-material isothermal transfer without stored
+elastic/plastic history. Its P1 velocity field supplies the initial viscous strain.
 Source tetrahedra must be nonoverlapping; target overfill is not a full mesh
 intersection certificate. Capillarity must be explicitly neglected because a
 surface-energy projection is not represented. There is no enthalpy advection,
@@ -6191,7 +6192,7 @@ energy conservation.
 
 `free_surface3_from_tetrahedra_with_enthalpy_and_rheology` carries the original temperature/shear material law into the existing thermal VOF owner. Each source tetrahedron supplies its actual affine velocity gradient and `sqrt(2 D:D)`. Original pinned property-line admission covers that tetrahedron's complete P1 temperature span at its actual rate; a reference rate cannot conceal unsupported source shear. Shared vertices are admitted separately when adjacent tetrahedra have different strain. Source-query and original geometric budgets remain explicit.
 
-The original exact overlap, per-fragment mass, linear/angular momentum and enthalpy transfer remain authoritative. The receiving native owner resolves its own force-corrected shear and source viscosity, retaining the same law through continuing motion and molecular `mu*gamma_dot^2` heat. Source rates are reported separately from receiving constitutive samples. The equilibrium population initializer rebuilds viscous stress; it does not transfer the source stress tensor or erase elastic memory. Kinetic/potential projection discrepancies remain numerical accounts, never heat. The existing `with_time_origin` preserves an explicitly supplied source clock before continuation.
+The original exact overlap, per-fragment mass, linear/angular momentum and enthalpy transfer remain authoritative. The receiving native owner resolves its own force-corrected shear and source viscosity, retaining the same law through continuing motion and molecular `mu*gamma_dot^2` heat. Source rates are reported separately from receiving constitutive samples. The receiving viscous stress is initialized from the overlap-projected symmetric P1 strain and the original source at the receiving enthalpy and rate. Nonlinear stress is evaluated at that projected state; an average of source stress tensors is not implied, and elastic memory remains outside this handoff. Kinetic/potential projection discrepancies remain numerical accounts, never heat. The existing `with_time_origin` preserves an explicitly supplied source clock before continuation.
 
 Two synthetic regressions specify data-only rheology changes in actual native motion/dissipation, independent mass/enthalpy and both-momentum checks, source-versus-receiver rates, rigid-rotation objectivity, out-of-domain source shear, bounded admission, late receiver refusal and cancellation. Constant reference density, fully liquid source, absent stored elastic/plastic history and neglected capillary surface energy remain required. MR28, MR29 and MR69 remain open for their broader phase, stress-history and moving-geometry obligations.
 
@@ -8426,8 +8427,8 @@ projection changes remain numerical representation error and never become
 heat. Source-card, pinned-claim, caloric, density, native scaling, work-budget
 and cancellation gates remain in force.
 
-These constructors still admit already-liquid, stress-free, uniform-material
-snapshots with explicitly neglected capillarity. They do not release solid
+These constructors still admit already-liquid, uniform-material snapshots
+without stored elastic/plastic history, with explicitly neglected capillarity. They do not release solid
 elastic energy, transport plastic history, create a pressure projection,
 support different fluids in one cell or claim a complete melting transition.
 The component mapping is ingress lineage, not persistent fragment tracking
@@ -9400,3 +9401,39 @@ late-carrier-refusal rollback/retry, and swept collisions hidden by clear
 endpoints. These tests were authored but could not be compiled or executed in
 the delivery environment: the pinned runtime compiler was killed before this
 crate, and the execution environment subsequently became unavailable.
+
+### P1 viscous strain through native liquid ingress
+
+Existing tetrahedral-liquid handoffs carry the volume-weighted symmetric P1
+velocity gradient through their original tet/cell overlaps. The same native
+Hermite reconstruction and Guo force-frame owner initialize the receiving
+viscous second moment without changing represented density or momentum.
+The required pre-collision nonequilibrium tensor uses molecular tau, while
+physical viscous stress includes the original tau-minus-half correction.
+Zero strain preserves the original populations exactly; actual velocity and
+stress moments are read back before each cell is accepted.
+
+Frozen viscosity uses its original admitted relaxation. Thermal and
+generalized-Newtonian ingress query the original source at projected enthalpy
+and strain before attaching the existing constitutive owner. Receiving-cell
+queries consume the original explicit source-query budget. An admitted local
+relaxation can seed that same constitutive solve after coverage, coordinate,
+finiteness and relaxation-domain checks. The final source solve replaces every
+provisional sample before publication. Ordinary cell constructors and default
+thermal attachments retain their existing initialization semantics.
+
+These local seeds avoid false source-domain queries caused by an unrelated
+global reference guess. No second viscosity law or retained redundant state
+map is introduced. Actual per-fragment mass, linear/angular momentum and
+mechanical projection accounts are rechecked after thermal/force attachment.
+Numerical remap energy remains separate from enthalpy; no elastic release or
+stress-history transfer is implied. Nonlinear stress is evaluated at the
+projected strain rather than claimed to equal an average source stress.
+
+Focused regression definitions independently recover forced population
+momentum and the viscous tensor, translating/rotating/shearing P1 fields and
+continued native motion, population-positivity refusal, and a tight material
+rate domain whose valid initialization would fail from the reference guess.
+Nonpositive populations, unsupported sources, exhausted query bounds and
+cancellation return no candidate. The broader deforming/melting boundary,
+pressure-projection and elastic-history obligations remain open.

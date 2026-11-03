@@ -90,8 +90,8 @@ fn original_p1_shear_law_drives_receiving_motion_and_molecular_heat() {
     with_cx(&gate, |cx| {
         for slope in [0.0, 0.02] {
             let card = source_card(slope, 100.0);
-            // This authored reference differs from both the actual P1 rate (2)
-            // and the initially equilibrated receiving native rate (near zero).
+            // The authored reference differs from the actual P1 rate (2).
+            // Receiving stress must retain that rate, not restart at zero.
             let law = LiquidTemperatureLaw::try_new(
                 &card,
                 &shear_point(1.5),
@@ -124,9 +124,11 @@ fn original_p1_shear_law_drives_receiving_motion_and_molecular_heat() {
                     )
                     .is_err()
             );
+            let mut receiving = domain();
+            receiving.gravity_m_s2 = [0.5, -0.75, 0.25];
             let (thermal, report) = scaling
                 .free_surface3_from_tetrahedra_with_enthalpy_and_rheology(
-                    domain(),
+                    receiving,
                     [0.0; 3],
                     source(&p, &t, &v, &h),
                     &law,
@@ -166,7 +168,10 @@ fn original_p1_shear_law_drives_receiving_motion_and_molecular_heat() {
                     1e-18,
                 );
             }
-            assert!(thermal.rheology_at([3, 3, 3]).unwrap().shear_rate_per_s < 1e-8);
+            close(thermal.rheology_at([3, 3, 3]).unwrap().shear_rate_per_s, 2.0, 1e-8);
+            let initial = thermal.material_at([3, 3, 3]).unwrap();
+            let temperature = initial.material().query().axes()["T"];
+            close(initial.dynamic_viscosity_pa_s(), viscosity_at(temperature, 2.0, slope), 1e-9);
             let mut heat = 0.0;
             let mut maximum_native_rate = 0.0_f64;
             for _ in 0..4 {
@@ -209,6 +214,51 @@ fn original_p1_shear_law_drives_receiving_motion_and_molecular_heat() {
     );
     assert!((outcomes[0].1 - outcomes[1].1).abs() > 1e-13);
     assert_eq!((p, t, v, h), before);
+}
+
+#[test]
+fn g4_known_initial_tau_keeps_a_valid_strain_inside_its_tight_source_domain() {
+    use crate::material::free_surface::enthalpy::rheology::RheologyBinding;
+
+    let card = source_card(0.02, 2.001);
+    let law = LiquidTemperatureLaw::try_new(
+        &card, &shear_point(1.5), "T", LiquidViscosityBasis::Dynamic,
+        MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    let surface = ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+        law.reference_state().material().clone(), LiquidViscosityBasis::Dynamic, "T", "rate",
+    ).unwrap();
+    let caloric = chart(&card, 1000.0);
+    let (points, tets, _) = cube([0.0; 3]);
+    let velocities: Vec<_> = points.iter()
+        .map(|p| [0.01 + 2.0 * (p[1] - 0.004), 0.0, 0.0]).collect();
+    let h = vec![200000.0; points.len()];
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let scaling = plan_free_surface_from_material(&surface, 0.001, 0.0005, 0.1).unwrap();
+        let mut receiving = domain();
+        receiving.gravity_m_s2 = [0.5, -0.75, 0.25];
+        let (thermal, report) = scaling.free_surface3_from_tetrahedra_with_enthalpy_and_rheology(
+            receiving, [0.0; 3], source(&points, &tets, &velocities, &h),
+            &law, &caloric, bounds(), Default::default(), solve(), cx, &gate,
+        ).unwrap();
+        for component in &report.mechanical.components {
+            for &cell in &component.target_cells {
+                close(thermal.rheology_at(cell).unwrap().shear_rate_per_s, 2.0, 1e-8);
+            }
+        }
+        close(report.target_enthalpy_j, report.source_enthalpy_j, 1e-11);
+        // The default attachment must retain its existing semantics. Its
+        // reference tau=0.635 estimates 2.047.../s from this valid stress,
+        // outside the source domain; the admitted initial tau=0.65 avoids that
+        // false query while the SAME source solve still checks the endpoint.
+        let binding = RheologyBinding::try_new(&surface, &law, solve()).unwrap();
+        assert!(thermal.flow().clone().with_bound_thermal_transport(
+            &law, &caloric, Default::default(),
+            |cell| thermal.specific_enthalpy_at(cell).unwrap(),
+            None, Some(binding), None, &gate,
+        ).is_err());
+    });
 }
 
 #[test]

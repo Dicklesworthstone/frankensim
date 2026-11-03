@@ -2533,7 +2533,7 @@ fn same_velocity(left: [f64; 3], right: [f64; 3]) -> bool {
     })
 }
 
-fn regularized_populations(rho: f64, velocity: [f64; 3], stress: [[f64; 3]; 3]) -> [f64; Q3] {
+pub(crate) fn regularized_populations(rho: f64, velocity: [f64; 3], stress: [[f64; 3]; 3]) -> [f64; Q3] {
     let mut populations = equilibrium3(rho, velocity);
     let coefficient = 1.0 / (2.0 * CS2 * CS2);
     for q in 0..Q3 {

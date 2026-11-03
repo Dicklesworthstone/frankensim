@@ -36,7 +36,8 @@ pub(super) fn admit_source_transport(
     Ok(())
 }
 
-/// Re-read force-corrected native velocity after the original Guo rebind.
+/// Re-read force-corrected native velocity after initial viscous strain and
+/// any original buoyancy/rheology attachment.
 /// Reuse the same per-fragment projection/error budget, including its absolute
 /// sums, rather than trusting an earlier initializer's unforced report.
 pub(super) fn admit_receiver_moments(
@@ -66,7 +67,7 @@ pub(super) fn admit_receiver_moments(
             let cell = flow
                 .sample_at_si(x, y, z)
                 .map_err(TetLiquidTransferError::from)?
-                .ok_or_else(|| invalid("buoyancy attachment lost an original liquid cell"))?;
+                .ok_or_else(|| invalid("initial constitutive attachment lost an original liquid cell"))?;
             let mass = cell.density_kg_m3 * cell.fill_fraction * cell_volume;
             let position = centre(coordinates, dx);
             accumulate_cell(&mut target, mass, position, cell.velocity_m_s);
@@ -92,7 +93,7 @@ pub(super) fn admit_receiver_moments(
         .abs()
         > limits.mass_tolerance_kg
     {
-        return Err(invalid("buoyancy attachment changed the original native mass ledger").into());
+        return Err(invalid("initial constitutive attachment changed the native mass ledger").into());
     }
     let (centroid_shift_m, kinetic_energy_change_j, gravitational_energy_change_j) =
         check_projection(&report.source, &total, gravity, limits)?;

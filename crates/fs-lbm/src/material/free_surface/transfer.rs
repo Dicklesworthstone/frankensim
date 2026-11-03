@@ -10,8 +10,11 @@
 //! error, bounded by the caller, never heat. The returned report describes
 //! ingress only; subsequent evolution belongs to the original VOF solver.
 //!
-//! The base entry point is an already-liquid, stress-free, uniform-material
-//! isothermal snapshot with capillarity explicitly omitted. The `enthalpy`
+//! The base entry point is an already-liquid, uniform-material isothermal
+//! snapshot without stored elastic stress/history and with capillarity omitted.
+//! The same overlaps carry its symmetric P1 velocity gradient into the native
+//! viscous stress; rigid momentum correction does not change that strain.
+//! The `enthalpy`
 //! extension carries a P1 caloric field into the original thermal VOF owner.
 //! Neither path melts a solid, discards plastic history, or performs a pressure
 //! solve.
@@ -146,12 +149,15 @@ struct CellIntegral {
     component: usize,
     volume: f64,
     momentum: [f64; 3],
+    strain_integral: [f64; 6],
     enthalpy_j: f64,
 }
 
 #[derive(Default)]
-struct TransferredEnthalpy {
+struct TransferredFields {
     by_cell: BTreeMap<[usize; 3], f64>,
+    /// Volume-weighted symmetric P1 velocity gradient, in inverse seconds.
+    strain_per_s: BTreeMap<[usize; 3], [f64; 6]>,
     source_j: f64,
     source_by_component_j: Vec<f64>,
 }
@@ -203,13 +209,31 @@ fn finite_moments(m: &LiquidTransferMoments) -> bool {
         .all(|v| v.is_finite())
 }
 
+fn symmetric_strain(gradient: [[f64; 3]; 3]) -> [f64; 6] {
+    [
+        gradient[0][0], gradient[1][1], gradient[2][2],
+        0.5 * gradient[0][1] + 0.5 * gradient[1][0],
+        0.5 * gradient[0][2] + 0.5 * gradient[2][0],
+        0.5 * gradient[1][2] + 0.5 * gradient[2][1],
+    ]
+}
+
+fn strain_rate(strain: [f64; 6]) -> f64 {
+    strain.into_iter().enumerate().fold(0.0_f64, |rate, (index, value)| {
+        rate.hypot(value * if index < 3 { core::f64::consts::SQRT_2 } else { 2.0 })
+    })
+}
+
 impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// Transfer actual geometry and P1 motion into this material's native flow.
     ///
     /// Source density is the SAME immutable liquid density used for native mass,
     /// inertia and viscosity scaling. No material name or extra density is accepted.
-    /// Source tets must already be liquid and stress-free; this API does not
-    /// authorize deleting a solid's internal energy or history. Surface tension
+    /// Source tets must already be liquid without stored elastic stress/history;
+    /// this API does not authorize deleting a solid's internal energy. Its
+    /// overlap-averaged symmetric P1 gradient initializes the SAME source's
+    /// viscous stress through the native Guo population owner. No subcell
+    /// dissipation or elastic energy is deposited as heat. Surface tension
     /// must be explicitly neglected because a conservative surface-energy
     /// projection is not represented here. Initial numerical pressure is zero
     /// relative to the existing gas reference. Pressure initialization is not
@@ -248,7 +272,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         rheology: Option<&super::enthalpy::rheology::RheologyBinding>,
         limits: TetLiquidTransferLimits,
         cx: &Cx<'_>,
-    ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport, TransferredEnthalpy), TetLiquidTransferError> {
+    ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport, TransferredFields), TetLiquidTransferError> {
         checkpoint(cx)?;
         // Only an admitted original thermal/rheology binding can cross this
         // boundary with an evolving source. The same geometric and moment
@@ -286,7 +310,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         let (component_for_tet, mut components) = components::partition(source, cx)?;
         let mut cells: BTreeMap<[usize; 3], CellIntegral> = BTreeMap::new();
         let mut original = LiquidTransferMoments::default();
-        let mut thermal = TransferredEnthalpy::default();
+        let mut thermal = TransferredFields::default();
         thermal.source_by_component_j.resize(components.len(), 0.0);
         let mut overlap_tests = 0usize;
         for (tet_index, indices) in source.tetrahedra.iter().enumerate() {
@@ -325,6 +349,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             integrate_source(&mut original, p, v, whole.volume * rho, grid_origin_m);
             integrate_source(&mut components[component].source, p, v, whole.volume * rho, grid_origin_m);
             let gradient = field_gradient(p, v)?;
+            let strain = symmetric_strain(gradient);
             let h = source_h.map(|values| indices.map(|i| values[i as usize]));
             let h_gradient = h.map(|values| field_gradient(p, values.map(|value| [value])))
                 .transpose()?;
@@ -373,6 +398,9 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                             ));
                         }
                         target.volume += overlap.volume;
+                        for (integral, rate) in target.strain_integral.iter_mut().zip(strain) {
+                            *integral += overlap.volume * rate;
+                        }
                         if let (Some(values), Some(gradient)) = (h, h_gradient) {
                             target.enthalpy_j += rho
                                 * (values[0] * overlap.volume + dot(gradient[0], overlap.first));
@@ -409,6 +437,11 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             // the actual resulting mass discrepancy is audited below as well.
             let fill_fraction = fill.min(1.0);
             let mass = rho * cell_volume * fill_fraction;
+            let strain = integral.strain_integral.map(|value| value / integral.volume);
+            if strain.iter().any(|value| !value.is_finite()) {
+                return Err(invalid("overlap-averaged P1 liquid strain is unrepresentable"));
+            }
+            thermal.strain_per_s.insert(coordinates, strain);
             if source_h.is_some() {
                 let h = integral.enthalpy_j / mass;
                 if !h.is_finite() || !thermal.source_j.is_finite() {
@@ -429,7 +462,17 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         components::correct(&mut initial, &components, rho * cell_volume, dx, limits, cx)?;
         let predicted = integrate_cells(&initial, rho * cell_volume, dx, cx)?;
         check_projection(&original, &predicted, domain.gravity_m_s2, limits)?;
-        let flow = self.free_surface3_from_cells_inner(domain, &initial, cx)?;
+        let mut flow = self.free_surface3_from_cells_inner(domain, &initial, cx)?;
+        if source_h.is_none() {
+            for (&coordinates, &strain) in &thermal.strain_per_s {
+                checkpoint(cx)?;
+                flow.lattice.initialize_strain_at(
+                    coordinates, strain.map(|value| value * self.timestep_s()), self.flow.tau,
+                ).map_err(MaterialLbmError::from)?;
+            }
+        }
+        // Thermal ingress seeds the same strain after resolving each target's
+        // actual T/rate viscosity, then repeats this native momentum readback.
         let mut actual = LiquidTransferMoments::default();
         let mut actual_components = vec![LiquidTransferMoments::default(); components.len()];
         for (index, cell) in initial.iter().enumerate() {

@@ -77,7 +77,7 @@ fn chart(card: &MaterialCard, rho: f64) -> EquilibriumEnthalpyPhaseCurve {
 }
 fn thermal_limits() -> TetEnthalpyTransferLimits {
     TetEnthalpyTransferLimits {
-        mechanical: limits(), max_source_queries: 64, enthalpy_tolerance_j: 1e-11,
+        mechanical: limits(), max_source_queries: 1024, enthalpy_tolerance_j: 1e-11,
     }
 }
 fn affine_h(p: [f64; 3]) -> f64 {

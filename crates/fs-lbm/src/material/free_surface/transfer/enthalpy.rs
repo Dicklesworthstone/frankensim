@@ -6,7 +6,9 @@
 //! Mechanical projection error stays in the parent's report and is never heat.
 //!
 //! Input is already liquid with no stored elastic energy/history on one
-//! constant-density caloric chart. This does not release a stressed solid, erase plastic history,
+//! constant-density caloric chart. The original overlap-averaged P1 strain
+//! seeds the source-backed viscous stress before native constitutive attachment.
+//! This does not release a stressed solid, erase plastic history,
 //! convert phases, introduce pressure work or supply capillary surface energy.
 
 use std::collections::BTreeSet;
@@ -46,7 +48,8 @@ pub struct TetrahedralLiquidEnthalpyState<'a> {
 pub struct TetEnthalpyTransferLimits {
     /// Existing exact-overlap, momentum and mechanical projection gates.
     pub mechanical: TetLiquidTransferLimits,
-    /// Bound on source-node, caloric-knot and source-property-line samples.
+    /// Bound on source-node, caloric-knot, source-property-line and receiving
+    /// cell temperature/strain samples.
     /// The total caloric knot count must also fit this bound before scanning.
     pub max_source_queries: usize,
     /// Allowed sum of absolute per-component target minus source enthalpy [J].
@@ -64,7 +67,7 @@ pub struct TetEnthalpyTransferReport {
     pub target_enthalpy_j: f64,
     /// Target minus source enthalpy [J], without mechanical-error conversion.
     pub enthalpy_defect_j: f64,
-    /// Actual source-node, caloric-knot and property-line sample queries.
+    /// Actual source-node, caloric-knot, property-line and receiving-strain queries.
     pub source_queries: usize,
     /// Original P1 `sqrt(2 D:D)` [1/s], in input tetrahedron order.
     /// Empty for frozen-viscosity ingress. These are source admission rates,
@@ -162,10 +165,14 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     /// then resolves viscosity at its OWN force-corrected native shear, and
     /// retains that law through subsequent heat, conduction, flow and optional
     /// molecular dissipation. Source and receiving shear need not be equal.
-    /// The equilibrium initializer reconstructs viscous stress on the lattice;
-    /// it does not transfer the source stress tensor. Generalized-Newtonian
-    /// viscosity has no stored elastic memory to erase. Stress startup and
-    /// the numerical representation change still require refinement.
+    /// The SAME overlaps average the original symmetric P1 gradient. Each
+    /// receiving cell resolves the original source at that strain and its
+    /// projected enthalpy, then initializes the physical native viscous stress
+    /// before the constitutive attachment. This preserves affine strain and
+    /// does not reset it to zero. Nonlinear viscosity is evaluated at the
+    /// receiving T/rate; an average of nonlinear source stresses is not implied.
+    /// Generalized-Newtonian viscosity has no stored elastic memory to erase.
+    /// Subcell strain variation and later lattice reconstruction require refinement.
     ///
     /// Fully liquid source, neglected capillarity, source-domain, projection
     /// and cancellation restrictions are the same as the ordinary transfer.
@@ -288,7 +295,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
             )?;
             (minimum_h, maximum_h, Vec::new())
         };
-        let (flow, mut mechanical, transferred) = self.transfer_tetrahedra(
+        let (mut flow, mut mechanical, transferred) = self.transfer_tetrahedra(
             domain, grid_origin_m, source.motion, Some(source.specific_enthalpy_j_kg),
             binding.as_ref(), limits.mechanical, cx,
         )?;
@@ -299,16 +306,45 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
                 return Err(invalid("overlap projection left the source enthalpy convex hull").into());
             }
         }
+        let rate_axis = binding.as_ref().map(|_| {
+            self.material().rheology_axes()
+                .expect("original source admitted by native rheology binding").1
+        });
+        let mut initial_tau = binding.as_ref().map(|_| BTreeMap::new());
+        for (&coordinates, &strain) in &transferred.strain_per_s {
+            checkpoint(cx)?;
+            if gate.is_requested() {
+                return Err(TetLiquidTransferError::Cancelled.into());
+            }
+            let h = *transferred.by_cell.get(&coordinates)
+                .ok_or_else(|| invalid("initial liquid strain has no transferred enthalpy"))?;
+            let rate = super::strain_rate(strain);
+            if !rate.is_finite() {
+                return Err(invalid("receiving P1 liquid strain is unrepresentable").into());
+            }
+            let viscosity = admit_source_sample(
+                h, density, law, caloric, limits, &mut source_queries,
+                rate_axis.map(|axis| (axis, rate)), buoyancy,
+            )?;
+            let (scaling, _) = crate::material::plan_momentum_scaling(
+                viscosity, self.cell_size_m(), self.timestep_s(),
+                self.flow.u_lattice * self.velocity_scale,
+            ).map_err(FreeSurfaceEnthalpyError::from)?;
+            flow.lattice.initialize_strain_at(
+                coordinates, strain.map(|value| value * self.timestep_s()), scaling.tau,
+            ).map_err(FreeSurfaceEnthalpyError::from)?;
+            if let Some(guesses) = &mut initial_tau {
+                guesses.insert(coordinates, scaling.tau);
+            }
+        }
         let initial_h = |coordinates| transferred.by_cell.get(&coordinates).copied().unwrap_or(f64::NAN);
         let thermal = flow.with_bound_thermal_transport(
-            law, caloric, controls, initial_h, buoyancy, binding, gate,
+            law, caloric, controls, initial_h, buoyancy, binding, initial_tau.as_ref(), gate,
         )?;
-        if buoyancy.is_some() {
-            buoyancy::admit_receiver_moments(
-                thermal.flow(), &mut mechanical, self.cell_size_m(),
-                domain.gravity_m_s2, limits.mechanical, cx,
-            )?;
-        }
+        buoyancy::admit_receiver_moments(
+            thermal.flow(), &mut mechanical, self.cell_size_m(),
+            domain.gravity_m_s2, limits.mechanical, cx,
+        )?;
         let target_enthalpy_j = thermal.total_enthalpy_j()?;
         let enthalpy_defect_j = target_enthalpy_j - transferred.source_j;
         if !enthalpy_defect_j.is_finite()
@@ -412,7 +448,7 @@ fn admit_source_sample(
     queries: &mut usize,
     rate: Option<(&str, f64)>,
     buoyancy: Option<BoussinesqConfig<3>>,
-) -> Result<(), TetEnthalpyTransferError> {
+) -> Result<f64, TetEnthalpyTransferError> {
     *queries = queries.checked_add(1)
         .filter(|count| *count <= limits.max_source_queries)
         .ok_or_else(|| invalid("tetrahedral thermal source-query budget exhausted"))?;
@@ -432,7 +468,7 @@ fn admit_transport_temperature(
     law: &LiquidTemperatureLaw<'_>,
     rate: Option<(&str, f64)>,
     buoyancy: Option<BoussinesqConfig<3>>,
-) -> Result<(), TetEnthalpyTransferError> {
+) -> Result<f64, TetEnthalpyTransferError> {
     let material = match rate {
         Some((axis, rate)) => {
             let point = law.reference_point().clone()
@@ -443,12 +479,16 @@ fn admit_transport_temperature(
         }
         None => law.at_temperature(Temperature::new(temperature_k)),
     }.map_err(FreeSurfaceEnthalpyError::from)?;
+    // The original reference density owns momentum inertia in both the
+    // constant-density and admitted Boussinesq paths, exactly as in the native
+    // thermal owner. No second viscosity law or reference-rate substitution.
+    let viscosity = material.dynamic_viscosity_pa_s() / density;
     if let Some(config) = buoyancy {
         buoyancy::admit_source_transport(material, density, law, config)?;
     } else if material.density_kg_m3().to_bits() != density.to_bits() {
         return Err(invalid("source thermal field requires a density/volume-change owner").into());
     }
-    Ok(())
+    Ok(viscosity)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -13,7 +13,7 @@ pub(super) fn source(q: usize, velocity: [f64; 3], force: [f64; 3]) -> f64 {
 // zeroth moment. Even a one-ulp density change can turn a full interface into
 // a fictitious partial cell. The rest correction changes no momentum/stress;
 // try its adjacent representations before closing the final ordered add.
-fn preserve_density(populations: &mut [f64; Q3], rho: f64) -> Result<(), FreeSurfaceError3> {
+pub(super) fn preserve_density(populations: &mut [f64; Q3], rho: f64) -> Result<(), FreeSurfaceError3> {
     populations[0] += rho - populations.iter().sum::<f64>();
     let corrected_rest = populations[0];
     let actual = populations.iter().sum::<f64>();

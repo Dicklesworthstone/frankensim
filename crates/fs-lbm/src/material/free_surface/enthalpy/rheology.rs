@@ -253,7 +253,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         let binding = RheologyBinding::try_new(self.material(), law, solve)?;
         let flow = self.free_surface3_from_cells_inner(domain, initial, cx)?;
         let liquid = flow.with_bound_thermal_transport(
-            law, caloric, controls, initial_h, buoyancy, Some(binding), gate,
+            law, caloric, controls, initial_h, buoyancy, Some(binding), None, gate,
         )?;
         cx.checkpoint().map_err(|_| FreeSurfaceError3::Cancelled)?;
         Ok(liquid)
@@ -272,9 +272,12 @@ impl<'s> MaterialFreeSurface3<'s> {
         initial_h: impl Fn([usize; 3]) -> f64,
         buoyancy: Option<crate::material::transport::boussinesq::BoussinesqConfig<3>>,
         binding: Option<RheologyBinding>,
+        initial_tau: Option<&BTreeMap<[usize; 3], f64>>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
-        self.with_enthalpy_model(law, caloric, controls, initial_h, buoyancy, binding, None, gate)
+        self.with_enthalpy_model_seeded(
+            law, caloric, controls, initial_h, buoyancy, binding, None, initial_tau, gate,
+        )
     }
 }
 

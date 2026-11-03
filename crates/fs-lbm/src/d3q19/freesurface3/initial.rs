@@ -7,6 +7,9 @@ use super::*;
 use crate::MACH_LIMIT;
 use crate::d3q19::sparse::MORTON_COORD_BITS;
 
+#[cfg(test)]
+mod stress_tests;
+
 /// One initially occupied Cartesian cell. Omitted cells contain no liquid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceInitialCell3 {
@@ -32,6 +35,82 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), FreeSurfaceError3> {
 }
 
 impl FreeSurface3 {
+    /// Seed one cell of an unpublished transfer candidate with its admitted
+    /// symmetric strain, packed xx, yy, zz, xy, xz, yz, in lattice time units.
+    /// The supplied molecular tau belongs to that SAME strain/source query.
+    /// This changes no represented mass, velocity, heat or elapsed time. It
+    /// supplies Newtonian/generalized-Newtonian stress, never elastic memory.
+    /// Callers own cancellation between these fixed-size cell operations and
+    /// re-audit actual native momenta before returning their complete candidate.
+    pub(crate) fn initialize_strain_at(
+        &mut self,
+        coordinates: [usize; 3],
+        strain: [f64; 6],
+        tau: f64,
+    ) -> Result<(), FreeSurfaceError3> {
+        let fail = |reason| refused(Some(coordinates), reason);
+        if !tau.is_finite() || tau <= 0.5 || strain.iter().any(|v| !v.is_finite()) {
+            return Err(fail("initial viscous strain or relaxation is inadmissible"));
+        }
+        let [x, y, z] = coordinates;
+        let sample = self.sample_at(x, y, z)
+            .filter(|state| matches!(state.cell, Cell3::Fluid | Cell3::Interface)
+                && state.fill_fraction > 0.0)
+            .ok_or_else(|| fail("initial viscous strain requires an occupied liquid cell"))?;
+        // Retain the exact existing equilibrium/Guo representation at zero
+        // strain, including rigid-motion input and its density reduction.
+        if strain == [0.0; 6] {
+            return Ok(());
+        }
+        let key = morton3((x / TILE) as u32, (y / TILE) as u32, (z / TILE) as u32);
+        let lane = x % TILE + TILE * (y % TILE + TILE * (z % TILE));
+        let slot = self.grid.slot_of(key)
+            .ok_or_else(|| fail("initial viscous strain lost its native tile"))?;
+        let rho = sample.density;
+        let velocity = sample.velocity;
+        let force = self.force_at_lane(key, lane);
+        // Pi_neq = -2 rho cs^2 tau D. The physical viscous Cauchy stress is
+        // -(1 - 1/(2 tau))*Pi_neq; using tau-1/2 here would seed the wrong rate.
+        let expected = strain.map(|rate| -2.0 * CS2_3 * rho * tau * rate);
+        if expected.iter().any(|v| !v.is_finite()) {
+            return Err(fail("initial viscous stress overflows lattice units"));
+        }
+        let [xx, yy, zz, xy, xz, yz] = expected;
+        let tensor = [[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]];
+        let mut populations = crate::d3q19::boundary::regularized_populations(rho, velocity, tensor);
+        forcing::preserve_density(&mut populations, rho)?;
+        let populations = forcing::reframe(populations, velocity, [0.0; 3], force)?;
+        if populations.iter().any(|v| !v.is_finite() || *v <= 0.0)
+            || populations.iter().sum::<f64>() != rho
+        {
+            return Err(fail("initial viscous stress needs positive density-preserving populations"));
+        }
+        let actual_velocity: [f64; 3] = core::array::from_fn(|axis| {
+            let momentum = populations.iter().enumerate().map(|(q, &f)| {
+                let direction = [E3[q].0, E3[q].1, E3[q].2];
+                f * f64::from(direction[axis])
+            }).sum::<f64>();
+            (momentum + 0.5 * force[axis]) / rho
+        });
+        let actual = crate::d3q19::force_corrected_stress3(
+            &populations, rho, actual_velocity, force,
+        );
+        let allowance = 256.0 * f64::EPSILON
+            * (rho + expected.iter().map(|v| v.abs()).sum::<f64>());
+        if !allowance.is_finite()
+            || actual_velocity.iter().zip(velocity).any(|(actual, expected)| {
+                !actual.is_finite() || ((actual - expected) * rho).abs() > allowance
+            })
+            || actual.iter().zip(expected).any(|(actual, expected)| {
+                !actual.is_finite() || (actual - expected).abs() > allowance
+            })
+        {
+            return Err(fail("initial viscous populations do not reproduce physical moments"));
+        }
+        self.grid.set_populations(slot, lane, populations);
+        Ok(())
+    }
+
     /// Construct the original sparse free surface from transferred cell state.
     ///
     /// Unlike the binary occupancy constructor, this path never invents a
