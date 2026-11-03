@@ -86,7 +86,7 @@ fn poll(cx: &Cx<'_>) -> Result<(), SolveRefusal> {
 }
 
 /// Resolve once before numerical work. A curve's equal endpoints do not erase
-/// interior variation, and a two-coordinate law naming T is never frozen.
+/// interior variation, and a nonconstant two-coordinate law naming T is never frozen.
 pub(super) fn prepare(
     spec: &ProjectSpec,
     cards: &CardPackSet,
@@ -133,8 +133,16 @@ pub(super) fn prepare(
                             && value.to_bits() != property.value_lo.to_bits()
                     })
                 }
-                PropertyValue::Surface2D { axes, .. } => {
+                PropertyValue::Surface2D { axes, samples, .. } => {
+                    // A globally flat source table has no temperature feedback.
+                    // Every other T surface stays conservative: equal queries
+                    // alone cannot prove a constant path through its cells.
                     axes.contains(&requirements.temperature_axis)
+                        && samples.first().is_none_or(|(_, reference)| {
+                            samples
+                                .iter()
+                                .any(|(_, value)| value.to_bits() != reference.to_bits())
+                        })
                 }
                 _ => false,
             };
@@ -167,6 +175,133 @@ pub(super) fn prepare(
         }))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cards::{CardPackKind, RawCardPack};
+    use fs_matdb::{ClaimSet, InterpolationPolicy, NormalizedInterfacePack, NormalizedPack};
+
+    #[test]
+    fn constant_surface_contact_keeps_legacy_path_after_binding() {
+        let original = NormalizedInterfacePack::from_bytes(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/contact-pair/cold-hot.fsintpk"
+        )))
+        .unwrap();
+        for off_point_resistance in [0.1, 0.2] {
+            let mut claims = ClaimSet::new();
+            for id in original.card().claims().observation_ids() {
+                claims
+                    .register_observation(original.card().claims().observation(id).unwrap().clone())
+                    .unwrap();
+            }
+            let mut claim = original
+                .card()
+                .claims()
+                .claims_ordered()
+                .next()
+                .unwrap()
+                .1
+                .clone();
+            claim.value = PropertyValue::Surface2D {
+                axes: ["T".into(), "normal_pressure".into()],
+                axis_dims: [
+                    fs_project::spec::dims::TEMPERATURE,
+                    fs_project::spec::dims::PRESSURE,
+                ],
+                samples: vec![
+                    ([280.0, 0.9e6], off_point_resistance),
+                    ([320.0, 0.9e6], 0.1),
+                    ([300.0, 1.0e6], 0.1),
+                ],
+                triangles: vec![[0, 1, 2]],
+                dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            };
+            claim.interpolation = InterpolationPolicy::LinearInside;
+            claims.insert_claim(claim).unwrap();
+            let pack = NormalizedPack::new(
+                "synthetic-contact-surface",
+                "unit-test",
+                original.source_artifact(),
+                original.redistribution_terms(),
+                claims,
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+            let pack = NormalizedInterfacePack::new(
+                original.card().surface_a().clone(),
+                original.card().surface_b().clone(),
+                original.card().context().clone(),
+                pack,
+            )
+            .unwrap();
+            let cards = CardPackSet::admit(vec![
+                RawCardPack {
+                    kind: CardPackKind::Interface,
+                    source: "surface-test".into(),
+                    bytes: pack.to_bytes(),
+                    expect: None,
+                },
+                RawCardPack {
+                    kind: CardPackKind::Material,
+                    source: "solid-test".into(),
+                    bytes: include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../data/reference-project/aa6061.fsmcdpk"
+                    ))
+                    .to_vec(),
+                    expect: None,
+                },
+            ])
+            .unwrap();
+            let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../examples/contact-pair/contact-pair.fsim"
+            )))
+            .unwrap()
+            .decoded
+            .spec;
+            // Native box-support admission currently accepts a Surface2D at
+            // a point; source-cell corners alone do not prove an interval.
+            for material in spec.materials.as_mut().unwrap() {
+                material.temp_lo.value = 300.0;
+                material.temp_hi.value = 300.0;
+            }
+            let joint = &mut spec.interface_cards.as_mut().unwrap()[0];
+            joint.card = cards.interfaces()[0].card().to_hex();
+            if let fs_project::InterfaceState::DryContact {
+                pressure_half_width,
+                ..
+            } = &mut joint.state
+            {
+                pressure_half_width.value = 0.0;
+            }
+            let resolution = fs_project::resolve_bindings(
+                &spec,
+                &cards.library(),
+                &BindingRequirements::thermal_steady_v1(),
+            );
+            assert!(resolution.admissible(), "{:?}", resolution.violations);
+            let binding = resolution
+                .bindings
+                .iter()
+                .find(|row| matches!(row.target, BindingTarget::Interface(_)))
+                .unwrap();
+            assert_eq!(binding.properties[0].value_lo.to_bits(), 0.1_f64.to_bits());
+            assert_eq!(
+                binding.properties[0].value_lo,
+                binding.properties[0].value_hi
+            );
+            assert_eq!(
+                prepare(&spec, &cards).unwrap().is_some(),
+                off_point_resistance != 0.1,
+                "globally flat tables keep constant-contact compositions; other T tables stay conservative"
+            );
+        }
     }
 }
 

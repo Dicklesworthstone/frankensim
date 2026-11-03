@@ -219,8 +219,9 @@ fn native_temperature_contact_queries_the_accepted_faces_and_preserves_heat() {
                 .map(|row| row.f64_field("heat_rate_a_to_b_w").unwrap())
                 .sum::<f64>();
             assert!((interface_heat.abs() - 12.0 * 0.37).abs() < 1e-7);
-            assert!(
-                receipt.get("roundoff").is_none(),
+            assert_eq!(
+                receipt.get("solver_control"),
+                Some(&J::Null),
                 "a frozen-contact inverse is not a nonlinear certificate"
             );
             let field = artifact(&ledger, receipt.str_field("solution_artifact").unwrap());
