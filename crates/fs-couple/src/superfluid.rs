@@ -28,6 +28,9 @@ use fs_thermal::enthalpy::{
 /// Reciprocal pressure impulse and motion on the original native rigid-body owner.
 pub mod piston;
 
+/// Two freely moving native bodies with reciprocal channel pressure and forcing.
+pub mod piston_pair;
+
 /// Original thermal stepping controls plus explicit heat and combined-account gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionHeatControls {

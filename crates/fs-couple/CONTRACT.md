@@ -25399,3 +25399,37 @@ separate original owners.
 `liquid_gas::evaporation::momentum::advance_liquid_with_moving_gas` advances the original Stefan/enthalpy phase solve and one native VOF interval with explicit retained gas bulk momentum. `MovingGasParcel` requires an authored Cartesian velocity and preserves the original finite gas composition, internal energy, volume and source axes; bulk kinetic energy is derived separately. Evaporation carries the actual liquid mean velocity into gas; condensation carries the retained gas mean velocity into the original native complete-mixing owner. The receiver's physical relative kinetic loss heats that same receiver once through its original caloric law. Gas momentum updates by the reciprocal accepted mass impulse, and actual represented liquid plus gas source momentum and kinetic-plus-caloric energy must close within the declared budgets.
 
 Optional sensible heat retains the original source solve; optional pressure uses the actual mixing-heated gas EOS. Neither pressure traction nor a molecular vapor-jet recoil is inferred as an additional phase impulse. Source domains, latent-datum compatibility, temperature-increment limits, native capacity and speed bounds remain authoritative after mixing. The complete private gas/liquid candidate publishes atomically after one retained flow timestep; zero-flux sensible heating preserves the same mechanical account. This is a homogeneous mean-drift, first-order phase/mixing/flow split, with fixed connected gas volume. Its closed source ledger excludes subsequent VOF wall/pressure forces and numerical kinetic truncation; those are not mixing heat.
+
+
+## Two moving superfluid pistons with authored fluid and body forces
+
+With `superfluid`, `superfluid::piston_pair::advance_balanced_piston_pair`
+composes the original Landau channel with two original native rigid bodies.
+Both ends move; there is no stationary support absorbing unreported momentum.
+Left/right body states, mass properties and balanced-pressure references are
+explicit. Bodies share one world axis and remain centered, spin-free and
+within the declared small-displacement reference configuration.
+
+The original reciprocal two-end midpoint response supplies a mass-scaled
+symmetric 2-by-2 Cholesky solve for both velocities. A force-only anchor
+preserves uniform translation and common acceleration without artificial
+blocked-pressure loads. Native `RigidBodyIntegrator` advances positions and
+momenta without changing native masses or inertias. Each endpoint fluid
+half-cell carries separate momentum and kinetic storage, distinct from the
+resolved channel interior.
+
+Authored component body forces and independent outward piston loads retain
+their physical impulse and work. Reports distinguish pressure impulse, actual
+native momentum change, fluid contact impulse, external body impulse,
+endpoint-fluid source impulse and actual midpoint work. Whole-system momentum
+and energy are checked before any owner publishes. Friction heat is exported
+once. Nonlinear advection, moving meshes, rotation and temperature-driven
+material updates remain outside this reference-grid model. The existing
+single-piston API shares native admission and motion preparation helpers.
+
+`superfluid_piston_pair` independently checks isolated translation/recoil,
+common acceleration of all fluid mass and both bodies, spatial fluid/body
+forcing (including disparate native masses), and complete rollback on refusal
+or cancellation. Its cumulative balances include both fluid half-cells.
+All five pair, five existing piston and seven heat tests passed native
+source-module validation; a full workspace Cargo build is not claimed.

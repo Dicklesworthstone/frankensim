@@ -142,40 +142,9 @@ pub fn advance_balanced_piston(
     cancelled: impl Fn() -> bool,
 ) -> Result<PistonStep, PistonError> {
     check(&cancelled)?;
-    if [
-        controls.momentum_tolerance_n_s,
-        controls.energy_tolerance_j,
-        controls.velocity_tolerance_m_s,
-    ]
-    .into_iter()
-    .any(|value| !value.is_finite() || value < 0.0)
-    {
-        return Err(PistonError::Invalid(
-            "tolerances must be finite and nonnegative",
-        ));
-    }
-    if !boundary.max_displacement_m.is_finite()
-        || boundary.max_displacement_m <= 0.0
-        || boundary.max_displacement_m > 0.1 * channel.length_m()
-        || !boundary.equilibrium_position_world.is_finite()
-    {
-        return Err(PistonError::Invalid(
-            "invalid small-displacement reference or limit",
-        ));
-    }
+    validate_controls(controls)?;
     let before = *body;
-    let axis = before
-        .directional_effective_mass(properties, Vec3::ZERO, boundary.positive_axis_world)?
-        .unit_direction_world;
-    let velocity_before = before.center_of_mass_velocity_world(properties)?;
-    if before.angular_momentum_body() != Vec3::ZERO
-        || norm(velocity_before.cross(axis)) > 64.0 * f64::EPSILON * norm(velocity_before)
-    {
-        return Err(PistonError::Invalid(
-            "piston requires centered axial translation without spin",
-        ));
-    }
-    admit_position(before, boundary, axis)?;
+    let (axis, velocity_before) = admit_boundary(channel, before, properties, boundary)?;
     let (end_index, sign) = match boundary.end {
         ChannelEnd::Left => (0, -1.0),
         ChannelEnd::Right => (1, 1.0),
@@ -242,42 +211,24 @@ pub fn advance_balanced_piston(
             // The channel reports pressure impulse INTO its interior, in +x.
             let port_impulse = -sign * wave.boundary_pressure_impulse_n_s[end_index];
             let body_impulse = port_impulse * (properties.mass() / effective_mass);
-            let mechanical = RigidBodyIntegrator::new(Gravity::ZERO).step(
+            let motion = prepare_motion(
                 before,
                 properties,
-                Wrench {
-                    force_world: outward.scale(body_impulse / dt_s),
-                    torque_body: Vec3::ZERO,
-                },
+                boundary,
+                axis,
+                velocity_before,
+                u_mid,
+                body_impulse,
                 dt_s,
+                controls,
             )?;
-            let after = mechanical.state_after;
-            admit_position(after, boundary, axis)?;
-            let velocity_after = after.center_of_mass_velocity_world(properties)?;
-            let u_after = velocity_after.dot(outward);
-            let average_velocity = velocity_before.scale(0.5).add(velocity_after.scale(0.5));
-            let actual_u_mid = average_velocity.dot(outward);
-            let displacement_velocity = after
-                .pose()
-                .position_world()
-                .sub(before.pose().position_world())
-                .scale(dt_s.recip());
-            if !displacement_velocity.is_finite()
-                || !average_velocity.is_finite()
-                || (actual_u_mid - u_mid).abs() > controls.velocity_tolerance_m_s
-                || norm(displacement_velocity.sub(average_velocity))
-                    > controls.velocity_tolerance_m_s
-            {
-                return Err(PistonError::Invalid(
-                    "native midpoint motion does not resolve the fluid port",
-                ));
-            }
-            let delta_momentum = after
-                .linear_momentum_world()
-                .sub(before.linear_momentum_world());
+            let mechanical = motion.mechanical;
+            let u_after = motion.velocity_after_outward_m_s;
+            let actual_u_mid = motion.midpoint_velocity_outward_m_s;
+            let delta_momentum = motion.delta_momentum_world_n_s;
             let half_impulse = half_mass * (u_after - u_before);
             let momentum_residual = delta_momentum.add(outward.scale(half_impulse - port_impulse));
-            let body_energy_change = average_velocity.dot(delta_momentum);
+            let body_energy_change = motion.kinetic_change_j;
             let half_energy_change = half_impulse * actual_u_mid;
             let combined_energy_residual = wave.wave_balance_defect_j
                 + wave.boundary_wave_work_j
@@ -335,6 +286,119 @@ pub fn advance_balanced_piston(
     Ok(report)
 }
 
+pub(super) fn validate_controls(controls: PistonControls) -> Result<(), PistonError> {
+    if [
+        controls.momentum_tolerance_n_s,
+        controls.energy_tolerance_j,
+        controls.velocity_tolerance_m_s,
+    ]
+    .into_iter()
+    .any(|value| !value.is_finite() || value < 0.0)
+    {
+        Err(PistonError::Invalid(
+            "tolerances must be finite and nonnegative",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn admit_boundary(
+    channel: &TwoFluidChannel,
+    before: RigidBodyState,
+    properties: MassProperties,
+    boundary: BalancedPistonBoundary,
+) -> Result<(Vec3, Vec3), PistonError> {
+    if !boundary.max_displacement_m.is_finite()
+        || boundary.max_displacement_m <= 0.0
+        || boundary.max_displacement_m > 0.1 * channel.length_m()
+        || !boundary.equilibrium_position_world.is_finite()
+    {
+        return Err(PistonError::Invalid(
+            "invalid small-displacement reference or limit",
+        ));
+    }
+    let axis = before
+        .directional_effective_mass(properties, Vec3::ZERO, boundary.positive_axis_world)?
+        .unit_direction_world;
+    let velocity = before.center_of_mass_velocity_world(properties)?;
+    if before.angular_momentum_body() != Vec3::ZERO
+        || norm(velocity.cross(axis)) > 64.0 * f64::EPSILON * norm(velocity)
+    {
+        return Err(PistonError::Invalid(
+            "piston requires centered axial translation without spin",
+        ));
+    }
+    admit_position(before, boundary, axis)?;
+    Ok((axis, velocity))
+}
+
+pub(super) struct PistonMotion {
+    pub mechanical: StepReceipt,
+    pub velocity_after_outward_m_s: f64,
+    pub midpoint_velocity_outward_m_s: f64,
+    pub delta_momentum_world_n_s: Vec3,
+    pub kinetic_change_j: f64,
+}
+
+// Both compositions use the same original native integrator and admission.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_motion(
+    before: RigidBodyState,
+    properties: MassProperties,
+    boundary: BalancedPistonBoundary,
+    axis: Vec3,
+    velocity_before: Vec3,
+    prescribed_midpoint_outward_m_s: f64,
+    body_impulse_outward_n_s: f64,
+    dt_s: f64,
+    controls: PistonControls,
+) -> Result<PistonMotion, PistonError> {
+    let outward = axis.scale(if boundary.end == ChannelEnd::Left {
+        -1.0
+    } else {
+        1.0
+    });
+    let mechanical = RigidBodyIntegrator::new(Gravity::ZERO).step(
+        before,
+        properties,
+        Wrench {
+            force_world: outward.scale(body_impulse_outward_n_s / dt_s),
+            torque_body: Vec3::ZERO,
+        },
+        dt_s,
+    )?;
+    let after = mechanical.state_after;
+    admit_position(after, boundary, axis)?;
+    let velocity_after = after.center_of_mass_velocity_world(properties)?;
+    let average_velocity = velocity_before.scale(0.5).add(velocity_after.scale(0.5));
+    let actual_u_mid = average_velocity.dot(outward);
+    let displacement_velocity = after
+        .pose()
+        .position_world()
+        .sub(before.pose().position_world())
+        .scale(dt_s.recip());
+    if !displacement_velocity.is_finite()
+        || !average_velocity.is_finite()
+        || (actual_u_mid - prescribed_midpoint_outward_m_s).abs() > controls.velocity_tolerance_m_s
+        || norm(displacement_velocity.sub(average_velocity)) > controls.velocity_tolerance_m_s
+    {
+        return Err(PistonError::Invalid(
+            "native midpoint motion does not resolve the fluid port",
+        ));
+    }
+    let delta_momentum = after
+        .linear_momentum_world()
+        .sub(before.linear_momentum_world());
+    Ok(PistonMotion {
+        mechanical,
+        velocity_after_outward_m_s: velocity_after.dot(outward),
+        midpoint_velocity_outward_m_s: actual_u_mid,
+        delta_momentum_world_n_s: delta_momentum,
+        kinetic_change_j: average_velocity.dot(delta_momentum),
+    })
+}
+
 fn admit_position(
     body: RigidBodyState,
     boundary: BalancedPistonBoundary,
@@ -356,11 +420,11 @@ fn admit_position(
     }
 }
 
-fn norm(value: Vec3) -> f64 {
+pub(super) fn norm(value: Vec3) -> f64 {
     det::hypot(det::hypot(value.x, value.y), value.z)
 }
 
-fn check(cancelled: &impl Fn() -> bool) -> Result<(), PistonError> {
+pub(super) fn check(cancelled: &impl Fn() -> bool) -> Result<(), PistonError> {
     if cancelled() {
         Err(PistonError::Cancelled)
     } else {
