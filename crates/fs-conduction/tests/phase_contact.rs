@@ -2,6 +2,8 @@
 //! Manufactured sources and analytical balances, not measured interface data.
 #[path = "contact_material_state/common.rs"]
 mod common;
+#[path = "phase_contact/history.rs"]
+mod history;
 mod support;
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::interface::NonmatchingOptions;
@@ -82,7 +84,7 @@ fn source(
         (
             ["fa".into(), "fb".into()],
             [Dims::NONE; 2],
-            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            [[0.0, 0.0], [a_limit, 0.0], [0.0, 1.0], [a_limit, 1.0]],
         )
     };
     claim.value = PropertyValue::Surface2D {

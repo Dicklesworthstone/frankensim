@@ -3597,3 +3597,38 @@ Two earlier enclosure-test import paths were corrected; all three earlier
 material enclosure adjoint regressions now execute successfully. DSR and
 required sibling checkouts were unavailable, so this is focused native
 fallback evidence, not full workspace or experimental validation.
+
+## Phase-aware contact throughout primary-enthalpy histories
+
+`ContactEnthalpyHistoryRun::new_newton` retains original A/B caloric objects
+and phase-aware interface sources through direct, event-aligned and adaptive
+histories. Every candidate evaluates independent P1 T(h)/f(h) traces and the
+existing complete contact Jacobian. Latent fractions remain active where
+dT/dh is zero. Matching, pointwise matching and nonmatching quadrature,
+original conductivity and immutable reference masses keep their owners.
+
+Prescribed-temperature chart admission and the independent physical nodal
+residual/global joule gates remain authoritative. Coupled controls are retained
+and must match each advance; a mismatched policy refuses. The existing
+temperature-only outer-iteration constructor and its mean-radiation attachment
+remain available. Policy inspection distinguishes those methods explicitly:
+`coupling()` returns the optional outer policy and `newton_config()` returns
+the optional full-h Newton policy. Initial attachment and failed candidates
+publish no physical state.
+
+Three new G0/G1 regressions execute independent latent quadratic exchange
+across all three contact discretizations, complete melting/freezing through
+energy-predicted sensible equilibration, held heater pulses, phase-only
+adaptive rejection, exact chart/source identity, source support, cancellation,
+policy refusal and deterministic resume. A malformed partial-support fixture
+was corrected so its authored surface samples lie inside their declared
+validity, preserving the same affine resistance law.
+
+The actual updated library and test targets compiled against matching cached
+native dependencies. All three new history tests and all three existing
+thermal-contact history tests passed. The larger phase-contact target retains
+an unrelated all-fixed-contact fixture that the current temperature-contact
+constructor refuses; this is not a claim of an all-green broad target.
+DSR and required sibling checkouts were unavailable. These are focused native
+implementation checks, not measured-interface validation or a continuum
+error bound.

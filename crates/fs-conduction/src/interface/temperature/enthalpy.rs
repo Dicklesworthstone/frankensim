@@ -59,6 +59,24 @@ pub struct ContactEnthalpyNewtonConfig {
     pub residual_tolerance_j: f64,
 }
 
+impl ContactEnthalpyNewtonConfig {
+    pub(crate) fn validate(self) -> Result<(), EnthalpyError> {
+        if self.max_residual_evaluations == 0
+            || self.max_face_pairs == 0
+            || !self.residual_tolerance_j.is_finite()
+            || self.residual_tolerance_j <= 0.0
+            || self.step.newton.relative_tolerance != 0.0
+            || self.step.newton.absolute_tolerance > self.residual_tolerance_j
+            || !matches!(self.step.newton.globalization, fs_solver::Globalization::LineSearch(_))
+        {
+            return Err(EnthalpyError::InvalidInput(
+                "contact enthalpy Newton requires positive work/joule gates, line search, zero relative tolerance and a numerical target no looser than the physical target",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn check_coupled_endpoint(
     physical: &EnthalpyEndpointEvaluation,
     config: ContactEnthalpyNewtonConfig,

@@ -11,20 +11,28 @@ use super::super::{events, radiation::{RadiationRegionHistory, admit_histories, 
 use events::adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step};
 use crate::AmbientRadiationConfig;
 use crate::interface::temperature::{ContactIterationConfig, TemperatureContacts};
-use crate::interface::temperature::enthalpy::ContactEnthalpyStep;
-use crate::transient::enthalpy::EnthalpyStepConfig;
+use crate::interface::temperature::enthalpy::{ContactEnthalpyNewtonConfig, ContactEnthalpyStep};
+use crate::transient::enthalpy::{EnthalpyError, EnthalpyStepConfig};
 use crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyError;
 use fs_exec::Cx;
 
 /// One phase-history run and its complete, immutable material-contact model.
 /// No mutable accessor can advance the inner run while omitting its contacts.
-/// Only temperature coordinates of the contact law evolve; geometry, pressure,
-/// selected source claims and reference mass remain fixed.
+/// The coupled Newton method evolves each body's own temperature and liquid
+/// fraction through its original caloric chart. Geometry, pressure, selected
+/// source claims and reference mass remain fixed. The original outer-iteration
+/// method remains available for explicitly temperature-only contact laws.
 pub struct ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     run: EnthalpyHistoryRun<'h, 'm, 'c>,
     contacts: TemperatureContacts<'m, 'i>,
-    coupling: ContactIterationConfig,
+    coupling: ContactHistoryCoupling,
     radiation: Option<(Vec<RadiationRegionHistory>, AmbientRadiationConfig)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ContactHistoryCoupling {
+    Legacy(ContactIterationConfig),
+    Newton(ContactEnthalpyNewtonConfig),
 }
 
 impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
@@ -55,7 +63,43 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let boundary = run.problem.boundary.at(cx, run.time_s).map_err(conduction)?;
         contacts.evaluate(cx, &boundary, &run.temperature).map_err(conduction)?;
         poll(cx, 0).map_err(conduction)?;
-        Ok(Self { run, contacts, coupling, radiation: None })
+        Ok(Self { run, contacts, coupling: ContactHistoryCoupling::Legacy(coupling), radiation: None })
+    }
+
+    /// Attach original phase-aware contacts to the existing full enthalpy Newton
+    /// solver before the first physical step. Every trial uses each body's
+    /// independent P1 T(h) and f(h) trace and the complete source contact tangent.
+    /// The latent fraction remains active when dT/dh is zero.
+    ///
+    /// The complete coupled policy is retained for continuation. Every advance
+    /// must pass the same `config.step`; mismatched controls refuse explicitly.
+    /// Matching/nonmatching geometry, source claims, reference masses and
+    /// source-owned k(h_h) remain with their original physical owners.
+    ///
+    /// # Errors
+    /// Advanced history, duplicate interfaces, invalid Newton work/physical
+    /// gates, foreign mesh or caloric objects, original source refusal or
+    /// cancellation. Construction performs no thermal step.
+    pub fn new_newton(cx: &Cx<'_>, run: EnthalpyHistoryRun<'h, 'm, 'c>,
+        contacts: TemperatureContacts<'m, 'i>, config: ContactEnthalpyNewtonConfig)
+        -> Result<Self, HeterogeneousEnthalpyError>
+    {
+        poll(cx, 0).map_err(conduction)?;
+        if run.accepted_steps != 0 || run.problem.interfaces.is_some() {
+            return Err(invalid("attach the complete contact set to an unadvanced run with no separately declared interfaces"));
+        }
+        config.validate()?;
+        config.step.newton.validate().map_err(EnthalpyError::Newton)?;
+        if config.step.max_newton_iterations == 0 || !config.step.energy_tolerance_j.is_finite()
+            || config.step.energy_tolerance_j <= 0.0
+        {
+            return Err(invalid("contact history requires positive nonlinear work and finite positive energy tolerance"));
+        }
+        contacts.check_mesh(run.problem.boundary.mesh()).map_err(conduction)?;
+        let boundary = run.problem.boundary.at(cx, run.time_s).map_err(conduction)?;
+        contacts.evaluate_enthalpy(cx, &boundary, &run.storage, &run.specific_h)?;
+        poll(cx, 0).map_err(conduction)?;
+        Ok(Self { run, contacts, coupling: ContactHistoryCoupling::Newton(config), radiation: None })
     }
 
     /// Retain sourced radiating surfaces and independent reservoir histories.
@@ -67,6 +111,9 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         poll(cx, 0).map_err(conduction)?;
         if self.run.accepted_steps != 0 || self.radiation.is_some() {
             return Err(invalid("attach radiation once, before the first material-contact history step"));
+        }
+        if matches!(self.coupling, ContactHistoryCoupling::Newton(_)) {
+            return Err(invalid("area-mean radiation requires the iterated contact history method; coupled Newton needs an explicit pointwise radiation owner"));
         }
         config.validate().map_err(conduction)?;
         admit_histories(cx, self.run.problem.boundary, self.run.time_s, &patches).map_err(conduction)?;
@@ -82,9 +129,19 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     #[must_use]
     pub fn contacts(&self) -> &TemperatureContacts<'m, 'i> { &self.contacts }
 
-    /// Original outer contact policy, unchanged during retries and continuation.
+    /// Original outer contact policy; absent for the coupled enthalpy Newton method.
     #[must_use]
-    pub const fn coupling(&self) -> ContactIterationConfig { self.coupling }
+    pub const fn coupling(&self) -> Option<ContactIterationConfig> {
+        match self.coupling { ContactHistoryCoupling::Legacy(config) => Some(config),
+            ContactHistoryCoupling::Newton(_) => None }
+    }
+
+    /// Complete retained coupled Newton policy, absent for outer iteration.
+    #[must_use]
+    pub const fn newton_config(&self) -> Option<ContactEnthalpyNewtonConfig> {
+        match self.coupling { ContactHistoryCoupling::Legacy(_) => None,
+            ContactHistoryCoupling::Newton(config) => Some(config) }
+    }
 
     /// Original radiative declarations, absent when radiation was not selected.
     #[must_use]
@@ -186,13 +243,21 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let history = self.run.problem.boundary;
         let boundary = if before { events::boundary_before(cx, history, to) }
             else { history.at(cx, to) }.map_err(conduction)?;
-        natural_only(&boundary)?;
+        match self.coupling {
+            ContactHistoryCoupling::Legacy(_) => natural_only(&boundary)?,
+            ContactHistoryCoupling::Newton(_) => self.run.storage.admit_prescribed_boundary(cx, &boundary)?,
+        }
         let source = if before { events::source_before(&self.run.problem.source, to, old.len()) }
             else { self.run.problem.source.at(to, old.len()) }.map_err(conduction)?;
         let problem = self.run.conduction_problem(&boundary, &source)?;
+        let coupling = match self.coupling {
+            ContactHistoryCoupling::Newton(_) => return Ok(self.contacts.advance_enthalpy_newton(
+                cx, &self.run.storage, problem, old, to - from, self.newton_config_for(step)?)?),
+            ContactHistoryCoupling::Legacy(coupling) => coupling,
+        };
         match &self.radiation {
             None => Ok(self.contacts.advance_enthalpy(cx, &self.run.storage, problem,
-                old, to - from, step, self.coupling)?),
+                old, to - from, step, coupling)?),
             Some((histories, config)) => {
                 let patches = if before { patches_before(cx, histories, to).map_err(conduction)? }
                     else {
@@ -204,8 +269,19 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
                         patches
                     };
                 Ok(self.contacts.advance_enthalpy_with_ambient_radiation(cx, &self.run.storage,
-                    problem, old, to - from, step, self.coupling, &patches, *config)?)
+                    problem, old, to - from, step, coupling, &patches, *config)?)
             }
         }
+    }
+
+    fn newton_config_for(&self, step: EnthalpyStepConfig)
+        -> Result<ContactEnthalpyNewtonConfig, HeterogeneousEnthalpyError>
+    {
+        let config = self.newton_config().ok_or_else(||
+            invalid("this contact history requires the coupled enthalpy Newton method"))?;
+        if config.step != step {
+            return Err(invalid("advance controls must match the retained contact enthalpy Newton policy"));
+        }
+        Ok(config)
     }
 }

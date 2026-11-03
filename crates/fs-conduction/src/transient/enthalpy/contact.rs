@@ -4,7 +4,6 @@
 
 use std::cell::Cell;
 
-use fs_solver::Globalization;
 use fs_sparse::Coo;
 
 use super::*;
@@ -340,21 +339,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                 "pointwise radiation must retain the exact transport mesh and boundary",
             ));
         }
-        if config.max_residual_evaluations == 0
-            || config.max_face_pairs == 0
-            || !config.residual_tolerance_j.is_finite()
-            || config.residual_tolerance_j <= 0.0
-            || config.step.newton.relative_tolerance != 0.0
-            || config.step.newton.absolute_tolerance > config.residual_tolerance_j
-            || !matches!(
-                config.step.newton.globalization,
-                Globalization::LineSearch(_)
-            )
-        {
-            return Err(EnthalpyError::InvalidInput(
-                "contact enthalpy Newton requires positive work/joule gates, line search, zero relative tolerance and a numerical target no looser than the physical target",
-            ));
-        }
+        config.validate()?;
         let base = StepContext {
             storage: self,
             cx,
