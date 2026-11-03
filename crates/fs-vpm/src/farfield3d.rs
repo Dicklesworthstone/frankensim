@@ -21,6 +21,9 @@
 use crate::filament3d::{FilamentWake, Refusal, segment_velocity_with_core};
 use fs_blake3::hash_domain;
 
+#[path = "farfield3d/advection.rs"]
+mod advection;
+
 /// Registered core-evolution mode (enters identity).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WakeCoreEvolutionMode {

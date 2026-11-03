@@ -588,6 +588,46 @@ existing entry point, checks independent space/time-dependent transport and
 moving-frame covariance, verifies image dynamics against direct finite-core
 line integration, and exercises boundary/callback/work-limit rollback.
 
+### Coupled material motion across near/far representations
+
+`FarField::shed_self_induced` and its environment form advance retained exact
+far sources together with the attached near sheet. Near and far must share
+the same shedding interval and core mode. Signed circulation must balance at
+every combined physical endpoint; incomplete/pruned open vortex lines refuse.
+A deterministic coordinate index binds shared free endpoints once per interval
+(signed zeros denote the same point). Prescribed line nodes have separate
+identities even when a newborn free row occupies the same coordinates.
+
+The common stage integrator updates each unique free vertex once. Exact far
+sources precede near sources in the direct sweep, preserving the physical
+ordering across aggregation. Both representations see the same current and
+midpoint geometry, incident flow, line trajectory, images and elapsed diffusion.
+Far source circulations and stored base cores remain unchanged. After all
+stages succeed, each cell's geometry and multipole moments are rebuilt from
+its moved exact sources once; the accumulated diffusion offset remains separate
+from those stored cores. Near and far states publish together only after the
+last cancellation check. Separately stored image snapshots must be rebuilt
+after successful physical motion.
+
+This is a bounded direct reference path, with cost proportional to unique
+nodes × retained sources × substeps. It avoids repeatedly convecting shared
+endpoints and preparing segment geometry per target, but does not accelerate
+the dynamics using far multipoles. Source assembly is a linear pass between
+substep checkpoints; direct target sweeps check cancellation within every 256
+source contributions. Circulation transport is conservative; exact impulse or
+energy conservation is not asserted for a discrete wake interacting with its
+prescribed lifting line or image boundary. Core spreading remains the declared
+algebraic model rather than a resolved viscous vortex tube. Streamwise
+refinement is an explicit separate operation.
+
+`tests/hybrid_advection3d.rs` checks the independent translating-square-ring
+solution and time-dependent diffusion integral, second-order convergence,
+bit-identical frozen-core partitioned/unpartitioned motion over multiple
+intervals, rebuilt cell geometry and core moments, shared seam continuity,
+environment equivalence, and atomic topology/time/core/work/cancellation
+refusals. The tests do not infer an accurate far expansion inside its source
+cell from the exact direct evolution used here.
+
 ## Finite-core connected 3-D wake
 
 `FilamentWake` stores captured **quad strengths**, positive along the current
