@@ -1,10 +1,11 @@
 //! Finite-body hinges with native force and pure-couple reactions.
 
 use super::{
-    ActionReactionImpulseReceipt, Dd, DistanceGraphControls, DistanceGraphError, DistanceLink,
-    DistanceStepError, Geometry, JointGraphStep, JointRows, MAX_DISTANCE_ROWS, MassProperties,
-    NativeReaction, RigidBodyIntegrator, RigidBodyState, Row, RowKind, Rows, SphericalJoint, Vec3,
-    Wrench, advance_between, driven, limit, planned_bytes_for, poll, positive, reserved,
+    ActionReactionImpulseReceipt, Dd, DistanceGraphControls, DistanceGraphError, DistanceGraphStep,
+    DistanceLink, DistanceStepError, Geometry, JointGraphStep, JointRows, MAX_DISTANCE_ROWS,
+    MassProperties, NativeReaction, RigidBodyIntegrator, RigidBodyState, Row, RowKind, Rows,
+    SphericalJoint, Vec3, Wrench, advance_between, driven, limit, planned_bytes_for, poll,
+    positive, reserved,
 };
 use crate::MomentumImpulseReceipt;
 
@@ -105,11 +106,45 @@ pub enum ArticulatedJoint {
     Revolute(RevoluteJoint),
 }
 impl ArticulatedJoint {
-    fn row_count(self) -> usize {
+    pub(super) fn row_count(self) -> usize {
         match self {
             Self::Distance(_) => 1,
             Self::Spherical(_) => 3,
             Self::Revolute(_) => 5,
+        }
+    }
+
+    // Callers bound the row count before supplying exactly this joint's span.
+    // Keep one geometry owner for static, actuated and spatial-load graphs.
+    pub(super) fn write_rows(self, rows: &mut [Row]) {
+        let (bodies, points) = match self {
+            Self::Distance(link) => {
+                rows[0] = Row::distance(link);
+                return;
+            }
+            Self::Spherical(joint) => (joint.bodies, joint.points_body_m),
+            Self::Revolute(joint) => (joint.bodies, joint.points_body_m),
+        };
+        for axis in 0..3 {
+            rows[axis] = Row {
+                bodies,
+                points_body_m: points,
+                kind: RowKind::Cartesian(axis),
+            };
+        }
+        if let Self::Revolute(joint) = self {
+            for component in 0..2 {
+                rows[3 + component] = Row {
+                    bodies,
+                    points_body_m: [Vec3::ZERO; 2],
+                    kind: RowKind::Revolute(AngularConstraint {
+                        axes_body: joint.axes_body,
+                        transverse_second_body: joint.transverse_second_body[component],
+                        length_m: joint.angular_length_m,
+                        component,
+                    }),
+                };
+            }
         }
     }
 }
@@ -145,7 +180,8 @@ pub enum JointReactionImpulse {
 }
 
 /// Native graph receipt plus authored-joint row spans and paired work account.
-pub type ArticulatedGraphStep = JointGraphStep<JointReactionImpulse>;
+pub type ArticulatedGraphStep<FreeStep = crate::StepReceipt> =
+    JointGraphStep<JointReactionImpulse, FreeStep>;
 
 /// Advance distance, ball and revolute joints in one coupled full-inertia solve.
 ///
@@ -189,36 +225,7 @@ pub fn advance_articulated_graph(
         poll(&mut cancelled)?;
         let width = joint.row_count();
         limit("constraints", (row_count + width) as u128, maximum as u128)?;
-        let (bodies, points) = match joint {
-            ArticulatedJoint::Distance(link) => {
-                rows[row_count] = Row::distance(link);
-                row_count += 1;
-                continue;
-            }
-            ArticulatedJoint::Spherical(joint) => (joint.bodies, joint.points_body_m),
-            ArticulatedJoint::Revolute(joint) => (joint.bodies, joint.points_body_m),
-        };
-        for axis in 0..3 {
-            rows[row_count + axis] = Row {
-                bodies,
-                points_body_m: points,
-                kind: RowKind::Cartesian(axis),
-            };
-        }
-        if let ArticulatedJoint::Revolute(joint) = joint {
-            for component in 0..2 {
-                rows[row_count + 3 + component] = Row {
-                    bodies,
-                    points_body_m: [Vec3::ZERO; 2],
-                    kind: RowKind::Revolute(AngularConstraint {
-                        axes_body: joint.axes_body,
-                        transverse_second_body: joint.transverse_second_body[component],
-                        length_m: joint.angular_length_m,
-                        component,
-                    }),
-                };
-            }
-        }
+        joint.write_rows(&mut rows[row_count..row_count + width]);
         row_count += width;
     }
     let extra = joints.len() as u128 * core::mem::size_of::<JointRows>() as u128;
@@ -237,10 +244,19 @@ pub fn advance_articulated_graph(
         None,
         &mut cancelled,
     )?;
+    finish(step, joints, bytes, &mut cancelled)
+}
+
+pub(super) fn finish<FreeStep>(
+    step: DistanceGraphStep<JointReactionImpulse, FreeStep>,
+    joints: &[ArticulatedJoint],
+    planned_live_bytes: u128,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ArticulatedGraphStep<FreeStep>, DistanceGraphError> {
     let mut joint_rows = reserved(joints.len())?;
     let mut first_row = 0;
     for &joint in joints {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         let row_count = joint.row_count();
         joint_rows.push(JointRows {
             first_row,
@@ -248,10 +264,26 @@ pub fn advance_articulated_graph(
         });
         first_row += row_count;
     }
+    let (constraint_work_j, constraint_angular_impulse_world_nms) =
+        reaction_account(&step, cancelled)?;
+    poll(cancelled)?;
+    Ok(JointGraphStep {
+        step,
+        joint_rows,
+        constraint_work_j,
+        constraint_angular_impulse_world_nms,
+        planned_live_bytes: planned_live_bytes as usize,
+    })
+}
+
+pub(super) fn reaction_account<FreeStep>(
+    step: &DistanceGraphStep<JointReactionImpulse, FreeStep>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(f64, Vec3), DistanceGraphError> {
     let mut work = Dd::ZERO;
     let mut angular = [Dd::ZERO; 3];
     for event in step.position_impulses.iter().chain(&step.velocity_impulses) {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         match event {
             JointReactionImpulse::Point(event) => {
                 let before = driven::relative_velocity(
@@ -278,14 +310,7 @@ pub fn advance_articulated_graph(
     if !constraint_work_j.is_finite() || !constraint_angular_impulse_world_nms.is_finite() {
         return Err(DistanceStepError::Invalid("articulated graph reaction account").into());
     }
-    poll(&mut cancelled)?;
-    Ok(JointGraphStep {
-        step,
-        joint_rows,
-        constraint_work_j,
-        constraint_angular_impulse_world_nms,
-        planned_live_bytes: bytes as usize,
-    })
+    Ok((constraint_work_j, constraint_angular_impulse_world_nms))
 }
 
 #[derive(Clone, Copy)]
@@ -414,14 +439,26 @@ impl NativeReaction for JointReactionImpulse {
         }
     }
     fn add_drive_work(
-        _: &mut driven::Work,
-        _: &[Self],
-        _: &[f64],
-        _: &[driven::Target],
-        _: bool,
-        _: &mut impl FnMut() -> bool,
+        work: &mut driven::Work,
+        events: &[Self],
+        impulses: &[f64],
+        targets: &[driven::Target],
+        endpoint: bool,
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DistanceGraphError> {
-        Err(DistanceStepError::Invalid("articulated joints do not prescribe motion").into())
+        for (i, ((event, impulse), target)) in events.iter().zip(impulses).zip(targets).enumerate()
+        {
+            poll(cancelled)?;
+            match event {
+                Self::Point(event) => work.add_point(i, event, *impulse, *target, endpoint)?,
+                Self::Couple(event) => {
+                    // Hinges are passive. Only distance rows own prescribed
+                    // rates; retain the physical couple work in their defect.
+                    work.add_work(i, Dd::ZERO, Dd::from_f64(event.impulse_work_j))?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

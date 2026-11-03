@@ -5535,6 +5535,100 @@ Joint friction, motors, angular stops, backlash, impacts, fixed supports,
 arbitrary dependent constraints, nonlinear state enclosures, exact energy,
 global branches, symplecticity and the other integrator lanes remain unclaimed.
 
+## Driven distance actuators inside finite ball-and-hinge mechanisms
+
+`rigid_rattle::distance::graph::advance_driven_joint_graph` accepts a single
+`DrivenJoint` sequence containing quadratic distance actuators, spherical
+joints and revolute hinges. Every scalar row enters the original simultaneous
+full-inertia force/couple mobility and native impulse/free-step/impulse solve.
+An actuator therefore recoils every connected finite body and transmits the
+actual off-center forces and hinge couples. No part of the mechanism is pinned
+or advanced by a separate integrator or sequential joint solve.
+
+The original `DistanceDrive` command owner prepares each radial row's positive
+length, initial/final range rate and representation residuals. It still checks
+interior collapse and unrepresentable nonzero displacement. Cartesian ball
+and angular hinge rows retain their original geometry and zero prescribed
+rate. Default distance commands supply fixed rods. The rate owner cancels
+common COM translation before adding spin, including for default commands;
+rounded laboratory point velocities cannot hide a spinning attachment.
+
+Every original native point/couple event remains in the result. Actuator
+source work is its two scalar impulses paired with the corresponding commanded
+range rates. Passive joints contribute exactly zero source work. Their actual
+ordered force/couple work, including shared-body cross terms, remains in the
+constraint-work defect. The result also pairs total reaction work independently
+and reports the requested residual angular impulse of finite point closures.
+Native momentum/kinetic-work representation defects remain in the underlying
+receipts; no energy discrepancy is erased or labeled as physical heat.
+
+One continuation vector carries each updated command, per-joint work,
+representation residual and scalar-row span. The original 32-row bound counts
+one row per rod, three per ball and five per hinge. Two fixed stack banks extend
+the original reused native trial buffers; no per-trial allocation is added.
+Live-payload admission includes the complete continuation vector. Rank, local
+branch, whole-vector impulse, angular travel, nonlinear trial and cancellation
+limits still refuse atomically. The shared internal free-motion seam uses the
+actual native free-step receipt type and includes caller-owned load-bound
+storage in the same budget; the public held-wrench path retains its native map.
+
+Seven focused G0/G1/G3/G4 tests cover analytical finite group recoil and hinge
+torque, a free-floating actuated hinge with a finite spherical payload against
+an independent conserved-angular-momentum quadrature and refinement, long
+off-center full-tensor work/momentum balance and reversal, native passive and
+rod-only parity, frame/boost/endpoint/order covariance and hidden-spin admission,
+the actual connected 32-row boundary, command/rank/trial/payload refusals and
+every observed cancellation checkpoint. All 59 prior native MBD regressions
+also pass in the actual-source bounded native build. Full-workspace/DSR gates
+and independent experimental validation are not substituted by this evidence.
+
+This remains an ideal bilateral distance actuator with an external energy
+source. Motor efficiency/storage, commanded hinge spin, friction, stops,
+impacts, dependent-row mechanisms, global branches, exact energy and
+symplecticity remain outside the claim.
+
+### Spatial force moments through complete finite-body mechanisms
+
+`advance_spatial_articulated_graph` and `advance_spatial_driven_joint_graph`
+accept the original `PreparedSpatialLoads` for every finite body in the passive
+or actuated rod/ball/hinge graph. Each
+nonlinear trial calls the original `RigidBodyIntegrator::step_spatial`: a
+world-held point force follows its rotating material arm, while body-held and
+world-held couples retain their declared frames. The complete native
+`SpatialStepReceipt` is returned for every free step, including source impulse,
+actual work and its finite-step defect. Joint reactions retain their original
+finite recoil, point-gap angular impulse and force/couple work accounts.
+
+Pair and graph paths share one statically selected native free-motion adapter.
+The force/couple mobility, native full-inertia response, two impulse stages,
+nonlinear trials, rank checks and authored-joint mapping remain the same
+owners. `DistanceGraphStep` and the joint receipts default to their original
+free-step type, preserving the held-wrench API and its logical payload. The
+spatial graph budgets one torque-bound scalar per body in addition to its actual
+larger native receipts and joint map. Each conservative torque bound is prepared
+once from the fixed-size load representation; no load-set traversal, fresh
+inertia factorization or allocation occurs within a trial.
+
+The spatial driven entry uses the same target bank, quadratic command checks,
+per-joint continuation and source-work owner as the held-wrench driven entry.
+External spatial work, prescribed actuator work and passive constraint defects
+remain separate. Passive-only motion has identical native receipts; default
+radial commands use the existing compensated rate arithmetic and agree with
+the legacy static-rod result at roundoff rather than promising bitwise identity.
+
+Seven groups in `tests/rigid_spatial_graph.rs` check an independently integrated
+nonlinear loaded hinge chain with second-order refinement and reversal,
+off-center full-tensor mixed-joint source/constraint momentum and work closure,
+world-frame and common-boost covariance, exact native free-body/source-receipt
+identity, a loaded actuator with independent unequal-mass recoil, rotor dynamics
+and signed actuator work, complete payload admission and every observed
+cancellation point. All 73 combined tests (the 59 earlier pair, graph,
+driven-distance, ball, hinge and native spatial-load tests plus fourteen new
+mixed-drive and spatial groups) pass in the bounded actual-source build. This is not a full-workspace
+or DSR gate. Held loads, resolved local travel and the original smooth bilateral
+joint assumptions remain required; arbitrary state-dependent force laws,
+contact, global branches and exact energy conservation remain outside this map.
+
 ## Finite rigid separation at prescribed relative linear and spin velocities
 
 The native assembly owner exposes

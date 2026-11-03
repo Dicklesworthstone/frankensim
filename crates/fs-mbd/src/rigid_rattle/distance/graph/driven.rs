@@ -172,7 +172,7 @@ pub(super) struct Target {
     pub final_rate: Dd,
 }
 impl Target {
-    fn prepare(
+    pub(super) fn prepare(
         index: usize,
         link: DistanceLink,
         drive: DistanceDrive,
@@ -264,32 +264,53 @@ impl Work {
         for (i, ((event, impulse), target)) in events.iter().zip(impulses).zip(targets).enumerate()
         {
             poll(cancelled)?;
-            let rate = if endpoint {
-                target.final_rate
-            } else {
-                Dd::from_f64(target.initial_rate)
-            };
-            let source = Dd::from_f64(*impulse) * rate;
-            let before = relative_velocity(
-                event.first.point_kinematics_before,
-                event.second.point_kinematics_before,
-            );
-            let after = relative_velocity(
-                event.first.point_kinematics_after,
-                event.second.point_kinematics_after,
-            );
-            let j = event.second.impulse_world;
-            let mut relative_work = Dd::ZERO;
-            for ((before, after), j) in before.into_iter().zip(after).zip([j.x, j.y, j.z]) {
-                relative_work = relative_work
-                    + (before * Dd::from_f64(0.5) + after * Dd::from_f64(0.5)) * Dd::from_f64(j);
-            }
-            let work = &mut self.links[i];
-            work.source = work.source + source;
-            work.defect = work.defect + (relative_work - source);
-            if !finite(work.source) || !finite(work.defect) {
-                return Err(DistanceStepError::Invalid("prescribed graph impulse work").into());
-            }
+            self.add_point(i, event, *impulse, *target, endpoint)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn add_point(
+        &mut self,
+        index: usize,
+        event: &ActionReactionImpulseReceipt,
+        impulse: f64,
+        target: Target,
+        endpoint: bool,
+    ) -> Result<(), DistanceGraphError> {
+        let rate = if endpoint {
+            target.final_rate
+        } else {
+            Dd::from_f64(target.initial_rate)
+        };
+        let source = Dd::from_f64(impulse) * rate;
+        let before = relative_velocity(
+            event.first.point_kinematics_before,
+            event.second.point_kinematics_before,
+        );
+        let after = relative_velocity(
+            event.first.point_kinematics_after,
+            event.second.point_kinematics_after,
+        );
+        let j = event.second.impulse_world;
+        let mut relative_work = Dd::ZERO;
+        for ((before, after), j) in before.into_iter().zip(after).zip([j.x, j.y, j.z]) {
+            relative_work = relative_work
+                + (before * Dd::from_f64(0.5) + after * Dd::from_f64(0.5)) * Dd::from_f64(j);
+        }
+        self.add_work(index, source, relative_work)
+    }
+
+    pub(super) fn add_work(
+        &mut self,
+        index: usize,
+        source: Dd,
+        actual_work: Dd,
+    ) -> Result<(), DistanceGraphError> {
+        let work = &mut self.links[index];
+        work.source = work.source + source;
+        work.defect = work.defect + (actual_work - source);
+        if !finite(work.source) || !finite(work.defect) {
+            return Err(DistanceStepError::Invalid("prescribed graph impulse work").into());
         }
         Ok(())
     }
@@ -331,6 +352,6 @@ pub(super) fn range_rate(
     }
     Ok(result)
 }
-fn finite(value: Dd) -> bool {
+pub(super) fn finite(value: Dd) -> bool {
     value.hi.is_finite() && value.lo.is_finite()
 }

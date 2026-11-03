@@ -38,10 +38,10 @@ pub struct JointRows {
 
 /// Atomic motion of a mixed independent-body joint graph.
 #[derive(Debug, Clone, PartialEq)]
-pub struct JointGraphStep<E = ActionReactionImpulseReceipt> {
+pub struct JointGraphStep<E = ActionReactionImpulseReceipt, FreeStep = crate::StepReceipt> {
     /// Original solver receipt, in scalar-row order. Every original free step
     /// and every actual native reaction remain available for inspection.
-    pub step: DistanceGraphStep<E>,
+    pub step: DistanceGraphStep<E, FreeStep>,
     /// Row spans in authored joint order; no persistent state is inferred.
     pub joint_rows: Vec<JointRows>,
     /// Signed reaction work [J], paired from native relative COM/spin components

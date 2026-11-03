@@ -28,6 +28,9 @@ pub mod distance;
 #[path = "rigid_rattle/pair_step.rs"]
 mod pair_step;
 
+#[path = "rigid_rattle/free_motion.rs"]
+mod free_motion;
+
 /// A material point sliding on a plane carried by another finite rigid body.
 #[path = "rigid_rattle/finite_plane.rs"]
 pub mod finite_plane;

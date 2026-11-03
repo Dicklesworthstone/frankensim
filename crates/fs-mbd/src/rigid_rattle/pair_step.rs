@@ -5,10 +5,11 @@
 //! bounded residual-decreasing native free trials, then endpoint reaction.
 
 use super::distance::{DistanceStepControls, DistanceStepError, DistanceStepReceipt};
+use super::free_motion::{FreeFlow, SpatialFlow};
 use crate::spatial_loads::{PreparedSpatialLoads, SpatialStepReceipt};
 use crate::{
-    ActionReactionImpulseReceipt, MassProperties, RigidBodyIntegrator, RigidBodyState, StepReceipt,
-    Vec3, Wrench, apply_equal_and_opposite_impulse_at_body_points,
+    ActionReactionImpulseReceipt, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3,
+    Wrench, apply_equal_and_opposite_impulse_at_body_points,
 };
 
 #[derive(Clone, Copy)]
@@ -36,7 +37,13 @@ pub(super) fn advance(
     cancelled: impl FnMut() -> bool,
 ) -> Result<DistanceStepReceipt, DistanceStepError> {
     advance_with(
-        constraint, states, integrator, wrenches, duration_s, controls, cancelled,
+        constraint,
+        states,
+        integrator,
+        &wrenches[..],
+        duration_s,
+        controls,
+        cancelled,
     )
 }
 
@@ -55,7 +62,10 @@ pub(super) fn advance_spatial(
         constraint,
         states,
         integrator,
-        SpatialFlow { loads, bounds },
+        SpatialFlow {
+            loads: &loads,
+            bounds: &bounds,
+        },
         duration_s,
         controls,
         cancelled,
@@ -203,68 +213,6 @@ fn apply(
         g.arms_body_m[1],
         g.normal.scale(impulse),
     )?)
-}
-
-trait FreeFlow {
-    type Receipt: Copy;
-
-    fn torque_bound(&self, index: usize) -> f64;
-    fn step(
-        &self,
-        index: usize,
-        integrator: RigidBodyIntegrator,
-        state: RigidBodyState,
-        properties: MassProperties,
-        duration_s: f64,
-    ) -> Result<Self::Receipt, DistanceStepError>;
-    fn state_after(receipt: Self::Receipt) -> RigidBodyState;
-}
-
-impl FreeFlow for [Wrench; 2] {
-    type Receipt = StepReceipt;
-
-    fn torque_bound(&self, index: usize) -> f64 {
-        norm(self[index].torque_body)
-    }
-    fn step(
-        &self,
-        index: usize,
-        integrator: RigidBodyIntegrator,
-        state: RigidBodyState,
-        properties: MassProperties,
-        duration_s: f64,
-    ) -> Result<StepReceipt, DistanceStepError> {
-        Ok(integrator.step(state, properties, self[index], duration_s)?)
-    }
-    fn state_after(receipt: StepReceipt) -> RigidBodyState {
-        receipt.state_after
-    }
-}
-
-struct SpatialFlow {
-    loads: [PreparedSpatialLoads; 2],
-    bounds: [f64; 2],
-}
-
-impl FreeFlow for SpatialFlow {
-    type Receipt = SpatialStepReceipt;
-
-    fn torque_bound(&self, index: usize) -> f64 {
-        self.bounds[index]
-    }
-    fn step(
-        &self,
-        index: usize,
-        integrator: RigidBodyIntegrator,
-        state: RigidBodyState,
-        properties: MassProperties,
-        duration_s: f64,
-    ) -> Result<SpatialStepReceipt, DistanceStepError> {
-        Ok(integrator.step_spatial(state, properties, &self.loads[index], duration_s)?)
-    }
-    fn state_after(receipt: SpatialStepReceipt) -> RigidBodyState {
-        receipt.step.state_after
-    }
 }
 
 struct Trial<R> {

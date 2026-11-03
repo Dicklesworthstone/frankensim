@@ -10,6 +10,7 @@
 //! Native free steps, actual impulses and finite constraint work remain visible,
 //! and poses are not repaired.
 
+use super::super::free_motion::FreeFlow;
 use super::{
     DistanceStepControls, DistanceStepError, Geometry, RigidDistanceConstraint, norm, poll,
     positive,
@@ -37,6 +38,16 @@ pub use revolute::{
     ArticulatedGraphStep, ArticulatedJoint, CoupleImpulseReceipt, JointReactionImpulse,
     RevoluteJoint, advance_articulated_graph,
 };
+
+#[path = "graph/driven_joints.rs"]
+mod driven_joints;
+pub use driven_joints::{
+    DrivenJoint, DrivenJointGraphStep, DrivenJointStep, advance_driven_joint_graph,
+};
+
+#[path = "graph/spatial.rs"]
+mod spatial;
+pub use spatial::{advance_spatial_articulated_graph, advance_spatial_driven_joint_graph};
 
 /// Maximum simultaneous independent scalar rows in the bounded dense solve.
 pub const MAX_DISTANCE_ROWS: usize = 32;
@@ -226,14 +237,14 @@ pub struct DistanceResidual {
 
 /// One atomic native-body graph step, with every actual reaction event.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DistanceGraphStep<E = ActionReactionImpulseReceipt> {
+pub struct DistanceGraphStep<E = ActionReactionImpulseReceipt, FreeStep = StepReceipt> {
     /// Accepted bodies in original body-slice order.
     pub states_after: Vec<RigidBodyState>,
     /// Initial native reactions in original scalar-row order. The default
     /// event type is the original material-point pair receipt.
     pub position_impulses: Vec<E>,
     /// Original unconstrained native steps between the two impulse stages.
-    pub free_steps: Vec<StepReceipt>,
+    pub free_steps: Vec<FreeStep>,
     /// Endpoint native reactions in original scalar-row order.
     pub velocity_impulses: Vec<E>,
     /// Sum of actual initial and endpoint pair work [J], including all cross
@@ -392,12 +403,29 @@ fn advance_between<E: NativeReaction>(
     duration_s: f64,
     controls: DistanceGraphControls,
     targets: Option<&[driven::Target]>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<(DistanceGraphStep<E>, driven::Work), DistanceGraphError> {
+    advance_between_with(
+        states, properties, links, integrator, wrenches, duration_s, controls, targets, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_between_with<E: NativeReaction, F: FreeFlow>(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    links: Rows<'_>,
+    integrator: RigidBodyIntegrator,
+    flow: F,
+    duration_s: f64,
+    controls: DistanceGraphControls,
+    targets: Option<&[driven::Target]>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(DistanceGraphStep<E, F::Receipt>, driven::Work), DistanceGraphError> {
     poll(&mut cancelled)?;
     let local = controls.step;
     if states.len() != properties.len()
-        || states.len() != wrenches.len()
+        || states.len() != flow.len()
         || !positive(duration_s)
         || !positive(local.maximum_impulse_ns)
         || !positive(local.maximum_rotation_increment_rad)
@@ -427,14 +455,14 @@ fn advance_between<E: NativeReaction>(
         1,
         u128::from(controls.maximum_trial_evaluations),
     )?;
-    let bytes = planned_bytes_for::<E>(states.len(), links.len());
+    let bytes = planned_bytes_for_motion::<E, F::Receipt>(states.len(), links.len());
     limit("live bytes", bytes, controls.maximum_live_bytes as u128)?;
     let problem = Problem {
         states,
         properties,
         links,
         integrator,
-        wrenches,
+        flow,
         duration_s,
         controls,
         targets,
@@ -448,7 +476,9 @@ fn advance_between<E: NativeReaction>(
             );
         }
         let mut g = problem.geometry(link, link.bodies.map(|b| states[b]))?;
-        if let Some(targets) = targets {
+        if let Some(targets) = targets
+            && matches!(link.kind, RowKind::Distance(_))
+        {
             g.rate = (driven::range_rate(
                 link.bodies.map(|b| states[b]),
                 link.bodies.map(|b| properties[b]),
@@ -582,7 +612,9 @@ fn advance_between<E: NativeReaction>(
         {
             return Err(DistanceStepError::NotConverged.into());
         }
-        if let Some(targets) = targets {
+        if let Some(targets) = targets
+            && matches!(link.kind, RowKind::Distance(_))
+        {
             let target = targets[i];
             let represented_gap = Dd::from_f64(g.gap) - target.length_residual;
             let represented_rate = Dd::from_f64(g.rate)
@@ -634,29 +666,32 @@ fn advance_between<E: NativeReaction>(
     ))
 }
 
-struct Problem<'a> {
+struct Problem<'a, F> {
     states: &'a [RigidBodyState],
     properties: &'a [MassProperties],
     links: Rows<'a>,
     integrator: RigidBodyIntegrator,
-    wrenches: &'a [Wrench],
+    flow: F,
     duration_s: f64,
     controls: DistanceGraphControls,
     targets: Option<&'a [driven::Target]>,
 }
-impl Problem<'_> {
+impl<F: FreeFlow> Problem<'_, F> {
     fn endpoint_geometry(
         &self,
         index: usize,
         states: [RigidBodyState; 2],
     ) -> Result<Geometry, DistanceStepError> {
         let mut link = self.links.get(index);
-        if let Some(targets) = self.targets {
-            link.kind = RowKind::Distance(targets[index].length);
+        let target = self
+            .targets
+            .filter(|_| matches!(link.kind, RowKind::Distance(_)))
+            .map(|targets| targets[index]);
+        if let Some(target) = target {
+            link.kind = RowKind::Distance(target.length);
         }
         let mut g = self.geometry(link, states)?;
-        if let Some(targets) = self.targets {
-            let target = targets[index];
+        if let Some(target) = target {
             // Solve against the original polynomial, retaining the part lost
             // when the endpoint length/rate are rounded for continuation.
             g.gap = (Dd::from_f64(g.gap) + target.length_residual).to_f64();
@@ -755,7 +790,7 @@ impl Problem<'_> {
         &self,
         impulses: &[f64],
         initial: &[Geometry],
-        out: &mut Trial<E>,
+        out: &mut Trial<E, F::Receipt>,
         evaluations: &mut u32,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DistanceGraphError> {
@@ -781,18 +816,19 @@ impl Problem<'_> {
             poll(cancelled)?;
             let inertia = self.properties[i].principal_inertia_body();
             let travel = (norm(state.angular_momentum_body())
-                + self.duration_s * norm(self.wrenches[i].torque_body))
+                + self.duration_s * self.flow.torque_bound(i))
                 * (self.duration_s / inertia.x.min(inertia.y).min(inertia.z));
             if !travel.is_finite() || travel > self.controls.step.maximum_rotation_increment_rad {
                 return Err(DistanceStepError::LocalBranch.into());
             }
-            let step = self.integrator.step(
+            let step = self.flow.step(
+                i,
+                self.integrator,
                 *state,
                 self.properties[i],
-                self.wrenches[i],
                 self.duration_s,
             )?;
-            *state = step.state_after;
+            *state = F::state_after(step);
             out.steps.push(step);
         }
         let chord =
@@ -816,13 +852,13 @@ impl Problem<'_> {
         Ok(())
     }
 }
-struct Trial<E> {
+struct Trial<E, FreeStep> {
     states: Vec<RigidBodyState>,
-    steps: Vec<StepReceipt>,
+    steps: Vec<FreeStep>,
     impulses: Vec<E>,
     geometry: Vec<Geometry>,
 }
-impl<E> Trial<E> {
+impl<E, FreeStep> Trial<E, FreeStep> {
     fn new(bodies: usize, rows: usize) -> Result<Self, DistanceGraphError> {
         Ok(Self {
             states: reserved(bodies)?,
@@ -842,8 +878,8 @@ struct Mobility {
     factor: Cholesky,
 }
 impl Mobility {
-    fn new(
-        problem: &Problem<'_>,
+    fn new<F: FreeFlow>(
+        problem: &Problem<'_, F>,
         states: &[RigidBodyState],
         geometry: &[Geometry],
         cancelled: &mut impl FnMut() -> bool,
@@ -944,8 +980,11 @@ fn planned_bytes(bodies: usize, rows: usize) -> u128 {
     planned_bytes_for::<ActionReactionImpulseReceipt>(bodies, rows)
 }
 fn planned_bytes_for<E>(bodies: usize, rows: usize) -> u128 {
+    planned_bytes_for_motion::<E, StepReceipt>(bodies, rows)
+}
+fn planned_bytes_for_motion<E, FreeStep>(bodies: usize, rows: usize) -> u128 {
     use core::mem::size_of as s;
-    2 * bodies as u128 * (s::<RigidBodyState>() + s::<StepReceipt>()) as u128
+    2 * bodies as u128 * (s::<RigidBodyState>() + s::<FreeStep>()) as u128
         + rows as u128 * (2 * s::<E>() + 3 * s::<Geometry>()
             + s::<AngularRow>() + 5 * s::<f64>() + s::<DistanceResidual>()) as u128
         // Matrix, old/new factors and conservative dense-factor scratch. At
