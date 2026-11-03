@@ -51,12 +51,11 @@ circulatory force; profile drag, thrust and weight belong to their existing
 owners, and this report adds no separate induced-drag model. Each solve retains
 its existing choice of incident velocity, wash and circulation closure.
 
-The nonlinear section equation still measures incidence and trailing-sheet
-induction in the global body xz plane. Reporting its full force vector does
-not make that section closure objective for arbitrarily oriented or vertical
-lifting surfaces. The linear rotation fixtures do not assert such a nonlinear
-model extension. Ground-image rotation invariance is asserted only for
-rotations preserving the certified horizontal plane.
+The historical nonlinear entry points measure incidence and trailing-sheet
+induction in the global body xz plane. Arbitrarily oriented nonlinear sections
+use the explicit section-frame entry points described below; reporting a full
+force vector alone does not select that model. Ground-image rotation invariance
+is asserted only for rotations preserving the certified horizontal plane.
 
 `tests/force_vector_battery.rs` supplies physical regressions for signed
 vertical/canted linear loading, rigid-rotation covariance of circulation and
@@ -123,6 +122,61 @@ without a second solve, repeated Biot–Savart construction, or ambiguous invers
 of a stalled lift coefficient. G0 checks invert a linear section law from the
 returned circulation under nonuniform inflow and twist and verify that the
 reported incidence includes a nonzero induction correction.
+
+### Nonlinear sections in their physical lifting-surface frames
+
+`nonlinear::SectionFrame` declares orthonormal forward-chord and directed bound-span
+axes in the same Cartesian frame as the panels and incident flow. Their cross
+product is the positive-incidence normal; positive section lift opposes it under
+the native negative-circulation convention. `BODY_XZ` is (+x, +y, +z).
+`SectionFrame::from_panel` derives the span from A to B and projects the vector
+from the control point to the bound midpoint into the plane normal to that span.
+Every row owned by a strip must share its directed span and chord/span lifting
+plane, with an aft control point. Either sign of the boundary-condition normal
+is legal because reversing it reverses both sides of the linear equation.
+Degenerate, nonfinite or incompatible geometry refuses with `section-frame-invalid`.
+
+`solve_nonlinear_with_section_frames` accepts these frames and one complete local
+incident velocity per strip. Vector wash, gust and rigid-motion effects must be
+composed before the call. `SectionFrame::flow` exposes the same section kinematics
+to load consumers: chordwise `Uc`, normal `Un`, spanwise velocity, projected
+velocity, incidence `atan2(Un,Uc)` and speed `U = sqrt(Uc² + Un²)`. Spanwise flow
+does not inflate the two-dimensional polar speed. Forward flow is admitted in
+the declared chord direction, even when its global x component is negative;
+zero, reversed or nonfinite local chordwise flow refuses with `incident-flow-invalid`.
+
+The strip equation uses `Gamma = -0.5*U*c*cl(alpha_eff)`. For trailing-sheet
+induced velocity `W`, its first-order incidence correction is the directional
+derivative `(Uc*Wn - Un*Wc)/(Uc² + Un²)`, including chordwise induction at finite
+incidence. The projection onto `(Uc/U)*normal - (Un/U)*chord` is prepared once in
+the existing scalar influence matrix. It adds no vector work per nonlinear
+iteration. The shared safeguarded iteration and Newton continuation retain their
+original row ratios, work budgets and strict `1e-10` accepted residual gate.
+Accepted incidence and full Kutta–Joukowsky forces use that accepted circulation;
+force assembly retains the original complete local velocity.
+
+`StripSpec::chord_m` is the chord of the physical section normal to the bound
+span. For a swept parallelogram this equals streamwise chord times cosine of
+sweep; multiplying it by the actual bound-span length preserves the declared
+section area. Callers must supply that chord explicitly. The model freezes
+incident section speed, uses first-order induction and reference-freestream
+straight trailing legs, and does not add crossflow separation, reverse-flow
+polars, exact induced-velocity incidence, or unsteady memory.
+
+`continuation::solve_with_section_frames` shares the existing residual/Jacobian
+owner. Its layout identity additionally includes all frame axes and a distinct
+domain, so legacy and framed continuation anchors cannot be interchanged even
+for `BODY_XZ`. The existing body-xz APIs retain their arithmetic and frozen
+golden; choosing frames is explicit and does not alter default flight behavior.
+
+The five `tests/section_frames.rs` cases solve actual nonlinear systems. They
+check rigid-frame covariance, signed vertical restoring force, global-axis
+reversal with local forward flow, swept `q*S*cl` area and spanwise-flow exclusion,
+an independent finite-incidence angle derivative and circulation residual,
+framed Picard/Newton agreement and continuation identity, and all-row geometry
+admission. These pass with the existing 30 numerical tests in a 35-test native
+run of actual wing and solver numerical sources. This is not full-workspace or
+frontend qualification.
 
 ### Noncontracting alternating strip modes
 

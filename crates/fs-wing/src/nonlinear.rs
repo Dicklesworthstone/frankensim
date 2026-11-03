@@ -28,6 +28,10 @@ use fs_math::det;
 /// Explicit bounded continuation of an accepted section solution.
 pub mod continuation;
 
+#[path = "nonlinear/section.rs"]
+mod section;
+pub use section::{SectionFlow, SectionFrame};
+
 /// Iteration cap (refusals at cap AND cap+1 by the safeguard test).
 // 600, not 200: the full wing+canard multisurface system converges
 // linearly at ~0.94/iteration through the cross-coupling (measured in
@@ -60,7 +64,8 @@ pub struct StripSpec {
     pub panel_indices: Vec<usize>,
     /// Strip chord [m].
     pub chord_m: f64,
-    /// Geometric incidence offset relative to the body x-axis [rad].
+    /// Geometric incidence offset [rad], relative to the declared section
+    /// chord in framed solves and the body x-axis in the legacy entry points.
     pub twist_rad: f64,
 }
 
@@ -98,8 +103,8 @@ pub struct NonlinearReport {
     /// same incident velocities and circulation as `total_lift_n`.
     /// Its z component is exactly `-total_lift_n`. Profile drag, thrust,
     /// weight and a separate induced-drag model are not included.
-    /// The section closure still uses body-xz incidence and induction;
-    /// this vector does not generalize that closure to vertical surfaces.
+    /// Section incidence/induction follows the selected solver entry point:
+    /// legacy body-xz or explicit normal-section frames.
     pub total_force_n: [f64; 3],
 }
 
@@ -185,6 +190,7 @@ pub fn solve_nonlinear(
         strip_du_axial,
         warm_start,
         None,
+        None,
     )
 }
 
@@ -222,6 +228,51 @@ pub fn solve_nonlinear_with_incident(
         strip_du_axial,
         warm_start,
         None,
+        None,
+    )
+}
+
+/// Nonlinear closure in one admitted normal-section frame per strip.
+///
+/// `incident_mps` contains the complete accepted local velocities, including
+/// wash/gust/rigid-motion contributions already expressed in the panel frame.
+/// No body-axis scalar wash is inferred. Section speed excludes spanwise flow;
+/// the prepared trailing-sheet projection differentiates local incidence as
+/// `(Uc*Wn - Un*Wc)/(Uc^2 + Un^2)`, including chordwise induction at finite
+/// incidence. Circulation uses the frozen incident section speed and the
+/// existing first-order induction model. Forces use the full accepted vectors.
+///
+/// All rows owned by a strip must have the frame's directed span and chord/span
+/// lifting plane. Swept layouts supply the physical normal-section chord.
+/// This is not an exact finite-induced-angle or reverse-flow section model.
+///
+/// # Errors
+/// The existing solve refusals, `section-frame-invalid` for a missing or
+/// incompatible frame, or `incident-flow-invalid` for non-forward local flow.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_nonlinear_with_section_frames(
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    freestream: [f64; 3],
+    rho: f64,
+    closure: SectionClosure<'_>,
+    frames: &[SectionFrame],
+    incident_mps: &[[f64; 3]],
+    warm_start: Option<&[f64]>,
+) -> Result<NonlinearReport, Refusal> {
+    solve_nonlinear_impl(
+        op,
+        panels,
+        strips,
+        freestream,
+        rho,
+        closure,
+        Some(incident_mps),
+        None,
+        warm_start,
+        Some(frames),
+        None,
     )
 }
 
@@ -236,6 +287,7 @@ fn solve_nonlinear_impl(
     strip_incident_mps: Option<&[[f64; 3]]>,
     strip_du_axial: Option<&[f64]>,
     warm_start: Option<&[f64]>,
+    section_frames: Option<&[SectionFrame]>,
     mut continuation: Option<&mut continuation::Guard<'_>>,
 ) -> Result<NonlinearReport, Refusal> {
     if geometry_hash(panels, freestream) != op.geometry_hash {
@@ -278,6 +330,27 @@ fn solve_nonlinear_impl(
             owned[i] = true;
         }
     }
+    if let Some(frames) = section_frames {
+        if frames.len() != strips.len() || strip_incident_mps.is_none() {
+            return Err(refuse(
+                "section-frame-invalid",
+                "one section frame and complete incident vector per strip are required".into(),
+                "provide the admitted normal-section layout and accepted local flow",
+            ));
+        }
+        if !rho.is_finite() || rho <= 0.0 || strips.iter().any(|strip| !strip.chord_m.is_finite()) {
+            return Err(refuse(
+                "strips-invalid",
+                "finite positive density and normal-section chords are required".into(),
+                "supply physical density and each strip's normal-section chord",
+            ));
+        }
+        for (frame, strip) in frames.iter().zip(strips) {
+            for &j in &strip.panel_indices {
+                frame.admit_panel(&panels[j])?;
+            }
+        }
+    }
     let vmag = (freestream[0] * freestream[0]
         + freestream[1] * freestream[1]
         + freestream[2] * freestream[2])
@@ -308,18 +381,22 @@ fn solve_nonlinear_impl(
         let mut local = Vec::with_capacity(strips.len());
         for (s, velocity) in incident.iter().enumerate() {
             let mut velocity = *velocity;
-            velocity[0] += strip_du_axial.map_or(0.0, |du| du[s]);
-            let speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
-            if !velocity.iter().all(|v| v.is_finite())
-                || velocity[0] <= 0.0
-                || !(speed > 0.0 && speed.is_finite())
-            {
-                return Err(refuse(
-                    "incident-flow-invalid",
-                    format!("strip {s} has invalid/reversed chordwise flow {velocity:?}"),
-                    "this section model requires finite positive chordwise relative flow",
-                ));
+            if section_frames.is_none() {
+                velocity[0] += strip_du_axial.map_or(0.0, |du| du[s]);
+                let speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
+                if !velocity.iter().all(|v| v.is_finite())
+                    || velocity[0] <= 0.0
+                    || !(speed > 0.0 && speed.is_finite())
+                {
+                    return Err(refuse(
+                        "incident-flow-invalid",
+                        format!("strip {s} has invalid/reversed chordwise flow {velocity:?}"),
+                        "this section model requires finite positive chordwise relative flow",
+                    ));
+                }
             }
+            // The framed lane admits the complete vector once below, while
+            // preparing the reusable angle derivative and section speed.
             local.push(velocity);
         }
         Some(local)
@@ -339,26 +416,36 @@ fn solve_nonlinear_impl(
             (front.a[1] + front.b[1]) / 2.0,
             (front.a[2] + front.b[2]) / 2.0,
         ];
+        let framed_flow = section_frames
+            .map(|frames| frames[s].flow(local_velocity.as_ref().unwrap()[s]))
+            .transpose()?;
         downwash.push(
             panels
                 .iter()
-                .map(|p| crate::trailing_velocity_pub(mid, p.a, p.b, stream)[2])
+                .map(|p| {
+                    let velocity = crate::trailing_velocity_pub(mid, p.a, p.b, stream);
+                    framed_flow.map_or(velocity[2], |flow| flow.induction_velocity(velocity))
+                })
                 .collect::<Vec<_>>(),
         );
         for &panel in &strip.panel_indices {
             panel_strip[panel] = s;
         }
-        section_flow.push(match &local_velocity {
-            Some(local) => {
-                let v = local[s];
-                let speed = (v[0] * v[0] + v[2] * v[2]).sqrt();
-                (det::atan2(v[2], v[0]), speed, speed)
+        section_flow.push(if let Some(flow) = framed_flow {
+            (flow.incidence_rad, flow.speed_mps, flow.speed_mps)
+        } else {
+            match &local_velocity {
+                Some(local) => {
+                    let v = local[s];
+                    let speed = (v[0] * v[0] + v[2] * v[2]).sqrt();
+                    (det::atan2(v[2], v[0]), speed, speed)
+                }
+                None => (
+                    alpha_free,
+                    vmag,
+                    vmag + strip_du_axial.map_or(0.0, |du| du[s]),
+                ),
             }
-            None => (
-                alpha_free,
-                vmag,
-                vmag + strip_du_axial.map_or(0.0, |du| du[s]),
-            ),
         });
     }
     // Row-split ratios from the linear solution; strip totals start from
@@ -380,7 +467,7 @@ fn solve_nonlinear_impl(
         });
     }
     if let Some(guard) = &mut continuation {
-        guard.prepare(panels, strips, freestream, lin)?;
+        guard.prepare(panels, strips, freestream, lin, section_frames)?;
     }
     let mut gamma = vec![0.0f64; n];
     let scatter = |strip_gamma: &[f64], gamma: &mut Vec<f64>| {

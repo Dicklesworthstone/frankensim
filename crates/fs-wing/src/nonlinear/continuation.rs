@@ -14,7 +14,7 @@
 
 use super::{
     GAMMA_TOL, InfluenceOperator, NonlinearReport, Panel, ROW_SUM_FLOOR, Refusal, SectionClosure,
-    StripRegime, StripSpec, geometry_hash, refuse, solve_nonlinear_impl,
+    SectionFrame, StripRegime, StripSpec, geometry_hash, refuse, solve_nonlinear_impl,
 };
 use fs_blake3::hash_domain;
 use fs_math::det;
@@ -163,6 +163,63 @@ pub fn solve_with_incident(
     previous: Option<&WingContinuation>,
     domain: ContinuationControls,
 ) -> Result<ContinuedReport, Refusal> {
+    solve_impl(
+        op, panels, strips, freestream, rho, closure, incident, axial_wash, previous, domain, None,
+    )
+}
+
+/// Continue the explicit normal-section equations under changing local flow.
+///
+/// The complete incident vectors already include wash. Frame axes are part of
+/// the accepted layout identity, so neither changing the section convention nor
+/// reusing a legacy body-xz anchor can silently change the continued equation.
+/// The existing Newton/FGMRES/Armijo owner, domain controls and final residual
+/// gate are shared with [`solve_with_incident`].
+///
+/// # Errors
+/// The refusals of [`solve_with_incident`] and the admitted section-frame solve.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_with_section_frames(
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    freestream: [f64; 3],
+    rho: f64,
+    closure: SectionClosure<'_>,
+    frames: &[SectionFrame],
+    incident: &[[f64; 3]],
+    previous: Option<&WingContinuation>,
+    domain: ContinuationControls,
+) -> Result<ContinuedReport, Refusal> {
+    solve_impl(
+        op,
+        panels,
+        strips,
+        freestream,
+        rho,
+        closure,
+        incident,
+        None,
+        previous,
+        domain,
+        Some(frames),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_impl(
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    freestream: [f64; 3],
+    rho: f64,
+    closure: SectionClosure<'_>,
+    incident: &[[f64; 3]],
+    axial_wash: Option<&[f64]>,
+    previous: Option<&WingContinuation>,
+    domain: ContinuationControls,
+    frames: Option<&[SectionFrame]>,
+) -> Result<ContinuedReport, Refusal> {
     domain.admit()?;
     if !rho.is_finite() || rho <= 0.0 {
         return Err(refuse(
@@ -192,6 +249,7 @@ pub fn solve_with_incident(
         Some(incident),
         axial_wash,
         previous.map(WingContinuation::gamma),
+        frames,
         Some(&mut guard),
     )?;
     let maximum_incidence_change_rad = previous.map_or(0.0, |anchor| {
@@ -238,6 +296,7 @@ impl Guard<'_> {
         strips: &[StripSpec],
         freestream: [f64; 3],
         linear: &[f64],
+        frames: Option<&[SectionFrame]>,
     ) -> Result<(), Refusal> {
         let mut identity = geometry_hash(panels, [0.0; 3]).into_bytes();
         for strip in strips {
@@ -247,16 +306,33 @@ impl Guard<'_> {
                 identity.extend_from_slice(&(j as u64).to_le_bytes());
             }
         }
-        self.layout_id =
-            hash_domain("org.frankensim.fs-wing.continuation-layout.v1", &identity).to_hex();
+        self.layout_id = if let Some(frames) = frames {
+            for frame in frames {
+                for value in frame
+                    .chord_direction()
+                    .into_iter()
+                    .chain(frame.span_direction())
+                    .chain(frame.normal_direction())
+                {
+                    identity.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+            }
+            hash_domain(
+                "org.frankensim.fs-wing.continuation-section-layout.v1",
+                &identity,
+            )
+            .to_hex()
+        } else {
+            hash_domain("org.frankensim.fs-wing.continuation-layout.v1", &identity).to_hex()
+        };
         if let Some(previous) = self.previous
             && (previous.layout_id != self.layout_id
                 || previous.effective_incidence_rad.len() != strips.len())
         {
             return Err(refuse(
                 "nonlinear-continuation-stale",
-                "the accepted circulation belongs to another panel/strip layout".into(),
-                "establish a new anchor or supply a verified circulation transfer after geometry changes",
+                "the accepted circulation belongs to another panel/strip/section layout".into(),
+                "establish a new anchor or supply a verified circulation transfer after geometry or section-frame changes",
             ));
         }
         let speed = det::sqrt(freestream.iter().map(|x| x * x).sum());
