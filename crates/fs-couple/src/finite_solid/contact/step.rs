@@ -32,8 +32,9 @@ use super::{
     FiniteSolidRigidContactControls, FiniteSolidRigidContactError, FiniteSolidRigidContactReport,
 };
 use crate::finite_solid::FiniteSolidBody;
-use free::{FreeFlightControls, FreeFlightError, FreeFlightReport};
+use free::{FreeFlightControls, FreeFlightError, FreeFlightReport, RigidGravity};
 use fs_exec::Cx;
+use fs_mbd::gravity::RigidGravityField;
 use fs_mbd::{Gravity, MassProperties, RigidBodyState, Vec3, Wrench};
 use fs_query::TriangleQueryError;
 use fs_query::triangle::sweep::{
@@ -329,7 +330,7 @@ impl<'a> FiniteSolidBody<'a> {
             body_force_n_m3,
             None,
             wrenches,
-            gravity,
+            RigidGravity::Uniform(gravity),
             duration_s,
             origin_m,
             controls,
@@ -376,7 +377,7 @@ impl<'a> FiniteSolidBody<'a> {
             body_force_n_m3,
             None,
             wrenches,
-            gravity,
+            RigidGravity::Uniform(gravity),
             duration_s,
             origin_m,
             controls,
@@ -422,7 +423,7 @@ impl<'a> FiniteSolidBody<'a> {
             body_force_n_m3,
             Some(pressure_pa),
             wrenches,
-            gravity,
+            RigidGravity::Uniform(gravity),
             duration_s,
             origin_m,
             controls,
@@ -468,7 +469,61 @@ impl<'a> FiniteSolidBody<'a> {
             body_force_n_m3,
             Some(pressure_pa),
             wrenches,
-            gravity,
+            RigidGravity::Uniform(gravity),
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance the complete mixed impact scene in an explicit stationary rigid
+    /// gravity field, retaining the solid's separately bound native sources.
+    ///
+    /// Each original smooth trial and shortened retry samples rigid gravity at
+    /// both actual endpoint poses. The same native model supplies force, torque
+    /// and potential; a finite-body approximation must be explicitly selected
+    /// by its caller. Held wrenches must exclude this field. Optional uniform
+    /// pressure uses the original closed solid boundary and pressure work.
+    ///
+    /// Contact loss, field potential work and signed/absolute integration errors
+    /// keep separate accounts. This shares the original transient impact and
+    /// affine collision-path owner, including all complete-scene admission.
+    /// Neither affine collision admission nor field endpoint checks certify the
+    /// field domain between endpoints. Close approaches require refinement;
+    /// sustained loaded contact retains its separate first-order lane.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mixed_sphere_trajectory_candidate_in_field(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
+        wrenches: &[Wrench],
+        field: &dyn RigidGravityField,
+        frame: u64,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (Self, Vec<RigidBodyState>, FiniteSolidSphereTrajectoryReport),
+        FiniteSolidSphereTrajectoryError,
+    > {
+        self.sphere_trajectory_with(
+            surface,
+            Some(scene),
+            bodies,
+            properties,
+            scene.spheres(),
+            nodal_forces_n,
+            body_force_n_m3,
+            uniform_pressure_pa,
+            wrenches,
+            RigidGravity::Spatial { field, frame },
             duration_s,
             origin_m,
             controls,
@@ -488,7 +543,7 @@ impl<'a> FiniteSolidBody<'a> {
         body_force_n_m3: [f64; 3],
         uniform_pressure_pa: Option<f64>,
         wrenches: &[Wrench],
-        gravity: Gravity,
+        gravity: RigidGravity<'_>,
         duration_s: f64,
         origin_m: [f64; 3],
         controls: FiniteSolidSphereTrajectoryControls,
@@ -561,20 +616,19 @@ impl<'a> FiniteSolidBody<'a> {
                         elapsed_s: elapsed,
                     });
                 }
-                let (candidate, rigid_candidate, free) = post_solid
-                    .rigid_free_flight_with_pressure(
-                        &post_rigid,
-                        properties,
-                        nodal_forces_n,
-                        body_force_n_m3,
-                        uniform_pressure_pa,
-                        wrenches,
-                        gravity,
-                        dt,
-                        origin_m,
-                        controls.free,
-                        cx,
-                    )?;
+                let (candidate, rigid_candidate, free) = post_solid.rigid_free_flight_with_source(
+                    &post_rigid,
+                    properties,
+                    nodal_forces_n,
+                    body_force_n_m3,
+                    uniform_pressure_pa,
+                    wrenches,
+                    gravity,
+                    dt,
+                    origin_m,
+                    controls.free,
+                    cx,
+                )?;
                 let represented = candidate.native_state().t - post_solid.native_state().t;
                 if (represented - dt).abs() > clock_tolerance {
                     return Err(FiniteSolidSphereTrajectoryError::TimeResolution {

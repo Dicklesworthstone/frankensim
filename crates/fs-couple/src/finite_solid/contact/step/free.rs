@@ -10,6 +10,7 @@ use crate::finite_solid::{
     FiniteSolidBody, FiniteSolidControls, FiniteSolidError, FiniteSolidStep,
 };
 use fs_exec::Cx;
+use fs_mbd::gravity::{GravityError, RigidGravityField, step_in_field_with_loads};
 use fs_mbd::{
     DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, StepReceipt,
     UnitQuaternion, Vec3, Wrench,
@@ -48,13 +49,23 @@ pub struct FreeFlightReport {
     /// Solid load work, rigid force-displacement work and endpoint torque work.
     /// Uniform rigid gravity is included here; it is not counted again as storage.
     pub source_work_j: f64,
+    /// Held rigid COM-force displacement work and body-couple kick work.
+    pub rigid_held_work_j: f64,
+    /// Original rigid field potential decrease (uniform gravity uses its exact
+    /// displacement work). Included once in source work, not again as storage.
+    pub rigid_gravity_work_j: f64,
     /// Stable solid kinetic + original strain change minus its native source work.
     pub solid_integration_defect_j: f64,
     /// Actual rotational energy change inside the native torque-free rigid maps.
     pub rigid_drift_energy_defect_j: f64,
+    /// Gravity half-kick work minus the same field's potential decrease.
+    pub rigid_gravity_work_defect_j: f64,
+    /// Held COM-force kick work minus its actual displacement work. Spatial
+    /// gravity can make the two endpoint linear half-kicks unequal.
+    pub rigid_held_force_work_defect_j: f64,
     pub integration_defect_j: f64,
-    /// Sum of absolute solid and individual rigid drift defects. Opposite signed
-    /// numerical errors cannot cancel to pass the requested integration gate.
+    /// Sum of absolute solid, individual rigid drift, gravity and held-force
+    /// defects. Opposite signed errors cannot pass the integration gate.
     pub absolute_integration_defect_j: f64,
     /// Actual storage change minus source work and the labeled numerical defects.
     pub work_energy_residual_j: f64,
@@ -82,6 +93,7 @@ pub enum FreeFlightError {
     Invalid(&'static str),
     Solid(FiniteSolidError),
     Rigid(DynamicsError),
+    Gravity(GravityError),
     Cancelled,
     /// Neither mechanical candidate is published after a failed physical gate.
     Audit(Box<FreeFlightReport>),
@@ -96,12 +108,30 @@ impl From<DynamicsError> for FreeFlightError {
         Self::Rigid(error)
     }
 }
+impl From<GravityError> for FreeFlightError {
+    fn from(error: GravityError) -> Self {
+        match error {
+            GravityError::Cancelled => Self::Cancelled,
+            error => Self::Gravity(error),
+        }
+    }
+}
 impl core::fmt::Display for FreeFlightError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native rigid/finite-solid free flight: {self:?}")
     }
 }
 impl std::error::Error for FreeFlightError {}
+
+/// One declared native rigid gravity law for every trial in the shared driver.
+#[derive(Clone, Copy)]
+pub(crate) enum RigidGravity<'a> {
+    Uniform(Gravity),
+    Spatial {
+        field: &'a dyn RigidGravityField,
+        frame: u64,
+    },
+}
 
 impl<'a> FiniteSolidBody<'a> {
     /// Advance both native owners under held loads and admit actual balances.
@@ -137,14 +167,14 @@ impl<'a> FiniteSolidBody<'a> {
         controls: FreeFlightControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, Vec<RigidBodyState>, FreeFlightReport), FreeFlightError> {
-        self.rigid_free_flight_with_pressure(
+        self.rigid_free_flight_with_source(
             bodies,
             properties,
             nodal_forces_n,
             body_force_n_m3,
             None,
             wrenches,
-            gravity,
+            RigidGravity::Uniform(gravity),
             duration_s,
             origin_m,
             controls,
@@ -174,14 +204,56 @@ impl<'a> FiniteSolidBody<'a> {
         controls: FreeFlightControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, Vec<RigidBodyState>, FreeFlightReport), FreeFlightError> {
-        self.rigid_free_flight_with_pressure(
+        self.rigid_free_flight_with_source(
             bodies,
             properties,
             nodal_forces_n,
             body_force_n_m3,
             Some(pressure_pa),
             wrenches,
-            gravity,
+            RigidGravity::Uniform(gravity),
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance rigid participants in one explicitly declared stationary native
+    /// field alongside the solid's own retained sources. The original rigid
+    /// gravity owner samples force, torque and potential at both actual poses;
+    /// its monopole or explicitly selected finite-body model is unchanged.
+    ///
+    /// `uniform_pressure_pa` supplies held pressure only to a pressure-bound
+    /// solid. Held wrenches must exclude this field. Potential decrease is
+    /// source work once; gravity, held-force and free-rotation numerical defects
+    /// have separate noncancelling gates. Endpoint admission does not certify a
+    /// field domain along the intervening path. Moving fields and sustained
+    /// loaded contact require their own stage/trajectory owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rigid_free_flight_candidate_in_field(
+        &self,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
+        wrenches: &[Wrench],
+        field: &dyn RigidGravityField,
+        frame: u64,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FreeFlightControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, Vec<RigidBodyState>, FreeFlightReport), FreeFlightError> {
+        self.rigid_free_flight_with_source(
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            uniform_pressure_pa,
+            wrenches,
+            RigidGravity::Spatial { field, frame },
             duration_s,
             origin_m,
             controls,
@@ -190,7 +262,7 @@ impl<'a> FiniteSolidBody<'a> {
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    pub(super) fn rigid_free_flight_with_pressure(
+    pub(super) fn rigid_free_flight_with_source(
         &self,
         bodies: &[RigidBodyState],
         properties: &[MassProperties],
@@ -198,7 +270,7 @@ impl<'a> FiniteSolidBody<'a> {
         body_force_n_m3: [f64; 3],
         uniform_pressure_pa: Option<f64>,
         wrenches: &[Wrench],
-        gravity: Gravity,
+        gravity: RigidGravity<'_>,
         duration_s: f64,
         origin_m: [f64; 3],
         controls: FreeFlightControls,
@@ -324,7 +396,11 @@ impl<'a> FiniteSolidBody<'a> {
         let strain_change_j = solid.strain_after_j - solid.strain_before_j;
         let solid_defect = kinetic_change_j + strain_change_j - solid.source_work_j;
         let mut source_work_j = solid.source_work_j;
+        let mut rigid_held_work_j = 0.0;
+        let mut rigid_gravity_work_j = 0.0;
         let mut drift_defect = 0.0;
+        let mut gravity_defect = 0.0;
+        let mut held_force_defect = 0.0;
         let mut absolute_defect = solid_defect.abs();
         let mut absolute_linear_residual = magnitude(linear_change.sub(applied).sub(support));
         let mut absolute_angular_residual =
@@ -333,11 +409,24 @@ impl<'a> FiniteSolidBody<'a> {
         let mut rigid_next = Vec::with_capacity(bodies.len());
         let mut rigid = Vec::with_capacity(bodies.len());
         for ((&old, &property), &wrench) in bodies.iter().zip(properties).zip(wrenches) {
-            let flight = rigid_free_flight(old, property, wrench, gravity, duration_s, origin, cx)?;
+            let flight = match gravity {
+                RigidGravity::Uniform(gravity) => {
+                    rigid_free_flight(old, property, wrench, gravity, duration_s, origin, cx)?
+                }
+                _ => rigid_free_flight_with_source(
+                    old, property, wrench, gravity, duration_s, origin, cx,
+                )?,
+            };
             kinetic_change_j += flight.kinetic_change_j;
             source_work_j += flight.source_work_j;
+            rigid_held_work_j += flight.held_work_j;
+            rigid_gravity_work_j += flight.gravity_work_j;
             drift_defect += flight.drift_defect_j;
-            absolute_defect += flight.drift_defect_j.abs();
+            gravity_defect += flight.gravity_defect_j;
+            held_force_defect += flight.held_force_defect_j;
+            absolute_defect += flight.drift_defect_j.abs()
+                + flight.gravity_defect_j.abs()
+                + flight.held_force_defect_j.abs();
             linear_change = linear_change.add(flight.linear_change);
             angular_change = angular_change.add(flight.angular_change);
             applied = applied.add(flight.applied);
@@ -348,7 +437,7 @@ impl<'a> FiniteSolidBody<'a> {
             rigid_next.push(flight.receipt.state_after);
             rigid.push(flight.receipt);
         }
-        let integration_defect_j = solid_defect + drift_defect;
+        let integration_defect_j = solid_defect + drift_defect + gravity_defect + held_force_defect;
         let report = FreeFlightReport {
             duration_s,
             solid,
@@ -356,8 +445,12 @@ impl<'a> FiniteSolidBody<'a> {
             kinetic_change_j,
             strain_change_j,
             source_work_j,
+            rigid_held_work_j,
+            rigid_gravity_work_j,
             solid_integration_defect_j: solid_defect,
             rigid_drift_energy_defect_j: drift_defect,
+            rigid_gravity_work_defect_j: gravity_defect,
+            rigid_held_force_work_defect_j: held_force_defect,
             integration_defect_j,
             absolute_integration_defect_j: absolute_defect,
             work_energy_residual_j: kinetic_change_j + strain_change_j
@@ -381,6 +474,11 @@ impl<'a> FiniteSolidBody<'a> {
             report.kinetic_change_j,
             report.strain_change_j,
             report.source_work_j,
+            report.rigid_held_work_j,
+            report.rigid_gravity_work_j,
+            report.rigid_drift_energy_defect_j,
+            report.rigid_gravity_work_defect_j,
+            report.rigid_held_force_work_defect_j,
             report.integration_defect_j,
             report.absolute_integration_defect_j,
             report.work_energy_residual_j,
@@ -425,7 +523,11 @@ pub(crate) struct RigidFreeFlight {
     pub receipt: StepReceipt,
     pub kinetic_change_j: f64,
     pub source_work_j: f64,
+    pub held_work_j: f64,
+    pub gravity_work_j: f64,
     pub drift_defect_j: f64,
+    pub gravity_defect_j: f64,
+    pub held_force_defect_j: f64,
     pub linear_change: Vec3,
     pub angular_change: Vec3,
     pub applied: Vec3,
@@ -435,7 +537,7 @@ pub(crate) struct RigidFreeFlight {
     pub work_residual_j: f64,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn rigid_free_flight(
     old: RigidBodyState,
     property: MassProperties,
@@ -445,31 +547,95 @@ pub(crate) fn rigid_free_flight(
     origin: Vec3,
     cx: &Cx<'_>,
 ) -> Result<RigidFreeFlight, FreeFlightError> {
+    rigid_free_flight_with_source(
+        old,
+        property,
+        wrench,
+        RigidGravity::Uniform(gravity),
+        duration_s,
+        origin,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn rigid_free_flight_with_source(
+    old: RigidBodyState,
+    property: MassProperties,
+    wrench: Wrench,
+    gravity: RigidGravity<'_>,
+    duration_s: f64,
+    origin: Vec3,
+    cx: &Cx<'_>,
+) -> Result<RigidFreeFlight, FreeFlightError> {
     poll(cx)?;
     let half = 0.5 * duration_s;
-    let integrator = RigidBodyIntegrator::new(gravity);
-    // The callback exposes the ACTUAL endpoint before the second kick.
-    let (receipt, drifted) =
-        integrator.step_verlet_with(old, property, wrench, duration_s, |drifted| {
-            poll(cx)?;
-            Ok::<_, FreeFlightError>((wrench, drifted))
-        })?;
+    let (receipt, drifted, gravity_before, gravity_after, potential_work) = match gravity {
+        RigidGravity::Uniform(gravity) => {
+            // Preserve the original uniform native map and its exact constant
+            // force work. No subtraction of a large potential datum is needed.
+            let (receipt, drifted) = RigidBodyIntegrator::new(gravity).step_verlet_with(
+                old,
+                property,
+                wrench,
+                duration_s,
+                |drifted| {
+                    poll(cx)?;
+                    Ok::<_, FreeFlightError>((wrench, drifted))
+                },
+            )?;
+            let load = Wrench {
+                force_world: gravity.acceleration_world().scale(property.mass()),
+                torque_body: Vec3::ZERO,
+            };
+            let work = load.force_world.dot(
+                receipt
+                    .state_after
+                    .pose()
+                    .position_world()
+                    .sub(old.pose().position_world()),
+            );
+            (receipt, drifted, load, load, work)
+        }
+        RigidGravity::Spatial { field, frame } => {
+            let native =
+                step_in_field_with_loads(field, frame, old, property, wrench, duration_s, || {
+                    cx.checkpoint().is_err()
+                })?;
+            (
+                native.step,
+                native.state_after_drift,
+                native.load_before.wrench,
+                native.load_after.wrench,
+                native.load_before.potential_energy_j - native.load_after.potential_energy_j,
+            )
+        }
+    };
     let new = receipt.state_after;
-    let total_force = wrench
-        .force_world
-        .add(gravity.acceleration_world().scale(property.mass()));
-    let torque_half = wrench.torque_body.scale(half);
+    let force_before = wrench.force_world.add(gravity_before.force_world);
+    let force_after = wrench.force_world.add(gravity_after.force_world);
+    let torque_before_half = wrench
+        .torque_body
+        .add(gravity_before.torque_body)
+        .scale(half);
+    let torque_after_half = wrench
+        .torque_body
+        .add(gravity_after.torque_body)
+        .scale(half);
     // Exactly the original first half-kick arithmetic; accepted momenta/poses
     // are never reconstructed or projected by this shared account.
-    let kicked = old.angular_momentum_body().add(torque_half);
+    let kicked = old.angular_momentum_body().add(torque_before_half);
     let drift_defect_j = rotational_change(property, kicked, drifted.angular_momentum_body())?;
-    let torque_work = torque_half.dot(
-        angular_average(property, old.angular_momentum_body(), kicked)?.add(angular_average(
-            property,
-            drifted.angular_momentum_body(),
-            new.angular_momentum_body(),
-        )?),
-    );
+    let first_omega = angular_average(property, old.angular_momentum_body(), kicked)?;
+    let last_omega = angular_average(
+        property,
+        drifted.angular_momentum_body(),
+        new.angular_momentum_body(),
+    )?;
+    let torque_work = wrench
+        .torque_body
+        .scale(half)
+        .dot(first_omega.add(last_omega));
     let dx = new.pose().position_world().sub(old.pose().position_world());
     let dp = new.linear_momentum_world().sub(old.linear_momentum_world());
     let p_average = old
@@ -482,7 +648,40 @@ pub(crate) fn rigid_free_flight(
             old.angular_momentum_body(),
             new.angular_momentum_body(),
         )?;
-    let source_work_j = total_force.dot(dx) + torque_work;
+    let held_force_work = wrench.force_world.dot(dx);
+    let held_work_j = held_force_work + torque_work;
+    // Uniform-only consumers retain the original constant-force account,
+    // including its roundoff convention and native drift-only defect.
+    let source_work_j = match gravity {
+        RigidGravity::Uniform(_) => force_before.dot(dx) + torque_work,
+        RigidGravity::Spatial { .. } => held_work_j + potential_work,
+    };
+    // These are commanded native half-kicks paired with the ACTUAL adjoining
+    // momenta. Component decomposition error is checked in work_residual_j;
+    // it cannot be silently assigned to gravity or free-rotation energy.
+    let first_velocity = old
+        .linear_momentum_world()
+        .scale(0.5 / property.mass())
+        .add(drifted.linear_momentum_world().scale(0.5 / property.mass()));
+    let last_velocity = drifted
+        .linear_momentum_world()
+        .scale(0.5 / property.mass())
+        .add(new.linear_momentum_world().scale(0.5 / property.mass()));
+    let gravity_kick_work = gravity_before.force_world.scale(half).dot(first_velocity)
+        + gravity_after.force_world.scale(half).dot(last_velocity)
+        + gravity_before.torque_body.scale(half).dot(first_omega)
+        + gravity_after.torque_body.scale(half).dot(last_omega);
+    let held_force_kick_work = wrench
+        .force_world
+        .scale(half)
+        .dot(first_velocity.add(last_velocity));
+    let (gravity_defect_j, held_force_defect_j) = match gravity {
+        RigidGravity::Uniform(_) => (0.0, 0.0),
+        RigidGravity::Spatial { .. } => (
+            gravity_kick_work - potential_work,
+            held_force_kick_work - held_force_work,
+        ),
+    };
     let r_average = old
         .pose()
         .position_world()
@@ -499,28 +698,50 @@ pub(crate) fn rigid_free_flight(
             new.pose().orientation(),
             new.angular_momentum_body(),
         ));
-    let force_half = total_force.scale(half);
-    let applied = force_half.add(force_half);
+    let force_before_half = force_before.scale(half);
+    let force_after_half = force_after.scale(half);
+    let applied = force_before_half.add(force_after_half);
     let applied_angular = old
         .pose()
         .position_world()
         .sub(origin)
-        .cross(force_half)
-        .add(new.pose().position_world().sub(origin).cross(force_half))
-        .add(old.pose().orientation().rotate_body_to_world(torque_half))
-        .add(new.pose().orientation().rotate_body_to_world(torque_half));
+        .cross(force_before_half)
+        .add(
+            new.pose()
+                .position_world()
+                .sub(origin)
+                .cross(force_after_half),
+        )
+        .add(
+            old.pose()
+                .orientation()
+                .rotate_body_to_world(torque_before_half),
+        )
+        .add(
+            new.pose()
+                .orientation()
+                .rotate_body_to_world(torque_after_half),
+        );
     Ok(RigidFreeFlight {
         receipt,
         kinetic_change_j,
         source_work_j,
+        held_work_j,
+        gravity_work_j: potential_work,
         drift_defect_j,
+        gravity_defect_j,
+        held_force_defect_j,
         linear_change: dp,
         angular_change,
         applied,
         applied_angular,
         linear_residual: dp.sub(applied),
         angular_residual: angular_change.sub(applied_angular),
-        work_residual_j: kinetic_change_j - source_work_j - drift_defect_j,
+        work_residual_j: kinetic_change_j
+            - source_work_j
+            - drift_defect_j
+            - gravity_defect_j
+            - held_force_defect_j,
     })
 }
 

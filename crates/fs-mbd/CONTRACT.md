@@ -5836,3 +5836,18 @@ constraint activation, changing ratios, backlash, nonholonomic rolling,
 arbitrary redundancy resolution, continuous-path enclosure, symplecticity or
 energy-exactness claim. Full Cargo/DSR qualification and the broader multibody
 bead remain outstanding.
+
+### Retained spatial-gravity endpoint loads for coupled consumers
+
+`gravity::step_in_field_with_loads` returns the original native step together
+with the two actual conservative `GravityLoad` samples and the native state
+after free drift, before the endpoint half-kick. `step_in_field` delegates to
+that same implementation and keeps its original return type and map. Both
+loads exclude the caller's separately held wrench; the native step includes it.
+
+Coupled owners can therefore reconstruct actual half-kick work and external
+linear/angular impulses and compare them with potential decrease without a
+third source query or an inferred intermediate momentum. The original full
+inertia, field/frame/domain validation and cancellation checks remain binding.
+The receipt adds no field law, accepted-path domain guarantee or energy-exact
+integration claim.

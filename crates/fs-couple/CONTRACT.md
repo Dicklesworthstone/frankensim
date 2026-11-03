@@ -24194,7 +24194,8 @@ solid objective energy/momentum discrete-gradient owner and each original rigid
 `step_verlet_with` owner over one positive interval. It retains native state receipts and returns both candidates
 only after complete momentum and work checks. Solid forces come from the same
 prepared external-load owner as the native solve. Rigid gravity is included
-once in force work; solid gravity remains an explicit caller-supplied load.
+once in force work; a solid may bind its own explicit stationary field, whose
+native nodal loads, potential work and integration defect retain separate accounts.
 
 The solid account uses consistent `M delta-v`, current midpoint coordinates and
 the full angular increment `x_average cross delta-p + delta-x cross p_average`.
@@ -24277,7 +24278,7 @@ accumulate before global cancellation. Native phase and endpoint clocks must
 agree with requested elapsed time within the declared binary64 rounding gate;
 unrepresentable timing refuses instead of overwriting native state. Gravity
 work is included once: the rigid integrator owns its gravity, while the solid's
-resolved gravity is part of its explicit held loads. No loss becomes heat
+bound gravity owner retains its own sampled loads and potential/work account. No loss becomes heat
 without an independent physical partition.
 
 Focused G1/G3/G4 fixtures specify an automatically detected elastic bounce,
@@ -27914,3 +27915,45 @@ The complete original source must already be liquid on the same constant referen
 Native child M/P/L/h and zero-work kinetic identity are checked against the original before transfer. The actual receiving liquid plus retained native body are checked again against the original with one global budget. Numerical kinetic and gravitational projection changes never become heat. Whole-source caloric admission and selected-piece transfer share one source-query ceiling. Any source, topology, phase, occupancy, projection, budget, or cancellation refusal returns neither child and leaves the borrowed source unchanged.
 
 Three focused regressions cover analytic rotated unequal-body accounting, actual liquid readback, native continuation, successive releases and composed lineage, cold retained matter, missing occupancy, strict projection budgets, cancellation, and deterministic retry. Source parsing, formatting, whitespace, and API checks passed; native compilation and tests were not executed in this resource-constrained session.
+
+## Spatial rigid gravity through mixed finite-solid contact trajectories
+
+`FiniteSolidBody::rigid_free_flight_candidate_in_field` and
+`mixed_sphere_trajectory_candidate_in_field` connect the original
+`RigidGravityField` to the existing free-flight and transient mixed-sphere
+owners. The caller supplies an explicit field and frame and may retain an
+explicit uniform pressure on the solid's original closed boundary. A solid's
+separately bound stationary field is neither inferred from nor replaced by
+the rigid field.
+
+Each rigid step reuses native endpoint-load Verlet and retains both actual
+field samples and the state after free drift. Central forces and explicitly
+selected quadrupole force/torque enter the original full-inertia rigid owner;
+there is no extra field query, alternate integrator or inferred finite-body
+gravity model. The original uniform-gravity entry and the uniform helper used
+by inelastic trajectories retain their previous map and accounting semantics.
+
+Rigid potential decrease is physical source work once. Held world-force
+displacement work and body-torque kick work stay separate from free-rotation
+drift error, gravity half-kick work minus potential decrease, and the difference
+between held-force kick work and displacement work under changing field loads.
+Signed defects close the measured work identity; the sum of their individual
+absolute magnitudes must independently pass the integration allowance. Opposite
+errors cannot cancel through admission, and none becomes contact heat.
+
+The same field reaches every original geometry retry and accepted free phase.
+Only accepted phases accumulate time, source work, impulses or numerical
+defects. Actual endpoint forces and rotated body torques supply the external
+linear/angular impulse account; original simultaneous rigid/solid and
+rigid/rigid contact retain their own unallocated mechanical loss. Final
+whole-trajectory work, momentum and absolute-defect gates remain binding.
+Native field/domain/frame refusal, exhausted work or cancellation returns
+neither accepted mechanical candidate.
+
+This remains the original transient contact owner with its declared affine
+numerical collision path. Endpoint gravity samples do not enclose the field
+domain between them; close approaches require caller refinement and admission.
+The sustained first-order contact lane and inelastic material trajectories
+retain their existing uniform rigid-gravity interfaces. No source recoil,
+gravity inference from an undeclared shape, continuum path certificate or
+global impact-accuracy claim is added.

@@ -1,6 +1,8 @@
 //! G1/G3 automatic contact trajectories on actual native mechanical states.
 #[path = "step/free.rs"]
 mod free;
+#[path = "step/gravity.rs"]
+mod gravity;
 #[path = "step/pressure.rs"]
 mod pressure;
 #[path = "step/scene.rs"]

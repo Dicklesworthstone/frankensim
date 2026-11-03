@@ -286,9 +286,7 @@ fn quadrupole_inertia_trace(
 ) -> Result<f64, GravityError> {
     let principal = properties.principal_inertia_body();
     let trace = finite(principal.x + principal.y + principal.z)?;
-    if (0.5 * trace / properties.mass()).sqrt()
-        > body_radius_m * (1.0 + 32.0 * f64::EPSILON)
-    {
+    if (0.5 * trace / properties.mass()).sqrt() > body_radius_m * (1.0 + 32.0 * f64::EPSILON) {
         return Err(GravityError::Invalid(
             "inertia exceeds declared body radius",
         ));
@@ -346,8 +344,52 @@ pub fn step_in_field(
     properties: MassProperties,
     other_wrench: Wrench,
     duration_seconds: f64,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<StepReceipt, GravityError> {
+    Ok(step_in_field_with_loads(
+        field,
+        frame,
+        state,
+        properties,
+        other_wrench,
+        duration_seconds,
+        cancelled,
+    )?
+    .step)
+}
+
+/// The original native step and the actual conservative samples that drove it.
+///
+/// Coupled consumers can account for external impulses, potential decrease and
+/// numerical work defects without evaluating the field again or reconstructing
+/// an intermediate momentum from a rounded endpoint. No sample certifies the
+/// intervening trajectory's field domain.
+#[derive(Clone, Copy, Debug)]
+pub struct GravityStepReceipt {
+    /// Completed native state and diagnostics, including this field's potential.
+    pub step: StepReceipt,
+    /// Field load at the initial pose, before the first half-kick.
+    pub load_before: GravityLoad,
+    /// Field load at the actual drift endpoint, before the final half-kick.
+    pub load_after: GravityLoad,
+    /// Native state after free drift and before the endpoint half-kick.
+    pub state_after_drift: RigidBodyState,
+}
+
+/// Advance the same map as [`step_in_field`], retaining its original stages.
+///
+/// The returned loads exclude `other_wrench`; the native step includes both.
+/// Field, frame, full-inertia, cancellation and endpoint-domain semantics are
+/// exactly those of [`step_in_field`].
+pub fn step_in_field_with_loads(
+    field: &(impl RigidGravityField + ?Sized),
+    frame: u64,
+    state: RigidBodyState,
+    properties: MassProperties,
+    other_wrench: Wrench,
+    duration_seconds: f64,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<GravityStepReceipt, GravityError> {
     if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
         return Err(DynamicsError::InvalidStepDuration.into());
     }
@@ -357,23 +399,29 @@ pub fn step_in_field(
     poll(&mut cancelled)?;
     let before = field.load(frame, state.pose(), properties)?.validate()?;
     poll(&mut cancelled)?;
-    let (mut receipt, potential_after) = RigidBodyIntegrator::new(Gravity::ZERO)
+    let (mut receipt, (after, state_after_drift)) = RigidBodyIntegrator::new(Gravity::ZERO)
         .step_verlet_with::<_, GravityError>(
-            state,
-            properties,
-            combine(before.wrench, other_wrench),
-            duration_seconds,
-            |drifted| {
-                poll(&mut cancelled)?;
-                let after = field.load(frame, drifted.pose(), properties)?.validate()?;
-                Ok((combine(after.wrench, other_wrench), after.potential_energy_j))
-            },
-        )?;
+        state,
+        properties,
+        combine(before.wrench, other_wrench),
+        duration_seconds,
+        |drifted| {
+            poll(&mut cancelled)?;
+            let after = field.load(frame, drifted.pose(), properties)?.validate()?;
+            Ok((combine(after.wrench, other_wrench), (after, drifted)))
+        },
+    )?;
     receipt.diagnostics_before =
         with_potential(receipt.diagnostics_before, before.potential_energy_j)?;
-    receipt.diagnostics_after = with_potential(receipt.diagnostics_after, potential_after)?;
+    receipt.diagnostics_after =
+        with_potential(receipt.diagnostics_after, after.potential_energy_j)?;
     poll(&mut cancelled)?;
-    Ok(receipt)
+    Ok(GravityStepReceipt {
+        step: receipt,
+        load_before: before,
+        load_after: after,
+        state_after_drift,
+    })
 }
 
 fn combine(gravity: Wrench, other: Wrench) -> Wrench {
