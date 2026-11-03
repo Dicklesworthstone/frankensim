@@ -165,6 +165,19 @@ increments and retentions preserve both small attacks and long decay tails.
 Focused G1 tests cover those regimes and a one-second, 440-cycle high-Q decay;
 cached full/half steps and direct steps share the same coefficient evaluator.
 
+The undamped held-force cache also retains the entire gains
+`sinc(omega*h)` and `(1-cos(omega*h))/(omega*h)^2`. If squaring frequency loses
+its normal range, or a static equilibrium/velocity quotient overflows, motion
+uses these gains with scaled force impulse instead of dividing by stiffness.
+This preserves finite near-rigid attacks and their signed physical work without
+introducing a frequency floor. The corresponding exceptional spring-force and
+stored-energy evaluation multiplies `omega*q` first, retaining finite restoring
+acceleration and energy-budget admission even when `omega^2` underflows.
+Ordinary normal-range transitions and energy retain their existing operation
+order. `tests/soft_mode_time.rs` covers the free limit, cached/direct and
+subdivision agreement, finite attacks with unrepresentable static equilibrium,
+retained restoring force across damping regimes, and transactional energy caps.
+
 `time::LinearForceTransition` adds a prepared exact first-order-hold path for
 forces specified at both interval endpoints. It shares the entire-series and
 transition-doubling owner, adding the analytically integrated force moment.

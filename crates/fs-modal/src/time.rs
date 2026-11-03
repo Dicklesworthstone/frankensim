@@ -362,14 +362,22 @@ impl PreparedZohCoefficients {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct UndampedTransition {
+    duration_s: f64,
+    sine: f64,
+    one_minus_cosine: f64,
+    // Entire force-convolution gains, scaled by h and h^2. Retaining them
+    // avoids division by a vanishing stiffness during a finite-time attack.
+    sinc: f64,
+    cosc: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
 enum ExactZohCoefficients {
     Free {
         duration_s: f64,
     },
-    Undamped {
-        sine: f64,
-        one_minus_cosine: f64,
-    },
+    Undamped(UndampedTransition),
     Damped {
         position_retention: f64,
         velocity_retention: f64,
@@ -1421,12 +1429,20 @@ fn check_limit(what: &'static str, value: f64, limit: f64) -> Result<(), ModalAc
 }
 
 fn modal_energy(mode: ModalAcousticMode, state: ModalAcousticState) -> f64 {
+    let omega = mode.angular_frequency_rad_s;
+    let q = state.displacement_m_sqrt_kg;
+    let stiffness = omega * omega;
+    let twice_potential = if stiffness.is_normal() {
+        stiffness * q * q
+    } else {
+        // A subnormal/underflowed omega^2 can erase finite stored energy.
+        // Preserve the ordinary operation tree when its stiffness is normal.
+        let weighted_displacement = omega * q;
+        weighted_displacement * weighted_displacement
+    };
     f64::midpoint(
         state.velocity_m_sqrt_kg_per_s * state.velocity_m_sqrt_kg_per_s,
-        mode.angular_frequency_rad_s
-            * mode.angular_frequency_rad_s
-            * state.displacement_m_sqrt_kg
-            * state.displacement_m_sqrt_kg,
+        twice_potential,
     )
 }
 
@@ -1439,10 +1455,22 @@ fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficie
     if zeta == 0.0 {
         let angle = omega * dt;
         let half_sine = det::sin(0.5 * angle);
-        return ExactZohCoefficients::Undamped {
-            sine: det::sin(angle),
-            one_minus_cosine: 2.0 * half_sine * half_sine,
+        let sine = det::sin(angle);
+        let (sinc, cosc) = if angle.abs() < f64::MIN_POSITIVE {
+            // The half-angle can underflow, but both entire gains have their
+            // exactly rounded limits here. No physical stiffness is changed.
+            (1.0, 0.5)
+        } else {
+            let half_sinc = half_sine / angle;
+            (sine / angle, 2.0 * half_sinc * half_sinc)
         };
+        return ExactZohCoefficients::Undamped(UndampedTransition {
+            duration_s: dt,
+            sine,
+            one_minus_cosine: 2.0 * half_sine * half_sine,
+            sinc,
+            cosc,
+        });
     }
     // For q'' + c q' + omega^2 q = F, B is the velocity response to a
     // held unit force and G is its displacement response. E11 = 1-omega^2 G,
@@ -1522,11 +1550,8 @@ fn advance_exact_zoh_increment(
                 displacement_increment,
             );
         }
-        ExactZohCoefficients::Undamped {
-            sine,
-            one_minus_cosine,
-        } => {
-            return advance_undamped_zoh(mode, state, force, sine, one_minus_cosine);
+        ExactZohCoefficients::Undamped(transition) => {
+            return advance_undamped_zoh(mode, state, force, transition);
         }
         ExactZohCoefficients::Damped {
             position_retention,
@@ -1536,7 +1561,13 @@ fn advance_exact_zoh_increment(
             position_decrement,
             velocity_decrement,
         } => {
-            let restoring_force = force - omega * omega * q0;
+            let stiffness = omega * omega;
+            let spring_force = if stiffness.is_normal() {
+                stiffness * q0
+            } else {
+                omega * (omega * q0)
+            };
+            let restoring_force = force - spring_force;
             let (q, displacement_increment) = if position_decrement.abs() < 0.5 {
                 let increment = velocity_gain * v0 + displacement_gain * restoring_force;
                 (q0 + increment, increment)
@@ -1569,15 +1600,39 @@ fn advance_undamped_zoh(
     mode: ModalAcousticMode,
     state: ModalAcousticState,
     force: f64,
-    sine: f64,
-    one_minus_cosine: f64,
+    transition: UndampedTransition,
 ) -> (ModalAcousticState, f64) {
     let omega = mode.angular_frequency_rad_s;
     let q = state.displacement_m_sqrt_kg;
     let v = state.velocity_m_sqrt_kg_per_s;
-    let displacement_increment =
-        (v / omega) * sine + (force / (omega * omega) - q) * one_minus_cosine;
-    let velocity_increment = (force / omega - omega * q) * sine - v * one_minus_cosine;
+    let UndampedTransition {
+        duration_s,
+        sine,
+        one_minus_cosine,
+        sinc,
+        cosc,
+    } = transition;
+    let stiffness = omega * omega;
+    let equilibrium = force / stiffness;
+    let scaled_velocity = v / omega;
+    let (displacement_increment, velocity_increment) =
+        if stiffness.is_normal() && equilibrium.is_finite() && scaled_velocity.is_finite() {
+            // Preserve the established arithmetic for ordinary resolved modes.
+            (
+                scaled_velocity * sine + (equilibrium - q) * one_minus_cosine,
+                (force / omega - omega * q) * sine - v * one_minus_cosine,
+            )
+        } else {
+            // Exact held-force convolution in velocity units. The finite-time
+            // response can exist even when F/omega^2 or v/omega cannot. Form
+            // h*omega^2*q without first squaring the very soft/stiff omega.
+            let angle = omega * duration_s;
+            let residual_impulse = duration_s * force - (omega * q) * angle;
+            (
+                duration_s * (sinc * v) + (duration_s * cosc) * residual_impulse,
+                sinc * residual_impulse - v * one_minus_cosine,
+            )
+        };
     (
         ModalAcousticState {
             displacement_m_sqrt_kg: q + displacement_increment,
