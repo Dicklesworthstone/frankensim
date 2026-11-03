@@ -462,3 +462,6 @@ fn explicit_closed_valve_coasts_with_the_identical_gas_and_no_engine_impulse() {
             .is_err()
     );
 }
+
+#[path = "tensor_tests.rs"]
+mod tensor;

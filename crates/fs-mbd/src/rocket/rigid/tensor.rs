@@ -173,6 +173,10 @@ impl sealed::Sealed for TensorRocketInertia {}
 impl RocketInertiaModel for TensorRocketInertia {
     type ExhaustInertia = SpecificInertia;
 
+    fn zero_exhaust_inertia() -> SpecificInertia {
+        SpecificInertia::ZERO
+    }
+
     fn mass_properties(self, translation: RocketState) -> Result<MassProperties, RigidRocketError> {
         TensorRocketInertia::mass_properties(self, translation)
     }

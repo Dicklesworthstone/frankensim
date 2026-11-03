@@ -8,9 +8,10 @@
 //! Pressure thrust enters both the net thrust and its lever-arm torque once.
 //!
 //! Gas thermodynamics is comoving and spatially mixed. The native rigid model
-//! retains its fixed-COM/common-principal-axis inertia law and explicitly supplied
-//! diagonal rotational exhaust flux. This adapter does not infer internal-flow
-//! momentum, general outlet tensors, slosh, COM motion or world exhaust energy.
+//! retains the selected fixed-COM inertia model and its explicitly supplied
+//! angular outflow law, including noncommuting full tensors in fixed material
+//! axes. This adapter does not infer internal-flow momentum, outlet geometry,
+//! slosh, COM motion or world exhaust energy.
 
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::blowdown::{
@@ -22,13 +23,13 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::rocket::{
 use fs_mbd::rocket::RocketState;
 use fs_mbd::rocket::rigid::{
     RigidRocketError, RigidRocketForcing, RigidRocketInertia, RigidRocketSolve, RigidRocketState,
-    RigidRocketStep,
+    RigidRocketStep, RocketInertiaModel,
 };
 use fs_mbd::{UnitQuaternion, Vec3};
 
 /// Forcing in one caller-declared inertial frame and the vehicle body frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GasRigidRocketEnvironment {
+pub struct GasRigidRocketEnvironment<E = Vec3> {
     /// Identity of the common world frame; no coordinate transform is inferred.
     pub inertial_frame: u64,
     /// Explicit nonnegative back pressure [Pa], zero for vacuum.
@@ -37,9 +38,9 @@ pub struct GasRigidRocketEnvironment {
     pub thrust_direction_body: Vec3,
     /// Effective thrust application point relative to the shared COM [m].
     pub thrust_application_arm_body_m: Vec3,
-    /// Declared diagonal outflow co-rotation moment per mass [m²].
-    /// Independent of the thrust arm; arbitrary off-axis outlet tensors are unsupported.
-    pub co_rotating_exhaust_specific_inertia_m2: Vec3,
+    /// Declared outflow co-rotation inertia per mass [m²], independent of the thrust arm.
+    /// Use `Vec3` for the diagonal model or prepared `SpecificInertia` for full tensors.
+    pub co_rotating_exhaust_specific_inertia_m2: E,
     /// Additional exported angular momentum per mass [m²/s], excluding axial jet torque.
     pub exhaust_swirl_specific_angular_momentum_body_m2_s: Vec3,
     /// Gravitational acceleration in the matching world frame [m/s²].
@@ -74,9 +75,9 @@ pub struct GasRigidRocketCoastEnvironment {
 
 /// An immutable gas reservoir and vehicle whose propellant comes only from it.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GasRigidRocketState {
+pub struct GasRigidRocketState<I = RigidRocketInertia> {
     reservoir: ClosedGasParcel,
-    vehicle: RigidRocketState,
+    vehicle: RigidRocketState<I>,
     inertial_frame: u64,
 }
 
@@ -130,7 +131,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), GasRigidRocketError>
 
 /// Original gas/nozzle and native mechanics reports for the same interval.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GasRigidRocketStep {
+pub struct GasRigidRocketStep<I = RigidRocketInertia> {
     /// Shared physical duration [s].
     pub duration_s: f64,
     /// Actual finite reservoir mass, species and stagnation-enthalpy accounting.
@@ -138,7 +139,7 @@ pub struct GasRigidRocketStep {
     /// Original source-resolved midpoint nozzle flow and regime.
     pub midpoint_nozzle: RocketNozzleFlow,
     /// Original native rigid trajectory, directed impulse and spin accounting.
-    pub mechanics: RigidRocketStep,
+    pub mechanics: RigidRocketStep<I>,
     /// Remaining vehicle propellant minus remaining tank mass [kg].
     pub remaining_mass_residual_kg: f64,
     /// Accepted native consumed mass minus actual expelled gas [kg].
@@ -149,53 +150,53 @@ pub struct GasRigidRocketStep {
 
 /// Complete candidate gas and rigid endpoints, published atomically.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GasRigidRocketCandidate {
-    endpoint: GasRigidRocketState,
-    step: GasRigidRocketStep,
+pub struct GasRigidRocketCandidate<I = RigidRocketInertia> {
+    endpoint: GasRigidRocketState<I>,
+    step: GasRigidRocketStep<I>,
 }
 
 /// Complete closed-valve candidate; reservoir mass and thermodynamic state are unchanged.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GasRigidRocketCoastCandidate {
-    endpoint: GasRigidRocketState,
-    mechanics: RigidRocketStep,
+pub struct GasRigidRocketCoastCandidate<I = RigidRocketInertia> {
+    endpoint: GasRigidRocketState<I>,
+    mechanics: RigidRocketStep<I>,
 }
-impl GasRigidRocketCoastCandidate {
+impl<I> GasRigidRocketCoastCandidate<I> {
     /// Complete next state with the identical source-bearing reservoir.
     #[must_use]
-    pub const fn endpoint(&self) -> &GasRigidRocketState {
+    pub const fn endpoint(&self) -> &GasRigidRocketState<I> {
         &self.endpoint
     }
     /// Original native rigid coast report.
     #[must_use]
-    pub const fn mechanics(&self) -> &RigidRocketStep {
+    pub const fn mechanics(&self) -> &RigidRocketStep<I> {
         &self.mechanics
     }
     /// Accept coast and its native report without a gas query or another step.
     #[must_use]
-    pub fn into_parts(self) -> (GasRigidRocketState, RigidRocketStep) {
+    pub fn into_parts(self) -> (GasRigidRocketState<I>, RigidRocketStep<I>) {
         (self.endpoint, self.mechanics)
     }
 }
-impl GasRigidRocketCandidate {
+impl<I> GasRigidRocketCandidate<I> {
     /// Joint candidate endpoint.
     #[must_use]
-    pub const fn endpoint(&self) -> &GasRigidRocketState {
+    pub const fn endpoint(&self) -> &GasRigidRocketState<I> {
         &self.endpoint
     }
     /// Original owner reports and actual coupling residuals.
     #[must_use]
-    pub const fn step(&self) -> &GasRigidRocketStep {
+    pub const fn step(&self) -> &GasRigidRocketStep<I> {
         &self.step
     }
     /// Accept both physical owners without another solve or inventory repair.
     #[must_use]
-    pub fn into_parts(self) -> (GasRigidRocketState, GasRigidRocketStep) {
+    pub fn into_parts(self) -> (GasRigidRocketState<I>, GasRigidRocketStep<I>) {
         (self.endpoint, self.step)
     }
 }
 
-impl GasRigidRocketState {
+impl<I: RocketInertiaModel> GasRigidRocketState<I> {
     /// Assemble native rigid motion with all propellant in this source reservoir.
     /// Dry mass includes the tank/container. Propellant inventory is derived.
     pub fn new(
@@ -205,7 +206,7 @@ impl GasRigidRocketState {
         velocity_m_s: Vec3,
         orientation: UnitQuaternion,
         angular_momentum_body_kg_m2_s: Vec3,
-        inertia: RigidRocketInertia,
+        inertia: I,
         inertial_frame: u64,
     ) -> Result<Self, GasRigidRocketError> {
         let translation = RocketState {
@@ -233,7 +234,7 @@ impl GasRigidRocketState {
     }
     /// Original native rigid rocket state.
     #[must_use]
-    pub const fn vehicle(&self) -> &RigidRocketState {
+    pub const fn vehicle(&self) -> &RigidRocketState<I> {
         &self.vehicle
     }
     /// Identity of the common world frame, not proof that it is inertial.
@@ -254,7 +255,7 @@ impl GasRigidRocketState {
         duration_s: f64,
         controls: RigidRocketSolve,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<GasRigidRocketCoastCandidate, GasRigidRocketError> {
+    ) -> Result<GasRigidRocketCoastCandidate<I>, GasRigidRocketError> {
         poll(&mut cancelled)?;
         if environment.inertial_frame != self.inertial_frame {
             return Err(GasRigidRocketError::Invalid(
@@ -266,7 +267,7 @@ impl GasRigidRocketState {
                 mass_flow_kg_s: 0.0,
                 effective_exhaust_velocity_body_m_s: Vec3::ZERO,
                 thrust_application_arm_body_m: Vec3::ZERO,
-                co_rotating_exhaust_specific_inertia_m2: Vec3::ZERO,
+                co_rotating_exhaust_specific_inertia_m2: I::zero_exhaust_inertia(),
                 exhaust_swirl_specific_angular_momentum_body_m2_s: Vec3::ZERO,
                 gravity_world_m_s2: environment.gravity_world_m_s2,
                 external_force_world_n: environment.external_force_world_n,
@@ -307,12 +308,12 @@ impl GasRigidRocketState {
     /// the source reservoir mass tolerance; no owner is silently resynchronized.
     pub fn advance(
         &self,
-        environment: GasRigidRocketEnvironment,
+        environment: GasRigidRocketEnvironment<I::ExhaustInertia>,
         nozzle: RocketNozzle,
         duration_s: f64,
         controls: GasRigidRocketSolve,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<GasRigidRocketCandidate, GasRigidRocketError> {
+    ) -> Result<GasRigidRocketCandidate<I>, GasRigidRocketError> {
         poll(&mut cancelled)?;
         if environment.inertial_frame != self.inertial_frame {
             return Err(GasRigidRocketError::Invalid(

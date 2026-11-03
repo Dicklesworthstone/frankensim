@@ -44,6 +44,9 @@ pub trait RocketInertiaModel: sealed::Sealed + Copy + core::fmt::Debug + Partial
     /// Prepared specific co-rotation inertia of the exported mass, in m².
     type ExhaustInertia: Copy + core::fmt::Debug + PartialEq;
 
+    /// Exact zero angular outflow for an explicitly closed valve or coast.
+    fn zero_exhaust_inertia() -> Self::ExhaustInertia;
+
     /// Validate and assemble native mass properties at this propellant inventory.
     fn mass_properties(self, translation: RocketState) -> Result<MassProperties, RigidRocketError>;
 
@@ -274,6 +277,10 @@ impl ScalarSum {
 impl sealed::Sealed for RigidRocketInertia {}
 impl RocketInertiaModel for RigidRocketInertia {
     type ExhaustInertia = Vec3;
+
+    fn zero_exhaust_inertia() -> Vec3 {
+        Vec3::ZERO
+    }
 
     fn mass_properties(self, translation: RocketState) -> Result<MassProperties, RigidRocketError> {
         RigidRocketInertia::mass_properties(self, translation)

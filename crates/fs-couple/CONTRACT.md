@@ -16603,10 +16603,18 @@ cancellation or either owner's refusal publishes neither endpoint.
 `coast` explicitly closes the valve. It preserves the exact tank/source state,
 uses zero engine mass flow/thrust/exhaust spin, and advances native mechanics
 under gravity and other supplied forces/torques. A failed gas/nozzle solve never
-implicitly selects coast. Both powered and coast operations retain the native
-fixed-COM/shared-principal-axis mass model and separately declared diagonal
-rotational exhaust flux; no slosh, general outlet tensor, internal-flow momentum
-or complete world exhaust-energy audit is inferred.
+implicitly selects coast. `GasRigidRocketState<I>` retains either native
+fixed-COM inertia model, with `RigidRocketInertia` as the compatible default.
+`TensorRocketInertia` keeps independently oriented dry and propellant tensors
+in their original material axes as mass is consumed; its environment carries
+prepared `SpecificInertia` for angular outflow without a diagonal projection.
+The native sealed inertia owner supplies exact zero exhaust for closed valves.
+All gas/source, inventory, axial-impulse, cancellation and native mechanical
+budgets are shared between the two models. Neither model infers slosh, shifting
+COM, outlet geometry, internal-flow momentum or a complete world exhaust-energy
+audit. New full-tensor coupling regressions exercise original-owner parity,
+noncommuting angular outflow, world spin balance, exact-gas coast and atomic
+refusal; native execution of those added cases remains pending.
 
 Native actual-source verification passed seven rigid-coupling tests: rotating
 and off-axis thrust, scalar/world impulse distinction, pressure torque once,
