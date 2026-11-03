@@ -1,5 +1,63 @@
 # fs-em contract
 
+## Three-dimensional dielectric fields, circuit storage and force
+
+`spatial::electrostatic::SpatialElectrostatics` solves the fixed-geometry,
+linear dielectric problem on the original tetrahedral P1 complex. It uses the
+shared spatial geometry, checked Jacobi-CG and weighted Whitney Hodge
+`K = d0^T M_epsilon d0`. The complete material state at each cell supplies
+absolute-SI scalar or explicitly oriented principal permittivities through
+`SpatialDielectricLaw`; geometry, gradients and the immutable operator are
+prepared once for repeated boundary and charge excitations.
+
+Typed exterior faces carry P1 voltage or uniform outward displacement D.n.
+Unlisted faces have D.n=0. Constant cell volume charge and face loads use exact
+P1 source moments. The signed Neumann load is minus the outward displacement.
+Compatibility includes BOTH volume and boundary load on each disconnected
+component before admitting a numerical gauge. Physical prescribed potentials
+and numerical gauges remain distinct, so a gauge cannot hide an incompatible
+charge. Existing source-free spatial magnetic/current consumers keep the same
+boundary wrapper.
+
+Solved potentials remain relative to each component through E, D, electrode
+reactions, source work and stored energy. Absolute voltage is reconstructed only
+for reporting, retaining authored voltage traces exactly. Reactions use voltage
+differences and compensated accumulation. Admission checks total and component
+charge balance, free-node/gauge residuals, and dielectric energy against both
+the weak-source pairing and Hodge quadratic. Scalar and tensor material jumps
+are retained cellwise; raw interior normal-D jumps are diagnostics, not a
+smoothed field, equilibrated flux or continuum error certificate.
+
+`SpatialCapacitance` admits two disjoint unions of original exterior faces,
+solves their zero-volume-charge unit excitation, and checks electrode charge
+against C=2U. Its capacitor branch belongs to the existing native circuit
+owner. Actual terminal voltages or charge reconstruct the original spatial
+field and recheck amplitude-scaled charge/energy without another Krylov solve.
+Do not count circuit capacitor storage and the same field energy twice.
+This owner does not infer floating/multiple electrodes or assign impressed
+volume charge to a passive two-terminal capacitor.
+
+`SpatialElectricField::maxwell_wrench` uses the existing closed-surface
+Maxwell integral and SE(3) wrench convention with D and E. Every integration
+face is internal, and both neighboring tetrahedra must retain one identical
+complete isotropic source, zero prescribed volume charge, and no
+electrode/imposed-displacement vertices. The homogeneous exterior is assumed
+nondeforming, without electrostriction or fluid-pressure forces. This is a
+fixed-geometry instantaneous load; advancing motion requires explicit
+electrical, stored and mechanical work accounting and field/surface refinement.
+
+The independent `electrostatic::tetrahedral::TetDielectricOperator` remains
+the explicit-tensor/polarization weak-form primitive for constitutive coupling.
+Both paths use the native FEEC kernels. This sourced boundary-value owner does
+not yet admit impressed polarization, internal sheet charge, nonlinear or
+dispersive 3D dielectrics, infinite exterior boundaries, or moving-field work.
+
+`tests/spatial_electrostatic.rs` and its force submodule cover analytic layered
+capacitance and D continuity, retained high-bias fields, a 3D Poisson refinement
+sequence, pure-Neumann/disconnected compatibility, rotated anisotropy, native
+RC charge/heat/storage, actual-voltage/charge recovery, Q E force refinement,
+wrench frames and the original source/cancellation/work-budget refusals.
+
 ## Gauge-stable dielectric charge and energy
 
 Planar electrostatic elimination and physical recovery remove the independent

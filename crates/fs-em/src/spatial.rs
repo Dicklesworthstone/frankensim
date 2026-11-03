@@ -23,6 +23,8 @@
 pub mod force;
 /// Source-bearing three-dimensional Ohmic current and local Joule heat.
 pub mod conduction;
+/// Source-bound three-dimensional dielectric fields and circuit capacitance.
+pub mod electrostatic;
 pub mod nonlinear;
 pub mod vector_potential;
 
@@ -389,7 +391,38 @@ fn prepare_scalar_boundary_traces(
     flux_tolerance_wb: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ScalarBoundary, SpatialMagneticError> {
+    prepare_scalar_boundary_traces_with_sources(
+        mesh,
+        faces,
+        components,
+        potential,
+        flux,
+        None,
+        flux_tolerance_wb,
+        cancelled,
+    )
+}
+
+// The compatibility condition belongs to the COMPLETE weak load, including
+// volume sources. A numerical gauge must never absorb an incompatible charge.
+// Existing source-free magnetic/current consumers use the wrapper above.
+#[allow(clippy::too_many_arguments)]
+fn prepare_scalar_boundary_traces_with_sources(
+    mesh: &TetComplex,
+    faces: &[Face],
+    components: &[usize],
+    potential: impl IntoIterator<Item = (usize, [f64; 3])>,
+    flux: impl IntoIterator<Item = (usize, f64)>,
+    volume_load: Option<&[f64]>,
+    flux_tolerance_wb: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ScalarBoundary, SpatialMagneticError> {
     let n = mesh.vertex_count;
+    if volume_load.is_some_and(|load| {
+        load.len() != n || load.iter().any(|value| !value.is_finite())
+    }) {
+        return Err(invalid("complete finite scalar volume load required"));
+    }
     let mut prescribed = vec![None; n];
     let mut has_potential = vec![false; n];
     let mut used_faces = BTreeSet::new();
@@ -415,6 +448,12 @@ fn prepare_scalar_boundary_traces(
     let physical_prescribed: Vec<_> = prescribed.iter().map(Option::is_some).collect();
     let mut flux_load_wb = vec![0.0; n];
     let mut net_flux = vec![0.0; n];
+    if let Some(load) = volume_load {
+        for (v, &value) in load.iter().enumerate() {
+            poll(cancelled)?;
+            net_flux[components[v]] = finite(net_flux[components[v]] + value)?;
+        }
+    }
     for (face, density) in flux {
         poll(cancelled)?;
         if faces.get(face).is_none_or(|f| f.cells.len() != 1)
@@ -442,7 +481,7 @@ fn prepare_scalar_boundary_traces(
         if !has_potential[v] {
             if net_flux[v].abs() > flux_tolerance_wb {
                 return Err(invalid(
-                    "net outward magnetic flux must vanish in a pure-flux component",
+                    "net scalar volume and boundary load must vanish in a pure-flux component",
                 ));
             }
             prescribed[v] = Some(0.0);

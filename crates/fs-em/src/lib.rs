@@ -48,6 +48,11 @@
 //! The dielectric field uses the same contour integral for electric force and
 //! torque. Native circuit electrode potentials can reconstruct its original
 //! spatial field and mechanical load without another field solve.
+//! [`spatial::electrostatic`] uses the shared tetrahedral operators for full
+//! three-dimensional dielectric fields, volume charge and exterior displacement
+//! traces. Scalar and oriented principal permittivities retain their original
+//! material sources. Its charge-checked capacitance feeds the same native
+//! circuit owner, and its exterior Maxwell stress supplies mechanical wrenches.
 
 /// Spatial source-bound DC current, Joule heat and geometry-derived resistance.
 pub mod conduction;
@@ -59,7 +64,7 @@ pub mod planar;
 /// Separate from the mesh magnetoquasistatic field owners.
 #[cfg(feature = "plane-wave")]
 pub mod plane_wave;
-/// Three-dimensional current-free fields with sourced linear/recoil materials.
+/// Three-dimensional magnetic, Ohmic and dielectric fields on shared tetrahedra.
 pub mod spatial;
 pub mod transfer;
 pub mod winding;
