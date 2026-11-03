@@ -932,19 +932,15 @@ fn live_cil_reagent_doses_respeciate_without_moving_carbon_or_progress() {
         before_inputs.sodium.value() + 0.2,
         2e-16,
     );
-    report_accounts(&CilAdvance {
-        layout: cyanide.layout.clone(),
-        state: cyanide.state.clone(),
-        interval_gold_dissolved: Amount::new(0.0),
-        interval_product_capture: Amount::new(0.0),
-        interval_preg_robbing_capture: Amount::new(0.0),
-        conservation: cyanide.conservation,
-        accepted_steps: 0,
-        rejected_steps: 0,
-        work: cyanide.work,
-        maximum_local_error: Amount::new(0.0),
-        accumulated_error_estimate: Amount::new(0.0),
-    });
+    for residual in [
+        cyanide.conservation.gold,
+        cyanide.conservation.counterion,
+        cyanide.conservation.dissolved_oxygen,
+        cyanide.conservation.maximum_site_residual,
+    ] {
+        close(residual.value(), 0.0, 2e-12);
+    }
+    close(cyanide.conservation.cyanide.value(), 0.0, 1e-8);
 
     let ph_before = bath.state().solution.speciation.ph.value();
     let hydroxide = bath
