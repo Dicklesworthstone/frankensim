@@ -191,6 +191,11 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidForceKick<'a>), FiniteSolidError> {
         checkpoint(cx)?;
+        if self.gravity.is_some() {
+            return Err(invalid(
+                "stationary gravity requires the native coupled step; split gravity work is not supported",
+            ));
+        }
         if !duration_s.is_finite() || duration_s <= 0.0 {
             return Err(invalid("force kick requires a finite positive interval"));
         }
@@ -392,6 +397,11 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidContactDrift), FiniteSolidError> {
         checkpoint(cx)?;
+        if self.gravity.is_some() {
+            return Err(invalid(
+                "stationary gravity requires the native coupled step; split gravity work is not supported",
+            ));
+        }
         if !Arc::ptr_eq(&self.prepared, &kick.prepared)
             || self.state.q != kick.initial_q
             || self.state.t != kick.initial_t

@@ -60,7 +60,8 @@ pub struct FreeFlightReport {
     pub work_energy_residual_j: f64,
     pub linear_momentum_change_kg_m_s: Vec3,
     pub angular_momentum_change_kg_m2_s: Vec3,
-    /// Held nodal/body loads and both native rigid force/torque endpoint kicks.
+    /// Held nodal/body loads, the solid's native midpoint gravity, and both
+    /// native rigid force/torque endpoint kicks.
     pub external_impulse_kg_m_s: Vec3,
     pub external_angular_impulse_kg_m2_s: Vec3,
     /// External reaction ON the solid's stationary prescribed DOFs.
@@ -105,10 +106,10 @@ impl std::error::Error for FreeFlightError {}
 impl<'a> FiniteSolidBody<'a> {
     /// Advance both native owners under held loads and admit actual balances.
     ///
-    /// The solid receives the explicit referential nodal/body loads. `gravity`
-    /// belongs to the native rigid integrator; any solid gravity must already be
-    /// included in its supplied loads. No density convention is guessed and no
-    /// gravitational potential is counted on top of the gravity work.
+    /// The solid receives its explicit referential nodal/body loads and any
+    /// retained StationaryGravity field. The `gravity` argument belongs to the
+    /// rigid integrator. Held loads must not duplicate the solid's bound field;
+    /// its potential work is already included once in the native source work.
     ///
     /// A wrench holds its world force and body torque at BOTH endpoints. Applied
     /// angular impulse uses those two rotated body torques and actual endpoint
@@ -246,10 +247,29 @@ impl<'a> FiniteSolidBody<'a> {
         // quadrature or lumped mass enters the momentum account. Uniform pressure
         // has zero total force/torque; its actual work and any constrained
         // support impulse already belong to the native solid receipt.
-        let force = self
+        let mut force = self
             .prepared
             .external_force_n(nodal_forces_n, body_force_n_m3, cx)
             .map_err(FiniteSolidError::from)?;
+        // The solid may retain its own conservative point field. Its actual
+        // native midpoint force must enter these impulses and moments exactly
+        // once, including supported nodes. Its potential work is already in
+        // solid.source_work_j; the rigid gravity argument remains independent.
+        if let Some(gravity) = &solid.gravity {
+            for (dof, (force, &field_force)) in
+                force.iter_mut().zip(&gravity.midpoint_force_n).enumerate()
+            {
+                if dof % 4096 == 0 {
+                    poll(cx)?;
+                }
+                *force += field_force;
+                if !force.is_finite() {
+                    return Err(FreeFlightError::Invalid(
+                        "solid source force is not representable",
+                    ));
+                }
+            }
+        }
         let before_x = self.current_positions(cx)?;
         let after_x = solid_next.current_positions(cx)?;
         let mut delta_v = vec![0.0; force.len()];

@@ -6,6 +6,8 @@ mod contact;
 mod energy_momentum;
 #[path = "finite_solid/expansion.rs"]
 mod expansion;
+#[path = "finite_solid/gravity.rs"]
+mod gravity;
 #[path = "finite_solid/impulse.rs"]
 mod impulse;
 #[path = "finite_solid/pressure.rs"]

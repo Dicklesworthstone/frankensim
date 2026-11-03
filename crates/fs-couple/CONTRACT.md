@@ -1,5 +1,38 @@
 # CONTRACT: fs-couple
 
+## Stationary native gravity in evolving finite solids
+
+`FiniteSolidBody::new_with_gravity` and `new_with_gravity_and_sources`
+bind an explicit stationary native `PointGravityField` and inertial frame to
+the original cellwise or P1 reference mass, optionally alongside current-area
+pressure. Initialization and ordinary/energy-momentum motion reuse the original
+generalized-alpha/Newton operator. Native gravity force and its analytic spatial
+derivative are evaluated on the evolving solver stage; the material endpoint
+chain factor is not applied a second time to the gravity derivative.
+
+Gravity potential decrease enters source work exactly once. The full nodal
+force retained from the accepted native stage feeds stationary support reactions
+and mixed solid/rigid free-flight impulse and moment accounts. The binding
+survives cloned and instantaneous-impulse candidates, retaining the field and
+acceleration history through continued motion. Affine gravity has matching
+stage-force and potential work to quadrature roundoff. Nonlinear fields retain
+a separate signed quadrature defect and the existing mechanical energy gate;
+that numerical defect is never physical heat.
+
+Field-domain, frame, cancellation and accounting failures publish no candidate.
+The first-order force/contact/drift split explicitly refuses a bound field until
+it has a matching split work law. Callers must not duplicate the bound field in
+held nodal or body loads. Moving-source power, field rebinding, self-gravity and a
+new time integrator are outside this binding.
+
+Six focused regressions cover free fall and global impulse/moment balance,
+stiff tidal-field motion with original graded mass and pressure, impulse
+continuation, nonlinear potential-work defects, domain/split refusal and
+cancellation. They were added but not executed: the native dependency closure
+compiled through the original solid owner, then the execution environment
+disconnected before the candidate coupling build returned.
+
+
 ## Finite gas and rigid wall under molecular shear
 
 `molecular_shear::step_candidate` exchanges tangential momentum between the

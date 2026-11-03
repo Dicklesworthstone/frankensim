@@ -296,9 +296,10 @@ impl<'a> FiniteSolidBody<'a> {
     /// exhaust progress/work bounds; no artificial resting/runout state is made.
     /// Pressure-bound solids retain the explicit-pressure native refusal.
     ///
-    /// Gravity applies to rigid bodies. Supply the solid's resolved gravity in
-    /// its held nodal/body loads. Total impact loss remains unallocated; neither
-    /// it nor the reported integration defect is automatically converted to heat.
+    /// The gravity argument applies to rigid bodies; a solid's retained
+    /// StationaryGravity field follows its native motion automatically. Held
+    /// loads must not duplicate that bound field. Total impact loss remains
+    /// unallocated; neither it nor integration defect is converted to heat.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn sphere_trajectory_candidate(
         &self,

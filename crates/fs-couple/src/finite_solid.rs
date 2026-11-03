@@ -16,7 +16,7 @@
 //! every trial state; changing interval loads are validated separately.
 //!
 //! This bounded path has fixed supports, held referential nodal/body loads,
-//! optional held pressure on the current exterior faces,
+//! optional stationary native gravity and held pressure on the current exterior faces,
 //! compressible isothermal hyperelasticity and conforming P1 tetrahedra.
 //! The opt-in energy-momentum step uses the same native time solver with an
 //! objective strain-space discrete gradient and analytic endpoint tangent.
@@ -31,6 +31,9 @@
 //! No evolving heat equation, plasticity, moving supports,
 //! fluid feedback, mixed incompressible formulation or continuous-in-time
 //! nonintersection claim is made.
+
+/// Native stationary gravity evaluated on the current material configuration.
+pub mod gravity;
 
 /// Source-declared engineering thermal reference preparation.
 pub mod thermal;
@@ -300,8 +303,10 @@ pub struct FiniteSolidStep {
     pub kinetic_after_j: f64,
     pub strain_before_j: f64,
     pub strain_after_j: f64,
-    /// Held referential load work plus held-pressure work along the interval.
+    /// Held referential load work, pressure work and native gravity potential work.
     pub source_work_j: f64,
+    /// The retained field's potential and actual midpoint force/work, when bound.
+    pub gravity: Option<gravity::GravityStep>,
     /// Uniform pressure uses -p (V_after - V_before). Per-face pressure uses
     /// exact work along the straight nodal-displacement segment; this is
     /// path-dependent, and the physical curved trajectory needs time refinement.
@@ -321,6 +326,7 @@ pub struct FiniteSolidBody<'a> {
     problem: HyperTetProblem<'a, FiniteSolidMaterial>,
     prepared: Arc<PreparedHyperTetProblem<'a, FiniteSolidMaterial>>,
     reference_density_field: Option<Arc<TetrahedralDensityBody>>,
+    gravity: Option<gravity::BoundGravity<'a>>,
     mass: Arc<Csr>,
     free_mass: Arc<Csr>,
     free: Arc<[usize]>,
@@ -348,6 +354,7 @@ impl<'a> FiniteSolidBody<'a> {
     ) -> Result<Self, FiniteSolidError> {
         Self::initialize(
             problem,
+            None,
             None,
             None,
             TetPressure::Uniform(0.0),
@@ -380,6 +387,7 @@ impl<'a> FiniteSolidBody<'a> {
     ) -> Result<Self, FiniteSolidError> {
         Self::initialize(
             problem,
+            None,
             None,
             Some(surface),
             pressure_pa.into(),
@@ -418,6 +426,7 @@ impl<'a> FiniteSolidBody<'a> {
             problem,
             Some(density),
             None,
+            None,
             TetPressure::Uniform(0.0),
             displacement_m,
             velocity_m_s,
@@ -446,6 +455,7 @@ impl<'a> FiniteSolidBody<'a> {
         Self::initialize(
             problem,
             Some(density),
+            None,
             Some(surface),
             pressure_pa.into(),
             displacement_m,
@@ -460,6 +470,7 @@ impl<'a> FiniteSolidBody<'a> {
     fn initialize(
         problem: HyperTetProblem<'a, FiniteSolidMaterial>,
         reference_density_field: Option<Arc<TetrahedralDensityBody>>,
+        gravity: Option<gravity::StationaryGravity<'a>>,
         pressure_surface: Option<Arc<ClosedTetPressureSurface>>,
         pressure: TetPressure<'_>,
         displacement_m: &[[f64; 3]],
@@ -520,6 +531,11 @@ impl<'a> FiniteSolidBody<'a> {
                 problem.reference_mass_matrix(&densities, cx)?
             }
         };
+        let gravity = gravity
+            .map(|source| {
+                gravity::BoundGravity::new(&problem, reference_density_field.as_deref(), source, cx)
+            })
+            .transpose()?;
         let mut fixed = vec![0.0; dofs];
         let mut is_fixed = vec![false; dofs];
         let u: Vec<f64> = displacement_m.iter().flatten().copied().collect();
@@ -581,7 +597,8 @@ impl<'a> FiniteSolidBody<'a> {
             .as_deref()
             .filter(|_| !unloaded)
             .map(|surface| (surface, pressure));
-        let operator = DynamicOperator::new(&prepared, &free_mass, &free, &fixed, pressure, cx);
+        let mut operator = DynamicOperator::new(&prepared, &free_mass, &free, &fixed, pressure, cx);
+        operator.gravity = gravity.as_ref();
         let preconditioner = MassDiagonal { mass: &free_mass };
         let result = second_order_acceleration(
             &operator,
@@ -603,6 +620,7 @@ impl<'a> FiniteSolidBody<'a> {
             problem,
             prepared,
             reference_density_field,
+            gravity,
             mass: Arc::new(mass),
             free_mass,
             free,
@@ -648,8 +666,9 @@ impl<'a> FiniteSolidBody<'a> {
     ///
     /// Pass these sorted nodal forces to the existing candidate-step methods;
     /// do not count the same acceleration again as a body-force density.
-    /// This is a held load. Resampling a position-dependent field and supplying
-    /// its potential/tangent remain responsibilities of that field's owner.
+    /// This is a held load. For evolving native gravity force, tangent and
+    /// potential, initialize with [`Self::new_with_gravity`] instead. Do not also
+    /// supply that bound field through these held acceleration loads.
     pub fn reference_acceleration_load_n(
         &self,
         acceleration_m_s2: &[[f64; 3]],
@@ -915,6 +934,7 @@ impl<'a> FiniteSolidBody<'a> {
             cx,
         );
         operator.energy_momentum_start = energy_momentum.then_some(before_u.as_slice());
+        operator.gravity = self.gravity.as_ref();
         let integrator =
             OperatorGeneralizedAlpha::new(self.free.len(), duration_s, 1.0, controls.solve);
         // Immutable matrices are shared; only the physical trajectory is copied.
@@ -946,7 +966,18 @@ impl<'a> FiniteSolidBody<'a> {
             }
             None => 0.0,
         };
-        let kinetic_change_j = if energy_momentum {
+        let midpoint: Vec<f64> = before_u
+            .iter()
+            .zip(&after_u)
+            .map(|(before, after)| 0.5 * before + 0.5 * after)
+            .collect();
+        let gravity = operator.gravity_balance(&before_u, &after_u)?;
+        if let Some(gravity) = &gravity {
+            source_work_j = (fs_math::dd::Dd::from_f64(source_work_j)
+                + fs_math::dd::Dd::from_f64(gravity.work_j))
+            .to_f64();
+        }
+        let kinetic_change_j = if energy_momentum || gravity.is_some() {
             let dv: Vec<f64> = candidate
                 .state
                 .v
@@ -966,8 +997,15 @@ impl<'a> FiniteSolidBody<'a> {
         } else {
             kinetic_after_j - kinetic_before_j
         };
-        let integration_defect_j =
-            kinetic_change_j + (strain_after_j - strain_before_j) - source_work_j;
+        let integration_defect_j = if gravity.is_some() {
+            use fs_math::dd::Dd;
+            (Dd::from_f64(kinetic_change_j)
+                + (Dd::from_f64(strain_after_j) - Dd::from_f64(strain_before_j))
+                - Dd::from_f64(source_work_j))
+            .to_f64()
+        } else {
+            kinetic_change_j + (strain_after_j - strain_before_j) - source_work_j
+        };
         if !source_work_j.is_finite() || !integration_defect_j.is_finite() {
             return Err(FiniteSolidError::Invalid(
                 "mechanical work is not representable",
@@ -979,11 +1017,6 @@ impl<'a> FiniteSolidBody<'a> {
                 allowance_j: controls.energy_tolerance_j,
             });
         }
-        let midpoint: Vec<f64> = before_u
-            .iter()
-            .zip(&after_u)
-            .map(|(before, after)| 0.5 * before + 0.5 * after)
-            .collect();
         let mut internal = if energy_momentum {
             operator.algorithmic_force(&before_u, &after_u)?
         } else {
@@ -991,6 +1024,11 @@ impl<'a> FiniteSolidBody<'a> {
         };
         if !energy_momentum {
             subtract_pressure_force(&mut internal, &midpoint, pressure, cx)?;
+        }
+        if let Some(gravity) = &gravity {
+            for (force, &field_force) in internal.iter_mut().zip(&gravity.midpoint_force_n) {
+                *force -= field_force;
+            }
         }
         let mut acceleration = vec![0.0; before_u.len()];
         for ((&dof, before), after) in self.free.iter().zip(&self.state.v).zip(&candidate.state.v) {
@@ -1031,6 +1069,7 @@ impl<'a> FiniteSolidBody<'a> {
                 strain_before_j,
                 strain_after_j,
                 source_work_j,
+                gravity,
                 pressure_work_j,
                 integration_defect_j,
                 support_reactions_n,
@@ -1177,6 +1216,11 @@ struct DynamicOperator<'a, 'b, 'cx> {
     free: &'b [usize],
     fixed: &'b [f64],
     pressure: Option<(&'b ClosedTetPressureSurface, TetPressure<'b>)>,
+    gravity: Option<&'b gravity::BoundGravity<'a>>,
+    gravity_at: RefCell<Option<(Vec<f64>, fs_solid::hyper3::gravity::TetGravityLoad3)>>,
+    // Only a resistance-force callback records this snapshot. Domain admission,
+    // Jacobians and preconditioners must not replace the solved force stage.
+    gravity_force_at: RefCell<Option<(Vec<f64>, Vec<f64>)>>,
     cx: &'b Cx<'cx>,
     energy_momentum_start: Option<&'b [f64]>,
     tangent: RefCell<Option<(Vec<f64>, Csr)>>,
@@ -1200,6 +1244,9 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
             free,
             fixed,
             pressure,
+            gravity: None,
+            gravity_at: RefCell::new(None),
+            gravity_force_at: RefCell::new(None),
             cx,
             energy_momentum_start: None,
             tangent: RefCell::new(None),
@@ -1306,6 +1353,7 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
                     }
                 }
             }
+            full = self.combine_gravity_tangent(full, &displacement)?;
             let reduced = reduce_matrix(&full, self.free, self.cx)?;
             self.tangent.replace(Some((q.to_vec(), reduced)));
         }
@@ -1347,6 +1395,8 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
                 .volume_m3(&displacement, self.cx)
                 .map_err(|error| error.to_string())?;
         }
+        self.ensure_gravity(&displacement)
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -1384,6 +1434,8 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
             if self.energy_momentum_start.is_none() {
                 subtract_pressure_force(&mut full, &displacement, self.pressure, self.cx)?;
             }
+            self.subtract_gravity_force(&mut full, &displacement)?;
+            self.retain_gravity_force(&displacement)?;
             Ok(full)
         });
         match result {
@@ -1409,7 +1461,9 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
             matrix.spmv(direction, output);
             // Native rho_inf=1 evaluates forces at midpoint q. Endpoint
             // reconstruction has d(q_after)/d(q_mid)=2, including this tangent.
-            if self.energy_momentum_start.is_some() {
+            // A bound gravity tangent already combines the material endpoint
+            // chain factor with the unscaled midpoint gravity derivative.
+            if self.energy_momentum_start.is_some() && self.gravity.is_none() {
                 for value in output.iter_mut() {
                     *value *= 2.0;
                 }
@@ -1448,7 +1502,7 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
                     self.mass.get(row, row),
                     weights.tangent
                         * matrix.get(row, row)
-                        * if self.energy_momentum_start.is_some() {
+                        * if self.energy_momentum_start.is_some() && self.gravity.is_none() {
                             2.0
                         } else {
                             1.0
