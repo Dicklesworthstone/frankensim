@@ -15934,14 +15934,28 @@ Newton action is claimed for the new path quadrature.
 Quadrature and original-source refusals produce nonfinite trial efforts in the
 infallible native interface; the source APIs retain typed errors. A failed work
 evaluation cannot become an optional-numerator fallback. The prepared solver
-publishes no partial endpoint on refusal. No phase switch, snap impulse,
-damping, heat, or evolving material law is inferred. The actual source branch
+publishes no partial endpoint on refusal. No phase switch is inferred under
+the default contacting-only policy. No snap impulse, damping,
+heat, or evolving material law is inferred. The actual source branch
 and envelope are checked at every endpoint, midpoint and quadrature sample;
 mechanical timestep refinement and the local quasistatic contact assumption
 remain necessary. Focused `adhesive_maugis_storage` tests cover independent
 original-coordinate force work, source identity, tensile motion and reversal,
 unequal-mass energy/momentum, prepared/reference agreement, tiny paths and
 source/work-budget refusal without state mutation.
+
+The potential's explicit `with_noncontact_continuation` policy also admits the
+original stable deformed noncontact disk and continuous loss/recovery of solid
+contact. Native bodies can move from positive adhesive gap through the
+zero-area junction into compression and back. Original disk work is analytic;
+only the contacting portion of a crossing path consumes quadrature. Gap states
+retain attractive normal force but exactly zero solid friction area. The same
+complete native discrete gradient preserves pairwise action/reaction and the
+original absolute energy, without an impulse or loss at the continuous
+junction. The original terminal disk fold and unsupported high-Tabor
+continuation refuse without publishing a native state. Additional focused
+regressions check independent disk integrals, path reversal/subdivision, tiny
+paths at the fold, and inertial gap/contact/gap motion with unequal body masses.
 
 ## Adhesive junctions on the native modal network
 

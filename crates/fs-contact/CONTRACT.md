@@ -1957,6 +1957,19 @@ applicability envelope. It does not automatically select a phase or load the
 quasistatic fixture. A branch endpoint retains energy/force but withholds a
 smooth tangent; an approach outside the branch refuses.
 
+An explicit `with_noncontact_continuation` policy extends this potential through
+the continuous zero-solid-area junction when the original Maugis model has a
+stable deformed noncontact disk. The policy is retained in the potential and
+exposed by `noncontact_continuation`; the default contacting-only policy stays
+unchanged. The original disk equations supply attractive force, positive gap
+and absolute elastic/surface potential with exactly zero solid friction area.
+Disk path work is evaluated analytically in its radius coordinate, with a
+cancellation-stable mean effort and no quadrature evaluations. A crossing path
+splits at the original zero-area junction and integrates only its contacting
+part. Force and original energy remain continuous while bodies make or lose
+solid contact. The terminal noncontact fold still refuses; this policy does
+not prescribe a discontinuous jump to the detached phase.
+
 The mechanical path integrates the original force using the existing bounded
 adaptive Simpson owner. Symmetric physical-indentation samples subtract the
 central force before integration, so a short path retains a resolved mean

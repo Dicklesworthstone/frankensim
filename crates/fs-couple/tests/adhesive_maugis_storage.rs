@@ -3,7 +3,7 @@
 mod common;
 use core::f64::consts::PI;
 use fs_contact::normal_patch::maugis::continuation::{
-    MaugisContinuationBudget, MaugisContinuationError,
+    MaugisContinuationBudget, MaugisContinuationError, MaugisPhase,
 };
 use fs_contact::normal_patch::maugis::mechanical::MaugisAttachedPotential;
 use fs_contact::normal_patch::maugis::{
@@ -317,4 +317,182 @@ fn tiny_paths_remain_resolved_and_missing_work_cannot_fall_back_silently() {
     }
     let site = BoundNormalContact::new(potential(&law).into(), vec![1.0], 0.0).unwrap();
     assert!(BoundNormalStorage::new(Box::new(Opaque), 1, vec![site]).is_err());
+}
+
+#[test]
+fn continuous_noncontact_work_matches_original_disk_and_contact_integrals() {
+    for lambda in [0.02, 0.2, 0.8] {
+        let law = model(lambda);
+        let (d0, f0) = scales(&law);
+        let owner = potential(&law).with_noncontact_continuation().unwrap();
+        let limits = owner.noncontact_continuation().unwrap();
+        assert_eq!(owner.identity(), law.identity());
+        assert!(potential(&law).noncontact_continuation().is_none());
+        let lo = limits.minimum_indentation_m;
+        let touch = limits.first_contact_indentation_m;
+        let from = lo + 0.3 * (touch - lo);
+        let disk_to = lo + 0.8 * (touch - lo);
+        let disk = owner.path(from, disk_to).unwrap();
+        assert_eq!(disk.work.evaluations, 0);
+        assert_eq!(disk.work.estimated_absolute_error_j, 0.0);
+
+        // Independent quadrature in PHYSICAL disk radius: original uniform
+        // traction F=-pi*sigma*c^2 and delta'(c)=c/R-4*sigma/(pi*E*).
+        let r = law.effective_radius_m();
+        let e = law.normal_state().elastic().reduced_modulus_pa();
+        let sigma = law.normal_state().adhesion_energy_j_per_m2() / law.interaction_range_m();
+        let force_work = |a: f64, b: f64| {
+            let c0 = law.evaluate_noncontact(a).unwrap().cohesive_radius_m();
+            let c1 = law.evaluate_noncontact(b).unwrap().cohesive_radius_m();
+            let f = |c: f64| -PI * sigma * c * c * (c / r - 4.0 * sigma / (PI * e));
+            (c1 - c0) * (f(c0) + 4.0 * f(c0.midpoint(c1)) + f(c1)) / 6.0
+        };
+        close(disk.work.work_j, force_work(from, disk_to), f0 * d0, 2e-11);
+        let to = 0.5 * d0;
+        let path = owner.path(from, to).unwrap();
+        let original_contact = law
+            .reversible_work_between(touch, to, budget(&law).work)
+            .unwrap();
+        close(
+            path.work.work_j,
+            force_work(from, touch) + original_contact.work_j,
+            f0 * d0,
+            2e-10,
+        );
+        let reverse = owner.path(to, from).unwrap();
+        close(reverse.mean_force_n, path.mean_force_n, f0, 2e-14);
+        close(reverse.work.work_j, -path.work.work_j, f0 * d0, 2e-14);
+        close(
+            owner.path(from, touch).unwrap().work.work_j
+                + owner.path(touch, to).unwrap().work.work_j,
+            path.work.work_j,
+            f0 * d0,
+            2e-10,
+        );
+        let gap = owner.evaluate(from).unwrap();
+        assert_eq!(gap.phase(), MaugisPhase::Noncontact);
+        assert!(gap.normal_force_n() < 0.0 && gap.central_gap_m() > 0.0);
+        assert_eq!(gap.friction_contact_state().unwrap().area_m2(), 0.0);
+        assert_eq!(owner.evaluate(touch).unwrap().phase(), MaugisPhase::Contact);
+        assert_eq!(
+            owner
+                .evaluate(touch)
+                .unwrap()
+                .friction_contact_state()
+                .unwrap()
+                .area_m2(),
+            0.0
+        );
+        assert!(potential(&law).evaluate(from).is_err());
+        // Contacting values remain the exact original branch under either policy.
+        assert_eq!(
+            owner.evaluate(to).unwrap(),
+            potential(&law).evaluate(to).unwrap()
+        );
+    }
+}
+
+#[test]
+fn native_inertia_makes_and_loses_solid_contact_without_impulse_or_shear_area_in_gap() {
+    let law = model(0.2);
+    let (d0, f0) = scales(&law);
+    let owner = potential(&law).with_noncontact_continuation().unwrap();
+    let limits = owner.noncontact_continuation().unwrap();
+    let start = limits
+        .minimum_indentation_m
+        .midpoint(limits.first_contact_indentation_m);
+    let system = system(owner.clone());
+    let mut workspace = StepWorkspace::new(&system).unwrap();
+    let mut x = [0.75 * start, 0.0, -0.25 * start, 0.0];
+    let initial = owner.evaluate(x[0] - x[2]).unwrap().potential_j();
+    let time = (0.75 * d0 / f0).sqrt();
+    let p0 = (0.75 * f0 * d0).sqrt();
+    let mut made_contact = false;
+    let mut lost_contact = false;
+    let mut gap_samples = 0;
+    for _ in 0..400 {
+        let mut next = [f64::NAN; 4];
+        let report = workspace
+            .step_into(&system, &x, &[], 0.03 * time, &mut next, &mut [])
+            .unwrap();
+        x = next;
+        let response = owner.evaluate(x[0] - x[2]).unwrap();
+        if response.phase() == MaugisPhase::Noncontact {
+            gap_samples += 1;
+            lost_contact |= made_contact;
+            assert!(response.central_gap_m() > 0.0);
+            assert!(response.normal_force_n() < 0.0);
+            assert_eq!(response.friction_contact_state().unwrap().area_m2(), 0.0);
+        } else {
+            made_contact = true;
+            assert!(response.friction_contact_state().unwrap().area_m2() > 0.0);
+        }
+        close(x[1] + x[3], 0.0, p0, 2e-9);
+        close(x[0] + 3.0 * x[2], 0.0, d0, 2e-8);
+        close(response.potential_j() + kinetic(&x), initial, f0 * d0, 3e-8);
+        assert_eq!(report.dissipated, 0.0);
+        assert_eq!(report.supplied, 0.0);
+    }
+    assert!(gap_samples > 2 && made_contact && lost_contact);
+}
+
+#[test]
+fn noncontact_tiny_paths_and_fold_refusal_preserve_native_state() {
+    let law = model(0.2);
+    let (d0, f0) = scales(&law);
+    let owner = potential(&law).with_noncontact_continuation().unwrap();
+    let limits = owner.noncontact_continuation().unwrap();
+    let fold = limits.minimum_indentation_m;
+    let middle = fold.midpoint(limits.first_contact_indentation_m);
+    for from in [fold, middle] {
+        let to = from.next_up();
+        let path = owner.path(from, to).unwrap();
+        close(
+            path.mean_force_n,
+            owner.evaluate(from.midpoint(to)).unwrap().normal_force_n(),
+            f0,
+            2e-8,
+        );
+        assert!(path.work.work_j < 0.0);
+        assert_eq!(path.work.evaluations, 0);
+    }
+    assert!(matches!(
+        owner.evaluate(fold.next_down()),
+        Err(MaugisContinuationError::NoNoncontactEquilibrium { .. })
+    ));
+    assert!(owner.path(middle, fold.next_down()).is_err());
+    assert!(owner.path(f64::NAN, middle).is_err());
+    assert!(
+        potential(&model(5.0))
+            .with_noncontact_continuation()
+            .is_err()
+    );
+    let system = system(owner);
+    let mut workspace = StepWorkspace::new(&system).unwrap();
+    let dt = 0.01 * (0.75 * d0 / f0).sqrt();
+    let invalid = [fold.next_down(), 0.0, 0.0, 0.0];
+    let mut output = [17.0; 4];
+    assert!(
+        workspace
+            .step_into(&system, &invalid, &[], dt, &mut output, &mut [])
+            .is_err()
+    );
+    assert_eq!(output, [17.0; 4]);
+    let accepted = [middle, 0.0, 0.0, 0.0];
+    let reference = fs_phs::step(&system, &accepted, &[], dt).unwrap();
+    workspace
+        .step_into(&system, &accepted, &[], dt, &mut output, &mut [])
+        .unwrap();
+    for i in 0..4 {
+        close(
+            output[i],
+            reference.x[i],
+            if i % 2 == 0 {
+                d0
+            } else {
+                (0.75 * f0 * d0).sqrt()
+            },
+            2e-8,
+        );
+    }
 }

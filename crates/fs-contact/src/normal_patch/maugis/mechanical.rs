@@ -1,12 +1,16 @@
 //! Original attached Maugis potential for native mechanical evolution.
 //!
-//! This owner explicitly selects the stable contacting branch. It does not
-//! continue through its fold, select a noncontact state, or turn quasistatic
-//! release into an inertial impulse. Those changes need an additional physical
-//! owner. The retained original source supplies all forces and absolute energy.
+//! This owner explicitly selects the stable contacting branch. An opt-in
+//! extension follows its continuous zero-solid-area junction into the original
+//! deformed noncontact adhesive disk, when that branch exists. Neither mode
+//! crosses its terminal fold or turns quasistatic release into an inertial
+//! impulse. The retained original source supplies all forces and absolute energy.
 
-use super::continuation::{MaugisContinuationBudget, MaugisContinuationError, MaugisEquilibrium};
+use super::continuation::{
+    MaugisContinuationBudget, MaugisContinuationError, MaugisEquilibrium, MaugisNoncontactLimits,
+};
 use super::{MaugisError, MaugisWorkEstimate, SourceMaugisSphereContact};
+use core::f64::consts::PI;
 use fs_blake3::ContentHash;
 
 /// Explicit attached-branch choice with bounded original-force integration.
@@ -14,6 +18,7 @@ use fs_blake3::ContentHash;
 pub struct MaugisAttachedPotential {
     source: SourceMaugisSphereContact,
     budget: MaugisContinuationBudget,
+    noncontact: Option<MaugisNoncontactLimits>,
 }
 
 /// Work and the conjugate mean force on one straight approach interval.
@@ -49,7 +54,36 @@ impl MaugisAttachedPotential {
             }
             .into());
         }
-        Ok(Self { source, budget })
+        Ok(Self {
+            source,
+            budget,
+            noncontact: None,
+        })
+    }
+
+    /// Explicitly allow loss and recovery of SOLID contact along the original
+    /// locally stable connected branch. Across its zero-area junction, force
+    /// and absolute energy are continuous; no snap, impulse or loss is added.
+    /// The deformed adhesive disk retains attraction with zero friction area.
+    ///
+    /// Sources without a stable noncontact interval refuse. The lower disk
+    /// fold still refuses further separation: a dynamical transition to the
+    /// detached phase needs its own physical internal-motion/loss model.
+    pub fn with_noncontact_continuation(mut self) -> Result<Self, MaugisContinuationError> {
+        self.noncontact = Some(self.source.noncontact_limits()?.ok_or(
+            MaugisError::InvalidInput {
+                field: "source has no stable continuous noncontact branch",
+            },
+        )?);
+        Ok(self)
+    }
+
+    /// Explicit branch policy and cached physical bounds. None retains the
+    /// original contact-only admission; the original source identity is shared
+    /// because values on the common contacting domain are unchanged.
+    #[must_use]
+    pub const fn noncontact_continuation(&self) -> Option<MaugisNoncontactLimits> {
+        self.noncontact
     }
     /// Original immutable finite-zone law, including its material receipts.
     #[must_use]
@@ -71,19 +105,39 @@ impl MaugisAttachedPotential {
     pub const fn indentation_scale_m(&self) -> f64 {
         self.source.indentation_scale_m
     }
-    /// Original attached energy and force, including the finite branch endpoint.
-    /// A request beyond that endpoint refuses rather than switching phase.
+    /// Original energy and force on the explicitly admitted connected branch.
+    /// Its terminal endpoint is finite; further separation refuses. Selecting
+    /// the continuous noncontact extension never selects the detached phase.
     pub fn evaluate(
         &self,
         indentation_m: f64,
     ) -> Result<MaugisEquilibrium, MaugisContinuationError> {
-        self.source.evaluate_contact_energy(indentation_m)
+        if let Some(limits) = self.noncontact
+            && indentation_m < limits.first_contact_indentation_m
+        {
+            self.source.evaluate_noncontact(indentation_m)
+        } else {
+            self.source.evaluate_contact_energy(indentation_m)
+        }
     }
     /// Integrate the actual force along the commanded straight approach path.
     /// Symmetric, centered quadrature preserves a resolved mean effort even
     /// when endpoint-energy subtraction would lose all significant digits.
     /// Numerical work estimates are not certified interval bounds.
     pub fn path(
+        &self,
+        from_m: f64,
+        to_m: f64,
+    ) -> Result<MaugisMechanicalPath, MaugisContinuationError> {
+        if let Some(limits) = self.noncontact
+            && from_m.min(to_m) < limits.first_contact_indentation_m
+        {
+            return self.connected_path(from_m, to_m, limits.first_contact_indentation_m);
+        }
+        self.contact_path(from_m, to_m)
+    }
+
+    fn contact_path(
         &self,
         from_m: f64,
         to_m: f64,
@@ -145,7 +199,102 @@ impl MaugisAttachedPotential {
             },
         )?;
         let mean_force_n = central_force + correction * force_scale;
+        self.finish_path(
+            from,
+            to,
+            delta,
+            mean_force_n,
+            (error * work_scale, evaluations),
+        )
+    }
+
+    fn connected_path(
+        &self,
+        from_m: f64,
+        to_m: f64,
+        touch_m: f64,
+    ) -> Result<MaugisMechanicalPath, MaugisContinuationError> {
+        // Admit both original endpoints before integrating. A failed trial
+        // cannot extrapolate past the noncontact fold or switch to detachment.
+        let from = self.evaluate(from_m)?;
+        let to = self.evaluate(to_m)?;
+        let delta = to_m - from_m;
+        if delta == 0.0 {
+            return self.finish_path(from, to, 0.0, from.normal_force_n(), (0.0, 0));
+        }
+        let lo = from_m.min(to_m);
+        let hi = from_m.max(to_m);
+        let disk_end = hi.min(touch_m);
+        let disk_a = self.source.evaluate_noncontact(lo)?;
+        let disk_b = self.source.evaluate_noncontact(disk_end)?;
+        let mean_disk = self.noncontact_mean_force(disk_a, disk_b)?;
+        if hi <= touch_m {
+            return self.finish_path(from, to, delta, mean_disk, (0.0, 0));
+        }
+        // Split at the genuine continuous zero-area junction, so adaptive
+        // quadrature only sees the original contacting branch. The disk part
+        // is exact and consumes no quadrature evaluations or hidden budget.
+        let contact = self.contact_path(touch_m, hi)?;
+        let span = hi - lo;
+        let mean_force_n =
+            mean_disk * ((touch_m - lo) / span) + contact.mean_force_n * ((hi - touch_m) / span);
+        self.finish_path(
+            from,
+            to,
+            delta,
+            mean_force_n,
+            (
+                contact.work.estimated_absolute_error_j,
+                contact.work.evaluations,
+            ),
+        )
+    }
+
+    // On the original disk, d(delta)/dc = d0*(c-c_fold) and
+    // F/F0 = -pi*lambda*c^2/2. Integrate in x=c-c_fold, then cancel
+    // the common interval length before division. Every remaining polynomial
+    // term is nonnegative, including arbitrarily short paths near the fold.
+    fn noncontact_mean_force(
+        &self,
+        a: MaugisEquilibrium,
+        b: MaugisEquilibrium,
+    ) -> Result<f64, MaugisContinuationError> {
+        let fold = (8.0 / (3.0 * PI)) * self.source.lambda;
+        let fold_radius = fold * self.source.radius_scale_m;
+        let x = (a.cohesive_radius_m() - fold_radius) / self.source.radius_scale_m;
+        let y = (b.cohesive_radius_m() - fold_radius) / self.source.radius_scale_m;
+        let sum = x + y;
+        let second_over_first = if sum == 0.0 {
+            0.0
+        } else {
+            (2.0 / 3.0) * (x * x + x * y + y * y) / sum
+        };
+        let shape = fold * fold + 2.0 * fold * second_over_first + 0.5 * (x * x + y * y);
+        let force = -((PI / 2.0) * self.source.lambda * self.source.force_scale_n) * shape;
+        if !force.is_finite() || force >= 0.0 || x < 0.0 || y < 0.0 {
+            return Err(MaugisError::Unrepresentable {
+                field: "noncontact mechanical mean effort",
+            }
+            .into());
+        }
+        Ok(force)
+    }
+
+    fn finish_path(
+        &self,
+        from: MaugisEquilibrium,
+        to: MaugisEquilibrium,
+        delta: f64,
+        mean_force_n: f64,
+        (estimated_absolute_error_j, evaluations): (f64, usize),
+    ) -> Result<MaugisMechanicalPath, MaugisContinuationError> {
         let work_j = mean_force_n * delta;
+        if delta != 0.0 && mean_force_n != 0.0 && work_j == 0.0 {
+            return Err(MaugisError::Unrepresentable {
+                field: "mechanical path work increment",
+            }
+            .into());
+        }
         let energy_residual_j = (to.potential_j() - from.potential_j()) - work_j;
         let tolerance = self.budget.energy_absolute_tolerance_j
             + self.budget.energy_relative_tolerance
@@ -154,7 +303,6 @@ impl MaugisAttachedPotential {
                     .abs()
                     .max(to.potential_j().abs())
                     .max(work_j.abs());
-        let estimated_absolute_error_j = error * work_scale;
         if [
             mean_force_n,
             work_j,
