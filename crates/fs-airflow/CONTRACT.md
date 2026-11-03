@@ -1073,6 +1073,34 @@ mass defect and a common-reference whole-system energy balance. Synthetic
 sources, homogeneous branches, an isothermal solid body, prescribed relative
 flow and first-order splitting remain explicit; timestep refinement is needed.
 
+### Bulk and surface properties for forced spheres
+
+`medium::convection::evaluate_sphere_from_material` retains both supplied fluid
+owners and uses the shared Whitaker sphere card: bulk rho, mu, Cp and k supply
+Re, Pr and h, while only viscosity comes from the fluid at surface temperature.
+The helper also lowers the resulting coefficient to the original conduction
+Robin row. The generic transport seam cannot prove that two supplied sources
+describe the same fluid; its caller must preserve pressure and composition.
+
+`finite_gas::sphere::ForcedSphereGasSurface` performs that second temperature
+query through the existing source-pinned ideal/explicit-branch real-gas owner.
+Its repeatable callback and finite-body adapter use the original reciprocal
+heat/piston solver, with no additional gas parcel or thermal integrator. Gas
+energy, body enthalpy (including latent heat), pressure work and motion retain
+one signed heat exchange. Patch area cannot exceed either the sphere's pi D²
+surface or its declared thermal body's exposed area. Zero area is insulation.
+The complete thermal bracket must remain in the selected correlation domain.
+
+Whitaker's source bounds, including mu_bulk/mu_surface in [1, 3.2], remain
+strictly enforced; no film-property substitution, unit-ratio clamp, stagnant
+extension, buoyancy blend, evaporation or extra conductive link is inferred.
+Prescribed free-stream speed supplies no fan work or drag. Focused G0/G1/G3/G4
+tests cover an independent liquid formula and Robin lowering, actual gas
+source/pressure/composition retention, trial-dependent viscosity, melting and
+gas/body/motion energy closure, deterministic replay, insulation and atomic
+source/geometry/cancellation refusal. They do not establish experimental
+accuracy or support outside the original isolated-sphere model.
+
 ### Natural convection in finite gas and coupled surface networks
 
 `medium::convection::finite_gas::NaturalGasSurface` evaluates the shared

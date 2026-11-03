@@ -21,7 +21,8 @@ pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
         let geometry = match row.word()? {
             "cylinder-crossflow" => ForcedGasGeometry::CylinderCrossflow,
             "laminar-flat-plate" => ForcedGasGeometry::LaminarFlatPlate,
-            _ => return Err("convection-cell needs cylinder-crossflow or laminar-flat-plate".into()),
+            "sphere" => ForcedGasGeometry::Sphere,
+            _ => return Err("convection-cell needs cylinder-crossflow, laminar-flat-plate or sphere".into()),
         };
         let boundary = ForcedGasBoundary {
             geometry, exposed_area_m2: row.positive()?,
@@ -117,7 +118,7 @@ impl Reservoir {
 
     pub fn describe(&self, routes: &[Route]) {
         let gas = self.law.reference().state();
-        eprintln!("contact_thermal_gas_reservoir=T_K={}; p_Pa={}; exposed_cells={}; original composition; film-temperature properties; prescribed infinite reservoir; no flow/finite-gas integration",
+        eprintln!("contact_thermal_gas_reservoir=T_K={}; p_Pa={}; exposed_cells={}; original composition; correlation-specific property temperatures; prescribed infinite reservoir; no flow/finite-gas integration",
             gas.temperature, gas.pressure, routes.len());
         for route in routes {
             eprintln!("contact_thermal_convection_cell={}; geometry={:?}; area_m2={}; length_m={}; free_stream_m_s={}",

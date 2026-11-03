@@ -17,6 +17,7 @@ convection-cell 20 laminar-flat-plate 0.000001 0.002 1
 The columns are cell ID, exterior geometry/regime, exposed area [m2],
 characteristic length [m], and prescribed relative free-stream speed [m/s].
 Cylinder length means diameter; flat-plate length is the streamwise extent.
+The `sphere` geometry also uses diameter and admits exposed area up to pi D².
 Every other v5 record is the existing v4 record, in the same order: dry contacts,
 films, film surfaces, series heat, material heat budget, fiber/string heat, links.
 `boundary adiabatic` remains available in v5 and has no `convection` block.
@@ -24,14 +25,28 @@ These rows are a syntax example, not measured instrument geometry.
 
 ## One physical state and one heat step
 
-Each original nonlinear thermal trial evaluates the gas at the arithmetic
-wall/bulk film temperature. The original `IsobaricGasLaw` preserves composition
+Each original nonlinear thermal trial evaluates plate/cylinder properties at
+the arithmetic wall/bulk film temperature. The original `IsobaricGasLaw` preserves composition
 and pressure, and resolves density, viscosity, conductivity and Cp together.
 For humid gas, water mole fraction stays fixed rather than inventing water to
 hold relative humidity constant. All original source/phase errors propagate.
 
 The existing `fs-convection` card computes the Nusselt number and h = Nu k/L:
-Churchill-Bernstein crossflow or the laminar average isothermal-flat-plate law.
+Churchill-Bernstein crossflow, the laminar average isothermal-flat-plate law,
+or Whitaker's isolated-sphere law. The sphere uses the original bulk gas for
+Re, Pr and k, and queries the same gas at wall temperature only for its
+bulk/surface viscosity correction. `GasConvectionSample::property_gas` retains
+the coefficient state; `surface_gas` retains the sphere's second query.
+
+The sphere card requires Re in [3.5, 76000], Pr in [0.71, 380] and
+mu_bulk/mu_surface in [1, 3.2]. A hotter sphere in a colder ordinary gas can
+violate the viscosity range, and the USSA dry-air fit at 300 K has Pr below
+0.71. Both cases refuse without clamping; a source-backed nitrogen atmosphere
+and a colder sphere provide an admitted example. The entire thermal-source
+temperature interval must remain admissible during profile preparation.
+These limits come from Whitaker (1972), Eq. (33), Table 1,
+https://doi.org/10.1002/aic.690180219 .
+
 No second correlation formula, fitted cooling coefficient or material-name
 switch is introduced. The public `ForcedGasBoundary` result retains the
 actual gas evaluation, correlation evidence, signed heat and instantaneous

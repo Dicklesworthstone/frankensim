@@ -25,6 +25,10 @@ pub use mixed::{
     evaluate_aiding_vertical_plate_from_material,
 };
 
+/// Forced spheres with separate bulk and surface-temperature material states.
+pub mod sphere;
+pub use sphere::{MaterialSphereConvection, evaluate_sphere_from_material};
+
 /// Geometry and heat-flow direction required by the selected forced correlation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ForcedConvectionSettings {

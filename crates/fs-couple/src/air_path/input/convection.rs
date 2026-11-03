@@ -1,7 +1,9 @@
 //! Source-gas forced convection into an explicitly prescribed reservoir.
 //!
-//! The original isobaric gas law supplies the film-state rho, mu, Cp and k;
-//! fs-convection owns every correlation and its regime/evidence. This adapter
+//! The original isobaric gas law supplies each correlation's property state:
+//! mean-film rho, mu, Cp and k for plates/cylinders, or bulk properties plus
+//! surface viscosity for spheres. fs-convection owns every correlation and its
+//! regime/evidence. This adapter
 //! supplies signed boundary heat, not a new thermal or fluid time integrator.
 //! Reservoir temperature, pressure, composition and velocity are prescribed.
 //! No finite gas inventory, buoyancy, rarefaction, radiation or moving exposure
@@ -26,6 +28,10 @@ pub enum ForcedGasGeometry {
     CylinderCrossflow,
     /// Streamwise length; the shared laminar average isothermal-plate relation.
     LaminarFlatPlate,
+    /// Isolated isothermal sphere; diameter is the characteristic length.
+    /// Whitaker's bulk/surface viscosity correction and its validity bounds
+    /// apply. Nearby walls, contacts and mass-transfer blowing are not modeled.
+    Sphere,
 }
 
 /// Fixed exposed geometry. Contact-covered area must be excluded by its owner.
@@ -65,7 +71,12 @@ impl From<CorrelationError> for GasConvectionError {
 /// The same evaluated gas and model evidence that produced the boundary heat.
 #[derive(Debug)]
 pub struct GasConvectionSample {
-    pub film_gas: GasRecord,
+    /// State used for Re, Pr and k: mean film for a plate/cylinder, free stream
+    /// for a sphere. Pressure, composition and source law are unchanged.
+    pub property_gas: GasRecord,
+    /// Same gas law evaluated at the wall, retained when the sphere relation
+    /// needs surface viscosity. Other geometries do not query this state.
+    pub surface_gas: Option<GasRecord>,
     pub nusselt: NusseltEvaluation,
     pub coefficient: Evidence<HeatTransferCoefficient>,
     pub wall_temperature_k: f64,
@@ -88,11 +99,26 @@ impl ForcedGasBoundary {
                 "forced flow requires positive finite length, exposed area and speed",
             ));
         }
+        if self.geometry == ForcedGasGeometry::Sphere
+            && self.exposed_area_m2 > core::f64::consts::PI
+                * self.characteristic_length_m * self.characteristic_length_m
+        {
+            return Err(GasConvectionError::Invalid(
+                "sphere exposed area cannot exceed pi times diameter squared",
+            ));
+        }
         Ok(())
     }
 
-    /// Evaluate an original source law at (T_wall + T_bulk)/2, holding its
-    /// reference pressure/composition. Heat uses the FULL wall/bulk difference.
+    /// Evaluate the original source law at the selected correlation's property
+    /// temperature, holding reference pressure/composition. Plates/cylinders
+    /// use (T_wall + T_bulk)/2. Spheres use the bulk state for Re, Pr and k and
+    /// the surface state only for mu_bulk/mu_surface (Whitaker 1972, Eq. 33,
+    /// doi:10.1002/aic.690180219). Heat uses the FULL wall/bulk difference.
+    ///
+    /// Whitaker's bounded card requires mu_bulk/mu_surface in [1, 3.2]. A hot
+    /// sphere in a colder ordinary gas therefore refuses rather than replacing
+    /// this correction with 1 or borrowing a film-property approximation.
     ///
     /// A thermochemical law retains the original source model and pinned
     /// claims; a snapshot alone is not sufficient. Humid laws preserve water
@@ -108,15 +134,33 @@ impl ForcedGasBoundary {
             return Err(GasConvectionError::Invalid("wall temperature must be positive finite kelvin"));
         }
         let reservoir_temperature_k = gas.reference().state().temperature;
-        let film_temperature_k = 0.5 * wall_temperature_k + 0.5 * reservoir_temperature_k;
-        let film_gas = gas.at_temperature(Temperature::new(film_temperature_k))?;
-        let transport = film_gas.transport_state()?;
+        let (property_gas, surface_gas) = match self.geometry {
+            ForcedGasGeometry::Sphere => (
+                gas.reference().clone(),
+                Some(gas.at_temperature(Temperature::new(wall_temperature_k))?),
+            ),
+            ForcedGasGeometry::CylinderCrossflow | ForcedGasGeometry::LaminarFlatPlate => (
+                gas.at_temperature(Temperature::new(
+                    0.5 * wall_temperature_k + 0.5 * reservoir_temperature_k,
+                ))?,
+                None,
+            ),
+        };
+        let transport = property_gas.transport_state()?;
         let reynolds = transport.reynolds(self.speed_m_s, self.characteristic_length_m)?;
         let id = match self.geometry {
             ForcedGasGeometry::CylinderCrossflow => CorrelationId::ChurchillBernsteinCylinder,
             ForcedGasGeometry::LaminarFlatPlate => CorrelationId::FlatPlateLaminarAverage,
+            ForcedGasGeometry::Sphere => CorrelationId::WhitakerSphere,
         };
-        let nusselt = fs_convection::evaluate(id, CorrelationInputs::forced(reynolds, transport.prandtl()))?;
+        let mut inputs = CorrelationInputs::forced(reynolds, transport.prandtl());
+        if let Some(surface) = &surface_gas {
+            inputs = inputs.with_viscosity_ratio(
+                transport.dynamic_viscosity_pa_s()
+                    / surface.transport_state()?.dynamic_viscosity_pa_s(),
+            );
+        }
+        let nusselt = fs_convection::evaluate(id, inputs)?;
         let coefficient = nusselt.heat_transfer_coefficient(
             ThermalConductivity::new(transport.thermal_conductivity_w_m_k()),
             Length::new(self.characteristic_length_m),
@@ -135,7 +179,7 @@ impl ForcedGasBoundary {
         {
             return Err(GasConvectionError::Invalid("boundary heat or entropy is unrepresentable"));
         }
-        Ok(GasConvectionSample { film_gas, nusselt, coefficient,
+        Ok(GasConvectionSample { property_gas, surface_gas, nusselt, coefficient,
             wall_temperature_k, reservoir_temperature_k, conductance_w_k,
             heat_into_wall_w, entropy_generation_w_k })
     }

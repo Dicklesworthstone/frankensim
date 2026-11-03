@@ -18,6 +18,10 @@ fn gas_boundary_grammar_preserves_old_profiles_and_refuses_false_exposure() {
     let parsed = Profile::parse(text.as_bytes()).unwrap();
     assert_eq!(parsed.convection.len(), 1);
     assert_eq!(parsed.convection[0].cell, CellId(10));
+    let sphere_text = text.replace("cylinder-crossflow 1e-6", "sphere 1e-7");
+    let spherical = Profile::parse(sphere_text.as_bytes()).unwrap();
+    assert_eq!(spherical.convection[0].boundary.geometry, ForcedGasGeometry::Sphere);
+    assert!(Profile::parse(text.replace("cylinder-crossflow", "sphere").as_bytes()).is_err());
     for (old, new) in [
         ("convection 1", "convection 0"),
         ("convection-cell 10", "convection-cell 99"),

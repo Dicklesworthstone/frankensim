@@ -11,6 +11,8 @@ mod real_gas;
 mod natural;
 #[path = "finite_gas_convection/natural_network.rs"]
 mod natural_network;
+#[path = "finite_gas_convection/sphere.rs"]
+mod sphere;
 use fs_airflow::graph::thermal::medium::convection::{
     ForcedConvectionSettings, evaluate_forced_from_material, finite_gas::*,
 };

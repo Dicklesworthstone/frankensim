@@ -9,6 +9,9 @@
 /// Source-pinned film properties on the same finite gas/body heat residual.
 pub mod film;
 
+/// Forced spheres using bulk transport and source-pinned surface viscosity.
+pub mod sphere;
+
 /// Multiple finite gases and convective patches on the existing circuit/thermal assembly.
 pub mod network;
 /// Buoyancy-driven vertical-plate heat exchange at actual gas/body states.
