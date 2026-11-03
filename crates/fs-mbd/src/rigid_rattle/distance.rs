@@ -143,111 +143,11 @@ impl RigidDistanceConstraint {
         wrenches: [Wrench; 2],
         duration_s: f64,
         controls: DistanceStepControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<DistanceStepReceipt, DistanceStepError> {
-        poll(&mut cancelled)?;
-        if !positive(duration_s)
-            || !positive(controls.maximum_impulse_ns)
-            || !positive(controls.maximum_rotation_increment_rad)
-            || controls.maximum_rotation_increment_rad > 0.25
-            || controls.maximum_position_iterations == 0
-            || controls.maximum_backtracks == 0
-        {
-            return Err(DistanceStepError::Invalid(
-                "positive finite local controls required",
-            ));
-        }
-        let initial = self.geometry(states)?;
-        if initial.gap.abs() > self.position_tolerance_m
-            || initial.rate.abs() > self.velocity_tolerance_mps
-        {
-            return Err(DistanceStepError::InitialConstraint);
-        }
-        let response = duration_s * self.mobility(states, initial.normal)?;
-        if !positive(response) {
-            return Err(DistanceStepError::Invalid("distance impulse response"));
-        }
-        let problem = Problem {
-            constraint: self,
-            states,
-            integrator,
-            wrenches,
-            duration_s,
-            controls,
-            normal: initial.normal,
-        };
-        let mut impulse = 0.0;
-        let mut trial = problem.evaluate(impulse, &mut cancelled)?;
-        let mut iterations = 0;
-        while trial.geometry.gap.abs() > self.position_tolerance_m {
-            if iterations == controls.maximum_position_iterations {
-                return Err(DistanceStepError::NotConverged);
-            }
-            let mut correction = -trial.geometry.gap / response;
-            if !correction.is_finite() {
-                return Err(DistanceStepError::LocalBranch);
-            }
-            let mut accepted = None;
-            for _ in 0..controls.maximum_backtracks {
-                poll(&mut cancelled)?;
-                let next_impulse = impulse + correction;
-                if next_impulse == impulse {
-                    break;
-                }
-                if next_impulse.abs() <= controls.maximum_impulse_ns {
-                    match problem.evaluate(next_impulse, &mut cancelled) {
-                        Ok(candidate)
-                            if candidate.geometry.gap.abs() < trial.geometry.gap.abs() =>
-                        {
-                            accepted = Some((next_impulse, candidate));
-                            break;
-                        }
-                        Ok(_) | Err(DistanceStepError::LocalBranch) => {}
-                        Err(error) => return Err(error),
-                    }
-                }
-                correction *= 0.5;
-            }
-            let Some((next_impulse, candidate)) = accepted else {
-                return Err(DistanceStepError::LocalBranch);
-            };
-            impulse = next_impulse;
-            trial = candidate;
-            iterations += 1;
-        }
-        poll(&mut cancelled)?;
-        let free = trial.steps.map(|s| s.state_after);
-        let final_impulse = -trial.geometry.rate / self.mobility(free, trial.geometry.normal)?;
-        if !final_impulse.is_finite() || final_impulse.abs() > controls.maximum_impulse_ns {
-            return Err(DistanceStepError::LocalBranch);
-        }
-        let velocity_impulse =
-            self.pair_impulse(free, trial.geometry.normal.scale(final_impulse))?;
-        let states_after = [
-            velocity_impulse.first.state_after,
-            velocity_impulse.second.state_after,
-        ];
-        let final_geometry = self.geometry(states_after)?;
-        if final_geometry.gap.abs() > self.position_tolerance_m
-            || final_geometry.rate.abs() > self.velocity_tolerance_mps
-        {
-            return Err(DistanceStepError::NotConverged);
-        }
-        let constraint_work_j = trial.impulse.impulse_work_j + velocity_impulse.impulse_work_j;
-        if !constraint_work_j.is_finite() {
-            return Err(DistanceStepError::Invalid("distance constraint work"));
-        }
-        poll(&mut cancelled)?;
-        Ok(DistanceStepReceipt {
-            states_after,
-            position_impulse: trial.impulse,
-            free_steps: trial.steps,
-            velocity_impulse,
-            constraint_work_j,
-            final_gap_m: final_geometry.gap,
-            final_range_rate_mps: final_geometry.rate,
-            position_iterations: iterations,
-        })
+        super::pair_step::advance(
+            self, states, integrator, wrenches, duration_s, controls, cancelled,
+        )
     }
 
     fn geometry(&self, states: [RigidBodyState; 2]) -> Result<Geometry, DistanceStepError> {
@@ -277,28 +177,6 @@ impl RigidDistanceConstraint {
         Ok(Geometry { normal, gap, rate })
     }
 
-    fn mobility(
-        &self,
-        states: [RigidBodyState; 2],
-        normal: Vec3,
-    ) -> Result<f64, DistanceStepError> {
-        let a = states[0].directional_effective_mass(
-            self.properties[0],
-            self.points_body_m[0],
-            normal,
-        )?;
-        let b = states[1].directional_effective_mass(
-            self.properties[1],
-            self.points_body_m[1],
-            normal,
-        )?;
-        let result = a.inverse_mass_kg_inverse + b.inverse_mass_kg_inverse;
-        if !positive(result) {
-            return Err(DistanceStepError::Invalid("pair mobility"));
-        }
-        Ok(result)
-    }
-
     fn pair_impulse(
         &self,
         states: [RigidBodyState; 2],
@@ -321,66 +199,23 @@ struct Geometry {
     gap: f64,
     rate: f64,
 }
-struct Trial {
-    impulse: ActionReactionImpulseReceipt,
-    steps: [StepReceipt; 2],
-    geometry: Geometry,
-}
-struct Problem<'a> {
-    constraint: &'a RigidDistanceConstraint,
-    states: [RigidBodyState; 2],
-    integrator: RigidBodyIntegrator,
-    wrenches: [Wrench; 2],
-    duration_s: f64,
-    controls: DistanceStepControls,
-    normal: Vec3,
-}
-impl Problem<'_> {
-    fn evaluate(
+impl super::pair_step::Constraint for RigidDistanceConstraint {
+    fn properties(&self) -> [MassProperties; 2] {
+        self.properties
+    }
+    fn tolerances(&self) -> [f64; 2] {
+        [self.position_tolerance_m, self.velocity_tolerance_mps]
+    }
+    fn geometry(
         &self,
-        impulse_ns: f64,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Trial, DistanceStepError> {
-        poll(cancelled)?;
-        let impulse = self
-            .constraint
-            .pair_impulse(self.states, self.normal.scale(impulse_ns))?;
-        let states = [impulse.first.state_after, impulse.second.state_after];
-        for i in 0..2 {
-            let principal = self.constraint.properties[i].principal_inertia_body();
-            let minimum = principal.x.min(principal.y).min(principal.z);
-            let travel = (norm(states[i].angular_momentum_body())
-                + self.duration_s * norm(self.wrenches[i].torque_body))
-                * (self.duration_s / minimum);
-            if !travel.is_finite() || travel > self.controls.maximum_rotation_increment_rad {
-                return Err(DistanceStepError::LocalBranch);
-            }
-        }
-        let first = self.integrator.step(
-            states[0],
-            self.constraint.properties[0],
-            self.wrenches[0],
-            self.duration_s,
-        )?;
-        poll(cancelled)?;
-        let second = self.integrator.step(
-            states[1],
-            self.constraint.properties[1],
-            self.wrenches[1],
-            self.duration_s,
-        )?;
-        poll(cancelled)?;
-        let geometry = self
-            .constraint
-            .geometry([first.state_after, second.state_after])?;
-        let max_chord = 2.0 * fs_math::det::sin(0.5 * self.controls.maximum_rotation_increment_rad);
-        if norm(geometry.normal.sub(self.normal)) > max_chord {
-            return Err(DistanceStepError::LocalBranch);
-        }
-        Ok(Trial {
-            impulse,
-            steps: [first, second],
-            geometry,
+        states: [RigidBodyState; 2],
+    ) -> Result<super::pair_step::Geometry, DistanceStepError> {
+        let g = self.geometry(states)?;
+        Ok(super::pair_step::Geometry {
+            normal: g.normal,
+            arms_body_m: self.points_body_m,
+            gap: g.gap,
+            rate: g.rate,
         })
     }
 }

@@ -1975,6 +1975,45 @@ refinement, reversal, full-inertia frame/boost covariance, P/L/source-work
 closure, stationary identity, remote-origin and hidden-spin failures, and
 every cancellation checkpoint.
 
+### Plane constraints carried by a finite rigid body
+
+`rigid_rattle::finite_plane::FinitePointPlaneConstraint` constrains a material
+point of one native rigid body to an infinite plane carried by a second finite
+body. Both evolve with their actual full inertia, original native free motion
+and independent applied wrenches. The normal reaction acts on the carrier at
+the current projected sliding point. Its equal-and-opposite impulse therefore
+retains the carrier's rotational Jacobian and reciprocal torque; a fixed plane
+anchor is not substituted for the physical reaction point.
+
+The scalar impulse/free-step/impulse engine is shared with the original rigid
+distance pair. Its mobility arithmetic, native reactions, local backtracking,
+angular/impulse limits and cancellation order retain the original distance
+path. Initial position and velocity constraints must hold; neither pose is
+repaired. Every accepted receipt returns both bodies, both native pair events,
+both free steps, gap/speed residuals and numerical constraint work evaluated
+from relative COM/spin components. This internal work defect is not an external
+support source or heat. Central reactions retain total linear and angular
+momentum to the admitted geometry and floating-point errors; native event
+receipts retain actual momentum increments and their defects.
+
+Double-double relative geometry preserves local arms at remote origins and
+cancels common velocity before local spin is added. The plane is represented
+by its original body-normal scalar offset, prepared once; translating its
+authored anchor arbitrarily far along the same plane cannot introduce a false
+world-normal offset or overflow an irrelevant anchor query. The reconstructed
+native reaction arm must fit the original position tolerance.
+
+The step allocates no heap storage and publishes neither body on numerical or
+late cancellation refusal. This is a smooth bilateral sliding joint, including
+tensile reactions, without unilateral collision, friction, a finite plane
+boundary, exact-energy conservation or a global nonlinear-root certificate.
+`tests/rigid_finite_plane.rs` covers analytical unequal-mass load sharing, an
+independent continuous finite-inertia sliding-bead/rotor reference with
+second-order refinement and reversal, full-tensor P/L/work balance, frame/boost
+covariance, tangential-anchor equivalence, hidden-arm/spin admission and every
+cancellation checkpoint. The original six distance-pair regressions also pass
+against the shared engine.
+
 ## Distance between independent finite rigid bodies
 
 `rigid_rattle::distance::RigidDistanceConstraint::advance` evolves two independent

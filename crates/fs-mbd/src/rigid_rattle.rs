@@ -25,6 +25,13 @@ pub mod step;
 #[path = "rigid_rattle/distance.rs"]
 pub mod distance;
 
+#[path = "rigid_rattle/pair_step.rs"]
+mod pair_step;
+
+/// A material point sliding on a plane carried by another finite rigid body.
+#[path = "rigid_rattle/finite_plane.rs"]
+pub mod finite_plane;
+
 use crate::{MassProperties, Vec3 as MbdVec3};
 use fs_ga::{Se3, So3Tangent, Twist, Vec3};
 use fs_time::se3::{RattleProjection, Se3Error};
