@@ -36,6 +36,10 @@ pub mod breakage;
 #[path = "comminution/circuit.rs"]
 pub mod circuit;
 
+/// Continuous perfectly mixed grinding with source-declared selection rates.
+#[path = "comminution/population_balance.rs"]
+pub mod population_balance;
+
 /// Grinding energy per dry mass, in coherent SI joules per kilogram.
 pub type SpecificGrindingEnergy = Qty<2, 0, -2, 0, 0, 0>;
 

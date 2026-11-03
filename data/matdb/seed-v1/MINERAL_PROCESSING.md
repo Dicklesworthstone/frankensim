@@ -507,6 +507,33 @@ At 12 MW net pinion power and utilization 0.9, the corresponding arithmetic
 throughput is 250 kg/s, or 900 dry t/h. A real site needs its own measured work
 index and applicable circuit corrections; this example is not a plant forecast.
 
+### Continuous grinding with residence-dependent particle sizes
+
+`fs_material::comminution::population_balance::ContinuousPopulationBalanceMill`
+solves a steady, perfectly mixed mill from original selection frequencies
+[1/s] and daughter mass fractions for each size class. `at_residence_time`
+uses a supplied residence, while `at_dry_holdup` derives residence from dry
+hold-up / actual dry feed. All rates and daughters retain their original
+specimen, method, source and typed operating limits.
+
+```bash
+cargo run -p fs-material --example continuous_ball_mill
+```
+
+The synthetic example holds 6000 kg dry solids in the mill. Changing dry feed
+from 100 to 200 kg/s shortens residence from 60 to 30 seconds and changes the
+fine-class product fraction from 52.25% to 35.60%. Dry mass, every assayed
+element and outlet water remain accounted for. The inferred 3000 kg water
+hold-up assumes water shares the same perfect-mixer residence as solids.
+
+The coarse-to-fine population balance uses strictly finer daughter classes and
+retains a terminal nonbreaking fine class. Selection rates are explicit
+source inputs; Bond work index and per-pass redistribution do not supply them.
+This is a local steady first-order grinding model, with no inferred plant
+calibration, liberation, transient response, size-dependent discharge or media
+trajectory. Its [model-family reference](https://doi.org/10.3390/min12060679)
+does not supply the example's authored parameters.
+
 ### Grinding a declared ore blend
 
 `AdditiveGrindingBlend::new` accepts `GrindingFeed` records containing each

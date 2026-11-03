@@ -10532,3 +10532,28 @@ prints every outlet, and forms any circuit-scale Bond estimate from fresh
 throughput and the combined external PSD. Zero dry flow has no P80. This
 prescribed split supplies no calibrated bleed-control policy, metal recovery
 optimization, selective rejection or purge-treatment prediction.
+
+## Continuous population-balance grinding
+
+`comminution::population_balance::ContinuousPopulationBalanceMill` solves the
+steady, perfectly mixed size-mass balance from original per-class selection
+frequencies and conditional daughter mass fractions. `at_residence_time` uses
+an admitted common residence; `at_dry_holdup` derives it from positive dry
+hold-up and actual feed. The triangular coarse-to-fine solve is bounded to
+128 classes. Source context covers both rates and daughters, with explicit
+typed support for residence and dry flow; actual solids fraction is also owned.
+
+Every measured solid-phase element follows its parent mass congruently.
+Carrier water is unchanged at the outlet and shares the same residence only
+under the explicit perfect-mixing assumption. Hold-ups equal outlet rates times
+residence. Original daughter fractions close within eight binary64 epsilons
+and are never renormalized; floating-point results are not interval certificates.
+Bad layouts, nonconservative/coarsening daughters, unsupported source points,
+nonpositive operating conditions and unrepresentable arithmetic refuse without
+mutating the feed. No ore-rate inference, liberation, transient response,
+size-dependent discharge, media dynamics, power or wear prediction is supplied.
+
+The six focused population-balance tests cover independent two-class and
+multiclass balances, every dry/element/water account, throughput/residence
+response, source admission and invalid kinetic declarations. The executable
+`continuous_ball_mill` example uses explicitly synthetic rates and distributions.
