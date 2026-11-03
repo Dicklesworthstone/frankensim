@@ -233,11 +233,52 @@ pub fn assemble_circuit_with_conductance(
 pub fn assemble_circuit_with_conductance_polled(
     graph: &CircuitGraph,
     blocks: &[ConductanceBlock],
+    poll: impl FnMut() -> Result<(), CircuitError>,
+) -> Result<CircuitDae, CircuitError> {
+    assemble_circuit_with_couplings_polled(graph, &[], blocks, poll)
+}
+
+/// Assemble reciprocal magnetic storage and conducting-field loads together.
+///
+/// The same descriptor retains the full inverse inductance matrix, each
+/// complete B G B^T conductance stamp, and the original capacitor, source and
+/// ideal-transformer constraints. Magnetic cross terms therefore affect both
+/// winding currents and spatial Joule loss in one Kirchhoff solve. Neither
+/// coupling is reduced to uncoupled branches or applied after the time step.
+/// The dense preparation bounds are those of the conducting-field assembler.
+///
+/// # Errors
+/// The original magnetic and conductance admissions, including nonpositive
+/// whole-matrix inductance, duplicate magnetic links and invalid field nodes.
+pub fn assemble_circuit_with_couplings(
+    graph: &CircuitGraph,
+    mutual: &[MutualInductance],
+    blocks: &[ConductanceBlock],
+) -> Result<CircuitDae, CircuitError> {
+    assemble_circuit_with_couplings_polled(graph, mutual, blocks, || Ok(()))
+}
+
+/// Combined magnetic/field assembly with bounded cooperative checkpoints.
+/// Factorization itself remains synchronous under the existing dense limits.
+pub fn assemble_circuit_with_couplings_polled(
+    graph: &CircuitGraph,
+    mutual: &[MutualInductance],
+    blocks: &[ConductanceBlock],
     mut poll: impl FnMut() -> Result<(), CircuitError>,
 ) -> Result<CircuitDae, CircuitError> {
     poll()?;
     conductance::admit_circuit(graph, blocks)?;
-    assemble_circuit_parts(graph, &[], blocks, &mut poll)
+    let windings = graph
+        .branches
+        .iter()
+        .filter(|(_, _, branch)| matches!(branch, Branch::Inductor { .. }))
+        .count();
+    if mutual.len() > windings * windings.saturating_sub(1) / 2 {
+        return Err(CircuitError::Invalid {
+            what: "more magnetic links than distinct winding pairs",
+        });
+    }
+    assemble_circuit_parts(graph, mutual, blocks, &mut poll)
 }
 
 #[allow(clippy::too_many_lines)] // one original Kirchhoff assembly pass
@@ -351,7 +392,10 @@ fn assemble_circuit_parts(
     let inverse_inductance = if mutual.is_empty() {
         None
     } else {
-        Some(coupled_inverse_inductance(graph, mutual, n_l)?)
+        poll()?;
+        let inverse = coupled_inverse_inductance(graph, mutual, n_l)?;
+        poll()?;
+        Some(inverse)
     };
     let n_c = graph
         .branches
@@ -431,7 +475,9 @@ fn assemble_circuit_parts(
                 let cond = 1.0 / ohms;
                 // A self-loop has zero incidence and zero voltage drop. It
                 // must neither dissipate power nor anchor a floating node.
-                if a == b { continue; }
+                if a == b {
+                    continue;
+                }
                 let stamp = |r: &mut Vec<f64>, i: Option<usize>, k: Option<usize>| {
                     if let (Some(i), Some(k)) = (i, k) {
                         r[i * n + k] += if i == k { cond } else { -cond };
@@ -867,17 +913,22 @@ mod circuit_tests {
     fn same_node_resistors_cannot_change_circuit_power_or_anchor_a_node() {
         let original = CircuitGraph {
             node_count: 2,
-            branches: vec![(1, 0, Branch::VoltageSource { port: 0 }),
-                (1, 0, Branch::Resistor { ohms: 10.0 })],
+            branches: vec![
+                (1, 0, Branch::VoltageSource { port: 0 }),
+                (1, 0, Branch::Resistor { ohms: 10.0 }),
+            ],
             transformers: vec![],
         };
         let mut with_loops = original.clone();
-        with_loops.branches.extend([(1, 1, Branch::Resistor { ohms: 0.01 }),
-            (0, 0, Branch::Resistor { ohms: 1.0 })]);
+        with_loops.branches.extend([
+            (1, 1, Branch::Resistor { ohms: 0.01 }),
+            (0, 0, Branch::Resistor { ohms: 1.0 }),
+        ]);
         let baseline = assemble_circuit(&original).unwrap();
         let looped = assemble_circuit(&with_loops).unwrap();
-        let initial = baseline.consistent_initial_state(
-            &vec![0.0; baseline.system.state_dim()], &[3.0]).unwrap();
+        let initial = baseline
+            .consistent_initial_state(&vec![0.0; baseline.system.state_dim()], &[3.0])
+            .unwrap();
         let (expected, _) = baseline.step_audited(&initial, &[3.0], 0.25).unwrap();
         let (actual, defect) = looped.step_audited(&initial, &[3.0], 0.25).unwrap();
         assert_eq!(actual.x, expected.x);
@@ -887,9 +938,13 @@ mod circuit_tests {
         assert!((actual.supplied - 0.225).abs() < 1e-14);
         assert!(defect < 1e-14);
         with_loops.node_count = 3;
-        with_loops.branches.push((2, 2, Branch::Resistor { ohms: 1.0 }));
-        assert!(matches!(assemble_circuit(&with_loops),
-            Err(CircuitError::FloatingNode { node: 2 })));
+        with_loops
+            .branches
+            .push((2, 2, Branch::Resistor { ohms: 1.0 }));
+        assert!(matches!(
+            assemble_circuit(&with_loops),
+            Err(CircuitError::FloatingNode { node: 2 })
+        ));
     }
 
     fn series_rlc(r_ohm: f64, l_h: f64, c_f: f64) -> CircuitGraph {

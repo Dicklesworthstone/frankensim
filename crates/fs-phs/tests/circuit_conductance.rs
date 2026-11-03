@@ -3,8 +3,9 @@ use fs_phs::circuit::conductance::{
     ConductanceBlock, MAX_CONDUCTANCE_BLOCK_COORDINATES, MAX_CONDUCTANCE_BLOCKS,
 };
 use fs_phs::circuit::{
-    Branch, CircuitError, CircuitGraph, assemble_circuit_with_conductance,
-    assemble_circuit_with_conductance_polled,
+    Branch, CircuitError, CircuitGraph, MutualInductance, assemble_circuit_with_conductance,
+    assemble_circuit_with_conductance_polled, assemble_circuit_with_couplings,
+    assemble_circuit_with_couplings_polled,
 };
 
 fn close(actual: f64, expected: f64) {
@@ -114,6 +115,96 @@ fn finite_inductor_and_both_capacitors_use_one_original_kirchhoff_step() {
     close(step.delta_h, -heat);
     close(block.power_w(&[0.0, v1, v2]).unwrap() * dt, heat);
     close(defect, 0.0);
+}
+
+#[test]
+fn coupled_windings_drive_the_full_field_load_with_one_power_balance() {
+    let block = ConductanceBlock::try_new(vec![0, 1, 2], vec![2.0, 1.0, 1.0, 3.0]).unwrap();
+    for orientation in [1.0, -1.0] {
+        let graph = CircuitGraph {
+            node_count: 3,
+            branches: vec![
+                (1, 0, Branch::VoltageSource { port: 0 }),
+                (1, 0, Branch::Inductor { henries: 2.0 }),
+                if orientation > 0.0 {
+                    (2, 0, Branch::Inductor { henries: 1.0 })
+                } else {
+                    (0, 2, Branch::Inductor { henries: 1.0 })
+                },
+            ],
+            transformers: vec![],
+        };
+        let links = [MutualInductance {
+            branches: (1, 2),
+            henries: orientation * 0.5,
+        }];
+        let dae =
+            assemble_circuit_with_couplings(&graph, &links, std::slice::from_ref(&block)).unwrap();
+        let mut state = dae
+            .consistent_initial_state(&vec![0.0; dae.system.state_dim()], &[1.0])
+            .unwrap();
+        let (mut flux1, mut i2, mut supplied, mut heat) = (0.0, 0.0, 0.0, 0.0);
+        let dt = 0.2;
+        for _ in 0..5 {
+            // Independent midpoint elimination: V1=1, L=[[2,.5],[.5,1]],
+            // i2+V1+3V2=0. The secondary leakage L2-M²/L1 is 7/8 H.
+            let leakage = 0.875;
+            let h = dt / 2.0;
+            let mid_i2 = (i2 - h * (1.0 / 3.0 + 0.25) / leakage) / (1.0 + h / (3.0 * leakage));
+            let v2 = -(mid_i2 + 1.0) / 3.0;
+            let mid_i1 = (flux1 + h - 0.5 * mid_i2) / 2.0;
+            let expected_heat = dt * (2.0 + 2.0 * v2 + 3.0 * v2 * v2);
+            let expected_supply = dt * (mid_i1 + 2.0 + v2);
+            let (step, defect) = dae.step_audited(&state, &[1.0], dt).unwrap();
+            flux1 += dt;
+            i2 = 2.0 * mid_i2 - i2;
+            let i1 = (flux1 - 0.5 * i2) / 2.0;
+            let currents = dae.inductor_currents(&step.x).unwrap();
+            close(currents[0], i1);
+            close(currents[1], orientation * i2);
+            close(step.dissipated, expected_heat);
+            close(step.supplied, expected_supply);
+            close(block.power_w(&[0.0, 1.0, v2]).unwrap() * dt, expected_heat);
+            close(defect, 0.0);
+            supplied += step.supplied;
+            heat += step.dissipated;
+            // Full independently reconstructed magnetic energy, including M.
+            let stored = 0.5 * (2.0 * i1 * i1 + i1 * i2 + i2 * i2);
+            close(dae.system.hamiltonian(&step.x), stored);
+            close(supplied, heat + stored);
+            state = step.x;
+        }
+        let mut refused = links;
+        refused[0].henries = 2.0;
+        assert!(
+            assemble_circuit_with_couplings(&graph, &refused, std::slice::from_ref(&block))
+                .is_err()
+        );
+        assert!(
+            assemble_circuit_with_couplings(&graph, &[links[0]; 2], std::slice::from_ref(&block))
+                .is_err()
+        );
+        let mut calls = 0;
+        assert!(
+            assemble_circuit_with_couplings_polled(
+                &graph,
+                &links,
+                std::slice::from_ref(&block),
+                || {
+                    calls += 1;
+                    if calls == 3 {
+                        Err(CircuitError::Invalid {
+                            what: "cancelled magnetic preparation",
+                        })
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(calls, 3);
+    }
 }
 
 #[test]

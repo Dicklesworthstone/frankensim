@@ -23,6 +23,15 @@ constraints, source ports, consistent initialization and native time step remain
 the only circuit owners. An electrode with no lumped branch can therefore solve
 as an ordinary zero-net-current algebraic terminal.
 
+`assemble_circuit_with_couplings` admits signed mutual-inductance links and
+conductance blocks together. It retains the complete positive-definite L and
+each complete G in the original descriptor: magnetic induction changes the
+currents driving spatial Joule loss, while flux storage includes every mutual
+term. Its polled form checks cancellation around magnetic preparation as well
+as the existing field stamps. Both source work and local field heat still come
+from their constitutive laws. Fixed L is required; this entry point does not
+invent thermal or mechanical work for changing magnetic parameters.
+
 Original reciprocal coefficients, including either mutual sign, are retained.
 The existing resistance-factor owner admits passivity and supplies independent
 positive-square `power_w`; heat is never inferred from storage loss or a ledger
@@ -44,6 +53,9 @@ existing admission behavior.
 mutual coefficients, one shared finite C/L step, a field-only floating electrode,
 arbitrary reference mapping, independent terminal power, passive nullspaces,
 separated physical scales, and malformed/cancelled/over-capacity refusals.
+The combined-winding regression independently reconstructs leakage dynamics,
+full magnetic storage, terminal power and source work over multiple intervals,
+including reversed winding polarity and refused singular/invalid couplings.
 
 ### Continuous harmonic response of the complete linear system
 
