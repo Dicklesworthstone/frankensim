@@ -12,6 +12,8 @@ pub mod conduction;
 pub mod multiple;
 /// Chemistry, optional sensible heat and phase transfer on one native clock.
 pub mod reactive;
+/// Original finite-gas plumbing feeding native phase, radiation and conduction.
+pub mod transport;
 
 use fs_exec::CancelGate;
 use fs_lbm::material::free_surface::enthalpy::{
