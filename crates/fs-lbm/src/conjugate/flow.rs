@@ -34,6 +34,10 @@ pub use density_transport::{
     MaterialAdvectionStep, MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport,
     MaterialMomentumStep, MaterialVolumeSource,
 };
+mod material_momentum;
+pub use material_momentum::{
+    MaterialMomentumAdvance, MaterialMomentumAdvanceControls, MaterialMomentumAdvanceInput,
+};
 mod phase_volume;
 pub use phase_volume::{
     CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,

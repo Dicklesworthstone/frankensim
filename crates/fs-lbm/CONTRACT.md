@@ -8569,3 +8569,40 @@ noncaloric energy and momentum paths; and stale-limiter rejection even with an
 exact affine caloric law. Rust parsing, compilation and native numerical
 execution were unavailable in the delivery environment; source/API review
 does not establish those executed results.
+
+## Evolving material momentum on one native pressure and transport step
+
+`FlowField::advance_material_momentum` composes the existing current-mass
+reconstruction, native body-force/pressure impulse feedback and conservative
+material transport. Each original injection/extraction rate supplies its own
+signed volume target. The same pressure-corrected field produces the accepted
+mass routes, and those immutable routes transport the mechanically updated
+extensive momentum with zero additional impulse. There is one pressure solve;
+momentum creates neither another mass solve nor an independent material flux.
+
+The returned cell mass, specific enthalpy and extensive momentum are the
+endpoint inventory; extensive enthalpy is mass times specific enthalpy. The
+retained `transport.projection.field` is explicitly the force/project transport
+stage, not a reconstruction of endpoint P/M. Every subsequent call reconstructs
+interior/free faces from the supplied current mass and momentum. The receiver
+supplies held boundary fluxes only, so stale transport velocities cannot replace
+the authoritative endpoint momentum.
+
+Opposed volume sources retain their gross mass, enthalpy and momentum exchanges
+even when their net volume is zero. Every incoming material route requires its
+authored velocity; extraction and boundary outflow use the actual donor.
+Mechanics and material must share identical original projection controls,
+including duration and acceptance gates. Original work limits, local/global
+balance checks and cancellation remain in force. No stage returns a candidate
+until mass, enthalpy, momentum and every original stage gate have accepted; all
+input inventories remain unchanged on refusal.
+
+This is a first-order force/pressure/advection split. It adds no viscosity,
+thermal expansion, EOS or phase mobility and does not claim a complete
+Navier-Stokes integrator. Native numerical losses remain separate from physical
+enthalpy. Three authored regression sources cover independently calculated
+opposed-source inventories and one pressure impulse, repeated evolution from
+endpoint momentum with deliberately unrelated receiver velocities, and
+mismatched clocks/gates, missing inflow velocity, native budgets, cancellation
+and exact retry. Independent arithmetic checks were evaluated separately;
+Rust compilation, rustfmt and native test execution were unavailable.
