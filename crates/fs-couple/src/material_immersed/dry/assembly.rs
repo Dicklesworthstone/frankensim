@@ -6,6 +6,8 @@ use fs_lbm::d3q19::{DryBodiesExchange3, DryBodyCouplingConfig3};
 
 mod planes;
 pub use planes::{PlaneFilmSi, ResolvedImmersedPlanes};
+mod surfaces;
+pub use surfaces::{MaterialFilmSurfaceSi, ResolvedImmersedSurfaces};
 
 struct StepLoads<const N: usize> {
     next: u64,

@@ -304,23 +304,15 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
         let mut bodies = Vec::with_capacity(N);
         for (material, state) in inertias.iter().zip(initial) {
             poll(gate)?;
-            let mut tensor = material.inertia_com();
-            for entry in &mut tensor.m {
-                *entry = finite(*entry / inertia_unit)?;
-            }
-            let inertia = InertiaTensor3::new(tensor)
-                .map_err(|source| Error::Native(PartialSaturationError3::Motion { source }))?;
-            bodies.push(MovingPartialSaturationBody3 {
-                center: convert(state.center_m, 1.0 / dx)?,
-                orientation: state.orientation,
-                mass: positive(material.mass() / mass_unit)?,
-                inertia,
-                velocity: convert(state.velocity_m_s, dt / dx)?,
-                angular_momentum_body: vector(convert(
-                    state.angular_momentum_body_kg_m2_s,
-                    1.0 / angular_impulse_unit,
-                )?),
-            });
+            bodies.push(body_to_lattice(
+                material,
+                state,
+                dx,
+                dt,
+                mass_unit,
+                inertia_unit,
+                angular_impulse_unit,
+            )?);
         }
         let grid = BoundaryGrid3::new(
             domain.cells[0],
@@ -439,18 +431,12 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
             .bodies
             .get(index)
             .ok_or(Error::Invalid("body index out of range"))?;
-        Ok(BodyStateSi {
-            center_m: convert(body.center, self.scaling.cell_size_m())?,
-            orientation: body.orientation,
-            velocity_m_s: convert(
-                body.velocity,
-                self.scaling.cell_size_m() / self.scaling.timestep_s(),
-            )?,
-            angular_momentum_body_kg_m2_s: convert(
-                array(body.angular_momentum_body),
-                self.angular_impulse_unit,
-            )?,
-        })
+        body_to_si(
+            body,
+            self.scaling.cell_size_m(),
+            self.scaling.timestep_s(),
+            self.angular_impulse_unit,
+        )
     }
 
     /// Advance one physical dt with held WORLD forces [N] and center couples
@@ -535,6 +521,52 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
     pub fn energy_j(&self, lattice: f64) -> Result<f64, Error> {
         finite(lattice * self.energy_unit)
     }
+}
+
+// One full-inertia conversion for sampled solids and finite film carriers.
+fn body_to_lattice(
+    material: &fs_mbd::articulated::SpatialInertia,
+    state: BodyStateSi,
+    dx: f64,
+    dt: f64,
+    mass_unit: f64,
+    inertia_unit: f64,
+    angular_impulse_unit: f64,
+) -> Result<MovingPartialSaturationBody3, Error> {
+    let mut tensor = material.inertia_com();
+    for entry in &mut tensor.m {
+        *entry = finite(*entry / inertia_unit)?;
+    }
+    let inertia = InertiaTensor3::new(tensor)
+        .map_err(|source| Error::Native(PartialSaturationError3::Motion { source }))?;
+    Ok(MovingPartialSaturationBody3 {
+        center: convert(state.center_m, 1.0 / dx)?,
+        orientation: state.orientation,
+        mass: positive(material.mass() / mass_unit)?,
+        inertia,
+        velocity: convert(state.velocity_m_s, dt / dx)?,
+        angular_momentum_body: vector(convert(
+            state.angular_momentum_body_kg_m2_s,
+            1.0 / angular_impulse_unit,
+        )?),
+    })
+}
+
+fn body_to_si(
+    body: &MovingPartialSaturationBody3,
+    dx: f64,
+    dt: f64,
+    angular_impulse_unit: f64,
+) -> Result<BodyStateSi, Error> {
+    Ok(BodyStateSi {
+        center_m: convert(body.center, dx)?,
+        orientation: body.orientation,
+        velocity_m_s: convert(body.velocity, dx / dt)?,
+        angular_momentum_body_kg_m2_s: convert(
+            array(body.angular_momentum_body),
+            angular_impulse_unit,
+        )?,
+    })
 }
 
 fn positive(x: f64) -> Result<f64, Error> {

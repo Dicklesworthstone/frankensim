@@ -20,7 +20,10 @@ use super::*;
 
 mod assembly;
 /// Source-backed physical dry assemblies, including simultaneous sphere films.
-pub use assembly::{PlaneFilmSi, ResolvedImmersedBodies, ResolvedImmersedPlanes};
+pub use assembly::{
+    MaterialFilmSurfaceSi, PlaneFilmSi, ResolvedImmersedBodies, ResolvedImmersedPlanes,
+    ResolvedImmersedSurfaces,
+};
 
 /// ONE ordinary sphere/ellipsoid on the existing source-scaled D3Q19 owner.
 /// Its private native container is reused for units/source identity only; this

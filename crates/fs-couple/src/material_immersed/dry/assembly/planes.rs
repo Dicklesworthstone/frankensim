@@ -31,7 +31,7 @@ pub struct PlaneFilmSi {
 }
 
 impl PlaneFilmSi {
-    fn lattice<F: FluidTransport + ?Sized>(
+    pub(super) fn lattice<F: FluidTransport + ?Sized>(
         self,
         scaling: &MaterialScaling<'_, F>,
     ) -> Result<LubricationPlane3, Error> {

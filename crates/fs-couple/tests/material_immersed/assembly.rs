@@ -7,6 +7,8 @@ use fs_lbm::d3q19::{DryBodiesExchange3, DryBodyCouplingConfig3};
 
 #[path = "assembly/planes.rs"]
 mod planes;
+#[path = "assembly/surfaces.rs"]
+mod surfaces;
 
 type Model<'a, const N: usize> = ResolvedImmersedBodies<'a, ResolvedLiquidState, N>;
 

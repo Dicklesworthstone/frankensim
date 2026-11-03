@@ -23496,6 +23496,54 @@ statically reviewed; pinned formatting passes. The public target remains
 uncompiled and unexecuted because the constellation preflight finds missing
 siblings and Cargo fails on asupersync before Rust compilation.
 
+### Material-owned moving finite film surfaces
+
+`ResolvedImmersedBodies::with_moving_surfaces` binds mixed
+`MaterialFilmSurfaceSi::{Prescribed, Finite}` descriptors to the original dry
+sphere/fluid assembly. `ResolvedImmersedSurfaces` retains the source descriptors,
+material identity, complete source inertia, fluid snapshot, accepted state and
+clock. Finite carriers use the same shared SI/lattice full-inertia conversion
+as sampled bodies; body-frame points and normals move with the original native
+rigid pose. Prescribed descriptors include the existing axial-spin law.
+
+One original native dry-body correction and simultaneous resistance solve
+includes every sphere and surface. Finite recoil influences all other film
+responses and the streamed fluid candidate during each nonlinear probe.
+Accepted surface state advances once with the spheres and fluid; failed
+probes and refused steps preserve every accepted state and the step count.
+All SI load conversions and the next clock value are checked before native
+publication. Complete authored surface loads are world center forces/couples;
+prescribed slots require exact zeros and receive no extra imposed impulse.
+
+Read-only observers expose accepted finite-carrier SI states, actual world
+plane geometry and native local point velocity. The assembly's original mass,
+impulse, angular-impulse and energy converters interpret the unchanged native
+report. Prescribed actuator work, finite-carrier kinetic storage, native
+free-rotation energy defect and isothermal film loss remain distinct. The
+sphere/exterior-fluid account is an open subsystem; its surface reaction must
+not be mistaken for a second external load on a finite carrier.
+
+The wrapper delegates source-consistent viscosity refresh, initial physical
+flow and held uniform/spatial fluid-force rebinding to the original assembly.
+No independent surface viscosity or mutable assembly escape is introduced.
+Density changes keep the original conservative-transfer refusal. Empty and
+prescribed-only inputs retain the original admitted physical trajectories.
+
+Each finite descriptor is an independent local planar missing-film carrier.
+Source inertia does not certify an infinite plane or its geometric extent.
+The caller owns matching resolved-wall geometry and the applicability of the
+planar approximation. No sampled carrier interior, buoyancy, inferred weight,
+shared multi-face carrier, contact, exact swept collision detection, moving-wall
+GCL or thermal destination is supplied. Complete finite-carrier external loads
+must therefore be authored explicitly; native admission and dry budgets apply.
+
+Four public regression groups cover source-derived full inertia and SI/local
+velocity, repeated mixed-system momentum/work and accepted motion, exact legacy
+continuation, and live coefficient refresh with refusal/cancellation/retry.
+They were authored but remain uncompiled and unexecuted: runtime compilation
+was killed before the changed native crate, and the execution environment
+subsequently became unavailable.
+
 ### Physical initial flow and external fluid loads on material bodies
 
 `RetainedFluidBodies`, `ResolvedImmersedBody`,
