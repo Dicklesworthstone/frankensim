@@ -1,0 +1,72 @@
+frankensim.matdb-source.v1
+observation	identity	Malachite Cu2(CO3)(OH)2, pure solid reference	USGS Bulletin 2131 printed page 25, malachite row	The source identifies malachite with formula weight 221.116 g/mol. Preserve this printed value; independently rounded formula weights for other participants can leave a small mass residual even when atom and charge counts conserve exactly. This is a pure malachite reference, not azurite, a mixed copper-carbonate ore, moisture-bearing feed or a producer specimen.
+observation	reference-values	Malachite standard reference quantities	USGS Bulletin 2131 printed page 25, malachite row	Retain standard formation enthalpy -1054.0 kJ/mol and standard molar entropy 166.3 J/(mol K) at 298.15 K and 100000 Pa. The row cites Kiseleva and others (1992), reference 241, for entropy and Richardson and Brown (1974), reference 339, for formation quantities. No heat-capacity curve or temperature extrapolation is supplied by this pack.
+observation	gibbs-reference	Literal malachite standard formation Gibbs energy	USGS Bulletin 2131 printed page 25, malachite row	The separate Gibbs column prints -890.2 kJ/mol with a reported uncertainty magnitude 2.2 kJ/mol. Retain this direct tabulation under the USGS elemental-reference convention. Formation Gibbs energy is not formation enthalpy minus temperature times absolute species entropy alone. The printed magnitude does not supply a probability distribution, covariance or guaranteed bound; uncertainty remains Unstated.
+observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 25	The malachite row reports magnitudes 2.1 kJ/mol for formation enthalpy and 2.5 J/(mol K) for entropy. Page 3 describes the calorimetric uncertainty convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain these magnitudes; all claims retain Unstated confidence semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.
+observation	scope	USGS elemental reference convention and mineral identity	USGS Bulletin 2131 printed pages 1 and 3	The source uses 100000 Pa, stable condensed elemental forms and ideal elemental gases at the stated temperature. Its elemental data combine JANAF, CODATA and separate USGS calcium measurements. The required source-elemental-reference-usgs-b2131 and source-phase-malachite selectors preserve this evaluation and mineral identity. No leaching rate, particle liberation, accessible copper fraction, finite-concentration activity model, equilibrium conversion or specimen-specific acid demand is supplied.
+scalar	molar-mass	identity,scope	mass	221.116	g/mol	tabulated
+scalar	formation-enthalpy	identity,reference-values,reported-uncertainty,scope	hf	-1054.0	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,gibbs-reference,scope	gf	-890.2	kJ/mol	tabulated
+scalar	standard-entropy	identity,reference-values,reported-uncertainty,scope	s0	166.3	J/mol/K	tabulated
+scalar	formation-uncertainty	reported-uncertainty,scope	hf_uncertainty	2.1	kJ/mol	tabulated
+scalar	entropy-uncertainty	reported-uncertainty,scope	s_uncertainty	2.5	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	formation-uncertainty	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	formation-uncertainty	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	formation-uncertainty	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	formation-uncertainty	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	formation-uncertainty	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	formation-uncertainty	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	molar-mass	polymorph	1	1	1
+validity	formation-enthalpy	polymorph	1	1	1
+validity	formation-gibbs-energy	polymorph	1	1	1
+validity	standard-entropy	polymorph	1	1	1
+validity	formation-uncertainty	polymorph	1	1	1
+validity	entropy-uncertainty	polymorph	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	formation-uncertainty	pure	1	1	1
+validity	entropy-uncertainty	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	formation-uncertainty	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	formation-uncertainty	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1

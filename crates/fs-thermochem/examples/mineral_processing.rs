@@ -56,7 +56,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 20] = [
+const REACTIONS: [&str; 22] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
@@ -76,6 +76,8 @@ const REACTIONS: [&str; 20] = [
     "sulfur-trioxide-hydration",
     "pyrite-to-acid",
     "calcite-bicarbonate-neutralization",
+    "calcite-carbonic-acid-neutralization",
+    "malachite-carbonic-acid-leach",
     "dolomite-bicarbonate-neutralization",
 ];
 const USAGE: &str = "usage: mineral_processing [--reaction NAME] [--equilibrium] [--gibbs] [--activity 'SPECIES=VALUE']... [--] PACK... REACTED_SPECIES_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
@@ -444,6 +446,50 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
             ],
             equation: "CaCO3(calcite) + H+(aq) -> Ca[2+](aq) + HCO3[-](aq), bicarbonate endpoint",
         },
+        "calcite-carbonic-acid-neutralization" => ReactionCase {
+            reaction: MineralReaction::CalciteCarbonicAcidNeutralization,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "calcite-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "calcium-ion-aqueous-usgs-b2131",
+                "carbonic-acid-aqueous-usgs-b2131",
+            ],
+            species: &["CaCO3(s)", "H+(aq)", "Ca[2+](aq)", "H2CO3(aq)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "CaCO3(calcite) + 2 H+(aq) -> Ca[2+](aq) + H2CO3(aq), source-defined neutral carbonic endpoint",
+        },
+        "malachite-carbonic-acid-leach" => ReactionCase {
+            reaction: MineralReaction::MalachiteCarbonicAcidLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "malachite-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "copper-ii-ion-aqueous-usgs-b2131",
+                "carbonic-acid-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+            ],
+            species: &[
+                "Cu2CO3(OH)2(s)",
+                "H+(aq)",
+                "Cu[2+](aq)",
+                "H2CO3(aq)",
+                "H2O(l)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+            ],
+            equation: "Cu2CO3(OH)2(malachite) + 4 H+(aq) -> 2 Cu[2+](aq) + H2CO3(aq) + 2 H2O(l), source-defined neutral carbonic endpoint",
+        },
         "dolomite-bicarbonate-neutralization" => ReactionCase {
             reaction: MineralReaction::DolomiteBicarbonateNeutralization,
             reference: USGS_REFERENCE,
@@ -517,9 +563,14 @@ fn reference_point(
     ] {
         point = point.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)?;
     }
-    // Aqueous ions use the source's hypothetical unit-activity, infinite-
-    // dilution standard state. They are not pure isolated-ion solutions.
-    let state_axes: &[&str] = if phase_axis == "source-phase-aqueous" {
+    // The neutral USGS carbonic component retains its own formula convention;
+    // it is neither an individual ion nor a pure molecular H2CO3 liquid.
+    let state_axes: &[&str] = if pack_id == "carbonic-acid-aqueous-usgs-b2131" {
+        &[
+            "source-aqueous-unit-activity-infinite-dilution",
+            "source-carbonic-reference-usgs-b2131",
+        ]
+    } else if phase_axis == "source-phase-aqueous" {
         &[
             "source-individual-ion",
             "source-aqueous-unit-activity-infinite-dilution",
@@ -530,6 +581,13 @@ fn reference_point(
     };
     for axis in state_axes {
         point = point.with_quantity(*axis, QuantitySpec::dimensional(Dims::NONE), 1.0)?;
+    }
+    if pack_id == "malachite-solid-usgs-b2131-thermochemistry" {
+        point = point.with_quantity(
+            "source-phase-malachite",
+            QuantitySpec::dimensional(Dims::NONE),
+            1.0,
+        )?;
     }
     if pack_id == "copper-ii-oxide-solid-usgs-b2131-thermochemistry" {
         point = point.with_quantity(

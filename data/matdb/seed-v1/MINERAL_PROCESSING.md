@@ -28,6 +28,14 @@ endpoints connect ferric hydrolysis, proton generation and hydrated-lime
 neutralization. The processing CLI runs each endpoint from the actual compiled
 packs, including source-matched enthalpy/entropy equilibrium diagnostics.
 
+## Copper-carbonate leaching and acidic gangue demand
+
+The [carbonate-leaching guide](MINING_CARBONATE_LEACHING.md) completes malachite
+leaching and calcite's two-proton carbonic endpoint with compatible USGS
+material packs, actual mass and acid accounting, reaction heat, and separate
+direct/caloric Gibbs calculations. The carbonic component retains the source's
+formal aqueous-CO2-plus-water basis and requires its explicit reference selector.
+
 ## Ore and gangue constituents
 
 The six `*-handbook-mineralogy-reference` profiles retain the Mineralogical
@@ -395,11 +403,13 @@ the availability bound does not predict reaction progress or a commercial dose.
 | --- | --- |
 | `LimeHydration` | One mole water per mole CaO, forming solid Ca(OH)2 |
 | `CalciteAcidNeutralization` | Two mol H+ per mol calcite, dissolved CO2 endpoint |
+| `CalciteCarbonicAcidNeutralization` | Two mol H+ per mol calcite, source-defined neutral carbonic component endpoint |
 | `DolomiteAcidNeutralization` | Four mol H+ per mol dolomite, dissolved CO2 endpoint |
 | `CalciteBicarbonateNeutralization` | One mol H+ per mol calcite, retained bicarbonate endpoint |
 | `DolomiteBicarbonateNeutralization` | Two mol H+ per mol dolomite, retained bicarbonate endpoint |
 | `HydratedLimeNeutralization` | Two mol H+ consumed and two mol water formed per mol Ca(OH)2 |
 | `MalachiteAcidLeach` | Four mol H+ per mol malachite, forming two mol dissolved Cu(II) |
+| `MalachiteCarbonicAcidLeach` | Four mol H+ per mol malachite, two mol Cu2+, one formal H2CO3 component and two explicit waters |
 | `GoldCyanidation` | Two mol cyanide and 0.25 mol oxygen per mol gold, net ionic Elsner balance |
 | `PyriteOxidationFerrous` | 3.5 mol O2 consumed and 2 mol H+ generated per mol pyrite |
 | `PyriteOxidationFerricHydroxide` | 3.75 mol O2 consumed and 4 mol H+ generated per mol pyrite |

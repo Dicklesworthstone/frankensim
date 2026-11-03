@@ -1,0 +1,73 @@
+frankensim.matdb-source.v1
+observation	identity	USGS neutral carbonic reference on an H2CO3 formula basis	USGS Bulletin 2131 printed page 15, H2CO3 (un-ionized), STD. STATE m=1 row	Retain the source formula H2CO3 and formula weight 62.025 g/mol as the formal component basis. The row cites Wagman and others (1982), reference 419; the NBS tables explicitly identify their H2CO3 entry as equivalent to aqueous CO2 plus liquid water. This is not an independently resolved hydrated molecular-H2CO3 species, a pure liquid acid, bicarbonate or a CO2(aq) property pack. The required source-carbonic-reference-usgs-b2131 selector binds every claim to the USGS evaluation on this component basis.
+observation	reference-values	Source-defined H2CO3 aqueous reference enthalpy and entropy	USGS Bulletin 2131 printed page 15, H2CO3 (un-ionized) row	Retain standard formation enthalpy -699.7 kJ/mol and standard molar entropy 184.7 J/(mol K) at 298.15 K and 100000 Pa. The entropy is for the neutral source-defined component and is not the conventional individual-ion entropy property. Retain the selected USGS values and precision; alternative compilations' values or resolved molecular-species values are not substituted.
+observation	gibbs-reference	Literal source-defined H2CO3 standard formation Gibbs energy	USGS Bulletin 2131 printed page 15, H2CO3 (un-ionized) row	The separate Gibbs column prints -623.2 kJ/mol with a reported uncertainty magnitude 0.1 kJ/mol. Retain this direct tabulation under the USGS elemental and carbonic-component reference conventions. Formation Gibbs energy is not formation enthalpy minus temperature times species entropy alone. The reported magnitude does not supply a probability distribution, covariance or guaranteed bound; uncertainty remains Unstated.
+observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 15	The row reports magnitudes 0.1 kJ/mol for formation enthalpy and 0.9 J/(mol K) for entropy. Page 3 describes the calorimetric uncertainty convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain these magnitudes; all claims retain Unstated confidence semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.
+observation	carbonic-convention	NBS H2CO3 represents an aqueous-CO2-plus-water component basis	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv, H2CO3 row; DOI https://doi.org/10.18434/M32124	The official NIST dataset of the NBS tables names the aqueous H2CO3 entry equivalent to CO2(ao) + H2O(l). This supplies the component convention for the NBS source cited by Bulletin 2131; the NBS dataset's numerical values are not substituted for the selected USGS evaluation. Consume the declared formal H2CO3 component with matching stoichiometric water bookkeeping: it includes one water formula unit relative to a CO2 basis. No independently resolved molecular H2CO3 population, hydration fraction, or hydration equilibrium is supplied. Do not reinterpret these values as pure molecular H2CO3, relabel them as CO2(aq) formation values, or combine them with an independent hydration reaction without a justified basis conversion.
+observation	scope	Hypothetical unit-activity aqueous reference, not a concentration model	USGS Bulletin 2131 printed pages iv, 1 and 3	The source defines m=1 as a hypothetical ideal aqueous standard state at unit activity and infinite dilution, not a finite-concentration 1 mol/kg solution. Pressure is 100000 Pa. Every claim is restricted to 298.15 K and requires both the USGS elemental-reference and carbonic-component selectors. There is no pure-species or individual-ion claim. No temperature extrapolation, activity coefficient, hydration equilibrium, Henry constant, gas transfer, pH, speciation, or reaction kinetics is supplied. A concentration or activity of independently resolved molecular H2CO3 cannot be substituted for the source-defined component activity.
+scalar	molar-mass	identity,carbonic-convention,scope	mass	62.025	g/mol	tabulated
+scalar	formation-enthalpy	identity,reference-values,reported-uncertainty,carbonic-convention,scope	hf	-699.7	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,gibbs-reference,carbonic-convention,scope	gf	-623.2	kJ/mol	tabulated
+scalar	standard-entropy	identity,reference-values,reported-uncertainty,carbonic-convention,scope	s0	184.7	J/mol/K	tabulated
+scalar	formation-uncertainty	reported-uncertainty,carbonic-convention,scope	hf_uncertainty	0.1	kJ/mol	tabulated
+scalar	entropy-uncertainty	reported-uncertainty,carbonic-convention,scope	s_uncertainty	0.9	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	formation-uncertainty	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	formation-uncertainty	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	formation-uncertainty	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	formation-uncertainty	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	formation-uncertainty	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	formation-uncertainty	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	standard-entropy	aqueous	1	1	1
+validity	formation-uncertainty	aqueous	1	1	1
+validity	entropy-uncertainty	aqueous	1	1	1
+validity	molar-mass	carbonic	1	1	1
+validity	formation-enthalpy	carbonic	1	1	1
+validity	formation-gibbs-energy	carbonic	1	1	1
+validity	standard-entropy	carbonic	1	1	1
+validity	formation-uncertainty	carbonic	1	1	1
+validity	entropy-uncertainty	carbonic	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	formation-uncertainty	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	formation-uncertainty	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1
