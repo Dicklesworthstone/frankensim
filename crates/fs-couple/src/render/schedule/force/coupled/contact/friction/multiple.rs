@@ -843,7 +843,23 @@ impl MultiFrictionModalSystem {
             return self.coupled_stop_rescue(&a, &f, &normal, &lawrefs, drives, gate);
         }
         let seed = self.regimes.clone();
-        match active_set::solve_active_set(&a, &f, &normal, &lawrefs, dt, &seed, self.active_set_budget)? {
+        // The previous accepted step's branches, for the hysteresis rule of the
+        // rescue's last resort. A sliding port keeps its traction's direction.
+        // Any other port, and every port before the first accepted step, counts
+        // as stuck.
+        let previous: Vec<active_set::Branch> = (0..p)
+            .map(|i| match self.frame.ports.get(i) {
+                Some(port) if self.accepted && port.regime == ModalFrictionRegime::Sliding && port.traction_n > 0.0 => {
+                    active_set::Branch::SlidePos
+                }
+                Some(port) if self.accepted && port.regime == ModalFrictionRegime::Sliding && port.traction_n < 0.0 => {
+                    active_set::Branch::SlideNeg
+                }
+                _ => active_set::Branch::Stuck,
+            })
+            .collect();
+        match active_set::solve_active_set_with_hysteresis(&a, &f, &normal, &lawrefs, dt, &seed, &previous,
+            self.active_set_budget)? {
             active_set::Resolution::Solved(tractions, regimes) => {
                 poll(gate)?;
                 if let Some(stops) = &self.obstacles {

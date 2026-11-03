@@ -13,7 +13,21 @@
 //! bank in `normal_support_press` has three. The walk below never consults the
 //! ports' history: it starts at all-stuck and flips the worst violator, so the
 //! partition it keeps is a function of the step alone. At that step it keeps
-//! SS+, which continues the previous motion; nothing here makes that general.
+//! SS+, which continues the previous motion; the walk itself makes nothing of
+//! that general.
+//!
+//! When the walk exhausts on a plain line of at most five ports, the plain
+//! rescue has a last resort (`solve_active_set_with_hysteresis`, MagentaBadger
+//! 16900/17076). It solves every one of the 3^p partitions, with each sliding
+//! row written in its branch speed so the zero-slip kink is a boundary rather
+//! than a fold. It keeps only partitions that pass the walk's own residual gate
+//! and `consistent_at`, then takes the one nearest the previous step's
+//! branches. That choice is the hysteresis rule of McIntyre, Schumacher &
+//! Woodhouse (1983), not a tie-break: the contact keeps its state while that
+//! state exists, and when it ceases to exist the contact goes to the state that
+//! remains. A step the walk resolves never reaches this. A step with no
+//! consistent partition, or with a tie the rule cannot break, keeps the walk's
+//! refusal unchanged.
 //!
 //! This module solves a consistent partition directly. It runs ONLY after the
 //! Gauss-Seidel sweep has failed, so every step the sweep already converges is
@@ -514,6 +528,250 @@ pub(super) fn solve_active_set_condensed(
     budget: usize,
 ) -> Result<Resolution, ModalFrictionError> {
     walk_line(&Line::Condensed(line), ports, law, dt, budget)
+}
+
+/// Largest port count the last-resort enumeration runs on: 3^5 = 243 partitions.
+pub(super) const ENUMERATION_MAX_PORTS: usize = 5;
+
+/// The plain rescue: the walk, then its last resort. Only when the walk exhausts
+/// on at most [`ENUMERATION_MAX_PORTS`] ports does [`nearest_consistent_partition`]
+/// run. A step the walk resolves returns the walk's tractions bit for bit. A step
+/// with no consistent partition, or with a tie the hysteresis rule cannot break,
+/// returns the walk's own exhaustion, payload and all.
+///
+/// `previous` is each port's branch on the previous accepted step: a sliding
+/// port in the direction of its traction, and any other port stuck. Before the
+/// first accepted step, the bow is at rest and every port counts as stuck.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn solve_active_set_with_hysteresis(
+    a: &[f64],
+    f: &[f64],
+    normal: &[f64],
+    law: &[&FrictionLaw],
+    dt: f64,
+    seed: &[ModalFrictionRegime],
+    previous: &[Branch],
+    budget: usize,
+) -> Result<Resolution, ModalFrictionError> {
+    let walked = solve_active_set(a, f, normal, law, dt, seed, budget)?;
+    if matches!(walked, Resolution::Solved(..)) || f.len() > ENUMERATION_MAX_PORTS {
+        return Ok(walked);
+    }
+    Ok(match nearest_consistent_partition(a, f, normal, law, dt, previous)? {
+        Some((t, regimes)) => Resolution::Solved(t, regimes),
+        None => walked,
+    })
+}
+
+/// Every one of the 3^p partitions of a plain line, each solved once by
+/// [`solve_partition_by_speed`] and put to the walk's own acceptance: the
+/// residual on the actual slip within 1e-12, then [`consistent_at`]. Returns the
+/// consistent partition that differs from `previous` in the fewest ports. It
+/// returns `None` when no partition is consistent, or when two or more tie for
+/// nearest. It never returns a partition that failed either test.
+///
+/// The selection is the hysteresis rule of McIntyre, Schumacher & Woodhouse
+/// (1983, "On the oscillations of musical instruments", J. Acoust. Soc. Am.
+/// 74:1325), discussed in Woodhouse (2014, "The acoustics of the violin: a
+/// review", Rep. Prog. Phys. 77:115901) §2.2. Where the falling friction curve
+/// cuts the load line more than once, the contact keeps its current state while
+/// that state exists. When the state ceases to exist, the contact jumps to the
+/// state that remains. Among several consistent joint states, the one nearest
+/// the previous step's is that rule. The selection is physics, so a tie it
+/// cannot break refuses instead of picking one.
+///
+/// Each partition is solved from one start, so a second root on the same
+/// partition is not looked for.
+pub(super) fn nearest_consistent_partition(
+    a: &[f64],
+    f: &[f64],
+    normal: &[f64],
+    law: &[&FrictionLaw],
+    dt: f64,
+    previous: &[Branch],
+) -> Result<Option<(Vec<f64>, Vec<ModalFrictionRegime>)>, ModalFrictionError> {
+    let p = f.len();
+    if p > ENUMERATION_MAX_PORTS || previous.len() != p {
+        return Ok(None);
+    }
+    let branches = [Branch::Stuck, Branch::SlidePos, Branch::SlideNeg];
+    let count = (0..p).fold(1usize, |n, _| n * 3);
+    let mut nearest: Option<(usize, Vec<f64>, Vec<Branch>)> = None;
+    let mut tied = false;
+    for code in 0..count {
+        let mut rest = code;
+        let cells: Vec<Branch> = (0..p)
+            .map(|_| {
+                let b = branches[rest % 3];
+                rest /= 3;
+                b
+            })
+            .collect();
+        let Some(t) = solve_partition_by_speed(a, f, normal, law, dt, &cells, 100) else {
+            continue;
+        };
+        if !consistent_at(&slips(a, f, &t), normal, law, dt, &cells, &t)? {
+            continue;
+        }
+        let distance = cells.iter().zip(previous).filter(|(c, b)| c != b).count();
+        let best = nearest.as_ref().map(|(d, ..)| *d);
+        if best == Some(distance) {
+            tied = true;
+        } else if best.is_none_or(|d| distance < d) {
+            nearest = Some((distance, t, cells));
+            tied = false;
+        }
+    }
+    Ok(match nearest {
+        Some((_, t, cells)) if !tied => Some((t, cells.iter().map(|&b| regime_of(b)).collect())),
+        _ => None,
+    })
+}
+
+/// Lowest speed and number of doublings of the critical-speed scan: 1e-6 m/s to
+/// 1e-6 * 2^30, about 1.07e3 m/s.
+const CRITICAL_SCAN_MIN_M_S: f64 = 1e-6;
+const CRITICAL_SCAN_STEPS: usize = 31;
+
+/// The slip speed past which a sliding row's own residual is monotone. It comes
+/// from the law's own slope and the port's diagonal compliance `a_ii`, for any
+/// `FrictionLaw`.
+///
+/// On a sliding row the residual is `t_i - sign mu(|slip_i| / dt) N_i`. With the
+/// other tractions held, its derivative in `t_i` on the branch's side is
+/// `1 + mu'(v) N_i a_ii / dt`. Where the law falls faster than `-dt / (N_i a_ii)`
+/// the row is not monotone: it has a minimum, and a local maximum at the
+/// zero-slip kink. On a step where the stuck state has just ceased to exist,
+/// that maximum sits just below zero: it is the ghost of the near intersection.
+/// A Newton started on the near side cycles on it. That happened on the violin
+/// E5 onset step with the measured rosin row (WG2025 eq. 13, where
+/// `-mu' N a_ii / dt` is 1.72 at rest; the hyperbolic 0.8/0.4/0.2 control gives
+/// 0.078).
+///
+/// The scan doubles the speed from [`CRITICAL_SCAN_MIN_M_S`] and returns the
+/// first grid speed past the last one where `-mu' N a_ii / dt >= 1`. It returns
+/// 0 when the law never falls that fast: flat, rising, Coulomb, and the
+/// hyperbolic and Stribeck rows of this module's captured tests. The slope is
+/// a forward difference of the law alone, as in `solve_condensed`.
+///
+/// No claim. `a_ii` is the port's own compliance, not the line condensed onto
+/// the port by the partition's other rows. For a symmetric positive definite `a`,
+/// condensing stuck rows out lowers the effective compliance, so the condensed
+/// critical speed is at most this one, and the start lies past it. That is an
+/// argument, not a proof, and it says nothing about sliding neighbours.
+///
+/// It is checked on five captured steps. On the violin E5 eq. 13 onset step it
+/// finds the one consistent state. On this module's o7qbp, stop-bank and A4
+/// three- and five-cell steps it finds the same consistent partitions as the
+/// walk's own solve.
+fn critical_speed(law: &FrictionLaw, normal: f64, a_ii: f64, dt: f64) -> Result<f64, ModalFrictionError> {
+    let gain = normal * a_ii / dt;
+    let mut speed = CRITICAL_SCAN_MIN_M_S;
+    let mut past = 0.0;
+    for _ in 0..CRITICAL_SCAN_STEPS {
+        let h = 1e-7 * speed;
+        let slope = (kinetic_mu(law, speed + h)? - kinetic_mu(law, speed)?) / h;
+        speed *= 2.0;
+        if -slope * gain >= 1.0 {
+            past = speed;
+        }
+    }
+    Ok(past)
+}
+
+/// Joint-Newton a FIXED partition of a plain line, with every sliding row written
+/// in its branch speed `s_i >= 0` instead of its traction. The row's traction
+/// `t_i = sign mu(s_i) N_i` is explicit, and the row is
+/// `slip_i(t) - sign s_i dt = 0`. No `|slip|` is taken, so the zero-slip kink is
+/// the boundary `s_i = 0`, not a fold in the residual. Stuck rows are
+/// `slip_i(t) = 0` in `t_i`, as in `solve_partition`.
+///
+/// Starts: stuck tractions at 0, and each sliding speed at the larger of its
+/// free-slip speed `|f_i| / dt` and [`critical_speed`]. No step takes a speed
+/// below a tenth of its current value, so a row stays on its branch. The
+/// Jacobian is exact in the line (`-a_ij dt_j / dx_j`) and differences only the
+/// law.
+///
+/// Iteration stops when no unknown moves, or after `max_newton` steps. The
+/// result then faces `solve_partition`'s own gate: the residual on the actual
+/// slip within 1e-12 on every row.
+fn solve_partition_by_speed(
+    a: &[f64],
+    f: &[f64],
+    normal: &[f64],
+    law: &[&FrictionLaw],
+    dt: f64,
+    cells: &[Branch],
+    max_newton: usize,
+) -> Option<Vec<f64>> {
+    let p = f.len();
+    let sliding = |i: usize| cells[i] != Branch::Stuck;
+    let mut x = vec![0.0f64; p];
+    for i in 0..p {
+        if sliding(i) {
+            x[i] = (f[i] / dt).abs().max(critical_speed(law[i], normal[i], a[i * p + i], dt).ok()?);
+        }
+    }
+    // The tractions and their derivatives in the unknowns.
+    let tractions = |x: &[f64]| -> Option<(Vec<f64>, Vec<f64>)> {
+        let mut t = vec![0.0f64; p];
+        let mut dt_dx = vec![1.0f64; p];
+        for i in 0..p {
+            if sliding(i) {
+                let sign = branch_sign(cells[i]);
+                let h = 1e-7 * x[i].max(1e-6);
+                let mu = kinetic_mu(law[i], x[i]).ok()?;
+                t[i] = sign * mu * normal[i];
+                dt_dx[i] = sign * (kinetic_mu(law[i], x[i] + h).ok()? - mu) / h * normal[i];
+            } else {
+                t[i] = x[i];
+            }
+        }
+        Some((t, dt_dx))
+    };
+    for _ in 0..max_newton {
+        let (t, dt_dx) = tractions(&x)?;
+        let slip = slips(a, f, &t);
+        let mut neg = vec![0.0f64; p];
+        let mut jac = vec![0.0f64; p * p];
+        for i in 0..p {
+            let row = if sliding(i) { slip[i] - branch_sign(cells[i]) * x[i] * dt } else { slip[i] };
+            neg[i] = -row;
+            for j in 0..p {
+                jac[i * p + j] = -a[i * p + j] * dt_dx[j];
+            }
+            if sliding(i) {
+                jac[i * p + i] -= branch_sign(cells[i]) * dt;
+            }
+        }
+        let delta = dense_solve(&jac, &neg, p)?;
+        let mut moved = false;
+        for i in 0..p {
+            let next = x[i] + delta[i];
+            if !next.is_finite() {
+                return None;
+            }
+            let next = if sliding(i) { next.max(0.1 * x[i]) } else { next };
+            moved |= next != x[i];
+            x[i] = next;
+        }
+        if !moved {
+            break;
+        }
+    }
+    let (t, _) = tractions(&x)?;
+    let slip = slips(a, f, &t);
+    for i in 0..p {
+        let r = if sliding(i) {
+            t[i] - kinetic_traction(law[i], normal[i], branch_sign(cells[i]), slip[i], dt).ok()?
+        } else {
+            slip[i]
+        };
+        if !(r.abs() <= 1e-12) {
+            return None;
+        }
+    }
+    Some(t)
 }
 
 fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: usize)
@@ -1046,5 +1304,208 @@ mod tests {
             }
             Resolution::Solved(t, _) => panic!("a zero-load port has no consistent partition, got tractions {t:?}"),
         }
+    }
+
+    // Captured refusal state of the violin E5 sitebow card with the measured rosin
+    // row `friction rosin-wg2025-eq13` (3-cell ribbon, 144 kHz). It was dumped by a
+    // scratch capture build (MagentaBadger 16900, 2026-11-03) at the step after
+    // accepted sample 10788, where the sweep failed and the walk refused: "5/28
+    // pivots, last active set S-+, worst KKT violation at port 0
+    // (slide-pos-wrong-direction-or-nondissipative) size 1e0".
+    //
+    // The previous step was SS+. Port 1 now needs 2.6e-5 N more than its cone
+    // holds, so SS+ has ceased to exist. Solving every partition from a grid of
+    // starts finds exactly one consistent state, S-+: port 1 breaks away at
+    // -3.1 mm/s. The walk visits S-+, but its partition Newton cycles across
+    // port 1's zero-slip kink.
+    const E5_LINE: [f64; 9] = [
+        5.1734155698535495e-6, 2.9809085288452823e-6, 3.0751603963720907e-6,
+        2.9809085288452823e-6, 5.099163599374646e-6, 2.718315640216884e-6,
+        3.075160396372091e-6, 2.7183156402168843e-6, 5.262846745918796e-6,
+    ];
+    const E5_FREE_SLIP: [f64; 3] = [2.747519612686609e-7, -1.5907963135027875e-8, 3.627451607228994e-7];
+    const E5_NORMAL: [f64; 3] = [0.0529; 3];
+    const E5_DT: f64 = 1.0 / 144_000.0;
+    // The S-+ root found by the multi-start |slip| Newton, independent of the speed solve.
+    const E5_S_MINUS_PLUS: [f64; 3] = [0.05895761563373555, -0.05818005488303967, 0.04655664028650187];
+
+    /// Every partition the speed solve resolves to a consistent state, with its tractions.
+    fn consistent_by_speed(a: &[f64], f: &[f64], n: &[f64], laws: &[&FrictionLaw], dt: f64) -> Vec<(Vec<Branch>, Vec<f64>)> {
+        let p = f.len();
+        let bs = all_branches();
+        let mut found = Vec::new();
+        for code in 0..3usize.pow(p as u32) {
+            let cells: Vec<Branch> = (0..p).map(|i| bs[code / 3usize.pow(i as u32) % 3]).collect();
+            if let Some(t) = solve_partition_by_speed(a, f, n, laws, dt, &cells, 100) {
+                if is_consistent(a, f, n, laws, dt, &cells, &t).unwrap() {
+                    found.push((cells, t));
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_eq13_onset_step_refuses_on_the_walk_and_its_one_consistent_state_is_rescued() {
+        use Branch::{SlideNeg, SlidePos, Stuck};
+        let law = FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13();
+        let laws = [&law, &law, &law];
+        let (a, f, n) = (&E5_LINE, &E5_FREE_SLIP, &E5_NORMAL);
+        let seed = [ModalFrictionRegime::Sticking, ModalFrictionRegime::Sticking, ModalFrictionRegime::Sliding];
+        let previous = [Stuck, Stuck, SlidePos];
+        let s_minus_plus = [Stuck, SlideNeg, SlidePos];
+
+        // Before: the walk refuses with the render's own payload, because its
+        // partition solve cannot resolve the one consistent state.
+        match solve_active_set(a, f, n, &laws, E5_DT, &seed, 28).unwrap() {
+            Resolution::Exhausted { pivots, last_set, worst } => assert_eq!(
+                (pivots, last_set.as_str(), worst.port, worst.condition, worst.size),
+                (5, "S-+", 0, "slide-pos-wrong-direction-or-nondissipative", 1.0)
+            ),
+            Resolution::Solved(t, _) => panic!("the walk is the captured refusal, got tractions {t:?}"),
+        }
+        assert!(
+            solve_partition(a, f, n, &laws, E5_DT, &s_minus_plus, 100).is_none(),
+            "the walk's partition solve cycles on S-+"
+        );
+        let cap = law.static_coefficient().unwrap() * n[1];
+        let ss_plus = solve_partition(a, f, n, &laws, E5_DT, &[Stuck, Stuck, SlidePos], 100).unwrap();
+        assert!(ss_plus[1].abs() > cap && ss_plus[1].abs() < cap * (1.0 + 1e-3), "SS+ is just past its cone");
+
+        let found = consistent_by_speed(a, f, n, &laws, E5_DT);
+        assert_eq!(
+            found.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(),
+            vec![s_minus_plus.to_vec()],
+            "the speed solve finds exactly the one consistent state"
+        );
+
+        // After: the rescue lands it, and it passes the unchanged gate and KKT test.
+        match solve_active_set_with_hysteresis(a, f, n, &laws, E5_DT, &seed, &previous, 28).unwrap() {
+            Resolution::Solved(t, regimes) => {
+                assert_eq!(
+                    regimes,
+                    [ModalFrictionRegime::Sticking, ModalFrictionRegime::Sliding, ModalFrictionRegime::Sliding]
+                );
+                assert!(is_consistent(a, f, n, &laws, E5_DT, &s_minus_plus, &t).unwrap());
+                let slip = slips(a, f, &t);
+                assert!(slip[0].abs() <= 1e-12, "port 0 stays stuck: slip {}", slip[0]);
+                for i in 1..3 {
+                    let kt = kinetic_traction(&law, n[i], branch_sign(s_minus_plus[i]), slip[i], E5_DT).unwrap();
+                    assert!((t[i] - kt).abs() <= 1e-12, "port {i}: traction {} against kinetic {kt}", t[i]);
+                }
+                for (i, (&got, &want)) in t.iter().zip(&E5_S_MINUS_PLUS).enumerate() {
+                    assert!((got - want).abs() <= 1e-12, "port {i}: {got} against the multi-start root {want}");
+                }
+                let breakaway = slip[1] / E5_DT;
+                assert!((breakaway + 3.102e-3).abs() < 1e-5, "port 1 breaks away at {breakaway} m/s");
+            }
+            Resolution::Exhausted { pivots, last_set, worst } => panic!(
+                "the one consistent state must be rescued: {pivots} pivots, last set {last_set}, worst {worst:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_step_with_no_consistent_partition_keeps_the_walks_refusal_through_the_last_resort() {
+        // The zero-load port above: no partition is consistent, so the last resort
+        // finds nothing and the walk's exhaustion comes back unchanged.
+        let l = a4_law();
+        let laws = [&l];
+        let seed = vec![ModalFrictionRegime::Sticking];
+        let (a, f, n) = ([3.0e-6], [1.0e-7], [0.0]);
+        assert!(nearest_consistent_partition(&a, &f, &n, &laws, A4_DT, &[Branch::Stuck]).unwrap().is_none());
+        let walked = solve_active_set(&a, &f, &n, &laws, A4_DT, &seed, 8).unwrap();
+        let rescued = solve_active_set_with_hysteresis(&a, &f, &n, &laws, A4_DT, &seed, &[Branch::Stuck], 8).unwrap();
+        match (walked, rescued) {
+            (
+                Resolution::Exhausted { pivots: p0, last_set: s0, worst: w0 },
+                Resolution::Exhausted { pivots: p1, last_set: s1, worst: w1 },
+            ) => assert_eq!(
+                (p0, s0, w0.port, w0.condition, w0.size.to_bits()),
+                (p1, s1, w1.port, w1.condition, w1.size.to_bits())
+            ),
+            _ => panic!("a zero-load port has no consistent partition: both must refuse"),
+        }
+    }
+
+    #[test]
+    fn a_step_the_walk_resolves_returns_the_walks_tractions_bit_for_bit() {
+        // The last resort runs only after an exhaustion. `previous` is set unlike
+        // every walk's answer, so any leak of the enumeration would show.
+        let check = |a: &[f64], f: &[f64], n: &[f64], laws: &[&FrictionLaw], dt: f64, budget: usize| {
+            let p = f.len();
+            let seed = vec![ModalFrictionRegime::Sticking; p];
+            let previous = vec![Branch::SlideNeg; p];
+            let walked = solve_active_set(a, f, n, laws, dt, &seed, budget).unwrap();
+            let rescued = solve_active_set_with_hysteresis(a, f, n, laws, dt, &seed, &previous, budget).unwrap();
+            match (walked, rescued) {
+                (Resolution::Solved(t0, r0), Resolution::Solved(t1, r1)) => {
+                    assert_eq!(r0, r1);
+                    let bits = |t: &[f64]| t.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(bits(&t0), bits(&t1));
+                }
+                _ => panic!("the walk resolves this step, and so must the rescue"),
+            }
+        };
+        let (a, f) = operating_point();
+        let stribeck = law();
+        check(&a, &f, &NORMAL, &[&stribeck; 5], DT, 64);
+        let coulomb = FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.4 };
+        check(&STOP_LINE, &STOP_FREE_SLIP, &STOP_NORMAL, &[&coulomb; 3], STOP_DT, 4 * 3 + 16);
+        let a4 = a4_law();
+        check(&A4_3_COMPLIANCE, &A4_3_FREE_SLIP, &A4_3_NORMAL, &[&a4; 3], A4_DT, 4 * 3 + 16);
+        check(&A4_5_COMPLIANCE, &A4_5_FREE_SLIP, &A4_5_NORMAL, &[&a4; 5], A4_DT, 4 * 5 + 16);
+    }
+
+    #[test]
+    fn the_speed_solve_finds_the_walks_consistent_partitions_on_the_captured_steps() {
+        // The start behind `critical_speed` rests on an argument, not a proof.
+        // These are the steps it was checked on: on each, the speed solve finds
+        // the same consistent partitions as the walk's own solve, with the same
+        // tractions.
+        let same = |a: &[f64], f: &[f64], n: &[f64], laws: &[&FrictionLaw], dt: f64| -> usize {
+            let p = f.len();
+            let bs = all_branches();
+            let mut walk_solve = Vec::new();
+            for code in 0..3usize.pow(p as u32) {
+                let cells: Vec<Branch> = (0..p).map(|i| bs[code / 3usize.pow(i as u32) % 3]).collect();
+                if let Some(t) = solve_partition(a, f, n, laws, dt, &cells, 200) {
+                    if is_consistent(a, f, n, laws, dt, &cells, &t).unwrap() {
+                        walk_solve.push((cells, t));
+                    }
+                }
+            }
+            let by_speed = consistent_by_speed(a, f, n, laws, dt);
+            assert_eq!(
+                by_speed.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(),
+                walk_solve.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>()
+            );
+            for ((cells, t), (_, w)) in by_speed.iter().zip(&walk_solve) {
+                for (i, (&got, &want)) in t.iter().zip(w).enumerate() {
+                    assert!((got - want).abs() <= 1e-9, "{cells:?} port {i}: {got} against {want}");
+                }
+            }
+            by_speed.len()
+        };
+        let (a, f) = operating_point();
+        let stribeck = law();
+        assert_eq!(same(&a, &f, &NORMAL, &[&stribeck; 5], DT), 1);
+        let coulomb = FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.4 };
+        assert_eq!(same(&STOP_LINE, &STOP_FREE_SLIP, &STOP_NORMAL, &[&coulomb; 3], STOP_DT), 3);
+        let a4 = a4_law();
+        assert_eq!(same(&A4_3_COMPLIANCE, &A4_3_FREE_SLIP, &A4_3_NORMAL, &[&a4; 3], A4_DT), 1);
+        assert_eq!(same(&A4_5_COMPLIANCE, &A4_5_FREE_SLIP, &A4_5_NORMAL, &[&a4; 5], A4_DT), 1);
+
+        // On the stop bank's three states, the previous step decides. SS+ continues
+        // an SS+ step. From rest, SS+ and S-S each differ in one port: the rule
+        // cannot break that tie, so it refuses rather than pick one.
+        use Branch::{SlidePos, Stuck};
+        let laws = [&coulomb; 3];
+        let (a, f, n) = (&STOP_LINE, &STOP_FREE_SLIP, &STOP_NORMAL);
+        let (_, regimes) = nearest_consistent_partition(a, f, n, &laws, STOP_DT, &[Stuck, Stuck, SlidePos])
+            .unwrap()
+            .expect("SS+ is nearest an SS+ step");
+        assert_eq!(regimes, [ModalFrictionRegime::Sticking, ModalFrictionRegime::Sticking, ModalFrictionRegime::Sliding]);
+        assert!(nearest_consistent_partition(a, f, n, &laws, STOP_DT, &[Stuck; 3]).unwrap().is_none());
     }
 }
