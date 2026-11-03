@@ -8,7 +8,7 @@ use fs_material::hyper::mixed::VolumetricTreatment;
 use super::{
     MixedImpulseControls, MixedImpulseReport, MixedViscoTetError, MixedViscoTetMotion,
     MixedViscoTetSolid, SolidImpulseControls, SolidImpulseReport, SolidPointKinematics,
-    SolidPointMobility, Tet10ImpulsePoint, checkpoint, inertia_error,
+    SolidPointMobility, SolidPointMobilityMatrix, Tet10ImpulsePoint, checkpoint, inertia_error,
 };
 use crate::hyper3::mixed::impulse::constrained_impulse;
 use crate::inertia::point::tet10;
@@ -77,6 +77,63 @@ impl<'a> MixedViscoTetMotion<'a> {
             cx,
         )
         .map_err(|error| MixedViscoTetError::from(inertia_error(error)))
+    }
+
+    /// Complete simultaneous cross-point/direction mobility [1/kg].
+    /// Each row uses a unit world direction and all ten signed quadratic weights.
+    /// Original consistent mass supplies every cross term with bounded workspace,
+    /// keeping one full response at a time and copying no material history.
+    /// Exact incompressibility refuses this mass-only entry.
+    pub fn point_mobility_matrix_per_kg(
+        &self,
+        held: &[usize],
+        rows: &[(Tet10ImpulsePoint, [f64; 3])],
+        maximum_rows: usize,
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<SolidPointMobilityMatrix, MixedViscoTetError> {
+        checkpoint(cx)?;
+        if self.solid.volumetric == VolumetricTreatment::ExactIncompressible {
+            return Err(MixedViscoTetError::ExactIncompressibleImpulse);
+        }
+        tet10::mobility_matrix(
+            &self.mass,
+            self.solid.elements,
+            held,
+            rows,
+            maximum_rows,
+            controls,
+            cx,
+        )
+        .map_err(|error| MixedViscoTetError::from(inertia_error(error)))
+    }
+
+    /// Apply all quadratic material-point impulses in one native velocity update.
+    /// The work-conjugate traces retain curved geometry, signed corner weights,
+    /// and small net nodal loads through original compensated accumulation.
+    /// One complete candidate retains physical pressure and every Maxwell state.
+    /// Exact incompressibility refuses this mass-only entry before distribution.
+    pub fn point_impulses_candidate(
+        &self,
+        held: &[usize],
+        impulses: &[(Tet10ImpulsePoint, [f64; 3])],
+        origin: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<MixedViscoMotionImpulse<'a>, MixedViscoTetError> {
+        checkpoint(cx)?;
+        if self.solid.volumetric == VolumetricTreatment::ExactIncompressible {
+            return Err(MixedViscoTetError::ExactIncompressibleImpulse);
+        }
+        let entries = tet10::distributions(
+            self.solid.elements,
+            self.velocity_mps.len(),
+            impulses,
+            controls,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        self.impulse_candidate(held, &entries, origin, controls, cx)
     }
 
     /// Apply a world impulse through the transpose of the same quadratic trace.

@@ -4226,6 +4226,15 @@ and P2 trace helpers retain conjugate point work and torque on curved geometry;
 they do not replace the original mass by a point mass. The finite-compliance
 entry is connected to the existing rigid impact owner in `fs-couple`.
 
+The same finite-compliance owner exposes `point_mobility_matrix_per_kg` and
+`point_impulses_candidate` for simultaneous quadratic contacts. The original
+signed P2 trace and supported consistent mass retain every cross-point and
+cross-direction entry. Caller row/workspace caps are admitted before allocation;
+one mesh-sized response is retained at a time, without a dense mass inverse or
+material-history copy. Loads remain separate until the original compensated
+nodal admission combines them, followed by one complete native candidate.
+Exact incompressibility retains its typed refusal on these mass-only entries.
+
 The focused `mixed_visco_dynamics/impulse.rs` regressions use independent
 rational P2 integrals and signed corner loads, deformed angular impulse,
 moving-support work, nonzero retained pressure and relaxed Maxwell histories,
@@ -4239,6 +4248,9 @@ The material-point extension checks signed quadratic interpolation and loads,
 supported mobility against independent P2 integrals, torque, work and retained
 history. The point owner's polynomial fixture also checks curved reference
 geometry and virtual work independently of the finite-element solve.
+The simultaneous-point regression independently inverts a rational P2 corner/
+edge mass block, including negative cross mobility and rotated directions,
+and checks summed point work, torque, moving supports and retained histories.
 Native execution remains pending the existing dependency-build blocker; this
 addition is not a completed Cargo or DSR gate.
 

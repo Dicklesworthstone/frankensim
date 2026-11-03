@@ -341,6 +341,22 @@ order invariance, moving-support restitution/work, retained histories and
 native budget/cancellation refusals. This fixed-pose event does not supply
 collision detection, event localization or persistent-contact time integration.
 
+`multiple::mixed_visco_mixed_contact_candidate` and
+`multiple::elliptic::mixed_visco_mixed_elliptic_contact_candidate` extend this
+same coupled owner to finite-compliance P2/P1 Maxwell solids. The complete
+quadratic cross-point matrix supplies circular or directional Coulomb response;
+one summed native event preserves physical pressure and all material histories.
+The original ellipse owner retains exact free slip on a zero-coefficient axis
+and exact circular equivalence for equal principal coefficients. No principal
+direction or contact point is solved independently.
+
+The curved quadratic regression adds two simultaneous impacts with independently
+integrated P2 mass and full rigid tensors. Its exact normal block predicts both
+positive impulses, signed moving-support work and kinetic loss. It also covers
+the directional adapter's circular equivalence and a free-slip principal axis.
+These Rust regressions remain unexecuted under the existing native dependency/
+resource blocker; rational checks and formatting do not substitute for Cargo.
+
 `solid_enthalpy::finite_plastic::FiniteThermoplasticSolid::mixed_contact_candidate`
 binds the thermal Tet4 event to the original source-backed caloric trajectory.
 The accepted clock, cell enthalpies, reference geometry/mass and exact caloric

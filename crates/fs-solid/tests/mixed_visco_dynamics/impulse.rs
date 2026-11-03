@@ -918,6 +918,155 @@ fn quadratic_point_uses_curved_trace_signed_corner_mobility_and_original_impulse
             exact.point_impulse_candidate(&held, point, applied, origin, impulse_controls(), cx,),
             Err(MixedViscoTetError::ExactIncompressibleImpulse)
         ));
+        assert!(matches!(
+            exact.point_mobility_matrix_per_kg(
+                &held,
+                &[(point, [1.0, 0.0, 0.0])],
+                1,
+                impulse_controls(),
+                cx,
+            ),
+            Err(MixedViscoTetError::ExactIncompressibleImpulse)
+        ));
+        assert!(matches!(
+            exact.point_impulses_candidate(
+                &held,
+                &[(point, applied)],
+                origin,
+                impulse_controls(),
+                cx,
+            ),
+            Err(MixedViscoTetError::ExactIncompressibleImpulse)
+        ));
         assert_eq!(exact.velocity_mps(), velocity);
+    });
+}
+
+#[test]
+fn simultaneous_quadratic_points_retain_negative_cross_mobility_and_native_support_work() {
+    use fs_solid::hyper3::mixed::visco::dynamics::Tet10ImpulsePoint;
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(10.0 * MU, true);
+        let velocity: Vec<_> = nodes
+            .iter()
+            .map(|x| [0.04 + 0.2 * x[0] * x[1], -0.02 + 0.1 * x[0] * x[0], 0.03])
+            .collect();
+        let motion = MixedViscoTetMotion::try_new(
+            relaxed(&nodes, &elements, &material, cx),
+            &[DENSITY],
+            &velocity,
+            MASS_BYTES,
+            cx,
+        )
+        .unwrap();
+        let edge = 4 + TET10_EDGES
+            .iter()
+            .position(|e| e.contains(&0) && e.contains(&1))
+            .unwrap();
+        let free = [
+            3 * elements[0][0],
+            3 * elements[0][0] + 1,
+            3 * elements[0][edge],
+            3 * elements[0][edge] + 1,
+        ];
+        let held: Vec<_> = (0..3 * nodes.len()).filter(|d| !free.contains(d)).collect();
+        let center = Tet10ImpulsePoint {
+            tetrahedron: 0,
+            barycentric: [0.25; 4],
+        };
+        let corner = Tet10ImpulsePoint {
+            tetrahedron: 0,
+            barycentric: [1.0, 0.0, 0.0, 0.0],
+        };
+        let rows = [
+            (center, [1.0, 0.0, 0.0]),
+            (corner, [0.6, 0.8, 0.0]),
+            (center, [0.0, 1.0, 0.0]),
+        ];
+        let mobility = motion
+            .point_mobility_matrix_per_kg(&held, &rows, 3, impulse_controls(), cx)
+            .unwrap();
+        assert_eq!(mobility.dimension, 3);
+        assert_eq!(mobility.solves.len(), 3);
+        assert!(mobility.solves.iter().all(|s| s.converged_euclidean()));
+        // Independently integrated free x/y blocks contain negative corner-edge
+        // mass. These three traces have two physical positions and rotated axes;
+        // their negative off-diagonal response must not be discarded or clipped.
+        let (m00, m01, m11) = (mass(0, 0), mass(0, edge), mass(edge, edge));
+        assert!(m01 < 0.0);
+        let determinant = m00 * m11 - m01 * m01;
+        let weights = [[-0.125, 0.25], [1.0, 0.0], [-0.125, 0.25]];
+        let mut expected = [0.0; 9];
+        for i in 0..3 {
+            for j in 0..3 {
+                let dot: f64 = (0..3).map(|c| rows[i].1[c] * rows[j].1[c]).sum();
+                let response = (weights[i][0] * (m11 * weights[j][0] - m01 * weights[j][1])
+                    + weights[i][1] * (m00 * weights[j][1] - m01 * weights[j][0]))
+                    / determinant;
+                expected[3 * i + j] = dot * response;
+                near(
+                    mobility.matrix_per_kg[3 * i + j],
+                    expected[3 * i + j],
+                    2e-10,
+                );
+            }
+        }
+        assert!(mobility.matrix_per_kg[1] < -1.0);
+        assert!(mobility.matrix_per_kg[5] < -1.0);
+        assert!(
+            motion
+                .point_mobility_matrix_per_kg(&held, &rows, 2, impulse_controls(), cx)
+                .is_err()
+        );
+        let strengths = [0.001, -0.0003, 0.0002];
+        let impulses: Vec<_> = rows
+            .iter()
+            .zip(strengths)
+            .map(|(&(point, direction), strength)| (point, direction.map(|d| d * strength)))
+            .collect();
+        let origin = [-0.2, 0.1, 0.05];
+        let event = motion
+            .point_impulses_candidate(&held, &impulses, origin, impulse_controls(), cx)
+            .unwrap();
+        retained(&motion, &event.motion);
+        for &dof in &held {
+            assert_eq!(
+                event.motion.velocity_mps()[dof / 3][dof % 3],
+                velocity[dof / 3][dof % 3]
+            );
+        }
+        let mut work = 0.0;
+        let mut resultant = [0.0; 3];
+        let mut torque = [0.0; 3];
+        for (i, &(point, direction)) in rows.iter().enumerate() {
+            let before = motion.point_kinematics(point, cx).unwrap();
+            let after = event.motion.point_kinematics(point, cx).unwrap();
+            let delta: f64 = (0..3)
+                .map(|c| direction[c] * (after.velocity_mps[c] - before.velocity_mps[c]))
+                .sum();
+            let predicted: f64 = (0..3).map(|j| expected[3 * i + j] * strengths[j]).sum();
+            near(delta, predicted, 2e-12);
+            let impulse = impulses[i].1;
+            for c in 0..3 {
+                work += impulse[c] * 0.5 * (before.velocity_mps[c] + after.velocity_mps[c]);
+                resultant[c] += impulse[c];
+                let (j, k) = ((c + 1) % 3, (c + 2) % 3);
+                torque[c] += (before.position_m[j] - origin[j]) * impulse[k]
+                    - (before.position_m[k] - origin[k]) * impulse[j];
+            }
+        }
+        near(event.impulse.applied_work_j, work, 2e-12);
+        near(
+            event.impulse.kinetic_change_j,
+            work + event.impulse.support_work_j,
+            2e-12,
+        );
+        assert!(event.impulse.support_work_j.abs() > 1e-6);
+        for c in 0..3 {
+            near(event.impulse.applied.linear_kg_m_s[c], resultant[c], 2e-12);
+            near(event.impulse.applied.angular_kg_m2_s[c], torque[c], 2e-12);
+        }
+        assert_eq!(motion.velocity_mps(), velocity);
     });
 }

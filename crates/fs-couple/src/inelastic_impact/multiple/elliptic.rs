@@ -58,6 +58,31 @@ fn solve<P: Copy>(
     solve_elliptic_frictional_contacts(&laws, matrix, controls.contact, || cx.checkpoint().is_err())
 }
 
+/// Directional friction with the original quadratic mixed Maxwell solid.
+/// Continuous pressure and all material histories survive the single coupled
+/// event; signed P2 cross-point response enters the complete physical matrix.
+/// The finite-compliance formulation is required by this mass-only entry.
+#[allow(clippy::too_many_arguments)]
+pub fn mixed_visco_mixed_elliptic_contact_candidate<'a>(
+    solid: &MixedViscoTetMotion<'a>,
+    held: &[usize],
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    contacts: &[InelasticMixedEllipticContact<Tet10ImpulsePoint>],
+    origin: [f64; 3],
+    controls: InelasticMixedContactControls,
+    cx: &Cx<'_>,
+) -> Result<
+    InelasticMixedEllipticCandidate<MixedViscoTetMotion<'a>>,
+    InelasticMixedEllipticContactError<MixedViscoTetError>,
+> {
+    native_candidate!(
+        @law solid, held, bodies, properties, contacts, origin, controls, cx,
+        Some(solid.velocity_mps()), motion,
+        |queries, matrix| solve(contacts, queries, matrix, controls, cx)
+    )
+}
+
 /// Coupled directional impacts retaining finite J2 deformation and return state.
 #[allow(clippy::too_many_arguments)]
 pub fn plastic_mixed_elliptic_contact_candidate<'a, L: FiniteJ2Material>(

@@ -31,7 +31,7 @@ pub use crate::hyper3::mixed::impulse::{MixedImpulseControls, MixedImpulseReport
 pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
 pub use crate::inertia::{
     InertialEnergy, SolidImpulseControls, SolidImpulseReport, SolidPointKinematics,
-    SolidPointMobility, Tet10ImpulsePoint,
+    SolidPointMobility, SolidPointMobilityMatrix, Tet10ImpulsePoint,
 };
 
 mod impulse;

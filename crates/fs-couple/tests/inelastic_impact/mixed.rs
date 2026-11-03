@@ -206,6 +206,8 @@ fn curved_quadratic_contact_preserves_pressure_memory_and_native_momentum() {
         assert_eq!(event.solid.reference_density_kg_m3(), &[6.0]);
         assert_eq!(motion.velocity_mps(), velocity);
 
+        check_quadratic_manifold(&motion, &held, cx);
+
         let exact = MixedViscoTetMotion::try_new(
             new_solid(VolumetricTreatment::ExactIncompressible),
             &[6.0],
@@ -231,4 +233,162 @@ fn curved_quadratic_contact_preserves_pressure_memory_and_native_momentum() {
         ));
         assert_eq!(exact.velocity_mps(), velocity);
     });
+}
+
+fn check_quadratic_manifold(motion: &MixedViscoTetMotion<'_>, held: &[usize], cx: &Cx<'_>) {
+    use fs_couple::inelastic_impact::multiple::elliptic::{
+        EllipticFriction, mixed_visco_mixed_elliptic_contact_candidate,
+    };
+
+    let points =
+        [[0.0, 0.25, 0.25, 0.5], [0.0, 0.5, 0.25, 0.25]].map(|barycentric| Tet10ImpulsePoint {
+            tetrahedron: 0,
+            barycentric,
+        });
+    let contacts: [_; 2] = core::array::from_fn(|body| InelasticMixedContact {
+        id: 20 + body as u64,
+        point: RigidImpactPoint {
+            body,
+            arm_body: Vec3::new(0.0, 0.0, 0.2),
+        },
+        counterpart: FiniteSolidContactCounterpart::Solid(points[body]),
+        normal_world: Vec3::new(1.0, 0.0, 0.0),
+        tangent_world: Vec3::new(0.0, 1.0, 0.0),
+        activation_tolerance_m: 1e-12,
+        friction_coefficient: 0.0,
+        normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 0.5 },
+    });
+    let bodies: [_; 2] = core::array::from_fn(|body| {
+        let point = motion
+            .point_kinematics(points[body], cx)
+            .unwrap()
+            .position_m;
+        let state = rigid_at(point, -0.8 - body as f64);
+        RigidBodyState::new(
+            state.pose(),
+            state.linear_momentum_world().add(Vec3::new(
+                0.0,
+                if body == 0 { 0.8 } else { -0.5 },
+                0.6,
+            )),
+            Vec3::ZERO,
+        )
+        .unwrap()
+    });
+    let properties = [properties(); 2];
+    let mut controls = mixed_controls();
+    controls.solid_impulse.maximum_workspace_components = 8192;
+    let event = mixed_visco_mixed_contact_candidate(
+        motion,
+        held,
+        &bodies,
+        &properties,
+        &contacts,
+        ORIGIN,
+        controls,
+        cx,
+    )
+    .unwrap();
+
+    // Only the original edge-12 x component is free. Its mass is 8/105 kg
+    // and these traces are 1/4 and 1/2. The two normal rows are therefore
+    // [[539/384, 105/64], [105/64, 371/96]], including each full rigid tensor.
+    // Solving this coupled 2x2 system against [3/2, 3] gives the values below;
+    // two separate point solves cannot give these impulses.
+    let matrix = &event.report.contact_mobility_per_kg;
+    for (index, expected) in [
+        (0, 539.0 / 384.0),
+        (3, 105.0 / 64.0),
+        (18, 105.0 / 64.0),
+        (21, 371.0 / 96.0),
+    ] {
+        near(matrix[index], expected, 3e-11);
+    }
+    for (body, expected) in [576.0 / 1799.0, 1152.0 / 1799.0].into_iter().enumerate() {
+        near(event.report.contact.impulses[body][0], expected, 2e-10);
+        near(event.report.contact.impulses[body][1], 0.0, 1e-12);
+        near(event.report.contact.impulses[body][2], 0.0, 1e-12);
+        near(
+            event.report.contact.relative_velocities_after[body][0],
+            0.5 * (1 + body) as f64,
+            2e-10,
+        );
+    }
+    near(
+        event.report.contact.dissipated_energy,
+        720.0 / 1799.0,
+        2e-10,
+    );
+    near(event.report.support_work_j, -162.0 / 8995.0, 2e-10);
+    near(event.report.kinetic_change_j, -3762.0 / 8995.0, 2e-10);
+    mixed_audit(&event.report);
+
+    let circular = contacts.map(|contact| InelasticMixedContact {
+        normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 0.0 },
+        ..contact.with_friction(0.2)
+    });
+    let circle = mixed_visco_mixed_contact_candidate(
+        motion,
+        held,
+        &bodies,
+        &properties,
+        &circular,
+        ORIGIN,
+        controls,
+        cx,
+    )
+    .unwrap();
+    let equal = mixed_visco_mixed_elliptic_contact_candidate(
+        motion,
+        held,
+        &bodies,
+        &properties,
+        &circular.map(|c| {
+            c.with_friction(EllipticFriction {
+                coefficients_mu: [0.2; 2],
+                principal_axis: [3.0, 4.0],
+            })
+        }),
+        ORIGIN,
+        controls,
+        cx,
+    )
+    .unwrap();
+    assert_eq!(equal.rigid_bodies, circle.rigid_bodies);
+    assert_eq!(equal.solid.velocity_mps(), circle.solid.velocity_mps());
+    assert_eq!(equal.report.contact.transformed, circle.report.contact);
+
+    let free_z = mixed_visco_mixed_elliptic_contact_candidate(
+        motion,
+        held,
+        &bodies,
+        &properties,
+        &circular.map(|c| {
+            c.with_friction(EllipticFriction {
+                coefficients_mu: [0.2, 0.0],
+                principal_axis: [1.0, 0.0],
+            })
+        }),
+        ORIGIN,
+        controls,
+        cx,
+    )
+    .unwrap();
+    for impulse in &free_z.report.contact.impulses {
+        near(impulse[2], 0.0, 1e-13);
+        assert!(impulse[1].abs() > 1e-4);
+    }
+    for next in [&event.solid, &circle.solid, &free_z.solid] {
+        assert_eq!(next.solid().pressure_pa(), motion.solid().pressure_pa());
+        assert_eq!(
+            next.solid().displacement_m(),
+            motion.solid().displacement_m()
+        );
+        assert_eq!(
+            next.solid().quadrature_states(),
+            motion.solid().quadrature_states()
+        );
+        assert_eq!(next.solid().time_s(), motion.solid().time_s());
+    }
+    assert_eq!(motion.velocity_mps(), [[0.2, 0.0, 0.0]; 10]);
 }

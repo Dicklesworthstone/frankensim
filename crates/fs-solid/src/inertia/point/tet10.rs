@@ -2,8 +2,8 @@
 
 use super::{
     Cx, InertiaError, ReferenceMass, SolidImpulseControls, SolidPointKinematics,
-    SolidPointMobility, barycentric, checkpoint, invalid, response_mobility, traced_kinematics,
-    unit_direction,
+    SolidPointMobility, SolidPointMobilityMatrix, barycentric, checkpoint, invalid,
+    mapped_distributions, mapped_mobility, response_mobility, traced_kinematics, unit_direction,
 };
 use crate::linear3::tet10::tet10_shapes;
 
@@ -80,6 +80,46 @@ pub(crate) fn directional_mobility(
     unit_direction(direction)?;
     let impulse = distribution(point, tetrahedra, mass.ndofs() / 3, direction, cx)?;
     response_mobility(mass, held, &impulse, controls, cx)
+}
+
+/// Full cross-point response through the same signed quadratic traces.
+/// The shared owner retains one full velocity response per column at a time.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mobility_matrix(
+    mass: &ReferenceMass,
+    tetrahedra: &[[usize; 10]],
+    held: &[usize],
+    rows: &[(Tet10ImpulsePoint, [f64; 3])],
+    maximum_rows: usize,
+    controls: SolidImpulseControls,
+    cx: &Cx<'_>,
+) -> Result<SolidPointMobilityMatrix, InertiaError> {
+    mapped_mobility(
+        mass,
+        held,
+        rows,
+        maximum_rows,
+        controls,
+        |point| validate(point, tetrahedra, mass.ndofs() / 3),
+        cx,
+    )
+}
+
+/// Keep contributions separate until native compensated nodal accumulation.
+pub(crate) fn distributions(
+    tetrahedra: &[[usize; 10]],
+    node_count: usize,
+    impulses: &[(Tet10ImpulsePoint, [f64; 3])],
+    controls: SolidImpulseControls,
+    cx: &Cx<'_>,
+) -> Result<Vec<(usize, f64)>, InertiaError> {
+    mapped_distributions(
+        node_count,
+        impulses,
+        controls,
+        |point| validate(point, tetrahedra, node_count),
+        cx,
+    )
 }
 
 #[cfg(test)]

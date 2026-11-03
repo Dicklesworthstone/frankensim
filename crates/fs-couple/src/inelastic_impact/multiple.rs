@@ -23,6 +23,10 @@ use fs_exec::Cx;
 use fs_material::plastic::finite::{FiniteJ2Material, thermal::FiniteThermalJ2Material};
 use fs_mbd::{MassProperties, RigidBodyState};
 use fs_solid::hyper3::{
+    mixed::visco::{
+        MixedViscoTetError,
+        dynamics::{MixedViscoTetMotion, Tet10ImpulsePoint},
+    },
     plastic::{
         FinitePlasticTetError,
         dynamics::FinitePlasticTetMotion,
@@ -153,6 +157,40 @@ pub(super) use native_candidate;
 
 /// Directional friction ellipses through these same native material owners.
 pub mod elliptic;
+
+/// Simultaneous Coulomb impacts on the original quadratic mixed Maxwell solid.
+///
+/// All ten signed shape values, full cross-point response and moving-support
+/// work participate in the same coupled solve as the rigid/rigid rows. Physical
+/// pressure, deformation and every relaxation history remain unchanged. This
+/// entry requires the original finite-compliance volumetric formulation.
+#[allow(clippy::too_many_arguments)]
+pub fn mixed_visco_mixed_contact_candidate<'a>(
+    solid: &MixedViscoTetMotion<'a>,
+    held: &[usize],
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    contacts: &[InelasticMixedContact<Tet10ImpulsePoint>],
+    origin: [f64; 3],
+    controls: InelasticMixedContactControls,
+    cx: &Cx<'_>,
+) -> Result<
+    InelasticMixedContactCandidate<MixedViscoTetMotion<'a>>,
+    InelasticMixedContactError<MixedViscoTetError>,
+> {
+    native_candidate!(
+        solid,
+        held,
+        bodies,
+        properties,
+        contacts,
+        origin,
+        controls,
+        cx,
+        Some(solid.velocity_mps()),
+        motion
+    )
+}
 
 /// Resolve a coupled impact while retaining every accepted plastic state.
 #[allow(clippy::too_many_arguments)]
