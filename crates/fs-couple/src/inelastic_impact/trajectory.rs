@@ -9,6 +9,9 @@
 /// Loaded sustained contact through native force, contact and material drift phases.
 pub mod sustained;
 
+/// Original quadratic Maxwell motion through bounded curved-surface impacts.
+pub mod quadratic;
+
 use super::multiple::{
     InelasticMixedContactControls, InelasticMixedContactError, InelasticMixedContactReport,
     visco_mixed_contact_candidate,
@@ -57,25 +60,25 @@ pub struct ViscoSphereTrajectoryControls {
 
 /// Accepted native interval; rejected trials contribute neither history nor loss.
 #[derive(Clone, Debug)]
-pub struct ViscoSphereTrajectoryStep {
+pub struct SphereTrajectoryStep<M, P> {
     /// Exact duration used by both native owners, retained for deterministic replay.
     pub duration_s: f64,
     pub elapsed_s: f64,
     pub maximum_contact_gap_m: f64,
     pub impact: Option<InelasticMixedContactReport>,
-    pub material: FiniteViscoTetEnergy,
+    pub material: M,
     pub inertia: InertialEnergy,
     pub momentum: SolidMotionMomentum,
     pub rigid: Vec<StepReceipt>,
-    pub path: FiniteSolidSpherePathReport,
+    pub path: P,
 }
 
 /// Physical losses and numerical errors remain separate throughout the call.
-#[derive(Clone, Debug, Default)]
-pub struct ViscoSphereTrajectoryReport {
+#[derive(Clone, Debug)]
+pub struct SphereTrajectoryReport<M, P> {
     pub duration_s: f64,
     pub rejected_steps: usize,
-    pub steps: Vec<ViscoSphereTrajectoryStep>,
+    pub steps: Vec<SphereTrajectoryStep<M, P>>,
     pub kinetic_change_j: f64,
     pub stored_change_j: f64,
     pub source_work_j: f64,
@@ -100,6 +103,46 @@ pub struct ViscoSphereTrajectoryReport {
     pub accumulated_linear_residual_kg_m_s: f64,
     pub accumulated_angular_residual_kg_m2_s: f64,
     pub accumulated_energy_residual_j: f64,
+}
+
+/// Original Tet4 receipt names retain their concrete material and path types.
+pub type ViscoSphereTrajectoryStep =
+    SphereTrajectoryStep<FiniteViscoTetEnergy, FiniteSolidSpherePathReport>;
+pub type ViscoSphereTrajectoryReport =
+    SphereTrajectoryReport<FiniteViscoTetEnergy, FiniteSolidSpherePathReport>;
+
+impl<M, P> Default for SphereTrajectoryReport<M, P> {
+    fn default() -> Self {
+        Self {
+            duration_s: 0.0,
+            rejected_steps: 0,
+            steps: Vec::new(),
+            kinetic_change_j: 0.0,
+            stored_change_j: 0.0,
+            source_work_j: 0.0,
+            support_work_j: 0.0,
+            relaxation_loss_j: 0.0,
+            unallocated_contact_loss_j: 0.0,
+            numerical_kinetic_loss_j: 0.0,
+            material_endpoint_defect_j: 0.0,
+            rigid_drift_defect_j: 0.0,
+            absolute_integration_defect_j: 0.0,
+            work_energy_residual_j: 0.0,
+            linear_momentum_change_kg_m_s: Vec3::ZERO,
+            angular_momentum_change_kg_m2_s: Vec3::ZERO,
+            external_impulse_kg_m_s: Vec3::ZERO,
+            external_angular_impulse_kg_m2_s: Vec3::ZERO,
+            support_impulse_kg_m_s: Vec3::ZERO,
+            support_angular_impulse_kg_m2_s: Vec3::ZERO,
+            angular_integration_defect_kg_m2_s: Vec3::ZERO,
+            absolute_angular_integration_defect_kg_m2_s: 0.0,
+            linear_momentum_residual_kg_m_s: Vec3::ZERO,
+            angular_momentum_residual_kg_m2_s: Vec3::ZERO,
+            accumulated_linear_residual_kg_m_s: 0.0,
+            accumulated_angular_residual_kg_m2_s: 0.0,
+            accumulated_energy_residual_j: 0.0,
+        }
+    }
 }
 
 /// Adopt all native owners together after the complete requested interval passes.
@@ -274,7 +317,7 @@ pub fn visco_sphere_trajectory_candidate<'a>(
                 )
                 .map_err(E::Solid)?;
             let represented = step.motion.solid().time_s() - post.solid().time_s();
-            check_clock(dt, represented, clock_tolerance)?;
+            check_clock(dt, represented, clock_tolerance).map_err(E::Path)?;
             let flights: Vec<_> = post_rigid
                 .iter()
                 .zip(properties)
@@ -332,7 +375,7 @@ pub fn visco_sphere_trajectory_candidate<'a>(
         let impact = event.map(|e| e.report);
         accumulate(
             &mut report,
-            &step.material_energy,
+            (&step.material_energy).into(),
             step.inertia,
             momentum,
             &flights,
@@ -348,7 +391,8 @@ pub fn visco_sphere_trajectory_candidate<'a>(
             elapsed,
             step.motion.solid().time_s() - start_time,
             clock_tolerance,
-        )?;
+        )
+        .map_err(E::Path)?;
         report.steps.push(ViscoSphereTrajectoryStep {
             duration_s: dt,
             elapsed_s: elapsed,
@@ -367,7 +411,7 @@ pub fn visco_sphere_trajectory_candidate<'a>(
         geometry = geometry_next;
         contacts = contacts_next;
         finish(&mut report);
-        if !admitted(&report, controls) {
+        if !admitted(&report, controls.into()) {
             return Err(E::Audit(Box::new(report)));
         }
     }
@@ -376,7 +420,8 @@ pub fn visco_sphere_trajectory_candidate<'a>(
         duration_s,
         solid.solid().time_s() - start_time,
         clock_tolerance,
-    )?;
+    )
+    .map_err(E::Path)?;
     poll(cx)?;
     Ok(ViscoSphereTrajectoryCandidate {
         solid,
@@ -385,16 +430,67 @@ pub fn visco_sphere_trajectory_candidate<'a>(
     })
 }
 
-fn accumulate(
-    r: &mut ViscoSphereTrajectoryReport,
-    material: &FiniteViscoTetEnergy,
+/// Common physical contributions; each native material receipt remains intact
+/// in its step. Both formulations supply TOTAL physical storage, including bulk.
+struct ViscoIntervalWork {
+    stored_change_j: f64,
+    dead_load_endpoint_work_j: f64,
+    support_endpoint_work_j: f64,
+    dissipated_j: f64,
+    endpoint_work_defect_j: f64,
+    equilibrium_work_residual_j: f64,
+}
+
+macro_rules! native_visco_work {
+    ($material:ty) => {
+        impl From<&$material> for ViscoIntervalWork {
+            fn from(value: &$material) -> Self {
+                Self {
+                    stored_change_j: value.stored_after_j - value.stored_before_j,
+                    dead_load_endpoint_work_j: value.dead_load_endpoint_work_j,
+                    support_endpoint_work_j: value.support_endpoint_work_j,
+                    dissipated_j: value.dissipated_j,
+                    endpoint_work_defect_j: value.endpoint_work_defect_j,
+                    equilibrium_work_residual_j: value.equilibrium_work_residual_j,
+                }
+            }
+        }
+    };
+}
+native_visco_work!(FiniteViscoTetEnergy);
+native_visco_work!(fs_solid::hyper3::mixed::visco::MixedViscoTetEnergy);
+
+#[derive(Clone, Copy)]
+struct TrajectoryAuditControls {
+    linear_tolerance_kg_m_s: f64,
+    angular_tolerance_kg_m2_s: f64,
+    energy_tolerance_j: f64,
+    integration_tolerance_j: f64,
+    angular_integration_tolerance_kg_m2_s: f64,
+}
+
+impl From<ViscoSphereTrajectoryControls> for TrajectoryAuditControls {
+    fn from(value: ViscoSphereTrajectoryControls) -> Self {
+        Self {
+            linear_tolerance_kg_m_s: value.linear_tolerance_kg_m_s,
+            angular_tolerance_kg_m2_s: value.angular_tolerance_kg_m2_s,
+            energy_tolerance_j: value.energy_tolerance_j,
+            integration_tolerance_j: value.integration_tolerance_j,
+            angular_integration_tolerance_kg_m2_s: value.angular_integration_tolerance_kg_m2_s,
+        }
+    }
+}
+
+fn accumulate<M, P>(
+    r: &mut SphereTrajectoryReport<M, P>,
+    material: ViscoIntervalWork,
     inertia: InertialEnergy,
     momentum: SolidMotionMomentum,
     flights: &[RigidFreeFlight],
     impact: Option<&InelasticMixedContactReport>,
 ) {
     r.kinetic_change_j += inertia.kinetic_change_j;
-    r.stored_change_j += material.stored_after_j - material.stored_before_j;
+    r.stored_change_j += material.stored_change_j;
     r.source_work_j += material.dead_load_endpoint_work_j;
     r.support_work_j += material.support_endpoint_work_j;
     r.relaxation_loss_j += material.dissipated_j;
@@ -470,7 +566,7 @@ fn accumulate(
     }
 }
 
-fn finish(r: &mut ViscoSphereTrajectoryReport) {
+fn finish<M, P>(r: &mut SphereTrajectoryReport<M, P>) {
     r.work_energy_residual_j = r.kinetic_change_j
         + r.stored_change_j
         + r.relaxation_loss_j
@@ -491,7 +587,7 @@ fn finish(r: &mut ViscoSphereTrajectoryReport) {
         .sub(r.angular_integration_defect_kg_m2_s);
 }
 
-fn admitted(r: &ViscoSphereTrajectoryReport, c: ViscoSphereTrajectoryControls) -> bool {
+fn admitted<M, P>(r: &SphereTrajectoryReport<M, P>, c: TrajectoryAuditControls) -> bool {
     [
         r.kinetic_change_j,
         r.stored_change_j,
@@ -609,14 +705,12 @@ fn check_clock(
     requested: f64,
     represented: f64,
     tolerance: f64,
-) -> Result<(), ViscoSphereTrajectoryError> {
-    if (represented - requested).abs() > tolerance {
-        Err(ViscoSphereTrajectoryError::Path(
-            FiniteSolidSphereTrajectoryError::TimeResolution {
-                requested_step_s: requested,
-                represented_step_s: represented,
-            },
-        ))
+) -> Result<(), FiniteSolidSphereTrajectoryError> {
+    if !represented.is_finite() || (represented - requested).abs() > tolerance {
+        Err(FiniteSolidSphereTrajectoryError::TimeResolution {
+            requested_step_s: requested,
+            represented_step_s: represented,
+        })
     } else {
         Ok(())
     }

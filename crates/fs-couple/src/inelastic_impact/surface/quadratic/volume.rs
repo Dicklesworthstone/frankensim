@@ -35,7 +35,7 @@ pub enum QuadraticSolidVolumePathVerdict {
 pub struct QuadraticSolidVolumePathReport {
     pub verdict: QuadraticSolidVolumePathVerdict,
     pub tested_tetrahedra: usize,
-    /// Aggregate constructed subdivision cells over the examined elements.
+    /// Aggregate evaluated subdivision cells over the examined elements.
     pub examined_cells: usize,
 }
 

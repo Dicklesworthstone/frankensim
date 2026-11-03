@@ -1,5 +1,50 @@
 # CONTRACT: fs-couple
 
+## Native quadratic Maxwell trajectories through curved impacts
+
+`inelastic_impact::trajectory::quadratic::mixed_visco_sphere_trajectory_candidate`
+advances the original finite-compliance P2/P1 Maxwell motion and COM-centred
+rigid spheres through simultaneous curved-surface impulses, native material
+steps and native rigid free flight. The original consistent mass, complete
+inertia tensor, pressure gauge, material laws and quadrature histories remain
+with their existing owners. Stationary held velocity DOFs retain their initial
+prescribed displacement; external nodal/body loads, wrenches and gravity are
+explicit and fixed for the call.
+
+The complete reference and initial current TET10 maps must be admitted before
+the first impulse. Each trial then requires whole-material volume-path and
+curved boundary-path admission, plus independent sphere-pair sweeps sharing
+the boundary work allowances. Unresolved volume/boundary paths or ambiguous
+endpoint activation shorten the interval and recompute the native solve from
+the same accepted post-impact state. Rejected trials contribute no history,
+loss or accepted time. Refusal retains the unresolved evidence, and caller
+owners remain unchanged unless the complete returned candidate is adopted.
+
+Both Tet4 and TET10 trajectories share one physical accounting implementation.
+The existing Tet4 receipt names remain concrete aliases. Actual linear/angular
+momentum changes, applied/support impulses, total material storage including
+bulk, physical relaxation and contact loss stay separate from backward-Euler
+kinetic loss, angular drift and endpoint-work defects. Signed final balances
+and accumulated residual magnitudes both obey complete-call limits. Accepted
+coordinates and endpoint geometry are reused between intervals.
+
+This driver supports finite compliance, stationary supports and one
+COM-centred sphere per rigid body. It explicitly refuses exact-incompressible
+backward-Euler flight because the endpoint displacement chord does not prove
+the instantaneous volume-tangent velocity needed by constrained contact.
+Undeclared sphere-pair encounters, rotating offset centres, unresolved
+persistent/grazing contact and exhausted budgets refuse. Geometric admission
+covers the declared affine coordinate path and local material regularity,
+not the continuum trajectory or global solid self-intersection.
+
+Native regression source covers a curved supported bounce with history replay,
+free recoil and continued pressure/history evolution, original signed TET10
+body loads with full rigid wrench/gravity, independent numerical-defect gates,
+and transactional late/pair/cancellation refusals. Pinned parser/format checks,
+native-owner source review and independent exact-rational impulse/loss
+calculations passed. Native compilation and test execution remain unverified
+under the workspace disk/dependency-memory blocker.
+
 ## Whole-material quadratic volume admission
 
 `inelastic_impact::surface::quadratic::volume` binds a prepared volume check to

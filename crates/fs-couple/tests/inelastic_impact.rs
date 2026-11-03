@@ -48,6 +48,9 @@ mod scene;
 #[path = "inelastic_impact/trajectory.rs"]
 mod trajectory;
 
+#[path = "inelastic_impact/quadratic_trajectory.rs"]
+mod quadratic_trajectory;
+
 #[path = "inelastic_impact/sustained.rs"]
 mod sustained;
 
