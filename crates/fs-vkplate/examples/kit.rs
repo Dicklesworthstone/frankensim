@@ -23,6 +23,8 @@ const OBSERVER_FLAG: &str = "--observer";
 const CAVITY_MODES_FLAG: &str = "--cavity-modes";
 /// ALL-IN (MB 14741), opt-in: `--wire-contact viscoelastic`, the snare wires' contact loss from the film card (.372).
 const WIRE_CONTACT_FLAG: &str = "--wire-contact";
+/// ALL-IN (MB 15788), opt-in with --cavity-modes: the air modes' viscothermal wall loss (Pierce Eq. (10-4.16)).
+const CAVITY_WALL_LOSS_FLAG: &str = "--cavity-wall-loss";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
@@ -46,12 +48,17 @@ fn main() {
             std::process::exit(2)
         }
     });
+    let wall_loss = all.iter().any(|a| a == CAVITY_WALL_LOSS_FLAG);
+    if wall_loss && cavity_modes.is_none() {
+        eprintln!("refused: {CAVITY_WALL_LOSS_FLAG} is the loss of the air modes; give {CAVITY_MODES_FLAG} F_MAX_HZ too");
+        std::process::exit(1)
+    }
     let valued = |i: usize| i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG);
     let a: Vec<String> = all
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && !valued(*i)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
@@ -124,7 +131,7 @@ fn main() {
                 std::process::exit(1)
             }
         };
-        match kit::attach_cavity_modes(&mut p, &spec, f_max) {
+        match kit::attach_cavity_modes_with(&mut p, &spec, f_max, wall_loss) {
             Ok(receipt) => p.notes.push(receipt),
             Err(e) => {
                 eprintln!("refused: {e}");

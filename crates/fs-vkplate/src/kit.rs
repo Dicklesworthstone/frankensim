@@ -1205,11 +1205,84 @@ pub fn cylinder_air_modes(radius: f64, depth: f64, sound_speed: f64, f_max: f64)
     out
 }
 
+/// The viscothermal boundary-layer loss of one rigid-cylinder air mode (`cylinder_air_modes`), as the free
+/// mode's amplitude decay rate sigma [1/s] (Q = omega / (2 sigma)).
+///
+/// The law: A. D. Pierce, Acoustics: An Introduction to Its Physical Principles and Applications (McGraw-Hill
+/// 1981; ASA reprint 1989), Sec. 10-4, Eq. (10-4.16). It gives the power the acoustic mode loses per unit
+/// area of a rigid wall held at ambient temperature:
+/// (omega rho mu / 2)^(1/2) <v_T^2> + (gamma - 1) (omega rho kappa / (2 c_p))^(1/2) <p^2> / (rho c)^2.
+/// Here v_T is the tangential velocity and p the pressure just outside the layers. The page is 594 of the
+/// retypeset PDF read (jontalle.web.engr.illinois.edu/Public/BOOKS/Pierce-Acoustics.81.pdf); the equation
+/// number is the book's.
+///
+/// Take p = A psi cos(omega t), so v = A grad(psi) sin(omega t) / (rho omega), and the stored energy
+/// A^2 int psi^2 dV / (2 rho c^2). The energy balance then gives
+/// sigma = [ (c / omega)^2 (omega rho mu / 2)^(1/2) int_S |grad_T psi|^2 dS
+///         + (gamma - 1) (omega rho kappa / (2 c_p))^(1/2) int_S psi^2 dS ] / (2 rho int psi^2 dV).
+///
+/// For psi = J_m(alpha r / a) {cos, sin}(m theta) cos(p pi z / L) with J_m'(alpha) = 0, every integral is
+/// closed:
+/// - On the shell (r = a): psi^2, and its azimuthal and axial gradients.
+/// - On both heads (z = 0 and z = L, where cos^2 = 1): int psi^2 dA = R Theta, and
+///   int |grad psi|^2 dA = (alpha / a)^2 R Theta, by Green's identity with the Neumann rim. Here
+///   R = int_0^a J_m^2 r dr = a^2 (1 - m^2 / alpha^2) J_m(alpha)^2 / 2, or a^2 / 2 for the axial modes.
+///
+/// The heads count as rigid walls at ambient temperature. Pierce's criteria (10-4.4a, b) hold for the film:
+/// its thermal effusivity is about 10^4 times the air's, and a 0.19 mm film is about 10^3 times
+/// (10-4.4b)'s bound at 600 Hz. The layers' share of the heads' own motion is not modelled.
+///
+/// Values come from the gas record: viscosity, conductivity, c_p, gamma, density and sound speed. Nothing is
+/// fitted. A non-finite or negative property is refused; zero viscosity and conductivity give sigma = 0,
+/// so Q is infinite.
+pub fn cylinder_mode_wall_sigma(md: &CylinderAirMode, radius: f64, depth: f64, gas: &crate::GasState) -> Result<f64, String> {
+    use crate::radiation::bessel_j;
+    let (rho, c) = (gas.density, gas.sound_speed);
+    let (mu, kap, cp, gamma) = (gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_heat_cp, gas.gamma);
+    for (name, v) in [("dynamic viscosity", mu), ("thermal conductivity", kap)] {
+        if !(v.is_finite() && v >= 0.0) {
+            return Err(format!("cavity wall loss: the gas record's {name} {v} must be finite and not negative"));
+        }
+    }
+    if !(rho.is_finite() && rho > 0.0 && c.is_finite() && c > 0.0 && cp.is_finite() && cp > 0.0 && gamma.is_finite() && gamma >= 1.0) {
+        return Err(format!("cavity wall loss: gas density {rho}, sound speed {c}, c_p {cp}, gamma {gamma} out of range"));
+    }
+    if !(radius > 0.0 && depth > 0.0 && md.omega.is_finite() && md.omega > 0.0) {
+        return Err(format!("cavity wall loss: mode {md:?} in a {radius} x {depth} m cylinder is out of range"));
+    }
+    let m = md.m as f64;
+    let axial_only = md.m == 0 && md.n == 0;
+    let jm2 = if axial_only { 1.0 } else { bessel_j(md.m, md.alpha).powi(2) };
+    // int over theta of cos^2 (or sin^2) m theta, and of the derivative's sin^2 (or cos^2): equal for m >= 1
+    let theta = if md.m == 0 { 2.0 * PI } else { PI };
+    let (zc, zs) = if md.p == 0 { (depth, 0.0) } else { (0.5 * depth, 0.5 * depth) };
+    let rr = if axial_only {
+        0.5 * radius * radius
+    } else {
+        0.5 * radius * radius * (1.0 - m * m / (md.alpha * md.alpha)) * jm2
+    };
+    let (kr, kz) = (md.alpha / radius, md.p as f64 * PI / depth);
+    let volume_sq = rr * theta * zc;
+    let surface_sq = jm2 * radius * theta * zc + 2.0 * rr * theta;
+    let surface_grad = jm2 * radius * theta * ((m / radius).powi(2) * zc + kz * kz * zs) + 2.0 * kr * kr * rr * theta;
+    let w = md.omega;
+    let viscous = (c / w).powi(2) * (w * rho * mu / 2.0).sqrt() * surface_grad;
+    let thermal = (gamma - 1.0) * (w * rho * kap / (2.0 * cp)).sqrt() * surface_sq;
+    Ok((viscous + thermal) / (2.0 * rho * volume_sq))
+}
+
 /// Opt-in (ALL-IN, MB 14741): the drum's enclosed air as the rigid cylinder's acoustic modes below `f_max`
 /// (`cylinder_air_modes`), beside the lumped cavity, coupling both heads (`AirModes`). Values: the gas record's
 /// density and sound speed and the drum's radius and depth; `f_max` is a declared truncation. The shell is
 /// rigid and the air lossless here. Returns the receipt line.
 pub fn attach_cavity_modes(p: &mut Piece, spec: &DrumSpec, f_max: f64) -> Result<String, String> {
+    attach_cavity_modes_with(p, spec, f_max, false)
+}
+
+/// `attach_cavity_modes`, and with `wall_loss` (opt-in, MB 15788) each mode also carries the viscothermal
+/// boundary-layer loss on shell and heads (`cylinder_mode_wall_sigma`). Without it the result is
+/// `attach_cavity_modes`'s, bit for bit.
+pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall_loss: bool) -> Result<String, String> {
     use crate::radiation::bessel_j;
     if !(f_max.is_finite() && f_max > 0.0) {
         return Err(format!("cavity modes: f_max {f_max} Hz must be positive"));
@@ -1262,6 +1335,26 @@ pub fn attach_cavity_modes(p: &mut Piece, spec: &DrumSpec, f_max: f64) -> Result
     let kappa: Vec<f64> = modes.iter().map(|md| rho * c * c / (volume * md.lambda)).collect();
     let wt2: Vec<f64> = modes.iter().map(|md| (2.0 - 2.0 * (md.omega * k).cos()) / (k * k)).collect();
     let nm = modes.len();
+    let gas = p.instrument.gas.clone();
+    let sigma: Vec<f64> = if wall_loss {
+        modes.iter().map(|md| cylinder_mode_wall_sigma(md, a, l, &gas)).collect::<Result<_, _>>()?
+    } else {
+        vec![]
+    };
+    let loss = if wall_loss {
+        let q = |i: usize| modes[i].omega / (2.0 * sigma[i]);
+        let (lo, hi) = (0..nm).fold((0, 0), |(lo, hi), i| (if q(i) < q(lo) { i } else { lo }, if q(i) > q(hi) { i } else { hi }));
+        let band: Vec<usize> = (0..nm).filter(|&i| (2000.0..=8000.0).contains(&(modes[i].omega / (2.0 * PI)))).collect();
+        let t60 = |i: usize| 3.0 * std::f64::consts::LN_10 / sigma[i];
+        let (t_lo, t_hi) = band.iter().fold((f64::INFINITY, 0.0f64), |(x, y), &i| (x.min(t60(i)), y.max(t60(i))));
+        let name = |i: usize| format!("({},{},{}) {:.0} Hz", modes[i].m, modes[i].n, modes[i].p, modes[i].omega / (2.0 * PI));
+        format!(
+            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz; no loss inside the air and none from the heads' own motion in the layers (a lower bound)",
+            gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_heat_cp, gas.gamma, q(lo), name(lo), q(hi), name(hi), band.len()
+        )
+    } else {
+        "shell rigid, air lossless (no boundary-layer loss: a lower bound)".to_string()
+    };
     p.instrument.air_modes.push(AirModes {
         kappa,
         wt2,
@@ -1271,11 +1364,12 @@ pub fn attach_cavity_modes(p: &mut Piece, spec: &DrumSpec, f_max: f64) -> Result
         heads,
         y: vec![0.0; nm],
         q: vec![0.0; ns],
+        sigma,
     });
     let first: Vec<String> = modes.iter().filter(|md| !md.sine).take(10)
         .map(|md| format!("({},{},{}) {:.0} Hz", md.m, md.n, md.p, md.omega / (2.0 * PI))).collect();
     Ok(format!(
-        "cavity modes (opt-in, ALL-IN): the enclosed air as {nm} acoustic modes on {ns} head shapes of a rigid closed cylinder (radius {a} m, depth {l} m; gas rho {rho:.4} kg/m^3, c {c:.2} m/s) from {:.0} to {:.0} Hz (declared truncation {f_max} Hz), coupling both heads beside the lumped (0,0,0) term; first: {}; shell rigid, air lossless (no boundary-layer loss: a lower bound)",
+        "cavity modes (opt-in, ALL-IN): the enclosed air as {nm} acoustic modes on {ns} head shapes of a rigid closed cylinder (radius {a} m, depth {l} m; gas rho {rho:.4} kg/m^3, c {c:.2} m/s) from {:.0} to {:.0} Hz (declared truncation {f_max} Hz), coupling both heads beside the lumped (0,0,0) term; first: {}; {loss}",
         modes[0].omega / (2.0 * PI), modes[nm - 1].omega / (2.0 * PI), first.join(", ")
     ))
 }
@@ -1572,6 +1666,7 @@ mod air_mode_tests {
             heads: vec![(head, g.clone(), vec![1.0, 1.0])],
             y: vec![0.0; 2],
             q: vec![0.0; 2],
+            sigma: vec![],
         });
         let energy = |w: f64, wp: f64, x: &[f64], xp: &[f64]| -> f64 {
             let mut e = 0.5 * mass * ((w - wp) / k).powi(2);
@@ -1652,6 +1747,7 @@ mod air_mode_tests {
                 heads: (0..2).map(|j| (heads[j], gs[j].to_vec(), signs[j].to_vec())).collect(),
                 y: vec![0.0; 3],
                 q: vec![0.0; 2],
+                sigma: vec![],
             });
             let g = |j: usize, m: usize| sign[j][m] * gs[j][shape[m]];
             let mut out: [f64; 0] = [];
@@ -1766,5 +1862,236 @@ mod wire_retardation_tests {
         eprintln!("KAT5 share {share:.4}, f_ref {f:.1} Hz, A {a:.4e} s");
         assert!((f / 23730.0 - 1.0).abs() < 2e-3, "{f}");
         assert!((a / 2.44e-7 - 1.0).abs() < 5e-3, "{a}");
+    }
+}
+
+#[cfg(test)]
+mod cavity_wall_loss_tests {
+    use super::*;
+    use crate::radiation::bessel_j;
+
+    const A: f64 = 0.1703;
+    const L: f64 = 0.1524;
+
+    /// Pierce's book route, independent of the surface integrals in `cylinder_mode_wall_sigma`, for the
+    /// purely axial modes (0,0,p) of the closed cylinder.
+    /// - The shell: a wide duct's wall attenuation, Eq. (10-5.8),
+    ///   alpha_walls = 2^(-3/2) eta_mu (1 + (gamma - 1) / Pr^(1/2)) L_P / A_c with L_P / A_c = 2 / a.
+    ///   The standing wave's two grazing components decay at c alpha_walls.
+    /// - The two heads, at normal incidence: Eq. (10-4.21)'s absorption 2^(3/2) eta_kappa takes
+    ///   2^(3/2) eta_kappa (A/2)^2 / (2 rho c) per unit area from each.
+    ///   That is sigma = 2^(1/2) eta_kappa c / L, with eta from Eq. (10-4.19).
+    #[test]
+    fn axial_modes_match_pierces_duct_and_normal_incidence_q() {
+        let g = crate::standard_gas();
+        let (rho, c, mu, kap, cp, gamma) = (g.density, g.sound_speed, g.dynamic_viscosity, g.thermal_conductivity, g.specific_heat_cp, g.gamma);
+        let pr = mu * cp / kap;
+        let mut worst: f64 = 0.0;
+        let mut count = 0;
+        for md in cylinder_air_modes(A, L, c, 8000.0).iter().filter(|md| md.m == 0 && md.n == 0) {
+            let w = md.omega;
+            let eta_mu = (w * mu / (rho * c * c)).sqrt();
+            let eta_kappa = (gamma - 1.0) * (w * kap / (rho * c * c * cp)).sqrt();
+            let alpha_walls = 2f64.powf(-1.5) * eta_mu * (1.0 + (gamma - 1.0) / pr.sqrt()) * 2.0 / A;
+            let book = c * alpha_walls + 2f64.sqrt() * eta_kappa * c / L;
+            let code = cylinder_mode_wall_sigma(md, A, L, &g).unwrap();
+            eprintln!("axial (0,0,{}) {:.0} Hz: sigma {code:.4} 1/s, book {book:.4}, Q {:.0}", md.p, w / (2.0 * PI), w / (2.0 * code));
+            worst = worst.max((code / book - 1.0).abs());
+            count += 1;
+        }
+        eprintln!("axial modes: {count} checked, worst relative difference {worst:.2e}");
+        assert!(count >= 7 && worst < 1e-12, "{count} {worst}");
+    }
+
+    /// Every other mode, against the same law integrated numerically.
+    /// - Midpoint sums over the volume, the shell and both heads.
+    /// - Gradients by central differences of psi itself.
+    /// This uses none of the closed forms: not R, not Green's identity, not the angular and axial factors.
+    /// Bound 1e-3.
+    #[test]
+    fn general_modes_match_surface_quadrature() {
+        let g = crate::standard_gas();
+        let (rho, c, mu, kap, cp, gamma) = (g.density, g.sound_speed, g.dynamic_viscosity, g.thermal_conductivity, g.specific_heat_cp, g.gamma);
+        let modes = cylinder_air_modes(A, L, c, 6000.0);
+        let general: Vec<&CylinderAirMode> = modes.iter().filter(|md| !(md.m == 0 && md.n == 0)).collect();
+        // The pick covers every class by construction: m = 0, m >= 1 cosine, m >= 1 sine, each with p = 0 and p >= 1.
+        // It takes the lowest and the highest mode of each class below 6 kHz.
+        // Then it adds the highest azimuthal order, the highest radial order, and the mode nearest the 5754 Hz line.
+        let classes: [fn(&CylinderAirMode) -> bool; 6] = [
+            |md| md.m == 0 && md.p == 0,
+            |md| md.m == 0 && md.p >= 1,
+            |md| md.m >= 1 && !md.sine && md.p == 0,
+            |md| md.m >= 1 && md.sine && md.p == 0,
+            |md| md.m >= 1 && !md.sine && md.p >= 1,
+            |md| md.m >= 1 && md.sine && md.p >= 1,
+        ];
+        let mut picked: Vec<&CylinderAirMode> = vec![];
+        let mut extra: Vec<&CylinderAirMode> = vec![];
+        for class in classes {
+            let members: Vec<&CylinderAirMode> = general.iter().copied().filter(|md| class(md)).collect();
+            assert!(!members.is_empty(), "no mode of a class below 6 kHz");
+            extra.push(members[0]);
+            extra.push(members[members.len() - 1]);
+        }
+        extra.push(general.iter().copied().max_by(|x, y| x.m.cmp(&y.m).then(y.omega.total_cmp(&x.omega))).unwrap());
+        extra.push(general.iter().copied().max_by(|x, y| x.n.cmp(&y.n).then(y.omega.total_cmp(&x.omega))).unwrap());
+        let target = 2.0 * PI * 5754.0;
+        extra.push(general.iter().copied().min_by(|x, y| (x.omega - target).abs().total_cmp(&(y.omega - target).abs())).unwrap());
+        for md in extra {
+            if !picked.iter().any(|q| std::ptr::eq(*q, md)) {
+                picked.push(md);
+            }
+        }
+        eprintln!("{} general modes below 6 kHz; {} picked", general.len(), picked.len());
+        assert!(picked.len() >= 12, "{}", picked.len());
+        assert!(picked.iter().any(|md| md.sine) && picked.iter().any(|md| md.m == 0) && picked.iter().any(|md| md.p >= 1));
+        let mut worst: f64 = 0.0;
+        for md in picked {
+            let kz = md.p as f64 * PI / L;
+            let ang = |th: f64| if md.m == 0 { 1.0 } else if md.sine { (md.m as f64 * th).sin() } else { (md.m as f64 * th).cos() };
+            let psi = |r: f64, th: f64, z: f64| bessel_j(md.m, md.alpha * r / A) * ang(th) * (kz * z).cos();
+            let (nr, nt, nz) = (400usize, 256usize, 256usize);
+            let (dr, dt, dz) = (A / nr as f64, 2.0 * PI / nt as f64, L / nz as f64);
+            let (hr, ht, hz) = (1e-6 * A, 1e-6, 1e-6 * L);
+            // volume, by its separable factors summed numerically
+            let sr: f64 = (0..nr).map(|i| { let r = (i as f64 + 0.5) * dr; bessel_j(md.m, md.alpha * r / A).powi(2) * r * dr }).sum();
+            let st: f64 = (0..nt).map(|j| ang((j as f64 + 0.5) * dt).powi(2) * dt).sum();
+            let sz: f64 = (0..nz).map(|q| ((kz * (q as f64 + 0.5) * dz).cos()).powi(2) * dz).sum();
+            let volume = sr * st * sz;
+            // the shell, r = a
+            let (mut shell_sq, mut shell_grad) = (0.0, 0.0);
+            for j in 0..nt {
+                let th = (j as f64 + 0.5) * dt;
+                for q in 0..nz {
+                    let z = (q as f64 + 0.5) * dz;
+                    let v = psi(A, th, z);
+                    let d_th = (psi(A, th + ht, z) - psi(A, th - ht, z)) / (2.0 * ht) / A;
+                    let d_z = (psi(A, th, z + hz) - psi(A, th, z - hz)) / (2.0 * hz);
+                    shell_sq += v * v * A * dt * dz;
+                    shell_grad += (d_th * d_th + d_z * d_z) * A * dt * dz;
+                }
+            }
+            // both heads, z = 0 and z = L
+            let (mut heads_sq, mut heads_grad) = (0.0, 0.0);
+            for z in [0.0, L] {
+                for i in 0..nr {
+                    let r = (i as f64 + 0.5) * dr;
+                    for j in 0..nt {
+                        let th = (j as f64 + 0.5) * dt;
+                        let v = psi(r, th, z);
+                        let d_r = (psi(r + hr, th, z) - psi(r - hr, th, z)) / (2.0 * hr);
+                        let d_th = (psi(r, th + ht, z) - psi(r, th - ht, z)) / (2.0 * ht) / r;
+                        heads_sq += v * v * r * dr * dt;
+                        heads_grad += (d_r * d_r + d_th * d_th) * r * dr * dt;
+                    }
+                }
+            }
+            let w = md.omega;
+            let quad = ((c / w).powi(2) * (w * rho * mu / 2.0).sqrt() * (shell_grad + heads_grad)
+                + (gamma - 1.0) * (w * rho * kap / (2.0 * cp)).sqrt() * (shell_sq + heads_sq)) / (2.0 * rho * volume);
+            let code = cylinder_mode_wall_sigma(md, A, L, &g).unwrap();
+            let rel = (code / quad - 1.0).abs();
+            eprintln!("({},{},{}) {} {:.0} Hz: sigma {code:.4} 1/s, quadrature {quad:.4}, rel {rel:.1e}, Q {:.0}",
+                md.m, md.n, md.p, if md.sine { "sin" } else { "cos" }, w / (2.0 * PI), w / (2.0 * code));
+            worst = worst.max(rel);
+        }
+        eprintln!("general modes: worst relative difference to quadrature {worst:.2e}");
+        assert!(worst < 1e-3, "{worst}");
+    }
+
+    /// The stepped air coordinate, heads held: one mode near 5754 Hz rings down at its sigma.
+    /// - The discrete energy E = (kappa / wt2) ((X - X-) / k)^2 / 2 + kappa X X- / 2 falls as exp(-2 sigma t).
+    ///   Checked over 1 s at 144 kHz; bound 1e-3.
+    /// - The same mode without sigma keeps E to 1e-9.
+    #[test]
+    fn a_held_head_air_mode_rings_down_at_its_sigma() {
+        let g = crate::standard_gas();
+        let modes = cylinder_air_modes(A, L, g.sound_speed, 8000.0);
+        let target = 2.0 * PI * 5754.0;
+        let md = modes.iter().min_by(|x, y| (x.omega - target).abs().total_cmp(&(y.omega - target).abs())).unwrap();
+        let sigma = cylinder_mode_wall_sigma(md, A, L, &g).unwrap();
+        let rate = 144000.0;
+        let k = 1.0 / rate;
+        let wt2 = (2.0 - 2.0 * (md.omega * k).cos()) / (k * k);
+        let kappa = 1.0e7;
+        let run = |s: Vec<f64>| -> f64 {
+            let mut ins = Instrument::new(rate);
+            ins.add(Body::point("held", 1.0));
+            ins.air_modes.push(AirModes {
+                kappa: vec![kappa], wt2: vec![wt2], x: vec![1.0], xp: vec![1.0], shape: vec![0], heads: vec![],
+                y: vec![0.0], q: vec![0.0], sigma: s,
+            });
+            let energy = |a: &AirModes| 0.5 * kappa / wt2 * ((a.x[0] - a.xp[0]) / k).powi(2) + 0.5 * kappa * a.x[0] * a.xp[0];
+            let mut out: [f64; 0] = [];
+            ins.step(&mut out);
+            let e0 = energy(&ins.air_modes[0]);
+            for _ in 0..144000 {
+                ins.step(&mut out);
+            }
+            energy(&ins.air_modes[0]) / e0
+        };
+        let measured = -run(vec![sigma]).ln() / (2.0 * 144000.0 * k);
+        let lossless = run(vec![]);
+        eprintln!("({},{},{}) {:.0} Hz: sigma {sigma:.4} 1/s, stepped {measured:.4} 1/s (T60 {:.2} s, Q {:.0}); lossless energy ratio {lossless:.12}",
+            md.m, md.n, md.p, md.omega / (2.0 * PI), 3.0 * std::f64::consts::LN_10 / sigma, md.omega / (2.0 * sigma));
+        assert!((measured / sigma - 1.0).abs() < 1e-3, "{measured} vs {sigma}");
+        assert!((lossless - 1.0).abs() < 1e-9, "{lossless}");
+    }
+
+    /// (2) The loss is opt-in.
+    /// - Without it, the snare-off's air modes carry no sigma and the receipt is the lossless one.
+    /// - With it, only sigma differs: kappa, wt2, the shapes, the weights and the signs are the same bits.
+    /// - The WAV-level check, this binary against build8's with no new flag, is the build's `cmp`.
+    #[test]
+    fn the_wall_loss_is_opt_in_and_changes_only_sigma() {
+        let spec = snare_wires_off();
+        let mut off = drum(&spec, &[(0.005, 4.5)]).unwrap();
+        let mut on = drum(&spec, &[(0.005, 4.5)]).unwrap();
+        let r_off = attach_cavity_modes(&mut off, &spec, 8000.0).unwrap();
+        let r_on = attach_cavity_modes_with(&mut on, &spec, 8000.0, true).unwrap();
+        let (a, b) = (&off.instrument.air_modes[0], &on.instrument.air_modes[0]);
+        assert!(a.sigma.is_empty() && r_off.ends_with("shell rigid, air lossless (no boundary-layer loss: a lower bound)"), "{r_off}");
+        assert_eq!(b.sigma.len(), b.kappa.len());
+        assert!(b.sigma.iter().all(|s| s.is_finite() && *s > 0.0));
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&a.kappa), bits(&b.kappa));
+        assert_eq!(bits(&a.wt2), bits(&b.wt2));
+        assert_eq!(a.shape, b.shape);
+        for (ha, hb) in a.heads.iter().zip(&b.heads) {
+            assert_eq!(ha.0, hb.0);
+            assert_eq!(bits(&ha.1), bits(&hb.1));
+            assert_eq!(bits(&ha.2), bits(&hb.2));
+        }
+        eprintln!("{r_on}");
+    }
+
+    /// (3) Planted negatives.
+    /// - A gas with no viscosity and no conductivity gives sigma = 0 exactly, so Q is infinite, not a default.
+    /// - Viscosity alone at zero leaves exactly the thermal share.
+    /// - A missing (NaN) or negative property is refused.
+    #[test]
+    fn an_inviscid_nonconducting_gas_gives_infinite_q_and_a_bad_record_is_refused() {
+        let air = crate::standard_gas();
+        let modes = cylinder_air_modes(A, L, air.sound_speed, 8000.0);
+        let mut ideal = air.clone();
+        ideal.dynamic_viscosity = 0.0;
+        ideal.thermal_conductivity = 0.0;
+        for md in &modes {
+            let s = cylinder_mode_wall_sigma(md, A, L, &ideal).unwrap();
+            assert!(s == 0.0 && (md.omega / (2.0 * s)).is_infinite(), "{md:?}: {s}");
+        }
+        let mut inviscid = air.clone();
+        inviscid.dynamic_viscosity = 0.0;
+        for md in modes.iter().filter(|md| md.m == 0 && md.n == 0) {
+            let w = md.omega;
+            let therm = (air.gamma - 1.0) * (w * air.thermal_conductivity / (2.0 * air.density * air.specific_heat_cp)).sqrt();
+            let s = cylinder_mode_wall_sigma(md, A, L, &inviscid).unwrap();
+            assert!((s / (therm / A + 2.0 * therm / L) - 1.0).abs() < 1e-12, "{md:?}: {s}");
+        }
+        for (field, v) in [("mu", f64::NAN), ("mu", -1e-5), ("kappa", f64::NAN), ("kappa", -1e-3)] {
+            let mut bad = air.clone();
+            if field == "mu" { bad.dynamic_viscosity = v } else { bad.thermal_conductivity = v }
+            assert!(cylinder_mode_wall_sigma(&modes[0], A, L, &bad).is_err(), "{field} {v} was not refused");
+        }
     }
 }

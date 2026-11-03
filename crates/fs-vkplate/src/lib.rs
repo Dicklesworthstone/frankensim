@@ -2005,8 +2005,11 @@ pub struct Cavity {
 /// (`g_i = h^2 psi(x_i)`, the mode's shape at the node) and an air coordinate `X` of mass `kappa / omega^2`.
 /// The mode's pressure amplitude is `-kappa (Y - X)` and pushes node `i` with `g_i` times it, so heads and air
 /// exchange energy without making any: held heads leave `X` ringing at the mode's frequency. The leapfrog air
-/// step uses `wt2 = (2 - 2 cos(omega k)) / k^2`, so a held-head mode rings at `omega` exactly. Lossless: the
-/// air's boundary layers on shell and heads are not modelled, a lower bound on loss. Modes that differ only
+/// step uses `wt2 = (2 - 2 cos(omega k)) / k^2`, so a held-head mode rings at `omega` exactly. Lossless unless
+/// `sigma` is given: then each air coordinate also carries the damping `2 sigma_m dX/dt` (centred, so the step
+/// stays passive), the viscothermal boundary-layer loss on shell and heads (`kit::cylinder_mode_wall_sigma`);
+/// a held-head mode then rings down as `exp(-sigma_m t)`. An empty `sigma` is the lossless step, bit for bit.
+/// Modes that differ only
 /// in their axial order share one shape on a head and differ there by a sign (`(-1)^p` on the far head), so
 /// the weights are stored per shape: `shape[m]` is mode `m`'s shape, and `heads` holds per head body its
 /// weights shape-major (`g` of shape `s` at node `i` is `weights[s * n + i]`) and per mode its sign there.
@@ -2023,6 +2026,8 @@ pub struct AirModes {
     pub y: Vec<f64>,
     /// Scratch per shape: a head's projection on it, then the pressure it carries there.
     pub q: Vec<f64>,
+    /// Per mode, the amplitude decay rate [1/s] of the wall boundary layers (opt-in); empty = lossless.
+    pub sigma: Vec<f64>,
 }
 
 /// A hole in a head (a kick drum's front port): the air plug in it is an inertance
@@ -3430,7 +3435,13 @@ impl Instrument {
             }
             for m in 0..nm {
                 let stretch = air.y[m] - air.x[m];
-                let next = 2.0 * air.x[m] - air.xp[m] + k * k * air.wt2[m] * stretch;
+                let next = if air.sigma.is_empty() {
+                    2.0 * air.x[m] - air.xp[m] + k * k * air.wt2[m] * stretch
+                } else {
+                    // (X+ - 2X + X-) / k^2 + 2 sigma (X+ - X-) / 2k = wt2 (Y - X)
+                    let sk = air.sigma[m] * k;
+                    (2.0 * air.x[m] - (1.0 - sk) * air.xp[m] + k * k * air.wt2[m] * stretch) / (1.0 + sk)
+                };
                 air.xp[m] = air.x[m];
                 air.x[m] = next;
                 air.y[m] = -air.kappa[m] * stretch; // this mode's pressure amplitude
