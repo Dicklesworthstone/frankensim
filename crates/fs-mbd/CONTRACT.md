@@ -1,5 +1,28 @@
 # CONTRACT: fs-mbd
 
+## Physical acceleration at articulated material points
+
+`InverseDynamics::prepare_point_motion` and `ForwardDynamics::prepare_point_motion`
+use the original matching `Kinematics` and original gravity to restore physical
+acceleration from prescribed-base RNEA/ABA's gravity-shifted spatial receipt.
+`FreeFloatingForwardDynamics::prepare_point_motion` accepts its already physical
+spatial acceleration without adding gravity again. Both apply the necessary
+`omega cross v` conversion from spatial to Cartesian origin acceleration.
+The prepared link query retains `alpha cross r` and `omega cross (omega cross r)`
+for each original body-fixed material point. Native joint Coriolis/centrifugal
+effects remain in the original solver's acceleration, without another tree or
+inertia solve. Preparation and queries are fixed-work and allocation-free.
+
+`ArticulatedPointMotion::specific_acceleration_world` separately returns ideal
+accelerometer specific force `a - g`: a stationary supported point reads `-g`,
+whereas a nonrotating point in free fall reads zero. No impact acceleration,
+sensor dynamics, sliding attachment, missing reaction solve or time integration
+is inferred. Callers must supply receipts from the same model, state and instant;
+shape/index and finite-arithmetic admission cannot prove that provenance.
+G1/G3 tests cover an analytic rotating radial slider, independent differentiation
+of native forward kinematics, rotated frames, common velocity boosts, gravity
+conventions and malformed/unrepresentable motion refusal.
+
 ## Instantaneous rigid-point motion
 
 `RigidBodyIntegrator::prepare_point_motion` captures one native smooth state,

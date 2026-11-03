@@ -22,6 +22,10 @@ pub mod contact_geometry;
 #[path = "articulated/mass_moments.rs"]
 mod mass_moments;
 
+#[path = "articulated/point_motion.rs"]
+mod point_motion;
+pub use point_motion::{ArticulatedPointMotion, PreparedLinkPointMotion};
+
 use core::fmt;
 use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
 use fs_math::dd::Dd;
@@ -93,6 +97,13 @@ pub enum ArticulatedError {
     },
     /// An articulated model must contain at least one link.
     EmptyModel,
+    /// A material-point query names a link outside its kinematics receipt.
+    InvalidLinkIndex {
+        /// Requested zero-based link index.
+        link: usize,
+        /// Number of retained links.
+        link_count: usize,
+    },
     /// A link name must be nonempty and unique.
     InvalidLinkName {
         /// Link with the invalid or repeated name.
@@ -201,6 +212,12 @@ impl fmt::Display for ArticulatedError {
                 "joint effort {value} for link {link} exceeds absolute limit {maximum}"
             ),
             Self::EmptyModel => formatter.write_str("an articulated model needs at least one link"),
+            Self::InvalidLinkIndex { link, link_count } => {
+                write!(
+                    formatter,
+                    "link {link} is outside the {link_count}-link kinematics receipt"
+                )
+            }
             Self::InvalidLinkName { link } => {
                 write!(formatter, "link {link} has an empty or duplicate name")
             }
@@ -935,7 +952,9 @@ pub struct Kinematics {
 pub struct InverseDynamics {
     /// Generalized forces in compact joint order.
     pub generalized_force: Vec<f64>,
-    /// Body-coordinate link accelerations, including the gravity convention.
+    /// Gravity-shifted Featherstone spatial accelerations in link coordinates.
+    /// These are not Cartesian point accelerations. [`Self::prepare_point_motion`]
+    /// restores the original gravity and applies the moving-frame conversion.
     pub body_acceleration: Vec<Twist>,
     /// Net body-coordinate wrenches propagated through each link.
     pub body_wrench: Vec<Wrench>,
@@ -946,7 +965,9 @@ pub struct InverseDynamics {
 pub struct ForwardDynamics {
     /// Generalized accelerations in compact joint order.
     pub generalized_acceleration: Vec<f64>,
-    /// Body-coordinate link accelerations, including the gravity convention.
+    /// Gravity-shifted Featherstone spatial accelerations in link coordinates.
+    /// Use [`Self::prepare_point_motion`] with the original gravity and matching
+    /// kinematics for physical Cartesian material-point acceleration.
     pub body_acceleration: Vec<Twist>,
 }
 
@@ -966,7 +987,9 @@ pub struct FreeFloatingForwardDynamics {
     /// Featherstone spatial acceleration of every retained link, expressed in
     /// that link's body coordinates. Convert each linear component with
     /// [`origin_linear_acceleration_body`] and the corresponding body twist
-    /// before integrating a Cartesian origin velocity.
+    /// before integrating a Cartesian origin velocity. Alternatively,
+    /// [`Self::prepare_point_motion`] handles physical link-point observations
+    /// without adding gravity a second time.
     pub body_spatial_acceleration: Vec<Twist>,
 }
 
