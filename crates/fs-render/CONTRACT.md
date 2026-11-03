@@ -59,6 +59,14 @@ differentiable lift). Pure Rust throughout.
   Snell refraction and total internal reflection, plus smooth-delta and
   single-scattering isotropic-GGX reflection/transmission. Radiance transport
   uses the documented `(eta_i/eta_t)^2` transmission convention.
+  Bare reflection rationalizes the original index contrast and obtains
+  transmission from normal Poynting flux, so a rounded unit reflectance does
+  not extinguish a positive transmitted channel. Scalar and polarized paths
+  share these coefficients and the factored Snell normal wave number. Only
+  cancellation at a critical ray uses `fs-math` double-double arithmetic;
+  ordinary interfaces remain allocation-free binary64 calculations. Focused
+  G1/G3 tests retain near-matched-index refraction, critical-angle side,
+  grazing transmission, polarized power closure and finite sampled weights.
   Native spectral bulk absorption retains 2–16 declared vacuum-wavelength
   knots covering exactly 380–780 nm, with nonnegative intensity coefficients
   in inverse metres and deterministic linear interpolation. Imaginary-index
@@ -93,7 +101,8 @@ differentiable lift). Pure Rust throughout.
   `absorption_residual()` is a balance diagnostic, not a positive layer-resolved
   heat source or a certificate for sub-ULP losses. Absorbing coatings can remove
   power under external total internal reflection while transmitted power remains
-  zero. Existing bare-interface arithmetic and identities are retained.
+  zero. Existing material identities are retained; bare-interface arithmetic
+  follows the shared stable Fresnel law described above.
   `DielectricCoatingStack::layer_power_balance` additionally supplies positive
   total and per-film s/p absorption from that same native transmitting solve.
   It retains factored incident port waves at each boundary and contracts the
@@ -143,7 +152,9 @@ differentiable lift). Pure Rust throughout.
   TT and TRT connectors carry physical R/T separately from those MIS densities,
   and completed random-walk paths replay the same conditional probabilities.
   A representably black coating has a zero-weight reflection proposal. Uncoated
-  event ordering is unchanged. The scalar camera model remains unpolarized at
+  event ordering is unchanged except when bare R rounds to one with positive T:
+  that weak transmitted channel also takes the low end of the variate. The
+  scalar camera model remains unpolarized at
   each interaction; repeated scalar R/T products do not carry Stokes history.
   The exterior longitudinal wave is taken from native Snell/TIR classification,
   preventing a separate squared-index rounding from inventing a propagating

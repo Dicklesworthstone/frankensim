@@ -18,6 +18,7 @@ use fs_geom::Vec3;
 
 use crate::dielectric::{
     BeerLambertAbsorption, DielectricError, DielectricEvent, DielectricIor, FresnelDielectric,
+    dielectric_power_coefficients, dielectric_transmitted_normal_squared,
     fresnel_dielectric, sample_smooth_dielectric,
 };
 use crate::polarization::{Mueller, Stokes};
@@ -70,9 +71,8 @@ pub fn fresnel_dielectric_polarized(
         });
     }
     if scalar.total_internal_reflection {
-        let ratio = eta_i / eta_t;
-        let gamma = (ratio * ratio * (1.0 - incident_cosine * incident_cosine)
-            - 1.0).max(0.0).sqrt();
+        let gamma = (-dielectric_transmitted_normal_squared(incident_cosine, eta_i, eta_t))
+            .max(0.0).sqrt() / eta_t;
         let (sr, si) = tir_amplitude(eta_i * incident_cosine, eta_t * gamma);
         let (pr, pi) = tir_amplitude(eta_t * incident_cosine, eta_i * gamma);
         // r_s conj(r_p): retain the phase difference even though both powers
@@ -83,17 +83,9 @@ pub fn fresnel_dielectric_polarized(
             scalar,
         });
     }
-    let ci = incident_cosine;
-    let ct = scalar.transmitted_cosine;
-    let ds = eta_i * ci + eta_t * ct;
-    let dp = eta_t * ci + eta_i * ct;
-    let rs = (eta_i * ci - eta_t * ct) / ds;
-    let rp = (eta_t * ci - eta_i * ct) / dp;
-    // Power-normalized transmission, not squared E-field transmission.
-    // The direct expression avoids cancellation in 1-r² near grazing.
-    let numerator = 4.0 * eta_i * eta_t * ci * ct;
-    let ts = (numerator / (ds * ds)).clamp(0.0, 1.0);
-    let tp = (numerator / (dp * dp)).clamp(0.0, 1.0);
+    let ([rs, rp], [ts, tp]) = dielectric_power_coefficients(
+        incident_cosine, eta_i, eta_t, scalar.transmitted_cosine,
+    );
     Ok(PolarizedFresnel {
         reflection: diagonal(rs * rs, rp * rp, rs * rp, 0.0),
         transmission: diagonal(ts, tp, ts.sqrt() * tp.sqrt(), 0.0),
@@ -162,17 +154,18 @@ pub fn sample_smooth_dielectric_polarized(
     let n = normal.scale(1.0 / normal.dot(normal).sqrt());
     let w = wo.scale(1.0 / wo.dot(wo).sqrt());
     let fresnel = fresnel_dielectric_polarized(n.dot(w).clamp(0.0, 1.0), eta_i, eta_t)?;
-    let (matrix, scale) = match sample.event {
-        DielectricEvent::Reflection => (fresnel.reflection, 1.0 / sample.probability),
+    let (matrix, eta_factor) = match sample.event {
+        DielectricEvent::Reflection => (fresnel.reflection, 1.0),
         DielectricEvent::Transmission => (
-            fresnel.transmission, (eta_i / eta_t).powi(2) / sample.probability,
+            fresnel.transmission, (eta_i / eta_t).powi(2),
         ),
     };
     Ok(PolarizedDielectricSample {
         direction: sample.direction,
         event: sample.event,
         probability: sample.probability,
-        radiance_weight: Mueller(matrix.0.map(|row| row.map(|value| value * scale))),
+        radiance_weight: Mueller(matrix.0.map(|row| row.map(|value|
+            (value / sample.probability) * eta_factor))),
     })
 }
 
@@ -249,6 +242,46 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn g3_near_matched_scalar_and_polarized_reflection_share_the_same_snell_owner() {
+        for eta_t in [f64::from_bits(1.5_f64.to_bits() - 1),
+            f64::from_bits(1.5_f64.to_bits() + 1)] {
+            for cosine in [1.0e-8, 1.7e-8, 1.8e-8, 0.3, 1.0] {
+                let response = fresnel_dielectric_polarized(cosine, 1.5, eta_t).unwrap();
+                close(response.reflection.0[0][0], response.scalar.reflectance);
+                close(response.transmission.0[0][0], response.scalar.transmittance);
+                for state in [Stokes::unpolarized(1.0),
+                    Stokes::try_new(1.0, 0.0, 1.0, 0.0).unwrap(),
+                    Stokes::try_new(1.0, 0.0, 0.0, 1.0).unwrap()] {
+                    let reflected = response.reflection.apply(state);
+                    let transmitted = response.transmission.apply(state);
+                    close(reflected.i + transmitted.i, 1.0);
+                    assert!(Stokes::try_new(reflected.i, reflected.q, reflected.u, reflected.v).is_some());
+                    assert!(Stokes::try_new(transmitted.i, transmitted.q, transmitted.u, transmitted.v).is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_grazing_polarized_transmission_keeps_finite_weights_below_reciprocal_range() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        for cosine in [1.0e-18, 1.0e-40, 1.0e-310] {
+            let response = fresnel_dielectric_polarized(cosine, 1.0, 1.5).unwrap();
+            assert!(response.scalar.transmittance > 0.0);
+            assert_eq!(response.transmission.0[0][0], response.scalar.transmittance);
+            let wo = Vec3::new(1.0, 0.0, cosine);
+            let scalar = sample_smooth_dielectric(normal, wo, 1.0, 1.5, 0.0).unwrap();
+            let polarized = sample_smooth_dielectric_polarized(normal, wo, 1.0, 1.5, 0.0).unwrap();
+            assert_eq!(polarized.event, DielectricEvent::Transmission);
+            assert_eq!(polarized.direction, scalar.direction);
+            assert_eq!(polarized.probability, scalar.probability);
+            assert!(polarized.radiance_weight.0.iter().flatten().all(|value| value.is_finite()));
+            close(polarized.radiance_weight.apply(Stokes::unpolarized(1.0)).i,
+                scalar.radiance_weight);
         }
     }
 

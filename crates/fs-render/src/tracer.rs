@@ -191,9 +191,9 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
 /// opaque materials retain tracer-v1 stream order and image bits.
-// v16 initializes rays launched inside admitted dielectric regions. Exterior
-// origins retain the same empty stack, random streams and radiance arithmetic.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 16;
+// v17 shares stable bare Fresnel powers and critical-angle geometry with
+// polarized transport, retaining positive T when grazing R rounds to one.
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 17;
 
 /// Radiance-mode shading-normal projection for brushed GGX conductors.
 /// Version 2 removes spurious gain at geometric grazing incidence.

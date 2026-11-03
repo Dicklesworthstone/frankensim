@@ -962,8 +962,8 @@ pub struct FresnelDielectric {
     /// Power reflectance in `[0, 1]`.
     pub reflectance: f64,
     /// Transmitted normal power flux. For a coherent coating this comes from
-    /// its complex transmitted field, retaining weak transmission even when R
-    /// rounds to one. Uncoated interfaces retain their established `1-R` bits.
+    /// its complex transmitted field. Bare interfaces use normal Poynting
+    /// flux directly, retaining weak transmission even when R rounds to one.
     pub transmittance: f64,
     /// Positive transmitted-angle cosine, or zero under total internal
     /// reflection.
@@ -1018,9 +1018,8 @@ pub fn fresnel_dielectric(
             total_internal_reflection: false,
         });
     }
-    let eta = eta_i / eta_t;
-    let sin2_t = eta * eta * (1.0 - incident_cosine * incident_cosine).max(0.0);
-    if sin2_t >= 1.0 {
+    let normal_squared = dielectric_transmitted_normal_squared(incident_cosine, eta_i, eta_t);
+    if normal_squared <= 0.0 {
         return Ok(FresnelDielectric {
             reflectance: 1.0,
             transmittance: 0.0,
@@ -1028,16 +1027,11 @@ pub fn fresnel_dielectric(
             total_internal_reflection: true,
         });
     }
-    let transmitted_cosine = (1.0 - sin2_t).max(0.0).sqrt();
-    let parallel_numerator = eta_t * incident_cosine - eta_i * transmitted_cosine;
-    let parallel_denominator = eta_t * incident_cosine + eta_i * transmitted_cosine;
-    let perpendicular_numerator = eta_i * incident_cosine - eta_t * transmitted_cosine;
-    let perpendicular_denominator = eta_i * incident_cosine + eta_t * transmitted_cosine;
-    if parallel_denominator <= 0.0 || perpendicular_denominator <= 0.0 {
-        return Err(DielectricError::InvalidInterface);
-    }
-    let parallel = parallel_numerator / parallel_denominator;
-    let perpendicular = perpendicular_numerator / perpendicular_denominator;
+    let transmitted_cosine = if incident_cosine == 1.0 { 1.0 }
+        else { (normal_squared.sqrt() / eta_t).min(1.0) };
+    let ([perpendicular, parallel], transmitted) = dielectric_power_coefficients(
+        incident_cosine, eta_i, eta_t, transmitted_cosine,
+    );
     // Both ratios are bounded in [-1, 1], so the textbook half-sum cannot
     // overflow. Preserve this explicit Fresnel form rather than changing the
     // new transport bit semantics to satisfy the generic midpoint lint.
@@ -1045,10 +1039,64 @@ pub fn fresnel_dielectric(
     let reflectance = 0.5 * (parallel * parallel + perpendicular * perpendicular);
     Ok(FresnelDielectric {
         reflectance: reflectance.clamp(0.0, 1.0),
-        transmittance: 1.0 - reflectance.clamp(0.0, 1.0),
+        transmittance: (0.5 * transmitted[0] + 0.5 * transmitted[1]).min(1.0),
         transmitted_cosine,
         total_internal_reflection: false,
     })
+}
+
+/// Squared transmitted normal wave number divided by the vacuum wave number
+/// squared. Factoring the original index contrast retains near-matched media;
+/// `1 - (eta_i/eta_t)^2 * (1-cosine^2)` can erase a propagating channel there.
+/// Only cancellation at the critical ray uses the existing precision ladder.
+pub(crate) fn dielectric_transmitted_normal_squared(cosine: f64, eta_i: f64, eta_t: f64) -> f64 {
+    let normal = eta_i * cosine;
+    let contrast = (eta_t - eta_i) * (eta_t + eta_i);
+    let squared = normal.mul_add(normal, contrast);
+    if eta_i > eta_t && squared.abs() <= 64.0 * f64::EPSILON * (normal * normal + contrast.abs()) {
+        use fs_math::dd::Dd;
+        let incident = Dd::from_f64(eta_i);
+        let transmitted = Dd::from_f64(eta_t);
+        let normal = incident * Dd::from_f64(cosine);
+        ((transmitted - incident) * (transmitted + incident) + normal * normal).to_f64()
+    } else {
+        squared
+    }
+}
+
+/// Shared s/p electric reflection amplitudes and normal-power transmission.
+/// Inputs have already passed the bare-interface domain and Snell checks.
+/// Rationalizing the reflected numerators preserves weak index contrast;
+/// direct Poynting transmission preserves the complement of rounded unit R.
+pub(crate) fn dielectric_power_coefficients(
+    cosine: f64, eta_i: f64, eta_t: f64, transmitted_cosine: f64,
+) -> ([f64; 2], [f64; 2]) {
+    let qi = eta_i * cosine;
+    let qt = eta_t * transmitted_cosine;
+    let ds = qi + qt;
+    let pi = eta_t * cosine;
+    let pt = eta_i * transmitted_cosine;
+    let dp = pi + pt;
+    let contrast = (eta_i - eta_t) * (eta_i + eta_t);
+    // Keep the direct near-unit limit: rationalizing a well-separated pair
+    // can round an exactly unit grazing amplitude away from one. Use the
+    // contrast only when subtraction would lose a weak reflected wave.
+    let rs = if (qi - qt).abs() < 0.25 * ds {
+        contrast / (ds * ds)
+    } else { (qi - qt) / ds }.clamp(-1.0, 1.0);
+    let rp = if cosine == 1.0 { -rs } else {
+        if (pi - pt).abs() < 0.25 * dp {
+            let ni2 = eta_i * eta_i;
+            let nt2 = eta_t * eta_t;
+            let brewster = (cosine * cosine).mul_add(ni2 + nt2, -ni2);
+            -contrast / nt2 * brewster / (dp * dp)
+        } else { (pi - pt) / dp }.clamp(-1.0, 1.0)
+    };
+    // Divide before multiplying to retain subnormal positive flux. Every ratio
+    // lies in [0,1]; no overflowing reciprocal or difference of unit powers.
+    let ts = (4.0 * (qi / ds) * (qt / ds)).min(1.0);
+    let tp = (4.0 * (pi / dp) * (pt / dp)).min(1.0);
+    ([rs, rp], [ts, tp])
 }
 
 /// The sampled side of a dielectric interface.
@@ -1508,7 +1556,10 @@ fn interface_selects_reflection(
     if fresnel.total_internal_reflection {
         return true;
     }
-    if interface.is_some_and(|value| value.is_active()) && probabilities[1] < probabilities[0] {
+    if (interface.is_some_and(|value| value.is_active())
+        || (fresnel.reflectance == 1.0 && fresnel.transmittance > 0.0))
+        && probabilities[1] < probabilities[0]
+    {
         // Keep the smaller channel at the low end of [0,1). Its threshold
         // survives even when the complementary power rounds exactly to one.
         sample >= probabilities[1]
@@ -1942,6 +1993,55 @@ mod tests {
         assert_close(result.reflectance, 0.04, 2.0e-15, "normal Fresnel");
         assert_close(result.transmitted_cosine, 1.0, 0.0, "normal Snell");
         assert!(!result.total_internal_reflection);
+    }
+
+    #[test]
+    fn g1_near_matched_reflection_and_critical_transmission_retain_original_indices() {
+        // Independent 90-digit decimal evaluation of the original binary64
+        // inputs, using Snell and the electric-field Fresnel coefficients.
+        // The old squared-ratio subtraction turned the second case into TIR,
+        // losing 70% of incident power that should cross the interface.
+        let upper = f64::from_bits(1.5_f64.to_bits() + 1);
+        let lower = f64::from_bits(1.5_f64.to_bits() - 1);
+        for (cosine, eta_t, expected_cosine, expected_r, expected_t) in [
+            (1.0e-8, upper, 1.990_124_300_724_392e-8,
+                0.109_648_060_511_336_41, 0.890_351_939_488_663_6),
+            (1.8e-8, lower, 5.285_879_942_509_564e-9,
+                0.298_117_388_521_066, 0.701_882_611_478_933_9),
+            (0.745_355_992_499_93, 1.0, 1.922_808_372_914_912_4e-8,
+                0.999_999_888_212_221_2, 1.117_877_787_955_790_5e-7),
+        ] {
+            let result = fresnel_dielectric(cosine, 1.5, eta_t).unwrap();
+            assert!(!result.total_internal_reflection);
+            for (actual, expected) in [(result.transmitted_cosine, expected_cosine),
+                (result.reflectance, expected_r), (result.transmittance, expected_t)] {
+                assert!((actual - expected).abs() <= 2.0e-13 * expected,
+                    "{actual:.17e} != {expected:.17e}");
+            }
+        }
+        assert!(fresnel_dielectric(1.7e-8, 1.5, lower).unwrap().total_internal_reflection);
+    }
+
+    #[test]
+    fn g1_bare_grazing_transmission_survives_rounded_unit_reflection() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        for cosine in [1.0e-18, 1.0e-40, 1.0e-310] {
+            let response = fresnel_dielectric(cosine, 1.0, 1.5).unwrap();
+            assert_eq!(response.reflectance, 1.0);
+            assert!(!response.total_internal_reflection);
+            // Leading grazing Poynting flux, whose O(cosine^2) correction is
+            // below binary64 resolution at these angles.
+            let expected = 5.813_776_741_499_454 * cosine;
+            assert!((response.transmittance / expected - 1.0).abs() < 2.0e-13);
+            let wo = Vec3::new(1.0, 0.0, cosine);
+            let transmitted = sample_smooth_dielectric(normal, wo, 1.0, 1.5, 0.0).unwrap();
+            assert_eq!(transmitted.event, DielectricEvent::Transmission);
+            assert_eq!(transmitted.probability, response.transmittance);
+            assert!(transmitted.direction.z < 0.0);
+            assert_eq!(transmitted.radiance_weight, (1.0_f64 / 1.5).powi(2));
+            let reflected = sample_smooth_dielectric(normal, wo, 1.0, 1.5, 0.5).unwrap();
+            assert_eq!(reflected.event, DielectricEvent::Reflection);
+        }
     }
 
     #[test]
