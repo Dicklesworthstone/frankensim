@@ -1794,6 +1794,42 @@ inelastic counterpart succeeds. Redundant directions remain a typed numerical
 refusal. No friction, collision-time search, position repair, continuous contact
 force or nonsmooth timestep claim is made.
 
+### Mixed free and prescribed-base normal impacts
+
+The additive `articulated_contacts::mixed::resolve_mixed_articulated_contacts`
+entry admits simultaneous normal contacts between independently free trees,
+stationary supported mechanisms and externally driven mechanisms. Each
+`MixedArticulatedContactSystem` declares its actual free or prescribed base;
+the existing native ABA inverse-mass maps supply its contact mobility. All
+contacts share the original geometry, positive-definite simultaneous normal
+law, accumulated link impulses and endpoint admission. The original free-only
+entry retains its native response type through the result's default type
+parameter.
+
+Prescribed bases retain their actual native reaction force and couple, in
+body and world coordinates, through `MixedArticulatedImpulseResponse`.
+Their support work is reported separately from plane work and mechanical
+impact loss. The shared global momentum residual subtracts both plane and
+base impulses; its energy residual is actual kinetic change minus both work
+sources plus admitted loss. A moving support can supply energy without
+being mistaken for passive-contact energy creation. No fictitious support
+mass, independent link mass, sequential collision response or post-event
+velocity projection is introduced.
+
+The original limits of 64 contacts and 128 systems, full-tensor and
+offset-COM treatment, actual endpoint speed limits, nonnegative-gap admission,
+global restitution passivity and cancellation remain active. Locked,
+redundant or insufficiently resolved active normal mobilities refuse through
+the original solver. This entry adds instantaneous normal momentum exchange;
+mixed-boundary friction, collision detection and sustained-contact trajectories
+remain outside this entry.
+
+Focused native tests cover free-only response parity, a free body striking a
+supported hinge with physical support recoil, two coupled contacts sharing
+one nondiagonal mobility, a moving and rotating full-tensor support under
+frame/origin/boost changes, and atomic rank, speed-limit and cancellation
+refusals.
+
 ### Shared material-point contact geometry
 
 `articulated::contact_geometry` owns link-fixed witnesses, positive separating

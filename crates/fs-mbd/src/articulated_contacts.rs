@@ -18,15 +18,21 @@ pub mod trajectory;
 /// Configuration-admitted sustained contact under joint, body, and gravity loads.
 pub mod step;
 
+/// Simultaneous normal contacts with original free and prescribed-base boundaries.
+pub mod mixed;
+
 use core::fmt;
 use fs_contact::frictional_multicontact::FrictionalContactError;
 use fs_contact::multicontact::{
     MultiImpactConfig, MultiImpactError, MultiImpactResult, NormalContactImpact,
     solve_normal_impacts,
 };
-use fs_ga::{GaError, Twist, Vec3, Wrench};
+#[cfg(test)]
+use fs_ga::Twist;
+use fs_ga::{GaError, Vec3, Wrench};
 use fs_math::dd::Dd;
 use fs_tribo::TriboError;
+use mixed::{ContactResponse, ContactSystem};
 use std::collections::BTreeMap;
 
 #[cfg(test)]
@@ -37,9 +43,8 @@ pub use crate::articulated::contact_geometry::{
     ArticulatedNormalContact, ContactCounterpart, LinkContactPoint,
 };
 use crate::articulated::{
-    ArticulatedError, ArticulatedModel, BaseState, FreeFloatingBaseState,
-    FreeFloatingImpulseResponse, Kinematics, apply_free_floating_impulses, forward_kinematics,
-    free_floating_impulse_delta,
+    ArticulatedError, ArticulatedModel, FreeFloatingBaseState, FreeFloatingImpulseResponse,
+    Kinematics, forward_kinematics,
 };
 
 /// Borrowed state of one independently free articulated tree.
@@ -57,9 +62,9 @@ pub struct ArticulatedContactSystem<'a> {
 
 /// Complete candidate states are published only after global admission.
 #[derive(Debug, Clone)]
-pub struct ArticulatedContactResult {
-    /// Updated states and physical momenta in input-system order.
-    pub responses: Vec<FreeFloatingImpulseResponse>,
+pub struct ArticulatedContactResult<R = FreeFloatingImpulseResponse> {
+    /// Updated native states and physical momenta in input-system order.
+    pub responses: Vec<R>,
     /// Simultaneous scalar impulses in input-contact order, in N s.
     pub normal_impulses: Vec<f64>,
     /// Relative speeds measured from the actual returned states, in m/s.
@@ -70,13 +75,15 @@ pub struct ArticulatedContactResult {
     pub normal_law: MultiImpactResult,
     /// Signed work from all prescribed planes, in joules.
     pub plane_work: f64,
+    /// Signed work from prescribed base reactions, in J; zero for free trees.
+    pub support_work: f64,
     /// Globally admitted impact loss, in joules; no heat partition is implied.
     pub dissipated_energy: f64,
-    /// Actual kinetic-energy change minus plane work plus admitted loss, in J.
+    /// Actual kinetic change minus plane and base work plus admitted loss, in J.
     pub energy_balance_residual: f64,
-    /// Total linear-momentum change minus prescribed-plane impulse, in N s.
+    /// Total linear change minus prescribed plane and base impulses, in N s.
     pub linear_momentum_residual: Vec3,
-    /// Total angular-momentum change minus plane angular impulse, in N m s.
+    /// Total angular change minus plane and base angular impulses, in N m s.
     pub angular_momentum_residual: Vec3,
 }
 
@@ -288,8 +295,17 @@ pub fn resolve_articulated_contacts(
     systems: &[ArticulatedContactSystem<'_>],
     contacts: &[ArticulatedNormalContact],
     config: MultiImpactConfig,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedContactResult, ArticulatedContactError> {
+    resolve_contacts(systems, contacts, config, cancelled)
+}
+
+fn resolve_contacts<S: ContactSystem>(
+    systems: &[S],
+    contacts: &[ArticulatedNormalContact],
+    config: MultiImpactConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ArticulatedContactResult<S::Response>, ArticulatedContactError> {
     if contacts.len() > 64 || contacts.len() > config.solver.max_variables || systems.len() > 128 {
         return Err(ArticulatedContactError::Invalid(
             "articulated contact event exceeds its size cap",
@@ -340,6 +356,7 @@ pub fn resolve_articulated_contacts(
         relative_normal_speeds_after: mechanics.speeds_after,
         delassus,
         plane_work: mechanics.plane_work,
+        support_work: mechanics.support_work,
         dissipated_energy: law.dissipated_energy,
         normal_law: law,
         energy_balance_residual: mechanics.energy_balance_residual,
@@ -367,10 +384,11 @@ struct EventResponse<'a> {
     velocity_tolerance: f64,
     energy_tolerance: f64,
 }
-struct EventResult {
-    responses: Vec<FreeFloatingImpulseResponse>,
+struct EventResult<R = FreeFloatingImpulseResponse> {
+    responses: Vec<R>,
     speeds_after: Vec<f64>,
     plane_work: f64,
+    support_work: f64,
     kinetic_energy_change: f64,
     energy_balance_residual: f64,
     linear_momentum_residual: Vec3,
@@ -378,8 +396,8 @@ struct EventResult {
     endpoint_velocity_residual: f64,
 }
 impl EventWorkspace {
-    fn new(
-        systems: &[ArticulatedContactSystem<'_>],
+    fn new<S: ContactSystem>(
+        systems: &[S],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ArticulatedContactError> {
         let mut before = Vec::with_capacity(systems.len());
@@ -387,15 +405,12 @@ impl EventWorkspace {
         let mut joint_impulses = Vec::with_capacity(systems.len());
         for (index, system) in systems.iter().enumerate() {
             poll(cancelled)?;
+            let system = system.system_view();
             before.push(dynamics(
                 index,
                 forward_kinematics(
                     system.model,
-                    BaseState::prescribed(
-                        system.base.world_from_base,
-                        system.base.twist_body,
-                        Twist::zero(),
-                    ),
+                    system.base,
                     system.joint_position,
                     system.joint_velocity,
                 ),
@@ -410,9 +425,9 @@ impl EventWorkspace {
         })
     }
 
-    fn delassus(
+    fn delassus<S: ContactSystem>(
         &mut self,
-        systems: &[ArticulatedContactSystem<'_>],
+        systems: &[S],
         prepared: &[Prepared],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<f64>, ArticulatedContactError> {
@@ -438,9 +453,7 @@ impl EventWorkspace {
                 let system = &systems[system_index];
                 let delta = dynamics(
                     system_index,
-                    free_floating_impulse_delta(
-                        system.model,
-                        system.joint_position,
+                    system.inverse_mass(
                         &self.joint_impulses[system_index],
                         &self.loads[system_index],
                     ),
@@ -467,14 +480,16 @@ impl EventWorkspace {
         Ok(delassus)
     }
 
-    fn apply(
+    fn apply<S: ContactSystem>(
         mut self,
-        systems: &[ArticulatedContactSystem<'_>],
+        systems: &[S],
         prepared: &[Prepared],
         law: EventResponse<'_>,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<EventResult, ArticulatedContactError> {
+    ) -> Result<EventResult<S::Response>, ArticulatedContactError> {
         let mut plane_work_sum = Dd::ZERO;
+        let mut support_work_sum = Dd::ZERO;
+        let mut has_support = false;
         let mut external_linear = VectorSum::default();
         let mut external_angular = VectorSum::default();
         // Scratch grows with touched links, not with every link in every tree.
@@ -527,38 +542,40 @@ impl EventWorkspace {
         let mut angular_scale = angular_impulse_scale + magnitude(external_angular.value()?);
         for (index, system) in systems.iter().enumerate() {
             poll(cancelled)?;
+            let input = system.system_view();
             let response = dynamics(
                 index,
-                apply_free_floating_impulses(
-                    system.model,
-                    system.base,
-                    system.joint_position,
-                    system.joint_velocity,
-                    &self.joint_impulses[index],
-                    &self.loads[index],
-                ),
+                system.apply(&self.joint_impulses[index], &self.loads[index]),
             )?;
+            let view = response.impulse_view();
             after.push(dynamics(
                 index,
                 forward_kinematics(
-                    system.model,
-                    BaseState::prescribed(
-                        response.base_after.world_from_base,
-                        response.base_after.twist_body,
-                        Twist::zero(),
-                    ),
-                    system.joint_position,
-                    &response.joint_velocity_after,
+                    input.model,
+                    view.base_after,
+                    input.joint_position,
+                    view.joint_velocity_after,
                 ),
             )?);
-            let initial = response.momentum_before;
-            let final_state = response.momentum_after;
-            energy_change_sum = energy_change_sum + Dd::from_f64(response.kinetic_energy_change);
+            let initial = view.momentum_before;
+            let final_state = view.momentum_after;
+            energy_change_sum = energy_change_sum + Dd::from_f64(view.kinetic_energy_change);
             energy_scale = finite(
                 energy_scale + initial.kinetic_energy.abs() + final_state.kinetic_energy.abs(),
             )?;
-            linear_change.add(response.linear_momentum_change_world)?;
-            angular_change.add(response.angular_momentum_change_world)?;
+            linear_change.add(view.linear_momentum_change_world)?;
+            angular_change.add(view.angular_momentum_change_world)?;
+            if let Some((impulse, work)) = view.support {
+                // The native constrained solve owns these reactions. They are
+                // external to the assembled moving trees, not lost momentum.
+                external_linear.add(impulse.force)?;
+                external_angular.add(impulse.torque)?;
+                linear_scale = finite(linear_scale + magnitude(impulse.force))?;
+                angular_scale = finite(angular_scale + magnitude(impulse.torque))?;
+                support_work_sum = support_work_sum + Dd::from_f64(finite(work)?);
+                energy_scale = finite(energy_scale + work.abs())?;
+                has_support = true;
+            }
             linear_scale = finite(
                 linear_scale
                     + magnitude(initial.linear_momentum_world)
@@ -574,7 +591,7 @@ impl EventWorkspace {
             // not a zero roundoff scale. Retain the original link contributions
             // at both endpoints, including the separate COM and world arms.
             for kinematics in [&self.before[index], &after[index]] {
-                for (link_index, link) in system.model.links().iter().enumerate() {
+                for (link_index, link) in input.model.links().iter().enumerate() {
                     if link_index % 64 == 0 {
                         poll(cancelled)?;
                     }
@@ -623,8 +640,11 @@ impl EventWorkspace {
             speeds_after.push(actual);
         }
         let energy_change = finite(energy_change_sum.to_f64())?;
-        let stored_and_mechanical_sum =
+        let mut stored_and_mechanical_sum =
             energy_change_sum - plane_work_sum + Dd::from_f64(law.stored_energy_change);
+        if has_support {
+            stored_and_mechanical_sum = stored_and_mechanical_sum - support_work_sum;
+        }
         let stored_and_mechanical_work = finite(stored_and_mechanical_sum.to_f64())?;
         let energy_balance_residual =
             finite((stored_and_mechanical_sum + Dd::from_f64(law.dissipated_energy)).to_f64())?;
@@ -650,6 +670,7 @@ impl EventWorkspace {
             responses,
             speeds_after,
             plane_work,
+            support_work: finite(support_work_sum.to_f64())?,
             kinetic_energy_change: energy_change,
             energy_balance_residual,
             linear_momentum_residual,
