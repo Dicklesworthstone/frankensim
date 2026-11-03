@@ -67,6 +67,17 @@ force and tangent evaluation. A small relative sliding coordinate therefore
 survives a much larger common translation. Original wall rows remain queryable;
 unrepresentable derived rows refuse during construction.
 
+`ShearedFilm::with_layer_viscosities` continues the original uniform-channel or
+layered film with one positive coefficient per original layer. It retains graph
+geometry, wall rows, normalized interfaces, pressure limits and the common
+Barus law. Hydraulic mobility, both entrainment weights, harmonic wall drag and
+combined layer work are recompiled together; updating only a hydraulic mean is
+insufficient. Unchanged coefficients preserve the exact original arithmetic.
+This operation has no thermal state or clock and never reprices completed work.
+Four focused regressions compare independent two-layer Couette integrals,
+uniform-layer and unchanged-coefficient limits, updated Barus tangents, retained
+geometry and transactional invalid-coefficient refusals.
+
 Profiles and wall rows are prescribed. Pressure-only layer work fractions
 do not partition combined Couette heat: layerwise pressure/shear cross
 terms generally do not cancel. This module introduces no thermal clock,

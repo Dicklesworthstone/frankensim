@@ -34,7 +34,7 @@ mod layer_work;
 use layer_work::LayerWork;
 pub use layer_work::MAX_LAYER_REPORTS;
 
-use super::stratified::{GapViscosityProfile, StratifiedFilm};
+use super::stratified::{GapViscosityProfile, StratifiedFilm, ViscosityLayer};
 use super::{
     FilmError, FilmReport, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm, Solution, dot, fail,
     solve_factored,
@@ -133,6 +133,78 @@ impl ShearedFilm {
     ) -> Result<Self, FilmError> {
         let (film, profiles) = stratified.into_parts();
         Self::compile(film, Some(profiles), walls)
+    }
+
+    /// Recompile the same sliding film at new positive layer viscosities.
+    ///
+    /// Values follow the flat original order returned by `channel_layer_range`;
+    /// a uniform channel has one implicit layer. Original graph geometry, wall
+    /// velocity rows, layer interfaces, pressure limits and the common Barus
+    /// coefficient are retained. Values remain referenced to zero gauge
+    /// pressure, as in the original pressure operator.
+    ///
+    /// Hydraulic mobility, both Couette entrainment weights, harmonic shear
+    /// drag and combined pressure/shear layer work are recompiled together.
+    /// Replacing only the pressure operator's hydraulic equivalent would leave
+    /// the physical wall traction and heat distribution inconsistent.
+    ///
+    /// This stateless coefficient continuation adds no thermal clock or energy.
+    /// A thermal owner must accept its source states before publishing the
+    /// result; work completed under the old coefficients is unchanged. Identical
+    /// coefficients return an exact clone. Every refusal leaves `self` intact.
+    pub fn with_layer_viscosities(&self, viscosities_pa_s: &[f64]) -> Result<Self, FilmError> {
+        if viscosities_pa_s.len() != self.layer_count()
+            || viscosities_pa_s
+                .iter()
+                .any(|mu| !mu.is_finite() || *mu <= 0.0)
+        {
+            return fail(
+                "sliding viscosity update needs every original positive layer coefficient",
+            );
+        }
+        match &self.profiles {
+            None => {
+                if viscosities_pa_s == self.film.channel_viscosities_pa_s() {
+                    return Ok(self.clone());
+                }
+                Self::new(
+                    self.film.with_channel_viscosities(viscosities_pa_s)?,
+                    self.walls.clone(),
+                )
+            }
+            Some(profiles) => {
+                if profiles
+                    .iter()
+                    .flat_map(|profile| profile.layers())
+                    .zip(viscosities_pa_s)
+                    .all(|(layer, &mu)| layer.dynamic_viscosity_pa_s == mu)
+                {
+                    return Ok(self.clone());
+                }
+                let mut values = viscosities_pa_s.iter();
+                let profiles = profiles
+                    .iter()
+                    .map(|profile| {
+                        GapViscosityProfile::new(
+                            profile
+                                .layers()
+                                .iter()
+                                .map(|layer| ViscosityLayer {
+                                    upper_fraction: layer.upper_fraction,
+                                    dynamic_viscosity_pa_s: *values
+                                        .next()
+                                        .expect("complete layer coverage"),
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Self::from_stratified(
+                    StratifiedFilm::new(&self.film, profiles)?,
+                    self.walls.clone(),
+                )
+            }
+        }
     }
 
     fn compile(
