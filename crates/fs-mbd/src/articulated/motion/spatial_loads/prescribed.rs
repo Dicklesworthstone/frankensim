@@ -5,7 +5,7 @@
 //! RNEA retain the actual support reaction and its signed work.
 
 use super::super::prescribed::{
-    EvaluatedPrescribedStep, PrescribedBaseMotionError, PrescribedBaseMotionState,
+    EffortLaw, EvaluatedPrescribedStep, PrescribedBaseMotionError, PrescribedBaseMotionState,
     PrescribedBaseMotionStep, PrescribedBasePath, PrescribedStage, external_sources,
     step_evaluated,
 };
@@ -114,23 +114,11 @@ pub fn step_prescribed_base_bushings(
     loads: SpatialMotionLoads<'_>,
     bushings: &[SpatialBushing],
     duration: f64,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
-    poll(&mut cancelled)?;
-    bushing::admit(model, loads, bushings, &mut cancelled)?;
-    let evaluated = step_evaluated(
-        model,
-        state,
-        path,
-        loads.held,
-        duration,
-        &mut cancelled,
-        |stage, kinematics, cancelled| {
-            evaluate_shared(model, stage, kinematics, loads, bushings, cancelled)
-        },
-        None,
-    )?;
-    finish(model, evaluated, loads, bushings, &mut cancelled)
+    step_with_bushings_and_effort(
+        model, state, path, loads, bushings, duration, None, cancelled,
+    )
 }
 
 /// Advance the same supported bushings with stage-dependent joint effort.
@@ -153,6 +141,29 @@ pub fn step_prescribed_base_bushings_with_effort(
         &PrescribedBaseMotionState,
         &mut [f64],
     ) -> Result<(), PrescribedBaseMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
+    step_with_bushings_and_effort(
+        model,
+        state,
+        path,
+        loads,
+        bushings,
+        duration,
+        Some(&mut effort),
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn step_with_bushings_and_effort<B: BushingLaw>(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
+    duration: f64,
+    effort: Option<&mut EffortLaw<'_>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
     poll(&mut cancelled)?;
@@ -167,7 +178,7 @@ pub fn step_prescribed_base_bushings_with_effort(
         |stage, kinematics, cancelled| {
             evaluate_shared(model, stage, kinematics, loads, bushings, cancelled)
         },
-        Some(&mut effort),
+        effort,
     )?;
     finish(model, evaluated, loads, bushings, &mut cancelled)
 }

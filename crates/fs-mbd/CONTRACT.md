@@ -4376,3 +4376,24 @@ parity. All four groups and the five existing mixed-normal groups pass in the
 bounded native numerical target. Unrelated tangential, trajectory, bilateral
 and executor paths are excluded; blocked dense GEMM is guarded by an unexercised
 fail-fast fixture. This does not substitute for the full Cargo or DSR gate.
+
+
+## Full passive bushings on prescribed supports
+
+`articulated::motion::spatial_loads::bushing::coupled` exposes supported
+explicit stepping with and without stage-dependent joint effort. Fixed and
+driven mechanisms now use the original complete 6x6 passive stiffness and
+damping forms, including translation/rotation coupling. The existing finite
+material-frame geometry, SO(3) pullback and reciprocal wrench lift remain the
+only constitutive owners.
+
+Diagonal and full-matrix supported adapters share one midpoint lifecycle. The
+same forces enter native ABA joint motion and RNEA support recovery, preserving
+linear/angular impulse, signed support work, actuator work, attachment storage
+and damping loss. No effective mass or substitute fixed base is introduced.
+This explicit lane must resolve the fastest coupled mode; sampled chart checks
+do not certify the continuous path.
+
+`tests/articulated_prescribed_coupled.rs` checks an independently solved
+translation/rotation mechanism under stationary and translating supports,
+feedback evaluated at the actual stages, and exact diagonal-law parity.

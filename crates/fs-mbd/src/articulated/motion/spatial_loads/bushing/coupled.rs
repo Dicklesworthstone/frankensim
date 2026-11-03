@@ -8,6 +8,10 @@
 mod matrix;
 pub use matrix::{BushingCoordinateScales, BushingMatrixError, PassiveBushingMatrix};
 
+use super::super::super::prescribed::{
+    PrescribedBaseMotionError, PrescribedBaseMotionState, PrescribedBasePath,
+};
+use super::super::prescribed::PrescribedSpatialMotionStep;
 use super::*;
 
 /// Fixed attachment geometry with independently prepared full passive K and C.
@@ -139,6 +143,64 @@ pub fn step_free_floating_bushings_implicit(
 ) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
     super::super::implicit::step_with_bushings(
         model, state, loads, bushings, duration, config, cancelled,
+    )
+}
+
+/// Advance full passive K/C coupling on a fixed or prescribed moving support.
+///
+/// Uses the same finite geometry, reciprocal wrenches and native supported
+/// midpoint lifecycle as diagonal bushings. All cross-axis forces enter both
+/// joint dynamics and the complete support reaction; storage, damping loss
+/// and signed support work retain their separate physical accounts.
+///
+/// This explicit step must resolve the fastest coupled attachment mode.
+/// The caller supplies a consistent support path; chart admission and
+/// cancellation have the same semantics as the original supported entry.
+#[allow(clippy::too_many_arguments)]
+pub fn step_prescribed_base_bushings(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[CoupledSpatialBushing],
+    duration: f64,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
+    super::super::prescribed::step_with_bushings_and_effort(
+        model, state, path, loads, bushings, duration, None, cancelled,
+    )
+}
+
+/// Advance supported full-matrix bushings with stage-dependent joint effort.
+///
+/// The callback receives the actual prescribed-base stage and elapsed time.
+/// Its output starts from held effort at each stage. Feedback and all full
+/// bushing couplings act on that same state, including support recovery.
+/// Native inputs remain borrowed; callback-owned effects cannot be rolled back.
+#[allow(clippy::too_many_arguments)]
+pub fn step_prescribed_base_bushings_with_effort(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[CoupledSpatialBushing],
+    duration: f64,
+    mut effort: impl FnMut(
+        f64,
+        &PrescribedBaseMotionState,
+        &mut [f64],
+    ) -> Result<(), PrescribedBaseMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PrescribedSpatialMotionStep, PrescribedBaseMotionError> {
+    super::super::prescribed::step_with_bushings_and_effort(
+        model,
+        state,
+        path,
+        loads,
+        bushings,
+        duration,
+        Some(&mut effort),
+        cancelled,
     )
 }
 
