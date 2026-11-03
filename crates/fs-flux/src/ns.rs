@@ -56,6 +56,9 @@ fn viscous_normal(grad: [[f64; 2]; 2], n: [f64; 2], symmetric: bool) -> [f64; 2]
     }
 }
 
+// Shared with the retained transport records; two sites per sign branch.
+const CONVECTION_EDGE_QUADRATURE_CAPACITY: usize = 4;
+
 /// Integrate each polynomial branch of an upwind BDM1 face exactly.
 /// The native normal moments give w.n = m0 + 12 m1 (s - 1/2), s in [0,1].
 /// Splitting at its interior zero makes (w.n) u_up.v cubic on each segment;
@@ -69,7 +72,7 @@ fn convection_edge_quadrature(
     moments: [f64; 2],
 ) -> impl Iterator<Item = ([f64; 2], f64, f64)> {
     let original = crate::bdm::edge_gauss_pub(a, b);
-    let mut points = [([0.0; 2], 0.0, 0.0); 4];
+    let mut points = [([0.0; 2], 0.0, 0.0); CONVECTION_EDGE_QUADRATURE_CAPACITY];
     points[0] = (original[0].0, original[0].1, 0.0);
     points[1] = (original[1].0, original[1].1, 1.0);
     let mut count = 2;

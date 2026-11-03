@@ -118,6 +118,15 @@ fn actual_gas_source_scales_reservoir_momentum_stress_and_evolving_inertia_toget
             .outward_mass_flux_moments(&left, [0.0; 2])
             .unwrap();
         near(mass_flux, -0.55 * density, 4e-8);
+        let exchange = result.solution.boundary_transport(&left, [0.0; 2], [0.0; 2]).unwrap();
+        near(exchange.outward_mass_flux_kg_per_m_s, mass_flux, 4e-12);
+        // -.5*rho*integral_0^1 (.4+.3y)*((.4+.3y)^2+(.1-.2y)^2) dy.
+        near(exchange.outward_kinetic_energy_w_per_m, -2167.0 * density / 24_000.0, 4e-8);
+        near(exchange.upwind_kinetic_dissipation_w_per_m, 0.0, 2e-12);
+        for axis in 0..2 {
+            near(exchange.outward_momentum.force_n_per_m[axis], load.outward_momentum.force_n_per_m[axis], 4e-12);
+        }
+        near(exchange.outward_momentum.moment_n, load.outward_momentum.moment_n, 4e-12);
     }
     assert_eq!(previous, vec![0.0; system.n_u]);
 }
@@ -215,6 +224,9 @@ fn reservoir_rheology_uses_retained_endpoint_materials_and_preserves_source_refu
             4e-8,
         );
         near(load.stress.force_n_per_m[1], 0.3 * viscosity(0.5), 4e-8);
+        let exchange = result.step.solution.boundary_transport(&left, [0.0; 2], [0.0; 2]).unwrap();
+        near(exchange.outward_kinetic_energy_w_per_m, -2167.0 * density / 24_000.0, 4e-8);
+        near(exchange.upwind_kinetic_dissipation_w_per_m, 0.0, 2e-12);
         assert_eq!(
             reads.get(),
             queries,

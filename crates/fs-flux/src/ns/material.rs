@@ -36,7 +36,7 @@ mod porous;
 #[path = "material/rheology.rs"]
 mod rheology;
 pub use mixed::{
-    MaterialBoundaryLoad, MaterialBoundaryWrench, MaterialStokesBoundary,
+    MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench, MaterialStokesBoundary,
     MaterialStokesRheologySolution, MaterialStokesSolution,
 };
 pub use navier_stokes::{

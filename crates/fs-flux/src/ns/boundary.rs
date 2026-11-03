@@ -17,6 +17,9 @@ pub use reaction::{
     BoundaryLoad, BoundaryReactionOwner, BoundaryReactions, BoundaryWrench,
     DiscreteBoundaryReaction,
 };
+#[path = "boundary/transport.rs"]
+mod transport;
+pub use transport::BoundaryTransport;
 
 #[path = "boundary/rheology.rs"]
 mod rheology;

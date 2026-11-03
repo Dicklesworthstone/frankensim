@@ -3365,3 +3365,51 @@ all axes and rectangular geometry, independent heat with zero momentum fit,
 formation-reference invariance, evolving walls, conservative advancement,
 capacity admission, cancellation and retry. The broader 25-test molecular/SGS
 group also passes with the actual current fs-lbm, fs-gas and fs-tribo dependencies.
+
+## Boundary momentum and kinetic-energy transport
+
+The original mixed-flow reaction assembly now retains its SAME sign-split
+advector/upwind quadrature in four inline records: position, carried velocity
+and weighted normal flux. `BoundaryReactions::transport` and the single-edge
+`DiscreteBoundaryReaction::transport` expose volume flow, linear/angular
+momentum, carried kinetic power and boundary upwind dissipation together.
+Selections reduce in canonical edge order with fixed-size compensated sums.
+No field, material or reservoir callback is queried during reporting.
+
+For normal relative flow q, interior velocity u and the admitted upwind trace g,
+carried kinetic flux is q|g|²/2. The numerical inflow loss is
+max(-q,0)|u-g|²/2. Since g=u on outflow, their sum equals the boundary kinetic
+term q(u.g-|u|²/2). The loss is separate from interior-face upwinding, viscosity
+and any declared backflow resistance, and is not silently deposited as heat.
+Both terms are cubic on an affine BDM1 branch and use its existing quadrature.
+
+A uniform carried-velocity offset preserves the original control-surface-
+relative flow. Each retained velocity is shifted before its momentum and
+kinetic-power products, and each position is translated before its torque
+product. No sum over different samples is formed before these conversions.
+This avoids subtracting large absolute kinetic fluxes merely to recover small
+world-frame exchange, and preserves tiny reversing-flow contributions even
+when their volume contribution rounds away from the total. Counterflow can
+carry nonzero momentum and energy while its net volume vanishes.
+Finite-precision admission and existing solve tolerances still apply; no exact
+state, large-coordinate accuracy or whole-scheme passivity theorem is asserted.
+
+`MaterialStokesSolution::boundary_transport` uses the original material density
+for mass, momentum and kinetic power in SI per unit depth. Newtonian and
+coupled-rheology Navier-Stokes endpoints share that owner.
+`TranslatingAleStep::boundary_transport_world` shifts carried velocities by the
+accepted mesh rate and translates the requested moment origin. The existing
+world boundary-load method now consumes the same momentum reconstruction.
+Pressure/Cauchy-stress work remains separate; these kinetic quantities do not
+supply enthalpy, internal energy, species, entropy or a complete StreamPort.
+
+Four focused kernel regressions exercise large common velocity offsets,
+zero-net-volume counterflow, energy/work identity, invalid frames, bounded
+storage and tiny-flux preservation for both signs and sample orders. Native
+reversing-face tests independently integrate cubic transport polynomials;
+source-density, endpoint rheology and translating-domain tests retain their
+original owners and verify kinetic transport, frame covariance, unchanged
+callback counts and canonical selection. Stored transport is fixed-size per
+boundary edge (176 nominal bytes on 64-bit targets), with a capacity shared
+with the native quadrature generator and an explicit overflow refusal. Reporting does not resample fields and needs no nonlinear solve or per-face
+heap allocation.

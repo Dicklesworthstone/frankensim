@@ -3,6 +3,7 @@
 use super::{
     AdmittedBoundary, OpenBoundaryPolicy, Samples, StokesBoundaryError, StokesPressureReference,
 };
+use super::transport::{BoundaryTransport, Sums, TransportAccumulator, TransportQuadrature};
 use crate::bdm::{edge_gauss_pub, eval_basis};
 use crate::ns::{
     FluxSolution, FluxSystem, convection_boundary_trace, convection_edge_quadrature, viscous_normal,
@@ -136,11 +137,24 @@ pub struct DiscreteBoundaryReaction {
     load: BoundaryLoad,
     normal_measure: [f64; 2],
     normal_moment_measure: f64,
-    outward_volume_flux: f64,
-    outward_volume_first_moment: [f64; 2],
+    transport: TransportQuadrature,
 }
 
 impl DiscreteBoundaryReaction {
+    /// Advected volume, momentum and kinetic power from this edge's original
+    /// quadrature, with a uniform carried-velocity offset. Pressure work and
+    /// mechanical stress are separate; no pressure datum is needed.
+    ///
+    /// # Errors
+    /// Refuses nonfinite origins/offsets or unrepresentable transport.
+    pub fn transport(
+        &self,
+        origin_m: [f64; 2],
+        velocity_offset_m_s: [f64; 2],
+    ) -> Result<BoundaryTransport, StokesBoundaryError> {
+        self.transport.evaluate(origin_m, velocity_offset_m_s)
+    }
+
     /// Evaluate this edge's functional about origin_m. A MeanZero component
     /// REQUIRES Some(offset), the authored pressure offset [m²/s²] to add to
     /// its reported mean-zero field; Some(0) is an explicit gauge choice.
@@ -217,30 +231,86 @@ impl BoundaryReactions {
         edges: &[usize],
         origin_m: [f64; 2],
     ) -> Result<(f64, [f64; 2]), StokesBoundaryError> {
-        if edges.is_empty() || !origin_m.iter().all(|x| x.is_finite()) {
-            return Err(invalid("nonempty boundary selection and finite flux origin required"));
+        if !origin_m.iter().all(|x| x.is_finite()) {
+            return Err(invalid("finite flux origin required"));
+        }
+        let mut sums = Sums::<3>::new();
+        for index in self.selected_transport_edges(edges)? {
+            let (flux, moment) = self.edges[index].transport.volume_flux_moments(origin_m);
+            sums.add([flux, moment[0], moment[1]]);
+        }
+        let values = sums.values();
+        if !values.iter().all(|v| v.is_finite()) {
+            return Err(invalid("unrepresentable boundary volume flux moments"));
+        }
+        Ok((values[0], [values[1], values[2]]))
+    }
+
+    /// Selected-edge volume, linear/angular momentum and kinetic transport,
+    /// retaining the original upwind traces and advector. The velocity offset
+    /// changes carried velocities while preserving flow relative to the control
+    /// surface, as in translation from an ALE frame to the world frame.
+    ///
+    /// Boundary upwind dissipation is reported separately. Pressure/stress
+    /// work, internal energy, heat and species are not included. This is not
+    /// a full discrete kinetic-energy balance or passivity guarantee.
+    ///
+    /// # Errors
+    /// Refuses empty/duplicate/nonboundary selections, nonfinite frame values,
+    /// and unrepresentable output; never resamples boundary or material data.
+    pub fn transport(
+        &self,
+        edges: &[usize],
+        origin_m: [f64; 2],
+        velocity_offset_m_s: [f64; 2],
+    ) -> Result<BoundaryTransport, StokesBoundaryError> {
+        if !origin_m.iter().chain(&velocity_offset_m_s).all(|v| v.is_finite()) {
+            return Err(invalid("finite transport origin and velocity offset required"));
+        }
+        let mut sums = Sums::<6>::new();
+        for index in self.selected_transport_edges(edges)? {
+            let item = self.edges[index].transport(origin_m, velocity_offset_m_s)?;
+            sums.add([
+                item.outward_volume_flux_m2_s,
+                item.outward_momentum.force[0],
+                item.outward_momentum.force[1],
+                item.outward_momentum.moment,
+                item.outward_kinetic_energy_flux,
+                item.upwind_kinetic_dissipation,
+            ]);
+        }
+        let values = sums.values();
+        let transport = BoundaryTransport {
+            origin_m,
+            velocity_offset_m_s,
+            outward_volume_flux_m2_s: values[0],
+            outward_momentum: BoundaryWrench {
+                force: [values[1], values[2]],
+                moment: values[3],
+            },
+            outward_kinetic_energy_flux: values[4],
+            upwind_kinetic_dissipation: values[5],
+        };
+        if !transport.finite() {
+            return Err(invalid("unrepresentable boundary transport sum"));
+        }
+        Ok(transport)
+    }
+
+    fn selected_transport_edges(&self, edges: &[usize]) -> Result<Vec<usize>, StokesBoundaryError> {
+        if edges.is_empty() {
+            return Err(invalid("nonempty transport edge selection required"));
         }
         let mut selected = edges.to_vec();
         selected.sort_unstable();
         if selected.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(invalid("duplicate flux edge"));
         }
-        let mut flux = 0.0;
-        let mut first_moment = [0.0; 2];
-        for edge in selected {
-            let index = self.edges.binary_search_by_key(&edge, |item| item.edge)
+        for edge in &mut selected {
+            *edge = self.edges.binary_search_by_key(edge, |item| item.edge)
                 .map_err(|_| invalid("flux selection must contain original boundary edges"))?;
-            let item = &self.edges[index];
-            flux += item.outward_volume_flux;
-            for axis in 0..2 {
-                first_moment[axis] += item.outward_volume_first_moment[axis]
-                    - origin_m[axis] * item.outward_volume_flux;
-            }
         }
-        if !flux.is_finite() || !first_moment.iter().all(|x| x.is_finite()) {
-            return Err(invalid("unrepresentable boundary volume flux moments"));
-        }
-        Ok((flux, first_moment))
+        Ok(selected)
     }
 
     /// Sum selected edges in canonical order without reassembly or source
@@ -471,8 +541,7 @@ impl ReactionOperator {
                     }
                 }
             };
-            let mut outward_volume_flux = 0.0;
-            let mut outward_volume_first_moment = [0.0; 2];
+            let mut transport = TransportAccumulator::new();
             if let Some((moments, advect)) = face.advection {
                 for (point, weight, fraction) in convection_edge_quadrature(a, b, moments) {
                     let u = velocity(system, cell, point, &field.x);
@@ -495,10 +564,7 @@ impl ReactionOperator {
                         u
                     };
                     let volume_flux = weight * wn;
-                    outward_volume_flux += volume_flux;
-                    for axis in 0..2 {
-                        outward_volume_first_moment[axis] += point[axis] * volume_flux;
-                    }
+                    transport.sample(point, volume_flux, upwind, u)?;
                     load.outward_momentum
                         .sample(point, upwind.map(|v| weight * wn * v));
                     if face.policy == Some(OpenBoundaryPolicy::DissipativeBackflow) {
@@ -508,10 +574,8 @@ impl ReactionOperator {
                 }
                 load.stress.add(load.backflow);
             }
-            if !load.finite()
-                || !outward_volume_flux.is_finite()
-                || !outward_volume_first_moment.iter().all(|v| v.is_finite())
-            {
+            let transport = transport.finish()?;
+            if !load.finite() {
                 return Err(invalid("nonfinite discrete boundary reaction"));
             }
             edges.push(DiscreteBoundaryReaction {
@@ -526,8 +590,7 @@ impl ReactionOperator {
                 load,
                 normal_measure: edge.normal.map(|n| edge.len * n),
                 normal_moment_measure: edge.len * cross(edge.mid, edge.normal),
-                outward_volume_flux,
-                outward_volume_first_moment,
+                transport,
             });
         }
         Ok(BoundaryReactions {

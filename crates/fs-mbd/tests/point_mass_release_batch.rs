@@ -1,4 +1,4 @@
-use fs_mbd::assembly::capture::{PointMassCapture, capture_point_mass};
+use fs_mbd::assembly::capture::{PointMassCapture, capture_point_mass, capture_point_masses};
 use fs_mbd::assembly::release::{
     PointMassRelease, PointMassReleaseBatchResult, release_point_mass, release_point_masses,
 };
@@ -386,6 +386,47 @@ fn full_tensor_batch_is_covariant_and_recapture_restores_original_body() {
     inputs[1].impulse_on_parcel_body_ns = Vec3::new(-0.4, 0.7, -0.6);
     let out = release(&b, p, &inputs);
     conservation(b, p, &out);
+
+    // Simultaneous recapture uses ONE retained-body COM for every parcel.
+    let incoming: Vec<_> = inputs
+        .iter()
+        .zip(&out.parcels)
+        .map(|(input, parcel)| PointMassCapture {
+            mass_kg: parcel.mass_kg,
+            attachment_arm_body_m: input.attachment_arm_body_m.sub(out.center_shift_body_m),
+            velocity_world_m_s: parcel.velocity_world_m_s().unwrap(),
+        })
+        .collect();
+    let captured = capture_point_masses(
+        &out.state,
+        out.properties,
+        &incoming,
+        controls(incoming.len()),
+        || false,
+    )
+    .unwrap();
+    inertia(captured.properties, p, 8e-12);
+    vector(
+        captured.state.pose().position_world(),
+        b.pose().position_world(),
+        3e-14,
+    );
+    vector(
+        captured.state.linear_momentum_world(),
+        b.linear_momentum_world(),
+        3e-14,
+    );
+    vector(
+        captured.state.angular_momentum_body(),
+        b.angular_momentum_body(),
+        8e-12,
+    );
+    close(
+        captured.removed_relative_energy_j,
+        out.supplied_work_j,
+        3e-12,
+    );
+
     let mut recovered = out.state;
     let mut recovered_properties = out.properties;
     let mut shift = out.center_shift_body_m;

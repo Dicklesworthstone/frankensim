@@ -102,6 +102,56 @@ fn flux(
     (force, moment)
 }
 
+// Cubic antiderivatives independently reconstruct carried kinetic power,
+// boundary upwind loss, and q*(u.u_upwind-|u|²/2) on each sign branch.
+fn energy_flux(
+    mesh: &TriMesh,
+    edge: usize,
+    advector: &dyn Fn([f64; 2]) -> [f64; 2],
+    interior: &dyn Fn([f64; 2]) -> [f64; 2],
+    reservoir: &dyn Fn([f64; 2]) -> [f64; 2],
+    offset: [f64; 2],
+) -> [f64; 3] {
+    let geometry = &mesh.edges[edge];
+    let a = mesh.verts[geometry.verts.0];
+    let b = mesh.verts[geometry.verts.1];
+    let wa = advector(a);
+    let wb = advector(b);
+    let normal = [
+        wa[0] * geometry.normal[0] + wa[1] * geometry.normal[1],
+        (wb[0] - wa[0]) * geometry.normal[0] + (wb[1] - wa[1]) * geometry.normal[1],
+    ];
+    let mut cuts = vec![0.0, 1.0];
+    if normal[1] != 0.0 {
+        let zero = -normal[0] / normal[1];
+        if zero > 0.0 && zero < 1.0 { cuts.insert(1, zero); }
+    }
+    let ua = interior(a);
+    let ub = interior(b);
+    let mut result = [0.0; 3];
+    for interval in cuts.windows(2) {
+        let (lo, hi) = (interval[0], interval[1]);
+        let inflow = normal[0] + normal[1] * (lo + hi) * 0.5 < 0.0;
+        let trace = if inflow { reservoir } else { interior };
+        let ga = trace(a);
+        let gb = trace(b);
+        for axis in 0..2 {
+            let u = [ua[axis] + offset[axis], ub[axis] - ua[axis]];
+            let g = [ga[axis] + offset[axis], gb[axis] - ga[axis]];
+            let slip = [ua[axis] - ga[axis], u[1] - g[1]];
+            result[0] += 0.5 * geometry.len * product_integral(&[normal, g, g], lo, hi);
+            if inflow {
+                result[1] -= 0.5 * geometry.len * product_integral(&[normal, slip, slip], lo, hi);
+            }
+            result[2] += geometry.len * (
+                product_integral(&[normal, u, g], lo, hi)
+                - 0.5 * product_integral(&[normal, u, u], lo, hi)
+            );
+        }
+    }
+    result
+}
+
 fn selected_reservoir<'a>(
     mesh: &TriMesh,
     selected: usize,
@@ -197,6 +247,29 @@ fn reversing_face_imports_exact_affine_momentum_and_torque_without_fixing_flow_r
         .volume_flux_moments(&[left], origin)
         .unwrap();
     near(volume, -0.2, 3e-13);
+    for offset in [[0.0; 2], [3.0, -2.0]] {
+        let transport = solved.reactions.transport(&[left], origin, offset).unwrap();
+        let incoming_shifted = |point| {
+            let u = incoming(point);
+            [u[0] + offset[0], u[1] + offset[1]]
+        };
+        let interior_shifted = |point| {
+            let u = interior(point);
+            [u[0] + offset[0], u[1] + offset[1]]
+        };
+        let (expected_force, expected_torque) =
+            flux(&mesh, left, &advector, &interior_shifted, &incoming_shifted, origin);
+        let [energy, loss, power] = energy_flux(&mesh, left, &advector, &interior, &incoming, offset);
+        near(transport.outward_volume_flux_m2_s, volume, 3e-13);
+        for axis in 0..2 {
+            near(transport.outward_momentum.force[axis], expected_force[axis], 4e-12);
+        }
+        near(transport.outward_momentum.moment, expected_torque, 4e-12);
+        near(transport.outward_kinetic_energy_flux, energy, 5e-12);
+        near(transport.upwind_kinetic_dissipation, loss, 5e-12);
+        near(energy + transport.upwind_kinetic_dissipation, power, 6e-12);
+        assert_eq!(transport, reaction.transport(origin, offset).unwrap());
+    }
 }
 
 #[test]
@@ -365,7 +438,16 @@ fn reservoir_admission_and_cached_samples_preserve_history_on_refusal() {
     assert_eq!(queries.get(), 2 * edges.len());
     for reaction in solved.solution.reactions.edges() {
         reaction.load([0.2, 0.3], None).unwrap();
+        reaction.transport([0.2, 0.3], [2.0, -1.0]).unwrap();
     }
+    let exchange = solved.solution.reactions.transport(&edges, [0.2, 0.3], [2.0, -1.0]).unwrap();
+    let mut reverse = edges.clone();
+    reverse.reverse();
+    assert_eq!(exchange, solved.solution.reactions.transport(&reverse, [0.2, 0.3], [2.0, -1.0]).unwrap());
+    for selection in [vec![], vec![edges[0], edges[0]], vec![usize::MAX]] {
+        assert!(solved.solution.reactions.transport(&selection, [0.0; 2], [0.0; 2]).is_err());
+    }
+    assert!(solved.solution.reactions.transport(&edges, [0.0; 2], [f64::NAN, 0.0]).is_err());
     assert_eq!(
         queries.get(),
         2 * edges.len(),

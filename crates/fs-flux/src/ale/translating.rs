@@ -13,7 +13,7 @@
 //! rotation, deformation, changing topology, or a whole-domain energy audit.
 
 use crate::{
-    FluxSystem, MaterialBoundaryLoad, MaterialFluxError, MaterialFluxNumerics, MaterialFluxSystem,
+    FluxSystem, MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialFluxError, MaterialFluxNumerics, MaterialFluxSystem,
     MaterialNavierStokesBoundary, MaterialNavierStokesStep, NavierStokesControls,
     OpenBoundaryPolicy,
 };
@@ -106,9 +106,10 @@ impl TranslatingAleStep {
     /// using reservoir world velocity on incoming OpenReservoir traces.
     /// Origins and offsets are physical world metres and Pascals.
     ///
-    /// The native relative-flux load is corrected by W times its SAME retained
-    /// advector's mass flux and first spatial moment. Stress/pressure are invariant
-    /// under translation; the moment origin is translated before evaluation.
+    /// Native retained quadrature shifts each carried velocity before
+    /// reduction, retaining the SAME advector and upwind trace as the solve.
+    /// Stress/pressure are invariant under translation; the moment origin is
+    /// translated before evaluation.
     /// Native per-component pressure datum admission remains authoritative.
     /// No stress/advective double counting or power/passivity claim is implied.
     ///
@@ -120,6 +121,39 @@ impl TranslatingAleStep {
         origin_world_m: [f64; 2],
         pressure_offsets_pa: &[Option<f64>],
     ) -> Result<MaterialBoundaryLoad, TranslatingAleError> {
+        let origin = self.reference_origin(origin_world_m)?;
+        let mut load = self.relative_flow.solution
+            .boundary_loads(edges, origin, pressure_offsets_pa)?;
+        let transport = self.relative_flow.solution
+            .boundary_transport(edges, origin, self.mesh_velocity_m_s)?;
+        load.outward_momentum = transport.outward_momentum;
+        load.origin_m = origin_world_m;
+        Ok(load)
+    }
+
+    /// World mass, linear/angular momentum and kinetic transport through this
+    /// moving control surface. All use the original relative advector and
+    /// upwind traces; carried velocities are shifted by the accepted mesh rate.
+    /// Boundary upwind loss is invariant under that common shift.
+    ///
+    /// Pressure/stress work and thermodynamic energy remain separately owned.
+    /// This does not establish a whole-domain energy or passivity theorem.
+    ///
+    /// # Errors
+    /// Refuses invalid edge/frame selections or unrepresentable world transport.
+    pub fn boundary_transport_world(
+        &self,
+        edges: &[usize],
+        origin_world_m: [f64; 2],
+    ) -> Result<MaterialBoundaryTransport, TranslatingAleError> {
+        let origin = self.reference_origin(origin_world_m)?;
+        let mut transport = self.relative_flow.solution
+            .boundary_transport(edges, origin, self.mesh_velocity_m_s)?;
+        transport.origin_m = origin_world_m;
+        Ok(transport)
+    }
+
+    fn reference_origin(&self, origin_world_m: [f64; 2]) -> Result<[f64; 2], TranslatingAleError> {
         let origin = [
             origin_world_m[0] - self.translation_m[0],
             origin_world_m[1] - self.translation_m[1],
@@ -127,32 +161,7 @@ impl TranslatingAleStep {
         if !origin_world_m.iter().chain(&origin).all(|x| x.is_finite()) {
             return Err(TranslatingAleError::Invalid("nonfinite world load origin"));
         }
-        let mut load =
-            self.relative_flow
-                .solution
-                .boundary_loads(edges, origin, pressure_offsets_pa)?;
-        let (mass_flux, first_moment) = self
-            .relative_flow
-            .solution
-            .outward_mass_flux_moments(edges, origin)?;
-        for axis in 0..2 {
-            load.outward_momentum.force_n_per_m[axis] += self.mesh_velocity_m_s[axis] * mass_flux;
-        }
-        load.outward_momentum.moment_n += first_moment[0] * self.mesh_velocity_m_s[1]
-            - first_moment[1] * self.mesh_velocity_m_s[0];
-        load.origin_m = origin_world_m;
-        if !load
-            .outward_momentum
-            .force_n_per_m
-            .iter()
-            .all(|v| v.is_finite())
-            || !load.outward_momentum.moment_n.is_finite()
-        {
-            return Err(TranslatingAleError::Invalid(
-                "world momentum-flux conversion overflow",
-            ));
-        }
-        Ok(load)
+        Ok(origin)
     }
 }
 

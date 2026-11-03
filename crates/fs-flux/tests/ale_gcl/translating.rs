@@ -355,6 +355,16 @@ fn reservoir_inflow_and_world_momentum_are_covariant_on_translating_domains() {
         near(load.stress.force_n_per_m[0], -5.5, 4e-8);
         near(load.stress.force_n_per_m[1], 0.04, 4e-8);
         assert_eq!(load.backflow.force_n_per_m, [0.0; 2]);
+        let exchange = step.boundary_transport_world(&left, translation).unwrap();
+        assert_eq!(exchange.outward_momentum, load.outward_momentum);
+        near(exchange.outward_mass_flux_kg_per_m_s, -0.25 * density, 4e-8);
+        // q=.2+.1y: integrate -.5*rho*q*((q+boost_x)^2+(.03+boost_y)^2).
+        let energy = -0.5 * density * (
+            13.0 / 800.0 + 19.0 * boost[0] / 150.0
+            + 0.25 * (boost[0] * boost[0] + (0.03 + boost[1]).powi(2))
+        );
+        near(exchange.outward_kinetic_energy_w_per_m, energy, 5e-8);
+        near(exchange.upwind_kinetic_dissipation_w_per_m, 0.0, 2e-12);
         assert_eq!(queries.get(), 2 * boundaries.len());
         relative_solutions.push(step.relative_flow.solution.velocity_dofs().to_vec());
         assert!(std::ptr::eq(owner.material(), &material));

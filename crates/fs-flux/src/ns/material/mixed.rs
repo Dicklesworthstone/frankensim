@@ -68,6 +68,36 @@ pub struct MaterialBoundaryLoad {
     pub pressure_offsets_pa: Vec<(usize, Option<f64>)>,
 }
 
+/// Source-density conversion of the original convective boundary exchange.
+/// Pressure/stress work, heat and thermodynamic internal energy remain separate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialBoundaryTransport {
+    /// Origin [m] for outward angular momentum.
+    pub origin_m: [f64; 2],
+    /// Uniform offset [m/s] applied to carried velocities, retaining the same
+    /// control-surface-relative advecting flux.
+    pub velocity_offset_m_s: [f64; 2],
+    /// Signed outward mass flow per metre depth [kg/(m s)].
+    pub outward_mass_flux_kg_per_m_s: f64,
+    /// Linear/angular momentum transported outward, in coherent SI.
+    pub outward_momentum: MaterialBoundaryWrench,
+    /// Signed outward carried kinetic power per metre depth [W/m].
+    pub outward_kinetic_energy_w_per_m: f64,
+    /// Nonnegative numerical boundary upwind dissipation [W/m].
+    /// No automatic thermal deposition or physical entropy production is implied.
+    pub upwind_kinetic_dissipation_w_per_m: f64,
+}
+
+fn physical_wrench(value: BoundaryWrench, density: f64) -> Result<MaterialBoundaryWrench, MaterialFluxError> {
+    let force_n_per_m = value.force.map(|f| density * f);
+    let moment_n = density * value.moment;
+    if !force_n_per_m.iter().all(|f| f.is_finite()) || !moment_n.is_finite() {
+        Err(MaterialFluxError::Invalid("unrepresentable physical boundary effort"))
+    } else {
+        Ok(MaterialBoundaryWrench { force_n_per_m, moment_n })
+    }
+}
+
 pub(super) fn physical_boundary_load(
     flow: &StokesSolution,
     density: f64,
@@ -83,20 +113,7 @@ pub(super) fn physical_boundary_load(
         .reactions
         .resultant(edges, origin_m, &offsets)
         .map_err(MaterialFluxError::Boundary)?;
-    let physical = |value: BoundaryWrench| {
-        let force_n_per_m = value.force.map(|f| density * f);
-        let moment_n = density * value.moment;
-        if !force_n_per_m.iter().all(|f| f.is_finite()) || !moment_n.is_finite() {
-            Err(MaterialFluxError::Invalid(
-                "unrepresentable physical boundary effort",
-            ))
-        } else {
-            Ok(MaterialBoundaryWrench {
-                force_n_per_m,
-                moment_n,
-            })
-        }
-    };
+    let physical = |value| physical_wrench(value, density);
     Ok(MaterialBoundaryLoad {
         origin_m,
         stress: physical(load.stress)?,
@@ -140,6 +157,40 @@ pub struct MaterialStokesSolution {
 }
 
 impl MaterialStokesSolution {
+    /// Source-density-scaled volume/momentum/kinetic exchange from the original
+    /// admitted upwind traces, with a uniform carried-velocity frame offset.
+    /// No source callbacks, pressure datum, or boundary reassembly are needed.
+    /// Newtonian and coupled-rheology Navier-Stokes endpoints share this owner.
+    /// Stokes-only solutions carry zero convective transport.
+    ///
+    /// # Errors
+    /// Refuses invalid selections/frames and unrepresentable SI conversion.
+    pub fn boundary_transport(
+        &self,
+        edges: &[usize],
+        origin_m: [f64; 2],
+        velocity_offset_m_s: [f64; 2],
+    ) -> Result<MaterialBoundaryTransport, MaterialFluxError> {
+        let transport = self.flow.reactions
+            .transport(edges, origin_m, velocity_offset_m_s)
+            .map_err(MaterialFluxError::Boundary)?;
+        let density = self.transport.density_kg_m3();
+        let mass_flux = density * transport.outward_volume_flux_m2_s;
+        let kinetic = density * transport.outward_kinetic_energy_flux;
+        let dissipation = density * transport.upwind_kinetic_dissipation;
+        if !mass_flux.is_finite() || !kinetic.is_finite() || !dissipation.is_finite() {
+            return Err(MaterialFluxError::Invalid("physical boundary transport overflow"));
+        }
+        Ok(MaterialBoundaryTransport {
+            origin_m,
+            velocity_offset_m_s,
+            outward_mass_flux_kg_per_m_s: mass_flux,
+            outward_momentum: physical_wrench(transport.outward_momentum, density)?,
+            outward_kinetic_energy_w_per_m: kinetic,
+            upwind_kinetic_dissipation_w_per_m: dissipation,
+        })
+    }
+
     /// Signed outward mass flux [kg/(m s)] and its first spatial moment [kg/s]
     /// about origin_m. Both come from the original retained convective
     /// advector, exactly as the endpoint momentum-transport receipt does.
