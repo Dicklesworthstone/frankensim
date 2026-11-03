@@ -1,0 +1,65 @@
+frankensim.matdb-source.v1
+observation	identity	Ferrous ion Fe2+(aq), conventional aqueous reference	USGS Bulletin 2131 printed page 7, Fe2+(aq) row	This is the individual dissolved Fe2+ ion with formula weight 55.847 g/mol. It is not metallic iron, Fe3+, total dissolved iron, an iron-sulfate complex, a pure-ion phase or a qualified ore specimen.
+observation	reference-values	Fe2+(aq) reference quantities	USGS Bulletin 2131 printed page 7	Retain the printed formation enthalpy -91.1 kJ/mol and conventional ionic entropy -107.1 J/(mol K). The negative entropy is relative to the H+(aq) zero convention, not an absolute ionic entropy. The USGS row cites reference 411 (Tremaine and LeBlanc, 1980); later evaluations are not silently substituted.
+observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 7	The source prints 3.0 kJ/mol for the formation-enthalpy uncertainty magnitude and 2.0 J/(mol K) for the entropy uncertainty magnitude. Page 3 describes the calorimetric convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain the printed magnitudes; all claims retain Unstated uncertainty semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.
+observation	scope	USGS source-reference scope	USGS Bulletin 2131 printed pages iv, 1 and 3	The source defines aqueous m=1 as a hypothetical ideal solution at unit activity with ions at infinite dilution, not a finite-concentration 1 mol/kg solution. The USGS elemental-reference and H+(aq)-zero selectors are both required. Individual ions carry no source-pure-species assertion. No activity coefficients, speciation, hydration-shell mass, heat of mixing, precipitation or kinetics are inferred.
+scalar	molar-mass	identity,scope	mass	55.847	g/mol	tabulated
+scalar	formation-enthalpy	reference-values,reported-uncertainty,scope	hf	-91.1	kJ/mol	tabulated
+scalar	entropy	reference-values,reported-uncertainty,scope	s0	-107.1	J/mol/K	tabulated
+scalar	formation-uncertainty	reported-uncertainty,scope	hf_uncertainty	3.0	kJ/mol	tabulated
+scalar	entropy-uncertainty	reported-uncertainty,scope	s_uncertainty	2.0	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	entropy	unstated	-	-	-	-
+uncertainty	formation-uncertainty	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	entropy	temperature	298.15	298.15	K
+validity	formation-uncertainty	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	entropy	pressure	100000	100000	Pa
+validity	formation-uncertainty	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	entropy	standard	1	1	1
+validity	formation-uncertainty	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	entropy	convention	1	1	1
+validity	formation-uncertainty	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	entropy	phase	1	1	1
+validity	formation-uncertainty	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	entropy	aqueous	1	1	1
+validity	formation-uncertainty	aqueous	1	1	1
+validity	entropy-uncertainty	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	entropy	ionic	1	1	1
+validity	formation-uncertainty	ionic	1	1	1
+validity	entropy-uncertainty	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	entropy	identity	1	1	1
+validity	formation-uncertainty	identity	1	1	1
+validity	entropy-uncertainty	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	entropy	reference	1	1	1
+validity	formation-uncertainty	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	entropy	specimen	0	0	1
+validity	formation-uncertainty	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1

@@ -1,0 +1,45 @@
+frankensim.matdb-source.v1
+observation	identity	Oxygen O2, USGS ideal-gas reference state	USGS Bulletin 2131 printed page 8, O2(g) row	This is pure ideal-gas O2 in its elemental reference state at one bar, with the source formula weight 31.999 g/mol. It is not dissolved oxygen, air, an oxygen-transfer model or a measured gas supply.
+observation	reference-values	O2(g) reference quantities	USGS Bulletin 2131 printed page 8	Retain standard formation enthalpy 0.0 kJ/mol and standard molar entropy 205.15 J/(mol K). The zero formation enthalpy is the elemental reference convention and remains an explicit source claim. The table prints no formation-enthalpy uncertainty magnitude for this reference zero.
+observation	reported-uncertainty	Source uncertainty magnitudes without an invented probability	USGS Bulletin 2131 printed pages 3 and 8	The source prints 0.02 J/(mol K) for the entropy uncertainty magnitude. Page 3 describes the calorimetric convention as twice the standard deviation of the mean, but supplies no universal coverage probability or covariance for this compiled row. Dimensional metadata retain the printed magnitudes; all claims retain Unstated uncertainty semantics. They are not independent Gaussian standard deviations, guaranteed bounds or a certified reaction interval.
+observation	scope	USGS source-reference scope	USGS Bulletin 2131 printed pages iv, 1 and 3	The selected quantities apply only at 298.15 K and 100000 Pa with the source-elemental-reference-usgs-b2131 selector and the declared pure phase. No heat-capacity curve, temperature extrapolation, phase-stability boundary, mixing heat or reaction kinetics is supplied. A complete reaction must use compatible participant references; a caller label cannot change a source evaluation.
+scalar	molar-mass	identity,scope	mass	31.999	g/mol	tabulated
+scalar	formation-enthalpy	reference-values,reported-uncertainty,scope	hf	0.0	kJ/mol	tabulated
+scalar	entropy	reference-values,reported-uncertainty,scope	s0	205.15	J/mol/K	tabulated
+scalar	entropy-uncertainty	reported-uncertainty,scope	s_uncertainty	0.02	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	entropy	unstated	-	-	-	-
+uncertainty	entropy-uncertainty	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	entropy	temperature	298.15	298.15	K
+validity	entropy-uncertainty	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	entropy	pressure	100000	100000	Pa
+validity	entropy-uncertainty	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	entropy	standard	1	1	1
+validity	entropy-uncertainty	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	entropy	convention	1	1	1
+validity	entropy-uncertainty	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	entropy	phase	1	1	1
+validity	entropy-uncertainty	phase	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	entropy	pure	1	1	1
+validity	entropy-uncertainty	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	entropy	reference	1	1	1
+validity	entropy-uncertainty	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	entropy	specimen	0	0	1
+validity	entropy-uncertainty	specimen	0	0	1

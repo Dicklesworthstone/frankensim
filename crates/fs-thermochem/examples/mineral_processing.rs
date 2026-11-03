@@ -40,7 +40,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 11] = [
+const REACTIONS: [&str; 12] = [
     "lime-hydration",
     "magnesite-calcination",
     "magnetite-oxidation",
@@ -48,6 +48,7 @@ const REACTIONS: [&str; 11] = [
     "cupric-oxide-reduction",
     "cuprous-oxide-reduction",
     "pyrite-roasting",
+    "pyrite-oxidation-ferrous",
     "sulfur-dioxide-oxidation",
     "sulfur-trioxide-hydration",
     "pyrite-to-acid",
@@ -174,6 +175,35 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-gas",
             ],
             equation: "4 FeS2(s) + 11 O2(g) -> 2 Fe2O3(s) + 8 SO2(g), hematite endpoint",
+        },
+        "pyrite-oxidation-ferrous" => ReactionCase {
+            reaction: MineralReaction::PyriteOxidationFerrous,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "pyrite-solid-usgs-b2131-thermochemistry",
+                "oxygen-gas-usgs-b2131",
+                "water-liquid-usgs-b2131",
+                "iron-ii-ion-aqueous-usgs-b2131",
+                "sulfate-ion-aqueous-usgs-b2131",
+                "hydrogen-ion-aqueous-usgs-b2131",
+            ],
+            species: &[
+                "FeS2(s)",
+                "O2(g)",
+                "H2O(l)",
+                "Fe[2+](aq)",
+                "SO4[2-](aq)",
+                "H+(aq)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-liquid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "2 FeS2(s) + 7 O2(g) + 2 H2O(l) -> 2 Fe[2+](aq) + 4 SO4[2-](aq) + 4 H+(aq), ferrous acid-generation endpoint",
         },
         "sulfur-dioxide-oxidation" => ReactionCase {
             reaction: MineralReaction::SulfurDioxideOxidation,
@@ -309,7 +339,10 @@ fn reference_point(
             1.0,
         )?;
     }
-    if pack_id == "pyrite-solid-janaf-thermochemistry" {
+    if matches!(
+        pack_id,
+        "pyrite-solid-janaf-thermochemistry" | "pyrite-solid-usgs-b2131-thermochemistry"
+    ) {
         point = point.with_quantity(
             "source-phase-pyrite",
             QuantitySpec::dimensional(Dims::NONE),
