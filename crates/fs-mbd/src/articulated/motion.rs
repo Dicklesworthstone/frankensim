@@ -497,16 +497,24 @@ impl MomentumMap {
             let rotation = pose.rotation();
             let r = pose.transform_point(link.inertia.center_of_mass())? - center_base;
             let r_array = [r.x, r.y, r.z];
-            let r_squared = r.dot(r);
             let matrix = rotation.matrix();
             let rotated_inertia = matrix
                 .compose(link.inertia.inertia_com())
                 .compose(matrix.transpose());
             for row in 0..3 {
                 for column in 0..3 {
-                    let diagonal = if row == column { r_squared } else { 0.0 };
+                    // The diagonal is the sum of the two perpendicular
+                    // squared arms. Subtracting r[row]^2 from r.dot(r) loses
+                    // transverse orbital inertia on elongated assemblies.
+                    let orbital = if row == column {
+                        let a = r_array[(row + 1) % 3];
+                        let b = r_array[(row + 2) % 3];
+                        a * a + b * b
+                    } else {
+                        -r_array[row] * r_array[column]
+                    };
                     inertia.m[row * 3 + column] += rotated_inertia.m[row * 3 + column]
-                        + link.inertia.mass() * (diagonal - r_array[row] * r_array[column]);
+                        + link.inertia.mass() * orbital;
                 }
             }
             let velocity = shape.body_twist[i];

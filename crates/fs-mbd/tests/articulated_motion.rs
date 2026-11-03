@@ -681,3 +681,73 @@ fn invalid_steps_and_late_cancellation_never_publish_or_mutate_a_partial_state()
     }
     assert_eq!(state, before);
 }
+
+/// G1/G3: transverse orbital inertia survives an elongated fixed-link layout.
+/// The physical owner independently sums each body's spin and orbital momentum;
+/// a cancellation-damaged locked inertia would report the wrong applied impulse.
+#[test]
+fn elongated_fixed_tree_retains_transverse_orbital_inertia_and_applied_momentum() {
+    let long = 65536.0;
+    let short = 1.0 / 2048.0;
+    // short^2 is below half an ulp of long^2, but its contribution to the
+    // longitudinal inertia is representable and affects the actual response.
+    let longitudinal_inertia = 5.0 + 4.0 * short * short;
+    for axis in 0..3 {
+        let vector_on = |longitudinal: f64, transverse: f64| {
+            let mut values = [0.0; 3];
+            values[axis] = longitudinal;
+            values[(axis + 1) % 3] = transverse;
+            Vec3::new(values[0], values[1], values[2])
+        };
+        let mut links = vec![Link::new(
+            "base",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            sphere(1.0, 1.0),
+        )];
+        for (index, (a, b)) in [(1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            links.push(Link::new(
+                format!("corner-{index}"),
+                Some(0),
+                Se3::from_parts(So3::identity(), vector_on(a * long, b * short)).unwrap(),
+                JointModel::FIXED,
+                sphere(1.0, 1.0),
+            ));
+        }
+        let model = ArticulatedModel::new(links).unwrap();
+        for torque in [1.0, -3.0] {
+            let mut wrenches = [Wrench::default(); 5];
+            wrenches[0] = Wrench::new(vector_on(torque, 0.0), Vec3::default());
+            let loads = FreeFloatingMotionLoads {
+                generalized_force: &[],
+                external_body_wrench: &wrenches,
+                gravity_world: Vec3::default(),
+            };
+            let duration = 0.5;
+            let step = step_free_floating(
+                &model,
+                &still(vec![], vec![]),
+                loads,
+                duration,
+                || false,
+            )
+            .unwrap();
+            vector(
+                step.state_after.base.twist_body.angular,
+                vector_on(torque * duration / longitudinal_inertia, 0.0),
+                2e-12,
+            );
+            vector(step.momentum_after.linear_momentum_world, Vec3::default(), 2e-12);
+            vector(
+                step.momentum_after.angular_momentum_world,
+                vector_on(torque * duration, 0.0),
+                2e-11,
+            );
+            impulse_balance(&step, 2e-11);
+        }
+    }
+}
