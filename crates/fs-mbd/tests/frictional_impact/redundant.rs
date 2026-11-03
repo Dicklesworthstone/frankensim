@@ -125,7 +125,7 @@ fn g1_redundant_frictionless_normal_reactions_preserve_restitution() {
 }
 
 #[test]
-fn g3_common_support_work_is_determined_but_independent_support_work_refuses() {
+fn g3_common_support_work_and_independent_frictionless_belts_are_admitted() {
     let properties = [property(3.0, Vec3::new(1.0, 1.0, 1.0))];
     let initial = [body(
         Vec3::new(0.0, 0.0, 0.25),
@@ -153,9 +153,9 @@ fn g3_common_support_work_is_determined_but_independent_support_work_refuses() {
     close(report.support_work_j, -0.0003);
     close(report.contact.dissipated_energy, 1.50015);
 
-    // Frictionless redundant normals still have unique body motion. Different
-    // prescribed translations require a separate support-work witness before
-    // this native owner can publish its combined energy report.
+    // Different tangential translations cannot exchange work through exactly
+    // frictionless contacts. The restricted work witness admits the normal
+    // event without inventing a tangential traction or changing either belt.
     let properties = [property(2.0, Vec3::new(1.0, 1.0, 1.0))];
     let initial = [body(
         Vec3::ZERO,
@@ -177,6 +177,220 @@ fn g3_common_support_work_is_determined_but_independent_support_work_refuses() {
         velocity_world: Vec3::new(0.01, 0.0, 0.0),
     };
     let mut bodies = initial;
+    let report = apply_rigid_frictional_impacts(
+        &mut bodies,
+        &properties,
+        &[first, second],
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    close_vector(bodies[0].linear_momentum_world(), Vec3::ZERO);
+    close(report.support_work_j, 0.0);
+    close(report.contact.dissipated_energy, 1.0);
+    assert_eq!(
+        report
+            .contact
+            .impulse_work_witness
+            .unwrap()
+            .impulse_coordinates,
+        [0, 3]
+    );
+}
+
+#[test]
+fn g1_rotating_support_and_finite_body_recoil_have_determined_total_work() {
+    use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
+    use fs_mbd::frictional_impact::elliptic::apply_rigid_elliptic_impacts;
+
+    // Three contacts spin up body zero on a rotating platform while body one
+    // simultaneously strikes its centre. The four normal rows are independent;
+    // the full twelve-row point mobility has a redundant shear allocation.
+    // The independent sticking solution gives v0+=U, omega0+=Omega, v1+=0.
+    let properties = [
+        property(3.0, Vec3::new(1.0, 1.0, 1.0)),
+        property(2.0, Vec3::new(1.0, 1.0, 1.0)),
+    ];
+    let u = Vec3::new(0.01, -0.02, 0.0);
+    let omega = Vec3::new(0.0, 0.0, 0.02);
+    let rotation = UnitQuaternion::from_axis_angle(Vec3::new(1.0, -2.0, 3.0), 0.7).unwrap();
+    for q in [UnitQuaternion::IDENTITY, rotation] {
+        let centre = Vec3::new(2.0, -3.0, 1.0);
+        let boost = Vec3::new(0.7, -0.4, 0.3);
+        let initial = [
+            body(
+                centre,
+                q,
+                boost
+                    .add(q.rotate_body_to_world(Vec3::new(0.0, 0.0, -1.0)))
+                    .scale(3.0),
+            ),
+            body(
+                centre.add(q.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0 + 1e-12))),
+                q,
+                boost
+                    .add(q.rotate_body_to_world(Vec3::new(0.0, 0.0, -2.0)))
+                    .scale(2.0),
+            ),
+        ];
+        let mut contacts = tripod().to_vec();
+        for c in &mut contacts {
+            c.point.arm_body.z = 0.0;
+            c.normal_world = q.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+            c.tangent_world = q.rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0));
+            c.other = RigidImpactCounterpart::PrescribedPlane {
+                point_world: initial[0]
+                    .pose()
+                    .point_world_from_body(c.point.arm_body)
+                    .unwrap(),
+                velocity_world: boost
+                    .add(q.rotate_body_to_world(u.add(omega.cross(c.point.arm_body)))),
+            };
+        }
+        contacts.push(RigidFrictionalContact {
+            id: 40,
+            point: RigidImpactPoint {
+                body: 1,
+                arm_body: Vec3::new(0.0, 0.0, -1.0),
+            },
+            other: RigidImpactCounterpart::Body(RigidImpactPoint {
+                body: 0,
+                arm_body: Vec3::ZERO,
+            }),
+            normal_world: q.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+            tangent_world: q.rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0)),
+            activation_tolerance_m: 1e-10,
+            friction_coefficient: 0.0,
+            normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 0.0 },
+        });
+        let mut bodies = initial;
+        let report = apply_rigid_frictional_impacts(
+            &mut bodies,
+            &properties,
+            &contacts,
+            controls(),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        let FrictionalContactDeterminacy::UniqueVelocity(witness) = &report.contact.determinacy
+        else {
+            panic!("shear loads must remain representative");
+        };
+        assert_eq!((witness.dimension, witness.rank), (12, 9));
+        let work = report.contact.impulse_work_witness.as_ref().unwrap();
+        assert!(work.range_velocity_residual <= work.allowed_range_velocity_residual);
+        close_vector(
+            bodies[0].linear_momentum_world(),
+            boost.add(q.rotate_body_to_world(u)).scale(3.0),
+        );
+        close_vector(bodies[0].angular_momentum_body(), omega);
+        close_vector(bodies[1].linear_momentum_world(), boost.scale(2.0));
+        close_vector(bodies[1].angular_momentum_body(), Vec3::ZERO);
+        close(report.contact.impulses[3][0], 4.0);
+        close(report.contact.impulses[..3].iter().map(|p| p[0]).sum(), 7.0);
+
+        // A rotating support supplies U dot delta_P + Omega dot delta_H_COM.
+        // No per-contact shear allocation appears in this independent oracle.
+        let expected_impulse = q.rotate_body_to_world(Vec3::new(3.0 * u.x, 3.0 * u.y, 7.0));
+        let expected_work =
+            boost.add(q.rotate_body_to_world(u)).dot(expected_impulse) + omega.dot(omega);
+        let expected_loss = 5.5 + 0.5 * (3.0 * u.dot(u) + omega.dot(omega));
+        close(report.support_work_j, expected_work);
+        close(report.contact.dissipated_energy, expected_loss);
+        close(report.kinetic_change_j, expected_work - expected_loss);
+        close_vector(report.support_impulse_ns, expected_impulse);
+        close_vector(
+            report.support_angular_impulse_nms,
+            centre
+                .cross(expected_impulse)
+                .add(q.rotate_body_to_world(omega)),
+        );
+        close_vector(report.linear_momentum_residual_ns, Vec3::ZERO);
+        close_vector(report.angular_momentum_residual_nms, Vec3::ZERO);
+        for (before, after) in initial.iter().zip(bodies) {
+            assert_eq!(before.pose(), after.pose());
+        }
+
+        let mut reordered = initial;
+        let repeated = apply_rigid_frictional_impacts(
+            &mut reordered,
+            &properties,
+            &[contacts[3], contacts[1], contacts[0], contacts[2]],
+            controls(),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        assert_eq!(bodies, reordered);
+        assert_eq!(report.contact, repeated.contact);
+
+        // The work-conjugate ellipse transform carries the same physical
+        // rotating-source proof; it must not reintroduce the translation gate.
+        let directional: Vec<_> = contacts
+            .iter()
+            .map(|c| RigidFrictionalContact {
+                id: c.id,
+                point: c.point,
+                other: c.other,
+                normal_world: c.normal_world,
+                tangent_world: c.tangent_world,
+                activation_tolerance_m: c.activation_tolerance_m,
+                normal_law: c.normal_law,
+                friction_coefficient: EllipticFriction {
+                    coefficients_mu: [c.friction_coefficient, 2.0 * c.friction_coefficient],
+                    principal_axis: [0.6, 0.8],
+                },
+            })
+            .collect();
+        let mut anisotropic = initial;
+        let directional_report = apply_rigid_elliptic_impacts(
+            &mut anisotropic,
+            &properties,
+            &directional,
+            controls(),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        assert!(
+            directional_report
+                .contact
+                .transformed
+                .impulse_work_witness
+                .is_some()
+        );
+        for (a, b) in anisotropic.iter().zip(bodies) {
+            close_vector(a.linear_momentum_world(), b.linear_momentum_world());
+            close_vector(a.angular_momentum_body(), b.angular_momentum_body());
+        }
+        close(directional_report.support_work_j, expected_work);
+        close(directional_report.contact.dissipated_energy, expected_loss);
+    }
+}
+
+#[test]
+fn g4_ambiguous_moving_support_loss_refuses_before_native_momentum_publication() {
+    use fs_contact::frictional_multicontact::FrictionalContactError;
+    let properties = [property(2.0, Vec3::new(1.0, 1.0, 1.0))];
+    let initial = [body(
+        Vec3::ZERO,
+        UnitQuaternion::IDENTITY,
+        Vec3::new(0.0, 0.0, -2.0),
+    )];
+    let first = plane(
+        RigidImpactPoint {
+            body: 0,
+            arm_body: Vec3::ZERO,
+        },
+        0.0,
+        1.0,
+    );
+    let mut second = first;
+    second.id = 2;
+    second.normal_law = NormalVelocityLaw::NewtonRestitution { coefficient: 0.0 };
+    second.other = RigidImpactCounterpart::PrescribedPlane {
+        point_world: Vec3::ZERO,
+        velocity_world: Vec3::new(0.0, 0.0, 1.0),
+    };
+    let mut bodies = initial;
     assert!(matches!(
         apply_rigid_frictional_impacts(
             &mut bodies,
@@ -185,7 +399,9 @@ fn g3_common_support_work_is_determined_but_independent_support_work_refuses() {
             controls(),
             &CancelGate::new()
         ),
-        Err(RigidFrictionalImpactError::UnresolvedSupportWork)
+        Err(RigidFrictionalImpactError::Contact(
+            FrictionalContactError::UnresolvedWork { .. }
+        ))
     ));
     assert_eq!(bodies, initial);
 }

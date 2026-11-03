@@ -12,7 +12,6 @@ use super::{
     RigidFrictionalImpactReport, RigidImpactControls, RigidImpactKinematics, apply_impacts_with,
 };
 use crate::{MassProperties, RigidBodyState};
-use fs_contact::frictional_multicontact::FrictionalContactDeterminacy;
 use fs_contact::frictional_multicontact::elliptic::{
     EllipticFriction, EllipticFrictionalContact, EllipticFrictionalContactError,
     EllipticFrictionalContactResult, solve_elliptic_frictional_contacts,
@@ -50,12 +49,6 @@ impl ImpactResponse for EllipticFrictionalContactResult {
             relative_velocities_after: &self.relative_velocities_after,
             relative_work: self.relative_work,
             dissipated_energy: self.dissipated_energy,
-            // An invertible tangent congruence preserves the distinction
-            // between unique impulses and a determined mobility image.
-            velocity_only: matches!(
-                self.transformed.determinacy,
-                FrictionalContactDeterminacy::UniqueVelocity(_)
-            ),
         }
     }
 }

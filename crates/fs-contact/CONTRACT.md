@@ -1237,7 +1237,31 @@ bounded spectral work runs only after the contraction fast path fails.
 
 `UniqueVelocity(PsdVelocityWitness)` has an explicit `PsdVelocityCriterion`: `NormalRangeObservable` uses the earlier friction-weighted normal-range feedback bound; `CandidateFrictionDirection` uses subgradients of an audited candidate. For any second Coulomb root, norm monotonicity gives `E + delta_p_n dot C delta_v_t <= 0`, with `E = delta_p^T W delta_p`. When this bilinear feedback annihilates the admitted mobility nullspace and its symmetric energy form is positive on the range, all roots have the same `W*p`, even when individual normal reactions vary. On a full-rank mobility this also determines every impulse coordinate. The report retains actual weighted directions, normalized null coupling, energy margin, spectral/orthogonality residuals and traction/subgradient residuals. Near-zero slip uses the declared sticking resolution; sliding directions and null coupling are checked relative to friction magnitude, including tiny coefficients.
 
-A bounded SVD may propose a coherent traction representative, but it must preserve the ORIGINAL mobility image to roundoff and pass the complete original law/work audit before use. Neither representative nor minimum norm assigns a physical pressure distribution, per-contact heat, or independently moving-support work. Distinct checked velocity roots report `Nonunique`; two different impulse gauges alone do not. Unproved determinacy still refuses. These are sufficient floating-point admissions, not interval uniqueness or general Painleve classification.
+A bounded SVD may propose a coherent traction representative, but it must preserve the ORIGINAL mobility image to roundoff and pass the complete original law/work audit before use. Neither representative nor minimum norm assigns a physical pressure distribution, per-contact heat, or individual moving-support work. Distinct checked velocity roots report `Nonunique`; two different impulse gauges alone do not. Unproved determinacy still refuses. These are sufficient floating-point admissions, not interval uniqueness or general Painleve classification.
+
+Every accepted `UniqueVelocity` result also carries an
+`impulse_work_witness`. For two roots with the same mobility image, the
+midpoint-work difference is `v_before dot delta_p`, with `W*delta_p=0`.
+The cached numerical range therefore checks the preimpact velocity's
+nullspace projection before publishing TOTAL relative work or loss. The
+witness retains its canonical active coordinates, rank, dimensional velocity
+residual/allowance and original spectral/orthogonality residuals. Unresolved
+work returns typed `UnresolvedWork`; a chosen passive representative is not
+enough to assign a physical dissipation.
+
+Exactly zero-friction tangents have zero impulse under the original law. If
+their independent velocities defeat the full-range check, one bounded checked
+principal-mobility analysis may omit only those coordinates. This admits
+frictionless belts with different tangential speeds and mixed frictional /
+frictionless contacts without replacing or dropping any row in the actual
+contact solve. Nonzero coefficients, including tiny ones, keep both tangents.
+The independent-impulse path performs no added spectral work. Downstream
+mechanical consumers can combine determined body kinetic change and total
+relative work to determine total moving-support work, including compatible
+rigid rotation; individual redundant loads and source allocations stay
+representative. Focused regressions include an analytic two-contact family
+with identical velocity but losses ranging from zero to two joules, and
+zero-friction/mixed-coordinate work admission.
 
 Sixteen focused integration groups pass: the twelve earlier groups plus physical four-foot cube stick/threshold/oblique sliding with two independently constructed pressure allocations, independent tangent-frame covariance and permutation, an exact heterogeneous-friction example with two passive motions, and tiny heterogeneous-friction refusal. Three original analytic-action/preconditioner tests also pass. Native body motion follows for an actual mechanical Gram matrix; whole-workspace Cargo/DSR verification and broader Moreau-Jean scope remain separate.
 

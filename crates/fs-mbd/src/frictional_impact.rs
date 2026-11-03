@@ -19,8 +19,8 @@ pub mod elliptic;
 
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::frictional_multicontact::{
-    FrictionalContact, FrictionalContactConfig, FrictionalContactDeterminacy,
-    FrictionalContactError, FrictionalContactResult, NormalVelocityLaw, solve_frictional_contacts,
+    FrictionalContact, FrictionalContactConfig, FrictionalContactError, FrictionalContactResult,
+    NormalVelocityLaw, solve_frictional_contacts,
 };
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
@@ -102,11 +102,6 @@ pub enum RigidFrictionalImpactError<R = FrictionalContactResult, E = FrictionalC
     Invalid(&'static str),
     Dynamics(DynamicsError),
     Contact(E),
-    /// A unique body velocity does not determine the work exchanged between
-    /// independently moving supports when contact impulses remain indeterminate.
-    /// Velocity-only admission permits one common support translation, whose
-    /// work is that velocity dotted with the uniquely determined net impulse.
-    UnresolvedSupportWork,
     Cancelled,
     Audit(Box<RigidFrictionalImpactReport<R>>),
 }
@@ -159,7 +154,6 @@ struct PhysicalImpulseView<'a> {
     relative_velocities_after: &'a [[f64; 3]],
     relative_work: f64,
     dissipated_energy: f64,
-    velocity_only: bool,
 }
 trait ImpactResponse {
     fn physical(&self) -> PhysicalImpulseView<'_>;
@@ -171,10 +165,6 @@ impl ImpactResponse for FrictionalContactResult {
             relative_velocities_after: &self.relative_velocities_after,
             relative_work: self.relative_work,
             dissipated_energy: self.dissipated_energy,
-            velocity_only: matches!(
-                self.determinacy,
-                FrictionalContactDeterminacy::UniqueVelocity(_)
-            ),
         }
     }
 }
@@ -234,9 +224,12 @@ fn rounded_vector(sum: [Dd; 3]) -> Vec3 {
 /// Redundant contact rows may be admitted when the original contact operator
 /// proves a unique body velocity. Their individual impulses then remain one
 /// admissible representative, not uniquely determined local forces or heat.
-/// This velocity-only route admits dynamic bodies and supports with one common
-/// translation. Their total work follows the uniquely determined net impulse.
-/// Independently moving supports require unique impulses to determine work.
+/// The core separately proves that total relative work is independent of the
+/// impulse gauge. Native kinetic change is fixed by the determined body motion,
+/// so TOTAL prescribed-support work is determined as well. This admits compatible
+/// rotating supports and independent contact islands; individual support loads
+/// and work allocations remain representatives. Incompatible source motion
+/// refuses through the contact core's `UnresolvedWork` error.
 /// Other unresolved manifolds retain a typed determinacy refusal. Impact loss
 /// remains unallocated mechanical loss; a physical thermal/plastic/damage law
 /// must determine its disposition. No finite-patch preload, spin friction or
@@ -417,21 +410,6 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         return Err(invalid(
             "constitutive response does not match contact dimensions",
         ));
-    }
-    if physical.velocity_only {
-        // A null impulse changes no body's momentum. Consequently it changes
-        // neither total support impulse nor U dot total_support_impulse for a
-        // common prescribed translation U. Distinct support velocities need
-        // a separate work-determinacy witness, which this owner does not infer.
-        let mut common_support_velocity = None;
-        for c in contacts {
-            if let RigidImpactCounterpart::PrescribedPlane { velocity_world, .. } = c.other {
-                if common_support_velocity.is_some_and(|u| u != velocity_world) {
-                    return Err(RigidFrictionalImpactError::UnresolvedSupportWork);
-                }
-                common_support_velocity = Some(velocity_world);
-            }
-        }
     }
     let mut impulses = vec![ImpulseAccumulator::default(); bodies.len()];
     let mut support_work = Dd::ZERO;

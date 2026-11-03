@@ -314,7 +314,8 @@ fn g3_redundant_directional_support_retains_velocity_only_work_authority() {
     );
     close(report.total_energy_residual_j, 0.0);
 
-    // Different support translations still require individual load authority.
+    // Frictionless tangent motion carries no impulse or source work, even
+    // when the two prescribed translations differ.
     let properties = [property(2.0, Vec3::new(1.0, 1.0, 1.0))];
     let initial = [body(
         Vec3::ZERO,
@@ -339,17 +340,26 @@ fn g3_redundant_directional_support_retains_velocity_only_work_authority() {
         velocity_world: boost,
     };
     let mut bodies = initial;
-    assert!(matches!(
-        apply_rigid_elliptic_impacts(
-            &mut bodies,
-            &properties,
-            &[c, other],
-            controls(),
-            &CancelGate::new()
-        ),
-        Err(RigidFrictionalImpactError::UnresolvedSupportWork)
-    ));
-    assert_eq!(bodies, initial);
+    let result = apply_rigid_elliptic_impacts(
+        &mut bodies,
+        &properties,
+        &[c, other],
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    close_vector(bodies[0].linear_momentum_world(), Vec3::ZERO);
+    close(result.support_work_j, 0.0);
+    close(result.contact.dissipated_energy, 1.0);
+    assert_eq!(
+        result
+            .contact
+            .transformed
+            .impulse_work_witness
+            .unwrap()
+            .impulse_coordinates,
+        [0, 3]
+    );
 }
 
 #[test]

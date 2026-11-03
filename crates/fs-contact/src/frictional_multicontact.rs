@@ -12,6 +12,7 @@
 //! candidate energy form for impulse determinacy. A separate PSD range witness
 //! admits redundant rows only when
 //! the coupled law determines velocity despite a possible contact-impulse gauge.
+//! A separate range check makes total impulse work independent of that gauge.
 //! It does not manufacture per-contact load authority from that gauge. Without
 //! a determinacy witness, distinct checked roots report nonuniqueness and an
 //! otherwise checked candidate remains explicitly unresolved. General singular
@@ -45,7 +46,8 @@ pub enum FrictionalContactDeterminacy {
     /// and inactive kinematics; arbitrary inactive cross rows have no such
     /// guarantee. The returned
     /// impulses are one law-satisfying representative, not authoritative local
-    /// loads or a heat/support-work allocation.
+    /// loads or individual heat/support-work allocations. The result's separate
+    /// `impulse_work_witness` establishes TOTAL relative work numerically.
     UniqueVelocity(PsdVelocityWitness),
 }
 
@@ -110,6 +112,31 @@ pub struct PsdVelocityWitness {
     pub maximum_null_eigenvalue_magnitude: f64,
 }
 
+/// Numerical total-work determinacy for a velocity-only contact response.
+///
+/// Two admissible impulses differ by `z` with `W*z=0`. Their midpoint-work
+/// difference is `v_before dot z`; it vanishes when the preimpact velocity is
+/// in the mobility range. Exactly frictionless tangent coordinates can be
+/// omitted because every law-satisfying impulse is zero there. This remains a
+/// floating range admission, not an interval theorem or a local heat partition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PsdImpulseWorkWitness {
+    /// Coordinates of the checked original principal mobility, indexed into
+    /// normal-first triples in `active_indices` order. Any omitted coordinate
+    /// is a tangent at a contact whose friction coefficient is exactly zero.
+    pub impulse_coordinates: Vec<usize>,
+    /// Numerically separated rank of that principal mobility.
+    pub rank: usize,
+    /// Euclidean norm of the preimpact velocity's nullspace projection [m/s].
+    pub range_velocity_residual: f64,
+    /// Declared velocity tolerance plus the numerical range margin [m/s].
+    pub allowed_range_velocity_residual: f64,
+    /// Original-matrix eigen-equation residual after mobility normalization.
+    pub spectral_residual: f64,
+    /// Orthogonality residual of the checked range/nullspace basis.
+    pub orthogonality_residual: f64,
+}
+
 /// Explicit choice of normal endpoint law; these alternatives are not aliases.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NormalVelocityLaw {
@@ -145,6 +172,9 @@ pub struct FrictionalContactConfig {
     /// Energy determinacy additionally uses at most two bounded range-energy
     /// eigendecompositions and one 63-by-21 representative SVD per solve;
     /// these fixed-size admission calls are outside the Newton callback count.
+    /// Total-work admission reuses the cached range; only a failed full-range
+    /// check with exactly frictionless tangents may inspect one smaller
+    /// principal mobility using the same bounded eigendecomposition owner.
     pub maximum_evaluations: usize,
     pub maximum_newton_iterations: usize,
     pub velocity_tolerance: f64,
@@ -199,6 +229,7 @@ pub struct FrictionalContactResult {
     /// Original indices, ordered by stable contact ID, including separating
     /// geometrically active contacts that another contact may drive closed.
     pub active_indices: Vec<usize>,
+    /// TOTAL relative midpoint work, independent of any admitted impulse gauge.
     pub relative_work: f64,
     /// Nonnegative TOTAL impact loss; no automatic heat or friction partition.
     pub dissipated_energy: f64,
@@ -218,6 +249,9 @@ pub struct FrictionalContactResult {
     /// passivity checks and Newton solve are unchanged; this is not a branch-
     /// local Jacobian nonsingularity test or a compliance regularization.
     pub impulse_energy_witness: Option<PsdVelocityWitness>,
+    /// Present for every `UniqueVelocity` result. Unique impulses already
+    /// determine work and need no additional range witness.
+    pub impulse_work_witness: Option<PsdImpulseWorkWitness>,
     /// Minimum SPD pivot, or zero for the admitted semidefinite range lane.
     pub minimum_normalized_pivot: f64,
     pub evaluations: usize,
@@ -246,6 +280,15 @@ pub enum FrictionalContactError {
     ResidualNotSatisfied(FrictionalContactResiduals),
     EnergyIncrease {
         work: f64,
+        allowed: f64,
+    },
+    /// Determined velocity alone does not determine total work. Preimpact
+    /// relative motion has an unresolved component along the impulse gauge;
+    /// no arbitrary dissipation or source-work allocation is published.
+    UnresolvedWork {
+        /// Nullspace projection of the tested velocity vector [m/s].
+        range_velocity_residual: f64,
+        /// Numerical range and caller velocity allowance [m/s].
         allowed: f64,
     },
     /// Both witnesses satisfy the physical law and passivity gates and have
@@ -526,6 +569,17 @@ pub fn solve_frictional_contacts(
         }
     }
     if let Some(witness) = range_witness {
+        result.impulse_work_witness = Some(range::impulse_work_witness(
+            // Only a checked semidefinite range creates range_witness above.
+            range_admission
+                .as_ref()
+                .ok_or(E::Invalid("missing mobility range"))?,
+            &matrix,
+            &free,
+            &mu,
+            config,
+            &mut **cancel.borrow_mut(),
+        )?);
         result.determinacy = FrictionalContactDeterminacy::UniqueVelocity(witness);
     } else if let Some((bound, weights)) = witness {
         result.contraction_bound = bound;
@@ -780,6 +834,7 @@ fn audit(
         contraction_bound: 1.0,
         contraction_weights: vec![],
         impulse_energy_witness: None,
+        impulse_work_witness: None,
         minimum_normalized_pivot: 0.0,
         evaluations: 0,
         nonlinear: None,

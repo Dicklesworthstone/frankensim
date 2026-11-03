@@ -17,7 +17,10 @@
 //! supplied original W. No eigenvalue shift, compliance, or truncated matrix
 //! enters the physical solve. The small matrix cap bounds each unpolled call.
 
-use super::{FrictionalContactError, PsdVelocityCriterion, PsdVelocityWitness, poll};
+use super::{
+    FrictionalContactConfig, FrictionalContactError, PsdImpulseWorkWitness, PsdVelocityCriterion,
+    PsdVelocityWitness, poll,
+};
 use fs_solver::orthant::active_set::SpdOrthantConfig;
 
 /// Numerical PSD admission is separate from Coulomb determinacy. A separated
@@ -56,6 +59,60 @@ pub(super) fn admit_positive_definite(
 ) -> Result<Option<RangeAdmission>, FrictionalContactError> {
     Ok(admit_spectrum(original, d, config, cancelled)?
         .filter(|admission| admission.null.is_empty()))
+}
+
+/// Work differences between two roots are v_before dot delta_p. First reuse
+/// the already checked full mobility range. If necessary, omit only tangent
+/// coordinates that the EXACT zero-friction law fixes to zero. For their
+/// complementary index set S, positive semidefiniteness gives
+/// ker(W_SS) = {z_S : W * embed_S(z_S) = 0}. Thus v_S in range(W_SS)
+/// suffices even when unrelated frictionless slip is not in range(W).
+pub(super) fn impulse_work_witness(
+    range: &RangeAdmission,
+    original: &[f64],
+    velocity: &[f64],
+    mu: &[f64],
+    config: FrictionalContactConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PsdImpulseWorkWitness, FrictionalContactError> {
+    let d = range.dimension;
+    let mut witness = range.work_projection(
+        velocity,
+        (0..d).collect(),
+        config.velocity_tolerance,
+        cancelled,
+    )?;
+    if witness.range_velocity_residual <= witness.allowed_range_velocity_residual {
+        return Ok(witness);
+    }
+    let coordinates: Vec<_> = (0..d).filter(|&i| i % 3 == 0 || mu[i / 3] > 0.0).collect();
+    if coordinates.len() < d {
+        let m = coordinates.len();
+        let mut principal = Vec::with_capacity(m * m);
+        let mut restricted_velocity = Vec::with_capacity(m);
+        for &i in &coordinates {
+            poll(cancelled)?;
+            restricted_velocity.push(velocity[i]);
+            for &j in &coordinates {
+                principal.push(original[i * d + j]);
+            }
+        }
+        if let Some(restricted) = admit_spectrum(&principal, m, config.matrix, cancelled)? {
+            witness = restricted.work_projection(
+                &restricted_velocity,
+                coordinates,
+                config.velocity_tolerance,
+                cancelled,
+            )?;
+            if witness.range_velocity_residual <= witness.allowed_range_velocity_residual {
+                return Ok(witness);
+            }
+        }
+    }
+    Err(FrictionalContactError::UnresolvedWork {
+        range_velocity_residual: witness.range_velocity_residual,
+        allowed: witness.allowed_range_velocity_residual,
+    })
 }
 
 fn admit_spectrum(
@@ -159,6 +216,42 @@ fn admit_spectrum(
 }
 
 impl RangeAdmission {
+    fn work_projection(
+        &self,
+        velocity: &[f64],
+        impulse_coordinates: Vec<usize>,
+        tolerance: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PsdImpulseWorkWitness, FrictionalContactError> {
+        let d = self.dimension;
+        let scale = velocity.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        let mut normalized_residual = 0.0_f64;
+        if scale > 0.0 {
+            for &k in &self.null {
+                poll(cancelled)?;
+                let projection: f64 = (0..d)
+                    .map(|i| self.vectors[i * d + k] * (velocity[i] / scale))
+                    .sum();
+                // This norm is independent of the arbitrary basis chosen for
+                // a repeated null eigenvalue, unlike a largest-coordinate test.
+                normalized_residual = normalized_residual.hypot(projection);
+            }
+        }
+        let residual = normalized_residual * scale;
+        let allowed = tolerance + self.zero_band * (d as f64).sqrt() * scale;
+        if !residual.is_finite() || !allowed.is_finite() {
+            return Err(FrictionalContactError::NonFinite);
+        }
+        Ok(PsdImpulseWorkWitness {
+            impulse_coordinates,
+            rank: self.retained.len(),
+            range_velocity_residual: residual,
+            allowed_range_velocity_residual: allowed,
+            spectral_residual: self.spectral_residual,
+            orthogonality_residual: self.orthogonality_residual,
+        })
+    }
+
     pub fn normal_nullspace_residual(&self, mu: &[f64]) -> f64 {
         mu.iter()
             .enumerate()

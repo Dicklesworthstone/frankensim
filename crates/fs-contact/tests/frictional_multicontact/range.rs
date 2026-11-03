@@ -68,6 +68,95 @@ fn velocity_witness(out: &FrictionalContactResult, dimension: usize) {
     assert_eq!(out.contraction_bound, 1.0);
     assert!(out.contraction_weights.is_empty());
     assert_eq!(out.minimum_normalized_pivot, 0.0);
+    let work = out.impulse_work_witness.as_ref().unwrap();
+    assert_eq!(work.impulse_coordinates, (0..dimension).collect::<Vec<_>>());
+    assert!(work.range_velocity_residual <= work.allowed_range_velocity_residual);
+}
+
+// G1: the same unique W*p can conceal different passive work. Normal impulse
+// allocations [a,2-a], 0<=a<=2, all produce endpoint normal speeds [1,0] and
+// satisfy Newton restitution [1,0], but their total loss is 2-a joules.
+#[test]
+fn determined_motion_does_not_publish_an_arbitrary_source_work_allocation() {
+    use fs_contact::frictional_multicontact::NormalVelocityLaw;
+    let w = gram(&[[0.0; 3]; 2]);
+    let mut contacts = [
+        contact(1, [-1.0, 0.0, 0.0], 0.0),
+        contact(2, [-2.0, 0.0, 0.0], 0.0),
+    ];
+    contacts[0].normal_law = NormalVelocityLaw::NewtonRestitution { coefficient: 1.0 };
+    for a in [0.0, 0.5, 2.0] {
+        let impulses = [[a, 0.0, 0.0], [2.0 - a, 0.0, 0.0]];
+        let mut work = 0.0;
+        for i in 0..6 {
+            let before = contacts[i / 3].relative_velocity[i % 3];
+            let after = before
+                + (0..6)
+                    .map(|j| w[6 * i + j] * impulses[j / 3][j % 3])
+                    .sum::<f64>();
+            close(after, if i == 0 { 1.0 } else { 0.0 });
+            work += 0.5 * (before + after) * impulses[i / 3][i % 3];
+        }
+        close(work, a - 2.0);
+    }
+    for order in [[0, 1], [1, 0]] {
+        let error =
+            solve_frictional_contacts(&order.map(|i| contacts[i]), &w, Default::default(), || {
+                false
+            })
+            .unwrap_err();
+        let FrictionalContactError::UnresolvedWork {
+            range_velocity_residual,
+            allowed,
+        } = error
+        else {
+            panic!("expected work-determinacy refusal, got {error:?}");
+        };
+        close(range_velocity_residual, 0.5_f64.sqrt());
+        assert!(range_velocity_residual > allowed);
+    }
+}
+
+// G1: frictionless sliding cannot exchange tangential work. Restricting the
+// witness to coordinates where impulses may actually act avoids rejecting
+// valid normal impacts merely because two frictionless belts move differently.
+#[test]
+fn zero_friction_tangents_are_excluded_only_from_the_work_proof() {
+    use fs_contact::frictional_multicontact::NormalVelocityLaw;
+    let w = gram(&[[0.0; 3]; 2]);
+    let mut contacts = [
+        contact(1, [-1.0, 1.0, 2.0], 0.0),
+        contact(2, [-1.0, -3.0, 5.0], 0.0),
+    ];
+    for c in &mut contacts {
+        c.normal_law = NormalVelocityLaw::NewtonRestitution { coefficient: 0.5 };
+    }
+    let result = solve(&contacts, &w);
+    let proof = result.impulse_work_witness.as_ref().unwrap();
+    assert_eq!(proof.impulse_coordinates, [0, 3]);
+    assert_eq!(proof.rank, 1);
+    close(proof.range_velocity_residual, 0.0);
+    close(result.impulses.iter().map(|p| p[0]).sum(), 1.5);
+    close(result.dissipated_energy, 0.375);
+    for (i, c) in contacts.iter().enumerate() {
+        close(result.relative_velocities_after[i][0], 0.5);
+        for axis in [1, 2] {
+            close(result.impulses[i][axis], 0.0);
+            close(
+                result.relative_velocities_after[i][axis],
+                c.relative_velocity[axis],
+            );
+        }
+    }
+
+    // A mixed pair still keeps BOTH tangent axes of the frictionful contact.
+    contacts[1].friction_coefficient = 0.1;
+    contacts[1].relative_velocity = [-1.0, 0.0, 0.0];
+    let result = solve(&contacts, &w);
+    let proof = result.impulse_work_witness.as_ref().unwrap();
+    assert_eq!(proof.impulse_coordinates, [0, 3, 4, 5]);
+    assert_eq!(proof.rank, 3);
+    close(result.dissipated_energy, 0.375);
 }
 
 #[test]
