@@ -79,6 +79,7 @@ impl From<PhsError> for ModalTimeError {
 pub struct ModalGalerkinSource {
     profile: RadiusProfile,
     gas: GasState,
+    regional_gases: Option<Vec<GasState>>,
     modes: ModeCount,
     elements: usize,
     end: ModalEnd,
@@ -95,9 +96,27 @@ impl ModalGalerkinSource {
     pub const fn profile(&self) -> &RadiusProfile {
         &self.profile
     }
-    /// Original admitted, fixed gas state.
+    /// Original admitted inlet gas. For a regional source, the other original
+    /// states remain available through [`Self::gas_at_element`].
     pub const fn gas(&self) -> &GasState {
         &self.gas
+    }
+    /// Original gas of one axial element, without averaging its density,
+    /// compressibility or source state. Out-of-range indices return None.
+    pub fn gas_at_element(&self, element: usize) -> Option<&GasState> {
+        if element >= self.elements {
+            return None;
+        }
+        Some(
+            self.regional_gases
+                .as_ref()
+                .map_or(&self.gas, |gases| &gases[element]),
+        )
+    }
+    /// Authored per-element states, when this source was assembled regionally.
+    /// The uniform constructor retains its single original state instead.
+    pub fn regional_gases(&self) -> Option<&[GasState]> {
+        self.regional_gases.as_deref()
     }
     /// Complete retained radial basis, including the plane mode.
     pub const fn modes(&self) -> ModeCount {
@@ -205,6 +224,65 @@ pub fn assemble_lossless(
     elements: usize,
     end: ModalEnd,
     max_states: usize,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ModalGalerkin, ModalTimeError> {
+    assemble(
+        profile, gas, None, modes, elements, end, max_states, cancelled,
+    )
+}
+
+/// Assemble the same full multimodal operator with one original gas state per
+/// uniform axial element. Interfaces lie exactly on the authored element grid;
+/// refining that grid requires repeating each state's physical interval.
+///
+/// Each element uses its own `S/rho` and `S/(rho*c^2)` in the SAME stiffness
+/// and consistent mass assembly. Continuous pressure potential and the weak
+/// flux balance enforce pressure and volume-flow continuity across interfaces,
+/// including density contrasts and local transverse cutoffs. No average sound
+/// speed, impedance interpolation or fitted resonance correction is used.
+///
+/// These are prescribed frozen regions at one common static pressure. Mean
+/// flow, mixing, thermal/species evolution and moving interfaces are absent.
+/// Source states, geometry, every coordinate and the original work limits are
+/// retained. Uniform repeated states reproduce the uniform operator exactly.
+///
+/// # Errors
+/// Empty regions, incoherent gas states, unequal static pressures, or any
+/// original geometry, resolution, capacity, factorization or cancellation
+/// refusal from [`assemble_lossless`].
+pub fn assemble_lossless_regional(
+    profile: &RadiusProfile,
+    gases: &[GasState],
+    modes: ModeCount,
+    end: ModalEnd,
+    max_states: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ModalGalerkin, ModalTimeError> {
+    cancelled_at(&mut cancelled, 0)?;
+    let inlet = gases.first().ok_or(ModalTimeError::Invalid(
+        "regional modal source needs one gas state per axial element",
+    ))?;
+    assemble(
+        profile,
+        inlet,
+        Some(gases),
+        modes,
+        gases.len(),
+        end,
+        max_states,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble(
+    profile: &RadiusProfile,
+    gas: &GasState,
+    regional_gases: Option<&[GasState]>,
+    modes: ModeCount,
+    elements: usize,
+    end: ModalEnd,
+    max_states: usize,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ModalGalerkin, ModalTimeError> {
     cancelled_at(&mut cancelled, 0)?;
@@ -240,10 +318,26 @@ pub fn assemble_lossless(
         crate::segment_wave(gas, profile.inlet_radius(), 1.0, LossModel::Lossless)?
             .characteristic_impedance
             .re;
-    let mouth_reference =
-        crate::segment_wave(gas, profile.outlet_radius(), 1.0, LossModel::Lossless)?
-            .characteristic_impedance
-            .re;
+    if let Some(gases) = regional_gases {
+        for (element, state) in gases.iter().enumerate() {
+            cancelled_at(&mut cancelled, element)?;
+            crate::validate_gas(state)?;
+            if state.pressure != gas.pressure {
+                return Err(ModalTimeError::Invalid(
+                    "regional modal gases need a common static pressure; mean flow is not modeled",
+                ));
+            }
+        }
+    }
+    let outlet_gas = regional_gases.map_or(gas, |gases| &gases[elements - 1]);
+    let mouth_reference = crate::segment_wave(
+        outlet_gas,
+        profile.outlet_radius(),
+        1.0,
+        LossModel::Lossless,
+    )?
+    .characteristic_impedance
+    .re;
     let h = profile.length() / elements as f64;
     if !h.is_finite() || h <= 0.0 {
         return Err(ModalTimeError::Invalid(
@@ -259,13 +353,15 @@ pub fn assemble_lossless(
     let offset = 0.5 / fs_math::det::sqrt(3.0);
     for element in 0..elements {
         cancelled_at(&mut cancelled, element)?;
+        let local_gas = regional_gases.map_or(gas, |gases| &gases[element]);
         for fraction in [0.5 - offset, 0.5 + offset] {
             let x = (element as f64 + fraction) * h;
             let radius = profile.radius(x)?;
             let flare = profile.slope(x)? / radius;
             let area = core::f64::consts::PI * radius * radius;
-            let kinetic_weight = 0.5 * h * area / gas.density;
-            let compressive_weight = kinetic_weight / (gas.sound_speed * gas.sound_speed);
+            let kinetic_weight = 0.5 * h * area / local_gas.density;
+            let compressive_weight =
+                kinetic_weight / (local_gas.sound_speed * local_gas.sound_speed);
             if !kinetic_weight.is_finite()
                 || kinetic_weight <= 0.0
                 || !compressive_weight.is_finite()
@@ -389,6 +485,7 @@ pub fn assemble_lossless(
         source: ModalGalerkinSource {
             profile: profile.clone(),
             gas: *gas,
+            regional_gases: regional_gases.map(<[GasState]>::to_vec),
             modes,
             elements,
             end,

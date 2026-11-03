@@ -2726,6 +2726,24 @@ elements and a separate N=1/2/4 taper rung, including live cross-mode
 reflection and reciprocity. These are bounded witnesses, not a general band
 certificate. Capacity/cancellation refuse explicitly.
 
+`assemble_lossless_regional` uses one original coherent gas state per axial
+element in that same assembly, with no averaged density or sound speed.
+Local `S/rho` stiffness and `S/(rho c^2)` consistent mass retain interface
+reflection, regional transverse cutoffs and physical resonance movement.
+The continuous pressure potential and weak flux balance enforce pressure
+and volume-flow continuity. Inlet and mouth references use their own gas;
+the original states remain inspectable by element. Repeating a uniform gas
+preserves the original matrices and port structure exactly.
+
+All regions must have one common equilibrium pressure. Interfaces coincide
+with element boundaries, so an axial refinement must retain those physical
+locations. This is frozen, lossless stratified acoustics; it does not evolve
+temperature, composition, convection, mixing or interface motion. Focused
+G1/G3 tests compare two-medium transfer and a propagating/evanescent cutoff
+transition against independent pressure/flow formulas, then refine the first
+closed/open physical pole against the analytic two-section boundary root.
+Original gas-coherence, capacity and cancellation refusals remain mandatory.
+
 
 ## Two-face continuous modal ports
 
