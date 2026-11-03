@@ -325,4 +325,80 @@ fn molecular_flue_observation_uses_the_explicit_exterior_species_and_refuses_mis
     );
 }
 
+#[test]
+fn measured_exit_negative_current_feedback_keeps_the_jet_mouth_residual_increasing() {
+    // The committed D4 flute card with the opt-in measured jet exit (coarse kernel row). Its forced
+    // kernel opens with a negative precursor at the labium, so g_0 < 0 and the same-sample jet
+    // feedback is negative. At every source sample of a block, rebuild the residual the jet-mouth
+    // solve brackets (this sample's boundary, radiation, previous flows and prepared kernel) and
+    // require it strictly increasing over [lo, hi]; the solve itself must then accept the sample.
+    use crate::flue_loop::{JetStepCoefficients, RetardedVelocity, solve_mouth_port};
+    use crate::flue_loop::mouth_radiation::MouthRadiation;
+    use crate::flue_loop::window_radiation::WindowRadiation;
+    use file::FlueFilePerformance;
+    use fs_exec::CancelGate;
+    const CARD: &str =
+        include_str!("../../../../../../data/instruments/descriptions/flute/flute-d4.performance");
+    const JET: &str = "jet 90 1e-6 3 0\n";
+    const SAMPLES: usize = 2048;
+    const GRID: usize = 129;
+    assert_eq!(CARD.matches(JET).count(), 1, "the D4 jet row changed; update this test");
+    let text = CARD.replace(JET, &format!("{JET}jet_response forced-bickley 0.25 40 exit measured\n"));
+    let mut renderer = FlueFilePerformance::from_bytes(text.as_bytes(), 256,
+        &CancelGate::new_clock_free()).unwrap().into_renderer();
+    let v = &mut renderer.voice;
+    // The residual below is the solve's branch for this card: no published transfer, no unsteady
+    // windway, no mouth contraction.
+    assert!(v.forced.is_some() && v.nolle.is_none() && v.unsteady_windway.is_none()
+        && v.mouth_contraction.is_none());
+    v.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+    let (dt, b, area) = (v.dt, 0.5*v.geometry.flue_height_m, v.geometry.mouth_area_m2());
+    let (mut lowest, mut highest) = (f64::INFINITY, f64::NEG_INFINITY);
+    for n in 0..SAMPLES {
+        // This sample's inputs as advance_block forms them for this card.
+        let u = v.jet_speed_m_s();
+        let card_u = v.card_speed_at(v.blow_pa, u);
+        let q_max = u*v.geometry.flue_height_m*v.geometry.flue_width_m;
+        let seed_scale = v.island.seed_amplitude_rel*card_u;
+        // The stream is Copy: the copy makes the voice's next draw and leaves the voice's own.
+        let mut stream = v.seed;
+        let seed = if seed_scale > 0.0 { seed_scale*(2.0*stream.next_f64()-1.0) } else { 0.0 };
+        let omega_c = card_u/(4.0*v.momentum_thickness_m);
+        let c = JetStepCoefficients { q_max, half_width_m: b,
+            offset_m: v.geometry.effective_offset_m(), band_alpha: omega_c*dt/(1.0+omega_c*dt),
+            hp_alpha: 1.0/(1.0+0.5*omega_c*dt), leak_rate: omega_c/100.0, eta_override: None };
+        // prepare resets and recomputes the current pair from the retained intervals alone, so
+        // advance_block's own prepare of this sample repeats it exactly.
+        assert!(v.forced.as_mut().unwrap().prepare(u).unwrap().is_some());
+        let g0 = v.forced.as_ref().unwrap().current().1;
+        let delayed = RetardedVelocity { past_m_s: seed, current_weight: 1.0 };
+        let boundary = v.line.mouth_boundary().unwrap();
+        let (md, mh) = v.mouth_radiation.as_ref().map_or((0.0, 0.0), MouthRadiation::affine_pressure);
+        let (wd, wh) = v.window_radiation.as_ref().map_or((0.0, 0.0), WindowRadiation::affine_pressure);
+        let (direct_pa, history_pa) = (md+wd, mh+wh);
+        let (l, r, zc) = (v.inertance, v.resistance+direct_pa, v.zc);
+        let direct = boundary.direct_reflection;
+        let compliance = (1.0-direct)/((l/dt+r)*(1.0-direct)+zc*(1.0+direct));
+        let feedback = compliance*(v.source_coeff/dt)*(0.5*q_max)*(g0*delayed.current_weight/area)/b;
+        assert!(g0 < 0.0 && feedback < 0.0, "sample {n}: g_0 {g0:e}, feedback {feedback:e}");
+        lowest = lowest.min(feedback);
+        highest = highest.max(feedback);
+        let port = |source_pa: f64| solve_mouth_port(boundary, source_pa-history_pa, v.q_prev,
+            l, r, zc, dt).unwrap().flow_m3_s;
+        let lo = port(v.source_coeff*(0.0-v.flow_prev)/dt).min(0.0);
+        let hi = port(v.source_coeff*(q_max-v.flow_prev)/dt).max(0.0);
+        let residual = |q: f64| q-port(v.jet_trial(delayed.past_m_s+delayed.current_weight*q/area,
+            0.0, c).unwrap().source_pa);
+        let mut last = residual(lo);
+        for k in 1..GRID {
+            let q = lo+(hi-lo)*(k as f64)/((GRID-1) as f64);
+            let next = residual(q);
+            assert!(next > last, "sample {n}: residual falls at q {q:e}: {last:e} -> {next:e}");
+            last = next;
+        }
+        v.step_block(&mut [0.0]).unwrap();
+    }
+    println!("D4 measured exit, 300 Pa: {SAMPLES} samples, current feedback {lowest:e} to {highest:e}");
+}
+
 mod gas;

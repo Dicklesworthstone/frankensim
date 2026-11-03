@@ -1650,6 +1650,9 @@ impl FlueVoice {
         // Together with passive port and separation impedances, feedback < 1
         // makes the scalar residual strictly increasing. Otherwise refine the
         // source clock; choosing an arbitrary root would change its dynamics.
+        // A negative current feedback (a signed precursor in the forced kernel,
+        // e.g. the measured exit's g_0 < 0) gives the residual a slope >= 1.
+        // The bound that matters is feedback < 1.
         let direct = boundary.direct_reflection;
         let denominator = (l/dt+r)*(1.0-direct)+zc*(1.0+direct);
         let compliance = (1.0-direct)/denominator;
@@ -1660,7 +1663,7 @@ impl FlueVoice {
         };
         let feedback = compliance*(self.source_coeff/dt)*(0.5*c.q_max)*eta_slope/c.half_width_m;
         if direct.abs() > 1.0 || !compliance.is_finite() || compliance <= 0.0
-            || !feedback.is_finite() || !(0.0..1.0).contains(&feedback) {
+            || !feedback.is_finite() || !(feedback < 1.0) {
             return Err(FlueError::Invalid { what: "current jet feedback is underresolved; refine the source time step" });
         }
         // The cut jet lies between zero and Qmax. The lossless responses at
