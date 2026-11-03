@@ -644,9 +644,9 @@ differentiable lift). Pure Rust throughout.
   and local-field paths through null and accepted collisions. These native
   regressions are authored but unexecuted in the implementation environment.
 
-- `camera::area_lights::CurvedAreaEmitter` prepares area sampling on an
-  original native triangle mesh and its exact `SurfaceEmitter`, directly from
-  the surface scene or an admitted camera emitter. Sources may include all
+- `camera::area_lights::CurvedAreaEmitter` prepares area sampling on original
+  native geometry and its exact `SurfaceEmitter`, directly from the surface
+  scene or an admitted camera emitter. Mesh sources may include all
   original faces or an explicit strictly increasing face selection through
   `try_new_faces` / `from_camera_faces`; disconnected, noncoplanar and closed
   meshes retain original face winding and per-side radiance. `AreaEmitterLimits`
@@ -675,6 +675,28 @@ differentiable lift). Pure Rust throughout.
   seeds do not establish image completeness. It does not add a second
   emission term to camera continuation. Singular caustic integration and
   coherent interference remain outside it.
+
+- Native chart area emitters use the original owner's explicit
+  `Chart::{surface_area, sample_surface_area, surface_area_pdf_at}` capability.
+  `SphereChart` provides closed-form uniform area sampling and matching hit
+  density without tessellation. `CurvedAreaEmitter::sample_area_with_context`
+  samples either backend; legacy `sample_area` retains mesh behavior and
+  returns `ContextRequired` for a chart. `AreaEmitterSample::triangle_index`
+  now returns `Option<usize>`: an original mesh face or `None` for a chart.
+  Samples retain the exact prepared support identity, native outward normal
+  and area PDF under proper-rigid placement. Chart preparation and hit lookup
+  each require one bounded native operation; zero work limits refuse. Native
+  face-subset constructors reject charts, and overlapping whole-chart bindings
+  remain duplicate support. Camera-hit density queries retain the unsnapped
+  integrated point and validate the original normal and object/frame identity.
+  Surface and molecular cameras invoke the same contextual sampler and
+  reciprocal MIS path. Each emitting side uses its original adjacent medium
+  and calibrated per-side radiance, with no source-interface Fresnel event.
+  Six authored renderer regressions cover native sphere measure/placement,
+  source ownership and work bounds, actual refractive surface/molecular camera
+  paths, matching hit PDFs and both sides of an emitting dielectric sphere.
+  Independent numerical Snell/radiometry controls passed; Rust execution
+  remains unavailable without Rust/DSR/RCH.
 
 - `BundleConnectionTarget::try_surface_receiver` stops at the original
   continuous scattering material before its receiving BSDF or local branch
@@ -802,9 +824,10 @@ differentiable lift). Pure Rust throughout.
   support ownership, conditional face densities, disjoint bindings on surface
   and molecular paths, excluded source sides and partial occlusion. Independent
   numerical references and 3,000 exact planar-overlap comparisons passed; Rust
-  compilation and regressions remain unexecuted without Rust/DSR/RCH. Analytic
-  chart emitters, singular caustic integration, volume emission and global
-  optical-image completeness remain outside scope.
+  compilation and regressions remain unexecuted without Rust/DSR/RCH. Charts
+  lacking explicit area sampling or native departure authority, singular caustic
+  integration, volume emission and global optical-image completeness remain
+  outside scope.
 
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original

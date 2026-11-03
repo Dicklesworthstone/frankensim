@@ -379,7 +379,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
             let remaining = work.remaining(settings)?;
             let event = path.surface_events().checked_sub(1)
                 .ok_or(AreaLightCameraError::NumericalRange)?;
-            let sample = binding.source.sample_area(area_samples(event, index))
+            let sample = binding.source.sample_area_with_context(cx, area_samples(event, index))
                 .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
             work.samples += 1;
             let target = receiver.target(binding.position_tolerance_m)

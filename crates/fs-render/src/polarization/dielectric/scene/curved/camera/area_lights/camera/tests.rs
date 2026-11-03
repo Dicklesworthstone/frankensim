@@ -1,6 +1,7 @@
 //! Area-light camera radiometry and complementary emitter-hit regressions.
 
 mod support;
+mod sphere;
 
 use super::*;
 use crate::charts::{Ray, TriMesh};

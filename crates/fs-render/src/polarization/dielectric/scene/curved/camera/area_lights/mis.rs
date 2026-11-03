@@ -24,7 +24,7 @@
 //! Inserting a noisy ratio-tracking estimate into this nonlinear heuristic
 //! would correlate its weight with source attenuation and bias the result.
 
-use super::{AreaEmitterError, AreaEmitterSample, CurvedAreaEmitter, cross, delta, norm};
+use super::{AreaEmitterError, AreaEmitterSample, CurvedAreaEmitter, SourceSupport, cross, delta, norm};
 use crate::gradient_index::bundle::ProjectionOptions;
 use crate::instances::SharedGeometry;
 use crate::polarization::dielectric::scene::curved::CurvedContact;
@@ -203,7 +203,7 @@ impl CurvedAreaEmitter<'_, '_, '_> {
     ) -> Result<(f64, f64), AreaEmitterError> {
         if !core::ptr::eq(sample.emitter, self.emitter)
             || !core::ptr::eq(sample.instance, self.instance)
-            || !core::ptr::eq(sample.support, self.triangles.as_slice())
+            || !core::ptr::eq(sample.support, &self.support)
         {
             return Err(AreaEmitterError::SampleOwnerMismatch);
         }
@@ -243,9 +243,9 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         Ok((light_log_pdf, reverse_log_probability))
     }
 
-    /// Recover a selected face's represented area density at a native emitter
-    /// hit. The original mesh BVH resolves full three-dimensional membership;
-    /// the native witness's feature ID identifies a coplanar patch, not a face.
+    /// Recover the original source's area density at a native emitter hit.
+    /// Mesh membership uses its original BVH; analytic charts supply their own
+    /// boundary density and normal. No chart is replaced by a proxy surface.
     /// The launch position stays on the integrated camera ray and is unsnapped.
     /// An original face outside this source's declared support returns `None`;
     /// edges, unresolved membership and work limits still refuse.
@@ -263,9 +263,6 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         {
             return Err(AreaEmitterError::SourceContactMismatch);
         }
-        let SharedGeometry::Mesh(mesh) = self.instance.geometry() else {
-            return Err(AreaEmitterError::UnsupportedGeometry);
-        };
         let local = self.instance.transform().inverse()
             .map_err(|_| AreaEmitterError::NumericalRange)?
             .transform_point(contact.witness.surface_point);
@@ -276,13 +273,34 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         let coordinate_scale = [point.x, point.y, point.z, local.x, local.y, local.z]
             .into_iter().fold(0.0_f64, |scale, x| scale.max(x.abs()));
         let tolerance = (contact.resolution_m + 64.0 * f64::EPSILON * coordinate_scale).next_up();
-        let triangle = mesh.area_source_face_at(cx, local, tolerance,
-            self.limits.max_lookup_work).map_err(AreaEmitterError::Mesh)?
-            .ok_or(AreaEmitterError::SourceContactMismatch)?;
-        let Ok(slot) = self.triangles.binary_search_by_key(&triangle, |entry| entry.original_triangle)
-            else { return Ok(None); };
-        let [a, b, c] = mesh.triangles[triangle].map(|index| mesh.vertices[index as usize]);
-        let raw = self.instance.transform().transform_vector(cross(delta(b, a), delta(c, a)));
+        let (triangle, local_normal, pdf_area_per_m2) = match (&self.support, self.instance.geometry()) {
+            (SourceSupport::Mesh(triangles), SharedGeometry::Mesh(mesh)) => {
+                let triangle = mesh.area_source_face_at(cx, local, tolerance,
+                    self.limits.max_lookup_work).map_err(AreaEmitterError::Mesh)?
+                    .ok_or(AreaEmitterError::SourceContactMismatch)?;
+                let Ok(slot) = triangles.binary_search_by_key(&triangle, |entry| entry.original_triangle)
+                    else { return Ok(None); };
+                let [a, b, c] = mesh.triangles[triangle].map(|index| mesh.vertices[index as usize]);
+                let entry = &triangles[slot];
+                let lower = if slot == 0 { 0.0 } else { triangles[slot - 1].cumulative_m2 };
+                let pdf = ((entry.cumulative_m2 - lower) / self.total_area_m2) / entry.area_m2;
+                (Some(triangle), cross(delta(b, a), delta(c, a)), pdf)
+            }
+            (SourceSupport::Chart, SharedGeometry::Chart(chart)) => {
+                if self.limits.max_lookup_work == 0 {
+                    return Err(AreaEmitterError::SourceWorkLimit { limit: 0 });
+                }
+                let density = chart.surface_area_pdf_at(cx, local, tolerance)
+                    .map_err(AreaEmitterError::Chart)?;
+                let length = norm(density.normal);
+                if !length.is_finite() || (length - 1.0).abs() > 1e-8 {
+                    return Err(AreaEmitterError::SourceContactMismatch);
+                }
+                (None, density.normal, density.pdf_area_per_m2)
+            }
+            _ => return Err(AreaEmitterError::SourceContactMismatch),
+        };
+        let raw = self.instance.transform().transform_vector(local_normal);
         let length = norm(raw);
         let normal = Vec3::new(raw.x / length, raw.y / length, raw.z / length);
         if !normal.dot(contact.witness.normal).is_finite()
@@ -290,16 +308,13 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         {
             return Err(AreaEmitterError::SourceContactMismatch);
         }
-        let entry = &self.triangles[slot];
-        let lower = if slot == 0 { 0.0 } else { self.triangles[slot - 1].cumulative_m2 };
-        let pdf_area_per_m2 = ((entry.cumulative_m2 - lower) / self.total_area_m2) / entry.area_m2;
         if !pdf_area_per_m2.is_finite() || pdf_area_per_m2 <= 0.0 {
             return Err(AreaEmitterError::NumericalRange);
         }
         Ok(Some(AreaEmitterSample {
             emitter: self.emitter,
             instance: self.instance,
-            support: self.triangles.as_slice(),
+            support: &self.support,
             triangle,
             position_m,
             normal,

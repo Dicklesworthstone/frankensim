@@ -360,7 +360,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         }
         let remaining = work.remaining(settings.area_lights)?;
         let source_ordinal = work.samples;
-        let sample = binding.source.sample_area(area_samples(vertex_ordinal, index))
+        let sample = binding.source.sample_area_with_context(cx, area_samples(vertex_ordinal, index))
             .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
         work.samples += 1;
         let target = match receiver {

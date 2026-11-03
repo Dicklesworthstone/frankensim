@@ -35,7 +35,7 @@ fn g1_closed_emitter_excluded_seeds_keep_native_hits_and_standalone_strictness()
         let owner = CurvedAreaLightCameraScene::try_new(cx, &camera, &bindings).unwrap();
         let samples = [(4.0 / 9.0) * AREA / source.total_area_m2(), 0.5];
         let selected = source.sample_area(samples).unwrap();
-        assert_eq!(selected.triangle_index(), 0);
+        assert_eq!(selected.triangle_index(), Some(0));
         let mut workspace = AreaLightCameraWorkspace::try_new(1, 1, 8).unwrap();
         let baseline = camera.sample_ray_with_samples(cx, camera_ray(), 550.0, 0,
             settings().surfaces, |_| [0.0; 3]).unwrap();

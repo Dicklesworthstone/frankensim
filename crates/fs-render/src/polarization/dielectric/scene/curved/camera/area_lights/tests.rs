@@ -16,7 +16,6 @@ use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 use crate::polarization::dielectric::scene::curved::participating::CurvedRayleighMedium;
 #[cfg(feature = "volumes")]
 use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
-#[cfg(feature = "volumes")]
 use fs_geom::fixtures::SphereChart;
 
 fn with_cx(f: impl FnOnce(&Cx<'_>)) {
@@ -103,7 +102,12 @@ fn g0_original_panel_area_pdf_and_winding_survive_rigid_placement() {
             (0.8, 1, 0.7_f64.sqrt(), [2.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, -2.0, 0.0]),
         ] {
             let sampled = panel.sample_area([u, 0.25]).unwrap();
-            assert_eq!(sampled.triangle_index(), triangle);
+            assert_eq!(sampled.triangle_index(), Some(triangle));
+            let contextual = panel.sample_area_with_context(cx, [u, 0.25]).unwrap();
+            assert_eq!(contextual.triangle_index(), sampled.triangle_index());
+            assert_eq!(contextual.position_m(), sampled.position_m());
+            assert_eq!(contextual.normal(), sampled.normal());
+            assert_eq!(contextual.pdf_area_per_m2(), sampled.pdf_area_per_m2());
             assert_eq!(sampled.object_id(), 2);
             near(sampled.pdf_area_per_m2(), 1.0 / 3.0, 1e-14);
             let expected_local = Point3::new(
@@ -151,7 +155,7 @@ fn g1_closed_native_mesh_and_conditional_faces_keep_original_area_and_transport(
         let mut lower = 0.0;
         for (face, area) in [1.0, 3.0, 1.5, 3.5].into_iter().enumerate() {
             let sample = whole.sample_area([(lower + area * 4.0 / 9.0) / 9.0, 0.5]).unwrap();
-            assert_eq!(sample.triangle_index(), face);
+            assert_eq!(sample.triangle_index(), Some(face));
             near(sample.pdf_area_per_m2(), 1.0 / 9.0, 1e-14);
             assert!(sample.normal().dot(normals[face]) > 1.0 - 1e-14);
             lower += area;
@@ -163,7 +167,7 @@ fn g1_closed_native_mesh_and_conditional_faces_keep_original_area_and_transport(
         assert!(whole.support_overlaps(&odd));
         near(odd.total_area_m2(), 6.5, 1e-14);
         let selected = odd.sample_area([0.8, 0.5]).unwrap();
-        assert_eq!(selected.triangle_index(), 3);
+        assert_eq!(selected.triangle_index(), Some(3));
         near(selected.pdf_area_per_m2(), 1.0 / 6.5, 1e-14);
         assert!(matches!(CurvedAreaEmitter::try_new_faces(cx, &scene, &emitter, &[0],
             AreaEmitterLimits { max_triangles: 3, ..limits }),
@@ -331,4 +335,5 @@ fn g1_area_lens_images_sum_original_branch_power_with_independent_source_surviva
 }
 
 mod mis;
+mod chart;
 

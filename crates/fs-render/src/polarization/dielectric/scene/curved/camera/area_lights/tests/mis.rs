@@ -3,6 +3,8 @@
 use super::*;
 use crate::spectral::SpectralReflectance;
 
+mod analytic;
+
 #[test]
 fn g1_reciprocal_area_pdf_cancels_receiver_obliquity_and_common_host_index() {
     with_cx(|cx| {
@@ -274,7 +276,7 @@ fn g1_native_nonplanar_emitter_hits_recover_only_their_selected_face_density() {
             let contact = hit.path().last_contact().unwrap();
             let position = hit.path().beam().ray().origin;
             let sample = whole.sample_at_contact_if_supported(cx, contact, position).unwrap().unwrap();
-            assert_eq!(sample.triangle_index(), triangle);
+            assert_eq!(sample.triangle_index(), Some(triangle));
             assert_eq!(sample.position_m(), position);
             near(sample.normal().dot(placement.transform_vector(normal)), 1.0, 1e-14);
             near(sample.pdf_area_per_m2(), 1.0 / 0.81, 1e-14);

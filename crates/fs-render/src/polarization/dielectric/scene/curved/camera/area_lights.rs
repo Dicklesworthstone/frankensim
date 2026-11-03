@@ -1,6 +1,6 @@
 //! Finite-area source irradiance through original native refractive images.
 //!
-//! A prepared source borrows an original surface emitter and native mesh faces.
+//! A prepared source borrows an original emitter and native mesh or chart.
 //! It samples area without tessellating charts or constructing surrogate lamps.
 //! For one area sample, Le*cos(source)/pdf_area is a differential radiant
 //! intensity. The native polarized bundle applies Fresnel transfer, absorption,
@@ -42,6 +42,7 @@ use crate::polarization::dielectric::scene::curved::participating::transmittance
 };
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
+use fs_geom::surface::SurfaceAreaError;
 use fs_math::det;
 
 /// Reciprocal optical-image densities and complementary camera MIS weights.
@@ -58,9 +59,13 @@ pub mod participating;
 pub enum AreaEmitterError {
     InvalidEmitter { object_id: u64 },
     UnsupportedGeometry,
+    UnsupportedFaceSubset,
+    ContextRequired,
+    SourceWorkLimit { limit: u64 },
     TriangleBudget { required: usize, limit: usize },
     InvalidTriangle { triangle: usize },
     Mesh(MeshAreaError),
+    Chart(SurfaceAreaError),
     AllocationFailure,
     InvalidSample,
     SampleOwnerMismatch,
@@ -87,6 +92,9 @@ impl From<fs_exec::Cancelled> for AreaEmitterError {
 impl From<MeshAreaError> for AreaEmitterError {
     fn from(error: MeshAreaError) -> Self { Self::Mesh(error) }
 }
+impl From<SurfaceAreaError> for AreaEmitterError {
+    fn from(error: SurfaceAreaError) -> Self { Self::Chart(error) }
+}
 impl core::fmt::Display for AreaEmitterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native finite-area emitter: {self:?}")
@@ -96,13 +104,18 @@ impl core::error::Error for AreaEmitterError {}
 
 /// Bounds the original mesh, preparation and each native hit lookup. Subsets
 /// still inspect excluded original faces for overlapping source support.
+/// A chart capability invocation counts as one bounded native operation;
+/// preparation and lookup therefore each require a nonzero work limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AreaEmitterLimits {
     /// Whole original mesh bound, also bounding selected CDF construction.
+    /// Native charts do not use this triangle bound.
     pub max_triangles: usize,
-    /// Native BVH visits, candidate pairs and source faces during admission.
+    /// Native BVH visits, candidate pairs and source faces during admission,
+    /// or one bounded chart area-capability invocation.
     pub max_preparation_work: u64,
-    /// Native BVH visits and candidate faces in one contact membership query.
+    /// Native BVH visits and candidate faces in one contact membership query,
+    /// or one bounded chart density-capability invocation.
     pub max_lookup_work: u64,
 }
 
@@ -119,32 +132,40 @@ struct TriangleArea {
     cumulative_m2: f64,
 }
 
+#[derive(Debug)]
+enum SourceSupport {
+    Mesh(Vec<TriangleArea>),
+    Chart,
+}
+
 /// Original source geometry and radiance, with bounded sampling metadata.
 /// All original mesh faces or an explicit sorted subset may emit. Selected
 /// faces have disjoint interiors from every coplanar original face; no mesh
 /// union or multiplicity correction is inferred. Faces need not be connected
 /// or coplanar. Their original windings and per-side radiance are retained.
-/// The mesh is borrowed, never copied or converted. Image seeds remain world
-/// directions and must support the selected face's emitting hemisphere.
+/// A chart supplies its own whole-surface area sampling and matching density;
+/// unsupported chart owners refuse. Geometry is borrowed, never converted.
+/// Image seeds remain world directions and must support the sampled point's
+/// emitting hemisphere.
 pub struct CurvedAreaEmitter<'s, 'm, 'e> {
     scene: &'s CurvedPolarizedScene<'m>,
     emitter: &'e SurfaceEmitter,
     instance: &'m GeometryInstance,
-    triangles: Vec<TriangleArea>,
+    support: SourceSupport,
     total_area_m2: f64,
     limits: AreaEmitterLimits,
 }
 
 /// A sealed area sample from the original emitter and geometry instance.
-/// The density includes triangle selection and is measured in inverse m².
+/// The density includes native surface selection and is measured in inverse m².
 /// It does not include a side, direction, wavelength or optical-image PDF.
 #[derive(Clone, Copy, Debug)]
 pub struct AreaEmitterSample<'a> {
     emitter: &'a SurfaceEmitter,
     instance: &'a GeometryInstance,
     // This exact preparation owns the conditional subset PDF.
-    support: &'a [TriangleArea],
-    triangle: usize,
+    support: &'a SourceSupport,
+    triangle: Option<usize>,
     position_m: Point3,
     normal: Vec3,
     pdf_area_per_m2: f64,
@@ -152,7 +173,8 @@ pub struct AreaEmitterSample<'a> {
 
 impl AreaEmitterSample<'_> {
     pub const fn object_id(&self) -> u64 { self.emitter.object_id() }
-    pub const fn triangle_index(&self) -> usize { self.triangle }
+    /// Original mesh face, or `None` for a native chart sample.
+    pub const fn triangle_index(&self) -> Option<usize> { self.triangle }
     pub const fn position_m(&self) -> Point3 { self.position_m }
     pub const fn normal(&self) -> Vec3 { self.normal }
     pub const fn pdf_area_per_m2(&self) -> f64 { self.pdf_area_per_m2 }
@@ -196,7 +218,7 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             AreaEmitterLimits { max_triangles, ..AreaEmitterLimits::default() })
     }
 
-    /// Prepare all original faces with explicit geometry and work limits.
+    /// Prepare a whole native source with explicit mesh geometry/work limits.
     pub fn try_new_with_limits(
         cx: &Cx<'_>, scene: &'s CurvedPolarizedScene<'m>, emitter: &'e SurfaceEmitter,
         limits: AreaEmitterLimits,
@@ -233,6 +255,19 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             .binary_search_by_key(&object_id, GeometryInstance::object_id)
             .map_err(|_| invalid())?;
         let instance = &geometry.instances()[index];
+        if let SharedGeometry::Chart(chart) = instance.geometry() {
+            if faces.is_some() { return Err(AreaEmitterError::UnsupportedFaceSubset); }
+            if limits.max_preparation_work == 0 {
+                return Err(AreaEmitterError::SourceWorkLimit { limit: 0 });
+            }
+            let total_area_m2 = chart.surface_area(cx)?;
+            if !total_area_m2.is_finite() || total_area_m2 <= 0.0 {
+                return Err(AreaEmitterError::NumericalRange);
+            }
+            cx.checkpoint()?;
+            return Ok(Self { scene, emitter, instance, support: SourceSupport::Chart,
+                total_area_m2, limits });
+        }
         let SharedGeometry::Mesh(mesh) = instance.geometry() else {
             return Err(AreaEmitterError::UnsupportedGeometry);
         };
@@ -281,7 +316,8 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             previous = cumulative;
         }
         cx.checkpoint()?;
-        Ok(Self { scene, emitter, instance, triangles, total_area_m2: previous, limits })
+        Ok(Self { scene, emitter, instance, support: SourceSupport::Mesh(triangles),
+            total_area_m2: previous, limits })
     }
 
     pub const fn source_emitter(&self) -> &'e SurfaceEmitter { self.emitter }
@@ -293,10 +329,15 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
     /// original faces, so sorted native face identity determines overlap here.
     pub(super) fn support_overlaps(&self, other: &Self) -> bool {
         if !core::ptr::eq(self.instance, other.instance) { return false; }
+        let (triangles, other_triangles) = match (&self.support, &other.support) {
+            (SourceSupport::Chart, SourceSupport::Chart) => return true,
+            (SourceSupport::Mesh(left), SourceSupport::Mesh(right)) => (left, right),
+            _ => return false,
+        };
         let (mut a, mut b) = (0, 0);
-        while a < self.triangles.len() && b < other.triangles.len() {
-            let left = self.triangles[a].original_triangle;
-            let right = other.triangles[b].original_triangle;
+        while a < triangles.len() && b < other_triangles.len() {
+            let left = triangles[a].original_triangle;
+            let right = other_triangles[b].original_triangle;
             if left == right { return true; }
             if left < right { a += 1; } else { b += 1; }
         }
@@ -305,16 +346,20 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
 
     /// Sample the original mesh with two variates in [0,1). An exact triangle
     /// edge/vertex is unresolved for the source departure and refuses, without
-    /// jitter, snapping, or success-conditioned resampling.
+    /// jitter, snapping, or success-conditioned resampling. Chart sources need
+    /// [`Self::sample_area_with_context`] and return `ContextRequired` here.
     pub fn sample_area(&self, samples: [f64; 2]) -> Result<AreaEmitterSample<'_>, AreaEmitterError> {
         if samples.into_iter().any(|u| !u.is_finite() || !(0.0..1.0).contains(&u)) {
             return Err(AreaEmitterError::InvalidSample);
         }
+        let SourceSupport::Mesh(triangles) = &self.support else {
+            return Err(AreaEmitterError::ContextRequired);
+        };
         let target = samples[0] * self.total_area_m2;
-        let slot = self.triangles.partition_point(|entry| entry.cumulative_m2 <= target);
-        let entry = self.triangles.get(slot).ok_or(AreaEmitterError::InvalidSample)?;
+        let slot = triangles.partition_point(|entry| entry.cumulative_m2 <= target);
+        let entry = triangles.get(slot).ok_or(AreaEmitterError::InvalidSample)?;
         let triangle = entry.original_triangle;
-        let lower = if slot == 0 { 0.0 } else { self.triangles[slot - 1].cumulative_m2 };
+        let lower = if slot == 0 { 0.0 } else { triangles[slot - 1].cumulative_m2 };
         let interval = entry.cumulative_m2 - lower;
         let u = (target - lower) / interval;
         let root = det::sqrt(u);
@@ -345,8 +390,46 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             return Err(AreaEmitterError::NumericalRange);
         }
         Ok(AreaEmitterSample { emitter: self.emitter, instance: self.instance,
-            support: self.triangles.as_slice(), triangle,
+            support: &self.support, triangle: Some(triangle),
             position_m, normal, pdf_area_per_m2 })
+    }
+
+    /// Sample the original native geometry through its contextual owner.
+    /// Charts retain their own area measure, parameterization and outward
+    /// normal. Proper-rigid placement preserves area and its probability
+    /// density; no chart tessellation or primitive-specific renderer path is
+    /// introduced. Mesh draws retain the same represented CDF as `sample_area`.
+    pub fn sample_area_with_context(
+        &self, cx: &Cx<'_>, samples: [f64; 2],
+    ) -> Result<AreaEmitterSample<'_>, AreaEmitterError> {
+        cx.checkpoint()?;
+        if matches!(&self.support, SourceSupport::Mesh(_)) { return self.sample_area(samples); }
+        if samples.into_iter().any(|u| !u.is_finite() || !(0.0..1.0).contains(&u)) {
+            return Err(AreaEmitterError::InvalidSample);
+        }
+        let SharedGeometry::Chart(chart) = self.instance.geometry() else {
+            return Err(AreaEmitterError::UnsupportedGeometry);
+        };
+        let sample = chart.sample_surface_area(cx, samples)?;
+        let length = norm(sample.normal);
+        if ![sample.position_m.x, sample.position_m.y, sample.position_m.z,
+            sample.normal.x, sample.normal.y, sample.normal.z, sample.pdf_area_per_m2]
+            .into_iter().all(f64::is_finite) || sample.pdf_area_per_m2 <= 0.0
+            || !length.is_finite() || (length - 1.0).abs() > 2e-10 {
+            return Err(AreaEmitterError::NumericalRange);
+        }
+        let position_m = self.instance.transform().transform_point(sample.position_m);
+        let raw_normal = self.instance.transform().transform_vector(sample.normal);
+        let length = norm(raw_normal);
+        if ![position_m.x, position_m.y, position_m.z, length].into_iter().all(f64::is_finite)
+            || length <= 0.0 {
+            return Err(AreaEmitterError::NumericalRange);
+        }
+        let normal = Vec3::new(raw_normal.x / length, raw_normal.y / length, raw_normal.z / length);
+        cx.checkpoint()?;
+        Ok(AreaEmitterSample { emitter: self.emitter, instance: self.instance,
+            support: &self.support, triangle: None, position_m, normal,
+            pdf_area_per_m2: sample.pdf_area_per_m2 })
     }
 
     /// Incident spectral irradiance at an original detector or scattering
@@ -418,7 +501,7 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
     ) -> Result<(BundleConnectionLaunch, BundleSurfaceSource, f64), AreaEmitterError> {
         if !core::ptr::eq(sample.emitter, self.emitter)
             || !core::ptr::eq(sample.instance, self.instance)
-            || !core::ptr::eq(sample.support, self.triangles.as_slice()) {
+            || !core::ptr::eq(sample.support, &self.support) {
             return Err(AreaEmitterError::SampleOwnerMismatch);
         }
         if side == BoundarySide::OnSurface

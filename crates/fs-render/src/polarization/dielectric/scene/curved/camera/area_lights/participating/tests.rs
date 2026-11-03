@@ -1,5 +1,7 @@
 //! Native molecular NEE, matched emitter hits and independent source survival.
 
+mod sphere;
+
 use super::*;
 use crate::charts::TriMesh;
 use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance};
