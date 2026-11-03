@@ -11,8 +11,10 @@
 //! split with frozen mechanical coefficients. The declared source must describe
 //! this layer thickness; matching IDs/areas cannot establish that calibration.
 //! The original card's named third body is explicitly mapped to the thermal
-//! layer material. Evolving thickness, open cracks and thermal weakening need
-//! their own geometry/source transfer. The optional entropy account covers
+//! layer material. Evolving thickness and open cracks need their own geometry
+//! transfer. [`temperature`] stages original prescribed temperature successors
+//! and irreversible weakening before this same motion/heat increment. The
+//! optional entropy account covers
 //! caloric storage, conduction and viscous generation, not fracture/surface
 //! entropy or a temperature-dependent cohesive free energy.
 
@@ -29,6 +31,13 @@ use fs_solver::{NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunPr
 use fs_thermal::enthalpy::backward_euler::{StepCoefficients, resolvable_increment_j};
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation, MaterialId};
 use std::cell::Cell;
+
+/// Prescribed source temperature, irreversible weakening and finite layer heat.
+pub mod temperature;
+pub use temperature::{
+    CohesiveLayerHeatTemperature, TemperatureHeatedCohesiveLayerCandidate,
+    propose_deformable_cohesive_layer_heat_with_temperature,
+};
 
 /// Explicit ordered assignment of one original surface to its thermal body.
 #[derive(Clone, Copy)]

@@ -23916,13 +23916,34 @@ nonthermal. Nonzero damaged-surface friction refuses because its localized
 surface destination is absent. Mechanical coefficients remain frozen and no
 source parameter work is thermalized. The small-deformation thermal geometry is
 a fixed material-reference layer with a closed normal path; the original source
-must be calibrated for that thickness. Open cracks, evolving thickness and
-thermal weakening are outside this split. Optional entropy covers caloric
+must be calibrated for that thickness. Open cracks and evolving thickness are
+outside this split. Optional entropy covers caloric
 storage, conduction and viscosity, without claiming a fracture/surface-entropy
 closure. Both immutable candidates remain unpublished on source, nonlinear,
 energy or cancellation failure. The `friction_heat/cohesive/layer.rs` regression
 uses independent three-capacity conduction and bilinear damage/viscosity
 integrals, plus native friction, identity and late-refusal cases.
+
+`friction_heat::third_body::cohesive::propose_deformable_cohesive_layer_heat_with_temperature`
+adds prescribed thermal weakening to that same finite adhesive transaction.
+Caller-owned successors retain the original selected claims, nonthermal query
+coordinates, patch geometry, elastic operator and accepted irreversible history.
+The existing native transfer runs once at held geometry before motion; thermal
+iterations see actual subsequent damage without repeating the source change.
+Signed coefficient work remains explicit external work, and both fixed-jump
+thermal fracture and later mechanical fracture stay outside caloric heat.
+Only the actual subsequent surviving-bond viscosity heats the finite adhesive
+and conducts through its original two resistances. An independent audit reads
+original/final bond storage, accrued fracture and finite thermal storage, with
+the unchanged initial native kinetic/bulk energy and signed source work; the
+three original owners' residuals provide a separate check. Cooling cannot heal
+damage. Either both final candidates are returned or both accepted owners stay
+unchanged, including on foreign-source and late cancellation refusals. This is
+explicit prescribed temperature with frozen coefficients during motion, without
+cohesive entropy or closed thermoelastic feedback. The layer temperature tests
+compare analytic inertial unloading and three-capacity diffusion after thermal
+weakening, continued cooling without healing, and late source/cancellation
+rollback (G1/G3/G4).
 
 ### Prescribed source temperature with native cohesive heating
 
