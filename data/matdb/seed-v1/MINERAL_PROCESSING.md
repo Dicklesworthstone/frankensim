@@ -14,6 +14,10 @@ compatible USGS material packs to CO reduction, graphite gasification and
 the aggregate carbon-reduction endpoint, with finite reagent inventories
 and separate reference enthalpy and Gibbs calculations.
 
+The [gamma recovery guide](MINING_GAMMA_RECOVERY.md) adds heterogeneous
+first-order kinetics for batch tests and separately declared stationary
+stirred-tank trains, with retained rate classes and bounded numerical work.
+
 Peroxide oxidation, cyanate hydrolysis and ammonia speciation now have matched
 material references and finite-inventory and coupled-pH examples; see
 [cyanide treatment](MINING_CYANIDE_TREATMENT.md).

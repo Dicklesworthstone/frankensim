@@ -14,10 +14,11 @@ use fs_matdb::{
     ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance, QueryPoint,
 };
 use fs_material::recovery::{
-    MAXIMUM_RATE_PARAMETER, RATE_PARAMETER, ULTIMATE_RECOVERY_PARAMETER,
+    GAMMA_SCALE_PARAMETER, GAMMA_SHAPE_PARAMETER, MAXIMUM_RATE_PARAMETER, RATE_PARAMETER,
+    RecoveryRateDistribution, ULTIMATE_RECOVERY_PARAMETER,
     continuous::{
-        CONTINUOUS_SINGLE_RATE_LAW, CONTINUOUS_UNIFORM_RATE_LAW, ContinuousRecoveryCard,
-        MEAN_RESIDENCE_TIME_AXIS, TANK_COUNT_AXIS,
+        CONTINUOUS_GAMMA_RATE_LAW, CONTINUOUS_SINGLE_RATE_LAW, CONTINUOUS_UNIFORM_RATE_LAW,
+        ContinuousRecoveryCard, MEAN_RESIDENCE_TIME_AXIS, TANK_COUNT_AXIS,
     },
 };
 use fs_qty::{Dims, Frequency, MassFlowRate, QuantitySpec, Time, Volume, VolumetricFlowRate};
@@ -26,23 +27,33 @@ const HOUR: f64 = 3600.0;
 const NOMINAL_FLOW: f64 = 0.19535657;
 const USAGE: &str = "usage: continuous_recovery [ACTUAL_FLOW_M3_S, default 0.19535657]";
 
-fn synthetic_card(uniform: bool) -> ConstitutiveModelCard {
-    let (law, parameter, rate) = if uniform {
-        (
+fn synthetic_card(distribution: RecoveryRateDistribution) -> ConstitutiveModelCard {
+    let (law, parameter, rate) = match distribution {
+        RecoveryRateDistribution::UniformFromZero => (
             CONTINUOUS_UNIFORM_RATE_LAW,
             MAXIMUM_RATE_PARAMETER,
             2.0 / (6.0 * HOUR),
-        )
-    } else {
-        (
+        ),
+        RecoveryRateDistribution::Single => (
             CONTINUOUS_SINGLE_RATE_LAW,
             RATE_PARAMETER,
             1.0 / (6.0 * HOUR),
-        )
+        ),
+        RecoveryRateDistribution::Gamma => (
+            CONTINUOUS_GAMMA_RATE_LAW,
+            GAMMA_SCALE_PARAMETER,
+            2.0 / (6.0 * HOUR),
+        ),
+    };
+    let shape = if distribution == RecoveryRateDistribution::Gamma {
+        Some(0.5)
+    } else {
+        None
     };
     let declaration = format!(
         "Synthetic stationary local first-order law; no measured calibration. \
          law={law}; version=1; Rinf=0.9 fraction; {parameter}={rate:.17e} s^-1; \
+         gamma-shape={shape:?}; \
          equal ideal full tanks; constant carrier flow and local rates; no hidden state. \
          Hydraulic mean residence domain=[43200,172800] s; tank count=[1,16]; pH=[9,11]. \
          This is an independently authored continuous law, not an extension of a finite batch test."
@@ -51,25 +62,35 @@ fn synthetic_card(uniform: bool) -> ConstitutiveModelCard {
         "continuous-recovery-authored-local-law-v1",
         declaration.as_bytes(),
     );
+    let mut parameters = BTreeMap::from([
+        (
+            ULTIMATE_RECOVERY_PARAMETER.into(),
+            LawParameter {
+                value: 0.9,
+                dims: Dims::NONE,
+            },
+        ),
+        (
+            parameter.into(),
+            LawParameter {
+                value: rate,
+                dims: Frequency::DIMS,
+            },
+        ),
+    ]);
+    if let Some(value) = shape {
+        parameters.insert(
+            GAMMA_SHAPE_PARAMETER.into(),
+            LawParameter {
+                value,
+                dims: Dims::NONE,
+            },
+        );
+    }
     ConstitutiveModelCard {
         law: LawId(law.into()),
         law_version: 1,
-        parameters: BTreeMap::from([
-            (
-                ULTIMATE_RECOVERY_PARAMETER.into(),
-                LawParameter {
-                    value: 0.9,
-                    dims: Dims::NONE,
-                },
-            ),
-            (
-                parameter.into(),
-                LawParameter {
-                    value: rate,
-                    dims: Frequency::DIMS,
-                },
-            ),
-        ]),
+        parameters,
         state_schema_version: 0,
         initial_state: InitialStatePolicy::ZeroInternalState,
         validity: ValidityDomain::unconstrained()
@@ -121,11 +142,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let models = [
         (
             "single",
-            ContinuousRecoveryCard::from_card(synthetic_card(false))?,
+            ContinuousRecoveryCard::from_card(synthetic_card(RecoveryRateDistribution::Single))?,
         ),
         (
             "uniform",
-            ContinuousRecoveryCard::from_card(synthetic_card(true))?,
+            ContinuousRecoveryCard::from_card(synthetic_card(
+                RecoveryRateDistribution::UniformFromZero,
+            ))?,
+        ),
+        (
+            "gamma",
+            ContinuousRecoveryCard::from_card(synthetic_card(RecoveryRateDistribution::Gamma))?,
         ),
     ];
     // Admit every requested result before printing a partial output table.
@@ -145,7 +172,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         flow
     );
     println!(
-        "# Both models have Rinf=0.9 and mean local rate 1/(6 h): single k=1/(6 h), uniform k in [0,2/(6 h)]."
+        "# All models have Rinf=0.9 and mean local rate 1/(6 h): single k=1/(6 h), uniform k in [0,2/(6 h)], gamma shape=0.5 and rate scale=2/(6 h)."
     );
     println!(
         "# These cards declare stationary local kinetics, with mean-residence domain 12..48 h, 1..16 tanks and pH 9..11. They do not extend finite elapsed-time test evidence."
@@ -157,11 +184,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     println!(
-        "model,tanks,actual_flow_m3_s,mean_residence_h,feed_metal_kg_h,recovery_pct,recovered_metal_kg_h,tail_metal_kg_h,conservation_residual_kg_s"
+        "model,tanks,actual_flow_m3_s,mean_residence_h,feed_metal_kg_h,recovery_pct,recovered_metal_kg_h,tail_metal_kg_h,conservation_residual_kg_s,gamma_fraction_error_estimate,gamma_integrand_evaluations"
     );
     for (label, result) in results {
         println!(
-            "{label},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.6e}",
+            "{label},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.6e},{:.6e},{}",
             result.tank_count,
             result.actual_train_flow.value(),
             result.mean_residence_time.value() / HOUR,
@@ -169,7 +196,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             result.recovery.value() * 100.0,
             result.recovered_metal_flow.value() * HOUR,
             result.tail_metal_flow.value() * HOUR,
-            result.conservation_residual.value()
+            result.conservation_residual.value(),
+            result
+                .gamma_integration
+                .map_or(0.0, |r| r.absolute_error_estimate.value()),
+            result.gamma_integration.map_or(0, |r| r.evaluations),
         );
     }
     Ok(())

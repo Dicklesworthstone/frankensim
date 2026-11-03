@@ -77,10 +77,211 @@ fn evaluate(card: &ContinuousRecoveryCard, n: usize, mean: f64, feed: f64) -> Co
         MassFlowRate::new(feed),
         &point(),
     )
-    .unwrap()
+    .unwrap_or_else(|error| {
+        panic!(
+            "train n={n} mean={mean} parameters={:?}: {error:?}",
+            card.source().parameters
+        )
+    })
 }
 fn close(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a} != {b}");
+}
+
+fn gamma_source(shape: f64, scale: f64) -> ConstitutiveModelCard {
+    let mut card = source(false, scale);
+    card.law = LawId(CONTINUOUS_GAMMA_RATE_LAW.into());
+    card.parameters.remove(super::super::RATE_PARAMETER);
+    card.parameters.insert(
+        super::super::GAMMA_SCALE_PARAMETER.into(),
+        LawParameter {
+            value: scale,
+            dims: Frequency::DIMS,
+        },
+    );
+    card.parameters.insert(
+        super::super::GAMMA_SHAPE_PARAMETER.into(),
+        LawParameter {
+            value: shape,
+            dims: Dims::NONE,
+        },
+    );
+    card
+}
+
+#[test]
+fn gamma_cstr_matches_independent_ratewise_balances_including_singular_shape() {
+    // Integrate RATE populations, independently of production's log-residence
+    // integral. For shape=1/2, k=theta*u² removes the rate-density singularity;
+    // shape=2 has density u*exp(-u). Neither oracle uses candidate outputs.
+    for shape in [0.5, 2.0] {
+        let original = gamma_source(shape, 0.02);
+        let card = ContinuousRecoveryCard::from_card(original.clone()).unwrap();
+        for tanks in [1, 2, 8, 64] {
+            let samples = 16384;
+            let upper = if shape == 0.5 { 12.0 } else { 64.0 };
+            let mut recovered = 0.0;
+            let mut surviving = 0.0;
+            for j in 0..=samples {
+                let u = upper * f64::from(j) / f64::from(samples);
+                let (rate, density) = if shape == 0.5 {
+                    (
+                        0.02 * u * u,
+                        2.0 / std::f64::consts::PI.sqrt() * (-u * u).exp(),
+                    )
+                } else {
+                    (0.02 * u, u * (-u).exp())
+                };
+                let mut survivor = 1.0;
+                for _ in 0..tanks {
+                    survivor /= 1.0 + rate * 100.0 / tanks as f64;
+                }
+                let weight = if j == 0 || j == samples {
+                    1.0
+                } else if j % 2 == 0 {
+                    2.0
+                } else {
+                    4.0
+                };
+                recovered += weight * density * (1.0 - survivor);
+                surviving += weight * density * survivor;
+            }
+            let result = evaluate(&card, tanks, 100.0, 10.0);
+            close(
+                result.recovery.value(),
+                0.9 * recovered * upper / (3.0 * f64::from(samples)),
+                1e-10,
+            );
+            close(
+                result.unrecovered_fraction.value(),
+                0.1 + 0.9 * surviving * upper / (3.0 * f64::from(samples)),
+                1e-10,
+            );
+            assert_eq!(result.source_card, original);
+            close(result.conservation_residual.value(), 0.0, 2e-15);
+            let diagnostics = result.gamma_integration.unwrap();
+            assert!(diagnostics.evaluations > 0 && diagnostics.evaluations <= 65_536);
+            assert!(diagnostics.absolute_error_estimate.value() < 1e-11);
+            assert!(diagnostics.omitted_tail_bound.value() < 1e-14);
+        }
+    }
+}
+
+#[test]
+fn gamma_cstr_residence_distribution_and_narrow_rate_limit_remain_distinct() {
+    let card = ContinuousRecoveryCard::from_card(gamma_source(0.5, 0.04)).unwrap();
+    let one = evaluate(&card, 1, 100.0, 1.0);
+    let eight = evaluate(&card, 8, 100.0, 1.0);
+    let batch_at_mean = 0.9 * (1.0 - 1.0 / 5.0_f64.sqrt());
+    assert!(one.recovery.value() < eight.recovery.value());
+    assert!(eight.recovery.value() < batch_at_mean);
+    assert!((eight.recovery.value() - batch_at_mean).abs() > 0.005);
+    let concentrated = ContinuousRecoveryCard::from_card(gamma_source(1e6, 0.02 / 1e6)).unwrap();
+    let single = ContinuousRecoveryCard::from_card(source(false, 0.02)).unwrap();
+    for tanks in [1, 8, 64] {
+        close(
+            evaluate(&concentrated, tanks, 100.0, 1.0).recovery.value(),
+            evaluate(&single, tanks, 100.0, 1.0).recovery.value(),
+            4e-7,
+        );
+    }
+    let twice_flow = card
+        .evaluate_train(
+            8,
+            Volume::new(100.0),
+            VolumetricFlowRate::new(2.0),
+            MassFlowRate::new(1.0),
+            &point(),
+        )
+        .unwrap();
+    assert!(twice_flow.recovery.value() < eight.recovery.value());
+}
+
+#[test]
+fn gamma_cstr_preserves_tiny_responses_and_refuses_unresolved_numerics() {
+    let tiny = ContinuousRecoveryCard::from_card(gamma_source(2.0, 1e-200)).unwrap();
+    for tanks in [1, 8] {
+        let result = evaluate(&tiny, tanks, 1.0, 1e200);
+        close(result.recovered_metal_flow.value(), 1.8, 2e-12);
+        assert!(result.recovery.value() > 0.0);
+    }
+    let huge_shape = ContinuousRecoveryCard::from_card(gamma_source(1e300, 1e-300)).unwrap();
+    close(
+        evaluate(&huge_shape, 1, 1.0, 1.0).recovery.value(),
+        0.45,
+        2e-12,
+    );
+    let mut tail_source = gamma_source(0.1, f64::MAX);
+    tail_source
+        .parameters
+        .get_mut(super::super::ULTIMATE_RECOVERY_PARAMETER)
+        .unwrap()
+        .value = 1.0;
+    let tail = ContinuousRecoveryCard::from_card(tail_source).unwrap();
+    let result = evaluate(&tail, 1, 100.0, 1.0);
+    assert!(result.unrecovered_fraction.value() > 0.0);
+    assert!(result.unrecovered_fraction.value() < 1e-30);
+    // This positive survival is beyond binary64; it must not become zero.
+    let impossible = ContinuousRecoveryCard::from_card(gamma_source(f64::MAX, f64::MAX)).unwrap();
+    assert!(matches!(
+        impossible.evaluate_train(
+            64,
+            Volume::new(1.0),
+            VolumetricFlowRate::new(1.0),
+            MassFlowRate::new(1.0),
+            &point()
+        ),
+        Err(RecoveryError::Arithmetic(_))
+    ));
+}
+
+#[test]
+fn gamma_requires_its_own_stationary_source_and_complete_support() {
+    for shape in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(ContinuousRecoveryCard::from_card(gamma_source(shape, 0.02)).is_err());
+    }
+    for mutate in 0..5 {
+        let mut source = gamma_source(2.0, 0.02);
+        match mutate {
+            0 => source.law = LawId(super::super::GAMMA_RATE_LAW.into()),
+            1 => {
+                source
+                    .parameters
+                    .remove(super::super::GAMMA_SHAPE_PARAMETER);
+            }
+            2 => {
+                source
+                    .parameters
+                    .get_mut(super::super::GAMMA_SHAPE_PARAMETER)
+                    .unwrap()
+                    .dims = Frequency::DIMS
+            }
+            3 => {
+                source
+                    .parameters
+                    .get_mut(super::super::GAMMA_SCALE_PARAMETER)
+                    .unwrap()
+                    .dims = Time::DIMS
+            }
+            _ => source.sources.clear(),
+        }
+        assert!(ContinuousRecoveryCard::from_card(source).is_err());
+    }
+    let model = ContinuousRecoveryCard::from_card(gamma_source(2.0, 0.02)).unwrap();
+    assert_eq!(
+        model.evaluate_train(
+            8,
+            Volume::new(100.0),
+            VolumetricFlowRate::new(1.0),
+            MassFlowRate::new(1.0),
+            &QueryPoint::new()
+        ),
+        Err(RecoveryError::OutsideValidity)
+    );
+    let zero = ContinuousRecoveryCard::from_card(gamma_source(2.0, 0.0)).unwrap();
+    let result = evaluate(&zero, 8, 100.0, 10.0);
+    assert_eq!(result.recovery.value(), 0.0);
+    assert_eq!(result.gamma_integration, None);
 }
 
 #[test]

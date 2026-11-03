@@ -8,6 +8,11 @@
 //! The single and uniform-rate first-order forms are listed in *Minerals*
 //! 10 (2020), 1027, Table 1, <https://doi.org/10.3390/min10111027>. This is a
 //! model-family reference; it does not supply a rate or recovery for an ore.
+//! Gamma-rate shape and scale follow Vinnett and Waters (2020), Table 1,
+//! <https://doi.org/10.3390/min10100913>; scale is an inverse time, not a time.
+
+#[path = "recovery/gamma.rs"]
+mod gamma;
 
 /// Explicit distributed-rate recovery with gamma/discrete populations, separate
 /// recovered/residual accounts, and steady equal-CSTR cascade response.
@@ -33,6 +38,8 @@ use fs_qty::{Dimensionless, Dims, Frequency, QuantitySpec, Time};
 pub const SINGLE_RATE_LAW: &str = "single-rate-recovery";
 /// Uniform rate population on [0,kmax]; R(t)=Rinf*(1-(1-exp(-kmax*t))/(kmax*t)).
 pub const UNIFORM_RATE_LAW: &str = "uniform-rate-recovery";
+/// Gamma rates: R(t)=Rinf*(1-(1+theta*t)^(-shape)).
+pub const GAMMA_RATE_LAW: &str = "gamma-rate-recovery";
 /// Typed seconds axis supplied by [`RecoveryKinetics::evaluate`].
 pub const ELAPSED_TIME_AXIS: &str = "elapsed-time";
 /// Dimensionless fraction of feed metal in the recoverable population.
@@ -41,6 +48,10 @@ pub const ULTIMATE_RECOVERY_PARAMETER: &str = "ultimate-recovery";
 pub const RATE_PARAMETER: &str = "rate-constant";
 /// Uniform distribution's upper endpoint, in inverse seconds.
 pub const MAXIMUM_RATE_PARAMETER: &str = "maximum-rate-constant";
+/// Positive dimensionless shape of the gamma rate distribution.
+pub const GAMMA_SHAPE_PARAMETER: &str = "gamma-shape";
+/// Gamma scale in inverse seconds; the mean rate is shape times scale.
+pub const GAMMA_SCALE_PARAMETER: &str = "gamma-rate-scale";
 
 /// Unsupported source declaration, applicability, or numerical range.
 #[derive(Clone, Debug, PartialEq)]
@@ -73,6 +84,8 @@ pub enum RecoveryRateDistribution {
     Single,
     /// Recoverable material has rates uniformly distributed from zero to kmax.
     UniformFromZero,
+    /// Gamma-distributed rates with explicitly declared shape and rate scale.
+    Gamma,
 }
 
 /// Immutable, source-bound empirical contact-time curve.
@@ -82,10 +95,11 @@ pub struct RecoveryKinetics {
     distribution: RecoveryRateDistribution,
     ultimate: Dimensionless,
     rate: Frequency,
+    shape: Option<Dimensionless>,
 }
 
 impl RecoveryKinetics {
-    /// Admit exactly two finite dimensioned parameters, law version 1, no hidden
+    /// Admit two parameters (three for gamma), law version 1, no hidden
     /// state, nonempty original source hashes, and a finite typed time window.
     /// Additional typed validity axes (e.g. grind, pH or temperature) are retained.
     pub fn from_card(source: ConstitutiveModelCard) -> Result<Self, RecoveryError> {
@@ -96,16 +110,22 @@ impl RecoveryKinetics {
                 RecoveryRateDistribution::UniformFromZero,
                 MAXIMUM_RATE_PARAMETER,
             ),
+            GAMMA_RATE_LAW => (RecoveryRateDistribution::Gamma, GAMMA_SCALE_PARAMETER),
             _ => return Err(RecoveryError::Invalid("unsupported recovery law")),
         };
         if source.law_version != 1
             || source.state_schema_version != 0
             || source.initial_state != InitialStatePolicy::ZeroInternalState
-            || source.parameters.len() != 2
+            || source.parameters.len()
+                != if distribution == RecoveryRateDistribution::Gamma {
+                    3
+                } else {
+                    2
+                }
             || source.sources.is_empty()
         {
             return Err(RecoveryError::Invalid(
-                "requires version 1, zero state, two parameters and original source hashes",
+                "requires version 1, zero state, the exact law parameters and original source hashes",
             ));
         }
         let ultimate = source
@@ -127,6 +147,7 @@ impl RecoveryKinetics {
                 "ultimate recovery must be a fraction and rate nonnegative inverse seconds",
             ));
         }
+        let shape = gamma_shape(&source, distribution)?;
         let Some((lo, hi)) = source.validity.bound(ELAPSED_TIME_AXIS) else {
             return Err(RecoveryError::Invalid(
                 "declare a finite elapsed-time validity window",
@@ -156,6 +177,7 @@ impl RecoveryKinetics {
             distribution,
             ultimate,
             rate,
+            shape,
         })
     }
 
@@ -175,9 +197,14 @@ impl RecoveryKinetics {
         self.ultimate
     }
 
-    /// k for a single population, or kmax for a uniform population.
+    /// k, uniform kmax, or gamma rate scale theta, in inverse seconds.
     pub const fn rate(&self) -> Frequency {
         self.rate
+    }
+
+    /// Original dimensionless gamma shape; absent for the other distributions.
+    pub const fn gamma_shape(&self) -> Option<Dimensionless> {
+        self.shape
     }
 
     /// Evaluate at actual contact time and all source conditions. The separate
@@ -219,6 +246,14 @@ impl RecoveryKinetics {
         if t == 0.0 || self.rate.value() == 0.0 || self.ultimate.value() == 0.0 {
             return Ok(Dimensionless::new(0.0));
         }
+        if let Some(shape) = self.shape {
+            let value = self.ultimate.value() * gamma::batch(shape.value(), self.rate.value(), t)?;
+            return if value > 0.0 && value <= self.ultimate.value() {
+                Ok(Dimensionless::new(value))
+            } else {
+                Err(RecoveryError::Arithmetic("gamma recovery fraction"))
+            };
+        }
         let x = self.rate.value() * t;
         if !x.is_finite() || x == 0.0 {
             return Err(RecoveryError::Arithmetic("rate-time product"));
@@ -237,6 +272,9 @@ impl RecoveryKinetics {
                 sum
             }
             RecoveryRateDistribution::UniformFromZero => 1.0 + det::expm1(-x) / x,
+            RecoveryRateDistribution::Gamma => {
+                return Err(RecoveryError::Invalid("missing admitted gamma shape"));
+            }
         };
         let value = self.ultimate.value() * fraction;
         if !value.is_finite() || value <= 0.0 || value > self.ultimate.value() {
@@ -244,6 +282,25 @@ impl RecoveryKinetics {
         }
         Ok(Dimensionless::new(value))
     }
+}
+
+fn gamma_shape(
+    source: &ConstitutiveModelCard,
+    distribution: RecoveryRateDistribution,
+) -> Result<Option<Dimensionless>, RecoveryError> {
+    if distribution != RecoveryRateDistribution::Gamma {
+        return Ok(None);
+    }
+    let shape = source
+        .parameters
+        .get(GAMMA_SHAPE_PARAMETER)
+        .ok_or(RecoveryError::Invalid("missing gamma shape"))?;
+    if shape.dims != Dims::NONE || !shape.value.is_finite() || shape.value <= 0.0 {
+        return Err(RecoveryError::Invalid(
+            "gamma shape must be positive and dimensionless",
+        ));
+    }
+    Ok(Some(Dimensionless::new(shape.value)))
 }
 
 #[cfg(test)]

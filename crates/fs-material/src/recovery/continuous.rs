@@ -8,7 +8,7 @@
 //!
 //! Every tank is full and perfectly mixed, with the same actual carrier flow,
 //! active volume and constant rate law. The recoverable feed population has
-//! either one rate or uniformly distributed rates on [0,kmax]. Each rate class
+//! one rate, uniform rates on [0,kmax], or gamma-distributed rates. Each rate class
 //! retains its rate as it passes through the train; the surviving population is
 //! not reset to the feed distribution after each tank. The remainder of feed
 //! metal is inert under this law. Separation does not alter the carrier flow.
@@ -20,6 +20,12 @@
 //! population. Source support and arithmetic verification do not establish plant
 //! calibration. Transients, adsorption, reagent limits and volume changes are
 //! outside this steady, dilute-constituent model.
+//!
+//! Gamma responses integrate the rate-distribution Laplace transform against
+//! the actual Erlang residence distribution, with bounded work, explicit tail
+//! bounds and quadrature estimates. They do not evaluate batch recovery at the
+//! mean residence. Shape, inverse-second scale and original local-law support
+//! are mandatory; no batch-to-continuous calibration is inferred.
 
 use super::{ELAPSED_TIME_AXIS, RecoveryError, RecoveryRateDistribution, residence::MAX_TANKS};
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, QueryPoint};
@@ -28,10 +34,14 @@ use fs_qty::{
     Dimensionless, Dims, Frequency, MassFlowRate, QuantitySpec, Time, Volume, VolumetricFlowRate,
 };
 
+pub use super::gamma::GammaIntegrationReport;
+
 /// Stationary local single-rate recovery; not the finite-time batch law.
 pub const CONTINUOUS_SINGLE_RATE_LAW: &str = "cstr-single-rate-recovery";
 /// Stationary local uniform rate population; not the finite-time batch law.
 pub const CONTINUOUS_UNIFORM_RATE_LAW: &str = "cstr-uniform-rate-recovery";
+/// Stationary local gamma rate population; not the finite-time batch law.
+pub const CONTINUOUS_GAMMA_RATE_LAW: &str = "cstr-gamma-rate-recovery";
 /// Operating-domain coordinate V/Q, in seconds; not an individual particle age.
 pub const MEAN_RESIDENCE_TIME_AXIS: &str = "mean-residence-time";
 /// Dimensionless integer count of equal ideal tanks in the declared model.
@@ -44,6 +54,7 @@ pub struct ContinuousRecoveryCard {
     distribution: RecoveryRateDistribution,
     ultimate: f64,
     rate: f64,
+    shape: Option<f64>,
 }
 
 /// A steady constituent balance with the complete original source and conditions.
@@ -73,11 +84,15 @@ pub struct ContinuousTreatment {
     pub tail_metal_flow: MassFlowRate,
     /// Recovered plus tail minus feed, in kg/s; no residual balancing plug.
     pub conservation_residual: MassFlowRate,
+    /// Gamma numerical work/error diagnostics; analytic single/uniform laws
+    /// and explicitly zero-rate/zero-recoverable responses need no quadrature.
+    pub gamma_integration: Option<GammaIntegrationReport>,
 }
 
 impl ContinuousRecoveryCard {
     /// Admit a distinct stationary law with fraction Rinf and inverse-second k
-    /// (or kmax), version 1 and no hidden state. The source must explicitly bound
+    /// (or kmax, or gamma scale plus dimensionless shape), version 1 and no
+    /// hidden state. The source must explicitly bound
     /// positive hydraulic mean residence and integer tank count, and type every
     /// additional applicability axis. Any batch `elapsed-time` axis refuses.
     pub fn from_card(source: ConstitutiveModelCard) -> Result<Self, RecoveryError> {
@@ -87,6 +102,10 @@ impl ContinuousRecoveryCard {
             CONTINUOUS_UNIFORM_RATE_LAW => (
                 RecoveryRateDistribution::UniformFromZero,
                 super::MAXIMUM_RATE_PARAMETER,
+            ),
+            CONTINUOUS_GAMMA_RATE_LAW => (
+                RecoveryRateDistribution::Gamma,
+                super::GAMMA_SCALE_PARAMETER,
             ),
             _ => {
                 return Err(RecoveryError::Invalid(
@@ -98,11 +117,16 @@ impl ContinuousRecoveryCard {
             || source.state_schema_version != 0
             || source.initial_state != InitialStatePolicy::ZeroInternalState
             || source.sources.is_empty()
-            || source.parameters.len() != 2
+            || source.parameters.len()
+                != if distribution == RecoveryRateDistribution::Gamma {
+                    3
+                } else {
+                    2
+                }
             || source.validity.bound(ELAPSED_TIME_AXIS).is_some()
         {
             return Err(RecoveryError::Invalid(
-                "requires version 1, zero state, two sourced parameters and no batch elapsed-time domain",
+                "requires version 1, zero state, the exact sourced parameters and no batch elapsed-time domain",
             ));
         }
         let ultimate = source
@@ -124,6 +148,7 @@ impl ContinuousRecoveryCard {
                 "requires fraction Rinf in [0,1] and nonnegative local rate in inverse seconds",
             ));
         }
+        let shape = super::gamma_shape(&source, distribution)?.map(Dimensionless::value);
         let validity = &source.validity;
         let mean = validity.bound(MEAN_RESIDENCE_TIME_AXIS);
         let count = validity.bound(TANK_COUNT_AXIS);
@@ -156,6 +181,7 @@ impl ContinuousRecoveryCard {
             distribution,
             ultimate,
             rate,
+            shape,
         })
     }
 
@@ -238,8 +264,13 @@ impl ContinuousRecoveryCard {
         {
             return Err(RecoveryError::OutsideValidity);
         }
+        let mut gamma_integration = None;
         let (converted, survival) = if self.rate == 0.0 || self.ultimate == 0.0 {
             (0.0, 1.0)
+        } else if let Some(shape) = self.shape {
+            let result = super::gamma::continuous(shape, self.rate, mean, tank_count)?;
+            gamma_integration = Some(result.report);
+            (result.converted, result.surviving)
         } else {
             let mut a = self.rate * (mean / tank_count as f64);
             if a == 0.0 {
@@ -276,6 +307,7 @@ impl ContinuousRecoveryCard {
             recovered_metal_flow: MassFlowRate::new(recovered),
             tail_metal_flow: MassFlowRate::new(unrecovered),
             conservation_residual: MassFlowRate::new(residual),
+            gamma_integration,
         })
     }
 }
@@ -336,6 +368,11 @@ fn fractions(
                 survival += det::exp(exponent);
             }
             (converted / (n - 1) as f64, survival / (n - 1) as f64)
+        }
+        RecoveryRateDistribution::Gamma => {
+            return Err(RecoveryError::Invalid(
+                "gamma closure requires the original shape",
+            ));
         }
     };
     if !result.0.is_finite()

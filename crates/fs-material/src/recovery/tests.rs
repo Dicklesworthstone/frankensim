@@ -205,3 +205,81 @@ fn arithmetic_range_refuses_and_source_identity_changes() {
         Err(RecoveryError::Arithmetic(_))
     ));
 }
+
+fn gamma_source(shape: f64, scale: f64) -> ConstitutiveModelCard {
+    let mut card = source(false);
+    card.law = LawId(GAMMA_RATE_LAW.into());
+    card.parameters.remove(RATE_PARAMETER);
+    card.parameters.insert(
+        GAMMA_SCALE_PARAMETER.into(),
+        LawParameter {
+            value: scale,
+            dims: Frequency::DIMS,
+        },
+    );
+    card.parameters.insert(
+        GAMMA_SHAPE_PARAMETER.into(),
+        LawParameter {
+            value: shape,
+            dims: Dims::NONE,
+        },
+    );
+    card
+}
+
+#[test]
+fn gamma_batch_matches_exact_laplace_transform_and_retains_shape_scale() {
+    for shape in [0.25_f64, 0.5, 1.0, 2.0, 12.0] {
+        let original = gamma_source(shape, 0.02);
+        let law = RecoveryKinetics::from_card(original.clone()).unwrap();
+        assert_eq!(law.distribution(), RecoveryRateDistribution::Gamma);
+        assert_eq!(law.gamma_shape().unwrap().value(), shape);
+        assert_eq!(law.rate().value(), 0.02);
+        assert_eq!(law.source(), &original);
+        assert_eq!(value(&law, 0.0), 0.0);
+        for t in [1e-10_f64, 1.0, 100.0, 1000.0] {
+            let expected = 0.9 * (-(-shape * (0.02 * t).ln_1p()).exp_m1());
+            close(value(&law, t), expected, 2e-14 * expected);
+        }
+    }
+    // Shape one is the exponential-rate population, not a single rate.
+    let law = RecoveryKinetics::from_card(gamma_source(1.0, 0.02)).unwrap();
+    close(value(&law, 100.0), 0.6, 3e-16);
+    assert!(
+        value(&law, 100.0) < value(&RecoveryKinetics::from_card(source(false)).unwrap(), 100.0)
+    );
+}
+
+#[test]
+fn gamma_batch_refuses_invalid_shape_units_and_unrepresentable_recovery() {
+    for shape in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(RecoveryKinetics::from_card(gamma_source(shape, 0.02)).is_err());
+    }
+    let mut wrong = gamma_source(2.0, 0.02);
+    wrong
+        .parameters
+        .get_mut(GAMMA_SHAPE_PARAMETER)
+        .unwrap()
+        .dims = Time::DIMS;
+    assert!(RecoveryKinetics::from_card(wrong).is_err());
+    let mut wrong = gamma_source(2.0, 0.02);
+    wrong
+        .parameters
+        .get_mut(GAMMA_SCALE_PARAMETER)
+        .unwrap()
+        .dims = Time::DIMS;
+    assert!(RecoveryKinetics::from_card(wrong).is_err());
+    let zero = RecoveryKinetics::from_card(gamma_source(2.0, 0.0)).unwrap();
+    assert_eq!(value(&zero, 100.0), 0.0);
+    let law = RecoveryKinetics::from_card(gamma_source(1e-300, 1e-300)).unwrap();
+    assert!(matches!(
+        law.evaluate(Time::new(1.0), &conditions()),
+        Err(RecoveryError::Arithmetic(_))
+    ));
+    // Separate logarithms retain a representable response when scale*time
+    // would overflow, or scale*time would underflow before shape is applied.
+    let law = RecoveryKinetics::from_card(gamma_source(1e-300, f64::MAX)).unwrap();
+    assert!(value(&law, 100.0) > 0.0);
+    let law = RecoveryKinetics::from_card(gamma_source(1e300, 1e-300)).unwrap();
+    close(value(&law, 1.0), 0.9 * (1.0 - (-1.0_f64).exp()), 4e-14);
+}
