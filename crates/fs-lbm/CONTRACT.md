@@ -941,6 +941,9 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   flags, vector gravity, per-cell relaxation time, per-cell external force,
   periodicity flags, deterministic collide/stream steps, and gas/wall
   boundary bounce handling for the plain non-free-surface step.
+  `Grid::rebind_gravity` and `Grid::rebind_forcing` replace held acceleration
+  and local loads without an instantaneous physical half-force impulse, using
+  the caller's reusable collision scratch and atomic accepted-state publication.
   `core2::MomentumExchange2`, `stream_from_with_wall_momentum`, and
   `step_with_wall_momentum` add an opt-in raw lattice-impulse receipt for an
   explicitly selected subset of stationary wall cells without changing the
@@ -7048,6 +7051,38 @@ spatial forces, and close the original mass ledger after conversion. This
 removes force-frame artifacts; it does not claim a globally momentum-conserving
 VOF remap, transferred nonequilibrium stress or a physical liquid equation of
 state. Frozen version-1 replay continues to expose its historical behavior.
+
+### Physical momentum at dense force changes and rest initialization
+
+The D2Q9 `Grid::rebind_gravity` and `Grid::rebind_forcing` operations change
+piecewise-held acceleration and local force density in the original Guo chart.
+For every active fluid/interface cell they use its own density and physical
+velocity and replace `f` by `f + (S(u,F_old)-S(u,F_new))/2`, where
+`F = rho*g + fext`. Physical mass, momentum and the force-corrected second
+moment are preserved to population roundoff, including evolved nonequilibrium
+stress. No time elapses and no physical impulse, work or heat is added. The
+next original collision/stream step supplies the held force's actual impulse.
+Direct writes to the public force fields retain the previous stored populations
+and therefore have a different half-source/time convention; they are not the
+physical-state-preserving operation.
+
+Admission checks the full field lengths and finite forces, plus each active
+cell's density, physical velocity and proposed populations before publication.
+The caller's reusable collision buffer holds the proposal. Gas/wall population
+bits, topology, relaxation and boundary settings are retained. Identical inputs
+leave both accepted populations and scratch unchanged. No second force-field
+copy or additional persistent buffer is allocated.
+
+Ordinary dense channel, rheology, two-level refinement, dam-break and material
+free-surface constructors now initialize physical rest in the declared source
+frame. Previously they encoded zero raw population momentum and hence started
+with an unintended half-force velocity; the refined levels even started with
+different physical velocities. Focused regressions check full physical moments
+at nonunit densities, changing spatial loads, atomic late-cell refusal, all
+five D2Q9 collision families through switch/reversal/off histories, periodic
+whole-grid impulse closure, and sourced SI gravity independent of liquid density.
+This does not change the existing force, pressure, boundary or free-surface
+transport laws, or establish temporal order for arbitrary force histories.
 
 ### Finite-slope thermocapillary height graphs
 

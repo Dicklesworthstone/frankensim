@@ -258,7 +258,6 @@ fn lbm_106_rotation_equivariance() {
     let mut grid = Grid::uniform(h, w, 0.55);
     grid.periodic_x = false;
     grid.periodic_y = false;
-    grid.g = [-g, 0.0];
     for i in 0..h * w {
         grid.flags[i] = Cell::Gas;
     }
@@ -280,6 +279,7 @@ fn lbm_106_rotation_equivariance() {
             grid.flags[i] = Cell::Fluid;
         }
     }
+    grid.rebind_gravity([-g, 0.0], &mut Vec::new()).unwrap();
     let mut sim2 = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
     for _ in 0..300 {
         sim1.step();

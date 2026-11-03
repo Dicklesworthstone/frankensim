@@ -134,7 +134,10 @@ impl Lbm {
     /// force `gx`.
     #[must_use]
     pub fn channel(nx: usize, ny: usize, tau: f64, gx: f64) -> Lbm {
-        let f0 = equilibrium(1.0, 0.0, 0.0);
+        let mut f0 = equilibrium(1.0, 0.0, 0.0);
+        if gx != 0.0 {
+            thermal::forcing::reframe2(&mut f0, [0.0; 2], [0.0; 2], [gx, 0.0]);
+        }
         Lbm {
             nx,
             ny,

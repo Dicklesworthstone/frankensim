@@ -14,6 +14,9 @@ pub mod frame;
 /// Finite-inertia disk motion with geometry rasterized on the native lattice.
 pub mod moving_disk;
 
+mod forcing;
+pub use forcing::ForceRebindError2;
+
 const MAX_REGULARIZED_BOUNDARY_SPEED_SQ: f64 = 0.03;
 const UNIT_NORMAL_TOLERANCE: f64 = 128.0 * f64::EPSILON;
 
@@ -123,10 +126,13 @@ pub struct Grid {
     pub f: Vec<[f64; Q]>,
     /// Per-cell relaxation time.
     pub tau: Vec<f64>,
-    /// Gravity vector (lattice units).
+    /// Gravity vector (lattice units). Direct assignment changes the Guo
+    /// half-force interpretation; use [`Grid::rebind_gravity`] to change a
+    /// held acceleration without an instantaneous physical impulse.
     pub g: [f64; 2],
     /// Per-cell external force (Boussinesq buoyancy etc.), added to
-    /// ρ·g.
+    /// ρ·g. Use [`Grid::rebind_forcing`] to replace a held force field while
+    /// preserving the physical state.
     pub fext: Vec<[f64; 2]>,
     /// Periodic in x?
     pub periodic_x: bool,

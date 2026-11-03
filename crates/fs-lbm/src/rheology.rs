@@ -837,7 +837,6 @@ pub fn channel_flow(
     let grid_ny = ny + 2;
     let mut grid = Grid::uniform(nx, grid_ny, 1.0);
     grid.periodic_y = false;
-    grid.g = [gx, 0.0];
     // Wall rows top and bottom.
     for x in 0..nx {
         let bottom = grid.idx(x, 0);
@@ -846,6 +845,8 @@ pub fn channel_flow(
         grid.flags[top] = Cell::Wall;
     }
     let mut scratch: Vec<[f64; Q]> = Vec::new();
+    grid.rebind_gravity([gx, 0.0], &mut scratch)
+        .expect("channel gravity must admit a finite physical rest state");
     let mut stats = RheologyStats::default();
     let mut last_peak = 0.0f64;
     let mut steps = 0;

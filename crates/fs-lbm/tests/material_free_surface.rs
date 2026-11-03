@@ -251,6 +251,26 @@ fn physical_samples_use_guo_velocity_and_hide_gas_populations() {
 }
 
 #[test]
+fn dense_material_liquid_starts_at_rest_then_receives_one_gravity_impulse() {
+    use fs_lbm::material::free_surface::MaterialFreeSurfaceDomain2;
+    for rho in [800.0, 1_600.0] {
+        let source = liquid(rho, rho * 0.0001, None);
+        let gravity = [-0.1, 0.2];
+        let mut flow = plan(&source).free_surface2(MaterialFreeSurfaceDomain2 {
+            cells: [16, 16], gravity_m_s2: gravity,
+            contact: fs_lbm::ContactModel::Neutral, max_cells: 256,
+        }, |_, _| true).unwrap();
+        let initial = flow.sample_at_si(8, 8).unwrap().unwrap();
+        near(initial.density_kg_m3, rho, 1e-14);
+        assert!(initial.velocity_m_s.iter().all(|u| u.abs() < 2e-17));
+        // The interior is uniform, before any stationary-wall transient arrives.
+        flow.step();
+        let after = flow.sample_at_si(8, 8).unwrap().unwrap();
+        for d in 0..2 { near(after.velocity_m_s[d], gravity[d] * 0.001, 1e-11); }
+    }
+}
+
+#[test]
 fn capillary_reconstruction_and_allocation_domains_refuse_before_construction() {
     let source = liquid(1_000.0, 0.1, Some(0.01));
     // At this long timestep native sigma*kappa/CS2 can exceed one and

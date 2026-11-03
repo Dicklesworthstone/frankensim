@@ -68,7 +68,8 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// Z faces refuse: no silent dimensional remapping is performed.
     ///
     /// The classifier receives only interior cell coordinates. Interface
-    /// insertion follows the native half-filled-cell convention. This is an
+    /// insertion follows the native half-filled-cell convention. Liquid starts
+    /// at physical rest in the held gravity's Guo source frame. This is an
     /// isothermal equilibrium-angle closure, not a dynamic wetting model.
     pub fn free_surface2(
         self,
@@ -116,7 +117,6 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         let mut grid = Grid::uniform(nx, ny, self.flow.tau);
         grid.periodic_x = false;
         grid.periodic_y = false;
-        grid.g = gravity;
         for y in 0..ny {
             for x in 0..nx {
                 let i = grid.idx(x, y);
@@ -129,6 +129,9 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 };
             }
         }
+        grid.rebind_gravity(gravity, &mut Vec::new()).map_err(|_| {
+            MaterialLbmError::Invalid("D2Q9 gravity cannot represent the physical rest state")
+        })?;
         let mut lattice = FreeSurface::new(grid, self.surface_tension_lattice, domain.contact);
         if let Some((wall, angle)) = planar {
             lattice.set_planar_contact_angle(wall, angle).map_err(|_| {

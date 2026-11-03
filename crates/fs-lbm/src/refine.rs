@@ -104,14 +104,14 @@ fn rescale(
 impl RefinedChannel {
     /// Build with `nx_c` coarse columns, `own_c` coarse fluid rows
     /// below the split and `own_f` fine fluid rows above it, gravity
-    /// `gx` along the channel.
+    /// `gx` along the channel. Both levels start at the same physical rest
+    /// velocity in their distinct Guo force frames.
     #[must_use]
     pub fn new(nx_c: usize, own_c: usize, own_f: usize, tau_c: f64, gx: f64) -> RefinedChannel {
         let tau_f = 2.0f64.mul_add(tau_c, -0.5);
         // Coarse: wall + own + ghost.
         let mut coarse = Grid::uniform(nx_c, own_c + 2, tau_c);
         coarse.periodic_y = false;
-        coarse.g = [gx, 0.0];
         for x in 0..nx_c {
             let w = coarse.idx(x, 0);
             coarse.flags[w] = Cell::Wall;
@@ -122,11 +122,16 @@ impl RefinedChannel {
         // halves on the fine grid.
         let mut fine = Grid::uniform(2 * nx_c, own_f + 3, tau_f);
         fine.periodic_y = false;
-        fine.g = [gx / 2.0, 0.0];
         for x in 0..2 * nx_c {
             let w = fine.idx(x, own_f + 2);
             fine.flags[w] = Cell::Wall;
         }
+        let mut scratch = Vec::new();
+        coarse
+            .rebind_gravity([gx, 0.0], &mut scratch)
+            .expect("coarse gravity must admit a finite physical rest state");
+        fine.rebind_gravity([gx / 2.0, 0.0], &mut scratch)
+            .expect("fine gravity must admit a finite physical rest state");
         RefinedChannel {
             coarse,
             fine,
@@ -134,7 +139,7 @@ impl RefinedChannel {
             tau_f,
             own_c,
             own_f,
-            scratch: Vec::new(),
+            scratch,
             reflux: vec![[0.0; Q]; nx_c],
             source_mass_reflux: vec![0.0; nx_c],
         }

@@ -926,7 +926,6 @@ pub fn dam_break(
     let mut grid = Grid::uniform(nx, ny, 0.55);
     grid.periodic_x = false;
     grid.periodic_y = false;
-    grid.g = [0.0, -g];
     for i in 0..nx * ny {
         grid.flags[i] = Cell::Gas;
     }
@@ -948,6 +947,8 @@ pub fn dam_break(
             grid.flags[i] = Cell::Fluid;
         }
     }
+    grid.rebind_gravity([0.0, -g], &mut Vec::new())
+        .expect("dam-break gravity must admit a finite physical rest state");
     FreeSurface::new(grid, sigma, contact)
 }
 
