@@ -5887,3 +5887,36 @@ analytical-oracle review completed. Native compilation, execution and rustfmt
 remain unrun for this increment because the execution container was replaced
 and the replacement has no Rust, DSR or RCH toolchain. These tests are not a
 passing native or full-workspace qualification claim.
+
+## Sustained reciprocal contact between finite articulated bodies
+
+`articulated_contacts::step::sustained::step_sustained_articulated_contacts`
+extends the same bounded original force/displacement solve and native
+free/prescribed midpoint responses to finite body pairs and translating planes
+in one contact inventory. The plane-only entry delegates to this shared engine.
+Each finite pair applies equal and opposite world forces at its original link
+material points. Native inertia, base recoil, joint coupling and prescribed
+support reactions remain inside the original mechanical response.
+
+Per-side spatial impulses and actual material-displacement work are retained.
+Pair impulses are internal: actual gravity/body sources are rebuilt through the
+original native spatial reducer at the native midpoint, before rounding, and
+prescribed support and plane exchanges remain external. Relative witness
+positions audit each pair's angular reciprocity before large world moments
+can cancel. Numerical integration and contact quadrature defects remain
+separate from physical frictional loss.
+
+Initial, native midpoint and endpoint observations admit finite-pair normal-line
+geometry and bound the actual force couple. Complete-path separation, frame
+applicability, contact mode and additional determinacy evidence remain the
+caller's responsibility. Fixed-witness sticking and central normal contact are
+supported. Sliding surfaces needing newly selected material points, rotating
+contact frames, generic collision discovery and a global Moreau--Jean theorem
+are outside this local candidate's scope. No compensating couple, fictitious
+inertia, state/force projection or automatic thermal credit is introduced.
+
+G1/G3 regressions in `tests/articulated_sustained_pairs.rs` cover reciprocal
+finite-body pushing, system/contact permutations, a moving three-body column
+with either a prescribed support or a plane, guided finite-body sticking,
+detachment, and artificial-couple refusals. The original sustained-plane
+regressions remain tests of the same shared engine and its native refusal paths.

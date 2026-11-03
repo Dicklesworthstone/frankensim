@@ -1,9 +1,17 @@
-//! Sustained plane forces coupled to original free/prescribed articulated motion.
+//! Sustained reciprocal forces coupled to original free/prescribed articulated motion.
 //!
 //! The contact owner solves force/displacement complementarity. Every response
 //! restarts from the same borrowed native state, with gravity, actuator effort,
 //! body loads and held contact forces present together at both original stages.
 //! There is no force kick, restitution solve, proxy inertia or contact spring.
+//! Body pairs retain their ORIGINAL material witnesses and fixed contact frame;
+//! they must remain a reciprocal force pair along the whole admitted path.
+//! Sliding witnesses that separate tangentially require a moving-surface owner,
+//! not compensating torques or a numerical projection in this material-point lane.
+
+mod reciprocal;
+
+pub use reciprocal::ArticulatedSustainedPairExchange;
 
 use super::mixed::{native_input, totals};
 use super::{
@@ -13,14 +21,14 @@ use super::{
 use crate::articulated::contact_geometry::{ContactGeometryError, prepare_contact_frame};
 use crate::articulated::motion::prescribed::{
     PrescribedBaseMotionError, PrescribedBaseMotionState, PrescribedBaseMotionStep,
-    PrescribedBasePath,
+    PrescribedBasePath, external_sources,
 };
 use crate::articulated::motion::spatial_loads::prescribed::step_prescribed_base_spatial_with_effort;
 use crate::articulated::motion::spatial_loads::{
     MaterialPoint, SpatialMotionLoads, WorldPointLoad, step_free_floating_spatial_with_effort,
 };
 use crate::articulated::motion::{
-    FreeFloatingMotionError, FreeFloatingMotionStep, MAX_FREE_FLOATING_STEP_LINKS,
+    FreeFloatingMotionError, FreeFloatingMotionStep, MAX_FREE_FLOATING_STEP_LINKS, SpatialSum,
 };
 use crate::articulated::{ArticulatedError, BaseState, Kinematics, forward_kinematics};
 use crate::articulated_contacts::mixed::ContactSystem;
@@ -54,6 +62,44 @@ pub struct ArticulatedSustainedPlaneContact {
     pub friction_coefficient: f64,
     /// Numerical conditioning in N/m; these scales add no physical compliance.
     pub scales: NaturalMapScales,
+}
+
+/// Held sustained force between original body witnesses or against a plane.
+///
+/// Body witnesses must belong to distinct rigid links. They receive exact
+/// opposite world forces with their original moment arms. The fixed frame and
+/// fixed material points must remain applicable throughout the admitted path;
+/// this includes long-dwell sticking and central normal contact, not arbitrary
+/// sliding surface pairs. Force-bearing pairs are checked for normal-line
+/// geometry and angular reciprocity at the native stages and endpoint.
+#[derive(Clone, Copy, Debug)]
+pub struct ArticulatedSustainedContact {
+    pub id: u64,
+    /// Original material point receiving the positive force.
+    pub point: LinkContactPoint,
+    /// Finite counterpart receives the opposite force. Plane velocity is constant.
+    pub other: ContactCounterpart,
+    pub normal_world: Vec3,
+    pub tangent_world: Vec3,
+    pub friction_coefficient: f64,
+    pub scales: NaturalMapScales,
+}
+
+impl From<ArticulatedSustainedPlaneContact> for ArticulatedSustainedContact {
+    fn from(contact: ArticulatedSustainedPlaneContact) -> Self {
+        Self {
+            id: contact.id,
+            point: contact.point,
+            other: ContactCounterpart::PrescribedPlane {
+                point_world: contact.plane_point_world,
+                velocity_world: contact.plane_velocity_world,
+            },
+            normal_world: contact.normal_world,
+            tangent_world: contact.tangent_world,
+            friction_coefficient: contact.friction_coefficient,
+            scales: contact.scales,
+        }
+    }
 }
 
 /// Separate numerical, geometric and physical allowances in SI units.
@@ -94,19 +140,25 @@ pub enum ArticulatedSustainedMotion {
 /// alone do not establish these claims. The caller also owns any additional
 /// branch/determinacy evidence needed to adopt this local numerical candidate.
 /// Callback-owned history must remain staged until the complete call succeeds.
-pub struct ArticulatedSustainedPath<'a> {
+pub struct ArticulatedSustainedPath<'a, Contact = ArticulatedSustainedPlaneContact> {
     pub systems: &'a [System<'a>],
     /// Native midpoint PREDICTORS used for forces/work, not inferred interpolation.
     pub midpoint: &'a [State],
     pub endpoint: &'a [State],
     pub support_paths: &'a [Option<PrescribedBasePath>],
     /// Contacts and forces in the same canonical ID order.
-    pub contacts: &'a [ArticulatedSustainedPlaneContact],
+    pub contacts: &'a [Contact],
     pub axes_world: &'a [[Vec3; 3]],
     pub forces_n: &'a [[f64; 3]],
     pub time_before_s: f64,
     pub duration: f64,
 }
+
+/// Complete-path admission for a common inventory of finite pairs and planes.
+/// In addition to contact mode, the caller must establish reciprocal force
+/// geometry throughout the interval; finite stage observations are insufficient.
+pub type ArticulatedSustainedContactPath<'a> =
+    ArticulatedSustainedPath<'a, ArticulatedSustainedContact>;
 
 /// Physically audited LOCAL candidate, without an existence/uniqueness claim.
 ///
@@ -121,6 +173,8 @@ pub struct ArticulatedSustainedStepCandidate<P> {
     pub motion: Vec<ArticulatedSustainedMotion>,
     pub support_paths: Vec<Option<PrescribedBasePath>>,
     pub contact_ids: Vec<u64>,
+    /// Finite-body exchanges in contact-ID order, with actual native moment arms.
+    pub pair_exchanges: Vec<ArticulatedSustainedPairExchange>,
     /// Unmodified final force solve and freshly recomputed endpoint gap/slip, SI units.
     pub solve: SolveReport,
     /// Total original response calls, including an optional inactive-mode restart.
@@ -135,6 +189,7 @@ pub struct ArticulatedSustainedStepCandidate<P> {
     pub linear_momentum_change_world: Vec3,
     pub angular_momentum_change_about_origin_world: Vec3,
     /// Includes gravity, body loads, plane forces and prescribed support reaction.
+    /// Reciprocal forces between retained finite bodies are internal and excluded.
     pub external_linear_impulse_world: Vec3,
     pub external_angular_impulse_about_origin_world: Vec3,
     /// Held effort and body-wrench work at the actual native midpoint stage, J.
@@ -194,6 +249,12 @@ pub enum ArticulatedSustainedError<E> {
         contact_id: u64,
         reason: &'static str,
     },
+    /// Fixed material witnesses would inject an artificial internal couple.
+    Reciprocity {
+        contact_id: u64,
+        /// Moment of the applied pair over one duration, about any common origin.
+        angular_impulse_world: Vec3,
+    },
     Balance(&'static str),
     Path(E),
     Cancelled,
@@ -205,13 +266,77 @@ impl<E: core::fmt::Debug> core::fmt::Display for ArticulatedSustainedError<E> {
 }
 impl<E: std::error::Error + 'static> std::error::Error for ArticulatedSustainedError<E> {}
 
-/// Solve held sustained-plane forces against original articulated trajectories.
+/// Plane-only entry to the shared native sustained-contact engine.
+///
+/// The original contact order, plane-path callback and result semantics are
+/// retained. See [`step_sustained_articulated_contacts`] for common admission,
+/// numerical budgets and physical accounting.
+#[allow(clippy::too_many_arguments)]
+pub fn step_sustained_articulated_planes<P, E>(
+    systems: &[System<'_>],
+    contacts: &[ArticulatedSustainedPlaneContact],
+    initial_forces_n: &[[f64; 3]],
+    start_time_s: f64,
+    controls: ArticulatedSustainedControls,
+    support_path: impl FnMut(
+        usize,
+        &PrescribedBaseMotionState,
+        f64,
+    ) -> Result<PrescribedBasePath, PrescribedBaseMotionError>,
+    admit_path: impl FnOnce(&ArticulatedSustainedPath<'_>) -> Result<P, E>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ArticulatedSustainedStepCandidate<P>, ArticulatedSustainedError<E>> {
+    poll(&mut cancelled)?;
+    if contacts.len() > solve::MAX_CONTACTS {
+        return Err(ArticulatedSustainedError::Invalid(
+            "contact count exceeds hard bound",
+        ));
+    }
+    let common: Vec<_> = contacts.iter().copied().map(Into::into).collect();
+    let mut sorted = contacts.to_vec();
+    sorted.sort_unstable_by_key(|contact| contact.id);
+    step_sustained_articulated_contacts(
+        systems,
+        &common,
+        initial_forces_n,
+        start_time_s,
+        controls,
+        support_path,
+        |path| {
+            admit_path(&ArticulatedSustainedPath {
+                systems: path.systems,
+                midpoint: path.midpoint,
+                endpoint: path.endpoint,
+                support_paths: path.support_paths,
+                contacts: &sorted,
+                axes_world: path.axes_world,
+                forces_n: path.forces_n,
+                time_before_s: path.time_before_s,
+                duration: path.duration,
+            })
+        },
+        cancelled,
+    )
+}
+
+/// Solve reciprocal sustained forces against original articulated trajectories.
 ///
 /// All forces act simultaneously at both native stages, preserving full ABA
 /// coupling, finite inertia, base recoil and driven support reactions. A resting
 /// gravity equilibrium therefore needs no per-step velocity reset or artificial
 /// kick loss. Tangent slip is actual material displacement relative to plane
-/// material, including a translating belt's signed work.
+/// material or the opposite finite body, including a translating belt's signed
+/// work. Every finite pair acts on both original trees (or distinct links of
+/// one tree); its linear impulse and spatial torque must cancel. Such forces
+/// are internal, while prescribed support reactions remain external sources.
+///
+/// **Fixed-witness scope:** loaded finite pairs must keep the original material
+/// points on a common normal line, and any tangential force requires coincident
+/// points within the declared angular-impulse gate. Sticking and central normal
+/// contact are supported. Tangentially separating witnesses are refused even
+/// when an endpoint force law converges; there is no artificial transport couple
+/// and no inference of updated sliding-surface contact points. The caller must
+/// establish these properties for the complete path and fixed frame.
 ///
 /// Supply one initial force triple per contact in input order. Support samples
 /// are requested once per prescribed tree and reused unchanged in every native
@@ -231,9 +356,9 @@ impl<E: std::error::Error + 'static> std::error::Error for ArticulatedSustainedE
 /// native response and contact law must independently accept the new candidate;
 /// both solves share the caller's response and outer-iteration budgets.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub fn step_sustained_articulated_planes<P, E>(
+pub fn step_sustained_articulated_contacts<P, E>(
     systems: &[System<'_>],
-    contacts: &[ArticulatedSustainedPlaneContact],
+    contacts: &[ArticulatedSustainedContact],
     initial_forces_n: &[[f64; 3]],
     start_time_s: f64,
     controls: ArticulatedSustainedControls,
@@ -242,7 +367,7 @@ pub fn step_sustained_articulated_planes<P, E>(
         &PrescribedBaseMotionState,
         f64,
     ) -> Result<PrescribedBasePath, PrescribedBaseMotionError>,
-    admit_path: impl FnOnce(&ArticulatedSustainedPath<'_>) -> Result<P, E>,
+    admit_path: impl FnOnce(&ArticulatedSustainedContactPath<'_>) -> Result<P, E>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedSustainedStepCandidate<P>, ArticulatedSustainedError<E>> {
     poll(&mut cancelled)?;
@@ -266,10 +391,7 @@ pub fn step_sustained_articulated_planes<P, E>(
         poll(&mut cancelled)?;
         let geometry = prepare_contact_frame(
             contact.point,
-            ContactCounterpart::PrescribedPlane {
-                point_world: contact.plane_point_world,
-                velocity_world: contact.plane_velocity_world,
-            },
+            contact.other,
             contact.normal_world,
             contact.tangent_world,
             index,
@@ -279,8 +401,15 @@ pub fn step_sustained_articulated_planes<P, E>(
         let axes = geometry.rows.map(|row| row.axis_world);
         let parts = point_parts(&before[contact.point.system_index], contact.point)
             .map_err(|error| ArticulatedSustainedError::Geometry(error.into()))?;
-        let gap = point_gap(parts, contact.plane_point_world, axes[0]);
-        let speed = relative_speed(&before[contact.point.system_index], *contact, axes)
+        let other_parts = match contact.other {
+            ContactCounterpart::Body(point) => point_parts(&before[point.system_index], point)
+                .map_err(|error| ArticulatedSustainedError::Geometry(error.into()))?,
+            ContactCounterpart::PrescribedPlane { point_world, .. } => {
+                [point_world, Vec3::default(), Vec3::default()]
+            }
+        };
+        let gap = dot_dd(axes[0], difference(parts, other_parts));
+        let speed = relative_speed(&before, *contact, axes)
             .map_err(|error| ArticulatedSustainedError::Geometry(error.into()))?;
         check_gap(contact.id, gap.to_f64())?;
         if gap.to_f64() <= controls.loaded_gap_tolerance_m
@@ -296,6 +425,7 @@ pub fn step_sustained_articulated_planes<P, E>(
             axes,
             initial_gap: gap,
             initial_parts: parts,
+            initial_other_parts: other_parts,
             initial_speed: speed,
         });
     }
@@ -406,6 +536,9 @@ pub fn step_sustained_articulated_planes<P, E>(
     let mut plane_work = Dd::ZERO;
     let mut normal_work = Dd::ZERO;
     let mut tangential_work = Dd::ZERO;
+    for pair in &native.pairs {
+        pair.admit(controls)?;
+    }
     for (index, prepared) in prepared.iter().enumerate() {
         poll(&mut cancelled)?;
         let force = forces[index];
@@ -421,11 +554,13 @@ pub fn step_sustained_articulated_planes<P, E>(
             });
         }
         tangential_work = tangential_work + tangent;
-        for (&force, axis) in force.iter().zip(prepared.axes) {
-            plane_work = plane_work
-                + Dd::from_f64(force)
-                    * dot(axis, prepared.contact.plane_velocity_world)
-                    * Dd::from_f64(controls.duration);
+        if let ContactCounterpart::PrescribedPlane { velocity_world, .. } = prepared.contact.other {
+            for (&force, axis) in force.iter().zip(prepared.axes) {
+                plane_work = plane_work
+                    + Dd::from_f64(force)
+                        * dot(axis, velocity_world)
+                        * Dd::from_f64(controls.duration);
+            }
         }
     }
     let a = &native.accounts;
@@ -508,6 +643,7 @@ pub fn step_sustained_articulated_planes<P, E>(
         motion: native.motion,
         support_paths,
         contact_ids: sorted.iter().map(|c| c.id).collect(),
+        pair_exchanges: native.pairs.into_iter().map(|pair| pair.exchange).collect(),
         solve: report,
         total_response_evaluations,
         total_nonlinear_iterations,
@@ -540,11 +676,17 @@ struct Frame {
     world: Kinematics,
     shape: Kinematics,
 }
+impl std::borrow::Borrow<Kinematics> for Frame {
+    fn borrow(&self) -> &Kinematics {
+        &self.world
+    }
+}
 struct Prepared {
-    contact: ArticulatedSustainedPlaneContact,
+    contact: ArticulatedSustainedContact,
     axes: [Vec3; 3],
     initial_gap: Dd,
     initial_parts: [Vec3; 3],
+    initial_other_parts: [Vec3; 3],
     initial_speed: [f64; 3],
 }
 #[derive(Default)]
@@ -566,6 +708,7 @@ struct Response {
     paths: Vec<[f64; 3]>,
     relative_displacement: Vec<[Dd; 3]>,
     midpoint_gaps: Vec<f64>,
+    pairs: Vec<reciprocal::PairResponse>,
     accounts: Accounts,
 }
 type NativeError = ArticulatedSustainedError<core::convert::Infallible>;
@@ -581,6 +724,7 @@ fn response(
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Response, NativeError> {
     let mut points = vec![Vec::new(); systems.len()];
+    let mut world_forces = Vec::with_capacity(prepared.len());
     for (p, force) in prepared.iter().zip(forces) {
         poll(cancelled)?;
         let coordinates: [Dd; 3] = core::array::from_fn(|axis| {
@@ -604,6 +748,17 @@ fn response(
             force_world,
             couple_world: Vec3::default(),
         });
+        if let ContactCounterpart::Body(other) = p.contact.other {
+            points[other.system_index].push(WorldPointLoad {
+                point: MaterialPoint {
+                    link: other.link_index,
+                    point_body: other.point_body,
+                },
+                force_world: force_world.scale(-1.0),
+                couple_world: Vec3::default(),
+            });
+        }
+        world_forces.push(force_world);
     }
     let mut states = Vec::with_capacity(systems.len());
     let mut midpoints = Vec::with_capacity(systems.len());
@@ -637,11 +792,6 @@ fn response(
                 accounts.actual.add(
                     step.linear_momentum_change_world,
                     step.angular_momentum_change_world,
-                    controls.angular_origin_world,
-                );
-                accounts.sources.add(
-                    step.external_linear_impulse_world,
-                    step.external_angular_impulse_world,
                     controls.angular_origin_world,
                 );
                 accounts.kinetic = accounts.kinetic + Dd::from_f64(step.kinetic_energy_change);
@@ -680,11 +830,6 @@ fn response(
                     controls.angular_origin_world,
                 );
                 accounts.sources.add(
-                    step.external_linear_impulse_world,
-                    step.external_angular_impulse_world,
-                    controls.angular_origin_world,
-                );
-                accounts.sources.add(
                     step.support_linear_impulse_world,
                     step.support_angular_impulse_world,
                     controls.angular_origin_world,
@@ -705,6 +850,29 @@ fn response(
     let middle = frames(systems, &midpoints, cancelled)?;
     let after = frames(systems, &states, cancelled)?;
     for (index, system) in systems.iter().enumerate() {
+        // Reuse the original source reducer on the ACTUAL native stage. Do not
+        // subtract internal contact loads from a rounded per-tree source total:
+        // that can erase a small real body/gravity source beside a large pair.
+        let sources = external_sources(
+            system.model,
+            middle[index].base.world_from_base,
+            &middle[index].world,
+            &middle[index].shape,
+            system.loads,
+            &mut || cancelled(),
+        )
+        .map_err(|error| match error {
+            PrescribedBaseMotionError::Dynamics(error) => ArticulatedSustainedError::Dynamics {
+                system_index: index,
+                error,
+            },
+            error => prescribed_error(index, error),
+        })?;
+        reciprocal::add_spatial(
+            &mut accounts.sources,
+            sources.scaled(controls.duration),
+            controls.angular_origin_world,
+        );
         let input = native_input(system.model, &middle[index].state);
         for (&effort, &velocity) in system
             .loads
@@ -752,7 +920,8 @@ fn response(
     let mut paths = Vec::with_capacity(prepared.len());
     let mut slips = Vec::with_capacity(prepared.len());
     let mut midpoint_gaps = Vec::with_capacity(prepared.len());
-    for (p, force) in prepared.iter().zip(forces) {
+    let mut pairs = Vec::new();
+    for (contact_index, (p, &force_world)) in prepared.iter().zip(&world_forces).enumerate() {
         poll(cancelled)?;
         let index = p.contact.point.system_index;
         let end_parts = point_parts(&after[index], p.contact.point)
@@ -761,10 +930,56 @@ fn response(
             .map_err(|error| ArticulatedSustainedError::Geometry(error.into()))?;
         let displacement = difference(end_parts, p.initial_parts);
         let midpoint_displacement = difference(mid_parts, p.initial_parts);
-        let relative = p.axes.map(|axis| {
-            dot_dd(axis, displacement)
-                - dot(axis, p.contact.plane_velocity_world) * Dd::from_f64(controls.duration)
-        });
+        let velocity = velocity_parts(&middle[index], p.contact.point)
+            .map_err(|error| ArticulatedSustainedError::Geometry(error.into()))?;
+        let (other_displacement, other_midpoint_displacement, other_velocity) =
+            match p.contact.other {
+                ContactCounterpart::Body(other) => {
+                    let end = point_parts(&after[other.system_index], other)
+                        .map_err(|error| ArticulatedSustainedError::Geometry(error.into()))?;
+                    let midpoint = point_parts(&middle[other.system_index], other)
+                        .map_err(|error| ArticulatedSustainedError::Geometry(error.into()))?;
+                    let other_displacement = difference(end, p.initial_other_parts);
+                    pairs.push(reciprocal::record(
+                        p,
+                        other,
+                        contact_index,
+                        force_world,
+                        &middle,
+                        &after,
+                        displacement,
+                        other_displacement,
+                        controls,
+                    )?);
+                    (
+                        other_displacement,
+                        difference(midpoint, p.initial_other_parts),
+                        velocity_parts(&middle[other.system_index], other)
+                            .map_err(|error| ArticulatedSustainedError::Geometry(error.into()))?,
+                    )
+                }
+                ContactCounterpart::PrescribedPlane { velocity_world, .. } => {
+                    let delta = components(velocity_world)
+                        .map(|v| Dd::from_f64(v) * Dd::from_f64(controls.duration));
+                    let mut plane = SpatialSum::default();
+                    plane.add_force(components(force_world).map(Dd::from_f64), &mid_parts);
+                    reciprocal::add_spatial(
+                        &mut accounts.sources,
+                        plane.scaled(controls.duration),
+                        controls.angular_origin_world,
+                    );
+                    // Plane work is external. The native contact quadrature is the
+                    // work on the retained body, not relative work against the plane.
+                    (
+                        delta,
+                        delta.map(|v| v * Dd::from_f64(0.5)),
+                        [Vec3::default(); 2],
+                    )
+                }
+            };
+        let relative = p
+            .axes
+            .map(|axis| dot_dd(axis, displacement) - dot_dd(axis, other_displacement));
         paths.push([
             (p.initial_gap + relative[0]).to_f64(),
             relative[1].to_f64(),
@@ -773,18 +988,14 @@ fn response(
         slips.push(relative);
         midpoint_gaps.push(
             (p.initial_gap + dot_dd(p.axes[0], midpoint_displacement)
-                - dot(p.axes[0], p.contact.plane_velocity_world)
-                    * Dd::from_f64(0.5 * controls.duration))
+                - dot_dd(p.axes[0], other_midpoint_displacement))
             .to_f64(),
         );
-        let velocity = velocity_parts(&middle[index], p.contact.point)
-            .map_err(|error| ArticulatedSustainedError::Geometry(error.into()))?;
-        for (&force, axis) in force.iter().zip(p.axes) {
-            accounts.contact_quadrature = accounts.contact_quadrature
-                + Dd::from_f64(force)
-                    * (dot(axis, velocity[0]) + dot(axis, velocity[1]))
-                    * Dd::from_f64(controls.duration);
-        }
+        accounts.contact_quadrature = accounts.contact_quadrature
+            + (dot(force_world, velocity[0]) + dot(force_world, velocity[1])
+                - dot(force_world, other_velocity[0])
+                - dot(force_world, other_velocity[1]))
+                * Dd::from_f64(controls.duration);
     }
     Ok(Response {
         states,
@@ -793,6 +1004,7 @@ fn response(
         paths,
         relative_displacement: slips,
         midpoint_gaps,
+        pairs,
         accounts,
     })
 }
@@ -855,18 +1067,21 @@ fn velocity_parts(frame: &Frame, point: LinkContactPoint) -> Result<[Vec3; 2], f
     ])
 }
 fn relative_speed(
-    frame: &Frame,
-    contact: ArticulatedSustainedPlaneContact,
+    frames: &[Frame],
+    contact: ArticulatedSustainedContact,
     axes: [Vec3; 3],
 ) -> Result<[f64; 3], fs_ga::GaError> {
-    let parts = velocity_parts(frame, contact.point)?;
+    let parts = velocity_parts(&frames[contact.point.system_index], contact.point)?;
+    let other = match contact.other {
+        ContactCounterpart::Body(point) => velocity_parts(&frames[point.system_index], point)?,
+        ContactCounterpart::PrescribedPlane { velocity_world, .. } => {
+            [velocity_world, Vec3::default()]
+        }
+    };
     Ok(axes.map(|axis| {
-        (dot(axis, parts[0]) + dot(axis, parts[1]) - dot(axis, contact.plane_velocity_world))
+        (dot(axis, parts[0]) + dot(axis, parts[1]) - dot(axis, other[0]) - dot(axis, other[1]))
             .to_f64()
     }))
-}
-fn point_gap(parts: [Vec3; 3], plane: Vec3, normal: Vec3) -> Dd {
-    dot(normal, parts[0]) - dot(normal, plane) + dot(normal, parts[1]) + dot(normal, parts[2])
 }
 fn difference(last: [Vec3; 3], first: [Vec3; 3]) -> [Dd; 3] {
     core::array::from_fn(|axis| {
@@ -948,7 +1163,7 @@ fn check_contact<E>(
 
 fn admit<E>(
     systems: &[System<'_>],
-    contacts: &[ArticulatedSustainedPlaneContact],
+    contacts: &[ArticulatedSustainedContact],
     forces: &[[f64; 3]],
     time: f64,
     c: ArticulatedSustainedControls,

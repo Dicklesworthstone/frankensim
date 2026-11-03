@@ -1104,13 +1104,13 @@ fn physical_increments(
 /// Signed spatial reductions retain local couples and small opposing impulses
 /// before the final f64 receipt. Origin parts are deliberately never combined.
 #[derive(Clone, Copy, Default)]
-struct SpatialSum {
-    linear: [Dd; 3],
-    angular: [Dd; 3],
+pub(crate) struct SpatialSum {
+    pub(crate) linear: [Dd; 3],
+    pub(crate) angular: [Dd; 3],
 }
 
 impl SpatialSum {
-    fn add_force(&mut self, force: [Dd; 3], position_parts: &[Vec3]) {
+    pub(crate) fn add_force(&mut self, force: [Dd; 3], position_parts: &[Vec3]) {
         add_components(&mut self.linear, force);
         for arm in position_parts {
             add_components(
@@ -1125,7 +1125,7 @@ impl SpatialSum {
         add_components(&mut self.angular, components(couple).map(Dd::from_f64));
     }
 
-    fn scaled(self, duration: f64) -> Self {
+    pub(crate) fn scaled(self, duration: f64) -> Self {
         let dt = Dd::from_f64(duration);
         Self {
             linear: self.linear.map(|value| dt * value),

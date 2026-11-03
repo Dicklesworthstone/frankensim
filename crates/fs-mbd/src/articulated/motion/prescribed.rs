@@ -720,7 +720,7 @@ pub(super) fn advance(
 
 /// Original held external loads and gravity, before any internal additions.
 /// The caller already owns native world and base-relative stage geometry.
-pub(super) fn external_sources(
+pub(crate) fn external_sources(
     model: &ArticulatedModel,
     world_from_base: Se3,
     world: &Kinematics,
