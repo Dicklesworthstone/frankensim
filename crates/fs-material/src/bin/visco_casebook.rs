@@ -25,7 +25,8 @@ use std::time::Instant;
 
 use fs_casebook::fnv1a64;
 use fs_material::visco::{
-    FractionalZener, GeneralizedMaxwell, LoweredModel, fit_fractional_zener, lower_to_prony,
+    FractionalZener, GeneralizedMaxwell, LoweredModel, fit_fractional_zener_components,
+    lower_to_prony_components,
 };
 use fs_math::det;
 
@@ -167,12 +168,11 @@ fn main() {
     // iteration's relative residual norm.
     let init =
         FractionalZener::new(3.0e9, 4.0e10, 0.6, 1.0e-5).unwrap_or_else(|e| refuse("fit", &e));
-    // Residual budget: uniform ±NOISE_REL multiplicative noise on both
-    // channels has RMS ≈ NOISE_REL/√3 ≈ 5.8e-4 (observed converged
-    // residual 4.0e-4); the authored budget leaves ~4x headroom over the
-    // noise floor while still refusing any structurally wrong fit.
-    let fit =
-        fit_fractional_zener(&samples, &init, 200, 2.5e-3).unwrap_or_else(|e| refuse("fit", &e));
+    // Independent samplewise storage and loss budgets include the authored
+    // ±NOISE_REL multiplicative measurement noise. A good elastic fit cannot
+    // compensate for an inaccurate damping spectrum.
+    let fit = fit_fractional_zener_components(&samples, &init, 200, 2.5e-3, 2.5e-3)
+        .unwrap_or_else(|e| refuse("fit", &e));
     for (iter, residual) in fit.residual_history.iter().enumerate() {
         println!(
             "{{\"suite\":\"{SUITE}\",\"case\":\"fit-iteration\",\"iter\":{iter},\"residual_rel\":{residual:.6e}}}"
@@ -198,8 +198,8 @@ fn main() {
     );
 
     // Stage 3: lower to a certified Prony band covering the carriers.
-    let lowered: LoweredModel =
-        lower_to_prony(fitted, 20.0, 2.0e4, 10, 0.02).unwrap_or_else(|e| refuse("lower", &e));
+    let lowered: LoweredModel = lower_to_prony_components(fitted, 20.0, 2.0e4, 10, 0.02, 0.02)
+        .unwrap_or_else(|e| refuse("lower", &e));
     let term_hash = hash_f64s(
         &lowered
             .model
@@ -210,11 +210,14 @@ fn main() {
     );
     println!(
         "{{\"suite\":\"{SUITE}\",\"case\":\"lower\",\"terms\":{},\"band_rad_s\":[{:.6e},{:.6e}],\
-         \"sup_rel_err\":{:.6e},\"verification_points\":{},\"term_hash\":\"{term_hash:016x}\",\"verdict\":\"pass\"}}",
+         \"sup_rel_err\":{:.6e},\"sup_rel_storage_err\":{:.6e},\"sup_rel_loss_err\":{:.6e},\
+         \"verification_points\":{},\"term_hash\":\"{term_hash:016x}\",\"verdict\":\"pass\"}}",
         lowered.model.terms.len(),
         lowered.band.0,
         lowered.band.1,
         lowered.sup_rel_err,
+        lowered.sup_rel_storage_err,
+        lowered.sup_rel_loss_err,
         lowered.verification_points,
     );
 

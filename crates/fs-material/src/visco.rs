@@ -38,14 +38,14 @@ use fs_ad::Real;
 use fs_ad::dual::gradient;
 use fs_math::det;
 
-/// Passive full-tensor Prony (generalized Maxwell) viscoelastic law in Mandel coordinates.
-pub mod tensor;
 /// Zener thermoelastic damping of solid circular sections (exact thermal-mode series).
 pub mod circular_ted;
 /// Bounded two-exponent fractional law, including measured violin-varnish spectra.
 pub mod modified_zener;
 pub mod source;
 pub mod stress_control;
+/// Passive full-tensor Prony (generalized Maxwell) viscoelastic law in Mandel coordinates.
+pub mod tensor;
 pub use modified_zener::ModifiedFractionalZener;
 pub use tensor::{Mandel6, PronyBranch, TensorProny, TensorPronyState};
 
@@ -487,7 +487,11 @@ impl GeneralizedMaxwell {
             dt.is_finite() && dt >= 0.0,
             "Prony step requires a finite non-negative dt"
         );
-        assert_eq!(state.q.len(), self.terms.len(), "Prony state must match its branches");
+        assert_eq!(
+            state.q.len(),
+            self.terms.len(),
+            "Prony state must match its branches"
+        );
         let d_eps = strain_new - state.strain;
         let mut mean_stress = self.e_inf * (state.strain + 0.5 * d_eps);
         let mut stress = self.e_inf * strain_new;
@@ -544,9 +548,7 @@ pub fn prony_rate(q: f64, rate: f64, tau: f64) -> Result<(f64, f64), ViscoError>
     let relaxation = q / tau;
     let derivative = rate - relaxation;
     let heat = q * relaxation;
-    if !derivative.is_finite() || !heat.is_finite() || heat < 0.0
-        || q != 0.0 && heat == 0.0
-    {
+    if !derivative.is_finite() || !heat.is_finite() || heat < 0.0 || q != 0.0 && heat == 0.0 {
         return Err(ViscoError::Parameters {
             what: "Maxwell differential rate or physical power is unrepresentable",
         });
@@ -777,7 +779,9 @@ pub fn sup_rel_modulus_error(
 /// spanning the band with margin, Lawson–Hanson NNLS on storage+loss
 /// samples (E∞ pinned to the fractional model's E0 so the ω→0 limits agree
 /// exactly), then a 512-point verification sweep. Refuses if the measured
-/// supremum error exceeds `tol`.
+/// supremum complex-modulus error exceeds `tol`. For decay-sensitive uses,
+/// [`lower_to_prony_components`] additionally controls the loss modulus itself:
+/// a small complex error can otherwise conceal a large relative damping error.
 ///
 /// # Errors
 /// [`ViscoError::Parameters`] on a bad band or term count;
@@ -800,6 +804,45 @@ pub fn lower_to_prony(
             complex: Some(tol),
             storage: None,
             loss: None,
+        },
+    )
+}
+
+/// Lower a fractional Zener with independent relative storage and loss budgets.
+///
+/// This uses the same positive-Prony fit and relaxation ladder as
+/// [`lower_to_prony`], but both `|E′_fit/E′ - 1| <= storage_rel` and
+/// `|E″_fit/E″ - 1| <= loss_rel` must hold on its 512-point verification grid.
+/// Weak physical damping is therefore judged against its own magnitude, not
+/// the much larger elastic modulus. No extra fitting work is needed: the shared
+/// solver already weights and measures the two components separately.
+///
+/// If `storage_rel < 1`, these component bounds imply a relative loss-factor
+/// error at most `(loss_rel + storage_rel) / (1 - storage_rel)` at those same
+/// samples. They are measured grid bounds, not an enclosure between samples
+/// or a validation of the source material law.
+///
+/// # Errors
+/// [`ViscoError::Parameters`] for invalid band, count or tolerances;
+/// [`ViscoError::FitTolerance`] when either component exceeds its budget.
+pub fn lower_to_prony_components(
+    fz: &FractionalZener,
+    f_lo: f64,
+    f_hi: f64,
+    n_terms: usize,
+    storage_rel: f64,
+    loss_rel: f64,
+) -> Result<LoweredModel, ViscoError> {
+    lower_scalar_to_prony(
+        |omega| Ok(fz.modulus(omega)),
+        fz.e0,
+        (f_lo, f_hi),
+        n_terms,
+        10.0,
+        ScalarLoweringTolerance {
+            complex: None,
+            storage: Some(storage_rel),
+            loss: Some(loss_rel),
         },
     )
 }
@@ -1142,13 +1185,15 @@ fn ls_solve_subset(a: &[f64], b: &[f64], rows: usize, cols: usize, idx: &[usize]
 // Fitting front-end: complex-modulus data → fractional Zener
 // ---------------------------------------------------------------------------
 
-/// Result of [`fit_fractional_zener`]: the admitted model plus the
+/// Result of [`fit_fractional_zener`] or [`fit_fractional_zener_components`]:
+/// the admitted model plus the
 /// per-iteration relative residual norms (the fit's replayable evidence).
 #[derive(Debug, Clone)]
 pub struct ZenerFit {
     /// The fitted, admission-checked model.
     pub model: FractionalZener,
-    /// Per-iteration relative residual norms.
+    /// Per-iteration RMS residual, using the selected complex or component
+    /// normalization. Component budgets are checked sample by sample as well.
     pub residual_history: Vec<f64>,
 }
 
@@ -1186,9 +1231,113 @@ pub fn fit_fractional_zener(
     max_iters: usize,
     tol_rel: f64,
 ) -> Result<ZenerFit, ViscoError> {
-    if !(tol_rel.is_finite() && tol_rel > 0.0) {
+    fit_fractional_zener_with_budget(samples, init, max_iters, ZenerFitBudget::Complex(tol_rel))
+}
+
+/// Fit measured storage and loss with independent relative accuracy budgets.
+///
+/// The same AD-driven Levenberg–Marquardt solver as [`fit_fractional_zener`]
+/// normalizes each residual and Jacobian row by that measured component.
+/// Thus a weak loss signal still controls the fitted relaxation spectrum.
+/// Acceptance requires every sample's storage error to be at most
+/// `storage_rel` and every loss error to be at most `loss_rel`; an accurate
+/// elastic fit alone cannot authorize an inaccurate damping law.
+///
+/// Samples must have strictly positive storage and loss. A zero or censored
+/// loss measurement needs an absolute experimental detection limit, which this
+/// relative-error API does not infer. Budgets must include measurement noise.
+/// These sampled fit checks neither validate a material nor establish accuracy
+/// between samples. Pair this with [`lower_to_prony_components`] when converting
+/// the fitted law to runtime memory branches.
+///
+/// # Errors
+/// [`ViscoError::Parameters`] for invalid samples or tolerances;
+/// [`ViscoError::FitDiverged`] when the iterate exceeds either component budget.
+/// In that case `residual` is the worst error divided by its own budget.
+pub fn fit_fractional_zener_components(
+    samples: &[(f64, f64, f64)],
+    init: &FractionalZener,
+    max_iters: usize,
+    storage_rel: f64,
+    loss_rel: f64,
+) -> Result<ZenerFit, ViscoError> {
+    fit_fractional_zener_with_budget(
+        samples,
+        init,
+        max_iters,
+        ZenerFitBudget::Components {
+            storage_rel,
+            loss_rel,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ZenerFitBudget {
+    Complex(f64),
+    Components { storage_rel: f64, loss_rel: f64 },
+}
+
+impl ZenerFitBudget {
+    fn tolerances(self) -> [f64; 2] {
+        match self {
+            Self::Complex(tol) => [tol, tol],
+            Self::Components {
+                storage_rel,
+                loss_rel,
+            } => [storage_rel, loss_rel],
+        }
+    }
+
+    fn scales(self, storage: f64, loss: f64) -> [f64; 2] {
+        match self {
+            Self::Complex(_) => {
+                let magnitude = det::sqrt(storage * storage + loss * loss);
+                [magnitude, magnitude]
+            }
+            Self::Components { .. } => [storage, loss],
+        }
+    }
+
+    fn violation(self, residuals: &[f64], norm: f64) -> f64 {
+        match self {
+            Self::Complex(tol) => norm / tol,
+            Self::Components {
+                storage_rel,
+                loss_rel,
+            } => residuals
+                .chunks_exact(2)
+                .map(|r| (r[0].abs() / storage_rel).max(r[1].abs() / loss_rel))
+                .fold(0.0_f64, f64::max),
+        }
+    }
+
+    fn accepts(self, residuals: &[f64], norm: f64) -> bool {
+        match self {
+            Self::Complex(tol) => norm <= tol,
+            Self::Components {
+                storage_rel,
+                loss_rel,
+            } => residuals
+                .chunks_exact(2)
+                .all(|r| r[0].abs() <= storage_rel && r[1].abs() <= loss_rel),
+        }
+    }
+}
+
+fn fit_fractional_zener_with_budget(
+    samples: &[(f64, f64, f64)],
+    init: &FractionalZener,
+    max_iters: usize,
+    budget: ZenerFitBudget,
+) -> Result<ZenerFit, ViscoError> {
+    if budget
+        .tolerances()
+        .iter()
+        .any(|t| !(t.is_finite() && *t > 0.0))
+    {
         return Err(ViscoError::Parameters {
-            what: "the residual budget tol_rel must be finite and positive",
+            what: "fit residual budgets must be finite and positive",
         });
     }
     if samples.len() < 4 {
@@ -1200,6 +1349,11 @@ pub fn fit_fractional_zener(
         if !(w.is_finite() && ep.is_finite() && epp.is_finite() && w > 0.0 && ep > 0.0) {
             return Err(ViscoError::Parameters {
                 what: "samples need finite omega > 0, E' > 0, finite E''",
+            });
+        }
+        if matches!(budget, ZenerFitBudget::Components { .. }) && epp <= 0.0 {
+            return Err(ViscoError::Parameters {
+                what: "component-relative fitting requires strictly positive measured loss",
             });
         }
     }
@@ -1218,17 +1372,13 @@ pub fn fit_fractional_zener(
     // Relative residual 2-norm and (residuals, Jacobian) at θ.
     let m = samples.len() * 2;
     let mut jac = Vec::new();
-    let (mut residuals, mut norm) = zener_fit_residuals(samples, &theta, Some(&mut jac), m);
+    let (mut residuals, mut norm) = zener_fit_residuals(samples, &theta, Some(&mut jac), m, budget);
     let mut history = vec![norm];
     let mut lambda = 1e-3f64;
     for _iteration in 0..max_iters {
         if norm < 1e-12 {
-            let (e0, e_inf, alpha, tau) = unpack_zener_fit_parameters(&theta);
-            let model = FractionalZener::new(e0, e_inf, alpha, tau)?;
-            return Ok(ZenerFit {
-                model,
-                residual_history: history,
-            });
+            // Numerical stationarity does not waive a tighter authored budget.
+            break;
         }
         // Normal equations with Marquardt scaling on the diagonal.
         let mut ata = [0.0f64; 16];
@@ -1252,7 +1402,7 @@ pub fn fit_fractional_zener(
             theta[2] + delta[2],
             theta[3] + delta[3],
         ];
-        let (cand_res, cand_norm) = zener_fit_residuals(samples, &candidate, None, m);
+        let (cand_res, cand_norm) = zener_fit_residuals(samples, &candidate, None, m, budget);
         if cand_norm < norm {
             theta = candidate;
             lambda = (lambda * 0.5).max(1e-12);
@@ -1262,7 +1412,8 @@ pub fn fit_fractional_zener(
                     + delta[2] * delta[2]
                     + delta[3] * delta[3],
             );
-            let (_, refreshed_norm) = zener_fit_residuals(samples, &theta, Some(&mut jac), m);
+            let (_, refreshed_norm) =
+                zener_fit_residuals(samples, &theta, Some(&mut jac), m, budget);
             residuals = cand_res;
             norm = refreshed_norm;
             history.push(norm);
@@ -1278,7 +1429,8 @@ pub fn fit_fractional_zener(
             }
         }
     }
-    if norm <= tol_rel {
+    let violation = budget.violation(&residuals, norm);
+    if norm.is_finite() && budget.accepts(&residuals, norm) {
         let (e0, e_inf, alpha, tau) = unpack_zener_fit_parameters(&theta);
         let model = FractionalZener::new(e0, e_inf, alpha, tau)?;
         return Ok(ZenerFit {
@@ -1287,7 +1439,10 @@ pub fn fit_fractional_zener(
         });
     }
     Err(ViscoError::FitDiverged {
-        residual: norm,
+        residual: match budget {
+            ZenerFitBudget::Complex(_) => norm,
+            ZenerFitBudget::Components { .. } => violation,
+        },
         iterations: history.len() - 1,
     })
 }
@@ -1305,6 +1460,7 @@ fn zener_fit_residuals(
     theta: &[f64; 4],
     jac: Option<&mut Vec<f64>>,
     m: usize,
+    budget: ZenerFitBudget,
 ) -> (Vec<f64>, f64) {
     let (e0, e_inf, alpha, tau) = unpack_zener_fit_parameters(theta);
     // Chain rule of the transform: rows are raw params, cols are θ.
@@ -1323,10 +1479,10 @@ fn zener_fit_residuals(
     }
     let mut sq = 0.0f64;
     for &(w, ep_d, epp_d) in samples {
-        let mag = det::sqrt(ep_d * ep_d + epp_d * epp_d);
+        let [storage_scale, loss_scale] = budget.scales(ep_d, epp_d);
         let (ep, epp) = FractionalZener::modulus_parts(e0, e_inf, alpha, tau, w);
-        let r0 = (ep - ep_d) / mag;
-        let r1 = (epp - epp_d) / mag;
+        let r0 = (ep - ep_d) / storage_scale;
+        let r1 = (epp - epp_d) / loss_scale;
         sq += r0 * r0 + r1 * r1;
         r.push(r0);
         r.push(r1);
@@ -1338,13 +1494,13 @@ fn zener_fit_residuals(
                 tau,
             };
             let ((_, gp), (_, gl)) = probe.modulus_gradients(w);
-            for grad in [gp, gl] {
+            for (grad, scale) in [(gp, storage_scale), (gl, loss_scale)] {
                 for c in 0..4 {
                     let mut acc = 0.0;
                     for (raw, chain_row) in chain.iter().enumerate() {
                         acc += grad[raw] * chain_row[c];
                     }
-                    j.push(acc / mag);
+                    j.push(acc / scale);
                 }
             }
         }
@@ -1490,6 +1646,111 @@ impl ThermoelasticZener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_lowering_refuses_weak_loss_hidden_by_complex_error() {
+        // G1: one relaxation arm cannot reproduce this broad weak-loss law,
+        // even though its elastic stiffness is accurate to better than 0.1%.
+        let law = FractionalZener::new(1e9, 1.001e9, 0.3, 1e-3).unwrap();
+        let stiffness_only = lower_to_prony(&law, 20.0, 20_000.0, 1, 0.001).unwrap();
+        assert!(stiffness_only.sup_rel_err < 0.001);
+        assert!(stiffness_only.sup_rel_loss_err > 0.8);
+        assert!(matches!(
+            lower_to_prony_components(&law, 20.0, 20_000.0, 1, 0.001, 0.01),
+            Err(ViscoError::FitTolerance { achieved, required })
+                if achieved > 0.8 && required == 0.01
+        ));
+    }
+
+    #[test]
+    fn component_lowering_keeps_the_original_fit_and_bounds_decay_error() {
+        let law = FractionalZener::new(1e9, 1.001e9, 0.3, 1e-3).unwrap();
+        let original = lower_to_prony(&law, 20.0, 20_000.0, 16, 0.01).unwrap();
+        let fit = lower_to_prony_components(&law, 20.0, 20_000.0, 16, 0.01, 0.02).unwrap();
+        assert_eq!(fit.model.terms, original.model.terms);
+        assert_eq!(fit.sup_rel_err.to_bits(), original.sup_rel_err.to_bits());
+        assert!(fit.sup_rel_storage_err <= 0.01);
+        assert!(fit.sup_rel_loss_err <= 0.02);
+        // G1: independent denser sample locations check the physical loss
+        // factor, whose two component errors combine through E''/E'.
+        for i in 0..1001 {
+            let omega = lowering_grid_frequency(fit.band.0, fit.band.1, i, 1001);
+            let expected = law.loss_factor(omega);
+            let actual = fit.loss_factor_checked(omega).unwrap();
+            assert!((actual / expected - 1.0).abs() <= 0.03 / 0.99);
+        }
+        assert!(fit.modulus_checked(fit.band.1 * 1.001).is_err());
+    }
+
+    fn weak_loss_samples(law: &FractionalZener) -> Vec<(f64, f64, f64)> {
+        (0..48)
+            .map(|i| {
+                let omega = lowering_grid_frequency(5.0, 5e5, i, 48);
+                let (storage, loss) = law.modulus(omega);
+                (omega, storage, loss)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn component_fit_refuses_a_stiffness_accurate_but_wrong_decay() {
+        let law = FractionalZener::new(1e9, 1.001e9, 0.35, 1e-3).unwrap();
+        let wrong_loss = FractionalZener::new(1e9, 1.0001e9, 0.35, 1e-3).unwrap();
+        let samples = weak_loss_samples(&law);
+        assert!(fit_fractional_zener(&samples, &wrong_loss, 0, 0.001).is_ok());
+        assert!(matches!(
+            fit_fractional_zener_components(&samples, &wrong_loss, 0, 0.001, 0.01),
+            Err(ViscoError::FitDiverged { residual, .. }) if residual > 80.0
+        ));
+    }
+
+    #[test]
+    fn component_fit_recovers_weak_decay_independent_of_modulus_units() {
+        // G1/G3: fit the same physical spectrum expressed at three modulus
+        // scales, then verify loss factors at frequencies outside the sample grid.
+        for scale in [1e-6, 1.0, 1e6] {
+            let law = FractionalZener::new(1e9 * scale, 1.001e9 * scale, 0.35, 1e-3).unwrap();
+            let init =
+                FractionalZener::new(1.0001e9 * scale, 1.0006e9 * scale, 0.55, 2e-3).unwrap();
+            let fit =
+                fit_fractional_zener_components(&weak_loss_samples(&law), &init, 200, 1e-7, 1e-7)
+                    .unwrap();
+            for i in 0..101 {
+                let omega = lowering_grid_frequency(6.0, 4e5, i, 101);
+                assert!((fit.model.loss_factor(omega) / law.loss_factor(omega) - 1.0).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn component_accuracy_requires_positive_budgets_and_measured_loss() {
+        let law = FractionalZener::new(1e9, 1.001e9, 0.35, 1e-3).unwrap();
+        let samples = weak_loss_samples(&law);
+        for bad in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+            for (storage, loss) in [(bad, 0.01), (0.01, bad)] {
+                assert!(matches!(
+                    lower_to_prony_components(&law, 20.0, 20_000.0, 8, storage, loss),
+                    Err(ViscoError::Parameters { .. })
+                ));
+                assert!(matches!(
+                    fit_fractional_zener_components(&samples, &law, 10, storage, loss),
+                    Err(ViscoError::Parameters { .. })
+                ));
+            }
+        }
+        for loss in [0.0, -1.0] {
+            let mut invalid = samples.clone();
+            invalid[0].2 = loss;
+            assert!(matches!(
+                fit_fractional_zener_components(&invalid, &law, 10, 0.01, 0.01),
+                Err(ViscoError::Parameters { .. })
+            ));
+        }
+        // Even a tiny residual cannot waive a caller's stricter fit budget.
+        let mut shifted = samples.clone();
+        shifted[0].1 *= 1.0 + 1e-13;
+        assert!(fit_fractional_zener(&shifted, &law, 10, 1e-16).is_err());
+    }
 
     #[test]
     fn maxwell_differential_power_closes_the_original_ramp_law() {
@@ -1876,9 +2137,8 @@ mod tests {
     fn rayleigh_fit_is_covariant_under_frequency_units() {
         let reference = RayleighDamping::from_two_points(100.0, 0.01, 1000.0, 0.02).unwrap();
         for scale in [1.0e-200, 1.0, 1.0e200] {
-            let fit = RayleighDamping::from_two_points(
-                100.0 * scale, 0.01, 1000.0 * scale, 0.02,
-            ).unwrap();
+            let fit = RayleighDamping::from_two_points(100.0 * scale, 0.01, 1000.0 * scale, 0.02)
+                .unwrap();
             assert!((fit.alpha / scale / reference.alpha - 1.0).abs() < 2.0e-14);
             assert!((fit.beta * scale / reference.beta - 1.0).abs() < 2.0e-14);
             assert!((fit.zeta_at(100.0 * scale) - 0.01).abs() < 2.0e-16);
@@ -1894,8 +2154,12 @@ mod tests {
             RayleighDamping::new(0.0, 0.0).unwrap(),
         ] {
             let fit = RayleighDamping::from_two_points(
-                2.0, reference.zeta_at(2.0), 16.0, reference.zeta_at(16.0),
-            ).unwrap();
+                2.0,
+                reference.zeta_at(2.0),
+                16.0,
+                reference.zeta_at(16.0),
+            )
+            .unwrap();
             assert_eq!(fit.alpha, reference.alpha);
             assert_eq!(fit.beta, reference.beta);
         }
@@ -2028,8 +2292,7 @@ mod tests {
             for (initial, increment) in [(0.0, 0.8), (0.3, -0.8), (-0.7, 0.2)] {
                 let (end, mean, heat) = whole.apply(initial, increment);
                 let (middle, first_mean, first_heat) = halves.apply(initial, 0.5 * increment);
-                let (second_end, second_mean, second_heat) =
-                    halves.apply(middle, 0.5 * increment);
+                let (second_end, second_mean, second_heat) = halves.apply(middle, 0.5 * increment);
                 for (actual, expected) in [
                     (end, second_end),
                     (mean, 0.5 * (first_mean + second_mean)),
@@ -2041,7 +2304,10 @@ mod tests {
                     );
                 }
                 assert!(heat >= 0.0 && first_heat >= 0.0 && second_heat >= 0.0);
-                assert_eq!(whole.apply(initial, increment), prony_ramp(initial, increment, rate));
+                assert_eq!(
+                    whole.apply(initial, increment),
+                    prony_ramp(initial, increment, rate)
+                );
             }
         }
     }

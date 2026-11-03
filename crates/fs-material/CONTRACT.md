@@ -3039,6 +3039,19 @@ The fractional value and AD tangents share that arithmetic. These numerical
 improvements do not extend any source applicability band or replace the light-loss
 assumption behind modal `eta/2`.
 
+`fit_fractional_zener_components` fits storage and loss with separate relative
+residuals and AD Jacobian rows. Every measured component must meet its own
+samplewise budget, so weak damping cannot disappear behind elastic stiffness.
+Relative loss fitting requires positive measured loss; a zero or censored value
+needs an experimental detection limit this API does not invent.
+`lower_to_prony_components` applies independent storage/loss gates to the shared
+positive-Prony solver and its 512-point verification grid, retaining the original
+complex-error API and coefficients. At those samples the loss-factor relative
+error is bounded by `(loss_rel + storage_rel)/(1 - storage_rel)` when
+`storage_rel < 1`. The `visco_casebook` consumer uses both component-aware APIs
+and reports both lowering errors before its ring-down. These remain numerical
+sample/grid checks, without an inter-sample or experimental validation claim.
+
 The public `visco::prony_ramp` is the shared allocation-free scalar branch owner:
 initial elastic strain plus total strain increment and `dt/tau` produce endpoint,
 interval mean and independent physical dashpot heat. Consumers retain their
