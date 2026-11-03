@@ -139,8 +139,10 @@ state/phase refusals, the actual-pack Hess cycle, finite sequential inventory,
 zinc-limited copper cementation and source-mass Faraday yield with excess-charge
 refusal.
 
+The [zinc ferrite source set](MINING_ZINC_FERRITE.md) adds pure-phase formation,
+ferrite acid dissolution and the combined goethite-precipitation account.
 These reference endpoints do not supply a roast temperature or sensible heat,
-conversion, zinc-ferrite formation, solid-solution properties, selective leach
-kinetics, solution purification, passivation or plant recovery. Iron-bearing
-calcines and zinc electrolytes need additional phase and impurity models;
-ordinary point thermochemistry cannot infer those process outcomes.
+conversion, solid-solution properties, selective leach kinetics, solution
+purification, passivation or plant recovery. Iron-bearing calcines and zinc
+electrolytes need additional phase and impurity models; ordinary point
+thermochemistry cannot infer those process outcomes.

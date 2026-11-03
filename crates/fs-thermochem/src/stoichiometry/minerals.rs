@@ -92,8 +92,8 @@
 //! the Australian NPI zinc-concentrating/smelting/refining manual, section 2.3:
 //! <https://www.dcceew.gov.au/sites/default/files/documents/fzinc.pdf>.
 //! Sulfate spectators are omitted in the net ionic leach and productive-cell
-//! equations; solution purification, ferrite residues and side reactions are
-//! not supplied. Zinc ferric attack follows Fowler and Crundwell (1999), eq. 1:
+//! equations; solution purification and side reactions remain explicit inputs.
+//! Zinc ferric attack follows Fowler and Crundwell (1999), eq. 1:
 //! <https://doi.org/10.1128/AEM.65.12.5285-5292.1999>. The selected reference
 //! species use USGS B2131 pp10,13,18,20 at 298.15 K and 1 bar. These aggregate
 //! balances and point thermochemistry do not describe roaster operating heat
@@ -102,6 +102,14 @@
 //! dust purification stage in NPI section 2.3.4. It accounts for one dissolved
 //! Zn(II) per copper removed; rates, competing impurities and removal targets
 //! require caller-supplied process models.
+//! Zinc-ferrite endpoints distinguish pure ZnFe2O4 from zincite in calcine:
+//! see the NPI manual section 2.3.3 and USGS B2131 pp16,20,22. Formation is the
+//! declared oxide-combination balance ZnO + Fe2O3 -> ZnFe2O4, not a roasting
+//! mechanism or a ferrite-fraction prediction. Complete acid dissolution
+//! consumes eight protons and releases two ferric ions per zinc. Adding two
+//! existing goethite-hydrolysis extents gives the separate net endpoint with
+//! two protons consumed. That aggregate does not permit a staged calculation
+//! to borrow acid regenerated later, nor select the precipitating iron phase.
 
 use super::{ConservedReaction, ReactionBalanceError};
 use crate::{
@@ -230,6 +238,15 @@ pub enum MineralReaction {
     /// Cu2+(aq) + Zn(s) -> Cu(s) + Zn2+(aq).
     /// Zinc-dust copper cementation; no impurity selectivity or rate is inferred.
     CopperCementationWithZinc,
+    /// ZnO(s) + Fe2O3(s, hematite) -> ZnFe2O4(s, pure franklinite).
+    /// Declared oxide-combination endpoint; no calcine phase fraction is inferred.
+    ZincFerriteFormation,
+    /// ZnFe2O4(s) + 8 H+(aq) -> Zn2+(aq) + 2 Fe3+(aq) + 4 H2O(l).
+    /// Complete dissolution retains the ferric-iron and proton burdens.
+    ZincFerriteAcidLeach,
+    /// ZnFe2O4(s) + 2 H+(aq) -> Zn2+(aq) + 2 FeO(OH)(s, goethite).
+    /// Aggregate of ferrite dissolution and two goethite-hydrolysis extents.
+    ZincFerriteToGoethiteLeach,
 }
 
 // One species: stable phase/charge id, element counts, charge, signed coefficient.
@@ -609,6 +626,36 @@ impl MineralReaction {
                     ("Zn[2+](aq)", &[1, 0, 0], 2, 1),
                     ("Fe[2+](aq)", &[0, 1, 0], 2, 2),
                     ("S(s)", &[0, 0, 1], 0, 1),
+                ],
+            ),
+            Self::ZincFerriteFormation => (
+                "zinc-ferrite-formation",
+                &["Zn", "Fe", "O"],
+                &[
+                    ("ZnO(s)", &[1, 0, 1], 0, -1),
+                    ("Fe2O3(s)", &[0, 2, 3], 0, -1),
+                    ("ZnFe2O4(s)", &[1, 2, 4], 0, 1),
+                ],
+            ),
+            Self::ZincFerriteAcidLeach => (
+                "zinc-ferrite-acid-leach",
+                &["Zn", "Fe", "O", "H"],
+                &[
+                    ("ZnFe2O4(s)", &[1, 2, 4, 0], 0, -1),
+                    ("H+(aq)", &[0, 0, 0, 1], 1, -8),
+                    ("Zn[2+](aq)", &[1, 0, 0, 0], 2, 1),
+                    ("Fe[3+](aq)", &[0, 1, 0, 0], 3, 2),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, 4),
+                ],
+            ),
+            Self::ZincFerriteToGoethiteLeach => (
+                "zinc-ferrite-goethite-leach",
+                &["Zn", "Fe", "O", "H"],
+                &[
+                    ("ZnFe2O4(s)", &[1, 2, 4, 0], 0, -1),
+                    ("H+(aq)", &[0, 0, 0, 1], 1, -2),
+                    ("Zn[2+](aq)", &[1, 0, 0, 0], 2, 1),
+                    ("FeO(OH)(s)", &[0, 1, 2, 1], 0, 2),
                 ],
             ),
             Self::CopperCementationWithZinc => (

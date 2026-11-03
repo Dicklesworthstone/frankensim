@@ -82,6 +82,9 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         ZincElectrowinning,
         FerricSphaleriteLeach,
         CopperCementationWithZinc,
+        ZincFerriteFormation,
+        ZincFerriteAcidLeach,
+        ZincFerriteToGoethiteLeach,
     ] {
         let first = recipe.build().unwrap();
         let second = recipe.build().unwrap();

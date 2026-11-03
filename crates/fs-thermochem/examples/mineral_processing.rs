@@ -14,6 +14,8 @@
 //! metal and sulfur-dioxide references for roasting, acid/ferric leaching and
 //! oxygen-evolving electrowinning. Zinc-dust cementation of dissolved copper
 //! uses the same zinc references and compatible USGS copper references.
+//! Zinc-ferrite modes distinguish free zincite from ferrite-bound zinc and
+//! account for ferric iron, acid consumption and the net goethite endpoint.
 //! Gold cyanidation uses six matched historical NBS/1989-errata references,
 //! including the individual aqueous CN-, Au(CN)2- and OH- ions.
 //! Separate NBS cases resolve molecular HCN dissociation, water dissociation,
@@ -65,7 +67,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 37] = [
+const REACTIONS: [&str; 40] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
@@ -80,6 +82,9 @@ const REACTIONS: [&str; 37] = [
     "zinc-electrowinning",
     "ferric-sphalerite-leach",
     "copper-cementation-with-zinc",
+    "zinc-ferrite-formation",
+    "zinc-ferrite-acid-leach",
+    "zinc-ferrite-goethite-leach",
     "gold-cyanidation",
     "gold-cyanidation-dissolved-oxygen",
     "hydrogen-cyanide-dissociation",
@@ -479,6 +484,60 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-aqueous",
             ],
             equation: "Cu[2+](aq) + Zn(s) -> Cu(s) + Zn[2+](aq), zinc-dust copper cementation endpoint",
+        },
+        "zinc-ferrite-formation" => ReactionCase {
+            reaction: MineralReaction::ZincFerriteFormation,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "zincite-solid-usgs-b2131-thermochemistry",
+                "hematite-solid-usgs-b2131-thermochemistry",
+                "franklinite-solid-usgs-b2131-thermochemistry",
+            ],
+            species: &["ZnO(s)", "Fe2O3(s)", "ZnFe2O4(s)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-solid",
+                "source-phase-solid",
+            ],
+            equation: "ZnO(zincite) + Fe2O3(hematite) -> ZnFe2O4(franklinite), pure zinc-ferrite formation endpoint",
+        },
+        "zinc-ferrite-acid-leach" => ReactionCase {
+            reaction: MineralReaction::ZincFerriteAcidLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "franklinite-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "zinc-ion-aqueous-usgs-b2131",
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+            ],
+            species: &["ZnFe2O4(s)", "H+(aq)", "Zn[2+](aq)", "Fe[3+](aq)", "H2O(l)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+            ],
+            equation: "ZnFe2O4(franklinite) + 8 H+(aq) -> Zn[2+](aq) + 2 Fe[3+](aq) + 4 H2O(l), ferric-iron acid-leach endpoint",
+        },
+        "zinc-ferrite-goethite-leach" => ReactionCase {
+            reaction: MineralReaction::ZincFerriteToGoethiteLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "franklinite-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "zinc-ion-aqueous-usgs-b2131",
+                "goethite-solid-usgs-b2131-thermochemistry",
+            ],
+            species: &["ZnFe2O4(s)", "H+(aq)", "Zn[2+](aq)", "FeO(OH)(s)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-solid",
+            ],
+            equation: "ZnFe2O4(franklinite) + 2 H+(aq) -> Zn[2+](aq) + 2 FeO(OH)(goethite), net leach/precipitation endpoint with no reaction path inferred",
         },
         "pyrite-roasting" => ReactionCase {
             reaction: MineralReaction::PyriteRoastingToHematite,
@@ -983,6 +1042,8 @@ fn reference_point(
         "bornite-solid-usgs-b2131-thermochemistry" => Some("source-phase-bornite"),
         "sphalerite-solid-usgs-b2131-thermochemistry" => Some("source-phase-sphalerite"),
         "zincite-solid-usgs-b2131-thermochemistry" => Some("source-phase-zincite"),
+        "franklinite-solid-usgs-b2131-thermochemistry" => Some("source-phase-franklinite"),
+        "hematite-solid-usgs-b2131-thermochemistry" => Some("source-phase-hematite"),
         "sulfur-orthorhombic-solid-usgs-b2131" => Some("source-phase-sulfur-orthorhombic"),
         _ => None,
     };
