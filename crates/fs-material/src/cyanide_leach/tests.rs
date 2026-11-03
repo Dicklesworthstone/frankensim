@@ -2,6 +2,10 @@
 //! Ka=1e-7 and Kw=1e-14 are manufactured mathematical inputs, not HCN measurements.
 
 use super::*;
+
+#[path = "tests/gas_transfer.rs"]
+mod gas_transfer;
+
 use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

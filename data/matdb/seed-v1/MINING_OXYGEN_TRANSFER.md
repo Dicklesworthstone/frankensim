@@ -95,3 +95,58 @@ finite-headspace mass balance, and exercises solvent-basis scaling, empty/trace
 stocks and source/domain refusals. These checks establish the declared model's
 arithmetic and source linkage; they do not calibrate leach kinetics or forecast
 plant recovery.
+
+## Couple finite oxygen exchange to gold cyanidation
+
+`fs_material::cyanide_leach::gas_transfer::AeratedGoldCyanidation` attaches
+this partition and an independently declared `OxygenTransfer` card to an
+original `GoldCyanidationBatch`. At every numerical stage, the original
+chemical owner recalculates free CN, pH and the gold dissolution rate `r`.
+For cumulative dissolved gold `x`, liquid oxygen `D`, gas oxygen `G` and
+signed transfer `J`, the coupled accounts are
+
+```text
+J = kLa*(D_equilibrium(G)-D)
+dx/dt = r
+dD/dt = J-r/4
+dG/dt = -J
+```
+
+`advance` can disable gas contact while existing liquid oxygen continues to
+support dissolution. `dose_oxygen` meters an explicit amount into the finite
+headspace between advances; it changes neither liquid inventories nor elapsed
+time. This is a fixed-volume headspace with explicit oxygen additions, not
+continuous air flow or an infinite oxygen reservoir. Temperature, liquid
+volume and solvent-activity basis remain fixed. Original source support is
+checked at every evaluated stage. Numerical error estimates remain distinct
+from source/model uncertainty.
+
+The `aerated_gold_leach` example uses seven actual NBS packs. Compile them and run:
+
+```bash
+aerated_pack_dir="$(mktemp -d)"
+for pack in hydrogen-cyanide-aqueous-nbs1989 hydrogen-ion-aqueous-nbs1989 cyanide-ion-aqueous-nbs1989 hydroxide-ion-aqueous-nbs1989 water-liquid-nbs1989-thermochemistry oxygen-gas-nbs1989-thermochemistry oxygen-aqueous-nbs1989-thermochemistry; do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
+    --out "$aerated_pack_dir/$pack.fsmatpk"
+done
+cargo run -p fs-material --example aerated_gold_leach -- \
+  --materials "$aerated_pack_dir"
+```
+
+The authored example uses `k=0.5 m6/(mol2 s)` and `kLa=0.01/s`, with 0.001 mol
+accessible Au, 0.000001 mol initial dissolved O2 and 0.0001 mol headspace O2.
+After 120 s without contact, dissolved Au is approximately 2.924e-6 mol and
+remains below the initial-DO-only ceiling of 4e-6 mol. With finite headspace
+exchange, the corresponding amount is approximately 1.969e-4 mol. Contact
+then stops for 60 s: exchange is zero while reaction continues. A metered
+0.0002 mol headspace dose followed by 240 s of resumed contact produces
+approximately 7.369e-4 mol dissolved Au. These results describe this synthetic
+rate/inventory scenario, not a calibrated ore or plant forecast.
+
+Every stage prints gas/liquid O2, oxygen partial pressure, free CN, pH, Au
+inventories, independently integrated transfer and reaction consumption, and
+Au/CN/oxygen/charge residuals. The final gas plus liquid plus consumed oxygen
+matches the original plus metered 0.000301 mol oxygen account. The example
+does not infer air purity, bubble hydrodynamics, heat feedback, competing
+cyanide complexes or carbon adsorption chemistry.

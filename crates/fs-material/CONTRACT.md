@@ -1,5 +1,48 @@
 # fs-material — CONTRACT
 
+## Finite gas/liquid oxygen supply during cyanidation
+
+`cyanide_leach::gas_transfer::AeratedGoldCyanidation` attaches a finite,
+fixed-volume ideal oxygen headspace to the original admitted cyanidation bath.
+The original charge, source-backed acid/base families, empirical dissolution
+law, reaction progress and absolute clock survive attachment. The original
+reaction-network owner joins the exact O2 species definitions; matching labels
+alone cannot admit a different molecular formula. Thermochemical references
+must share temperature, reference pressure and elemental convention.
+
+`OxygenTransfer` combines the original `IdealGasLiquidPartition` with a distinct
+`local-oxygen-gas-liquid-transfer` source card declaring kLa in inverse seconds.
+At each stage, current gas stock supplies ideal partial pressure and hence
+equilibrium dissolved amount D*. The explicit local law is `J=kLa*(D*-D)`.
+With original gold rate r, the coupled balances are `dx/dt=r`,
+`dD/dt=J-r/4`, `dG/dt=-J`; another coordinate independently integrates signed
+gas-to-liquid transfer. Thus oxygen supply changes while reaction consumes it.
+An explicit contact switch stops exchange without stopping dissolved-oxygen
+consumption. Metered `dose_oxygen` calls add actual O2 to the gas stock between
+advances and retain a separate cumulative input account.
+
+Bounded RK4 full/two-half trials retain the positive two-half solution without
+clipping or correcting balances. Difference/15 is measured in the stated
+Au-equivalent L1 norm `|dx|+4*(|dD|+|dG|+|dTransfer|)`; time-weighted allowances
+control the sum of accepted estimates within each call. Accumulated estimates
+are reported since attachment, separate from earlier closed-batch error. They
+are not certified global bounds or source/speciation uncertainty. Every stage
+and final point must satisfy both original kinetic sources. Transfer-source
+pH, free CN and other known changing chemistry coordinates use the actual
+solution owner; caller-fixed extras cannot replace them. Source, range, work
+or cancellation refusal publishes no partial state, clock or dose account.
+
+Results retain the original models, source conditions, gas/liquid O2, actual
+free CN/pH, Au inventories, signed interval/cumulative transfer, metered doses,
+original equation amounts and independent Au/CN/liquid-O2/gas-O2/total-O2
+residuals. Original-equation OH formation remains distinct from equilibrium OH.
+Fixed temperature, liquid/gas volumes, solvent activity basis and ideal phase
+partition are explicit. The model does not infer continuous air flow, venting,
+gas purity, bubble hydrodynamics, salinity correction, slurry kLa calibration,
+finite solvent H/O closure, energy balance or simultaneous carbon adsorption.
+The actual-source `aerated_gold_leach` example and source compilation are
+documented in `data/matdb/seed-v1/MINING_OXYGEN_TRANSFER.md`.
+
 ## Finite gold cyanidation with coupled aqueous speciation
 
 `cyanide_leach::GoldCyanidationBatch` advances accessible gold dissolution

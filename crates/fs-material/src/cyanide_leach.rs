@@ -43,6 +43,9 @@ use fs_thermochem::{
 };
 use std::{collections::BTreeSet, sync::Arc};
 
+/// Finite gas/liquid oxygen exchange coupled to the original cyanidation owner.
+pub mod gas_transfer;
+
 /// Explicit empirical coefficient in m6/(mol2 s).
 pub type CyanidationRateConstant = Qty<6, 0, -1, 0, 0, -2>;
 /// Accessible gold dissolution rate in mol Au/s.
@@ -718,6 +721,18 @@ fn evaluate(
     x: f64,
     work: &mut Work<'_, impl FnMut() -> bool>,
 ) -> Result<CyanidationState> {
+    evaluate_with_oxygen(layout, elapsed, x, None, work)
+}
+
+// The gas/liquid owner supplies an independently integrated dissolved stock;
+// the closed-batch path retains its original stoichiometric oxygen remainder.
+fn evaluate_with_oxygen(
+    layout: &Layout,
+    elapsed: f64,
+    x: f64,
+    oxygen_stock: Option<f64>,
+    work: &mut Work<'_, impl FnMut() -> bool>,
+) -> Result<CyanidationState> {
     work.tick()?;
     let amounts = layout
         .model
@@ -726,7 +741,10 @@ fn evaluate(
     let c = &layout.charge;
     let gold = remainder(c.accessible_gold.value(), amount(&amounts, AU), x)?;
     let cyanide = remainder(c.uncomplexed_cyanide.value(), amount(&amounts, CN), x)?;
-    let oxygen = remainder(c.dissolved_oxygen.value(), amount(&amounts, OXYGEN), x)?;
+    let oxygen = match oxygen_stock {
+        Some(value) => positive_or_zero(value, "integrated dissolved oxygen loses range")?,
+        None => remainder(c.dissolved_oxygen.value(), amount(&amounts, OXYGEN), x)?,
+    };
     let complex = sum([c.gold_complex.value(), amount(&amounts, COMPLEX)].into_iter())?;
     let mut totals = c.other_families.clone();
     totals.push((layout.model.cyanide_family.clone(), Amount::new(cyanide)));
