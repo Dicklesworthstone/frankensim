@@ -4742,3 +4742,95 @@ mechanism with reduced inertias 6/5 and 10/7, verify both carrier recoils and
 complete momentum/work accounts, solve stiff full K/C plus feedback through
 an independent 2x2 midpoint map, and retain exact diagonal parity for both
 native integrators.
+
+## Automatic sphere encounters across free and prescribed articulated trees
+
+The mixed trajectory spheres owner, through
+advance_mixed_sphere_contacts, locates its own sphere-to-sphere event times
+and material witnesses, then continues the original free or prescribed
+articulated motion. ContactSphere descriptors follow input-system order;
+one SpherePairLaw is required for every unordered stable-ID pair. Complete
+canonical pair coverage is bounded by 21 pairs, with at most 4096 native links,
+64 events and explicit attempted-step/geometry-query budgets.
+
+Each exposed root-attached sphere encloses its original tree. All link origins
+and COMs coincide, and joints are fixed or revolute; full physical inertia
+tensors and movable prescribed roots retain their native response. Second
+moments must fit the declared radius, but do not certify an unknown shape's
+enclosure. Free centres have uniform-gravity acceleration with no other link
+force. Prescribed centres have constant world acceleration, while their support
+frames have constant world angular velocity. Exact rotation samples use the
+original exponential owner; body acceleration remains
+R^T*a_world - omega_body cross v_body. Angular joint motion, body torques and
+relative actuator effort retain the original ABA and RNEA owners.
+
+Every relative centre path is quadratic in real arithmetic. The existing
+fs-contact accelerated-sphere owner finds first entry and every interior
+distance extremum, including an encounter hidden between separated endpoints.
+All actual native endpoint and regenerated root-link material-point gaps must
+also be nonnegative. Up to 64 earlier floating-time neighbours are tried;
+positions, contact arms, inertia and velocities are never projected. All pairs
+within the explicit positive activation resolution enter one simultaneous
+native mixed Coulomb event. Discovery restarts from the actual accepted native
+velocities and support clock.
+
+Generated witnesses pass the same original contact-frame/normal-line admission
+before an event time is accepted. Its unchanged 256-epsilon rounding coefficient
+now retains the actual pose-translation and material-arm magnitudes used in
+each point transform, so cancellation at the world origin cannot collapse the
+arithmetic allowance. Material points and normals remain untouched; meaningful
+off-line separation still refuses. The direct geometry target
+tests/articulated_contact_geometry.rs covers this scene-frame covariance.
+
+The result retains native event responses, full support reactions, signed
+boundary/actuator work, unallocated impact loss and complete reusable states.
+Actual stage/event energy and spatial-momentum changes and independent source
+impulses are reduced in DD before window balances; large rounded endpoint totals
+remain diagnostics. Smooth integration defects remain separate from physical
+work and impact loss. Cancellation or a late path, law, model, limit or budget
+refusal publishes no partial window.
+
+This is floating analytic coverage of the declared spheres, not a validated
+trajectory tube or interval CCD certificate. General offset links, protruding
+geometry, arbitrary support commands, sustained contact, Zeno continuation and
+impact-to-heat allocation require their own physical owners. Incompatible
+prescribed/prescribed approach and unresolved near-rest inward contact refuse.
+The focused native target is tests/articulated_mixed_spheres.rs.
+
+## Loaded sustained contact with mixed articulated boundaries
+
+step::mixed::step_mixed_articulated_frictional_contacts composes the original
+held-load impulse, one simultaneous native mixed Coulomb event, and unloaded
+native free/prescribed drift. It reuses the mixed trajectory state/system
+carriers, a common physical clock and explicit midpoint/endpoint prescribed
+support samples. A driven support supplies its real reaction impulse and signed
+work during the load kick, contact event and unloaded drift; no artificial
+support mass or independent link inertia replaces the original coupled model.
+
+The mandatory geometry callback receives the actual post-contact states,
+native endpoints and supplied support paths. It must admit the complete path,
+omitted-feature coverage and continued applicability of the frozen contact
+witnesses. The midpoint and endpoint samples alone do not establish that claim.
+Strict original endpoint gaps, joint limits, cancellation and absolute native
+work/momentum gates precede publication. All borrowed states remain unchanged
+on failure, and callback-owned history must be staged until success.
+
+Complete native load/contact/drift receipts accompany the accepted state.
+DD actual stage increments and source reductions retain body/gravity/actuator
+kick work, load-support work, drift-support work and independent impulse
+balances. Joint and gravity displacement work and their splitting differences
+remain separate; prescribed drift kinetic change minus support work is the
+numerical drift defect. Contact loss may include removal of a free load kick
+and therefore is not automatically continuum friction heat.
+
+Gravity displacement work retains base translation, original relative-FK link
+origins and rotated local COM arms as separate DD differences. A distant world
+origin therefore cannot erase represented local motion and mislabel its real
+work as an additional splitting defect.
+
+The first-order force/contact/drift composition is bounded by 128 systems,
+4096 links and 21 contacts. It does not claim a complete Moreau--Jean method,
+automatic collision discovery, continuous rotating-body-wrench work, a
+continuous angular gravity integral along an arbitrary driven path, or a
+thermal partition. The focused native target is
+tests/articulated_mixed_contact_step.rs.

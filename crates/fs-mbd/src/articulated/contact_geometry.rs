@@ -207,11 +207,23 @@ fn prepare_normal_geometry(
     };
     let separation = world_point - other_point;
     let gap = finite(normal.dot(separation))?;
-    if second.is_some() {
+    if let Some(second) = second {
         let tangent = separation - normal.scale(gap);
+        let first_pose = kinematics[point.system_index].borrow().world_from_link[point.link_index];
+        let second_pose = kinematics[second.point.system_index]
+            .borrow()
+            .world_from_link[second.point.link_index];
+        // R*arm + translation may nearly cancel at a valid contact near the
+        // world origin. Its arithmetic error belongs to those ORIGINAL inputs,
+        // not only to the small reconstructed world points. Keep the same
+        // roundoff coefficient and physical witnesses; no arm is projected.
         let scale = magnitude(world_point)
             .max(magnitude(other_point))
-            .max(magnitude(separation));
+            .max(magnitude(separation))
+            .max(magnitude(first_pose.translation()))
+            .max(magnitude(second_pose.translation()))
+            .max(magnitude(point.point_body))
+            .max(magnitude(second.point.point_body));
         if magnitude(tangent) > 256.0 * f64::EPSILON * scale {
             return Err(ContactGeometryError::NonCollinearContact { index });
         }

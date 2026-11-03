@@ -5,6 +5,9 @@
 //! configuration. Support paths, collision times and contact geometry belong
 //! to the caller; no artificial support inertia or path interpolation is used.
 
+/// Automatic encounters of spherical free and prescribed articulated carriers.
+pub mod spheres;
+
 use super::{
     ArticulatedTrajectoryConfig, ArticulatedTrajectoryError, ArticulatedTrajectoryEvent,
     ArticulatedTrajectoryMomentum, Impulses, event_schedule, finite_vector, poll, smooth_error,
