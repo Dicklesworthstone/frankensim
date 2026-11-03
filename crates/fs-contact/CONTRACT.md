@@ -23,9 +23,14 @@ basis. Normal impulses are solved together with friction, not supplied as
 independent estimates.
 
 Equal principal coefficients retain identity coordinates, including the
-frictionless pair. Unequal coefficients must both be positive; a singly zero
-principal coefficient returns an explicit unsupported-degeneracy error.
-Unrepresentable transforms and unproved determinacy refuse. The original
+frictionless pair. Principal coefficients may be nonnegative: a single zero
+admits exact free slip on that principal tangent axis with bounded Coulomb
+traction on the other. The original disk solver uses a decoupled auxiliary
+coordinate whose exact impulse vanishes; no physical compliance or epsilon
+friction is introduced. The original full active mobility passes its existing
+symmetry, positive-semidefinite and numerical-rank admission before the
+singular coordinate map. Unrepresentable transforms and unproved determinacy
+refuse. The original
 contraction witness uses the exact two-dimensional spectral norm for tangent
 blocks, preserving roundoff inflation and the strict contraction margin.
 
@@ -37,12 +42,16 @@ cancellation and solver budgets retain the native owner's limits. This is an
 instantaneous rigid impulse model: it introduces no duration, compliance,
 contact pressure, thermal partition or finite-slip history.
 
-Twenty-one original and directional integration tests pass, covering analytical
-normal/tangential coupling, constructed multi-contact roots, rotated frames,
-circular/frictionless reduction, redundant/nonunique response, permutation,
-cancellation and refusal. The coordinate transformation adds bounded quadratic
-assembly to the existing dense contact solve; no performance benchmark or
-experimental friction calibration is claimed.
+The original tests cover analytical normal/tangential coupling, constructed
+multi-contact roots, rotated frames, circular/frictionless reduction,
+redundant/nonunique response, permutation, cancellation and refusal. Additional
+free-slip regressions cover resisting-axis sticking during free-axis sliding,
+shared contacts with different principal axes, and invalid physical mobility
+that a singular map could otherwise conceal. Physical endpoint velocities use
+the original complete mobility, retaining free-axis response to normal and
+other-contact impulses. The coordinate transformation adds bounded quadratic
+assembly; singly-zero coefficients also require original-mobility admission.
+No performance benchmark or experimental friction calibration is claimed.
 
 ## Source-pinned directional impact coefficients
 

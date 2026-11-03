@@ -616,8 +616,9 @@ This retains the original first-order held-force splitting and its timestep
 refinement requirement. The caller supplies the normal law, held friction role,
 original collision/path authority and any objective texture transport.
 Instantaneous loss does not define finite slip history, pressure, wear or heat
-allocation. Positive ellipses remain subject to native determinacy admission;
-singly zero principal coefficients retain explicit refusal.
+allocation. Nonnegative principal coefficients include exact free slip along
+one principal tangent axis. Every response remains subject to native physical
+mobility and determinacy admission.
 
 ## Directional friction through original articulated contact
 
@@ -642,7 +643,11 @@ histories together. Source failure, cancellation, numerical refusal and late
 physical audit failure return no partial candidate. This remains a fixed-pose
 instantaneous impact law: no collision discovery, time advancement, pressure
 from impulse or thermal allocation is inferred. The caller owns normal response
-and source-frame transport. Singly zero ellipses and unproved determinacy refuse.
+and source-frame transport. One-axis free slip uses the same native map and
+complete original momentum/work checks; unproved determinacy still refuses.
+Focused rigid roller-chain and off-centre articulated regressions check free-axis
+momentum, shared normal/traction recoil, resisting-axis stick, permutation and
+physical angular/work balances.
 
 ## Directional friction through sphere impact events
 

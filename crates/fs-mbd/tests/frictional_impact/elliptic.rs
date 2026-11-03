@@ -197,6 +197,60 @@ fn chain() -> (
 }
 
 #[test]
+fn g1_three_body_roller_chain_transfers_traction_without_free_axis_impulse() {
+    let (mut initial, properties, contacts) = chain();
+    let free_momenta = [-0.3, 1.7, -2.5];
+    for i in 0..3 {
+        let p = initial[i].linear_momentum_world();
+        initial[i] = RigidBodyState::new(
+            initial[i].pose(),
+            Vec3::new(p.x, p.y, free_momenta[i]),
+            Vec3::ZERO,
+        )
+        .unwrap();
+    }
+    let directional = contacts.map(|c| with_friction(c, ellipse([0.15, 0.0], [1.0, 0.0])));
+    let mut states = initial;
+    let result = apply_rigid_elliptic_impacts(
+        &mut states,
+        &properties,
+        &directional,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    // Complete shared-body normal block [[2,-1],[-1,2]]. The resting second
+    // interface receives a real impulse through the middle body's recoil.
+    close(result.contact.impulses[0][0], 4.0 / 3.0);
+    close(result.contact.impulses[1][0], 2.0 / 3.0);
+    close(result.contact.impulses[0][1], -0.2);
+    close(result.contact.impulses[1][1], 0.0);
+    for i in 0..3 {
+        close(states[i].linear_momentum_world().x, 2.0 / 3.0);
+        assert_eq!(states[i].linear_momentum_world().z, free_momenta[i]);
+        assert_eq!(states[i].pose(), initial[i].pose());
+    }
+    close(states[0].linear_momentum_world().y, 0.8);
+    close(states[1].linear_momentum_world().y, 0.2);
+    for impulse in &result.contact.impulses {
+        assert_eq!(impulse[2], 0.0);
+    }
+    close_vector(result.linear_momentum_residual_ns, Vec3::ZERO);
+    close_vector(result.angular_momentum_residual_nms, Vec3::ZERO);
+    close(result.total_energy_residual_j, 0.0);
+    let mut reordered = initial;
+    apply_rigid_elliptic_impacts(
+        &mut reordered,
+        &properties,
+        &[directional[1], directional[0]],
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    assert_eq!(states, reordered);
+}
+
+#[test]
 fn g1_three_body_ellipse_chain_is_simultaneous_and_circular_limit_is_exact() {
     let (initial, properties, contacts) = chain();
     let directional = contacts.map(|c| with_friction(c, ellipse([0.15, 0.4], [1.0, 0.0])));

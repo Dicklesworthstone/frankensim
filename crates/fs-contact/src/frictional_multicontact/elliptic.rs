@@ -7,10 +7,14 @@
 //! is introduced. Original-coordinate law, kinematics and work are admitted
 //! independently before returning a candidate.
 //!
-//! The native determinacy proof is retained explicitly in transformed
-//! coordinates. An invertible B preserves uniqueness of impulses or velocities,
-//! but its contraction weights and PSD witness vectors are not physical-basis
-//! quantities. No timestep, contact pressure or impact-heat allocation is inferred.
+//! A single zero coefficient gives exact free slip along that principal axis.
+//! Its zero impulse-map column uses a decoupled auxiliary coordinate in the
+//! disk solve; the Coulomb law forces that auxiliary impulse to zero. No small
+//! physical traction or compliance is introduced. Original physical mobility is
+//! admitted separately before a singular map can hide any invalid direction.
+//! Native determinacy evidence remains explicitly in transformed coordinates;
+//! its weights and PSD witness vectors are not physical-basis quantities.
+//! No timestep, contact pressure or impact-heat allocation is inferred.
 
 use super::*;
 use fs_math::det;
@@ -57,6 +61,10 @@ pub struct EllipticContactCoordinates {
     pub tangent_impulse_map: [[f64; 2]; 2],
     /// Original scalar disk radius is this coefficient times normal impulse.
     pub scalar_friction_coefficient: f64,
+    /// Decoupled auxiliary mobility [kg^-1] in each principal tangent coordinate.
+    /// Nonzero only at a zero impulse-map column for one-axis free slip. Its
+    /// exact impulse is zero; it contributes no physical inertia or traction.
+    pub auxiliary_tangent_mobility: [f64; 2],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -94,9 +102,8 @@ pub struct EllipticFrictionalContactResult {
 pub enum EllipticFrictionalContactError {
     Configuration(FrictionalContactError),
     Invalid(&'static str),
-    UnsupportedDegenerateEllipse {
-        index: usize,
-    },
+    /// The ORIGINAL physical mobility failed admission before a singular map.
+    OriginalMobility(FrictionalContactError),
     /// Candidate impulses or determinacy diagnostics inside error use q/v';
     /// the supplied coordinates identify their physical interpretation.
     Transformed {
@@ -125,12 +132,10 @@ struct Prepared {
     ratios: [f64; 2],
     inverse_velocity: [[f64; 2]; 2],
     minimum_scale: f64,
+    free_axis: Option<usize>,
 }
 impl Prepared {
-    fn new(
-        friction: EllipticFriction,
-        index: usize,
-    ) -> Result<Self, EllipticFrictionalContactError> {
+    fn new(friction: EllipticFriction) -> Result<Self, EllipticFrictionalContactError> {
         use EllipticFrictionalContactError as E;
         let mu = friction.coefficients_mu;
         let axis = friction.principal_axis;
@@ -140,9 +145,6 @@ impl Prepared {
             return Err(E::Invalid(
                 "finite nonnegative coefficients and texture required",
             ));
-        }
-        if (mu[0] == 0.0) != (mu[1] == 0.0) {
-            return Err(E::UnsupportedDegenerateEllipse { index });
         }
         let scale = axis[0].abs().max(axis[1].abs());
         if scale == 0.0 {
@@ -158,29 +160,40 @@ impl Prepared {
                 coordinates: EllipticContactCoordinates {
                     tangent_impulse_map: identity,
                     scalar_friction_coefficient: reference,
+                    auxiliary_tangent_mobility: [0.0; 2],
                 },
                 axis,
                 ratios: [1.0; 2],
                 inverse_velocity: identity,
                 minimum_scale: 1.0,
+                free_axis: None,
             });
         }
         let ratios = mu.map(|v| v / reference);
-        if ratios.into_iter().any(|v| !v.is_finite() || v <= 0.0) {
+        if ratios
+            .into_iter()
+            .enumerate()
+            .any(|(i, v)| !v.is_finite() || (mu[i] > 0.0 && v <= 0.0))
+        {
             return Err(E::Invalid(
                 "representable positive directional ratios required",
             ));
         }
+        let free_axis = mu.iter().position(|&v| v == 0.0);
         let [c, s] = axis;
         let map = [
             [c * ratios[0], -s * ratios[1]],
             [s * ratios[0], c * ratios[1]],
         ];
         let length2 = c * c + s * s;
-        let inverse = [
-            [c / (ratios[0] * length2), -s / (ratios[1] * length2)],
-            [s / (ratios[0] * length2), c / (ratios[1] * length2)],
-        ];
+        let inverse = if free_axis.is_some() {
+            identity
+        } else {
+            [
+                [c / (ratios[0] * length2), -s / (ratios[1] * length2)],
+                [s / (ratios[0] * length2), c / (ratios[1] * length2)],
+            ]
+        };
         if inverse.iter().flatten().any(|v| !v.is_finite()) {
             return Err(E::Invalid(
                 "representable inverse directional coordinates required",
@@ -190,11 +203,13 @@ impl Prepared {
             coordinates: EllipticContactCoordinates {
                 tangent_impulse_map: map,
                 scalar_friction_coefficient: reference,
+                auxiliary_tangent_mobility: [0.0; 2],
             },
             axis,
             ratios,
             inverse_velocity: inverse,
-            minimum_scale: ratios[0].min(ratios[1]),
+            minimum_scale: ratios.into_iter().filter(|&v| v > 0.0).fold(1.0, f64::min),
+            free_axis,
         })
     }
     fn block(self) -> [[f64; 3]; 3] {
@@ -225,9 +240,11 @@ impl Prepared {
 
 /// Reuse the original coupled contact solve on one complete work-preserving map.
 ///
-/// Positive principal coefficients and the exact both-zero frictionless limit
-/// are admitted. Singly-zero ellipses refuse explicitly; no epsilon traction is
-/// introduced. Equal coefficients use the original scalar coordinates exactly.
+/// Nonnegative principal coefficients include exact one-axis free slip and the
+/// both-zero frictionless limit. No epsilon traction is introduced. Equal
+/// coefficients use the original scalar coordinates exactly. A collapsed
+/// ellipse uses one decoupled auxiliary disk coordinate whose law forces its
+/// impulse to zero; original mobility admission and physical audits still apply.
 /// The complete row-major 3N-by-3N mobility is transformed without dropping
 /// normal/shear or cross-contact blocks. Original work/evaluation/contact
 /// budgets remain bounded; coordinate transforms poll at each contact row.
@@ -266,9 +283,9 @@ pub fn solve_elliptic_frictional_contacts(
     let mut prepared = Vec::with_capacity(n);
     let mut native_contacts = Vec::with_capacity(n);
     let mut minimum_scale = 1.0_f64;
-    for (i, c) in contacts.iter().enumerate() {
+    for c in contacts {
         poll(&mut cancelled)?;
-        let p = Prepared::new(c.friction, i)?;
+        let p = Prepared::new(c.friction)?;
         minimum_scale = minimum_scale.min(p.minimum_scale);
         native_contacts.push(FrictionalContact {
             id: c.id,
@@ -280,7 +297,7 @@ pub fn solve_elliptic_frictional_contacts(
         });
         prepared.push(p);
     }
-    let coordinates: Vec<_> = prepared.iter().map(|p| p.coordinates).collect();
+    let mut coordinates: Vec<_> = prepared.iter().map(|p| p.coordinates).collect();
     let mut transformed_config = config;
     transformed_config.velocity_tolerance *= minimum_scale;
     if !transformed_config.velocity_tolerance.is_finite()
@@ -291,7 +308,7 @@ pub fn solve_elliptic_frictional_contacts(
         ));
     }
     let identity = [[1.0, 0.0], [0.0, 1.0]];
-    let matrix = if coordinates
+    let mut matrix = if coordinates
         .iter()
         .all(|c| c.tangent_impulse_map == identity)
     {
@@ -299,6 +316,29 @@ pub fn solve_elliptic_frictional_contacts(
     } else {
         congruence(delassus, &prepared, &order, &mut cancelled)?
     };
+    if prepared.iter().any(|p| p.free_axis.is_some()) {
+        admit_original_mobility(contacts, delassus, &order, config, &mut cancelled)?;
+        for (i, p) in prepared.iter().enumerate() {
+            poll(&mut cancelled)?;
+            if let Some(axis) = p.free_axis {
+                if contacts[i].gap > contacts[i].activation_tolerance {
+                    continue;
+                }
+                let auxiliary = 3 * i + 1 + axis;
+                let physical = 3 * i + 2 - axis;
+                let scale = matrix[physical * d + physical];
+                if !scale.is_finite() || scale <= 0.0 {
+                    return Err(E::Invalid("resolved resisting-axis mobility required"));
+                }
+                // The zero column of B makes this entire row/column zero.
+                // Set only its auxiliary diagonal. v_aux=scale*q_aux with
+                // zero incoming speed forces q_aux=0: in stick v_aux=0; in
+                // slide q_aux=-mu*pn*v_aux/|v_t| has the opposite sign.
+                matrix[auxiliary * d + auxiliary] = scale;
+                coordinates[i].auxiliary_tangent_mobility[axis] = scale;
+            }
+        }
+    }
     let transformed = match solve_frictional_contacts(
         &native_contacts,
         &matrix,
@@ -338,13 +378,21 @@ pub fn solve_elliptic_frictional_contacts(
     for &i in &order {
         poll(&mut cancelled)?;
         let qv = transformed.relative_velocities_after[i];
-        let inv = prepared[i].inverse_velocity;
-        let predicted = [
-            qv[0],
-            inv[0][0] * qv[1] + inv[0][1] * qv[2],
-            inv[1][0] * qv[1] + inv[1][1] * qv[2],
-        ];
-        let diff = [0, 1, 2].map(|a| velocities[i][a] - predicted[a]);
+        let diff = if prepared[i].free_axis.is_some() {
+            // Free-slip speed is obtained from the ORIGINAL complete W*p,
+            // including normal/traction coupling. Only the physical image
+            // has a transformed counterpart; the auxiliary speed must vanish.
+            let physical = prepared[i].velocity(velocities[i]);
+            [0, 1, 2].map(|a| physical[a] - qv[a])
+        } else {
+            let inv = prepared[i].inverse_velocity;
+            let predicted = [
+                qv[0],
+                inv[0][0] * qv[1] + inv[0][1] * qv[2],
+                inv[1][0] * qv[1] + inv[1][1] * qv[2],
+            ];
+            [0, 1, 2].map(|a| velocities[i][a] - predicted[a])
+        };
         residuals.maximum_velocity_residual_m_s =
             residuals.maximum_velocity_residual_m_s.max(norm3(diff)?);
     }
@@ -403,6 +451,56 @@ pub fn solve_elliptic_frictional_contacts(
         coordinates,
         transformed_config,
     })
+}
+
+// A singular B must not hide an indefinite or asymmetric physical mobility.
+// Reuse exactly the original owner's active-row SPD/PSD admission. In the PSD
+// case, delta_q^T B^T W B delta_q=0 then implies W B delta_q=0, so a native
+// unique-velocity witness still determines the original mechanical response.
+fn admit_original_mobility(
+    contacts: &[EllipticFrictionalContact],
+    original: &[f64],
+    order: &[usize],
+    config: FrictionalContactConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), EllipticFrictionalContactError> {
+    use EllipticFrictionalContactError as E;
+    let active: Vec<_> = order
+        .iter()
+        .copied()
+        .filter(|&i| contacts[i].gap <= contacts[i].activation_tolerance)
+        .collect();
+    let d = 3 * active.len();
+    let full = 3 * contacts.len();
+    let mut matrix = Vec::with_capacity(d * d);
+    for &i in &active {
+        poll(cancelled)?;
+        for a in 0..3 {
+            for &j in &active {
+                for b in 0..3 {
+                    matrix.push(original[(3 * i + a) * full + 3 * j + b]);
+                }
+            }
+        }
+    }
+    match solve_spd_orthant(&matrix, &vec![0.0; d], config.matrix, &mut *cancelled) {
+        Ok(_) => Ok(()),
+        Err(SpdOrthantError::Cancelled) => Err(E::Cancelled),
+        Err(
+            error @ (SpdOrthantError::NotPositiveDefinite { .. }
+            | SpdOrthantError::Degenerate { .. }),
+        ) => match super::range::admit(&matrix, d, config.matrix, cancelled) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(E::OriginalMobility(
+                FrictionalContactError::MobilityNotAdmitted(error),
+            )),
+            Err(FrictionalContactError::Cancelled) => Err(E::Cancelled),
+            Err(error) => Err(E::OriginalMobility(error)),
+        },
+        Err(error) => Err(E::OriginalMobility(
+            FrictionalContactError::MobilityNotAdmitted(error),
+        )),
+    }
 }
 
 fn congruence(
@@ -475,8 +573,12 @@ fn physical_law(
     let (violation, support_work, expected) = if reference == 0.0 {
         (norm2(p)?, 0.0, [0.0; 2])
     } else {
-        let gauge = norm2([p[0] / mu[0], p[1] / mu[1]])?;
-        let violation = checked(reference * (gauge - pn).max(0.0))?;
+        let (gauge, forbidden) = if let Some(axis) = prepared.free_axis {
+            ((p[1 - axis] / mu[1 - axis]).abs(), p[axis].abs())
+        } else {
+            (norm2([p[0] / mu[0], p[1] / mu[1]])?, 0.0)
+        };
+        let violation = checked(reference * (gauge - pn).max(0.0))?.max(forbidden);
         let support_work = checked((reference * pn) * weighted_speed)?;
         let expected_material = if weighted_speed == 0.0 {
             [0.0; 2]
@@ -499,7 +601,14 @@ fn physical_law(
     let duality =
         checked((support_work + impulse[1] * velocity[1] + impulse[2] * velocity[2]).abs())?;
     r.tangential_duality_gap = r.tangential_duality_gap.max(duality);
-    if speed > config.velocity_tolerance {
+    // Sliding along a zero-friction axis does not preclude sticking traction
+    // on the resisting axis. Only that axis selects its saturated branch.
+    let resisted_speed = if prepared.free_axis.is_some() {
+        weighted_speed
+    } else {
+        speed
+    };
+    if resisted_speed > config.velocity_tolerance {
         r.sliding_impulse_residual = r
             .sliding_impulse_residual
             .max(norm2([impulse[1] - expected[0], impulse[2] - expected[1]])?);

@@ -65,8 +65,8 @@ impl<E: core::fmt::Debug> std::error::Error for ArticulatedEllipticSourceError<E
 /// Resolve one supplied simultaneous directional-friction event.
 ///
 /// The coefficient pair and principal axis use the contact's normalized tangent
-/// frame. The original contact owner admits positive principal coefficients or
-/// the fully frictionless pair; a singly zero coefficient is unsupported.
+/// frame. The original contact owner admits nonnegative coefficients, including
+/// exact free slip along one principal axis and traction along the other.
 /// Determinacy evidence remains explicitly in transformed coordinates. Native
 /// unique-velocity admission does not make individual pressures or source-work
 /// shares unique. The original contact owner separately admits total work;

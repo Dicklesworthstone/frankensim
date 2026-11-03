@@ -259,7 +259,7 @@ fn directional_coefficient_and_degenerate_law_refusals_keep_original_native_stat
                 }
             ))
         ));
-        let singular = solid.sustained_elliptic_sphere_trajectory_candidate(
+        let invalid = solid.sustained_elliptic_sphere_trajectory_candidate(
             &surface,
             &scene,
             &[initial],
@@ -273,19 +273,19 @@ fn directional_coefficient_and_degenerate_law_refusals_keep_original_native_stat
             sustained_controls(STEP),
             |_, _, _| {
                 Ok::<_, core::convert::Infallible>(EllipticFriction {
-                    coefficients_mu: [0.0, 0.8],
+                    coefficients_mu: [-0.1, 0.8],
                     principal_axis: [1.0, 0.0],
                 })
             },
             cx,
         );
         assert!(matches!(
-            singular,
+            invalid,
             Err(FiniteSolidSustainedTrajectoryError::Impact(
                 FiniteSolidSustainedEllipticFailure::Contact(
-                    FiniteSolidRigidContactError::Contact(
-                        EllipticFrictionalContactError::UnsupportedDegenerateEllipse { .. }
-                    )
+                    FiniteSolidRigidContactError::Contact(EllipticFrictionalContactError::Invalid(
+                        _
+                    ))
                 )
             ))
         ));

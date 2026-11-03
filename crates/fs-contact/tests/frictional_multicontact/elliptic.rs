@@ -88,6 +88,117 @@ fn directional_sliding_retains_normal_tangent_feedback_and_physical_work() {
 }
 
 #[test]
+fn one_axis_free_slip_preserves_normal_feedback_and_resisting_axis_stick() {
+    let w = [2.0, 0.2, 0.3, 0.2, 1.4, 0.1, 0.3, 0.1, 1.8];
+    for resisting_speed in [4.0, 0.1] {
+        let c = directional(1, [-2.0, 3.0, resisting_speed], [0.0, 0.5], 0.0);
+        let out = solve_ellipse(&[c], &w);
+        // Independent simultaneous normal/traction solve. The large free-axis
+        // speed must neither rotate the traction nor prevent active-axis stick.
+        let (pn, pt) = if resisting_speed == 4.0 {
+            let pn = 2.0 / (2.0 - 0.3 * 0.5);
+            (pn, -0.5 * pn)
+        } else {
+            let determinant = 2.0 * 1.8 - 0.3 * 0.3;
+            (
+                (3.6 + 0.3 * resisting_speed) / determinant,
+                (-2.0 * resisting_speed - 0.6) / determinant,
+            )
+        };
+        close(out.impulses[0][0], pn);
+        assert_eq!(out.impulses[0][1], 0.0);
+        close(out.impulses[0][2], pt);
+        close(out.relative_velocities_after[0][0], 0.0);
+        close(
+            out.relative_velocities_after[0][1],
+            3.0 + 0.2 * pn + 0.1 * pt,
+        );
+        close(
+            out.relative_velocities_after[0][2],
+            resisting_speed + 0.3 * pn + 1.8 * pt,
+        );
+        assert!(out.relative_velocities_after[0][1] > 3.0);
+        if resisting_speed == 0.1 {
+            close(out.relative_velocities_after[0][2], 0.0);
+            assert!(pt.abs() < 0.5 * pn);
+        }
+        let expected_work =
+            -pn + 0.5 * pt * (resisting_speed + out.relative_velocities_after[0][2]);
+        close(out.relative_work, expected_work);
+        close(out.dissipated_energy, -expected_work);
+    }
+}
+
+#[test]
+fn differently_oriented_free_slip_contacts_keep_the_shared_physical_mobility() {
+    let (mut contacts, w, _) = coupled_ellipses();
+    contacts[0].friction.coefficients_mu = [0.25, 0.0];
+    contacts[1].friction.coefficients_mu = [0.0, 0.3];
+    let endpoint = [[0.0, 2.0, 0.7], [0.0, -0.4, 1.0]];
+    let expected = [
+        sliding_impulse(contacts[0].friction, 1.0, endpoint[0]),
+        sliding_impulse(contacts[1].friction, 0.8, endpoint[1]),
+    ];
+    for i in 0..6 {
+        contacts[i / 3].relative_velocity[i % 3] = endpoint[i / 3][i % 3]
+            - (0..6)
+                .map(|j| w[6 * i + j] * expected[j / 3][j % 3])
+                .sum::<f64>();
+    }
+    let out = solve_ellipse(&contacts, &w);
+    for i in 0..2 {
+        for a in 0..3 {
+            close(out.impulses[i][a], expected[i][a]);
+            close(out.relative_velocities_after[i][a], endpoint[i][a]);
+        }
+    }
+    let mut permuted = vec![0.0; 36];
+    for i in 0..6 {
+        for j in 0..6 {
+            permuted[6 * i + j] = w[6 * ((i + 3) % 6) + (j + 3) % 6];
+        }
+    }
+    let swapped = solve_ellipse(&[contacts[1], contacts[0]], &permuted);
+    assert_eq!(out.impulses[0], swapped.impulses[1]);
+    assert_eq!(out.impulses[1], swapped.impulses[0]);
+    assert_eq!(out.relative_work.to_bits(), swapped.relative_work.to_bits());
+}
+
+#[test]
+fn free_slip_cannot_hide_invalid_or_ambiguous_original_mobility() {
+    let c = directional(1, [-1.0, 2.0, 3.0], [0.0, 0.2], 0.0);
+    for w in [
+        // Negative inertia, asymmetry and unresolved rank all disappear from
+        // B^T W B if the zero physical column is trusted without admission.
+        [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0],
+        [1.0, 0.5, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        [1.0, 1.0 - 1e-13, 0.0, 1.0 - 1e-13, 1.0, 0.0, 0.0, 0.0, 1.0],
+    ] {
+        assert!(matches!(
+            solve_elliptic_frictional_contacts(&[c], &w, Default::default(), || false),
+            Err(EllipticFrictionalContactError::OriginalMobility(_))
+        ));
+    }
+    let w = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let mut count = 0;
+    solve_elliptic_frictional_contacts(&[c], &w, Default::default(), || {
+        count += 1;
+        false
+    })
+    .unwrap();
+    for stop in [count / 2, count] {
+        let mut seen = 0;
+        assert!(matches!(
+            solve_elliptic_frictional_contacts(&[c], &w, Default::default(), || {
+                seen += 1;
+                seen == stop
+            }),
+            Err(EllipticFrictionalContactError::Cancelled)
+        ));
+    }
+}
+
+#[test]
 fn independent_coupled_ellipse_root_is_permutation_invariant() {
     let (contacts, w, expected) = coupled_ellipses();
     let out = solve_ellipse(&contacts, &w);
@@ -220,16 +331,11 @@ fn independent_tangent_frame_rotations_preserve_the_physical_solution() {
 }
 
 #[test]
-fn singular_axes_budgets_and_cancellation_refuse_without_changing_inputs() {
+fn invalid_axes_budgets_and_cancellation_refuse_without_changing_inputs() {
     let (contacts, w, _) = coupled_ellipses();
     let before = contacts.clone();
     let matrix_before = w.clone();
     let mut invalid = contacts.clone();
-    invalid[0].friction.coefficients_mu[1] = 0.0;
-    assert!(matches!(
-        solve_elliptic_frictional_contacts(&invalid, &w, Default::default(), || false),
-        Err(EllipticFrictionalContactError::UnsupportedDegenerateEllipse { index: 0 })
-    ));
     invalid[0].friction.coefficients_mu[1] = -0.1;
     assert!(matches!(
         solve_elliptic_frictional_contacts(&invalid, &w, Default::default(), || false),

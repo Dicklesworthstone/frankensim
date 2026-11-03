@@ -76,6 +76,49 @@ fn physical_audit(result: &ArticulatedEllipticContactResult) {
     assert!(result.contact.residuals.sliding_impulse_residual < 1e-9);
 }
 
+#[test]
+fn free_slip_articulated_contact_retains_inertial_recoil_and_active_axis_stick() {
+    let model = body(2.0, 2.0);
+    for tangent_speed in [3.0, 0.1] {
+        let state = system(
+            &model,
+            Vec3::default(),
+            Vec3::new(tangent_speed, -1.0, 2.0),
+            Vec3::default(),
+        );
+        let c = directional(contact(Vec3::new(1.0, -1.0, 0.0), 0.0), [0.3, 0.0]);
+        let result = ell_solve(&[state], &[c]);
+        // W_nn=W_tt=1 and W_nt=1/2. For small incoming tangent speed,
+        // normal recoil still drives sliding; choose a matching negative
+        // incident speed below in the dedicated sticking case.
+        let pn = 20.0 / 17.0;
+        let pt = -0.3 * pn;
+        close(result.contact.impulses[0][0], pn);
+        close(result.contact.impulses[0][1], pt);
+        assert_eq!(result.contact.impulses[0][2], 0.0);
+        assert_eq!(result.responses[0].base_after.twist_body.linear.z, 2.0);
+        close_vector(
+            result.responses[0].base_after.twist_body.angular,
+            Vec3::new(0.0, 0.0, (pn + pt) / 2.0),
+        );
+        physical_audit(&result);
+    }
+    let state = system(
+        &model,
+        Vec3::default(),
+        Vec3::new(-0.4, -1.0, 2.0),
+        Vec3::default(),
+    );
+    let c = directional(contact(Vec3::new(1.0, -1.0, 0.0), 0.0), [0.3, 0.0]);
+    let result = ell_solve(&[state], &[c]);
+    close(result.contact.impulses[0][0], 0.8 / 0.75);
+    close(result.contact.impulses[0][1], -0.1 / 0.75);
+    close(result.relative_velocities_after[0][1], 0.0);
+    close(result.relative_velocities_after[0][2], -2.0);
+    assert_eq!(result.responses[0].base_after.twist_body.linear.z, 2.0);
+    physical_audit(&result);
+}
+
 /// The analytical normal impulse depends on the simultaneous tangential
 /// impulse: pn + pt/2 = 1 and pt = -0.3 pn, hence pn=20/17.
 #[test]
@@ -438,7 +481,7 @@ fn source_candidates_keep_physical_points_mapping_and_atomic_late_refusal() {
     ));
     assert_eq!(histories, [History(7), History(11)]);
     let invalid = EllipticFriction {
-        coefficients_mu: [0.0, 0.4],
+        coefficients_mu: [-0.1, 0.4],
         ..law
     };
     assert!(matches!(
@@ -451,9 +494,9 @@ fn source_candidates_keep_physical_points_mapping_and_atomic_late_refusal() {
             || false,
         ),
         Err(ArticulatedEllipticSourceError::Mechanics(
-            ArticulatedContactError::EllipticFrictionLaw(
-                EllipticFrictionalContactError::UnsupportedDegenerateEllipse { .. }
-            )
+            ArticulatedContactError::EllipticFrictionLaw(EllipticFrictionalContactError::Invalid(
+                _
+            ))
         ))
     ));
     let mut calls = 0;

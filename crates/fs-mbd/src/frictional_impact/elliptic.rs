@@ -57,7 +57,8 @@ impl ImpactResponse for EllipticFrictionalContactResult {
 ///
 /// Principal coefficients and axes are admitted by the original contact core.
 /// Both zero coefficients use its frictionless lane; a single zero principal
-/// coefficient is an unsupported singular ellipse and refuses. Dissipated
+/// coefficient gives exact free slip along that axis and bounded traction on
+/// the other, through the same simultaneous solve. Dissipated
 /// impact energy remains total mechanical loss, without an inferred thermal
 /// partition, contact pressure or event duration.
 pub fn apply_rigid_elliptic_impacts(
