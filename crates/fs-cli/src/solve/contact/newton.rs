@@ -1,7 +1,9 @@
 //! The native steady path uses the original complete bulk/contact Newton owner.
 
 use fs_conduction::interface::temperature::TemperatureContacts;
-use fs_conduction::interface::temperature::steady::newton::SteadyContactNewtonConfig;
+use fs_conduction::interface::temperature::steady::newton::{
+    ContactSteadyNewtonSolution, SteadyContactNewtonConfig,
+};
 use fs_conduction::{
     ConductionProblem, ConductionReport, ConductionSolution, LinearSolveEvidence, Nonlinearity,
     ResidualClaim, SolveConfig, StopReason,
@@ -24,7 +26,7 @@ pub(super) fn supported(prepared: &Prepared, config: &SolveConfig) -> bool {
         && prepared.supports_coupled_newton()
 }
 
-fn controls(
+pub(super) fn controls(
     config: &SolveConfig,
     tolerance: f64,
     max_pairs: usize,
@@ -129,6 +131,21 @@ pub(super) fn solve(
             controls(config, tolerance, max_pairs, initial.len())?,
         )
         .map_err(lower)?;
+    finish(cx, problem, accepted, tolerance, work, SCOPE, "")
+}
+
+/// Format a counted numerical response after its original physical owner has
+/// accepted the unchanged field. A composition may supply a stronger endpoint
+/// audit and separately declared work without inventing Newton history.
+pub(super) fn finish(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    accepted: ContactSteadyNewtonSolution,
+    tolerance: f64,
+    work: &mut Work,
+    scope: &str,
+    composition: &str,
+) -> Result<(SolidSolution, String), SolveRefusal> {
     let krylov = accepted
         .newton
         .history
@@ -197,7 +214,7 @@ pub(super) fn solve(
             "\"total_thermal_responses\":{},\"total_nonlinear_iterations\":{},\"total_krylov_iterations\":{},",
             "\"residual_evaluations\":{},\"jacobian_assemblies\":{},",
             "\"residual_norm_w\":{},\"residual_tolerance_w\":{},\"energy_closure_w\":{},",
-            "\"energy_tolerance_w\":{},\"newton_history\":[{}],\"face_states\":[{}],\"scope\":{}}}"
+            "\"energy_tolerance_w\":{},\"newton_history\":[{}],\"face_states\":[{}],\"scope\":{}{}}}"
         ),
         accepted.newton.iterations,
         krylov,
@@ -212,7 +229,8 @@ pub(super) fn solve(
         number(tolerance)?,
         history.join(","),
         states.join(","),
-        json_string(SCOPE)
+        json_string(scope),
+        composition,
     );
     let conduction = ConductionSolution {
         temperature: accepted.temperature,

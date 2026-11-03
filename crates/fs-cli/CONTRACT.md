@@ -685,7 +685,7 @@ refer to that unchanged field, while `temperature_contact` retains the outer
 thermal/Krylov work, both local temperatures, actual resistance and usage
 receipt identities. Equal curve endpoints cannot hide interior variation.
 Explicit claim pins disambiguate sources without bypassing validity checks.
-Radiation, adaptive-goal refinement and derivative/bound
+Steady enclosure radiation, adaptive-goal refinement and derivative/bound
 requests on this varying-contact path refuse with
 `cli-solve-conduction-contact-composition`; no frozen-contact inverse or
 roundoff certificate is published. Constant-contact projects retain their
@@ -745,6 +745,19 @@ known boundary-pulse energy, equivalent capacity/enthalpy storage, unequal initi
 temperatures, latent storage and explicit unsupported history derivatives.
 Pressure, reference geometry and the selected contact claim stay fixed; phase
 fraction does not independently alter the contact law.
+
+Solve driver 100 composes steady source-curve contact with declared area-mean
+ambient radiation. Every original radiation response calls the complete
+bulk/contact Newton owner, and the unchanged endpoint is independently checked
+against newly queried contact resistance and its physical radiative boundary.
+Purely radiating bodies can use explicit zero-flux nonradiative boundaries;
+initialization does not invent a convection bath to establish an anchor.
+Natural-convection and transported-air callbacks reuse this same response;
+only original convective heat enters the transported-air balance. The receipt
+counts all nested thermal, nonlinear and Krylov work and distinguishes the
+last applied-secant Newton history from the full physical endpoint audit.
+The radiative composition retains the scalar/continuous-source Newton
+admission; unsupported surface tangents refuse rather than freezing the law.
 
 The library surface exposes `run_solve`, `resume_solve`, `SolveRunId`,
 `SolveStage`, `SolveDriverState`, `SolveOutcome`, and `SolveRefusal`. The

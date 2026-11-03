@@ -1,11 +1,12 @@
 //! Native steady projects consume the existing source-backed contact owner.
 
 mod newton;
+mod radiation;
 
 use fs_conduction::interface::temperature::steady::SteadyContactConfig;
 use fs_conduction::interface::temperature::{TemperatureContact, TemperatureContacts};
 use fs_conduction::{
-    ConductionMesh, ConductionProblem, ConductionSolver, DofMap, SolveConfig, ThermalBoundary,
+    ConductionMesh, ConductionProblem, ConductionSolver, SolveConfig, ThermalBoundary,
 };
 use fs_exec::Cx;
 use fs_matdb::{ClaimId, InterpolationPolicy, PropertyValue, QueryPoint};
@@ -15,7 +16,7 @@ use super::{SolveRefusal, conduction_error, json_string, parse_claim_id};
 use crate::cards::CardPackSet;
 
 const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. The returned field passes freshly queried physical watt residual and heat-balance gates. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Radiation, adaptive-goal refinement, adjoints and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. Declared area-mean ambient radiation uses the original radiation iteration around complete contact Newton responses; convection alone heats transported air. The returned field passes freshly queried physical watt residual and heat-balance gates. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Steady enclosure/pointwise radiation, adaptive-goal refinement, adjoints and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
 
 struct Source {
     name: String,
@@ -340,17 +341,22 @@ pub(super) fn admit(
     let transient = setup.transient.as_ref();
     let unsupported_transient = transient.is_some_and(|_| {
         setup.boundaries.iter().any(|row| {
-                matches!(
-                    row.condition,
-                    fs_project::ThermalBoundaryCondition::NaturalConvection { .. }
-                        | fs_project::ThermalBoundaryCondition::AirflowConvection { .. }
-                )
-            })
+            matches!(
+                row.condition,
+                fs_project::ThermalBoundaryCondition::NaturalConvection { .. }
+                    | fs_project::ThermalBoundaryCondition::AirflowConvection { .. }
+            )
+        })
             || spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint"))
     });
+    // Steady ambient radiation reuses the complete contact Newton response.
+    // Other radiative storage compositions require their own coupled owner.
+    let unsupported_radiation = setup.radiation.as_ref().is_some_and(|declaration| {
+        let pointwise = declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise);
+        transient.is_some() || pointwise
+    }) || setup.enclosure_radiation.is_some();
     if unsupported_transient
-        || setup.radiation.is_some()
-        || setup.enclosure_radiation.is_some()
+        || unsupported_radiation
         || adjoint
         || mean_bound
         || spec
@@ -360,8 +366,8 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection, or capacity/total-enthalpy transient solves with prescribed or scheduled boundaries; this requested composition needs the complete contact feedback",
-            "use the admitted steady path or a capacity/total-enthalpy transient with prescribed temperature, flux or convection and no radiation or derivative/bound outputs; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient radiation, or capacity/total-enthalpy transient solves with prescribed or scheduled boundaries; this requested composition needs additional complete contact feedback",
+            "use an admitted storage and boundary composition without derivative/bound outputs; this contact path admits only steady area-mean ambient radiation; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())
@@ -450,14 +456,13 @@ impl Prepared {
         resolution: &fs_project::ConductionInterfaceResolution,
         mut config: SolveConfig,
         max_pairs: usize,
+        radiation: Option<&super::radiation::LoweredRadiation>,
         work: &mut Work,
     ) -> Result<(super::radiation::SolidSolution, String), SolveRefusal> {
         let contacts = self.bind(cx, problem.mesh, problem.boundary, resolution, max_pairs)?;
         // Use the spatial owner's actual initial-field and material-span policy.
         // This prepares state only; it executes no uncounted thermal response.
-        let initial = ConductionSolver::new(problem, config.clone()).map_err(lower)?;
-        let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count()).map_err(lower)?;
-        let initial = dofs.scatter(&initial.state().free_temperature);
+        let initial = ConductionSolver::initial_temperature(problem, &config).map_err(lower)?;
         let mut power_scale = 0.0;
         for (element, tet) in problem.mesh.complex().tets.iter().enumerate() {
             if element % 256 == 0 {
@@ -473,6 +478,12 @@ impl Prepared {
             (config.stop.residual_rtol * power_scale.max(1.0)).max(config.stop.residual_atol);
         if !tolerance.is_finite() || tolerance <= 0.0 {
             return Err(bad("contact watt allowance is not positive and finite"));
+        }
+        if let Some(radiation) = radiation {
+            return radiation::solve(
+                cx, self, problem, &contacts, &initial, &config,
+                tolerance, max_pairs, radiation, work,
+            );
         }
         if newton::supported(self, &config) {
             return newton::solve(

@@ -274,7 +274,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// transient Newton owner, including constant bulk and source-knot starts.
 /// Version 99 advances source-backed temperature-dependent contact through
 /// native total-enthalpy trajectories, retaining physical storage and source queries.
-pub const SOLVE_DRIVER_VERSION: u32 = 99;
+/// Version 100 composes steady source-contact Newton responses with
+/// area-mean ambient radiation, preserving fresh endpoint gates and convection-
+/// only air exchange without an artificial convection bath.
+pub const SOLVE_DRIVER_VERSION: u32 = 100;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6921,7 +6924,8 @@ fn conduction_solve_receipt(
             };
             if let Some(contacts) = &temperature_contact {
                 let (solid, receipt) = contacts.solve(&cx, problem, &interface_resolution,
-                    config, limits.max_selected_faces, &mut temperature_contact_work.borrow_mut())?;
+                    config, limits.max_selected_faces, radiation.as_ref(),
+                    &mut temperature_contact_work.borrow_mut())?;
                 check_deadline()?;
                 *temperature_contact_fragment.borrow_mut() = Some(receipt);
                 return Ok(solid);

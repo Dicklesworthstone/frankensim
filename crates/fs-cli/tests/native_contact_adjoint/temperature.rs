@@ -3,6 +3,8 @@ use super::*;
 
 #[path = "temperature/transient.rs"]
 mod transient;
+#[path = "temperature/radiation.rs"]
+mod radiation;
 
 fn temperature_pack() -> (Vec<u8>, String, String) {
     temperature_pack_from_knots(vec![(200.0, 0.2), (450.0, 0.45)])
@@ -362,7 +364,7 @@ fn temperature_contact_is_rebound_on_each_native_uniform_rung() {
 }
 
 #[test]
-fn temperature_contact_never_substitutes_frozen_derivatives_or_radiation() {
+fn temperature_contact_never_substitutes_frozen_derivatives_or_adaptive_goals() {
     let f = Fixture::new(false, false);
     let (source, contact, ledger) = prepare(&f, 20, Some(OUTPUT));
     let result = run(&f, &source, &contact, &ledger);
@@ -371,7 +373,8 @@ fn temperature_contact_never_substitutes_frozen_derivatives_or_radiation() {
         format!("{}{}", result.stdout, result.stderr)
             .contains("cli-solve-conduction-contact-composition")
     );
-    let f = Fixture::new(false, true);
+    let mut f = Fixture::new(false, true);
+    f.project.solver.as_mut().unwrap().fidelity = "adaptive".into();
     let (source, contact, ledger) = prepare(&f, 21, None);
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let result = fs_cli::run(vec![
