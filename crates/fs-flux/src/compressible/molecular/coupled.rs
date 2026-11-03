@@ -39,7 +39,9 @@ pub struct MolecularStepReport {
     pub after: Totals,
     /// Combined inward molecular and advective boundary transfer.
     pub boundary_change: Totals,
-    /// `after - before - boundary_change` for all conservative components.
+    /// Applied body impulse/work over the same complete physical interval.
+    pub source_change: ForceChange2d,
+    /// `after - before - boundary_change - source_change`.
     pub conservation_residual: Totals,
 }
 
@@ -110,6 +112,45 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         &mut self,
         maximum_duration: Time,
         controls: MolecularStepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport, MolecularError> {
+        self.step_impl(maximum_duration, controls, None, cancelled)
+    }
+
+    /// Drive the original viscous/thermal flow with acceleration or volumetric
+    /// force. Molecular halves surround the same conservative forced Euler
+    /// interval; a shortened or refused central step restarts the whole split
+    /// from the accepted state. Source work and wall transfer remain distinct.
+    /// Allocate reusable scratch through `flow().forcing_workspace(maximum_bytes)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        force: BodyForce2d<'_>,
+        force_controls: ForceControl2d,
+        workspace: &mut ForcingWorkspace2d,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport, MolecularError> {
+        force_controls.admit::<Error>()?;
+        let active = force.admit::<Error>(self.accepted.states.len(), &mut cancelled)?;
+        workspace.admit(self.accepted.states.len())?;
+        if !active {
+            return self.step(maximum_duration, controls, cancelled);
+        }
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            cancelled,
+        )
+    }
+
+    fn step_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        mut forcing: Option<(BodyForce2d<'_>, ForceControl2d, &mut ForcingWorkspace2d)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport, MolecularError> {
         poll(&mut cancelled)?;
@@ -132,6 +173,9 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         let mut rate: f64 = 0.0;
         for q in &self.accepted.states {
             let p = q.primitive(&self.accepted.gas, &mut cancelled)?;
+            if let Some((_, force_controls, _)) = &forcing {
+                force_controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+            }
             rate = rate.max(
                 (p.velocity[0].abs() + p.sound_speed) / self.accepted.grid.spacing[0]
                     + (p.velocity[1].abs() + p.sound_speed) / self.accepted.grid.spacing[1],
@@ -159,9 +203,17 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
                 )?;
                 self.boundary_trial
                     .copy_from_slice(&self.molecular.boundary_impulses);
-                let advection =
-                    self.trial
-                        .step(Time::new(dt), controls.advection, &mut cancelled)?;
+                let advection = match forcing.as_mut() {
+                    Some((force, force_controls, workspace)) => self.trial.step_impl(
+                        Time::new(dt),
+                        controls.advection,
+                        Some((*force, *force_controls, &mut **workspace)),
+                        &mut cancelled,
+                    )?,
+                    None => self
+                        .trial
+                        .step(Time::new(dt), controls.advection, &mut cancelled)?,
+                };
                 if advection.elapsed.value() != dt {
                     shortened = Some(advection.elapsed.value());
                     return Err(MolecularError::Invalid(
@@ -188,6 +240,21 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
                 {
                     *total = add_totals(*total, *impulse);
                 }
+                if let Some((_, force_controls, _)) = &forcing {
+                    let mut endpoint_rate = 0.0_f64;
+                    for state in &self.trial.states {
+                        let p = state.primitive(&self.trial.gas, &mut cancelled)?;
+                        force_controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+                        let local: f64 = (0..2)
+                            .map(|axis| {
+                                (p.velocity[axis].abs() + p.sound_speed)
+                                    / self.trial.grid.spacing[axis]
+                            })
+                            .sum();
+                        endpoint_rate = endpoint_rate.max(local);
+                    }
+                    cartesian::check_cfl::<Error>(endpoint_rate * dt, controls.advection.cfl)?;
+                }
                 let after = checked_totals(
                     &self.trial.states,
                     self.accepted.grid.cell_volume(),
@@ -198,7 +265,14 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
                     &mut cancelled,
                 )?;
                 let boundary_change = Totals::from_array(outward.map(|v| -v));
-                let conservation_residual = balance(before, after, boundary_change)?;
+                let source_change = advection.source_change;
+                let source_totals = Totals {
+                    mass: 0.0,
+                    momentum: source_change.impulse,
+                    energy: source_change.work,
+                };
+                let conservation_residual =
+                    balance(before, after, add_totals(boundary_change, source_totals))?;
                 poll(&mut cancelled)?;
                 Ok(MolecularStepReport {
                     elapsed: Time::new(dt),
@@ -209,6 +283,7 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
                     before,
                     after,
                     boundary_change,
+                    source_change,
                     conservation_residual,
                 })
             })();

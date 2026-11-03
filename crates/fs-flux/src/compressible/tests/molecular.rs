@@ -363,3 +363,171 @@ fn g0_zero_transport_recovers_original_euler_and_work_refusal_is_atomic() {
         );
     }
 }
+
+fn forcing_workspace(flow: &Euler2d) -> ForcingWorkspace2d {
+    flow.forcing_workspace(flow.required_forcing_workspace_bytes().unwrap())
+        .unwrap()
+}
+
+#[test]
+fn g2_g4_forced_molecular_work_wall_loads_and_late_cancellation_share_one_state() {
+    let make = || {
+        let mut flow = coupled();
+        flow.step(Time::new(0.001), MolecularStepControl::default(), || false)
+            .unwrap();
+        flow
+    };
+    let duration = Time::new(0.001);
+    let controls = MolecularStepControl::default();
+    let force = BodyForce2d::UniformAcceleration([-3.0, 1.0]);
+    let cap = ForceControl2d { maximum_mach: 2.0 };
+    let mut probe = make();
+    let mut scratch = forcing_workspace(probe.flow());
+    let mut calls = 0;
+    let report = probe
+        .step_with_forcing(duration, controls, force, cap, &mut scratch, || {
+            calls += 1;
+            false
+        })
+        .unwrap();
+    assert_eq!(report.advection.elapsed, report.elapsed);
+    assert_eq!(report.first.elapsed.value(), 0.5 * report.elapsed.value());
+    assert_eq!(report.second.elapsed, report.first.elapsed);
+    assert_eq!(report.source_change, report.advection.source_change);
+    assert!(report.source_change.work < 0.0);
+    assert_eq!(report.boundary_change.energy, 0.0);
+    close(
+        report.after.energy - report.before.energy,
+        report.source_change.work,
+        2e-12,
+    );
+    for (axis, acceleration) in [-3.0, 1.0].into_iter().enumerate() {
+        close(
+            report.source_change.impulse[axis],
+            acceleration * report.elapsed.value() * report.before.mass,
+            2e-13,
+        );
+    }
+    for residual in report.conservation_residual.array() {
+        close(residual, 0.0, 2e-12);
+    }
+    let mut flow = make();
+    let old = flow.flow().states().to_vec();
+    let old_time = flow.flow().time();
+    let old_report = *flow.last_step().unwrap();
+    let old_advection = *flow.flow().last_step().unwrap();
+    let loads: Vec<_> = SIDES
+        .into_iter()
+        .map(|side| flow.boundary_impulses(side).to_vec())
+        .collect();
+    let euler_loads: Vec<_> = SIDES
+        .into_iter()
+        .map(|side| flow.flow().boundary_impulses(side).to_vec())
+        .collect();
+    let mut scratch = forcing_workspace(flow.flow());
+    let mut polls = 0;
+    assert_eq!(
+        flow.step_with_forcing(duration, controls, force, cap, &mut scratch, || {
+            polls += 1;
+            polls == calls
+        }),
+        Err(MolecularError::Cancelled)
+    );
+    assert_eq!(flow.flow().states(), old);
+    assert_eq!(flow.flow().time(), old_time);
+    assert_eq!(flow.last_step(), Some(&old_report));
+    assert_eq!(flow.flow().last_step(), Some(&old_advection));
+    for (i, side) in SIDES.into_iter().enumerate() {
+        assert_eq!(flow.boundary_impulses(side), loads[i]);
+        assert_eq!(flow.flow().boundary_impulses(side), euler_loads[i]);
+    }
+    let retried = flow
+        .step_with_forcing(duration, controls, force, cap, &mut scratch, || false)
+        .unwrap();
+    assert_eq!(retried, report);
+    assert_eq!(flow.flow().states(), probe.flow().states());
+}
+
+#[test]
+fn g1_forced_molecular_retry_restarts_the_whole_common_interval() {
+    let controls = MolecularStepControl::default();
+    let force = BodyForce2d::UniformAcceleration([2000.0, -1000.0]);
+    let cap = ForceControl2d { maximum_mach: 0.8 };
+    let mut flow = coupled();
+    let mut scratch = forcing_workspace(flow.flow());
+    let report = flow
+        .step_with_forcing(Time::new(1.0), controls, force, cap, &mut scratch, || false)
+        .unwrap();
+    assert!(report.coupling_retries > 0);
+    assert_eq!(report.advection.elapsed, report.elapsed);
+    assert_eq!(report.first.elapsed.value(), 0.5 * report.elapsed.value());
+    assert_eq!(report.second.elapsed, report.first.elapsed);
+    assert_eq!(flow.flow().time(), report.elapsed);
+    for state in flow.flow().states() {
+        let p = state.primitive(flow.flow().gas(), || false).unwrap();
+        assert!(p.velocity[0].hypot(p.velocity[1]) / p.sound_speed <= 0.80000000000001);
+    }
+    for residual in report.conservation_residual.array() {
+        close(residual, 0.0, 2e-12);
+    }
+    // Replaying only the final duration from the original state must recover
+    // every accepted field and load: rejected halves cannot leak into the split.
+    let mut replay = coupled();
+    let mut scratch = forcing_workspace(replay.flow());
+    let expected = replay
+        .step_with_forcing(report.elapsed, controls, force, cap, &mut scratch, || false)
+        .unwrap();
+    assert_eq!(expected.coupling_retries, 0);
+    assert_eq!(expected.advection, report.advection);
+    assert_eq!(expected.first, report.first);
+    assert_eq!(expected.second, report.second);
+    assert_eq!(expected.source_change, report.source_change);
+    assert_eq!(replay.flow().states(), flow.flow().states());
+    for side in SIDES {
+        assert_eq!(replay.boundary_impulses(side), flow.boundary_impulses(side));
+    }
+}
+
+#[test]
+fn g0_forced_molecular_zero_source_and_zero_transport_recover_native_owners() {
+    let controls = MolecularStepControl::default();
+    let cap = ForceControl2d { maximum_mach: 2.0 };
+    let duration = Time::new(0.001);
+    let mut native = coupled();
+    let mut zero = coupled();
+    let mut scratch = forcing_workspace(zero.flow());
+    let expected = native.step(duration, controls, || false).unwrap();
+    let report = zero
+        .step_with_forcing(
+            duration,
+            controls,
+            BodyForce2d::UniformAcceleration([0.0; 2]),
+            cap,
+            &mut scratch,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(report, expected);
+    assert_eq!(zero.flow().states(), native.flow().states());
+    for side in SIDES {
+        assert_eq!(zero.boundary_impulses(side), native.boundary_impulses(side));
+    }
+    let init = |x: [f64; 2]| [1.0 + 0.1 * x[0], 0.1 * x[0], -0.1 * x[1], 2.0];
+    let mut euler = planar(4, init);
+    let original = planar(4, init);
+    let coefficients = law(&original, 0.0, 0.0, 0.0);
+    let mut molecular = MolecularEuler2d::new(original, coefficients, || false).unwrap();
+    let force = BodyForce2d::UniformForceDensity([0.8, -0.3]);
+    let mut ew = forcing_workspace(&euler);
+    let mut mw = forcing_workspace(molecular.flow());
+    let expected = euler
+        .step_with_forcing(duration, controls.advection, force, cap, &mut ew, || false)
+        .unwrap();
+    let report = molecular
+        .step_with_forcing(duration, controls, force, cap, &mut mw, || false)
+        .unwrap();
+    assert_eq!(report.advection, expected);
+    assert_eq!(report.source_change, expected.source_change);
+    assert_eq!(molecular.flow().states(), euler.states());
+    assert_eq!(molecular.flow().time(), euler.time());
+}

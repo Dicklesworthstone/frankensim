@@ -1337,10 +1337,20 @@ with checked required bytes and actual capacity admission. Source loops and
 retries allocate no additional arrays. Focused regressions cover unequal
 density acceleration versus volumetric forcing, variable-Cp signed work,
 spatial source fields, zero-source bit equality, force-driven Mach/CFL retries,
-budget refusal and final-checkpoint cancellation/replay. This planar entry is
-for frozen inviscid gas; it does not yet add forced planar molecular/mixture
-composition. The same held-source and hydrostatic no-claim boundaries below
-apply.
+budget refusal and final-checkpoint cancellation/replay. The same held-source
+and hydrostatic no-claim boundaries below apply.
+
+`MolecularEuler2d::step_with_forcing` reuses this forced interval between its
+original Fourier/Newtonian molecular halves. The complete split restarts from
+the accepted field if the central source/advection/source interval shortens,
+or if the final molecular state fails its Mach or acoustic CFL guard. Molecular
+heat and viscous work remain in the original transport operator; the combined
+report distinguishes body impulse/work from wall and advective exchange. The
+caller reuses the same planar forcing scratch, with no added retry arrays.
+Regressions cover braking with variable calorics and physical wall loads,
+force-driven common-duration retries/replay, final-checkpoint rollback including
+prior reports/loads, zero-source bit equality and zero-transport recovery of the
+forced Euler owner. Planar varying-composition forcing remains outside this rung.
 
 `Euler3d::step_with_forcing` composes source half step, original SSP RK2
 advection and source half step inside the existing retry/publication owner.
