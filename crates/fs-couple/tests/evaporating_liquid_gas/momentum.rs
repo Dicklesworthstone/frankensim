@@ -4,6 +4,7 @@ use super::*;
 use fs_couple::liquid_gas::evaporation::momentum::{
     MovingGasEvaporationCandidate, MovingGasParcel, advance_liquid_with_moving_gas,
 };
+use fs_material::evaporation::gas::GasEvaporationError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn liquid_velocity(liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>) -> [f64; 3] {
@@ -395,6 +396,77 @@ fn zero_phase_flux_keeps_drift_while_reciprocal_sensible_heat_advances_once() {
         assert_eq!(next.report().momentum.liquid_mixing_heat_j, 0.0);
         assert!(next.report().native.heat.unwrap().heat_into_liquid_j > 0.0);
         check_source_and_thermal(liquid, &gas, &binding, &next);
+    });
+}
+
+#[test]
+fn accumulated_sensible_and_receiver_heat_obey_the_original_single_interface_cap() {
+    with_liquid_interfaces(0.0, &[(INTERFACE, 0.4, 305.0)], |liquid, gate| {
+        let source = source(-13.4e6);
+        let gas = MovingGasParcel::new(gas(&source, 300.0, 0.0), [300.0, -100.0, 50.0]).unwrap();
+        let original = gas.clone();
+        let bits = liquid.flow().lattice().grid().state_bits();
+        let binding = binding(&source, 0.0);
+        let face = surface(&Phase, &binding);
+        let mut solve = controls();
+        solve.phase.maximum_temperature_increment_k = 10.0;
+        let baseline = advance_liquid_with_moving_gas(
+            liquid,
+            &gas,
+            &source,
+            face,
+            solve,
+            Some((50.0, heat_controls())),
+            None,
+            gate,
+        )
+        .unwrap();
+        let native = &baseline.report().native;
+        assert!(native.heat.as_ref().unwrap().gas_temperature_k[1] > 300.0);
+        assert!(baseline.report().momentum.gas_mixing_heat_j > 0.0);
+        let final_gas = baseline.gas().parcel().state().state().temperature;
+        let original_increment = final_gas - gas.parcel().state().state().temperature;
+        let phase_increment = (native.exchange.gas_temperature_k[1] - 300.0).abs();
+        let reset_increment = (final_gas - native.phase.gas_temperature_k[0]).abs();
+        let liquid_increment = (native.exchange.surface_temperature_k[1] - 305.0).abs();
+        let before_mixing_limit = phase_increment.max(reset_increment).max(liquid_increment);
+        assert!(original_increment > before_mixing_limit + 1e-6);
+        solve.phase.maximum_temperature_increment_k =
+            0.5 * (before_mixing_limit + original_increment);
+        // The original thermal/phase owner fits the same complete-interval cap.
+        advance_liquid_with_gas_and_heat(
+            liquid,
+            gas.parcel(),
+            &source,
+            face,
+            50.0,
+            solve,
+            heat_controls(),
+            gate,
+        )
+        .unwrap();
+        let error = advance_liquid_with_moving_gas(
+            liquid,
+            &gas,
+            &source,
+            face,
+            solve,
+            Some((50.0, heat_controls())),
+            None,
+            gate,
+        )
+        .err()
+        .expect("combined original-to-final temperature increment must refuse");
+        assert!(matches!(
+            error,
+            EvaporatingLiquidGasError::Phase(GasEvaporationError::StepSizeLimit {
+                reason: "phase plus receiver mixing exceeds the original temperature increment bound",
+                ..
+            })
+        ));
+        assert_eq!(gas, original);
+        assert_eq!(liquid.flow().lattice().grid().state_bits(), bits);
+        assert_eq!(liquid.physical_time_s(), 0.0);
     });
 }
 

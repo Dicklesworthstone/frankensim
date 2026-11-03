@@ -14,6 +14,45 @@ fn inflow(datum: f64) -> FreeSurfaceMassInflow {
 }
 
 #[test]
+fn signed_inflow_batch_retains_comoving_withdrawal_and_zero_mass_heat() {
+    for dm in [-1e-7, 0.0] {
+        with_liquid(0.0, |liquid, gate| {
+            let before = liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+            let heat = 0.02;
+            let h0 = liquid.specific_enthalpy_at(INTERFACE).unwrap();
+            let exchange = FreeSurfaceMassExchange {
+                coordinates: INTERFACE,
+                mass_kg: dm,
+                specific_enthalpy_j_kg: h0,
+                heat_j: heat,
+            };
+            let report = liquid
+                .mix_interface_inflow_with_exchange(&[], &[exchange], controls(), gate)
+                .unwrap();
+            let after = liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+            let sample = report.exchange.samples[0];
+            assert_eq!(sample.mixing_heat_j, 0.0);
+            assert_eq!(report.mixing_heat_j, 0.0);
+            for d in 0..3 {
+                near(after.velocity_m_s[d], before.velocity_m_s[d], 2e-14);
+                near(
+                    report.exchange.carried_momentum_kg_m_s[d],
+                    sample.mass_change_kg * before.velocity_m_s[d],
+                    2e-14,
+                );
+            }
+            near(
+                report.exchange.enthalpy_change_j,
+                sample.mass_change_kg * h0 + heat,
+                controls().energy_tolerance_j,
+            );
+            assert!(report.absolute_total_energy_defect_j <= controls().energy_tolerance_j);
+            assert_eq!(liquid.physical_time_s(), 0.0);
+        });
+    }
+}
+
+#[test]
 fn g1_well_mixed_inflow_fills_and_accelerates_actual_liquid_with_closed_total_energy() {
     with_liquid(0.0, |liquid, gate| {
         let before = liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap();

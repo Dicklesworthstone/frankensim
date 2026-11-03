@@ -20,6 +20,8 @@ use kinematics::kinetic_energy;
 
 /// Source-relative species, bulk momentum and internal energy in one gas update.
 pub mod boundary;
+/// Many native interfaces sharing one retained moving gas and donor inventory.
+pub mod multiple;
 
 /// Original finite gas plus an explicitly initialized bulk momentum.
 ///
@@ -233,7 +235,33 @@ pub(super) fn admit_mixed_endpoints(
     catalog: &ThermochemicalGasModel,
     surface: LiquidGasEvaporationSurface<'_>,
     controls: EvaporatingLiquidGasSolve,
-    phase: &GasEvaporationStep,
+    exchange: &GasEvaporationStep,
+    liquid_h: f64,
+) -> Result<(), EvaporatingLiquidGasError> {
+    admit_mixed_surface(
+        liquid,
+        gas,
+        catalog,
+        surface,
+        controls.phase,
+        [
+            exchange.surface_temperature_k[0],
+            exchange.gas_temperature_k[0],
+        ],
+        exchange.duration_s,
+        liquid_h,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn admit_mixed_surface(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>,
+    gas: &ClosedGasParcel,
+    catalog: &ThermochemicalGasModel,
+    surface: LiquidGasEvaporationSurface<'_>,
+    controls: GasEvaporationSolve,
+    initial_temperature_k: [f64; 2],
+    duration_s: f64,
     liquid_h: f64,
 ) -> Result<(), EvaporatingLiquidGasError> {
     let temperature = liquid.liquid_temperature_at_specific_enthalpy_k(liquid_h)?;
@@ -251,22 +279,20 @@ pub(super) fn admit_mixed_endpoints(
         .map_err(GasEvaporationError::from)?
         - (liquid_h + surface.binding.liquid_enthalpy_offset_j_kg)
         - properties.latent_heat_j_kg;
-    if !residual.is_finite() || residual.abs() > controls.phase.latent_compatibility_tolerance_j_kg
-    {
+    if !residual.is_finite() || residual.abs() > controls.latent_compatibility_tolerance_j_kg {
         return Err(GasEvaporationError::CaloricMismatch {
             temperature_k: temperature,
             residual_j_kg: residual,
-            tolerance_j_kg: controls.phase.latent_compatibility_tolerance_j_kg,
+            tolerance_j_kg: controls.latent_compatibility_tolerance_j_kg,
         }
         .into());
     }
-    if (temperature - phase.surface_temperature_k[0]).abs()
-        > controls.phase.maximum_temperature_increment_k
-        || (gas.state().state().temperature - phase.gas_temperature_k[0]).abs()
-            > controls.phase.maximum_temperature_increment_k
+    if (temperature - initial_temperature_k[0]).abs() > controls.maximum_temperature_increment_k
+        || (gas.state().state().temperature - initial_temperature_k[1]).abs()
+            > controls.maximum_temperature_increment_k
     {
         return Err(GasEvaporationError::StepSizeLimit {
-            maximum_duration_s: 0.5 * phase.duration_s,
+            maximum_duration_s: 0.5 * duration_s,
             reason: "phase plus receiver mixing exceeds the original temperature increment bound",
         }
         .into());

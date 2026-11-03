@@ -547,13 +547,15 @@ fn advance_native_with_momentum<'s, 'm, 'catalog>(
     }
     let stored_delta_h = mass_exchange.samples[0].specific_enthalpy_j_kg[1] - h0;
     if momentum.is_some() {
+        // The combined exchange retains original temperatures; the phase
+        // receipt begins after optional heat and would reset this interval cap.
         momentum::admit_mixed_endpoints(
             &next_liquid,
             &next_gas,
             catalog,
             surface,
             controls,
-            &phase,
+            &exchange,
             mass_exchange.samples[0].specific_enthalpy_j_kg[1],
         )?;
     }

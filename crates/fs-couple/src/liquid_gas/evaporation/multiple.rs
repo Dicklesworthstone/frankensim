@@ -19,6 +19,7 @@ use fs_material::evaporation::gas::chamber::{
     GasLiquidChamberSurfaceStep, advance_chamber_with_gas_mass_selection,
 };
 
+use super::momentum::{self, multiple::DistributedPhaseMomentumReport};
 use super::{
     CancelGate, ClosedGasParcel, EvaporatingLiquidGasError, EvaporationError,
     FreeSurfaceEnthalpyReport, FreeSurfaceFiniteGasPressureLoad, FreeSurfaceMassExchange,
@@ -47,6 +48,8 @@ pub struct DistributedLiquidGasSolve {
     /// Whole interval, including absolute local defects and native flow [kg].
     pub mass_tolerance_kg: f64,
     /// Whole sum of absolute source, native storage and flow defects [J].
+    /// Moving-gas entry points also include their closed phase-source kinetic
+    /// defect; subsequent native-flow mechanical truncation is not heat.
     pub energy_tolerance_j: f64,
 }
 
@@ -377,6 +380,54 @@ pub(super) fn advance_native_with_flow<'s, 'm, 'catalog, 'surface>(
         Error,
     >,
 ) -> Result<DistributedLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
+    advance_native_with_momentum_and_flow(
+        liquid,
+        gas,
+        catalog,
+        surfaces,
+        controls,
+        heat_controls,
+        maximum_density_excursion,
+        None,
+        gate,
+        finish,
+    )
+    .map(|(candidate, _)| candidate)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_native_with_momentum_and_flow<'s, 'm, 'catalog, 'surface>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surfaces: impl ExactSizeIterator<
+        Item = (
+            LiquidGasEvaporationSurface<'surface>,
+            Option<(f64, GasFilmHeatSolve)>,
+        ),
+    >,
+    controls: DistributedLiquidGasSolve,
+    heat_controls: Option<GasLiquidChamberHeatSolve>,
+    maximum_density_excursion: Option<f64>,
+    gas_momentum: Option<[f64; 3]>,
+    gate: &CancelGate,
+    finish: impl FnOnce(
+        &mut MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        &mut ClosedGasParcel,
+    ) -> Result<
+        (
+            FreeSurfaceEnthalpyReport,
+            Option<FreeSurfaceFiniteGasPressureLoad>,
+        ),
+        Error,
+    >,
+) -> Result<
+    (
+        DistributedLiquidGasCandidate<'s, 'm, 'catalog>,
+        Option<DistributedPhaseMomentumReport>,
+    ),
+    Error,
+> {
     poll(gate)?;
     admit_pressure(liquid, maximum_density_excursion)?;
     if [controls.mass_tolerance_kg, controls.energy_tolerance_j]
@@ -597,7 +648,23 @@ pub(super) fn advance_native_with_flow<'s, 'm, 'catalog, 'surface>(
         });
     }
     let mut next_liquid = liquid.clone();
-    let mass_exchange = next_liquid.exchange_interface_mass(&transfers, controls.native, gate)?;
+    let (mass_exchange, momentum) = if let Some(gas_momentum) = gas_momentum {
+        let (exchange, motion) = momentum::multiple::exchange(
+            &mut next_liquid,
+            gas,
+            &mut next_gas,
+            gas_momentum,
+            &transfers,
+            controls,
+            gate,
+        )?;
+        (exchange, Some(motion))
+    } else {
+        (
+            next_liquid.exchange_interface_mass(&transfers, controls.native, gate)?,
+            None,
+        )
+    };
     let mut native_samples = BTreeMap::new();
     for sample in &mass_exchange.samples {
         poll(gate)?;
@@ -615,6 +682,7 @@ pub(super) fn advance_native_with_flow<'s, 'm, 'catalog, 'surface>(
     absolute_mass.add(gas_species_defect.abs())?;
     absolute_mass.add(mass_exchange.absolute_mass_defect_kg)?;
     let mut reports = Vec::with_capacity(inputs.len());
+    let original_gas_temperature_k = gas.state().state().temperature;
     for (index, (input, phase)) in inputs.iter().zip(phase_surfaces).enumerate() {
         poll(gate)?;
         // Native samples use their sparse-tile order, not Cartesian/source-ID
@@ -628,6 +696,24 @@ pub(super) fn advance_native_with_flow<'s, 'm, 'catalog, 'surface>(
             return Err(Error::Invalid(
                 "native phase transfer differs from its selected gas debit",
             ));
+        }
+        if momentum.is_some() {
+            // This budget covers the complete heat/phase/mixing interval.
+            // Phase receipts start AFTER optional sensible heating, so their
+            // initial temperatures would incorrectly reset the allowed drift.
+            momentum::admit_mixed_surface(
+                &next_liquid,
+                &next_gas,
+                catalog,
+                ordered[&input.coordinates].0,
+                controls.chamber.surface,
+                [
+                    liquid.liquid_temperature_at_specific_enthalpy_k(input.initial_h_j_kg)?,
+                    original_gas_temperature_k,
+                ],
+                duration_s,
+                native.specific_enthalpy_j_kg[1],
+            )?;
         }
         let projection = selected[index].expect("selected before native transaction");
         let heat = film_heat.as_ref().map(|_| heat_surfaces[index]);
@@ -645,7 +731,8 @@ pub(super) fn advance_native_with_flow<'s, 'm, 'catalog, 'surface>(
         };
         let defect = projection.final_mass_kg
             * (native.specific_enthalpy_j_kg[1] - input.initial_h_j_kg)
-            - source_relative_storage;
+            - source_relative_storage
+            - native.mixing_heat_j;
         native_caloric.add(defect)?;
         absolute_caloric.add(defect.abs())?;
         absolute_mass
@@ -672,10 +759,14 @@ pub(super) fn advance_native_with_flow<'s, 'm, 'catalog, 'surface>(
                 .species_mass_kg(&binding.species)
                 .map_err(GasEvaporationError::from)?);
     let native_phase_caloric_defect_j = native_caloric.value();
-    let energy_residual_j =
-        exchange.energy_residual_j + native_phase_caloric_defect_j + flow.balance_defect_j;
+    let mechanical_defect = momentum.as_ref().map_or(0.0, |m| m.energy_residual_j);
+    let energy_residual_j = exchange.energy_residual_j
+        + native_phase_caloric_defect_j
+        + mechanical_defect
+        + flow.balance_defect_j;
     let absolute_energy_defect_j = exchange.sum_absolute_energy_residual_j
         + absolute_caloric.value()
+        + mechanical_defect.abs()
         + flow.balance_defect_j.abs();
     let absolute_mass_defect_kg = absolute_mass.value();
     let native_liquid_enthalpy_change_j =
@@ -714,26 +805,29 @@ pub(super) fn advance_native_with_flow<'s, 'm, 'catalog, 'surface>(
         });
     }
     poll(gate)?;
-    Ok(DistributedLiquidGasCandidate {
-        liquid: next_liquid,
-        gas: next_gas,
-        catalog,
-        report: DistributedLiquidGasReport {
-            duration_s,
-            phase,
-            exchange,
-            heat: film_heat,
-            surfaces: reports,
-            mass_exchange,
-            flow,
-            pressure,
-            native_liquid_enthalpy_change_j,
-            native_phase_caloric_defect_j,
-            mass_residual_kg,
-            volatile_mass_residual_kg,
-            absolute_mass_defect_kg,
-            energy_residual_j,
-            absolute_energy_defect_j,
+    Ok((
+        DistributedLiquidGasCandidate {
+            liquid: next_liquid,
+            gas: next_gas,
+            catalog,
+            report: DistributedLiquidGasReport {
+                duration_s,
+                phase,
+                exchange,
+                heat: film_heat,
+                surfaces: reports,
+                mass_exchange,
+                flow,
+                pressure,
+                native_liquid_enthalpy_change_j,
+                native_phase_caloric_defect_j,
+                mass_residual_kg,
+                volatile_mass_residual_kg,
+                absolute_mass_defect_kg,
+                energy_residual_j,
+                absolute_energy_defect_j,
+            },
         },
-    })
+        momentum,
+    ))
 }

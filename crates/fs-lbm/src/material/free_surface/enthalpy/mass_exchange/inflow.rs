@@ -21,8 +21,8 @@ pub struct FreeSurfaceMassInflowReport {
     /// Original native inventory account. Its heat_j contains only the caller's
     /// external heat; the conversion from kinetic energy is separate below.
     pub exchange: FreeSurfaceMassExchangeReport,
-    /// Kinetic energy carried by the represented incoming mass [J], including
-    /// the velocity dispersion of distinct streams entering the same cell.
+    /// Signed kinetic energy carried by represented streams [J], including
+    /// incoming velocity dispersion and any comoving withdrawals.
     pub carried_kinetic_energy_j: f64,
     /// Actual endpoint change of resolved liquid kinetic energy [J].
     pub kinetic_energy_change_j: f64,
@@ -132,8 +132,40 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         controls: FreeSurfaceMassExchangeControls,
         gate: &CancelGate,
     ) -> Result<PreparedFreeSurfaceMassInflow<'a, 's, 'm>, Error> {
+        self.prepare_interface_inflow_with_exchange(inflows, &[], controls, gate)
+    }
+
+    /// Mix positive incoming streams together with comoving withdrawals and
+    /// zero-mass heat patches in ONE original native transaction. Nonpositive
+    /// exchanges retain their actual old liquid velocity; no powered ejection
+    /// or artificial negative mixing heat is inferred. Coordinates must be
+    /// disjoint between the two batches. All source owners publish together.
+    pub fn mix_interface_inflow_with_exchange(
+        &mut self,
+        inflows: &[FreeSurfaceMassInflow],
+        comoving: &[FreeSurfaceMassExchange],
+        controls: FreeSurfaceMassExchangeControls,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceMassInflowReport, Error> {
+        self.prepare_interface_inflow_with_exchange(inflows, comoving, controls, gate)
+            .map(PreparedFreeSurfaceMassInflow::publish)
+    }
+
+    /// Prepare the mixed signed batch without changing any accepted owner.
+    /// The original mass, caloric, population and force-refresh path runs once.
+    pub fn prepare_interface_inflow_with_exchange<'a>(
+        &'a mut self,
+        inflows: &[FreeSurfaceMassInflow],
+        comoving: &[FreeSurfaceMassExchange],
+        controls: FreeSurfaceMassExchangeControls,
+        gate: &CancelGate,
+    ) -> Result<PreparedFreeSurfaceMassInflow<'a, 's, 'm>, Error> {
         poll(gate)?;
-        if inflows.len() > self.controls.max_cells {
+        if inflows
+            .len()
+            .checked_add(comoving.len())
+            .is_none_or(|n| n > self.controls.max_cells)
+        {
             return Err(Error::Invalid("inflow exceeds the original cell budget"));
         }
         let scale = self.flow.scaling.velocity_si(1.0)?;
@@ -174,7 +206,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 mixtures.insert(location, stream);
             }
         }
-        let exchanges: Vec<_> = mixtures
+        let mut exchanges: Vec<_> = mixtures
             .iter()
             .map(|(&location, mixture)| FreeSurfaceMassExchange {
                 coordinates: FreeSurface3::transport_coordinates(location)
@@ -184,6 +216,25 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 heat_j: mixture.heat_j,
             })
             .collect();
+        for exchange in comoving {
+            poll(gate)?;
+            if !exchange.mass_kg.is_finite() || exchange.mass_kg > 0.0 {
+                return Err(Error::Invalid(
+                    "comoving batch requires nonpositive transfers",
+                ));
+            }
+            let location = self
+                .location_at(exchange.coordinates)
+                .ok_or(Error::Invalid(
+                    "comoving batch needs an existing liquid interface",
+                ))?;
+            if mixtures.contains_key(&location) {
+                return Err(Error::Invalid(
+                    "inflow and comoving batches must use distinct cells",
+                ));
+            }
+            exchanges.push(*exchange);
+        }
         let (candidate, exchange, balance) = self.prepare_interface_mass_model(
             &exchanges,
             Some(TransferMomentum::Mixing(&mixtures)),
@@ -250,6 +301,37 @@ pub(super) fn kinetic_change(dm: f64, new_mass: f64, velocity: [f64; 3], delta: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_batch_keeps_withdrawals_and_thermal_only_cells_comoving() {
+        let input = MassLocation3::Cell(0, 0);
+        let output = MassLocation3::Cell(0, 1);
+        let thermal = MassLocation3::Cell(0, 2);
+        let mixtures = BTreeMap::from([(
+            input,
+            IncomingMixture::new(0.2, [0.1, -0.2, 0.0], 100.0, 0.0).unwrap(),
+        )]);
+        let model = TransferMomentum::Mixing(&mixtures);
+        let velocity = [0.02, 0.03, -0.01];
+        assert_eq!(
+            model.state(&output, 1.0, -0.2, 0.8, velocity),
+            Some((velocity, 0.0, 0.0))
+        );
+        assert_eq!(
+            model.state(&thermal, 1.0, 0.0, 1.0, velocity),
+            Some((velocity, 0.0, 0.0))
+        );
+        assert!(model.state(&output, 1.0, 0.2, 1.2, velocity).is_none());
+        let mixed = model.state(&input, 1.0, 0.2, 1.2, velocity).unwrap();
+        assert!(mixed.1 > 0.0);
+        for d in 0..3 {
+            assert!((1.2 * mixed.0[d] - velocity[d] - 0.2 * [0.1, -0.2, 0.0][d]).abs() < 1e-17);
+        }
+        let outgoing = kinetic_change(-0.2, 0.8, velocity, [0.0; 3]);
+        assert_eq!(outgoing, -0.1 * velocity.iter().map(|u| u * u).sum::<f64>());
+        assert_eq!(model.velocity_at(&output), None);
+        assert_eq!(model.kinetic_variance_at(&thermal), 0.0);
+    }
 
     #[test]
     fn g1_shared_cell_state_closes_all_stream_and_resident_momenta_and_kinetics() {

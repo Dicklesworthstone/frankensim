@@ -92,6 +92,9 @@ impl<'a> TransferMomentum<'a> {
     ) -> Option<([f64; 3], f64, f64)> {
         let carried = match self {
             Self::Comoving => velocity,
+            Self::Mixing(mixtures) if !mixtures.contains_key(location) && dm <= 0.0 => {
+                return Some((velocity, 0.0, 0.0));
+            }
             Self::Throughflow { cells, .. } => {
                 return cells.get(location)?.state(old_mass, dm, new_mass, velocity);
             }
@@ -175,6 +178,9 @@ pub struct FreeSurfaceMassExchangeSample {
     pub carried_enthalpy_j: f64,
     /// Separately supplied heat, counted once [J].
     pub heat_j: f64,
+    /// Physical receiver-mixing heat already deposited in this cell [J].
+    /// Separate from caller-supplied heat and caloric representation defects.
+    pub mixing_heat_j: f64,
     /// Accepted [initial, final] liquid specific enthalpy [J/kg].
     pub specific_enthalpy_j_kg: [f64; 2],
 }
@@ -465,6 +471,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 || dm * (transfer.specific_enthalpy_j_kg - old_h),
                 |cell| cell.relative_enthalpy(dm, old_h),
             ) + transfer.heat_j;
+            let mut mixing_heat_j = 0.0;
             if let Some(momentum) = momentum {
                 let before = self
                     .flow
@@ -497,6 +504,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                     lattice.transport_set_interface_velocity(location, native, gate)?;
                 }
                 relative_supply += heat;
+                mixing_heat_j = heat;
             }
             let new_h = old_h + relative_supply / new_mass_kg;
             if !new_mass_kg.is_finite()
@@ -527,6 +535,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 mass_change_kg: dm,
                 carried_enthalpy_j: carried_enthalpy,
                 heat_j: transfer.heat_j,
+                mixing_heat_j,
                 specific_enthalpy_j_kg: [old_h, new_h],
             });
         }
