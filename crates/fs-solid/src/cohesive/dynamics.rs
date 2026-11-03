@@ -12,7 +12,9 @@
 //! unchanged. The bulk potential is `u^T K u/2` in these reduced coordinates;
 //! moving essential constraints or additional prestress potentials require
 //! their own mechanics/work owner. Reference geometry, trace maps, local frames,
-//! areas and source conditions are inherited unchanged from `CohesiveState`.
+//! areas and source conditions are inherited from `CohesiveState`. Explicit
+//! fixed-jump temperature transfer preserves that geometry and all motion while
+//! advancing only the original source-defined cohesive coefficients/history.
 //! A broken bond keeps its history, mass and velocity, and still resists normal
 //! compression through its original law. No new contact topology, friction,
 //! heat routing, finite-strain kinematics or stability/unique-root claim is made.
@@ -24,7 +26,8 @@ use fs_material::cohesive::{CohesiveEnergy, CohesivePoint};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{LinearOp, NewtonKrylovState, NewtonReport, SolverRunProgress};
 
-use super::{CohesiveState, Config, Error, dot, finite, positive};
+use super::temperature::{TemperatureConfig, TemperatureEnergy};
+use super::{CohesiveState, CohesiveSystem, Config, Error, dot, finite, positive};
 
 /// Explicit numerical, trajectory and energy controls. These are not material
 /// coefficients or inferred small-strain validity limits.
@@ -105,6 +108,15 @@ pub struct DynamicsStep<'m, 'a> {
     pub energy_tolerance_j: f64,
 }
 
+/// Fixed-jump temperature candidate with the original inertia and clock.
+/// No kinetic/bulk storage changes or mechanical/viscous work occur here.
+pub struct DynamicsTemperatureStep<'m, 'a> {
+    /// Temperature-transferred interfaces with all original motion retained.
+    pub motion: CohesiveMotion<'m, 'a>,
+    /// Integrated interface parameter work, storage change and damage release.
+    pub energy: TemperatureEnergy,
+}
+
 impl<'m, 'a> CohesiveState<'m, 'a> {
     /// Add actual reduced inertia and velocity to this accepted state. The mass
     /// must use exactly the same free DOFs and ordering as the elastic/jump
@@ -159,6 +171,64 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
     #[must_use]
     pub fn steps(&self) -> usize {
         self.steps
+    }
+
+    /// Change the original sourced bond temperatures without resetting damage,
+    /// velocity, time, trajectory count, mass or mechanical step controls.
+    /// The next ordinary step evolves under the resulting interface forces.
+    pub fn transfer_temperature<'n, 'b>(
+        &self,
+        target: &'n CohesiveSystem<'b>,
+        temperature_axis: &str,
+        config: TemperatureConfig,
+        cx: &Cx<'_>,
+    ) -> Result<DynamicsTemperatureStep<'n, 'b>, DynamicsError>
+    where
+        'm: 'n,
+    {
+        self.transfer_temperature_controlled(target, temperature_axis, config, &mut || {
+            cx.checkpoint().is_err()
+        })
+    }
+
+    /// Predicate form; a late refusal leaves the complete original motion intact.
+    pub fn transfer_temperature_controlled<'n, 'b, C: FnMut() -> bool>(
+        &self,
+        target: &'n CohesiveSystem<'b>,
+        temperature_axis: &str,
+        config: TemperatureConfig,
+        cancelled: &mut C,
+    ) -> Result<DynamicsTemperatureStep<'n, 'b>, DynamicsError>
+    where
+        'm: 'n,
+    {
+        let transferred = self.state.transfer_temperature_controlled(
+            target,
+            temperature_axis,
+            config,
+            cancelled,
+        )?;
+        let mut velocity_m_s = Vec::with_capacity(self.velocity_m_s.len());
+        for chunk in self.velocity_m_s.chunks(256) {
+            if cancelled() {
+                return Err(Error::Cancelled.into());
+            }
+            velocity_m_s.extend_from_slice(chunk);
+        }
+        if cancelled() {
+            return Err(Error::Cancelled.into());
+        }
+        Ok(DynamicsTemperatureStep {
+            motion: CohesiveMotion {
+                state: transferred.state,
+                mass: self.mass,
+                velocity_m_s,
+                time_s: self.time_s,
+                steps: self.steps,
+                config: self.config,
+            },
+            energy: transferred.energy,
+        })
     }
 
     /// Advance one straight displacement/jump path. `mean_force_n` is the

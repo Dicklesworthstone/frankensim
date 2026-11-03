@@ -41,6 +41,9 @@ pub mod dynamics;
 /// Thermal shrinkage and Maxwell history driving a restrained cohesive joint.
 pub mod thermal_joint;
 
+/// Source-preserving temperature transfer of the same deformable interfaces.
+pub mod temperature;
+
 /// One sparse column of a local displacement-jump map.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JumpTerm {
@@ -76,7 +79,9 @@ impl<'a> CohesivePatch<'a> {
     }
     /// Bind ordered interface data to the same work-conjugate mechanics owner.
     /// Actual receiving material states must match the source surface roles.
-    /// Source conditions remain fixed for every damage history of this patch.
+    /// Source conditions stay fixed during mechanical updates. The explicit
+    /// temperature owner prepares source-preserving successor patches and
+    /// transfers the same irreversible history.
     pub fn from_interface(id: u64, area_m2: f64, source: &'a ResolvedBilinearCohesive,
         surface_materials: [&MaterialStateId; 2], terms: Vec<JumpTerm>) -> Result<Self, Error> {
         source.require_surface_materials(surface_materials[0], surface_materials[1])

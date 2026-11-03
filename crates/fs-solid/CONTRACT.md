@@ -2945,9 +2945,11 @@ retain their source. No constitutive, quadrature or nonlinear solver is copied.
 
 Swapping an interface dataset changes the traction/separation envelope, failure
 point and area-integrated fracture work in the native equilibrium solver.
-Conditions remain fixed for a damage history. Source refresh across thermal or
-chemical evolution, adaptive fracture topology and complete structural/thermal
-energy accounting are not introduced. The `cohesive_source` integration tests
+Conditions remain fixed during each mechanical increment. The explicit
+`cohesive::temperature` transfer below advances the same sourced interface to
+new temperatures without resetting history. Chemical evolution, adaptive
+fracture topology and complete structural/thermal energy accounting are not
+introduced. The `cohesive_source` integration tests
 check an independently solved compliant pull, material substitution, exact P1
 area/fracture accounting, surface-order refusal and atomic cancellation.
 
@@ -3800,9 +3802,11 @@ candidate publication makes late cancellation, material-domain refusal, failed
 work gates and exhausted solves leave the entire accepted trajectory intact.
 
 This is fixed-reference small-strain dynamics with fixed material/source
-conditions, frames and topology. It does not update bulk coefficients, impose
-moving reduced constraints, transfer cohesive temperature history, discover
-contact, add damaged-area friction or provide a unique/stable nonlinear root.
+conditions during each mechanical increment, fixed frames and fixed topology.
+The explicit temperature transfer below may advance the cohesive source and
+history between increments. It does not update bulk coefficients, impose
+moving reduced constraints, discover contact, add damaged-area friction or
+provide a unique/stable nonlinear root.
 Prescribed interface offsets and reduced external forces are explicit inputs;
 their physical construction and resolution of reversals, crack events and
 softening branches remain caller responsibilities. Smooth elastic motion has
@@ -3818,6 +3822,41 @@ damage. Late cancellation, a material-domain refusal and work-budget exhaustion
 also retain the complete accepted trajectory. These focused native tests do
 not constitute a dynamic crack-propagation, finite-strain or service-validation
 campaign.
+
+### Temperature-dependent adhesion in deformable equilibrium and dynamics
+
+`CohesiveSystem::with_temperature_sources` prepares temperature successors on
+the original patches. `CohesiveState::transfer_temperature` accepts those
+coefficients only after matching the original elastic operator, DOFs, patch
+identities, areas and complete sparse trace maps. Every ordered source retains
+the original card, selected claims, material surfaces and nonthermal query
+coordinates through `ResolvedBilinearCohesive::require_temperature_successor`.
+Unsourced interfaces and substituted geometry/operators refuse.
+
+Each quadrature point uses the existing material owner's fixed-jump coefficient
+change followed by irreversible relaxation. Common-mode and frozen-physical-mode
+BK histories retain their original interpretation; cooling cannot heal bonds or
+rescale past fracture work. Area-integrated signed parameter work, additional
+damage loss and storage change are reported separately and gated by
+`parameter work - storage change - damage loss`. No displacement or dashpot
+work occurs during transfer, and neither parameter work nor damage loss is
+automatically assigned to heat. Bulk elasticity and thermal expansion remain
+outside this transfer.
+
+`CohesiveMotion::transfer_temperature` retains the original mass, velocity,
+physical time, accepted step count and numerical controls. The next native
+mechanical solve responds to the resulting interface tractions. The transferred
+state is not asserted to be equilibrated at its new temperature. All sources,
+histories and integrated accounts publish atomically; per-site and bounded
+vector polls preserve cancellation without partial accepted state.
+
+`tests/cohesive_temperature.rs` checks independent heated-bond storage/damage
+identities, area integration across two original sites, cooling irreversibility,
+native continuation to failure, changed-frequency inertial motion with retained
+mass, trajectory-budget retention, source/geometry/operator refusal and late
+cancellation. These manufactured source curves verify the integration; they
+are not physical validation of a temperature-dependent adhesive specimen or a
+coupled thermal-transport/heat-partition model.
 
 ## Conservative finite-strain elastic motion
 
