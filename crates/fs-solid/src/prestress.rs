@@ -137,6 +137,11 @@ impl TetLinearElasticProblem<'_> {
     /// remain unchanged. The caller owns the additional constitutive law and
     /// its source identity; this API does not infer adiabaticity by itself.
     ///
+    /// With no dead forces, accept both the thermal-only solve and the explicit
+    /// empty-nodal-load solve through their respective exact recovery owners.
+    /// Their distinct source identities are retained; a changed or omitted
+    /// nonempty force vector cannot reuse either accepted state.
+    ///
     /// The signed geometric stiffness still comes from the single native
     /// initial-stress kernel. Negative eigenvalues remain signed, and this
     /// frozen conservative pencil is not a transient or stability certificate.
@@ -147,9 +152,16 @@ impl TetLinearElasticProblem<'_> {
         constitutive_materials: TetMaterialField<'_>, mesh_frame: ContentHash,
         maximum_absolute_mandel_strain: f64, cx: &Cx<'_>,
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
-        let stress = self.recover_thermal_stress_with_nodal_forces(
+        let stress = match self.recover_thermal_stress_with_nodal_forces(
             solution, thermal, nodal_forces_n, mesh_frame,
-            maximum_absolute_mandel_strain, cx)?;
+            maximum_absolute_mandel_strain, cx)
+        {
+            Err(TetElasticError::StressRecoveryInputMismatch) if nodal_forces_n.is_empty() => {
+                self.recover_thermal_stress(solution, thermal, mesh_frame,
+                    maximum_absolute_mandel_strain, cx)?
+            }
+            result => result?,
+        };
         self.assemble_constitutive_tangent_from_stress(stress, constitutive_materials, cx)
     }
 

@@ -69,6 +69,63 @@ fn replacement_tangent_keeps_original_stress_and_inertial_inventory() {
     });
 }
 
+#[test]
+fn explicit_empty_and_loaded_equilibria_keep_the_original_stress_binding() {
+    with_cx(|cx| {
+        let mat = material();
+        let thermal = strain(0.01);
+        let field = TetThermalStrainField::Uniform(&thermal);
+        let p = problem(&mat, &TETS, &FIXED);
+        let tangent = TetElasticMaterial::try_new(6.0, 2000.0, 0.25, [42; 32]).unwrap();
+        let plain = p
+            .solve_thermal_displacement(field, TetStaticSolveConfig::default(), cx)
+            .unwrap();
+        let plain_stress = p
+            .recover_thermal_stress(&plain, field, ContentHash([1; 32]), 0.1, cx)
+            .unwrap();
+        let loaded_forces = [(4, 0.25)];
+        for forces in [&[][..], &loaded_forces[..]] {
+            let u = p
+                .solve_thermal_displacement_with_nodal_forces(
+                    field, forces, TetStaticSolveConfig::default(), cx,
+                )
+                .unwrap();
+            let original = p
+                .assemble_thermal_tangent_with_nodal_forces(
+                    &u, field, forces, ContentHash([1; 32]), 0.1, cx,
+                )
+                .unwrap();
+            let assemble = |candidate: &TetLinearElasticProblem<'_>, loads: &[(usize, f64)]| {
+                candidate.assemble_thermal_tangent_with_constitutive_materials(
+                    &u, field, loads, TetMaterialField::Uniform(&tangent),
+                    ContentHash([1; 32]), 0.1, cx,
+                )
+            };
+            let result = assemble(&p, forces).unwrap();
+            assert_eq!(result.stress(), original.stress());
+            assert_eq!(result.geometric_stiffness().to_dense(),
+                original.geometric_stiffness().to_dense());
+            assert_eq!(result.pencil().mass.to_dense(), original.pencil().mass.to_dense());
+            if forces.is_empty() {
+                // Identical physics does not erase the original load-owner identity.
+                assert_eq!(result.stress().elements(), plain_stress.elements());
+                assert_ne!(result.stress().identity(), plain_stress.identity());
+            } else {
+                // An omitted physical load must fail BOTH recovery owners.
+                assert!(matches!(assemble(&p, &[]),
+                    Err(TetElasticError::StressRecoveryInputMismatch)));
+            }
+            assert!(matches!(assemble(&p, &[(4, 0.5)]),
+                Err(TetElasticError::StressRecoveryInputMismatch)));
+            // Matching source labels cannot hide changed equilibrium coefficients,
+            // including when the empty-load fallback is available.
+            let changed = TetElasticMaterial::try_new(6.0, 1100.0, 0.25, [7; 32]).unwrap();
+            assert!(matches!(assemble(&problem(&changed, &TETS, &FIXED), forces),
+                Err(TetElasticError::StressRecoveryInputMismatch)));
+        }
+    });
+}
+
 // Independent initial-stress potential in Green strain, evaluated under an
 // affine virtual displacement on the unit tet. Its Hessian at the origin has
 // the declared small-displacement K_material + K_geometric terms. This oracle
