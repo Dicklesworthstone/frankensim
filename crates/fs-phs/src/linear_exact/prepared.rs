@@ -40,6 +40,9 @@ pub struct PreparedQuadraticFlow {
     inverse: Vec<f64>,
     transition: Vec<f64>,
     integrals: Vec<Vec<f64>>,
+    // Exactly affine observations only have entries in the constant coordinate's
+    // row/column. Keep their dense arithmetic order without its O(d^2) zero work.
+    affine_integrals: Vec<bool>,
     dt: f64,
     growth_factor: f64,
     storage_norm_factor: f64,
@@ -488,6 +491,7 @@ impl PreparedQuadraticFlow {
         }
         let mut transition = Vec::new();
         let mut integrals = Vec::with_capacity(count);
+        let mut affine_integrals = Vec::with_capacity(count);
         for index in 0..count.max(1) {
             check_cancel(&mut cancelled)?;
             let mut form = vec![0.0; d * d];
@@ -515,6 +519,7 @@ impl PreparedQuadraticFlow {
                 transition = prepared.transition;
             }
             if index < count {
+                affine_integrals.push(is_affine_integral(&prepared.loss_integral, d));
                 integrals.push(prepared.loss_integral);
             }
         }
@@ -527,6 +532,7 @@ impl PreparedQuadraticFlow {
             inverse,
             transition,
             integrals,
+            affine_integrals,
             dt,
             growth_factor,
             storage_norm_factor,
@@ -666,13 +672,49 @@ impl PreparedQuadraticFlow {
                 .map(|j| self.inverse[i * self.n + j] * balanced[j])
                 .sum();
         }
-        for (out, w) in integrals.iter_mut().zip(&self.integrals) { *out = quadratic(w, z); }
+        for ((out, w), &affine) in integrals
+            .iter_mut()
+            .zip(&self.integrals)
+            .zip(&self.affine_integrals)
+        {
+            *out = if affine {
+                affine_integral(w, z)
+            } else {
+                quadratic(w, z)
+            };
+        }
         if !finite(endpoint) || !finite(integrals) {
             return Err(refuse("prepared quadratic candidate overflows"));
         }
         Ok(())
     }
 
+}
+
+fn is_affine_integral(matrix: &[f64], dimension: usize) -> bool {
+    let last = dimension - 1;
+    (0..last).all(|i| {
+        matrix[i * dimension..i * dimension + last]
+            .iter()
+            .all(|x| *x == 0.0)
+    })
+}
+
+// Same left-associated products and row-major additions as quadratic(). With
+// finite coordinates, skipped products are signed zero; an accumulator that
+// starts at +0 cannot change by adding them. Do not combine the two symmetric
+// entries or contract a mean-output map: either would change the rounding.
+fn affine_integral(matrix: &[f64], coordinates: &[f64]) -> f64 {
+    let dimension = coordinates.len();
+    let last = dimension - 1;
+    let mut result = 0.0;
+    for i in 0..last {
+        result += coordinates[i] * matrix[i * dimension + last] * coordinates[last];
+    }
+    for j in 0..dimension {
+        result += coordinates[last] * matrix[last * dimension + j] * coordinates[j];
+    }
+    result
 }
 
 // A floating-point envelope of lambda_max(sym(A)), with recomputed reconstruction
@@ -742,4 +784,62 @@ fn extended_growth_rate(
         return Err(refuse("extended interval reconstruction bound is not finite").into());
     }
     Ok(bound)
+}
+
+#[cfg(test)]
+mod affine_integral_tests {
+    use super::*;
+
+    #[test]
+    fn affine_observations_preserve_dense_bits_without_discarding_quadratic_terms() {
+        let system = crate::mass_spring_damper(1.0, 9.0, 0.7).unwrap();
+        let split = super::super::split_quadratic(
+            &system,
+            super::super::LinearSplitBudget {
+                max_modes: 2,
+                max_omega_dt: 2.8,
+            },
+        )
+        .unwrap();
+        let flow = PreparedQuadraticFlow::new(
+            &system,
+            &split,
+            0.03,
+            &[vec![0.0, 0.0, 0.0, 1.0]],
+            &[vec![0.3, -0.2]],
+            DenseExponentialBudget {
+                max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
+                max_dense_bytes: usize::MAX,
+                max_multiply_terms: u64::MAX,
+            },
+        )
+        .unwrap();
+        assert_eq!(flow.affine_integrals, [false, true]);
+        for scale in [1.0 / 1_099_511_627_776.0, 1.0, 1_099_511_627_776.0] {
+            for i in 0..32 {
+                let state = [
+                    scale * (i as f64 - 15.0) / 13.0,
+                    scale * (7.0 - i as f64) / 19.0,
+                ];
+                let input = [scale * (i as f64 % 7.0 - 3.0)];
+                let mut z = vec![0.0; flow.d];
+                let mut values = [0.0; 2];
+                flow.evaluate_into(
+                    &state,
+                    &input,
+                    &mut z,
+                    &mut [0.0; 2],
+                    &mut [0.0; 2],
+                    &mut values,
+                )
+                .unwrap();
+                for (&actual, full) in values.iter().zip(&flow.integrals) {
+                    assert_eq!(actual.to_bits(), quadratic(full, &z).to_bits());
+                }
+            }
+        }
+        let mut almost_linear = flow.integrals[1].clone();
+        almost_linear[0] = f64::from_bits(1);
+        assert!(!is_affine_integral(&almost_linear, flow.d));
+    }
 }

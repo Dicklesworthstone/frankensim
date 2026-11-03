@@ -935,9 +935,22 @@ heat, port-work and storage-change admission. No state or off-diagonal
 coupling is dropped. `LinearSplit::is_exact_quadratic` exposes the original
 storage classification for consumer dispatch.
 
+`PreparedQuadraticFlow` classifies each cached integral by exact zero structure
+during preparation. An affine observation only occupies the constant
+coordinate's row and column, so its warm contraction visits O(n+m) entries
+instead of O((n+m)^2). With one output per modal force this removes cubic port
+observation work from a full damping step. The original left-associated
+products and row-major addition order of every potentially nonzero term are
+preserved. No tolerance discards a small quadratic term; genuine quadratic
+integrals keep their complete dense contraction. The classification adds no
+warm allocation or alternate physical loss approximation.
+
 `prepared_exact_owned` checks 1,000 warm calls with zero allocations, complete
 coupled damping and Maxwell states, bitwise borrowed/owned work and motion,
 direct exact propagation, energy-datum invariance, capacity and atomic refusal.
+The affine-integral unit regression compares the exact output bits with the
+original dense contraction across signed states at three numerical scales and
+checks that even the smallest positive quadratic coefficient stays dense.
 All nine existing multirate tests pass against the changed owner. These are
 native numerical and allocation checks, not measured wall-time acceleration or
 full workspace qualification.
