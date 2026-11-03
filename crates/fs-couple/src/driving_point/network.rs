@@ -8,8 +8,9 @@ use super::{
     realize_characteristic_response,
 };
 use fs_duct::network::{
-    CoupledTermination, DuctNetwork, NetworkDriveResponse, NodeBoundary, PortTermination,
-    network_drive, network_drive_coupled,
+    CoupledTermination, DuctNetwork, NetworkDriveResponse, NetworkSourceResponse, NodeBoundary,
+    PortExcitation, PortSource, PortTermination, network_drive, network_drive_coupled,
+    network_drive_sources,
 };
 #[cfg(test)]
 use fs_duct::network::network_port_impedance;
@@ -17,7 +18,7 @@ use fs_duct::{DuctError, LossModel, Segment, Termination};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_ports::{PortKind, PortOrientation, PortSchema, PortValueShape};
-use fs_vfit::discretize::{DelayedFilter, reflectance};
+use fs_vfit::discretize::DelayedFilter;
 
 /// A selected active port and explicit loads for every other graph port.
 #[derive(Debug, Clone)]
@@ -146,6 +147,78 @@ impl NetworkDrivingPoint {
         )
     }
 
+    /// Complex pressure reflection at a positive real wave reference [Pa s/m³].
+    ///
+    /// The original graph solves `p + zc U = 2` for a unit incident pressure
+    /// wave, then returns `b = (p - zc U)/2`, with U into the graph. This is
+    /// `(Z - zc)/(Z + zc)` wherever the input impedance exists, and remains
+    /// finite at a lossless input-flow node where the unit-flow solve cannot.
+    /// The phasor convention remains exp(-i omega t); no frequency shift,
+    /// added damping, clipped reflection or replacement boundary is used.
+    pub fn reflection(
+        &self,
+        gas: &GasState,
+        omega: f64,
+        loss: LossModel,
+        zc: f64,
+    ) -> Result<C64, DuctError> {
+        if !self.coupled_labels.is_empty() {
+            return Err(DuctError::BadParameter {
+                what: "network reflection with coupled ports needs their coupled termination",
+            });
+        }
+        let sources = self.reflection_source(zc)?;
+        let response = network_drive_sources(
+            &self.network, gas, omega, loss, &sources, &self.terminations, None,
+        )?;
+        self.reflected_wave(&response, zc)
+    }
+
+    /// [`Self::reflection`] with the complete declared mutual load. Source and
+    /// all scalar/coupled terminations enter the same physical boundary solve.
+    pub fn reflection_coupled(
+        &self,
+        gas: &GasState,
+        omega: f64,
+        loss: LossModel,
+        zc: f64,
+        coupled: &CoupledTermination,
+    ) -> Result<C64, DuctError> {
+        self.admit_coupled_labels(coupled)?;
+        let sources = self.reflection_source(zc)?;
+        let response = network_drive_sources(
+            &self.network, gas, omega, loss, &sources, &self.terminations, Some(coupled),
+        )?;
+        self.reflected_wave(&response, zc)
+    }
+
+    fn reflection_source(&self, zc: f64) -> Result<[PortSource; 1], DuctError> {
+        if !zc.is_finite() || zc <= 0.0 {
+            return Err(DuctError::BadParameter {
+                what: "network reflection requires a finite positive wave reference",
+            });
+        }
+        Ok([PortSource {
+            label: self.active_port.clone(),
+            excitation: PortExcitation::Pressure {
+                open_circuit_pressure_pa: C64::from_re(2.0),
+                impedance_pa_s_m3: C64::from_re(zc),
+            },
+        }])
+    }
+
+    fn reflected_wave(&self, response: &NetworkSourceResponse, zc: f64) -> Result<C64, DuctError> {
+        let fields = &response.fields;
+        let active = fields.ports.iter().position(|label| *label == self.active_port)
+            .expect("source port admitted by the original graph solve");
+        let reflected = fields.port_pressures[active].scale(0.5)
+            - fields.port_inflows[active].scale(zc).scale(0.5);
+        if !reflected.re.is_finite() || !reflected.im.is_finite() {
+            return Err(DuctError::Singular);
+        }
+        Ok(reflected)
+    }
+
     fn admit_coupled_labels(&self, coupled: &CoupledTermination) -> Result<(), DuctError> {
         // The producer builds the matrix in the declared order
         // (`coupled_labels`); a permuted or empty label list is refused, never
@@ -160,8 +233,9 @@ impl NetworkDrivingPoint {
 
     /// Realize the driving point as a causal characteristic line with the
     /// ladder, Fourier convention and passivity gate of [`super::realize_line`].
-    /// `R = (Z - zc)/(Z + zc)` is sampled from the network solve at every
-    /// ladder frequency and at the realizer's near-DC point (1e-3 rad/s).
+    /// [`Self::reflection`] samples the finite wave boundary at every ladder
+    /// frequency and at the realizer's near-DC point (1e-3 rad/s), including
+    /// lossless input-impedance poles.
     /// A network solve may refuse that close to DC as ill-conditioned
     /// (`Singular`). Below the largest rung's first bin, such a refusal is
     /// answered from the lowest frequency in decades up to that bin at which
@@ -194,11 +268,10 @@ impl NetworkDrivingPoint {
         let dt = 1.0 / f64::from(sample_rate_hz);
         let geo_delay = 2.0 * self.longest_path()? / gas.sound_speed / dt;
         let solve = |omega: f64| -> Result<C64, DuctError> {
-            let response = match coupled_at.as_mut() {
-                Some(source) => self.response_coupled(gas, omega, loss, &source(omega)?)?,
-                None => self.response(gas, omega, loss)?,
-            };
-            Ok(reflectance(response.impedance, zc))
+            match coupled_at.as_mut() {
+                Some(source) => self.reflection_coupled(gas, omega, loss, zc, &source(omega)?),
+                None => self.reflection(gas, omega, loss, zc),
+            }
         };
         realize_response_line(geo_delay, sample_rate_hz, zc, ladder, solve)
     }

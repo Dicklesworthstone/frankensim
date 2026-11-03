@@ -22,6 +22,8 @@ pub use loaded::{
 };
 pub mod observation;
 pub mod field;
+/// Prepared incident/reflected pressure waves on the original loaded graph.
+pub mod scattering;
 mod prepared;
 pub use prepared::{
     NetworkCoherenceBudget, NetworkSourceCoordinate, NetworkSourceQuantity,

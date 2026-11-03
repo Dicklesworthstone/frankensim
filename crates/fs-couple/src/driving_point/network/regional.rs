@@ -1,7 +1,10 @@
 //! Source-retaining media on the original network and characteristic-line owner.
 
 use super::*;
-use fs_duct::network::{NetworkMedia, network_drive_coupled_regional, network_drive_regional};
+use fs_duct::network::{
+    NetworkMedia, network_drive_coupled_regional, network_drive_regional,
+    network_drive_sources_regional,
+};
 
 impl NetworkDrivingPoint {
     /// Full gas source record at the active edge end. The same unique plane
@@ -53,6 +56,46 @@ impl NetworkDrivingPoint {
         )
     }
 
+    /// Finite pressure reflection with each original edge and exterior gas.
+    /// The matched pressure source uses the same real reference and physical
+    /// wave convention as [`Self::reflection`]; no junction gas is averaged.
+    pub fn reflection_regional(
+        &self,
+        media: &NetworkMedia,
+        omega: f64,
+        loss: LossModel,
+        zc: f64,
+    ) -> Result<C64, DuctError> {
+        if !self.coupled_labels.is_empty() {
+            return Err(DuctError::BadParameter {
+                what: "network reflection with coupled ports needs their coupled termination",
+            });
+        }
+        let sources = self.reflection_source(zc)?;
+        let response = network_drive_sources_regional(
+            &self.network, media, omega, loss, &sources, &self.terminations, None,
+        )?;
+        self.reflected_wave(&response, zc)
+    }
+
+    /// [`Self::reflection_regional`] retaining every mutual term of the
+    /// declared coupled load and the original per-edge material records.
+    pub fn reflection_coupled_regional(
+        &self,
+        media: &NetworkMedia,
+        omega: f64,
+        loss: LossModel,
+        zc: f64,
+        coupled: &CoupledTermination,
+    ) -> Result<C64, DuctError> {
+        self.admit_coupled_labels(coupled)?;
+        let sources = self.reflection_source(zc)?;
+        let response = network_drive_sources_regional(
+            &self.network, media, omega, loss, &sources, &self.terminations, Some(coupled),
+        )?;
+        self.reflected_wave(&response, zc)
+    }
+
     /// Realize a static, regionally filled graph through the original causal
     /// response ladder. Each edge contributes its actual L/c to the longest
     /// shortest travel path; composition/temperature therefore change both the
@@ -76,11 +119,10 @@ impl NetworkDrivingPoint {
         }
         let geo_delay = self.regional_round_trip_seconds(media)? * f64::from(sample_rate_hz);
         let solve = |omega: f64| -> Result<C64, DuctError> {
-            let response = match coupled_at.as_mut() {
-                Some(source) => self.response_coupled_regional(media, omega, loss, &source(omega)?)?,
-                None => self.response_regional(media, omega, loss)?,
-            };
-            Ok(reflectance(response.impedance, zc))
+            match coupled_at.as_mut() {
+                Some(source) => self.reflection_coupled_regional(media, omega, loss, zc, &source(omega)?),
+                None => self.reflection_regional(media, omega, loss, zc),
+            }
         };
         realize_response_line(geo_delay, sample_rate_hz, zc, ladder, solve)
     }
