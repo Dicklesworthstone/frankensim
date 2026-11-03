@@ -12086,3 +12086,35 @@ under large reference shifts, shared three-port withdrawal, tiny signed drift
 and nonzero thermal tails, and endpoint/source/cancellation refusal. Source and
 fixture files passed Rustfmt parsing and bounded API review; native execution
 remains blocked by the missing constellation checkouts.
+
+### Reciprocal drifting streams on one shared molecular interface
+
+`species::effusion::drift::exchange::sample` samples both original gases once
+through the SAME qualified aperture in one declared translating control frame.
+Its normal points left to right; the original incidence owner uses the opposite
+normal for the left donor and that normal for the right donor. Separate gross
+species masses retain their complete conditional vector impulses and original
+crossing energies. No finite donor is replaced with a prescribed reservoir.
+
+The sampler also retains one signed species transfer and the two caloric rows
+relative to each gas's original partial enthalpy. A shared formation-independent
+energy coordinate and original enthalpy increment construct both rows before
+rounding; gross reference-energy reports are not subtracted for thermal closure.
+Near-rest signed drift increments remain separate from rounded gross masses;
+far-tail beams use their direct positive sampled incidence. Zero net mass does
+not discard counterflow momentum or energy.
+
+The consuming finite owner must admit BOTH original gross species withdrawals,
+transform the same stream impulse into its common inertial frame, account for
+actual bulk kinetic changes and publish both endpoints atomically. This sampler
+does not evolve gas, add thermalization heat, infer remaining-wall forces or
+supply flight/collection geometry between separated vessels. Its retained
+`admit_endpoints` operation checks both final source/drift states and reciprocal
+selected transmission support without sampling or spending a beam again.
+Zero area is inactive; finite frozen rates require time refinement.
+
+Focused original-source cases specify pressure moments at zero net mass,
+thermal/tangential energy and datum crosswalks, tiny signed drift and positive
+tails, orientation/scaling invariance and atomic source/cancellation refusal.
+Rustfmt parsing and direct API review are available; native compilation and
+execution remain blocked before Rust compilation by missing sibling manifests.

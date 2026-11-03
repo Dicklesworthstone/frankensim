@@ -20,6 +20,9 @@ use super::{
 use fs_math::dd::Dd;
 use fs_thermal::sublimation::molecular::drift::incident_maxwellian;
 
+/// Reciprocal finite molecular streams through one shared moving aperture.
+pub mod exchange;
+
 /// Additional authored support for drift through one original aperture law.
 ///
 /// The declaration must cover locally undisturbed Maxwellian incidence and

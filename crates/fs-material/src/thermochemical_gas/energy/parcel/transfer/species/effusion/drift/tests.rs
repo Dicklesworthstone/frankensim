@@ -1,4 +1,5 @@
 //! Synthetic original NASA/material sources exercise the aperture crosswalk.
+mod exchange;
 use super::*;
 use crate::thermochemical_gas::{
     ThermochemicalGasModel,
