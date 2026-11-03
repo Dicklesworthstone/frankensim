@@ -24,6 +24,10 @@ pub use payload::ShellRigidPayload;
 mod impulse;
 pub use impulse::{MovingShellImpulse, ShellPointImpulse};
 
+#[path = "moving_load/inverse_inertia.rs"]
+mod inverse_inertia;
+pub use inverse_inertia::ShellPointInverseInertia;
+
 /// A reference material location on one original triangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellLoadPoint {
@@ -265,26 +269,17 @@ impl MovingShellModel {
         self.check_field(displacement)?;
         self.check_field(velocity)?;
         let (nodes, reference_position_m) = self.point(point)?;
-        let (mut q, mut v) = ([0.0; 6], [0.0; 6]);
-        for (&node, &weight) in nodes.iter().zip(&point.barycentric) {
-            for axis in 0..6 {
-                if let Some(free) = self.free_index[6 * node + axis] {
-                    q[axis] += weight * displacement[free];
-                    v[axis] += weight * velocity[free];
-                } else if let Some(supports) = supports {
-                    q[axis] +=
-                        weight * self.support_value(6 * node + axis, &supports.displacement_m);
-                    v[axis] += weight * self.support_value(6 * node + axis, &supports.velocity_m_s);
-                }
-            }
-        }
+        let q = self.material_components(
+            point,
+            nodes,
+            displacement,
+            supports.map(|s| &s.displacement_m),
+        );
+        let v = self.material_components(point, nodes, velocity, supports.map(|s| &s.velocity_m_s));
         let rotation_rad = [q[3], q[4], q[5]];
         let angular_velocity_rad_s = [v[3], v[4], v[5]];
-        let displacement_m = add([q[0], q[1], q[2]], cross(rotation_rad, point.offset_m));
-        let velocity_m_s = add(
-            [v[0], v[1], v[2]],
-            cross(angular_velocity_rad_s, point.offset_m),
-        );
+        let displacement_m = [q[0], q[1], q[2]];
+        let velocity_m_s = [v[0], v[1], v[2]];
         let [a, b, c] = nodes.map(|i| self.plate.nodes[i].position_m);
         let normal = unit(cross(sub(b, a), sub(c, a)))?;
         let normal = unit(add(normal, cross(rotation_rad, normal)))?;
@@ -301,6 +296,33 @@ impl MovingShellModel {
             angular_velocity_rad_s,
             normal,
         })
+    }
+
+    // Exact material-point kinematics paired with project_components.
+    // Callers validate the original point, free field and prescribed values.
+    fn material_components(
+        &self,
+        point: ShellLoadPoint,
+        nodes: [usize; 3],
+        field: &[f64],
+        supports: Option<&[[f64; 3]; 3]>,
+    ) -> [f64; 6] {
+        let mut result = [0.0; 6];
+        for (&node, &weight) in nodes.iter().zip(&point.barycentric) {
+            for (axis, value) in result.iter_mut().enumerate() {
+                let row = 6 * node + axis;
+                if let Some(free) = self.free_index[row] {
+                    *value += weight * field[free];
+                } else if let Some(supports) = supports {
+                    *value += weight * self.support_value(row, supports);
+                }
+            }
+        }
+        let offset = cross([result[3], result[4], result[5]], point.offset_m);
+        for axis in 0..3 {
+            result[axis] += offset[axis];
+        }
+        result
     }
 
     /// Start at t=0 with the original free-DOF displacement and velocity. The

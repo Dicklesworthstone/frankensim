@@ -740,6 +740,37 @@ bare-shell and off-center anisotropic payload momentum/energy, driven-pin
 reaction/work, zero-free-impulse support events, unchanged force continuation,
 actual rounded increments, and atomic refusal/retry.
 
+### Coupled point inverse inertia
+
+`MovingShellMotion::point_inverse_inertia` prepares the complete physical
+`B M_ff^-1 B^T` response for an ordered material-point set using the retained
+native mass LU. Each point contributes six rows and columns: Cartesian linear
+then angular components. Linear/free-angular impulses in N s / N m s map to
+material/angular velocity increments in m/s / rad/s; the blocks therefore
+retain their mixed physical units. `ShellPointInverseInertia::apply` applies
+simultaneous impulses with every cross-point and offset coupling preserved.
+
+The original force/impulse transpose and a shared observation sampler own
+both maps. Finite payload inertia and prescribed-pin constraints stay in the
+original mass solve. Constrained or redundant directions remain singular;
+no response inversion, diagonal replacement, symmetrization or regularizing
+stiffness is introduced. Prescribed support velocities contribute no affine
+event increment. This is a linear response before accepted-velocity rounding;
+actual event admission and support impulse/work remain with `apply_impulses`.
+
+Checked dimensions and byte counts, the original point budget, and the
+original `max_matrix_entries` bound dense allocation. Preparation requires
+six native mass solves per point, with no new factorization. Callers can
+reuse the immutable operator while the model and material points remain
+fixed; it need not be rebuilt each step. Preparation, refusal and cancellation
+leave accepted motion, loads and support reactions untouched. The existing
+reference-frame, small-rotation scope and caller-owned contact law remain.
+
+G0/G1/G3/G4 tests in `tests/moving_load/inverse_inertia.rs` compare complete
+cross-point blocks against analytic nodal inertia, independently inventory
+payload work, check simultaneous physical events and reciprocity, and retain
+constrained/redundant null directions, dense budgets and cancellation purity.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,

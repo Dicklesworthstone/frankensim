@@ -1,4 +1,4 @@
-//! Instantaneous physical impulses on the original consistent-mass motion.
+//! Instantaneous physical impulses through the original full native inertia.
 //!
 //! Point kinematics, constrained membership and mass are unchanged. This is an
 //! event port for a caller-owned collision/actuator law, not a contact solver.
@@ -28,7 +28,8 @@ pub struct MovingShellImpulse {
     pub applied_impulse: ShellSpatialResultant,
     /// Impulse ON the shell from its original pinned support constraints.
     pub support_impulse: ShellSpatialResultant,
-    /// Actual consistent-mass velocity change, including attached payloads.
+    /// Momentum change from the actual velocity difference and full native mass,
+    /// including attached payloads.
     pub momentum_change: ShellSpatialResultant,
     /// Actual change minus applied and support impulses.
     pub momentum_residual: ShellSpatialResultant,

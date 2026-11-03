@@ -12,6 +12,9 @@ mod payload;
 #[path = "moving_load/impulse.rs"]
 mod impulse;
 
+#[path = "moving_load/inverse_inertia.rs"]
+mod inverse_inertia;
+
 fn plate() -> ShellPlate {
     ShellPlate {
         nodes: vec![
