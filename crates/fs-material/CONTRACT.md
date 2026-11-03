@@ -1,5 +1,51 @@
 # fs-material — CONTRACT
 
+## Continuous solution flow through retained sorbent populations
+
+`aqueous_adsorption::flow::AdsorptionCstr` advances one full, ideally mixed
+solution tank containing one to 128 retained dry sorbent populations. All
+populations share the actual dissolved inventory of one analytical element.
+The original `AqueousLangmuir` owner supplies equilibrium loading; a distinct
+`local-aqueous-langmuir-linear-driving-force` source supplies the inverse-second
+rate in `dA_i/dt=k_i*(M_i*q_eq(D/V)-A_i)`. The solution balance is
+`dD/dt=Q*(c_in-D/V)-sum(dA_i/dt)`. Each population retains its own original
+isotherm, rate, dry mass, loading and additional chemistry conditions. Batch
+age and residence-time correlations cannot silently supply a local rate.
+
+Piecewise-constant feed intervals retain the accepted dissolved, occupied and
+vacant stocks, elapsed time and cumulative inlet/outlet accounts. Loaded
+sorbents can desorb while another population adsorbs. With the pump stopped,
+sorption continues while inlet and outlet are exactly zero. Carbon remains
+retained; the solution outlet contains only the dissolved analytical element.
+
+Backward Euler reduces each implicit step to one monotone common-concentration
+balance. Occupied and vacant stocks use bounded convex updates without
+clipping. Outlet is independently integrated as `h*Q*D_new/V`, never supplied
+by closing the balance. Accepted states use two half steps; their comparison
+with a full step uses divisor one for this first-order method. The tolerance
+applies to each accepted local L1 stock/outlet comparison. Its accumulated
+estimate is reported separately and is not a certified global-error bound.
+Original source support is checked at every full- and half-step endpoint;
+this does not enclose the exact continuous trajectory. Step, scalar-root and
+population work are bounded. Any refusal or cancellation publishes no partial
+inventory, clock or cumulative account.
+
+Results expose original models and source points, signed interval/cumulative
+transfer, retained dissolved and sorbent stocks, independent outlet integration,
+interval/cumulative balance residuals and numerical work. Fixed liquid volume,
+temperature, dry masses and externally declared chemistry are explicit. The
+owner does not infer charged-complex removal, counterion transfer, simultaneous
+leaching, carbon movement, regeneration chemistry or plant calibration.
+
+Eight focused tests cover independent washout and finite-bath solutions,
+first-order refinement, stationary loading, heterogeneous retained populations,
+stops/restart and desorption, scaling/subdivision/order/continuation, trace
+stocks and atomic source/work/cancellation refusal. The
+`mineral_adsorption_flow` example runs four continued feed/stop/wash intervals
+and prints the complete metal accounts. Its coefficients are explicitly
+synthetic. Run with
+`cargo run -p fs-material --example mineral_adsorption_flow`.
+
 ## Finite-time aqueous adsorption with competing sorbent populations
 
 `aqueous_adsorption::kinetics::AdsorptionBatch` adds persistent reversible

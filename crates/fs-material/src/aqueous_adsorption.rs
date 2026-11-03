@@ -20,6 +20,10 @@
 #[path = "aqueous_adsorption/kinetics.rs"]
 pub mod kinetics;
 
+/// Finite-time sorption into retained populations with actual solution through-flow.
+#[path = "aqueous_adsorption/flow.rs"]
+pub mod flow;
+
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint};
 use fs_math::det;
 use fs_qty::{
