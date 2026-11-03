@@ -45,6 +45,15 @@ pub struct ContactEnthalpyStep {
     pub radiation_iterations: usize,
 }
 
+/// Prepared radiation is reused across contact responses. Pointwise emission
+/// remains inside each original enthalpy Newton solve, never a frozen load.
+#[derive(Clone, Copy)]
+enum FixedPointRadiation<'a, 'm> {
+    MeanAmbient(&'a [AmbientRadiationPatch], AmbientRadiationConfig),
+    PointwiseAmbient(&'a crate::PointwiseAmbientRadiation<'m>),
+    PointwiseEnclosure(&'a crate::PointwiseEnclosureRadiation<'m>),
+}
+
 /// Bounded coupled Newton work and independent physical enthalpy acceptance.
 #[derive(Debug, Clone, Copy)]
 pub struct ContactEnthalpyNewtonConfig {
@@ -299,7 +308,62 @@ impl TemperatureContacts<'_, '_> {
         radiation_config: AmbientRadiationConfig,
     ) -> Result<ContactEnthalpyStep, EnthalpyError> {
         self.advance_enthalpy_inner(cx, engine, problem, old_h, dt_s, step_config,
-            coupling, Some((patches, radiation_config)))
+            coupling, Some(FixedPointRadiation::MeanAmbient(patches, radiation_config)))
+    }
+
+    /// Compose source-surface contact resistance with original local P1
+    /// ambient radiation without requiring a contact-source derivative.
+    ///
+    /// Each contact response solves the complete nonlinear radiation/storage
+    /// problem from the same `old_h`. Only the contact query field is relaxed.
+    /// Acceptance re-queries contact at the unchanged candidate and evaluates
+    /// the full nodal joule residual and external heat with the same prepared
+    /// radiation owner. Prescribed-node storage belongs to the original bath
+    /// reaction exactly once. The owner must bind this exact mesh and boundary.
+    ///
+    /// All contact responses and their Newton/Krylov work are bounded and
+    /// counted. Pointwise radiation adds no outer radiation iterations or
+    /// secant boundary; its final report stays in `conduction`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_enthalpy_with_pointwise_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+        problem: ConductionProblem<'_>,
+        old_h: &[f64],
+        dt_s: f64,
+        step_config: EnthalpyStepConfig,
+        coupling: ContactIterationConfig,
+        radiation: &crate::PointwiseAmbientRadiation<'_>,
+    ) -> Result<ContactEnthalpyStep, EnthalpyError> {
+        self.advance_enthalpy_inner(cx, engine, problem, old_h, dt_s, step_config,
+            coupling, Some(FixedPointRadiation::PointwiseAmbient(radiation)))
+    }
+
+    /// Compose source-surface contact with the original pointwise closed or
+    /// open enclosure radiation owner. Local emission and reflected irradiation
+    /// remain inside each original enthalpy solve, with fixed view factors and
+    /// emissivity. Contact and closed-enclosure exchange are internal; only the
+    /// open environment contributes external radiative heat.
+    ///
+    /// The same immutable-history, prescribed-bath, full residual and work
+    /// requirements as the ambient pointwise entry apply. A zero total enclosure
+    /// heat cannot admit an unbalanced local nodal field. No source-surface
+    /// tangent, arbitrary-law convergence or trajectory derivative is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_enthalpy_with_pointwise_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+        problem: ConductionProblem<'_>,
+        old_h: &[f64],
+        dt_s: f64,
+        step_config: EnthalpyStepConfig,
+        coupling: ContactIterationConfig,
+        radiation: &crate::PointwiseEnclosureRadiation<'_>,
+    ) -> Result<ContactEnthalpyStep, EnthalpyError> {
+        self.advance_enthalpy_inner(cx, engine, problem, old_h, dt_s, step_config,
+            coupling, Some(FixedPointRadiation::PointwiseEnclosure(radiation)))
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -312,20 +376,20 @@ impl TemperatureContacts<'_, '_> {
         dt_s: f64,
         step_config: EnthalpyStepConfig,
         coupling: ContactIterationConfig,
-        radiation: Option<(&[AmbientRadiationPatch], AmbientRadiationConfig)>,
+        radiation: Option<FixedPointRadiation<'_, '_>>,
     ) -> Result<ContactEnthalpyStep, EnthalpyError> {
         poll(cx, 0)?;
         self.check_mesh(problem.mesh)?;
         step_config.newton.validate().map_err(EnthalpyError::Newton)?;
         let radiation_factor = match radiation {
-            Some((patches, config)) => {
+            Some(FixedPointRadiation::MeanAmbient(patches, config)) => {
                 config.validate()?;
                 if patches.is_empty() {
                     return Err(EnthalpyError::InvalidInput("contact radiation requires declared patches"));
                 }
                 config.max_iterations
             },
-            None => 1,
+            _ => 1,
         };
         let max_responses = coupling.max_iterations.checked_mul(radiation_factor)
             .ok_or(EnthalpyError::InvalidInput("contact radiation work allowance overflows"))?;
@@ -368,27 +432,44 @@ impl TemperatureContacts<'_, '_> {
         for iteration in 1..=coupling.max_iterations {
             poll(cx, iteration)?;
             let applied = self.evaluate(cx, problem.boundary, &guess)?;
-            let (solved, report, boundary, trial_newton, trial_krylov) = match radiation {
-                Some((patches, config)) => {
+            let (solved, report, boundary, work) = match radiation {
+                Some(FixedPointRadiation::MeanAmbient(patches, config)) => {
                     let response = engine.advance_with_ambient_radiation(cx, problem,
                         Some(applied.frozen_interfaces()), old_h, dt_s, step_config, patches, config)?;
                     radiation_iterations = radiation_iterations.checked_add(response.radiation.iterations)
                         .filter(|&n| n <= max_responses)
                         .ok_or(EnthalpyError::InvalidInput("contact radiation work exceeds allowance"))?;
                     let work = (response.radiation.solid_iterations, response.radiation.krylov_iterations);
-                    (response.conduction, Some(response.radiation), Some(response.combined_boundary), work.0, work.1)
+                    (response.conduction, Some(response.radiation), Some(response.combined_boundary), Some(work))
                 },
                 None => {
                     let solved = engine.advance(cx, problem, Some(applied.frozen_interfaces()),
                         old_h, dt_s, step_config)?;
+                    (solved, None, None, None)
+                },
+                Some(FixedPointRadiation::PointwiseAmbient(owner)) => {
+                    let solved = engine.advance_with_pointwise_ambient_radiation(
+                        cx, problem, Some(applied.frozen_interfaces()), old_h, dt_s, step_config, owner,
+                    )?;
+                    (solved, None, None, None)
+                },
+                Some(FixedPointRadiation::PointwiseEnclosure(owner)) => {
+                    let solved = engine.advance_with_pointwise_enclosure_radiation(
+                        cx, problem, Some(applied.frozen_interfaces()), old_h, dt_s, step_config, owner,
+                    )?;
+                    (solved, None, None, None)
+                },
+            };
+            let (trial_newton, trial_krylov) = match work {
+                Some(work) => work,
+                None => {
                     let mut work = 0usize;
                     for row in &solved.newton.history {
                         poll(cx, work)?;
                         work = work.checked_add(row.linear_iterations)
                             .ok_or(EnthalpyError::InvalidInput("contact enthalpy inner work overflows"))?;
                     }
-                    let iterations = solved.newton.iterations;
-                    (solved, None, None, iterations, work)
+                    (solved.newton.iterations, work)
                 },
             };
             newton = newton.checked_add(trial_newton)
@@ -398,10 +479,28 @@ impl TemperatureContacts<'_, '_> {
                 .filter(|&n| n <= max_krylov)
                 .ok_or(EnthalpyError::InvalidInput("contact enthalpy Krylov work exceeds allowance"))?;
             let actual = self.evaluate(cx, problem.boundary, &solved.temperature)?;
-            let physical = engine.evaluate_endpoint(
-                cx, problem, Some(actual.frozen_interfaces()), old_h,
-                &solved.specific_enthalpy_j_kg, dt_s, step_config, radiation.map(|(patches, _)| patches),
-            )?;
+            let physical = match radiation {
+                Some(FixedPointRadiation::PointwiseAmbient(owner)) => {
+                    engine.evaluate_endpoint_with_pointwise_ambient_radiation(
+                        cx, problem, Some(actual.frozen_interfaces()), old_h,
+                        &solved.specific_enthalpy_j_kg, dt_s, step_config, owner,
+                    )?
+                },
+                Some(FixedPointRadiation::PointwiseEnclosure(owner)) => {
+                    engine.evaluate_endpoint_with_pointwise_enclosure_radiation(
+                        cx, problem, Some(actual.frozen_interfaces()), old_h,
+                        &solved.specific_enthalpy_j_kg, dt_s, step_config, owner,
+                    )?
+                },
+                other => engine.evaluate_endpoint(
+                    cx, problem, Some(actual.frozen_interfaces()), old_h,
+                    &solved.specific_enthalpy_j_kg, dt_s, step_config,
+                    match other {
+                        Some(FixedPointRadiation::MeanAmbient(patches, _)) => Some(patches),
+                        _ => None,
+                    },
+                )?,
+            };
             poll(cx, iteration)?;
             last_residual = physical.residual_norm_j;
             if last_residual.is_finite() && last_residual <= coupling.residual_tolerance_j
@@ -639,3 +738,4 @@ impl TemperatureContacts<'_, '_> {
         Ok(ContactEnthalpyRadiationLinearization { step, contact })
     }
 }
+

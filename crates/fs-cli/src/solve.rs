@@ -281,7 +281,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// source-contact enthalpy owner, retaining its complete physical endpoint gates.
 /// Version 102 integrates source-surface enthalpy contact fixed points and
 /// prescribed-bath storage through the shared physical endpoint owner.
-pub const SOLVE_DRIVER_VERSION: u32 = 104;
+/// Version 105 composes source-surface contact fixed points with local ambient
+/// and enclosure radiation through prescribed, natural and transported-air heat.
+pub const SOLVE_DRIVER_VERSION: u32 = 105;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

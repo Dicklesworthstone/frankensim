@@ -1,4 +1,6 @@
 //! Independent simplex moments for one coupled contact/radiation enthalpy solve.
+#[path = "pointwise/surface.rs"]
+mod surface;
 use super::*;
 use fs_conduction::radiation::{GrayDiffuseEnclosure, RadiationSurface, ViewFactorMatrix};
 use fs_conduction::{
@@ -523,3 +525,4 @@ fn g4_coupled_pointwise_contact_refuses_wrong_binding_and_unsupported_surface_wi
         assert_eq!(old, TARGET_H);
     });
 }
+

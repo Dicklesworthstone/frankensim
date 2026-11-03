@@ -3274,9 +3274,10 @@ Contact response, Newton and Krylov counts include every discarded outer trial.
 The declared response factor expands the existing work budgets before marching;
 retained numerical histories still describe the final inner solve per endpoint.
 Latent heat remains in specific enthalpy, and contact heat remains internal.
-Pointwise radiation continues to require the admitted scalar/continuous-curve
-Newton tangent. Surface-law radiation, airflow feedback and trajectory
-derivatives remain explicitly unsupported by this CLI composition.
+Pointwise radiation uses the scalar/continuous-curve Newton tangent or the
+source-surface fixed point described under driver 105. The transported-air
+composition is described under driver 104. Surface-contact trajectory
+derivatives remain outside these forward compositions.
 
 The actual CLI regression cases cover source-surface latent-plateau exchange,
 curve/surface agreement at fixed pressure, scheduled bath jumps and all-trial
@@ -3294,16 +3295,18 @@ the existing bounded contact fixed point. Every nested response retains the
 original old specific enthalpy. After updating the natural coefficient from the
 candidate wall temperature, the driver re-queries contact at that unchanged
 candidate and checks its complete nodal joule residual and storage/heat balance
-under the updated physical boundary. Optional pointwise radiation retains its
-existing scalar/curve contact Newton owner and independent heat account.
+under the updated physical boundary. Optional pointwise radiation uses the
+shared contact response selected by source shape, with its independent heat
+account; driver 105 adds the source-surface fixed-point response.
 
 Contact heat stays internal, natural-reservoir heat leaves storage once, and
 latent fraction comes from primary specific enthalpy. Per-step contact evidence
 describes the final physical audit; response, Newton and Krylov totals include
 every discarded natural/contact trial. Admission expands the corresponding work
 caps before marching. Exact ambient equilibrium and out-of-domain natural cards
-retain their explicit refusals. Transported-air contact feedback, capacity-only
-natural/contact trajectories and contact history derivatives remain unsupported.
+retain their explicit refusals. Driver 104 adds transported-air contact
+feedback. Capacity-only natural/contact trajectories and contact history
+derivatives remain unsupported.
 
 Native regression cases cover curve/surface agreement, evolving latent fraction,
 independent natural heat and original-history energy accounting, source-domain
@@ -3318,7 +3321,8 @@ through the same nested natural/contact owner. Each seed audit, inner response
 and accepted physical audit retains the original old enthalpy and re-evaluates
 the pinned source contact at the actual candidate temperature. Scalar and curve
 Newton contacts also retain optional pointwise ambient/enclosure radiation;
-source surfaces retain the bounded contact fixed point without radiation.
+driver 105 extends that same radiation composition to source-surface fixed
+points.
 
 Acceptance checks the unchanged field at the updated air references and natural
 coefficients. The physical residual and storage/heat gate both pass, together
@@ -3331,7 +3335,36 @@ work caps include the full nesting. No extra uncounted endpoint solve is used.
 Inner contact fixed points tighten their own physical stopping gate alongside
 Newton tolerances so they can satisfy the outer convection allowance.
 
-Capacity-only contact with derived convection, surface-law contact with
-radiation, contact history derivatives, air storage and time-varying flow remain
-outside this composition. Focused native regression cases exercise these joined
+Capacity-only contact with derived convection, contact history derivatives,
+air storage and time-varying flow remain outside this composition. Focused native regression cases exercise these joined
 owners; their runtime execution still requires the full dependency build.
+
+### Source-surface contact with pointwise radiation — driver 105
+
+Source-backed resistance surfaces now use the original bounded contact fixed
+point with pointwise ambient, closed-enclosure or explicit-bath open-enclosure
+radiation. Scalar and continuous-curve sources retain complete contact Newton.
+All three radiation modes share the same response and receipt owner through
+prescribed boundaries, natural convection and transported-air feedback.
+
+Every contact response advances the same original old enthalpy. The original
+heterogeneous enthalpy Newton owner solves local radiation at the candidate
+field, then a fresh contact query supplies the complete nodal joule residual
+and independent storage/heat gate. Prescribed-node storage enters the reservoir
+reaction once. Internal contact and closed reflection are not external heat;
+ambient/open radiation stays separate from convection and actual air heat gain.
+
+Contact, Newton and Krylov totals include every discarded nested response.
+Pointwise radiation is part of the inner Newton solve rather than a separate
+radiation outer iteration; retained Newton history describes the final inner
+solve. The current tighter inner-contact gate is preserved under natural and
+transported-air feedback. No work cap or acceptance tolerance is relaxed.
+
+The new native endpoint regressions cover independent local radiation moments,
+closed/open reflection, nonuniform latent states, enthalpy datum shifts,
+prescribed bath jumps, late source refusal and retry. CLI regressions cover the
+three radiation modes, natural-convection composition and late source retry;
+these CLI cases are syntax-checked but their runtime execution is not claimed.
+This slice retains fixed reference geometry/mass, prescribed emissivities and
+view factors, and bounded source-support admission. It adds no source-surface
+contact tangent, trajectory adjoint or arbitrary fixed-point convergence claim.

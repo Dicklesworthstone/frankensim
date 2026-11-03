@@ -5,7 +5,7 @@ use fs_conduction::{
 };
 use fs_conduction::radiation::GrayDiffuseEnclosure;
 use fs_conduction::transient::enthalpy::EnthalpyEndpointEvaluation;
-use fs_conduction::interface::temperature::enthalpy::{ContactEnthalpyStep, ContactEnthalpyNewtonConfig};
+use fs_conduction::interface::temperature::enthalpy::ContactEnthalpyStep;
 use super::*;
 
 enum Owner<'a> {
@@ -87,14 +87,20 @@ impl<'a> Owner<'a> {
     fn advance_contact(
         &self, cx: &Cx<'_>, engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
         problem: ConductionProblem<'_>, contacts: &TemperatureContacts<'_, '_>,
-        old: &[f64], dt_s: f64, config: ContactEnthalpyNewtonConfig,
+        old: &[f64], dt_s: f64, config: contact::enthalpy::Config,
     ) -> Result<ContactEnthalpyStep, SolveRefusal> {
-        match self {
-            Self::Ambient(owner) => contacts.advance_enthalpy_newton_with_pointwise_ambient_radiation(
-                cx, engine, problem, old, dt_s, config, owner,
+        match (self, config.coupled_newton) {
+            (Self::Ambient(owner), true) => contacts.advance_enthalpy_newton_with_pointwise_ambient_radiation(
+                cx, engine, problem, old, dt_s, config.native, owner,
             ),
-            Self::Enclosure(owner) => contacts.advance_enthalpy_newton_with_pointwise_enclosure_radiation(
-                cx, engine, problem, old, dt_s, config, owner,
+            (Self::Enclosure(owner), true) => contacts.advance_enthalpy_newton_with_pointwise_enclosure_radiation(
+                cx, engine, problem, old, dt_s, config.native, owner,
+            ),
+            (Self::Ambient(owner), false) => contacts.advance_enthalpy_with_pointwise_ambient_radiation(
+                cx, engine, problem, old, dt_s, config.native.step, config.coupling(), owner,
+            ),
+            (Self::Enclosure(owner), false) => contacts.advance_enthalpy_with_pointwise_enclosure_radiation(
+                cx, engine, problem, old, dt_s, config.native.step, config.coupling(), owner,
             ),
         }.map_err(failed)
     }
@@ -104,7 +110,7 @@ impl<'a> Owner<'a> {
 pub(in crate::solve::transient) fn advance_contact(
     cx: &Cx<'_>, engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
     problem: ConductionProblem<'_>, contacts: &TemperatureContacts<'_, '_>,
-    old: &[f64], dt_s: f64, config: ContactEnthalpyNewtonConfig,
+    old: &[f64], dt_s: f64, config: contact::enthalpy::Config,
     lowering: &radiation::LoweredRadiation, enclosure: Option<&GrayDiffuseEnclosure>,
 ) -> Result<ContactEnthalpyStep, SolveRefusal> {
     Owner::new(cx, problem, lowering, enclosure)?
@@ -170,13 +176,26 @@ pub(in crate::solve::transient) fn receipt(
         count.checked_add(row.linear_iterations)
             .ok_or_else(|| bad("pointwise Newton Krylov work count overflows"))
     })?;
+    receipt_with_work(
+        endpoint, physical, lowering, threshold, 1, endpoint.newton.iterations, krylov_iterations,
+    )
+}
+
+/// The endpoint owns one retained Newton history; contact and convection may
+/// have discarded many other radiation-bearing solves before accepting it.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::solve::transient) fn receipt_with_work(
+    endpoint: &EnthalpyStepSolution, physical: &EnthalpyEndpointEvaluation,
+    lowering: &radiation::LoweredRadiation, threshold: f64,
+    solid_solves: usize, nonlinear_updates: usize, krylov_iterations: usize,
+) -> Result<String, SolveRefusal> {
     let exchange = radiation::pointwise_receipt(
         endpoint.pointwise_radiation.as_ref(), endpoint.pointwise_enclosure_radiation.as_ref(),
         lowering, physical.convective_out_w,
     )?;
     Ok(format!(
-        "{{\"model\":\"pointwise-p1\",\"solid_solves\":1,\"solid_iterations\":{},\"krylov_iterations\":{krylov_iterations},\"physical_residual_j\":{},\"physical_residual_threshold_j\":{},\"physical_energy_residual_j\":{},\"physical_dirichlet_in_w\":{},\"convective_out_w\":{},\"prescribed_neumann_out_w\":{},\"nonlinear_radiative_out_w\":{},\"exchange\":{exchange}}}",
-        endpoint.newton.iterations, number(physical.residual_norm_j)?, number(threshold)?,
+        "{{\"model\":\"pointwise-p1\",\"solid_solves\":{solid_solves},\"solid_iterations\":{nonlinear_updates},\"krylov_iterations\":{krylov_iterations},\"physical_residual_j\":{},\"physical_residual_threshold_j\":{},\"physical_energy_residual_j\":{},\"physical_dirichlet_in_w\":{},\"convective_out_w\":{},\"prescribed_neumann_out_w\":{},\"nonlinear_radiative_out_w\":{},\"exchange\":{exchange}}}",
+        number(physical.residual_norm_j)?, number(threshold)?,
         number(physical.energy_residual_j)?, number(physical.dirichlet_in_w)?,
         number(physical.convective_out_w)?, number(physical.neumann_out_w)?,
         number(physical.radiation_out_w)?,
@@ -193,3 +212,4 @@ pub(in crate::solve::transient) fn evaluate(
     Owner::new(cx, problem, lowering, enclosure)?
         .evaluate(cx, engine, problem, interfaces, old, candidate, dt_s, config)
 }
+

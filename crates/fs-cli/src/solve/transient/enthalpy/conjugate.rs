@@ -557,6 +557,7 @@ pub(super) fn advance(
         if let Some(lowering) = radiation {
             last.radiation_evidence = pointwise_contact_receipt(
                 &last.endpoint, &physical, lowering, physical_residual_tolerance_j,
+                radiation_trials, nonlinear_updates, krylov_iterations,
             )?;
             maximum_radiation_energy_residual_j = maximum_radiation_energy_residual_j
                 .max(physical.energy_residual_j.abs());

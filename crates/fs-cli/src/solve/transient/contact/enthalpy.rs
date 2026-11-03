@@ -33,6 +33,14 @@ impl Config {
         super::max_responses(self.coupled_newton)
     }
 
+    pub(in crate::solve::transient) fn coupling(self) -> ContactIterationConfig {
+        ContactIterationConfig {
+            max_iterations: self.max_responses(),
+            relaxation: 0.5,
+            residual_tolerance_j: self.native.residual_tolerance_j,
+        }
+    }
+
     fn method(self) -> &'static str {
         if self.coupled_newton {
             "source-backed-contact-enthalpy-newton"
@@ -47,7 +55,7 @@ impl Config {
     }
 }
 
-pub(in crate::solve::transient) const NO_CLAIM: &str = "Source-backed matching contact resistance from scalar or continuous linear source curves and primary specific enthalpy are solved in one native Newton/FGMRES system with the complete contact-temperature tangent and each regional phase chart's temperature response. Temperature-source surfaces instead use the existing bounded relaxed contact fixed point; every inner enthalpy solve keeps the original old state, and acceptance re-queries the source at the unchanged endpoint and checks the complete physical residual and energy balance. Response, Newton and Krylov counts include discarded contact trials. A successful fixed point does not establish arbitrary-law convergence or uniqueness. Every residual and rejected trial retains the same accepted old enthalpy. The unchanged accepted field passes a freshly queried full nodal joule-residual gate and a separate storage/heat energy gate. Contact flux is internal transfer; prescribed reservoir reactions include boundary-node storage once. All retained contact rows describe accepted physical endpoints under the originally pinned material claims. Both time grids retain every workload and prescribed-boundary switch. Explicit pointwise ambient, closed-enclosure and open-enclosure radiation use the original local-emission and reflected-irradiation owners inside that same Newton residual and tangent. Their actual endpoint heat shares the independent physical acceptance gates; closed exchange is internal and open-environment heat is counted once. Natural convection encloses these contact-aware enthalpy responses, re-queries the original card at the candidate wall temperature, and rechecks the unchanged endpoint with both its fresh contact law and updated physical convection coefficient. Quasi-steady transported-air callbacks use the same contact-aware responses, including nested natural convection on separate targets. The unchanged endpoint passes fresh contact, updated-air-reference, physical residual and actual-air energy gates. Only forced convection heats transported air; natural reservoirs and radiation retain separate heat accounts. All nested response, Newton and Krylov work is counted. Pressure, geometry, source support, view factors and reference mass are fixed. Surface-law contacts combined with radiation, patch-mean radiation, phase-dependent contact resistance, contact trajectory derivatives, arbitrary-law convergence and continuum bounds are not inferred.";
+pub(in crate::solve::transient) const NO_CLAIM: &str = "Source-backed matching contact resistance from scalar or continuous linear source curves and primary specific enthalpy are solved in one native Newton/FGMRES system with the complete contact-temperature tangent and each regional phase chart's temperature response. Temperature-source surfaces instead use the existing bounded relaxed contact fixed point; every inner enthalpy solve keeps the original old state, and acceptance re-queries the source at the unchanged endpoint and checks the complete physical residual and energy balance. Response, Newton and Krylov counts include discarded contact trials. A successful fixed point does not establish arbitrary-law convergence or uniqueness. Every residual and rejected trial retains the same accepted old enthalpy. The unchanged accepted field passes a freshly queried full nodal joule-residual gate and a separate storage/heat energy gate. Contact flux is internal transfer; prescribed reservoir reactions include boundary-node storage once. All retained contact rows describe accepted physical endpoints under the originally pinned material claims. Both time grids retain every workload and prescribed-boundary switch. Explicit pointwise ambient, closed-enclosure and open-enclosure radiation use the original local-emission and reflected-irradiation owners inside every inner enthalpy Newton residual and tangent, including every source-surface contact response. Their actual endpoint heat shares the independent physical acceptance gates; closed exchange is internal and open-environment heat is counted once. Natural convection encloses these contact-aware enthalpy responses, re-queries the original card at the candidate wall temperature, and rechecks the unchanged endpoint with both its fresh contact law and updated physical convection coefficient. Quasi-steady transported-air callbacks use the same contact-aware responses, including nested natural convection on separate targets. The unchanged endpoint passes fresh contact, updated-air-reference, physical residual and actual-air energy gates. Only forced convection heats transported air; natural reservoirs and radiation retain separate heat accounts. All nested response, Newton and Krylov work is counted. Pressure, geometry, source support, view factors and reference mass are fixed. Patch-mean radiation, phase-dependent contact resistance, contact trajectory derivatives, arbitrary-law convergence and continuum bounds are not inferred.";
 
 pub(in crate::solve::transient) struct Step {
     pub(in crate::solve::transient) conduction: EnthalpyStepSolution,
@@ -200,23 +208,16 @@ pub(in crate::solve::transient) fn advance(
 ) -> Result<Step, SolveRefusal> {
     poll(cx, deadline)?;
     let accepted = match (config.coupled_newton, radiation) {
-        (true, Some(lowering)) => advance_pointwise_contact(
-            cx, engine, problem, contacts, old_h, dt_s, config.native, lowering, enclosure,
+        (_, Some(lowering)) => advance_pointwise_contact(
+            cx, engine, problem, contacts, old_h, dt_s, config, lowering, enclosure,
         )?,
         (true, None) => contacts.advance_enthalpy_newton(
             cx, engine, problem, old_h, dt_s, config.native,
         ).map_err(failed)?,
         (false, None) => contacts.advance_enthalpy(
             cx, engine, problem, old_h, dt_s, config.native.step,
-            ContactIterationConfig {
-                max_iterations: config.max_responses(),
-                relaxation: 0.5,
-                residual_tolerance_j: config.native.residual_tolerance_j,
-            },
+            config.coupling(),
         ).map_err(failed)?,
-        (false, Some(_)) => return Err(bad(
-            "surface-law enthalpy contact cannot use the pointwise-radiation Newton path",
-        )),
     };
     poll(cx, deadline)?;
     let receipt = step_receipt(
@@ -226,6 +227,7 @@ pub(in crate::solve::transient) fn advance(
     )?;
     let radiation_receipt = radiation.map(|lowering| pointwise_contact_receipt(
         &accepted.conduction, &accepted.physical, lowering, config.native.residual_tolerance_j,
+        accepted.iterations, accepted.nonlinear_iterations, accepted.krylov_iterations,
     )).transpose()?;
     let mut conduction = accepted.conduction;
     // Publish the fresh accepted physical operator and heat reactions. Newton

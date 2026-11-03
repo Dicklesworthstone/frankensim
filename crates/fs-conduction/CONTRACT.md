@@ -3883,3 +3883,32 @@ mass, tetrahedral stiffness and consistent triangular contact blocks. Separate
 regressions retain the independent spatial-melting roots and verify latent-bath,
 work-limit and cancellation refusals. These prove the bounded discrete model;
 they do not establish arbitrary source-surface convergence or continuum error.
+
+## Pointwise radiation inside source-backed enthalpy contact fixed points
+
+`TemperatureContacts::advance_enthalpy_with_pointwise_ambient_radiation` and
+`advance_enthalpy_with_pointwise_enclosure_radiation` compose the existing
+source-contact fixed point with the original local ambient and closed/open
+enclosure owners. Each contact response passes the same accepted old specific
+enthalpy to heterogeneous enthalpy Newton. Radiation is solved at that response's
+actual local field, without replacing simplex emission by mean temperature.
+
+A fresh source query at the candidate produces the physical contact operator.
+Acceptance requires both its complete nodal joule residual and the independent
+storage/heat balance. Prescribed-temperature storage enters the reservoir
+reaction exactly once. Internal contact and closed reflection cancel globally;
+ambient or explicit open-bath radiation remains separately accounted external
+heat. Global cancellation cannot excuse a failed local residual.
+
+Response, Newton and Krylov counts retain all discarded contact trials.
+Pointwise radiation contributes to the inner Newton work, with zero separate
+outer radiation iterations; retained Newton history belongs to the final inner
+solve. Owner mismatch, late source-domain exit, cancellation and exhausted work
+return no accepted endpoint and preserve the caller's old history.
+
+Four native regressions use independent simplex emission/radiosity and
+manufactured transport equations to check local latent states, datum shifts,
+closed/open heat, both prescribed-bath jump directions and refusal/retry.
+The interface retains fixed reference mass/geometry and the prepared owner's
+emissivities/view factors. It adds neither a surface-contact tangent nor a
+convergence guarantee for arbitrary resistance surfaces.

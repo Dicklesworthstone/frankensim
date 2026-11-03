@@ -6,6 +6,8 @@ use super::*;
 mod convection;
 #[path = "enthalpy/airflow.rs"]
 mod airflow;
+#[path = "enthalpy/surface_radiation.rs"]
+mod surface_radiation;
 use fs_project::{
     ConductionEnclosure, ConductionTransient, EnclosureRadiatingSurface,
     EnclosureViewFactorEvidence, RadiationSpatialModel, ThermalBoundaryCondition,
@@ -107,23 +109,12 @@ fn fixture(horizon: f64, max_step: f64) -> Fixture {
 }
 
 fn receipt(f: &Fixture, ordinal: usize) -> (J, J) {
-    let (source, contact, ledger) = prepare(f, ordinal, None);
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = fs_cli::run(vec![
-        "--json".into(),
-        "solve".into(),
-        source.to_str().unwrap().into(),
-        ledger.to_str().unwrap().into(),
-        "--materials".into(),
-        f.dir.join("solid.fsmcdpk").to_str().unwrap().into(),
-        "--materials".into(),
-        root.join("data/reference-project/gray-surface.fsmcdpk")
-            .to_str()
-            .unwrap()
-            .into(),
-        "--interfaces".into(),
-        contact.to_str().unwrap().into(),
-    ]);
+    receipt_with_pack(f, ordinal, temperature_pack())
+}
+
+fn receipt_with_pack(f: &Fixture, ordinal: usize, pack: (Vec<u8>, String, String)) -> (J, J) {
+    let (source, contact, ledger) = prepare_with_pack(f, ordinal, None, pack);
+    let output = run_with_radiation_pack(f, &source, &contact, &ledger);
     assert_eq!(
         output.exit_code,
         fs_cli::exit::SUCCESS,
@@ -144,6 +135,25 @@ fn receipt(f: &Fixture, ordinal: usize) -> (J, J) {
     let conduction = artifact(&ledger, stage.str_field("receipt").unwrap());
     let field = artifact(&ledger, conduction.str_field("solution_artifact").unwrap());
     (conduction, field)
+}
+
+fn run_with_radiation_pack(f: &Fixture, source: &Path, contact: &Path, ledger: &Path) -> fs_cli::CommandOutput {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fs_cli::run(vec![
+        "--json".into(),
+        "solve".into(),
+        source.to_str().unwrap().into(),
+        ledger.to_str().unwrap().into(),
+        "--materials".into(),
+        f.dir.join("solid.fsmcdpk").to_str().unwrap().into(),
+        "--materials".into(),
+        root.join("data/reference-project/gray-surface.fsmcdpk")
+            .to_str()
+            .unwrap()
+            .into(),
+        "--interfaces".into(),
+        contact.to_str().unwrap().into(),
+    ])
 }
 
 fn audit_contact(time: &J) {
