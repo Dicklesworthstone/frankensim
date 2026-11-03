@@ -20,8 +20,8 @@ use crate::articulated::{ArticulatedModel, Kinematics};
 /// Accepted supported motion and original finite-attachment energy accounts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrescribedSpatialMotionStep {
-    /// Native supported trajectory, including actuator, external, internal and
-    /// support work. Connection forces enter both dynamics and support recovery.
+    /// Native supported trajectory, including actuator, external, internal,
+    /// constraint and support work. Connections enter dynamics and support recovery.
     pub motion: PrescribedBaseMotionStep,
     /// Original axial and bushing spring storage at the supplied state, in joules.
     pub stored_energy_before: f64,
@@ -33,8 +33,8 @@ pub struct PrescribedSpatialMotionStep {
     /// Internal connection work + actual storage change + damping loss.
     /// This discretization defect is not an additional source of heat.
     pub connection_work_residual: f64,
-    /// Kinetic + connection storage change + loss, minus actuator, external
-    /// and prescribed-support work. This is a numerical balance diagnostic.
+    /// Kinetic + connection storage change + loss, minus actuator, external,
+    /// constraint and prescribed-support work; a numerical balance diagnostic.
     pub mechanical_work_residual: f64,
 }
 

@@ -16,10 +16,10 @@ use super::{
     generalized_momentum, parameter_work, raw_momentum_candidate, state_kinematics,
     transfer_inertia, validate_compatible_models,
 };
-use crate::articulated::motion::FreeFloatingMotionState;
+use crate::articulated::motion::{FreeFloatingMotionState, MAX_FREE_FLOATING_STEP_LINKS};
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, free_floating_impulse_delta,
-    momentum_from_kinematics, validate_slice, validate_twist,
+    momentum_from_kinematics, prescribed_base_impulse_delta, validate_slice, validate_twist,
 };
 use core::fmt;
 use fs_ga::{Twist, Wrench};
@@ -405,7 +405,9 @@ pub(in crate::articulated::motion) fn validate_controls(
     validate_condition_floor(controls.minimum_reciprocal_condition)
 }
 
-fn validate_condition_floor(minimum: f64) -> Result<(), ConstraintError> {
+pub(in crate::articulated::motion) fn validate_condition_floor(
+    minimum: f64,
+) -> Result<(), ConstraintError> {
     if !minimum.is_finite() || !(4096.0 * f64::EPSILON..=1.0).contains(&minimum) {
         return Err(ConstraintError::Invalid("reciprocal-condition floor"));
     }
@@ -526,6 +528,12 @@ pub(in crate::articulated::motion) fn admit_constraints(
     Ok(ConstraintResiduals { position, velocity })
 }
 
+#[derive(Clone, Copy)]
+enum ConstraintBoundary {
+    Free,
+    PrescribedTrial,
+}
+
 struct VelocityColumn {
     base: Twist,
     joint: Vec<f64>,
@@ -557,9 +565,60 @@ impl<'a> PreparedJointConstraints<'a> {
         minimum_reciprocal_condition: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConstraintError> {
+        Self::for_boundary(
+            model,
+            joint_position,
+            rows,
+            minimum_reciprocal_condition,
+            ConstraintBoundary::Free,
+            cancelled,
+        )
+    }
+
+    /// Constant rows remain meaningful away from their affine manifold during
+    /// nonlinear probes. Actual initial and accepted states are admitted by the
+    /// constrained motion owner. Native joint configuration limits still apply.
+    pub(in crate::articulated::motion) fn prescribed_trial(
+        model: &ArticulatedModel,
+        joint_position: &[f64],
+        rows: &'a [JointConstraint],
+        minimum_reciprocal_condition: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConstraintError> {
+        Self::for_boundary(
+            model,
+            joint_position,
+            rows,
+            minimum_reciprocal_condition,
+            ConstraintBoundary::PrescribedTrial,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn for_boundary(
+        model: &ArticulatedModel,
+        joint_position: &[f64],
+        rows: &'a [JointConstraint],
+        minimum_reciprocal_condition: f64,
+        boundary: ConstraintBoundary,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConstraintError> {
         poll(cancelled)?;
         validate_condition_floor(minimum_reciprocal_condition)?;
-        validate_compatible_models(model, model)?;
+        match boundary {
+            ConstraintBoundary::Free => validate_compatible_models(model, model)?,
+            ConstraintBoundary::PrescribedTrial => {
+                if model.link_count() > MAX_FREE_FLOATING_STEP_LINKS {
+                    return Err(ReconfigurationError::TooManyLinks {
+                        got: model.link_count(),
+                        maximum: MAX_FREE_FLOATING_STEP_LINKS,
+                    }
+                    .into());
+                }
+                model.validate_configuration(joint_position)?;
+            }
+        }
         let joints = model.dof_count();
         if joint_position.len() != joints {
             return Err(ConstraintError::Invalid(
@@ -567,7 +626,9 @@ impl<'a> PreparedJointConstraints<'a> {
             ));
         }
         validate_rows(rows, joints, cancelled)?;
-        admit_positions(rows, joint_position, cancelled)?;
+        if matches!(boundary, ConstraintBoundary::Free) {
+            admit_positions(rows, joint_position, cancelled)?;
+        }
         let n = rows.len();
         let mut factor = LuWorkspace::new(n)?;
         if n == 0 {
@@ -586,12 +647,23 @@ impl<'a> PreparedJointConstraints<'a> {
         let zero_body_impulses = vec![Wrench::default(); model.link_count()];
         for (column, constraint) in rows.iter().enumerate() {
             poll(cancelled)?;
-            let delta = free_floating_impulse_delta(
-                model,
-                joint_position,
-                &constraint.coefficients,
-                &zero_body_impulses,
-            )?;
+            let delta = match boundary {
+                ConstraintBoundary::Free => free_floating_impulse_delta(
+                    model,
+                    joint_position,
+                    &constraint.coefficients,
+                    &zero_body_impulses,
+                )?,
+                ConstraintBoundary::PrescribedTrial => {
+                    prescribed_base_impulse_delta(
+                        model,
+                        joint_position,
+                        &constraint.coefficients,
+                        &zero_body_impulses,
+                    )?
+                    .velocity
+                }
+            };
             poll(cancelled)?;
             let action = apply_rows(rows, &delta.joint, cancelled)?;
             for (row, value) in action.into_iter().enumerate() {

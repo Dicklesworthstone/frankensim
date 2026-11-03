@@ -4866,3 +4866,43 @@ a branched tree, world-frame/inertial-boost covariance, exact passive parity,
 source-work refusal, cancellation and actual speed-limit refusal. The full
 focused inventory run passes 24 cases: these six plus four supported passive
 release, eight supported capture, three free capture and three free release.
+
+## Constant gear and lock constraints in supported implicit motion
+
+`articulated::motion::spatial_loads::prescribed::implicit::constraints`
+connects the original affine `JointConstraint` rows to supported implicit
+midpoint motion. World and axial loads, diagonal/full passive 6x6 bushings,
+and smooth actuator feedback share one actual stage. Each row is constant
+`A q = b`, with tangent condition `A qdot = 0`; the native prescribed-base ABA
+acceleration receives the ideal reaction from
+`(A M^-1 A^T) lambda = -A a_free`.
+
+The original prepared constraint owner now shares its normalized row-space
+factorization between free and prescribed boundaries. Prescribed trial columns
+use the raw native inverse-mass response, so numerical unit probes are not
+mistaken for physical velocity-limit violations. The bounded row mobility is
+the only dense matrix; no generalized mass matrix or substitute dynamics is
+introduced. Caller feedback and spatial laws are evaluated once per residual,
+before the native reaction, with genuine effort limits still enforced.
+
+Original RNEA recovers support force and torque from the completed acceleration.
+The common supported motion receipt now carries separate signed
+`constraint_work`, zero for unconstrained paths. It is subtracted in the physical
+work balance independently of actuator work, support work, passive storage and
+damping loss. An explicit absolute reaction-work budget admits any finite
+nonzero tangency defect; such work is never hidden in heat or caller actuation.
+Initial, accepted midpoint and endpoint affine/tangent residuals must all meet
+the original row tolerances. Numerical derivative probes may lie off the
+manifold; no clipping or state projection is applied. Empty rows retain exact
+original implicit behavior.
+
+Eight new cases check independently reduced geared-rotor inertia and signed
+rotating-support work, a coupled translating/rotating rack with full K/C and
+feedback, one feedback call per residual, exact diagonal/full parity, a scalar
+root lock whose reaction exceeds the motor rating, large virtual response
+columns with small real speed limits, row-scaling equivalence, separate finite
+reaction work, rank/configuration/tangency refusal, physical endpoint limits
+and cancellation. All eight and 39 affected original regressions pass. This
+owner covers constant affine gears/locks; activation impulses, backlash,
+varying ratios, nonlinear point loops and general nonholonomic constraints
+remain separate work. Original midpoint phase and geometric limits remain.

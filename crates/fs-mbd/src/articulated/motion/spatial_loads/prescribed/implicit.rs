@@ -11,6 +11,9 @@
 //! base samples must describe one smooth physical path; no derivative
 //! consistency, continuous-path admission, rigid closure or contact is inferred.
 
+/// Constant affine joint locks and gear relations on the same implicit stage.
+pub mod constraints;
+
 use super::super::SpatialMotionLoads;
 use super::super::bushing::{self, BushingLaw, SpatialBushing};
 pub use super::super::implicit::ImplicitSpatialConfig;
@@ -20,11 +23,13 @@ use crate::articulated::motion::prescribed::{
     EffortLaw, PrescribedBaseMotionError, PrescribedBaseMotionState, PrescribedBasePath,
     PrescribedMidpoint, admit_stage, advance, finish_step, poll, prepare_step,
 };
+use crate::articulated::motion::reconfigure::constraints::ConstraintError;
 use crate::articulated::motion::{FreeFloatingMotionError, sum_products};
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, JointKind, forward_dynamics, forward_kinematics,
     validate_slice,
 };
+use fs_math::dd::Dd;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::nonlinear::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport};
 use std::cell::{Cell, RefCell};
@@ -54,6 +59,8 @@ pub enum ImplicitPrescribedSpatialError {
     Invalid(&'static str),
     /// Original supported dynamics, load, geometry, clock or cancellation refusal.
     Motion(PrescribedBaseMotionError),
+    /// Original affine joint-row admission, mobility, reaction or work refusal.
+    Constraint(ConstraintError),
     /// Residual work was exhausted, including on independent final verification.
     EvaluationBudget {
         /// Residual evaluations already consumed.
@@ -80,6 +87,11 @@ impl std::error::Error for ImplicitPrescribedSpatialError {}
 impl From<PrescribedBaseMotionError> for ImplicitPrescribedSpatialError {
     fn from(value: PrescribedBaseMotionError) -> Self {
         Self::Motion(value)
+    }
+}
+impl From<ConstraintError> for ImplicitPrescribedSpatialError {
+    fn from(value: ConstraintError) -> Self {
+        Self::Constraint(value)
     }
 }
 impl From<ArticulatedError> for ImplicitPrescribedSpatialError {
@@ -237,6 +249,33 @@ pub(in crate::articulated::motion::spatial_loads) fn step_with_bushings_and_effo
     duration: f64,
     config: ImplicitSpatialConfig,
     effort: Option<&mut EffortLaw<'_>>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitPrescribedSpatialStep, ImplicitPrescribedSpatialError> {
+    step_with_bushings_effort_and_reaction(
+        model, state, path, loads, bushings, duration, config, effort, None, cancelled,
+    )
+}
+
+/// Additional native joint acceleration and its separately owned physical power.
+/// Caller efforts and their native effort admission are never replaced or widened.
+type ReactionLaw<'a> = dyn FnMut(
+        &PrescribedBaseMotionState,
+        &mut [f64],
+        &mut dyn FnMut() -> bool,
+    ) -> Result<Dd, ImplicitPrescribedSpatialError>
+    + 'a;
+
+#[allow(clippy::too_many_arguments)]
+fn step_with_bushings_effort_and_reaction<B: BushingLaw>(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    effort: Option<&mut EffortLaw<'_>>,
+    reaction: Option<&mut ReactionLaw<'_>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ImplicitPrescribedSpatialStep, ImplicitPrescribedSpatialError> {
     poll(&mut cancelled)?;
@@ -288,6 +327,7 @@ pub(in crate::articulated::motion::spatial_loads) fn step_with_bushings_and_effo
         Vec::new()
     };
     let effort = RefCell::new((effort, effort_values));
+    let reaction = RefCell::new(reaction);
     let evaluate_stage = |x: &[f64]| {
         let mut cancel = cancelled.borrow_mut();
         poll(&mut *cancel)?;
@@ -302,7 +342,8 @@ pub(in crate::articulated::motion::spatial_loads) fn step_with_bushings_and_effo
         let mut effort = effort.borrow_mut();
         let (law, values) = &mut *effort;
         let stage_effort = law.as_deref_mut().map(|law| (law, values.as_mut_slice()));
-        equations.evaluate(x, stage_effort, &mut *cancel)
+        let mut reaction = reaction.borrow_mut();
+        equations.evaluate(x, stage_effort, reaction.as_deref_mut(), &mut *cancel)
     };
     let (solution, mut report) = if n == 0 {
         // All-fixed supported trees still evaluate the actual loads and native
@@ -413,6 +454,7 @@ impl<'a, B: BushingLaw> MidpointEquations<'a, B> {
         &self,
         x: &[f64],
         effort: Option<(&mut EffortLaw<'_>, &mut [f64])>,
+        reaction: Option<&mut ReactionLaw<'_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MidpointEvaluation<'a>, ImplicitPrescribedSpatialError> {
         if x.len() != self.scales.len() {
@@ -458,7 +500,7 @@ impl<'a, B: BushingLaw> MidpointEquations<'a, B> {
         } else {
             self.loads.held.generalized_force
         };
-        let dynamics = forward_dynamics(
+        let mut dynamics = forward_dynamics(
             self.model,
             state.base,
             &state.joint_position,
@@ -468,6 +510,17 @@ impl<'a, B: BushingLaw> MidpointEquations<'a, B> {
             &load.body_wrench,
         )?;
         poll(cancelled)?;
+        let constraint_power = if let Some(law) = reaction {
+            let power = law(&state, &mut dynamics.generalized_acceleration, cancelled)?;
+            poll(cancelled)?;
+            validate_slice(
+                &dynamics.generalized_acceleration,
+                "implicit_prescribed.constrained_acceleration",
+            )?;
+            power
+        } else {
+            Dd::ZERO
+        };
         let residual: Vec<_> = state
             .joint_velocity
             .iter()
@@ -482,8 +535,8 @@ impl<'a, B: BushingLaw> MidpointEquations<'a, B> {
             state.joint_velocity.iter().copied(),
         );
         validate_slice(
-            &[actuator_power.to_f64()],
-            "implicit_prescribed.actuator_power",
+            &[actuator_power.to_f64(), constraint_power.to_f64()],
+            "implicit_prescribed.stage_power",
         )?;
         poll(cancelled)?;
         Ok(MidpointEvaluation {
@@ -493,6 +546,7 @@ impl<'a, B: BushingLaw> MidpointEquations<'a, B> {
                 load,
                 generalized_acceleration: dynamics.generalized_acceleration,
                 actuator_power,
+                constraint_power,
             },
             residual,
         })

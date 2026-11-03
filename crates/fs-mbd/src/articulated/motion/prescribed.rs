@@ -112,6 +112,9 @@ pub struct PrescribedBaseMotionStep {
     pub support_work: f64,
     /// Midpoint effort times relative joint rate, integrated over the step, J.
     pub actuator_work: f64,
+    /// Midpoint ideal joint-reaction work, J; zero without a constrained owner.
+    /// Finite admitted tangency defects retain their signed work, never heat.
+    pub constraint_work: f64,
     /// Midpoint external body-wrench work plus uniform-gravity work, J.
     /// Internal finite connections and the support are excluded.
     pub external_work: f64,
@@ -120,7 +123,7 @@ pub struct PrescribedBaseMotionStep {
     pub gravity_work: f64,
     /// Midpoint internal spatial-connection work, J; zero for held loads alone.
     pub internal_body_work: f64,
-    /// Kinetic change minus actuator, support, external and internal work, J.
+    /// Kinetic change minus actuator, support, external, internal and joint-reaction work, J.
     /// A diagnostic of integration/path error, not dissipation or a bound.
     pub kinetic_work_residual: f64,
 }
@@ -285,6 +288,7 @@ pub(super) struct PrescribedMidpoint<'a> {
     pub(super) load: PrescribedStage<'a>,
     pub(super) generalized_acceleration: Vec<f64>,
     pub(super) actuator_power: Dd,
+    pub(super) constraint_power: Dd,
 }
 
 /// Common admission and original initial momentum for both midpoint lanes.
@@ -443,6 +447,7 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
             load: midpoint_load,
             generalized_acceleration: midpoint_dynamics.generalized_acceleration,
             actuator_power,
+            constraint_power: Dd::ZERO,
         },
         cancelled,
     )
@@ -474,6 +479,7 @@ pub(super) fn finish_step(
         load: midpoint_load,
         generalized_acceleration,
         actuator_power,
+        constraint_power,
     } = midpoint;
     let inverse = inverse_dynamics(
         model,
@@ -557,17 +563,23 @@ pub(super) fn finish_step(
     );
     let dt = Dd::from_f64(duration);
     let actuator_work = dt * actuator_power;
+    let constraint_work = dt * constraint_power;
     let support_work = dt * support_power;
     let external_work = dt * Dd::from_f64(midpoint_load.external_power) + gravity_work;
     let internal_body_work = dt * Dd::from_f64(midpoint_load.internal_power);
     let dissipated_energy = dt * Dd::from_f64(midpoint_load.dissipation_power);
-    let residual =
-        kinetic_change - actuator_work - support_work - external_work - internal_body_work;
+    let residual = kinetic_change
+        - actuator_work
+        - constraint_work
+        - support_work
+        - external_work
+        - internal_body_work;
     validate_slice(
         &[
             kinetic_change.to_f64(),
             gravity_work.to_f64(),
             actuator_work.to_f64(),
+            constraint_work.to_f64(),
             support_power.to_f64(),
             support_work.to_f64(),
             external_work.to_f64(),
@@ -599,6 +611,7 @@ pub(super) fn finish_step(
             support_power: support_power.to_f64(),
             support_work: support_work.to_f64(),
             actuator_work: actuator_work.to_f64(),
+            constraint_work: constraint_work.to_f64(),
             external_work: external_work.to_f64(),
             gravity_work: gravity_work.to_f64(),
             internal_body_work: internal_body_work.to_f64(),
