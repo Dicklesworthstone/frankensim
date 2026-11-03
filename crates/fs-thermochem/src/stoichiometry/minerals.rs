@@ -14,6 +14,13 @@
 //! Distinct bicarbonate endpoints follow USGS WRIR 95-4097, equations 4-5:
 //! <https://pubs.usgs.gov/wri/1995/4097/report.pdf>. A carbonate's acid capacity
 //! is therefore endpoint-dependent, not a universal measured ore property.
+//! The NBS carbonate dissociations use the source's formal H2CO3 component,
+//! explicitly equivalent to CO2(ao) + H2O(l), and individual HCO3-/CO3(2-) ions:
+//! <https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf>, printed pages 2-83 to 2-84;
+//! corrected data <https://doi.org/10.18434/M32124>. This component carries one
+//! water formula unit; it is not independently resolved hydrated carbonic acid.
+//! Its source qualifier must be retained, and no separate hydration equilibrium
+//! or gas-transfer law is introduced by these two acid/base equations.
 //! Lime hydration is CaO + H2O -> Ca(OH)2; source-bound formation enthalpies
 //! are supplied separately. Hydrated-lime neutralization follows the EPA acid
 //! mine drainage design manual:
@@ -140,6 +147,12 @@ pub enum MineralReaction {
     /// H2O(l) -> H+(aq) + OH[-](aq).
     /// Standard water dissociation; activity laws and equilibrium remain explicit.
     WaterDissociation,
+    /// H2CO3(aq, formal CO2+H2O component) -> H+(aq) + HCO3[-](aq).
+    /// Requires the source's explicit component basis, not true H2CO3 hydration.
+    CarbonicComponentDissociation,
+    /// HCO3[-](aq) -> H+(aq) + CO3[2-](aq).
+    /// Second carbonate-family proton step; no mineral precipitation is implied.
+    BicarbonateDissociation,
     /// 2 FeS2(s) + 7 O2(g) + 2 H2O(l) -> 2 Fe2+ + 4 SO4(2-) + 4 H+.
     PyriteOxidationFerrous,
     /// 4 Fe2+(aq) + O2(g) + 4 H+(aq) -> 4 Fe3+(aq) + 2 H2O(l).
@@ -363,6 +376,24 @@ impl MineralReaction {
                     ("H2O(l)", &[2, 1], 0, -1),
                     ("H+(aq)", &[1, 0], 1, 1),
                     ("OH[-](aq)", &[1, 1], -1, 1),
+                ],
+            ),
+            Self::CarbonicComponentDissociation => (
+                "carbonic-component-dissociation",
+                &["H", "C", "O"],
+                &[
+                    ("H2CO3(aq)", &[2, 1, 3], 0, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("HCO3[-](aq)", &[1, 1, 3], -1, 1),
+                ],
+            ),
+            Self::BicarbonateDissociation => (
+                "bicarbonate-dissociation",
+                &["H", "C", "O"],
+                &[
+                    ("HCO3[-](aq)", &[1, 1, 3], -1, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("CO3[2-](aq)", &[0, 1, 3], -2, 1),
                 ],
             ),
             Self::HydrogenSulfateDissociation => (

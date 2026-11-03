@@ -65,7 +65,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 35] = [
+const REACTIONS: [&str; 37] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
@@ -84,6 +84,8 @@ const REACTIONS: [&str; 35] = [
     "gold-cyanidation-dissolved-oxygen",
     "hydrogen-cyanide-dissociation",
     "water-dissociation",
+    "carbonic-component-dissociation",
+    "bicarbonate-dissociation",
     "pyrite-roasting",
     "pyrite-oxidation-ferrous",
     "ferrous-oxidation-ferric",
@@ -331,6 +333,38 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-aqueous",
             ],
             equation: "H2O(l) -> H+(aq) + OH[-](aq), pure water and NBS molal aqueous references",
+        },
+        "carbonic-component-dissociation" => ReactionCase {
+            reaction: MineralReaction::CarbonicComponentDissociation,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "carbonic-component-aqueous-nbs1989",
+                "hydrogen-ion-aqueous-nbs1989",
+                "bicarbonate-ion-aqueous-nbs1989",
+            ],
+            species: &["H2CO3(aq)", "H+(aq)", "HCO3[-](aq)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "H2CO3(aq, formal CO2+H2O component) -> H+(aq) + HCO3[-](aq), source component conversion rather than molecular hydration",
+        },
+        "bicarbonate-dissociation" => ReactionCase {
+            reaction: MineralReaction::BicarbonateDissociation,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "bicarbonate-ion-aqueous-nbs1989",
+                "hydrogen-ion-aqueous-nbs1989",
+                "carbonate-ion-aqueous-nbs1989",
+            ],
+            species: &["HCO3[-](aq)", "H+(aq)", "CO3[2-](aq)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "HCO3[-](aq) -> H+(aq) + CO3[2-](aq), NBS second carbonate-family proton step",
         },
         "copper-electrowinning" => ReactionCase {
             reaction: MineralReaction::CopperElectrowinning,
@@ -867,6 +901,11 @@ fn reference_point(
         &[
             "source-aqueous-unit-activity-infinite-dilution",
             "source-carbonic-reference-usgs-b2131",
+        ]
+    } else if pack_id == "carbonic-component-aqueous-nbs1989" {
+        &[
+            "source-aqueous-unit-activity-infinite-dilution",
+            "source-carbonic-component-co2-plus-water",
         ]
     } else if matches!(
         pack_id,

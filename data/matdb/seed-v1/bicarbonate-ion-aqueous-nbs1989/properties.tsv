@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	identity	Individual aqueous bicarbonate ion HCO3-, NBS reference	NBS Table 23:C, printed page 2-83, HCO3- state ao	The source molar mass is 61.0174 g/mol. This is the individual bicarbonate ion with charge -1. It is not carbonate ion, a metal-bicarbonate complex, total inorganic carbon or a commercial bicarbonate solution. It retains the NBS evaluation needed to share original proton and water sources with the existing NBS cyanide family; the distinct USGS B2131 bicarbonate pack is not relabelled.
+observation	standard	Literal NBS 298.15 K thermodynamic row	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	The row gives standard molar formation enthalpy -691.99 kJ/mol, independently tabulated standard molar formation Gibbs energy -586.77 kJ/mol, and conventional ionic standard molar entropy 91.2 J/(mol K). Signs and printed precision are retained. The ao reference is a hypothetical ideal aqueous solution at unit molality, with activity referred to infinite dilution, not a measured 1 mol/kg solution or a molar concentration standard state. The source supplies no per-row probability distribution or cross-species covariance; uncertainty remains Unstated.
+observation	component-scope	Chemical identity and allowed family interpretation	NBS Table 23:C and sections 5.5 to 5.8	The conventional ionic entropy and formation H/G use the NBS H+(ao)=0 reference. The two NBS carbonate-family dissociations preserve these values separately from the USGS evaluation. A family total is a caller-declared uncomplexed inorganic-carbon inventory, not the total carbon atoms in ore or in other dissolved complexes.
+observation	scope	One matched NBS evaluation at its original reference state	https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf; https://doi.org/10.6028/jres.125.007	All four claims require 298.15 K, 100000 Pa and source-elemental-reference-nbs1989. This denotes NIST's NBS evaluation with 1989 errata, not a claim that the 1966 carbon table was newly measured in 1989. Direct formation-G and H-minus-T-S reaction results remain independent; no fitted correction reconciles them. The profiles connect to the existing NBS proton, water, hydroxide and HCN/CN- sources. They do not supply an activity-coefficient model, finite-concentration calibration, kinetics, mineral accessibility, gas-transfer rate or plant recovery.
+scalar	molar-mass	identity,component-scope,scope	mass	61.0174	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,component-scope,scope	hf	-691.99	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,component-scope,scope	gf	-586.77	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,component-scope,scope	s0	91.2	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	standard-entropy	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	standard-entropy	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	standard-entropy	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1

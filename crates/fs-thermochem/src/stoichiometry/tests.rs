@@ -57,6 +57,8 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         HydrogenCyanideDissociation,
         HydrogenSulfateDissociation,
         WaterDissociation,
+        CarbonicComponentDissociation,
+        BicarbonateDissociation,
         PyriteOxidationFerrous,
         FerrousOxidationFerric,
         FerricPyriteOxidation,
