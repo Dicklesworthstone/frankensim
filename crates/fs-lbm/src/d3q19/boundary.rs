@@ -27,7 +27,9 @@ pub use profile::{BoundaryProfileError3, InletFlux3, VelocityProfileReport3};
 mod forcing;
 pub use forcing::{BoundaryForcingError3, RigidFrame3};
 mod rotor;
-pub use rotor::{WallRotor3, WallRotorError3, WallRotorExchange3};
+pub use rotor::{
+    WallRotor3, WallRotorError3, WallRotorExchange3, WallRotorResponse3, WallRotorsExchange3,
+};
 mod partial_saturation;
 pub use partial_saturation::{
     CarrierFaceExchange3, CarrierLubricationExchange3, CarrierLubricationFace3,

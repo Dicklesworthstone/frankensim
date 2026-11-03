@@ -305,6 +305,64 @@ pub struct WallRotorExchange3 {
     pub mechanical_work_residual: f64,
 }
 
+/// One rotor's accepted response in a simultaneous multi-rotor step.
+///
+/// All impulses act on this rotor. Angular impulses use the requested moment
+/// origin, except the scalar hydrodynamic angular impulse, which uses the
+/// rotor center and its positive Cartesian axis. Global housing/body-force
+/// exchanges appear only once in [WallRotorsExchange3].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WallRotorResponse3 {
+    /// Accepted spin before this step.
+    pub angular_velocity_before: f64,
+    /// Held wall spin during the native bounce.
+    pub angular_velocity_midpoint: f64,
+    /// Accepted spin after the fluid reaction.
+    pub angular_velocity_after: f64,
+    /// Native moving-wall exchange on this rotor's complete patch.
+    pub hydrodynamic: WallMomentumExchange3,
+    /// Fluid angular impulse about this rotor's center, projected on its axis.
+    pub hydrodynamic_angular_impulse: f64,
+    /// Bearing impulse on this rotor, cancelling its hydrodynamic force.
+    pub bearing_impulse: [f64; 3],
+    /// Bearing angular impulse on this rotor about the requested moment origin.
+    pub bearing_angular_impulse: [f64; 3],
+    /// Applied axial couple integrated over this lattice step.
+    pub external_angular_impulse: f64,
+    /// Rotor kinetic energy change in stable polarized form.
+    pub kinetic_energy_change: f64,
+    /// Applied axial couple times midpoint spin.
+    pub external_work: f64,
+    /// Kinetic change minus measured fluid-on-rotor work and applied work.
+    pub mechanical_work_residual: f64,
+}
+
+/// Simultaneous native fluid coupling to a fixed array of independent rotors.
+///
+/// Each rotor response appears in input-array order. The stationary housing
+/// and held fluid body-force exchanges are global and are counted exactly once.
+/// Summing fluid and rotor momentum changes plus housing impulses minus all
+/// bearing impulses closes against the fluid body force and applied couples.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WallRotorsExchange3<const N: usize> {
+    /// Individual rotor responses in the same order as the input array.
+    pub rotors: [WallRotorResponse3; N],
+    /// Exchange on all walls outside the union of rotating patches.
+    pub stationary_walls: WallMomentumExchange3,
+    /// Held body-force impulse over all collided fluid cells, counted once.
+    pub body_force_impulse: [f64; 3],
+    /// Moment of the held fluid body force about the requested origin.
+    pub body_force_angular_impulse: [f64; 3],
+}
+
+#[derive(Clone, Copy, Default)]
+struct RotorMotion3 {
+    before: f64,
+    midpoint: f64,
+    after: f64,
+    angle: f64,
+}
+
 impl BoundaryGrid3 {
     /// Advance native fluid collision/streaming and a finite-inertia wall rotor.
     ///
@@ -324,6 +382,7 @@ impl BoundaryGrid3 {
     /// The external impulse is a pure axial couple. Bearings do no work because
     /// the center is fixed and their torque has no allowed axial component.
     /// All other walls are stationary; no periodic/open face is admitted.
+    /// Use [Self::step_with_finite_inertia_rotors] for several simultaneous rotors.
     /// Call this method for each coupled step: ordinary [Self::step] has no
     /// rotor owner and treats the patch as the underlying stationary wall.
     ///
@@ -331,6 +390,7 @@ impl BoundaryGrid3 {
     /// the final population swap. Refusal leaves accepted populations, forces,
     /// topology lock, and rotor motion intact. Prepared cells and the grid's
     /// reusable next-state buffer avoid per-step dense allocation after warmup.
+
     pub fn step_with_finite_inertia_rotor(
         &mut self,
         rotor: &mut WallRotor3,
@@ -338,12 +398,74 @@ impl BoundaryGrid3 {
         moment_origin: [f64; 3],
         gate: &CancelGate,
     ) -> Result<WallRotorExchange3, WallRotorError3> {
-        rotor.validate(self, gate)?;
-        if !external_angular_impulse.is_finite() || !moment_origin.into_iter().all(f64::is_finite) {
+        let batch = self.step_with_finite_inertia_rotors(
+            core::array::from_mut(rotor),
+            [external_angular_impulse],
+            moment_origin,
+            gate,
+        )?;
+        let [response] = batch.rotors;
+        Ok(WallRotorExchange3 {
+            angular_velocity_before: response.angular_velocity_before,
+            angular_velocity_midpoint: response.angular_velocity_midpoint,
+            angular_velocity_after: response.angular_velocity_after,
+            hydrodynamic: response.hydrodynamic,
+            stationary_walls: batch.stationary_walls,
+            hydrodynamic_angular_impulse: response.hydrodynamic_angular_impulse,
+            bearing_impulse: response.bearing_impulse,
+            bearing_angular_impulse: response.bearing_angular_impulse,
+            body_force_impulse: batch.body_force_impulse,
+            body_force_angular_impulse: batch.body_force_angular_impulse,
+            external_angular_impulse: response.external_angular_impulse,
+            kinetic_energy_change: response.kinetic_energy_change,
+            external_work: response.external_work,
+            mechanical_work_residual: response.mechanical_work_residual,
+        })
+    }
+
+    /// Advance several independent finite-inertia wall rotors in one fluid step.
+    ///
+    /// All rotors see the same original post-collision fluid state. Their
+    /// complete patches must be disjoint; repeated or intersecting patch cells
+    /// refuse before collision. Each rotor's affine wall response is solved at
+    /// its own midpoint spin, and one native stream publishes all rotor motion
+    /// and fluid populations together. Calling the single-rotor step repeatedly
+    /// would instead advance the fluid multiple times.
+    ///
+    /// Rotors can occupy the same face, opposite faces, or different Cartesian
+    /// axes. The fixed-size arrays keep per-rotor workspaces bounded. A sparse
+    /// ordered merge recognizes patch cells without a dense per-cell owner map:
+    /// ordinary interior cells compare one cached address, and rotor cursors are
+    /// searched only when a patch cell is consumed.
+    ///
+    /// Global housing and body-force exchanges appear exactly once in the
+    /// returned receipt; each rotor retains its own bearing and work exchange.
+    /// Geometry/low-Mach rules match [Self::step_with_finite_inertia_rotor].
+    /// An empty array refuses. Cancellation or any late rotor/fluid refusal
+    /// publishes none of the proposed fluid or rotor states.
+    pub fn step_with_finite_inertia_rotors<const N: usize>(
+        &mut self,
+        rotors: &mut [WallRotor3; N],
+        external_angular_impulses: [f64; N],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<WallRotorsExchange3<N>, WallRotorError3> {
+        checkpoint(gate)?;
+        if N == 0 {
+            return Err(WallRotorError3::Invalid("at least one rotor is required"));
+        }
+        if !external_angular_impulses.into_iter().all(f64::is_finite)
+            || !moment_origin.into_iter().all(f64::is_finite)
+        {
             return Err(WallRotorError3::Invalid(
-                "applied impulse and moment origin must be finite",
+                "applied impulses and moment origin must be finite",
             ));
         }
+        for rotor in rotors.iter() {
+            rotor.validate(self, gate)?;
+        }
+        validate_disjoint(rotors, gate)?;
+
         let mut body_force_impulse = [0.0; 3];
         let mut body_force_angular_impulse = [0.0; 3];
         let collide = collision_kernel3();
@@ -373,62 +495,9 @@ impl BoundaryGrid3 {
                 }
             }
         }
-
-        let mut stationary_angular_impulse = 0.0;
-        let mut damping = 0.0;
-        for (index, cell) in rotor.cells.iter().enumerate() {
-            if index.is_multiple_of(TILE_CELLS) {
-                checkpoint(gate)?;
-            }
-            let rho = (0..Q3)
-                .map(|q| self.post[q][cell.tile].0[cell.lane])
-                .sum::<f64>();
-            if !(rho.is_finite() && rho > 0.0) {
-                return Err(BoundaryStepError3::Unphysical { cell: cell.cell }.into());
-            }
-            damping += rho * dot(cell.unit_velocity, cell.unit_velocity) / 3.0;
-            for (q, e) in E3.iter().enumerate() {
-                if rotor.face_mask & (1u32 << q) == 0 {
-                    continue;
-                }
-                let projection = dot(
-                    [f64::from(e.0), f64::from(e.1), f64::from(e.2)],
-                    cell.unit_velocity,
-                );
-                stationary_angular_impulse -=
-                    2.0 * projection * self.post[OPP3[q]][cell.tile].0[cell.lane];
-            }
-        }
-        let before = rotor.angular_velocity;
-        let denominator = rotor.inertia + 0.5 * damping;
-        let delta = (external_angular_impulse + stationary_angular_impulse - damping * before)
-            / denominator;
-        let midpoint = before + 0.5 * delta;
-        let after = before + delta;
-        let angle = rotor.angle + midpoint;
-        if ![
-            stationary_angular_impulse,
-            damping,
-            denominator,
-            delta,
-            midpoint,
-            after,
-            angle,
-        ]
-        .into_iter()
-        .all(f64::is_finite)
-            || denominator <= 0.0
-        {
-            return Err(WallRotorError3::Invalid(
-                "rotor midpoint response is non-finite",
-            ));
-        }
-        for (index, cell) in rotor.cells.iter().enumerate() {
-            if index.is_multiple_of(TILE_CELLS) {
-                checkpoint(gate)?;
-            }
-            validate_speed(cell.unit_velocity, midpoint)?;
-            validate_speed(cell.unit_velocity, after)?;
+        let mut motions = [RotorMotion3::default(); N];
+        for i in 0..N {
+            motions[i] = propose_motion(self, &rotors[i], external_angular_impulses[i], gate)?;
         }
 
         let mut next = self.next.take().unwrap_or_else(|| self.f.clone());
@@ -440,23 +509,23 @@ impl BoundaryGrid3 {
                 open_link_masks: &self.open_link_masks,
                 stationary_link_masks: &self.stationary_link_masks,
                 boundaries: self.boundaries,
-                dims: rotor.dimensions,
+                dims: [self.nx, self.ny, self.nz],
             };
-            let mut hydrodynamic = WallMomentumExchange3::default();
+            let mut hydrodynamic = [WallMomentumExchange3::default(); N];
             let mut stationary_walls = WallMomentumExchange3::default();
-            let mut patch_index = 0;
+            let mut cursors = [0; N];
+            let mut next_patch = next_rotor_cell(rotors, &cursors);
             for tile in 0..self.f[0].len() {
                 checkpoint(gate)?;
                 for lane in 0..TILE_CELLS {
                     if self.solid[tile] & (1u64 << lane) != 0 {
                         continue;
                     }
-                    let patch = rotor
-                        .cells
-                        .get(patch_index)
-                        .filter(|cell| cell.tile == tile && cell.lane == lane);
-                    let velocity =
-                        patch.map_or([0.0; 3], |cell| cell.unit_velocity.map(|u| u * midpoint));
+                    let patch =
+                        next_patch.filter(|(_, cell)| cell.tile == tile && cell.lane == lane);
+                    let velocity = patch.map_or([0.0; 3], |(owner, cell)| {
+                        cell.unit_velocity.map(|u| u * motions[owner].midpoint)
+                    });
                     let mut values = view.pull_cell(tile, lane);
                     let mask = self.link_masks[tile].0[lane];
                     if mask != 0 {
@@ -473,9 +542,15 @@ impl BoundaryGrid3 {
                                 cell,
                                 direction: q,
                             };
-                            if patch.is_some() {
+                            if let Some((owner, _)) = patch {
                                 *value = wall_population(outgoing, rho, q, velocity);
-                                hydrodynamic.add_link(link, outgoing, rho, velocity, moment_origin);
+                                hydrodynamic[owner].add_link(
+                                    link,
+                                    outgoing,
+                                    rho,
+                                    velocity,
+                                    moment_origin,
+                                );
                             } else {
                                 stationary_walls.add_link(
                                     link,
@@ -488,8 +563,9 @@ impl BoundaryGrid3 {
                         }
                     }
                     let rho_next = values.iter().sum::<f64>();
-                    if !values.iter().all(|value| value.is_finite())
-                        || !(rho_next.is_finite() && rho_next > 0.0)
+                    if !(values.iter().all(|value| value.is_finite())
+                        && rho_next.is_finite()
+                        && rho_next > 0.0)
                     {
                         return Err(BoundaryStepError3::Unphysical {
                             cell: self.coords(tile, lane),
@@ -499,67 +575,42 @@ impl BoundaryGrid3 {
                     for (field, value) in next.iter_mut().zip(values) {
                         field[tile].0[lane] = value;
                     }
-                    if patch.is_some() {
-                        patch_index += 1;
+                    if let Some((owner, _)) = patch {
+                        cursors[owner] += 1;
+                        next_patch = next_rotor_cell(rotors, &cursors);
                     }
                 }
             }
-            debug_assert_eq!(patch_index, rotor.cells.len());
-            let hydrodynamic = hydrodynamic.checked()?;
+            debug_assert!(next_patch.is_none());
+            for exchange in &mut hydrodynamic {
+                *exchange = exchange.checked()?;
+            }
             let stationary_walls = stationary_walls.checked()?;
-            let center_offset = core::array::from_fn(|i| rotor.center[i] - moment_origin[i]);
-            let force_moment = cross(center_offset, hydrodynamic.wall_impulse);
-            let axis = rotor.face.axis();
-            let hydrodynamic_angular_impulse =
-                hydrodynamic.wall_angular_impulse[axis] - force_moment[axis];
-            let bearing_impulse = hydrodynamic.wall_impulse.map(|impulse| -impulse);
-            let bearing_angular_impulse = core::array::from_fn(|i| {
-                if i == axis {
-                    hydrodynamic_angular_impulse - hydrodynamic.wall_angular_impulse[i]
-                } else {
-                    -hydrodynamic.wall_angular_impulse[i]
-                }
+            let responses = core::array::from_fn(|i| {
+                rotor_response(
+                    &rotors[i],
+                    motions[i],
+                    hydrodynamic[i],
+                    external_angular_impulses[i],
+                    moment_origin,
+                )
             });
-            let kinetic_energy_change = rotor.inertia * (after - before) * midpoint;
-            let external_work = external_angular_impulse * midpoint;
-            let mechanical_work_residual =
-                kinetic_energy_change - external_work - hydrodynamic.wall_work;
-            if ![
-                body_force_impulse,
-                body_force_angular_impulse,
-                bearing_impulse,
-                bearing_angular_impulse,
-            ]
-            .into_iter()
-            .flatten()
-            .chain([
-                hydrodynamic_angular_impulse,
-                kinetic_energy_change,
-                external_work,
-                mechanical_work_residual,
-            ])
-            .all(f64::is_finite)
+            if ![body_force_impulse, body_force_angular_impulse]
+                .into_iter()
+                .flatten()
+                .all(f64::is_finite)
+                || !responses.iter().all(response_is_finite)
             {
                 return Err(WallRotorError3::Invalid(
                     "rotor momentum or work is non-finite",
                 ));
             }
             checkpoint(gate)?;
-            Ok(WallRotorExchange3 {
-                angular_velocity_before: before,
-                angular_velocity_midpoint: midpoint,
-                angular_velocity_after: after,
-                hydrodynamic,
+            Ok(WallRotorsExchange3 {
+                rotors: responses,
                 stationary_walls,
-                hydrodynamic_angular_impulse,
-                bearing_impulse,
-                bearing_angular_impulse,
                 body_force_impulse,
                 body_force_angular_impulse,
-                external_angular_impulse,
-                kinetic_energy_change,
-                external_work,
-                mechanical_work_residual,
             })
         })();
         match outcome {
@@ -567,8 +618,10 @@ impl BoundaryGrid3 {
                 core::mem::swap(&mut self.f, &mut next);
                 self.next = Some(next);
                 self.topology_locked = true;
-                rotor.angular_velocity = after;
-                rotor.angle = angle;
+                for (rotor, motion) in rotors.iter_mut().zip(motions) {
+                    rotor.angular_velocity = motion.after;
+                    rotor.angle = motion.angle;
+                }
                 Ok(exchange)
             }
             Err(error) => {
@@ -577,6 +630,167 @@ impl BoundaryGrid3 {
             }
         }
     }
+}
+
+fn propose_motion(
+    grid: &BoundaryGrid3,
+    rotor: &WallRotor3,
+    external_angular_impulse: f64,
+    gate: &CancelGate,
+) -> Result<RotorMotion3, WallRotorError3> {
+    let mut stationary_angular_impulse = 0.0;
+    let mut damping = 0.0;
+    for (index, cell) in rotor.cells.iter().enumerate() {
+        if index.is_multiple_of(TILE_CELLS) {
+            checkpoint(gate)?;
+        }
+        let rho = (0..Q3)
+            .map(|q| grid.post[q][cell.tile].0[cell.lane])
+            .sum::<f64>();
+        if !(rho.is_finite() && rho > 0.0) {
+            return Err(BoundaryStepError3::Unphysical { cell: cell.cell }.into());
+        }
+        damping += rho * dot(cell.unit_velocity, cell.unit_velocity) / 3.0;
+        for (q, e) in E3.iter().enumerate() {
+            if rotor.face_mask & (1u32 << q) == 0 {
+                continue;
+            }
+            let projection = dot(
+                [f64::from(e.0), f64::from(e.1), f64::from(e.2)],
+                cell.unit_velocity,
+            );
+            stationary_angular_impulse -=
+                2.0 * projection * grid.post[OPP3[q]][cell.tile].0[cell.lane];
+        }
+    }
+    let before = rotor.angular_velocity;
+    let denominator = rotor.inertia + 0.5 * damping;
+    let delta =
+        (external_angular_impulse + stationary_angular_impulse - damping * before) / denominator;
+    let midpoint = before + 0.5 * delta;
+    let after = before + delta;
+    let angle = rotor.angle + midpoint;
+    if ![
+        stationary_angular_impulse,
+        damping,
+        denominator,
+        delta,
+        midpoint,
+        after,
+        angle,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+        || denominator <= 0.0
+    {
+        return Err(WallRotorError3::Invalid(
+            "rotor midpoint response is non-finite",
+        ));
+    }
+    for (index, cell) in rotor.cells.iter().enumerate() {
+        if index.is_multiple_of(TILE_CELLS) {
+            checkpoint(gate)?;
+        }
+        validate_speed(cell.unit_velocity, midpoint)?;
+        validate_speed(cell.unit_velocity, after)?;
+    }
+    Ok(RotorMotion3 {
+        before,
+        midpoint,
+        after,
+        angle,
+    })
+}
+
+fn rotor_response(
+    rotor: &WallRotor3,
+    motion: RotorMotion3,
+    hydrodynamic: WallMomentumExchange3,
+    external_angular_impulse: f64,
+    origin: [f64; 3],
+) -> WallRotorResponse3 {
+    let center_offset = core::array::from_fn(|i| rotor.center[i] - origin[i]);
+    let force_moment = cross(center_offset, hydrodynamic.wall_impulse);
+    let axis = rotor.face.axis();
+    let hydrodynamic_angular_impulse = hydrodynamic.wall_angular_impulse[axis] - force_moment[axis];
+    let bearing_impulse = hydrodynamic.wall_impulse.map(|impulse| -impulse);
+    let bearing_angular_impulse = core::array::from_fn(|i| {
+        if i == axis {
+            hydrodynamic_angular_impulse - hydrodynamic.wall_angular_impulse[i]
+        } else {
+            -hydrodynamic.wall_angular_impulse[i]
+        }
+    });
+    let kinetic_energy_change = rotor.inertia * (motion.after - motion.before) * motion.midpoint;
+    let external_work = external_angular_impulse * motion.midpoint;
+    let mechanical_work_residual = kinetic_energy_change - external_work - hydrodynamic.wall_work;
+    WallRotorResponse3 {
+        angular_velocity_before: motion.before,
+        angular_velocity_midpoint: motion.midpoint,
+        angular_velocity_after: motion.after,
+        hydrodynamic,
+        hydrodynamic_angular_impulse,
+        bearing_impulse,
+        bearing_angular_impulse,
+        external_angular_impulse,
+        kinetic_energy_change,
+        external_work,
+        mechanical_work_residual,
+    }
+}
+
+fn response_is_finite(response: &WallRotorResponse3) -> bool {
+    [response.bearing_impulse, response.bearing_angular_impulse]
+        .into_iter()
+        .flatten()
+        .chain([
+            response.hydrodynamic_angular_impulse,
+            response.kinetic_energy_change,
+            response.external_work,
+            response.mechanical_work_residual,
+        ])
+        .all(f64::is_finite)
+}
+
+// Lists are prepared in native tile/lane order. Search only when a sparse
+// patch entry is consumed; this helper is never called for an ordinary cell.
+fn next_rotor_cell<const N: usize>(
+    rotors: &[WallRotor3; N],
+    cursors: &[usize; N],
+) -> Option<(usize, RotorCell3)> {
+    rotors
+        .iter()
+        .enumerate()
+        .filter_map(|(owner, rotor)| {
+            rotor
+                .cells
+                .get(cursors[owner])
+                .copied()
+                .map(|cell| (owner, cell))
+        })
+        .min_by_key(|(_, cell)| (cell.tile, cell.lane))
+}
+
+fn validate_disjoint<const N: usize>(
+    rotors: &[WallRotor3; N],
+    gate: &CancelGate,
+) -> Result<(), WallRotorError3> {
+    let mut cursors = [0; N];
+    let mut previous = None;
+    let mut visited = 0usize;
+    while let Some((owner, cell)) = next_rotor_cell(rotors, &cursors) {
+        if visited.is_multiple_of(TILE_CELLS) {
+            checkpoint(gate)?;
+        }
+        let address = (cell.tile, cell.lane);
+        if previous == Some(address) {
+            return Err(WallRotorError3::Invalid("rotor patches overlap"));
+        }
+        previous = Some(address);
+        cursors[owner] += 1;
+        visited += 1;
+    }
+    checkpoint(gate)
 }
 
 fn stationary_closed(grid: &BoundaryGrid3) -> Result<(), WallRotorError3> {

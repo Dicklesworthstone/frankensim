@@ -421,3 +421,352 @@ fn late_native_stream_refusal_and_cancellation_publish_neither_state() {
     assert_ne!(snapshot(&grid), before);
     assert!(rotor.angular_velocity() < 0.001);
 }
+
+#[test]
+fn one_rotor_batch_is_bitwise_equivalent_to_the_existing_api() {
+    let n = 8;
+    let gate = CancelGate::new();
+    let origin = [-2.0, 1.5, 3.0];
+    let center = center(n, Face3::YMax);
+    let mut single_grid = BoundaryGrid3::new(n, n, n, 0.8, [1e-6, -2e-6, 3e-6], closed());
+    let mut batch_grid = BoundaryGrid3::new(n, n, n, 0.8, [1e-6, -2e-6, 3e-6], closed());
+    single_grid.perturb(17, 0.0003);
+    batch_grid.perturb(17, 0.0003);
+    let mut single_rotor = WallRotor3::new(
+        &single_grid,
+        Face3::YMax,
+        center,
+        2.6,
+        80.0,
+        0.003,
+        n * n,
+        &gate,
+    )
+    .unwrap();
+    let mut batch_rotors = [single_rotor.clone()];
+    for external in [0.0, 0.002, -0.001, 0.0] {
+        let single = single_grid
+            .step_with_finite_inertia_rotor(&mut single_rotor, external, origin, &gate)
+            .unwrap();
+        let batch = batch_grid
+            .step_with_finite_inertia_rotors(&mut batch_rotors, [external], origin, &gate)
+            .unwrap();
+        let response = batch.rotors[0];
+        assert_eq!(snapshot(&single_grid), snapshot(&batch_grid));
+        assert_eq!(
+            single_rotor.angular_velocity(),
+            batch_rotors[0].angular_velocity()
+        );
+        assert_eq!(single_rotor.angle(), batch_rotors[0].angle());
+        assert_eq!(single.hydrodynamic, response.hydrodynamic);
+        assert_eq!(single.stationary_walls, batch.stationary_walls);
+        assert_eq!(single.body_force_impulse, batch.body_force_impulse);
+        assert_eq!(
+            single.body_force_angular_impulse,
+            batch.body_force_angular_impulse
+        );
+        assert_eq!(single.bearing_impulse, response.bearing_impulse);
+        assert_eq!(
+            single.bearing_angular_impulse,
+            response.bearing_angular_impulse
+        );
+        assert_eq!(
+            [
+                single.angular_velocity_before,
+                single.angular_velocity_midpoint,
+                single.angular_velocity_after,
+                single.hydrodynamic_angular_impulse,
+                single.external_angular_impulse,
+                single.kinetic_energy_change,
+                single.external_work,
+                single.mechanical_work_residual
+            ],
+            [
+                response.angular_velocity_before,
+                response.angular_velocity_midpoint,
+                response.angular_velocity_after,
+                response.hydrodynamic_angular_impulse,
+                response.external_angular_impulse,
+                response.kinetic_energy_change,
+                response.external_work,
+                response.mechanical_work_residual
+            ]
+        );
+    }
+}
+
+#[test]
+fn opposite_rotors_counterrotate_in_one_source_free_fluid_timeline() {
+    let n = 8;
+    let gate = CancelGate::new();
+    let origin = [1.25, 2.75, -0.5];
+    let mut grid = BoundaryGrid3::new(n, n, n, 0.8, [0.0; 3], closed());
+    let inertia = 200.0;
+    let mut rotors = [
+        WallRotor3::new(
+            &grid,
+            Face3::ZMax,
+            center(n, Face3::ZMax),
+            2.6,
+            inertia,
+            -0.003,
+            n * n,
+            &gate,
+        )
+        .unwrap(),
+        WallRotor3::new(
+            &grid,
+            Face3::ZMin,
+            center(n, Face3::ZMin),
+            2.6,
+            inertia,
+            0.003,
+            n * n,
+            &gate,
+        )
+        .unwrap(),
+    ];
+    let initial = inventory(&grid, origin);
+    let mut housing_linear = [0.0; 3];
+    let mut housing_angular = [0.0; 3];
+    for _ in 0..16 {
+        let before = inventory(&grid, origin);
+        let spins_before = rotors.each_ref().map(|rotor| rotor.angular_velocity());
+        let exchange = grid
+            .step_with_finite_inertia_rotors(&mut rotors, [0.0; 2], origin, &gate)
+            .unwrap();
+        let after = inventory(&grid, origin);
+        near(after.0, before.0, 3e-10);
+        near(
+            rotors[0].angular_velocity(),
+            -rotors[1].angular_velocity(),
+            3e-16,
+        );
+        let spin_impulse = (0..2)
+            .map(|i| inertia * (rotors[i].angular_velocity() - spins_before[i]))
+            .sum::<f64>();
+        for axis in 0..3 {
+            let bearing_force: f64 = exchange
+                .rotors
+                .iter()
+                .map(|r| r.bearing_impulse[axis])
+                .sum();
+            let bearing_moment: f64 = exchange
+                .rotors
+                .iter()
+                .map(|r| r.bearing_angular_impulse[axis])
+                .sum();
+            let force = exchange.stationary_walls.wall_impulse[axis] - bearing_force;
+            let torque = exchange.stationary_walls.wall_angular_impulse[axis] - bearing_moment;
+            housing_linear[axis] += force;
+            housing_angular[axis] += torque;
+            near(after.1[axis] - before.1[axis] + force, 0.0, 2e-12);
+            near(
+                after.2[axis] - before.2[axis]
+                    + torque
+                    + if axis == 2 { spin_impulse } else { 0.0 },
+                0.0,
+                8e-12,
+            );
+        }
+        assert_eq!(exchange.body_force_impulse, [0.0; 3]);
+        assert_eq!(exchange.body_force_angular_impulse, [0.0; 3]);
+        for response in exchange.rotors {
+            near(response.external_work, 0.0, 0.0);
+            near(response.mechanical_work_residual, 0.0, 2e-14);
+        }
+    }
+    let final_state = inventory(&grid, origin);
+    for axis in 0..3 {
+        near(
+            final_state.1[axis] - initial.1[axis] + housing_linear[axis],
+            0.0,
+            2e-11,
+        );
+        near(
+            final_state.2[axis] - initial.2[axis]
+                + housing_angular[axis]
+                + if axis == 2 {
+                    inertia * (rotors[0].angular_velocity() + rotors[1].angular_velocity())
+                } else {
+                    0.0
+                },
+            0.0,
+            8e-11,
+        );
+    }
+    assert!(
+        rotors
+            .iter()
+            .all(|rotor| rotor.angular_velocity().abs() < 0.003)
+    );
+}
+
+#[test]
+fn rotors_on_three_spatial_axes_share_one_housing_and_force_exchange() {
+    let n = 8;
+    let gate = CancelGate::new();
+    let origin = [-1.1, 2.3, 9.7];
+    let force = [1e-6, 2e-6, -1e-6];
+    let mut grid = BoundaryGrid3::new(n, n, n, 0.8, force, closed());
+    grid.perturb(81, 0.0005);
+    let faces = [Face3::XMin, Face3::YMax, Face3::ZMin];
+    let inertias = [53.0, 39.0, 67.0];
+    let spins = [0.003, -0.002, 0.001];
+    let external = [0.004, -0.003, 0.005];
+    let mut rotors = core::array::from_fn(|i| {
+        WallRotor3::new(
+            &grid,
+            faces[i],
+            center(n, faces[i]),
+            1.6,
+            inertias[i],
+            spins[i],
+            n * n,
+            &gate,
+        )
+        .unwrap()
+    });
+    for _ in 0..4 {
+        let before = inventory(&grid, origin);
+        let spins_before = rotors.each_ref().map(|rotor| rotor.angular_velocity());
+        let exchange = grid
+            .step_with_finite_inertia_rotors(&mut rotors, external, origin, &gate)
+            .unwrap();
+        let after = inventory(&grid, origin);
+        near(after.0, before.0, 3e-10);
+        for axis in 0..3 {
+            let rotor_impulse =
+                inertias[axis] * (rotors[axis].angular_velocity() - spins_before[axis]);
+            let bearing_force: f64 = exchange
+                .rotors
+                .iter()
+                .map(|r| r.bearing_impulse[axis])
+                .sum();
+            let bearing_moment: f64 = exchange
+                .rotors
+                .iter()
+                .map(|r| r.bearing_angular_impulse[axis])
+                .sum();
+            near(
+                exchange.body_force_impulse[axis],
+                (n * n * n) as f64 * force[axis],
+                3e-17,
+            );
+            near(
+                after.1[axis] - before.1[axis] + exchange.stationary_walls.wall_impulse[axis]
+                    - bearing_force,
+                exchange.body_force_impulse[axis],
+                3e-12,
+            );
+            near(
+                after.2[axis] - before.2[axis]
+                    + rotor_impulse
+                    + exchange.stationary_walls.wall_angular_impulse[axis]
+                    - bearing_moment,
+                exchange.body_force_angular_impulse[axis] + external[axis],
+                1e-11,
+            );
+            near(
+                rotor_impulse,
+                external[axis] + exchange.rotors[axis].hydrodynamic_angular_impulse,
+                2e-12,
+            );
+            near(exchange.rotors[axis].mechanical_work_residual, 0.0, 2e-14);
+        }
+        let measured = exchange.stationary_walls.measured_links
+            + exchange
+                .rotors
+                .iter()
+                .map(|r| r.hydrodynamic.measured_links)
+                .sum::<usize>();
+        assert_eq!(measured, grid.boundary_links().len());
+    }
+}
+
+#[test]
+fn overlapping_patches_or_one_late_rotor_refusal_leave_every_state_intact() {
+    let n = 8;
+    let gate = CancelGate::new();
+    let origin = [0.0; 3];
+    let mut grid = BoundaryGrid3::new(n, n, n, 0.8, [0.0; 3], closed());
+    let left = WallRotor3::new(
+        &grid,
+        Face3::ZMin,
+        [2.5, 4.0, 0.0],
+        1.2,
+        30.0,
+        0.003,
+        n * n,
+        &gate,
+    )
+    .unwrap();
+    let right = WallRotor3::new(
+        &grid,
+        Face3::ZMin,
+        [5.5, 4.0, 0.0],
+        1.2,
+        40.0,
+        -0.002,
+        n * n,
+        &gate,
+    )
+    .unwrap();
+    let mut overlap = [left.clone(), left.clone()];
+    let before = snapshot(&grid);
+    let error = grid
+        .step_with_finite_inertia_rotors(&mut overlap, [0.0; 2], origin, &gate)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        WallRotorError3::Invalid("rotor patches overlap")
+    ));
+    assert_eq!(snapshot(&grid), before);
+    assert!(
+        overlap
+            .iter()
+            .all(|rotor| rotor.angle() == 0.0 && rotor.angular_velocity() == 0.003)
+    );
+
+    let mut disjoint = [left, right];
+    let error = grid
+        .step_with_finite_inertia_rotors(&mut disjoint, [0.0, 1e9], origin, &gate)
+        .unwrap_err();
+    assert!(matches!(error, WallRotorError3::Invalid(_)));
+    assert_eq!(snapshot(&grid), before);
+    assert_eq!(
+        disjoint.each_ref().map(|rotor| rotor.angular_velocity()),
+        [0.003, -0.002]
+    );
+    assert_eq!(disjoint.each_ref().map(|rotor| rotor.angle()), [0.0; 2]);
+    let cancelled = CancelGate::new();
+    cancelled.request();
+    assert!(matches!(
+        grid.step_with_finite_inertia_rotors(&mut disjoint, [0.0; 2], origin, &cancelled),
+        Err(WallRotorError3::Boundary(BoundaryStepError3::Cancelled))
+    ));
+    assert_eq!(snapshot(&grid), before);
+    let mut empty: [WallRotor3; 0] = [];
+    assert!(
+        grid.step_with_finite_inertia_rotors(&mut empty, [], origin, &gate)
+            .is_err()
+    );
+    assert_eq!(snapshot(&grid), before);
+
+    // Two separately driven patches on the same face are a valid joint step.
+    let exchange = grid
+        .step_with_finite_inertia_rotors(&mut disjoint, [0.0; 2], origin, &gate)
+        .unwrap();
+    assert_ne!(snapshot(&grid), before);
+    assert!(disjoint[0].angular_velocity() < 0.003);
+    assert!(disjoint[1].angular_velocity() > -0.002);
+    assert_eq!(
+        exchange.stationary_walls.measured_links
+            + exchange
+                .rotors
+                .iter()
+                .map(|r| r.hydrodynamic.measured_links)
+                .sum::<usize>(),
+        grid.boundary_links().len()
+    );
+}

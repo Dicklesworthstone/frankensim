@@ -9808,3 +9808,24 @@ and two radii, small inertia, all four collision models, arbitrary-origin
 source/bearing balance, fluid-driven spin-up, topology admission and atomic
 late refusal. `examples/finite_rotor3.rs` runs unforced spin-down and reports
 actual fluid/rotor/housing angular exchange.
+
+### Simultaneous independent wall rotors
+
+`BoundaryGrid3::step_with_finite_inertia_rotors<const N>` advances a nonempty
+fixed array of rotors against one shared native collision and streaming step.
+All midpoint responses use the same post-collision fluid state. Complete
+patch cells must be disjoint; overlap refuses before collision. Rotors may
+share one face, occupy opposite faces, or rotate about different Cartesian
+axes. A fixed-size cursor merge caches the next sparse patch address, so
+ordinary fluid cells do not scan the rotor list and no dense owner map is
+allocated.
+
+`WallRotorsExchange3` reports per-rotor `WallRotorResponse3` entries in input
+order, with stationary-housing and fluid body-force exchanges counted once
+globally. Each rotor retains its own applied couple, bearing reactions and
+midpoint work identity. The single-rotor API delegates to the same kernel and
+preserves its receipt. All proposed fluid and rotor states publish together;
+a later rotor refusal or cancellation accepts none. Tests cover bitwise
+one-element equivalence, source-free counterrotation, three spatial axes with
+body force/applied couples, same-face disjoint patches, overlap and atomic
+late refusal.
