@@ -5781,6 +5781,27 @@ clarinet is one filling of those objects.
   This remains fixed-gas, infinite-baffle, one-way observation, with original
   source-law, filter-tail, temporal and spatial approximation limits.
 
+  `air_path::fluid::{FluidObserverFilter, propagate_pressure_history}` uses
+  the original material `ClassicalBulkAbsorption` for liquids and real gases,
+  reusing the existing response design, FIR stepping and linear convolution.
+  The sample clock remains exactly `1/dt`. Numerical tail-energy tolerance is
+  explicit and is not derived from terrestrial-air uncertainty. Admission
+  requires `omega*tau <= 0.01` through Nyquist; this weak-loss applicability
+  threshold is not an error bound. The retained material, actual FIR DC delay,
+  remaining `r/c - delay`, numerical padding and tail energy are reported.
+  Nonfinite input/output refuses atomically. The finite-band minimum-phase
+  response does not claim physical dispersion or source uncertainty.
+
+  `pcm_wav::baffled::BaffledPressure::new_multirate_fluid_differentiating`
+  composes that same fluid filter on each original surface path. Gas and
+  general-fluid paths share one preparation owner for exact-distance caching,
+  original density gain, signed surface projection, common causal padding,
+  cancellation, work limits and allocation-free stepping. It retains the
+  original infinite-baffle and prescribed-motion assumptions. G1/G3 tests
+  compare signed complex path sums, delay closure and actual pressure changes
+  against independently calculated bulk-viscosity attenuation; all original
+  gas path semantics remain in the same owner.
+
   Offline acoustic assemblies apply every selected observer law through
   `air_path::propagate_pressure_history_with_model`: ISO's complex Debye
   phase, the classical law's declared in-band minimum phase, and molecular

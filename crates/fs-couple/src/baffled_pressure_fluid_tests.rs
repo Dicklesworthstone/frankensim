@@ -1,0 +1,193 @@
+//! G1/G3: original liquid coefficients reach every signed physical sound path.
+use super::super::path;
+use super::*;
+use fs_material::fluid_acoustics::FluidAcousticState;
+use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluidState;
+use fs_material::fluid_transport::FluidTransportState;
+use std::f64::consts::TAU;
+
+fn propagation(bulk: f64) -> FluidPropagation {
+    // Authored viscous-liquid fixture, no assertion of measured properties.
+    let state = ThermoviscousFluidState::try_new(
+        FluidAcousticState::try_new(1000.0, 1200.0).unwrap(),
+        FluidTransportState::try_new(1000.0, 4000.0, 0.6, 5.0).unwrap(),
+        3900.0,
+    )
+    .unwrap();
+    FluidPropagation {
+        absorption: ClassicalBulkAbsorption::from_material(&state, bulk).unwrap(),
+        maximum_truncated_energy: 1e-12,
+        limits: FluidPropagationLimits::surface_reference(),
+    }
+}
+
+fn surface() -> Vec<SurfaceSample> {
+    vec![
+        SurfaceSample {
+            position_m: [-0.3, 0.0, 0.0],
+            area_m2: 0.2,
+            mode_shape: vec![1.0, 0.2],
+        },
+        SurfaceSample {
+            position_m: [0.3, 0.0, 0.0],
+            area_m2: 0.1,
+            mode_shape: vec![-0.7, 0.4],
+        },
+        SurfaceSample {
+            position_m: [0.8, 0.4, 0.0],
+            area_m2: 0.1,
+            mode_shape: vec![0.3, -0.5],
+        },
+    ]
+}
+
+#[test]
+fn g1_signed_fluid_paths_keep_distinct_attenuation_and_relative_phase() {
+    let propagation = propagation(10.0);
+    let surface = surface();
+    let position = [0.0, 0.0, 2.0];
+    let rate = 48_000;
+    let (receiver, report) = BaffledPressure::new_multirate_fluid_differentiating(
+        &surface,
+        2,
+        rate,
+        rate,
+        position,
+        &propagation,
+        &mut || false,
+    )
+    .unwrap();
+    assert_eq!(report.surface_filter_indices, [0, 0, 1]);
+    assert_ne!(report.filters[0].range_m, report.filters[1].range_m);
+    for frequency in [100.0, 4000.0, 12_000.0, 21_000.0] {
+        let omega_dt = TAU * frequency / f64::from(rate);
+        for input in 0..2 {
+            let (mut expected_re, mut expected_im, mut scale) = (0.0, 0.0, 0.0);
+            for (sample, &index) in surface.iter().zip(&report.surface_filter_indices) {
+                let receipt = report.filters[index];
+                assert_eq!(receipt.absorption, propagation.absorption);
+                let filter = FluidObserverFilter::new(
+                    propagation.absorption,
+                    receipt.range_m,
+                    1.0 / f64::from(rate),
+                    propagation.maximum_truncated_energy,
+                )
+                .unwrap();
+                let (re, im) =
+                    filter
+                        .taps()
+                        .iter()
+                        .enumerate()
+                        .fold((0.0, 0.0), |(re, im), (n, h)| {
+                            (
+                                re + h * (omega_dt * n as f64).cos(),
+                                im - h * (omega_dt * n as f64).sin(),
+                            )
+                        });
+                let phase = -omega_dt
+                    * (receipt.receiver_delay_s * f64::from(rate)
+                        + report.additional_latency_samples as f64
+                        + path::HALF as f64);
+                let gain =
+                    1000.0 * sample.area_m2 * sample.mode_shape[input] / (TAU * receipt.range_m);
+                expected_re += gain * (re * phase.cos() - im * phase.sin());
+                expected_im += gain * (re * phase.sin() + im * phase.cos());
+                scale += gain.abs() * re.hypot(im);
+                assert!(
+                    (receipt.receiver_delay_s + receipt.low_frequency_delay_s
+                        - receipt.range_m / 1200.0)
+                        .abs()
+                        < 1e-17
+                );
+            }
+            let (re, im) = receiver
+                .kernels
+                .iter()
+                .fold((0.0, 0.0), |(re, im), (n, weights)| {
+                    (
+                        re + weights[input] * (omega_dt * *n as f64).cos(),
+                        im - weights[input] * (omega_dt * *n as f64).sin(),
+                    )
+                });
+            assert!((re - expected_re).hypot(im - expected_im) < 5e-4 * scale);
+        }
+    }
+}
+
+#[test]
+fn g3_actual_liquid_pressure_has_the_independent_bulk_viscosity_attenuation_ratio() {
+    let patch = [SurfaceSample {
+        position_m: [0.0; 3],
+        area_m2: 0.2,
+        mode_shape: vec![1.0],
+    }];
+    let mut receivers: Vec<_> = [0.0, 10.0]
+        .into_iter()
+        .map(|bulk| {
+            BaffledPressure::new_multirate_fluid_differentiating(
+                &patch,
+                1,
+                48_000,
+                48_000,
+                [0.0, 0.0, 2.0],
+                &propagation(bulk),
+                &mut || false,
+            )
+            .unwrap()
+            .0
+        })
+        .collect();
+    let mut energy = [0.0; 2];
+    for frame in 0..4096 {
+        let velocity = [(TAU * 12_000.0 * frame as f64 / 48_000.0).sin()];
+        for (i, receiver) in receivers.iter_mut().enumerate() {
+            let pressure = receiver.step(&velocity).unwrap();
+            if frame >= 2048 {
+                energy[i] += pressure * pressure;
+            }
+        }
+    }
+    let omega = TAU * 12_000.0;
+    let expected = (-omega * omega * 10.0 * 2.0 / (2.0 * 1000.0 * 1200.0_f64.powi(3))).exp();
+    assert!(energy[0] > 1.0 && energy[1] < 0.95 * energy[0]);
+    assert!(((energy[1] / energy[0]).sqrt() - expected).abs() < 2e-3);
+    let mut replay = receivers[1].clone();
+    for value in [0.2, -0.4, 0.0, 0.1] {
+        assert_eq!(
+            receivers[1].step(&[value]).unwrap().to_bits(),
+            replay.step(&[value]).unwrap().to_bits()
+        );
+    }
+}
+
+#[test]
+fn g0_fluid_surface_keeps_original_path_work_cancellation_and_applicability_limits() {
+    let original = propagation(10.0);
+    let surface = surface();
+    let prepare = |p: &FluidPropagation, cancelled: &mut dyn FnMut() -> bool| {
+        BaffledPressure::new_multirate_fluid_differentiating(
+            &surface,
+            2,
+            48_000,
+            48_000,
+            [0.0, 0.0, 2.0],
+            p,
+            &mut || cancelled(),
+        )
+    };
+    assert!(prepare(&original, &mut || true).is_err());
+    let mut limited = original;
+    limited.limits.max_unique_paths = 1;
+    assert!(prepare(&limited, &mut || false).is_err());
+    limited = original;
+    limited.limits.max_filter_taps = 1;
+    assert!(prepare(&limited, &mut || false).is_err());
+    limited = original;
+    limited.limits.max_kernel_terms = 1;
+    assert!(prepare(&limited, &mut || false).is_err());
+    limited = original;
+    limited.maximum_truncated_energy = f64::NAN;
+    assert!(prepare(&limited, &mut || false).is_err());
+    assert!(prepare(&propagation(1e6), &mut || false).is_err());
+    assert!(prepare(&original, &mut || false).is_ok());
+}

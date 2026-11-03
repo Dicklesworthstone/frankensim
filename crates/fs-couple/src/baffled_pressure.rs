@@ -41,6 +41,10 @@ pub mod harmonic;
 #[path = "baffled_pressure_gas.rs"]
 pub mod gas;
 
+/// Classical absorption along each path through the original liquid/real gas.
+#[path = "baffled_pressure_fluid.rs"]
+pub mod fluid;
+
 /// Multiple physical openings through the same retarded-time pressure owner.
 #[path = "baffled_pressure_openings.rs"]
 pub mod openings;

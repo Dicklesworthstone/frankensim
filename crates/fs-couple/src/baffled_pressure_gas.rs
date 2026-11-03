@@ -131,9 +131,24 @@ pub struct GasPropagationReport {
     pub kernel_terms: usize,
 }
 
-struct PreparedPath {
+pub(super) struct PathFilter<R> {
+    pub response: Vec<f64>,
+    pub receipt: R,
+    pub receiver_delay_s: f64,
+    pub low_frequency_delay_s: f64,
+}
+
+pub(super) struct MaterialPaths<R> {
+    pub surface_filter_indices: Vec<usize>,
+    pub filters: Vec<R>,
+    pub additional_latency_samples: usize,
+    pub kernel_terms: usize,
+}
+
+struct PreparedPath<R> {
     response: Vec<f64>,
-    receipt: ObserverFilterReceipt,
+    receipt: R,
+    range_m: f64,
     residual_delay_samples: f64,
     first: usize,
     kernel: Vec<f64>,
@@ -211,19 +226,56 @@ impl BaffledPressure {
         poll(cancelled)?;
         gas.validate_coherence()
             .map_err(|error| format!("Rayleigh propagation gas: {error}"))?;
-        let limits = propagation.limits;
-        if limits.max_unique_paths == 0
-            || limits.max_filter_taps == 0
-            || limits.max_kernel_terms == 0
-        {
-            return Err("material Rayleigh propagation needs positive finite work budgets".into());
-        }
         if propagation.relaxation.is_some()
             && propagation.law != GasAbsorptionModel::MolecularRelaxation
         {
             return Err(
                 "a supplied gas relaxation state requires the molecular propagation law".into(),
             );
+        }
+        let (receiver, paths) = Self::new_multirate_material_differentiating(
+            surface, inputs, mechanics_rate, output_rate, position_m,
+            RayleighMedium::from(gas), propagation.limits, cancelled, |distance| {
+                let filter = ObserverFilter::for_law(
+                    propagation.law, gas, propagation.relaxation.as_ref(), distance, output_rate,
+                ).map_err(|error| format!("Rayleigh gas path at {distance} m: {error}"))?;
+                Ok(PathFilter {
+                    response: filter.taps().to_vec(), receipt: *filter.receipt(),
+                    receiver_delay_s: filter.receipt().receiver_delay_s,
+                    low_frequency_delay_s: filter.receipt().low_frequency_delay_s,
+                })
+            },
+        )?;
+        Ok((receiver, GasPropagationReport {
+            gas: *gas, law: propagation.law,
+            surface_filter_indices: paths.surface_filter_indices,
+            filters: paths.filters,
+            additional_latency_samples: paths.additional_latency_samples,
+            kernel_terms: paths.kernel_terms,
+        }))
+    }
+
+    // One geometric/convolution owner for gas and generic-fluid material laws.
+    // The factory supplies only the original per-distance filter and its clock;
+    // gain, signed projection, causal padding and all work limits stay here.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_multirate_material_differentiating<R>(
+        surface: &[SurfaceSample],
+        inputs: usize,
+        mechanics_rate: u32,
+        output_rate: u32,
+        position_m: [f64; 3],
+        medium: RayleighMedium,
+        limits: GasPropagationLimits,
+        cancelled: &mut impl FnMut() -> bool,
+        mut filter_at: impl FnMut(f64) -> Result<PathFilter<R>, String>,
+    ) -> Result<(Self, MaterialPaths<R>), String> {
+        poll(cancelled)?;
+        if limits.max_unique_paths == 0
+            || limits.max_filter_taps == 0
+            || limits.max_kernel_terms == 0
+        {
+            return Err("material Rayleigh propagation needs positive finite work budgets".into());
         }
         // Reuse complete original geometry, clocks and allocation admission.
         let mut receiver = Self::new_multirate(
@@ -232,7 +284,7 @@ impl BaffledPressure {
             mechanics_rate,
             output_rate,
             position_m,
-            RayleighMedium::from(gas),
+            medium,
         )?;
         let rate = f64::from(output_rate);
         let mut by_distance = BTreeMap::<u64, usize>::new();
@@ -263,31 +315,24 @@ impl BaffledPressure {
         let mut minimum_delay = 0.0_f64;
         for distance in distances {
             poll(cancelled)?;
-            let filter = ObserverFilter::for_law(
-                propagation.law,
-                gas,
-                propagation.relaxation.as_ref(),
-                distance,
-                output_rate,
-            )
-            .map_err(|error| format!("Rayleigh gas path at {distance} m: {error}"))?;
+            let filter = filter_at(distance)?;
             total_filter_taps = total_filter_taps
-                .checked_add(filter.taps().len())
+                .checked_add(filter.response.len())
                 .ok_or("Rayleigh source response extent overflow")?;
             if total_filter_taps > limits.max_filter_taps {
                 return Err(
                     "Rayleigh gas paths exceed their declared source-response budget".into(),
                 );
             }
-            let receipt = *filter.receipt();
-            let delay = rate * receipt.receiver_delay_s;
-            if !delay.is_finite() || !receipt.low_frequency_delay_s.is_finite() {
+            let delay = rate * filter.receiver_delay_s;
+            if !delay.is_finite() || !filter.low_frequency_delay_s.is_finite() {
                 return Err("Rayleigh gas path delay is unrepresentable".into());
             }
             minimum_delay = minimum_delay.min(delay);
             prepared.push(PreparedPath {
-                response: filter.taps().to_vec(),
-                receipt,
+                response: filter.response,
+                receipt: filter.receipt,
+                range_m: distance,
                 residual_delay_samples: delay,
                 first: 0,
                 kernel: Vec::new(),
@@ -324,7 +369,7 @@ impl BaffledPressure {
                 return Err("Rayleigh material projection exceeds its declared kernel work".into());
             }
             remaining_terms -= terms;
-            let gain = gas.density * sample.area_m2 / (TAU * prepared.receipt.range_m);
+            let gain = medium.density * sample.area_m2 / (TAU * prepared.range_m);
             for (tap, &weight) in prepared.kernel.iter().enumerate() {
                 let row = bins
                     .entry(prepared.first + tap)
@@ -361,9 +406,7 @@ impl BaffledPressure {
         poll(cancelled)?;
         Ok((
             receiver,
-            GasPropagationReport {
-                gas: *gas,
-                law: propagation.law,
+            MaterialPaths {
                 surface_filter_indices: indices,
                 filters: prepared.into_iter().map(|path| path.receipt).collect(),
                 additional_latency_samples: padding,

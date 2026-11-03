@@ -9,6 +9,8 @@
 pub mod cylinder;
 /// Source-record admission shared by native pressure performers.
 pub mod input;
+/// Explicit classical bulk absorption for any admitted thermoviscous fluid.
+pub mod fluid;
 
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
@@ -880,10 +882,24 @@ fn stokes_kirchhoff_response(
 fn design_observer_response(
     range_m: f64,
     rate: f64,
+    spectrum: impl FnMut(usize) -> Result<Vec<FftC64>, AcousticRealizeError>,
+) -> Result<ObserverResponse, AcousticRealizeError> {
+    design_observer_response_with_budget(range_m, rate, None, spectrum)
+}
+
+// An explicit relative-energy budget carries no ISO/source-uncertainty claim.
+// Existing gas callers retain their original uncertainty-weighted budget.
+fn design_observer_response_with_budget(
+    range_m: f64,
+    rate: f64,
+    relative_energy: Option<f64>,
     mut spectrum: impl FnMut(usize) -> Result<Vec<FftC64>, AcousticRealizeError>,
 ) -> Result<ObserverResponse, AcousticRealizeError> {
     if !(range_m.is_finite() && range_m >= 0.0 && rate.is_finite() && rate > 0.0) {
         return Err(invalid("an observer filter needs a finite nonnegative range and a positive finite rate"));
+    }
+    if relative_energy.is_some_and(|value| !value.is_finite() || value <= 0.0 || value >= 1.0) {
+        return Err(invalid("observer relative truncation energy must lie strictly between zero and one"));
     }
     if range_m == 0.0 {
         return Ok(ObserverResponse {
@@ -904,12 +920,15 @@ fn design_observer_response(
         for (k, h) in half.iter().enumerate() {
             let weight = if k == 0 || k == n / 2 { 1.0 } else { 2.0 };
             let magnitude = h.re.hypot(h.im);
-            let perturbed = det::exp(1.1 * det::ln(magnitude));
             magnitude_energy += weight * magnitude * magnitude;
-            uncertainty += weight * (magnitude - perturbed) * (magnitude - perturbed);
+            if relative_energy.is_none() {
+                let perturbed = det::exp(1.1 * det::ln(magnitude));
+                uncertainty += weight * (magnitude - perturbed) * (magnitude - perturbed);
+            }
         }
         let alpha_uncertainty_energy = uncertainty / magnitude_energy;
-        let budget = OBSERVER_TRUNCATION_ENERGY.min(OBSERVER_UNCERTAINTY_MARGIN * alpha_uncertainty_energy);
+        let budget = relative_energy.unwrap_or_else(||
+            OBSERVER_TRUNCATION_ENERGY.min(OBSERVER_UNCERTAINTY_MARGIN * alpha_uncertainty_energy));
         // A sub-sample delay in [0, 1) that makes the Nyquist bin real, so
         // the periodic spectrum has no jump there. A minimum phase already
         // has a real Nyquist bin.
@@ -1244,16 +1263,23 @@ impl ObserverFilter {
 
     /// Filter one sample on the receipt's clock.
     pub fn process(&mut self, sample: f64) -> f64 {
-        let len = self.taps.len();
-        self.history[self.head] = sample;
-        let mut sum = 0.0;
-        for (j, tap) in self.taps.iter().enumerate() {
-            let index = if j <= self.head { self.head - j } else { self.head + len - j };
-            sum += tap * self.history[index];
-        }
-        self.head = if self.head + 1 == len { 0 } else { self.head + 1 };
-        sum
+        process_fir(&self.taps, &mut self.history, &mut self.head, sample)
     }
+}
+
+// Shared fixed-order allocation-free convolution for gas and general-fluid
+// observers. The checked fluid facade rolls back the single written slot if
+// finite input produces an unrepresentable output.
+fn process_fir(taps: &[f64], history: &mut [f64], head: &mut usize, sample: f64) -> f64 {
+    let len = taps.len();
+    history[*head] = sample;
+    let mut sum = 0.0;
+    for (j, tap) in taps.iter().enumerate() {
+        let index = if j <= *head { *head - j } else { *head + len - j };
+        sum += tap * history[index];
+    }
+    *head = if *head + 1 == len { 0 } else { *head + 1 };
+    sum
 }
 
 // One transform implementation for explicit and legacy model selection.
