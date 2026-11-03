@@ -3,6 +3,8 @@ use super::*;
 use fs_solid::hyper3::visco::dynamics::{SolidImpulseControls, TetImpulsePoint};
 use fs_solver::CheckedCgConfig;
 
+mod split;
+
 const RHO: [f64; 4] = [30.0, 150.0, 30.0, 30.0];
 const EXTENSION: f64 = 1e-4;
 const HOLD: f64 = 0.007;

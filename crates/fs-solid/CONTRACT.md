@@ -3987,6 +3987,46 @@ their existing distinct accounts. The ordinary `advance` result is unchanged.
 An independent graded-simplex regression checks moving supports, body/nodal
 loads, actual angular inventory and nonzero numerical drift at two origins.
 
+`hyper3::visco::dynamics::split` provides native force/contact/drift primitives
+for loaded sustained-contact consumers. `force_kick_candidate` uses the accepted
+original first Piola stresses and explicit referential loads, then applies their
+combined impulse through the original supported consistent mass. Configuration,
+material history and time remain fixed during the kick and any following contact
+impulses. Immutable coordinate, Piola and Maxwell-history buffers are shared by
+velocity-only candidates; new buffers accompany actual material/configuration
+evolution. `contact_drift_candidate` advances coordinates with the actual retained
+post-contact velocity and updates every Maxwell branch through the same native
+constitutive endpoint evaluation used by the implicit interval owner.
+
+The kick privately binds the original immutable accepted material state, mass,
+loads, duration and stationary support set. Velocity-only native impulses retain
+its new force-phase identity; a skipped or superseded force phase, different
+configuration, clock, material history or mass refuses. Repeated nodal and body
+loads accumulate with compensation before each resultant is rounded and scaled
+by the interval, retaining a small imbalance between large opposed loads.
+Editing public diagnostic fields cannot change the continuation or its physical
+account. The private identity check is constant-time and requires no duplicate
+constitutive-history snapshot.
+
+Native relaxation loss, source displacement work, force splitting and the signed
+material endpoint defect remain distinct. The signed integration account closes
+storage plus kinetic change and physical loss; the sum of absolute phase defects
+has an independent caller allowance. Kinetic drift retains the same velocity and
+mass, so its kinetic change is exactly zero. One sparse mass action computes both
+momentum inventories and the stable actual angular increment `sum(delta_x cross
+M v)` with compensated products. Coordinate-rounding residue is bounded as a
+numerical momentum error, never an external torque or heat source.
+
+These primitives are a first-order explicit force/kinetic split with native
+constitutive relaxation. The enclosing consumer must refine its timestep and
+admit contact geometry; the primitives do not supply collision detection or a
+general contact-existence guarantee. Failure or cancellation preserves the input
+owner. The ordinary implicit `advance` retains its original integration rule.
+Focused native tests specify graded supported recoil, load cancellation,
+intervening contact impulses, constitutive replay, actual momentum inventory and
+phase-binding refusal. Their execution remains unverified while the required
+constellation sibling checkouts are unavailable.
+
 Native plastic, viscoelastic and thermal Tet4 owners expose their immutable
 original reference coordinates/connectivity and assembly bounds for geometry
 consumers. These views borrow accepted owners and never rebuild material state.

@@ -94,11 +94,19 @@ pub struct FiniteViscoTetSolid<'a> {
     material: ViscoelasticLawField<'a>,
     elements: Arc<Vec<Element>>,
     budget: TetAssemblyBudget,
-    displacement_m: Vec<[f64; 3]>,
-    states: Vec<ViscoState>,
-    first_piola_pa: Vec<[f64; 9]>,
+    displacement_m: Arc<[[f64; 3]]>,
+    states: Arc<[ViscoState]>,
+    first_piola_pa: Arc<[[f64; 9]]>,
     stored_energy_j: f64,
     time_s: f64,
+    /// Accepted material/configuration and split-phase lineage; contact impulses share it.
+    accepted_identity: Arc<()>,
+}
+
+struct ConstitutiveEndpoint {
+    states: Vec<ViscoState>,
+    first_piola_pa: Vec<[f64; 9]>,
+    energy: FiniteViscoTetEnergy,
 }
 
 /// A complete accepted candidate. Dropping it leaves the previous solid intact.
@@ -245,11 +253,12 @@ impl<'a> FiniteViscoTetSolid<'a> {
             material,
             elements: Arc::new(elements),
             budget,
-            displacement_m: vec![[0.0; 3]; nodes_m.len()],
-            states,
-            first_piola_pa,
+            displacement_m: vec![[0.0; 3]; nodes_m.len()].into(),
+            states: states.into(),
+            first_piola_pa: first_piola_pa.into(),
             stored_energy_j,
             time_s: 0.0,
+            accepted_identity: Arc::new(()),
         })
     }
 
@@ -302,6 +311,59 @@ impl<'a> FiniteViscoTetSolid<'a> {
     }
     pub fn material(&self) -> ViscoelasticLawField<'a> {
         self.material
+    }
+
+    /// One original material interval at a supplied full displacement. The
+    /// caller owns kinematics/equilibrium; this does not fabricate reactions.
+    fn material_endpoint(
+        &self,
+        u: &[f64],
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ConstitutiveEndpoint, FiniteViscoTetError> {
+        let mut energy = FiniteViscoTetEnergy {
+            stored_before_j: self.stored_energy_j,
+            ..Default::default()
+        };
+        let mut states = Vec::with_capacity(self.states.len());
+        let mut first_piola_pa = Vec::with_capacity(self.states.len());
+        for (index, element) in self.elements.iter().enumerate() {
+            checkpoint(cx)?;
+            let deformation =
+                HyperTetProblem::<FrozenViscoHyperelastic<'_>>::deformation_gradient(element, u);
+            let response = self
+                .material
+                .at(index)
+                .step_response(&self.states[index], &deformation, dt_s)
+                .map_err(|source| FiniteViscoTetError::Material {
+                    element: index,
+                    source,
+                })?;
+            let w = element.volume;
+            energy.stored_after_j += w * response.state.stored;
+            energy.dissipated_j += w * response.dissipated_pa;
+            energy.native_loading_work_j += w * response.loading_work_pa;
+            energy.incremental_potential_j += w * response.incremental_potential_pa;
+            let work_density = (0..9).fold(0.0, |sum, c| {
+                response.first_piola_pa[c].mul_add(
+                    deformation[c] - self.states[index].deformation_gradient[c],
+                    sum,
+                )
+            });
+            energy.internal_endpoint_work_j += w * work_density;
+            first_piola_pa.push(response.first_piola_pa);
+            states.push(response.state);
+        }
+        let stored_change = energy.stored_after_j - energy.stored_before_j;
+        energy.material_balance_error_j =
+            energy.native_loading_work_j - stored_change - energy.dissipated_j;
+        energy.endpoint_work_defect_j =
+            energy.internal_endpoint_work_j - stored_change - energy.dissipated_j;
+        Ok(ConstitutiveEndpoint {
+            states,
+            first_piola_pa,
+            energy,
+        })
     }
 
     /// Solve one actual interval with absolute endpoint supports and dead loads.
@@ -389,42 +451,11 @@ impl<'a> FiniteViscoTetSolid<'a> {
         let motion = inertia
             .map(|owner| owner.motion(u, cx).map_err(super::inertia_error))
             .transpose()?;
-        let mut energy = FiniteViscoTetEnergy {
-            stored_before_j: self.stored_energy_j,
-            inertial_endpoint_work_j: motion
-                .as_ref()
-                .map_or(0.0, |(_, account)| account.inertial_work_j),
-            ..Default::default()
-        };
-        let mut states = Vec::with_capacity(self.states.len());
-        let mut first_piola_pa = Vec::with_capacity(self.states.len());
-        for (index, element) in self.elements.iter().enumerate() {
-            checkpoint(cx)?;
-            let deformation =
-                HyperTetProblem::<FrozenViscoHyperelastic<'_>>::deformation_gradient(element, u);
-            let response = self
-                .material
-                .at(index)
-                .step_response(&self.states[index], &deformation, dt_s)
-                .map_err(|source| FiniteViscoTetError::Material {
-                    element: index,
-                    source,
-                })?;
-            let w = element.volume;
-            energy.stored_after_j += w * response.state.stored;
-            energy.dissipated_j += w * response.dissipated_pa;
-            energy.native_loading_work_j += w * response.loading_work_pa;
-            energy.incremental_potential_j += w * response.incremental_potential_pa;
-            let work_density = (0..9).fold(0.0, |sum, c| {
-                response.first_piola_pa[c].mul_add(
-                    deformation[c] - self.states[index].deformation_gradient[c],
-                    sum,
-                )
-            });
-            energy.internal_endpoint_work_j += w * work_density;
-            first_piola_pa.push(response.first_piola_pa);
-            states.push(response.state);
-        }
+        let endpoint = self.material_endpoint(u, dt_s, cx)?;
+        let mut energy = endpoint.energy;
+        energy.inertial_endpoint_work_j = motion
+            .as_ref()
+            .map_or(0.0, |(_, account)| account.inertial_work_j);
         let external = problem.external(&self.elements, 1.0);
         energy.dead_load_endpoint_work_j = external
             .iter()
@@ -438,15 +469,10 @@ impl<'a> FiniteViscoTetSolid<'a> {
             .fold(0.0, |sum, (dof, force)| {
                 force.mul_add(u[*dof] - old_u[*dof], sum)
             });
-        let stored_change = energy.stored_after_j - energy.stored_before_j;
-        energy.material_balance_error_j =
-            energy.native_loading_work_j - stored_change - energy.dissipated_j;
         energy.equilibrium_work_residual_j = energy.dead_load_endpoint_work_j
             + energy.support_endpoint_work_j
             - energy.internal_endpoint_work_j
             - energy.inertial_endpoint_work_j;
-        energy.endpoint_work_defect_j =
-            energy.internal_endpoint_work_j - stored_change - energy.dissipated_j;
         energy_gate(
             "native material balance",
             energy.material_balance_error_j,
@@ -482,11 +508,12 @@ impl<'a> FiniteViscoTetSolid<'a> {
             material: self.material,
             elements: Arc::clone(&self.elements),
             budget: self.budget,
-            displacement_m: equilibrium.displacement_m.clone(),
-            states,
-            first_piola_pa,
+            displacement_m: equilibrium.displacement_m.clone().into(),
+            states: endpoint.states.into(),
+            first_piola_pa: endpoint.first_piola_pa.into(),
             stored_energy_j: energy.stored_after_j,
             time_s,
+            accepted_identity: Arc::new(()),
         };
         Ok((
             FiniteViscoTetStep {

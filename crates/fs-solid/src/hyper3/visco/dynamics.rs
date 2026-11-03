@@ -19,6 +19,10 @@ use super::{
 };
 use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 
+/// Native force/contact/drift composition with retained Maxwell history.
+pub mod split;
+pub use split::{FiniteViscoContactDrift, FiniteViscoContactDriftControls, FiniteViscoForceKick};
+
 pub use crate::inertia::InertialEnergy;
 pub use crate::inertia::{
     SolidImpulseControls, SolidImpulseReport, SolidMomentum, SolidMotionMomentum,
@@ -312,7 +316,7 @@ impl<'a> FiniteViscoTetMotion<'a> {
             .solid
             .nodes_m
             .iter()
-            .zip(&self.solid.displacement_m)
+            .zip(self.solid.displacement_m.iter())
             .enumerate()
         {
             if node % 256 == 0 {
@@ -340,11 +344,12 @@ impl<'a> FiniteViscoTetMotion<'a> {
             material: self.solid.material,
             elements: Arc::clone(&self.solid.elements),
             budget: self.solid.budget,
-            displacement_m: self.solid.displacement_m.clone(),
-            states: self.solid.states.clone(),
-            first_piola_pa: self.solid.first_piola_pa.clone(),
+            displacement_m: Arc::clone(&self.solid.displacement_m),
+            states: Arc::clone(&self.solid.states),
+            first_piola_pa: Arc::clone(&self.solid.first_piola_pa),
             stored_energy_j: self.solid.stored_energy_j,
             time_s: self.solid.time_s,
+            accepted_identity: Arc::clone(&self.solid.accepted_identity),
         };
         checkpoint(cx)?;
         Ok(FiniteViscoMotionImpulse {

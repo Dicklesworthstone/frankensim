@@ -1,4 +1,4 @@
-//! Original-mass momentum over a backward-Euler material interval.
+//! Original-mass momentum over native material and kinetic drift intervals.
 use fs_math::dd::Dd;
 
 use super::{Cx, InertiaError, ReferenceMass, SolidMomentum, checkpoint, finite, invalid};
@@ -20,7 +20,88 @@ pub struct SolidMotionMomentum {
     pub angular_residual_kg_m2_s: [f64; 3],
 }
 
+/// Native constant-velocity phase: momentum inventories and stable increments
+/// share one sparse mass action. The same mass and stored velocity imply an
+/// exactly zero kinetic change; coordinate rounding can leave an angular error.
+pub(crate) struct ConstantVelocityDrift {
+    pub before: SolidMomentum,
+    pub after: SolidMomentum,
+    pub change: SolidMomentum,
+    pub kinetic_j: f64,
+}
+
 impl ReferenceMass {
+    pub(crate) fn constant_velocity_drift(
+        &self,
+        reference_nodes_m: &[[f64; 3]],
+        displacement_before_m: &[[f64; 3]],
+        displacement_after_m: &[[f64; 3]],
+        velocity_mps: &[[f64; 3]],
+        origin_m: [f64; 3],
+        cx: &Cx<'_>,
+    ) -> Result<ConstantVelocityDrift, InertiaError> {
+        checkpoint(cx)?;
+        let nodes = self.ndofs() / 3;
+        if self.ndofs() % 3 != 0
+            || reference_nodes_m.len() != nodes
+            || displacement_before_m.len() != nodes
+            || displacement_after_m.len() != nodes
+            || velocity_mps.len() != nodes
+            || origin_m.iter().any(|x| !x.is_finite())
+        {
+            return Err(invalid("complete native kinetic drift geometry required"));
+        }
+        let p = self.action(velocity_mps.as_flattened(), cx)?;
+        let mut linear = [Dd::ZERO; 3];
+        let mut before_angular = [Dd::ZERO; 3];
+        let mut after_angular = [Dd::ZERO; 3];
+        let mut angular_change = [Dd::ZERO; 3];
+        let mut kinetic = Dd::ZERO;
+        for node in 0..nodes {
+            if node % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let mut before_arm = [Dd::ZERO; 3];
+            let mut after_arm = [Dd::ZERO; 3];
+            let mut travel = [Dd::ZERO; 3];
+            let mut momentum = [Dd::ZERO; 3];
+            for axis in 0..3 {
+                let before =
+                    finite(reference_nodes_m[node][axis] + displacement_before_m[node][axis])?;
+                let after =
+                    finite(reference_nodes_m[node][axis] + displacement_after_m[node][axis])?;
+                before_arm[axis] = Dd::from_f64(before) - Dd::from_f64(origin_m[axis]);
+                after_arm[axis] = Dd::from_f64(after) - Dd::from_f64(origin_m[axis]);
+                travel[axis] = Dd::from_f64(after) - Dd::from_f64(before);
+                momentum[axis] = Dd::from_f64(finite(p[3 * node + axis])?);
+                linear[axis] = linear[axis] + momentum[axis];
+                kinetic = kinetic
+                    + Dd::from_f64(0.5)
+                        * Dd::from_f64(finite(velocity_mps[node][axis])?)
+                        * momentum[axis];
+            }
+            let old = cross(before_arm, momentum);
+            let next = cross(after_arm, momentum);
+            let change = cross(travel, momentum);
+            for axis in 0..3 {
+                before_angular[axis] = before_angular[axis] + old[axis];
+                after_angular[axis] = after_angular[axis] + next[axis];
+                angular_change[axis] = angular_change[axis] + change[axis];
+            }
+        }
+        let kinetic_j = finite(kinetic.to_f64())?;
+        if kinetic_j < 0.0 {
+            return Err(invalid("nonnegative native drift kinetic energy required"));
+        }
+        checkpoint(cx)?;
+        Ok(ConstantVelocityDrift {
+            before: momentum(origin_m, linear, before_angular)?,
+            after: momentum(origin_m, linear, after_angular)?,
+            change: momentum(origin_m, [Dd::ZERO; 3], angular_change)?,
+            kinetic_j,
+        })
+    }
+
     /// Three mass-sized vectors and two sparse actions; no mass reconstruction,
     /// history copy, constitutive evaluation or new linear solve is required.
     #[allow(clippy::too_many_arguments)]
