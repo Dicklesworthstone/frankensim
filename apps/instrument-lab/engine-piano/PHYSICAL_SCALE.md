@@ -165,15 +165,11 @@ heat is booked in `damper_loss_j`, separately from conservative coupling work.
 
 Finite nonnegative pad drag is no longer restricted by the silent oscillator's
 underdamped transition domain. Strong pads use the same exact dissipative
-flow without clipping their drag. The bank's separate intrinsic-loss transition
-retains its existing domain and reports an affected key if that intrinsic
-model is not admitted.
+flow without clipping their drag.
 
 The model remains finite-footprint viscous drag with the declared quadrature.
-Falling damper action and felt impact are separate physical models. The
-bank's conservative string/board exchange still follows an explicit bridge
-trajectory, with its signed numerical work in `coupling_j`. The existing
-bank-off path is unchanged. Independent analytic station tests cover nodal
+Falling damper action and felt impact are separate physical models.
+Independent analytic station tests cover nodal
 cancellation, reciprocal recoil, integrated viscous heat, and modal ownership;
 native engine execution and WASM cost/quality measurements are still required
 before claiming new performance or audio-comparison results.
@@ -181,6 +177,43 @@ Rebuild WASM with `engine-piano/build-wasm.sh`;
 the factory requires `supportsDamperSpecification()` before forwarding this
 selection. `info().damperSpecificationSelected` reports an explicitly supplied
 file, including an all-free file.
+
+## Reciprocal sympathetic strings
+
+When `Config::silent_bank_hz` is enabled, all retained bank partials enter the
+same conservative bridge Schur solve as sounding strings. Each mode uses the
+shared modal owner's exact undamped zero-order-hold map; its average string
+displacement and the accepted average bridge displacement determine reciprocal
+forces within the same step. This resolves coupled normal modes and sympathetic
+beating without a delayed bank reaction or a numerical energy source in
+`coupling_j`. That account still records the separate nonlinear stretching
+split when selected.
+
+Active prefixes and bank tails share absolute modal displacement and velocity.
+Activation and retirement transfer ownership without copying or resetting the
+retained motion. Each retained mode appears once in the conservative and
+intrinsic-loss solves, and each string's unresolved chord drag is counted once
+over the retained union. Existing physical board-basis transfer and failed
+rebuild rollback remain in force; finite pads use the same union of velocities.
+The existing bank-off arithmetic is unchanged.
+
+Intrinsic loss uses the same reciprocal midpoint half-flow as sounding strings:
+material strain drag retains its bridge cross terms, while gas drag acts on
+absolute modal velocity. Critical and overdamped finite nonnegative source
+rates are admitted without clipping; nonrepresentable prepared flows refuse.
+Their time accuracy, like the existing active loss scheme, depends on the
+mechanical timestep. The implementation prepares a board-sized inverse and
+per-course projections, then performs allocation-free modal passes and a
+board-sized solve. It does not form a dense operator over all partials.
+
+The small production modal adapter has native analytic tests for reciprocal
+excitation, energy-conserving resonant beating with second-order frequency
+convergence, and the full material/gas/chord resistance and physical heat,
+including strong resistance. Public engine regressions cover the same partials
+under either owner, ownership changes during ringing, retirement/restrike,
+and a strongly damped source-material receiver. Those full engine regressions
+and native/WASM cost measurements remain unexecuted in this change; no new
+throughput or measured audio-comparison result is claimed.
 
 ## Native composition
 
@@ -221,13 +254,12 @@ density and propagation speed. Copies retain both that gas and the drag rates.
 `string_gas_drag_rates_per_s(key)` exposes the granted speaking partials' gas
 coefficients; `info().stringGasLoading` names the selected reduction.
 
-The silent bank keeps its existing explicit linear-bridge trajectory. Gas drag
-acts on absolute modal velocity there too: in the bank's relative-to-chord
-coordinate it supplies the constant force `-gas_rate * beta * bridge_velocity`.
-The original damped transition advances that forced equation by an equilibrium
-shift. Gas work uses that trajectory's absolute-velocity integral and enters
-the existing coupling-work account. Pad heat comes from the separate shared
-station flow, including its reciprocal bridge reaction.
+The silent bank and sounding strings share the same reciprocal intrinsic-loss
+solve. Gas drag acts on absolute modal velocity, while material strain loss
+includes the appropriate bridge cross terms. The common bridge recoil and
+modal kinetic changes determine physical `string_loss_j`; gas is never
+extrapolated into an invented loss on the residual chord. Pad heat comes from
+the separate shared station flow, including its reciprocal bridge reaction.
 
 This is the existing sampled, linear, unconfined, circular-cylinder approximation
 on retained absolute-velocity modes. It does not add fluid inertia, viscous
@@ -252,7 +284,8 @@ Native execution of these additions remains pending.
 
 The tuner fits nominal pinned-string partials, not the coupled board/string
 poles, time-discretization shifts, a global temperament, or a measured Railsback
-curve. Unstruck strings still have the live engine's existing static image;
+curve. With the optional silent bank disabled, unstruck strings retain the
+live engine's existing static image;
 this does not add full sympathetic resonance, calibrated felt/damping data,
 spatial soundboard convergence, or a listening-quality guarantee.
 

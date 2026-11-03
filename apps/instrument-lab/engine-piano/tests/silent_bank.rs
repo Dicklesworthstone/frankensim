@@ -2,15 +2,17 @@
 //! string that is not sounding moves, driven by the bridge.
 //! - Against the same partials attached as dynamic strings (every other key held down
 //!   silently, the partial band at the bank's band), both under the full sustain pedal so
-//!   no pad touches either, an A3 strike sounds the same to within -50 dB (measured -57.7).
-//! - The books close with the bank's explicit exchange booked, through a struck key handing
+//!   no pad touches either, an A3 strike follows the same coupled equations.
+//! - The books close without a bank coupling-work source, through a struck key handing
 //!   its bank partials to the dynamic set, returning them when it retires, and a re-strike.
 use fs_live_piano::{Config, Description, LivePiano};
 
 // The library deliberately excludes the embedded reference's unit tests.
-// Exercise the actual small production station flow without enabling that suite.
+// Exercise the actual small production flows without enabling that suite.
 #[path = "../src/shared_pad.rs"]
 mod shared_pad;
+#[path = "../src/modal_flow.rs"]
+mod modal_flow;
 
 const RATE: u32 = 48_000;
 
@@ -57,7 +59,7 @@ fn the_bank_sounds_as_the_same_partials_attached_as_strings() {
     }
     let db = 10.0 * (num / den).log10();
     println!("bank vs attached strings: {db:.1} dB");
-    assert!(db < -50.0, "the bank differs from the attached strings by {db:.1} dB");
+    assert!(db < -90.0, "the bank differs from the attached strings by {db:.1} dB");
     // And the bank changes the strike: without it the silent strings are rigid chords.
     let mut none = LivePiano::new(&desc, Config::live(RATE)).unwrap();
     none.set_sustain(1.0).unwrap();
@@ -68,7 +70,7 @@ fn the_bank_sounds_as_the_same_partials_attached_as_strings() {
 }
 
 #[test]
-fn the_books_close_with_the_bank_exchange_booked() {
+fn the_books_close_through_retirement_and_restrike_without_bank_coupling_work() {
     let mut cfg = Config::live(RATE);
     cfg.silent_bank_hz = 600.0;
     cfg.rt0425_string_damping = true;
@@ -88,9 +90,55 @@ fn the_books_close_with_the_bank_exchange_booked() {
     let l = p.close_ledger();
     println!("{l:?}");
     assert!(l.residual_j.abs() < 1.0e-9 * l.input_j, "residual {:e} of {:e} J", l.residual_j, l.input_j);
-    // Bound the remaining explicit conservative exchange independently of closure.
-    assert!(l.coupling_j.abs() < 2.0e-3 * l.input_j, "coupling {:e} of {:e} J", l.coupling_j, l.input_j);
+    assert_eq!(l.coupling_j, 0.0, "linear bank exchange must not book a numerical energy source");
     assert!(l.damper_loss_j > 0.0 && p.take_error().is_none());
+}
+
+#[test]
+fn borrowing_a_sounding_bank_prefix_preserves_the_coupled_trajectory() {
+    let mut desc = Description::embedded().unwrap().truncated(4).unwrap();
+    desc.courses.retain(|c| [45, 57].contains(&c.midi));
+    let mut cfg = Config::live(RATE);
+    cfg.max_partials = 16;
+    cfg.course_mode_budget = 48;
+    cfg.duplex = false;
+    cfg.silent_bank_hz = 1_200.0;
+    cfg.retire_ringing_j = 0.0;
+    cfg.retire_damped_j = 0.0;
+    let mut bank = LivePiano::new(&desc, cfg).unwrap();
+    bank.set_sustain(1.0).unwrap();
+    bank.note_on(57, 2.0).unwrap();
+    render(&mut bank, 0.08);
+    let mut borrowed = bank.clone();
+    let before = borrowed.stored_energy_j();
+    let bank_before = borrowed.bank_modes();
+    let dynamic_before = borrowed.dynamic_modes();
+    // Keep exactly the same retained union. Only ownership of the ringing
+    // bass string's first partial changes; the higher bank tail remains.
+    borrowed.set_quality(1, 1_200.0, 2_400).unwrap();
+    borrowed.silent_key_down(45).unwrap();
+    borrowed.apply_pending_notes();
+    assert_eq!(borrowed.sounding_keys(), 2);
+    assert_eq!(bank.sounding_keys(), 1);
+    assert_eq!(bank_before - borrowed.bank_modes(), borrowed.dynamic_modes() - dynamic_before);
+    assert!(borrowed.bank_modes() > 0);
+    assert!((borrowed.stored_energy_j() - before).abs() < 1e-10 * borrowed.ledger.input_j);
+    let (mut error, mut signal) = (0.0, 0.0);
+    for _ in 0..4096 {
+        let a = bank.step();
+        let b = borrowed.step();
+        assert!(a.is_finite() && b.is_finite());
+        error += (a - b).powi(2);
+        signal += a * a;
+    }
+    assert!(signal > 0.0);
+    assert!(error < 1e-14 * signal, "ownership changed the trajectory: relative error {}", (error / signal).sqrt());
+    for engine in [&mut bank, &mut borrowed] {
+        let ledger = engine.close_ledger();
+        assert_eq!(ledger.coupling_j, 0.0);
+        assert!(ledger.residual_j.abs() < 1e-8 * ledger.input_j, "{ledger:?}");
+        assert!(engine.take_error().is_none());
+    }
 }
 
 #[test]

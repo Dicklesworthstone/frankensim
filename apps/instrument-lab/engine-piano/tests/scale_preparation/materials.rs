@@ -211,6 +211,61 @@ fn gas() -> GasState {
 }
 
 #[test]
+fn a_strong_intrinsic_material_loss_is_admitted_in_the_reciprocal_silent_bank() {
+    let mut desc = small_description();
+    desc.courses.retain(|c| [57, 69].contains(&c.midi));
+    let elastic = load(&desc.courses,
+        &pack([CORE[0], CORE[1], 0.0]), &pack([COATING[0], COATING[1], 0.0]));
+    let courses = elastic.apply(&desc.courses).unwrap();
+    let target = courses.iter().find(|c| c.midi == 69).unwrap();
+    let omega = TAU * target.partial_hz(1, target.tension_n);
+    let k = PI / target.length_m;
+    // Both bonded layers have this manufactured viscosity, so C_b = eta*I.
+    // The unplayed fundamental has c/(2*omega) = 1.1. Its actual material
+    // rate exceeds the former bank-only underdamped admission limit.
+    let inertia = PI * OUTER.powi(4) / 4.0;
+    let eta = 2.2 * omega * target.linear_density_kg_m / (inertia * k.powi(4));
+    let source = load(&desc.courses,
+        &pack([CORE[0], CORE[1], eta]), &pack([COATING[0], COATING[1], eta]));
+    preparation::prepare_with_materials(&mut desc, None, None, Some(&source)).unwrap();
+    let reference = Bank::new_with_string_damping(&desc.courses, &desc.board,
+        48_000, 6000.0, 1, true, None, false).unwrap();
+    let (losses, _) = bank_string_losses(&reference);
+    let string = reference.strings.iter().find(|s|
+        desc.courses[s.course].midi == 69 && !s.duplex).unwrap();
+    let index = string.modes.start;
+    let rate = losses[index].mass_rate + losses[index].strain_rate;
+    near(rate / reference.modes[index].omega, 2.2);
+    assert!(rate > 1.9 * reference.modes[index].omega);
+
+    let mut cfg = config();
+    cfg.max_partials = 1;
+    cfg.course_mode_budget = 1;
+    cfg.max_dynamic_modes = 2;
+    cfg.silent_bank_hz = 6000.0;
+    cfg.retire_ringing_j = 0.0;
+    cfg.retire_damped_j = 0.0;
+    cfg.damper_specification = Some("frankensim-piano-dampers-v1\nfree,57\nfree,69\n".into());
+    let mut piano = LivePiano::new_with_materials(&desc, cfg, gas(), source).unwrap();
+    piano.note_on(57, 0.25).unwrap();
+    let mut peak = 0.0_f64;
+    for _ in 0..4096 {
+        let pressure = piano.step();
+        assert!(pressure.is_finite());
+        peak = peak.max(pressure.abs());
+    }
+    assert!(peak > 0.0);
+    assert_eq!(piano.sounding_keys(), 1, "the strongly damped receiver stays in the bank");
+    assert!(piano.bank_modes() > 0);
+    let ledger = piano.close_ledger();
+    assert!(ledger.input_j > 0.0 && ledger.string_loss_j > 0.0);
+    assert_eq!(ledger.damper_loss_j, 0.0);
+    assert_eq!(ledger.coupling_j, 0.0);
+    assert!(ledger.residual_j.abs() < 1e-8 * ledger.input_j, "{ledger:?}");
+    assert!(piano.take_error().is_none());
+}
+
+#[test]
 fn selected_extension_retains_source_section_gas_and_changes_the_rendered_motion() {
     let mut desc = small_description();
     let source = load(&desc.courses, &pack(CORE), &pack(COATING));

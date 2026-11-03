@@ -18,13 +18,15 @@
 //!
 //! What is REDUCED (and declared, never hidden):
 //!
-//! * only the SOUNDING keys' strings are dynamic. Every other string of the
-//!   88-key scale stays attached to the bridge quasi-statically (its chord
+//! * by default only the SOUNDING keys' strings are dynamic. Every other string
+//!   stays attached to the bridge quasi-statically (its chord
 //!   mass mu L/3 and tension stiffness T/L load the board), the reference's
 //!   own image of a string with no retained partials. A key becomes dynamic
 //!   at note-on with zero relative motion (energy-continuous) and returns to
 //!   the static image once its relative energy is below a declared threshold;
-//!   the energy discarded there is reported in the ledger.
+//!   the energy discarded there is reported in the ledger. The optional silent
+//!   bank retains every in-band partial of unplayed strings in the same coupled
+//!   solve; sounding voices borrow those retained states without resetting them.
 //! * string partials are capped per key (mode budget) and by a partial band;
 //! * one mechanical step per audio sample (the reference default is four);
 //! * dampers are a K-point viscous pad (the reference uses a finer quadrature
@@ -43,7 +45,7 @@ use crate::refmods::{
     linear::{Bank, BoardMode, dampers, string_stretching::{Material, Specification, WaveMaterial}},
     relaxation, shank, steinway_d, steinway_scale,
 };
-use crate::stretch::{Stretch, damped_transition};
+use crate::stretch::Stretch;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -55,7 +57,10 @@ use std::f64::consts::{PI, TAU};
 
 #[path = "shared_pad.rs"]
 mod shared_pad;
-use self::shared_pad::{ModalVelocity, PadPoint};
+use self::shared_pad::PadPoint;
+#[path = "modal_flow.rs"]
+mod modal_flow;
+use self::modal_flow::ModalFlow;
 
 /// Idealized backcheck/rest gap, as in the reference engine.
 const CATCH_DISTANCE: f64 = 0.020;
@@ -133,9 +138,9 @@ pub struct Config {
     pub felt_pack_hammers: bool,
     /// Silent strings. Every partial up to this frequency of every string that is not
     /// sounding moves, as a bank of damped modes driven by the bridge (0: the rigid-chord
-    /// image alone). Intrinsic losses act per partial; each physical pad station acts
-    /// on all retained partials of its string and reacts on the bridge. Conservative
-    /// exchange with the board uses an explicit step, booked in `Ledger::coupling_j`.
+    /// image alone). Every retained partial participates in the same reciprocal
+    /// bridge solve as the sounding strings. Material/gas losses and physical pad
+    /// stations act on the same retained state, including their bridge reactions.
     pub silent_bank_hz: f64,
     /// Geometric string extension: the reference's complete `--string-stretching` file
     /// (`linear`, `stretch` or `waves` per key of the scale; see `crate::stretch`). It acts
@@ -144,25 +149,15 @@ pub struct Config {
     pub string_stretching: Option<String>,
 }
 
-/// One partial of a silent string in the bank: the completed-square coordinate z of
-/// mode k (unit mass; the same table entry the dynamic set uses when its key
-/// sounds), its velocity and its exact intrinsic-loss transition. Physical pad
-/// stations act separately on the combined active prefix and bank tail.
+/// Constants of a retained bank partial. Its completed-square displacement and
+/// absolute modal velocity live in the same q/v tables as sounding strings;
+/// changing ownership never replaces or copies that physical state.
 #[derive(Clone, Debug)]
 struct BankMode {
     k: usize,
     w2: f64,
     beta: f64,
-    /// Gas part of the intrinsic loss: acts on absolute z', unlike material strain.
-    c_gas: f64,
-    z: f64,
-    v: f64,
-    p: [f64; 4],
-}
-
-impl ModalVelocity for BankMode {
-    fn velocity(&self) -> f64 { self.v }
-    fn add_velocity(&mut self, increment: f64) { self.v += increment; }
+    flow: ModalFlow,
 }
 
 /// The bank partials of one string segment, bank[start..end], lowest first. While
@@ -179,14 +174,22 @@ struct BankSeg {
     pad: Vec<PadPoint>,
 }
 
-/// The bank partials of one course and its bridge row's squared norm and last
-/// displacement in the current loaded basis.
+/// The untaken bank partials of one course, their cold Schur weights and
+/// allocation-free scratch for the same pre/finish/post flows as active strings.
 #[derive(Clone, Debug)]
 struct BankCourse {
     ci: usize,
     segs: Vec<BankSeg>,
     gl_norm2: f64,
-    b: f64,
+    hsd: Vec<f64>,
+    modes: usize,
+    w_schur: f64,
+    loss_w: f64,
+    sum_c4: f64,
+    endpoint_drag: f64,
+    b0: f64,
+    bm: f64,
+    src: f64,
 }
 
 impl Config {
@@ -986,6 +989,8 @@ struct Seg {
     duplex: bool,
     off: usize,
     n_max: usize,
+    /// Prefix retained by the silent bank, independent of active voice grants.
+    bank_n: usize,
     /// First record of this segment in `Modes::pre`/`fin`/`hit` (wasm32
     /// pair records, see `PreRec`).
     #[cfg(target_arch = "wasm32")]
@@ -1537,8 +1542,8 @@ pub struct Ledger {
     pub catch_loss_j: f64,
     /// Relative string energy discarded when keys returned to the static image.
     pub retired_j: f64,
-    /// Work the explicit coupling of the silent-string bank put into the instrument
-    /// (signed): numerical, not physical, and bounded by the energy it couples.
+    /// Signed numerical work of the explicit nonlinear string-extension split.
+    /// Reciprocal linear string/bank/board exchange adds no source to this account.
     pub coupling_j: f64,
     pub residual_j: f64,
 }
@@ -1583,6 +1588,7 @@ pub struct LivePiano {
     courses: Vec<Course>,
     segs: Vec<Seg>,
     m: Modes,
+    /// One state per physical retained partial, whether active or in the bank.
     q: Vec<f64>,
     v: Vec<f64>,
     fq: Vec<f64>,
@@ -1936,6 +1942,7 @@ impl LivePiano {
                 duplex: s.duplex,
                 off: s.modes.start,
                 n_max: s.modes.len(),
+                bank_n: 0,
                 #[cfg(target_arch = "wasm32")]
                 pair: 0,
                 endpoint_mass: c.linear_density_kg_m * length / 3.0,
@@ -1994,13 +2001,23 @@ impl LivePiano {
                         if m.omega[k] > top {
                             break;
                         }
-                        let c_int = losses[k].mass_rate + losses[k].strain_rate;
-                        if c_int >= 1.9 * m.omega[k] {
-                            return Err(format!("key {}: a silent-bank intrinsic mode would be overdamped", c.midi));
+                        // The same reciprocal midpoint resistance as active
+                        // strings admits critical and overdamped material loss.
+                        // No underdamped transition is used by the bank.
+                        let (mr, sr) = (losses[k].mass_rate, losses[k].strain_rate);
+                        if [mr, sr, mr + sr].iter().any(|x| !x.is_finite() || *x < 0.0) {
+                            return Err(format!("key {}: silent-bank intrinsic loss must be finite and nonnegative", c.midi));
                         }
-                        let c_gas = string_gas_drag_rates.get(k).copied().unwrap_or(0.0);
-                        bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], c_gas, z: 0.0, v: 0.0,
-                            p: damped_transition(m.w2[k], c_int, dt) });
+                        let p = pre[k];
+                        let f = fin[k];
+                        if [p.c1, p.c2, p.c3, p.qq, p.qv, p.vq, p.vv, p.ha,
+                            f.bqa, f.bva, f.cross, m.c4[k], m.lw[k]].iter().any(|x| !x.is_finite()) {
+                            return Err(format!("key {}: silent-bank modal flow is not representable", c.midi));
+                        }
+                        let flow = ModalFlow { c1: p.c1, c2: p.c2, c3: p.c3,
+                            qq: p.qq, qv: p.qv, vq: p.vq, vv: p.vv, ha: p.ha,
+                            bqa: f.bqa, bva: f.bva, cross: f.cross };
+                        bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], flow });
                     }
                     if bank_modes.len() > first {
                         let n = bank_modes.len() - first;
@@ -2012,10 +2029,13 @@ impl LivePiano {
                             PadPoint { shape, lift, norm_string, coef: 0.0, norm: 0.0 }
                         }).collect());
                         course_segs.push(BankSeg { seg: si, start: first, end: bank_modes.len(), taken: 0, pad: points });
+                        segs[si].bank_n = n;
                     }
                 }
                 if !course_segs.is_empty() {
-                    bank_courses.push(BankCourse { ci, segs: course_segs, gl_norm2: 0.0, b: 0.0 });
+                    bank_courses.push(BankCourse { ci, segs: course_segs, gl_norm2: 0.0, hsd: vec![0.0; r],
+                        modes: 0, w_schur: 0.0, loss_w: 0.0, sum_c4: 0.0, endpoint_drag: 0.0,
+                        b0: 0.0, bm: 0.0, src: 0.0 });
                 }
             }
         }
@@ -2394,7 +2414,12 @@ impl LivePiano {
             lift_bq += 0.5 * a * m.bq[k] * m.hs[k];
             cdiag += m.bq[k] * m.hs[k] * m.hs[k];
         }
-        let residual_mass = seg.endpoint_mass - beta2;
+        // A bank tail is already represented by modal mass. The residual
+        // chord belongs to the retained union, even under a small active grant.
+        let tail_beta2: f64 = if seg.bank_n > n {
+            m.beta[off + n..off + seg.bank_n].iter().map(|b| b * b).sum()
+        } else { 0.0 };
+        let residual_mass = seg.endpoint_mass - beta2 - tail_beta2;
         let endpoint_drag = seg.mass_rate * residual_mass + seg.strain_time * seg.t_over_l;
         let half = 0.25 * self.dt;
         loss_w += half * endpoint_drag;
@@ -2524,14 +2549,12 @@ impl LivePiano {
                     kept.push(s);
                     continue;
                 }
-                // Its partials within the bank go back to it, state and all.
+                // Bank partials keep the same q/v entries; only their owner changes.
                 let (mut handed, mut handed_beta2) = (0, 0.0);
                 if let Some((bi, j)) = bank_of[s.seg] {
                     let course = &mut self.bank_courses[bi];
                     let seg = &mut course.segs[j];
-                    for m in &mut self.bank[seg.start..seg.start + seg.taken] {
-                        m.z = self.q[m.k];
-                        m.v = self.v[m.k];
+                    for m in &self.bank[seg.start..seg.start + seg.taken] {
                         handed_beta2 += m.beta * m.beta;
                     }
                     handed = seg.taken;
@@ -2549,8 +2572,8 @@ impl LivePiano {
                 }
                 // Its chord keeps following the bridge: that kinetic energy stays.
                 self.ledger.retired_j += e - 0.5 * (s.beta2 - handed_beta2) * bdot * bdot;
-                self.q[range.clone()].fill(0.0);
-                self.v[range].fill(0.0);
+                self.q[s.off + handed..range.end].fill(0.0);
+                self.v[s.off + handed..range.end].fill(0.0);
                 self.counters.retirements += 1;
             }
             ac.segs = kept;
@@ -2586,17 +2609,15 @@ impl LivePiano {
             // z_n = beta_n*b. Kinetic and potential energy are continuous.
             // Partials the silent-string bank carried join with their own state.
             for s in &fresh {
-                for k in s.off..s.off + s.n {
-                    self.q[k] = self.m.beta[k] * b;
-                    self.v[k] = self.m.beta[k] * bdot;
-                }
+                let mut handed = 0;
                 if let Some((bi, j)) = bank_of[s.seg] {
                     let seg = &mut self.bank_courses[bi].segs[j];
                     seg.taken = (seg.end - seg.start).min(s.n);
-                    for m in &self.bank[seg.start..seg.start + seg.taken] {
-                        self.q[m.k] = m.z;
-                        self.v[m.k] = m.v;
-                    }
+                    handed = seg.taken;
+                }
+                for k in s.off + handed..s.off + s.n {
+                    self.q[k] = self.m.beta[k] * b;
+                    self.v[k] = self.m.beta[k] * bdot;
                 }
             }
             match self.keys[ci].slot {
@@ -2654,16 +2675,36 @@ impl LivePiano {
                 }
             }
         }
-        // So do the silent-string bank's partials (those it keeps); only their dynamic
-        // reaction w^2 beta z stays outside the pencil (`step_bank`).
-        for course in &self.bank_courses {
+        // Bank tails load the same pencil. Their conservative and loss Schur
+        // contributions use precisely these retained modes, once each.
+        for course in &mut self.bank_courses {
             let (mut beta2, mut mek) = (0.0, 0.0);
+            course.modes = 0;
+            course.w_schur = 0.0;
+            course.loss_w = 0.0;
+            course.sum_c4 = 0.0;
+            course.endpoint_drag = 0.0;
             for seg in &course.segs {
                 for m in &self.bank[seg.start + seg.taken..seg.end] {
                     beta2 += m.beta * m.beta;
                     mek += m.w2 * m.beta * m.beta;
+                    let a = 2.0 * self.m.ha[m.k];
+                    course.w_schur += 0.25 * a * a * self.m.bq[m.k];
+                    course.loss_w += self.m.lw[m.k];
+                    course.sum_c4 += self.m.c4[m.k];
+                    course.modes += 1;
+                }
+                if seg.taken == 0 {
+                    // A sounding prefix already owns its union's residual chord
+                    // in make_aseg. A bank-only string carries it here instead.
+                    let source = &self.segs[seg.seg];
+                    let retained_mass: f64 = self.bank[seg.start..seg.end].iter()
+                        .map(|m| m.beta * m.beta).sum();
+                    course.endpoint_drag += source.mass_rate * (source.endpoint_mass - retained_mass)
+                        + source.strain_time * source.t_over_l;
                 }
             }
+            course.loss_w += 0.25 * self.dt * course.endpoint_drag;
             if beta2 == 0.0 {
                 continue;
             }
@@ -2729,6 +2770,15 @@ impl LivePiano {
             schur[i * r + i] = 1.0 / self.bz[i].bq;
         }
         let mut loss_schur = identity(r);
+        for (bi, course) in self.bank_courses.iter().enumerate() {
+            let gl = &self.bank_gl[bi * r..(bi + 1) * r];
+            for i in 0..r {
+                for j in 0..r {
+                    schur[i * r + j] -= course.w_schur * gl[i] * gl[j];
+                    loss_schur[i * r + j] += course.loss_w * gl[i] * gl[j];
+                }
+            }
+        }
         for ac in &mut self.active {
             let g = &self.g_st[ac.ci * r..(ac.ci + 1) * r];
             let a = &self.a_st[ac.ci * r..(ac.ci + 1) * r];
@@ -2748,6 +2798,9 @@ impl LivePiano {
         }
         self.s_inv = crate::dense::spd_inverse(&schur, r, "bridge Schur complement")?;
         self.sd_inv = crate::dense::spd_inverse(&loss_schur, r, "string-loss Schur complement")?;
+        for (bi, course) in self.bank_courses.iter_mut().enumerate() {
+            matvec(&self.sd_inv, &self.bank_gl[bi * r..(bi + 1) * r], &mut course.hsd);
+        }
         for ac in &mut self.active {
             matvec(&self.s_inv, &ac.gl, &mut ac.resp);
             matvec(&self.sd_inv, &ac.gl, &mut ac.hsd);
@@ -2755,8 +2808,9 @@ impl LivePiano {
                 *y = z.bq * g;
             }
         }
-        // S = D - G W G^T (D = diag(1/bz.bq), W = diag(sum w_schur)) is applied per
-        // sample through Woodbury: O(r K) instead of the dense O(r^2) product.
+        // With the bank disabled, retain the existing active-only Woodbury
+        // application, S = D - G W G^T. The full bank uses the same prepared
+        // board-sized S^-1 directly; no dense all-partial operator is formed.
         // The capacitance I - W^1/2 G^T D^-1 G W^1/2 is SPD exactly when S is.
         let k = self.active.len();
         let ws: Vec<f64> = self.active.iter().map(|ac| ac.segs.iter().map(|s| s.w_schur).sum::<f64>().sqrt()).collect();
@@ -3200,12 +3254,13 @@ impl LivePiano {
                     continue;
                 }
                 let off = self.segs[seg.seg].off;
-                let active = &mut self.v[off..off + seg.taken];
-                let tail = &mut self.bank[seg.start + seg.taken..seg.end];
+                // Active and bank coordinates now share one contiguous table.
+                // This is the same complete retained station as before.
+                let velocity = &mut self.v[off..off + seg.end - seg.start];
                 let np = seg.pad.len();
                 for pindex in 0..np {
                     let p = &seg.pad[if reverse { np - 1 - pindex } else { pindex }];
-                    let (impulse, heat) = p.apply(active, tail, bridge_speed);
+                    let (impulse, heat) = p.apply::<f64>(velocity, &mut [], bridge_speed);
                     bridge_speed += course.gl_norm2 * impulse;
                     push += impulse;
                     loss += heat;
@@ -3235,11 +3290,12 @@ impl LivePiano {
         }
         let mut damper_loss = self.damp(false);
         damper_loss += self.damp_bank(false);
+        let coupled_bank = self.bank_courses.iter().any(|c| c.modes != 0);
         let mut string_loss = 0.0;
         let mut board_loss = 0.0;
 
         // ---- intrinsic string loss, pre half-flow (implicit midpoint) ----
-        if !self.active.is_empty() {
+        if !self.active.is_empty() || coupled_bank {
             self.rhs.copy_from_slice(&self.bvel);
             for ac in &self.active {
                 let mut source = 0.0;
@@ -3250,8 +3306,25 @@ impl LivePiano {
                     *x += g * source;
                 }
             }
+            for (bi, course) in self.bank_courses.iter().enumerate() {
+                if course.modes == 0 { continue; }
+                let mut source = 0.0;
+                for seg in &course.segs {
+                    for m in &self.bank[seg.start + seg.taken..seg.end] {
+                        source += m.flow.cross * self.v[m.k];
+                    }
+                }
+                for (x, g) in self.rhs.iter_mut().zip(&self.bank_gl[bi * r..(bi + 1) * r]) {
+                    *x += g * source;
+                }
+            }
             for ac in &mut self.active {
                 ac.bm = dot(&ac.hsd, &self.rhs);
+            }
+            for (bi, course) in self.bank_courses.iter_mut().enumerate() {
+                if course.modes == 0 { continue; }
+                course.bm = dot(&course.hsd, &self.rhs);
+                course.b0 = dot(&self.bank_gl[bi * r..(bi + 1) * r], &self.bq);
             }
             self.force_b.fill(0.0);
             self.rhs.fill(0.0); // becomes the coupling right-hand side below
@@ -3275,6 +3348,26 @@ impl LivePiano {
                     *x += g * reaction;
                 }
             }
+            for (bi, course) in self.bank_courses.iter().enumerate() {
+                if course.modes == 0 { continue; }
+                let (mut acc3, mut reaction) = (0.0, course.b0 * course.w_schur);
+                for seg in &course.segs {
+                    for m in &self.bank[seg.start + seg.taken..seg.end] {
+                        let (free, [loss, drag, force]) = m.flow.predict(self.q[m.k], self.v[m.k], course.bm);
+                        self.fq[m.k] = free[0];
+                        self.fv[m.k] = free[1];
+                        string_loss += 0.5 * loss;
+                        acc3 += drag;
+                        reaction += force;
+                    }
+                }
+                let reaction_loss = course.endpoint_drag * course.bm - acc3 - course.bm * course.sum_c4;
+                for ((f, x), g) in self.force_b.iter_mut().zip(self.rhs.iter_mut())
+                    .zip(&self.bank_gl[bi * r..(bi + 1) * r]) {
+                    *f += g * reaction_loss;
+                    *x += g * reaction;
+                }
+            }
             for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
                 let old = *v;
                 *v = old - dur * f;
@@ -3294,18 +3387,23 @@ impl LivePiano {
             self.bfv[j] = z.vq * self.bq[j] + z.vv * dv;
             self.rhs[j] += self.bfq[j] / z.bq;
         }
-        // end = S^-1 rhs (Woodbury, see `rebuild`).
-        for ((e, x), z) in self.end.iter_mut().zip(&self.rhs).zip(&self.bz) {
-            *e = z.bq * x;
-        }
-        let k = self.active.len();
-        for (u, ac) in self.wu.iter_mut().zip(&self.active) {
-            *u = dot(&ac.wy, &self.rhs);
-        }
-        for (a, ac) in self.active.iter().enumerate() {
-            let c = dot(&self.wmk[a * k..(a + 1) * k], &self.wu);
-            for (e, y) in self.end.iter_mut().zip(&ac.wy) {
-                *e += y * c;
+        // Every retained mode contributes to this same reciprocal solve.
+        // Preserve the active-only Woodbury path when there is no bank tail.
+        if coupled_bank {
+            matvec(&self.s_inv, &self.rhs, &mut self.end);
+        } else {
+            for ((e, x), z) in self.end.iter_mut().zip(&self.rhs).zip(&self.bz) {
+                *e = z.bq * x;
+            }
+            let k = self.active.len();
+            for (u, ac) in self.wu.iter_mut().zip(&self.active) {
+                *u = dot(&ac.wy, &self.rhs);
+            }
+            for (a, ac) in self.active.iter().enumerate() {
+                let c = dot(&self.wmk[a * k..(a + 1) * k], &self.wu);
+                for (e, y) in self.end.iter_mut().zip(&ac.wy) {
+                    *e += y * c;
+                }
             }
         }
 
@@ -3356,6 +3454,25 @@ impl LivePiano {
                 *x += g * reaction;
             }
         }
+        for (bi, course) in self.bank_courses.iter_mut().enumerate() {
+            if course.modes == 0 { continue; }
+            let gl = &self.bank_gl[bi * r..(bi + 1) * r];
+            let bbar = 0.5 * (course.b0 + dot(gl, &self.tmp));
+            let (mut reaction, mut source) = (0.0, 0.0);
+            for seg in &course.segs {
+                for m in &self.bank[seg.start + seg.taken..seg.end] {
+                    let (next, [force, src]) = m.flow.finish(self.q[m.k], self.fq[m.k], self.fv[m.k], bbar);
+                    self.q[m.k] = next[0];
+                    self.v[m.k] = next[1];
+                    reaction += force;
+                    source += src;
+                }
+            }
+            course.src = source;
+            for (x, g) in self.rhs.iter_mut().zip(gl) {
+                *x += g * reaction;
+            }
+        }
         for j in 0..r {
             self.bq[j] = self.tmp[j];
             self.bvel[j] = self.bfv[j] + self.bz[j].bv * self.rhs[j];
@@ -3372,12 +3489,18 @@ impl LivePiano {
         board_loss += 0.5 * self.bvel.iter().zip(&self.tmp).map(|(a, b)| a * a - b * b).sum::<f64>();
         self.bvel.copy_from_slice(&self.tmp);
         // ---- intrinsic string loss, post half-flow ----
-        if !self.active.is_empty() {
+        if !self.active.is_empty() || coupled_bank {
             self.rhs.copy_from_slice(&self.bvel);
             for ac in &self.active {
                 let source: f64 = ac.segs.iter().map(|s| s.src).sum();
                 for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
                     *x += g * source;
+                }
+            }
+            for (bi, course) in self.bank_courses.iter().enumerate() {
+                if course.modes == 0 { continue; }
+                for (x, g) in self.rhs.iter_mut().zip(&self.bank_gl[bi * r..(bi + 1) * r]) {
+                    *x += g * course.src;
                 }
             }
             self.force_b.fill(0.0);
@@ -3396,14 +3519,28 @@ impl LivePiano {
                     *f += g * reaction_loss;
                 }
             }
+            for (bi, course) in self.bank_courses.iter().enumerate() {
+                if course.modes == 0 { continue; }
+                let bm = dot(&course.hsd, &self.rhs);
+                let mut acc3 = 0.0;
+                for seg in &course.segs {
+                    for m in &self.bank[seg.start + seg.taken..seg.end] {
+                        let [velocity, loss, drag] = m.flow.loss(self.v[m.k], bm);
+                        self.v[m.k] = velocity;
+                        string_loss += 0.5 * loss;
+                        acc3 += drag;
+                    }
+                }
+                let reaction_loss = course.endpoint_drag * bm - acc3 - bm * course.sum_c4;
+                for (f, g) in self.force_b.iter_mut().zip(&self.bank_gl[bi * r..(bi + 1) * r]) {
+                    *f += g * reaction_loss;
+                }
+            }
             for (v, f) in self.bvel.iter_mut().zip(&self.force_b) {
                 let old = *v;
                 *v = old - dur * f;
                 string_loss += 0.5 * (old - *v) * (old + *v);
             }
-        }
-        if !self.bank_courses.is_empty() {
-            string_loss += self.step_bank();
         }
         damper_loss += self.damp_bank(true);
         damper_loss += self.damp(true);
@@ -3767,84 +3904,6 @@ impl LivePiano {
         }
     }
 
-    /// One step of the silent-string bank, after the dynamic set's step. Over the step the
-    /// bridge moved from where the last one left it to where this one did; taking that
-    /// motion as linear, each partial's motion relative to its chord, u = z - beta b,
-    /// obeys u'' + c u' + w^2 u = -g beta rate, where g is gas drag on absolute
-    /// velocity z'=u'+beta rate. Source material strain loss acts on u'.
-    /// The effective-scale legacy loss retains its original relative approximation.
-    /// The existing exact damped transition is shifted by -g beta rate/w^2.
-    /// Their reaction w^2 beta z (the rest of the coupling is
-    /// in the loaded pencil) then kicks the board's velocity.
-    ///
-    /// Pad flows surround the full mechanical step and couple every retained partial
-    /// to the bridge (damp_bank). Conservative exchange remains explicit: z did not
-    /// move while the board did, and the board feels z only from the next step.
-    /// Every change of the bank's energy that is not its loss, with the kicks' kinetic
-    /// energy, is that exchange's work, booked in Ledger::coupling_j. Per partial:
-    ///   (v1^2 + w^2 u1^2)/2 - (v0^2 + w^2 u0^2)/2 + loss - w^2 beta^2 (b^2 - b0^2)/2
-    ///   = beta rate (du1 - du0) + g beta rate (z1-z0)
-    ///     - w^2 beta^2 (b^2 - b0^2)/2,
-    /// since v = du + beta rate on both sides. Physical gas heat uses the
-    /// absolute velocity integral. Returns intrinsic string loss [J].
-    fn step_bank(&mut self) -> f64 {
-        let r = self.r;
-        let dt = self.dt;
-        let mut string_loss = 0.0;
-        let mut exchange = -0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
-        for i in 0..self.bank_courses.len() {
-            let gl = &self.bank_gl[i * r..(i + 1) * r];
-            let b = dot(gl, &self.bq);
-            let course = &mut self.bank_courses[i];
-            let (b0, rate) = (course.b, (b - course.b) / dt);
-            course.b = b;
-            let (mut force, mut loss, mut drive, mut stiffness) = (0.0, 0.0, 0.0, 0.0);
-            let mut gas_drive = 0.0;
-            for seg in &course.segs {
-                for m in &mut self.bank[seg.start + seg.taken..seg.end] {
-                    let (u, du) = (m.z - m.beta * b0, m.v - m.beta * rate);
-                    let mut u1 = m.p[0] * u + m.p[1] * du;
-                    let mut du1 = m.p[2] * u + m.p[3] * du;
-                    let gas_force = m.c_gas * m.beta * rate;
-                    if m.c_gas != 0.0 {
-                        let equilibrium = -gas_force / m.w2;
-                        u1 += equilibrium * (1.0 - m.p[0]);
-                        du1 -= equilibrium * m.p[2];
-                    }
-                    let relative_change = 0.5 * (du * du - du1 * du1 + m.w2 * (u * u - u1 * u1));
-                    if m.c_gas == 0.0 {
-                        loss += relative_change;
-                    } else {
-                        // c*integral(u'^2) = H_rel(0)-H_rel(1)-g*B*delta_u.
-                        // Add 2*g*B*delta_u+g*B^2*dt for gas on z'=u'+B.
-                        // The same extra term closes the existing explicit
-                        // bridge-exchange ledger; it is not extra dissipated heat.
-                        let extra = gas_force * (u1 - u + m.beta * (b - b0));
-                        loss += relative_change + extra;
-                        gas_drive += extra;
-                    }
-                    m.z = m.beta * b + u1;
-                    m.v = du1 + m.beta * rate;
-                    let wb = m.w2 * m.beta;
-                    drive += m.beta * (du1 - du);
-                    stiffness += wb * m.beta;
-                    force += wb * m.z;
-                }
-            }
-            string_loss += loss;
-            exchange += rate * drive - 0.5 * stiffness * (b * b - b0 * b0);
-            if gas_drive != 0.0 { exchange += gas_drive; }
-            if force != 0.0 {
-                let kick = dt * force;
-                for (x, g) in self.bvel.iter_mut().zip(gl) {
-                    *x += kick * g;
-                }
-            }
-        }
-        self.ledger.coupling_j += exchange + 0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
-        string_loss
-    }
-
     /// Mechanical energy now stored in strings (the silent-string bank's too), board,
     /// hammers and felt [J].
     /// The extension kick of every stretching sounding string (`crate::stretch`), after the
@@ -3909,8 +3968,8 @@ impl LivePiano {
             let b = dot(&self.bank_gl[bi * r..(bi + 1) * r], &self.bq);
             for seg in &course.segs {
                 for m in &self.bank[seg.start + seg.taken..seg.end] {
-                    let y = m.z - m.beta * b;
-                    e += 0.5 * (m.v * m.v + m.w2 * y * y);
+                    let y = self.q[m.k] - m.beta * b;
+                    e += 0.5 * (self.v[m.k] * self.v[m.k] + m.w2 * y * y);
                 }
             }
         }
