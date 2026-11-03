@@ -8,9 +8,7 @@ use fs_mbd::articulated::motion::inventory::supported::{
     SupportedPayloadControls, capture_payload,
 };
 use fs_mbd::articulated::motion::inventory::{PayloadError, PayloadState};
-use fs_mbd::articulated::motion::prescribed::{
-    PrescribedBaseMotionState, PrescribedBasePath,
-};
+use fs_mbd::articulated::motion::prescribed::{PrescribedBaseMotionState, PrescribedBasePath};
 use fs_mbd::articulated::motion::spatial_loads::SpatialMotionLoads;
 use fs_mbd::articulated::motion::spatial_loads::prescribed::implicit::{
     ImplicitSpatialConfig, step_prescribed_base_spatial_implicit,
@@ -40,7 +38,17 @@ fn pose(axis: Vec3, origin: Vec3) -> Se3 {
 fn inertia(mass: f64, center: Vec3, diagonal: [f64; 3], axes: Vec3) -> SpatialInertia {
     let r = So3::exp(So3Tangent::new(axes)).unwrap().matrix();
     let tensor = Mat3 {
-        m: [diagonal[0], 0., 0., 0., diagonal[1], 0., 0., 0., diagonal[2]],
+        m: [
+            diagonal[0],
+            0.,
+            0.,
+            0.,
+            diagonal[1],
+            0.,
+            0.,
+            0.,
+            diagonal[2],
+        ],
     };
     SpatialInertia::new(mass, center, r.compose(tensor).compose(r.transpose())).unwrap()
 }
@@ -87,13 +95,8 @@ fn fixture(
         joint_position: vec![0.2; model.dof_count()],
         joint_velocity: vec![0.7; model.dof_count()],
     };
-    let kin = forward_kinematics(
-        &model,
-        base,
-        &state.joint_position,
-        &state.joint_velocity,
-    )
-    .unwrap();
+    let kin =
+        forward_kinematics(&model, base, &state.joint_position, &state.joint_velocity).unwrap();
     let payload = PayloadState {
         inertia: inertia(
             1.5,
@@ -102,10 +105,7 @@ fn fixture(
             Vec3::new(-0.3, 0.2, 0.1),
         ),
         world_from_body: kin.world_from_link[0]
-            .compose(pose(
-                Vec3::new(0.4, -0.2, 0.3),
-                Vec3::new(0.7, -0.4, 0.2),
-            ))
+            .compose(pose(Vec3::new(0.4, -0.2, 0.3), Vec3::new(0.7, -0.4, 0.2)))
             .unwrap(),
         twist_body: Twist::new(Vec3::new(0.2, -0.4, 0.5), Vec3::new(1.2, -0.5, 0.3)),
     };
@@ -196,10 +196,7 @@ fn audit(
 #[test]
 fn capture_evolve_and_release_restore_tensor_and_current_rigid_velocity() {
     let joint = JointModel::revolute(Vec3::new(0., 0., 1.), None).unwrap();
-    let base = BaseState::stationary(pose(
-        Vec3::new(0.3, -0.2, 0.4),
-        Vec3::new(1., -2., 3.),
-    ));
+    let base = BaseState::stationary(pose(Vec3::new(0.3, -0.2, 0.4), Vec3::new(1., -2., 3.)));
     let (model, state, payload) = fixture(joint, base);
     let captured = capture_payload(
         &model,
@@ -230,9 +227,7 @@ fn capture_evolve_and_release_restore_tensor_and_current_rigid_velocity() {
         || false,
     )
     .unwrap();
-    assert!(
-        carried.scaled_residual_norm <= ImplicitSpatialConfig::default().residual_tolerance
-    );
+    assert!(carried.scaled_residual_norm <= ImplicitSpatialConfig::default().residual_tolerance);
     let evolved = carried.spatial.motion.state_after;
     assert_ne!(evolved.joint_position, captured.state_after.joint_position);
     let release = release_payload(
@@ -255,8 +250,8 @@ fn capture_evolve_and_release_restore_tensor_and_current_rigid_velocity() {
     let expected_pose = kin.world_from_link[0]
         .compose(captured.attachment.link_from_payload())
         .unwrap();
-    let expected_twist = kin.body_twist[0]
-        .transform_by(&captured.attachment.link_from_payload().inverse().unwrap());
+    let expected_twist =
+        kin.body_twist[0].transform_by(&captured.attachment.link_from_payload().inverse().unwrap());
     assert_eq!(release.payload_after.world_from_body, expected_pose);
     assert_eq!(release.payload_after.twist_body, expected_twist);
     assert_ne!(
@@ -275,8 +270,8 @@ fn moving_support_drop_inherits_offset_velocity_without_support_work() {
         JointModel::FIXED,
         BaseState::prescribed(pose0, Twist::new(spin, velocity), Twist::zero()),
     );
-    let capture = capture_payload(&model, &state, 0, payload, capture_controls(&[]), || false)
-        .unwrap();
+    let capture =
+        capture_payload(&model, &state, 0, payload, capture_controls(&[]), || false).unwrap();
     let release = release_payload(
         &capture.model_after,
         &capture.state_after,
@@ -307,13 +302,10 @@ fn moving_support_drop_inherits_offset_velocity_without_support_work() {
 fn nested_inventory_releases_in_reverse_order_and_repeated_release_refuses() {
     let (model, state, payload) =
         fixture(JointModel::FIXED, BaseState::stationary(Se3::identity()));
-    let first = capture_payload(&model, &state, 0, payload, capture_controls(&[]), || false)
-        .unwrap();
+    let first =
+        capture_payload(&model, &state, 0, payload, capture_controls(&[]), || false).unwrap();
     let second_payload = PayloadState {
-        world_from_body: pose(
-            Vec3::new(-0.3, 0.2, 0.1),
-            Vec3::new(-0.4, 0.6, -0.2),
-        ),
+        world_from_body: pose(Vec3::new(-0.3, 0.2, 0.1), Vec3::new(-0.4, 0.6, -0.2)),
         twist_body: Twist::zero(),
         ..payload
     };
@@ -334,7 +326,9 @@ fn nested_inventory_releases_in_reverse_order_and_repeated_release_refuses() {
             release_controls(&[]),
             || false,
         ),
-        Err(PayloadError::Invalid("release attachment inventory changed")),
+        Err(PayloadError::Invalid(
+            "release attachment inventory changed"
+        )),
     ));
     let drop_second = release_payload(
         &second.model_after,
@@ -363,18 +357,24 @@ fn nested_inventory_releases_in_reverse_order_and_repeated_release_refuses() {
             release_controls(&[]),
             || false,
         ),
-        Err(PayloadError::Invalid("release attachment inventory changed")),
+        Err(PayloadError::Invalid(
+            "release attachment inventory changed"
+        )),
     ));
     audit(&second.model_after, &second.state_after, &drop_second);
-    audit(&drop_second.model_after, &drop_second.state_after, &drop_first);
+    audit(
+        &drop_second.model_after,
+        &drop_second.state_after,
+        &drop_first,
+    );
 }
 
 #[test]
 fn cancellation_and_invalid_controls_never_spend_or_modify_attachment() {
     let (model, state, payload) =
         fixture(JointModel::FIXED, BaseState::stationary(Se3::identity()));
-    let capture = capture_payload(&model, &state, 0, payload, capture_controls(&[]), || false)
-        .unwrap();
+    let capture =
+        capture_payload(&model, &state, 0, payload, capture_controls(&[]), || false).unwrap();
     let original_model = capture.model_after.clone();
     let original_state = capture.state_after.clone();
     let attachment = capture.attachment.clone();

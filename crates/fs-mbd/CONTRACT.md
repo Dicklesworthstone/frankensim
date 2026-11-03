@@ -4834,3 +4834,35 @@ automatic collision discovery, continuous rotating-body-wrench work, a
 continuous angular gravity integral along an arbitrary driven path, or a
 thermal partition. The focused native target is
 tests/articulated_mixed_contact_step.rs.
+
+## Supported finite-payload separation impulses
+
+`articulated::motion::inventory::supported::release::release_payload_with_impulse`
+completes the supported rigid-payload lifecycle with simultaneous equal/opposite
+point impulses and free couples. It shares the existing `SeparationImpulse`
+convention and physical-point transform with free release. The retained tree
+uses native prescribed-base ABA and the released payload uses its original full
+spatial inverse inertia; every retained joint responds in the same event.
+
+The prescribed support retains its pose/twist and exposes its independent
+reaction impulse and signed work. Actual separation work is the impulse pair
+paired with the resulting relative velocity jump, admitted against an explicit
+source-work budget. Whole-system linear/angular momentum, native joint momentum,
+actual kinetic increments and common-frame energy defects remain independent
+accounts. Numerical decomposition error is never assigned to loss or source
+work. The composing actuator must debit the returned supplied work from its own
+energy source.
+
+Passive release and the zero-impulse limit retain identical state and balance
+accounts. Native endpoint speed limits remain active; impulse reactions do not
+pass through force/torque effort limits. A nonzero impulse whose outgoing payload
+jump is entirely erased refuses atomically. This
+bounded event does not infer collision, fracture, finite-duration separation or
+additional gear/loop constraints.
+
+Six focused cases independently check grounded and moving launchers (including
+negative support work), finite launcher recoil, a full-tensor offset payload on
+a branched tree, world-frame/inertial-boost covariance, exact passive parity,
+source-work refusal, cancellation and actual speed-limit refusal. The full
+focused inventory run passes 24 cases: these six plus four supported passive
+release, eight supported capture, three free capture and three free release.

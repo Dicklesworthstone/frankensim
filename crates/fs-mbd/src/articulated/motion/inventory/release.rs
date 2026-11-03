@@ -113,15 +113,7 @@ pub fn release_payload(
     let retained_link = &attachment.retained_link;
     let before = validate_inputs(model, state, target, constraints, controls, &mut cancelled)?;
     let prescribed = impulse.unwrap_or_default();
-    validate_vec3(prescribed.point_link_m, "payload_release.point")?;
-    validate_vec3(
-        prescribed.impulse_on_payload_link_ns,
-        "payload_release.force_impulse",
-    )?;
-    validate_vec3(
-        prescribed.couple_on_payload_link_nms,
-        "payload_release.free_couple",
-    )?;
+    admit_separation_impulse(prescribed)?;
     let no_impulse = prescribed.impulse_on_payload_link_ns == Vec3::default()
         && prescribed.couple_on_payload_link_nms == Vec3::default();
     let payload_before = payload_at_link(
@@ -145,21 +137,8 @@ pub fn release_payload(
             &mut cancelled,
         )?)
     };
-    let impulse_at_link = Wrench::new(
-        prescribed
-            .point_link_m
-            .cross(prescribed.impulse_on_payload_link_ns)
-            + prescribed.couple_on_payload_link_nms,
-        prescribed.impulse_on_payload_link_ns,
-    );
-    validate_wrench(impulse_at_link, "payload_release.link_impulse")?;
-    let impulse_on_retained_link = Wrench::new(
-        impulse_at_link.torque.scale(-1.0),
-        impulse_at_link.force.scale(-1.0),
-    );
-    let impulse_on_payload_body =
-        impulse_at_link.transform_by(&attachment.link_from_payload.inverse()?);
-    validate_wrench(impulse_on_payload_body, "payload_release.payload_impulse")?;
+    let (impulse_on_retained_link, impulse_on_payload_body) =
+        separation_impulses(prescribed, attachment.link_from_payload)?;
 
     let mut state_after = state.clone();
     let mut payload_after = payload_before;
@@ -353,4 +332,38 @@ pub(super) fn admit_attachment(
         ));
     }
     Ok(())
+}
+
+/// Original point/couple admission, shared by free and prescribed releases.
+pub(super) fn admit_separation_impulse(impulse: SeparationImpulse) -> Result<(), PayloadError> {
+    validate_vec3(impulse.point_link_m, "payload_release.point")?;
+    validate_vec3(
+        impulse.impulse_on_payload_link_ns,
+        "payload_release.force_impulse",
+    )?;
+    validate_vec3(
+        impulse.couple_on_payload_link_nms,
+        "payload_release.free_couple",
+    )?;
+    Ok(())
+}
+
+/// Equal/opposite impulses about the original link and payload frame origins.
+/// Both actions retain one shared physical application point.
+pub(super) fn separation_impulses(
+    impulse: SeparationImpulse,
+    link_from_payload: Se3,
+) -> Result<(Wrench, Wrench), PayloadError> {
+    let at_link = Wrench::new(
+        impulse
+            .point_link_m
+            .cross(impulse.impulse_on_payload_link_ns)
+            + impulse.couple_on_payload_link_nms,
+        impulse.impulse_on_payload_link_ns,
+    );
+    validate_wrench(at_link, "payload_release.link_impulse")?;
+    let on_retained = Wrench::new(at_link.torque.scale(-1.0), at_link.force.scale(-1.0));
+    let on_payload = at_link.transform_by(&link_from_payload.inverse()?);
+    validate_wrench(on_payload, "payload_release.payload_impulse")?;
+    Ok((on_retained, on_payload))
 }

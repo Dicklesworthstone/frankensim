@@ -11,7 +11,7 @@
 //! It does not discover contact, impose extra gear/loop rows, resolve a finite
 //! grasp duration, or assign the removed mechanical energy to a thermal body.
 
-/// Continuous-velocity detachment of an exact captured inventory.
+/// Passive or internally driven release of an exact captured inventory.
 #[path = "supported/release.rs"]
 pub mod release;
 
@@ -58,8 +58,8 @@ pub struct SupportedPayloadBalance {
     pub linear_momentum_change_world: Vec3,
     /// Actual spin plus orbital increment about the world origin, N m s.
     pub angular_momentum_change_world: Vec3,
-    /// Independent native ABA support impulse ON the complete system at capture.
-    /// Passive release has no impulse and reports an exact zero here.
+    /// Independent native ABA support impulse ON the complete system.
+    /// Passive release has no impulse; driven separation retains the reaction.
     /// Expressed about the base origin in base axes, in [N m s, N s].
     pub support_impulse_body: Wrench,
     /// The same reaction about the world origin, in world axes.
@@ -69,7 +69,7 @@ pub struct SupportedPayloadBalance {
     /// Actual world-origin angular increment minus support impulse, N m s.
     pub angular_momentum_residual_world: Vec3,
     /// Native RNEA projection of actual body increments or release decomposition.
-    /// These passive inventory events have no external relative-joint impulse.
+    /// Capture and equal/opposite separation have no external relative-joint impulse.
     pub joint_momentum_residual: Vec<f64>,
     /// Largest absolute residual divided by its declared allowance, at most one.
     pub maximum_normalized_momentum_residual: f64,
@@ -87,7 +87,7 @@ pub struct SupportedPayloadBalance {
     pub accounting_kinetic_energy_change_j: f64,
     /// Support work paired with the base twist in that same frame, J.
     pub accounting_support_work_j: f64,
-    /// Common-frame kinetic change minus support work plus any capture loss, J.
+    /// Common-frame kinetic change minus support/separation work plus capture loss, J.
     /// This finite numerical defect is never assigned to removed energy.
     pub energy_residual_j: f64,
 }
