@@ -4011,6 +4011,32 @@ the held bulk and card speeds. Omission keeps every default result bit-identical
 No card selects it: under it the island's loop-phase window moves every flue card
 off its pitch (pexfp.135.5 A/B), and that window is the open defect.
 
+`jet_noise SEED GAIN ST_LO ST_HI RE_ON` (opt-in) after the `jet_limits` record adds a
+measured turbulence source to the mouth. Every field is required and none is
+defaulted: the card names the published source it uses. `U` is Verge's jet
+velocity `U = sqrt(2 P_foot / rho)` (Verge 1995, eq. 2.12 definition) of the
+instantaneous blowing pressure `P_foot` upstream of the windway, for all three uses
+below; it is not the windway's bulk or centre speed that the loop's jet has, so at a
+fixed `P_foot` a card with another windway loss draws the same noise (a test pins
+this). The amplitude is `GAIN * rho * U^2 / 2 = GAIN * P_foot` in rms, the gate is
+`Re_h = U h / nu >= RE_ON`, and the band is the Strouhal band
+`St_h = f h / U` between `ST_LO` and `ST_HI`, recomputed every sample from the live
+`U`, so the spectrum slides with the pressure and the rms follows `U^2`. The stream is a
+band-passed unit Gaussian (a difference of two one-pole low-passes, scaled by the
+exact variance of the pair) keyed by `SEED` and its own kernel id
+(`FLUE_JET_NOISE_KERNEL`), not the island's onset-seed stream: exactly one normal is
+drawn per sample whether the gate is open or shut, so a gate that never opens leaves
+the loop bit-identical to the card without the row. The gate returns zero (and
+clears the filter state) while `Re_h < RE_ON` or the jet is not flowing. The
+pressure enters in series in the mouth solve, `radiation_history - p`, with the same
+value in all four trial solves of a sample; its work `p q dt` is booked in the
+source-work ledger and the ledger still closes. Omission keeps every result bit-identical. The sidecar records
+the five fields. No-claim: a single broadband source in series at the mouth; the
+gain and band belong to the cited measurement (Verge 1995 sec. 5.5 for a recorder-like
+pipe), are valid only near the Reynolds number and W/h where it was measured, and
+nothing here shapes the spectrum beyond the band edges or tunes a gain to a
+recording.
+
 `bernoulli_aperture::slit_channel` resolves fixed, fully developed planar
 Newtonian momentum from the retained `GasState` density and viscosity. Its
 2..=4096 cell-centred finite volumes share a no-slip wall diffusion operator;

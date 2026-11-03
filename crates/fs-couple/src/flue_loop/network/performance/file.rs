@@ -18,6 +18,13 @@
 //! moving apertures and mutual-radiation ports refuse this local closure.
 //! AREA_RATIO is in (0,1], MAXIMUM_MACH in (0,0.3]; SOURCE_TOKEN is mandatory.
 //!
+//! Optional `jet_noise SEED GAIN ST_LO ST_HI RE_ON` directly after `jet_limits` (every field required, no default):
+//! the opt-in breath noise of `flue_loop::JetNoiseSpec`, a dipole pressure jump in series in the mouth of rms
+//! `GAIN * rho U^2 / 2` over `St_h` in `[ST_LO, ST_HI]`, shut below `Re_h = RE_ON`, with
+//! U = sqrt(2 P_foot / rho) (Verge 1995 eq. 2.12 definition) of the instantaneous blowing pressure upstream of the
+//! windway, for the gain, the gate and the band alike (the windway's own speed is not used). Omitting the row leaves
+//! every result bit-identical.
+//!
 //! Optional `observer_gas LAW MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS`
 //! immediately after `receiver` selects `stokes-kirchhoff` or `lossless`.
 //! `observer_gas molecular MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS LAW`
@@ -40,7 +47,7 @@ use crate::bernoulli_aperture::radiation::environment::multiport::source::{
 use crate::bernoulli_aperture::viscothermal::ViscothermalSectionSpec;
 use crate::flue_loop::network::{FlueNetworkSpec, FlueSourcePaths};
 use crate::flue_loop::window_radiation::{WindowFlux, WindowRadiationLoad, cut_up_piston};
-use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice};
+use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, JetNoiseSpec};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::GasPropagation;
 use crate::pcm_wav::baffled::openings::duct::{DuctOpening, DuctRadiationSpec, DuctReconstruction};
@@ -496,6 +503,21 @@ impl FlueFilePerformance {
         let maximum_jet_mach = row.scalar()?;
         let max_jet_history_samples = row.number()?;
         row.end()?;
+        // Optional opt-in breath noise after `jet_limits`: `jet_noise SEED GAIN ST_LO ST_HI RE_ON`, every field required
+        // (no default gain or band; see `JetNoiseSpec`).
+        let jet_noise = if rows.next_is("jet_noise") {
+            let mut row = rows.row("jet_noise")?;
+            let spec = JetNoiseSpec {
+                seed: row.number()?,
+                gain: row.scalar()?,
+                strouhal_lo: row.scalar()?,
+                strouhal_hi: row.scalar()?,
+                reynolds_onset: row.scalar()?,
+            };
+            row.end()?;
+            spec.validate().map_err(|what| bad(rows.line, what))?;
+            Some(spec)
+        } else { None };
         let mut row = rows.row("wave_memory_bytes")?;
         let max_wave_memory_bytes: usize = row.number()?;
         row.end()?;
@@ -627,6 +649,10 @@ impl FlueFilePerformance {
         let held_pressure_pa = held_blowing_pressure(&schedule, control_source.as_ref());
         let voice = flow_input.attach(voice, held_pressure_pa)?;
         let voice = jet_input.attach(voice, held_pressure_pa, gate)?;
+        let voice = match jet_noise {
+            Some(spec) => voice.with_jet_noise(spec).map_err(FlueInputError::Physics)?,
+            None => voice,
+        };
         let voice = match &window {
             Some(record) => voice.with_window_mass(record.mass_per_density(),
                 record.riser_mass_per_density).map_err(FlueInputError::Physics)?,

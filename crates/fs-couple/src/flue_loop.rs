@@ -100,6 +100,7 @@ use fs_aeroac::jetcard::{JetCard, JetCardClaim};
 use fs_duct::{FingeringTable, Termination};
 use fs_material::gas::GasState;
 use fs_rand::StreamKey;
+use crate::turbulence_noise::{BandedGaussian, FLUE_JET_NOISE_KERNEL};
 
 use crate::bernoulli_aperture::developing::{DevelopingSlit, DevelopingSlitState};
 use crate::wind_line::{WindBoundary, WindLineBank, WindLineError};
@@ -132,6 +133,85 @@ pub mod forced_jet;
 /// Philox kernel id of the flue onset seed stream (logical identity;
 /// never a scheduling artifact).
 pub const FLUE_SEED_KERNEL: u32 = 0x666c_7565; // "flue"
+
+/// The opt-in breath noise of a flue jet (card row `jet_noise SEED GAIN ST_LO ST_HI RE_ON`): a dipole pressure jump
+/// in series in the mouth, uncorrelated with the acoustic field, of rms `gain * rho U_j^2 / 2 = gain * P_f` over the band
+/// `St_h = f h / U_j` in `[strouhal_lo, strouhal_hi]`, `h` the flue height, and zero while `Re_h = U_j h / nu` is below
+/// `reynolds_onset`. `U_j = sqrt(2 P_f / rho)` is VERGE'S jet velocity (the maximum jet velocity of his eq. 2.12) from the
+/// driving (foot) pressure `P_f`, the instantaneous blowing pressure upstream of the windway; it is NOT the card speed of
+/// the loop (the windway's bulk or centre speed): the measurement defines its gain, its floor and its band on `U_j`, and a
+/// windway with a viscous drop leaves `P_f` and so the noise unchanged while it slows the jet the loop sees. This is the
+/// FORM of Verge's measured source (PhD thesis, TU Eindhoven 1995, sec. 5.5, Fig. 5.15a: `Delta p / (rho U_j^2 / 2)` per
+/// analyser line, the pipe-end values, a recorder-like pipe with W/h 4 and h 1.00 mm, determinable only from 390 Pa); every
+/// field of it is the card's. There is NO default for any field: the law has no gain that holds for another geometry
+/// (Verge: noise grows with W/h, without a law). The draw is one normal per sample from the driver's own stream
+/// ([`FLUE_JET_NOISE_KERNEL`]), shut or open, so the stream index never depends on the gate and the island's onset seed is
+/// never touched.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JetNoiseSpec {
+    /// Declared seed of the noise stream.
+    pub seed: u64,
+    /// Dimensionless amplitude `Delta p_rms / (rho U_j^2 / 2)` [-].
+    pub gain: f64,
+    /// Lower band edge in `St_h = f h / U_j` [-].
+    pub strouhal_lo: f64,
+    /// Upper band edge in `St_h` [-].
+    pub strouhal_hi: f64,
+    /// Jet Reynolds number `Re_h = U_j h / nu` [-] below which the source is shut.
+    pub reynolds_onset: f64,
+}
+
+impl JetNoiseSpec {
+    /// # Errors
+    /// A named reason: gain finite and positive, `0 < strouhal_lo < strouhal_hi` finite, onset finite and non-negative.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(self.gain.is_finite() && self.gain > 0.0) {
+            return Err("jet_noise gain must be finite and positive");
+        }
+        if !(self.strouhal_lo.is_finite() && self.strouhal_lo > 0.0
+            && self.strouhal_hi.is_finite() && self.strouhal_hi > self.strouhal_lo) {
+            return Err("jet_noise needs a Strouhal band 0 < ST_LO < ST_HI");
+        }
+        if !(self.reynolds_onset.is_finite() && self.reynolds_onset >= 0.0) {
+            return Err("jet_noise reynolds onset must be finite and non-negative");
+        }
+        Ok(())
+    }
+}
+
+// The attached source: the spec, its own banded stream and the last series pressure it drew (0 while shut).
+struct JetNoise {
+    spec: JetNoiseSpec,
+    noise: BandedGaussian,
+    last_pa: f64,
+}
+
+impl JetNoise {
+    fn new(spec: JetNoiseSpec) -> Result<Self, FlueError> {
+        spec.validate().map_err(|what| FlueError::Invalid { what })?;
+        Ok(Self { noise: BandedGaussian::new(spec.seed, FLUE_JET_NOISE_KERNEL), spec, last_pa: 0.0 })
+    }
+
+    // The series pressure [Pa] of one accepted sample, drawn ONCE before any nonlinear trial; None while the gate is
+    // shut (so a shut source leaves the mouth solve and the ledger on their original arithmetic). Everything follows
+    // Verge's jet velocity `U_j = sqrt(2 P_f / rho)` of THIS sample's foot pressure `P_f` (never the windway's speed):
+    // the amplitude is `gain * rho U_j^2 / 2 = gain * P_f`, the gate `Re_h = U_j h / nu >= reynolds_onset`, the band edges
+    // `f = St U_j / h`. The stream advances by exactly one normal whether the gate is open or shut.
+    fn pressure_pa(&mut self, foot_pa: f64, flue_height_m: f64, rho: f64, nu: f64, dt: f64) -> Option<f64> {
+        let speed_m_s = if foot_pa > 0.0 { (2.0 * foot_pa / rho).sqrt() } else { 0.0 };
+        let reynolds = speed_m_s * flue_height_m / nu;
+        if !(speed_m_s > 0.0 && reynolds >= self.spec.reynolds_onset) {
+            self.noise.skip();
+            self.last_pa = 0.0;
+            return None;
+        }
+        let per_hz = speed_m_s / flue_height_m;
+        let w = self.noise.step(self.spec.strouhal_lo * per_hz, self.spec.strouhal_hi * per_hz, dt);
+        let pressure = self.spec.gain * foot_pa * w;
+        self.last_pa = pressure;
+        Some(pressure)
+    }
+}
 
 /// Typed refusals of the flue loop.
 #[derive(Debug)]
@@ -654,6 +734,8 @@ pub struct FlueVoice {
     // Opt-in forced-jet kernel (see `forced_jet`): the labium displacement from the retained exit
     // velocities. None = the island's own chain.
     forced: Option<forced_jet::ForcedJetKernel>,
+    // Opt-in breath noise in series in the mouth (see `JetNoiseSpec`); None = the original, byte-identical loop.
+    jet_noise: Option<JetNoise>,
     // Declared minimum bulk jet speed, which sizes the retained history, and most retained
     // jet-response input samples.
     minimum_jet_speed_m_s: f64,
@@ -781,6 +863,7 @@ impl FlueVoice {
             displacement_state: 0.0,
             nolle: None,
             forced: None,
+            jet_noise: None,
             minimum_jet_speed_m_s: minimum_jet_speed,
             max_jet_history_samples: max_history,
             inertance,
@@ -921,6 +1004,26 @@ impl FlueVoice {
         } else {
             bulk_m_s
         }
+    }
+
+    /// Attach the opt-in breath noise ([`JetNoiseSpec`]) before any accepted sample. It composes with every jet
+    /// model: it adds a series pressure to the mouth solve and changes nothing in the jet's own response. A voice
+    /// without it never draws from the noise stream and stays bit-identical.
+    ///
+    /// # Errors
+    /// Repeated or late attachment, a poisoned voice, or a spec [`JetNoiseSpec::validate`] refuses.
+    pub fn with_jet_noise(mut self, spec: JetNoiseSpec) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.jet_noise.is_some() {
+            return Err(FlueError::Invalid { what: "jet noise requires one cold attachment" });
+        }
+        self.jet_noise = Some(JetNoise::new(spec)?);
+        Ok(self)
+    }
+
+    /// The attached breath-noise card, if any.
+    #[must_use]
+    pub fn jet_noise(&self) -> Option<&JetNoiseSpec> {
+        self.jet_noise.as_ref().map(|noise| &noise.spec)
     }
 
     /// Feed the jet card its own speed (pexfp.135.5) before any accepted sample, after the
@@ -1371,6 +1474,7 @@ impl FlueVoice {
         seed: f64,
         c: JetStepCoefficients,
         nolle: Option<nolle_jet::NolleStep>,
+        series_noise_pa: Option<f64>,
     ) -> Result<(MouthStep, JetTrial, f64), FlueError> {
         let (radiation_direct, radiation_history) = self.mouth_radiation.as_ref()
             .map_or((0.0, 0.0), mouth_radiation::MouthRadiation::affine_pressure);
@@ -1379,6 +1483,14 @@ impl FlueVoice {
             .map_or((0.0, 0.0), window_radiation::WindowRadiation::affine_pressure);
         let (radiation_direct, radiation_history) =
             (radiation_direct + window_direct, radiation_history + window_history);
+        // The opt-in breath noise is a pressure in series with the jet's source, the SAME value in every nonlinear trial
+        // of this sample. Every use below subtracts `radiation_history` from the jet's source pressure, so a series
+        // pressure `p` enters as `radiation_history - p` and the four mouth solves (affine, Nolle, nonlinear, linear
+        // bracket) see it identically. Absent noise leaves `radiation_history` untouched, bit for bit.
+        let radiation_history = match series_noise_pa {
+            Some(p) => radiation_history - p,
+            None => radiation_history,
+        };
         let (l, r, zc, dt) = (self.inertance, self.resistance + radiation_direct, self.zc, self.dt);
         let area = self.geometry.mouth_area_m2();
         let jet = |q: f64| self.jet_trial(delayed.past_m_s+delayed.current_weight*q/area, seed, c);
@@ -1805,8 +1917,14 @@ impl FlueVoice {
                 eta_override: declared.then_some(0.0) };
             below_edge_samples += usize::from(declared);
             let boundary = self.line.mouth_boundary()?;
+            // The opt-in breath noise: ONE draw per accepted sample, before any nonlinear trial, from its own stream, on
+            // Verge's U_j of the instantaneous foot pressure (not on card_u, the loop's own jet speed).
+            let (flue_height_m, gas_density, kinematic_viscosity) = (self.geometry.flue_height_m, self.rho, self.nu);
+            let foot_pa = self.blow_pa;
+            let noise_pa = self.jet_noise.as_mut()
+                .and_then(|noise| noise.pressure_pa(foot_pa, flue_height_m, gas_density, kinematic_viscosity, dt));
             let (mouth, trial, separation_power) =
-                self.solve_jet_mouth(boundary, delayed, chain_seed, coefficients, nolle_step)?;
+                self.solve_jet_mouth(boundary, delayed, chain_seed, coefficients, nolle_step, noise_pa)?;
             let (eta, flow, p_source) = (trial.eta_m, trial.flow_m3_s, trial.source_pa);
             let nolle_candidate = nolle_step.map(|step|
                 step.candidate(mouth.flow_m3_s, flow-0.5*q_max*(1.0+(-y0/b).tanh()))
@@ -1850,7 +1968,11 @@ impl FlueVoice {
             self.flow_prev = flow;
             separation = next_separation;
             // Ledger terms of the implicit step (exact identity).
-            source_work += p_source * q * dt;
+            // The series breath noise delivers its own work: it is part of the source pressure the mouth sees.
+            source_work += match noise_pa {
+                Some(p) => (p_source + p) * q * dt,
+                None => p_source * q * dt,
+            };
             if let FlueResonator::Dg(duct) = &self.line {
                 if let Some(frame) = duct.last_frame().filter(|frame| frame.driven_mouth.is_some()) {
                     pipe_work += frame.inlet_work_j;
@@ -2629,6 +2751,121 @@ mod forced_jet_tests {
             assert!(d.ledger_defect_j.abs() <= 2e-12*scale+1e-30, "{d:?}");
             assert!(d.separation_loss_j >= 0.0);
         }
+    }
+
+    // Breath noise (JetNoiseSpec): G0 byte-identity, seed, refusals; G3 the rho U^2 law, the gate and the closed ledger.
+    fn noise_spec(onset: f64) -> JetNoiseSpec {
+        JetNoiseSpec { seed: 11, gain: 1.3e-3, strouhal_lo: 0.045, strouhal_hi: 0.115, reynolds_onset: onset }
+    }
+    // Eight 257-sample blocks of the relay chain at 100 Pa, as raw bits; the work ledger must close either way.
+    fn noise_run(noise: Option<JetNoiseSpec>) -> Vec<u64> {
+        let mut v = bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096);
+        if let Some(spec) = noise {
+            v = v.with_jet_noise(spec).unwrap();
+        }
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        let mut bits = Vec::new();
+        for _ in 0..8 {
+            let mut out = [0.0; 257];
+            v.step_block(&mut out).unwrap();
+            bits.extend(out.iter().map(|x| x.to_bits()));
+        }
+        assert_work(&v);
+        bits
+    }
+
+    #[test]
+    fn g0_jet_noise_without_the_row_or_with_a_shut_gate_is_bit_identical_and_an_open_gate_is_seeded() {
+        let base = noise_run(None);
+        // A source whose gate never opens draws only from its own stream: the loop is the original loop, bit for bit.
+        // (A noise drawn from the island's onset-seed stream would move every later seed draw and fail here.)
+        assert_eq!(noise_run(Some(noise_spec(1.0e12))), base);
+        let open = noise_run(Some(noise_spec(0.0)));
+        assert_ne!(open, base, "an open source changes the loop");
+        assert_eq!(noise_run(Some(noise_spec(0.0))), open, "a declared seed gives the same bits");
+        let other = JetNoiseSpec { seed: 12, ..noise_spec(0.0) };
+        assert_ne!(noise_run(Some(other)), open, "another seed gives another noise");
+    }
+
+    #[test]
+    fn g0_jet_noise_refuses_unusable_fields_and_late_or_repeated_attachment() {
+        let fresh = || bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096);
+        for bad in [
+            JetNoiseSpec { gain: 0.0, ..noise_spec(1700.0) },
+            JetNoiseSpec { gain: f64::NAN, ..noise_spec(1700.0) },
+            JetNoiseSpec { strouhal_lo: 0.0, ..noise_spec(1700.0) },
+            JetNoiseSpec { strouhal_lo: 0.115, strouhal_hi: 0.045, ..noise_spec(1700.0) },
+            JetNoiseSpec { strouhal_hi: f64::INFINITY, ..noise_spec(1700.0) },
+            JetNoiseSpec { reynolds_onset: -1.0, ..noise_spec(1700.0) },
+        ] {
+            assert!(fresh().with_jet_noise(bad).is_err(), "{bad:?}");
+        }
+        let attached = fresh().with_jet_noise(noise_spec(1700.0)).unwrap();
+        assert_eq!(attached.jet_noise(), Some(&noise_spec(1700.0)));
+        assert!(attached.with_jet_noise(noise_spec(1700.0)).is_err(), "one attachment");
+        let mut late = fresh();
+        late.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        late.step_block(&mut [0.0; 16]).unwrap();
+        assert!(late.with_jet_noise(noise_spec(1700.0)).is_err(), "cold attachment only");
+        assert!(fresh().jet_noise().is_none());
+    }
+
+    #[test]
+    fn g3_jet_noise_rms_is_gain_times_the_foot_pressure_and_so_scales_with_the_square_of_verges_jet_velocity() {
+        // U_j = sqrt(2 P_f / rho): 100 Pa -> 12.9 m/s, 400 Pa -> 25.8 m/s (U_j doubles); rms = gain * rho U_j^2 / 2 = gain * P_f.
+        let (h, rho, nu, dt, count) = (1.0e-3, 1.2, 1.5e-5, 1.0 / 48_000.0, 1usize << 16);
+        let rms = |foot_pa: f64| {
+            let mut n = JetNoise::new(noise_spec(0.0)).unwrap();
+            for _ in 0..4096 {
+                n.pressure_pa(foot_pa, h, rho, nu, dt);
+            }
+            let s2: f64 = (0..count).map(|_| n.pressure_pa(foot_pa, h, rho, nu, dt).unwrap().powi(2)).sum();
+            (s2 / count as f64).sqrt()
+        };
+        let (slow, fast) = (rms(100.0), rms(400.0));
+        let law = 1.3e-3 * 100.0;
+        assert!((slow - law).abs() < 0.05 * law, "rms {slow} against gain P_f = {law}");
+        assert!((fast / slow - 4.0).abs() < 0.2, "doubling U_j gave x{}", fast / slow);
+    }
+
+    #[test]
+    fn g3_jet_noise_gate_sits_at_the_onset_reynolds_number_of_verges_jet_velocity_and_the_ledger_closes_with_it_open() {
+        // rho 1.2, nu 1.5e-5, h 1 mm: Re_h = 1700 at U_j = 25.5 m/s, P_f = 390.15 Pa.
+        let (h, rho, nu, dt) = (1.0e-3, 1.2, 1.5e-5, 1.0 / 48_000.0);
+        let mut n = JetNoise::new(noise_spec(1700.0)).unwrap();
+        for _ in 0..64 {
+            assert!(n.pressure_pa(390.0, h, rho, nu, dt).is_none(), "Re_h 1699.7 is below his floor");
+            assert_eq!(n.last_pa, 0.0);
+        }
+        assert!(n.pressure_pa(390.5, h, rho, nu, dt).is_some(), "Re_h 1700.8 is above it");
+        for dead in [0.0, -5.0, f64::NAN] {
+            assert!(n.pressure_pa(dead, h, rho, nu, dt).is_none(), "no jet, no noise ({dead})");
+        }
+        // `noise_run` asserts the work ledger on its own: with the source open the series pressure's work is booked.
+        let _ = noise_run(Some(JetNoiseSpec { gain: 0.05, ..noise_spec(0.0) }));
+    }
+
+    #[test]
+    fn g3_jet_noise_follows_the_foot_pressure_not_the_windway_loss() {
+        // MB 15158: at fixed P_f a card with a different windway loss draws the same noise, bit for bit; the slit slows
+        // the jet the LOOP sees (its bulk speed) and nothing else. Block of one sample so the last draw is visible.
+        let run = |slit: bool| {
+            let mut v = bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096).with_jet_noise(noise_spec(0.0)).unwrap();
+            if slit {
+                v = v.with_viscous_windway(0.0615).unwrap();
+            }
+            v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+            let mut draws = Vec::new();
+            for _ in 0..512 {
+                v.step_block(&mut [0.0; 1]).unwrap();
+                draws.push(v.jet_noise.as_ref().unwrap().last_pa.to_bits());
+            }
+            (v.jet_speed_m_s(), draws)
+        };
+        let ((free_speed, free_draws), (slit_speed, slit_draws)) = (run(false), run(true));
+        assert!(free_speed - slit_speed > 3.0, "the slit must slow the loop's jet: {free_speed} against {slit_speed} m/s");
+        assert!(free_draws.iter().any(|b| f64::from_bits(*b) != 0.0), "the source must be open");
+        assert_eq!(free_draws, slit_draws, "same P_f, same noise");
     }
 
     #[test]

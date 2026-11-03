@@ -103,6 +103,76 @@ impl ColouredGaussian {
     }
 }
 
+/// Kernel id of the flue jet-noise stream in `fs_rand`'s `(seed, kernel, tile)` key: "jetn". The flue driver
+/// ([`BandedGaussian`] under this id) never touches the glottal stream or the flue island's onset-seed stream.
+pub const FLUE_JET_NOISE_KERNEL: u32 = 0x6a65_746e;
+
+/// The matched-pole coefficient of a first-order low-pass of cutoff `cutoff_hz` at step `dt`.
+fn one_pole_alpha(cutoff_hz: f64, dt: f64) -> f64 {
+    (1.0 - det::exp(-core::f64::consts::TAU * cutoff_hz * dt)).clamp(0.0, 1.0)
+}
+
+/// Stationary variance of `y_hi - y_lo`, two one-pole low-passes `y_k += alpha_k (x - y_k)` driven by the SAME unit
+/// white sample: `v_k = alpha_k / (2 - alpha_k)` each and the covariance `alpha_lo alpha_hi / (1 - (1 - alpha_lo)(1 - alpha_hi))`
+/// (the fixed point of `c = (1 - alpha_lo)(1 - alpha_hi) c + alpha_lo alpha_hi`).
+fn band_variance(alpha_lo: f64, alpha_hi: f64) -> f64 {
+    let denominator = alpha_lo + alpha_hi - alpha_lo * alpha_hi;
+    if denominator <= 0.0 {
+        return 0.0;
+    }
+    alpha_hi / (2.0 - alpha_hi) + alpha_lo / (2.0 - alpha_lo) - 2.0 * alpha_lo * alpha_hi / denominator
+}
+
+/// Gaussian noise through a band, normalised to unit variance: the difference of two first-order low-passes (cutoffs
+/// `f_lo < f_hi`, both changeable every step) driven by ONE white sample per step. The band edges are a modelling
+/// choice of this code (a soft first-order edge on each side), not of any source that names a band.
+#[derive(Clone, Debug)]
+pub struct BandedGaussian {
+    white: Stream,
+    y_lo: f64,
+    y_hi: f64,
+}
+
+impl BandedGaussian {
+    /// A stream at `seed` under `kernel` (tile 0), both filters at rest.
+    #[must_use]
+    pub fn new(seed: u64, kernel: u32) -> Self {
+        Self {
+            white: StreamKey { seed, kernel, tile: 0 }.stream(),
+            y_lo: 0.0,
+            y_hi: 0.0,
+        }
+    }
+
+    /// One band sample for edges `f_lo_hz < f_hi_hz` and step `dt` seconds, scaled by the closed-form stationary
+    /// standard deviation at the present edges (quasi-stationary, like [`ColouredGaussian::step`]). Edges that are not
+    /// ordered, positive and finite count as closed and are [`BandedGaussian::skip`]; edges so close or so high that
+    /// the two poles coincide give exactly zero (the difference vanishes identically).
+    pub fn step(&mut self, f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> f64 {
+        if !(f_lo_hz > 0.0 && f_hi_hz > f_lo_hz && f_hi_hz.is_finite() && dt > 0.0 && dt.is_finite()) {
+            return self.skip();
+        }
+        let x = self.white.next_normal();
+        let (a_lo, a_hi) = (one_pole_alpha(f_lo_hz, dt), one_pole_alpha(f_hi_hz, dt));
+        self.y_lo += a_lo * (x - self.y_lo);
+        self.y_hi += a_hi * (x - self.y_hi);
+        let variance = band_variance(a_lo, a_hi);
+        if !(variance > 0.0 && variance.is_finite()) {
+            return 0.0;
+        }
+        (self.y_hi - self.y_lo) / det::sqrt(variance)
+    }
+
+    /// A step with the source closed: exactly one white sample is drawn (the stream index does not depend on how long
+    /// the gate was shut), both filters are cleared and the output is zero.
+    pub fn skip(&mut self) -> f64 {
+        let _ = self.white.next_normal();
+        self.y_lo = 0.0;
+        self.y_hi = 0.0;
+        0.0
+    }
+}
+
 /// The voice's opt-in aspiration card: `aspiration_noise <seed> <xi> [<re_crit>]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AspirationCard {
@@ -330,5 +400,74 @@ mod tests {
         }
         assert_eq!(a.noise.white.index(), b.noise.white.index(), "one white sample per step either way");
         assert!(a.noise.white.index() > 0, "the stream advanced");
+    }
+
+    #[test]
+    fn banded_noise_has_unit_variance_no_dc_and_one_normal_per_step_gated_or_not() {
+        let (f_lo, f_hi, dt) = (1000.0, 2500.0, 1.0 / 48_000.0);
+        let mut g = BandedGaussian::new(41, FLUE_JET_NOISE_KERNEL);
+        for _ in 0..4096 {
+            g.step(f_lo, f_hi, dt);
+        }
+        let n = 1usize << 18;
+        let xs: Vec<f64> = (0..n).map(|_| g.step(f_lo, f_hi, dt)).collect();
+        let var = xs.iter().map(|x| x * x).sum::<f64>() / n as f64;
+        assert!((var - 1.0).abs() < 0.06, "variance {var}");
+        // A band-pass has no DC: the variance of 256-sample block means is far below the 1/256 of white noise.
+        let means: Vec<f64> = xs.chunks(256).map(|c| c.iter().sum::<f64>() / 256.0).collect();
+        let var_mean = means.iter().map(|m| m * m).sum::<f64>() / means.len() as f64;
+        assert!(var_mean < 0.25 / 256.0, "block-mean variance {var_mean} against white's {}", 1.0 / 256.0);
+        // One white sample per step, band open or shut, and the shut band clears the filters.
+        let mut open = BandedGaussian::new(7, FLUE_JET_NOISE_KERNEL);
+        let mut shut = BandedGaussian::new(7, FLUE_JET_NOISE_KERNEL);
+        for _ in 0..6 {
+            open.step(f_lo, f_hi, dt);
+        }
+        for _ in 0..6 {
+            assert_eq!(shut.skip(), 0.0);
+        }
+        assert_eq!(open.white.index(), shut.white.index());
+        assert!(open.white.index() > 0);
+        assert_eq!((shut.y_lo, shut.y_hi), (0.0, 0.0));
+        // A closed band (unordered or non-positive edges) is a skip as well: the same number of raw draws per step as an
+        // open step (`next_normal` consumes more than one raw draw, so the per-step count is measured, not assumed).
+        let before = open.white.index();
+        let per_step = before / 6;
+        assert_eq!(per_step * 6, before, "six open steps must advance the stream evenly");
+        assert_eq!(open.step(2500.0, 1000.0, dt), 0.0);
+        assert_eq!(open.step(0.0, 1000.0, dt), 0.0);
+        assert_eq!(open.white.index(), before + 2 * per_step);
+    }
+
+    #[test]
+    fn the_banded_variance_formula_matches_a_brute_force_run_and_the_seed_and_kernel_matter() {
+        // Two one-pole low-passes driven by the same white stream, the difference measured directly.
+        let (f_lo, f_hi, dt) = (700.0, 1900.0, 1.0 / 44_100.0);
+        let (a_lo, a_hi) = (one_pole_alpha(f_lo, dt), one_pole_alpha(f_hi, dt));
+        let mut white = StreamKey { seed: 3, kernel: FLUE_JET_NOISE_KERNEL, tile: 0 }.stream();
+        let (mut y_lo, mut y_hi) = (0.0f64, 0.0f64);
+        for _ in 0..8192 {
+            let x = white.next_normal();
+            y_lo += a_lo * (x - y_lo);
+            y_hi += a_hi * (x - y_hi);
+        }
+        let n = 1usize << 19;
+        let mut s2 = 0.0;
+        for _ in 0..n {
+            let x = white.next_normal();
+            y_lo += a_lo * (x - y_lo);
+            y_hi += a_hi * (x - y_hi);
+            s2 += (y_hi - y_lo) * (y_hi - y_lo);
+        }
+        let measured = s2 / n as f64;
+        let formula = band_variance(a_lo, a_hi);
+        assert!((measured - formula).abs() < 0.03 * formula, "measured {measured} against {formula}");
+        let run = |seed, kernel| {
+            let mut g = BandedGaussian::new(seed, kernel);
+            (0..64).map(|_| g.step(f_lo, f_hi, dt).to_bits()).collect::<Vec<u64>>()
+        };
+        assert_eq!(run(7, FLUE_JET_NOISE_KERNEL), run(7, FLUE_JET_NOISE_KERNEL));
+        assert_ne!(run(7, FLUE_JET_NOISE_KERNEL), run(8, FLUE_JET_NOISE_KERNEL));
+        assert_ne!(run(7, FLUE_JET_NOISE_KERNEL), run(7, GLOTTAL_NOISE_KERNEL), "the flue's kernel keeps its stream apart from the glottal one");
     }
 }
