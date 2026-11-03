@@ -162,7 +162,7 @@ impl BoundaryGrid3 {
     /// body order: permutations agree to roundoff, not necessarily bit for bit.
     ///
     /// # Errors
-    /// Inherits single-body BGK/TRT, held Guo forcing, finite/SPD, low-Mach, stationary
+    /// Inherits single-body D3Q19 collision, held Guo forcing, finite/SPD, low-Mach, stationary
     /// wall/periodic admission. Also refuses an empty assembly, malformed
     /// fraction fields and aggregate occupancy above one. Every refusal leaves
     /// all bodies, fluid populations and topology admission unchanged.
@@ -303,7 +303,7 @@ impl BoundaryGrid3 {
             return Ok((receipt, value, Vec::new()));
         }
         let relaxation = ImmersedRelaxation3::new(self.collision_model)
-            .ok_or_else(|| invalid("immersed assembly requires BGK or TRT"))?;
+            .ok_or_else(|| invalid("immersed assembly needs finite viscous relaxation time"))?;
         let tau = relaxation.tau;
         if !origin.into_iter().all(f64::is_finite)
             || Face3::ALL.into_iter().any(|face| {
@@ -440,7 +440,7 @@ impl BoundaryGrid3 {
                     let (rho, velocity) = moments(f, force, cell)?;
                     let physical = physical_populations(f, velocity, force);
                     let eq = equilibrium3(rho, velocity);
-                    let fluid_collision = relaxation.increments(&physical, &eq);
+                    let fluid_collision = relaxation.increments(&physical, &eq, &f, &ordinary);
                     let mut summed = [0.0; Q3];
                     for a in 0..N {
                         if a.is_multiple_of(TILE_CELLS) {

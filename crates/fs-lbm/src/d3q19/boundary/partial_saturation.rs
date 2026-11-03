@@ -1,4 +1,4 @@
-//! Spatial rigid-body response for the native partially saturated BGK/TRT law.
+//! Spatial rigid-body response for native partially saturated D3Q19 collision.
 //!
 //! With `G(r) v = V + omega cross r`, the solid impulse at one cell is
 //! `B rho (u-Gv)`, where `u` includes the native Guo half-force shift.
@@ -14,8 +14,12 @@
 //!
 //! TRT retains the same solid reflection and even/shear saturation weight,
 //! while the fluid part relaxes its odd modes at the native independent rate.
-//! The BGK force-free path is unchanged. This extension does not establish a
-//! curved-wall magic parameter, stresslet accuracy or suspension rheology.
+//! Central-moment and reduced-cumulant collision retain their native physical
+//! increment, with the second-order rate setting the saturation weight. The
+//! same zero first moment of that increment makes the body solve independent
+//! of the fluid's higher-order relaxation. Existing BGK/TRT paths are unchanged.
+//! This extension does not establish high-Re validity, a curved-wall magic
+//! parameter, stresslet accuracy or suspension rheology.
 
 use super::{
     BoundaryGrid3, BoundaryLink3, CancelGate, CollisionError3, CollisionModel3, E3, Face3,
@@ -194,7 +198,7 @@ pub enum PartialSaturationError3 {
         /// Stable diagnostic.
         reason: &'static str,
     },
-    /// Refusal from the unchanged native BGK/TRT cell owner.
+    /// Refusal from the unchanged native D3Q19 cell owner.
     Collision {
         /// Global cell coordinate.
         cell: [usize; 3],
@@ -286,7 +290,7 @@ fn moments(populations: [f64; Q3], force: [f64; 3], cell: [usize; 3]) -> Result<
     Ok((rho, velocity))
 }
 
-// Guo stores f = g - S(u,F)/2. Replace the BGK/TRT collision on physical g,
+// Guo stores f = g - S(u,F)/2. Replace the selected collision on physical g,
 // leaving the source outside that replacement: native_collision(f,F) +
 // sum_a B_a [Omega_s,a(g) - Omega_fluid(g)]. Each correction then has
 // first moment B_a rho (v_a-u), and the external fluid impulse remains F.
@@ -373,13 +377,14 @@ impl BoundaryGrid3 {
     /// native tile-major collision and pull operators. The existing `post`
     /// and `next` buffers are reused; only first-use streaming scratch and two
     /// fixed-size Cholesky factors allocate. Zero fractions recover the
-    /// ordinary BGK/TRT Guo step bit for bit. The immersed correction operates on
+    /// ordinary selected Guo step bit for bit. The immersed correction operates on
     /// physical half-source-shifted populations; body response uses the same
     /// force-corrected fluid velocity. Uniform and per-cell forcing are added
     /// by the original grid owner, and reported separately from reactions.
     ///
     /// # Errors
-    /// Requires BGK or TRT, finite held forcing, periodic or stationary-wall faces,
+    /// Admits BGK, TRT, central-moment and reduced-cumulant collision with finite
+    /// viscous relaxation time, held forcing, periodic or stationary-wall faces,
     /// symmetric positive-definite inertia, finite inputs, and body center/
     /// sampled point speeds squared below `0.03` before/midpoint/after.
     /// Invalid inputs, numerical overflow and cancellation leave all fluid
@@ -453,7 +458,7 @@ impl BoundaryGrid3 {
     ) -> Result<(PartialSaturationBodyExchange3, T)> {
         checkpoint(gate)?;
         let relaxation = ImmersedRelaxation3::new(self.collision_model)
-            .ok_or_else(|| invalid("finite-inertia immersed coupling requires BGK or TRT"))?;
+            .ok_or_else(|| invalid("immersed coupling needs finite viscous relaxation time"))?;
         let tau = relaxation.tau;
         if solid_fractions.len() != self.nx * self.ny * self.nz {
             return Err(invalid("solid fractions must cover the whole grid"));
@@ -608,7 +613,8 @@ impl BoundaryGrid3 {
                     let (rho, velocity) = moments(f, force, cell)?;
                     let physical = physical_populations(f, velocity, force);
                     let fluid_eq = equilibrium3(rho, velocity);
-                    let fluid_collision = relaxation.increments(&physical, &fluid_eq);
+                    let fluid_collision =
+                        relaxation.increments(&physical, &fluid_eq, &f, &ordinary);
                     let solid_eq = equilibrium3(rho, solid_velocity);
                     let b = epsilon * (tau - 0.5) / (1.0 - epsilon + tau - 0.5);
                     let mut fluid_impulse = [0.0; 3];

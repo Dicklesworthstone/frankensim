@@ -13,6 +13,20 @@ const TAU: f64 = 0.83;
 const ORIGIN: [f64; 3] = [-4.2, 7.1, 2.3];
 const UNIFORM: [f64; 3] = [2e-5, -1.1e-5, 0.7e-5];
 
+fn moment_models() -> [CollisionModel3; 2] {
+    [
+        CollisionModel3::CentralMoment {
+            second_order_rate: 1.0 / TAU,
+            higher_order_rate: 0.73,
+        },
+        CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.0 / TAU,
+            third_order_rate: 0.87,
+            fourth_order_rate: 1.63,
+        },
+    ]
+}
+
 fn close(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:e} != {b:e}: {}", a - b);
 }
@@ -184,6 +198,17 @@ fn trt_all_fill_limits_and_shared_cells_match_independent_forced_parity_formula(
     }
 }
 
+#[test]
+fn moment_models_at_all_fill_limits_retain_the_original_nonlinear_fluid_owner() {
+    for model in moment_models() {
+        for occupancy in [[0.0, 0.0], [0.37, 0.0], [1.0, 0.0], [0.3, 0.699]] {
+            for force in [[0.0; 3], [6e-4, -3e-4, 2e-4]] {
+                shared_cell_formula(model, occupancy, force);
+            }
+        }
+    }
+}
+
 fn shared_cell_formula(model: CollisionModel3, occupancy: [f64; 2], force: [f64; 3]) {
     let cell = [3, 3, 3];
     let (rho, u) = (1.07, [0.024, -0.017, 0.011]);
@@ -205,6 +230,15 @@ fn shared_cell_formula(model: CollisionModel3, occupancy: [f64; 2], force: [f64;
     physical[10] -= 1e-4;
     physical[1] -= 2e-4;
     physical[2] += 2e-4;
+    // Independent fourth-order content with zero density, momentum and
+    // second moment exercises the cumulant rate rather than only viscosity.
+    for q in [7, 8, 9, 10] {
+        physical[q] += 3e-4;
+    }
+    for q in [1, 2, 3, 4] {
+        physical[q] -= 6e-4;
+    }
+    physical[0] += 12e-4;
     let f = core::array::from_fn(|q| physical[q] - 0.5 * s[q]);
     g.set_populations(3, 3, 3, &f);
     let mut single = (occupancy[1] == 0.0).then(|| {
@@ -269,21 +303,35 @@ fn shared_cell_formula(model: CollisionModel3, occupancy: [f64; 2], force: [f64;
             }
         }
     }
-    let raw_collision = collision_oracle(model, &f, &eq);
-    let physical_collision = collision_oracle(model, &physical, &eq);
-    let mut expected: [f64; Q3] = core::array::from_fn(|q| {
-        let forcing = match model {
-            CollisionModel3::Bgk { tau } => (1.0 - 0.5 / tau) * s[q],
-            CollisionModel3::Trt { tau, magic } => {
-                let opp = fs_lbm::d3q19::OPP3[q];
-                let odd_tau = 0.5 + magic / (tau - 0.5);
-                (1.0 - 0.5 / tau) * 0.5 * (s[q] + s[opp])
-                    + (1.0 - 0.5 / odd_tau) * 0.5 * (s[q] - s[opp])
-            }
-            _ => unreachable!(),
-        };
-        f[q] + raw_collision[q] + forcing
-    });
+    let (physical_collision, mut expected): ([f64; Q3], [f64; Q3]) = match model {
+        CollisionModel3::CentralMoment { .. } | CollisionModel3::ReducedCumulant { .. } => {
+            // Invoke the unchanged *unforced* owner on the independently
+            // authored physical state. This does not repeat the production
+            // recovery of its increment from the already-forced result.
+            let post = fs_lbm::d3q19::collide_cell3(physical, model, [0.0; 3]).unwrap();
+            (
+                core::array::from_fn(|q| post[q] - physical[q]),
+                core::array::from_fn(|q| post[q] + 0.5 * s[q]),
+            )
+        }
+        _ => {
+            let raw = collision_oracle(model, &f, &eq);
+            let expected = core::array::from_fn(|q| {
+                let forcing = match model {
+                    CollisionModel3::Bgk { tau } => (1.0 - 0.5 / tau) * s[q],
+                    CollisionModel3::Trt { tau, magic } => {
+                        let opp = fs_lbm::d3q19::OPP3[q];
+                        let odd_tau = 0.5 + magic / (tau - 0.5);
+                        (1.0 - 0.5 / tau) * 0.5 * (s[q] + s[opp])
+                            + (1.0 - 0.5 / odd_tau) * 0.5 * (s[q] - s[opp])
+                    }
+                    _ => unreachable!(),
+                };
+                f[q] + raw[q] + forcing
+            });
+            (collision_oracle(model, &physical, &eq), expected)
+        }
+    };
     for a in 0..2 {
         let b = occupancy[a] * (TAU - 0.5) / (1.0 - occupancy.iter().sum::<f64>() + TAU - 0.5);
         let weight = b * rho;
@@ -337,6 +385,9 @@ fn zero_occupancy_retains_native_guo_populations_bit_for_bit() {
         tau: TAU,
         magic: 3.0 / 16.0,
     });
+    for model in moment_models() {
+        zero_occupancy(model);
+    }
 }
 
 fn zero_occupancy(model: CollisionModel3) {
@@ -390,6 +441,15 @@ fn trt_rotating_shared_bodies_close_world_momentum_torque_and_work() {
                 magic: 3.0 / 16.0,
             },
         );
+    }
+}
+
+#[test]
+fn moment_models_with_shared_rotating_bodies_close_world_momentum_torque_and_work() {
+    for model in moment_models() {
+        for walls in [false, true] {
+            assembly_balance_with_model(walls, model);
+        }
     }
 }
 
@@ -511,6 +571,15 @@ fn trt_moving_full_tensor_bodies_retain_world_momentum_and_force_ownership() {
     }
 }
 
+#[test]
+fn moving_moment_model_bodies_retain_world_momentum_and_single_force_ownership() {
+    for model in moment_models() {
+        for walls in [false, true] {
+            moving_balance_with_model(walls, model);
+        }
+    }
+}
+
 fn moving_balance_with_model(walls: bool, model: CollisionModel3) {
     let mut g = grid_with_model(walls, model);
     let shape = BodyFrameEllipsoid3::sphere(0.34).unwrap();
@@ -590,6 +659,9 @@ fn forced_single_and_singleton_assembly_retain_identical_results() {
         tau: TAU,
         magic: 3.0 / 16.0,
     });
+    for model in moment_models() {
+        singleton_replay(model);
+    }
 }
 
 fn singleton_replay(model: CollisionModel3) {
@@ -682,6 +754,9 @@ fn late_force_overflow_and_cancellation_publish_no_fluid_or_body_state() {
         tau: TAU,
         magic: 3.0 / 16.0,
     });
+    for model in moment_models() {
+        atomic_refusal(model);
+    }
 }
 
 fn atomic_refusal(model: CollisionModel3) {

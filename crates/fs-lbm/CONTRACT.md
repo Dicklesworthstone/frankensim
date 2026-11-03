@@ -7502,7 +7502,7 @@ alongside the original transfer budgets, clock and refusal rollback.
 ## Spatial finite-inertia immersed-body coupling on D3Q19
 
 `BoundaryGrid3::step_with_partial_saturation_body` couples the three translational
-and three angular velocities of `PartialSaturationBody3` to the native BGK/TRT
+and three angular velocities of `PartialSaturationBody3` to the native D3Q19
 populations and then runs the existing pull stream. The supplied symmetric,
 positive-definite inertia is expressed in world axes about the body's center;
 off-diagonal products and asymmetric sampled fractions are retained. Fractions
@@ -7513,6 +7513,9 @@ non-equilibrium reflection law as D2Q9 supplies solid impulse
 `B*rho*(u-Gv)`, with `B=epsilon*(tau-1/2)/(1-epsilon+tau-1/2)`.
 For TRT, `tau` is the even/shear relaxation time; the fluid collision retains
 its independently configured odd rate. The solid reflection law is unchanged.
+For central-moment and reduced-cumulant models, `tau=1/second_order_rate`;
+the original native nonlinear collision and every higher-order rate remain
+active in the fluid fraction. A finite reciprocal is required.
 The operator reduces `K=sum(B*rho*G^T*G)` through a scalar weight, first
 moments and the six independent rotary moments; one deterministic 6-by-6
 Cholesky solve advances `(M+K/2)*delta_v=sum(B*rho*G^T*(u-Gv_n))+J_external`.
@@ -7533,7 +7536,7 @@ blended populations using the existing native link receipt. Thus the immersed
 body's action/reaction is not confused with wall reaction. Global angular
 balance on a periodic domain additionally needs periodic transport flux.
 
-This is a BGK/TRT/Guo, fixed-geometry/world-inertia velocity substep in
+This is a D3Q19/Guo, fixed-geometry/world-inertia velocity substep in
 lattice units `dx=dt=1`. The caller owns pose drift and gyroscopic evolution and
 must rotate world inertia when orientation changes. Fluid populations and their
 mass/momentum remain in the immersed volume: body inertia is **additional** to
@@ -7621,7 +7624,7 @@ buffer clearing and swept-support checks poll at most every 64 cells, with at
 most 512 membership queries per cell. Native collision and streaming retain
 their existing tile checkpoints. Scratch allocation itself is not interruptible.
 
-This is one BGK/TRT/Guo immersed body in lattice `dx=dt=1`, with solid inertia
+This is one D3Q19/Guo immersed body in lattice `dx=dt=1`, with solid inertia
 additional to all retained interior fluid. It supplies no displaced-fluid
 physical-density closure, moving-mask/fresh-cell remap, discrete GCL, exact
 cell-intersection volume, wall contact, periodic body wrapping, overlapping
@@ -7789,14 +7792,37 @@ Stored Guo populations are `f = g - S(u,F)/2`, with physical velocity
 `rho*u = sum_q(f_q*c_q) + F/2`. The existing native source-frame transform
 recovers `g`. The immersed correction is
 `sum_a B_a (Omega_s,a(g) - Omega_fluid(g))`, added to the unchanged native
-`collide_cell3(f, model, F)` for the selected BGK or TRT model. Its first moment remains
+`collide_cell3(f, model, F)` for the selected collision model. Its first moment remains
 `sum_a B_a*rho*(v_a_mid-u)`; the original six-velocity solve uses this same
 physical velocity. The remaining imposed collision impulse is `F`. This is
 the declared additive-force extension of the retained-fluid PSM law, not a
 new displaced-fluid density closure or a full coupled temporal-order claim.
-Existing BGK paths retain their numerical arithmetic, and zero occupancy
-reproduces the native selected BGK/TRT forced populations bit for bit.
-Central-moment and reduced-cumulant immersed coupling remain unsupported.
+Existing BGK/TRT paths retain their numerical arithmetic, and zero occupancy
+reproduces the native selected forced populations bit for bit.
+
+Central-moment and reduced-cumulant models use the same physical-frame
+coupling. Their native forced output is `C(g)+S/2`; the immersed owner recovers
+the actual fluid increment as `(ordinary-g)-(g-f)`, equal to `C(g)-g` up to
+the roundoff of the two half-source additions. Thus no second moment transform,
+collision, source evaluation, heap allocation or population field is needed.
+Because this increment has zero first moment, its replacement retains the
+same six-velocity implicit body response and counts the imposed force once at
+every solid fraction. It also retains the selected higher-order relaxation
+and nonlinear cumulant products instead of substituting a BGK fluid increment.
+Single, simultaneous, moving, dry-inertia and lubricated owners share this
+collision path. This extends model compatibility; it does not establish a
+high-Re continuum, stresslet, suspension-viscosity or moving-body accuracy
+certificate for either moment model.
+
+The focused unit tests in `boundary/partial_saturation/collision.rs` compare
+recovered increments against a separate original unforced collision at three
+viscous rates, with unequal higher-order rates, nonzero stress and third/fourth
+content. Independent source and moment sums check mass, full external impulse
+and body recoil at empty, partial, nearly full and full saturation. Existing
+BGK/TRT increments are checked against their native owners. The original
+`forced_partial_saturation3` integration target additionally covers moment-model
+single/shared cells, all fill limits, repeated rotating/moving bodies, wall and
+periodic angular transport, singleton replay and atomic refusal/retry.
 
 `PartialSaturationForcing3` reports the sum of the actual configured fluid forces,
 their moment about the requested world origin, and imposed-force work at the
