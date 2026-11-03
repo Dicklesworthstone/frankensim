@@ -1044,37 +1044,94 @@ impl BoundaryGrid3 {
     /// held field becomes exactly `scale * selected` in every cell, so its
     /// zeros (and the open-face admission) are kept.
     ///
-    /// This low-level setter changes physical momentum immediately by half
-    /// the force change because it does not reframe populations. For a smooth
-    /// endpoint-sampled history, use [`Self::step_with_endpoint_force_scale`]
-    /// or [`Self::step_pooled_with_endpoint_force_scale`]: they collide with
-    /// the old force and publish the new force only at the accepted endpoint,
-    /// giving the trapezoidal impulse `(F_old + F_new) / 2`. Changing the force
-    /// BEFORE collision instead gives `3 F_new/2 - F_old/2` between the old
-    /// and new physical states. A discontinuous held-source change belongs to
-    /// [`Self::rebind_force_field`], which supplies no impulse.
+    /// Like [`Self::rebind_force_field`], scaling preserves accepted mass,
+    /// physical momentum `sum_q(f_q c_q) + F/2`, and force-corrected stress.
+    /// It advances no time and supplies no impulse. The following collision
+    /// applies the newly held force once per lattice step. A caller sampling
+    /// a smooth prescribed history at interval midpoints therefore supplies
+    /// midpoint impulses, without an additional half-force kick. For endpoint
+    /// histories, [`Self::step_with_endpoint_force_scale`] and its pooled
+    /// counterpart own trapezoidal timing: they collide with the accepted
+    /// start force and publish the new force with the accepted endpoint.
+    /// This setter selects a held source; it does not advance or stage time.
+    ///
+    /// The unscaled shape is retained once. Subsequent calls use the existing
+    /// collision scratch and allocate no population or force-field buffer.
     ///
     /// # Panics
     /// No per-cell field is held, `scale` is non-finite, or a scaled total
-    /// force is non-finite. Refusal leaves the held field intact.
+    /// force is non-finite, or a changed cell has an inadmissible density,
+    /// velocity or population-frame transform. Refusal leaves the accepted
+    /// populations and held field intact, including after a late-cell failure.
     pub fn set_force_field_scale(&mut self, scale: f64) {
         assert!(scale.is_finite(), "force-field scale must be finite");
         let field = self
             .force_field
-            .as_mut()
+            .as_ref()
             .expect("a per-cell force field must be selected before it is scaled");
-        let shape = self.force_field_shape.get_or_insert_with(|| field.clone());
+        self.force_field_shape.get_or_insert_with(|| field.clone());
+        let shape = self.force_field_shape.as_ref().unwrap();
         let uniform = self.force;
-        assert!(
-            shape.iter().all(|local| {
-                local
-                    .iter()
+        let mut changed = false;
+        for (held, local) in field.iter().zip(shape.iter()) {
+            let next = local.map(|value| scale * value);
+            assert!(
+                next.iter()
                     .zip(uniform)
-                    .all(|(value, total)| (scale * value + total).is_finite())
-            }),
-            "scaled per-cell force and total force must be finite"
-        );
-        for (held, local) in field.iter_mut().zip(shape.iter()) {
+                    .all(|(value, total)| value.is_finite() && (value + total).is_finite()),
+                "scaled per-cell force and total force must be finite"
+            );
+            changed |= *held != next;
+        }
+        if !changed {
+            return;
+        }
+        for tile in 0..self.f[0].len() {
+            for lane in 0..TILE_CELLS {
+                let mut populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
+                if self.solid[tile] & (1u64 << lane) == 0 {
+                    let previous = cell_force(uniform, Some(field), tile, lane);
+                    let next = core::array::from_fn(|axis| {
+                        uniform[axis] + scale * shape[tile * TILE_CELLS + lane][axis]
+                    });
+                    if previous != next {
+                        let [x, y, z] = self.coords(tile, lane);
+                        let (rho, momentum) = self.raw_moments(x, y, z);
+                        let velocity = core::array::from_fn(|axis| {
+                            (momentum[axis] + 0.5 * previous[axis]) / rho
+                        });
+                        assert!(
+                            velocity.iter().all(|value| value.is_finite()),
+                            "force scaling requires finite physical velocity"
+                        );
+                        crate::thermal::forcing::reframe3(
+                            &mut populations,
+                            velocity,
+                            previous,
+                            next,
+                        );
+                        let density = populations.iter().sum::<f64>();
+                        assert!(
+                            populations.iter().all(|value| value.is_finite())
+                                && density.is_finite()
+                                && density > 0.0,
+                            "force scaling produced an inadmissible population frame"
+                        );
+                    }
+                }
+                for (proposed, value) in self.post.iter_mut().zip(populations) {
+                    proposed[tile].0[lane] = value;
+                }
+            }
+        }
+        core::mem::swap(&mut self.f, &mut self.post);
+        for (held, local) in self
+            .force_field
+            .as_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(shape.iter())
+        {
             *held = local.map(|value| scale * value);
         }
     }

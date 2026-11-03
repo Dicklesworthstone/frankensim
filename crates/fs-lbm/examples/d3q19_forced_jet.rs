@@ -352,7 +352,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             [0.0; 3]
         }
     };
-    grid.set_force_field(acoustic_force);
+    grid.rebind_force_field(acoustic_force);
     grid.set_force_field_scale(0.0);
 
     let gate = CancelGate::new();

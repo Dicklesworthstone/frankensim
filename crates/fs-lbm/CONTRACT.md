@@ -3514,12 +3514,17 @@ every open-face cell and its first-interior neighbour, the cells the force-free
 regularized reconstruction reads; such a grid keeps a zero uniform force.
 `set_force_field_scale(s)` holds exactly `s * selected` in every cell for a
 fixed spatial shape with a caller-owned time history (an imposed acoustic
-pressure gradient). It does not reframe populations, so changing its value
-immediately changes physical momentum by half the force difference. For a
-smooth endpoint history, `step_with_endpoint_force_scale` and its pooled
-counterpart collide with `F_old`, then install `F_new` with the accepted state;
-physical momentum receives `(F_old + F_new) / 2`. Scaling BEFORE collision
-instead gives `3 F_new/2 - F_old/2`. All fluid samples and total forces must be
+pressure gradient). Like rebinding, it preserves accepted mass, physical
+momentum and full force-corrected stress before publishing the scaled force:
+changing scale supplies no elapsed-time impulse. The following collision
+applies the newly held force once. Smooth histories sampled at each interval
+midpoint supply midpoint impulses. `step_with_endpoint_force_scale` and its
+pooled counterpart own a separate trapezoidal endpoint convention: collision
+uses `F_start`, then populations and `F_end` publish together through the private
+endpoint publisher without a held-source reframe. Scaling itself does not
+advance or stage time. The shape is retained once;
+subsequent scales reuse collision scratch without population/force allocation.
+All fluid samples and total forces must be
 finite. Rebinding preflights every changed cell's physical velocity and new
 population frame in the existing collision scratch before publishing either
 populations or field; callback failure or late invalid-cell refusal leaves
@@ -7667,8 +7672,9 @@ mass, physical momentum and force-corrected stress at every fluid cell. It
 therefore applies no artificial half-force impulse when an external load
 switches, and supplies no elapsed-time work. Existing spatial fields and their
 selected scaling shape remain intact; the next step applies the new held force.
-This piecewise-held convention is separate from smooth-history trapezoidal
-`step_with_endpoint_force_scale`.
+`set_force_field_scale` uses the same piecewise-held convention for a retained
+spatial shape. Smooth endpoint histories use `step_with_endpoint_force_scale`
+and its pooled counterpart, which own the old/new force timing explicitly.
 
 Both operations use existing collision scratch, allocate no new population or
 force field, poll cancellation at each native tile and publish only after the

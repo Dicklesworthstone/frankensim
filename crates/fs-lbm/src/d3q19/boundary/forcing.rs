@@ -169,8 +169,10 @@ impl BoundaryGrid3 {
     /// subsequent steps; it advances no time and supplies no impulse or work.
     /// Existing per-cell forces and their selected spatial shape remain intact.
     /// A discontinuous pressure-gradient change therefore creates no artificial
-    /// half-force impulse. Smooth-history trapezoidal forcing remains the
-    /// separately declared `step_with_endpoint_force_scale` convention.
+    /// half-force impulse. `set_force_field_scale` preserves the same physical
+    /// state when selecting a held force from a prescribed spatial shape;
+    /// smooth endpoint histories instead use `step_with_endpoint_force_scale`,
+    /// which owns the old-collision/new-endpoint trapezoidal timing.
     ///
     /// Uses existing collision scratch with no new population or force-field
     /// allocation. Cancellation or a late-cell refusal leaves accepted fields

@@ -168,7 +168,7 @@ fn switched_reversed_and_disabled_sources_apply_only_elapsed_step_impulses() {
 }
 
 #[test]
-fn rebinding_and_finite_mass_walls_close_the_external_impulse_and_wall_work_balance() {
+fn scaled_sources_and_finite_mass_walls_close_external_impulse_and_wall_work_balance() {
     for normal in 0..3 {
         let tangent = [(normal + 1) % 3, (normal + 2) % 3];
         let mut faces = [FaceBoundary3::Periodic; 6];
@@ -202,10 +202,11 @@ fn rebinding_and_finite_mass_walls_close_the_external_impulse_and_wall_work_bala
             }
             p
         };
+        grid.rebind_force_field(|_| [1e-5, -2e-5, 3e-5]);
         for scale in [1.0, -0.5, 0.0] {
             let force = [scale * 1e-5, scale * -2e-5, scale * 3e-5];
             let before = total(&grid);
-            grid.rebind_force_field(|_| force);
+            grid.set_force_field_scale(scale);
             for a in 0..3 {
                 close(total(&grid)[a], before[a], 2e-13);
             }
@@ -397,7 +398,7 @@ fn open_faces_admit_a_field_that_vanishes_where_they_reconstruct() {
 }
 
 #[test]
-fn scaled_field_is_shape_times_scale_with_one_held_force_per_step() {
+fn scaled_field_preserves_physical_state_and_applies_one_held_force_per_step() {
     let shape = |[x, y, z]: [usize; 3]| {
         [
             1e-5 * (x as f64 + 1.0),
@@ -407,6 +408,10 @@ fn scaled_field_is_shape_times_scale_with_one_held_force_per_step() {
     };
     for model in [
         CollisionModel3::Bgk { tau: 0.7 },
+        CollisionModel3::CentralMoment {
+            second_order_rate: 1.6,
+            higher_order_rate: 1.0,
+        },
         CollisionModel3::ReducedCumulant {
             second_order_rate: 1.6,
             third_order_rate: 1.0,
@@ -415,29 +420,158 @@ fn scaled_field_is_shape_times_scale_with_one_held_force_per_step() {
     ] {
         let mut scaled = uniform_grid(model);
         let mut direct = uniform_grid(model);
-        scaled.set_force_field(shape);
+        for grid in [&mut scaled, &mut direct] {
+            grid.rebind_force_field(shape);
+            for [x, y, z] in cells(grid) {
+                let mut f = grid.populations(x, y, z);
+                // Carried normal/shear stress with no added mass or momentum.
+                f[1] += 0.001;
+                f[2] += 0.001;
+                f[0] -= 0.002;
+                f[7] += 0.0005;
+                f[8] += 0.0005;
+                f[9] -= 0.0005;
+                f[10] -= 0.0005;
+                grid.set_populations(x, y, z, &f);
+            }
+        }
         let total_shape = cells(&scaled).into_iter().fold([0.0; 3], |sum, cell| {
             let local = shape(cell);
             core::array::from_fn(|a| sum[a] + local[a])
         });
-        let start = raw_first_moment(&scaled, |_| true);
+        let start = fluid_momentum(&scaled);
         let mut impulse = [0.0; 3];
         for scale in [1.0, 0.6, -0.3, 0.0, 1.7] {
+            let before: Vec<_> = cells(&scaled)
+                .into_iter()
+                .map(|cell| moments(&scaled, cell))
+                .collect();
             scaled.set_force_field_scale(scale);
-            direct.set_force_field(|cell| shape(cell).map(|value| scale * value));
+            for (cell, expected) in cells(&scaled).into_iter().zip(before) {
+                let actual = moments(&scaled, cell);
+                close(actual.0, expected.0, 3e-15);
+                for a in 0..3 {
+                    close(actual.1[a], expected.1[a], 3e-15);
+                    for b in 0..3 {
+                        close(actual.2[a][b], expected.2[a][b], 3e-15);
+                    }
+                }
+                assert_eq!(
+                    scaled.force_density(cell[0], cell[1], cell[2]),
+                    shape(cell).map(|value| scale * value)
+                );
+            }
+            let bits = snapshot(&scaled);
+            scaled.set_force_field_scale(scale);
+            assert_eq!(
+                snapshot(&scaled),
+                bits,
+                "identical scale must preserve bits"
+            );
+            direct.rebind_force_field(|cell| shape(cell).map(|value| scale * value));
             assert_eq!(snapshot(&scaled), snapshot(&direct));
             scaled.step();
             direct.step();
             impulse = core::array::from_fn(|a| impulse[a] + scale * total_shape[a]);
+            let end = fluid_momentum(&scaled);
+            for a in 0..3 {
+                close(end[a] - start[a], impulse[a], 3e-13);
+            }
         }
         assert_eq!(snapshot(&scaled), snapshot(&direct));
-        // This low-level setter controls raw population momentum only. A
-        // correctly timed physical history is tested by the endpoint API below.
-        let end = raw_first_moment(&scaled, |_| true);
+    }
+}
+
+#[test]
+fn scaled_midpoint_and_endpoint_average_histories_supply_the_prescribed_impulse() {
+    let mut grid = uniform_grid(CollisionModel3::Bgk { tau: 0.8 });
+    let shape = [2e-4, -1e-4, 3e-5];
+    grid.rebind_force_field(|_| shape);
+    let mut expected = fluid_momentum(&grid);
+    let endpoints = [1.0, 0.6, -0.3, 0.0, 1.7];
+    for pair in endpoints.windows(2) {
+        // The caller stages the interval average, then restores its accepted
+        // endpoint force after stepping. Neither selection supplies an impulse.
+        grid.set_force_field_scale(0.5 * (pair[0] + pair[1]));
         for a in 0..3 {
-            close(end[a] - start[a], impulse[a], 1e-13);
+            close(fluid_momentum(&grid)[a], expected[a], 3e-13);
+        }
+        grid.step();
+        grid.set_force_field_scale(pair[1]);
+        for a in 0..3 {
+            expected[a] += 64.0 * shape[a] * 0.5 * (pair[0] + pair[1]);
+            close(fluid_momentum(&grid)[a], expected[a], 3e-13);
         }
     }
+
+    // Independent G1 impulse oracle: integral_0^1 A*t^2 dt = A/3.
+    // Refining the caller's source clock reduces midpoint quadrature error
+    // by four. A spurious F/2 frame jump would instead be first order.
+    let amplitude = 0.003;
+    let errors = [4, 8, 16].map(|steps| {
+        let mut grid = uniform_grid(CollisionModel3::Bgk { tau: 0.8 });
+        grid.rebind_force_field(|_| [amplitude / steps as f64, 0.0, 0.0]);
+        grid.set_force_field_scale(0.0);
+        let initial = fluid_momentum(&grid)[0];
+        for step in 0..steps {
+            let midpoint = (step as f64 + 0.5) / steps as f64;
+            grid.set_force_field_scale(midpoint * midpoint);
+            grid.step();
+        }
+        let impulse = fluid_momentum(&grid)[0] - initial;
+        let error = 64.0 * amplitude / 3.0 - impulse;
+        close(
+            error,
+            64.0 * amplitude / (12.0 * (steps as f64).powi(2)),
+            3e-13,
+        );
+        error
+    });
+    for pair in errors.windows(2) {
+        assert!((pair[0] / pair[1] - 4.0).abs() < 1e-6, "{errors:?}");
+    }
+}
+
+#[test]
+fn invalid_scale_and_late_population_refusal_leave_accepted_state_and_retry_intact() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let model = CollisionModel3::Bgk { tau: 0.8 };
+    let mut grid = uniform_grid(model);
+    let mut control = uniform_grid(model);
+    for grid in [&mut grid, &mut control] {
+        grid.rebind_force_field(|_| [1e-4, -2e-4, 3e-4]);
+        grid.step();
+    }
+    let before = snapshot(&grid);
+    for scale in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(catch_unwind(AssertUnwindSafe(|| grid.set_force_field_scale(scale))).is_err());
+        assert_eq!(snapshot(&grid), before);
+    }
+
+    let last = grid.populations(3, 3, 3);
+    grid.set_populations(3, 3, 3, &[0.0; Q3]);
+    let invalid = snapshot(&grid);
+    assert!(catch_unwind(AssertUnwindSafe(|| grid.set_force_field_scale(-0.75))).is_err());
+    assert_eq!(
+        snapshot(&grid),
+        invalid,
+        "late refusal must not publish scratch"
+    );
+    grid.set_populations(3, 3, 3, &last);
+    grid.set_force_field_scale(-0.75);
+    control.set_force_field_scale(-0.75);
+    grid.step();
+    control.step();
+    assert_eq!(snapshot(&grid), snapshot(&control));
+
+    // The initializer admits finite force data; scaling must separately
+    // reject overflow before changing any accepted populations or force.
+    let mut overflow = uniform_grid(model);
+    overflow.set_force_field(|_| [2.0, 0.0, 0.0]);
+    let before = snapshot(&overflow);
+    assert!(catch_unwind(AssertUnwindSafe(|| overflow.set_force_field_scale(f64::MAX))).is_err());
+    assert_eq!(snapshot(&overflow), before);
 }
 
 /// G0/G3/G5: periodic transport cancels, leaving the endpoint trapezoid of
@@ -556,7 +690,7 @@ fn endpoint_force_scale_sinusoidal_physical_velocity_converges_quadratically() {
     let force = 1e-4;
     early.rebind_force_field(|_| [force, 0.0, 0.0]);
     let start = fluid_momentum(&early)[0];
-    early.set_force_field_scale(3.0);
+    early.set_force_field(|_| [3.0 * force, 0.0, 0.0]);
     early.step();
     let gained = fluid_momentum(&early)[0] - start;
     close(gained, 64.0 * 4.0 * force, 2e-13);
