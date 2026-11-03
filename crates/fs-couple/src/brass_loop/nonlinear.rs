@@ -34,6 +34,7 @@ use fs_phs::linear_exact::{LinearPropagator, LinearSplit, step_split};
 use fs_phs::{PortHamiltonian, mass_spring_damper};
 
 use super::{BrassBlockDiag, BrassControl, LipIsland, prepare_lip, zero_crossing_lock_hz};
+use crate::turbulence_noise::{JetNoiseCard, LipJetNoise};
 
 /// How the nonlinear bore is cut, clocked and walled.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -87,6 +88,12 @@ pub struct NonlinearLip {
     face_pa: f64,
     block_index: u64,
     diags: Vec<BrassBlockDiag>,
+    /// Opt-in lip jet noise ([`LipJetNoise`]: Stevens' form with Verge's constant, an extrapolation); `None` adds nothing.
+    jet_noise: Option<LipJetNoise>,
+    /// The bore gas's dynamic viscosity [Pa s] and density [kg/m^3], the engine's own (the wall binding's), read only by the
+    /// opt-in jet noise: its Reynolds gate and its reference jet speed.
+    wall_viscosity_pa_s: f64,
+    reference_density_kg_m3: f64,
 }
 
 impl NonlinearLip {
@@ -122,6 +129,7 @@ impl NonlinearLip {
         {
             return Err("lip island parameters must be positive".into());
         }
+        let (wall_viscosity_pa_s, reference_density_kg_m3) = (wall_gas.dynamic_viscosity_pa_s, wall_gas.density_kg_m3);
         let bore = NonlinearBore::new(
             duct,
             gas.clone(),
@@ -155,7 +163,24 @@ impl NonlinearLip {
             face_pa: room.pressure,
             block_index: 0,
             diags: Vec::new(),
+            jet_noise: None,
+            wall_viscosity_pa_s,
+            reference_density_kg_m3,
         })
+    }
+
+    /// Attach the opt-in lip jet noise before any step: a series pressure source added to the blowing pressure that drives
+    /// the lip (its force) and the mouth reservoir the lip channel meters from, of rms `gain rho U_j^2 / 2` over
+    /// `St_h = f h / U_j` in `[st_lo, st_hi]`, shut while `Re_h = mdot / (w mu)` is below the card's onset or the jet flow is
+    /// not forward (see [`LipJetNoise`] for the law, what it rests on and the label). It runs once per gas step on the
+    /// previous gas step's metered mass flow and gap. A lip without it is bit-identical to one built before this existed; a
+    /// gate that never opens adds exactly zero.
+    ///
+    /// # Errors
+    /// The reason [`JetNoiseCard::validate`] gives.
+    pub fn with_jet_noise(mut self, card: JetNoiseCard) -> Result<Self, String> {
+        self.jet_noise = Some(LipJetNoise::new(card).map_err(str::to_string)?);
+        Ok(self)
     }
 
     /// Apply a control-rate change between blocks. A held bore has no valves.
@@ -249,13 +274,13 @@ impl NonlinearLip {
             for frame in 0..ratio {
                 let mut flow = 0.0;
                 for _ in 0..steps {
-                    let (gap, defect, face, outlet) = self.gas_step(dt)?;
+                    let (gap, defect, face, outlet, drive) = self.gas_step(dt)?;
                     gap_min = gap_min.min(gap);
                     gap_max = gap_max.max(gap);
                     gap_acc += gap;
                     worst_defect = worst_defect.max(defect);
                     let mouth_volume = face.mass_flow_kg_s.max(0.0) / self.mouth.density;
-                    blow_work += self.blow_pa * mouth_volume * dt;
+                    blow_work += drive * mouth_volume * dt;
                     bore_work += (face.pressure_pa - self.room.pressure) * face.mass_flow_kg_s
                         / self.room.density
                         * dt;
@@ -283,9 +308,41 @@ impl NonlinearLip {
 
     // One gas step: lip under the last cup pressure, then the bore with the
     // lip face at both stages. Returns the gap, the lip supply defect, the
-    // first-stage face and the mean bell volume flow.
-    fn gas_step(&mut self, dt: f64) -> Result<(f64, f64, LipFace, f64), String> {
-        let force = (self.blow_pa - (self.face_pa - self.room.pressure)) * self.lip.face_area_m2;
+    // first-stage face, the mean bell volume flow and the driving pressure the
+    // step used (the blowing pressure, plus the opt-in jet noise).
+    fn gas_step(&mut self, dt: f64) -> Result<(f64, f64, LipFace, f64, f64), String> {
+        // The opt-in jet noise is a series pressure source in the lip's driving pressure: it adds to the force on the lip and
+        // to the stagnation pressure of the mouth reservoir the lip channel meters from, as in the linear loop. It reads the
+        // previous gas step's metered flow and gap, and its speed is bounded by the Bernoulli speed of the present pressure
+        // drop. Zero is not added and the mouth state is not rebuilt, so a lip without it, or whose gate is shut, keeps
+        // `drive == blow_pa` and `mouth` bit for bit.
+        let mut drive = self.blow_pa;
+        let mut mouth = self.mouth;
+        if let Some(source) = self.jet_noise.as_mut() {
+            let drop = (self.blow_pa - (self.face_pa - self.room.pressure)).abs();
+            let bound = (2.0 * drop / self.reference_density_kg_m3).sqrt();
+            let noise = source.pressure_pa(
+                self.lip.width_m,
+                bound,
+                self.reference_density_kg_m3,
+                self.wall_viscosity_pa_s,
+                dt,
+            );
+            if noise != 0.0 {
+                drive += noise;
+                let pressure = self.room.pressure + drive;
+                let density = pressure / (self.gas.gas_constant() * self.room.temperature);
+                let state = self
+                    .gas
+                    .conserved(density, 0.0, pressure)
+                    .map_err(|e| format!("mouth reservoir refused: {e}"))?;
+                mouth = self
+                    .gas
+                    .primitive(state, || false)
+                    .map_err(|e| format!("mouth reservoir refused: {e}"))?;
+            }
+        }
+        let force = (drive - (self.face_pa - self.room.pressure)) * self.lip.face_area_m2;
         let record = step_split(
             &self.lip_sys,
             &self.lip_linear,
@@ -300,7 +357,7 @@ impl NonlinearLip {
         let gap = (self.lip.rest_gap_m + self.lip_state[0]).max(0.0);
         let opening = self.lip.width_m * gap;
         let inlet = self.bore.inlet_area_m2();
-        let (gas, mouth) = (&self.gas, self.mouth);
+        let gas = &self.gas;
         let mut first = None;
         let step = self
             .bore
@@ -314,7 +371,12 @@ impl NonlinearLip {
             .map_err(|e| format!("nonlinear bore step refused: {e}"))?;
         let face = first.ok_or_else(|| "the bore offered no first stage".to_string())?;
         self.face_pa = face.pressure_pa;
-        Ok((gap, defect, face, step.outlet_volume_flow_m3_s))
+        if let Some(source) = self.jet_noise.as_mut() {
+            // The metered mass flow as a volume flow at the reference density: `Re_h = Q rho / (w mu) = mdot / (w mu)` needs
+            // no density choice, and a negative flow (the cup above the mouth) is silent.
+            source.record(face.mass_flow_kg_s / self.reference_density_kg_m3, gap);
+        }
+        Ok((gap, defect, face, step.outlet_volume_flow_m3_s, drive))
     }
 }
 

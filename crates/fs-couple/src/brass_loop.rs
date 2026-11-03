@@ -36,6 +36,7 @@ use fs_phs::{PortHamiltonian, mass_spring_damper};
 use crate::mm_line::{
     CupState, MmBankLoad, MmLineBank, MmLineConfig, MmLineError, cup_junction_boundary, cup_port,
 };
+use crate::turbulence_noise::{JetNoiseCard, LipJetNoise};
 use fs_duct::Duct;
 
 /// File-driven lip-valve performances observed at a baffled microphone.
@@ -117,9 +118,13 @@ pub struct BrassVoice {
     cup_compliance: f64,
     p_bore_prev: f64,
     rho: f64,
+    /// Dynamic viscosity of the ambient gas [Pa s] (only the opt-in jet noise's Reynolds gate reads it).
+    mu: f64,
     dt: f64,
     block_index: u64,
     diags: Vec<BrassBlockDiag>,
+    /// Opt-in lip jet noise ([`LipJetNoise`]: Stevens' form with Verge's constant, an extrapolation); `None` adds nothing.
+    jet_noise: Option<LipJetNoise>,
 }
 
 impl BrassVoice {
@@ -174,10 +179,25 @@ impl BrassVoice {
             cup_compliance,
             p_bore_prev: 0.0,
             rho: gas.density,
+            mu: gas.dynamic_viscosity,
             dt: 1.0 / f64::from(config.sample_rate_hz),
             block_index: 0,
             diags: Vec::new(),
+            jet_noise: None,
         })
+    }
+
+    /// Attach the opt-in lip jet noise before any sample is rendered: a series pressure source added to the lip's driving
+    /// pressure (the force on the lip and the head of the flow solve alike), of rms `gain rho U_j^2 / 2` over
+    /// `St_h = f h / U_j` in `[st_lo, st_hi]`, shut while `Re_h = Q / (w nu)` is below the card's onset or the jet flow is
+    /// not forward (see [`LipJetNoise`] for the law, what it rests on and the label). A voice without it is bit-identical
+    /// to one built before this existed; a gate that never opens adds exactly zero.
+    ///
+    /// # Errors
+    /// [`MmLineError::Invalid`] with the reason [`JetNoiseCard::validate`] gives.
+    pub fn with_jet_noise(mut self, card: JetNoiseCard) -> Result<BrassVoice, MmLineError> {
+        self.jet_noise = Some(LipJetNoise::new(card).map_err(|what| MmLineError::Invalid { what })?);
+        Ok(self)
     }
 
     /// Apply a control-rate delta (BETWEEN blocks; D17 lift for valve
@@ -237,6 +257,9 @@ impl BrassVoice {
         self.lip_state = vec![0.0, 0.0];
         self.cup = CupState::default();
         self.p_bore_prev = 0.0;
+        if let Some(source) = self.jet_noise.as_mut() {
+            source.record(0.0, 0.0);
+        }
         Ok(())
     }
 
@@ -317,7 +340,19 @@ impl BrassVoice {
         for (index, slot) in out.iter_mut().enumerate() {
             // 1. Lip island under the transmural force (outward-striking:
             //    mouth overpressure opens the lip).
-            let dp_lip = self.blow_pa - self.p_bore_prev;
+            // The opt-in jet noise is a series pressure source in the lip's driving pressure (force on the lip and head of
+            // the flow solve alike, as the voice's glottal sources are). It reads the previous sample's jet flow and lip
+            // gap, its speed is bounded by the Bernoulli speed of the present pressure drop, and zero is not added, so a
+            // voice without it, or whose gate is shut, keeps `drive == blow_pa` bit for bit.
+            let mut drive = self.blow_pa;
+            if let Some(source) = self.jet_noise.as_mut() {
+                let bound = (2.0 * (self.blow_pa - self.p_bore_prev).abs() / self.rho).sqrt();
+                let noise = source.pressure_pa(self.lip.width_m, bound, self.rho, self.mu, dt);
+                if noise != 0.0 {
+                    drive += noise;
+                }
+            }
+            let dp_lip = drive - self.p_bore_prev;
             let force = dp_lip * self.lip.face_area_m2;
             let record = step_split(
                 &self.lip_sys,
@@ -355,7 +390,7 @@ impl BrassVoice {
                 0.0
             } else {
                 let b = 2.0 * wh * wh / (self.rho * a);
-                let head = self.blow_pa - k_off;
+                let head = drive - k_off;
                 if head >= 0.0 {
                     let c = 2.0 * wh * wh * head / self.rho;
                     -0.5 * b + (0.25 * b * b + c).sqrt()
@@ -364,7 +399,10 @@ impl BrassVoice {
                     0.5 * b - (0.25 * b * b + c).sqrt()
                 }
             };
-            blow_work += self.blow_pa * flow * dt;
+            blow_work += drive * flow * dt;
+            if let Some(source) = self.jet_noise.as_mut() {
+                source.record(flow, gap);
+            }
             let (p_plus, p_minus, p_now) = cup_junction_boundary(
                 flow,
                 boundary,
@@ -484,6 +522,71 @@ pub(crate) mod brass_loop_tests {
             face_area_m2: 2.0e-5,
             provenance: "AUTHORED probe values (Estimate)".to_string(),
         }
+    }
+
+    /// The probe voice (authored lip with a 1e-4 m^2 face, tension 1.6) with the opt-in lip jet noise, or without it.
+    fn jet_voice(card: Option<JetNoiseCard>) -> BrassVoice {
+        let gas = air(293.15);
+        let load = MmLoad::Analytic(Termination::FlangedOpen);
+        let mut lip = authored_lip();
+        lip.face_area_m2 = 1.0e-4;
+        let voice = BrassVoice::new(&[brass_combo(0.0)], &["open"], &gas, &load, &config(), lip, 1.5e-6).expect("voice");
+        let mut voice = match card {
+            Some(card) => voice.with_jet_noise(card).expect("a usable card"),
+            None => voice,
+        };
+        voice.apply(BrassControl::SetLipTension(1.6)).expect("tension");
+        voice
+    }
+
+    /// Three 1200-sample blocks of mouthpiece pressure at a steady `blow` [Pa].
+    fn jet_render(voice: &mut BrassVoice, blow: f64) -> Vec<f64> {
+        voice.apply(BrassControl::SetBlowingPressure(blow)).expect("blow");
+        let (mut out, mut block) = (Vec::new(), vec![0.0f64; 1200]);
+        for _ in 0..3 {
+            voice.step_block(&mut block).expect("block");
+            out.extend_from_slice(&block);
+        }
+        out
+    }
+
+    fn jet_card(onset: f64, seed: u64) -> JetNoiseCard {
+        JetNoiseCard { seed, gain: 1.3e-3, strouhal_lo: 0.045, strouhal_hi: 0.115, reynolds_onset: onset }
+    }
+
+    fn same_bits(a: &[f64], b: &[f64]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    /// Gauntlet G0 and G3. A voice without the jet noise, and one whose gate can never open, are bit-identical; with the gate
+    /// open (the lip at its rest gap passes `Re_h` 2300 at 3 kPa) the sound changes, is finite, and is seeded.
+    #[test]
+    fn lip_jet_noise_shut_gate_is_bit_identical_and_an_open_gate_changes_the_sound_seeded() {
+        let plain = jet_render(&mut jet_voice(None), 3000.0);
+        assert!(plain.iter().any(|p| p.abs() > 1.0), "the probe cup must carry pressure for the comparison to mean anything");
+        let shut = jet_render(&mut jet_voice(Some(jet_card(1.0e12, 7))), 3000.0);
+        assert!(same_bits(&plain, &shut), "a gate that never opens adds exactly zero");
+        let open = jet_render(&mut jet_voice(Some(jet_card(1700.0, 7))), 3000.0);
+        assert!(open.iter().all(|p| p.is_finite()));
+        assert!(!same_bits(&plain, &open), "an open gate must reach the pressure");
+        assert!(same_bits(&open, &jet_render(&mut jet_voice(Some(jet_card(1700.0, 7))), 3000.0)), "a declared seed repeats bit for bit");
+        assert!(!same_bits(&open, &jet_render(&mut jet_voice(Some(jet_card(1700.0, 8))), 3000.0)), "another seed gives another noise");
+    }
+
+    /// Gauntlet G3 with a planted negative. At 300 Pa the jet is 22 m/s, and `Re_h = Q / (w nu)` stays under 1700 for any lip
+    /// gap this drive can open (it would take more than 1.1 mm): the row with the 1700 gate is bit-identical to no row, while the
+    /// same row with NO gate (onset 0) speaks. The second half is what keeps the first from being vacuous. With no mouth
+    /// pressure at all there is no forward flow and no source, whatever the gate.
+    #[test]
+    fn lip_jet_noise_is_gated_on_the_jet_and_has_no_source_without_forward_flow() {
+        let plain = jet_render(&mut jet_voice(None), 300.0);
+        let gated = jet_render(&mut jet_voice(Some(jet_card(1700.0, 7))), 300.0);
+        assert!(same_bits(&plain, &gated), "below the gate's flow threshold the source stays shut");
+        let ungated = jet_render(&mut jet_voice(Some(jet_card(0.0, 7))), 300.0);
+        assert!(!same_bits(&plain, &ungated), "an ungated source speaks at the same pressure, so the gate is what shut the first");
+        let still = jet_render(&mut jet_voice(None), 0.0);
+        let none = jet_render(&mut jet_voice(Some(jet_card(0.0, 7))), 0.0);
+        assert!(same_bits(&still, &none), "no mouth pressure, no forward flow: no source even with no gate");
     }
 
     /// G0/G3: distinct referenced mouth loads participate in the live lip/cup

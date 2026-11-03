@@ -370,3 +370,96 @@ fn the_nozzle_still_refuses_a_backpressure_above_its_stationary_donor() {
     let moving = gas.nozzle_exit(moving, donor.pressure * (1.0 - 1e-6), || false).unwrap_err();
     assert!(format!("{moving:?}").contains("stationary nozzle donor or backpressure"), "{moving:?}");
 }
+
+// The opt-in lip jet noise on the nonlinear bore. The probe lip (authored, 12 mm wide, 0.5 mm rest gap, 1e-4 m^2 face, tension 1.6)
+// on the lip tests' three-segment bore, the specimen gas (mu 1.8e-5 Pa s, air-like), the real cards' clock (32 kHz output, 16
+// mechanics per output, one gas step each: 512 kHz) and the wall memory the bore tests use.
+fn jet_lip(card: Option<JetNoiseCard>) -> NonlinearLip {
+    let (gas, state) = specimen_with_state();
+    let duct = Duct {
+        segments: vec![
+            Segment::Cylinder { radius: 0.006, length: 0.30 },
+            Segment::Cone { inlet_radius: 0.006, outlet_radius: 0.012, length: 0.25 },
+            Segment::Cone { inlet_radius: 0.012, outlet_radius: 0.035, length: 0.12 },
+        ],
+    };
+    let lip = LipIsland {
+        mass_kg: 1.8e-4,
+        stiffness_n_m: 350.0,
+        damping_n_s_m: 0.05,
+        width_m: 0.012,
+        rest_gap_m: 5.0e-4,
+        face_area_m2: 1.0e-4,
+        provenance: "AUTHORED probe values (Estimate)".to_string(),
+    };
+    let clock = NonlinearClock {
+        maximum_cell_m: 2.4e-3,
+        output_rate_hz: 32_000,
+        mechanics_per_output: 16,
+        gas_steps_per_mechanics: 1,
+        wall: WallMemory { poles: 64, band_hz: [20.0, 8000.0], maximum_relative_error: 1e-2 },
+    };
+    let wall_gas = WallGas {
+        density_kg_m3: state.density,
+        dynamic_viscosity_pa_s: state.dynamic_viscosity,
+        gamma: state.gamma,
+        prandtl: state.prandtl,
+    };
+    let lip = NonlinearLip::new(&duct, gas, state.temperature, state.pressure, wall_gas, lip, 1.5e-6, clock)
+        .expect("nonlinear lip");
+    let mut lip = match card {
+        Some(card) => lip.with_jet_noise(card).expect("a usable card"),
+        None => lip,
+    };
+    lip.apply(BrassControl::SetLipTension(1.6)).expect("tension");
+    lip
+}
+
+// Eight blocks of 32 output samples (4096 gas steps) of cup overpressure at a steady `blow` [Pa].
+fn jet_run(lip: &mut NonlinearLip, blow: f64) -> Vec<f64> {
+    lip.apply(BrassControl::SetBlowingPressure(blow)).expect("blow");
+    let (mut out, mut cup, mut flows) = (Vec::new(), vec![0.0f64; 32], vec![0.0f64; 32 * 16]);
+    for _ in 0..8 {
+        lip.step_block(&mut cup, &mut flows).expect("block");
+        out.extend_from_slice(&cup);
+    }
+    out
+}
+
+fn jet_card(onset: f64, seed: u64) -> JetNoiseCard {
+    JetNoiseCard { seed, gain: 1.3e-3, strouhal_lo: 0.045, strouhal_hi: 0.115, reynolds_onset: onset }
+}
+
+fn same_bits(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
+// Gauntlet G0 and G3. A lip without the jet noise, and one whose gate can never open, are bit-identical; with the gate open (the lip at
+// its rest gap passes Re_h about 2300 at 3 kPa) the cup pressure changes, stays finite, and is seeded.
+#[test]
+fn lip_jet_noise_on_the_nonlinear_bore_shut_gate_is_bit_identical_and_an_open_gate_changes_the_pressure_seeded() {
+    let plain = jet_run(&mut jet_lip(None), 3000.0);
+    assert!(plain.iter().any(|p| p.abs() > 1.0), "the probe cup must carry pressure for the comparison to mean anything");
+    let shut = jet_run(&mut jet_lip(Some(jet_card(1.0e12, 7))), 3000.0);
+    assert!(same_bits(&plain, &shut), "a gate that never opens adds exactly zero");
+    let open = jet_run(&mut jet_lip(Some(jet_card(1700.0, 7))), 3000.0);
+    assert!(open.iter().all(|p| p.is_finite()));
+    assert!(!same_bits(&plain, &open), "an open gate must reach the cup pressure");
+    assert!(same_bits(&open, &jet_run(&mut jet_lip(Some(jet_card(1700.0, 7))), 3000.0)), "a declared seed repeats bit for bit");
+    assert!(!same_bits(&open, &jet_run(&mut jet_lip(Some(jet_card(1700.0, 8))), 3000.0)), "another seed gives another noise");
+}
+
+// Gauntlet G3 with a planted negative. At 300 Pa the jet is about 22 m/s and Re_h = mdot / (w mu) stays far under 1700: the row with the
+// 1700 gate is bit-identical to no row, while the same row with NO gate speaks (so the gate is what shut the first). With no mouth pressure
+// there is no forward flow and no source, whatever the gate; reverse flow is silent at the unit level (the source needs q > 0).
+#[test]
+fn lip_jet_noise_on_the_nonlinear_bore_is_gated_on_the_jet_and_silent_without_forward_flow() {
+    let plain = jet_run(&mut jet_lip(None), 300.0);
+    let gated = jet_run(&mut jet_lip(Some(jet_card(1700.0, 7))), 300.0);
+    assert!(same_bits(&plain, &gated), "below the gate the source stays shut");
+    let ungated = jet_run(&mut jet_lip(Some(jet_card(0.0, 7))), 300.0);
+    assert!(!same_bits(&plain, &ungated), "an ungated source speaks at the same pressure, so the gate is what shut the first");
+    let still = jet_run(&mut jet_lip(None), 0.0);
+    let none = jet_run(&mut jet_lip(Some(jet_card(0.0, 7))), 0.0);
+    assert!(same_bits(&still, &none), "no mouth pressure, no forward flow: no source even with no gate");
+}

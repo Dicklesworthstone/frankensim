@@ -415,6 +415,78 @@ impl GlottalJetNoise {
     }
 }
 
+/// Kernel id of the brass lip's jet-noise stream in `fs_rand`'s `(seed, kernel, tile)` key: "ljet". It is neither the voice's
+/// ("gjet", "glot") nor the flue's ("jetn") stream.
+pub const LIP_JET_NOISE_KERNEL: u32 = 0x6c6a_6574;
+
+/// The brass lip's opt-in jet-noise source: the SAME card and the SAME law as the voice row ([`JetNoiseCard`]; Stevens' form,
+/// Verge's constant, band and gate, an extrapolation, with the label and the measured shortfall written there), on the lip
+/// channel instead of the glottis. `width` is the lip slit width `w`, `h` the lip gap, `Q` the jet flow the lip meters:
+/// `U_j = Q / (w h)` is exactly the Bernoulli speed `sqrt(2 (p_blow - p_cup) / rho)` of the lip loop, and `Re_h = U_j h / nu =
+/// Q / (w nu)`. The gate is therefore a flow threshold `Q >= Re_on w nu`, and it sees FORWARD flow only: a lip whose
+/// mouth pressure is at or below the cup pressure (reverse or zero flow) has no jet and no source.
+///
+/// Measured on SilentBluff's V1 Bb4 hold (Cullen embouchure 19, 11.42 kPa, `--mouthpiece-wav` tap and the engine's own lip equation
+/// run offline): `Re_h >= 1700` on 56 % of the steady hold, in every cycle, peaking above 5400; the source is 11.7 Pa rms while the
+/// gate is open, 61 dB under the cup's AC rms. Kept additive on purpose: it repeats the arithmetic of [`GlottalJetNoise`] so that
+/// the landed voice path is untouched.
+#[derive(Clone, Debug)]
+pub struct LipJetNoise {
+    card: JetNoiseCard,
+    noise: BandedGaussian,
+    last_flow_m3_s: f64,
+    last_gap_m: f64,
+}
+
+impl LipJetNoise {
+    /// The source for `card`.
+    ///
+    /// # Errors
+    /// The reason [`JetNoiseCard::validate`] gives.
+    pub fn new(card: JetNoiseCard) -> Result<Self, &'static str> {
+        card.validate()?;
+        Ok(Self {
+            noise: BandedGaussian::new(card.seed, LIP_JET_NOISE_KERNEL),
+            card,
+            last_flow_m3_s: 0.0,
+            last_gap_m: 0.0,
+        })
+    }
+
+    /// The card.
+    #[must_use]
+    pub const fn card(&self) -> &JetNoiseCard {
+        &self.card
+    }
+
+    /// The series pressure [Pa] of this sample from the last sample's flow and gap (one sample of lag, no implicit loop).
+    /// `width_m` is the lip slit width, `max_speed_m_s` the Bernoulli bound `sqrt(2 |p_blow - p_cup| / rho)` of the present
+    /// pressure drop on the jet speed, `rho` and `mu` the gas density and dynamic viscosity. The stream advances by exactly
+    /// one white sample per call, gate open or shut.
+    pub fn pressure_pa(&mut self, width_m: f64, max_speed_m_s: f64, rho: f64, mu: f64, dt: f64) -> f64 {
+        let (q, h) = (self.last_flow_m3_s, self.last_gap_m);
+        if !(q > 0.0 && h > 0.0 && width_m > 0.0 && max_speed_m_s > 0.0 && rho > 0.0 && mu > 0.0) {
+            let _ = self.noise.skip();
+            return 0.0;
+        }
+        let speed = (q / (width_m * h)).min(max_speed_m_s);
+        let reynolds = speed * h * rho / mu;
+        if !(reynolds >= self.card.reynolds_onset) {
+            let _ = self.noise.skip();
+            return 0.0;
+        }
+        let per_hz = speed / h;
+        let w = self.noise.step(self.card.strouhal_lo * per_hz, self.card.strouhal_hi * per_hz, dt);
+        self.card.gain * 0.5 * rho * speed * speed * w
+    }
+
+    /// Remember this sample's jet flow [m^3/s] (signed: negative is reverse flow) and lip gap [m].
+    pub fn record(&mut self, flow_m3_s: f64, gap_m: f64) {
+        self.last_flow_m3_s = flow_m3_s;
+        self.last_gap_m = gap_m;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,5 +781,91 @@ mod tests {
         assert_ne!(run(7), run(8));
         assert_ne!(GLOTTAL_JET_NOISE_KERNEL, GLOTTAL_NOISE_KERNEL);
         assert_ne!(GLOTTAL_JET_NOISE_KERNEL, FLUE_JET_NOISE_KERNEL);
+    }
+
+    const LIP_DT: f64 = 1.0 / 32_000.0;
+    const LIP_WIDTH: f64 = 9.0e-3;
+
+    /// Gauntlet G3, the POSITIVE case planted on an open gap: a 1 mm lip gap passing 9e-4 m^3/s is a 100 m/s jet at
+    /// `Re_h = Q / (w nu) = 6000`, well past the 1700 gate; the source is then nonzero and its rms is `gain rho U_j^2 / 2`.
+    #[test]
+    fn lip_jet_noise_speaks_on_a_planted_open_gap_with_rms_gain_times_the_dynamic_pressure() {
+        let mut s = LipJetNoise::new(jet_card()).unwrap();
+        s.record(9.0e-4, 1.0e-3);
+        let bound = 1.0e3; // far above the 100 m/s jet: the clamp is not what is read here
+        for _ in 0..4096 {
+            s.pressure_pa(LIP_WIDTH, bound, RHO, MU, LIP_DT);
+        }
+        let n = 1usize << 17;
+        let xs: Vec<f64> = (0..n).map(|_| s.pressure_pa(LIP_WIDTH, bound, RHO, MU, LIP_DT)).collect();
+        assert!(xs.iter().filter(|x| **x != 0.0).count() > n * 99 / 100, "an open gate speaks on (almost) every sample");
+        let rms = (xs.iter().map(|x| x * x).sum::<f64>() / n as f64).sqrt();
+        let expected = 1.3e-3 * 0.5 * RHO * 100.0 * 100.0;
+        assert!((rms / expected - 1.0).abs() < 0.04, "rms {rms} against gain rho U^2 / 2 = {expected}");
+    }
+
+    /// Gauntlet G0/G3 planted negative (MB 16406): reverse flow, where the mouth pressure is at or below the cup pressure, and
+    /// zero flow or a closed lip give no source, with the SAME gap and magnitude that speak when the flow is forward.
+    #[test]
+    fn lip_jet_noise_is_silent_on_reverse_or_zero_flow_and_a_closed_lip() {
+        let speaks = |q: f64, h: f64| {
+            let mut s = LipJetNoise::new(jet_card()).unwrap();
+            s.record(q, h);
+            (0..256).any(|_| s.pressure_pa(LIP_WIDTH, 1.0e3, RHO, MU, LIP_DT) != 0.0)
+        };
+        assert!(speaks(9.0e-4, 1.0e-3), "forward flow through an open gap speaks (the negatives below are not vacuous)");
+        assert!(!speaks(-9.0e-4, 1.0e-3), "reverse flow (blow at or below the cup pressure) has no jet and no source");
+        assert!(!speaks(0.0, 1.0e-3), "no flow, no jet");
+        assert!(!speaks(9.0e-4, 0.0), "a closed lip has no jet");
+        // A zero bound (no drive) shuts it as well.
+        let mut s = LipJetNoise::new(jet_card()).unwrap();
+        s.record(9.0e-4, 1.0e-3);
+        assert_eq!(s.pressure_pa(LIP_WIDTH, 0.0, RHO, MU, LIP_DT), 0.0);
+    }
+
+    /// With `Re_h = U_j h / nu` and `U_j = Q / (w h)` the gap cancels: the gate is the flow threshold `Q = Re_on w nu`.
+    #[test]
+    fn lip_jet_noise_gate_is_a_flow_threshold_because_the_gap_cancels() {
+        let q_on = 1700.0 * LIP_WIDTH * (MU / RHO);
+        for h in [0.2e-3, 0.6e-3, 1.5e-3] {
+            let mut shut = LipJetNoise::new(jet_card()).unwrap();
+            shut.record(0.99 * q_on, h);
+            assert!((0..64).all(|_| shut.pressure_pa(LIP_WIDTH, 1.0e3, RHO, MU, LIP_DT) == 0.0), "below the flow threshold at gap {h}");
+            let mut open = LipJetNoise::new(jet_card()).unwrap();
+            open.record(1.01 * q_on, h);
+            assert!((0..64).any(|_| open.pressure_pa(LIP_WIDTH, 1.0e3, RHO, MU, LIP_DT) != 0.0), "above the flow threshold at gap {h}");
+        }
+    }
+
+    #[test]
+    fn lip_jet_noise_card_is_refused_unusable_and_the_stream_is_its_own_one_sample_per_call() {
+        let ok = jet_card();
+        for bad in [
+            JetNoiseCard { gain: 0.0, ..ok },
+            JetNoiseCard { strouhal_lo: 0.115, strouhal_hi: 0.045, ..ok },
+            JetNoiseCard { reynolds_onset: -1.0, ..ok },
+        ] {
+            assert!(LipJetNoise::new(bad).is_err(), "{bad:?}");
+        }
+        let q_on = 1700.0 * LIP_WIDTH * (MU / RHO);
+        let (mut open, mut shut) = (LipJetNoise::new(ok).unwrap(), LipJetNoise::new(ok).unwrap());
+        open.record(2.0 * q_on, 1e-3);
+        shut.record(0.1 * q_on, 1e-3);
+        for _ in 0..50 {
+            open.pressure_pa(LIP_WIDTH, 1.0e3, RHO, MU, LIP_DT);
+            shut.pressure_pa(LIP_WIDTH, 1.0e3, RHO, MU, LIP_DT);
+        }
+        assert_eq!(open.noise.white.index(), shut.noise.white.index(), "one white sample per call, gate open or shut");
+        assert!(open.noise.white.index() > 0);
+        let run = |seed| {
+            let mut s = LipJetNoise::new(JetNoiseCard { seed, ..ok }).unwrap();
+            s.record(2.0 * q_on, 1e-3);
+            (0..64).map(|_| s.pressure_pa(LIP_WIDTH, 1.0e3, RHO, MU, LIP_DT).to_bits()).collect::<Vec<u64>>()
+        };
+        assert_eq!(run(7), run(7));
+        assert_ne!(run(7), run(8));
+        for other in [GLOTTAL_NOISE_KERNEL, GLOTTAL_JET_NOISE_KERNEL, FLUE_JET_NOISE_KERNEL] {
+            assert_ne!(LIP_JET_NOISE_KERNEL, other, "the lip's stream is its own");
+        }
     }
 }

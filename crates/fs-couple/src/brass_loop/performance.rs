@@ -28,6 +28,7 @@
 //! mouth_flow_tail_tol <relative_energy>      optional; default 1e-10 (the line ladder's own)
 //! mouth_flow_max_taps <taps>                 optional; power of two in 512..=262144; default 65536 (the ladder's own ceiling)
 //! modal_baffle <relative_kernel_tol> <maximum_kernel_terms>  optional; full modal load and observation
+//! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>            optional; constriction noise of the lip jet, Verge's fraction
 //! cylinder <radius_m> <length_m>             bore records, mouthpiece to bell
 //! cone <inlet_radius_m> <outlet_radius_m> <length_m>
 //! bessel <inlet_radius_m> <outlet_radius_m> <length_m> <flare> <pieces>
@@ -45,6 +46,19 @@
 //! radial count is Gauss-Legendre nodes; radial and angular counts must be
 //! multiples of four for the quarter/half/full kernel convergence checks.
 //! Files without that record retain the original total-flow disk observation.
+//!
+//! `jet_noise` is the opt-in constriction noise of the lip jet, the voice's row on the lip channel
+//! ([`crate::turbulence_noise::LipJetNoise`]): a series
+//! pressure source added to the lip's driving pressure, of rms `gain * rho U_j^2 / 2` over `St_h = f h / U_j` in
+//! `[st_lo, st_hi]`, with `U_j = Q / (w h)` the Bernoulli speed of the lip channel and `h` the lip gap, shut while
+//! `Re_h = Q / (w nu)` is below `re_on` or the jet flow is not forward. Every field is required. The form is Stevens' (1971),
+//! the constant, band and gate are Verge's (1995, a flue jet at a labium, slit 1 mm), and putting them on a lip is an
+//! extrapolation that any page showing a render must say: "constriction noise from a flue-jet measurement (Verge 1995: flue
+//! jet at a labium, slit 1 mm), applied to the lip jet as an extrapolation; Stevens 1971 gives the form (a pressure source
+//! proportional to the pressure drop), not this constant". Both bores carry it: the linear loop adds it to the lip's driving
+//! pressure each sample, the nonlinear bore each gas step ([`super::nonlinear::NonlinearLip::with_jet_noise`]; there
+//! `Re_h = mdot / (w mu)` with the wall binding's own viscosity). A file without the record is bit-identical to one written
+//! before it existed, and so is one whose gate never opens.
 //!
 //! Exactly one of `lip_response` and `lip` is given. `lip_response` carries
 //! the quantities lip-reed measurements publish: the outward-striking
@@ -94,6 +108,7 @@ use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighM
 use crate::pcm_wav::baffled::modal::{MAX_MODAL_KERNEL_TERMS, ModalOutletOptions, ModalOutletReport};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
+use crate::turbulence_noise::JetNoiseCard;
 
 /// First line of every lip performance file.
 pub const LIP_PERFORMANCE_SCHEMA: &str = "frankensim-lip-performance-v1";
@@ -164,6 +179,7 @@ pub struct LipDescription {
     blow_track: String,
     tension_track: Option<String>,
     nonlinear: Option<(NonlinearBoreRecord, ThermochemicalGasModel)>,
+    jet_noise: Option<JetNoiseCard>,
 }
 
 struct Fields<'a> {
@@ -373,6 +389,7 @@ impl LipDescription {
         let mut mouth_flow_max_taps: Option<usize> = None;
         let mut modal_baffle: Option<ModalOutletOptions> = None;
         let mut nonlinear: Option<NonlinearBoreRecord> = None;
+        let mut jet_noise: Option<JetNoiseCard> = None;
         let mut ambient_words = None;
         let mut segments: Vec<Segment> = Vec::new();
         for (index, raw) in lines {
@@ -562,6 +579,23 @@ impl LipDescription {
                     }, &f)?;
                     f.finish()?;
                 }
+                "jet_noise" => {
+                    // Every field is required: the gain, the band and the onset are a source's measured numbers (Verge 1995,
+                    // a flue jet), and the card, not this code, says which it uses and where they come from.
+                    let seed: u64 = f.parse()?;
+                    let card = JetNoiseCard {
+                        seed,
+                        gain: f.number()?,
+                        strouhal_lo: f.number()?,
+                        strouhal_hi: f.number()?,
+                        reynolds_onset: f.number()?,
+                    };
+                    if let Err(why) = card.validate() {
+                        return f.err(why);
+                    }
+                    once(&mut jet_noise, card, &f)?;
+                    f.finish()?;
+                }
                 "microphone" => {
                     let position = [f.number()?, f.number()?, f.number()?];
                     let rings = f.count(128)? as usize;
@@ -700,7 +734,14 @@ impl LipDescription {
             blow_track,
             tension_track,
             nonlinear,
+            jet_noise,
         })
+    }
+
+    /// The opt-in lip jet-noise record, if the file declared one ([`crate::turbulence_noise::LipJetNoise`]).
+    #[must_use]
+    pub const fn jet_noise(&self) -> Option<&JetNoiseCard> {
+        self.jet_noise.as_ref()
     }
 
     /// The `bore nonlinear` record and the ambient source model it evolves,
@@ -842,6 +883,12 @@ impl LipDescription {
             self.cup_volume_m3,
         )
         .map_err(|e| format!("brass voice refused: {e}"))?;
+        let voice = match self.jet_noise {
+            Some(card) => voice
+                .with_jet_noise(card)
+                .map_err(|e| format!("jet_noise refused: {e}"))?,
+            None => voice,
+        };
         let line = voice
             .receipts()
             .first()
@@ -940,6 +987,10 @@ impl LipDescription {
             self.cup_volume_m3,
             clock,
         )?;
+        let lip = match self.jet_noise {
+            Some(card) => lip.with_jet_noise(card).map_err(|e| format!("jet_noise refused: {e}"))?,
+            None => lip,
+        };
         let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
             mouth_radius_m,
             clock.mechanics_rate_hz(),
@@ -1547,6 +1598,55 @@ mod tests {
              microphone 0 0 1 32 128 3000\n\
              {extra}schedule\n{SCHEDULE}"
         )
+    }
+
+    #[test]
+    fn jet_noise_parses_and_is_refused_by_name() {
+        let parse = |extra: &str| LipDescription::from_bytes(fixture(extra).as_bytes());
+        let ok = parse("jet_noise 7 1.3e-3 0.045 0.115 1700\n").expect("parses");
+        assert_eq!(
+            ok.jet_noise(),
+            Some(&JetNoiseCard { seed: 7, gain: 1.3e-3, strouhal_lo: 0.045, strouhal_hi: 0.115, reynolds_onset: 1700.0 })
+        );
+        assert_eq!(parse("").expect("parses").jet_noise(), None);
+        for (extra, needle) in [
+            ("jet_noise\n", "missing field"),
+            ("jet_noise 7 1.3e-3 0.045 0.115\n", "missing field"),
+            ("jet_noise 7 1.3e-3 0.045 0.115 1700 9\n", "unexpected extra field"),
+            ("jet_noise x 1.3e-3 0.045 0.115 1700\n", "malformed field"),
+            ("jet_noise 7 nan 0.045 0.115 1700\n", "must be finite"),
+            ("jet_noise 7 0 0.045 0.115 1700\n", "gain must be finite and positive"),
+            ("jet_noise 7 1.3e-3 0.115 0.045 1700\n", "Strouhal band"),
+            ("jet_noise 7 1.3e-3 0.045 0.115 -1\n", "reynolds onset"),
+            ("jet_noise 7 1.3e-3 0.045 0.115 1700\njet_noise 8 1.3e-3 0.045 0.115 1700\n", "may only appear once"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    /// Gauntlet G0 (a gate that never opens adds exactly zero), G3 (an open gate reaches the radiated sound, is seeded and
+    /// finite) and a planted negative (an ungated source speaks earlier than the gated one).
+    #[test]
+    fn jet_noise_is_bit_identical_when_its_gate_never_opens_and_otherwise_gated_seeded_and_audible() {
+        let build = |extra: &str| pressure(&LipDescription::from_bytes(fixture(extra).as_bytes()).expect("parses"));
+        let plain = build("");
+        let shut = build("jet_noise 7 1.3e-3 0.045 0.115 1e12\n");
+        assert!(
+            plain.iter().zip(&shut).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "a gate that never opens must leave the radiated pressure bit-identical to no row"
+        );
+        let open = build("jet_noise 7 1.3e-3 0.045 0.115 1700\n");
+        assert_ne!(plain, open, "an open gate must reach the radiated pressure");
+        let again = build("jet_noise 7 1.3e-3 0.045 0.115 1700\n");
+        assert!(open.iter().zip(&again).all(|(a, b)| a.to_bits() == b.to_bits()), "a declared seed repeats bit for bit");
+        assert_ne!(open, build("jet_noise 8 1.3e-3 0.045 0.115 1700\n"), "another seed gives another noise");
+        // The fixture's phrase ramps the mouth pressure up from 5 ms, so the jet crosses the 1700 gate partway up the ramp,
+        // while a source with no gate speaks from the first forward flow.
+        let first = |x: &[f64]| plain.iter().zip(x).position(|(a, b)| a.to_bits() != b.to_bits());
+        let ungated = build("jet_noise 7 1.3e-3 0.045 0.115 0\n");
+        let (at_gate, at_flow) = (first(&open).expect("gated source speaks"), first(&ungated).expect("ungated source speaks"));
+        assert!(at_flow + 20 < at_gate, "the gated source must wait for the gate: ungated at {at_flow}, gated at {at_gate}");
     }
 
     fn with_gas(record: &str) -> String {
@@ -2344,5 +2444,87 @@ mod tests {
             "the nonlinear loop must speak: {rms_nonlinear} Pa"
         );
         assert!((f_nonlinear / f_linear - 1.0).abs() <= 0.03);
+    }
+
+    // `--mouthpiece-wav` on the nonlinear route (MB 16445, 16793). `advance` appends the block's mouthpiece buffer to
+    // the tap after the engine match, so both engines fill it from the very buffer the window diagnostics read.
+    // Gauntlet G3 (metamorphic): the tap is a pure observer, so a tapped render is bit-identical to an untapped one;
+    // it is empty unless asked, holds one entry per rendered sample, and reproduces the engine's own window statistics.
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn the_mouthpiece_tap_on_the_nonlinear_bore_is_the_diagnostics_buffer_and_a_pure_observer() {
+        use fs_material::gas_species::input::ThermochemicalPhase;
+        const STEADY: &str = "frankensim-gesture-schedule-v1\n\
+            control_rate_hz\t700\n\
+            tracks\t1\n\
+            track\tblow\tblowing-pressure\n\
+            initial\tpressure-pa\t0e0\n\
+            events\t1\n\
+            event\t0e0\t1e-2\tpressure-pa\t3e3\n";
+        let packs = gas_test_support::packs("specimen-gas", 0.029, 3.5, 200.0);
+        let bindings = [packs.binding()];
+        let sources = ThermochemicalSources {
+            species: &bindings,
+            water_species: None,
+            phase: ThermochemicalPhase::FrozenGas,
+        };
+        let render = |tap: bool| {
+            let text = fixture(NONLINEAR_RECORD)
+                .replace("moist_air 293.15 101325 0", SPECIMEN)
+                .replace("audio 24000 2400", "audio 24000 4800")
+                .replace(SCHEDULE, STEADY);
+            let description =
+                LipDescription::from_bytes_with_gas_sources(text.as_bytes(), Some(&sources))
+                    .unwrap();
+            let mut performance = description.build().unwrap();
+            assert!(matches!(performance.info().bore, LipBoreInfo::Nonlinear(_)));
+            if tap {
+                performance.record_mouthpiece();
+            }
+            let mut radiated = vec![0.0; 4800];
+            for block in radiated.chunks_mut(600) {
+                performance.block(block).unwrap();
+            }
+            (
+                radiated,
+                performance.mouthpiece_pressure().to_vec(),
+                performance.windows(),
+            )
+        };
+        let (plain, untapped, _) = render(false);
+        let (tapped_audio, tap, windows) = render(true);
+        assert!(untapped.is_empty(), "no tap unless asked");
+        assert_eq!(tap.len(), 4800, "one tap entry per rendered sample");
+        assert!(tap.iter().all(|p| p.is_finite()));
+        assert!(
+            plain
+                .iter()
+                .zip(&tapped_audio)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the tap must change nothing else"
+        );
+        assert_eq!(windows.len(), 2, "4800 samples at 24 kHz are two tenth-second windows");
+        for (k, window) in windows.iter().enumerate() {
+            let slice = &tap[k * 2400..(k + 1) * 2400];
+            let mean = slice.iter().sum::<f64>() / slice.len() as f64;
+            let peak = 0.5
+                * (slice.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                    - slice.iter().copied().fold(f64::INFINITY, f64::min));
+            assert!(
+                (window.bore_mean_pa - mean).abs() <= 1e-9 * mean.abs().max(1.0),
+                "window {k}: diagnostics mean {} against the tap's {mean}",
+                window.bore_mean_pa
+            );
+            assert!(
+                (window.bore_ac_peak_pa - peak).abs() <= 1e-9 * peak.max(1.0),
+                "window {k}: diagnostics peak {} against the tap's {peak}",
+                window.bore_ac_peak_pa
+            );
+        }
+        assert!(
+            windows[1].bore_ac_peak_pa > 150.0,
+            "the lip speaks on the nonlinear bore, so the tap holds a real signal: {} Pa",
+            windows[1].bore_ac_peak_pa
+        );
     }
 }
