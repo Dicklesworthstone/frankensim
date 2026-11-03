@@ -25850,9 +25850,39 @@ existing stack requirements.
 Motion, finite enthalpy stores, thermal transport/network state, and the
 original clock publish through the existing atomic acceptance transaction.
 Cancellation, unrepresentable heat, invalid routing, or a late material-chart
-refusal leaves accepted state unchanged. This increment freezes sliding
-constitutive profiles; it does not infer a wall heat partition, additional
-thermal clock, or sliding-film source-temperature feedback.
+refusal leaves accepted state unchanged. Direct use of the heat-route
+constructor holds sliding constitutive profiles fixed. Temperature feedback
+requires the explicit liquid-film binding below; wall heat destinations and
+the original thermal clock remain unchanged.
+
+`LiquidFilmImpactSystem::new_with_sliding` adds explicit source-temperature
+feedback through the SAME finite-store proposal and accepted mechanical clock.
+`LiquidSlidingFilmLayerBinding` covers every original layer of every channel in
+each selected sliding island; a uniform passage has one implicit layer. Its
+temperature reservoir must be its existing heat destination. Normal-pressure
+and sliding-film insertion indices remain separate even when both are zero.
+The original material-card identity, pinned source claims, fixed nonthermal
+context, fully liquid phase and constant density/mass/volume gates apply to
+every row. There is no layer inventory, pressure-derived temperature or implicit
+wall heat partition.
+
+At the accepted endpoint, original local temperatures requery viscosity and
+the native `ShearedFilm::with_layer_viscosities` recompiles hydraulic mobility,
+Couette entrainment, harmonic wall drag and complete layer work together.
+Geometry, wall rows, normalized interfaces and the common Barus coefficient
+remain fixed. Completed work uses the OLD accepted coefficients and is never
+repriced at the endpoint. This is first-order constitutive splitting; each
+layer's explicit relative-viscosity-change bound requests time refinement.
+Every source, coefficient, thermal and cancellation gate precedes the joint
+publication, including when several normal/sliding islands share stores.
+Existing thermal-network substeps remain the sole heat-transport owner.
+
+Five focused groups in `tests/sliding_film_heat/feedback.rs` cover independent
+two-mass Couette drag and layer work, distinct per-channel temperatures,
+constant-source trajectory identity, mixed normal/sliding indices, source and
+step-change refusals, complete heat-destination coverage and late cancellation.
+The native coefficient-continuation regressions pass in the actual film-module
+harness. Native execution of these coupled regressions remains unclaimed.
 
 Four integration regressions cover independent two-body momentum and
 discrete-gradient work, native reference equality and both Newton images,

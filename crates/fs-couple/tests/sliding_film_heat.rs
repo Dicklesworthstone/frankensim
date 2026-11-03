@@ -1,6 +1,10 @@
 //! Combined moving-wall dissipation heats the original finite thermal owners.
 //! Synthetic constant layer viscosities and caloric charts are physical oracles,
-//! not measured material claims. No viscosity/temperature feedback is inferred.
+//! not measured material claims. Constant-profile fixtures below freeze
+//! viscosity; the feedback module binds source temperature explicitly.
+
+#[path = "sliding_film_heat/feedback.rs"]
+mod feedback;
 
 use fs_blake3::ContentHash;
 use fs_couple::render::plate::impact::material::heating::network::ReservoirCell;

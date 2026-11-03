@@ -299,5 +299,15 @@ impl PreparedImpactSystem {
             std::mem::swap(&mut self.inner.squeeze_films[*index], film);
         }
     }
+
+    // The same accepted-boundary publication for sliding islands also replaces
+    // native entrainment, shear drag and layer work as one complete operator.
+    pub(crate) fn swap_sliding_films(
+        &mut self, updates: &mut [(usize, super::squeeze::sliding::ShearedFilm)],
+    ) {
+        for (index, film) in updates {
+            std::mem::swap(&mut self.inner.sliding_films[*index], film);
+        }
+    }
 }
 

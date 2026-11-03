@@ -11,7 +11,9 @@
 //! explicit routes; a temperature binding never deposits additional heat.
 
 mod layers;
+mod sliding;
 pub use layers::LiquidFilmLayerBinding;
+pub use sliding::LiquidSlidingFilmLayerBinding;
 
 use std::collections::BTreeSet;
 
@@ -86,13 +88,15 @@ pub struct LiquidFilmImpactSystem<'m> {
     bindings: Vec<LiquidFilmBinding<'m>>,
     channel_bindings: Vec<LiquidFilmChannelBinding<'m>>,
     layer_bindings: Vec<LiquidFilmLayerBinding<'m>>,
+    sliding_layer_bindings: Vec<LiquidSlidingFilmLayerBinding<'m>>,
     reservoir_indices: Vec<usize>,
     sources: Vec<ResolvedLiquidState>,
     groups: Vec<FilmBindingGroup>,
+    sliding_groups: Vec<sliding::BindingGroup>,
 }
 
-// Uniform, channel and layer rows occupy distinct canonical source segments.
-// Each group covers one complete island, compiling its coefficients once.
+// Normal uniform/channel/layer rows precede the sliding-layer source segment.
+// Each group covers one complete island in its original mechanical owner.
 struct FilmBindingGroup {
     film: usize,
     rows: std::ops::Range<usize>,
@@ -194,10 +198,43 @@ impl<'m> LiquidFilmImpactSystem<'m> {
     /// This is first-order constitutive splitting with prescribed interfaces,
     /// not layer advection, mixing or a moving-interface thermal solver.
     pub fn new_with_layers(
+        inner: HeatedImpactSystem<'m>,
+        bindings: Vec<LiquidFilmBinding<'m>>,
+        channel_bindings: Vec<LiquidFilmChannelBinding<'m>>,
+        layer_bindings: Vec<LiquidFilmLayerBinding<'m>>,
+    ) -> Result<Self, ImpactError> {
+        Self::new_with_sliding(
+            inner,
+            bindings,
+            channel_bindings,
+            layer_bindings,
+            Vec::new(),
+        )
+    }
+
+    /// Bind source-temperature feedback for sliding films on the SAME thermal
+    /// proposal as any existing normal-pressure film bindings.
+    ///
+    /// Sliding indices refer to `sliding_film_count`, independently of the
+    /// normal-pressure indices in the other three binding lists. Each selected
+    /// sliding island needs every original channel and layer exactly once. A
+    /// uniform channel has one implicit layer; channels may share a liquid
+    /// reservoir or use different source laws and accepted temperatures.
+    /// Each layer's temperature reservoir must be its existing heat destination.
+    ///
+    /// The original native film recompiles pressure mobility, Couette
+    /// entrainment, shear drag and complete layer-work partition together.
+    /// Graph geometry, wall rows, layer interfaces and Barus pressure law stay
+    /// fixed. Completed mechanical work uses the old coefficients; all updated
+    /// coefficients and source states publish with the accepted thermal state.
+    /// This is the existing first-order constitutive split, with no extra heat,
+    /// material inventory or temperature inferred from pressure or slip speed.
+    pub fn new_with_sliding(
         mut inner: HeatedImpactSystem<'m>,
         mut bindings: Vec<LiquidFilmBinding<'m>>,
         mut channel_bindings: Vec<LiquidFilmChannelBinding<'m>>,
         mut layer_bindings: Vec<LiquidFilmLayerBinding<'m>>,
+        mut sliding_layer_bindings: Vec<LiquidSlidingFilmLayerBinding<'m>>,
     ) -> Result<Self, ImpactError> {
         let maximum_bindings: usize = (0..inner.mechanics().squeeze_film_count())
             .map(|index| {
@@ -216,8 +253,21 @@ impl<'m> LiquidFilmImpactSystem<'m> {
             .filter_map(|route| route.layers.as_ref())
             .map(|route| route.profile.layers().len())
             .sum();
-        let count = ordinary_count.saturating_add(layer_bindings.len());
-        if count == 0 || ordinary_count > maximum_bindings || layer_bindings.len() > maximum_layers
+        let maximum_sliding_layers: usize = (0..inner.mechanics().sliding_film_count())
+            .map(|index| {
+                inner
+                    .mechanics()
+                    .sliding_film(index)
+                    .expect("existing sliding film")
+                    .layer_count()
+            })
+            .sum();
+        let normal_count = ordinary_count.saturating_add(layer_bindings.len());
+        let count = normal_count.saturating_add(sliding_layer_bindings.len());
+        if count == 0
+            || ordinary_count > maximum_bindings
+            || layer_bindings.len() > maximum_layers
+            || sliding_layer_bindings.len() > maximum_sliding_layers
         {
             return Err(invalid(
                 "liquid film feedback needs bounded bindings to existing pressure channels",
@@ -226,6 +276,8 @@ impl<'m> LiquidFilmImpactSystem<'m> {
         bindings.sort_by_key(|binding| binding.film);
         channel_bindings.sort_by_key(|binding| (binding.film, binding.channel));
         layer_bindings.sort_by_key(|binding| (binding.film, binding.channel, binding.layer));
+        sliding_layer_bindings
+            .sort_by_key(|binding| (binding.film, binding.channel, binding.layer));
         let mut groups = Vec::new();
         for (i, binding) in bindings.iter().enumerate() {
             if i > 0 && bindings[i - 1].film == binding.film {
@@ -279,11 +331,15 @@ impl<'m> LiquidFilmImpactSystem<'m> {
         }
         layers::append_groups(&inner, &layer_bindings, ordinary_count, &mut groups)?;
         groups.sort_by_key(|group| group.film);
+        let sliding_groups = sliding::groups(&inner, &sliding_layer_bindings, normal_count)?;
         let mut reservoir_indices = Vec::with_capacity(count);
         let mut sources = Vec::with_capacity(count);
-        for (reservoir, law, maximum_change) in
-            source_bindings(&bindings, &channel_bindings, &layer_bindings)
-        {
+        for (reservoir, law, maximum_change) in source_bindings(
+            &bindings,
+            &channel_bindings,
+            &layer_bindings,
+            &sliding_layer_bindings,
+        ) {
             if !maximum_change.is_finite() || maximum_change <= 0.0 || maximum_change > 1.0 {
                 return Err(invalid("invalid constitutive step-change allowance"));
             }
@@ -308,17 +364,28 @@ impl<'m> LiquidFilmImpactSystem<'m> {
             updates.push((group.film, compiled.operator));
             layer_updates.extend(compiled.layer_routes);
         }
+        let mut sliding_updates = Vec::with_capacity(sliding_groups.len());
+        for group in &sliding_groups {
+            let film = inner
+                .mechanics()
+                .sliding_film(group.film)
+                .expect("bound sliding film");
+            sliding_updates.push((group.film, group.compile(film, &sources)?));
+        }
         // No fallible operation follows this coefficient publication.
         inner.mechanics.swap_squeeze_films(&mut updates);
+        inner.mechanics.swap_sliding_films(&mut sliding_updates);
         layers::publish(&mut inner, &mut layer_updates);
         Ok(Self {
             inner,
             bindings,
             channel_bindings,
             layer_bindings,
+            sliding_layer_bindings,
             reservoir_indices,
             sources,
             groups,
+            sliding_groups,
         })
     }
 
@@ -340,6 +407,11 @@ impl<'m> LiquidFilmImpactSystem<'m> {
     pub fn layer_bindings(&self) -> &[LiquidFilmLayerBinding<'m>] {
         &self.layer_bindings
     }
+    /// Sliding-layer prescriptions in original `(film, channel, layer)` order.
+    /// Uniform sliding passages each retain one implicit layer numbered zero.
+    pub fn sliding_layer_bindings(&self) -> &[LiquidSlidingFilmLayerBinding<'m>] {
+        &self.sliding_layer_bindings
+    }
     /// Actual uniform-island material states at the accepted temperature.
     /// Each entry corresponds to the same entry of `bindings`; channel source
     /// states are available through `channel_sources`.
@@ -355,7 +427,15 @@ impl<'m> LiquidFilmImpactSystem<'m> {
     /// canonical order as `layer_bindings`. Active profiles remain available
     /// through `system().layer_heat_profile(film, channel)`.
     pub fn layer_sources(&self) -> &[ResolvedLiquidState] {
-        &self.sources[self.bindings.len() + self.channel_bindings.len()..]
+        let start = self.bindings.len() + self.channel_bindings.len();
+        &self.sources[start..start + self.layer_bindings.len()]
+    }
+    /// Actual sliding-layer sources at accepted local temperatures, in the
+    /// same order as `sliding_layer_bindings`. Native layer profiles and wall
+    /// mappings remain available through `system().mechanics().sliding_film`.
+    pub fn sliding_layer_sources(&self) -> &[ResolvedLiquidState] {
+        &self.sources
+            [self.bindings.len() + self.channel_bindings.len() + self.layer_bindings.len()..]
     }
     /// Select the existing analytic/finite-difference Newton image.
     pub fn set_analytic_newton(&mut self, enabled: bool) {
@@ -366,14 +446,16 @@ impl<'m> LiquidFilmImpactSystem<'m> {
         self.inner.set_iteration_limit(limit)
     }
     /// Release accepted mechanics/heat and the uniform-island prescriptions.
-    /// This extraction omits channel and layer prescriptions. Use
+    /// This extraction omits channel, layer and sliding prescriptions. Use
     /// `into_all_parts` for uniform/channel sources or `into_layered_parts`
-    /// when layer prescriptions must also be retained.
+    /// when normal-pressure layer prescriptions must also be retained, or
+    /// `into_sliding_parts` for every prescription.
     pub fn into_parts(self) -> (HeatedImpactSystem<'m>, Vec<LiquidFilmBinding<'m>>) {
         (self.inner, self.bindings)
     }
     /// Release accepted mechanics/heat and the uniform/channel prescriptions.
-    /// This extraction omits layer bindings; `into_layered_parts` retains them.
+    /// This extraction omits layer and sliding bindings; `into_sliding_parts`
+    /// retains every prescription.
     /// Rebinding uses accepted local temperatures without resetting the clock.
     pub fn into_all_parts(
         self,
@@ -385,7 +467,8 @@ impl<'m> LiquidFilmImpactSystem<'m> {
         (self.inner, self.bindings, self.channel_bindings)
     }
 
-    /// Release accepted mechanics/heat and every original source prescription.
+    /// Release accepted mechanics/heat and the normal-pressure prescriptions.
+    /// Sliding prescriptions are retained by `into_sliding_parts`.
     /// Rebinding retains motion, caloric history, layer interfaces and time.
     pub fn into_layered_parts(
         self,
@@ -400,6 +483,26 @@ impl<'m> LiquidFilmImpactSystem<'m> {
             self.bindings,
             self.channel_bindings,
             self.layer_bindings,
+        )
+    }
+
+    /// Release accepted mechanics/heat and all normal/sliding source bindings.
+    /// Rebinding keeps accepted thermal and mechanical histories and time.
+    pub fn into_sliding_parts(
+        self,
+    ) -> (
+        HeatedImpactSystem<'m>,
+        Vec<LiquidFilmBinding<'m>>,
+        Vec<LiquidFilmChannelBinding<'m>>,
+        Vec<LiquidFilmLayerBinding<'m>>,
+        Vec<LiquidSlidingFilmLayerBinding<'m>>,
+    ) {
+        (
+            self.inner,
+            self.bindings,
+            self.channel_bindings,
+            self.layer_bindings,
+            self.sliding_layer_bindings,
         )
     }
 
@@ -471,9 +574,11 @@ impl<'m> LiquidFilmImpactSystem<'m> {
             bindings,
             channel_bindings,
             layer_bindings,
+            sliding_layer_bindings,
             reservoir_indices,
             sources,
             groups,
+            sliding_groups,
         } = self;
         let stores = inner.reservoirs().to_vec();
         let geometry: Vec<_> = groups
@@ -486,9 +591,20 @@ impl<'m> LiquidFilmImpactSystem<'m> {
                     .clone()
             })
             .collect();
+        let sliding_geometry: Vec<_> = sliding_groups
+            .iter()
+            .map(|group| {
+                inner
+                    .mechanics()
+                    .sliding_film(group.film)
+                    .expect("bound sliding film")
+                    .clone()
+            })
+            .collect();
         let mut next_sources = Vec::with_capacity(sources.len());
         let mut updates = Vec::with_capacity(groups.len());
         let mut layer_updates = Vec::new();
+        let mut sliding_updates = Vec::with_capacity(sliding_groups.len());
         let frame = inner.step_with_material_feedback(forces, gate, contact, |trial| {
             let proposed = transport(trial)?;
             if proposed.transfers.len() != stores.len() {
@@ -496,8 +612,13 @@ impl<'m> LiquidFilmImpactSystem<'m> {
                     "liquid feedback requires the complete original thermal proposal",
                 ));
             }
-            for (i, (_, law, maximum_change)) in
-                source_bindings(bindings, channel_bindings, layer_bindings).enumerate()
+            for (i, (_, law, maximum_change)) in source_bindings(
+                bindings,
+                channel_bindings,
+                layer_bindings,
+                sliding_layer_bindings,
+            )
+            .enumerate()
             {
                 if gate.is_requested() {
                     return Err(ImpactError::Cancelled);
@@ -522,11 +643,18 @@ impl<'m> LiquidFilmImpactSystem<'m> {
                 updates.push((group.film, compiled.operator));
                 layer_updates.extend(compiled.layer_routes);
             }
+            for (group, film) in sliding_groups.iter().zip(&sliding_geometry) {
+                if gate.is_requested() {
+                    return Err(ImpactError::Cancelled);
+                }
+                sliding_updates.push((group.film, group.compile(film, &next_sources)?));
+            }
             Ok(proposed)
         })?;
         // All thermal/source/contact/mechanical gates have passed. These swaps
         // cannot fail and carry no change of stored energy or time.
         inner.mechanics.swap_squeeze_films(&mut updates);
+        inner.mechanics.swap_sliding_films(&mut sliding_updates);
         layers::publish(inner, &mut layer_updates);
         *sources = next_sources;
         Ok(frame)
@@ -586,6 +714,7 @@ fn source_bindings<'s, 'm>(
     uniform: &'s [LiquidFilmBinding<'m>],
     channels: &'s [LiquidFilmChannelBinding<'m>],
     layers: &'s [LiquidFilmLayerBinding<'m>],
+    sliding_layers: &'s [LiquidSlidingFilmLayerBinding<'m>],
 ) -> impl Iterator<Item = (&'s str, &'s LiquidTemperatureLaw<'m>, f64)> {
     uniform
         .iter()
@@ -604,6 +733,13 @@ fn source_bindings<'s, 'm>(
             )
         }))
         .chain(layers.iter().map(|binding| {
+            (
+                binding.reservoir.as_str(),
+                &binding.law,
+                binding.maximum_relative_viscosity_change,
+            )
+        }))
+        .chain(sliding_layers.iter().map(|binding| {
             (
                 binding.reservoir.as_str(),
                 &binding.law,
