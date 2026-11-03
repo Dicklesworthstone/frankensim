@@ -12,7 +12,8 @@ use super::{ViscoElementError, ViscoElements, checkpoint};
 use fs_exec::Cx;
 use fs_math::{c64::C64, det};
 use fs_modal::harmonic::{
-    HarmonicResponseControls, HarmonicResponseError, PreparedHarmonicResponse,
+    HarmonicPortControls, HarmonicPortResponse, HarmonicResponseControls, HarmonicResponseError,
+    PreparedHarmonicResponse,
 };
 use fs_sparse::Csr;
 
@@ -56,7 +57,11 @@ pub struct ViscoHarmonicResponse {
     /// Cycle-averaged original constitutive loss omega u^H K'' u / 2 [W].
     /// Includes every Prony branch and the original Kelvin viscosity once.
     pub average_material_heat_w: f64,
-    /// Independent input work minus material loss [W]; not clipped.
+    /// Original boundary-port flow, opposing effort and absorbed work.
+    /// Boundary work is kept separate from intrinsic material heat: its source
+    /// determines whether it represents radiation, heat or another subsystem.
+    pub port_load: Option<HarmonicPortResponse>,
+    /// Input work minus material heat and boundary absorbed work [W]; not clipped.
     pub power_balance_residual_w: f64,
 }
 
@@ -69,6 +74,13 @@ pub struct ViscoHarmonicOperator<'a> {
     source: &'a ViscoElements,
     omega_rad_s: f64,
     response: PreparedHarmonicResponse,
+}
+
+struct HarmonicBoundary<'a> {
+    force_map: &'a [f64],
+    ports: usize,
+    impedance: &'a [C64],
+    controls: HarmonicPortControls,
 }
 
 impl ViscoElements {
@@ -86,6 +98,56 @@ impl ViscoElements {
         &self,
         omega_rad_s: f64,
         controls: HarmonicResponseControls,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoHarmonicOperator<'_>, ViscoHarmonicError> {
+        self.prepare_harmonic_response_impl(omega_rad_s, controls, None, cx)
+    }
+
+    /// Prepare the original hereditary solid with a complete physical boundary
+    /// impedance evaluated at this same frequency. The real row-major force map
+    /// `B` has one row per original free DOF and one column per power-conjugate
+    /// port. Its flow is `B^T v`, and the opposing effort is `Z B^T v`.
+    ///
+    /// The complete pencil is `K' - omega^2 M - i K'' - i omega B Z B^T`.
+    /// All reactive and mutual entries are retained. Structure and load enter
+    /// one factorization, so a physical boundary can regularize an otherwise
+    /// singular bare resonance. The original material spectrum, full-cycle
+    /// strain admission and intrinsic heat accounting remain unchanged.
+    ///
+    /// The shared owner admits the Hermitian part of `Z` as pointwise PSD.
+    /// The caller owns the load's frequency domain, physical units and causality;
+    /// a matrix at one frequency does not establish broadband passivity. The
+    /// structural controls retain their existing source-matrix accounting;
+    /// `port_controls` separately bound the additional projection and payload.
+    #[allow(clippy::too_many_arguments)] // physical source, ports and separate explicit budgets
+    pub fn prepare_harmonic_response_with_port_impedance(
+        &self,
+        omega_rad_s: f64,
+        force_map: &[f64],
+        ports: usize,
+        impedance: &[C64],
+        controls: HarmonicResponseControls,
+        port_controls: HarmonicPortControls,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoHarmonicOperator<'_>, ViscoHarmonicError> {
+        self.prepare_harmonic_response_impl(
+            omega_rad_s,
+            controls,
+            Some(HarmonicBoundary {
+                force_map,
+                ports,
+                impedance,
+                controls: port_controls,
+            }),
+            cx,
+        )
+    }
+
+    fn prepare_harmonic_response_impl(
+        &self,
+        omega_rad_s: f64,
+        controls: HarmonicResponseControls,
+        boundary: Option<HarmonicBoundary<'_>>,
         cx: &Cx<'_>,
     ) -> Result<ViscoHarmonicOperator<'_>, ViscoHarmonicError> {
         checkpoint(cx)?;
@@ -146,18 +208,35 @@ impl ViscoElements {
                 ));
             }
         }
-        let response = PreparedHarmonicResponse::try_new(
-            &mass,
-            &damping,
-            &storage,
-            n,
-            omega_rad_s,
-            HarmonicResponseControls {
-                maximum_payload_bytes: controls.maximum_payload_bytes - source_bytes,
-                ..controls
-            },
-            cx,
-        )?;
+        let solve_controls = HarmonicResponseControls {
+            maximum_payload_bytes: controls.maximum_payload_bytes - source_bytes,
+            ..controls
+        };
+        let response = if let Some(boundary) = boundary {
+            PreparedHarmonicResponse::try_with_port_impedance(
+                &mass,
+                &damping,
+                &storage,
+                n,
+                boundary.force_map,
+                boundary.ports,
+                boundary.impedance,
+                omega_rad_s,
+                solve_controls,
+                boundary.controls,
+                cx,
+            )?
+        } else {
+            PreparedHarmonicResponse::try_new(
+                &mass,
+                &damping,
+                &storage,
+                n,
+                omega_rad_s,
+                solve_controls,
+                cx,
+            )?
+        };
         checkpoint(cx)?;
         Ok(ViscoHarmonicOperator {
             source: self,
@@ -245,6 +324,7 @@ impl ViscoHarmonicOperator<'_> {
             relative_residual: result.relative_residual,
             average_input_power_w: result.average_input_power_w,
             average_material_heat_w: result.average_viscous_power_w,
+            port_load: result.port_load,
             power_balance_residual_w: result.power_balance_residual_w,
         })
     }

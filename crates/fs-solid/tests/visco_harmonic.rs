@@ -4,7 +4,7 @@
 use fs_exec::Cx;
 use fs_material::visco::tensor::{Mandel6, PronyBranch, TensorProny};
 use fs_math::c64::C64;
-use fs_modal::harmonic::{HarmonicResponseControls, HarmonicResponseError};
+use fs_modal::harmonic::{HarmonicPortControls, HarmonicResponseControls, HarmonicResponseError};
 use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::linear3::visco::*;
 
@@ -41,6 +41,13 @@ fn controls() -> HarmonicResponseControls {
         maximum_coordinates: 100,
         maximum_payload_bytes: 4 * 1024 * 1024,
         maximum_relative_residual: 2e-12,
+    }
+}
+fn port_controls() -> HarmonicPortControls {
+    HarmonicPortControls {
+        maximum_ports: 4,
+        maximum_projection_terms: 10_000,
+        maximum_payload_bytes: 1024 * 1024,
     }
 }
 fn diagonal(values: [f64; 6]) -> Mandel6 {
@@ -115,6 +122,7 @@ fn g1_hereditary_resonance_matches_analytic_complex_modulus_and_heat() {
             for f in [C64::new(0.001, 0.0), C64::new(-0.0004, 0.0007)] {
                 let expected = f / dynamic;
                 let result = prepared.solve(&[f], cx).unwrap();
+                assert!(result.port_load.is_none());
                 near(result.displacement_m[0], expected);
                 near(
                     result.velocity_m_s[0],
@@ -277,6 +285,248 @@ fn g0_g4_lossless_response_remains_lossless_and_cancellation_refuses() {
         assert!(
             source
                 .prepare_harmonic_response(2.0, controls(), cx)
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn g1_physical_boundary_resolves_bare_resonance_and_accounts_work_separately() {
+    with_cx(|cx, _| {
+        let source = solid(scalar_law(false), &[3], cx);
+        // M=K=1 analytically. Original mass quadrature can leave a few ulps
+        // of detuning; the bare response is singular or outside the material
+        // strain domain, while the physically loaded response is admitted.
+        match source.prepare_harmonic_response(1.0, controls(), cx) {
+            Err(ViscoHarmonicError::Harmonic(HarmonicResponseError::Singular { .. })) => {}
+            Ok(bare) => assert!(matches!(
+                bare.solve(&[C64::from_re(0.001)], cx),
+                Err(ViscoHarmonicError::Element(ViscoElementError::Material(_)))
+            )),
+            _ => panic!("unexpected bare-response refusal"),
+        }
+        // B=2, Z=.5: the analytic complete dynamic stiffness is -2i.
+        let prepared = source
+            .prepare_harmonic_response_with_port_impedance(
+                1.0,
+                &[2.0],
+                1,
+                &[C64::from_re(0.5)],
+                controls(),
+                port_controls(),
+                cx,
+            )
+            .unwrap();
+        let response = prepared.solve(&[C64::from_re(0.001)], cx).unwrap();
+        near(response.displacement_m[0], C64::new(0.0, 0.0005));
+        let load = response.port_load.as_ref().unwrap();
+        near(load.flow[0], C64::from_re(0.001));
+        near(load.effort[0], C64::from_re(0.0005));
+        assert_eq!(response.average_material_heat_w, 0.0);
+        close(load.average_absorbed_power_w, 2.5e-7, 2e-12);
+        close(response.average_input_power_w, 2.5e-7, 2e-12);
+        assert!(response.power_balance_residual_w.abs() < 1e-20);
+    });
+}
+
+#[test]
+fn g1_mutual_reactive_load_and_hereditary_solid_retain_full_forced_response() {
+    with_cx(|cx, _| {
+        let source = solid(scalar_law(true), &[3, 6], cx);
+        let mass = [1.0, 0.5, 0.5, 1.0];
+        let b = [1.0, 0.5, -0.4, 1.2];
+        let q = [C64::new(0.0004, -0.0002), C64::new(-0.0001, 0.0003)];
+        for w in [0.4, 1.5, 4.0] {
+            let x = 0.1 * w;
+            let stiffness = [1.0 + 3.0 * x * x / (1.0 + x * x), 0.0, 0.0, 0.5];
+            let loss = 0.2 * w + 3.0 * x / (1.0 + x * x);
+            // Independent two-port passive spring/mass/resistance network.
+            // Off-diagonal work and reactive terms must survive projection.
+            let z = [
+                C64::new(0.2, 0.7 / w - 0.2 * w),
+                C64::new(0.08, 0.1 / w),
+                C64::new(0.08, 0.1 / w),
+                C64::new(0.4, 0.5 / w - 0.3 * w),
+            ];
+            let v = q.map(|u| C64::new(w * u.im, -w * u.re));
+            let flow: [C64; 2] = core::array::from_fn(|a| v[0].scale(b[a]) + v[1].scale(b[2 + a]));
+            let effort: [C64; 2] =
+                core::array::from_fn(|a| z[2 * a] * flow[0] + z[2 * a + 1] * flow[1]);
+            let force: [C64; 2] = core::array::from_fn(|i| {
+                let internal = (0..2).fold(C64::ZERO, |sum, j| {
+                    sum + C64::new(
+                        stiffness[2 * i + j] - w * w * mass[2 * i + j],
+                        if i == 0 && j == 0 { -loss } else { 0.0 },
+                    ) * q[j]
+                });
+                internal + effort[0].scale(b[2 * i]) + effort[1].scale(b[2 * i + 1])
+            });
+            let prepared = source
+                .prepare_harmonic_response_with_port_impedance(
+                    w,
+                    &b,
+                    2,
+                    &z,
+                    controls(),
+                    port_controls(),
+                    cx,
+                )
+                .unwrap();
+            let response = prepared.solve(&force, cx).unwrap();
+            let boundary = response.port_load.as_ref().unwrap();
+            for i in 0..2 {
+                near(response.displacement_m[i], q[i]);
+                near(boundary.flow[i], flow[i]);
+                near(boundary.effort[i], effort[i]);
+            }
+            let heat = 0.5 * w * loss * q[0].norm_sq();
+            let boundary_work: f64 = (0..2)
+                .map(|i| 0.5 * (flow[i].re * effort[i].re + flow[i].im * effort[i].im))
+                .sum();
+            close(response.average_material_heat_w, heat, 2e-10);
+            close(boundary.average_absorbed_power_w, boundary_work, 2e-10);
+            close(response.average_input_power_w, heat + boundary_work, 2e-10);
+            assert!(response.power_balance_residual_w.abs() < 2e-10 * (heat + boundary_work));
+            assert_eq!(
+                response.displacement_m,
+                prepared.solve(&force, cx).unwrap().displacement_m
+            );
+        }
+    });
+}
+
+#[test]
+fn g3_zero_boundary_preserves_original_hereditary_response_bits() {
+    with_cx(|cx, _| {
+        let source = solid(scalar_law(true), &[3], cx);
+        let force = [C64::new(0.0007, -0.0002)];
+        for w in [0.5, 1.0, 4.0] {
+            let original = source
+                .prepare_harmonic_response(w, controls(), cx)
+                .unwrap()
+                .solve(&force, cx)
+                .unwrap();
+            let loaded = source
+                .prepare_harmonic_response_with_port_impedance(
+                    w,
+                    &[1.0],
+                    1,
+                    &[C64::ZERO],
+                    controls(),
+                    port_controls(),
+                    cx,
+                )
+                .unwrap()
+                .solve(&force, cx)
+                .unwrap();
+            for (a, b) in original.displacement_m.iter().zip(&loaded.displacement_m) {
+                assert_eq!(a.re.to_bits(), b.re.to_bits());
+                assert_eq!(a.im.to_bits(), b.im.to_bits());
+            }
+            assert_eq!(
+                original.average_material_heat_w.to_bits(),
+                loaded.average_material_heat_w.to_bits()
+            );
+            assert_eq!(
+                original.average_input_power_w.to_bits(),
+                loaded.average_input_power_w.to_bits()
+            );
+            assert_eq!(loaded.port_load.unwrap().average_absorbed_power_w, 0.0);
+        }
+    });
+}
+
+#[test]
+fn g0_g4_loaded_response_preserves_material_port_and_cancellation_admission() {
+    with_cx(|cx, gate| {
+        let source = solid(scalar_law(true).with_band((0.5, 10.0)).unwrap(), &[3], cx);
+        let z = [C64::from_re(0.5)];
+        assert!(
+            source
+                .prepare_harmonic_response_with_port_impedance(
+                    11.0,
+                    &[1.0],
+                    1,
+                    &z,
+                    controls(),
+                    port_controls(),
+                    cx,
+                )
+                .is_err()
+        );
+        for (map, load) in [
+            (&[][..], z[0]),
+            (&[1.0][..], C64::from_re(-1.0)),
+            (&[1.0][..], C64::new(f64::NAN, 0.0)),
+        ] {
+            assert!(
+                source
+                    .prepare_harmonic_response_with_port_impedance(
+                        2.0,
+                        map,
+                        1,
+                        &[load],
+                        controls(),
+                        port_controls(),
+                        cx,
+                    )
+                    .is_err()
+            );
+        }
+        let mut cap = port_controls();
+        cap.maximum_ports = 0;
+        assert!(matches!(
+            source.prepare_harmonic_response_with_port_impedance(
+                2.0,
+                &[1.0],
+                1,
+                &z,
+                controls(),
+                cap,
+                cx,
+            ),
+            Err(ViscoHarmonicError::Harmonic(
+                HarmonicResponseError::Budget { .. }
+            ))
+        ));
+        let prepared = source
+            .prepare_harmonic_response_with_port_impedance(
+                2.0,
+                &[1.0],
+                1,
+                &z,
+                controls(),
+                port_controls(),
+                cx,
+            )
+            .unwrap();
+        let x = 0.2;
+        let dynamic = C64::new(
+            1.0 + 3.0 * x * x / (1.0 + x * x) - 4.0,
+            -(0.4 + 3.0 * x / (1.0 + x * x) + 1.0),
+        );
+        assert!(matches!(
+            prepared.solve(&[dynamic * C64::new(0.015, 0.015)], cx),
+            Err(ViscoHarmonicError::Element(ViscoElementError::Material(_)))
+        ));
+        gate.request();
+        assert!(matches!(
+            prepared.solve(&[C64::from_re(0.001)], cx),
+            Err(ViscoHarmonicError::Harmonic(
+                HarmonicResponseError::Cancelled
+            ))
+        ));
+        assert!(
+            source
+                .prepare_harmonic_response_with_port_impedance(
+                    2.0,
+                    &[1.0],
+                    1,
+                    &z,
+                    controls(),
+                    port_controls(),
+                    cx,
+                )
                 .is_err()
         );
     });

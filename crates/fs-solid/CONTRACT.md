@@ -4424,3 +4424,27 @@ physical energy within 9.672e-17 J. Geometry and material are synthetic. This is
 native assembly/solve/motion consumer, not spatial convergence or experimental
 calibration evidence. Viscosity, hereditary loss, finite rotations, changing
 supports/topology and impulsive support motion are outside this conservative owner.
+
+## Physical boundary loading of hereditary harmonic solids
+
+`ViscoElements::prepare_harmonic_response_with_port_impedance` assembles the
+original material spectrum and consistent mass together with a caller-supplied
+physical load `Z(omega)` and real power-conjugate force map `B`. The complete
+pencil is `K' - omega^2 M - i K'' - i omega B Z B^T`. Reactive and mutual
+entries remain present; a loaded resonance is solved before any bare-system
+inversion. One factor is reused at that frequency.
+
+The shared harmonic owner supplies pointwise Hermitian-PSD admission and
+separate port/projection/payload limits. The load owner retains responsibility
+for its frequency domain, units, causality and source accuracy. Returned
+`port_load` contains the original flow, opposing effort and net absorbed
+boundary work. This work is separate from the original Prony/Kelvin material
+heat and is not relabeled as radiation or heat. The signed balance subtracts
+both contributions. Original source-band and full-cycle strain admission,
+structural payload budgets and cancellation still apply.
+
+`tests/visco_harmonic.rs` checks a load-regularized bare resonance, an independent
+coupled spring/mass/resistance boundary on a hereditary solid, separate work and
+heat, exact zero-load response parity, and material/load/capacity/cancellation
+refusals (G0/G1/G3/G4). These bounded numerical checks do not establish broadband
+load passivity, a spatial convergence certificate or measured material accuracy.
