@@ -7,6 +7,9 @@
 //! drives without repeating material queries. This is a stationary, lossless,
 //! isotropic fluid volume with no mean flow or thermal evolution.
 
+/// Original gas/liquid material sources on conforming tetrahedral regions.
+pub mod regions;
+
 use fs_feec::acoustics::helmholtz::heterogeneous::HeterogeneousHelmholtzFe;
 use fs_feec::acoustics::helmholtz::{AcousticFeError, HelmholtzFe, Medium};
 use fs_material::MaterialError;

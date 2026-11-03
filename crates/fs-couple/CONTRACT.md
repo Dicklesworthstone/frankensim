@@ -97,6 +97,15 @@ or thermal evolution. The `heterogeneous_acoustics` example accepts original
 gas source packs, drives a spatial pressure field, and exports pressure and
 boundary work; its local outlet impedance is not exact multimode radiation.
 
+`heterogeneous::regions::FluidRegionsInterior` binds original `FluidAcoustics`
+providers to explicit conforming tetrahedral regions. Gas, liquid, dense-fluid
+and material-card sources retain their own phase/relaxation policies and original
+receipts. Each used region is resolved once into a coherent acoustic snapshot;
+unused sources are not queried. The original heterogeneous FE owner assembles
+both physical matrices, including inverse-density interface coupling, with no
+homogeneous reference-fluid substitution. Region maps and source failures remain
+explicit. Changing an original source requires preparing a new frozen binding.
+
 ## Actual curved TET10 contact through native momentum owners
 
 `inelastic_impact::surface::quadratic::QuadraticSolidContactSurface` binds the
