@@ -25248,3 +25248,36 @@ G1/G3/G4 integration tests independently read complete native mass, linear and
 angular momentum, and enthalpy-plus-kinetic inventories, and exercise unequal
 velocities, mixing heat, datum/boost covariance, chained continuation and atomic
 refusals. These are synthetic conservation tests, not experimental validation.
+
+### Effusive vessels under gravity and external force
+
+`GasRocketState::advance_effusion_with_environment` retains the same original
+molecular outlets, shared species withdrawals and one gas reconstruction while
+the native physical-exhaust owner advances explicit uniform gravity and another
+held inertial force. Gravity follows the changing vehicle mass; the other force
+is held in newtons. Their native integrated impulse and mechanical work enter
+the coupled momentum/energy balances once. Closed or absent outlets preserve
+the gas and follow the same loaded constant-mass trajectory. The original
+`advance_effusion` entry delegates with exactly zero loads.
+
+Gas is the authoritative starting and ending propellant inventory. A local
+native starting copy uses its actual gas mass; an existing native/gas mismatch
+must pass the mass budget and its remap's momentum/kinetic magnitudes consume
+the corresponding physical budgets. Endpoint remapping and accepted-stream
+rate rounding retain their explicit signed corrections. Unresolved inventory
+rounding during gravity is bounded separately: an absolute mass uncertainty
+epsilon_m reserves `epsilon_m*abs(g_j)*dt` per momentum component and
+`epsilon_m*|g|*dt*sqrt(mean(|v|²))` in work. The native powered trajectory supplies
+that velocity moment. These reserves accompany the signed residuals and do not
+claim an exact interpolation of rounded gas mass or become fictitious heat.
+No-outflow coast has no mass-history uncertainty. A late budget, source or
+cancellation refusal publishes neither owner.
+
+The compact gas remains locally Maxwellian and mixed; internal gravity
+stratification, rotating apertures and resolved feed flows remain outside this
+model. Loads and normals are fixed during a call. Six added regression groups
+cover explicit/free parity, independent changing-mass trajectories, complete
+external-work and Galilean accounts, loaded closed-outlet motion, canonical
+inventory budgets, extreme-scale gravity reserves and atomic refusal. Rustfmt parsing and source/API review
+passed; numerical execution remains unverified while required constellation
+sibling dependencies are unavailable.

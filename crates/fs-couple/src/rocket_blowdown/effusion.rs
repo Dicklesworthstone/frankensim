@@ -1,4 +1,4 @@
-//! Source-bearing molecular escape from a freely translating finite vessel.
+//! Source-bearing molecular escape and explicitly forced vessel translation.
 //!
 //! All separately exposed outlets spend the same original species inventory
 //! and share one caloric reconstruction. Their actual accepted species masses
@@ -7,10 +7,11 @@
 //! into the same inertial frame as the vessel, so recoil is funded by the gas.
 //!
 //! The gas is locally Maxwellian in the vessel frame. Outward normals remain
-//! fixed in the declared inertial frame; rotation, wall accommodation, gravity,
-//! external forces, nozzle pressure thrust and finite receiver filling are not
-//! part of this free-translation model. Fluxes are held for each first-order
-//! finite-gas step. The caller refines time as temperature/composition changes.
+//! fixed in the declared inertial frame. Uniform gravity and another held force
+//! supply their original impulse and mechanical work. Rotation, wall
+//! accommodation, nozzle pressure thrust and finite receiver filling are not
+//! modeled. Fluxes and forcing are held for each first-order finite-gas step;
+//! changing temperature, composition or loads require caller time refinement.
 
 use super::GasRocketState;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
@@ -24,11 +25,12 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::{
     },
 };
 use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
+use fs_math::det;
 use fs_mbd::{
     Vec3,
     rocket::{
         RocketError,
-        exhaust::{ExhaustForcing, ExhaustStep},
+        exhaust::{ExhaustEnvironment, ExhaustForcing, ExhaustStep},
     },
 };
 use std::collections::BTreeMap;
@@ -43,6 +45,17 @@ pub struct EffusionOutlet<'a> {
     pub area_m2: f64,
     /// Finite unit vector pointing OUT of the vessel in its declared frame.
     pub outward_normal_world: Vec3,
+}
+
+/// Loads held in the same inertial frame as the vessel and outlet normals.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EffusionRocketEnvironment {
+    /// Frame identity, without an inferred coordinate transformation.
+    pub inertial_frame: u64,
+    /// Uniform gravitational acceleration [m/s²]; its force follows gas depletion.
+    pub gravity_world_m_s2: Vec3,
+    /// Other held force [N], excluding gravity and the outgoing molecular momentum.
+    pub external_force_world_n: Vec3,
 }
 
 /// Physical budgets for the shared material and mechanical transaction.
@@ -72,6 +85,13 @@ pub enum EffusionRocketError {
     },
     EnergyBalance {
         residual_j: f64,
+    },
+    /// Remaining physical budgets cannot cover numerical inventory uncertainty.
+    RoundingBudget {
+        momentum_residual_n_s: Vec3,
+        energy_residual_j: f64,
+        momentum_bound_n_s: Vec3,
+        energy_bound_j: f64,
     },
     Cancelled,
 }
@@ -127,6 +147,74 @@ impl Sum {
     }
 }
 
+// Gravity is a mass-dependent force. Do not invent when within the interval a
+// finite gas reconstruction's inventory rounding occurred. Its impulse is
+// bounded by epsilon_m*|g|*dt; Cauchy--Schwarz bounds work using the native
+// powered trajectory's mean speed squared. No mass escapes during a dry coast.
+fn nonnegative_product3(mut factors: [f64; 3]) -> Result<f64, EffusionRocketError> {
+    if factors
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(EffusionRocketError::Invalid(
+            "gravity rounding reserve needs finite nonnegative factors",
+        ));
+    }
+    if factors.contains(&0.0) {
+        return Ok(0.0);
+    }
+    factors.sort_by(f64::total_cmp);
+    // For positive factors this pairing cannot overflow or vanish unless the
+    // final triple product is also outside the positive representable range.
+    let product = (factors[0] * factors[2]) * factors[1];
+    if !product.is_finite() || product == 0.0 {
+        return Err(EffusionRocketError::Invalid(
+            "positive gravity rounding reserve vanished or overflowed",
+        ));
+    }
+    Ok(product)
+}
+
+fn gravity_rounding_bounds(
+    mass_uncertainty_kg: f64,
+    gravity: Vec3,
+    duration_s: f64,
+    mean_speed_squared_m2_s2: f64,
+) -> Result<(Vec3, f64), EffusionRocketError> {
+    if !mass_uncertainty_kg.is_finite() || mass_uncertainty_kg < 0.0 {
+        return Err(EffusionRocketError::Invalid(
+            "gravity mass-history uncertainty is unrepresentable",
+        ));
+    }
+    if mass_uncertainty_kg == 0.0 || gravity == Vec3::ZERO {
+        return Ok((Vec3::ZERO, 0.0));
+    }
+    let component =
+        |value: f64| nonnegative_product3([mass_uncertainty_kg, duration_s, value.abs()]);
+    let impulse = Vec3::new(
+        component(gravity.x)?,
+        component(gravity.y)?,
+        component(gravity.z)?,
+    );
+    let scale = impulse.x.max(impulse.y).max(impulse.z);
+    let work = if scale == 0.0 {
+        0.0
+    } else {
+        let unit = Vec3::new(impulse.x / scale, impulse.y / scale, impulse.z / scale);
+        nonnegative_product3([
+            scale,
+            det::sqrt(unit.norm_squared()),
+            det::sqrt(mean_speed_squared_m2_s2),
+        ])?
+    };
+    if !impulse.is_finite() || !work.is_finite() || work < 0.0 {
+        return Err(EffusionRocketError::Invalid(
+            "gravity mass-history rounding bound is unrepresentable",
+        ));
+    }
+    Ok((impulse, work))
+}
+
 /// Original accepted gas and mechanics plus their actual cross-owner balances.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EffusionRocketStep {
@@ -147,6 +235,13 @@ pub struct EffusionRocketStep {
     /// Accepted molecular energy plus its inertial kinetic transport [J].
     /// May be signed when original species use signed formation datums.
     pub exhaust_energy_world_j: f64,
+    /// Original native propellant minus authoritative starting gas inventory [kg].
+    /// A local native starting copy uses that gas inventory; no gas is added.
+    pub initial_mass_residual_kg: f64,
+    /// Numerical change in the original native representation when canonicalized.
+    /// Its magnitude is reserved in the physical budget, not supplied by a force.
+    pub initial_inventory_momentum_correction_n_s: Vec3,
+    pub initial_inventory_kinetic_correction_j: f64,
     /// Native remaining propellant minus actual accepted gas inventory [kg].
     pub remaining_mass_residual_kg: f64,
     pub consumed_mass_residual_kg: f64,
@@ -158,6 +253,13 @@ pub struct EffusionRocketStep {
     pub inventory_momentum_correction_n_s: Vec3,
     /// Corresponding kinetic-energy change, evaluated without bulk subtraction.
     pub inventory_kinetic_correction_j: f64,
+    /// Absolute inventory uncertainty behind the gravity reserve [kg]; zero for coast.
+    pub gravity_mass_history_uncertainty_kg: f64,
+    /// Componentwise nonnegative gravity impulse reserve [N s], separate from
+    /// the signed residual and the native nominal external impulse.
+    pub gravity_impulse_uncertainty_n_s: Vec3,
+    /// Nonnegative gravity work reserve [J]; no exact rounded mass history is claimed.
+    pub gravity_work_uncertainty_j: f64,
     pub momentum_residual_kg_m_s: Vec3,
     /// Original source-relative gas closure plus native kinetic/exhaust closure
     /// and the admitted inventory correction. No formation energies are subtracted.
@@ -206,16 +308,55 @@ impl GasRocketState {
         duration_s: f64,
         endpoint: GasEnergySolve,
         controls: EffusionRocketSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<EffusionRocketCandidate, EffusionRocketError> {
+        self.advance_effusion_with_environment(
+            EffusionRocketEnvironment {
+                inertial_frame,
+                gravity_world_m_s2: Vec3::ZERO,
+                external_force_world_n: Vec3::ZERO,
+            },
+            outlets,
+            duration_s,
+            endpoint,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Advance the same source-bearing escape under explicit gravity and force.
+    ///
+    /// The native trajectory integrates the force against the changing mass,
+    /// and its external impulse/work enter the same momentum/energy balances.
+    /// Closed outlets retain their gas while the vessel follows loaded coast.
+    /// Gravity-induced internal stratification is outside the compact mixed-gas
+    /// model. Geometry, loads and molecular fluxes are fixed over this interval.
+    ///
+    /// Gas is the authoritative initial and final propellant inventory. Initial
+    /// native inventory remapping and unresolved gravity mass-history rounding
+    /// reserve space in the existing physical budgets; neither is hidden as an
+    /// exact force/work correction. All endpoints remain tentative until the
+    /// final balance, original-source and cancellation checks succeed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_effusion_with_environment(
+        &self,
+        environment: EffusionRocketEnvironment,
+        outlets: &[EffusionOutlet<'_>],
+        duration_s: f64,
+        endpoint: GasEnergySolve,
+        controls: EffusionRocketSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<EffusionRocketCandidate, EffusionRocketError> {
         poll(&mut cancelled)?;
-        if inertial_frame != self.inertial_frame
+        if environment.inertial_frame != self.inertial_frame
+            || !environment.gravity_world_m_s2.is_finite()
+            || !environment.external_force_world_n.is_finite()
             || !controls.momentum_tolerance_n_s.is_finite()
             || controls.momentum_tolerance_n_s < 0.0
             || outlets.len() > MAX_SNAPSHOT_TRANSFERS
         {
             return Err(EffusionRocketError::Invalid(
-                "effusive recoil frame, momentum budget or outlet count",
+                "effusive recoil frame, finite loads, momentum budget or outlet count",
             ));
         }
         let mut ordered = BTreeMap::new();
@@ -316,9 +457,32 @@ impl GasRocketState {
             ),
             relative_energy_rate_w: relative_energy_j / duration_s,
         };
-        let exhaust = self
-            .vehicle
-            .advance_with_exhaust(forcing, duration_s, &mut cancelled)?;
+        let initial_mass_residual_kg = self.vehicle.propellant_mass_kg - self.reservoir.mass_kg();
+        let mass_budget = controls.transport.exchange.mass_tolerance_kg;
+        if !initial_mass_residual_kg.is_finite() || initial_mass_residual_kg.abs() > mass_budget {
+            return Err(EffusionRocketError::InventoryBalance {
+                remaining_residual_kg: initial_mass_residual_kg,
+                consumed_residual_kg: 0.0,
+            });
+        }
+        let mut native_initial = self.vehicle;
+        native_initial.propellant_mass_kg = self.reservoir.mass_kg();
+        let initial_inventory_momentum_correction_n_s =
+            self.vehicle.velocity_m_s.scale(-initial_mass_residual_kg);
+        let initial_inventory_kinetic_correction_j = if initial_mass_residual_kg == 0.0 {
+            0.0
+        } else {
+            (-0.5 * initial_mass_residual_kg) * self.vehicle.velocity_m_s.norm_squared()
+        };
+        let exhaust = native_initial.advance_with_exhaust_forced(
+            forcing,
+            ExhaustEnvironment {
+                gravity_m_s2: environment.gravity_world_m_s2,
+                external_force_n: environment.external_force_world_n,
+            },
+            duration_s,
+            &mut cancelled,
+        )?;
         let reservoir = parcels.remove(&0).ok_or(EffusionRocketError::Invalid(
             "accepted gas inventory vanished",
         ))?;
@@ -326,13 +490,10 @@ impl GasRocketState {
         let remaining_mass_residual_kg = vehicle.propellant_mass_kg - reservoir.mass_kg();
         let consumed_mass_residual_kg =
             exhaust.mechanics.burned_propellant_mass_kg - expelled_mass_kg;
-        let initial_mass_residual = self.vehicle.propellant_mass_kg - self.reservoir.mass_kg();
-        let mass_budget = controls.transport.exchange.mass_tolerance_kg;
         if !remaining_mass_residual_kg.is_finite()
             || !consumed_mass_residual_kg.is_finite()
             || remaining_mass_residual_kg.abs() > mass_budget
             || consumed_mass_residual_kg.abs() > mass_budget
-            || initial_mass_residual.abs() > mass_budget
             || (expelled_mass_kg > 0.0 && exhaust.mechanics.coast_duration_s != 0.0)
         {
             return Err(EffusionRocketError::InventoryBalance {
@@ -340,17 +501,13 @@ impl GasRocketState {
                 consumed_residual_kg: consumed_mass_residual_kg,
             });
         }
-        let delta_v = vehicle.velocity_m_s.sub(self.vehicle.velocity_m_s);
-        let mass_chart_change = initial_mass_residual - remaining_mass_residual_kg;
-        let inventory_momentum_correction_n_s = self
-            .vehicle
-            .velocity_m_s
-            .scale(mass_chart_change)
-            .sub(delta_v.scale(remaining_mass_residual_kg));
-        let inventory_kinetic_correction_j =
-            0.5 * mass_chart_change * self.vehicle.velocity_m_s.norm_squared()
-                - remaining_mass_residual_kg
-                    * (self.vehicle.velocity_m_s.dot(delta_v) + 0.5 * delta_v.norm_squared());
+        let inventory_momentum_correction_n_s =
+            vehicle.velocity_m_s.scale(-remaining_mass_residual_kg);
+        let inventory_kinetic_correction_j = if remaining_mass_residual_kg == 0.0 {
+            0.0
+        } else {
+            (-0.5 * remaining_mass_residual_kg) * vehicle.velocity_m_s.norm_squared()
+        };
         let mass_rate_correction = expelled_mass_kg - exhaust.mechanics.burned_propellant_mass_kg;
         let impulse_rate_correction = relative_momentum_kg_m_s.sub(exhaust.relative_momentum_n_s);
         let source_momentum_correction_n_s = exhaust
@@ -399,6 +556,48 @@ impl GasRocketState {
                 residual_j: energy_residual_j,
             });
         }
+        let gravity_mass_history_uncertainty_kg =
+            if expelled_mass_kg == 0.0 || environment.gravity_world_m_s2 == Vec3::ZERO {
+                0.0
+            } else {
+                consumed_mass_residual_kg.abs()
+                    + exhaust.mass_residual_kg.abs()
+                    + remaining_mass_residual_kg.abs()
+                    + gas.exchange.total_mass_residual_kg.abs()
+            };
+        let (gravity_impulse_uncertainty_n_s, gravity_work_uncertainty_j) =
+            gravity_rounding_bounds(
+                gravity_mass_history_uncertainty_kg,
+                environment.gravity_world_m_s2,
+                exhaust.mechanics.powered_duration_s,
+                exhaust.mean_speed_squared_m2_s2,
+            )?;
+        let momentum_bound = gravity_impulse_uncertainty_n_s.add(Vec3::new(
+            initial_inventory_momentum_correction_n_s.x.abs(),
+            initial_inventory_momentum_correction_n_s.y.abs(),
+            initial_inventory_momentum_correction_n_s.z.abs(),
+        ));
+        let energy_bound =
+            gravity_work_uncertainty_j + initial_inventory_kinetic_correction_j.abs();
+        if !momentum_bound.is_finite()
+            || !energy_bound.is_finite()
+            || [
+                (momentum_residual_kg_m_s.x, momentum_bound.x),
+                (momentum_residual_kg_m_s.y, momentum_bound.y),
+                (momentum_residual_kg_m_s.z, momentum_bound.z),
+            ]
+            .into_iter()
+            .any(|(residual, bound)| bound > controls.momentum_tolerance_n_s - residual.abs())
+            || energy_bound
+                > controls.transport.exchange.energy_tolerance_j - energy_residual_j.abs()
+        {
+            return Err(EffusionRocketError::RoundingBudget {
+                momentum_residual_n_s: momentum_residual_kg_m_s,
+                energy_residual_j,
+                momentum_bound_n_s: momentum_bound,
+                energy_bound_j: energy_bound,
+            });
+        }
         vehicle.propellant_mass_kg = reservoir.mass_kg();
         poll(&mut cancelled)?;
         let endpoint = Self {
@@ -417,12 +616,18 @@ impl GasRocketState {
                 relative_energy_j,
                 exhaust_momentum_world_kg_m_s,
                 exhaust_energy_world_j,
+                initial_mass_residual_kg,
+                initial_inventory_momentum_correction_n_s,
+                initial_inventory_kinetic_correction_j,
                 remaining_mass_residual_kg,
                 consumed_mass_residual_kg,
                 source_momentum_correction_n_s,
                 source_kinetic_correction_j,
                 inventory_momentum_correction_n_s,
                 inventory_kinetic_correction_j,
+                gravity_mass_history_uncertainty_kg,
+                gravity_impulse_uncertainty_n_s,
+                gravity_work_uncertainty_j,
                 momentum_residual_kg_m_s,
                 energy_residual_j,
             },

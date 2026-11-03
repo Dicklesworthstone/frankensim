@@ -119,7 +119,7 @@ fn vector_near(actual: Vec3, expected: Vec3, absolute: f64) {
 }
 
 fn mass(state: &GasRocketState) -> f64 {
-    state.vehicle().dry_mass_kg + state.vehicle().propellant_mass_kg
+    state.vehicle().dry_mass_kg + state.reservoir().mass_kg()
 }
 
 fn kinetic(state: &GasRocketState) -> f64 {
@@ -143,13 +143,16 @@ fn check_accounts(before: &GasRocketState, candidate: &EffusionRocketCandidate) 
         .scale(mass(after))
         .sub(before.vehicle().velocity_m_s.scale(mass(before)));
     vector_near(
-        body_momentum_change.add(step.exhaust_momentum_world_kg_m_s),
+        body_momentum_change
+            .add(step.exhaust_momentum_world_kg_m_s)
+            .sub(step.exhaust.external_impulse_n_s),
         Vec3::ZERO,
         2e-12,
     );
     near(
         internal(after) - internal(before) + kinetic(after) - kinetic(before)
-            + step.exhaust_energy_world_j,
+            + step.exhaust_energy_world_j
+            - step.exhaust.external_work_j,
         0.0,
         2e-8,
     );
@@ -518,4 +521,379 @@ fn closed_coast_source_refusal_and_late_cancellation_publish_neither_owner() {
         );
         assert_eq!(before, original);
     }
+}
+
+fn loaded_environment() -> EffusionRocketEnvironment {
+    EffusionRocketEnvironment {
+        inertial_frame: FRAME,
+        gravity_world_m_s2: Vec3::new(0.0, -9.81, 0.0),
+        external_force_world_n: Vec3::new(0.002, 0.003, -0.001),
+    }
+}
+
+#[test]
+fn explicit_zero_loads_retain_the_original_free_entry_exactly() {
+    let before = initial(MIXTURE, Vec3::new(2.0, -1.0, 0.5));
+    let law = interface(before.reservoir().model());
+    let outlets = [outlet(&law, Vec3::new(0.6, 0.8, 0.0))];
+    let original = before
+        .advance_effusion(FRAME, &outlets, DT, endpoint(), controls(), || false)
+        .unwrap();
+    let explicit = before
+        .advance_effusion_with_environment(
+            EffusionRocketEnvironment {
+                inertial_frame: FRAME,
+                gravity_world_m_s2: Vec3::ZERO,
+                external_force_world_n: Vec3::ZERO,
+            },
+            &outlets,
+            DT,
+            endpoint(),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(original, explicit);
+    assert_eq!(explicit.step().exhaust.external_impulse_n_s, Vec3::ZERO);
+    assert_eq!(explicit.step().exhaust.external_work_j, 0.0);
+    assert_eq!(explicit.step().gravity_mass_history_uncertainty_kg, 0.0);
+}
+
+#[test]
+fn loaded_escaping_gas_uses_changing_mass_and_the_same_external_work_under_a_boost() {
+    let before = initial(MIXTURE, Vec3::new(2.0, -1.0, 0.5));
+    let law = interface(before.reservoir().model());
+    let outlets = [outlet(&law, Vec3::new(0.6, 0.8, 0.0))];
+    let environment = loaded_environment();
+    let candidate = before
+        .advance_effusion_with_environment(
+            environment,
+            &outlets,
+            DT,
+            endpoint(),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let free = before
+        .advance_effusion(FRAME, &outlets, DT, endpoint(), controls(), || false)
+        .unwrap();
+    assert_eq!(
+        candidate.endpoint().reservoir(),
+        free.endpoint().reservoir()
+    );
+    let step = candidate.step();
+    let dm = step.expelled_mass_kg;
+    let m0 = mass(&before);
+    let fraction = dm / m0;
+    let logarithm = -(-fraction).ln_1p();
+    let position_factor = (fraction - (1.0 - fraction) * logarithm) / (fraction * fraction);
+    let thrustward_speed = step.relative_momentum_kg_m_s.scale(-1.0 / dm);
+    let expected_velocity = before
+        .vehicle()
+        .velocity_m_s
+        .add(thrustward_speed.scale(logarithm))
+        .add(
+            environment
+                .external_force_world_n
+                .scale(DT * logarithm / dm),
+        )
+        .add(environment.gravity_world_m_s2.scale(DT));
+    let expected_position = before
+        .vehicle()
+        .position_m
+        .add(before.vehicle().velocity_m_s.scale(DT))
+        .add(thrustward_speed.scale(DT * fraction * position_factor))
+        .add(
+            environment
+                .external_force_world_n
+                .scale(DT * DT * position_factor / m0),
+        )
+        .add(environment.gravity_world_m_s2.scale(0.5 * DT * DT));
+    vector_near(
+        candidate.endpoint().vehicle().velocity_m_s,
+        expected_velocity,
+        2e-12,
+    );
+    vector_near(
+        candidate.endpoint().vehicle().position_m,
+        expected_position,
+        2e-10,
+    );
+    // Gravity follows the linearly decreasing held-rate mass, unlike the fixed force.
+    vector_near(
+        step.exhaust.external_impulse_n_s,
+        environment
+            .gravity_world_m_s2
+            .scale((m0 - 0.5 * dm) * DT)
+            .add(environment.external_force_world_n.scale(DT)),
+        2e-14,
+    );
+    assert!(step.exhaust.external_work_j.abs() > 1e-5);
+    assert!(step.gravity_impulse_uncertainty_n_s.y >= 0.0);
+    assert!(
+        step.energy_residual_j.abs() + step.gravity_work_uncertainty_j
+            <= controls().transport.exchange.energy_tolerance_j
+    );
+    check_accounts(&before, &candidate);
+
+    let boost = Vec3::new(30.0, -40.0, 10.0);
+    let shifted = initial(MIXTURE, before.vehicle().velocity_m_s.add(boost));
+    let shifted_candidate = shifted
+        .advance_effusion_with_environment(
+            environment,
+            &outlets,
+            DT,
+            endpoint(),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let shifted_step = shifted_candidate.step();
+    vector_near(
+        shifted_candidate
+            .endpoint()
+            .vehicle()
+            .velocity_m_s
+            .sub(candidate.endpoint().vehicle().velocity_m_s),
+        boost,
+        1e-13,
+    );
+    vector_near(
+        shifted_step.exhaust.external_impulse_n_s,
+        step.exhaust.external_impulse_n_s,
+        2e-14,
+    );
+    near(
+        shifted_step.exhaust.external_work_j,
+        step.exhaust.external_work_j + boost.dot(step.exhaust.external_impulse_n_s),
+        2e-12,
+    );
+    vector_near(
+        shifted_step.exhaust_momentum_world_kg_m_s,
+        step.exhaust_momentum_world_kg_m_s.add(boost.scale(dm)),
+        2e-15,
+    );
+    near(
+        shifted_step.exhaust_energy_world_j,
+        step.exhaust_energy_world_j
+            + boost.dot(step.exhaust_momentum_world_kg_m_s)
+            + 0.5 * dm * boost.norm_squared(),
+        2e-12,
+    );
+    check_accounts(&shifted, &shifted_candidate);
+}
+
+#[test]
+fn closed_loaded_vessel_follows_constant_mass_ballistics_without_a_gas_query() {
+    let before = initial(PURE, Vec3::new(3.0, 2.0, -1.0));
+    let environment = loaded_environment();
+    let foreign = initial("A 1 0.028 3.5 0 1.7e-5 0.025", Vec3::ZERO);
+    let law = interface(foreign.reservoir().model());
+    let closed = EffusionOutlet {
+        area_m2: 0.0,
+        ..outlet(&law, Vec3::new(1.0, 0.0, 0.0))
+    };
+    for outlets in [&[][..], &[closed][..]] {
+        let candidate = before
+            .advance_effusion_with_environment(
+                environment,
+                outlets,
+                DT,
+                endpoint(),
+                controls(),
+                || false,
+            )
+            .unwrap();
+        let force = environment
+            .external_force_world_n
+            .add(environment.gravity_world_m_s2.scale(mass(&before)));
+        let acceleration = force.scale(1.0 / mass(&before));
+        let displacement = before
+            .vehicle()
+            .velocity_m_s
+            .scale(DT)
+            .add(acceleration.scale(0.5 * DT * DT));
+        vector_near(
+            candidate.endpoint().vehicle().velocity_m_s,
+            before.vehicle().velocity_m_s.add(acceleration.scale(DT)),
+            2e-14,
+        );
+        vector_near(
+            candidate.endpoint().vehicle().position_m,
+            before.vehicle().position_m.add(displacement),
+            2e-14,
+        );
+        vector_near(
+            candidate.step().exhaust.external_impulse_n_s,
+            force.scale(DT),
+            2e-14,
+        );
+        near(
+            candidate.step().exhaust.external_work_j,
+            force.dot(displacement),
+            2e-14,
+        );
+        assert_eq!(candidate.endpoint().reservoir(), before.reservoir());
+        assert_eq!(candidate.step().expelled_mass_kg, 0.0);
+        assert_eq!(candidate.step().exhaust_momentum_world_kg_m_s, Vec3::ZERO);
+        assert_eq!(candidate.step().exhaust_energy_world_j, 0.0);
+        assert_eq!(candidate.step().gravity_mass_history_uncertainty_kg, 0.0);
+        check_accounts(&before, &candidate);
+    }
+}
+
+#[test]
+fn initial_inventory_rounding_spends_physical_budget_before_canonicalization() {
+    let mut before = initial(PURE, Vec3::new(1e6, 0.0, 0.0));
+    // Manufacture the admitted small inventory mismatch a previous native owner
+    // may leave. It is small in kg but observable as momentum/work under a boost.
+    before.vehicle.propellant_mass_kg += 1e-15;
+    let saved = before.clone();
+    let quiet = EffusionRocketEnvironment {
+        inertial_frame: FRAME,
+        gravity_world_m_s2: Vec3::ZERO,
+        external_force_world_n: Vec3::ZERO,
+    };
+    assert!(matches!(
+        before.advance_effusion_with_environment(quiet, &[], DT, endpoint(), controls(), || false),
+        Err(EffusionRocketError::RoundingBudget { .. })
+    ));
+    let mut admitted = controls();
+    admitted.momentum_tolerance_n_s = 1e-8;
+    admitted.transport.exchange.energy_tolerance_j = 1e-2;
+    let candidate = before
+        .advance_effusion_with_environment(quiet, &[], DT, endpoint(), admitted, || false)
+        .unwrap();
+    assert!(candidate.step().initial_mass_residual_kg > 0.0);
+    assert!(candidate.step().initial_inventory_momentum_correction_n_s.x < 0.0);
+    assert!(candidate.step().initial_inventory_kinetic_correction_j < 0.0);
+    assert_eq!(
+        candidate.endpoint().vehicle().propellant_mass_kg,
+        candidate.endpoint().reservoir().mass_kg()
+    );
+    assert_eq!(before, saved);
+}
+
+#[test]
+fn loaded_refusals_and_late_cancellation_leave_both_original_owners_unchanged() {
+    let before = initial(MIXTURE, Vec3::new(2.0, -1.0, 0.5));
+    let saved = before.clone();
+    let law = interface(before.reservoir().model());
+    let outlets = [outlet(&law, Vec3::new(1.0, 0.0, 0.0))];
+    let environment = loaded_environment();
+    for invalid in [
+        EffusionRocketEnvironment {
+            inertial_frame: FRAME + 1,
+            ..environment
+        },
+        EffusionRocketEnvironment {
+            gravity_world_m_s2: Vec3::new(f64::NAN, 0.0, 0.0),
+            ..environment
+        },
+        EffusionRocketEnvironment {
+            external_force_world_n: Vec3::new(0.0, f64::INFINITY, 0.0),
+            ..environment
+        },
+        EffusionRocketEnvironment {
+            external_force_world_n: Vec3::new(1e308, 0.0, 0.0),
+            ..environment
+        },
+    ] {
+        assert!(
+            before
+                .advance_effusion_with_environment(
+                    invalid,
+                    &outlets,
+                    DT,
+                    endpoint(),
+                    controls(),
+                    || false
+                )
+                .is_err()
+        );
+        assert_eq!(before, saved);
+    }
+    let narrow = GasEnergySolve {
+        minimum_temperature_k: T0 - 1e-6,
+        ..endpoint()
+    };
+    assert!(
+        before
+            .advance_effusion_with_environment(
+                environment,
+                &outlets,
+                DT,
+                narrow,
+                controls(),
+                || false
+            )
+            .is_err()
+    );
+    let mut polls = 0;
+    before
+        .advance_effusion_with_environment(
+            environment,
+            &outlets,
+            DT,
+            endpoint(),
+            controls(),
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    for stop in [1, polls - 1, polls] {
+        let mut count = 0;
+        assert!(
+            before
+                .advance_effusion_with_environment(
+                    environment,
+                    &outlets,
+                    DT,
+                    endpoint(),
+                    controls(),
+                    || {
+                        count += 1;
+                        count == stop
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(before, saved);
+    }
+}
+
+#[test]
+fn gravity_reserve_keeps_representable_products_across_extreme_scales() {
+    // epsilon*dt underflows, but multiplication with finite gravity and RMS
+    // speed yields real, representable impulse and work reserves.
+    let (impulse, work) =
+        gravity_rounding_bounds(1e-250, Vec3::new(1e200, 0.0, 0.0), 1e-100, 1e200).unwrap();
+    near(impulse.x / 1e-150, 1.0, 2e-15);
+    assert_eq!(impulse.y, 0.0);
+    assert_eq!(impulse.z, 0.0);
+    near(work / 1e-50, 1.0, 2e-15);
+    // A mathematically positive reserve must refuse when its FINAL value
+    // cannot be represented; it must never silently become an exact zero.
+    assert!(gravity_rounding_bounds(1e-300, Vec3::new(1e-100, 0.0, 0.0), 1e-100, 1.0,).is_err());
+    assert!(gravity_rounding_bounds(1e-100, Vec3::new(1e-100, 0.0, 0.0), 1.0, 1e-300,).is_err());
+
+    let before = initial(PURE, Vec3::ZERO);
+    let saved = before.clone();
+    let law = interface(before.reservoir().model());
+    let candidate = before
+        .advance_effusion_with_environment(
+            loaded_environment(),
+            &[outlet(&law, Vec3::new(1.0, 0.0, 0.0))],
+            DT,
+            endpoint(),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert!(candidate.step().gravity_work_uncertainty_j.is_finite());
+    assert!(candidate.step().gravity_work_uncertainty_j >= 0.0);
+    assert_eq!(before, saved);
 }
