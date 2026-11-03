@@ -672,9 +672,8 @@ impl BoundaryGrid3 {
     ///
     /// Every dimension must be a positive multiple of [`TILE`]. The collision
     /// model and force must be finite and admissible. BGK and moment-space
-    /// models support body forces on periodic/walled domains; regularized
-    /// open velocity/pressure faces require a zero uniform force and a
-    /// per-cell field that vanishes where their reconstruction reads.
+    /// models support body forces on periodic/walled domains and regularized
+    /// open faces. Open reconstruction uses physical, force-corrected moments.
     ///
     /// # Panics
     /// Panics when dimensions, allocation geometry, collision parameters,
@@ -712,16 +711,6 @@ impl BoundaryGrid3 {
             "the selected D3Q19 collision model does not admit body forcing"
         );
         boundaries.validate();
-        let has_open_face = Face3::ALL
-            .into_iter()
-            .any(|face| boundaries.face(face).is_open());
-        assert!(
-            !has_open_face
-                || force
-                    .iter()
-                    .all(|value| matches!(value.classify(), core::num::FpCategory::Zero)),
-            "regularized velocity/pressure boundaries currently require zero body force"
-        );
         let ntx = nx / TILE;
         let nty = ny / TILE;
         let ntz = nz / TILE;
@@ -958,16 +947,13 @@ impl BoundaryGrid3 {
     /// on an evolved state, use [`Self::rebind_force_field`] to preserve
     /// physical momentum and stress instead.
     ///
-    /// An open velocity/pressure face reconstructs its cells from the first
-    /// interior cell with the force-free regularized closure, so the field
-    /// must be exactly zero on every open-face cell and its first-interior
-    /// neighbour. Forcing elsewhere (an imposed pressure gradient in the
-    /// interior of an open duct, for example) is admitted.
+    /// Open velocity/pressure faces retain the first-interior cell's physical
+    /// nonequilibrium stress and use the destination's own Guo source frame.
+    /// The field may vary across the open face and its interior neighbour.
     ///
     /// # Panics
-    /// A nonzero sample on or beside an open face, a collision model that
-    /// does not admit body forcing, or a sample or its sum with the uniform
-    /// force that is non-finite. Refusal leaves the prior field and
+    /// A collision model that does not admit body forcing, or a sample or
+    /// its sum with the uniform force that is non-finite. Refusal leaves the prior field and
     /// populations intact.
     pub fn set_force_field(&mut self, force: impl FnMut([usize; 3]) -> [f64; 3]) {
         self.force_field = Some(self.sample_force_field(force));
@@ -1041,8 +1027,7 @@ impl BoundaryGrid3 {
 
     /// Multiply the field last selected by [`Self::set_force_field`] or
     /// [`Self::rebind_force_field`] by `scale` for the following steps. The
-    /// held field becomes exactly `scale * selected` in every cell, so its
-    /// zeros (and the open-face admission) are kept.
+    /// held field becomes exactly `scale * selected` in every cell.
     ///
     /// Like [`Self::rebind_force_field`], scaling preserves accepted mass,
     /// physical momentum `sum_q(f_q c_q) + F/2`, and force-corrected stress.
@@ -1141,23 +1126,6 @@ impl BoundaryGrid3 {
             self.collision_model.supports_body_force(),
             "the selected collision model does not admit body forcing"
         );
-        let open: Vec<Face3> = Face3::ALL
-            .into_iter()
-            .filter(|&face| self.boundaries.face(face).is_open())
-            .collect();
-        let dims = [self.nx, self.ny, self.nz];
-        // An open-face cell and its first-interior neighbour: the cells the
-        // force-free regularized reconstruction reads.
-        let read_by_open_face = |cell: [usize; 3]| {
-            open.iter().any(|face| {
-                let axis = face.axis();
-                if face.is_min() {
-                    cell[axis] <= 1
-                } else {
-                    cell[axis] + 2 >= dims[axis]
-                }
-            })
-        };
         let mut field = vec![[0.0; 3]; self.f[0].len() * TILE_CELLS];
         for z in 0..self.nz {
             for y in 0..self.ny {
@@ -1173,10 +1141,6 @@ impl BoundaryGrid3 {
                             .all(|(local, uniform)| local.is_finite()
                                 && (local + uniform).is_finite()),
                         "per-cell force and total force must be finite"
-                    );
-                    assert!(
-                        value == [0.0; 3] || !read_by_open_face([x, y, z]),
-                        "per-cell force must vanish on open-face cells and their first-interior neighbours"
                     );
                     let (tile, lane) = self.addr(x, y, z);
                     field[tile * TILE_CELLS + lane] = value;
@@ -1401,8 +1365,15 @@ impl BoundaryGrid3 {
         moment_origin: [f64; 3],
     ) -> Result<[FiniteMassWallReceipt3; 2], BoundaryStepError3> {
         let faces = self.validate_finite_mass_walls(walls, moment_origin)?;
-        self.step_pooled_coupling_inner(pool, gate, None, None, Some((faces, walls, moment_origin)))
-            .map(|(_, receipts)| receipts.expect("finite wall step returns its receipts"))
+        self.step_pooled_coupling_inner(
+            pool,
+            gate,
+            None,
+            None,
+            Some((faces, walls, moment_origin)),
+            None,
+        )
+        .map(|(_, receipts)| receipts.expect("finite wall step returns its receipts"))
     }
 
     fn step_pooled_inner<P: KernelRunner>(
@@ -1412,7 +1383,7 @@ impl BoundaryGrid3 {
         measurement: Option<(&[BoundaryLink3], [f64; 3])>,
         models: Option<&[CollisionModel3]>,
     ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
-        self.step_pooled_coupling_inner(pool, gate, measurement, models, None)
+        self.step_pooled_coupling_inner(pool, gate, measurement, models, None, None)
             .map(|(exchange, _)| exchange)
     }
 
@@ -1423,6 +1394,7 @@ impl BoundaryGrid3 {
         measurement: Option<(&[BoundaryLink3], [f64; 3])>,
         models: Option<&[CollisionModel3]>,
         finite_walls: Option<([Face3; 2], [FiniteMassWall3; 2], [f64; 3])>,
+        endpoint_force_scale: Option<f64>,
     ) -> Result<(WallMomentumExchange3, Option<[FiniteMassWallReceipt3; 2]>), BoundaryStepError3>
     {
         if finite_walls.is_none() {
@@ -1481,10 +1453,11 @@ impl BoundaryGrid3 {
             self.next = Some(next);
             return Err(error);
         }
-        self.publish_next(
+        self.publish_next_with_force_scale(
             next,
             gate,
             measurement.is_some() || models.is_some() || proposal.is_some(),
+            endpoint_force_scale,
         )?;
         let receipts = proposal.map(|proposal| {
             self.boundaries = proposal.final_boundaries;
@@ -1498,25 +1471,49 @@ impl BoundaryGrid3 {
     /// All boundary reconstruction preconditions are checked before the swap.
     fn publish_next(
         &mut self,
-        mut next: [Vec<Tile>; Q3],
+        next: [Vec<Tile>; Q3],
         gate: &CancelGate,
         check_cancellation: bool,
     ) -> Result<(), BoundaryStepError3> {
-        // The open-face reconstruction asserts a positive density at its
-        // source cells; check them on the unpublished state so a lattice
-        // that left its physical regime refuses instead of panicking.
+        self.publish_next_with_force_scale(next, gate, check_cancellation, None)
+    }
+
+    fn publish_next_with_force_scale(
+        &mut self,
+        mut next: [Vec<Tile>; Q3],
+        gate: &CancelGate,
+        check_cancellation: bool,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<(), BoundaryStepError3> {
         if self.open_cells.is_none() {
             self.open_cells = Some(self.compile_open_cells());
         }
-        if let Some(cells) = &self.open_cells {
-            for &(_, interior, _) in cells {
-                let (tile, lane) = self.addr(interior[0], interior[1], interior[2]);
-                let rho = (0..Q3).map(|q| next[q][tile].0[lane]).sum::<f64>();
-                if !(rho.is_finite() && rho > 0.0) {
-                    self.next = Some(next);
-                    return Err(BoundaryStepError3::Unphysical { cell: interior });
+        let cells = self.open_cells.take().unwrap_or_default();
+        // Reconstruct in unpublished storage, including the actual endpoint
+        // force frame. An invalid late face leaves populations AND force held.
+        let outcome = (|| {
+            for (index, &(cell, interior, face)) in cells.iter().enumerate() {
+                if check_cancellation && index.is_multiple_of(TILE_CELLS) && gate.is_requested() {
+                    return Err(BoundaryStepError3::Cancelled);
+                }
+                let values = self.open_boundary_populations(
+                    &next,
+                    cell,
+                    interior,
+                    face,
+                    endpoint_force_scale,
+                )?;
+                let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
+                for (field, value) in next.iter_mut().zip(values) {
+                    field[tile].0[lane] = value;
                 }
             }
+            Ok(())
+        })();
+        self.open_cells = Some(cells);
+        if let Err(error) = outcome {
+            self.next = Some(next);
+            return Err(error);
         }
         if check_cancellation && gate.is_requested() {
             self.next = Some(next);
@@ -1524,7 +1521,9 @@ impl BoundaryGrid3 {
         }
         core::mem::swap(&mut self.f, &mut next);
         self.next = Some(next);
-        self.apply_open_boundaries();
+        if let Some(scale) = endpoint_force_scale {
+            self.publish_endpoint_force_scale(scale);
+        }
         Ok(())
     }
 
@@ -2012,48 +2011,99 @@ impl BoundaryGrid3 {
             self.open_cells = Some(self.compile_open_cells());
         }
         let cells = self.open_cells.take().unwrap_or_default();
-        for &([x, y, z], interior, face) in &cells {
-            let (neighbor_rho, neighbor_velocity, stress) =
-                self.regularized_source(interior[0], interior[1], interior[2]);
-            let (rho, velocity) = match self.boundaries.face(face) {
-                FaceBoundary3::Velocity { velocity } => (
-                    neighbor_rho,
-                    self.profile_velocity(face, [x, y, z]).unwrap_or(velocity),
-                ),
-                FaceBoundary3::Pressure { density } => (density, neighbor_velocity),
-                FaceBoundary3::Periodic | FaceBoundary3::Wall { .. } => unreachable!(),
-            };
-            let reconstructed = regularized_populations(rho, velocity, stress);
-            let (tile, lane) = self.addr(x, y, z);
-            let wall_mask = self.link_masks[tile].0[lane];
-            let open_mask = self.open_link_masks[tile].0[lane];
-            if wall_mask == 0 {
-                for (field, value) in self.f.iter_mut().zip(reconstructed) {
-                    field[tile].0[lane] = value;
-                }
-            } else {
-                // Mixed wall/open cells retain their bounced wall
-                // populations and streamed tangential populations.
-                // Only directions whose source crosses the open
-                // face alone receive the regularized closure.
-                for (q, value) in reconstructed.into_iter().enumerate().skip(1) {
-                    if open_mask & (1u32 << q) != 0 {
-                        self.f[q][tile].0[lane] = value;
-                    }
-                }
+        for &(cell, interior, face) in &cells {
+            let values = self
+                .open_boundary_populations(&self.f, cell, interior, face, None)
+                .expect("open-boundary reconstruction must remain physical and finite");
+            let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
+            for (field, value) in self.f.iter_mut().zip(values) {
+                field[tile].0[lane] = value;
             }
         }
         self.open_cells = Some(cells);
     }
 
-    fn regularized_source(&self, x: usize, y: usize, z: usize) -> (f64, [f64; 3], [[f64; 3]; 3]) {
-        let (rho, momentum) = self.raw_moments(x, y, z);
-        let velocity = core::array::from_fn(|axis| (momentum[axis] + 0.5 * self.force[axis]) / rho);
-        let equilibrium = equilibrium3(rho, velocity);
+    fn open_force(&self, tile: usize, lane: usize, endpoint_scale: Option<f64>) -> [f64; 3] {
+        if let Some(scale) = endpoint_scale {
+            let shape = self
+                .force_field_shape
+                .as_deref()
+                .or(self.force_field.as_deref())
+                .expect("admitted endpoint force shape");
+            core::array::from_fn(|a| self.force[a] + scale * shape[tile * TILE_CELLS + lane][a])
+        } else {
+            cell_force(self.force, self.force_field.as_deref(), tile, lane)
+        }
+    }
+
+    fn open_boundary_populations(
+        &self,
+        fields: &[Vec<Tile>; Q3],
+        cell: [usize; 3],
+        interior: [usize; 3],
+        face: Face3,
+        endpoint_scale: Option<f64>,
+    ) -> Result<[f64; Q3], BoundaryStepError3> {
+        let (neighbor_rho, neighbor_velocity, stress) =
+            self.regularized_source(fields, interior, endpoint_scale)?;
+        let (rho, velocity) = match self.boundaries.face(face) {
+            FaceBoundary3::Velocity { velocity } => (
+                neighbor_rho,
+                self.profile_velocity(face, cell).unwrap_or(velocity),
+            ),
+            FaceBoundary3::Pressure { density } => (density, neighbor_velocity),
+            FaceBoundary3::Periodic | FaceBoundary3::Wall { .. } => unreachable!(),
+        };
+        let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
+        let force = self.open_force(tile, lane, endpoint_scale);
+        let mut reconstructed = regularized_populations(rho, velocity, stress);
+        if force != [0.0; 3] {
+            // Guo's stored populations are f_phys - S(u,F)/2. Project
+            // physical stress first, then enter this cell's own frame;
+            // copying the neighbour's raw stress invents a force jump.
+            crate::thermal::forcing::reframe3(&mut reconstructed, velocity, [0.0; 3], force);
+        }
+        if self.link_masks[tile].0[lane] != 0 {
+            let open_mask = self.open_link_masks[tile].0[lane];
+            for q in 0..Q3 {
+                if open_mask & (1u32 << q) == 0 {
+                    // Retain bounced wall and streamed tangential populations.
+                    reconstructed[q] = fields[q][tile].0[lane];
+                }
+            }
+        }
+        let density = reconstructed.iter().sum::<f64>();
+        if !reconstructed.iter().all(|f| f.is_finite()) || !density.is_finite() || density <= 0.0 {
+            return Err(BoundaryStepError3::Unphysical { cell });
+        }
+        Ok(reconstructed)
+    }
+
+    fn regularized_source(
+        &self,
+        fields: &[Vec<Tile>; Q3],
+        [x, y, z]: [usize; 3],
+        endpoint_scale: Option<f64>,
+    ) -> Result<(f64, [f64; 3], [[f64; 3]; 3]), BoundaryStepError3> {
         let (tile, lane) = self.addr(x, y, z);
+        let mut rho = 0.0;
+        let mut momentum = [0.0; 3];
+        for (q, velocity) in E3.iter().enumerate() {
+            let fq = fields[q][tile].0[lane];
+            rho += fq;
+            momentum[0] += f64::from(velocity.0) * fq;
+            momentum[1] += f64::from(velocity.1) * fq;
+            momentum[2] += f64::from(velocity.2) * fq;
+        }
+        let force = self.open_force(tile, lane, endpoint_scale);
+        let velocity = core::array::from_fn(|axis| (momentum[axis] + 0.5 * force[axis]) / rho);
+        if !rho.is_finite() || rho <= 0.0 || !velocity.iter().all(|v| v.is_finite()) {
+            return Err(BoundaryStepError3::Unphysical { cell: [x, y, z] });
+        }
+        let equilibrium = equilibrium3(rho, velocity);
         let mut stress = [[0.0; 3]; 3];
         for q in 0..Q3 {
-            let nonequilibrium = self.f[q][tile].0[lane] - equilibrium[q];
+            let nonequilibrium = fields[q][tile].0[lane] - equilibrium[q];
             let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
             for row in 0..3 {
                 for column in 0..3 {
@@ -2061,7 +2111,15 @@ impl BoundaryGrid3 {
                 }
             }
         }
-        (rho, velocity, stress)
+        if force != [0.0; 3] {
+            for row in 0..3 {
+                for column in 0..3 {
+                    stress[row][column] +=
+                        0.5 * (velocity[row] * force[column] + force[row] * velocity[column]);
+                }
+            }
+        }
+        Ok((rho, velocity, stress))
     }
 
     fn compile_link_masks(

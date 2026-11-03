@@ -134,7 +134,7 @@ fn physical_initializer_and_switched_load_apply_only_elapsed_impulse() {
 }
 
 #[test]
-fn late_bad_cell_cancel_and_open_boundary_refuse_without_partial_publication() {
+fn late_bad_cell_and_cancel_refuse_while_open_force_rebinding_preserves_momentum() {
     let gate = CancelGate::new();
     let mut grid = BoundaryGrid3::new(4, 4, 4, 0.9, [0.0; 3], BoundarySpec3::periodic());
     grid.initialize_uniform_equilibrium(1.0, [0.02, -0.01, 0.03], &gate)
@@ -165,10 +165,17 @@ fn late_bad_cell_cancel_and_open_boundary_refuse_without_partial_publication() {
         [0.0; 3],
         BoundarySpec3::pressure_duct_z(1.0, 1.0),
     );
-    let before = populations(&open);
-    assert!(matches!(
-        open.rebind_uniform_force([0.0, 0.0, 0.001], &CancelGate::new()),
-        Err(BoundaryForcingError3::Invalid(_))
-    ));
-    assert_eq!(populations(&open), before);
+    let before: Vec<_> = (0..4).map(|z| moments(&open, [1, 1, z])).collect();
+    open.rebind_uniform_force([0.0, 0.0, 0.001], &CancelGate::new())
+        .unwrap();
+    for (z, expected) in before.iter().enumerate() {
+        let actual = moments(&open, [1, 1, z]);
+        near(actual.0, expected.0, 2e-15);
+        for a in 0..3 {
+            near(actual.1[a], expected.1[a], 2e-15);
+            for b in 0..3 {
+                near(actual.2[a][b], expected.2[a][b], 2e-15);
+            }
+        }
+    }
 }

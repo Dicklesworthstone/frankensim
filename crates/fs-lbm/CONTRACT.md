@@ -1504,7 +1504,7 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   faces. This surface does not move voxel topology or integrate rigid bodies.
 - On face-interior cells, regularized velocity/pressure reconstruction
   preserves the declared zeroth and first moments and copies the independently
-  measured non-equilibrium second moment from the first interior cell. Mixed
+  measured force-corrected non-equilibrium second moment from the first interior cell. Mixed
   wall/open rim cells preserve their per-link wall ownership instead of
   claiming exact target moments.
 
@@ -1569,11 +1569,10 @@ endpoints before selecting one, so an incomplete card refuses even when the
 current direction would consume the endpoint that is present. The adapter
 mutates neither the card nor free-surface state.
 D3Q19 boundary construction additionally rejects non-4-multiple dimensions,
-tile-count overflow, invalid collision parameters, moment-space collision with
-nonzero force, unpaired periodic faces, non-tangential/non-finite or
+tile-count overflow, invalid collision parameters, a nonzero force with an
+unsupported collision model, unpaired periodic faces, non-tangential/non-finite or
 outside-low-Mach wall velocities, non-finite or outside-low-Mach inlet
-velocities, non-positive pressure density, open faces on more than one axis,
-and body force combined with the current regularized open-face closure.
+velocities, non-positive pressure density, and open faces on more than one axis.
 Voxelization rejects non-finite samples, an all-solid domain, an obstructed
 first-interior open-face layer, and topology mutation after initialization.
 Boundary-grid perturbation rejects non-finite amplitudes or magnitudes at least
@@ -1589,8 +1588,8 @@ publication, and returns no loads or new fluid populations on refusal.
 non-positive cell states. Both moment-space rungs additionally refuse rates
 outside `(0, 2)`. Their fixed lattice inverse requires no numerical pivot or
 rank-admission threshold; non-finite outputs still refuse. Body
-forcing is supported by all three collision families; the regularized open
-velocity/pressure boundary closure retains its separate force-free admission.
+forcing is supported by all three collision families; regularized open
+velocity/pressure faces reconstruct physical moments in each cell's Guo frame.
 
 ## Determinism class
 
@@ -2971,8 +2970,8 @@ Their presence does not claim native execution or empirical gas validation.
   independent second-moment oracle and preserves arbitrary tangential target
   components under one implementation. This is not evidence that a correct
   Zou-He/Hecht-Harting implementation is unstable. The current closure is a
-  low-Mach fixture, not a high-Re characteristic/non-reflecting boundary; it
-  accepts only constant per-face targets and refuses simultaneous Guo force.
+  low-Mach fixture, not a high-Re characteristic/non-reflecting boundary.
+  Prescribed velocity traces and simultaneous Guo force use that same closure.
 - Open/wall intersections use an explicit per-link mixed policy: wall-crossing
   links bounce stationary, pure open-normal links are regularized, and links
   crossing both faces are wall-owned. This is not a geometric corner
@@ -3508,10 +3507,15 @@ the next collision supplies one step of the new force. Zero per-cell force
 disables that contribution while retaining any declared uniform force.
 `force_density` exposes their total for physical-moment sampling.
 
-Both field APIs support BGK, central moments, and reduced cumulants. Beside
-open velocity/pressure faces they admit only a field that is exactly zero on
-every open-face cell and its first-interior neighbour, the cells the force-free
-regularized reconstruction reads; such a grid keeps a zero uniform force.
+Both field APIs support BGK, central moments, and reduced cumulants. Open
+velocity/pressure faces admit uniform and spatial forcing, including different
+forces at a face and its first-interior neighbour. Reconstruction uses physical
+velocity `u=(sum_q f_q c_q + F/2)/rho` and physical nonequilibrium stress
+`Pi_neq + (u F + F u)/2` at the interior cell. It projects that stress with the
+prescribed face velocity or density, then uses the original `reframe3` to enter
+the destination's own Guo source frame. Zero force retains the old arithmetic.
+Mixed wall/open cells still replace only open-owned links; exact target moments
+are claimed only on face interiors. There is no new boundary lattice allocation.
 `set_force_field_scale(s)` holds exactly `s * selected` in every cell for a
 fixed spatial shape with a caller-owned time history (an imposed acoustic
 pressure gradient). Like rebinding, it preserves accepted mass, physical
@@ -3524,6 +3528,10 @@ uses `F_start`, then populations and `F_end` publish together through the privat
 endpoint publisher without a held-source reframe. Scaling itself does not
 advance or stage time. The shape is retained once;
 subsequent scales reuse collision scratch without population/force allocation.
+Open traces are reconstructed in unpublished storage in the final endpoint
+force frame, preserving the prescribed physical velocity when the force changes.
+A nonfinite or nonpositive reconstructed face refuses before either populations
+or the endpoint force is published.
 All fluid samples and total forces must be
 finite. Rebinding preflights every changed cell's physical velocity and new
 population frame in the existing collision scratch before publishing either
@@ -7699,16 +7707,21 @@ and its pooled counterpart, which own the old/new force timing explicitly.
 Both operations use existing collision scratch, allocate no new population or
 force field, poll cancellation at each native tile and publish only after the
 last check. A late unphysical cell preserves all accepted populations/forcing.
-An unchanged uniform force preserves population bits. Nonzero uniform forcing
-on regularized open boundaries refuses; use the existing interior spatial-force
-law where that boundary reconstruction requires force-free cells.
+An unchanged uniform force preserves population bits. Regularized open boundaries
+admit the same uniform and spatial forcing, with force-corrected velocity/stress
+reconstruction at both the source and destination cells.
 The initializer's caller supplies scenario Mach/physical-regime admission.
 These entries add no pressure-reservoir, variable-density or continuum-order claim.
 
-Three focused actual-native-source test groups pass: physical density/velocity
+Focused native-source regression groups cover physical density/velocity
 initialization under a held force, stress-preserving uniform switches with an
 existing spatial field, elapsed impulse, identical-force bits, and atomic late
-invalid-density/cancellation/open-boundary refusal. The original moment observer
+invalid-density/cancellation refusal. The forced-open cases in
+`tests/boundary_forcing.rs` additionally check every face orientation, independent
+physical momentum and stress, mixed wall-link ownership, serial/pooled
+endpoint-force parity, and atomic late reconstruction overflow with exact retry.
+These added cases were not executed in the constrained
+editing environment. The original moment observer
 is reached only after typed density admission. The full Cargo workspace remains
 unavailable with missing constellation runtime siblings.
 

@@ -94,8 +94,7 @@ impl BoundaryGrid3 {
                 }
             }
         }
-        self.publish_next(next, gate, true)?;
-        self.publish_endpoint_force_scale(next_scale);
+        self.publish_next_with_force_scale(next, gate, true, Some(next_scale))?;
         self.topology_locked = true;
         Ok(())
     }
@@ -113,9 +112,15 @@ impl BoundaryGrid3 {
         self.validate_endpoint_force_scale(next_scale, gate)?;
         // An empty selection uses the existing final cancellation checkpoint
         // without scanning wall links or introducing another stepping kernel.
-        self.step_pooled_with_wall_momentum(pool, gate, &[], [0.0; 3])?;
-        self.publish_endpoint_force_scale(next_scale);
-        Ok(())
+        self.step_pooled_coupling_inner(
+            pool,
+            gate,
+            Some((&[], [0.0; 3])),
+            None,
+            None,
+            Some(next_scale),
+        )
+        .map(|_| ())
     }
 
     fn validate_endpoint_force_scale(
@@ -149,7 +154,7 @@ impl BoundaryGrid3 {
 
     // The complete shape was admitted before stepping. Do not poll or refuse
     // between population publication and its matching endpoint force frame.
-    fn publish_endpoint_force_scale(&mut self, scale: f64) {
+    pub(super) fn publish_endpoint_force_scale(&mut self, scale: f64) {
         let field = self.force_field.as_mut().expect("admitted force field");
         let shape = self.force_field_shape.get_or_insert_with(|| field.clone());
         for (held, local) in field.iter_mut().zip(shape.iter()) {
@@ -188,14 +193,9 @@ impl BoundaryGrid3 {
                 "uniform force must be finite",
             ));
         }
-        if force != [0.0; 3]
-            && (!self.collision_model.supports_body_force()
-                || Face3::ALL
-                    .into_iter()
-                    .any(|face| self.boundaries.face(face).is_open()))
-        {
+        if force != [0.0; 3] && !self.collision_model.supports_body_force() {
             return Err(BoundaryForcingError3::Invalid(
-                "nonzero uniform force requires a forcing-compatible closed or periodic domain",
+                "nonzero uniform force requires a forcing-compatible collision model",
             ));
         }
         if self.force == force {

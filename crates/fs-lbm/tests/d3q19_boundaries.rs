@@ -926,9 +926,8 @@ fn moving_wall_rejects_normal_velocity() {
 }
 
 #[test]
-#[should_panic(expected = "currently require zero body force")]
-fn open_boundaries_reject_body_force_until_guo_moments_are_reconstructed() {
-    let _ = BoundaryGrid3::new(
+fn open_pressure_boundaries_admit_body_force_with_guo_moments() {
+    let mut grid = BoundaryGrid3::new(
         8,
         8,
         8,
@@ -936,6 +935,13 @@ fn open_boundaries_reject_body_force_until_guo_moments_are_reconstructed() {
         [0.0, 0.0, 1e-6],
         BoundarySpec3::pressure_duct_z(1.001, 0.999),
     );
+    grid.step();
+    assert!((grid.density(3, 3, 0) - 1.001).abs() < 2e-15);
+    assert!((grid.density(3, 3, 7) - 0.999).abs() < 2e-15);
+    for axis in 0..3 {
+        assert!((grid.velocity(3, 3, 0)[axis] - grid.velocity(3, 3, 1)[axis]).abs() < 2e-15);
+        assert!((grid.velocity(3, 3, 7)[axis] - grid.velocity(3, 3, 6)[axis]).abs() < 2e-15);
+    }
 }
 
 #[test]

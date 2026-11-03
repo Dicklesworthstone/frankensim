@@ -301,9 +301,7 @@ fn refused_source_or_late_frame_transform_preserves_force_and_populations_atomic
 }
 
 #[test]
-fn initial_force_frame_semantics_and_open_face_refusal_remain_explicit() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
+fn initial_force_frame_semantics_and_open_face_rebinding_remain_explicit() {
     let mut grid = BoundaryGrid3::new(4, 4, 4, 0.8, [2e-4, 0.0, 0.0], BoundarySpec3::periodic());
     let populations = grid.populations(1, 1, 1).map(f64::to_bits);
     grid.set_force_field(|_| [0.0, 4e-4, 0.0]);
@@ -319,18 +317,25 @@ fn initial_force_frame_semantics_and_open_face_refusal_remain_explicit() {
         [0.0; 3],
         BoundarySpec3::pressure_duct_z(1.0, 1.0),
     );
-    // Every cell of this 4-deep z duct is an open-face cell or its first
-    // interior neighbour: only the force-free field is admitted.
-    let before = snapshot(&open);
-    assert!(
-        catch_unwind(AssertUnwindSafe(
-            || open.rebind_force_field(|_| [0.0, 1e-4, 0.0])
-        ))
-        .is_err()
-    );
-    assert_eq!(snapshot(&open), before);
-    open.rebind_force_field(|_| [0.0; 3]);
-    assert_eq!(snapshot(&open), before);
+    // Every cell is on or beside an open face. Rebinding still supplies no
+    // impulse and preserves the physical stress even at mixed wall seams.
+    let before: Vec<_> = cells(&open)
+        .into_iter()
+        .map(|p| moments(&open, p))
+        .collect();
+    for force in [[0.0, 1e-4, 0.0], [0.0; 3]] {
+        open.rebind_force_field(|_| force);
+        for (p, expected) in cells(&open).into_iter().zip(&before) {
+            let actual = moments(&open, p);
+            close(actual.0, expected.0, 3e-15);
+            for a in 0..3 {
+                close(actual.1[a], expected.1[a], 3e-15);
+                for b in 0..3 {
+                    close(actual.2[a][b], expected.2[a][b], 3e-15);
+                }
+            }
+        }
+    }
 }
 
 fn raw_first_moment(grid: &BoundaryGrid3, keep: impl Fn([usize; 3]) -> bool) -> [f64; 3] {
@@ -351,8 +356,6 @@ fn raw_first_moment(grid: &BoundaryGrid3, keep: impl Fn([usize; 3]) -> bool) -> 
 
 #[test]
 fn open_faces_admit_a_field_that_vanishes_where_they_reconstruct() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
     let periodic = FaceBoundary3::Periodic;
     let duct = BoundarySpec3::new([
         FaceBoundary3::Velocity {
@@ -374,27 +377,218 @@ fn open_faces_admit_a_field_that_vanishes_where_they_reconstruct() {
             [0.0; 3]
         }
     });
-    for reach in [0, 1, 10, 11] {
-        let before = snapshot(&grid);
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| grid.set_force_field(|[x, _, _]| {
-                if x == reach {
-                    [0.0, pull, 0.0]
-                } else {
-                    [0.0; 3]
-                }
-            })))
-            .is_err(),
-            "a force read by the open face at x={reach} must be refused"
-        );
-        assert_eq!(snapshot(&grid), before);
-    }
     // From rest, cells 1..=10 exchange only rest populations with the faces
     // in the first step, so they gain exactly one held force per forced cell.
     grid.step();
     let gained = raw_first_moment(&grid, |[x, _, _]| (1..=10).contains(&x));
     close(gained[1], 8.0 * 16.0 * pull, 1e-13);
     close(gained[0], 0.0, 1e-13);
+}
+
+fn assert_open_physical_moments(grid: &BoundaryGrid3, axis: usize) {
+    let last = grid.dimensions()[axis] - 1;
+    for cell in cells(grid) {
+        if cell[axis] != 0 && cell[axis] != last {
+            continue;
+        }
+        let upper = cell[axis] == last;
+        let mut interior = cell;
+        interior[axis] = if upper { last - 1 } else { 1 };
+        let (rho, momentum, stress) = moments(grid, cell);
+        let (inside_rho, inside_momentum, inside_stress) = moments(grid, interior);
+        let face = Face3::ALL[2 * axis + usize::from(upper)];
+        let expected = match grid.boundaries().face(face) {
+            FaceBoundary3::Velocity { velocity } => {
+                close(rho, inside_rho, 2e-14);
+                velocity
+            }
+            FaceBoundary3::Pressure { density } => {
+                close(rho, density, 2e-14);
+                inside_momentum.map(|p| p / inside_rho)
+            }
+            _ => unreachable!(),
+        };
+        for a in 0..3 {
+            close(momentum[a] / rho, expected[a], 2e-14);
+            for b in 0..3 {
+                close(stress[a][b], inside_stress[a][b], 2e-14);
+            }
+        }
+    }
+}
+
+/// G0/G3: all six orientations, all velocity components and all nine stress
+/// moments use the actual uniform-plus-spatial source at BOTH cells.
+#[test]
+fn forced_open_faces_prescribe_physical_velocity_density_and_neighbour_stress() {
+    use fs_exec::CancelGate;
+    let gate = CancelGate::new_clock_free();
+    for axis in 0..3 {
+        for upper in [false, true] {
+            let mut faces = [FaceBoundary3::Periodic; 6];
+            faces[2 * axis + usize::from(upper)] = FaceBoundary3::Velocity {
+                velocity: [0.023, -0.017, 0.009],
+            };
+            faces[2 * axis + usize::from(!upper)] = FaceBoundary3::Pressure { density: 1.07 };
+            let mut grid =
+                BoundaryGrid3::new(8, 8, 8, 0.8, [2e-4, -3e-4, 1e-4], BoundarySpec3::new(faces));
+            grid.set_force_field(|[x, y, z]| {
+                [
+                    3e-5 * (x + 1) as f64,
+                    -2e-5 * (y + 1) as f64,
+                    4e-5 * (z + 1) as f64,
+                ]
+            });
+            grid.initialize_uniform_equilibrium(1.1, [0.012, -0.007, 0.006], &gate)
+                .unwrap();
+            for [x, y, z] in cells(&grid) {
+                let mut f = grid.populations(x, y, z);
+                // Independent normal and off-diagonal nonequilibrium moments.
+                f[1] += 0.001;
+                f[2] += 0.001;
+                f[0] -= 0.002;
+                f[7] += 0.0003;
+                f[8] += 0.0003;
+                f[9] -= 0.0003;
+                f[10] -= 0.0003;
+                grid.set_populations(x, y, z, &f);
+            }
+            grid.step();
+            assert_open_physical_moments(&grid, axis);
+        }
+    }
+}
+
+/// G0: forcing changes neither the owner of a wall-crossing link nor a
+/// tangentially streamed population at an open/wall intersection.
+#[test]
+fn forced_open_wall_seams_reconstruct_only_open_owned_links() {
+    use fs_exec::CancelGate;
+    use fs_lbm::d3q19::{OPP3, collide_cell3};
+    let model = CollisionModel3::Bgk { tau: 0.8 };
+    let mut grid = BoundaryGrid3::new(
+        8,
+        8,
+        8,
+        0.8,
+        [2e-4, -3e-4, 1e-4],
+        BoundarySpec3::velocity_pressure_duct_z([0.0, 0.0, 0.03], 1.0),
+    );
+    grid.set_force_field(|[x, y, z]| [1e-5 * x as f64, -2e-5 * y as f64, 3e-5 * z as f64]);
+    grid.initialize_uniform_equilibrium(1.1, [0.01, -0.02, 0.015], &CancelGate::new_clock_free())
+        .unwrap();
+    let cell = [0, 0, 0];
+    let wall = grid.link_mask(0, 0, 0);
+    let open = grid.open_link_mask(0, 0, 0);
+    assert_ne!(wall, 0);
+    assert_ne!(open, 0);
+    assert_eq!(wall & open, 0);
+    let collision = |[x, y, z]| {
+        collide_cell3(
+            grid.populations(x, y, z),
+            model,
+            grid.force_density(x, y, z),
+        )
+        .unwrap()
+    };
+    let local_post = collision(cell);
+    let expected: [f64; Q3] = core::array::from_fn(|q| {
+        if wall & (1 << q) != 0 {
+            local_post[OPP3[q]]
+        } else if open & (1 << q) != 0 {
+            0.0 // Checked separately by the physical face-interior oracle.
+        } else {
+            let e = [E3[q].0, E3[q].1, E3[q].2];
+            let source = core::array::from_fn(|a| (cell[a] as isize - e[a] as isize) as usize);
+            collision(source)[q]
+        }
+    });
+    grid.step();
+    let actual = grid.populations(0, 0, 0);
+    for q in 0..Q3 {
+        if open & (1 << q) == 0 {
+            assert_eq!(actual[q].to_bits(), expected[q].to_bits(), "link {q}");
+        }
+    }
+}
+
+/// G0/G5: held and endpoint forces share physical open traces across serial
+/// and pooled stepping. The endpoint check detects an F_old/2 frame leak.
+#[test]
+fn forced_open_endpoint_history_preserves_targets_and_pooled_bits() {
+    use fs_exec::{CancelGate, TilePool};
+    let gate = CancelGate::new_clock_free();
+    let pool = TilePool::for_host(2, 0x0F02CE);
+    let make = || {
+        let mut faces = [FaceBoundary3::Periodic; 6];
+        faces[0] = FaceBoundary3::Velocity {
+            velocity: [0.02, -0.01, 0.007],
+        };
+        faces[1] = FaceBoundary3::Pressure { density: 1.0 };
+        let mut grid =
+            BoundaryGrid3::new(8, 8, 8, 0.8, [2e-4, -1e-4, 3e-4], BoundarySpec3::new(faces));
+        grid.rebind_force_field(|[x, y, z]| {
+            [
+                3e-5 * (x + 1) as f64,
+                2e-5 * (y + 1) as f64,
+                -1e-5 * (z + 1) as f64,
+            ]
+        });
+        grid
+    };
+    let mut serial = make();
+    let mut pooled = make();
+    serial.step();
+    pooled.step_pooled(&pool, &gate).unwrap();
+    assert_eq!(snapshot(&serial), snapshot(&pooled));
+    assert_open_physical_moments(&serial, 0);
+    for scale in [0.6, -0.4, 0.0, 1.3] {
+        serial.step_with_endpoint_force_scale(scale, &gate).unwrap();
+        pooled
+            .step_pooled_with_endpoint_force_scale(&pool, &gate, scale)
+            .unwrap();
+        assert_eq!(snapshot(&serial), snapshot(&pooled));
+        assert_open_physical_moments(&serial, 0);
+    }
+}
+
+/// G4: a finite next force can overflow an open-face stress reconstruction.
+/// Even a refusal on the second face must preserve both accepted fields.
+#[test]
+fn forced_open_late_endpoint_overflow_refuses_atomically_and_retries() {
+    use fs_exec::{CancelGate, TilePool};
+    use fs_lbm::BoundaryStepError3;
+    let gate = CancelGate::new_clock_free();
+    let pool = TilePool::for_host(2, 0x0F02CE);
+    let make = || {
+        let mut faces = [FaceBoundary3::Periodic; 6];
+        faces[0] = FaceBoundary3::Velocity {
+            velocity: [0.02, 0.0, 0.0],
+        };
+        faces[1] = FaceBoundary3::Pressure { density: 1.0 };
+        let mut grid = BoundaryGrid3::new(8, 8, 8, 0.8, [0.0; 3], BoundarySpec3::new(faces));
+        grid.rebind_force_field(|[x, _, _]| if x >= 6 { [1e-5, 0.0, 0.0] } else { [0.0; 3] });
+        grid
+    };
+    for pooled in [false, true] {
+        let advance = |grid: &mut BoundaryGrid3, scale| {
+            if pooled {
+                grid.step_pooled_with_endpoint_force_scale(&pool, &gate, scale)
+            } else {
+                grid.step_with_endpoint_force_scale(scale, &gate)
+            }
+        };
+        let mut grid = make();
+        let mut control = make();
+        let before = snapshot(&grid);
+        let error = advance(&mut grid, 1e308).unwrap_err();
+        assert!(matches!(error, BoundaryStepError3::Unphysical { cell } if cell[0] >= 6));
+        assert_eq!(snapshot(&grid), before);
+        advance(&mut grid, 0.5).unwrap();
+        advance(&mut control, 0.5).unwrap();
+        assert_eq!(snapshot(&grid), snapshot(&control));
+        assert_open_physical_moments(&grid, 0);
+    }
 }
 
 #[test]
