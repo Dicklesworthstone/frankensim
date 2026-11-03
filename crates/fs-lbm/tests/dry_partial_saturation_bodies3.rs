@@ -829,3 +829,169 @@ fn empty_and_oversized_dry_assemblies_are_refused_before_publication() {
     assert_eq!(snapshot(&grid), populations);
     grid.voxelize_sdf(|_| 1.0);
 }
+
+fn point_quadrature(
+    grid: &BoundaryGrid3,
+    body: MovingPartialSaturationBody3,
+    shape: &impl BodyFrameShape3,
+    samples: usize,
+    origin: [f64; 3],
+    force_only: bool,
+    collapsed_to_center: bool,
+) -> [f64; 6] {
+    let [nx, ny, nz] = grid.dimensions();
+    let weight = 1.0 / (samples * samples * samples) as f64;
+    let mut total = [0.0; 6];
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                let force = grid.force_density(x, y, z);
+                let f = grid.populations(x, y, z);
+                let p: [f64; 3] = if force_only {
+                    force
+                } else {
+                    core::array::from_fn(|i| {
+                        (0..Q3)
+                            .map(|q| {
+                                let e = [E3[q].0, E3[q].1, E3[q].2];
+                                f64::from(e[i]) * f[q]
+                            })
+                            .sum::<f64>()
+                            + 0.5 * force[i]
+                    })
+                };
+                for sz in 0..samples {
+                    for sy in 0..samples {
+                        for sx in 0..samples {
+                            let cell = [x, y, z];
+                            let subcell = [sx, sy, sz];
+                            let point: [f64; 3] = core::array::from_fn(|i| {
+                                cell[i] as f64 + (subcell[i] as f64 + 0.5) / samples as f64
+                            });
+                            let local = body
+                                .orientation
+                                .inverse()
+                                .rotate(Vec3::new(
+                                    point[0] - body.center[0],
+                                    point[1] - body.center[1],
+                                    point[2] - body.center[2],
+                                ))
+                                .unwrap();
+                            if shape.contains(local) {
+                                let arm = core::array::from_fn(|i| {
+                                    (if collapsed_to_center {
+                                        cell[i] as f64 + 0.5
+                                    } else {
+                                        point[i]
+                                    }) - origin[i]
+                                });
+                                let angular = cross(arm, p);
+                                for i in 0..3 {
+                                    total[i] += weight * p[i];
+                                    total[i + 3] += weight * angular[i];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    total
+}
+
+#[test]
+fn cut_cell_dry_assembly_matches_point_torques_and_origin_covariance() {
+    let shape = BodyFrameEllipsoid3::sphere(1.2).unwrap();
+    let gate = CancelGate::new();
+    for forced in [false, true] {
+        let mut reference: Option<([MovingPartialSaturationBody3; 2], [[f64; 6]; 2])> = None;
+        for origin in [[0.0; 3], [4.3, -2.7, 1.9]] {
+            let mut grid = grid();
+            for z in 0..8 {
+                for y in 0..8 {
+                    for x in 0..12 {
+                        grid.set_populations(
+                            x,
+                            y,
+                            z,
+                            &equilibrium3(
+                                1.0 + 0.002 * (x + y + z) as f64,
+                                [0.002 * y as f64, -0.001 * z as f64, 0.0015 * x as f64],
+                            ),
+                        );
+                    }
+                }
+            }
+            if forced {
+                grid.rebind_force_field(|[x, y, z]| {
+                    [x as f64 * 3e-6, y as f64 * -2e-6, (z as f64 - 3.0) * 1e-6]
+                });
+            }
+            let mut bodies = [body([3.53, 4.13, 3.91], 0.3), body([6.57, 4.19, 3.89], 1.7)];
+            for b in &mut bodies {
+                b.velocity = [0.0007, -0.0003, 0.0004];
+                b.angular_momentum_body = Vec3::new(1e-4, -2e-4, 1.5e-4);
+            }
+            let mut fields = samplers(&grid);
+            let before =
+                bodies.map(|b| point_quadrature(&grid, b, &shape, 4, origin, false, false));
+            let collapsed =
+                bodies.map(|b| point_quadrature(&grid, b, &shape, 4, origin, false, true));
+            assert!(
+                (0..2).any(|a| { (3..6).any(|i| (before[a][i] - collapsed[a][i]).abs() > 1e-5) }),
+                "cut-cell angular momentum must differ from a cell-center lump"
+            );
+            let midpoint = bodies.map(|mut b| {
+                b.center = core::array::from_fn(|i| b.center[i] + 0.5 * b.velocity[i]);
+                b.orientation = b
+                    .inertia
+                    .momentum_step(
+                        b.orientation,
+                        b.angular_momentum_body,
+                        Vec3::new(0.0, 0.0, 0.0),
+                        0.5,
+                    )
+                    .unwrap()
+                    .0;
+                b
+            });
+            let source =
+                midpoint.map(|b| point_quadrature(&grid, b, &shape, 4, origin, true, false));
+            let report = grid
+                .step_with_dry_partial_saturation_bodies(
+                    &mut fields,
+                    [&shape, &shape],
+                    &mut bodies,
+                    [[0.0; 6]; 2],
+                    origin,
+                    DryBodyCouplingConfig3::default(),
+                    &gate,
+                )
+                .unwrap();
+            for a in 0..2 {
+                let after = point_quadrature(&grid, bodies[a], &shape, 4, origin, false, false);
+                for i in 0..6 {
+                    close(report.interior[a][0].momentum[i], before[a][i], 3e-12);
+                    close(report.interior[a][1].momentum[i], after[i], 3e-12);
+                    close(report.interior_forcing_impulses[a][i], source[a][i], 3e-16);
+                    close(report.combined_momentum_residual[i], 0.0, 5e-10);
+                }
+            }
+            if let Some((first_bodies, first_source)) = reference {
+                for a in 0..2 {
+                    let shift = cross(origin, first_source[a][..3].try_into().unwrap());
+                    for i in 0..3 {
+                        close(source[a][i + 3], first_source[a][i + 3] - shift[i], 3e-16);
+                        close(bodies[a].velocity[i], first_bodies[a].velocity[i], 2e-11);
+                    }
+                    let delta =
+                        bodies[a].angular_momentum_body - first_bodies[a].angular_momentum_body;
+                    close(delta.norm(), 0.0, 2e-11);
+                }
+            } else {
+                reference = Some((bodies, source));
+            }
+        }
+    }
+}

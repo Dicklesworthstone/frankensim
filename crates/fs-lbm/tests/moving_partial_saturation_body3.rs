@@ -511,3 +511,111 @@ fn endpoint_cancellation_and_fixed_obstacle_refuse_atomically() {
     assert_eq!(body, initial);
     assert_eq!(snapshot(&grid), blocked);
 }
+
+fn sampled_first_moment(sampler: &BodyFrameSampler3, index: usize) -> [f64; 3] {
+    sampler
+        .cut_cell_first_moments()
+        .iter()
+        .find(|(cell, _)| *cell == index)
+        .map_or([0.0; 3], |(_, moment)| *moment)
+}
+
+#[test]
+fn cut_cell_first_moments_match_independent_sample_points_and_clear_old_support() {
+    let grid = grid(BoundarySpec3::periodic());
+    let shape = BodyFrameEllipsoid3::new(Vec3::new(1.47, 0.83, 0.61)).unwrap();
+    let orientation = So3::exp(So3Tangent::new(Vec3::new(0.2, -0.3, 0.1))).unwrap();
+    let gate = CancelGate::new();
+    for samples in [1, 3, 8] {
+        let mut sampler = BodyFrameSampler3::new(&grid, samples).unwrap();
+        for center in [[3.37, 4.11, 3.83], [5.1, 3.0, 4.5]] {
+            let volume = sampler.sample(center, orientation, &shape, &gate).unwrap();
+            let mut expected_volume = vec![0.0; N * N * N];
+            let mut expected_moment = vec![[0.0; 3]; N * N * N];
+            let weight = 1.0 / (samples * samples * samples) as f64;
+            // Independently integrate the WORLD sample points, without using
+            // the sampler's fractions, sparse cache or integer moment sums.
+            for gz in 0..N * samples {
+                for gy in 0..N * samples {
+                    for gx in 0..N * samples {
+                        let fine = [gx, gy, gz];
+                        let point = fine.map(|v| (v as f64 + 0.5) / samples as f64);
+                        let local = orientation
+                            .inverse()
+                            .rotate(Vec3::new(
+                                point[0] - center[0],
+                                point[1] - center[1],
+                                point[2] - center[2],
+                            ))
+                            .unwrap();
+                        if shape.contains(local) {
+                            let cell = fine.map(|v| v / samples);
+                            let index = index(cell[0], cell[1], cell[2]);
+                            expected_volume[index] += weight;
+                            for i in 0..3 {
+                                expected_moment[index][i] +=
+                                    weight * (point[i] - cell[i] as f64 - 0.5);
+                            }
+                        }
+                    }
+                }
+            }
+            close(volume, expected_volume.iter().sum(), 2e-13);
+            let mut largest_offset = 0.0_f64;
+            for index in 0..N * N * N {
+                close(sampler.fractions()[index], expected_volume[index], 2e-14);
+                let measured = sampled_first_moment(&sampler, index);
+                for i in 0..3 {
+                    close(measured[i], expected_moment[index][i], 2e-14);
+                    largest_offset = largest_offset.max(measured[i].abs());
+                }
+                if sampler.fractions()[index] == 0.0 || sampler.fractions()[index] == 1.0 {
+                    assert_eq!(measured, [0.0; 3]);
+                }
+            }
+            if samples > 1 {
+                assert!(
+                    largest_offset > 0.02,
+                    "off-center cuts must exercise the moment"
+                );
+            }
+        }
+    }
+
+    // Two disjoint half-cell geometries retain opposite local moments even
+    // though their total occupancy fills this one cell exactly.
+    struct HalfCell;
+    impl BodyFrameShape3 for HalfCell {
+        fn bounding_radius(&self) -> f64 {
+            0.75
+        }
+        fn contains(&self, p: Vec3) -> bool {
+            p.x.abs() < 0.25 && p.y.abs() < 0.5 && p.z.abs() < 0.5
+        }
+    }
+    let mut halves = [
+        BodyFrameSampler3::new(&grid, 8).unwrap(),
+        BodyFrameSampler3::new(&grid, 8).unwrap(),
+    ];
+    for (side, sampler) in halves.iter_mut().enumerate() {
+        sampler
+            .sample(
+                [3.25 + 0.5 * side as f64, 3.5, 3.5],
+                So3::identity(),
+                &HalfCell,
+                &gate,
+            )
+            .unwrap();
+        let sign = if side == 0 { -1.0 } else { 1.0 };
+        assert_eq!(sampler.fractions()[index(3, 3, 3)], 0.5);
+        assert_eq!(
+            sampled_first_moment(sampler, index(3, 3, 3)),
+            [sign * 0.125, 0.0, 0.0]
+        );
+        let torque = cross(
+            sampled_first_moment(sampler, index(3, 3, 3)),
+            [0.0, 1.0, 0.0],
+        );
+        assert_eq!(torque, [0.0, 0.0, sign * 0.125]);
+    }
+}

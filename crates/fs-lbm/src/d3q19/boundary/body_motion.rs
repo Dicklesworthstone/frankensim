@@ -660,8 +660,9 @@ fn sample_geometry(
         // Sampling retains its original row-major arithmetic. Only the sparse
         // boundary moments are ordered for the existing population traversal.
         // Unstable sorting allocates no scratch; every cell key is unique.
-        first_moments
-            .sort_unstable_by_key(|&(index, _)| quadrature::cell_order(index, dims, crate::TILE));
+        first_moments.sort_unstable_by_key(|&(index, _)| {
+            quadrature::cell_order(index, dims, crate::d3q19::TILE)
+        });
     }
     checkpoint(gate)?;
     Ok(volume)
