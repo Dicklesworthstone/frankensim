@@ -4,7 +4,12 @@
 #[path = "coating_shell.rs"]
 mod fixture;
 
+use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_couple::acoustic_realize::AcousticRealizeError;
+use fs_couple::shear_shell::coating::harmonic::loaded::{
+    ShellHarmonicPort, ShellLoadedHarmonicOptions,
+};
+use fs_couple::shear_shell::coating::strain::ShellCoatingStrainBudget;
 use fs_couple::shear_shell::{
     CoatingSide, MaterialShellImage, ResolvedShearShell, ShellProjectionBudget,
     ShellReductionOptions,
@@ -16,7 +21,9 @@ use fs_couple::shear_shell::{
     pressure::ShellPressureSurfaces,
 };
 use fs_exec::CancelGate;
+use fs_exec::{Budget, Cx, ExecMode, StreamKey};
 use fs_math::c64::C64;
+use fs_modal::harmonic::{HarmonicPortControls, HarmonicResponseControls};
 use fs_plate::shell::{
     junction::TieBudget,
     mitc::{NodalDirectors, ShellConstraint, ShellMass},
@@ -168,13 +175,26 @@ fn g0_source_film_response_preserves_power_port_reciprocity_and_pressure_signs()
     assert_eq!(zero.total_dissipation_w(), 0.0);
     assert_eq!(zero.power_residual_w, 0.0);
     let bare = reduce_image(fixture::coupon(&gate), &gate);
-    let bare_force: Vec<_> = bare.force_ports()[0].iter().copied().map(C64::from_re).collect();
-    let baseline = bare.coating_harmonic_response(TAU*1000.0, &bare_force, options(), &gate).unwrap();
-    let coated = image.coating_harmonic_response(TAU*1000.0, &force(0), options(), &gate).unwrap();
+    let bare_force: Vec<_> = bare.force_ports()[0]
+        .iter()
+        .copied()
+        .map(C64::from_re)
+        .collect();
+    let baseline = bare
+        .coating_harmonic_response(TAU * 1000.0, &bare_force, options(), &gate)
+        .unwrap();
+    let coated = image
+        .coating_harmonic_response(TAU * 1000.0, &force(0), options(), &gate)
+        .unwrap();
     assert!(baseline.film_dissipation_w.is_empty());
     assert!(baseline.external_power_w > 0.0);
-    assert!(baseline.power_residual_w.abs() < 1e-10*baseline.total_dissipation_w());
-    assert!(relative_complex(&coated.force_port_velocity_m_s, &baseline.force_port_velocity_m_s) > 1e-7);
+    assert!(baseline.power_residual_w.abs() < 1e-10 * baseline.total_dissipation_w());
+    assert!(
+        relative_complex(
+            &coated.force_port_velocity_m_s,
+            &baseline.force_port_velocity_m_s
+        ) > 1e-7
+    );
 }
 
 #[test]
@@ -345,9 +365,353 @@ fn g3_single_component_assembly_preserves_source_response_and_signed_volume() {
         .unwrap();
     let b = assembled
         .coating_harmonic_response(
-            TAU*1000.0, &force(assembled.force_ports()), options(), &gate).unwrap();
+            TAU * 1000.0,
+            &force(assembled.force_ports()),
+            options(),
+            &gate,
+        )
+        .unwrap();
     assert!(relative_complex(&a.force_port_velocity_m_s, &b.force_port_velocity_m_s) < 1e-8);
-    assert!(relative_complex(&[a.exterior_volume_velocity_m3_s], &[b.exterior_volume_velocity_m3_s]) < 1e-8);
-    assert!(b.power_residual_w.abs() < 1e-10*b.total_dissipation_w());
+    assert!(
+        relative_complex(
+            &[a.exterior_volume_velocity_m3_s],
+            &[b.exterior_volume_velocity_m3_s]
+        ) < 1e-8
+    );
+    assert!(b.power_residual_w.abs() < 1e-10 * b.total_dissipation_w());
+    with_loaded_cx(&gate, |cx| {
+        let selection = [ShellHarmonicPort::Force(0)];
+        let impedance = [C64::new(500.0, 80.0)];
+        let mut a = direct
+            .prepare_coating_harmonic_with_impedance(
+                TAU * 1000.0,
+                &selection,
+                &impedance,
+                loaded_options(),
+                &gate,
+                cx,
+            )
+            .unwrap();
+        let mut b = assembled
+            .prepare_coating_harmonic_with_impedance(
+                TAU * 1000.0,
+                &selection,
+                &impedance,
+                loaded_options(),
+                &gate,
+                cx,
+            )
+            .unwrap();
+        let fa: Vec<_> = force(direct.force_ports())
+            .iter()
+            .map(|z| z.scale(1e-4))
+            .collect();
+        let fb: Vec<_> = force(assembled.force_ports())
+            .iter()
+            .map(|z| z.scale(1e-4))
+            .collect();
+        let a = a.solve(&fa, &gate, cx).unwrap();
+        let b = b.solve(&fb, &gate, cx).unwrap();
+        assert!(relative_complex(&a.boundary.flow, &b.boundary.flow) < 1e-8);
+        assert_eq!(a.coating_strain.films[0].component_index, None);
+        assert_eq!(b.coating_strain.films[0].component_index, Some(0));
+        assert!(b.coating_strain.within_authored_envelope);
+    });
 }
- 
+
+fn with_loaded_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+        f(&Cx::new(
+            gate,
+            arena,
+            StreamKey {
+                seed: 211,
+                kernel_id: 211,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        ))
+    })
+}
+
+fn loaded_options() -> ShellLoadedHarmonicOptions {
+    ShellLoadedHarmonicOptions {
+        material: options(),
+        maximum_material_payload_bytes: 1 << 20,
+        response: HarmonicResponseControls {
+            maximum_coordinates: 8,
+            maximum_payload_bytes: 8 << 20,
+            maximum_relative_residual: 1e-10,
+        },
+        ports: HarmonicPortControls {
+            maximum_ports: 4,
+            maximum_projection_terms: 1_000_000,
+            maximum_payload_bytes: 1 << 20,
+        },
+        strain: ShellCoatingStrainBudget {
+            maximum_bytes: 8_000_000,
+            maximum_work: 100_000_000,
+            evaluations: 8,
+        },
+    }
+}
+
+#[test]
+fn g3_loaded_zero_impedance_preserves_original_material_response_and_signed_ports() {
+    let gate = CancelGate::new_clock_free();
+    let image = make_image(&gate, true);
+    with_loaded_cx(&gate, |cx| {
+        for hz in [120.0, 1000.0] {
+            let mut prepared = image
+                .prepare_coating_harmonic_with_impedance(
+                    TAU * hz,
+                    &[
+                        ShellHarmonicPort::Force(0),
+                        ShellHarmonicPort::ExteriorVolume,
+                        ShellHarmonicPort::CavityVolume,
+                    ],
+                    &[C64::ZERO; 9],
+                    loaded_options(),
+                    &gate,
+                    cx,
+                )
+                .unwrap();
+            let force: Vec<_> = image.force_ports()[0]
+                .iter()
+                .map(|&x| C64::new(1e-4 * x, -3e-5 * x))
+                .collect();
+            let bare = image
+                .coating_harmonic_response(TAU * hz, &force, options(), &gate)
+                .unwrap();
+            let first = prepared.solve(&force, &gate, cx).unwrap();
+            let second = prepared.solve(&force, &gate, cx).unwrap();
+            assert_eq!(
+                first.shell.displacement_m_sqrt_kg,
+                second.shell.displacement_m_sqrt_kg
+            );
+            assert!(
+                relative_complex(
+                    &first.shell.displacement_m_sqrt_kg,
+                    &bare.displacement_m_sqrt_kg
+                ) < 1e-9
+            );
+            assert_eq!(first.boundary.average_absorbed_power_w, 0.0);
+            assert!(
+                relative_complex(
+                    &first.boundary.flow,
+                    &[
+                        first.shell.force_port_velocity_m_s[0],
+                        first.shell.exterior_volume_velocity_m3_s,
+                        first.shell.cavity_volume_velocity_m3_s,
+                    ]
+                ) < 1e-13
+            );
+            assert!(
+                relative_complex(&[first.boundary.flow[1]], &[-first.boundary.flow[2]]) < 1e-12
+            );
+            assert!(
+                (first.shell.film_dissipation_w[0] / bare.film_dissipation_w[0] - 1.0).abs() < 2e-9
+            );
+            assert!(first.coating_strain.within_authored_envelope);
+            assert_eq!(prepared.completed_strain_evaluations(), 2);
+        }
+    });
+}
+
+#[test]
+fn g1_loaded_full_mutual_impedance_matches_independent_port_feedback_and_heat() {
+    let gate = CancelGate::new_clock_free();
+    let image = make_image(&gate, true);
+    let omega = TAU * 1000.0;
+    let unit = |j: usize| {
+        image.force_ports()[j]
+            .iter()
+            .copied()
+            .map(C64::from_re)
+            .collect::<Vec<_>>()
+    };
+    let columns: Vec<_> = (0..2)
+        .map(|j| {
+            image
+                .coating_harmonic_response(omega, &unit(j), options(), &gate)
+                .unwrap()
+        })
+        .collect();
+    let z = [
+        C64::new(200.0, -80.0),
+        C64::new(25.0, 35.0),
+        C64::new(25.0, 35.0),
+        C64::new(120.0, 50.0),
+    ];
+    let force: Vec<_> = image.force_ports()[0]
+        .iter()
+        .zip(&image.force_ports()[1])
+        .map(|(&a, &b)| C64::new(1e-4 * a + 3e-5 * b, -4e-5 * b))
+        .collect();
+    let bare = image
+        .coating_harmonic_response(omega, &force, options(), &gate)
+        .unwrap();
+    // Original physical-port admittance Y: v = v_free - Y Z v. This 2x2
+    // feedback calculation is independent of the modal loaded-pencil assembly.
+    let mut a = [C64::ZERO; 4];
+    for i in 0..2 {
+        for j in 0..2 {
+            a[2 * i + j] = if i == j { C64::ONE } else { C64::ZERO };
+            for k in 0..2 {
+                a[2 * i + j] = a[2 * i + j] + columns[k].force_port_velocity_m_s[i] * z[2 * k + j];
+            }
+        }
+    }
+    let det = a[0] * a[3] - a[1] * a[2];
+    let rhs = &bare.force_port_velocity_m_s;
+    let flow = [
+        (a[3] * rhs[0] - a[1] * rhs[1]) / det,
+        (a[0] * rhs[1] - a[2] * rhs[0]) / det,
+    ];
+    let effort = [
+        z[0] * flow[0] + z[1] * flow[1],
+        z[2] * flow[0] + z[3] * flow[1],
+    ];
+    let net: Vec<_> = force
+        .iter()
+        .enumerate()
+        .map(|(i, &f)| {
+            f - effort[0].scale(image.force_ports()[0][i])
+                - effort[1].scale(image.force_ports()[1][i])
+        })
+        .collect();
+    let reference = image
+        .coating_harmonic_response(omega, &net, options(), &gate)
+        .unwrap();
+    with_loaded_cx(&gate, |cx| {
+        let mut prepared = image
+            .prepare_coating_harmonic_with_impedance(
+                omega,
+                &[ShellHarmonicPort::Force(0), ShellHarmonicPort::Force(1)],
+                &z,
+                loaded_options(),
+                &gate,
+                cx,
+            )
+            .unwrap();
+        let actual = prepared.solve(&force, &gate, cx).unwrap();
+        assert!(relative_complex(&actual.boundary.flow, &flow) < 1e-9);
+        assert!(relative_complex(&actual.boundary.effort, &effort) < 1e-9);
+        assert!(
+            relative_complex(
+                &actual.shell.displacement_m_sqrt_kg,
+                &reference.displacement_m_sqrt_kg
+            ) < 1e-9
+        );
+        assert!(
+            (actual.shell.total_dissipation_w() / reference.total_dissipation_w() - 1.0).abs()
+                < 2e-9
+        );
+        let power = actual.shell.total_dissipation_w() + actual.boundary.average_absorbed_power_w;
+        assert!(actual.boundary.average_absorbed_power_w > 0.0);
+        assert!(actual.shell.film_dissipation_w[0] > 0.0);
+        assert!(actual.power_balance_residual_w.abs() < 1e-9 * power);
+        assert!(
+            relative_complex(&actual.boundary.flow, &bare.force_port_velocity_m_s) > 0.01,
+            "the physical load must change the source response"
+        );
+    });
+}
+
+#[test]
+fn g0_g4_loaded_source_strain_passivity_budget_and_cancellation_refuse() {
+    let gate = CancelGate::new_clock_free();
+    let image = make_image(&gate, true);
+    with_loaded_cx(&gate, |cx| {
+        let port = [ShellHarmonicPort::Force(0)];
+        let z = [C64::from_re(20.0)];
+        for omega in [0.0, TAU * 20.0, TAU * 20000.0] {
+            assert!(
+                image
+                    .prepare_coating_harmonic_with_impedance(
+                        omega,
+                        &port,
+                        &z,
+                        loaded_options(),
+                        &gate,
+                        cx
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            image
+                .prepare_coating_harmonic_with_impedance(
+                    TAU * 1000.0,
+                    &port,
+                    &[C64::from_re(-1.0)],
+                    loaded_options(),
+                    &gate,
+                    cx
+                )
+                .is_err()
+        );
+        assert!(
+            image
+                .prepare_coating_harmonic_with_impedance(
+                    TAU * 1000.0,
+                    &[ShellHarmonicPort::Force(20)],
+                    &z,
+                    loaded_options(),
+                    &gate,
+                    cx
+                )
+                .is_err()
+        );
+        let mut cap = loaded_options();
+        cap.maximum_material_payload_bytes = 1;
+        assert!(
+            image
+                .prepare_coating_harmonic_with_impedance(TAU * 1000.0, &port, &z, cap, &gate, cx)
+                .is_err()
+        );
+        let mut prepared = image
+            .prepare_coating_harmonic_with_impedance(
+                TAU * 1000.0,
+                &port,
+                &z,
+                loaded_options(),
+                &gate,
+                cx,
+            )
+            .unwrap();
+        let excessive: Vec<_> = image.force_ports()[0]
+            .iter()
+            .map(|&x| C64::from_re(x * 1e9))
+            .collect();
+        assert!(prepared.solve(&excessive, &gate, cx).is_err());
+        assert_eq!(prepared.completed_strain_evaluations(), 1);
+        let small: Vec<_> = image.force_ports()[0]
+            .iter()
+            .map(|&x| C64::from_re(x * 1e-4))
+            .collect();
+        assert!(
+            prepared
+                .solve(&small, &gate, cx)
+                .unwrap()
+                .coating_strain
+                .within_authored_envelope
+        );
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(matches!(
+            prepared.solve(&small, &cancelled, cx),
+            Err(AcousticRealizeError::Cancelled)
+        ));
+        assert_eq!(prepared.completed_strain_evaluations(), 2);
+        with_loaded_cx(&cancelled, |cancelled_cx| {
+            assert!(matches!(
+                prepared.solve(&small, &gate, cancelled_cx),
+                Err(AcousticRealizeError::Cancelled)
+            ));
+        });
+        assert_eq!(prepared.completed_strain_evaluations(), 2);
+    });
+}

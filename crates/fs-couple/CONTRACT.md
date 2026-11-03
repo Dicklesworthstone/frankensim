@@ -23560,3 +23560,37 @@ exact-affine subdivision identity up to floating-point error, not evidence of
 spatial convergence or arbitrary-load resolution. A supported TET4 test checks
 fixed-row loads do no work and malformed endpoint fields preserve accepted
 state. The original two held-solid tests remain green.
+
+## Loaded hereditary shell resonance on original physical ports
+
+`shear_shell::coating::harmonic::loaded` connects the original equilibrium-basis
+film and substrate spectrum to `fs_modal::harmonic::PreparedHarmonicResponse`.
+Both `MaterialShellImage` and `MaterialShellAssemblyImage` can prepare a reusable
+`prepare_coating_harmonic_with_impedance` factor at one admitted frequency.
+The original film/substrate laws are evaluated once at that drive frequency;
+their complete coupled storage/loss and the unchanged image inertia enter
+`K - omega^2 M - i omega C - i omega B Z B^T` before factorization. No inversion
+of an unloaded resonance, per-mode loss approximation or extra material fit is
+introduced. The existing unloaded solve retains its original operation order.
+
+Port selection uses original force/velocity footprints or the original signed
+exterior/cavity pressure-volume rows. The entire complex mutual impedance is
+retained. Its Hermitian part receives the shared pointwise PSD admission; the
+caller remains responsible for its units, source band, physical boundary law
+and broadband causality. Internal background, substrate, interface and film
+heat remain separate from the load's net absorbed boundary work, with an
+independent combined mean-power residual. Absorbed boundary work alone is not
+a radiation or material-heat certificate.
+
+Each returned motion passes the existing original whole-film spatial/cycle
+strain-envelope observer. An insufficient envelope refuses the response and
+consumes that completed strain query; it does not establish material failure.
+Preparation and solve poll both the original source gate and shared execution
+context. Source, factor, port and strain work/storage limits remain explicit.
+This is a bounded fixed-basis periodic response, without a continuum/modal
+truncation certificate or startup, moving-material or nonlinear response claim.
+
+`tests/coating_harmonic.rs` covers zero-load parity and factor reuse, signed
+fluid ports, an independent full two-port feedback oracle, material/load power
+separation, single-component assembly parity, whole-film strain refusal,
+pointwise passivity, source/resource refusals and cancellation (G0/G1/G3/G4).

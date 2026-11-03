@@ -13,9 +13,10 @@
 //! Unselected wood/glue damping remains the fixed reduced operator selected
 //! when the image was made. Explicit substrate memory adds its same causal
 //! storage and loss at the drive frequency. The film law is evaluated at the common drive
-//! frequency. This is an unloaded structural response: signed volume velocity
-//! is exposed, but no cavity/radiation impedance, bridge/string feedback, sound
-//! pressure or perceptual-quality claim is inferred from it.
+//! frequency. `coating_harmonic_response` supplies unloaded structural response;
+//! [`loaded`] additionally composes source-authored physical impedance ports.
+//! Neither route infers a radiation law, sound pressure or perceptual quality
+//! from signed volume velocity alone.
 
 use super::relaxation::ShellCoatingRelaxation;
 use crate::acoustic_realize::AcousticRealizeError;
@@ -27,6 +28,9 @@ use crate::thin_plate::CompactBody;
 use fs_exec::CancelGate;
 use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
+
+/// Joint hereditary shell response with original physical impedance ports.
+pub mod loaded;
 
 /// Bounded dense work and a backward-error gate on the original equations.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,6 +94,51 @@ struct Image<'a> {
     interfaces: Vec<(&'a [f64], f64)>,
 }
 
+impl<'a> Image<'a> {
+    fn shell(image: &'a MaterialShellImage) -> Self {
+        Self {
+            modes: image.radiators(),
+            background: image.damping().matrix_per_s(),
+            force_ports: image.force_ports(),
+            exterior: image.volume_shapes_m2_per_sqrt_kg(),
+            cavity: image.cavity_volume_shapes_m2_per_sqrt_kg(),
+            films: image.coating_relaxation(),
+            substrate: image.substrate_relaxation(),
+            interfaces: image
+                .source()
+                .interfaces()
+                .iter()
+                .zip(image.interface_columns())
+                .filter(|(source, _)| source.law().damping_n_s_m != 0.0)
+                .map(|(source, row)| (row.as_slice(), source.law().damping_n_s_m))
+                .collect(),
+        }
+    }
+
+    fn assembly(image: &'a MaterialShellAssemblyImage) -> Self {
+        Self {
+            modes: image.radiators(),
+            background: image.damping().matrix_per_s(),
+            force_ports: image.force_ports(),
+            exterior: image.volume_shapes_m2_per_sqrt_kg(),
+            cavity: image.cavity_volume_shapes_m2_per_sqrt_kg(),
+            films: image.coating_relaxation(),
+            substrate: image.substrate_relaxation(),
+            interfaces: image
+                .source()
+                .components
+                .iter()
+                .zip(image.interface_columns())
+                .flat_map(|(component, columns)| {
+                    component.specimen.interfaces().iter().zip(columns)
+                })
+                .filter(|(source, _)| source.law().damping_n_s_m != 0.0)
+                .map(|(source, row)| (row.as_slice(), source.law().damping_n_s_m))
+                .collect(),
+        }
+    }
+}
+
 fn source_support(
     source: &ResolvedShearShell,
     omega: f64,
@@ -151,29 +200,7 @@ impl MaterialShellImage {
                 "coating harmonic response requires every source film projection",
             ));
         }
-        solve_image(
-            Image {
-                modes: self.radiators(),
-                background: self.damping().matrix_per_s(),
-                force_ports: self.force_ports(),
-                exterior: self.volume_shapes_m2_per_sqrt_kg(),
-                cavity: self.cavity_volume_shapes_m2_per_sqrt_kg(),
-                films,
-                substrate: self.substrate_relaxation(),
-                interfaces: self
-                    .source()
-                    .interfaces()
-                    .iter()
-                    .zip(self.interface_columns())
-                    .filter(|(source, _)| source.law().damping_n_s_m != 0.0)
-                    .map(|(source, row)| (row.as_slice(), source.law().damping_n_s_m))
-                    .collect(),
-            },
-            omega_rad_s,
-            force,
-            options,
-            gate,
-        )
+        solve_image(Image::shell(self), omega_rad_s, force, options, gate)
     }
 }
 
@@ -206,32 +233,7 @@ impl MaterialShellAssemblyImage {
                 "coating harmonic response requires every source film projection",
             ));
         }
-        solve_image(
-            Image {
-                modes: self.radiators(),
-                background: self.damping().matrix_per_s(),
-                force_ports: self.force_ports(),
-                exterior: self.volume_shapes_m2_per_sqrt_kg(),
-                cavity: self.cavity_volume_shapes_m2_per_sqrt_kg(),
-                films,
-                substrate: self.substrate_relaxation(),
-                interfaces: self
-                    .source()
-                    .components
-                    .iter()
-                    .zip(self.interface_columns())
-                    .flat_map(|(component, columns)| {
-                        component.specimen.interfaces().iter().zip(columns)
-                    })
-                    .filter(|(source, _)| source.law().damping_n_s_m != 0.0)
-                    .map(|(source, row)| (row.as_slice(), source.law().damping_n_s_m))
-                    .collect(),
-            },
-            omega_rad_s,
-            force,
-            options,
-            gate,
-        )
+        solve_image(Image::assembly(self), omega_rad_s, force, options, gate)
     }
 }
 
@@ -278,13 +280,19 @@ fn lu_error(error: LuComplexError) -> AcousticRealizeError {
     }
 }
 
-fn solve_image(
-    image: Image<'_>,
+struct MaterialOperator {
+    operator: Vec<C64>,
+    losses: Vec<f64>,
+    substrate_loss: f64,
+}
+
+fn material_operator(
+    image: &Image<'_>,
     omega: f64,
-    force: &[C64],
     options: ShellCoatingHarmonicOptions,
+    subtract_inertia: bool,
     gate: &CancelGate,
-) -> Result<ShellCoatingHarmonicResponse, AcousticRealizeError> {
+) -> Result<MaterialOperator, AcousticRealizeError> {
     poll(gate)?;
     let n = image.modes.len();
     let films = image.films.map_or(&[][..], ShellCoatingRelaxation::films);
@@ -308,10 +316,9 @@ fn solve_image(
     if n == 0
         || n > crate::shear_shell::MAX_SHELL_MODES
         || image.films.is_some_and(|memory| memory.mode_count() != n)
-        || image.substrate.is_some_and(|memory| memory.mode_count() != n
-            || memory.loss_stiffness_per_s2().len() != n*n)
-        || force.len() != n
-        || force.iter().any(|&f| !finite(f))
+        || image.substrate.is_some_and(|memory| {
+            memory.mode_count() != n || memory.loss_stiffness_per_s2().len() != n * n
+        })
         || !omega.is_finite()
         || omega <= 0.0
         || !options.solve_relative_tolerance.is_finite()
@@ -345,20 +352,39 @@ fn solve_image(
         .map(|&c| C64::new(0.0, -omega * c))
         .collect();
     for (i, mode) in image.modes.iter().enumerate() {
-        operator[i * n + i].re = mode.omega * mode.omega - omega * omega;
+        // The original unloaded path keeps its operation tree. The loaded
+        // path passes complete storage to fs-modal BEFORE subtracting inertia,
+        // avoiding cancellation from reconstructing K out of K-omega²I.
+        operator[i * n + i].re = if subtract_inertia {
+            mode.omega * mode.omega - omega * omega
+        } else {
+            mode.omega * mode.omega
+        };
     }
     for &(row, damping) in &image.interfaces {
         for (i, &a) in row.iter().enumerate() {
             poll(gate)?;
             for (j, &b) in row.iter().enumerate() {
+                if !subtract_inertia && j < i {
+                    continue;
+                }
                 operator[i * n + j].im -= omega * damping * a * b;
+                if !subtract_inertia {
+                    // One contraction owns both symmetric entries of the
+                    // physical rank-one loss, as in the source MITC projector.
+                    // Reversing a and b can otherwise differ by one ulp and
+                    // violate the shared full-pencil owner's exact symmetry.
+                    operator[j * n + i].im = operator[i * n + j].im;
+                }
             }
         }
     }
     let substrate_loss = if let Some(memory) = image.substrate {
         let band = memory.source_band_rad_s();
         if omega < band.0 || omega > band.1 {
-            return Err(invalid("harmonic substrate response exceeds original material/fit support"));
+            return Err(invalid(
+                "harmonic substrate response exceeds original material/fit support",
+            ));
         }
         let (storage, loss) = memory.modulus_shapes(omega);
         let increment = C64::new(storage, -loss);
@@ -366,7 +392,9 @@ fn solve_image(
             *value = *value + increment.scale(h);
         }
         loss
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     let mut losses = Vec::with_capacity(films.len());
     for film in films {
         poll(gate)?;
@@ -396,6 +424,32 @@ fn solve_image(
     if operator.iter().any(|&z| !finite(z)) {
         return Err(invalid("coating harmonic operator overflow"));
     }
+    Ok(MaterialOperator {
+        operator,
+        losses,
+        substrate_loss,
+    })
+}
+
+fn solve_image(
+    image: Image<'_>,
+    omega: f64,
+    force: &[C64],
+    options: ShellCoatingHarmonicOptions,
+    gate: &CancelGate,
+) -> Result<ShellCoatingHarmonicResponse, AcousticRealizeError> {
+    poll(gate)?;
+    let n = image.modes.len();
+    if force.len() != n || force.iter().any(|&f| !finite(f)) {
+        return Err(invalid(
+            "coating harmonic response needs complete finite forces, bounded work and a solve tolerance",
+        ));
+    }
+    let MaterialOperator {
+        operator,
+        losses,
+        substrate_loss,
+    } = material_operator(&image, omega, options, true, gate)?;
     let scale = operator.iter().map(|z| z.abs()).fold(0.0_f64, f64::max);
     if !scale.is_finite() || scale == 0.0 {
         return Err(invalid("coating harmonic operator has no finite scale"));
@@ -455,6 +509,32 @@ fn solve_image(
         .iter()
         .map(|q| C64::new(omega * q.im, -omega * q.re))
         .collect();
+    observe_image(
+        &image,
+        omega,
+        force,
+        &losses,
+        substrate_loss,
+        q,
+        v,
+        relative,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // one original spectrum and its solved motion
+fn observe_image(
+    image: &Image<'_>,
+    omega: f64,
+    force: &[C64],
+    losses: &[f64],
+    substrate_loss: f64,
+    q: Vec<C64>,
+    v: Vec<C64>,
+    relative: f64,
+    gate: &CancelGate,
+) -> Result<ShellCoatingHarmonicResponse, AcousticRealizeError> {
+    let films = image.films.map_or(&[][..], ShellCoatingRelaxation::films);
     let external_power_w = 0.5
         * force
             .iter()
@@ -464,7 +544,9 @@ fn solve_image(
     let background_dissipation_w = 0.5 * quadratic(image.background, &v, gate)?;
     let substrate_dissipation_w = if let Some(memory) = image.substrate {
         0.5 * omega * substrate_loss * quadratic(memory.loss_stiffness_per_s2(), &q, gate)?
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     let mut interface_dissipation_w = 0.0;
     for &(row, damping) in &image.interfaces {
         poll(gate)?;
@@ -472,7 +554,7 @@ fn solve_image(
     }
     let film_dissipation_w: Vec<_> = films
         .iter()
-        .zip(losses)
+        .zip(losses.iter().copied())
         .map(|(film, loss)| {
             quadratic(film.unit_stiffness_per_pa_s2(), &q, gate)
                 .map(|value| 0.5 * omega * loss * value)
@@ -487,9 +569,11 @@ fn solve_image(
     }
     let exterior_volume_velocity_m3_s = projection(image.exterior, &v);
     let cavity_volume_velocity_m3_s = projection(image.cavity, &v);
-    let power_residual_w =
-        background_dissipation_w + substrate_dissipation_w + interface_dissipation_w + film_dissipation_w.iter().sum::<f64>()
-            - external_power_w;
+    let power_residual_w = background_dissipation_w
+        + substrate_dissipation_w
+        + interface_dissipation_w
+        + film_dissipation_w.iter().sum::<f64>()
+        - external_power_w;
     if [
         external_power_w,
         background_dissipation_w,
