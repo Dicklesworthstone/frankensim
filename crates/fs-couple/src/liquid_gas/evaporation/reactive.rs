@@ -9,7 +9,7 @@
 //! again as a heat source.
 
 use super::conduction::{
-    ConductingLiquidGasReport, advance_liquid_surfaces_with_gas_and_conduction,
+    ConductingLiquidGasReport, advance_liquid_surfaces_with_gas_and_radiative_conduction,
 };
 use crate::cavity_phs::piston::reactive::{
     GasReaction, GasReactionError, GasReactionSolve, GasReactionStep,
@@ -18,7 +18,8 @@ use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceCellHeat,
     conduction::{
         FreeSurfaceBodyContact, FreeSurfaceBodyInterface, FreeSurfaceConductionControls,
-        FreeSurfaceConductionFace, FreeSurfaceGasFace, FreeSurfaceThermalBody,
+        FreeSurfaceConductionFace, FreeSurfaceGasFace, FreeSurfaceRadiationFace,
+        FreeSurfaceThermalBody,
     },
 };
 use fs_material::evaporation::gas::chamber::heat::GasLiquidChamberHeatSolve;
@@ -549,9 +550,59 @@ impl GasReaction {
         gate: &CancelGate,
     ) -> Result<ReactiveConductingLiquidGasCandidate<'s, 'm, '_, 'b>, ReactiveLiquidPhaseError>
     {
+        self.radiative_conducting_evaporating_liquid_candidate(
+            liquid,
+            gas,
+            surfaces,
+            bodies,
+            faces,
+            heat,
+            contacts,
+            interfaces,
+            exposed,
+            &[],
+            phase_controls,
+            thermal_controls,
+            maximum_density_excursion,
+            with_viscous_heating,
+            controls,
+            gate,
+        )
+    }
+
+    /// Include original resolved-cell-temperature liquid radiation in the
+    /// complete chemistry/phase/conduction transaction.
+    ///
+    /// This uses the existing gray-surface radiation law on the native thermal
+    /// owner. It neither supplies a second sensible-film coefficient nor changes
+    /// the phase owner's bulk-caloric temperature convention. Solved-interface
+    /// latent feedback and attached surface/contact-history refusals remain
+    /// unchanged. Radiation is external supply once; all finite participants,
+    /// original sources, budgets and the single native clock remain shared.
+    #[allow(clippy::too_many_arguments)]
+    pub fn radiative_conducting_evaporating_liquid_candidate<'s, 'm, 'b>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &ClosedGasParcel,
+        surfaces: &[LiquidGasEvaporationSurface<'_>],
+        bodies: &[FreeSurfaceThermalBody<'b>],
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        exposed: &[FreeSurfaceGasFace],
+        radiation: &[FreeSurfaceRadiationFace],
+        phase_controls: DistributedLiquidGasSolve,
+        thermal_controls: FreeSurfaceConductionControls,
+        maximum_density_excursion: Option<f64>,
+        with_viscous_heating: bool,
+        controls: ReactiveLiquidPhaseSolve,
+        gate: &CancelGate,
+    ) -> Result<ReactiveConductingLiquidGasCandidate<'s, 'm, '_, 'b>, ReactiveLiquidPhaseError>
+    {
         let mut accepted_bodies = None;
         let phase = self.native_phase_candidate(liquid, gas, controls, gate, |reacted| {
-            let candidate = advance_liquid_surfaces_with_gas_and_conduction(
+            let candidate = advance_liquid_surfaces_with_gas_and_radiative_conduction(
                 liquid,
                 reacted,
                 self.catalog(),
@@ -562,6 +613,7 @@ impl GasReaction {
                 contacts,
                 interfaces,
                 exposed,
+                radiation,
                 phase_controls,
                 thermal_controls,
                 controls.reaction.gas,

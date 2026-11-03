@@ -1,11 +1,14 @@
 //! Chemistry, phase transfer, finite walls and native thermal/flow publish together.
 use super::*;
 use crate::conduction::{film, joint_controls, thermal_controls, with_wall};
-use fs_couple::liquid_gas::evaporation::conduction::advance_liquid_surfaces_with_gas_and_conduction;
-use fs_lbm::material::free_surface::enthalpy::FreeSurfaceCellHeat;
+use fs_couple::liquid_gas::evaporation::conduction::advance_liquid_surfaces_with_gas_and_radiative_conduction;
+use fs_lbm::material::free_surface::enthalpy::{
+    FreeSurfaceCellHeat,
+    conduction::{FreeSurfaceEmissivity, FreeSurfaceRadiationFace},
+};
 
 #[test]
-fn g1_reactive_phase_and_full_conduction_match_the_original_owners_on_one_clock() {
+fn g1_reactive_phase_and_radiative_conduction_match_original_owners_on_one_clock() {
     for maximum_density_excursion in [None, Some(0.3)] {
         with_liquid_pressure(
             0.0,
@@ -22,6 +25,13 @@ fn g1_reactive_phase_and_full_conduction_match_the_original_owners_on_one_clock(
                     let binding = binding(source, 0.0);
                     let surfaces = [surface(&Phase, &binding)];
                     let exposed = [film(INTERFACE)];
+                    let radiation = [FreeSurfaceRadiationFace {
+                        liquid: INTERFACE,
+                        gas: exposed[0].gas,
+                        area_m2: 1e-6,
+                        emissivity: FreeSurfaceEmissivity::Prescribed(0.6),
+                        surroundings_k: 450.0,
+                    }];
                     let bodies = [body];
                     let initial_wall_h = bodies[0].enthalpy_j();
                     let heat = [FreeSurfaceCellHeat {
@@ -31,7 +41,7 @@ fn g1_reactive_phase_and_full_conduction_match_the_original_owners_on_one_clock(
                     let chemical = law
                         .parcel_candidate(&gas, DT, reactive_controls().reaction, || false)
                         .unwrap();
-                    let direct = advance_liquid_surfaces_with_gas_and_conduction(
+                    let direct = advance_liquid_surfaces_with_gas_and_radiative_conduction(
                         liquid,
                         chemical.gas(),
                         source,
@@ -42,6 +52,7 @@ fn g1_reactive_phase_and_full_conduction_match_the_original_owners_on_one_clock(
                         &[contact],
                         &[],
                         &exposed,
+                        &radiation,
                         joint_controls(),
                         thermal_controls(),
                         reactive_controls().reaction.gas,
@@ -51,7 +62,7 @@ fn g1_reactive_phase_and_full_conduction_match_the_original_owners_on_one_clock(
                     )
                     .unwrap();
                     let next = law
-                        .conducting_evaporating_liquid_candidate(
+                        .radiative_conducting_evaporating_liquid_candidate(
                             liquid,
                             &gas,
                             &surfaces,
@@ -61,6 +72,7 @@ fn g1_reactive_phase_and_full_conduction_match_the_original_owners_on_one_clock(
                             &[contact],
                             &[],
                             &exposed,
+                            &radiation,
                             joint_controls(),
                             thermal_controls(),
                             maximum_density_excursion,
@@ -98,6 +110,8 @@ fn g1_reactive_phase_and_full_conduction_match_the_original_owners_on_one_clock(
                     assert_ne!(thermal.bodies.as_ref().unwrap().heat_from_gas_j, 0.0);
                     let radiant_supply = thermal.body_radiation.as_ref().unwrap().heat_to_solids_j;
                     assert!(radiant_supply > 0.0);
+                    let liquid_radiation = thermal.radiation.as_ref().unwrap().heat_to_liquid_j;
+                    assert!(liquid_radiation > 0.0);
                     assert_eq!(
                         report.phase.thermal_gas_temperature_k[1],
                         next.gas().state().state().temperature,
@@ -116,7 +130,7 @@ fn g1_reactive_phase_and_full_conduction_match_the_original_owners_on_one_clock(
 
                     // Independently close the whole original inventory: gas/liquid
                     // and wall/liquid heat are internal. Only the authored cell
-                    // source and the wall's prescribed radiation enter this case.
+                    // source and both prescribed radiative boundaries enter this case.
                     let dm = next.liquid().flow().ledger_mass_kg().unwrap()
                         - liquid.flow().ledger_mass_kg().unwrap();
                     let dh = next.liquid().total_enthalpy_j().unwrap() - original_h;
@@ -131,7 +145,7 @@ fn g1_reactive_phase_and_full_conduction_match_the_original_owners_on_one_clock(
                     );
                     near(
                         dh + binding.liquid_enthalpy_offset_j_kg * dm + du + dw,
-                        heat[0].energy_j + radiant_supply,
+                        heat[0].energy_j + radiant_supply + liquid_radiation,
                         reactive_controls().energy_tolerance_j,
                     );
                     let volatile = report

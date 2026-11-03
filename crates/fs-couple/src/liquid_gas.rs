@@ -19,7 +19,7 @@ use fs_lbm::material::free_surface::enthalpy::{
     conduction::{
         FreeSurfaceBodyContact, FreeSurfaceBodyInterface, FreeSurfaceConductionControls,
         FreeSurfaceConductionFace, FreeSurfaceGasFace, FreeSurfaceInterfaceFace,
-        FreeSurfaceInterfaceSolve, FreeSurfaceThermalBody,
+        FreeSurfaceInterfaceSolve, FreeSurfaceRadiationFace, FreeSurfaceThermalBody,
     },
     viscous::FreeSurfaceViscousConductionReport,
 };
@@ -168,28 +168,19 @@ impl GasReaction {
         controls: ReactiveLiquidGasSolve,
         gate: &CancelGate,
     ) -> Result<ReactiveLiquidGasCandidate<'s, 'm, 'b>, ReactiveLiquidGasError> {
-        self.liquid_boundary_candidate(
+        self.radiative_liquid_candidate(
             liquid,
             gas,
             bodies,
-            exposed.len(),
+            faces,
+            heat,
+            contacts,
+            interfaces,
+            exposed,
+            &[],
+            None,
             controls,
             gate,
-            |next_liquid, next_gas, next_bodies| {
-                next_liquid.step_with_finite_gas_environment(
-                    faces,
-                    heat,
-                    controls.thermal,
-                    next_bodies,
-                    contacts,
-                    interfaces,
-                    next_gas,
-                    exposed,
-                    controls.reaction.gas,
-                    controls.with_viscous_heating,
-                    gate,
-                )
-            },
         )
     }
 
@@ -222,15 +213,57 @@ impl GasReaction {
         controls: ReactiveLiquidGasSolve,
         gate: &CancelGate,
     ) -> Result<ReactiveLiquidGasCandidate<'s, 'm, 'b>, ReactiveLiquidGasError> {
+        self.radiative_liquid_candidate(
+            liquid,
+            gas,
+            bodies,
+            faces,
+            heat,
+            contacts,
+            interfaces,
+            exposed,
+            &[],
+            Some(maximum_density_excursion),
+            controls,
+            gate,
+        )
+    }
+
+    /// React the same finite atmosphere and include the original cell-temperature
+    /// liquid radiation on its native thermal/flow timeline.
+    ///
+    /// Gas-film exchange is internal; prescribed liquid and wall radiation enter
+    /// the complete external supply once. The caller resolves the thermal boundary
+    /// layer or justifies the existing cell-temperature gray-surface approximation.
+    /// This does not solve a distinct interface temperature or infer emissivity.
+    /// Optional pressure uses the post-thermal gas EOS and retains the original
+    /// fixed-volume, stationary-geometry and pressure-reference restrictions.
+    /// Chemical, source and thermal failures discard all original owners together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn radiative_liquid_candidate<'s, 'm, 'b>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &IsochoricGasParcel,
+        bodies: &[FreeSurfaceThermalBody<'b>],
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        exposed: &[FreeSurfaceGasFace],
+        radiation: &[FreeSurfaceRadiationFace],
+        maximum_density_excursion: Option<f64>,
+        controls: ReactiveLiquidGasSolve,
+        gate: &CancelGate,
+    ) -> Result<ReactiveLiquidGasCandidate<'s, 'm, 'b>, ReactiveLiquidGasError> {
         self.liquid_boundary_candidate(
             liquid,
             gas,
             bodies,
-            exposed.len(),
+            exposed.len().max(radiation.len()),
             controls,
             gate,
             |next_liquid, next_gas, next_bodies| {
-                next_liquid.step_with_pressurized_finite_gas_environment(
+                next_liquid.step_with_radiative_finite_gas_environment(
                     faces,
                     heat,
                     controls.thermal,
@@ -239,6 +272,7 @@ impl GasReaction {
                     interfaces,
                     next_gas,
                     exposed,
+                    radiation,
                     controls.reaction.gas,
                     maximum_density_excursion,
                     controls.with_viscous_heating,
@@ -436,7 +470,13 @@ impl GasReaction {
             (None, Some(surface)) => surface.heat_from_gas_j,
             // A finite wall may be the gas's only thermal connection. Its gas
             // credit is already included in wall storage, not liquid external heat.
-            (None, None) if thermal.conduction.body_environment.is_some() => 0.0,
+            // A radiation-only liquid boundary supplies no heat from the gas.
+            (None, None)
+                if thermal.conduction.body_environment.is_some()
+                    || thermal.conduction.radiation.is_some() =>
+            {
+                0.0
+            }
             _ => {
                 return Err(ReactiveLiquidGasError::Invalid(
                     "finite atmosphere requires an original liquid or solid boundary heat account",

@@ -2452,6 +2452,51 @@ accounts, a real attached electrical core, post-thermal pressure, original-owner
 agreement, independent whole inventories, one clock and late refusal/retry.
 They require native execution before any numerical validation claim.
 
+### Liquid radiation on complete reactive and phase timelines
+
+`advance_liquid_surfaces_with_gas_and_radiative_conduction` passes the original
+resolved-cell-temperature liquid radiation law to the same finite-atmosphere
+thermal owner. `GasReaction::radiative_liquid_candidate` and
+`radiative_conducting_evaporating_liquid_candidate` retain that boundary through
+the original chemical and phase accounts. The original nonradiative entries
+share the implementation with an empty radiation slice.
+
+Liquid and wall radiation are external supply exactly once; finite gas films
+and solid/liquid contacts stay internal. A radiation-only liquid boundary can
+leave the gas's thermal storage unchanged. Original emissivity selection,
+surface geometry, combined thermal stability and optional endpoint pressure
+remain authoritative. The caller must resolve the liquid thermal boundary
+layer or justify cell temperature as its radiating-surface temperature.
+This does not supply the distinct interface-temperature/latent-power equation
+needed for solved-interface phase exchange; attached solved-surface and wetting
+histories retain their existing refusal.
+
+### Original gas plumbing on the native phase/thermal clock
+
+`evaporation::transport::advance_liquid_surfaces_with_gas_transport` first
+advances the original finite-gas transport snapshot over the liquid's retained
+timestep. It passes one explicitly nominated atmosphere node's exact transported
+parcel into the original phase and radiative-conduction transaction. The complete
+gas map, native liquid, finite walls, source catalog and both original reports
+publish together. Idle gas nodes remain in the result.
+
+Every original transport path shares its original gross-withdrawal allowance.
+The final gas map must pass the original endpoint driving-force and source
+checks after phase and heat exchange; an active pressure or permeation reversal
+rejects the entire candidate. Original source-relative transport residuals and
+absolute local defects join the complete phase/thermal budgets. Transported
+enthalpy, phase latent heat and internal film/contact heat are not reapplied
+as external sources.
+
+This is first-order transport/phase/conduction/flow splitting. Arrivals can
+participate in the later phase stage but cannot fund another outgoing path
+within the same original transport snapshot. It adds no simultaneous
+phase/plumbing solve, jet momentum, spatial gas CFD, compression work or
+whole-system entropy theorem. Regression sources cover real-nozzle phase
+feedback, independent network/liquid/wall inventories, actual final-pressure
+refusal, empty-path equivalence, retained idle nodes and deterministic retry.
+Native execution remains necessary before numerical validation claims.
+
 ## Assembled shell adhesive dissipation
 
 `shear_shell::assembly::MaterialShellAssembly::reduce` projects the original

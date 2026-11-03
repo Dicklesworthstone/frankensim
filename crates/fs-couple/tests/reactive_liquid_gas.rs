@@ -9,7 +9,10 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_lbm::d3q19::freesurface3::ContactModel3;
 use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceCellHeat, FreeSurfaceEnthalpyControls, MaterialFreeSurfaceEnthalpy3,
-    conduction::{FreeSurfaceConductionControls, FreeSurfaceGasFace},
+    conduction::{
+        FreeSurfaceConductionControls, FreeSurfaceEmissivity, FreeSurfaceGasFace,
+        FreeSurfaceRadiationFace,
+    },
 };
 use fs_lbm::material::free_surface::{
     MaterialFreeSurfaceDomain3, MaterialFreeSurfaceInitialCell3, plan_free_surface_from_material,
@@ -843,5 +846,222 @@ fn g3_native_thermal_exchange_keeps_its_original_energy_increment_under_formatio
             near(shifted.3, base.3, 1e-12);
         }
         assert_eq!(liquid.accepted_steps(), 0);
+    });
+}
+
+#[test]
+fn g1_reacting_finite_gas_and_liquid_radiation_match_independent_heat_storage() {
+    with_liquid(false, |liquid, gate| {
+        for with_film in [false, true] {
+            let law = reaction(500.0, 75.0, 2.0);
+            let initial = gas(&law);
+            let original_h = liquid.total_enthalpy_j().unwrap();
+            let original_bits = liquid.flow().lattice().grid().state_bits();
+            let exposed = if with_film { vec![face()] } else { vec![] };
+            let radiation = [FreeSurfaceRadiationFace {
+                liquid: EXPOSED,
+                gas: [4, 3, 3],
+                area_m2: 1e-6,
+                emissivity: FreeSurfaceEmissivity::Prescribed(0.6),
+                surroundings_k: 650.0,
+            }];
+            let chemical = law
+                .parcel_candidate(
+                    &ClosedGasParcel::from_isochoric(initial.clone()),
+                    DT,
+                    controls().reaction,
+                    || false,
+                )
+                .unwrap();
+            let mut direct_liquid = liquid.clone();
+            let mut direct_gas = chemical.gas().clone().into_isochoric();
+            direct_liquid
+                .step_with_radiative_finite_gas_environment(
+                    &[],
+                    &[],
+                    controls().thermal,
+                    &mut [],
+                    &[],
+                    &[],
+                    &mut direct_gas,
+                    &exposed,
+                    &radiation,
+                    controls().reaction.gas,
+                    None,
+                    false,
+                    gate,
+                )
+                .unwrap();
+            let next = law
+                .radiative_liquid_candidate(
+                    liquid,
+                    &initial,
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    &exposed,
+                    &radiation,
+                    None,
+                    controls(),
+                    gate,
+                )
+                .unwrap();
+            assert_eq!(&next.report().reaction, chemical.step());
+            assert_eq!(next.gas(), &direct_gas);
+            assert_eq!(
+                next.liquid().flow().lattice().grid().state_bits(),
+                direct_liquid.flow().lattice().grid().state_bits()
+            );
+            assert_eq!(
+                next.liquid().total_enthalpy_j().unwrap(),
+                direct_liquid.total_enthalpy_j().unwrap()
+            );
+
+            // Independent original constant-cp chemistry and explicit thermal
+            // substep equations. No native heat receipt supplies this reference.
+            let extent = DT * VOLUME * 500.0;
+            let amount = 100000.0 * VOLUME / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * 400.0);
+            let gas_capacity = 2.5 * 100000.0 * VOLUME / 400.0;
+            let conductivity = 0.03 * (1.0 + extent / amount);
+            let conductance = if with_film {
+                1e-6 / (0.0005 / 0.5 + 0.0005 / conductivity)
+            } else {
+                0.0
+            };
+            let (mut tl, mut tg) = (400.0_f64, 400.0 + 75.0 * extent / gas_capacity);
+            let mut radiated = 0.0;
+            for _ in 0..4 {
+                let qg = DT / 4.0 * conductance * (tg - tl);
+                let qr = DT / 4.0
+                    * 0.6
+                    * fs_lbm::conjugate::STEFAN_BOLTZMANN
+                    * 1e-6
+                    * (650.0_f64.powi(4) - tl.powi(4));
+                tl += (qg + qr) / 0.002;
+                tg -= qg / gas_capacity;
+                radiated += qr;
+            }
+            let report = next.report();
+            let thermal = &report.thermal.conduction;
+            let radiant = thermal.radiation.as_ref().unwrap();
+            assert_eq!(thermal.thermal.substeps, 4);
+            near(radiant.heat_to_liquid_j, radiated, 1e-12);
+            near(radiant.thermal_endpoint[0].liquid_temperature_k, tl, 1e-9);
+            near(next.gas().state().state().temperature, tg, 1e-9);
+            near(report.supplied_thermal_energy_j, radiated, 1e-12);
+            let actual_gas_change = next.gas().mass_kg()
+                * next.gas().state().specific_internal_energy_j_kg()
+                - initial.mass_kg() * initial.state().specific_internal_energy_j_kg();
+            near(
+                next.liquid().total_enthalpy_j().unwrap() - original_h + actual_gas_change,
+                radiated,
+                controls().total_energy_tolerance_j,
+            );
+            if !with_film {
+                assert!(thermal.environment.is_none());
+                assert_eq!(next.gas(), &chemical.gas().clone().into_isochoric());
+                assert_eq!(
+                    thermal
+                        .finite_gas
+                        .as_ref()
+                        .unwrap()
+                        .internal_energy_change_j,
+                    0.0
+                );
+            }
+            assert_eq!(next.liquid().accepted_steps(), 1);
+            assert_eq!(next.liquid().physical_time_s(), DT);
+            assert_eq!(liquid.accepted_steps(), 0);
+            assert_eq!(liquid.flow().lattice().grid().state_bits(), original_bits);
+            assert_eq!(liquid.total_enthalpy_j().unwrap(), original_h);
+        }
+    });
+}
+
+#[test]
+fn g3_reactive_cell_radiation_zero_limit_and_source_refusal_preserve_original_owners() {
+    with_liquid(false, |liquid, gate| {
+        let law = reaction(500.0, 75.0, 2.0);
+        let initial = gas(&law);
+        let initial_bits = liquid.flow().lattice().grid().state_bits();
+        let initial_h = liquid.total_enthalpy_j().unwrap();
+        let ordinary = law
+            .liquid_candidate(
+                liquid,
+                &initial,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[face()],
+                controls(),
+                gate,
+            )
+            .unwrap();
+        let patch = FreeSurfaceRadiationFace {
+            liquid: EXPOSED,
+            gas: [4, 3, 3],
+            area_m2: 1e-6,
+            emissivity: FreeSurfaceEmissivity::Prescribed(0.0),
+            surroundings_k: 650.0,
+        };
+        let run = |radiation: &[FreeSurfaceRadiationFace]| {
+            law.radiative_liquid_candidate(
+                liquid,
+                &initial,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[face()],
+                radiation,
+                None,
+                controls(),
+                gate,
+            )
+        };
+        let zero = run(&[patch]).unwrap();
+        assert_eq!(zero.gas(), ordinary.gas());
+        assert_eq!(
+            zero.liquid().flow().lattice().grid().state_bits(),
+            ordinary.liquid().flow().lattice().grid().state_bits()
+        );
+        assert_eq!(
+            zero.liquid().total_enthalpy_j().unwrap(),
+            ordinary.liquid().total_enthalpy_j().unwrap()
+        );
+        assert_eq!(
+            zero.report()
+                .thermal
+                .conduction
+                .radiation
+                .as_ref()
+                .unwrap()
+                .heat_to_liquid_j,
+            0.0
+        );
+        // This fixture has no authored emissivity claim. Chemistry may produce
+        // a private candidate, but the original radiative source owner refuses.
+        let unsupported = FreeSurfaceRadiationFace {
+            emissivity: FreeSurfaceEmissivity::Material,
+            ..patch
+        };
+        assert!(matches!(
+            run(&[unsupported]),
+            Err(ReactiveLiquidGasError::Liquid(_))
+        ));
+        assert_eq!(liquid.accepted_steps(), 0);
+        assert_eq!(liquid.flow().lattice().grid().state_bits(), initial_bits);
+        assert_eq!(liquid.total_enthalpy_j().unwrap(), initial_h);
+        let repeated = run(&[patch]).unwrap();
+        assert_eq!(repeated.gas(), zero.gas());
+        assert_eq!(
+            repeated.liquid().total_enthalpy_j().unwrap(),
+            zero.liquid().total_enthalpy_j().unwrap()
+        );
     });
 }

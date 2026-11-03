@@ -828,15 +828,30 @@ receipts. It does not subtract large absolute NASA9 energies. Changing a common
 formation-energy reference therefore cannot reject an otherwise admitted liquid,
 wall and atmosphere step or alter its heat, pressure or native liquid motion.
 
-This retains the existing pure-liquid, neglected-capillarity and first-order
-thermal/flow approximation. The caller supplies currently exposed geometry at
-each interval; the film is held during the thermal stage. Gas volume is an
-explicit fixed-volume approximation, with no gas momentum, pressure traction,
-evaporation, reaction, radiation or phase-density handoff. Five focused
+The caller supplies currently exposed geometry at each interval; the film is
+held during the thermal stage. Gas volume remains explicitly fixed. These
+thermal entries do not themselves perform reaction, phase transfer, gas-volume
+work or a phase-density handoff. Original attached surface/contact-history
+admission and first-order thermal/flow limits remain binding. Five focused
 synthetic regressions cover independent nonlinear NASA energy/pressure limits,
 data-driven native population changes, finite wall/interface/molecular heat,
 summed small-gas-capacity timestep admission, and late source/cancellation
 rollback. Their addition does not establish executed native validation.
+
+`step_with_radiative_finite_gas_environment` connects the existing liquid
+radiation input to this same finite-atmosphere kernel. All old finite-gas
+entries delegate with empty radiation. Radiation uses the original factored
+fourth-power law, source or prescribed emissivity, exposed geometry and combined
+thermal timestep bound. It is external supply to liquid; a gas film's opposite
+heat remains internal. Radiation-only exposure is admitted without a gas heat
+debit. The original finite-gas caloric account is still present.
+
+An optional density-excursion allowance selects the existing post-thermal gas
+pressure load, retaining its fixed reference and stationary geometry checks.
+The accepted EOS, liquid, finite solids and reports publish atomically after
+one native flow step. This is the existing cell-temperature gray-radiation
+approximation, requiring resolved boundary layers or justified lumped cells;
+it does not add solved-interface latent feedback or relax wetting restrictions.
 
 ## Public types and semantics
 
