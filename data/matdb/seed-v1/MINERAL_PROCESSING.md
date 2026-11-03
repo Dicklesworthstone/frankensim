@@ -167,6 +167,17 @@ reaction**, or −117360.5 J per mole of magnetite consumed. Fe2O3 denotes the
 hematite endpoint. These are standard chemical-energy changes; sensible heat,
 phase stability, conversion, kinetics and kiln fuel duty need further inputs.
 
+### Copper-oxide acid leaching
+
+The USGS tenorite profile adds six claims and completes
+`CuO(s) + 2 H+(aq) -> Cu[2+](aq) + H2O(l)` with the existing USGS copper-ion,
+proton and water sources. `MineralReaction::CupricOxideAcidLeach` supplies the exact
+conserved endpoint; `mineral_processing --reaction cupric-oxide-acid-leach`
+reports its four-pack balance. The source heat is −64800 J/mol extent and
+the direct formation-Gibbs route gives −43700 J/mol. See the
+[copper-leaching source guide](MINING_COPPER_LEACHING.md) for source values,
+pack commands, inventory limits and the distinct entropy-based Gibbs route.
+
 ### Copper oxide reduction and oxidation
 
 Four more profiles use the same typed JANAF standard-state convention. Each
@@ -396,6 +407,7 @@ the availability bound does not predict reaction progress or a commercial dose.
 | `MagnetiteOxidationToHematite` | Consumes 0.25 mol O2 and forms 1.5 mol hematite per mol magnetite |
 | `CuprousOxideOxidation` | Consumes 0.5 mol O2 and forms two mol CuO per mol Cu2O |
 | `CupricOxideCarbonMonoxideReduction` | One mol CO per mol CuO, forming copper and CO2 |
+| `CupricOxideAcidLeach` | Two mol H+ per mol tenorite CuO, forming one mol Cu2+ and one mol water |
 | `CuprousOxideCarbonMonoxideReduction` | One mol CO per mol Cu2O, forming two mol copper and one mol CO2 |
 | `PyriteRoastingToHematite` | Consumes 2.75 mol O2 and forms 0.5 mol hematite and two mol SO2 per mol pyrite |
 | `SulfurDioxideOxidation` | Consumes 0.5 mol O2 and forms one mol SO3 per mol SO2 |

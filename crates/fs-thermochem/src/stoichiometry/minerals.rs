@@ -41,6 +41,9 @@
 //! Cu(cr), CO(g), CO2(g) and O2(g) endpoints from the same JANAF reference.
 //! A carbon-monoxide reduction equation does not select an industrial reductant
 //! mixture, operating atmosphere, temperature, rate or metal recovery.
+//! CuO acid leaching instead retains tenorite, H+(aq), Cu(II)(aq) and liquid
+//! water from USGS Bulletin 2131, printed pages 6, 7 and 16. It is a declared
+//! conserved ionic endpoint; the material references do not supply a rate.
 //! Dry pyrite roasting and sulfur-to-acid balances use the explicit JANAF
 //! Fe-028, Fe-030, O-029, O-034, O-058, H-063 and H-075 phases. These are
 //! atom-balanced aggregate endpoints, not elementary reaction mechanisms.
@@ -113,6 +116,9 @@ pub enum MineralReaction {
     CuprousOxideOxidation,
     /// CuO(s) + CO(g) -> Cu(s) + CO2(g).
     CupricOxideCarbonMonoxideReduction,
+    /// CuO(s) + 2 H+(aq) -> Cu2+(aq) + H2O(l).
+    /// Tenorite acid-leaching endpoint; two proton equivalents per copper.
+    CupricOxideAcidLeach,
     /// Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g).
     CuprousOxideCarbonMonoxideReduction,
     /// 4 FeS2(s) + 11 O2(g) -> 2 Fe2O3(s) + 8 SO2(g).
@@ -353,6 +359,16 @@ impl MineralReaction {
                     ("CO(g)", &[0, 1, 1], 0, -1),
                     ("Cu(s)", &[1, 0, 0], 0, 1),
                     ("CO2(g)", &[0, 1, 2], 0, 1),
+                ],
+            ),
+            Self::CupricOxideAcidLeach => (
+                "cupric-oxide-acid-leach",
+                &["Cu", "H", "O"],
+                &[
+                    ("CuO(s)", &[1, 0, 1], 0, -1),
+                    ("H+(aq)", &[0, 1, 0], 1, -2),
+                    ("Cu[2+](aq)", &[1, 0, 0], 2, 1),
+                    ("H2O(l)", &[0, 2, 1], 0, 1),
                 ],
             ),
             Self::CuprousOxideCarbonMonoxideReduction => (

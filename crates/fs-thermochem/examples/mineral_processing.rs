@@ -56,13 +56,14 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 19] = [
+const REACTIONS: [&str; 20] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
     "magnetite-oxidation",
     "cuprous-oxide-oxidation",
     "cupric-oxide-reduction",
+    "cupric-oxide-acid-leach",
     "cuprous-oxide-reduction",
     "copper-electrowinning",
     "pyrite-roasting",
@@ -180,6 +181,24 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-gas",
             ],
             equation: "CuO(s) + CO(g) -> Cu(s) + CO2(g)",
+        },
+        "cupric-oxide-acid-leach" => ReactionCase {
+            reaction: MineralReaction::CupricOxideAcidLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "copper-ii-oxide-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "copper-ii-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+            ],
+            species: &["CuO(s)", "H+(aq)", "Cu[2+](aq)", "H2O(l)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+            ],
+            equation: "CuO(tenorite) + 2 H+(aq) -> Cu[2+](aq) + H2O(l), dissolved copper(II) endpoint",
         },
         "cuprous-oxide-reduction" => ReactionCase {
             reaction: MineralReaction::CuprousOxideCarbonMonoxideReduction,
@@ -511,6 +530,13 @@ fn reference_point(
     };
     for axis in state_axes {
         point = point.with_quantity(*axis, QuantitySpec::dimensional(Dims::NONE), 1.0)?;
+    }
+    if pack_id == "copper-ii-oxide-solid-usgs-b2131-thermochemistry" {
+        point = point.with_quantity(
+            "source-phase-tenorite",
+            QuantitySpec::dimensional(Dims::NONE),
+            1.0,
+        )?;
     }
     if pack_id == "calcite-solid-usgs-b2131-thermochemistry" {
         point = point.with_quantity(
