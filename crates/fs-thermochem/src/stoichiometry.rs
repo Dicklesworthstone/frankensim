@@ -10,6 +10,8 @@ pub mod minerals;
 pub mod electrolysis;
 /// Shared-inventory stages of independently admitted, exactly conserved reactions.
 pub mod network;
+/// Mixed-phase standard Gibbs energy and caller-supplied activity diagnostics.
+pub mod thermodynamics;
 
 use std::collections::BTreeMap;
 
@@ -413,16 +415,7 @@ impl ConservedReaction {
                     "formation reference states differ",
                 ));
             }
-            let answer = source.pack.claims().query_typed(
-                &PropertyKey::with_quantity(
-                    "standard-molar-formation-enthalpy",
-                    QuantitySpec::dimensional(Dims([2, 1, -2, 0, 0, -1])),
-                ),
-                source.at,
-                SelectionPolicy::SingleClaimOnly,
-            )?;
-            source.pack.claims().verify_receipt(&answer.receipt)?;
-            source.validate_selected(&answer)?;
+            let answer = source.select_formation_energy("standard-molar-formation-enthalpy")?;
             let value = product(
                 term.coefficient as f64,
                 answer.evidence.value.value,
@@ -476,6 +469,23 @@ pub struct FormationEnthalpySource<'a> {
 }
 
 impl FormationEnthalpySource<'_> {
+    // Both formation-energy consumers share exactly the same source selection
+    // and standard-state checks. This helper does not reinterpret the property.
+    fn select_formation_energy(&self, property: &str) -> Result<MaterialAnswer> {
+        self.validate_reference()?;
+        let answer = self.pack.claims().query_typed(
+            &PropertyKey::with_quantity(
+                property,
+                QuantitySpec::dimensional(Dims([2, 1, -2, 0, 0, -1])),
+            ),
+            self.at,
+            SelectionPolicy::SingleClaimOnly,
+        )?;
+        self.pack.claims().verify_receipt(&answer.receipt)?;
+        self.validate_selected(&answer)?;
+        Ok(answer)
+    }
+
     fn validate_reference(&self) -> Result<()> {
         use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
         for (axis, kind) in [

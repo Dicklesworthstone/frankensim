@@ -82,6 +82,38 @@ predict reaction rates/recovery/current efficiency, or supply heat of dilution.
 Independently rounded source molar masses need not sum bit-exactly even when
 elemental conservation is exact; they are not a new mass-conservation proof.
 
+### Mixed-phase formation Gibbs energy and explicit activities
+
+`stoichiometry::thermodynamics` evaluates an already conserved equation from
+complete `standard-molar-formation-gibbs-energy` claims in J/mol. It reuses the
+enthalpy source selection, typed reference-state checks and receipt verifier;
+all active species must share temperature, reference pressure and elemental
+reference. Aqueous claims must themselves fix the hypothetical unit-activity,
+infinite-dilution state. Charged participants additionally require the H+(aq)
+zero convention, identified from the exact charge matrix rather than a parsed
+species label. Non-aqueous sources require neutral pure-species references.
+Formation enthalpy minus absolute species entropy is never substituted for a
+missing formation-Gibbs claim.
+
+`standard_gibbs_change` returns the canonical source sum Delta_r G°, finite
+ln(K°) = -Delta_r G°/(R T), and direct K° only when positive and representable.
+The original sources, their uncertainty and their receipts remain attached.
+`at_activities` requires one finite positive dimensionless activity for every
+active species, including solvent and solid phases, relative to those source
+states. Activities greater than one are valid inputs; absent activities and
+zero-activity logarithmic limits refuse. Fixed-order compensated logarithmic
+sums evaluate ln(Q) without forming an overflowing quotient. The result
+Delta_r G = R T ln(Q/K°) is a local dG/dxi diagnostic; forward affinity is its
+negative. It is not a finite-extent total free-energy change, an equilibrium
+composition solve, a phase-selection certificate or a kinetic prediction.
+No concentrations, activity coefficients, pH or ideal-gas EOS are inferred.
+
+G0/G3 regressions cover independent Decimal known answers, reaction reversal
+and scaling, conserved reference shifts, source/activity permutation,
+log-only range limits, retained receipts and missing/mismatched reference
+conditions. The formulas follow IUPAC S05915 (standard equilibrium constant)
+and A00115 (relative activity); numerical checks do not calibrate a plant.
+
 ### Shared finite reagent inventories and source-bound heat
 
 `stoichiometry::network::ReactionNetwork` joins admitted equations while
