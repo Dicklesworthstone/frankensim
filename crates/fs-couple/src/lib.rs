@@ -90,6 +90,8 @@ pub mod stokes_motion;
 pub mod liquid_gas;
 /// Conservative matter and momentum transfer between original finite liquid owners.
 pub mod liquid_transfer;
+/// Reciprocal molecular streams on original finite gas inventories and bulk momenta.
+pub mod molecular_exchange;
 /// Finite gas and rigid-wall molecular shear with original caloric feedback.
 pub mod molecular_shear;
 pub mod material_assembly;

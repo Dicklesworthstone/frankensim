@@ -26523,3 +26523,43 @@ oracle and complete uniform-container energy balance; simultaneous open pressure
 and tangential viscous recoil; and budget/datum/bounds/final-cancellation rollback.
 New source and tests passed pinned Rustfmt parsing. Native compilation and test
 execution remain unverified in the delivery environment.
+
+### Conservative molecular exchange between two finite moving gases
+
+`molecular_exchange::step_candidate` joins two ORIGINAL `MovingGasParcel`
+owners through one explicitly shared thin aperture. Both gas inventories,
+compositions, temperatures and bulk momenta evolve. The common material sampler
+supplies two distinct drifting-Maxwellian streams; each sampled species mass,
+full conditional vector impulse and complete crossing energy is used with
+opposite signs on the two owners. Neither side is an infinite prescribed bath.
+
+Both donors' gross original-species withdrawals are admitted before either
+caloric solve. The retained small-drift net mass has its own gross-rounding
+check and supplies the common frame transform once. Each original moving-gas
+boundary owner uses its actual final mass and represented momentum to remove
+the corresponding kinetic change before ONE original caloric reconstruction.
+There is no second EOS, fitted heat capacity or added receiver-mixing heat.
+
+Joint admission checks actual total and individual-species mass changes,
+componentwise momentum, reciprocal original-reference energy and the combined
+internal-plus-bulk energy account. The aperture-frame and laboratory-frame
+energy accounts remain distinct, including the kinetic transform of actual
+mass/momentum representation residuals. Tolerances scale physical exchange and
+relative caloric work, not absolute formation energies or unrelated large
+momentum components. Both final source/transmission and relative-speed domains
+are admitted without resampling. Terminal cancellation publishes neither gas.
+
+This is a first-order homogeneous fixed-volume gas/control-volume exchange;
+time refinement resamples changing gas states. A shared interface does not
+infer separated-vessel flight, moving container geometry, remaining-wall
+pressure/support forces or a resolved flow field. Equal counterflow retains
+normal momentum transfer; the corresponding finite bulk kinetic change is
+funded by the original internal energies. Zero geometric area leaves inactive
+source distributions and aperture velocity unqueried.
+
+Six genuine-source test groups specify independent finite mass/pressure moments,
+zero-net-mass stress, tangential kinetic loss, common gas/aperture boosts and
+formation-reference invariance, shared gross withdrawal and newly arriving
+species, and atomic source/drift/cancellation refusal. Scoped Rustfmt parsing
+and direct API/source review passed. Native compilation and execution remain
+unverified because the required sibling manifests are unavailable.
