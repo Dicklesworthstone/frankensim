@@ -47,6 +47,10 @@ pub mod mis;
 /// Finite-area next-event sampling and complementary native emitter hits.
 pub mod camera;
 
+/// Original molecular camera paths with finite-area surface and volume lighting.
+#[cfg(feature = "volumes")]
+pub mod participating;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum AreaEmitterError {
     InvalidEmitter { object_id: u64 },

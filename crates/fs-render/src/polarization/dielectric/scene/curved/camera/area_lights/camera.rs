@@ -44,7 +44,7 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::images::
 };
 use crate::polarization::dielectric::transport::{PolarizationFrame, PolarizedBeam};
 use fs_exec::Cx;
-use fs_geom::Vec3;
+use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 pub const MAX_AREA_LIGHT_BINDINGS: usize = 64;
@@ -63,6 +63,30 @@ pub struct AreaLightBinding<'a, 's, 'm> {
     pub seeds: &'a [BundleImageSeed<'a>],
     pub image_options: BundleImageOptions,
     pub position_tolerance_m: f64,
+}
+
+/// Shared original-source proposal, independent of the receiving vertex kind.
+#[derive(Clone, Copy)]
+pub(super) struct SourceBinding<'a, 's, 'm> {
+    pub(super) source: &'a CurvedAreaEmitter<'s, 'm, 's>,
+    pub(super) source_side: BoundarySide,
+    pub(super) initial_medium: usize,
+    pub(super) source_transverse_axis: Vec3,
+    pub(super) seeds: &'a [BundleImageSeed<'a>],
+    pub(super) image_options: BundleImageOptions,
+    pub(super) position_tolerance_m: f64,
+}
+
+impl<'a, 's, 'm> AreaLightBinding<'a, 's, 'm> {
+    pub(super) fn source_binding(self) -> SourceBinding<'a, 's, 'm> {
+        SourceBinding {
+            source: self.source, source_side: self.source_side,
+            initial_medium: self.initial_medium,
+            source_transverse_axis: self.source_transverse_axis,
+            seeds: self.seeds, image_options: self.image_options,
+            position_tolerance_m: self.position_tolerance_m,
+        }
+    }
 }
 
 /// Camera limits and cumulative source work across all its diffuse encounters
@@ -103,6 +127,13 @@ pub enum AreaLightCameraError {
     Images { binding: usize, error: BundleImageError },
     PathMismatch { binding: usize },
     AmbiguousMembership { binding: usize },
+    #[cfg(feature = "volumes")]
+    MolecularPhase {
+        binding: usize,
+        error: crate::volumes::transport::scattering::polarized::PolarizedScatteringError,
+    },
+    #[cfg(feature = "volumes")]
+    SourceTrackingLimit,
     NumericalRange,
 }
 
@@ -122,9 +153,9 @@ impl core::error::Error for AreaLightCameraError {}
 /// Allocate once per worker, then reuse across rays and spectral lanes. The
 /// retained history is only the current diffuse-to-emitter delta chain.
 pub struct AreaLightCameraWorkspace {
-    images: BundleImageWorkspace,
-    history: Vec<DeltaStep>,
-    reverse_events: Vec<DielectricEvent>,
+    pub(super) images: BundleImageWorkspace,
+    pub(super) history: Vec<DeltaStep>,
+    pub(super) reverse_events: Vec<DielectricEvent>,
     max_delta_events: usize,
 }
 
@@ -150,23 +181,23 @@ impl AreaLightCameraWorkspace {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Work {
-    samples: u32,
-    images: u32,
-    traces: u32,
-    fields: u64,
-    geometry: u64,
+pub(super) struct Work {
+    pub(super) samples: u32,
+    pub(super) images: u32,
+    pub(super) traces: u32,
+    pub(super) fields: u64,
+    pub(super) geometry: u64,
 }
 
 impl Work {
-    fn add(&mut self, traces: u32, fields: u64, geometry: u64) -> Result<(), AreaLightCameraError> {
+    pub(super) fn add(&mut self, traces: u32, fields: u64, geometry: u64) -> Result<(), AreaLightCameraError> {
         self.traces = self.traces.checked_add(traces).ok_or(AreaLightCameraError::NumericalRange)?;
         self.fields = self.fields.checked_add(fields).ok_or(AreaLightCameraError::NumericalRange)?;
         self.geometry = self.geometry.checked_add(geometry).ok_or(AreaLightCameraError::NumericalRange)?;
         Ok(())
     }
 
-    fn remaining(self, settings: AreaLightCameraSettings) -> Result<u32, AreaLightCameraError> {
+    pub(super) fn remaining(self, settings: AreaLightCameraSettings) -> Result<u32, AreaLightCameraError> {
         settings.max_trace_evaluations.checked_sub(self.traces)
             .filter(|remaining| *remaining > 0)
             .ok_or(AreaLightCameraError::TraceEvaluationLimit)
@@ -177,9 +208,9 @@ impl Work {
 /// Image counts describe NEE images; work also includes reverse membership.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AreaLightCameraSample {
-    radiance: CameraRadianceSample,
-    area_radiance_w_m2_sr_nm: f64,
-    work: Work,
+    pub(super) radiance: CameraRadianceSample,
+    pub(super) area_radiance_w_m2_sr_nm: f64,
+    pub(super) work: Work,
 }
 
 impl AreaLightCameraSample {
@@ -196,8 +227,8 @@ impl AreaLightCameraSample {
 /// camera geometry, materials, continuation draws and source spectra stay in
 /// their owners; no replacement scene or per-ray allocation is introduced.
 pub struct CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
-    camera: &'a CurvedCameraScene<'s, 'm>,
-    bindings: &'a [AreaLightBinding<'l, 's, 'm>],
+    pub(super) camera: &'a CurvedCameraScene<'s, 'm>,
+    pub(super) bindings: &'a [AreaLightBinding<'l, 's, 'm>],
 }
 
 impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
@@ -213,25 +244,8 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         for (index, binding) in bindings.iter().enumerate() {
             cx.checkpoint()?;
             let invalid = || AreaLightCameraError::InvalidBinding { index };
-            if !core::ptr::eq(binding.source.scene, camera.scene)
-                || binding.source_side == BoundarySide::OnSurface
-                || (binding.source.emitter.sides() == super::super::EmissionSides::Front
-                    && binding.source_side != BoundarySide::Positive)
-                || binding.seeds.is_empty()
-                || binding.seeds.len() > MAX_BUNDLE_IMAGE_SEEDS
-                || binding.image_options.validate().is_err()
-                || !binding.position_tolerance_m.is_finite()
-                || binding.position_tolerance_m <= 0.0 {
-                return Err(invalid());
-            }
+            validate_source_binding(camera, binding.source_binding(), index)?;
             let source_id = binding.source.emitter.object_id();
-            let source_slot = camera.scene.bindings
-                .binary_search_by_key(&source_id, |entry| entry.object_id)
-                .map_err(|_| invalid())?;
-            if !camera.emitters.get(source_slot).and_then(|entry| *entry)
-                .is_some_and(|emitter| core::ptr::eq(emitter, binding.source.emitter)) {
-                return Err(invalid());
-            }
             let receiver = camera.scene.bindings
                 .binary_search_by_key(&binding.receiver_object_id, |entry| entry.object_id)
                 .map_err(|_| invalid())?;
@@ -242,24 +256,6 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                     Some(SceneMedium::Homogeneous(_) | SceneMedium::Differentiable { .. })) {
                     return Err(invalid());
                 }
-            }
-            let expected_source_medium = match camera.scene.bindings[source_slot].interaction {
-                Interaction::DepolarizingDiffuse { medium, .. }
-                | Interaction::SmoothConductor { medium, .. }
-                | Interaction::RoughConductor { medium, .. }
-                | Interaction::BrushedConductor { medium, .. } => Some(medium),
-                Interaction::Dielectric { outside, inside, .. }
-                | Interaction::CoatedDielectric { outside, inside, .. } => Some(
-                    if binding.source_side == BoundarySide::Positive { outside } else { inside }),
-                Interaction::Opaque => None,
-                Interaction::Detector { .. } => return Err(invalid()),
-            };
-            if expected_source_medium.is_some_and(|medium| medium != binding.initial_medium) {
-                return Err(invalid());
-            }
-            for seed in binding.seeds {
-                PolarizationFrame::try_new(seed.initial_direction, binding.source_transverse_axis)
-                    .map_err(|_| invalid())?;
             }
             for (first, earlier) in bindings[..index].iter().enumerate() {
                 if earlier.source.emitter.object_id() == source_id
@@ -426,7 +422,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_departure(
+    pub(super) fn record_departure(
         &self,
         path: &CurvedPathResult,
         incoming_beam: PolarizedBeam,
@@ -459,9 +455,9 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
             if active_source {
                 let outgoing = path.beam().ray().dir;
                 let normal = face_normal(contact, incoming_beam.ray().dir);
-                state.anchor = Some(DiffuseAnchor {
+                state.anchor = Some(ContinuationAnchor::Diffuse(DiffuseAnchor {
                     contact, medium: path.medium_index(), outgoing, normal, pdf,
-                });
+                }));
             }
             return Ok(());
         }
@@ -498,7 +494,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         Ok(())
     }
 
-    fn emitter_weight(
+    pub(super) fn emitter_weight(
         &self,
         cx: &Cx<'_>,
         path: &CurvedPathResult,
@@ -507,7 +503,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         workspace: &mut AreaLightCameraWorkspace,
         state: &PathState,
     ) -> Result<f64, AreaLightCameraError> {
-        let Some(anchor) = state.anchor else { return Ok(1.0); };
+        let Some(ContinuationAnchor::Diffuse(anchor)) = state.anchor else { return Ok(1.0); };
         let contact = *path.last_contact().ok_or(AreaLightCameraError::NumericalRange)?;
         let source_direction = path.beam().ray().dir.scale(-1.0);
         let cosine = contact.witness.normal.dot(source_direction);
@@ -519,6 +515,81 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                 && binding.source.emitter.object_id() == contact.object_id
                 && binding.source_side == side
         }) else { return Ok(1.0); };
+        emitter_weight_for_source(self.camera, cx, path, settings, work,
+            workspace, state, index, binding.source_binding())
+    }
+}
+
+pub(super) fn validate_source_binding(
+    camera: &CurvedCameraScene<'_, '_>,
+    binding: SourceBinding<'_, '_, '_>,
+    index: usize,
+) -> Result<(), AreaLightCameraError> {
+    let invalid = || AreaLightCameraError::InvalidBinding { index };
+    if !core::ptr::eq(binding.source.scene, camera.scene)
+        || binding.source_side == BoundarySide::OnSurface
+        || (binding.source.emitter.sides() == super::super::EmissionSides::Front
+            && binding.source_side != BoundarySide::Positive)
+        || binding.seeds.is_empty() || binding.seeds.len() > MAX_BUNDLE_IMAGE_SEEDS
+        || binding.image_options.validate().is_err()
+        || !binding.position_tolerance_m.is_finite() || binding.position_tolerance_m <= 0.0
+        || !matches!(camera.scene.media.get(binding.initial_medium),
+            Some(SceneMedium::Homogeneous(_) | SceneMedium::Differentiable { .. })) {
+        return Err(invalid());
+    }
+    let source_id = binding.source.emitter.object_id();
+    let source_slot = camera.scene.bindings.binary_search_by_key(&source_id, |entry| entry.object_id)
+        .map_err(|_| invalid())?;
+    if !camera.emitters.get(source_slot).and_then(|entry| *entry)
+        .is_some_and(|emitter| core::ptr::eq(emitter, binding.source.emitter)) {
+        return Err(invalid());
+    }
+    let expected_medium = match camera.scene.bindings[source_slot].interaction {
+        Interaction::DepolarizingDiffuse { medium, .. }
+        | Interaction::SmoothConductor { medium, .. }
+        | Interaction::RoughConductor { medium, .. }
+        | Interaction::BrushedConductor { medium, .. } => Some(medium),
+        Interaction::Dielectric { outside, inside, .. }
+        | Interaction::CoatedDielectric { outside, inside, .. } => Some(
+            if binding.source_side == BoundarySide::Positive { outside } else { inside }),
+        Interaction::Opaque => None,
+        Interaction::Detector { .. } => return Err(invalid()),
+    };
+    if expected_medium.is_some_and(|medium| medium != binding.initial_medium) {
+        return Err(invalid());
+    }
+    for seed in binding.seeds {
+        PolarizationFrame::try_new(seed.initial_direction, binding.source_transverse_axis)
+            .map_err(|_| invalid())?;
+    }
+    Ok(())
+}
+
+/// One native overlap implementation for diffuse and molecular anchors. The
+/// partition depends only on geometry and scalar angular/branch proposals;
+/// molecular survival is deliberately not sampled while deciding this weight.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emitter_weight_for_source(
+    camera: &CurvedCameraScene<'_, '_>,
+    cx: &Cx<'_>,
+    path: &CurvedPathResult,
+    settings: AreaLightCameraSettings,
+    work: &mut Work,
+    workspace: &mut AreaLightCameraWorkspace,
+    state: &PathState,
+    index: usize,
+    binding: SourceBinding<'_, '_, '_>,
+) -> Result<f64, AreaLightCameraError> {
+        let Some(anchor) = state.anchor else { return Ok(1.0); };
+        let contact = *path.last_contact().ok_or(AreaLightCameraError::NumericalRange)?;
+        let source_direction = path.beam().ray().dir.scale(-1.0);
+        let cosine = contact.witness.normal.dot(source_direction);
+        if !cosine.is_finite() { return Err(AreaLightCameraError::NumericalRange); }
+        if cosine == 0.0 { return Ok(1.0); }
+        let side = if cosine > 0.0 { BoundarySide::Positive } else { BoundarySide::Negative };
+        if binding.source.emitter.object_id() != contact.object_id || binding.source_side != side {
+            return Ok(1.0);
+        }
         if binding.initial_medium != path.medium_index() {
             return Err(AreaLightCameraError::PathMismatch { binding: index });
         }
@@ -527,10 +598,10 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         cx.checkpoint()?;
         let sample = binding.source.sample_at_contact(&contact, path.beam().ray().origin)
             .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
-        let target = target(binding, anchor.contact, anchor.normal)
+        let target = anchor.target(sample.position_m(), binding.position_tolerance_m)
             .map_err(|error| connection_error(index, error))?;
         workspace.reverse_events.clear();
-        let scene = self.camera.scene;
+        let scene = camera.scene;
         let mut signature = scene.surface_source_signature(contact, path.medium_index(), side);
         for step in workspace.history.iter().rev() {
             if step.tag != 2 { workspace.reverse_events.push(step.event); }
@@ -539,9 +610,19 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                 step.tag);
             append_medium(&mut signature, scene.medium_identity(step.incoming_medium));
         }
-        append_contact(&mut signature, anchor.contact, anchor.medium, anchor.medium,
-            anchor.contact.witness.normal.dot(anchor.outgoing.scale(-1.0)) > 0.0, 5);
-        append_medium(&mut signature, scene.medium_identity(anchor.medium));
+        match anchor {
+            ContinuationAnchor::Diffuse(anchor) => {
+                append_contact(&mut signature, anchor.contact, anchor.medium, anchor.medium,
+                    anchor.contact.witness.normal.dot(anchor.outgoing.scale(-1.0)) > 0.0, 5);
+                append_medium(&mut signature, scene.medium_identity(anchor.medium));
+            }
+            #[cfg(feature = "volumes")]
+            ContinuationAnchor::Molecular(anchor) => {
+                signature.update(b"volume-receiver");
+                signature.update(&(anchor.medium as u64).to_le_bytes());
+                append_medium(&mut signature, scene.medium_identity(anchor.medium));
+            }
+        }
         let expected_signature = signature.finalize();
         let source = BundleSurfaceSource::try_new(contact.object_id, side)
             .map_err(|error| AreaLightCameraError::Source {
@@ -573,7 +654,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         let sigma_min = det::sqrt(projection.area_per_solid_angle_m2())
             / det::sqrt(projection.condition_number());
         let actual_collar = workspace.history.iter().fold(
-            anchor.contact.resolution_m.max(contact.resolution_m),
+            anchor.resolution_m().max(contact.resolution_m),
             |maximum, step| maximum.max(step.contact.resolution_m),
         );
         let actual_resolution = (actual_collar / sigma_min).max(64.0 * f64::EPSILON);
@@ -590,13 +671,13 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
             + resolution + actual_resolution;
         let reverse_log_probability = bundle.reverse_branch_log_probability();
         let probability_allowance = 1e-6 * (1.0 + state.log_probability.abs());
-        let reverse_diffuse_pdf = (-anchor.normal.dot(arrival)).max(0.0) / core::f64::consts::PI;
-        if angular_distance(arrival, anchor.outgoing.scale(-1.0)) > angular_allowance
+        let reverse_angular_pdf = anchor.continuation_pdf(arrival, index)?;
+        if angular_distance(arrival, anchor.outgoing().scale(-1.0)) > angular_allowance
             || !reverse_log_probability.is_finite()
             || (reverse_log_probability - state.log_probability).abs() > probability_allowance
-            || !reverse_diffuse_pdf.is_finite()
-            || reverse_diffuse_pdf <= 0.0
-            || (reverse_diffuse_pdf - anchor.pdf).abs()
+            || !reverse_angular_pdf.is_finite()
+            || reverse_angular_pdf <= 0.0
+            || (reverse_angular_pdf - anchor.pdf()).abs()
                 > angular_allowance / core::f64::consts::PI + 64.0 * f64::EPSILON {
             return Err(AreaLightCameraError::PathMismatch { binding: index });
         }
@@ -620,8 +701,16 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                 image.angular_resolution_rad()) {
                 ImagePairClassification::Distinct => {}
                 ImagePairClassification::Duplicate if weight.is_none() && parity == image.projection_parity() => {
-                    weight = Some(binding.source.mis_weights(sample, image.connection(), target,
-                        settings.connection.projection)
+                    let weights = match anchor {
+                        ContinuationAnchor::Diffuse(_) => binding.source.mis_weights(
+                            sample, image.connection(), target, settings.connection.projection),
+                        #[cfg(feature = "volumes")]
+                        ContinuationAnchor::Molecular(_) => binding.source.volume_mis_weights(
+                            sample, image.connection(), target, settings.connection.projection,
+                            anchor.continuation_pdf(image.connection().path().bundle()
+                                .propagation().propagation().ray.dir, index)?),
+                    };
+                    weight = Some(weights
                         .map_err(|error| AreaLightCameraError::Source { binding: index, error })?
                         .continuation_weight());
                 }
@@ -631,11 +720,10 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
             }
         }
         Ok(weight.unwrap_or(1.0))
-    }
 }
 
 #[derive(Clone, Copy)]
-struct DiffuseAnchor {
+pub(super) struct DiffuseAnchor {
     contact: CurvedContact,
     medium: usize,
     outgoing: Vec3,
@@ -644,7 +732,107 @@ struct DiffuseAnchor {
 }
 
 #[derive(Clone, Copy)]
-struct DeltaStep {
+pub(super) enum ContinuationAnchor {
+    Diffuse(DiffuseAnchor),
+    #[cfg(feature = "volumes")]
+    Molecular(MolecularAnchor),
+}
+
+/// Only the two native molecular laws are retained; unlike cloning a general
+/// PhaseFunction, this tag can never copy a heap-backed tabulated phase.
+#[cfg(feature = "volumes")]
+#[derive(Clone, Copy)]
+pub(super) enum MolecularPhase {
+    Rayleigh,
+    Depolarized(f64),
+}
+
+#[cfg(feature = "volumes")]
+impl MolecularPhase {
+    pub(super) fn try_new(
+        phase: &crate::volumes::transport::scattering::PhaseFunction,
+        binding: usize,
+    ) -> Result<Self, AreaLightCameraError> {
+        use crate::volumes::transport::scattering::PhaseFunction;
+        match phase {
+            PhaseFunction::Rayleigh => Ok(Self::Rayleigh),
+            PhaseFunction::RayleighDepolarized { depolarization } => Ok(Self::Depolarized(*depolarization)),
+            _ => Err(AreaLightCameraError::MolecularPhase {
+                binding, error: crate::volumes::transport::VolumeTransportError::Phase.into(),
+            }),
+        }
+    }
+
+    fn native(self) -> crate::volumes::transport::scattering::PhaseFunction {
+        use crate::volumes::transport::scattering::PhaseFunction;
+        match self {
+            Self::Rayleigh => PhaseFunction::Rayleigh,
+            Self::Depolarized(depolarization) => PhaseFunction::RayleighDepolarized { depolarization },
+        }
+    }
+}
+
+#[cfg(feature = "volumes")]
+#[derive(Clone, Copy)]
+pub(super) struct MolecularAnchor {
+    pub(super) position: Point3,
+    pub(super) medium: usize,
+    pub(super) incoming: Vec3,
+    pub(super) outgoing: Vec3,
+    pub(super) phase: MolecularPhase,
+    pub(super) pdf: f64,
+}
+
+impl ContinuationAnchor {
+    fn target(self, _source: Point3, tolerance: f64) -> Result<BundleConnectionTarget, BundleConnectionError> {
+        match self {
+            Self::Diffuse(anchor) => BundleConnectionTarget::try_diffuse_receiver(
+                anchor.contact.object_id, anchor.contact.witness.surface_point, anchor.normal, tolerance),
+            #[cfg(feature = "volumes")]
+            Self::Molecular(anchor) => BundleConnectionTarget::try_volume_receiver(
+                anchor.medium, anchor.position, _source.delta_from(anchor.position), tolerance),
+        }
+    }
+
+    fn outgoing(self) -> Vec3 {
+        match self {
+            Self::Diffuse(anchor) => anchor.outgoing,
+            #[cfg(feature = "volumes")]
+            Self::Molecular(anchor) => anchor.outgoing,
+        }
+    }
+
+    fn pdf(self) -> f64 {
+        match self {
+            Self::Diffuse(anchor) => anchor.pdf,
+            #[cfg(feature = "volumes")]
+            Self::Molecular(anchor) => anchor.pdf,
+        }
+    }
+
+    fn resolution_m(self) -> f64 {
+        match self {
+            Self::Diffuse(anchor) => anchor.contact.resolution_m,
+            // The volume endpoint is the original sampled point, not a
+            // geometric contact with an invented surface-resolution collar.
+            #[cfg(feature = "volumes")]
+            Self::Molecular(_) => 0.0,
+        }
+    }
+
+    fn continuation_pdf(self, arrival: Vec3, _binding: usize) -> Result<f64, AreaLightCameraError> {
+        match self {
+            Self::Diffuse(anchor) => Ok((-anchor.normal.dot(arrival)).max(0.0) / core::f64::consts::PI),
+            #[cfg(feature = "volumes")]
+            Self::Molecular(anchor) => anchor.phase.native()
+                .eval_cos(anchor.incoming.dot(arrival.scale(-1.0)))
+                .map_err(|error| AreaLightCameraError::MolecularPhase { binding: _binding, error: error.into() }),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DeltaStep {
     contact: CurvedContact,
     incoming_medium: usize,
     outgoing_medium: usize,
@@ -654,19 +842,19 @@ struct DeltaStep {
 }
 
 #[derive(Default)]
-struct PathState {
-    anchor: Option<DiffuseAnchor>,
-    incoming_medium: usize,
+pub(super) struct PathState {
+    pub(super) anchor: Option<ContinuationAnchor>,
+    pub(super) incoming_medium: usize,
     log_probability: f64,
 }
 
-fn face_normal(contact: CurvedContact, incoming: Vec3) -> Vec3 {
+pub(super) fn face_normal(contact: CurvedContact, incoming: Vec3) -> Vec3 {
     if contact.witness.normal.dot(incoming) > 0.0 {
         contact.witness.normal.scale(-1.0)
     } else { contact.witness.normal }
 }
 
-fn target(
+pub(super) fn target(
     binding: &AreaLightBinding<'_, '_, '_>,
     contact: CurvedContact,
     normal: Vec3,
@@ -675,7 +863,7 @@ fn target(
         contact.witness.surface_point, normal, binding.position_tolerance_m)
 }
 
-fn diffuse_contribution(
+pub(super) fn diffuse_contribution(
     prefix: f64, initial_index: f64, local_index: f64, rho: f64,
     irradiance: f64, mis_weight: f64,
 ) -> Result<f64, AreaLightCameraError> {
@@ -690,7 +878,7 @@ fn diffuse_contribution(
     else { Err(AreaLightCameraError::NumericalRange) }
 }
 
-fn nonnegative(value: f64) -> Result<f64, AreaLightCameraError> {
+pub(super) fn nonnegative(value: f64) -> Result<f64, AreaLightCameraError> {
     if value.is_finite() && value >= 0.0 { Ok(value) }
     else { Err(AreaLightCameraError::NumericalRange) }
 }

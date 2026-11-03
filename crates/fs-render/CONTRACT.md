@@ -645,8 +645,8 @@ differentiable lift). Pure Rust throughout.
   Aggregate work includes all authored seed searches and retained replays.
   Unresolved or ambiguous searches refuse; finite seeds do not establish
   image completeness. This incident-irradiance consumer does not add a second
-  emission term to camera continuation. Rough-receiver and participating-camera area MIS,
-  singular caustic integration and coherent interference remain outside it.
+  emission term to camera continuation. Rough-receiver area MIS, singular caustic integration and coherent interference
+  remain outside it.
 
 - `camera::area_lights::camera::CurvedAreaLightCameraScene` composes
   original panel area samples with the native surface camera at declared
@@ -676,6 +676,36 @@ differentiable lift). Pure Rust throughout.
   refuses the whole pixel. G0/G1 regressions cover analytic paired estimators,
   unbound/direct sources, an unseeded ball-lens image, source ownership,
   cumulative limits, aperture/sample identity and independent spectral NEE.
+
+- With `volumes`,
+  `camera::area_lights::participating::CurvedRayleighAreaLightCameraScene`
+  adds finite-panel next-event sampling at original diffuse surfaces and real
+  molecular collisions. It borrows the exact admitted camera, source panels
+  and molecular scene. Each retained refractive image reuses its differentiated
+  native geometry and independently tracked scattering survival. Molecular
+  radiometry contracts both subpaths' full normalized Stokes states with the
+  local reciprocal phase; source absorption, Fresnel transfer, focusing and
+  the camera-to-vertex phase-index ratio occur once. No second camera survival,
+  collision rate or sampled continuation-phase divisor is introduced.
+  Surface and molecular paths share the same original-source validation and
+  reverse native history/image-membership implementation. Real collisions
+  replace the angular anchor, including in unbound media; null candidates
+  preserve it. Full emitter weight remains for unrepresented optical images.
+  Source tracking and area draws use independent streams and cumulative work
+  limits. Caller-owned bounded image/history storage is reused without per-ray
+  allocation. The deterministic angular partition deliberately omits survival
+  from the heuristic, as documented above; noisy source survival remains a
+  separate radiometric estimator.
+  `CurvedCameraRaster::sample_pixel_rayleigh_area_lights` integrates all four
+  wavelength lanes into the original physical-camera and XYZ sample, retaining
+  separate camera and source work. Any failed lane refuses the whole pixel.
+  G0/G1 regressions cover complementary Rayleigh/depolarized emitter hits,
+  two polarized collisions, null-history retention, independently varied
+  source ratios, cumulative area/trace limits, unchanged native pixels and
+  independently evaluated spectral source loss. Rust execution is unavailable
+  in the implementation environment; these regressions remain unexecuted.
+  Rough receiving BSDFs, arbitrary emitter meshes, singular caustic integration,
+  volume emission and global optical-image completeness remain outside scope.
 
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original
