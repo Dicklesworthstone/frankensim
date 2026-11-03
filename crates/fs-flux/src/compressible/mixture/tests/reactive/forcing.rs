@@ -414,3 +414,190 @@ fn g4_forced_molecular_wall_impulses_and_all_histories_commit_atomically() {
         molecular_impulses(&reference_operator)
     );
 }
+
+fn final_admission(flow: &ReactingEuler2d, report: &ReactiveStepReport, cap: ForceControl2d) {
+    let mut rate: f64 = 0.0;
+    for index in 0..flow.flow().cell_count() {
+        let q = flow.flow().cell(index).unwrap();
+        let p = q.primitive(flow.flow().gas(), || false).unwrap();
+        assert!(
+            p.velocity[0].hypot(p.velocity[1]) <= cap.maximum_mach * p.sound_speed * (1.0 + 1e-13)
+        );
+        rate = rate.max(
+            (0..2)
+                .map(|axis| {
+                    (p.velocity[axis].abs() + p.sound_speed) / flow.flow().grid().spacing[axis]
+                })
+                .sum(),
+        );
+        assert_eq!(q.partial_densities[2], 0.0);
+    }
+    assert!(
+        rate * report.elapsed.value()
+            <= ReactiveStepControl::default().transport.cfl * (1.0 + 1e-13)
+    );
+}
+
+#[test]
+fn g1_forced_reacting_restart_replays_one_common_chemical_and_mechanical_interval() {
+    let mechanism = make_mechanism(40.0, 500.0, 3.5);
+    let mut flow = uniform(&mechanism);
+    let mut scratch = workspace(&flow);
+    let forces = vec![[400.0, -200.0]; flow.flow().cell_count()];
+    let force = BodyForce2d::Acceleration(&forces);
+    let cap = ForceControl2d { maximum_mach: 0.8 };
+    let report = flow
+        .step_with_forcing(
+            Time::new(0.2),
+            ReactiveStepControl::default(),
+            force,
+            cap,
+            &mut scratch,
+            || false,
+        )
+        .unwrap();
+    assert!(report.coupling_retries > 0);
+    assert_eq!(report.transport.elapsed, report.elapsed);
+    assert_eq!(flow.flow().time(), report.elapsed);
+    assert_eq!(report.chemistry.cell_solves, 2 * flow.flow().cell_count());
+    coupled_balance(&report);
+    final_admission(&flow, &report, cap);
+    let mut replay = uniform(&mechanism);
+    let mut replay_work = workspace(&replay);
+    let expected = replay
+        .step_with_forcing(
+            report.elapsed,
+            ReactiveStepControl::default(),
+            force,
+            cap,
+            &mut replay_work,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(expected.coupling_retries, 0);
+    assert_eq!(expected.transport, report.transport);
+    assert_eq!(expected.chemistry, report.chemistry);
+    assert_eq!(expected.source_change, report.source_change);
+    assert_eq!(replay.flow().states(), flow.flow().states());
+    assert_eq!(impulses(&replay), impulses(&flow));
+}
+
+#[test]
+fn g0_zero_force_retains_native_reacting_and_molecular_paths_after_admission() {
+    let mechanism = make_mechanism(5.0, 8.0, 3.5);
+    for with_molecular in [false, true] {
+        let mut native = wall_field(&mechanism);
+        let mut flow = wall_field(&mechanism);
+        let mut native_operator = prepare(
+            native.flow(),
+            law(native.flow().gas(), 0.02, 0.03, 0.01, 0.02),
+        );
+        let mut operator = prepare(flow.flow(), law(flow.flow().gas(), 0.02, 0.03, 0.01, 0.02));
+        let mut scratch = workspace(&flow);
+        let zero = vec![[0.0; 2]; flow.flow().cell_count()];
+        let cap = ForceControl2d { maximum_mach: 1e-6 };
+        let bytes = flow.workspace_bytes() + operator.workspace_bytes() + scratch.workspace_bytes();
+        let expected = if with_molecular {
+            native
+                .step_with_dissipation(
+                    &mut native_operator,
+                    Time::new(0.001),
+                    ReactiveStepControl::default(),
+                    DissipationControl::default(),
+                    bytes,
+                    || false,
+                )
+                .unwrap()
+        } else {
+            native
+                .step(Time::new(0.001), ReactiveStepControl::default(), || false)
+                .unwrap()
+        };
+        let report = if with_molecular {
+            flow.step_with_dissipation_and_forcing(
+                &mut operator,
+                Time::new(0.001),
+                ReactiveStepControl::default(),
+                DissipationControl::default(),
+                bytes,
+                BodyForce2d::Acceleration(&zero),
+                cap,
+                &mut scratch,
+                || false,
+            )
+            .unwrap()
+        } else {
+            flow.step_with_forcing(
+                Time::new(0.001),
+                ReactiveStepControl::default(),
+                BodyForce2d::Acceleration(&zero),
+                cap,
+                &mut scratch,
+                || false,
+            )
+            .unwrap()
+        };
+        assert_eq!(report, expected);
+        assert_eq!(
+            report.source_change,
+            crate::compressible::mixture::ForceChange2d::default()
+        );
+        for (left, right) in flow.flow().states().iter().zip(native.flow().states()) {
+            assert_eq!(left.to_bits(), right.to_bits());
+        }
+        assert_eq!(flow.flow().time(), native.flow().time());
+        assert_eq!(impulses(&flow), impulses(&native));
+        if with_molecular {
+            // Zero forcing still owns its live scratch and must honor the
+            // complete coupled byte budget before following the native path.
+            assert!(matches!(
+                flow.step_with_dissipation_and_forcing(
+                    &mut operator,
+                    Time::new(0.001),
+                    ReactiveStepControl::default(),
+                    DissipationControl::default(),
+                    bytes - 1,
+                    BodyForce2d::Acceleration(&zero),
+                    cap,
+                    &mut scratch,
+                    || false,
+                ),
+                Err(ReactiveError::Invalid(_))
+            ));
+            assert_eq!(flow.flow().states(), native.flow().states());
+            assert_eq!(flow.flow().time(), native.flow().time());
+            assert_eq!(impulses(&flow), impulses(&native));
+        }
+        assert_eq!(operator.last_step(), native_operator.last_step());
+        assert_eq!(
+            molecular_impulses(&operator),
+            molecular_impulses(&native_operator)
+        );
+        let old = flow.flow().states().to_vec();
+        let malformed = vec![[0.0; 2]; flow.flow().cell_count() - 1];
+        assert!(
+            flow.step_with_forcing(
+                Time::new(0.001),
+                ReactiveStepControl::default(),
+                BodyForce2d::Acceleration(&malformed),
+                FORCE_CONTROL,
+                &mut scratch,
+                || false,
+            )
+            .is_err()
+        );
+        assert!(
+            flow.step_with_forcing(
+                Time::new(0.001),
+                ReactiveStepControl::default(),
+                BodyForce2d::Acceleration(&zero),
+                ForceControl2d { maximum_mach: 0.0 },
+                &mut scratch,
+                || false,
+            )
+            .is_err()
+        );
+        assert_eq!(flow.flow().states(), old);
+        assert_eq!(flow.last_step(), Some(&report));
+    }
+}

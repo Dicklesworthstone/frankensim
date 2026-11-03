@@ -457,12 +457,12 @@ impl ReactingEuler2d {
                     &mut cancelled,
                 )?;
                 let transport = if let Some((force, control, workspace)) = forcing.as_mut() {
-                    self.trial.step_with_forcing(
+                    // Shape, control and immutable source were admitted once;
+                    // only physical stage admission repeats on whole-step retries.
+                    self.trial.step_impl(
                         Time::new(dt),
                         controls.transport,
-                        *force,
-                        *control,
-                        &mut **workspace,
+                        Some((*force, *control, &mut **workspace)),
                         &mut cancelled,
                     )?
                 } else {
@@ -495,6 +495,7 @@ impl ReactingEuler2d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
+                let mut endpoint_rate: f64 = 0.0;
                 let second = match operator.as_deref_mut() {
                     Some(operator) => {
                         let report = operator.advance_unpublished(
@@ -522,27 +523,39 @@ impl ReactingEuler2d {
                                     "final molecular state is outside chemistry interval",
                                 ));
                             }
+                            // Reuse chemistry's final caloric recovery for the
+                            // mechanical endpoint guards instead of decoding again.
+                            if let Some((_, control, _)) = forcing.as_ref() {
+                                control
+                                    .admit_velocity::<super::Error>(p.velocity, p.sound_speed)?;
+                                endpoint_rate =
+                                    endpoint_rate.max(forcing::acoustic_rate(p, &self.trial.grid)?);
+                            }
                         }
                         Some(report)
                     }
                     None => None,
                 };
+                if let Some((_, control, _)) = forcing.as_ref() {
+                    // Without a molecular half, chemistry's final state still
+                    // needs the complete acoustic and Mach admission sweep.
+                    if second.is_none() {
+                        endpoint_rate = forcing::admit_field(
+                            &self.trial.gas,
+                            &self.trial.grid,
+                            &self.trial.states,
+                            *control,
+                            &mut cancelled,
+                        )?;
+                    }
+                    super::cartesian::check_cfl::<super::Error>(
+                        endpoint_rate * dt,
+                        controls.transport.cfl,
+                    )?;
+                }
                 let dissipation = first
                     .zip(second)
                     .map(|(first, second)| SplitDissipationReport { first, second });
-                if let Some((_, control, _)) = forcing.as_ref() {
-                    // Chemistry and viscous heating follow the central kick.
-                    // Admit their final sound speed and velocity as part of this
-                    // same transaction, including complete-interval CFL retries.
-                    let rate = forcing::admit_field(
-                        &self.trial.gas,
-                        &self.trial.grid,
-                        &self.trial.states,
-                        *control,
-                        &mut cancelled,
-                    )?;
-                    super::cartesian::check_cfl::<super::Error>(rate * dt, controls.transport.cfl)?;
-                }
                 let source_change = transport.source_change;
                 let after =
                     checked_totals(&self.trial.states, &self.trial.grid, n, &mut cancelled)?;
