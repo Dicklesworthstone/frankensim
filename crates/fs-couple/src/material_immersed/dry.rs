@@ -202,6 +202,17 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
         self.native.initialize_uniform_flow_si(velocity_m_s, gate)
     }
 
+    /// Hold new SI open-reservoir targets on the existing boundary kinds.
+    /// Preserves accepted fluid momentum, dry-body history and physical time;
+    /// the following step's shared `open` receipt owns reservoir transport.
+    pub fn rebind_open_boundaries_si(
+        &mut self,
+        faces: [FaceBoundarySi; 6],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.native.rebind_open_boundaries_si(faces, gate)
+    }
+
     /// Hold an external fluid volume force [N/m^3] with no rebind impulse/work.
     /// The original dry correction removes fictitious interior-fluid forcing;
     /// reduced gravity and authored solid forces must not include it again.

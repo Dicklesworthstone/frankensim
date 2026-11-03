@@ -200,6 +200,17 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
         self.native.initialize_uniform_flow_si(velocity_m_s, gate)
     }
 
+    /// Hold new SI open-reservoir targets on the existing boundary kinds.
+    /// Preserves fluid and every dry body until the next common native tick;
+    /// its shared `open` receipt owns the measured reservoir transport.
+    pub fn rebind_open_boundaries_si(
+        &mut self,
+        faces: [FaceBoundarySi; 6],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.native.rebind_open_boundaries_si(faces, gate)
+    }
+
     /// Hold an external fluid volume force [N/m^3] without an instantaneous
     /// momentum/stress jump. The simultaneous native dry correction owns each
     /// interior-fluid force subtraction; do not repeat it in authored solid loads.

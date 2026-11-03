@@ -43,6 +43,33 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
             .map_err(Error::Flow)
     }
 
+    /// Hold new velocity [m/s] and pressure-perturbation [Pa] reservoir targets.
+    ///
+    /// Faces follow `Face3::ALL`. Their kinds and all wall/periodic data stay
+    /// fixed. Conversion reuses the original source density, dx/dt and scenario
+    /// speed bound, including after an admitted viscosity-only source rebind.
+    /// All six targets are admitted before the native owner publishes any.
+    ///
+    /// This advances no time and changes no fluid population, force frame,
+    /// body state, geometry or accepted-step count. The next accepted native
+    /// interval applies the held targets; its shared `open` receipt owns actual
+    /// reservoir mass and linear/angular momentum exchange exactly once.
+    /// The caller samples time-varying controls at native tick boundaries.
+    /// No waveform interpolation, finite-reservoir or pressure-work model is
+    /// implied. Invalid targets or cancellation retain the previous controls.
+    pub fn rebind_open_boundaries_si(
+        &mut self,
+        faces: [FaceBoundarySi; 6],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        let boundaries =
+            boundary::lattice_boundaries(faces, &self.scaling, self.maximum_speed_m_s)?;
+        self.grid
+            .rebind_open_boundaries(boundaries, gate)
+            .map_err(Error::Flow)
+    }
+
     /// Replace an externally authored uniform fluid volume force [N/m^3].
     ///
     /// This is a force on represented fluid only. The load is held for

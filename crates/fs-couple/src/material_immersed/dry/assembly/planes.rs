@@ -226,6 +226,17 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedPlanes<'a, 
         self.assembly.initialize_uniform_flow_si(velocity_m_s, gate)
     }
 
+    /// Hold new SI open-reservoir targets without changing accepted fluid,
+    /// dry-body or prescribed-plane state. The original assembly owns admission
+    /// and the following common step's reservoir momentum account.
+    pub fn rebind_open_boundaries_si(
+        &mut self,
+        faces: [FaceBoundarySi; 6],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.assembly.rebind_open_boundaries_si(faces, gate)
+    }
+
     /// Hold an external fluid volume force [N/m^3] with no immediate impulse or
     /// work. Original fluid/body/plane history and its common clock are retained.
     pub fn rebind_uniform_fluid_force_si(

@@ -2,7 +2,8 @@
 use super::*;
 use fs_couple::material_immersed::dry::{ResolvedImmersedBodies, ResolvedImmersedBody};
 use fs_couple::material_immersed::settling::SubmergedSphere;
-use fs_lbm::d3q19::{BoundaryGrid3, DryBodyCouplingConfig3};
+use fs_couple::material_immersed::FaceBoundarySi;
+use fs_lbm::d3q19::{BoundaryGrid3, DryBodyCouplingConfig3, Face3, FaceBoundary3};
 
 fn fields(grid: &BoundaryGrid3) -> Vec<[f64; Q3]> {
     let [nx, ny, nz] = grid.dimensions();
@@ -464,4 +465,102 @@ fn invalid_speed_force_and_cancel_preserve_material_flow_and_body_history() {
     );
     assert_eq!(model.uniform_fluid_force_density_n_m3().unwrap(), [0.0; 3]);
     assert_eq!(model.accepted_steps(), 0);
+}
+
+#[test]
+fn live_si_reservoir_targets_keep_history_and_supply_measured_native_momentum() {
+    let liquid = fluid(3.0, 3e-4);
+    let warmer = fluid(3.0, 6e-4);
+    let source = body(6.0);
+    let gate = CancelGate::new_clock_free();
+    let faces = |speed, pressure| [
+        FaceBoundarySi::Periodic,
+        FaceBoundarySi::Periodic,
+        FaceBoundarySi::Periodic,
+        FaceBoundarySi::Periodic,
+        FaceBoundarySi::Velocity { velocity_m_s: [0.0, 0.0, speed] },
+        FaceBoundarySi::Pressure { perturbation_pa: pressure },
+    ];
+    let mut model = RetainedFluidSpheres::new(
+        &liquid,
+        domain().with_boundaries(faces(0.0002, 0.0)),
+        [AdditionalMaterialSphere::new(&source, RADIUS).unwrap(); 2],
+        initial(),
+        film(),
+        &gate,
+    )
+    .unwrap();
+    model.rebind_uniform_fluid_force_si([1e-5, -2e-5, 3e-5], &gate).unwrap();
+    model.rebind_fluid_force_field_si(&spatial_loads(0.2), &gate).unwrap();
+    // Warm the actual moving-body solve and its compiled open-cell cache.
+    model.step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate).unwrap();
+    model.rebind_fluid(&warmer, &gate).unwrap();
+    for (speed, pressure) in [(0.0004, 2e-6), (-0.0002, -1e-6), (0.0, 0.0)] {
+        let before = fields(model.grid());
+        let moments = physical_moments(model.grid());
+        let bodies = [model.state_si(0).unwrap(), model.state_si(1).unwrap()];
+        let steps = model.accepted_steps();
+        let p0 = physical_momentum_si(&model);
+        let mass0 = model.grid().total_mass();
+        model.rebind_open_boundaries_si(faces(speed, pressure), &gate).unwrap();
+        assert_eq!(fields(model.grid()), before);
+        assert_eq!(physical_moments(model.grid()), moments);
+        assert_eq!(
+            [model.state_si(0).unwrap(), model.state_si(1).unwrap()],
+            bodies
+        );
+        assert_eq!(model.accepted_steps(), steps);
+        let FaceBoundary3::Velocity { velocity } = model.grid().boundaries().face(Face3::ZMin)
+        else {
+            panic!("inlet kind changed");
+        };
+        close(velocity[2], speed * DT / DX, 2e-18);
+        let FaceBoundary3::Pressure { density } = model.grid().boundaries().face(Face3::ZMax)
+        else {
+            panic!("outlet kind changed");
+        };
+        close(density, 1.0 + pressure / (fs_lbm::CS2 * 3.0 * (DX / DT).powi(2)), 3e-16);
+        let report = model.step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate).unwrap();
+        let p1 = physical_momentum_si(&model);
+        for a in 0..3 {
+            let delivered = report.coupling.open.impulse[a]
+                + report.coupling.walls.fluid_population_impulse[a]
+                + report.coupling.forcing.impulse[a];
+            close(p1[a] - p0[a], model.impulse_ns(delivered).unwrap(), 2e-16);
+        }
+        close(
+            model.grid().total_mass() - mass0,
+            report.coupling.open.mass_change,
+            3e-10,
+        );
+        assert!(report.coupling.open.reconstructed_cells > 0);
+        assert_eq!(model.accepted_steps(), steps + 1);
+    }
+    let accepted = fields(model.grid());
+    let old_faces = model.grid().boundaries();
+    let bodies = [model.state_si(0).unwrap(), model.state_si(1).unwrap()];
+    let steps = model.accepted_steps();
+    let mut topology = faces(0.0001, 0.0);
+    topology[0] = FaceBoundarySi::StationaryWall;
+    topology[1] = FaceBoundarySi::StationaryWall;
+    for controls in [
+        faces(2.0 * domain().maximum_speed_m_s, 0.0),
+        faces(0.0001, f64::NAN),
+        faces(0.0001, -1.0),
+        topology,
+    ] {
+        assert!(model.rebind_open_boundaries_si(controls, &gate).is_err());
+        assert_eq!(model.grid().boundaries(), old_faces);
+        assert_eq!(fields(model.grid()), accepted);
+    }
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(model.rebind_open_boundaries_si(faces(0.0001, 1e-6), &cancelled).is_err());
+    assert_eq!(model.grid().boundaries(), old_faces);
+    assert_eq!(fields(model.grid()), accepted);
+    assert_eq!(
+        [model.state_si(0).unwrap(), model.state_si(1).unwrap()],
+        bodies
+    );
+    assert_eq!(model.accepted_steps(), steps);
 }

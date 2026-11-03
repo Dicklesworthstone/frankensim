@@ -9360,6 +9360,29 @@ and simultaneous pair. The earlier unsupported-model regression now refuses
 an unrepresentable reciprocal viscous time and moving walls, reflecting the
 newly admitted moment collision and open boundary capabilities.
 
+### Live reservoir targets without topology changes
+
+`BoundaryGrid3::rebind_open_boundaries` replaces held velocity/density values
+on existing open faces. Every face retains its boundary kind, and wall and
+periodic data must stay unchanged. The original fallible face admission runs
+before publication. A changed velocity target with an installed spatial
+profile refuses until that profile is explicitly cleared or updated; an
+unchanged inlet profile remains authoritative during outlet-pressure changes.
+
+The update inspects six records, allocates no grid storage and preserves
+compiled links, cached open cells, populations, held forces and their physical
+Guo frame. It applies no instantaneous impulse and advances no time. The next
+accepted native step applies the targets through the original regularized
+reconstruction, whose shared `open` receipt records actual mass, linear and
+angular momentum transfer. Invalid data, kind/wall changes and cancellation
+retain all previous controls. Targets are piecewise held per tick; no waveform
+interpolation, finite reservoir, moving topology or pressure-work law is added.
+
+The live-target cases in `tests/open_partial_saturation3.rs` target warmed
+solver parity against independently constructed native grids for all four
+admitted collision models, physical force-frame preservation, independent
+mass/linear/angular inventory, spatial-profile precedence and atomic refusal.
+
 ### Moving finite film carriers on the dry sphere/fluid clock
 
 `MovingLubricationSurface3::{Prescribed, Finite}` and the moving/dry

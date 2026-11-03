@@ -799,6 +799,62 @@ impl BoundaryGrid3 {
         self.boundaries
     }
 
+    /// Replace held velocity/density targets on existing open faces.
+    ///
+    /// Each face keeps its original boundary kind; walls and periodic faces
+    /// must remain unchanged. Only six face records are inspected, with no
+    /// allocation or rebuild of the compiled links or cached reconstruction
+    /// cells. Populations, force frames and physical time remain unchanged.
+    /// The next accepted step applies the new targets through the original
+    /// regularized boundary operator. Immersed receipts account for its actual
+    /// reservoir mass, impulse and angular impulse in their shared `open` field.
+    ///
+    /// A changed velocity target with an installed spatial profile refuses:
+    /// clear that profile explicitly first, or update it with
+    /// [`Self::set_velocity_profile`]. Unchanged profiles remain authoritative.
+    /// Targets are held over each tick; this does not interpolate a waveform,
+    /// model a finite reservoir, or provide a pressure-work balance.
+    ///
+    /// Invalid data, a kind/wall change or cancellation publishes no target.
+    pub fn rebind_open_boundaries(
+        &mut self,
+        boundaries: BoundarySpec3,
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryForcingError3> {
+        if gate.is_requested() {
+            return Err(BoundaryForcingError3::Cancelled);
+        }
+        boundaries.try_validate()?;
+        let mut updated = self.boundaries;
+        for face in Face3::ALL {
+            let before = self.boundaries.face(face);
+            let after = boundaries.face(face);
+            if before == after {
+                continue;
+            }
+            if !matches!(
+                (before, after),
+                (FaceBoundary3::Velocity { .. }, FaceBoundary3::Velocity { .. })
+                    | (FaceBoundary3::Pressure { .. }, FaceBoundary3::Pressure { .. })
+            ) {
+                return Err(BoundaryForcingError3::Invalid(
+                    "live open targets must preserve face kinds and wall data",
+                ));
+            }
+            if self.velocity_profiles[face.index()].is_some() {
+                return Err(BoundaryForcingError3::Invalid(
+                    "clear or update the spatial profile before changing its uniform target",
+                ));
+            }
+            updated.faces[face.index()] = after;
+        }
+        if gate.is_requested() {
+            return Err(BoundaryForcingError3::Cancelled);
+        }
+        self.boundaries = updated;
+        Ok(())
+    }
+
     /// Per-tile wall-link masks in canonical tile order.
     #[must_use]
     pub fn tile_link_masks(&self) -> &[LinkMaskTile3] {

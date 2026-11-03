@@ -485,6 +485,18 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> SubmergedMaterialBodies<
         self.native.rebind_fluid(fluid, gate)
     }
 
+    /// Hold new SI open-reservoir targets on the existing boundary kinds.
+    /// Retains fluid, excess carriers, displaced inertia and accepted time.
+    /// The next native step measures reservoir transport separately from
+    /// reduced gravity and authored solid loads.
+    pub fn rebind_open_boundaries_si(
+        &mut self,
+        faces: [FaceBoundarySi; 6],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.native.rebind_open_boundaries_si(faces, gate)
+    }
+
     /// Apply reduced weight plus authored WORLD center forces/couples once.
     ///
     /// The grid has no gravity force: reference hydrostatic pressure is removed.

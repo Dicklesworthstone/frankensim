@@ -1,4 +1,4 @@
-//! Construction-only SI faces on the original material-scaled flow owner.
+//! SI construction and live reservoir targets on the original scaled flow owner.
 
 use super::*;
 
@@ -38,7 +38,8 @@ impl FaceBoundarySi {
 
 /// Explicit faces paired with the unchanged resolution/allocation controls.
 /// All current material immersed constructors accept this or `ImmersedDomain`.
-/// There is no live boundary/topology mutation on an accepted flow state.
+/// Accepted owners can update open target values through
+/// `rebind_open_boundaries_si`; boundary kinds and topology remain fixed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImmersedBoundaryDomain {
     pub(super) domain: ImmersedDomain,
@@ -82,35 +83,44 @@ impl ImmersedBoundaryDomain {
         &self,
         scaling: &MaterialScaling<'_, F>,
     ) -> Result<BoundarySpec3, Error> {
-        let velocity = |value: [f64; 3]| -> Result<[f64; 3], Error> {
-            let value = convert(value, 1.0)?;
-            let speed = value[0].hypot(value[1]).hypot(value[2]);
-            if speed > self.domain.maximum_speed_m_s {
-                return Err(Error::Invalid(
-                    "boundary velocity exceeds the source-scaled scenario speed bound",
-                ));
-            }
-            Ok([
-                scaling.velocity_lattice(value[0])?,
-                scaling.velocity_lattice(value[1])?,
-                scaling.velocity_lattice(value[2])?,
-            ])
-        };
-        let mut faces = [FaceBoundary3::stationary_wall(); 6];
-        for (to, from) in faces.iter_mut().zip(self.faces) {
-            *to = match from {
-                FaceBoundarySi::Periodic => FaceBoundary3::Periodic,
-                FaceBoundarySi::StationaryWall => FaceBoundary3::stationary_wall(),
-                FaceBoundarySi::Velocity { velocity_m_s } => FaceBoundary3::Velocity {
-                    velocity: velocity(velocity_m_s)?,
-                },
-                FaceBoundarySi::Pressure { perturbation_pa } => FaceBoundary3::Pressure {
-                    density: scaling.density_lattice_from_pressure_perturbation(perturbation_pa)?,
-                },
-            };
-        }
-        let boundaries = BoundarySpec3::new(faces);
-        boundaries.try_validate().map_err(Error::Flow)?;
-        Ok(boundaries)
+        lattice_boundaries(self.faces, scaling, self.domain.maximum_speed_m_s)
     }
+}
+
+/// One source-owned conversion for construction and live held targets.
+pub(super) fn lattice_boundaries<F: FluidTransport + ?Sized>(
+    faces_si: [FaceBoundarySi; 6],
+    scaling: &MaterialScaling<'_, F>,
+    maximum_speed_m_s: f64,
+) -> Result<BoundarySpec3, Error> {
+    let velocity = |value: [f64; 3]| -> Result<[f64; 3], Error> {
+        let value = convert(value, 1.0)?;
+        let speed = value[0].hypot(value[1]).hypot(value[2]);
+        if speed > maximum_speed_m_s {
+            return Err(Error::Invalid(
+                "boundary velocity exceeds the source-scaled scenario speed bound",
+            ));
+        }
+        Ok([
+            scaling.velocity_lattice(value[0])?,
+            scaling.velocity_lattice(value[1])?,
+            scaling.velocity_lattice(value[2])?,
+        ])
+    };
+    let mut faces = [FaceBoundary3::stationary_wall(); 6];
+    for (to, from) in faces.iter_mut().zip(faces_si) {
+        *to = match from {
+            FaceBoundarySi::Periodic => FaceBoundary3::Periodic,
+            FaceBoundarySi::StationaryWall => FaceBoundary3::stationary_wall(),
+            FaceBoundarySi::Velocity { velocity_m_s } => FaceBoundary3::Velocity {
+                velocity: velocity(velocity_m_s)?,
+            },
+            FaceBoundarySi::Pressure { perturbation_pa } => FaceBoundary3::Pressure {
+                density: scaling.density_lattice_from_pressure_perturbation(perturbation_pa)?,
+            },
+        };
+    }
+    let boundaries = BoundarySpec3::new(faces);
+    boundaries.try_validate().map_err(Error::Flow)?;
+    Ok(boundaries)
 }

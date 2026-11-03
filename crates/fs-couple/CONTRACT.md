@@ -26878,7 +26878,7 @@ and execution remain unverified with the missing constellation dependencies.
 
 ### SI reservoir boundaries on material immersed bodies
 
-`ImmersedDomain::with_boundaries` creates an explicit construction-only
+`ImmersedDomain::with_boundaries` creates an explicit
 `ImmersedBoundaryDomain`. Its six `FaceBoundarySi` entries follow `Face3::ALL`
 and admit stationary walls, paired periodic faces, prescribed material-fluid
 velocity in m/s, and pressure perturbation in Pa. All eight retained-fluid,
@@ -26911,6 +26911,23 @@ through the existing mass/impulse/angular-impulse methods; no duplicate body
 reaction or heat destination is introduced. Source rebinding still requires
 unchanged reference density and fixed dx/dt, preserving these unit mappings.
 The original body halo, pressure-work and thermodynamic limitations remain.
+
+Accepted owners expose `rebind_open_boundaries_si` through retained-fluid,
+settling, ordinary dry-body/assembly, prescribed-plane and moving-surface
+interfaces. Construction and live updates share the same converter and source
+density, dx/dt and scenario speed bound, including after viscosity-only source
+rebinding. All face kinds and stationary/periodic data remain fixed.
+
+A successful update changes only held reservoir targets, preserving populations,
+physical force-corrected moments, body/surface histories and the accepted clock.
+The next common native step owns the actual reservoir mass and linear/angular
+momentum transfer exactly once. Invalid controls, topology changes or
+cancellation preserve the previous targets. Callers sample their histories at
+native tick boundaries; no interpolation, pressure-work or finite-reservoir
+storage is inferred. The actual source-backed regression in
+`tests/material_immersed/flow.rs` targets positive/reversed/zero inlet histories,
+pressure changes after viscosity rebinding, unchanged pre-step physical state,
+independent physical momentum/mass balances and atomic refusal.
 
 The focused cases in `material_immersed/boundary/tests.rs` exercise pressure
 round trips across scales, legacy defaults, typed pressure/speed/topology

@@ -2,9 +2,9 @@
 use fs_exec::CancelGate;
 use fs_ga::{Mat3, So3, Vec3};
 use fs_lbm::d3q19::{
-    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryGrid3, BoundarySpec3,
-    CollisionModel3, DryBodyCouplingConfig3, E3, FaceBoundary3, MovingPartialSaturationBody3,
-    PartialSaturationBody3, PartialSaturationError3, Q3, equilibrium3,
+    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3,
+    BoundarySpec3, CollisionModel3, DryBodyCouplingConfig3, E3, Face3, FaceBoundary3, InletFlux3,
+    MovingPartialSaturationBody3, PartialSaturationBody3, PartialSaturationError3, Q3, equilibrium3,
 };
 use fs_time::lie::gyrostat::InertiaTensor3;
 
@@ -688,4 +688,146 @@ fn physical_dry_single_singleton_and_pair_include_reservoir_momentum_once() {
     dry_case::<1>(true);
     dry_case::<1>(false);
     dry_case::<2>(false);
+}
+
+#[test]
+fn live_targets_reuse_warmed_forced_solver_and_measure_actual_reservoir_transport() {
+    let gate = CancelGate::new_clock_free();
+    let origin = [-2.3, 6.7, -1.1];
+    let mut fractions = vec![0.0; N * N * N];
+    fractions[(3 * N + 3) * N + 3] = 0.45;
+    for model in models() {
+        let mut actual = prepared(N, model, boundaries(true));
+        let mut rigid = body([4.0; 3]);
+        actual
+            .step_with_partial_saturation_body(
+                &fractions, &mut rigid, [0.0; 6], origin, &gate,
+            )
+            .unwrap();
+        let forces: Vec<_> = (0..N * N * N)
+            .map(|i| actual.force_density(i % N, (i / N) % N, i / (N * N)))
+            .collect();
+        for (velocity, density) in [
+            ([0.002, -0.001, 0.006], 1.001),
+            ([-0.001, 0.001, -0.004], 0.999),
+            ([0.001, -0.002, 0.012], 1.002),
+        ] {
+            let before = snapshot(&actual);
+            let old_body = rigid;
+            let mut faces = Face3::ALL.map(|face| actual.boundaries().face(face));
+            faces[4] = FaceBoundary3::Velocity { velocity };
+            faces[5] = FaceBoundary3::Pressure { density };
+            let targets = BoundarySpec3::new(faces);
+            actual.rebind_open_boundaries(targets, &gate).unwrap();
+            assert_eq!(actual.boundaries(), targets);
+            assert_eq!(snapshot(&actual), before);
+            for (i, &force) in forces.iter().enumerate() {
+                assert_eq!(actual.force_density(i % N, (i / N) % N, i / (N * N)), force);
+            }
+            // Independent construction with the new controls and the same
+            // accepted populations/force frame, rather than another live rebind.
+            let mut reference = prepared(N, model, targets);
+            for (i, values) in before.iter().enumerate() {
+                reference.set_populations(i % N, (i / N) % N, i / (N * N), values);
+            }
+            let mut reference_body = old_body;
+            let expected = reference
+                .step_with_partial_saturation_body(
+                    &fractions, &mut reference_body, [0.0; 6], origin, &gate,
+                )
+                .unwrap();
+            let receipt = actual
+                .step_with_partial_saturation_body(
+                    &fractions, &mut rigid, [0.0; 6], origin, &gate,
+                )
+                .unwrap();
+            assert_eq!(receipt, expected);
+            assert_eq!(rigid, reference_body);
+            assert_eq!(snapshot(&actual), snapshot(&reference));
+            let (mass, fluid) = fluid_change(&before, &actual, origin);
+            let body = body_change(old_body, rigid, origin);
+            close(mass, receipt.open.mass_change, 2e-12);
+            for i in 0..3 {
+                close(
+                    fluid[i] + body[i],
+                    receipt.open.impulse[i]
+                        + receipt.walls.fluid_population_impulse[i]
+                        + receipt.forcing.impulse[i],
+                    4e-12,
+                );
+                close(
+                    fluid[i + 3] + body[i + 3],
+                    receipt.open.angular_impulse[i]
+                        + receipt.walls.fluid_population_angular_impulse[i]
+                        + receipt.periodic.angular_momentum_change[i]
+                        + receipt.forcing.angular_impulse[i],
+                    3e-11,
+                );
+            }
+            assert_eq!(receipt.open.reconstructed_cells, 2 * N * N);
+            assert!(receipt.open.impulse.iter().any(|value| value.abs() > 1e-6));
+        }
+    }
+}
+
+#[test]
+fn live_target_refusals_preserve_profiles_populations_and_previous_controls() {
+    let gate = CancelGate::new_clock_free();
+    let original = boundaries(true);
+    let mut grid = prepared(N, models()[0], original);
+    grid.set_velocity_profile(Face3::ZMin, InletFlux3::Unconstrained, &gate, |_| {
+        Ok([0.001, -0.002, 0.012])
+    })
+    .unwrap();
+    let accepted = snapshot(&grid);
+    let profile = grid.velocity_profile(Face3::ZMin).unwrap().to_vec();
+    let original_faces = Face3::ALL.map(|face| original.face(face));
+    let mut proposals = Vec::new();
+    let mut changed = original_faces;
+    changed[0] = FaceBoundary3::stationary_wall();
+    changed[1] = FaceBoundary3::stationary_wall();
+    proposals.push(BoundarySpec3::new(changed));
+    changed = original_faces;
+    changed[4] = FaceBoundary3::Pressure { density: 1.0 };
+    proposals.push(BoundarySpec3::new(changed));
+    changed = original_faces;
+    changed[2] = FaceBoundary3::Wall { velocity: [0.001, 0.0, 0.0] };
+    proposals.push(BoundarySpec3::new(changed));
+    for velocity in [[f64::NAN, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.0, 0.02]] {
+        changed = original_faces;
+        changed[4] = FaceBoundary3::Velocity { velocity };
+        changed[5] = FaceBoundary3::Pressure { density: 1.001 };
+        proposals.push(BoundarySpec3::new(changed));
+    }
+    for density in [0.0, f64::NAN, f64::INFINITY] {
+        changed = original_faces;
+        changed[5] = FaceBoundary3::Pressure { density };
+        proposals.push(BoundarySpec3::new(changed));
+    }
+    for targets in proposals {
+        assert!(matches!(
+            grid.rebind_open_boundaries(targets, &gate),
+            Err(BoundaryForcingError3::Invalid(_))
+        ));
+        assert_eq!(grid.boundaries(), original);
+        assert_eq!(snapshot(&grid), accepted);
+        assert_eq!(grid.velocity_profile(Face3::ZMin).unwrap(), profile.as_slice());
+    }
+    changed = original_faces;
+    changed[5] = FaceBoundary3::Pressure { density: 1.001 };
+    let pressure_only = BoundarySpec3::new(changed);
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert_eq!(
+        grid.rebind_open_boundaries(pressure_only, &cancelled),
+        Err(BoundaryForcingError3::Cancelled)
+    );
+    assert_eq!(grid.boundaries(), original);
+    assert_eq!(snapshot(&grid), accepted);
+    grid.rebind_open_boundaries(pressure_only, &gate).unwrap();
+    assert_eq!(grid.velocity_profile(Face3::ZMin).unwrap(), profile.as_slice());
+    grid.clear_velocity_profile(Face3::ZMin);
+    changed[4] = FaceBoundary3::Velocity { velocity: [0.0, 0.0, 0.02] };
+    grid.rebind_open_boundaries(BoundarySpec3::new(changed), &gate).unwrap();
+    assert_eq!(snapshot(&grid), accepted);
 }

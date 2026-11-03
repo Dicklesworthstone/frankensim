@@ -215,6 +215,17 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedSurfaces<'a
         self.assembly.initialize_uniform_flow_si(velocity_m_s, gate)
     }
 
+    /// Hold new SI open-reservoir targets without changing accepted fluid,
+    /// sphere or moving-surface state. The original assembly owns admission
+    /// and the following common step's reservoir momentum account.
+    pub fn rebind_open_boundaries_si(
+        &mut self,
+        faces: [FaceBoundarySi; 6],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.assembly.rebind_open_boundaries_si(faces, gate)
+    }
+
     /// Hold a uniform external fluid volume force [N/m^3], with no immediate impulse.
     pub fn rebind_uniform_fluid_force_si(
         &mut self,
