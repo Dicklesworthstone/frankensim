@@ -8,12 +8,13 @@
 //! `p_i = (Phi q)_i - c_i`  (penetration of the displacement field
 //! past the obstacle profile),
 //!
-//! added to any fs-phs `Storage` ([`ContactStorage`]). Because the
-//! contact enters as a POTENTIAL with its exact analytic gradient, the
-//! Gonzalez discrete-gradient stepper makes collisions energy-exact by
-//! construction (the Bilbao-Chatziioannou energy-consistent collision
-//! doctrine, realized through the pHS machinery instead of a bespoke
-//! scheme) — no LCP, provably stable at rattle stiffnesses. The
+//! added to any fs-phs `Storage` ([`ContactStorage`]). With an exactly
+//! symmetric quadratic inner storage or an inner-owned discrete gradient,
+//! each contact's scalar potential secant is pulled back through its original
+//! collocation row. Internal equal/opposite rows then conserve total momentum
+//! as well as energy, without changing kinetic or unrelated internal efforts.
+//! Other nonlinear inner storages retain the Gonzalez rule. Both paths use
+//! the original pHS discrete-gradient stepping machinery, with no LCP. The
 //! implicit contact Newton, its iteration budget, and the achieved
 //! residual are fs-phs's disclosed caps (`StepRecord::newton_iters`,
 //! `solver_residual`) — one frozen solver law, not a second one.
@@ -492,6 +493,14 @@ impl ContactStorage {
 }
 
 impl Storage for ContactStorage {
+    fn discrete_gradient_rule(&self) -> Option<&dyn fs_phs::ConstitutiveDiscreteGradient> {
+        self.has_contact_discrete_gradient().then_some(self)
+    }
+
+    fn coordinate_scale(&self, coordinate: usize) -> Option<f64> {
+        self.inner.coordinate_scale(coordinate)
+    }
+
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], midpoint: &[f64]) -> Option<f64> {
         self.stable_midpoint_remainder(a, b, midpoint)
     }

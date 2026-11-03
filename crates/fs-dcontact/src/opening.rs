@@ -129,3 +129,5 @@ pub mod static_response;
 
 mod affine;
 pub use affine::{AffineContactResponse, AffineContactStep};
+
+mod distributed;

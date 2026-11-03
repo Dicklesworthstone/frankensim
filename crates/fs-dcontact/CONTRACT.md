@@ -42,6 +42,38 @@ LCP, no bespoke scheme).
   are fs-phs's (`step`, `StepRecord::{newton_iters,
   solver_residual}`, `NewtonStalled`): ONE frozen solver law.
 
+## Momentum-consistent distributed contact work
+
+For an exactly symmetric declared quadratic inner storage, or an inner storage
+with its own `ConstitutiveDiscreteGradient`, `ContactStorage` now supplies a
+componentwise discrete gradient. Each original scalar contact potential uses
+the existing stable `OpeningContactStep` secant and is pulled back through the
+same collocation row as its analytic force. This keeps contact effort out of
+momentum and unrelated internal coordinates. A row that annihilates a rigid
+translation exchanges equal and opposite discrete forces, so an internal pair
+preserves total momentum under the canonical pHS update. Its contact impulse
+is independent of a common Galilean boost, subject to represented geometry.
+
+The previous full-state Gonzalez correction could conserve total energy while
+adding a net internal force proportional to center-of-mass displacement. The
+new composition preserves the original Hamiltonian, physical quadrature,
+unilateral entry/separation, symmetry in endpoints and second-order consistency.
+Hunt--Crossley loss remains the separately owned dissipative port. An arbitrary
+nonlinear inner storage without a declared rule, and a merely tolerated
+asymmetric quadratic matrix, retain the original Gonzalez path and acquire no
+new momentum claim.
+
+An allocation-free endpoint Jacobian differentiates this actual composed rule.
+It delegates an owned inner action or uses the exact quadratic half-Hessian,
+then adds each contact's scalar secant derivative through its collocation row.
+A centered series prevents cancellation at nearly coincident active endpoints;
+the coincident zero-penetration alpha=1 kink uses the inactive Newton side.
+An inner rule without an analytic action retains the original probe fallback.
+Inner coordinate scales are retained for those probes.
+`tests/contact_momentum.rs` checks equal/opposite force, unchanged kinetic and
+tail efforts, physical work, Galilean/origin invariance, independent cubic
+force/tangent identities, contact crossings, and inner-rule composition.
+
 ## Invariants
 
 1. Polyline gap geometry matches analytic interpolation to 1e-14.
