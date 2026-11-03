@@ -1888,6 +1888,51 @@ vector extension of the scalar fit does not replace molecular differential
 diffusion, model unresolved reaction rates, or establish reacting-flow/DNS
 accuracy. The existing periodic, grid-aspect and exploratory-use limits apply.
 
+### Dynamic momentum and scalar transport in planar channels
+
+`sgs3::dynamic::channel::{ChannelDynamicSgs, ChannelDynamicScalar}` extends
+the shared normalized Favre--Germano kernels to a uniform Cartesian channel
+with two periodic directions and one axis bounded by planar halfway walls.
+There must be at least three fluid cells in each periodic direction and two
+in the wall-normal direction. The equal-volume test box contains nine cells
+within the same wall-normal plane; it never samples through a wall or wraps
+to the opposite plate. Numerator and denominator are averaged over each
+homogeneous plane before division, so the fitted coefficients remain functions
+of wall distance and time. Channel configurations make this plane averaging
+intrinsic rather than accepting a misleading periodic averaging selection.
+
+The resolved filter length remains `Delta = (hx*hy*hz)^(1/3)`. Expanding only
+the two homogeneous widths by three gives the squared test/grid length ratio
+`3^(4/3)`, rather than the fully periodic box's nine. This volume-width
+convention and homogeneous-direction filtering follow the alternatives
+described in Cabot (1991), *Large eddy simulations of passive and buoyant
+scalars with dynamic subgrid-scale models*, CTR Annual Research Briefs,
+section 2.1. It does not copy that paper's spectral discretization or claim
+its channel-flow accuracy.
+
+Normal derivatives use the quadratic through the two nearest fluid centres
+and the actual halfway boundary condition. Each preparation supplies both
+uniform wall velocities and independent scalar `Value` or `ZeroGradient`
+conditions. A scalar zero-gradient wall requires three normal fluid cells:
+the filtered scalar uses a second-order one-sided derivative of its actual
+Favre-filtered interior values there. Density weighting need not preserve the
+physical scalar's zero normal gradient, so that boundary condition is not
+imposed on the filtered quotient. Uniform Dirichlet values do survive the
+tangential Favre filter. Prescribed wall values participate in normalization:
+a uniform fluid field is not mistaken for zero strain or zero scalar gradient when its
+walls differ. Filtering, strain and scalar gradients share the same geometry;
+scalar diffusivity remains independently fitted even when momentum transport
+is zero. The existing explicit no-backscatter policy, coefficient admission
+bounds, finite-value checks and exploratory-use restriction remain in force.
+
+The reused numerical storage remains 136 bytes per fluid cell for momentum
+and 64 for one scalar, with actual-capacity admission. Plane reduction is
+linear in cell count, and preparation adds no allocation. The caller retains
+ownership of physical wall fluxes, molecular transport and the accepted step;
+scratch is usable only after a successful preparation. This is a wall-resolved
+planar closure, not a wall function, rough-wall model, arbitrary solid/open
+boundary filter, nonuniform mesh method or DNS qualification.
+
 ### Moving/open D3Q19 boundaries and turbulent wall loads
 
 `BoundaryGrid3::{sgs_workspace, prepare_sgs, step_with_sgs,

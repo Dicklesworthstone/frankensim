@@ -19,7 +19,9 @@
 //! References: Lilly (1992), doi:10.1063/1.858280; Moin, Squires, Cabot & Lee
 //! (1991), doi:10.1063/1.858164. This implements the deviatoric dynamic viscosity,
 //! not their complete compressible SGS energy/heat model. It supplies no wall
-//! treatment, shock model, scale-dependent correction or DNS validation.
+//! treatment on the periodic path; [`channel`] adds a bounded plane-channel
+//! filter. Neither path supplies a shock model, scale-dependent correction
+//! or DNS validation.
 //! Rectangular cells retain an isotropic eddy-viscosity closure: physical
 //! derivatives do not establish calibrated accuracy at arbitrary grid aspect
 //! ratios. See Scotti, Meneveau & Lilly (1993), doi:10.1063/1.858537.
@@ -30,6 +32,12 @@ use fs_math::det;
 /// Independently fitted gradient-diffusion transport of a resolved scalar.
 #[path = "dynamic/scalar.rs"]
 pub mod scalar;
+
+/// Wall-resolved planar channels with homogeneous tangential test filtering.
+#[path = "dynamic/channel.rs"]
+pub mod channel;
+
+use channel::{FilterGeometry, ScalarWall};
 
 /// Numerator and denominator are averaged separately, never their ratio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +122,8 @@ pub struct PeriodicDynamicSgs {
     spacing: [f64; 3],
     filter_width: f64,
     derivative_metric: [f64; 3],
+    geometry: FilterGeometry,
+    wall_velocity: [[f64; 3]; 2],
     velocity: Vec<[f64; 3]>,
     filtered: Vec<[f64; 4]>,
     basis: Vec<[f64; 6]>,
@@ -192,27 +202,20 @@ fn deviator(mut a: [f64; 6]) -> [f64; 6] {
 fn strain<const N: usize>(
     shape: [usize; 3],
     metric: [f64; 3],
+    geometry: FilterGeometry,
+    walls: [[f64; 3]; 2],
     cell: usize,
     u: &[[f64; N]],
 ) -> Result<(f64, [f64; 6]), DynamicSgsError> {
     let at = coordinates(shape, cell);
     let mut g = [[0.0; 3]; 3];
     for axis in 0..3 {
-        let sides = neighbors(shape[axis], at[axis]);
-        let mut low = at;
-        let mut high = at;
-        low[axis] = sides[0];
-        high[axis] = sides[2];
+        let stencil = geometry.stencil(shape, metric, cell, at, axis);
         for component in 0..3 {
-            let difference = u[index(shape, high)][component] - u[index(shape, low)][component];
-            let derivative = 0.5 * difference * metric[axis];
-            if !derivative.is_finite() || (derivative == 0.0 && difference != 0.0) {
-                return Err(DynamicSgsError::Cell {
-                    cell,
-                    reason: "unrepresentable normalized velocity derivative",
-                });
-            }
-            g[component][axis] = derivative;
+            g[component][axis] = stencil.derivative(
+                |j| u[j][component],
+                walls.map(|wall| ScalarWall::Value(wall[component])),
+            )?;
         }
     }
     let s = [
@@ -290,7 +293,17 @@ impl PeriodicDynamicSgs {
         spacing: f64,
         maximum_bytes: usize,
     ) -> Result<Self, DynamicSgsError> {
-        if shape.iter().any(|&n| n < 3) || !spacing.is_finite() || spacing <= 0.0 {
+        Self::new_geometry(shape, spacing, FilterGeometry::Periodic, maximum_bytes)
+    }
+
+    fn new_geometry(
+        shape: [usize; 3],
+        spacing: f64,
+        geometry: FilterGeometry,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        geometry.validate_shape(shape)?;
+        if !spacing.is_finite() || spacing <= 0.0 {
             return Err(DynamicSgsError::Invalid(
                 "at least three cells per periodic axis and positive isotropic spacing required",
             ));
@@ -311,6 +324,8 @@ impl PeriodicDynamicSgs {
             spacing: [spacing; 3],
             filter_width: spacing,
             derivative_metric: [1.0; 3],
+            geometry,
+            wall_velocity: [[0.0; 3]; 2],
             velocity: allocated(n, [0.0; 3])?,
             filtered: allocated(n, [0.0; 4])?,
             basis: allocated(n, [0.0; 6])?,
@@ -339,8 +354,17 @@ impl PeriodicDynamicSgs {
         spacing: [f64; 3],
         maximum_bytes: usize,
     ) -> Result<Self, DynamicSgsError> {
+        Self::new_cartesian_geometry(shape, spacing, FilterGeometry::Periodic, maximum_bytes)
+    }
+
+    fn new_cartesian_geometry(
+        shape: [usize; 3],
+        spacing: [f64; 3],
+        geometry: FilterGeometry,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
         if spacing[0] == spacing[1] && spacing[1] == spacing[2] {
-            return Self::new(shape, spacing[0], maximum_bytes);
+            return Self::new_geometry(shape, spacing[0], geometry, maximum_bytes);
         }
         if spacing.iter().any(|h| !h.is_finite() || *h <= 0.0) {
             return Err(DynamicSgsError::Invalid(
@@ -359,7 +383,7 @@ impl PeriodicDynamicSgs {
                 "unrepresentable Cartesian filter width or derivative metric",
             ));
         }
-        let mut result = Self::new(shape, filter_width, maximum_bytes)?;
+        let mut result = Self::new_geometry(shape, filter_width, geometry, maximum_bytes)?;
         result.spacing = spacing;
         result.derivative_metric = derivative_metric;
         Ok(result)
@@ -413,6 +437,17 @@ impl PeriodicDynamicSgs {
         config: DynamicSgsConfig,
         density: &[f64],
         velocity: &[[f64; 3]],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(DynamicSgsReport, InputScales), DynamicSgsError> {
+        self.prepare_scaled_with_walls(config, density, velocity, [[0.0; 3]; 2], cancelled)
+    }
+
+    fn prepare_scaled_with_walls(
+        &mut self,
+        config: DynamicSgsConfig,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        walls: [[f64; 3]; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(DynamicSgsReport, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
@@ -447,6 +482,25 @@ impl PeriodicDynamicSgs {
                 velocity_scale = velocity_scale.max(value.abs());
             }
         }
+        if let FilterGeometry::Channel(normal) = self.geometry {
+            for (side, wall) in walls.iter().enumerate() {
+                if wall[normal] != 0.0 {
+                    return Err(DynamicSgsError::Invalid(
+                        "channel walls must be impermeable",
+                    ));
+                }
+                for component in 0..3 {
+                    let difference = wall[component] - reference[component];
+                    if !difference.is_finite() {
+                        return Err(DynamicSgsError::Invalid(
+                            "finite representable wall velocity differences required",
+                        ));
+                    }
+                    self.wall_velocity[side][component] = difference;
+                    velocity_scale = velocity_scale.max(difference.abs());
+                }
+            }
+        }
         if velocity_scale == 0.0 {
             for (tile, values) in self.viscosity.chunks_mut(64).enumerate() {
                 poll(&mut cancelled, tile * 64)?;
@@ -470,9 +524,25 @@ impl PeriodicDynamicSgs {
                 *component /= velocity_scale;
             }
         }
+        if matches!(self.geometry, FilterGeometry::Channel(_)) {
+            for wall in &mut self.wall_velocity {
+                for component in wall {
+                    *component /= velocity_scale;
+                }
+            }
+        }
+        let samples = self.geometry.samples();
+        let ratio_squared = self.geometry.ratio_squared();
         for cell in 0..n {
             poll(&mut cancelled, cell)?;
-            let (rate, s) = strain(self.shape, self.derivative_metric, cell, &self.velocity)?;
+            let (rate, s) = strain(
+                self.shape,
+                self.derivative_metric,
+                self.geometry,
+                self.wall_velocity,
+                cell,
+                &self.velocity,
+            )?;
             self.strain_rate[cell] = rate;
             let rho = density[cell] / density_scale;
             self.basis[cell] = s.map(|v| rho * rate * v);
@@ -485,8 +555,8 @@ impl PeriodicDynamicSgs {
                 });
             }
             let mut filtered = [0.0; 4];
-            each_box(self.shape, cell, |j| {
-                let rho = density[j] / density_scale / 27.0;
+            self.geometry.each_box(self.shape, cell, |j| {
+                let rho = density[j] / density_scale / samples;
                 filtered[3] += rho;
                 for (k, v) in filtered[..3].iter_mut().enumerate() {
                     *v += rho * self.velocity[j][k];
@@ -510,8 +580,8 @@ impl PeriodicDynamicSgs {
             let mut a = [0.0; 6];
             let mut l = [0.0; 6];
             let mean = self.filtered[cell];
-            each_box(self.shape, cell, |j| {
-                let rho = density[j] / density_scale / 27.0;
+            self.geometry.each_box(self.shape, cell, |j| {
+                let rho = density[j] / density_scale / samples;
                 let d = core::array::from_fn::<_, 3, _>(|k| self.velocity[j][k] - mean[k]);
                 let product = [
                     d[0] * d[0],
@@ -523,11 +593,18 @@ impl PeriodicDynamicSgs {
                 ];
                 for k in 0..6 {
                     l[k] += rho * product[k];
-                    a[k] += self.basis[j][k] / 27.0;
+                    a[k] += self.basis[j][k] / samples;
                 }
             });
-            let (rate, s) = strain(self.shape, self.derivative_metric, cell, &self.filtered)?;
-            let m = core::array::from_fn(|k| 2.0 * (a[k] - 9.0 * mean[3] * rate * s[k]));
+            let (rate, s) = strain(
+                self.shape,
+                self.derivative_metric,
+                self.geometry,
+                self.wall_velocity,
+                cell,
+                &self.filtered,
+            )?;
+            let m = core::array::from_fn(|k| 2.0 * (a[k] - ratio_squared * mean[3] * rate * s[k]));
             let pair = [contract(deviator(l), m), contract(m, m)];
             if pair.iter().any(|v| !v.is_finite())
                 || (pair[1] == 0.0 && m.iter().any(|v| *v != 0.0))
@@ -541,6 +618,8 @@ impl PeriodicDynamicSgs {
             numerator.add(pair[0]);
             denominator.add(pair[1]);
         }
+        self.geometry
+            .average_planes(self.shape, &mut self.contraction, &mut cancelled)?;
         let domain = [numerator.value, denominator.value];
         let mut report = DynamicSgsReport {
             minimum_raw_coefficient_squared: f64::INFINITY,
@@ -549,7 +628,10 @@ impl PeriodicDynamicSgs {
         for cell in 0..n {
             poll(&mut cancelled, cell)?;
             let pair = match config.averaging {
-                DynamicAveraging::Domain => domain,
+                DynamicAveraging::Domain => match self.geometry {
+                    FilterGeometry::Periodic => domain,
+                    FilterGeometry::Channel(_) => self.contraction[cell],
+                },
                 DynamicAveraging::LocalBox => {
                     let mut pair = [0.0; 2];
                     let mut determined = false;
