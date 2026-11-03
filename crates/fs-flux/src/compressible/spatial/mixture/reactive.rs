@@ -471,9 +471,11 @@ impl ReactingEuler3d {
                     &mut cancelled,
                 )?;
                 let transport = if let Some((force, control, workspace)) = forcing.as_mut() {
-                    self.trial.step_with_forcing(
-                        Time::new(dt), controls.transport, *force, *control,
-                        &mut **workspace, &mut cancelled,
+                    // This owner already admitted the immutable source and
+                    // scratch geometry before entering the split retry loop.
+                    self.trial.step_impl(
+                        Time::new(dt), controls.transport,
+                        Some((*force, *control, &mut **workspace)), &mut cancelled,
                     )?
                 } else {
                     self.trial.step(Time::new(dt), controls.transport, &mut cancelled)?
@@ -504,6 +506,7 @@ impl ReactingEuler3d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
+                let mut endpoint_rate: f64 = 0.0;
                 let second = match operator.as_deref_mut() {
                     Some(operator) => {
                         let report = operator.advance_unpublished(
@@ -523,6 +526,14 @@ impl ReactingEuler3d {
                         let control = self.reactor.controls();
                         for q in self.trial.states.chunks_exact(width) {
                             let p = cell(q, n).primitive(&self.trial.gas, &mut cancelled)?;
+                            if let Some((_, force_control, _)) = forcing.as_ref() {
+                                force_control.admit_velocity::<super::Error>(
+                                    p.velocity, p.sound_speed,
+                                )?;
+                                endpoint_rate = endpoint_rate.max(forcing::acoustic_rate(
+                                    p, &self.trial.grid,
+                                )?);
+                            }
                             if !(control.minimum_temperature_k..=control.maximum_temperature_k)
                                 .contains(&p.temperature)
                             {
@@ -535,18 +546,22 @@ impl ReactingEuler3d {
                     }
                     None => None,
                 };
+                if let Some((_, control, _)) = forcing.as_ref() {
+                    // The molecular path already recovered this same endpoint
+                    // for its chemical temperature-domain admission above.
+                    if second.is_none() {
+                        endpoint_rate = forcing::admit_field(
+                            &self.trial.gas, &self.trial.grid, &self.trial.states,
+                            *control, &mut cancelled,
+                        )?;
+                    }
+                    super::stepping::check_cfl::<super::Error>(
+                        endpoint_rate * dt, controls.transport.cfl,
+                    )?;
+                }
                 let dissipation = first
                     .zip(second)
                     .map(|(first, second)| SplitDissipationReport3d { first, second });
-                if let Some((_, control, _)) = forcing.as_ref() {
-                    let rate = forcing::admit_field(
-                        &self.trial.gas, &self.trial.grid, &self.trial.states,
-                        *control, &mut cancelled,
-                    )?;
-                    super::stepping::check_cfl::<super::Error>(
-                        rate * dt, controls.transport.cfl,
-                    )?;
-                }
                 let after =
                     checked_totals(&self.trial.states, &self.trial.grid, n, &mut cancelled)?;
                 let chemistry = chemistry.report;

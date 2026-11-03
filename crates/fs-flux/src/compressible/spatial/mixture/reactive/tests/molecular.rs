@@ -445,3 +445,253 @@ fn g4_all_molecular_reacting_phases_and_support_loads_publish_atomically() {
     );
     assert_eq!(budget(&flow, &molecular), bytes);
 }
+
+#[test]
+fn g1_forced_molecular_reacting_restart_replays_one_admitted_interval() {
+    let mut flow = uniform();
+    let mut molecular = operator(flow.flow(), 0.02);
+    let mut scratch = flow.flow().forcing_workspace(usize::MAX).unwrap();
+    let bytes = budget(&flow, &molecular) + scratch.workspace_bytes();
+    let acceleration = [400.0, -200.0, 100.0];
+    let forces = vec![acceleration; flow.flow().cell_count()];
+    let cap = ForceControl3d { maximum_mach: 0.8 };
+    let controls = ReactiveStepControl::default();
+    let mut polls = 0;
+    let report = flow
+        .step_with_dissipation_and_forcing(
+            &mut molecular,
+            Time::new(0.2),
+            controls,
+            DissipationControl::default(),
+            bytes,
+            BodyForce3d::Acceleration(&forces),
+            cap,
+            &mut scratch,
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    balance(&report);
+    assert!(report.coupling_retries > 0);
+    assert_eq!(report.chemistry.cell_solves, 2 * flow.flow().cell_count());
+    let split = report.dissipation.unwrap();
+    let dt = report.elapsed.value();
+    assert_eq!(split.first.elapsed.value(), 0.5 * dt);
+    assert_eq!(split.second.elapsed, split.first.elapsed);
+    assert_eq!(molecular.last_step(), Some(&split.second));
+    let mut rate: f64 = 0.0;
+    for index in 0..flow.flow().cell_count() {
+        let p = flow
+            .flow()
+            .cell(index)
+            .unwrap()
+            .primitive(flow.flow().gas(), || false)
+            .unwrap();
+        assert!(
+            p.velocity[0].hypot(p.velocity[1]).hypot(p.velocity[2])
+                <= cap.maximum_mach * p.sound_speed * (1.0 + 1e-13)
+        );
+        rate = rate.max(
+            (0..3)
+                .map(|axis| {
+                    (p.velocity[axis].abs() + p.sound_speed) / flow.flow().grid().spacing()[axis]
+                })
+                .sum(),
+        );
+        for axis in 0..3 {
+            close(
+                p.velocity[axis],
+                [0.7, -0.4, 0.2][axis] + dt * acceleration[axis],
+                2e-12,
+            );
+        }
+    }
+    assert!(rate * dt <= controls.transport.cfl * (1.0 + 1e-13));
+    for axis in 0..3 {
+        close(
+            report.source_change.impulse[axis],
+            report.before.mass() * dt * acceleration[axis],
+            2e-12,
+        );
+    }
+    let work = report.before.mass()
+        * (0..3)
+            .map(|axis| {
+                dt * acceleration[axis] * ([0.7, -0.4, 0.2][axis] + 0.5 * dt * acceleration[axis])
+            })
+            .sum::<f64>();
+    close(report.source_change.work, work, 2e-12);
+    let mut replay = uniform();
+    let mut replay_molecular = operator(replay.flow(), 0.02);
+    let mut replay_scratch = replay.flow().forcing_workspace(usize::MAX).unwrap();
+    let expected = replay
+        .step_with_dissipation_and_forcing(
+            &mut replay_molecular,
+            report.elapsed,
+            controls,
+            DissipationControl::default(),
+            bytes,
+            BodyForce3d::Acceleration(&forces),
+            cap,
+            &mut replay_scratch,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(expected.coupling_retries, 0);
+    assert_eq!(expected.transport, report.transport);
+    assert_eq!(expected.chemistry, report.chemistry);
+    assert_eq!(expected.dissipation, report.dissipation);
+    assert_eq!(expected.source_change, report.source_change);
+    assert_eq!(replay.flow().states(), flow.flow().states());
+    assert_eq!(loads(&replay), loads(&flow));
+    let mut cancelled_flow = uniform();
+    let initial = cancelled_flow.flow().states().to_vec();
+    let mut cancelled_molecular = operator(cancelled_flow.flow(), 0.02);
+    let mut cancelled_scratch = cancelled_flow.flow().forcing_workspace(usize::MAX).unwrap();
+    let initial_loads = loads(&cancelled_flow);
+    let initial_molecular_loads = molecular_loads(&cancelled_molecular);
+    let mut count = 0;
+    assert_eq!(
+        cancelled_flow.step_with_dissipation_and_forcing(
+            &mut cancelled_molecular,
+            Time::new(0.2),
+            controls,
+            DissipationControl::default(),
+            bytes,
+            BodyForce3d::Acceleration(&forces),
+            cap,
+            &mut cancelled_scratch,
+            || {
+                count += 1;
+                count >= polls
+            },
+        ),
+        Err(ReactiveError::Cancelled)
+    );
+    assert_eq!(cancelled_flow.flow().states(), initial);
+    assert_eq!(cancelled_flow.flow().time(), Time::new(0.0));
+    assert_eq!(cancelled_flow.last_step(), None);
+    assert_eq!(cancelled_molecular.last_step(), None);
+    assert_eq!(loads(&cancelled_flow), initial_loads);
+    assert_eq!(
+        molecular_loads(&cancelled_molecular),
+        initial_molecular_loads
+    );
+}
+
+#[test]
+fn g0_zero_force_retains_native_spatial_reacting_and_molecular_paths() {
+    let create = || {
+        let (gas, mechanism) = mechanism(5.0, 8.0, 0.0);
+        coupled(
+            field(
+                gas,
+                CartesianGrid::new(3, 2, 2, 0.2, 0.25, 0.3).unwrap(),
+                Boundaries3d {
+                    x: WALLS,
+                    y: WALLS,
+                    z: WALLS,
+                },
+                |x| {
+                    let a = 0.5 + 0.2 * x[0] - 0.1 * x[2];
+                    (
+                        [a, 1.0 - a],
+                        [0.2 + 0.1 * x[1], -0.15, 0.12],
+                        1.0 + 0.1 * x[2],
+                    )
+                },
+            ),
+            mechanism,
+        )
+    };
+    for with_molecular in [false, true] {
+        let mut native = create();
+        let mut flow = create();
+        let mut native_molecular = operator(native.flow(), 0.02);
+        let mut molecular = operator(flow.flow(), 0.02);
+        let mut scratch = flow.flow().forcing_workspace(usize::MAX).unwrap();
+        let bytes = budget(&flow, &molecular) + scratch.workspace_bytes();
+        let zero = vec![[0.0; 3]; flow.flow().cell_count()];
+        // Inactive forcing must retain the original path even when an active
+        // source with this control would reject the initial velocity.
+        let cap = ForceControl3d { maximum_mach: 1e-6 };
+        let expected = if with_molecular {
+            native
+                .step_with_dissipation(
+                    &mut native_molecular,
+                    Time::new(0.001),
+                    ReactiveStepControl::default(),
+                    DissipationControl::default(),
+                    bytes,
+                    || false,
+                )
+                .unwrap()
+        } else {
+            native
+                .step(Time::new(0.001), ReactiveStepControl::default(), || false)
+                .unwrap()
+        };
+        let report = if with_molecular {
+            flow.step_with_dissipation_and_forcing(
+                &mut molecular,
+                Time::new(0.001),
+                ReactiveStepControl::default(),
+                DissipationControl::default(),
+                bytes,
+                BodyForce3d::Acceleration(&zero),
+                cap,
+                &mut scratch,
+                || false,
+            )
+            .unwrap()
+        } else {
+            flow.step_with_forcing(
+                Time::new(0.001),
+                ReactiveStepControl::default(),
+                BodyForce3d::Acceleration(&zero),
+                cap,
+                &mut scratch,
+                || false,
+            )
+            .unwrap()
+        };
+        assert_eq!(report, expected);
+        assert_eq!(report.source_change, ForceChange3d::default());
+        for (left, right) in flow.flow().states().iter().zip(native.flow().states()) {
+            assert_eq!(left.to_bits(), right.to_bits());
+        }
+        assert_eq!(flow.flow().time(), native.flow().time());
+        assert_eq!(loads(&flow), loads(&native));
+        assert_eq!(molecular.last_step(), native_molecular.last_step());
+        assert_eq!(
+            molecular_loads(&molecular),
+            molecular_loads(&native_molecular)
+        );
+        if with_molecular {
+            assert!(matches!(
+                flow.step_with_dissipation_and_forcing(
+                    &mut molecular,
+                    Time::new(0.001),
+                    ReactiveStepControl::default(),
+                    DissipationControl::default(),
+                    bytes - 1,
+                    BodyForce3d::Acceleration(&zero),
+                    cap,
+                    &mut scratch,
+                    || false,
+                ),
+                Err(ReactiveError::Invalid(_))
+            ));
+            assert_eq!(flow.flow().states(), native.flow().states());
+            assert_eq!(flow.last_step(), Some(&report));
+            assert_eq!(molecular.last_step(), native_molecular.last_step());
+            assert_eq!(loads(&flow), loads(&native));
+            assert_eq!(
+                molecular_loads(&molecular),
+                molecular_loads(&native_molecular)
+            );
+        }
+    }
+}
