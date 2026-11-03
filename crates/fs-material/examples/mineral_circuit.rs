@@ -13,32 +13,37 @@ use fs_material::comminution::{
     breakage::{
         BreakageColumn, BreakageTestContext, BreakageTransfer, SizeClass, SizeRedistributionCard,
     },
-    circuit::{CircuitSettings, ClosedGrindingCircuit, MILL_DRY_FLOW_AXIS},
+    circuit::{
+        CircuitSettings, ClosedGrindingCircuit, MILL_DRY_FLOW_AXIS, power::BondCircuitPrototype,
+    },
 };
 use fs_material::separation::{
     CLASSIFIER_LAW_ID, ClassifierCard, PARTICLE_DIAMETER_AXIS, ParticleClass, ParticleStream,
     Partition, SOLIDS_FRACTION_AXIS,
 };
 use fs_qty::{
-    Dimensionless, Dims, Length, MassFlowRate, QuantitySpec, Temperature, chemistry::ElementId,
+    Dimensionless, Dims, Length, MassFlowRate, Power, QuantitySpec, Temperature,
+    chemistry::ElementId,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         println!(
-            "Usage: mineral_circuit [coarse_retained_fraction [underflow_purge_fraction]]\n\
+            "Usage: mineral_circuit [coarse_retained_fraction [underflow_purge_fraction [net_pinion_kW]]]\n\
 Defaults: coarse retention 0.5, underflow purge 0; both allowed in [0,1].\n\
 The remaining coarse mass enters the fine class; unpurged underflow returns to the mill.\n\
 Prints an authored steady recycle, conservative dry/Cu/water balances and discrete P80.\n\
 The independent Bond estimate uses fresh throughput, F80 and combined overflow+purge P80.\n\
+Optional positive net pinion kW also solves a scaled on-stream operating point and rechecks source limits.\n\
 No fitted kinetics, predicted liberation or first-principles particle model is supplied."
         );
         return Ok(());
     }
-    if args.len() > 2 {
+    if args.len() > 3 {
         return Err(
-            "expected optional coarse retention and underflow purge fractions; use --help".into(),
+            "expected optional coarse retention, underflow purge and net pinion kW; use --help"
+                .into(),
         );
     }
     let retained: f64 = args.first().map_or(Ok(0.5), |value| value.parse())?;
@@ -46,6 +51,10 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
         return Err("coarse retained fraction must be finite and in [0,1]".into());
     }
     let purge: f64 = args.get(1).map_or(Ok(0.0), |value| value.parse())?;
+    let power_kw: Option<f64> = args.get(2).map(|value| value.parse()).transpose()?;
+    if power_kw.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+        return Err("net pinion power must be finite and positive".into());
+    }
     let underflow_recycle =
         Partition::from_fractions(Dimensionless::new(1.0 - purge), Dimensionless::new(purge))?;
     let description = format!(
@@ -55,7 +64,7 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
          Fine material retains its class; coarse remainder becomes fine, carrying the same assays. \
          Classifier d50 = 100 um, sharpness = 2, water bypass = 0.2. Constant per-pass coefficients are \
          explicitly assumed over actual mill dry flow 12..210 kg/s and solids mass fraction 0.5..0.95 \
-         at 298.15 K. Separate Bond Wi = 15 kWh/dry metric tonne; utilization = 0.9."
+         at 298.15 K. Separate Bond Wi = 15 kWh/dry metric tonne; all circuit rates are on-stream."
     );
     let artifact = hash_domain(
         "mineral-circuit-authored-scenario-v1",
@@ -148,15 +157,17 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
     )?;
     let conditions =
         QueryPoint::new().with_quantity("temperature", quantity(Temperature::DIMS), 298.15)?;
-    let solved = ClosedGrindingCircuit::new(mill, classifier).solve_with_underflow_recycle(
+    let circuit = ClosedGrindingCircuit::new(mill, classifier);
+    let settings = CircuitSettings {
+        absolute_balance_tolerance: MassFlowRate::new(1e-11),
+        relative_balance_tolerance: Dimensionless::new(1e-12),
+        maximum_circulating_load: Dimensionless::new(20.0),
+    };
+    let solved = circuit.solve_with_underflow_recycle(
         &fresh,
         &conditions,
         &conditions,
-        CircuitSettings {
-            absolute_balance_tolerance: MassFlowRate::new(1e-11),
-            relative_balance_tolerance: Dimensionless::new(1e-12),
-            maximum_circulating_load: Dimensionless::new(20.0),
-        },
+        settings,
         underflow_recycle,
     )?;
     let external = ParticleStream::mix(&[&solved.product, &solved.purge])?;
@@ -235,20 +246,64 @@ No fitted kinetics, predicted liberation or first-principles particle model is s
     if p80 < f80 {
         let energy = bond.specific_energy(f80, p80)?.value();
         // Circuit-scale Bond energy uses fresh throughput, not circulating mill feed.
-        let required_pinion_power = energy * fresh.dry_solids()?.value() / 0.9;
+        let required_pinion_power = energy * fresh.dry_solids()?.value();
         println!(
             "Independent Bond estimate to combined overflow+purge P80: {:.6} J/kg dry ({:.6} kWh/dry metric tonne)",
             energy,
             energy / 3600.0
         );
         println!(
-            "Required net pinion power: {:.6} kW at fresh {:.6} kg/s and utilization 0.9",
+            "Required net pinion power: {:.6} kW at on-stream fresh {:.6} kg/s",
             required_pinion_power / 1000.0,
             fresh.dry_solids()?.value()
         );
     } else {
         println!(
             "Bond estimate unavailable: combined external P80 equals fresh F80; this law requires strict size reduction."
+        );
+    }
+    if let Some(power_kw) = power_kw {
+        let prototype = BondCircuitPrototype::new(
+            &circuit,
+            &bond,
+            &fresh,
+            &conditions,
+            &conditions,
+            settings,
+            underflow_recycle,
+        )?;
+        let point = prototype.at_net_pinion_power(Power::new(power_kw * 1000.0))?;
+        println!(
+            "On-stream Bond operating point: {:.6} kW; F80={:.3} um, combined external P80={:.3} um, energy={:.6} J/kg dry",
+            point.net_pinion_power.value() / 1000.0,
+            point.fresh_f80.value() * 1e6,
+            point.external_p80.value() * 1e6,
+            point.specific_energy.value(),
+        );
+        println!("scaled_stream,dry_kg_s,Cu_kg_s,water_kg_s");
+        for (name, stream) in [
+            ("fresh", &point.solution.fresh_feed),
+            ("mill_feed", &point.solution.mill_feed),
+            ("recycle", &point.solution.recycle),
+            ("overflow", &point.solution.product),
+            ("purge", &point.solution.purge),
+        ] {
+            println!(
+                "{name},{:.9},{:.9},{:.9}",
+                stream.dry_solids()?.value(),
+                stream.element_flow(&copper)?.value(),
+                stream.water().value(),
+            );
+        }
+        println!(
+            "Rechecked actual mill flow {:.6} kg/s, solids fraction {:.9}, circulating load {:.9}; maximum balance discrepancy {:.6e} kg/s",
+            point.solution.mill_feed.dry_solids()?.value(),
+            point.solution.mill_feed.solids_mass_fraction()?.value(),
+            point.solution.circulating_load.value(),
+            point.solution.closure.maximum_absolute_error.value(),
+        );
+        println!(
+            "Scaled rates are on-stream; reporting-period utilization is separate from source operating limits."
         );
     }
     println!(

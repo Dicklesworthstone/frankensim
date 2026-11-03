@@ -497,8 +497,8 @@ increases mill feed to 52.826087 kg/s and circulating load to 340.217%, while
 the external solids, copper and water balances remain closed.
 
 The separate authored Bond estimate uses circuit F80=200 µm, P80=100 µm and
-Wi=15 kWh/dry metric tonne: 15816.234 J/kg of FRESH solids, requiring 210.883 kW
-net pinion power at 12 kg/s and 0.9 utilization. It is not multiplied by mill
+Wi=15 kWh/dry metric tonne: 15816.234 J/kg of FRESH solids, requiring 189.795 kW
+net pinion power at 12 kg/s on-stream fresh throughput. It is not multiplied by mill
 circulating tonnage, and no additional efficiency effect is inferred from the
 redistribution matrix. At retained fraction 1, discrete product P80 equals F80;
 the circuit remains reportable but this strict-size-reduction Bond estimate is
@@ -550,6 +550,42 @@ overflow would omit coarse material deliberately discharged from the circuit.
 For full purge in the authored case, the combined external P80 equals F80 and
 the strict-size-reduction Bond estimate is unavailable, even though the
 separately displayed fine overflow is smaller.
+
+#### Coupling available power to the admitted circuit
+
+`comminution::circuit::power::BondCircuitPrototype` joins the existing circuit
+and Bond owners. Its constructor independently solves a reference feed with
+the original mill card, classifier, conditions, numerical settings and exact
+underflow return/purge partition. `at_net_pinion_power(Power)` then calculates
+fresh capacity, while `at_fresh_throughput(MassFlowRate)` calculates the required
+net pinion power. Both use fresh-feed F80 and combined overflow-plus-purge P80.
+
+Every request scales the fresh size classes, elemental accounts and water
+together and re-solves the original circuit at the actual operating state.
+The original mill throughput and solids-fraction limits still apply; an
+admitted reference does not grant permission to extrapolate the source cards.
+The result retains the original prototype and exposes the complete scaled
+circuit, specific energy, size basis and net pinion power. A changed discrete
+size quantile, absent size reduction or unrepresentable positive flow refuses.
+
+The example accepts net pinion power in kW as a third optional argument:
+
+```bash
+cargo run -p fs-material --example mineral_circuit -- 0.5 0 100
+cargo run -p fs-material --example mineral_circuit -- 0.5 0.01 100
+```
+
+The first command uses the authored two-size case above and prints the scaled
+fresh, mill-feed, recycle, overflow and purge accounts at 100 kW. The second
+retains an explicit 1% underflow purge. Requests above the mill card's supported
+flow window fail instead of returning an extrapolated throughput.
+
+These are steady **on-stream** rates. Reporting-period utilization may be
+applied separately to production totals; it must not lower the actual running
+flow used to admit the mill source. The work index, transfer matrix and
+classifier remain caller-supplied empirical inputs. This coupling does not
+infer motor or auxiliary loads, ore liberation, wear or power-dependent
+breakage kinetics.
 
 ## From dry mill throughput to slurry and process water
 

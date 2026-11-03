@@ -27,6 +27,10 @@ use fs_matdb::QueryPoint;
 use fs_qty::{Dimensionless, MassFlowRate, QuantitySpec, chemistry::ElementId};
 use std::collections::BTreeMap;
 
+/// Source-admitted Bond power and fresh-throughput coupling for this circuit.
+#[path = "circuit/power.rs"]
+pub mod power;
+
 /// Optional source axis bound by the solver to actual dry mill-feed throughput.
 pub const MILL_DRY_FLOW_AXIS: &str = "mill-dry-solids-flow";
 
