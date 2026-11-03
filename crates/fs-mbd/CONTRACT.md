@@ -5851,3 +5851,39 @@ third source query or an inferred intermediate momentum. The original full
 inertia, field/frame/domain validation and cancellation checks remain binding.
 The receipt adds no field law, accepted-path domain guarantee or energy-exact
 integration claim.
+
+## Native impulse events on closed geared mechanisms
+
+`implicit::distance::joint::apply_impulses` applies declared joint and body
+impulses while existing distance, spherical and affine gear/lock rows react
+together. It reuses the original objective geometry, combined body/joint
+mobility, normalized Cholesky and native impulse application. The source
+inverse-mass probe receives no physical endpoint speed admission; one summed
+source/reaction event receives the original state and speed checks.
+
+Positions remain unchanged and initial/final row residuals must satisfy their
+original physical units and tolerances. Zero source still admits geometry,
+tangency and combined rank, then retains the input motion with zero reactions;
+an admitted finite defect does not activate a projection. Empty constraints
+delegate to the original native impulse response. The bound remains 32 scalar
+rows and 4096 links, without a dense generalized mass matrix or a contact law.
+
+`BilateralImpulseResponse` separates constraint-only body and joint impulses,
+material and joint multipliers, actual before/after residuals, and complete
+native momentum/energy response. Actual source and constraint work use
+compensated mean-velocity products. Objective row work and the total-work
+partition residual remain separate observations, retaining rounding in the
+wrench lift and summed impulses. No finite correction work is inferred heat.
+The normalized reciprocal infinity-norm condition is estimated with retained
+Cholesky unit-RHS solves for event consumers; continuous stepping does not pay
+for those extra solves. Every inverse column and row norm is admitted finite.
+
+Five focused native regression groups are added for independent geared
+mobility/work and frame covariance; actual constrained endpoint speed versus
+an inadmissible free probe; finite tangent work and passive exactness; spherical
+and angular reactions against an independently assembled full tensor at an
+admitted finite gap; and empty/rank/cancellation/retry behavior. Source/API and
+analytical-oracle review completed. Native compilation, execution and rustfmt
+remain unrun for this increment because the execution container was replaced
+and the replacement has no Rust, DSR or RCH toolchain. These tests are not a
+passing native or full-workspace qualification claim.
