@@ -31,6 +31,7 @@ fs-bem = { path = "../fs-bem" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-conduction = { path = "../fs-conduction" }
 fs-contact = { path = "../fs-contact" }
+fs-convection = { path = "../fs-convection" }
 fs-dcontact = { path = "../fs-dcontact" }
 fs-duct = { path = "../fs-duct" }
 fs-em = { path = "../fs-em" }
@@ -73,7 +74,6 @@ fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
-fs-convection = { path = "../fs-convection" }
 fs-modalid = { path = "../fs-modalid" }
 fs-ladder = { path = "../fs-ladder" }
 fs-io = { path = "../fs-io" }

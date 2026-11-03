@@ -4,6 +4,9 @@
 //! thermodynamic state admit the requested propagation law; the original
 //! `ObserverFilter` owns attenuation, dispersion, approximation and latency.
 
+/// Source-gas heat transfer with the same retained composition and material laws.
+pub mod convection;
+
 use super::{ObserverFilter, legacy_relative_humidity};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::{gas::GasState, gas_species::input::GasRecord};
