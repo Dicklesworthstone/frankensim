@@ -2006,10 +2006,17 @@ pub struct Cavity {
 /// The mode's pressure amplitude is `-kappa (Y - X)` and pushes node `i` with `g_i` times it, so heads and air
 /// exchange energy without making any: held heads leave `X` ringing at the mode's frequency. The leapfrog air
 /// step uses `wt2 = (2 - 2 cos(omega k)) / k^2`, so a held-head mode rings at `omega` exactly. Lossless unless
-/// `sigma` is given: then each air coordinate also carries the damping `2 sigma_m dX/dt` (centred, so the step
-/// stays passive), the viscothermal boundary-layer loss on shell and heads (`kit::cylinder_mode_wall_sigma`);
-/// a held-head mode then rings down as `exp(-sigma_m t)`. An empty `sigma` is the lossless step, bit for bit.
-/// Modes that differ only
+/// `sigma` is given: then each mode carries the viscothermal boundary-layer loss on shell and heads
+/// (`kit::cylinder_mode_wall_sigma`) as a dashpot `c_m = 2 sigma_m kappa_m / wt2_m` in parallel with its air
+/// spring, on the stretch. The air coordinate takes `-c_m d(X - Y)/dt`, with its own velocity centred and the
+/// heads' velocity as the bodies' backward difference `(Y - Y-) / k`; the heads take the reaction. A held-head
+/// mode rings down as `exp(-sigma_m t)`. Below a mode, where `X` follows the heads, the dashpot charges their
+/// motion almost nothing (about `sigma_m (omega / omega_m)^4` times the air's share of the moving mass), so the
+/// loss is a lower bound there too. The form landed in 9d3b26242 damped `2 sigma_m dX/dt`, the air coordinate's
+/// own velocity: below a mode that charged each mode's own-frequency loss to the heads' motion at every
+/// frequency, so it overcharged the loss below the air modes and was not a lower bound there (MB 17080). The
+/// energy can rise in a step by at most `sum_m c_m (Y+ - 2Y + Y-)^2 / (16 k)`, the share of the heads' backward
+/// velocity; held heads give zero. An empty `sigma` is the lossless step, bit for bit. Modes that differ only
 /// in their axial order share one shape on a head and differ there by a sign (`(-1)^p` on the far head), so
 /// the weights are stored per shape: `shape[m]` is mode `m`'s shape, and `heads` holds per head body its
 /// weights shape-major (`g` of shape `s` at node `i` is `weights[s * n + i]`) and per mode its sign there.
@@ -3295,6 +3302,20 @@ impl Instrument {
                 row_bound = row_bound.max(row);
             }
             gas_rate2 += trace_bound.min(row_bound);
+            // The wall loss's dashpots act on the heads through their backward velocity, an explicit dashpot like
+            // the radiation's: 2 D / dt more, D = sum_k c_k u_k u_k^T with c_k = 2 sigma_k kappa_k / wt2_k and
+            // u_k = M^-1/2 g_k, bounded the same two ways on its Gram sqrt(c_k c_l) g_k^T M^-1 g_l. (The air
+            // coordinate's own share is centred, so it needs no admission.)
+            if !air.sigma.is_empty() {
+                let c: Vec<f64> = (0..nm).map(|k| 2.0 * air.sigma[k] * air.kappa[k] / air.wt2[k]).collect();
+                let d_trace: f64 = (0..nm).map(|k| c[k] * gkl(k, k)).sum();
+                let mut d_row: f64 = 0.0;
+                for k in 0..nm {
+                    let row: f64 = (0..nm).map(|l| (c[k] * c[l]).sqrt() * gkl(k, l).abs()).sum();
+                    d_row = d_row.max(row);
+                }
+                gas_rate2 += 2.0 * rate * d_trace.min(d_row);
+            }
         }
         gas_rate2
     }
@@ -3423,28 +3444,46 @@ impl Instrument {
         // displacement and air coordinate, then the air coordinate's leapfrog step on the same state
         for air in self.air_modes.iter_mut() {
             let (nm, ns) = (air.kappa.len(), air.q.len());
+            let lossy = !air.sigma.is_empty();
             air.y.iter_mut().for_each(|y| *y = 0.0);
+            // with the wall loss, each mode's projected head step dY = Y - Y- (the bodies' backward difference)
+            let mut dy = if lossy { vec![0.0; nm] } else { Vec::new() };
+            let mut dq = if lossy { vec![0.0; ns] } else { Vec::new() };
             for (body, weights, sign) in &air.heads {
                 let b = &self.bodies[*body];
                 for s in 0..ns {
-                    air.q[s] = weights[s * b.n..(s + 1) * b.n].iter().zip(&b.w).map(|(g, w)| g * w).sum::<f64>();
+                    let gs = &weights[s * b.n..(s + 1) * b.n];
+                    air.q[s] = gs.iter().zip(&b.w).map(|(g, w)| g * w).sum::<f64>();
+                    if lossy {
+                        dq[s] = gs.iter().zip(b.w.iter().zip(&b.wp)).map(|(g, (w, wp))| g * (w - wp)).sum::<f64>();
+                    }
                 }
                 for m in 0..nm {
                     air.y[m] += sign[m] * air.q[air.shape[m]];
+                    if lossy {
+                        dy[m] += sign[m] * dq[air.shape[m]];
+                    }
                 }
             }
             for m in 0..nm {
                 let stretch = air.y[m] - air.x[m];
-                let next = if air.sigma.is_empty() {
-                    2.0 * air.x[m] - air.xp[m] + k * k * air.wt2[m] * stretch
+                if !lossy {
+                    let next = 2.0 * air.x[m] - air.xp[m] + k * k * air.wt2[m] * stretch;
+                    air.xp[m] = air.x[m];
+                    air.x[m] = next;
+                    air.y[m] = -air.kappa[m] * stretch; // this mode's pressure amplitude
                 } else {
-                    // (X+ - 2X + X-) / k^2 + 2 sigma (X+ - X-) / 2k = wt2 (Y - X)
+                    // the dashpot c = 2 sigma kappa / wt2 in parallel with the air spring, on the stretch:
+                    // (X+ - 2X + X-) / k^2 = wt2 (Y - X) - 2 sigma ((X+ - X-) / 2k - dY / k);
+                    // the heads take its reaction c ((X+ - X-) / 2k - dY / k) beside the spring's -kappa (Y - X)
                     let sk = air.sigma[m] * k;
-                    (2.0 * air.x[m] - (1.0 - sk) * air.xp[m] + k * k * air.wt2[m] * stretch) / (1.0 + sk)
-                };
-                air.xp[m] = air.x[m];
-                air.x[m] = next;
-                air.y[m] = -air.kappa[m] * stretch; // this mode's pressure amplitude
+                    let next = (2.0 * air.x[m] - (1.0 - sk) * air.xp[m] + 2.0 * sk * dy[m] + k * k * air.wt2[m] * stretch) / (1.0 + sk);
+                    let c = 2.0 * air.sigma[m] * air.kappa[m] / air.wt2[m];
+                    let relative = (0.5 * (next - air.xp[m]) - dy[m]) / k;
+                    air.xp[m] = air.x[m];
+                    air.x[m] = next;
+                    air.y[m] = -air.kappa[m] * stretch + c * relative; // pressure amplitude and the dashpot's reaction
+                }
             }
             for (body, weights, sign) in &air.heads {
                 let b = &mut self.bodies[*body];

@@ -1280,7 +1280,9 @@ pub fn attach_cavity_modes(p: &mut Piece, spec: &DrumSpec, f_max: f64) -> Result
 }
 
 /// `attach_cavity_modes`, and with `wall_loss` (opt-in, MB 15788) each mode also carries the viscothermal
-/// boundary-layer loss on shell and heads (`cylinder_mode_wall_sigma`). Without it the result is
+/// boundary-layer loss on shell and heads (`cylinder_mode_wall_sigma`), stepped as a dashpot on the stretch
+/// (`AirModes`; form B, MB 17080). The form landed in 9d3b26242 damped the air coordinate's own velocity: it
+/// overcharged the loss below the air modes and was not a lower bound there. Without `wall_loss` the result is
 /// `attach_cavity_modes`'s, bit for bit.
 pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall_loss: bool) -> Result<String, String> {
     use crate::radiation::bessel_j;
@@ -1349,7 +1351,7 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
         let (t_lo, t_hi) = band.iter().fold((f64::INFINITY, 0.0f64), |(x, y), &i| (x.min(t60(i)), y.max(t60(i))));
         let name = |i: usize| format!("({},{},{}) {:.0} Hz", modes[i].m, modes[i].n, modes[i].p, modes[i].omega / (2.0 * PI));
         format!(
-            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz; no loss inside the air and none from the heads' own motion in the layers (a lower bound)",
+            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz, each as a dashpot in parallel with its air spring, on the stretch (form B, MB 17080: below a mode it charges the heads' motion almost nothing); no loss inside the air, none from the heads' own motion in the layers, and no wall scrub of the air the heads move below the modes (a lower bound). The form landed in 9d3b26242 damped the air coordinate's own velocity instead: it overcharged the loss below the air modes and was not a lower bound there",
             gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_heat_cp, gas.gamma, q(lo), name(lo), q(hi), name(hi), band.len()
         )
     } else {
@@ -2093,5 +2095,156 @@ mod cavity_wall_loss_tests {
             if field == "mu" { bad.dynamic_viscosity = v } else { bad.thermal_conductivity = v }
             assert!(cylinder_mode_wall_sigma(&modes[0], A, L, &bad).is_err(), "{field} {v} was not refused");
         }
+    }
+
+    /// (4) Form B on a moving head (MB 17080). A point head on a ground spring (near 150 Hz) carries two lossy
+    /// air modes.
+    /// - The discrete energy is E = m v^2 / 2 + k_h w w- / 2 + sum [ (kappa / wt2) vx^2 / 2 + kappa (g w - x)(g w- - x-) / 2 ].
+    /// - In a step it changes by -k c R^2 + (c / 2) R (Y+ - 2Y + Y-) per mode, R being the stretch rate.
+    ///   So it can rise by at most sum c (Y+ - 2Y + Y-)^2 / (16 k), the heads' backward velocity's share.
+    /// - Checked every step for 40000 steps at 144 kHz, with an allowance of 1e-12 of E.
+    /// - Planted negative: the same air step by hand, but the head does not take the dashpot's reaction. It
+    ///   must break the bound.
+    #[test]
+    fn form_b_on_a_moving_head_rises_at_most_its_backward_velocity_share_and_a_missing_reaction_does_not() {
+        let (mass, rate) = (4.0e-3, 144000.0);
+        let k = 1.0 / rate;
+        let kappa = [1.0e7, 3.0e7];
+        let wt2: Vec<f64> = [600.0, 1900.0].iter().map(|f: &f64| (2.0 - 2.0 * (2.0 * PI * f * k).cos()) / (k * k)).collect();
+        let g = [1.2e-3, -0.7e-3];
+        let sigma = [20.0, 40.0];
+        let kh = mass * (2.0 * PI * 150.0).powi(2);
+        let c: Vec<f64> = (0..2).map(|m| 2.0 * sigma[m] * kappa[m] / wt2[m]).collect();
+        let energy = |w: f64, wp: f64, x: &[f64], xp: &[f64]| -> f64 {
+            let mut e = 0.5 * mass * ((w - wp) / k).powi(2) + 0.5 * kh * w * wp;
+            for m in 0..2 {
+                e += 0.5 * kappa[m] / wt2[m] * ((x[m] - xp[m]) / k).powi(2) + 0.5 * kappa[m] * (g[m] * w - x[m]) * (g[m] * wp - xp[m]);
+            }
+            e
+        };
+        let allowed_rise = |wn: f64, w: f64, wp: f64| -> f64 { (0..2).map(|m| c[m] * (g[m] * (wn - 2.0 * w + wp)).powi(2) / (16.0 * k)).sum() };
+        let mut ins = Instrument::new(rate);
+        let head = ins.add(Body::point("head", mass));
+        ins.bodies[head].w[0] = 1e-4;
+        ins.bodies[head].wp[0] = 1e-4;
+        ins.links.push(Link { a: (head, 0), b: None, k: kh, c: 0.0 });
+        ins.air_modes.push(AirModes {
+            kappa: kappa.to_vec(), wt2: wt2.clone(), x: vec![0.0; 2], xp: vec![0.0; 2], shape: vec![0, 1],
+            heads: vec![(head, g.to_vec(), vec![1.0, 1.0])], y: vec![0.0; 2], q: vec![0.0; 2], sigma: sigma.to_vec(),
+        });
+        let mut out: [f64; 0] = [];
+        ins.step(&mut out);
+        let e0 = energy(ins.bodies[head].w[0], ins.bodies[head].wp[0], &ins.air_modes[0].x, &ins.air_modes[0].xp);
+        let (mut e, mut worst) = (e0, f64::NEG_INFINITY);
+        for _ in 0..40000 {
+            let (w, wp) = (ins.bodies[head].w[0], ins.bodies[head].wp[0]);
+            ins.step(&mut out);
+            let wn = ins.bodies[head].w[0];
+            let en = energy(wn, ins.bodies[head].wp[0], &ins.air_modes[0].x, &ins.air_modes[0].xp);
+            worst = worst.max((en - e - allowed_rise(wn, w, wp)) / e0);
+            e = en;
+        }
+        // planted negative: the same air step by hand, the head with the spring forces alone
+        let (mut w, mut wp) = (1e-4, 1e-4);
+        let (mut x, mut xp) = ([0.0; 2], [0.0; 2]);
+        let (mut e_prev, mut e_first) = (None, 0.0);
+        let mut broken = f64::NEG_INFINITY;
+        for _ in 0..40001 {
+            let mut f = -kh * w;
+            let mut xn = [0.0; 2];
+            for m in 0..2 {
+                let (s, dy) = (g[m] * w - x[m], g[m] * (w - wp));
+                let sk = sigma[m] * k;
+                xn[m] = (2.0 * x[m] - (1.0 - sk) * xp[m] + 2.0 * sk * dy + k * k * wt2[m] * s) / (1.0 + sk);
+                f += -kappa[m] * s * g[m];
+            }
+            let wn = 2.0 * w - wp + k * k * f / mass;
+            let rise = allowed_rise(wn, w, wp);
+            (wp, w) = (w, wn);
+            (xp, x) = (x, xn);
+            let en = energy(w, wp, &x, &xp);
+            match e_prev {
+                Some(ep) => broken = broken.max((en - ep - rise) / e_first),
+                None => e_first = en,
+            }
+            e_prev = Some(en);
+        }
+        eprintln!("form B, moving head: worst step (dE - allowed rise) / E0 {worst:.3e}, E end / E0 {:.6}; planted (no reaction on the head): {broken:.3e}", e / e0);
+        assert!(worst <= 1e-12, "the energy rose past its backward-velocity share by {worst} of E0");
+        assert!(e < e0, "the loss took no energy: {e} vs {e0}");
+        assert!(broken > 1e-9, "the per-step bound cannot see a missing reaction: {broken}");
+    }
+
+    /// (5) Below the air modes (MB 17080). The test cylinder's lowest air mode is carried by a point head on a
+    /// ground spring. The head sits at a fifth of that mode's frequency, and the air is a fifth of the moving mass.
+    /// - Bound: the head's decay must be at or under the Pierce sqrt(omega) bound. That is the mode's whole sigma,
+    ///   scaled to the head's frequency by sqrt(omega_h / omega_m), times the air's share of the moving mass.
+    /// - Both runs start in the low mode, the air carried quasi-statically, and are read from the discrete
+    ///   energy between 0.1 s and 2 s at 144 kHz.
+    /// - Form B is stepped by the instrument.
+    /// - Planted negative: 9d3b26242's form (2 sigma dX/dt on the air coordinate, the head with the spring alone),
+    ///   stepped by hand. It must exceed the bound.
+    #[test]
+    fn below_the_air_modes_the_head_decays_at_most_at_the_pierce_sqrt_omega_bound_and_the_9d3b26242_form_does_not() {
+        let gas = crate::standard_gas();
+        let modes = cylinder_air_modes(A, L, gas.sound_speed, 8000.0);
+        let md = modes.iter().min_by(|x, y| x.omega.total_cmp(&y.omega)).unwrap();
+        let sigma = cylinder_mode_wall_sigma(md, A, L, &gas).unwrap();
+        let rate = 144000.0;
+        let k = 1.0 / rate;
+        let wt2 = (2.0 - 2.0 * (md.omega * k).cos()) / (k * k);
+        let (mass, g) = (4.0e-3, 1.0e-3);
+        let air_mass = 0.25 * mass;
+        let kappa = air_mass * wt2 / (g * g);
+        let wh = md.omega / 5.0;
+        let moving = mass + air_mass;
+        let kh = wh * wh * moving;
+        let share = air_mass / moving;
+        let bound = sigma * (wh / md.omega).sqrt() * share;
+        let (w0, t1, t2) = (1e-4, 14400usize, 288000usize);
+        let x0 = g * w0 * wt2 / (wt2 - wh * wh);
+        let energy = |w: f64, wp: f64, x: f64, xp: f64| {
+            0.5 * mass * ((w - wp) / k).powi(2) + 0.5 * kh * w * wp + 0.5 * kappa / wt2 * ((x - xp) / k).powi(2) + 0.5 * kappa * (g * w - x) * (g * wp - xp)
+        };
+        let decay = |e1: f64, e2: f64| -(e2 / e1).ln() / (2.0 * (t2 - t1) as f64 * k);
+        let mut ins = Instrument::new(rate);
+        let head = ins.add(Body::point("head", mass));
+        ins.bodies[head].w[0] = w0;
+        ins.bodies[head].wp[0] = w0;
+        ins.links.push(Link { a: (head, 0), b: None, k: kh, c: 0.0 });
+        ins.air_modes.push(AirModes {
+            kappa: vec![kappa], wt2: vec![wt2], x: vec![x0], xp: vec![x0], shape: vec![0],
+            heads: vec![(head, vec![g], vec![1.0])], y: vec![0.0], q: vec![0.0], sigma: vec![sigma],
+        });
+        let mut out: [f64; 0] = [];
+        let state = |ins: &Instrument| energy(ins.bodies[head].w[0], ins.bodies[head].wp[0], ins.air_modes[0].x[0], ins.air_modes[0].xp[0]);
+        let mut e1 = 0.0;
+        for i in 1..=t2 {
+            ins.step(&mut out);
+            if i == t1 {
+                e1 = state(&ins);
+            }
+        }
+        let form_b = decay(e1, state(&ins));
+        // planted negative: 9d3b26242's form, by hand
+        let (mut w, mut wp, mut x, mut xp) = (w0, w0, x0, x0);
+        let sk = sigma * k;
+        let mut f1 = 0.0;
+        for i in 1..=t2 {
+            let s = g * w - x;
+            let xn = (2.0 * x - (1.0 - sk) * xp + k * k * wt2 * s) / (1.0 + sk);
+            let wn = 2.0 * w - wp + k * k * (-kh * w - kappa * s * g) / mass;
+            (wp, w, xp, x) = (w, wn, x, xn);
+            if i == t1 {
+                f1 = energy(w, wp, x, xp);
+            }
+        }
+        let old_form = decay(f1, energy(w, wp, x, xp));
+        eprintln!(
+            "lowest air mode ({},{},{}) {:.0} Hz, sigma {sigma:.4} 1/s; head at {:.0} Hz, air share {share:.3}: form B decays at {form_b:.3e} 1/s, Pierce sqrt(omega) bound {bound:.3e}, 9d3b26242's form {old_form:.3e} (whole sigma x share {:.3e})",
+            md.m, md.n, md.p, md.omega / (2.0 * PI), wh / (2.0 * PI), sigma * share
+        );
+        assert!(form_b.is_finite() && form_b <= bound, "form B charges the head {form_b} 1/s, over the bound {bound}");
+        assert!(old_form > bound, "the below-mode check cannot see 9d3b26242's form: {old_form} <= {bound}");
     }
 }
