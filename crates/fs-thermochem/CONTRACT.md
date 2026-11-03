@@ -1,5 +1,63 @@
 # CONTRACT: fs-thermochem
 
+## Coupled finite metal/ligand competition and aqueous pH
+
+`acid_base::complexation::IdealLigandSystem` couples one original neutral
+`HL -> H+ + L-` acid family to explicitly declared, disjoint aqueous metal
+families. Each family has one to eight original exactly conserved association
+steps `parent + q L- -> complex`, with q between one and eight. The first step
+may consume two ligands and subsequent steps one each, as in the declared
+Cu(I)/dicyano/tricyano/tetracyano family. Exact shared elemental/charge
+definitions, common standard references and identical reused selected
+formation-Gibbs sources are required. The original queries, answers, receipts,
+reactions and aqueous model remain reachable from the result.
+
+The caller supplies finite analytical ligand and metal totals, every other
+acid-family total, explicit spectator-ion stocks and the common ideal activity
+amount `n_ref`. No counterion or missing complex is invented. At trial free
+ligand activity l, metal-member weights are `beta_j*l^n_j`, normalized in
+logarithmic coordinates. A reduced copy of the original aqueous owner treats
+free L- and charged metal members as spectators and solves electroneutrality;
+neutral complexes retain their own positive amounts. It then infers
+`n_HL=n_L*a_H/Ka`. A bounded logarithmic root closes the total of free,
+protonated and metal-bound ligand. Other acid families respond to the same pH.
+
+The retained inner pH bracket contributes its required-ligand variation to
+root signs and convergence; an ambiguous sign cannot discard an endpoint.
+The original full aqueous owner restores the complete HL/L family at the
+accepted uncomplexed pool. Normally that pool is the independently positive
+sum `n_L+n_HL`. Near floating logarithmic resolution, strong ion cancellation
+can make inferred HL poorly conditioned; a well-resolved analytical component
+difference `ligand_total-bound_ligand` may instead set the pool BEFORE that
+full solve. This is an alternate component equation, not normalization or
+clipping of previously solved species. An unresolved trace difference keeps
+the independent positive-sum route. In both cases, independently reduced final
+species inventories, original aqueous charge balance, all metal association
+mass actions and the bracket containing the restored free ligand must meet
+the requested controls. The reported ligand numerical spread is zero for an
+analytically fixed final pool; final pH-bracket uncertainty still participates
+in the association mass-action acceptance.
+
+Results expose every metal member's original identity, charge, bound-ligand
+count, amount, activity and log fraction; finite component totals, actual free
+and bound ligand, the complete original aqueous report, independent component
+and ligand residuals, log-equilibrium residual, numerical free-ligand bracket
+and nested work counts. Exact empty pools stay empty; representable positive
+trace stocks are retained even if their fraction underflows. Unrepresentable
+positive stocks, overlapping or inconsistent sources, inadequate inner or
+outer resolution, out-of-bracket roots, exhausted work and cancellation return
+no partial result. Ligand and charge tolerances control those residuals; they
+do not imply a universal pH error bound in strongly conditioned solutions.
+
+This fixed-temperature ideal model supplies no omitted metal redox states,
+precipitation, nonideal activity corrections, finite-solvent balance,
+kinetic constants or stability claim against undeclared complexes. Seven
+analytical test groups cover manufactured simultaneous states, two/one/one
+ligand chains, competing metals, buffering, extensive scaling, conditioned
+charge cancellation, empty and trace inventories, source identity and bounded
+work/refusal. Actual matched NBS Cu(I)/CN/HCN/water packs separately exercise
+source-backed competition and its coupling to the gold-leaching runtime.
+
 ## Source-bound ideal gas/aqueous partition
 
 `stoichiometry::thermodynamics::gas_liquid::IdealGasLiquidPartition` binds an

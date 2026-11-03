@@ -36,6 +36,8 @@ use std::{
     sync::Arc,
 };
 
+/// Finite shared ligand competition between source-bound aqueous metal families.
+pub mod complexation;
 /// Coupled charge balance, acid/base families and one finite hydrolyzing solid.
 pub mod precipitation;
 #[path = "acid_base/solve.rs"]

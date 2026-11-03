@@ -88,5 +88,52 @@ The focused integration compiles the real TSVs, checks every literal row and
 receipt, verifies formation constants and finite ligand inventories, checks
 the stepwise/solid Gibbs cycles and free-ligand activity dependence, and
 refuses missing heat data, unbalanced Cu(II) substitution and unsupported
-source conditions. It does not substitute an equilibrium solve with an
-independently chosen extent or label a calculated result as measured recovery.
+source conditions. Its explicit-extent checks exercise conservation. The
+additional coupled tests below solve finite solution composition.
+
+## Coupled dissolved Cu(I), cyanide and pH
+
+`fs_thermochem::stoichiometry::thermodynamics::acid_base::complexation`
+provides the simultaneous ideal closure. Bind the three consecutive
+`LigandAssociation` steps to the original conserved reactions and Gibbs
+sources: Cu+ plus **two** CN- forms the dicyano ion; the next two steps each
+add one CN-. Join them with `MetalLigandFamily::new`, then pass that family
+and the original HCN/water `IdealAcidBaseSystem` into `IdealLigandSystem::new`.
+The CN- source selected by the acid and metal steps must be identical.
+
+Call `speciate` with the total cyanide ligand amount, every dissolved metal
+total, any other acid-family totals, explicit spectator counterions, the
+common amount at unit activity, numerical controls and cancellation callback.
+`LigandSpeciation` retains free CN, HCN+CN, Cu-bound ligands, every copper
+member, pH, original sources and independently recomputed balances. It solves
+the finite ligand and charge equations together; it does not prescribe a
+fixed cyanide consumption per mole of copper.
+
+For an illustrative 0.010 mol cyanide pool on `n_ref=10 mol`, with 0.010 mol
+Na+ and one mol chloride counterion per mol dissolved Cu(I), the actual NBS
+rows give these **calculated ideal-model** results:
+
+| Dissolved Cu(I), mol | Free CN-, mol | Cu-bound CN, mol | pH |
+| ---: | ---: | ---: | ---: |
+| 0 | 0.00876922811862 | 0 | 10.08542435335 |
+| 0.002 | 0.00334128696158 | 0.00589899308257 | 9.87590079290 |
+
+The inventories are authored comparison inputs, not an ore assay or operating
+recommendation. The 0.002 mol copper case contains approximately
+0.00013055666116 mol dicyano, 0.00183989359512 mol tricyano and
+0.00002954974372 mol tetracyano complexes, plus a positive free-Cu+ tail.
+The [actual-source coupled tests](../../../xtask/tests/mining_copper_cyanide_sources/speciation.rs)
+compare against an independent high-precision balance reduction, check
+ligand scarcity and empty pools, and retain tiny positive species amounts.
+Near ligand exhaustion, pH is sensitive to the allowed ligand-balance error;
+the reference tests tighten the ligand and logarithmic bracket tolerances.
+Numerical residuals and retained brackets should accompany the calculated pH.
+
+For the source's ideal unit-molality convention, `n_ref=10 mol` represents
+10 kg solvent times the 1 mol/kg standard molality. It is not a 10 m3 solution
+volume. Scaling all inventories and this basis together preserves activities;
+changing the basis alone changes pH and the copper coordination distribution.
+The tests exercise both cases. No solvent inventory or temperature-dependent
+equilibrium, CuCN precipitation, Cu(I)/Cu(II) redox or dissolution of an ore
+copper mineral is inferred. All supplied dissolved Cu(I) remains in the
+explicit aqueous family until a separate supported process transfers it.

@@ -1,6 +1,6 @@
 //! G0/G3 original corrected NBS rows through conserved Cu(I)-cyanide chemistry.
-//! Formation constants and ligand demand are source-backed standard-state
-//! calculations; these tests do not assert a coupled solution or ore recovery.
+//! Formation constants, finite ligand demand and simultaneous ideal aqueous
+//! speciation retain the original data; no measured ore recovery is asserted.
 #![deny(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -25,6 +25,9 @@ const ENERGY: Dims = Dims([2, 1, -2, 0, 0, -1]);
 const ENTROPY: Dims = Dims([2, 1, -2, -1, 0, -1]);
 const MASS: Dims = Dims([0, 1, 0, 0, 0, -1]);
 const RT: f64 = 8.314_462_618_153_24 * 298.15;
+
+#[path = "mining_copper_cyanide_sources/speciation.rs"]
+mod speciation;
 
 struct Row {
     id: &'static str,
@@ -126,7 +129,7 @@ fn workspace() -> PathBuf {
                 .into()
         })
 }
-fn point(row: &Row) -> QueryPoint {
+fn reference_point(phase: &str, ionic: bool) -> QueryPoint {
     let mut at = QueryPoint::new()
         .with_quantity(
             "temperature",
@@ -146,18 +149,20 @@ fn point(row: &Row) -> QueryPoint {
     let mut flags = vec![
         (REFERENCE, 1.0),
         ("source-standard-state", 1.0),
+        (phase, 1.0),
         ("engineering-reference-model", 1.0),
         ("source-specimen-qualified", 0.0),
     ];
-    if row.charge == 0 {
-        flags.extend([("source-phase-solid", 1.0), ("source-pure-species", 1.0)]);
+    if phase != "source-phase-aqueous" {
+        flags.push(("source-pure-species", 1.0));
     } else {
-        flags.extend([
-            ("source-phase-aqueous", 1.0),
-            ("source-aqueous-unit-activity-infinite-dilution", 1.0),
-            ("source-ionic-reference-hydrogen-zero", 1.0),
-            ("source-individual-ion", 1.0),
-        ]);
+        flags.push(("source-aqueous-unit-activity-infinite-dilution", 1.0));
+        if ionic {
+            flags.extend([
+                ("source-ionic-reference-hydrogen-zero", 1.0),
+                ("source-individual-ion", 1.0),
+            ]);
+        }
     }
     for (name, value) in flags {
         at = at
@@ -166,6 +171,35 @@ fn point(row: &Row) -> QueryPoint {
     }
     at
 }
+
+fn compile_source(pack_id: &str, id: &str, at: QueryPoint, out: &Path) -> Source {
+    let target = out.join(format!("{pack_id}.fsmatpk"));
+    let run = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["matdb-pack", "--manifest"])
+        .arg(workspace().join(format!("data/matdb/seed-v1/{pack_id}/manifest.tsv")))
+        .arg("--out")
+        .arg(&target)
+        .env("CARGO_WORKSPACE_DIR", workspace())
+        .current_dir(workspace())
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{pack_id}: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let bytes = std::fs::read(target).unwrap();
+    let decoded = NormalizedPack::from_bytes(&bytes).unwrap();
+    let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes).unwrap();
+    assert_eq!(pack.pack_id(), pack_id);
+    assert_eq!(pack.to_bytes(), bytes);
+    Source {
+        id: SpeciesId::new(id).unwrap(),
+        pack,
+        at,
+    }
+}
+
 fn sources() -> &'static [Source; 7] {
     static SOURCES: OnceLock<[Source; 7]> = OnceLock::new();
     SOURCES.get_or_init(|| {
@@ -180,32 +214,17 @@ fn sources() -> &'static [Source; 7] {
         std::fs::create_dir(&out).unwrap();
         std::array::from_fn(|i| {
             let row = &ROWS[i];
-            let target = out.join(format!("{}.fsmatpk", row.pack));
-            let run = Command::new(env!("CARGO_BIN_EXE_xtask"))
-                .args(["matdb-pack", "--manifest"])
-                .arg(workspace().join(format!("data/matdb/seed-v1/{}/manifest.tsv", row.pack)))
-                .arg("--out")
-                .arg(&target)
-                .env("CARGO_WORKSPACE_DIR", workspace())
-                .current_dir(workspace())
-                .output()
-                .unwrap();
-            assert!(
-                run.status.success(),
-                "{}: {}",
+            let phase = if row.charge == 0 {
+                "source-phase-solid"
+            } else {
+                "source-phase-aqueous"
+            };
+            compile_source(
                 row.pack,
-                String::from_utf8_lossy(&run.stderr)
-            );
-            let bytes = std::fs::read(target).unwrap();
-            let decoded = NormalizedPack::from_bytes(&bytes).unwrap();
-            let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes).unwrap();
-            assert_eq!(pack.pack_id(), row.pack);
-            assert_eq!(pack.to_bytes(), bytes);
-            Source {
-                id: SpeciesId::new(row.id).unwrap(),
-                pack,
-                at: point(row),
-            }
+                row.id,
+                reference_point(phase, row.charge != 0),
+                &out,
+            )
         })
     })
 }
