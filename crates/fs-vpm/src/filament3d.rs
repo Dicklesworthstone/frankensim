@@ -26,6 +26,10 @@ use fs_blake3::hash_domain;
 mod advection;
 pub use advection::SelfInducedShed;
 
+#[path = "filament3d/remesh.rs"]
+mod remesh;
+pub use remesh::StreamwiseRefinement;
+
 #[path = "filament3d/impulse.rs"]
 mod impulse;
 pub(crate) use impulse::ring_angular_impulse;

@@ -435,6 +435,39 @@ viscosity, image and field tests retain their own Kelvin, symmetry, unequal-
 strength age/core weighting, unit-scaling, deterministic and atomicity oracles,
 with enough retained rows to represent the additional angular constraints.
 
+## Connected three-dimensional streamwise refinement
+
+`FilamentWake::refine_streamwise(max_edge_length_m, max_new_rows, cancelled)`
+inserts complete node lines until every streamwise edge meets the positive
+length target within 64 machine epsilons. Each original row-to-successor
+interval uses uniform subdivisions selected by its longest edge, including
+zero-strength edges. This retains a conforming connected lattice without
+T-junctions. `StreamwiseRefinement` reports row counts and longest edges before
+and after the operation. Caller and certificate row limits must admit the
+entire change; insufficient capacity refuses instead of partly refining.
+
+Each child retains the parent quad circulation, base squared core and elapsed
+age exactly. Inserted spanwise edges have zero circulation after cancellation;
+original trailing edges are subdivided collinearly with the same circulation
+and effective core. Consequently the represented finite-core velocity,
+velocity gradient/vorticity, and geometric linear and angular filament impulse
+remain unchanged to roundoff, including for warped quads. Neither dividing
+circulation among the children nor interpolating their ages would preserve
+that representation. Existing row buffers, the lifting line, shed count and
+attached far-field seam remain intact; no physical time elapses.
+
+Work and storage scale linearly with original plus inserted lattice size.
+Only inserted row buffers are constructed privately, with cancellation checks
+per row and before publication. Failed allocation, budget, geometry, age/core,
+coordinate-resolution or cancellation checks retain the original state.
+This operation resolves straight represented filaments for subsequent motion;
+it does not recover unresolved curvature, coarsen the wake, change the core
+model or establish a viscous tube-strain or energy-conservation claim.
+`tests/remesh3d.rs` checks independent physical-edge linear and angular
+integrals per station, finite-core velocity/Jacobian/curl at multiple core
+growth rates, retained material age and buffers, attached near/far continuity,
+row limits, idempotence and cancellation/late-refusal atomicity.
+
 ## Self-induced attached near-wake motion
 
 `FilamentWake::shed_self_induced` convects the existing connected near wake
