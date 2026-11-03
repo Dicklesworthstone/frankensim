@@ -53,6 +53,8 @@ use fs_sparse::{Coo, Csr};
 
 /// Fully integrated quadratic hexahedra using the shared quadratic assembler.
 pub mod hex;
+/// Trilinear bricks with full-tensor B-bar stiffness and consistent mass.
+pub mod hex8;
 mod isoparametric;
 pub use isoparametric::thermal_field::QuadraticThermalStrainField;
 pub use isoparametric::thermal_response::prestress::QuadraticPrestressedAssembly;

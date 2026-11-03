@@ -1,10 +1,11 @@
-//! The TET10 integration/assembly path, shared with quadratic hexahedra.
+//! The shared isoparametric integration/assembly path for tetrahedra and hexes.
 //! Local upper triangles, Mandel arithmetic and COO insertion retain the
 //! original TET10 operation order. Geometry and reference rules are inputs.
 use super::{
     QuadraticThermalStrainField, TetAssemblyBudget, TetElasticAssembly, TetElasticError,
     TetMaterialField, TetThermalLoad, free_dof_map, hash_usize,
 };
+use crate::linear::Formulation;
 use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 use fs_sparse::Coo;
@@ -25,6 +26,39 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
     material_samples: Option<QuadraticThermalStrainField<'_>>,
     fixed_dofs: &[usize],
     budget: TetAssemblyBudget,
+    stiffness_rule: &[(R, f64)],
+    mass_rule: &[(R, f64)],
+    evaluate: impl Fn([[f64; 3]; N], R, usize, usize) -> Result<Point<N>, TetElasticError>,
+    reference_density: impl Fn(usize, R) -> Option<f64>,
+    cx: &Cx<'_>,
+) -> Result<TetElasticAssembly, TetElasticError> {
+    assemble_with_formulation::<N, D, R>(
+        nodes_m,
+        elements,
+        materials,
+        material_samples,
+        fixed_dofs,
+        budget,
+        Formulation::Standard,
+        stiffness_rule,
+        mass_rule,
+        evaluate,
+        reference_density,
+        cx,
+    )
+}
+
+/// The optional B-bar projection changes only the strain columns; material
+/// coupling, upper-triangle assembly, constraint elimination and mass retain
+/// the same owners. The Standard branch retains its original arithmetic.
+pub(super) fn assemble_with_formulation<const N: usize, const D: usize, R: Copy>(
+    nodes_m: &[[f64; 3]],
+    elements: &[[usize; N]],
+    materials: TetMaterialField<'_>,
+    material_samples: Option<QuadraticThermalStrainField<'_>>,
+    fixed_dofs: &[usize],
+    budget: TetAssemblyBudget,
+    formulation: Formulation,
     stiffness_rule: &[(R, f64)],
     mass_rule: &[(R, f64)],
     evaluate: impl Fn([[f64; 3]; N], R, usize, usize) -> Result<Point<N>, TetElasticError>,
@@ -52,15 +86,65 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
         let mut volume = 0.0;
         let mut integrated_mass = 0.0;
         let mut has_density_profile = false;
+        // Retain the geometry once for B-bar's volume-weighted mean. Standard
+        // assembly still evaluates each point in its original loop order.
+        let mut projected_points = Vec::new();
+        let mut mean_gradients = [[0.0; 3]; N];
+        if formulation == Formulation::BBar {
+            projected_points.reserve(stiffness_rule.len());
+            let mut projected_volume = 0.0;
+            for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
+                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+                let p = evaluate(nodes, reference, element, point)?;
+                let dv = weight * p.determinant;
+                if !(dv.is_finite() && dv > 0.0) {
+                    return Err(TetElasticError::InvalidGeometryUpdate {
+                        what: "B-bar integration volume must be finite and positive",
+                    });
+                }
+                projected_volume += dv;
+                projected_points.push(p);
+            }
+            if !(projected_volume.is_finite() && projected_volume > 0.0) {
+                return Err(TetElasticError::InvalidGeometryUpdate {
+                    what: "B-bar element volume must be finite and positive",
+                });
+            }
+            for (p, &(_, weight)) in projected_points.iter().zip(stiffness_rule) {
+                let fraction = weight * p.determinant / projected_volume;
+                for (mean, gradient) in mean_gradients.iter_mut().zip(p.gradients) {
+                    for axis in 0..3 {
+                        mean[axis] = fraction.mul_add(gradient[axis], mean[axis]);
+                    }
+                }
+            }
+        }
         for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-            let p = evaluate(nodes, reference, element, point)?;
+            let compatible_point;
+            let p = if formulation == Formulation::BBar {
+                &projected_points[point]
+            } else {
+                compatible_point = evaluate(nodes, reference, element, point)?;
+                &compatible_point
+            };
             minimum_scaled_jacobian = minimum_scaled_jacobian.min(p.scaled_jacobian);
             let stiffness_material = match &material_samples {
                 Some(field) => field.material_at(material, element, point)?,
                 None => material,
             };
-            let b = mandel_b::<N, D>(p.gradients);
+            let mut b = mandel_b::<N, D>(p.gradients);
+            if formulation == Formulation::BBar {
+                for a in 0..N {
+                    for component in 0..3 {
+                        let correction =
+                            (mean_gradients[a][component] - p.gradients[a][component]) / 3.0;
+                        for row in &mut b[..3] {
+                            row[3 * a + component] += correction;
+                        }
+                    }
+                }
+            }
             let mut cb = [[0.0; D]; 6];
             for i in 0..6 {
                 for j in 0..D {
