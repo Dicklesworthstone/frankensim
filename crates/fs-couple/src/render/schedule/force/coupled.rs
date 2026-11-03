@@ -28,6 +28,8 @@ pub mod tones;
 pub mod radiation;
 pub mod damping;
 pub mod coefficients;
+/// Instantaneous momentum inputs on the complete, continuing modal owner.
+pub mod impulse;
 /// Complete-network continuous force records with independent physical heat.
 pub mod linear_forcing;
 pub use exact::prepared::{MAX_PREPARED_MODAL_MODES, PreparedModalBudget};
@@ -123,6 +125,9 @@ pub struct ModalCouplingConfig {
     /// Absolute reaction-force ceiling on each connection [N].
     pub maximum_abs_connection_force_n: f64,
     /// Scaled infinity-norm residual gate for the connection solve, in (0,1).
+    /// An instantaneous impulse also checks each represented momentum change
+    /// relative to that coordinate's requested/represented impulse, never to
+    /// its potentially much larger background velocity.
     pub solve_relative_tolerance: f64,
     /// Absolute discrete energy-closure tolerance [J].
     pub energy_absolute_tolerance_j: f64,
@@ -151,6 +156,8 @@ pub enum ModalCouplingError {
     ContactSolve { residual_n: f64, tolerance_n: f64, iterations: usize },
     /// Recomputed connection residual exceeds the caller's tolerance.
     SolveResidual { relative: f64, tolerance: f64 },
+    /// A coordinate did not retain its requested generalized momentum jump.
+    ImpulseResidual { mode: usize, relative: f64, tolerance: f64 },
     /// A combined physical ceiling was exceeded.
     Budget { what: &'static str, value: f64, limit: f64 },
     /// Storage change plus all disclosed losses does not match external work.
@@ -170,6 +177,8 @@ impl core::fmt::Display for ModalCouplingError {
                 "modal contact residual {residual_n:e} N exceeds {tolerance_n:e} N after {iterations} iterations"),
             Self::Factor(error) => write!(f, "modal connection factor: {error}"),
             Self::SolveResidual { relative, tolerance } => write!(f, "connection residual {relative:e} exceeds {tolerance:e}"),
+            Self::ImpulseResidual { mode, relative, tolerance } => write!(f,
+                "modal impulse coordinate {mode} residual {relative:e} exceeds {tolerance:e}"),
             Self::Budget { what, value, limit } => write!(f, "coupled {what}: {value:e} exceeds {limit:e}"),
             Self::EnergyBalance { residual_j, tolerance_j } => write!(f, "coupled energy residual {residual_j:e} J exceeds {tolerance_j:e} J"),
         }
@@ -244,6 +253,8 @@ impl CoupledModalFrame {
 pub struct CoupledModalSystem {
     models: Vec<ModalAcousticTimeModel>,
     candidates: Vec<ModalAcousticTimeModel>,
+    /// Fixed-size scratch for allocation-free instantaneous momentum staging.
+    impulse_states: Vec<ModalAcousticState>,
     exact: Option<exact::ExactNetwork>,
     prepared_budget: Option<PreparedModalBudget>,
     harmonic_only: bool,
@@ -477,6 +488,7 @@ impl CoupledModalSystem {
             }
         }
         let system = Self {
+            impulse_states: models.iter().flat_map(|model| model.states().iter().copied()).collect(),
             models, candidates, exact: operator.exact,
             prepared_budget: preparation.prepared_budget(),
             harmonic_only: preparation.is_harmonic_only(),

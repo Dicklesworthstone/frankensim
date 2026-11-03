@@ -8,21 +8,25 @@
 //!
 //! This is an explicitly prescribed ideal impulse, not a hammer/contact law,
 //! broadband radiation model, or inference from a musical strike velocity.
-//! Only independent `ModalString` slots (generic mass-normalized models) are
-//! admitted; coupled-network state must remain owned by its coupling solver.
+//! Independent `ModalString` slots and bilateral `CoupledModal` networks are
+//! admitted. Coupled jumps stage and publish through their original owner,
+//! retaining mechanical, material and acoustic histories. Nonlinear contact
+//! and friction voices need their own constrained reset and remain excluded.
 
 use super::{ScheduledRenderer, control, sizing};
 use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeModel};
 use crate::render::{RenderError, RenderVoice};
+use fs_math::dd::Dd;
 
 /// One additive mass-normalized momentum input on the absolute sample clock.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModalImpulse {
     /// Apply before this sample; an event at a callback's end stays pending.
     pub sample: u64,
-    /// Independent modal voice slot in the hosted context.
+    /// Independent or bilateral coupled modal voice slot in the hosted context.
     pub voice: usize,
-    /// Coordinate in that voice's admitted modal basis.
+    /// Coordinate in that voice's admitted modal basis. A coupled voice uses
+    /// component order followed by original mode order, as its force controls do.
     pub mode: usize,
     /// Signed generalized impulse [N s / sqrt(kg)].
     pub impulse_n_s_per_sqrt_kg: f64,
@@ -33,9 +37,10 @@ pub struct ModalImpulse {
 pub struct ImpulseBudget {
     /// Maximum authored scalar modal inputs, before same-time aggregation.
     pub max_events: usize,
-    /// Sum of mode counts over distinct (sample, voice) groups. Each admitted
+    /// Sum of mode counts over distinct (sample, voice) groups. An independent
     /// mode reserves a delta, a candidate state and a cloned model's mode/state
-    /// records; exact-ZOH coefficients remain shared with the original model.
+    /// records; exact-ZOH coefficients remain shared. A coupled group reserves
+    /// its complete delta; candidate scratch belongs to the original network.
     pub max_staged_modes: usize,
 }
 
@@ -51,12 +56,16 @@ pub struct ImpulseReceipt {
     pub kinetic_energy_change_j: f64,
 }
 
+enum ImpulseTarget {
+    Independent { states: Vec<ModalAcousticState>, model: ModalAcousticTimeModel },
+    Coupled,
+}
+
 struct StagedImpulse {
     sample: u64,
     voice: usize,
     delta: Vec<f64>,
-    states: Vec<ModalAcousticState>,
-    model: ModalAcousticTimeModel,
+    target: ImpulseTarget,
     work_j: f64,
 }
 
@@ -67,6 +76,10 @@ struct StagedImpulse {
 /// The underlying voices retain their own disclosed allocation boundaries.
 /// State/energy budgets are checked transactionally at each impulse; pressure
 /// and ordinary time-step budgets remain checked by the existing voice step.
+/// A nonzero impulse rounded entirely out of an independent velocity refuses;
+/// compensated signed work preserves cancelling modes' smaller contributions.
+/// Gated rendering retains the scheduler's whole-callback cancellation points;
+/// only the direct native coupled API polls within an instantaneous jump.
 pub struct ImpulseRenderer {
     renderer: ScheduledRenderer,
     events: Vec<StagedImpulse>,
@@ -98,8 +111,8 @@ impl ScheduledRenderer {
             if input.sample < self.samples_rendered() || input.sample == u64::MAX {
                 return Err(control("modal impulse sample is past or unrenderable"));
             }
-            let model = modal_model(&self, input.voice)?;
-            if input.mode >= model.modes().len()
+            let modes = modal_mode_count(&self, input.voice)?;
+            if input.mode >= modes
                 || !input.impulse_n_s_per_sqrt_kg.is_finite()
             {
                 return Err(control("modal impulse requires an existing coordinate and finite momentum"));
@@ -112,7 +125,7 @@ impl ScheduledRenderer {
         for input in &inputs {
             let key = (input.sample, input.voice);
             if last != Some(key) {
-                required = required.checked_add(modal_model(&self, input.voice)?.modes().len())
+                required = required.checked_add(modal_mode_count(&self, input.voice)?)
                     .ok_or_else(|| sizing("modal impulse staging size overflow"))?;
                 if required > budget.max_staged_modes {
                     return Err(sizing("modal impulse staging budget exceeded"));
@@ -125,8 +138,7 @@ impl ScheduledRenderer {
         let mut index = 0;
         while index < inputs.len() {
             let first = inputs[index];
-            let source = modal_model(&self, first.voice)?;
-            let mut delta = vec![0.0; source.modes().len()];
+            let mut delta = vec![0.0; modal_mode_count(&self, first.voice)?];
             while index < inputs.len()
                 && (inputs[index].sample, inputs[index].voice) == (first.sample, first.voice)
             {
@@ -137,18 +149,33 @@ impl ScheduledRenderer {
                 }
                 index += 1;
             }
+            let target = match &self.context.voices[first.voice] {
+                RenderVoice::ModalString(voice) => ImpulseTarget::Independent {
+                    states: voice.model.states().to_vec(), model: voice.model.clone(),
+                },
+                RenderVoice::CoupledModal(_) => ImpulseTarget::Coupled,
+                _ => unreachable!("impulse voice kind was admitted under exclusive ownership"),
+            };
             events.push(StagedImpulse {
                 sample: first.sample,
                 voice: first.voice,
                 delta,
-                states: source.states().to_vec(),
-                model: source.clone(),
+                target,
                 work_j: 0.0,
             });
         }
         let mut receipts = Vec::new();
         receipts.try_reserve(events.len()).map_err(|_| sizing("cannot reserve modal impulse receipts"))?;
         Ok(ImpulseRenderer { renderer: self, events, next_event: 0, receipts })
+    }
+}
+
+fn modal_mode_count(renderer: &ScheduledRenderer, voice: usize) -> Result<usize, RenderError> {
+    match renderer.context.voices.get(voice) {
+        Some(RenderVoice::ModalString(voice)) => Ok(voice.model.modes().len()),
+        Some(RenderVoice::CoupledModal(voice)) if !voice.system().is_harmonic_only() => Ok(voice.system().mode_count()),
+        Some(_) => Err(control("prescribed modal impulses require an independent or bilateral time-domain modal voice")),
+        None => Err(RenderError::UnknownVoice { index: voice }),
     }
 }
 
@@ -176,6 +203,15 @@ impl ImpulseRenderer {
     /// Inspect an independent modal voice's accepted state without advancing it.
     pub fn modal_states(&self, voice: usize) -> Result<&[ModalAcousticState], RenderError> {
         Ok(modal_model(&self.renderer, voice)?.states())
+    }
+
+    /// Inspect a coupled voice's original accepted mechanics and histories.
+    pub fn coupled_modal_system(&self, voice: usize) -> Result<&super::coupled::CoupledModalSystem, RenderError> {
+        match self.renderer.context.voices.get(voice) {
+            Some(RenderVoice::CoupledModal(voice)) => Ok(voice.system()),
+            Some(_) => Err(control("requested voice is not a bilateral coupled modal system")),
+            None => Err(RenderError::UnknownVoice { index: voice }),
+        }
     }
 
     /// Recover physical state and ordinary pending controls; future impulses
@@ -238,28 +274,44 @@ impl ImpulseRenderer {
         // All candidates are formed from CURRENT accepted state, not the state
         // at compilation. Nothing is published until every voice passes.
         for event in &mut self.events[begin..end] {
-            let current = modal_model(&self.renderer, event.voice)?;
-            event.states.clone_from_slice(current.states());
-            event.work_j = 0.0;
-            for ((candidate, old), &impulse) in event.states.iter_mut().zip(current.states()).zip(&event.delta) {
-                let before = old.velocity_m_sqrt_kg_per_s;
-                let after = before + impulse;
-                candidate.velocity_m_sqrt_kg_per_s = after;
-                event.work_j += (after - before) * f64::midpoint(before, after);
+            match (&mut self.renderer.context.voices[event.voice], &mut event.target) {
+                (RenderVoice::ModalString(voice), ImpulseTarget::Independent { states, model }) => {
+                    states.clone_from_slice(voice.model.states());
+                    let mut work = Dd::ZERO;
+                    for ((candidate, old), &impulse) in states.iter_mut().zip(voice.model.states()).zip(&event.delta) {
+                        let before = old.velocity_m_sqrt_kg_per_s;
+                        let after = before + impulse;
+                        if impulse != 0.0 && after == before {
+                            return Err(control("modal impulse is below representable velocity resolution"));
+                        }
+                        candidate.velocity_m_sqrt_kg_per_s = after;
+                        // Opposite modal works must not swallow a smaller
+                        // retained contribution between them in basis order.
+                        work = work + Dd::from_f64((after - before) * f64::midpoint(before, after));
+                    }
+                    event.work_j = work.to_f64();
+                    if !event.work_j.is_finite() || !work.lo.is_finite() {
+                        return Err(control("modal impulse work left the finite set"));
+                    }
+                    model.restore_states(states).map_err(RenderError::Modal)?;
+                }
+                (RenderVoice::CoupledModal(voice), ImpulseTarget::Coupled) => {
+                    event.work_j = voice.stage_impulse(&event.delta)?.kinetic_energy_change_j;
+                }
+                _ => unreachable!("impulse voice kind was admitted under exclusive ownership"),
             }
-            if !event.work_j.is_finite() {
-                return Err(control("modal impulse work left the finite set"));
-            }
-            event.model.restore_states(&event.states).map_err(RenderError::Modal)?;
         }
         // Swaps cannot fail or allocate. Workspace and held forces stay with
         // each runtime; the cloned model has the identical admitted basis,
         // clock, limits and shared transition kernel.
         for event in &mut self.events[begin..end] {
-            let RenderVoice::ModalString(voice) = &mut self.renderer.context.voices[event.voice] else {
-                unreachable!("impulse voice kind was admitted under exclusive ownership")
-            };
-            core::mem::swap(&mut voice.model, &mut event.model);
+            match (&mut self.renderer.context.voices[event.voice], &mut event.target) {
+                (RenderVoice::ModalString(voice), ImpulseTarget::Independent { model, .. }) => {
+                    core::mem::swap(&mut voice.model, model);
+                }
+                (RenderVoice::CoupledModal(voice), ImpulseTarget::Coupled) => voice.publish_impulse(),
+                _ => unreachable!("impulse voice kind was admitted under exclusive ownership"),
+            }
             self.receipts.push(ImpulseReceipt {
                 sample,
                 voice: event.voice,
@@ -420,7 +472,9 @@ pub mod ports {
 
     use super::{ImpulseBudget, ImpulseRenderer, ModalImpulse, control, sizing};
     use super::super::{ForceRenderConfig, ModalForceEvent, ModalForceVoice, ScheduledRenderer, project};
+    use super::super::coupled::{ModalConnection, ModalCouplingConfig, ModalCouplingError};
     use crate::render::RenderError;
+    use fs_exec::CancelGate;
 
     /// A signed physical impulse at one declared force port.
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -444,6 +498,8 @@ pub mod ports {
         pub max_projection_terms: usize,
         /// Sum of mode counts over those groups. Also bounds the scalar modal
         /// impulse history passed to the runtime before any zero coalescing.
+        /// Coupled rendering additionally charges the complete network mode
+        /// count once per distinct impulse sample, including unforced modes.
         pub max_staged_modes: usize,
     }
 
@@ -459,77 +515,141 @@ pub mod ports {
         pub fn from_modal_forces_and_impulses(
             voices: Vec<ModalForceVoice>,
             forces: Vec<ModalForceEvent>,
-            mut impulses: Vec<PortImpulse>,
+            impulses: Vec<PortImpulse>,
             force_config: ForceRenderConfig,
             impulse_budget: PhysicalImpulseBudget,
         ) -> Result<ImpulseRenderer, RenderError> {
-            if impulses.len() > impulse_budget.max_events {
-                return Err(sizing("physical impulse event budget exceeded"));
-            }
-            for input in &impulses {
-                let voice = voices.get(input.voice)
-                    .ok_or(RenderError::UnknownVoice { index: input.voice })?;
-                if input.sample == u64::MAX || input.port >= voice.port_shapes.len()
-                    || !input.impulse_n_s.is_finite()
-                {
-                    return Err(control("physical impulse needs a renderable sample, an existing port and finite newton-seconds"));
-                }
-            }
-            impulses.sort_by_key(|input| (input.sample, input.voice));
-            let mut terms = 0_usize;
-            let mut modes = 0_usize;
-            let mut previous = None;
-            for input in &impulses {
-                let key = (input.sample, input.voice);
-                if previous == Some(key) { continue; }
-                let voice = &voices[input.voice];
-                let count = voice.model.modes().len();
-                let work = count.checked_mul(voice.port_shapes.len())
-                    .ok_or_else(|| sizing("physical impulse projection size overflow"))?;
-                terms = terms.checked_add(work)
-                    .ok_or_else(|| sizing("physical impulse projection work overflow"))?;
-                modes = modes.checked_add(count)
-                    .ok_or_else(|| sizing("physical impulse staging size overflow"))?;
-                if terms > impulse_budget.max_projection_terms || modes > impulse_budget.max_staged_modes {
-                    return Err(sizing("physical impulse projection or staging budget exceeded"));
-                }
-                previous = Some(key);
-            }
-            let mut lowered = Vec::new();
-            lowered.try_reserve(modes).map_err(|_| sizing("cannot reserve projected physical impulses"))?;
-            let mut index = 0;
-            while index < impulses.len() {
-                let first = impulses[index];
-                let voice = &voices[first.voice];
-                let mut port_impulses = vec![0.0; voice.port_shapes.len()];
-                while index < impulses.len()
-                    && (impulses[index].sample, impulses[index].voice) == (first.sample, first.voice)
-                {
-                    let input = impulses[index];
-                    port_impulses[input.port] += input.impulse_n_s;
-                    if !port_impulses[input.port].is_finite() {
-                        return Err(control("summed physical impulse is nonfinite"));
-                    }
-                    index += 1;
-                }
-                // This is the existing physical port projection, not a second basis
-                // convention. Its linear map applies equally to force or momentum.
-                let generalized = project(&voice.port_shapes, &port_impulses)?;
-                for (mode, impulse_n_s_per_sqrt_kg) in generalized.into_iter().enumerate() {
-                    lowered.push(ModalImpulse {
-                        sample: first.sample,
-                        voice: first.voice,
-                        mode,
-                        impulse_n_s_per_sqrt_kg,
-                    });
-                }
-            }
+            let lowered = lower_physical_impulses(&voices, impulses, impulse_budget)?;
             let renderer = Self::from_modal_forces(voices, forces, force_config)?;
             renderer.with_modal_impulses(lowered, ImpulseBudget {
                 max_events: impulse_budget.max_staged_modes,
                 max_staged_modes: impulse_budget.max_staged_modes,
             })
         }
+
+        /// Drive the original connected mechanical system with physical held
+        /// forces and ideal momentum inputs through the SAME component ports.
+        ///
+        /// The ordinary coupled constructor owns preload, bridge reactions,
+        /// integration and all physical limits. Impulses on different components
+        /// at one sample form one simultaneous native momentum transaction.
+        /// No spring force is turned into an impulse and no sample is advanced
+        /// by applying one. Contact/friction laws are not inferred.
+        #[allow(clippy::too_many_arguments)]
+        pub fn from_coupled_modal_forces_and_impulses(
+            voices: Vec<ModalForceVoice>,
+            forces: Vec<ModalForceEvent>,
+            impulses: Vec<PortImpulse>,
+            force_config: ForceRenderConfig,
+            impulse_budget: PhysicalImpulseBudget,
+            connections: Vec<ModalConnection>,
+            coupling: ModalCouplingConfig,
+            gate: &CancelGate,
+        ) -> Result<ImpulseRenderer, RenderError> {
+            if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
+            let mut offsets = Vec::with_capacity(voices.len());
+            let mut count = 0_usize;
+            for voice in &voices {
+                offsets.push(count);
+                count = count.checked_add(voice.model.modes().len())
+                    .ok_or_else(|| sizing("coupled impulse mode extent overflow"))?;
+            }
+            if count > coupling.max_modes {
+                return Err(sizing("coupled impulse modes exceed the original network budget"));
+            }
+            let mut lowered = lower_physical_impulses(&voices, impulses, impulse_budget)?;
+            let mut staged = 0_usize;
+            let mut previous_sample = None;
+            for impulse in &mut lowered {
+                if previous_sample != Some(impulse.sample) {
+                    staged = staged.checked_add(count)
+                        .ok_or_else(|| sizing("coupled impulse staging extent overflow"))?;
+                    if staged > impulse_budget.max_staged_modes {
+                        return Err(sizing("coupled impulse staging budget exceeded"));
+                    }
+                    previous_sample = Some(impulse.sample);
+                }
+                impulse.mode += offsets[impulse.voice];
+                impulse.voice = 0;
+            }
+            let renderer = Self::from_coupled_modal_forces(voices, forces, force_config,
+                connections, coupling, gate)?;
+            let result = renderer.with_modal_impulses(lowered, ImpulseBudget {
+                max_events: impulse_budget.max_staged_modes,
+                max_staged_modes: impulse_budget.max_staged_modes,
+            })?;
+            if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
+            Ok(result)
+        }
+    }
+
+    fn lower_physical_impulses(
+        voices: &[ModalForceVoice],
+        mut impulses: Vec<PortImpulse>,
+        impulse_budget: PhysicalImpulseBudget,
+    ) -> Result<Vec<ModalImpulse>, RenderError> {
+        if impulses.len() > impulse_budget.max_events {
+            return Err(sizing("physical impulse event budget exceeded"));
+        }
+        for input in &impulses {
+            let voice = voices.get(input.voice)
+                .ok_or(RenderError::UnknownVoice { index: input.voice })?;
+            if input.sample == u64::MAX || input.port >= voice.port_shapes.len()
+                || !input.impulse_n_s.is_finite()
+            {
+                return Err(control("physical impulse needs a renderable sample, an existing port and finite newton-seconds"));
+            }
+        }
+        impulses.sort_by_key(|input| (input.sample, input.voice));
+        let mut terms = 0_usize;
+        let mut modes = 0_usize;
+        let mut previous = None;
+        for input in &impulses {
+            let key = (input.sample, input.voice);
+            if previous == Some(key) { continue; }
+            let voice = &voices[input.voice];
+            let count = voice.model.modes().len();
+            let work = count.checked_mul(voice.port_shapes.len())
+                .ok_or_else(|| sizing("physical impulse projection size overflow"))?;
+            terms = terms.checked_add(work)
+                .ok_or_else(|| sizing("physical impulse projection work overflow"))?;
+            modes = modes.checked_add(count)
+                .ok_or_else(|| sizing("physical impulse staging size overflow"))?;
+            if terms > impulse_budget.max_projection_terms || modes > impulse_budget.max_staged_modes {
+                return Err(sizing("physical impulse projection or staging budget exceeded"));
+            }
+            previous = Some(key);
+        }
+        let mut lowered = Vec::new();
+        lowered.try_reserve(modes).map_err(|_| sizing("cannot reserve projected physical impulses"))?;
+        let mut index = 0;
+        while index < impulses.len() {
+            let first = impulses[index];
+            let voice = &voices[first.voice];
+            let mut port_impulses = vec![0.0; voice.port_shapes.len()];
+            while index < impulses.len()
+                && (impulses[index].sample, impulses[index].voice) == (first.sample, first.voice)
+            {
+                let input = impulses[index];
+                port_impulses[input.port] += input.impulse_n_s;
+                if !port_impulses[input.port].is_finite() {
+                    return Err(control("summed physical impulse is nonfinite"));
+                }
+                index += 1;
+            }
+            // This is the existing physical port projection, not a second basis
+            // convention. Its linear map applies equally to force or momentum.
+            let generalized = project(&voice.port_shapes, &port_impulses)?;
+            for (mode, impulse_n_s_per_sqrt_kg) in generalized.into_iter().enumerate() {
+                lowered.push(ModalImpulse {
+                    sample: first.sample,
+                    voice: first.voice,
+                    mode,
+                    impulse_n_s_per_sqrt_kg,
+                });
+            }
+        }
+        Ok(lowered)
     }
 
     #[cfg(test)]

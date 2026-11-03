@@ -24,6 +24,15 @@ impl CoupledModalVoice {
     /// Original components and the last complete coupled energy/reaction record.
     #[must_use]
     pub const fn system(&self) -> &CoupledModalSystem { &self.system }
+    pub(in crate::render::schedule::force) fn stage_impulse(
+        &mut self, impulses: &[f64],
+    ) -> Result<super::impulse::ModalImpulseReceipt, RenderError> {
+        if self.poisoned { return Err(RenderError::Poisoned); }
+        self.system.stage_modal_impulse(impulses, None).map_err(RenderError::Coupled)
+    }
+    pub(in crate::render::schedule::force) fn publish_impulse(&mut self) {
+        self.system.publish_modal_impulse();
+    }
     /// Shared mechanical period [s], never resampled by the wrapper.
     #[must_use]
     pub fn sample_period_s(&self) -> f64 { self.system.sample_period_s() }

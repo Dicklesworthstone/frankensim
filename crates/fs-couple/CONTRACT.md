@@ -1,5 +1,41 @@
 # CONTRACT: fs-couple
 
+## Impulses on continuing coupled modal systems
+
+`CoupledModalSystem::apply_modal_impulse` applies a simultaneous generalized
+momentum jump through the original mass-normalized mechanical coordinates.
+The same physical port columns map N s into modal momentum as map N into
+modal force. Finite bilateral spring/dashpot forces have no instantaneous
+impulse. Mechanical displacement, Maxwell internal strains, proper passive
+radiation states, prepared operators, sample clock and preceding interval
+frame/port records remain unchanged. Only mechanical velocities publish.
+
+Each represented coordinate increment must satisfy the original relative
+solve tolerance against its requested/represented impulse, independently of
+background velocity and other coordinates. Stable kinetic work and prescribed
+impulse work are accumulated separately; their defect subtracts momentum
+before multiplication and uses the existing energy tolerances on the jump.
+Original component and whole-system energy, pressure and endpoint connection
+force ceilings remain binding. The returned receipt describes external work,
+without invented heat, damping or elapsed time. Native staging uses reserved
+scratch and publishes all components only after admission and cancellation.
+
+The existing `ImpulseRenderer` now routes bilateral `CoupledModal` voices
+through that native transaction and keeps same-time mixed-voice publication
+atomic. `from_coupled_modal_forces_and_impulses` shares the original physical
+force projector, preload and scheduler. All component impulses at a sample
+share one network jump; held forces and boundary-event ownership survive.
+Independent voices also refuse a nonzero impulse lost entirely to velocity
+rounding and retain small signed work between large cancelling modal works.
+The direct native API polls during the jump and just before publication;
+gated rendering retains its original whole-callback cancellation boundaries.
+Nonlinear contact/friction, rigid constraints, inertance feedthrough and an
+empirical strike law are outside this prescribed linear-network reset.
+`tests/coupled_impulse.rs` covers analytic two-mass continuation at two sample
+rates, ordinary/prepared paths, retained material/acoustic history, reciprocal
+momentum and work, refused/cancelled jumps, mixed-voice atomicity and callback
+partition invariance.
+
 ## Native rigid-body acoustic histories
 
 `pcm_wav::observation::moving::rigid` observes original `fs-mbd` prepared
