@@ -394,3 +394,6 @@ fn temperature_contact_never_substitutes_frozen_derivatives_or_radiation() {
             .contains("cli-solve-conduction-contact-composition")
     );
 }
+
+#[path = "temperature/transient_storage.rs"]
+mod transient_storage;

@@ -722,10 +722,29 @@ allowances. A source-domain exit publishes no completed trajectory. Tests in
 `native_contact_adjoint/temperature/transient.rs` cover live versus frozen
 contact, time refinement, a scheduled power pulse, source-knot starts, complete
 Newton work accounting and late source refusal.
-This contact composition still refuses total-enthalpy storage, radiation,
-derived natural/transported-air convection and trajectory derivatives. Its
-temporal difference remains Estimated; it provides no continuous-time peak or
-continuum error certificate.
+This contact composition still refuses radiation, derived natural/transported-air
+convection and trajectory derivatives. Its temporal difference remains Estimated;
+it provides no continuous-time peak or continuum error certificate.
+
+Solve driver 99 extends pinned matching-contact scalar and continuous-curve
+sources to primary specific-enthalpy trajectories through the native coupled
+Newton/FGMRES owner. Surface-law enthalpy contacts remain explicitly refused.
+The contact-temperature tangent and each regional phase chart share one
+endpoint residual. Original reference mass and old enthalpy remain fixed in
+every trial; latent heat stays in specific enthalpy alone. Both existing time
+grids retain workload and prescribed-boundary switches. Accepted source queries,
+contact fluxes, boundary reactions, nodal residual and storage/heat balance
+come from the same unchanged physical endpoint. Face-state histories and native
+tangent work are admitted against the existing memory and iteration budgets.
+
+The existing initial regional-enthalpy mode therefore supports initially hot
+and cold bodies exchanging heat through their live contact law, including a
+hot body remaining on a latent plateau while its liquid fraction changes.
+`native_contact_adjoint/temperature/transient_storage.rs` covers an independently
+known boundary-pulse energy, equivalent capacity/enthalpy storage, unequal initial
+temperatures, latent storage and explicit unsupported history derivatives.
+Pressure, reference geometry and the selected contact claim stay fixed; phase
+fraction does not independently alter the contact law.
 
 The library surface exposes `run_solve`, `resume_solve`, `SolveRunId`,
 `SolveStage`, `SolveDriverState`, `SolveOutcome`, and `SolveRefusal`. The

@@ -338,9 +338,8 @@ pub(super) fn admit(
         .and_then(|row| row.conduction.as_ref())
         .ok_or_else(|| bad("temperature-varying contacts need an explicit conduction setup"))?;
     let transient = setup.transient.as_ref();
-    let unsupported_transient = transient.is_some_and(|time| {
-        time.enthalpy.is_some()
-            || setup.boundaries.iter().any(|row| {
+    let unsupported_transient = transient.is_some_and(|_| {
+        setup.boundaries.iter().any(|row| {
                 matches!(
                     row.condition,
                     fs_project::ThermalBoundaryCondition::NaturalConvection { .. }
@@ -361,8 +360,8 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection, or constant-capacity transient solves with prescribed boundaries; this requested composition needs the complete contact feedback",
-            "use the admitted steady path or a constant-capacity transient with prescribed temperature, flux or convection and no radiation or derivative/bound outputs; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection, or capacity/total-enthalpy transient solves with prescribed or scheduled boundaries; this requested composition needs the complete contact feedback",
+            "use the admitted steady path or a capacity/total-enthalpy transient with prescribed temperature, flux or convection and no radiation or derivative/bound outputs; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())

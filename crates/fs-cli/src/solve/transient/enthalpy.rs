@@ -11,6 +11,7 @@ use fs_conduction::transient::enthalpy::{
     radiation::EnthalpyRadiationStepSolution,
 };
 use fs_solver::{Globalization, LineSearchConfig, NewtonKrylovConfig};
+use fs_conduction::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig;
 
 use super::*;
 
@@ -22,7 +23,7 @@ mod pointwise;
 pub(in crate::solve::transient) use pointwise::evaluate as evaluate_pointwise_endpoint;
 mod radiative;
 
-const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed temperature, Neumann and Robin boundaries remain active. A prescribed temperature requires a unique enthalpy on every incident phase chart; a latent plateau cannot silently select a phase fraction. The initial physical enthalpy remains unchanged, and prescribed-temperature reactions include its complete storage jump and all physical boundary heat exactly once. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation defaults to sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Natural reservoirs on distinct boundary targets compose with forced-air transport: every air trial encloses the existing natural/radiation endpoint solve while retaining the same accepted old enthalpy. The final physical audit evaluates updated natural coefficients and air references at the counted state; natural-reservoir and radiation heat stay separate from the forced-convective flux sent to air. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. Its forward sampled peak includes the original regional initial enthalpy temperature and every accepted fine endpoint in the same requirement region, retaining the earliest exact tie. This observation needs no adjoint and does not bound temperatures between samples. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Requested final or sampled-peak history derivatives revalidate the accepted fine endpoints and carry the shared exact specific-enthalpy transpose through prescribed convection, contact, complete declared ambient-radiation feedback, and the full natural-convection and streamwise-air boundary derivatives. Reported controls are initial enthalpy, delivered regional power, fixed reference density, independently declared prescribed-bath temperatures, per-surface absolute emissivity and radiation reservoir temperature, natural-reservoir and air-inlet temperatures, and independently controlled absolute fan-bank speed ratios. Fan controls include the retained hydraulic, convection-card and downstream-air parameter chain; unsupported coordinates keep explicit reasons. Independently varied prescribed boundaries sharing vertices are unsupported; a peak selected at the initial state has zero future bath sensitivity. Constitutive calibration and time-grid derivatives are fixed. Radiative controls hold query temperature and selected claim support fixed, retain source identities and restrict emissivity increments to feasible directions. Geometry, reference density and energetic internal variables are fixed during each forward trajectory. Declared closed gray-diffuse enclosures compose with total-enthalpy storage and prescribed convection through the shared reflected-radiation owner; every spatial rung binds actual mesh areas and both time grids retain immutable old enthalpy across all trials. Fresh patch exchange is internal, and the complete physical residual and storage/heat balance must pass before history advances. Natural/airflow endpoint loops and requested history derivatives use the same fresh closed-exchange model and the existing complete boundary feedback; original convection alone heats transported air. Explicit pointwise radiation integrates local P1 fourth-power emission and its exact tangent inside the same enthalpy Newton solve. Closed enclosures retain patch-uniform reflected irradiation; original convection alone heats air. Natural and airflow endpoint audits use that same spatial radiation owner, including original prescribed flux and reservoir reactions. The pointwise path preserves source support and fixed reference mass. Its requested trajectory derivatives reuse the complete local-emission and reflected-irradiation transpose, including spatially resolved absolute emissivity and ambient-reservoir controls. No material motion, density-driven expansion, phase kinetics, airflow storage, time-varying fan dynamics is inferred.";
+const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed temperature, Neumann and Robin boundaries remain active. Declared temperature-varying contact resistance uses actual endpoint trace temperatures and the shared monolithic specific-enthalpy Newton tangent, including each phase chart's temperature response. Its pinned-source contact rows and full nodal residual/energy gates describe the accepted physical field; scheduled prescribed boundaries reuse the same event-aligned time grids. This transient contact composition does not infer radiation, natural/airflow feedback or contact history derivatives. A prescribed temperature requires a unique enthalpy on every incident phase chart; a latent plateau cannot silently select a phase fraction. The initial physical enthalpy remains unchanged, and prescribed-temperature reactions include its complete storage jump and all physical boundary heat exactly once. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation defaults to sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Natural reservoirs on distinct boundary targets compose with forced-air transport: every air trial encloses the existing natural/radiation endpoint solve while retaining the same accepted old enthalpy. The final physical audit evaluates updated natural coefficients and air references at the counted state; natural-reservoir and radiation heat stay separate from the forced-convective flux sent to air. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. Its forward sampled peak includes the original regional initial enthalpy temperature and every accepted fine endpoint in the same requirement region, retaining the earliest exact tie. This observation needs no adjoint and does not bound temperatures between samples. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Requested final or sampled-peak history derivatives revalidate the accepted fine endpoints and carry the shared exact specific-enthalpy transpose through prescribed convection, contact, complete declared ambient-radiation feedback, and the full natural-convection and streamwise-air boundary derivatives. Reported controls are initial enthalpy, delivered regional power, fixed reference density, independently declared prescribed-bath temperatures, per-surface absolute emissivity and radiation reservoir temperature, natural-reservoir and air-inlet temperatures, and independently controlled absolute fan-bank speed ratios. Fan controls include the retained hydraulic, convection-card and downstream-air parameter chain; unsupported coordinates keep explicit reasons. Independently varied prescribed boundaries sharing vertices are unsupported; a peak selected at the initial state has zero future bath sensitivity. Constitutive calibration and time-grid derivatives are fixed. Radiative controls hold query temperature and selected claim support fixed, retain source identities and restrict emissivity increments to feasible directions. Geometry, reference density and energetic internal variables are fixed during each forward trajectory. Declared closed gray-diffuse enclosures compose with total-enthalpy storage and prescribed convection through the shared reflected-radiation owner; every spatial rung binds actual mesh areas and both time grids retain immutable old enthalpy across all trials. Fresh patch exchange is internal, and the complete physical residual and storage/heat balance must pass before history advances. Natural/airflow endpoint loops and requested history derivatives use the same fresh closed-exchange model and the existing complete boundary feedback; original convection alone heats transported air. Explicit pointwise radiation integrates local P1 fourth-power emission and its exact tangent inside the same enthalpy Newton solve. Closed enclosures retain patch-uniform reflected irradiation; original convection alone heats air. Natural and airflow endpoint audits use that same spatial radiation owner, including original prescribed flux and reservoir reactions. The pointwise path preserves source support and fixed reference mass. Its requested trajectory derivatives reuse the complete local-emission and reflected-irradiation transpose, including spatially resolved absolute emissivity and ambient-reservoir controls. No material motion, density-driven expansion, phase kinetics, airflow storage, time-varying fan dynamics is inferred.";
 
 /// Storage-specific scope carried by the outer conduction report.
 pub(super) fn no_claim() -> &'static str {
@@ -43,7 +44,7 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     Ok(())
 }
 
-fn failed(error: EnthalpyError) -> SolveRefusal {
+pub(super) fn failed(error: EnthalpyError) -> SolveRefusal {
     match error {
         EnthalpyError::Conduction(error @ ConductionError::Cancelled { .. }) => lower(error),
         other => bad(format!("total-enthalpy transport refused: {other}")),
@@ -239,6 +240,8 @@ fn march(
     engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    contact_config: Option<ContactEnthalpyNewtonConfig>,
     initial: &[f64],
     initial_goal_k: f64,
     ends_s: &[f64],
@@ -313,7 +316,26 @@ fn march(
         let mut radiation_fragment = String::new();
         let mut natural_fragment = String::new();
         let mut airflow_fragment = String::new();
-        let endpoint = if let Some(path) = airflow {
+        let mut contact_fragment = String::new();
+        let endpoint = if let Some(contacts) = temperature_contacts {
+            let controls = contact_config
+                .ok_or_else(|| bad("variable contact lost its enthalpy Newton controls"))?;
+            let solved = contact::enthalpy::advance(
+                cx, engine, step_problem, contacts, &old, dt, controls, deadline,
+            )?;
+            contact_fragment = format!(",\"temperature_contact\":{}", solved.receipt);
+            physical = Some((
+                finite(solved.physical.source_w + solved.physical.dirichlet_in_w
+                    - solved.physical.neumann_out_w - solved.physical.convective_out_w
+                    - solved.physical.radiation_out_w)?,
+                solved.physical.residual_norm_j,
+                controls.residual_tolerance_j,
+                solved.physical.energy_residual_j,
+            ));
+            physical_neumann_out_w = Some(solved.physical.neumann_out_w);
+            physical_dirichlet_in_w = Some(solved.physical.dirichlet_in_w);
+            solved.conduction
+        } else if let Some(path) = airflow {
             let solved = conjugate::advance(
                 cx, engine, step_problem, interfaces, &old, dt, config,
                 radiation, enclosure, natural, pressure_pa, path, deadline,
@@ -506,7 +528,9 @@ fn march(
             residuals_w.push(finite(row.residual_before / dt)?);
             linear.push(LinearSolveEvidence {
                 nonlinear_iteration: updates + row.iteration,
-                method: if airflow.is_some() && !natural.is_empty() {
+                method: if temperature_contacts.is_some() {
+                    "fgmres-enthalpy-newton-temperature-contact"
+                } else if airflow.is_some() && !natural.is_empty() {
                     "fgmres-enthalpy-newton-final-mixed-convection-trial"
                 } else if airflow.is_some() {
                     "fgmres-enthalpy-newton-final-airflow-trial"
@@ -559,7 +583,7 @@ fn march(
                 number(physical_dirichlet_in_w.unwrap_or(endpoint.dirichlet_in_w))?)
         };
         rows.push_str(&format!(
-            "{{\"step\":{},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"residual_j\":{},\"threshold_j\":{},\"newton_iterations\":{},\"krylov_iterations\":{krylov_iterations},\"liquid_mass_kg\":{},\"mean_liquid_mass_fraction\":{}{bath_fragment}{radiation_fragment}{natural_fragment}{airflow_fragment}}}",
+            "{{\"step\":{},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"residual_j\":{},\"threshold_j\":{},\"newton_iterations\":{},\"krylov_iterations\":{krylov_iterations},\"liquid_mass_kg\":{},\"mean_liquid_mass_fraction\":{}{bath_fragment}{radiation_fragment}{natural_fragment}{airflow_fragment}{contact_fragment}}}",
             index + 1, number(end)?, number(dt)?, number(qoi)?,
             number(endpoint.stored_energy_change_j)?, number(net_w)?, number(endpoint.source_w)?,
             number(energy_residual_j)?, number(residual_j)?,
@@ -618,6 +642,8 @@ pub(super) fn solve(
     spec: &ProjectSpec,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    contact_max_pairs: usize,
     labels: &[u32],
     region_ids: &BTreeMap<String, u32>,
     radiation: Option<&radiation::LoweredRadiation>,
@@ -655,7 +681,7 @@ pub(super) fn solve(
     }
     let newton = NewtonKrylovConfig {
         absolute_tolerance: 0.01 * policy.energy_tolerance.value / fs_math::det::sqrt(n as f64),
-        relative_tolerance: linear.tolerance,
+        relative_tolerance: if temperature_contacts.is_some() { 0.0 } else { linear.tolerance },
         linear_restart: restart,
         // Round down, so one Newton attempt never spends more than the
         // existing admitted linear-iteration allowance.
@@ -672,6 +698,14 @@ pub(super) fn solve(
         max_newton_iterations: storage.max_newton_iterations as usize,
         energy_tolerance_j: policy.energy_tolerance.value,
     };
+    let contact_config = temperature_contacts.map(|_| contact::enthalpy::config(
+        config, contact_max_pairs, storage.max_backtracks as usize, n,
+    )).transpose()?;
+    if contact_config.is_some_and(|controls|
+        controls.max_residual_evaluations.checked_mul(total_steps).is_none())
+    {
+        return Err(bad("combined contact enthalpy residual allowance overflows"));
+    }
     let natural_factor = if natural.is_empty() {
         1
     } else {
@@ -799,6 +833,11 @@ pub(super) fn solve(
     } else {
         0
     };
+    let contact_bytes = if temperature_contacts.is_some() {
+        contact::enthalpy::storage_bytes(contact_max_pairs, total_steps)?
+    } else {
+        0
+    };
     let adjoint_bytes = if objective.is_some() {
         adjoint::enthalpy_storage_bytes(
             n, elements, grids.fine.len(), storage.materials.len(),
@@ -847,6 +886,7 @@ pub(super) fn solve(
         .and_then(|v| v.checked_add(natural_bytes))
         .and_then(|v| v.checked_add(airflow_bytes))
         .and_then(|v| v.checked_add(adjoint_bytes))
+        .and_then(|v| v.checked_add(contact_bytes))
         .ok_or_else(|| bad("enthalpy memory allowance overflows"))?;
     if u64::try_from(bytes).unwrap_or(u64::MAX)
         > spec
@@ -966,6 +1006,8 @@ pub(super) fn solve(
         &engine,
         problem,
         interfaces,
+        temperature_contacts,
+        contact_config,
         &initial,
         initial_goal_k,
         &grids.coarse,
@@ -1001,6 +1043,8 @@ pub(super) fn solve(
         &engine,
         problem,
         interfaces,
+        temperature_contacts,
+        contact_config,
         &initial,
         initial_goal_k,
         &grids.fine,
@@ -1184,8 +1228,11 @@ pub(super) fn solve(
     let boundary_history_fragment = boundary_history.as_ref()
         .map(|history| format!(",\"boundary_history\":{}", history.receipt))
         .unwrap_or_default();
+    let contact_fragment = contact_config.map(|controls| contact::enthalpy::receipt(
+        controls, grids.coarse.len(), grids.fine.len(), coarse.updates + fine.updates,
+    )).transpose()?.unwrap_or_default();
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_state\":{initial_state},\"initial_temperature_k\":{initial_temperature_receipt},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt}{boundary_history_fragment},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"retained_history_update_limit\":{retained_newton_history_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_forward_and_adjoint_krylov_limit\":{total_forward_and_adjoint_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment}{airflow_receipt_fragment}{adjoint_fragment},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"schema\":\"fs-cli-transient-enthalpy-v1\",\"method\":\"backward-euler-total-enthalpy\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_state\":{initial_state},\"initial_temperature_k\":{initial_temperature_receipt},\"final_time_s\":{},\"coarse_steps\":{},\"fine_steps\":{},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_max_step_s\":{},\"fine_max_step_s\":{},\"workload\":{workload_receipt}{boundary_history_fragment}{contact_fragment},\"energy_tolerance_j\":{},\"materials\":[{}],\"nonlinear\":{{\"method\":\"newton-fgmres\",\"residual_units\":\"J\",\"report_residual_units\":\"W\",\"max_updates_per_step\":{},\"max_backtracks_per_update\":{},\"linear_restart\":{restart},\"max_linear_cycles\":{},\"total_newton_limit\":{total_newton_limit},\"retained_history_update_limit\":{retained_newton_history_limit},\"total_krylov_limit\":{total_krylov_limit},\"total_forward_and_adjoint_krylov_limit\":{total_forward_and_adjoint_krylov_limit},\"total_updates\":{},\"residual_atol_j\":{},\"residual_rtol\":{},\"armijo_c\":0.0001,\"line_search_shrink\":0.5{nonlinear_history_fragment}}}{radiation_receipt}{natural_receipt_fragment}{airflow_receipt_fragment}{adjoint_fragment},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"max_specific_enthalpy_difference_j_kg\":{},\"max_liquid_mass_fraction_difference\":{},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"endpoint\":{{\"vertex_order\":\"retained-conduction-mesh\",\"specific_enthalpy_j_kg\":[{}],\"liquid_mass_fraction\":[{}],\"reference_nodal_mass_kg\":[{}]}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         number(policy.horizon.value)?,
         grids.coarse.len(),
         grids.fine.len(),
