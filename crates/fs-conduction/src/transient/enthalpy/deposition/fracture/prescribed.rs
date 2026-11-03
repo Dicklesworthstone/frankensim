@@ -273,7 +273,7 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
                 &next.contacts,time_s,config.thermal,remaining,&mut checkpoint)?;
             if time_s > next.thermal.time_s() { report.thermal_intervals += 1; }
             add_thermal(&mut report.thermal,audit)?;
-            next = Self { thermal,contacts };
+            next = Self { thermal,contacts, ..next };
             let mut proposed = Vec::with_capacity(ends.len());
             for (&id,&end) in &ends {
                 checkpoint()?;
@@ -317,6 +317,7 @@ fn add_contacts(sum: &mut ContactReport,part: ContactReport) -> Result<(), Error
     sum.reclosed = add_count(sum.reclosed,part.reclosed)?;
     sum.changed_conductances = add_count(sum.changed_conductances,part.changed_conductances)?;
     sum.fracture_dissipation_j = finite_value(sum.fracture_dissipation_j+part.fracture_dissipation_j)?;
+    sum.viscous_dissipation_j = finite_value(sum.viscous_dissipation_j+part.viscous_dissipation_j)?;
     Ok(())
 }
 

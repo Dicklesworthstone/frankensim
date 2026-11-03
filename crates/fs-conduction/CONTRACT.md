@@ -977,6 +977,35 @@ staggered endpoint heating with immutable toughness, not resolved crack-tip
 temperatures, within-step thermomechanical equilibrium or a full entropy model.
 Seven focused heat-conversion regressions extend the existing contact tests.
 
+`synchronize_over_time` accepts the original constant-rate straight cohesive
+segment, including a physical surviving-bond viscosity. It requires the explicit
+duration to equal current thermal time minus the retained last mechanical
+synchronization time. Intermediate heat-transport stops do not reset that clock.
+The caller derives duration by subtracting those accepted absolute times and
+uses that represented interval in the mechanical update, rather than a separately
+rounded nominal timestep.
+The original `trial_over_time` law replays and checks the complete supplied point;
+foreign laws, inconsistent irreversible history, unsupported rates, stale/zero durations and
+cancellation refuse atomically. Untimed calls still reject viscous laws and
+retain the rate-independent zero-time replay behavior.
+
+`synchronize_over_time_with_heat` uses independent fracture and viscous heat
+fractions and independent receiving-side splits through `CohesiveHeatPartition`.
+Both physical losses and both nonthermal remainders stay separate. The same
+compensated partition and native caloric update account for all converted work,
+including viscosity accumulated before complete failure when endpoint dashpot
+traction is already zero. A second synchronization at the accepted time refuses;
+a later stationary hold produces no repeated loss. Six focused G1/G3/G4 groups
+cover independent intact/bilinear dashpot integrals, unloading, mixed shear
+failure, separate heat channels, actual mechanical time, source/history/rate
+refusals, latent-domain failure and cancellation after staged heat deposition.
+These endpoint APIs do not reconstruct unobserved mechanical paths, localize
+fracture events, evolve temperature-dependent coefficients or perform simultaneous
+thermomechanical equilibrium. The prescribed event path retains its existing
+rate-independent admission. Every physical reversal requires its own supplied
+segment: an undamaged closed loop has no retained point-history signature, so
+neither its existence nor its viscous work can be recovered from endpoints.
+
 > Beads `frankensim-extreal-program-f85xj.5.1`, `.5.3`, `.5.4`, and `.5.6`. The
 > cooling vertical's steady heat-conduction solve, matching-P1 contact rung,
 > first card-backed surface-radiation rung, and receipt-preserving PCB

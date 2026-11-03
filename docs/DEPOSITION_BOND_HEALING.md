@@ -107,9 +107,8 @@ integration exactness is not a temperature or physical-strength error bound.
 Eleven material tests and nine coupling tests cover isothermal dose, crossing
 knots, cooling/reheating, independent cooling-integral refinement, thermal
 primal/audit parity, contact windows and area partition, equal-time recontact,
-strength/fracture handoff, atomic refusals and same-grid replay. Native Rust
-execution is unverified in this editing environment. Independent Python/SciPy
-checks accompany the patch but do not substitute for compiling these tests.
+strength/fracture handoff, atomic refusals and same-grid replay. These are
+numerical regressions, not experimental calibration of a filament or adhesive.
 
 ## Cohesive failure changes subsequent cooling
 
@@ -133,8 +132,8 @@ those temperatures where supported, and call `synchronize` at the exact thermal
 endpoint with one `(interface_id, CohesivePoint)` per binding. Commit the staged
 mechanical result only after synchronization succeeds. The owner reproduces
 constitutive increments against retained history and checks exact law identity;
-it does not solve equilibrium again. Lost damage, unreported intermediate
-excursions, wrong IDs/time, stale thermal links and cancellation refuse without
+it does not solve equilibrium again. Lost or inconsistent irreversible history,
+wrong IDs/time, stale thermal links and cancellation refuse without
 publishing a partial interface update. Scheduled changes of mechanically owned
 links also refuse, including same-time remove/reinsert sequences. Unrelated
 births and thermal boundary changes continue normally.
@@ -154,7 +153,7 @@ remain outside this stage. Explicit endpoint heat conversion is available below.
 Eight additional Rust regressions cover analytical contact/no-contact cooling,
 independent reclosure conductance without healing, shear/partial damage,
 cohort/history/time/area refusals, scheduled ownership conflicts, cancellation,
-area partition and restart. Native execution remains unverified here.
+area partition and restart.
 
 ## Optional heat from new fracture work
 
@@ -186,3 +185,35 @@ replay/unloading/imported damage, zero conversion, shared-cell area partition,
 atomic refusals and disparate-magnitude report rounding. This is an endpoint
 staggered model with fixed areas and immutable toughness; it does not resolve
 crack-tip temperatures or certify a material's heat-conversion fraction.
+
+## Physical bond viscosity and timed heat transfer
+
+A bond created with `BilinearCohesive::with_viscosity` needs
+`FractureCooling::synchronize_over_time`, or
+`synchronize_over_time_with_heat` when its physical losses enter the thermal
+cells. The original `trial_over_time` law supplies both intrinsic fracture work
+and integrated surviving-bond dashpot loss along the declared straight segment.
+Viscous loss accumulated before failure remains present even when the final
+dashpot traction is zero. Elastic unloading may generate viscous heat without
+any new fracture work.
+
+Compute the duration as `target_time_s - state.last_synchronized_time_s()` and
+use that same value in the mechanical material trial and synchronization.
+Heat-transport stops leave this mechanical clock unchanged. The target must
+equal the current thermal time; the supplied duration must equal its represented
+difference from the previous mechanical time. A repeated timed synchronization
+refuses, while a later stationary hold contributes no repeated loss.
+
+One `CohesiveHeatPartition` per interface supplies independent fracture and
+viscous heat-conversion fractions, with separate receiving-side splits.
+`ContactReport` reports both losses, and `FractureHeatReport` retains both
+nonthermal remainders. The transfer residual closes their sum against the
+native enthalpy change. Neither channel implicitly consumes the other, and
+the caller must avoid double counting the upstream mechanical work.
+
+The complete contact/history/clock/enthalpy candidate publishes atomically.
+Final points cannot reveal every unreported trajectory: an undamaged closed
+loop, for example, can dissipate viscous work while returning to the same
+cohesive point. Supply each physical reversal as a separate segment. These APIs
+retain the staggered endpoint model; they do not infer a within-step fracture
+time, update toughness from the generated heat, or implement concurrent healing.

@@ -46,6 +46,203 @@ fn coupled(law: &BilinearCohesive, htc: f64) -> FractureCooling<'static,'_> {
 }
 fn near(a: f64,b: f64,tol: f64) { assert!((a-b).abs() < tol,"{a:e} != {b:e}"); }
 
+fn viscous_law() -> BilinearCohesive {
+    law().with_viscosity(fs_material::cohesive::CohesiveViscosity::new(1e8,2e8,0.1).unwrap())
+}
+fn both_partitions(id: u64) -> CohesiveHeatPartition {
+    CohesiveHeatPartition { interface: id, fracture_fraction_to_heat: 0.25,
+        fracture_fraction_to_first: 0.2, viscous_fraction_to_heat: 0.75,
+        viscous_fraction_to_first: 0.8 }
+}
+fn timed_config() -> StepConfig { StepConfig { max_dt_s: 0.25,..config() } }
+
+// G1: intact Kelvin--Voigt loss is A eta |delta_g|^2 / dt. Thermal query
+// stops must not replace that physical interval by the last thermal substep.
+#[test]
+fn timed_contact_uses_elapsed_mechanical_time_and_retains_both_loss_channels() {
+    let law = viscous_law();
+    let initial = coupled(&law,0.0);
+    let half = initial.advance_to(0.5,config(),|| Ok(())).unwrap().0;
+    let state = half.advance_to(1.0,config(),|| Ok(())).unwrap().0;
+    assert_eq!(state.last_synchronized_time_s(),0.0);
+    let point = law.bonded_point().trial_over_time([0.0001,0.0,0.0],1.0,1e-8)
+        .unwrap().equilibrium.point;
+    assert!(state.synchronize(1.0,&[(7,point)],1e-8,|| Ok(())).is_err());
+    assert!(state.synchronize_over_time(1.0,0.5,&[(7,point)],1e-8,|| Ok(())).is_err());
+    let (next,report) = state.synchronize_over_time(1.0,1.0,&[(7,point)],1e-8,|| Ok(())).unwrap();
+    assert_eq!(report.fracture_dissipation_j,0.0);
+    near(report.viscous_dissipation_j,0.0002*1e8*0.0001_f64.powi(2),1e-16);
+    assert_eq!(next.interfaces()[&7].point,point);
+    assert_eq!(next.thermal().cells(),state.thermal().cells());
+    assert_eq!(next.last_synchronized_time_s(),1.0);
+    assert_eq!(state.last_synchronized_time_s(),0.0);
+    assert!(next.synchronize_over_time(1.0,1.0,&[(7,point)],1e-8,|| Ok(())).is_err());
+
+    // A later hold carries neither a repeated dashpot impulse nor old fracture.
+    let held = next.advance_to(2.0,config(),|| Ok(())).unwrap().0;
+    let (_,report) = held.synchronize_over_time(2.0,1.0,&[(7,point)],1e-8,|| Ok(())).unwrap();
+    assert_eq!((report.fracture_dissipation_j,report.viscous_dissipation_j),(0.0,0.0));
+
+    // Non-binary absolute times use their represented difference, exactly as
+    // the original material update does, not an independently rounded 0.1 s.
+    let ready = initial.advance_to(0.2,config(),|| Ok(())).unwrap().0;
+    let point = law.bonded_point().trial_over_time([0.0001,0.0,0.0],0.2,1e-8)
+        .unwrap().equilibrium.point;
+    let ready = ready.synchronize_over_time(0.2,0.2,&[(7,point)],1e-8,|| Ok(())).unwrap().0
+        .advance_to(0.3,config(),|| Ok(())).unwrap().0;
+    let dt = 0.3-ready.last_synchronized_time_s();
+    assert_ne!(dt,0.1);
+    let point = point.trial_over_time([0.00015,0.0,0.0],dt,1e-8).unwrap().equilibrium.point;
+    assert!(ready.synchronize_over_time(0.3,0.1,&[(7,point)],1e-8,|| Ok(())).is_err());
+    let (accepted,report) = ready.synchronize_over_time(0.3,dt,&[(7,point)],1e-8,|| Ok(())).unwrap();
+    assert_eq!(accepted.last_synchronized_time_s(),0.3);
+    near(report.viscous_dissipation_j,0.0002*1e8*0.00005_f64.powi(2)/dt,1e-16);
+}
+
+// G1: integrate intact(g) independently over the bilinear loading envelope.
+// Endpoint viscosity is zero at failure although its preceding work is finite.
+#[test]
+fn timed_heat_separates_fracture_surface_energy_from_integrated_bond_viscosity() {
+    let law = viscous_law();
+    let initial = heat_fixture(&law,&HEAT,[0.001,0.002],[0.0,0.0]);
+    let state = initial.advance_to(2.0,timed_config(),|| Ok(())).unwrap().0;
+    let a = law.onset_separation_m();
+    let b = law.failure_separation_m();
+    let timed = law.bonded_point().trial_over_time([b,0.0,0.0],2.0,1e-8).unwrap();
+    assert_eq!(timed.traction_pa,[0.0;3]);
+    let viscosity = 0.0002*1e8*(b/2.0)*(a*b/(b-a))*(b/a).ln();
+    let (next,r) = state.synchronize_over_time_with_heat(2.0,2.0,
+        &[(7,timed.equilibrium.point)],&[both_partitions(7)],1e-8,1e-10,|| Ok(())).unwrap();
+    near(r.contact.fracture_dissipation_j,0.02,1e-12);
+    near(r.contact.viscous_dissipation_j,viscosity,1e-12);
+    near(r.heat_by_cell_j[&CellId(1)],0.001+0.6*viscosity,1e-12);
+    near(r.heat_by_cell_j[&CellId(2)],0.004+0.15*viscosity,1e-12);
+    near(r.nonthermal_fracture_energy_j,0.015,1e-12);
+    near(r.nonthermal_viscous_energy_j,0.25*viscosity,1e-12);
+    near(r.thermal.stored_energy_change_j+r.nonthermal_fracture_energy_j
+        +r.nonthermal_viscous_energy_j-r.contact.fracture_dissipation_j
+        -r.contact.viscous_dissipation_j,0.0,1e-10);
+    near(r.transfer_residual_j,0.0,1e-10);
+    assert_eq!(r.contact.opened,1);
+    assert_eq!(next.last_synchronized_time_s(),2.0);
+    assert_eq!(next.thermal().time_s(),2.0);
+    assert!(next.thermal().links().is_empty());
+    assert!(next.synchronize_over_time_with_heat(2.0,2.0,&[(7,timed.equilibrium.point)],
+        &[both_partitions(7)],1e-8,1e-10,|| Ok(())).is_err());
+}
+
+#[test]
+fn timed_unloading_heats_only_the_explicit_viscous_channel() {
+    let law = viscous_law();
+    let initial = heat_fixture(&law,&HEAT,[0.001,0.001],[0.0,0.0]);
+    let ready = initial.advance_to(1.0,timed_config(),|| Ok(())).unwrap().0;
+    let loaded = law.bonded_point().trial_over_time([0.0001,0.0,0.0],1.0,1e-8)
+        .unwrap().equilibrium.point;
+    let ready = ready.synchronize_over_time(1.0,1.0,&[(7,loaded)],1e-8,|| Ok(())).unwrap().0
+        .advance_to(2.0,timed_config(),|| Ok(())).unwrap().0;
+    let unloaded = loaded.trial_over_time([0.0;3],1.0,1e-8).unwrap().equilibrium.point;
+    let partition = CohesiveHeatPartition { fracture_fraction_to_heat: 0.0,
+        viscous_fraction_to_heat: 1.0,viscous_fraction_to_first: 0.5,..both_partitions(7) };
+    let (next,r) = ready.synchronize_over_time_with_heat(2.0,1.0,&[(7,unloaded)],
+        &[partition],1e-8,1e-10,|| Ok(())).unwrap();
+    assert_eq!(r.contact.fracture_dissipation_j,0.0);
+    near(r.contact.viscous_dissipation_j,0.0002,1e-16);
+    near(r.heat_by_cell_j[&CellId(1)],0.0001,1e-16);
+    near(r.heat_by_cell_j[&CellId(2)],0.0001,1e-16);
+    assert_eq!(r.nonthermal_fracture_energy_j,0.0);
+    assert_eq!(r.nonthermal_viscous_energy_j,0.0);
+    assert_eq!(next.interfaces()[&7].point.damage(),0.0);
+    assert_eq!(next.thermal().links()[&7],link(7));
+}
+
+#[test]
+fn timed_mixed_shear_failure_preserves_the_original_mode_and_reclosed_contact() {
+    use fs_material::cohesive::mixed_mode::MixedModeParameters;
+    let law = BilinearCohesive::new_mixed_mode(MixedModeParameters {
+        normal_stiffness_pa_m: 1e9,tangential_stiffness_pa_m: 2e9,
+        normal_strength_pa: 2e5,tangential_strength_pa: 4e5,
+        mode_i_fracture_energy_j_m2: 100.0,mode_ii_fracture_energy_j_m2: 200.0,
+        bk_exponent: 2.0,
+    },2e9,0.01).unwrap().with_viscosity(
+        fs_material::cohesive::CohesiveViscosity::new(1e8,2e8,0.1).unwrap());
+    let state = heat_fixture(&law,&HEAT,[0.001,0.001],[0.0,0.0])
+        .advance_to(2.0,timed_config(),|| Ok(())).unwrap().0;
+    let point = law.bonded_point().trial_over_time([0.0,0.00101,0.0],2.0,1e-8)
+        .unwrap().equilibrium.point;
+    let (next,r) = state.synchronize_over_time_with_heat(2.0,2.0,&[(7,point)],
+        &[both_partitions(7)],1e-8,1e-10,|| Ok(())).unwrap();
+    near(r.contact.fracture_dissipation_j,0.04,1e-12);
+    let viscosity = 0.0002*2e8*(0.00101/2.0)*(0.0002*0.001/0.0008)*5.0_f64.ln();
+    near(r.contact.viscous_dissipation_j,viscosity,1e-12);
+    assert_eq!(next.interfaces()[&7].point,point);
+    assert_eq!(point.mixed_mode_history().unwrap().energy_shear_fraction,1.0);
+    assert!(std::ptr::eq(next.interfaces()[&7].point.law(),&law));
+    assert_eq!(next.thermal().links()[&7].conductance_w_k,0.05);
+    assert_eq!(r.contact.changed_conductances,1);
+}
+
+#[test]
+fn timed_refusals_preserve_mechanical_clock_history_contacts_and_enthalpy() {
+    let law = viscous_law();
+    let other = law.clone();
+    let state = heat_fixture(&law,&HEAT,[0.001,0.001],[0.0,0.0])
+        .advance_to(1.0,timed_config(),|| Ok(())).unwrap().0;
+    let point = law.bonded_point().trial_over_time([0.001,0.0,0.0],1.0,1e-8)
+        .unwrap().equilibrium.point;
+    for dt in [0.0,-1.0,0.5,2.0,f64::NAN,f64::INFINITY] {
+        assert!(state.synchronize_over_time(1.0,dt,&[(7,point)],1e-8,|| Ok(())).is_err());
+    }
+    let hidden = point.trial_over_time([0.0001,0.0,0.0],1.0,1e-8).unwrap().equilibrium.point;
+    for proposed in [vec![],vec![(8,point)],vec![(7,other.bonded_point())],vec![(7,hidden)]] {
+        assert!(state.synchronize_over_time(1.0,1.0,&proposed,1e-8,|| Ok(())).is_err());
+    }
+    for partition in [CohesiveHeatPartition { viscous_fraction_to_heat: f64::NAN,..both_partitions(7) },
+        CohesiveHeatPartition { viscous_fraction_to_first: 1.1,..both_partitions(7) }] {
+        assert!(state.synchronize_over_time_with_heat(1.0,1.0,&[(7,point)],&[partition],
+            1e-8,1e-10,|| Ok(())).is_err());
+    }
+    // A valid material point alone cannot attest to a faster admissible rate.
+    let fast = heat_fixture(&law,&HEAT,[0.001,0.001],[0.0,0.0])
+        .advance_to(0.001,timed_config(),|| Ok(())).unwrap().0;
+    assert!(fast.synchronize_over_time(0.001,0.001,&[(7,point)],1e-8,|| Ok(())).is_err());
+
+    // Refuse at the final checkpoint, after caloric deposition has been staged.
+    let mut calls = 0;
+    state.synchronize_over_time_with_heat(1.0,1.0,&[(7,point)],&[both_partitions(7)],
+        1e-8,1e-10,|| { calls += 1; Ok(()) }).unwrap();
+    let mut retry_calls = 0;
+    assert!(matches!(state.synchronize_over_time_with_heat(1.0,1.0,&[(7,point)],
+        &[both_partitions(7)],1e-8,1e-10,|| {
+            retry_calls += 1;
+            if retry_calls == calls { Err(DepositionError::Cancelled) } else { Ok(()) }
+        }),Err(Error::Thermal(DepositionError::Cancelled))));
+    assert_eq!(state.last_synchronized_time_s(),0.0);
+    assert_eq!(state.interfaces()[&7].point,law.bonded_point());
+    assert_eq!(state.thermal().links()[&7],link(7));
+    assert!(state.thermal().cells().values().all(|cell| cell.specific_h_j_kg == 0.0));
+
+    let saturated = heat_fixture(&law,&LatentHeat,[0.001,0.001],[400.0,400.0])
+        .advance_to(1.0,timed_config(),|| Ok(())).unwrap().0;
+    assert!(saturated.synchronize_over_time_with_heat(1.0,1.0,&[(7,point)],
+        &[both_partitions(7)],1e-8,1e-10,|| Ok(())).is_err());
+    assert_eq!(saturated.last_synchronized_time_s(),0.0);
+    assert_eq!(saturated.interfaces()[&7].point,law.bonded_point());
+}
+
+#[test]
+fn untimed_rate_independent_sync_retains_zero_time_replay_and_advances_clock() {
+    let law = law();
+    let initial = coupled(&law,0.0);
+    let point = law.bonded_point().trial([0.0001,0.0,0.0],1e-8).unwrap().point;
+    let (first,_) = initial.synchronize(0.0,&[(7,point)],1e-8,|| Ok(())).unwrap();
+    let (again,r) = first.synchronize(0.0,&[(7,point)],1e-8,|| Ok(())).unwrap();
+    assert_eq!(again.last_synchronized_time_s(),0.0);
+    assert_eq!((r.fracture_dissipation_j,r.viscous_dissipation_j),(0.0,0.0));
+    let later = again.advance_to(1.0,config(),|| Ok(())).unwrap().0;
+    let (accepted,_) = later.synchronize(1.0,&[(7,point)],1e-8,|| Ok(())).unwrap();
+    assert_eq!(accepted.last_synchronized_time_s(),1.0);
+}
+
 // G1: without ambient loss, contact exchange has an independent two-body limit.
 #[test]
 fn failure_opens_actual_contact_and_changes_subsequent_temperatures() {

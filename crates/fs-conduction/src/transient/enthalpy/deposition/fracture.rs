@@ -10,6 +10,9 @@
 //! does not localize a fracture time inside the preceding step, solve mechanical
 //! equilibrium or move geometry. `synchronize_with_heat` optionally deposits
 //! an explicit fraction of newly dissipated fracture work into the same cells.
+//! The timed synchronization methods also consume physical bond viscosity from
+//! the original constant-rate path, with separate fracture/viscous heat fractions
+//! and a retained mechanical clock independent of thermal integration stops.
 //! Fixed local frames,
 //! small tangential travel and uniform original contact area are explicit limits.
 //! The opt-in [`prescribed`] path instead resolves switching times inside an
@@ -97,6 +100,9 @@ pub struct ContactReport {
     /// Incremental fracture dissipation over the bound original areas, J.
     /// Reported only: not automatically added to thermal enthalpy.
     pub fracture_dissipation_j: f64,
+    /// Physical surviving-bond dashpot loss on the timed straight jump path, J.
+    /// Separate from intrinsic fracture; zero for untimed synchronization.
+    pub viscous_dissipation_j: f64,
 }
 
 /// Explicit partition of NEW physical cohesive dissipation on one interface.
@@ -111,6 +117,18 @@ pub struct FractureHeatPartition {
     pub fraction_to_first: f64,
 }
 
+/// Independent conversion and receiving-side splits for the two physical losses.
+/// Fracture energy can remain in newly created surfaces while bond viscosity
+/// follows a different explicitly supplied heat conversion. No default is used.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CohesiveHeatPartition {
+    pub interface: u64,
+    pub fracture_fraction_to_heat: f64,
+    pub fracture_fraction_to_first: f64,
+    pub viscous_fraction_to_heat: f64,
+    pub viscous_fraction_to_first: f64,
+}
+
 /// One jointly accepted contact/history endpoint and its physical heat input.
 #[derive(Debug, Clone)]
 pub struct FractureHeatReport {
@@ -119,11 +137,13 @@ pub struct FractureHeatReport {
     pub heat_by_cell_j: BTreeMap<CellId, f64>,
     /// Fracture work not converted into heat [J]; never numerical dissipation.
     pub nonthermal_fracture_energy_j: f64,
+    /// Physical bond-viscosity loss not converted by the explicit partition, J.
+    pub nonthermal_viscous_energy_j: f64,
     /// The original thermal owner's storage/input account. `external_heat_j`
     /// is internal to the combined mechanical/thermal system.
     pub thermal: EnergyAudit,
     /// Reported thermal storage + reported nonthermal energy - reported
-    /// fracture work [J], resolved through compensated local differences.
+    /// fracture and viscous work [J], resolved through compensated differences.
     pub transfer_residual_j: f64,
 }
 
@@ -154,6 +174,10 @@ impl DepositionObserver for Contacts<'_> {
 pub struct FractureCooling<'t, 'm> {
     thermal: DepositionSimulation<'t>,
     contacts: Contacts<'m>,
+    // Thermal transport can advance before the caller supplies its mechanical
+    // endpoint. Keep the actual interval separately; neither thermal substeps
+    // nor a failed synchronization may reset its starting time.
+    last_synchronized_time_s: f64,
 }
 impl<'t, 'm> FractureCooling<'t, 'm> {
     /// Bind already activated thermal cells and exactly matching current links.
@@ -195,11 +219,14 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
         }
         // Also checks that due scheduled events have been processed first.
         let thermal = thermal.replace_contacts(&updates, &mut checkpoint)?;
-        Ok(Self { thermal, contacts: Contacts(contacts) })
+        let last_synchronized_time_s = thermal.time_s();
+        Ok(Self { thermal, contacts: Contacts(contacts), last_synchronized_time_s })
     }
 
     pub fn thermal(&self) -> &DepositionSimulation<'t> { &self.thermal }
     pub fn interfaces(&self) -> &BTreeMap<u64, Interface<'m>> { &self.contacts.0 }
+    /// Time of the retained mechanical endpoints, unchanged by heat transport.
+    pub fn last_synchronized_time_s(&self) -> f64 { self.last_synchronized_time_s }
 
     /// Advance heat with accepted closure held fixed. A scheduled event touching
     /// any mechanically owned link refuses, even if another equal-time event
@@ -209,14 +236,15 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
     ) -> Result<(Self, EnergyAudit), Error> {
         let (thermal, contacts, audit) = self.thermal.advance_observed(
             &self.contacts, target_s, config, checkpoint)?;
-        Ok((Self { thermal, contacts }, audit))
+        Ok((Self { thermal, contacts, last_synchronized_time_s: self.last_synchronized_time_s }, audit))
     }
 
     /// Accept exactly one proposed point for every bound ID at this thermal time.
     /// Points from `fs-solid::cohesive` can be passed directly. Re-evaluating their
     /// straight jump increments against the retained history verifies the SAME
     /// damage path and immutable law; it is not a second equilibrium solve.
-    /// Split paths at intermediate reversals: a hidden larger excursion refuses.
+    /// Split paths at intermediate reversals: inconsistent retained damage
+    /// refuses, but undamaged closed loops cannot be recovered from endpoints.
     ///
     /// Missing/extra/duplicate IDs, stale time, foreign laws, lost damage,
     /// thermal-contact conflicts, excessive slip, or cancellation refuse the
@@ -226,8 +254,31 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
         local_energy_tolerance_j_m2: f64,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, ContactReport), Error> {
-        self.synchronize_recording(time_s, proposed, local_energy_tolerance_j_m2,
-            |_, _, _| Ok(()), checkpoint)
+        self.synchronize_recording(time_s, None, proposed, local_energy_tolerance_j_m2,
+            |_, _, _, _| Ok(()), checkpoint)
+    }
+
+    /// Accept one constant-rate straight mechanical segment at the current
+    /// thermal time. `duration_s` must equal the elapsed time since the last
+    /// accepted synchronization and be positive; transport alone does not age
+    /// the mechanical clock. The original timed cohesive owner supplies both
+    /// fracture and physical viscous work, never endpoint-force quadrature.
+    /// Compute `duration_s = time_s - self.last_synchronized_time_s()` from the
+    /// accepted absolute times, using that same represented interval in the
+    /// mechanical update; a separately rounded nominal step can differ.
+    ///
+    /// The caller must supply the actual segment, splitting reversals. Complete
+    /// original-law history is replayed and compared before publication.
+    /// Undamaged closed loops leave no point-history signature; their viscous
+    /// work cannot be reconstructed or detected from the endpoints. This API
+    /// neither assigns loss to heat nor solves mechanical equilibrium.
+    /// Repeating the accepted time refuses.
+    pub fn synchronize_over_time(&self, time_s: f64, duration_s: f64,
+        proposed: &[(u64, CohesivePoint<'m>)], local_energy_tolerance_j_m2: f64,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, ContactReport), Error> {
+        self.synchronize_recording(time_s, Some(duration_s), proposed,
+            local_energy_tolerance_j_m2, |_, _, _, _| Ok(()), checkpoint)
     }
 
     /// Accept contact/history changes and heat from their new fracture work.
@@ -247,6 +298,42 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
     pub fn synchronize_with_heat(&self, time_s: f64,
         proposed: &[(u64, CohesivePoint<'m>)], partitions: &[FractureHeatPartition],
         local_energy_tolerance_j_m2: f64, heat_energy_tolerance_j: f64,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, FractureHeatReport), Error> {
+        self.synchronize_heating(time_s, None, proposed, partitions.iter().map(|p|
+            CohesiveHeatPartition { interface: p.interface,
+                fracture_fraction_to_heat: p.fraction_to_heat,
+                fracture_fraction_to_first: p.fraction_to_first,
+                viscous_fraction_to_heat: 0.0, viscous_fraction_to_first: 0.0 }),
+            local_energy_tolerance_j_m2, heat_energy_tolerance_j, checkpoint)
+    }
+
+    /// Timed counterpart with independently selected fracture and bond-viscous
+    /// heat conversion. The interval obeys `synchronize_over_time`; the single
+    /// authoritative replay also supplies the exact integrated dashpot loss.
+    /// Each bound interface needs one complete partition, including explicit
+    /// zero fractions when a channel is retained as a nonthermal sink.
+    ///
+    /// Contact, mechanical time/history and both caloric inputs publish together
+    /// only after the original thermal law and shared joule budget accept them.
+    /// No heat is invented from stored energy, numerical defects or prior damage.
+    /// Temperature-dependent toughness feedback and fracture-event localization
+    /// remain separate operations; this is staggered endpoint heating.
+    pub fn synchronize_over_time_with_heat(&self, time_s: f64, duration_s: f64,
+        proposed: &[(u64, CohesivePoint<'m>)], partitions: &[CohesiveHeatPartition],
+        local_energy_tolerance_j_m2: f64, heat_energy_tolerance_j: f64,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, FractureHeatReport), Error> {
+        self.synchronize_heating(time_s, Some(duration_s), proposed, partitions.iter().copied(),
+            local_energy_tolerance_j_m2, heat_energy_tolerance_j, checkpoint)
+    }
+
+    // Both public paths use the same compensated physical partition and native
+    // caloric update; the optional interval selects the original material owner.
+    fn synchronize_heating(&self, time_s: f64, duration_s: Option<f64>,
+        proposed: &[(u64, CohesivePoint<'m>)],
+        partitions: impl ExactSizeIterator<Item = CohesiveHeatPartition>,
+        local_energy_tolerance_j_m2: f64, heat_energy_tolerance_j: f64,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, FractureHeatReport), Error> {
         checkpoint()?;
@@ -254,35 +341,45 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
             return Err(Error::Invalid("complete heat partitions and finite nonnegative joule tolerance required"));
         }
         let mut ordered = BTreeMap::new();
-        for &partition in partitions {
+        for partition in partitions {
             checkpoint()?;
-            if !(0.0..=1.0).contains(&partition.fraction_to_heat)
-                || !(0.0..=1.0).contains(&partition.fraction_to_first)
+            if [partition.fracture_fraction_to_heat, partition.fracture_fraction_to_first,
+                partition.viscous_fraction_to_heat, partition.viscous_fraction_to_first]
+                .into_iter().any(|fraction| !(0.0..=1.0).contains(&fraction))
                 || !self.contacts.0.contains_key(&partition.interface)
                 || ordered.insert(partition.interface, partition).is_some()
             { return Err(Error::Invalid("unknown, duplicate or invalid fracture heat partition")); }
         }
         let mut heat: BTreeMap<CellId, HeatSum> = BTreeMap::new();
-        let mut work = HeatSum::default();
-        let mut nonthermal = HeatSum::default();
+        let mut fracture_work = HeatSum::default();
+        let mut viscous_work = HeatSum::default();
+        let mut nonthermal_fracture = HeatSum::default();
+        let mut nonthermal_viscous = HeatSum::default();
         let mut residual = HeatSum::default();
         let mut spent = HeatSum::default();
-        let (mut next, mut contact) = self.synchronize_recording(time_s, proposed,
-            local_energy_tolerance_j_m2, |id, link, dissipation| {
+        let (mut next, mut contact) = self.synchronize_recording(time_s, duration_s, proposed,
+            local_energy_tolerance_j_m2, |id, link, fracture, viscous| {
                 let partition = ordered[&id];
-                let converted = partition.fraction_to_heat * dissipation;
-                let first = partition.fraction_to_first * converted;
-                let second = converted - first;
-                let remainder = dissipation - converted;
-                heat.entry(link.a).or_default().add(first)?;
-                heat.entry(link.b).or_default().add(second)?;
-                work.add(dissipation)?;
-                nonthermal.add(remainder)?;
-                let mut local = HeatSum::default();
-                for term in [first, second, remainder, -dissipation] { local.add(term)?; }
-                let defect = local.value()?;
-                residual.add(defect)?;
-                spent.add(defect.abs())?;
+                for (dissipation, fraction, split, work, nonthermal) in [
+                    (fracture, partition.fracture_fraction_to_heat, partition.fracture_fraction_to_first,
+                        &mut fracture_work, &mut nonthermal_fracture),
+                    (viscous, partition.viscous_fraction_to_heat, partition.viscous_fraction_to_first,
+                        &mut viscous_work, &mut nonthermal_viscous),
+                ] {
+                    let converted = fraction * dissipation;
+                    let first = split * converted;
+                    let second = converted - first;
+                    let remainder = dissipation - converted;
+                    heat.entry(link.a).or_default().add(first)?;
+                    heat.entry(link.b).or_default().add(second)?;
+                    work.add(dissipation)?;
+                    nonthermal.add(remainder)?;
+                    let mut local = HeatSum::default();
+                    for term in [first, second, remainder, -dissipation] { local.add(term)?; }
+                    let defect = local.value()?;
+                    residual.add(defect)?;
+                    spent.add(defect.abs())?;
+                }
                 Ok(())
             }, &mut checkpoint)?;
         let mut heat_by_cell_j = BTreeMap::new();
@@ -295,10 +392,13 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
         }
         // Unlike the legacy report, the opt-in heat report carries compensated
         // aggregate work. Every lost final bit spends the SAME joule budget.
-        let (total_work, work_tail) = work.rounded()?;
-        let (nonthermal_energy, nonthermal_tail) = nonthermal.rounded()?;
-        contact.fracture_dissipation_j = total_work;
-        for term in [work_tail, -nonthermal_tail] {
+        let (fracture_work, fracture_tail) = fracture_work.rounded()?;
+        let (viscous_work, viscous_tail) = viscous_work.rounded()?;
+        let (nonthermal_fracture_energy_j, nonthermal_fracture_tail) = nonthermal_fracture.rounded()?;
+        let (nonthermal_viscous_energy_j, nonthermal_viscous_tail) = nonthermal_viscous.rounded()?;
+        contact.fracture_dissipation_j = fracture_work;
+        contact.viscous_dissipation_j = viscous_work;
+        for term in [fracture_tail, viscous_tail, -nonthermal_fracture_tail, -nonthermal_viscous_tail] {
             residual.add(term)?;
             spent.add(term.abs())?;
         }
@@ -349,7 +449,7 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
             return Err(DepositionError::EnergyBalance(transfer_residual_j).into());
         }
         let report = FractureHeatReport {
-            contact, heat_by_cell_j, nonthermal_fracture_energy_j: nonthermal_energy,
+            contact, heat_by_cell_j, nonthermal_fracture_energy_j, nonthermal_viscous_energy_j,
             thermal: audit, transfer_residual_j,
         };
         next.thermal = thermal;
@@ -358,15 +458,19 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
     }
 
     // One authoritative trial serves both the legacy contact update and heat.
-    fn synchronize_recording(&self, time_s: f64, proposed: &[(u64, CohesivePoint<'m>)],
+    fn synchronize_recording(&self, time_s: f64, duration_s: Option<f64>,
+        proposed: &[(u64, CohesivePoint<'m>)],
         local_energy_tolerance_j_m2: f64,
-        mut record: impl FnMut(u64, ThermalLink, f64) -> Result<(), Error>,
+        mut record: impl FnMut(u64, ThermalLink, f64, f64) -> Result<(), Error>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, ContactReport), Error> {
         checkpoint()?;
         if time_s != self.thermal.time_s() || proposed.len() != self.contacts.0.len()
             || !positive(local_energy_tolerance_j_m2)
         { return Err(Error::Invalid("require current thermal time, complete endpoints and positive energy gate")); }
+        if duration_s.is_some_and(|dt| !positive(dt) || dt != time_s-self.last_synchronized_time_s) {
+            return Err(Error::Invalid("timed synchronization requires the actual positive interval since the accepted mechanical endpoint"));
+        }
         let mut contacts = BTreeMap::new();
         let mut updates = Vec::with_capacity(proposed.len());
         let mut report = ContactReport::default();
@@ -384,8 +488,15 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
             if !std::ptr::eq(old.point.law(), point.law()) {
                 return Err(Error::Invalid("mechanical endpoint belongs to a different immutable law"));
             }
-            let trial = old.point.trial(point.jump_m(), local_energy_tolerance_j_m2)
-                .map_err(|error| Error::Material { interface: id, error })?;
+            let (trial, viscous_density) = match duration_s {
+                Some(dt) => {
+                    let timed = old.point.trial_over_time(point.jump_m(), dt, local_energy_tolerance_j_m2)
+                        .map_err(|error| Error::Material { interface: id, error })?;
+                    (timed.equilibrium, timed.viscous_dissipated_j_m2)
+                }
+                None => (old.point.trial(point.jump_m(), local_energy_tolerance_j_m2)
+                    .map_err(|error| Error::Material { interface: id, error })?, 0.0),
+            };
             if trial.point != point {
                 return Err(Error::Invalid("mechanical endpoint lost history or contains an unresolved excursion"));
             }
@@ -397,20 +508,22 @@ impl<'t, 'm> FractureCooling<'t, 'm> {
             if !old.closed && closed { report.reclosed += 1; }
             if old.closed && closed && expected != replacement { report.changed_conductances += 1; }
             let dissipated = old.reference.area_m2 * trial.energy.dissipated;
-            if !nonnegative(dissipated) {
-                return Err(Error::Invalid("unrepresentable local fracture dissipation"));
+            let viscous = old.reference.area_m2 * viscous_density;
+            if !nonnegative(dissipated) || !nonnegative(viscous) {
+                return Err(Error::Invalid("unrepresentable local cohesive dissipation"));
             }
-            record(id, old.reference, dissipated)?;
+            record(id, old.reference, dissipated, viscous)?;
             report.fracture_dissipation_j += dissipated;
-            if !nonnegative(report.fracture_dissipation_j) {
-                return Err(Error::Invalid("unrepresentable aggregate fracture dissipation"));
+            report.viscous_dissipation_j += viscous;
+            if !nonnegative(report.fracture_dissipation_j) || !nonnegative(report.viscous_dissipation_j) {
+                return Err(Error::Invalid("unrepresentable aggregate cohesive dissipation"));
             }
             updates.push(ContactUpdate { id, expected, replacement });
             contacts.insert(id, next);
         }
         let thermal = self.thermal.replace_contacts(&updates, &mut checkpoint)?;
         checkpoint()?;
-        Ok((Self { thermal, contacts: Contacts(contacts) }, report))
+        Ok((Self { thermal, contacts: Contacts(contacts), last_synchronized_time_s: time_s }, report))
     }
 
     /// Executor-scoped endpoint synchronization with identical atomic semantics.
