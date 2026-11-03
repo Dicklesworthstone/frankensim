@@ -28092,3 +28092,42 @@ global impact-accuracy claim is added.
 `free_surface_wall::planar::thermal::FreeSurfaceThermalPlanarWall` retains the original thermal VOF owner and native full-inertia rigid body. The isothermal and thermal variants share one planar mechanical implementation. One original rigid-link pilot and one final native replay feed the existing mass-whitened three-mode midpoint solve, preserving translation/spin coupling. Actual replay loads drive the native MBD endpoint, followed by the original linear, spin, orbital-plus-spin, midpoint, affine-response and work audits before either owner escapes.
 
 Discarded trials advance no accepted source history, enthalpy or clock. The final thermal receipt distinguishes authored and optional molecular heat; mechanical wall, applied and guide work remain separate. Existing body, full-grid trial, motion and work limits remain binding. Geometry is a fixed flooded plane with tangential translation and principal spin; cover/vacate, tilt, finite edges and a solved conduction boundary are not supplied. Four regression groups cover all-plane isothermal parity, heated/buoyant finite recoil, molecular heat applied once, and transactional late refusal/cancellation/retry. Source parsing, formatting and scoped whitespace checks passed; native build and test execution remain outstanding in this resource-constrained session.
+
+## Native rigid bodies striking continuing modal and cavity surfaces
+
+`impulse::impact::rigid::PreparedRigidModalImpacts` prepares complete world-vector
+modal material-point traces and their double-double Gram response. Each event
+recomputes the original rigid bodies' current-pose translation and full-inertia
+response. Shared bodies, shared modes, off-centre spin and normal/tangent terms
+enter one original simultaneous Coulomb solve; the same rows transfer reciprocal
+impulses through native rigid momentum application and continuing modal staging.
+
+Actual per-coordinate momentum, endpoint contact laws, finite-witness impulse
+couples, signed contact work, net passivity, kinetic closure and original modal
+state budgets all precede publication of either receiver. Tiny impulses cannot
+disappear behind a large background momentum. Stable contact IDs order the
+projection and work reductions. Redundant rows retain the original solver's
+velocity determinacy and unresolved local load/heat allocation.
+
+`SharedCavity::apply_surface_rigid_frictional_impacts` admits only physical
+surface components and validates actual cavity volume flows before either
+rigid or modal publication. Failed late admission and cancellation retain both
+accepted receivers and allow prepared scratch to be reused. Rigid poses, modal
+displacements, clocks, previous interval records, held inputs, material
+relaxation, radiation and auxiliary acoustic histories remain continuous.
+
+This is an instantaneous event on explicitly supplied material witnesses and
+frozen physical frames, with linear modal point geometry. Conservation of
+spatial momentum requires the corresponding represented modal symmetry. The
+API adds no collision discovery, persistent-contact integrator, shock model or
+thermal partition. Prepared modal rows and scratch are reused, while the native
+contact solver and returned receipts still allocate; no measured speedup is
+claimed.
+
+G1/G3/G4 regressions in `tests/modal_rigid_impacts.rs` cover analytic finite-mass
+stick/slip, tangent rotation, full-tensor off-centre spin, a distant world origin,
+shared-body/mode simultaneous response, native redundancy, current rigid
+pose/inertia, small losses beside common kinetic motion, refused source and
+geometry cases, lost rigid momentum, and continued material/radiation evolution.
+The owner-local test exercises late receiving-state refusal and cancellation
+immediately before joint publication.

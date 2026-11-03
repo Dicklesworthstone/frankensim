@@ -13,12 +13,65 @@ use crate::render::schedule::force::coupled::impulse::impact::frictional::{
 use crate::render::schedule::force::coupled::impulse::impact::multiple::{
     ModalMultiImpactError, ModalMultiImpactReceipt, PreparedModalImpacts,
 };
+use crate::render::schedule::force::coupled::impulse::impact::rigid::{
+    PreparedRigidModalImpacts, RigidModalImpactError, RigidModalImpactReceipt,
+};
 use crate::render::schedule::force::coupled::impulse::impact::{
     ModalImpactError, ModalImpactReceipt, PreparedModalImpact,
 };
 use fs_exec::CancelGate;
 
 impl SharedCavity {
+    /// Exchange one simultaneous Coulomb impulse set with actual free rigid
+    /// bodies, through the original cavity's physical surface modes. Native
+    /// translation/full inertia and modal recoil share the same complete solve.
+    /// Prepare against [`Self::network`]; acoustic auxiliaries cannot be struck.
+    ///
+    /// Actual surface/neck volume flows are admitted before EITHER receiver
+    /// publishes. Compression, neck/viscous auxiliary velocities, material and
+    /// radiation histories, poses, q and clock remain unchanged. This selected
+    /// frozen-geometry event supplies no collision search or shock/heat model.
+    pub fn apply_surface_rigid_frictional_impacts(
+        &mut self,
+        bodies: &mut [fs_mbd::RigidBodyState],
+        properties: &[fs_mbd::MassProperties],
+        impacts: &mut PreparedRigidModalImpacts,
+        gate: &CancelGate,
+    ) -> Result<RigidModalImpactReceipt, RigidModalImpactError> {
+        poll(gate)?;
+        if impacts
+            .modal_components()
+            .any(|index| index >= self.neck_component)
+        {
+            return Err(
+                network_invalid("rigid/cavity impacts require original physical surfaces").into(),
+            );
+        }
+        let column = &self.column;
+        let surface_modes = self.surface_modes;
+        let neck_shape = self.source.neck_volume_shape_m2_per_sqrt_kg();
+        let neck_area = self.source.neck_area_m2();
+        self.system.apply_rigid_frictional_impacts_with_admission(
+            bodies,
+            properties,
+            impacts,
+            gate,
+            |components| {
+                validate_volume_flows(
+                    components
+                        .iter()
+                        .flat_map(|model| model.states())
+                        .map(|state| state.velocity_m_sqrt_kg_per_s),
+                    column,
+                    surface_modes,
+                    neck_shape,
+                    neck_area,
+                    gate,
+                )
+            },
+        )
+    }
+
     /// Apply one simultaneous Coulomb event to the original physical surfaces.
     /// Normal and both tangent traces address the same surface pair at each
     /// contact. Zero tangents retain the original native locked-direction

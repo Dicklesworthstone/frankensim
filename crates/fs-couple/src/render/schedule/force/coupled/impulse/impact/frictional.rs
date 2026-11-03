@@ -523,7 +523,7 @@ impl CoupledModalSystem {
 
 // Recheck the original physical Coulomb law at the ACTUAL staged velocity,
 // independently of the native solve's natural map and predicted W*p response.
-fn audit_contact(
+pub(super) fn audit_contact(
     mu: f64,
     target: f64,
     p: [f64; 3],

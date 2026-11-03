@@ -26,6 +26,9 @@ pub mod multiple;
 /// Simultaneous normal/tangential Coulomb contacts on the original modal state.
 pub mod frictional;
 
+/// Simultaneous reciprocal impacts between native rigid bodies and modal points.
+pub mod rigid;
+
 /// Physical normal ports in one common scalar direction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModalImpactContact {
