@@ -26,7 +26,7 @@ pub mod saturation;
 /// Maximum number of components in one bounded mixture.
 pub const MAX_PENG_ROBINSON_COMPONENTS_V1: usize = 64;
 /// Fixed operation-tree version.
-pub const PENG_ROBINSON_EVALUATOR_VERSION_V1: u32 = 2;
+pub const PENG_ROBINSON_EVALUATOR_VERSION_V1: u32 = 3;
 
 const ROOT_TOL: f64 = 128.0 * f64::EPSILON;
 const COMPOSITION_TOL: f64 = 256.0 * f64::EPSILON;
@@ -335,7 +335,7 @@ impl PengRobinsonMixtureV1 {
             z.is_finite() && *z > dimensionless_b * (1.0 + ROOT_TOL)
         });
         roots.sort_by(|a, b| a.total_cmp(b));
-        roots.dedup_by(|a, b| (*a - *b).abs() <= ROOT_TOL * a.abs().max(b.abs()).max(1.0));
+        roots.dedup_by(|a, b| (*a - *b).abs() <= ROOT_TOL * a.abs().max(b.abs()));
         if roots.is_empty() {
             return Err(PengRobinsonErrorV1::NoMechanicalRoot);
         }
@@ -502,20 +502,7 @@ fn cubic_real_roots(
                 what: "single-root cubic factor",
             });
         }
-        let mut root = u - p / (3.0 * u) - c2 / 3.0;
-        // Only the already-admitted unique-root branch is polished. A finite
-        // correction must reduce the original polynomial residual; neither
-        // discriminant classification nor three-root branch labels are changed.
-        for _ in 0..2 {
-            let residual = ((root + c2) * root + c1) * root + c0;
-            let slope = (3.0 * root + 2.0 * c2) * root + c1;
-            let next = root - residual / slope;
-            if !next.is_finite() || !slope.is_finite() || slope == 0.0
-                || (((next + c2) * next + c1) * next + c0).abs() >= residual.abs() {
-                break;
-            }
-            root = next;
-        }
+        let root = polish_cubic_root(u - p / (3.0 * u) - c2 / 3.0, c2, c1, c0);
         return Ok(vec![root]);
     }
     if p >= 0.0 {
@@ -530,11 +517,78 @@ fn cubic_real_roots(
         });
     }
     let theta = det::acos((-0.5 * q / denominator).clamp(-1.0, 1.0)) / 3.0;
-    Ok(vec![
+    let candidates = [
         radius * det::cos(theta) - c2 / 3.0,
         radius * det::cos(theta - 2.0 * core::f64::consts::PI / 3.0) - c2 / 3.0,
         radius * det::cos(theta - 4.0 * core::f64::consts::PI / 3.0) - c2 / 3.0,
-    ])
+    ];
+    // At small pressure the gas root is O(1), while both dense roots are O(p).
+    // The depressed discriminant subtracts O(1) terms and can lose their sign;
+    // the two small trigonometric roots then lose their volumes or even invent
+    // a liquid branch above the critical temperature. Use only the best
+    // separated candidate (largest |f'|), polish it in the ORIGINAL cubic,
+    // and recover the remaining quadratic through Vieta's identities.
+    let root = candidates.into_iter().max_by(|a, b| {
+        let slope = |z: f64| ((3.0 * z + 2.0 * c2) * z + c1).abs();
+        slope(*a).total_cmp(&slope(*b))
+    }).expect("three finite cubic candidates");
+    let root = polish_cubic_root(root, c2, c1, c0);
+    let (sum, product) = if root == 0.0 {
+        if c0 != 0.0 {
+            return Err(PengRobinsonErrorV1::Unrepresentable {
+                what: "cubic deflation root",
+            });
+        }
+        (-c2, c1)
+    } else {
+        let product = -c0 / root;
+        let direct_sum = -c2 - root;
+        let sum = if direct_sum.abs() > 0.5 * c2.abs().max(root.abs()) {
+            direct_sum
+        } else {
+            // r*(s+t)+s*t=c1 retains two small roots when r nearly cancels c2.
+            (c1 - product) / root
+        };
+        (sum, product)
+    };
+    if !sum.is_finite() || !product.is_finite() {
+        return Err(PengRobinsonErrorV1::Unrepresentable {
+            what: "cubic deflation coefficients",
+        });
+    }
+    let scale = sum.abs().max(det::sqrt(product.abs()));
+    if scale == 0.0 {
+        return Ok(vec![root, 0.0, 0.0]);
+    }
+    let scaled_sum = sum / scale;
+    let scaled_product = (product / scale) / scale;
+    let discriminant = scaled_sum * scaled_sum - 4.0 * scaled_product;
+    let allowance = ROOT_TOL * (scaled_sum * scaled_sum).max(4.0 * scaled_product.abs());
+    if discriminant < -allowance {
+        return Ok(vec![root]);
+    }
+    // A tiny negative value at a repeated root is roundoff. This allowance is
+    // relative to the remaining roots' OWN scale, never to an O(1) gas root.
+    let delta = scale * det::sqrt(discriminant.max(0.0));
+    let first = 0.5 * (sum + delta.copysign(sum));
+    let second = if first == 0.0 { 0.0 } else { product / first };
+    Ok(vec![root, first, second])
+}
+
+fn polish_cubic_root(mut root: f64, c2: f64, c1: f64, c0: f64) -> f64 {
+    // Fixed work; accept only a finite correction that improves the original
+    // polynomial residual. No tolerance or constitutive coefficient is changed.
+    for _ in 0..2 {
+        let residual = ((root + c2) * root + c1) * root + c0;
+        let slope = (3.0 * root + 2.0 * c2) * root + c1;
+        let next = root - residual / slope;
+        if !next.is_finite() || !slope.is_finite() || slope == 0.0
+            || (((next + c2) * next + c1) * next + c0).abs() >= residual.abs() {
+            break;
+        }
+        root = next;
+    }
+    root
 }
 
 fn signed_cuberoot(value: f64) -> f64 {
@@ -845,7 +899,7 @@ mod tests {
             .evaluate_pt(Temperature::new(217.152_272_470_045_6),
                 Pressure::new(2_500_001.521_079_547_7)).unwrap();
         assert_eq!(state.phase_roots().len(), 1);
-        assert_eq!(state.evaluator_version(), 2);
+        assert_eq!(state.evaluator_version(), 3);
         let z = state.phase_roots()[0].compressibility_factor();
         // Independent polynomial root, not a cubic-formula round trip.
         assert!((z - 0.076_224_432_883_693_82).abs() < 2e-14);
@@ -951,6 +1005,103 @@ mod tests {
         ).unwrap();
         assert!((direct.pressure().value() - 1.0).abs() < 1e-7);
         assert!((direct.root().compressibility_factor() - 1.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn g1_low_pressure_cubic_preserves_liquid_volume_and_all_original_rows() {
+        let model = pure(methane());
+        // Independent 70-digit roots of the original dimensional volume
+        // polynomial, with the same declared methane constants at 150 K.
+        // These are mechanical/metastable branches, not phase-stability claims.
+        let references = [
+            (100.0, 0.000_041_760_662_761_526_087),
+            (1.0, 0.000_041_760_710_558_101_24),
+            (0.01, 0.000_041_760_711_036_069_79),
+            (0.0001, 0.000_041_760_711_040_849_47),
+            (0.000001, 0.000_041_760_711_040_897_27),
+            (0.00000001, 0.000_041_760_711_040_897_75),
+        ];
+        for (pressure, expected_volume) in references {
+            let state = model
+                .evaluate_pt(Temperature::new(150.0), Pressure::new(pressure))
+                .unwrap();
+            assert_eq!(state.phase_roots().len(), 3, "p={pressure} Pa");
+            let liquid = state.select(PengRobinsonPhaseV1::Liquid);
+            assert!(
+                (liquid.molar_volume_m3_per_mol() / expected_volume - 1.0).abs() < 5e-13,
+                "p={pressure} Pa, v={}", liquid.molar_volume_m3_per_mol(),
+            );
+            let a = state.dimensionless_a();
+            let b = state.dimensionless_b();
+            let c2 = b - 1.0;
+            let c1 = a - 3.0 * b * b - 2.0 * b;
+            let c0 = -(a * b - b * b - b * b * b);
+            for root in state.phase_roots() {
+                let z = root.compressibility_factor();
+                let residual = ((z + c2) * z + c1) * z + c0;
+                let scale = (z * z * z).abs() + (c2 * z * z).abs()
+                    + (c1 * z).abs() + c0.abs();
+                assert!(residual.abs() < 512.0 * f64::EPSILON * scale,
+                    "p={pressure} Pa, z={z}, relative residual={}", residual / scale);
+            }
+            // The intermediate mechanical branch remains unstable; repairing
+            // its root never turns it into an admissible acoustic material.
+            assert!(liquid.pressure_derivatives().1 < 0.0);
+            assert!(state.phase_roots()[1].pressure_derivatives().1 > 0.0);
+            assert!(state.select(PengRobinsonPhaseV1::Vapor).pressure_derivatives().1 < 0.0);
+        }
+    }
+
+    #[test]
+    fn g1_low_pressure_supercritical_gas_has_no_phantom_dense_root() {
+        let model = pure(methane());
+        for temperature in [200.0, 250.0, 300.0, 400.0] {
+            for pressure in [100.0, 1.0, 0.01, 0.0001, 0.000001] {
+                let state = model.evaluate_pt(
+                    Temperature::new(temperature), Pressure::new(pressure),
+                ).unwrap();
+                // T exceeds the supplied critical temperature. The original
+                // PR polynomial has one real root throughout this pressure set.
+                assert_eq!(state.phase_roots().len(), 1,
+                    "T={temperature} K, p={pressure} Pa: {:?}", state.phase_roots());
+                let vapor = state.select(PengRobinsonPhaseV1::Vapor);
+                assert_eq!(state.select(PengRobinsonPhaseV1::Liquid), vapor);
+                assert_eq!(state.select(PengRobinsonPhaseV1::Stable), vapor);
+                let ideal = methane().molar_mass.value() * pressure
+                    / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature);
+                assert!((vapor.mass_density_kg_per_m3() / ideal - 1.0).abs() < 1e-5);
+                assert!(vapor.caloric_mechanics(20.0, methane().molar_mass.value()).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn g1_cubic_deflation_retains_small_and_repeated_roots() {
+        for expected in [
+            [0.0, 1.0, 1.0],
+            [1e-20, 1.0, 1.0],
+            [-2.0, 1.0, 1.0],
+            [-1e-8, 1e-8, 1.0],
+            [1e-14, 3e-14, 1.0],
+            [-1.0, 0.0, 1.0],
+        ] {
+            let [a, b, c] = expected;
+            let mut roots = cubic_real_roots(-(a + b + c), a*b + a*c + b*c, -a*b*c).unwrap();
+            roots.sort_by(f64::total_cmp);
+            assert_eq!(roots.len(), 3, "expected={expected:?}, actual={roots:?}");
+            for (&actual, reference) in roots.iter().zip(expected) {
+                if reference == 0.0 {
+                    assert_eq!(actual, 0.0);
+                } else {
+                    // Repeated roots are intrinsically ill-conditioned; the
+                    // distinct small roots still retain their own relative scale.
+                    let repeated = expected.windows(2).any(|p| p[0] == p[1]);
+                    let tolerance = if repeated && reference.abs() >= 1.0 { 1e-7 } else { 2e-13 };
+                    assert!((actual / reference - 1.0).abs() < tolerance,
+                        "expected={expected:?}, actual={roots:?}");
+                }
+            }
+        }
     }
 
     #[test]
