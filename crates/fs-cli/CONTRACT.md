@@ -675,7 +675,7 @@ refer to that unchanged field, while `temperature_contact` retains the outer
 thermal/Krylov work, both local temperatures, actual resistance and usage
 receipt identities. Equal curve endpoints cannot hide interior variation.
 Explicit claim pins disambiguate sources without bypassing validity checks.
-Radiation, transient storage, adaptive-goal refinement and derivative/bound
+Radiation, adaptive-goal refinement and derivative/bound
 requests on this varying-contact path refuse with
 `cli-solve-conduction-contact-composition`; no frozen-contact inverse or
 roundoff certificate is published. Constant-contact projects retain their
@@ -683,6 +683,27 @@ existing solver and derivative paths. Tests in
 `native_contact_adjoint/temperature.rs` exercise real imported projects,
 nonlinear bulk conductivity, transported air, independent constant-resistance
 brackets and the unsupported-composition refusals.
+
+Solve driver 95 connects the same pinned matching-contact sources to native
+constant-capacity transient projects with prescribed temperature, flux or
+Robin boundaries. Both time grids use the original initial field and authored
+power/boundary switch schedule. Every contact trial retains the unchanged
+physical old field; accepted endpoint face temperatures re-query the original
+law before the complete nodal joule residual and independent storage/heat
+balance can pass. Published interface heat and reservoir reactions come from
+that freshly audited endpoint. Internal contact transfer is not another
+external heat source.
+
+The existing trajectory records now retain actual contact temperatures,
+resistances, source identities and counted thermal/Newton/Krylov work. Contact
+responses and per-step source-state rows consume the existing work and memory
+allowances. A source-domain exit publishes no completed trajectory. Tests in
+`native_contact_adjoint/temperature/transient.rs` cover live versus frozen
+contact, time refinement, a scheduled power pulse and late source refusal.
+This contact composition still refuses total-enthalpy storage, radiation,
+derived natural/transported-air convection and trajectory derivatives. Its
+temporal difference remains Estimated; it provides no continuous-time peak or
+continuum error certificate.
 
 The library surface exposes `run_solve`, `resume_solve`, `SolveRunId`,
 `SolveStage`, `SolveDriverState`, `SolveOutcome`, and `SolveRefusal`. The

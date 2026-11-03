@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use fs_conduction::assemble::DofMap;
+use fs_conduction::interface::temperature::TemperatureContacts;
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{
     BackwardEuler, NonlinearStepConfig, NonlinearStepSolution, RadiationStepSolution, StepConfig,
@@ -34,6 +35,7 @@ mod adjoint;
 mod boundary_history;
 use boundary_history::BoundaryHistory;
 mod conjugate;
+mod contact;
 mod enthalpy;
 mod enclosure;
 mod natural;
@@ -209,6 +211,7 @@ struct GridResult {
     maximum_energy_residual_j: f64,
     nonlinear_updates: usize,
     nonlinear_backtracks: usize,
+    contact_responses: usize,
     radiation: Option<RadiativeEndpoint>,
     radiation_trials: usize,
     maximum_physical_energy_residual_j: f64,
@@ -362,6 +365,7 @@ fn march(
     engine: &BackwardEuler<'_>,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
     policy: &ConductionTransient,
     ends_s: &[f64],
     workload: Option<&Workload<'_>>,
@@ -395,6 +399,7 @@ fn march(
     let mut maximum_energy_residual_j = 0.0_f64;
     let mut nonlinear_updates = 0;
     let mut nonlinear_backtracks = 0;
+    let mut contact_responses = 0;
     let mut endpoint_dt_s = 0.0;
     let mut endpoint_energy = None;
     let mut last_radiation = None;
@@ -435,9 +440,19 @@ fn march(
         let mut radiative_row = "null".to_string();
         let mut conjugate_row = "null".to_string();
         let mut natural_evidence = "null".to_string();
+        let mut contact_evidence = "null".to_string();
         let mut physical_target_j = None;
         let mut physical_energy = None;
-        let (endpoint, nonlinear_evidence, krylov_iterations) = if !natural.is_empty() {
+        let (endpoint, nonlinear_evidence, krylov_iterations) = if let Some(contacts) = temperature_contacts {
+            let solved = contact::advance(
+                cx, engine, step_problem, contacts, &old, dt, config, nonlinear, deadline,
+            )?;
+            contact_responses += solved.responses;
+            nonlinear_updates += solved.nonlinear_updates;
+            nonlinear_backtracks += solved.nonlinear_backtracks;
+            contact_evidence = solved.receipt;
+            (solved.conduction, "null".to_string(), solved.krylov_iterations)
+        } else if !natural.is_empty() {
             let solved = natural::advance(
                 cx, engine, step_problem, interfaces, &old, dt, config,
                 nonlinear, radiation, enclosure, airflow, natural, pressure_pa, deadline,
@@ -579,13 +594,19 @@ fn march(
         stored_j += endpoint.stored_energy_change_j;
         net_input_j += dt * net_w;
         maximum_energy_residual_j = maximum_energy_residual_j.max(energy.energy_residual_j.abs());
-        rows.push(format!("{{\"step\":{ordinal},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"relative_residual\":{},\"krylov_iterations\":{},\"nonlinear\":{nonlinear_evidence},\"radiation\":{radiative_row},\"conjugate\":{conjugate_row},\"natural\":{natural_evidence}}}",
+        rows.push(format!("{{\"step\":{ordinal},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"relative_residual\":{},\"krylov_iterations\":{},\"nonlinear\":{nonlinear_evidence},\"radiation\":{radiative_row},\"conjugate\":{conjugate_row},\"natural\":{natural_evidence},\"temperature_contact\":{contact_evidence}}}",
             number(end)?, number(dt)?, number(qoi)?, number(endpoint.stored_energy_change_j)?,
             number(net_w)?, number(endpoint.source_w)?, number(energy.energy_residual_j)?, number(endpoint.relative_residual)?,
             krylov_iterations));
         evidence.push(LinearSolveEvidence {
             nonlinear_iteration: ordinal - 1,
-            method: if !natural.is_empty() && airflow.is_some() {
+            method: if temperature_contacts.is_some() {
+                if nonlinear.is_some() {
+                    "fgmres-backward-euler-newton-temperature-contact"
+                } else {
+                    "pcg-backward-euler-temperature-contact"
+                }
+            } else if !natural.is_empty() && airflow.is_some() {
                 match (nonlinear.is_some(), radiation.is_some()) {
                     (true, true) => "fgmres-backward-euler-newton-radiation-mixed-convection",
                     (true, false) => "fgmres-backward-euler-newton-mixed-convection",
@@ -641,6 +662,7 @@ fn march(
         maximum_energy_residual_j,
         nonlinear_updates,
         nonlinear_backtracks,
+        contact_responses,
         radiation: last_radiation,
         radiation_trials,
         maximum_physical_energy_residual_j,
@@ -664,6 +686,7 @@ pub(super) fn solve(
     spec: &ProjectSpec,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
     labels: &[u32],
     region_ids: &BTreeMap<String, u32>,
     radiation: Option<&radiation::LoweredRadiation>,
@@ -676,6 +699,12 @@ pub(super) fn solve(
     admit(spec)?;
     poll(cx, deadline)?;
     let objective = adjoint::requested(spec)?;
+    if temperature_contacts.is_some() {
+        super::contact::admit(spec, objective.is_some(), false)?;
+        if interfaces.is_some() {
+            return Err(bad("source-backed contacts cannot also be supplied as frozen interfaces"));
+        }
+    }
     let policy = policy(spec).ok_or_else(|| bad("no transient declaration was supplied"))?;
     if labels.len() != problem.mesh.element_count() {
         return Err(bad(
@@ -751,6 +780,13 @@ pub(super) fn solve(
         .and_then(|row_bytes| if natural_requested {
             natural.len().checked_mul(4096)
                 .and_then(|bytes| bytes.checked_add(4096))
+                .and_then(|bytes| bytes.checked_add(row_bytes))
+        } else { Some(row_bytes) })
+        .and_then(|row_bytes| if temperature_contacts.is_some() {
+            // Matching pairs use two distinct boundary faces. Charge every
+            // boundary face conservatively for its per-step source-state row.
+            problem.mesh.boundary().len().checked_mul(1024)
+                .and_then(|bytes| bytes.checked_add(2048))
                 .and_then(|bytes| bytes.checked_add(row_bytes))
         } else { Some(row_bytes) })
         .ok_or_else(|| bad("transient coupling row estimate overflows"))?;
@@ -887,6 +923,11 @@ pub(super) fn solve(
         }
         config.residual_atol_j = 0.01 * policy.energy_tolerance.value
             / fs_math::det::sqrt(problem.mesh.vertex_count().max(1) as f64);
+        if temperature_contacts.is_some() {
+            // The outer source-law audit has its own fixed absolute target;
+            // an inner k(T) relative stop must leave room below that gate.
+            config.residual_rtol = config.residual_rtol.min(1e-13);
+        }
         config.validate().map_err(lower)?;
         Some(config)
     } else {
@@ -908,6 +949,7 @@ pub(super) fn solve(
     let airflow_factor = airflow.map_or(1, |_| airflow::exchange_config(false).max_iterations);
     let natural_factor = if natural_requested { buoyancy::MAX_ITERATIONS } else { 1 };
     let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
+    let contact_factor = if temperature_contacts.is_some() { contact::MAX_RESPONSES } else { 1 };
     let max_endpoint_evaluations_per_step = if natural_requested {
         natural_factor.checked_mul(2)
             .ok_or_else(|| bad("natural endpoint evaluation allowance overflows"))?
@@ -919,6 +961,7 @@ pub(super) fn solve(
     let max_airflow_iterations_per_step = airflow_factor.checked_mul(natural_factor)
         .ok_or_else(|| bad("coupled interface iteration allowance overflows"))?;
     let max_solid_solves_per_step = max_airflow_iterations_per_step.checked_mul(radiation_factor)
+        .and_then(|responses| responses.checked_mul(contact_factor))
         .ok_or_else(|| bad("coupled solid response allowance overflows"))?;
     let max_krylov_per_step = linear
         .max_iterations
@@ -954,6 +997,7 @@ pub(super) fn solve(
         &engine,
         problem,
         interfaces,
+        temperature_contacts,
         policy,
         &grids.coarse,
         workload.as_ref(),
@@ -975,6 +1019,7 @@ pub(super) fn solve(
         &engine,
         problem,
         interfaces,
+        temperature_contacts,
         policy,
         &grids.fine,
         workload.as_ref(),
@@ -1030,6 +1075,24 @@ pub(super) fn solve(
     };
     let nonlinear_updates = coarse.nonlinear_updates + fine.nonlinear_updates;
     let nonlinear_backtracks = coarse.nonlinear_backtracks + fine.nonlinear_backtracks;
+    let contact_responses = coarse.contact_responses + fine.contact_responses;
+    let contact_receipt = if temperature_contacts.is_some() {
+        format!(concat!(
+            "{{\"method\":\"source-backed-contact-fixed-point\",",
+            "\"max_thermal_responses_per_step\":{},\"max_krylov_iterations_per_step\":{},",
+            "\"coarse_thermal_responses\":{},\"fine_thermal_responses\":{},\"total_thermal_responses\":{},",
+            "\"physical_residual_tolerance_j\":{},\"history\":\"unchanged-physical-old-temperature-in-every-contact-trial\",",
+            "\"nonlinear_detail\":\"contact step rows count every inner k(T) Newton update and backtrack\",",
+            "\"scope\":{}}}"
+        ),
+            contact::MAX_RESPONSES, max_krylov_per_step,
+            coarse.contact_responses, fine.contact_responses, contact_responses,
+            number(contact::residual_tolerance_j(policy.energy_tolerance.value, problem.mesh.vertex_count())?)?,
+            json_string(contact::NO_CLAIM),
+        )
+    } else {
+        "null".to_string()
+    };
     let nonlinear_receipt = if let Some(config) = nonlinear {
         format!(
             "{{\"method\":\"newton-fgmres\",\"conductivity\":\"endpoint-k(T)-with-k-prime-tangent\",\"max_updates_per_step\":{},\"max_krylov_iterations_per_step\":{},\"residual_rtol\":{},\"residual_atol_j\":{},\"armijo_c\":{},\"line_search_shrink\":{},\"max_backtracks_per_update\":{},\"coarse_updates\":{},\"fine_updates\":{},\"total_updates\":{nonlinear_updates},\"total_backtracks\":{nonlinear_backtracks}}}",
@@ -1116,7 +1179,7 @@ pub(super) fn solve(
         .map(|history| format!(",\"boundary_history\":{}", history.receipt))
         .unwrap_or_default();
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt}{boundary_history_fragment},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}{adjoint_fragment}}}",
+        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt}{boundary_history_fragment},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"temperature_contact\":{contact_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}{adjoint_fragment}}}",
         number(initial_temperature)?,
         number(policy.horizon.value)?,
         policy.max_steps,
@@ -1196,6 +1259,8 @@ pub(super) fn solve(
     let report = ConductionReport {
         iterations: if nonlinear.is_some() {
             nonlinear_updates
+        } else if temperature_contacts.is_some() {
+            contact_responses
         } else if natural_requested {
             coarse.natural_solid_solves + fine.natural_solid_solves
         } else if airflow.is_some() {

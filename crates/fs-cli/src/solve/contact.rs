@@ -2,7 +2,9 @@
 
 use fs_conduction::interface::temperature::steady::SteadyContactConfig;
 use fs_conduction::interface::temperature::{TemperatureContact, TemperatureContacts};
-use fs_conduction::{ConductionProblem, ConductionSolver, DofMap, SolveConfig};
+use fs_conduction::{
+    ConductionMesh, ConductionProblem, ConductionSolver, DofMap, SolveConfig, ThermalBoundary,
+};
 use fs_exec::Cx;
 use fs_matdb::{ClaimId, PropertyValue, QueryPoint};
 use fs_project::{BindingRequirements, BindingTarget, CardLibrary, ProjectSpec};
@@ -328,7 +330,19 @@ pub(super) fn admit(
         .as_ref()
         .and_then(|row| row.conduction.as_ref())
         .ok_or_else(|| bad("temperature-varying contacts need an explicit conduction setup"))?;
-    if super::transient::requested(spec)
+    let transient = setup.transient.as_ref();
+    let unsupported_transient = transient.is_some_and(|time| {
+        time.enthalpy.is_some()
+            || setup.boundaries.iter().any(|row| {
+                matches!(
+                    row.condition,
+                    fs_project::ThermalBoundaryCondition::NaturalConvection { .. }
+                        | fs_project::ThermalBoundaryCondition::AirflowConvection { .. }
+                )
+            })
+            || spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint"))
+    });
+    if unsupported_transient
         || setup.radiation.is_some()
         || setup.enclosure_radiation.is_some()
         || adjoint
@@ -340,23 +354,24 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact currently admits steady base/uniform-ladder solves with prescribed, natural or airflow convection; this requested composition needs the complete contact feedback",
-            "use the steady base or ladder path without radiation or derivative/bound outputs; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection, or constant-capacity transient solves with prescribed boundaries; this requested composition needs the complete contact feedback",
+            "use the admitted steady path or a constant-capacity transient with prescribed temperature, flux or convection and no radiation or derivative/bound outputs; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())
 }
 
 impl Prepared {
-    pub(super) fn solve(
+    /// Bind the original sources to this spatial rung once. Both transient
+    /// grids reuse these exact faces and pinned claims; only queried T evolves.
+    pub(super) fn bind<'m>(
         &self,
         cx: &Cx<'_>,
-        problem: ConductionProblem<'_>,
+        mesh: &'m ConductionMesh,
+        boundary: &ThermalBoundary,
         resolution: &fs_project::ConductionInterfaceResolution,
-        mut config: SolveConfig,
         max_pairs: usize,
-        work: &mut Work,
-    ) -> Result<(super::radiation::SolidSolution, String), SolveRefusal> {
+    ) -> Result<TemperatureContacts<'m, '_>, SolveRefusal> {
         poll(cx)?;
         let mut laws = Vec::with_capacity(self.sources.len());
         for source in &self.sources {
@@ -389,15 +404,27 @@ impl Prepared {
                 .map_err(lower)?,
             );
         }
-        let contacts = TemperatureContacts::new(
+        TemperatureContacts::new(
             cx,
-            problem.mesh,
-            problem.boundary,
+            mesh,
+            boundary,
             Vec::new(),
             laws,
             max_pairs,
         )
-        .map_err(lower)?;
+        .map_err(lower)
+    }
+
+    pub(super) fn solve(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        resolution: &fs_project::ConductionInterfaceResolution,
+        mut config: SolveConfig,
+        max_pairs: usize,
+        work: &mut Work,
+    ) -> Result<(super::radiation::SolidSolution, String), SolveRefusal> {
+        let contacts = self.bind(cx, problem.mesh, problem.boundary, resolution, max_pairs)?;
         // Use the spatial owner's actual initial-field and material-span policy.
         // This prepares state only; it executes no uncounted thermal response.
         let initial = ConductionSolver::new(problem, config.clone()).map_err(lower)?;

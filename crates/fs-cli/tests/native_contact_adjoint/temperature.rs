@@ -1,7 +1,14 @@
 //! A real imported project must use each contact's current source temperature.
 use super::*;
 
+#[path = "temperature/transient.rs"]
+mod transient;
+
 fn temperature_pack() -> (Vec<u8>, String, String) {
+    temperature_pack_from_knots(vec![(200.0, 0.2), (450.0, 0.45)])
+}
+
+fn temperature_pack_from_knots(knots: Vec<(f64, f64)>) -> (Vec<u8>, String, String) {
     let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
     let claims = pack(
         "synthetic-temperature-contact",
@@ -10,7 +17,7 @@ fn temperature_pack() -> (Vec<u8>, String, String) {
         PropertyValue::Curve {
             abscissa: "T".into(),
             abscissa_dims: fs_project::spec::dims::TEMPERATURE,
-            knots: vec![(200.0, 0.2), (450.0, 0.45)],
+            knots,
             dims,
         },
         InterpolationPolicy::LinearInside,
@@ -63,9 +70,15 @@ fn temperature_pack() -> (Vec<u8>, String, String) {
 }
 
 fn prepare(f: &Fixture, ordinal: usize, output: Option<&str>) -> (PathBuf, PathBuf, PathBuf) {
+    prepare_with_pack(f, ordinal, output, temperature_pack())
+}
+
+fn prepare_with_pack(
+    f: &Fixture, ordinal: usize, output: Option<&str>,
+    (bytes, card, selected): (Vec<u8>, String, String),
+) -> (PathBuf, PathBuf, PathBuf) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut project = f.project.clone();
-    let (bytes, card, selected) = temperature_pack();
     let binding = &mut project.interface_cards.as_mut().unwrap()[0];
     binding.card = card;
     binding.claim = Some(selected);

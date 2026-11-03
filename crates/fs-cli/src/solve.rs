@@ -266,7 +266,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// natural/airflow response on the same mesh instead of restarting it cold.
 /// Version 95 aligns both transient grids to prescribed boundary switches,
 /// including trajectories with no regional power schedule.
-pub const SOLVE_DRIVER_VERSION: u32 = 95;
+/// Version 96 advances native capacity histories with the original evolving
+/// contact law and retains the accepted face queries and physical heat balance.
+pub const SOLVE_DRIVER_VERSION: u32 = 96;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -7015,9 +7017,15 @@ fn conduction_solve_receipt(
                 setup, &mesh, labeled, &surfaces, &regions, &interface_faces,
                 &initial_derived, &surface_heat_inputs,
             )?.boundary;
-            let interfaces = lower_thermal_interfaces(
-                spec, cards, &mesh, &boundary, &interface_resolution,
-            )?;
+            let interfaces = if temperature_contact.is_none() {
+                lower_thermal_interfaces(
+                    spec, cards, &mesh, &boundary, &interface_resolution,
+                )?
+            } else { None };
+            let transient_contacts = temperature_contact.as_ref().map(|prepared| {
+                prepared.bind(&cx, solve_mesh, &boundary, &interface_resolution,
+                    limits.max_selected_faces)
+            }).transpose()?;
             let mut linear = fs_conduction::LinearConfig::default();
             if let Some(solver) = &spec.solver {
                 linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
@@ -7030,7 +7038,8 @@ fn conduction_solve_receipt(
                 study.begin_rung()?;
             }
             let time = transient::solve(
-                &cx, spec, problem, interfaces.as_ref(), &labels, &region_ids,
+                &cx, spec, problem, interfaces.as_ref(), transient_contacts.as_ref(),
+                &labels, &region_ids,
                 radiation.as_ref(), airflow_path.as_ref(), &natural_laws,
                 pressure_pa, linear, deadline,
             )?;
