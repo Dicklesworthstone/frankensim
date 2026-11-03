@@ -6,13 +6,16 @@
 //! All free coordinates and signed eigenvalues are retained; rigid and unstable
 //! modes are not clipped or converted into real vibration frequencies.
 //!
-//! This bounded dense route freezes hyperelastic material conditions and dead
-//! loads. It does not admit a viscous/plastic algorithmic tangent, follower
-//! pressure, evolving gravity, damping, finite-amplitude motion or mode truncation.
+//! This bounded dense route freezes hyperelastic material conditions, dead
+//! loads and optional uniform closed-surface pressure. The latter contributes
+//! the original conservative follower tangent exactly once. It does not admit
+//! a viscous/plastic algorithmic tangent, nonconservative pressure patches,
+//! evolving gravity, damping, finite-amplitude motion or mode truncation.
 //! At constitutive switching surfaces it reports the original declared tangent,
 //! not a unique two-sided harmonic response. P1 volumetric locking and spatial
 //! convergence remain properties of the original discretization.
 
+use super::pressure::ClosedTetPressureSurface;
 use super::{HyperTetError, HyperTetProblem, HyperTetSolution, checkpoint};
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
@@ -78,6 +81,7 @@ impl std::error::Error for VibrationError {
 #[derive(Debug)]
 pub struct HyperTetVibration<'a, L: HyperelasticMaterial = Hyperelastic> {
     problem: HyperTetProblem<'a, L>,
+    held_pressure: Option<(&'a ClosedTetPressureSurface, f64)>,
     reference_density_kg_m3: Vec<f64>,
     equilibrium: HyperTetSolution,
     free_dofs: Vec<usize>,
@@ -99,6 +103,11 @@ fn dense_restriction(matrix: &Csr, free: &[usize], cx: &Cx<'_>) -> Result<Vec<f6
             dense[row * n + col] = matrix.get(full_row, full_col);
         }
     }
+    admit_symmetric(&dense, n)?;
+    Ok(dense)
+}
+
+fn admit_symmetric(dense: &[f64], n: usize) -> Result<(), HyperTetError> {
     if dense.iter().any(|value| !value.is_finite()) {
         return Err(invalid("nonfinite finite-strain vibration pencil"));
     }
@@ -115,7 +124,7 @@ fn dense_restriction(matrix: &Csr, free: &[usize], cx: &Cx<'_>) -> Result<Vec<f6
             }
         }
     }
-    Ok(dense)
+    Ok(())
 }
 
 impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
@@ -135,7 +144,35 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         settings: VibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
-        self.solve_vibration_impl(reference_density_kg_m3, None, settings, cx)
+        self.solve_vibration_impl(reference_density_kg_m3, None, None, settings, cx)
+    }
+
+    /// Original pressure-loaded equilibrium and its complete signed spectrum.
+    ///
+    /// Positive pressure acts inward on the same complete closed surface.
+    /// The linearization is K=d(f_internal-f_pressure)/du, including p*d²V/du²
+    /// exactly once. Pressure is held by an external reservoir; neither a finite
+    /// gas stiffness nor pressure dynamics is inferred. The exact reference
+    /// surface and pressure remain borrowed in the returned spectrum.
+    ///
+    /// # Errors
+    /// The original pressure reference/finite-value gates and all errors of
+    /// [`Self::solve_vibration`]. Nonuniform/open-patch pressure is not admitted.
+    pub fn solve_vibration_with_pressure(
+        &self,
+        surface: &'a ClosedTetPressureSurface,
+        pressure_pa: f64,
+        reference_density_kg_m3: &[f64],
+        settings: VibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
+        self.solve_vibration_impl(
+            reference_density_kg_m3,
+            None,
+            Some((surface, pressure_pa)),
+            settings,
+            cx,
+        )
     }
 
     /// Re-equilibrate one absolute dead-load endpoint from an initial iterate,
@@ -155,6 +192,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         self.solve_vibration_impl(
             reference_density_kg_m3,
             Some(initial_displacement_m),
+            None,
             settings,
             cx,
         )
@@ -164,11 +202,20 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         &self,
         reference_density_kg_m3: &[f64],
         initial: Option<&[f64]>,
+        held_pressure: Option<(&'a ClosedTetPressureSurface, f64)>,
         settings: VibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
         checkpoint(cx)?;
         self.validate_inputs()?;
+        if let Some((surface, pressure)) = held_pressure {
+            if !pressure.is_finite() || !surface.matches_reference(self.nodes_m, self.tetrahedra) {
+                return Err(invalid(
+                    "finite pressure and the exact reference pressure surface are required",
+                )
+                .into());
+            }
+        }
         if !settings.relative_residual_tolerance.is_finite()
             || !(0.0..1.0).contains(&settings.relative_residual_tolerance)
             || settings.relative_residual_tolerance == 0.0
@@ -194,9 +241,12 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             &free_dofs,
             cx,
         )?;
-        let equilibrium = match initial {
-            None => self.solve(cx)?,
-            Some(displacement) => self.solve_from(displacement, cx)?,
+        let equilibrium = match held_pressure {
+            Some((surface, pressure)) => self.solve_with_pressure(surface, pressure, cx)?,
+            None => match initial {
+                None => self.solve(cx)?,
+                Some(displacement) => self.solve_from(displacement, cx)?,
+            },
         };
         let displacement: Vec<_> = equilibrium
             .displacement_m
@@ -204,11 +254,24 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             .flatten()
             .copied()
             .collect();
-        let stiffness_n_m = dense_restriction(
+        let mut stiffness_n_m = dense_restriction(
             &self.prepare(cx)?.tangent_matrix(&displacement, cx)?,
             &free_dofs,
             cx,
         )?;
+        if let Some((surface, pressure)) = held_pressure {
+            if pressure != 0.0 {
+                let external = dense_restriction(
+                    &surface.force_tangent(&displacement, pressure, cx)?,
+                    &free_dofs,
+                    cx,
+                )?;
+                for (stiffness, load) in stiffness_n_m.iter_mut().zip(external) {
+                    *stiffness -= load;
+                }
+                admit_symmetric(&stiffness_n_m, n)?;
+            }
+        }
         checkpoint(cx)?;
         let modes = eigh_gen_dense(&stiffness_n_m, &mass_kg, n).map_err(VibrationError::Modal)?;
         checkpoint(cx)?;
@@ -239,6 +302,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         checkpoint(cx)?;
         Ok(HyperTetVibration {
             problem: *self,
+            held_pressure,
             reference_density_kg_m3: reference_density_kg_m3.to_vec(),
             equilibrium,
             free_dofs,
@@ -253,6 +317,13 @@ impl<L: HyperelasticMaterial> HyperTetVibration<'_, L> {
     /// Original mesh, material/source adapters, supports and dead loads.
     pub const fn problem(&self) -> &HyperTetProblem<'_, L> {
         &self.problem
+    }
+
+    /// Exact original closed pressure surface and held signed pressure [Pa].
+    /// None selects dead loads only; Some with zero retains an explicitly
+    /// supplied unloaded surface. Positive pressure acts inward.
+    pub const fn held_pressure(&self) -> Option<(&ClosedTetPressureSurface, f64)> {
+        self.held_pressure
     }
 
     /// Conserved mass density per original volume, in tetrahedron order.
@@ -270,7 +341,8 @@ impl<L: HyperelasticMaterial> HyperTetVibration<'_, L> {
         &self.free_dofs
     }
 
-    /// Row-major free-by-free native tangent, N/m, without an extra stress term.
+    /// Row-major free-by-free tangent, N/m: native material tangent minus any
+    /// held-pressure force tangent, without a second initial-stress matrix.
     pub fn stiffness_n_m(&self) -> &[f64] {
         &self.stiffness_n_m
     }

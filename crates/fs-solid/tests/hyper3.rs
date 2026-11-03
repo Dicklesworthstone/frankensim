@@ -1345,3 +1345,133 @@ fn g0_finite_strain_vibration_preserves_budgets_mass_domains_and_cancellation() 
         ));
     });
 }
+
+#[test]
+fn g1_closed_pressure_vibration_matches_hydrostatic_and_deviatoric_modes() {
+    let (mu, lame, rho, length) = (2e5, 8e5, 1100.0, 0.02);
+    let nodes = [
+        [0.0; 3],
+        [length, 0.0, 0.0],
+        [0.0, length, 0.0],
+        [0.0, 0.0, length],
+    ];
+    let tets = [[0, 1, 2, 3]];
+    let fixed: Vec<_> = (0..12)
+        .filter(|dof| ![3, 7, 11].contains(dof))
+        .map(|dof| (dof, 0.0))
+        .collect();
+    let material = neo_hookean(mu, lame);
+    let p = problem(&nodes, &tets, &material, &fixed, &[], 6);
+    let volume = length * length * length / 6.0;
+    let surface =
+        with_cx(|cx| ClosedTetPressureSurface::new(&nodes, &tets, p.budget, 16, cx).unwrap());
+    for stretch in [0.9_f64, 1.0, 1.15] {
+        let log_j = 3.0 * stretch.ln();
+        let piola = mu * stretch + (lame * log_j - mu) / stretch;
+        let pressure = -piola / (stretch * stretch); // P+p cof(F)=0.
+        let diagonal = mu + (mu + lame * (1.0 - log_j)) / (stretch * stretch);
+        let off_diagonal = lame / (stretch * stretch) + pressure * stretch;
+        // Each free coordinate changes one principal stretch. p*Hessian(J)
+        // contributes pressure*stretch off diagonal and zero on the diagonal.
+        let expected = [
+            10.0 * (diagonal - off_diagonal) / (rho * length * length),
+            10.0 * (diagonal - off_diagonal) / (rho * length * length),
+            10.0 * (diagonal + 2.0 * off_diagonal) / (rho * length * length),
+        ];
+        with_cx(|cx| {
+            let spectrum = p
+                .solve_vibration_with_pressure(&surface, pressure, &[rho], vibration_settings(), cx)
+                .unwrap();
+            assert_eq!(spectrum.free_dofs(), &[3, 7, 11]);
+            let (retained_surface, retained_pressure) = spectrum.held_pressure().unwrap();
+            assert!(core::ptr::eq(retained_surface, &surface));
+            assert_eq!(retained_pressure.to_bits(), pressure.to_bits());
+            assert_eq!(
+                spectrum.equilibrium(),
+                &p.solve_with_pressure(&surface, pressure, cx).unwrap()
+            );
+            for (axis, dof) in [3, 7, 11].into_iter().enumerate() {
+                vibration_close(
+                    1.0 + spectrum.equilibrium().displacement_m[dof / 3][axis] / length,
+                    stretch,
+                    2e-9,
+                );
+            }
+            for i in 0..3 {
+                vibration_close(spectrum.modes()[i].lambda, expected[i], 2e-8);
+                for j in 0..3 {
+                    vibration_close(
+                        spectrum.stiffness_n_m()[3 * i + j],
+                        volume / (length * length) * if i == j { diagonal } else { off_diagonal },
+                        2e-8,
+                    );
+                    let expected_mass = if i == j { rho * volume / 10.0 } else { 0.0 };
+                    vibration_close(spectrum.mass_kg()[3 * i + j], expected_mass, 2e-14);
+                }
+            }
+            let displacement: Vec<_> = spectrum
+                .equilibrium()
+                .displacement_m
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
+            let material_tangent = p.tangent_matrix(&displacement, cx).unwrap();
+            let pressure_tangent = surface.force_tangent(&displacement, pressure, cx).unwrap();
+            for (i, &row) in spectrum.free_dofs().iter().enumerate() {
+                for (j, &col) in spectrum.free_dofs().iter().enumerate() {
+                    assert_eq!(
+                        spectrum.stiffness_n_m()[3 * i + j].to_bits(),
+                        (material_tangent.get(row, col) - pressure_tangent.get(row, col)).to_bits(),
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn g0_closed_pressure_vibration_preserves_zero_load_and_reference_binding() {
+    use fs_solid::hyper3::vibration::VibrationError;
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let fixed: Vec<_> = (0..12)
+        .filter(|dof| ![3, 7, 11].contains(dof))
+        .map(|dof| (dof, 0.0))
+        .collect();
+    let material = neo_hookean(2.0, 4.0);
+    let p = problem(&nodes, &tets, &material, &fixed, &[], 1);
+    let surface =
+        with_cx(|cx| ClosedTetPressureSurface::new(&nodes, &tets, p.budget, 16, cx)).unwrap();
+    let mut other_nodes = nodes;
+    other_nodes[1][0] = 1.25;
+    let other_surface =
+        with_cx(|cx| ClosedTetPressureSurface::new(&other_nodes, &tets, p.budget, 16, cx)).unwrap();
+    with_cx(|cx| {
+        let dead = p.solve_vibration(&[7.0], vibration_settings(), cx).unwrap();
+        let zero = p
+            .solve_vibration_with_pressure(&surface, 0.0, &[7.0], vibration_settings(), cx)
+            .unwrap();
+        assert!(dead.held_pressure().is_none());
+        assert!(core::ptr::eq(zero.held_pressure().unwrap().0, &surface));
+        assert_eq!(zero.equilibrium(), dead.equilibrium());
+        assert_eq!(zero.mass_kg(), dead.mass_kg());
+        assert_eq!(zero.stiffness_n_m(), dead.stiffness_n_m());
+        for (a, b) in zero.modes().iter().zip(dead.modes()) {
+            assert_eq!(a.lambda.to_bits(), b.lambda.to_bits());
+            assert_eq!(a.phi, b.phi);
+        }
+        for (surface, pressure) in [(&surface, f64::NAN), (&other_surface, 0.0)] {
+            assert!(matches!(
+                p.solve_vibration_with_pressure(
+                    surface,
+                    pressure,
+                    &[7.0],
+                    vibration_settings(),
+                    cx
+                ),
+                Err(VibrationError::Solid(HyperTetError::InvalidInput { .. }))
+            ));
+        }
+    });
+}
