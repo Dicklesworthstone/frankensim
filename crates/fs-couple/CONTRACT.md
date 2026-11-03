@@ -110,6 +110,67 @@ compensated physical loss, inactive/separating no-ops, mass/budget refusal and
 final-poll atomic cancellation. The bridge advances the flexible-body coupling
 gap in `frankensim-b8bxd.9.3`; it does not close its broader program.
 
+## Simultaneous plate and finite rigid-body normal impacts
+
+`plate_impact::multiple::PlateRigidImpactSet` resolves an entire localized normal
+contact set between the same original spatial plate and one finite rigid body.
+Preparation reuses the isolated owner's full/reduced mass admission and solves
+the original consistent mass once per point. It caches all `B M^-1 B^T` cross
+responses, retaining both independently solved off-diagonal entries for the
+native contact owner's symmetry admission. There is no modal truncation, mass
+lumping, or dense matrix in the plate's full degrees of freedom. The contact
+matrix has at most 64 rows and columns.
+
+Each fixed-pose event adds the shared rigid body's full tensor contribution
+`1/m + (r_i cross n)^T I^-1 (r_j cross n)` in its original body frame. The existing
+`fs_contact::multicontact::solve_normal_impacts` owns the coupled complementarity
+and declared per-site restitution/proximity laws. Geometrically active sites
+participate even if initially separating: another contact can make them close.
+Inactive sites retain their complete predicted and measured cross response.
+Mutually incompatible rebound targets that violate assembled passivity refuse;
+neither sequential pair impulses nor a hidden restitution reduction is used.
+
+All point loads accumulate through the original work-conjugate transpose into
+one native structural impulse/restart. Their original central moments accumulate
+into one native rigid resultant impulse. The same shared admission as the
+isolated path checks actual stored transfer, complete constrained-row support
+reactions, represented transverse linear/bending-angular momentum, and combined
+compensated kinetic work. Every original point's post-event relative velocity
+is checked against the coupled law. Both original states publish only after the
+last cancellation check, preserving displacement/pose, physical time, accepted
+step counts and telemetry. An all-zero contact solution leaves both inputs
+unchanged and invokes neither native impulse update.
+
+The original contact determinacy is retained. `UniqueVelocity` identifies a
+redundant PSD contact set: its impulse vector and local support entries describe
+one checked representative, not unique local pressure, work or heat allocations.
+The original range admission is required for total loss. No thermal partition
+is inferred from the normal impulses. Numerical passivity residuals remain
+separate from nonnegative physical loss.
+
+Point-count, mass-nonzero, mobility-product and live-workspace caps are checked
+before preparation. The adapter's workspace bound includes cached rows, native
+mass-solve scratch and event arrays; the separately bounded original contact
+solver's scratch, borrowed model data and existing trajectory history are
+excluded. Repeated events reuse the prepared plate cross mobility and perform
+one structural impulse solve/restart irrespective of contact count.
+
+`tests/plate_impact/multiple.rs` compares original plate/tensor response with an
+independent dense coupled solve and a falsifying independent-scalar treatment.
+It checks contact-order covariance, plastic/partial/elastic impacts, continued
+damped plate and rigid motion, initially separating contact activation, complete
+support cross inertia, redundant-load determinacy, exact no-ops, budget and
+penetration refusals, and final-poll cancellation followed by a valid retry.
+The five isolated impact tests retain their original behavior after the shared
+preparation/transfer extraction.
+
+The represented model remains the original flat plate's fixed +z normal and
+transverse Pz/Lx/Ly dynamics with stationary supports. Collision discovery,
+moving sites/supports, finite normal rotation, friction, shell in-plane dynamics,
+and event adjoints require their corresponding owners. This advances the actual
+flexible-body transfer gap in `frankensim-b8bxd.9.3` without closing that broader
+program.
+
 ## Rigid impacts against solids with material memory
 
 `inelastic_impact::{plastic_rigid_impact_candidate,visco_rigid_impact_candidate}`

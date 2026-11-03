@@ -4,8 +4,9 @@
 //!
 //! This is a localized event, at fixed configuration, in the flat plate's +z
 //! direction. The caller supplies a body material point above the selected
-//! plate point. It does not detect collisions, rotate the plate normal, solve
-//! simultaneous contacts, apply friction, or deposit impact loss as heat.
+//! plate point. [`multiple`] couples simultaneous normal contacts through the
+//! same original mass and momentum owners. Neither path detects collisions,
+//! rotates the plate normal, applies friction, or deposits impact loss as heat.
 //! Momentum resultants are those represented by this transverse plate model:
 //! Pz and the two bending angular momenta Lx/Ly. In-plane translation and
 //! drilling rotation require the corresponding shell/solid dynamics owner.
@@ -28,6 +29,9 @@ use fs_time::galpha::impulse::{
 };
 use fs_time::galpha::initialization::{InitialSolveError, second_order_acceleration};
 use fs_time::galpha::second_order_adjoint::trajectory::StructuralTrajectoryModel;
+
+#[path = "plate_impact/multiple.rs"]
+pub mod multiple;
 
 /// Physical and numerical allowances. Background momentum never enlarges an
 /// impulse allowance. All supports are stationary in the original plate frame.
@@ -65,6 +69,7 @@ pub enum PlateRigidImpactError {
     Plate(ImpulseError),
     Body(DynamicsError),
     Contact(NormalImpactError),
+    MultipleContact(fs_contact::multicontact::MultiImpactError),
     Load(String),
     Balance {
         what: &'static str,
@@ -103,6 +108,23 @@ pub struct PlateRigidImpactReport {
     pub angular_balance_residual: Vec3,
     pub relative_normal_speed_after: f64,
     pub kinetic_energy_change_j: f64,
+    pub energy_residual_j: f64,
+}
+
+/// Actual native transfer shared by isolated and simultaneous impacts.
+/// For redundant contacts, support entries correspond to the contact owner's
+/// checked impulse representative; they do not establish a unique local load.
+#[derive(Debug)]
+pub struct PlateImpulseBalance {
+    pub support_impulses: Vec<(usize, f64)>,
+    pub plate_linear_impulse_world: Vec3,
+    pub plate_angular_impulse_world: Vec3,
+    pub support_linear_impulse_world: Vec3,
+    pub support_angular_impulse_world: Vec3,
+    pub linear_balance_residual: Vec3,
+    pub angular_balance_residual: Vec3,
+    pub kinetic_energy_change_j: f64,
+    pub work_energy_residual_j: f64,
     pub energy_residual_j: f64,
 }
 
@@ -170,6 +192,24 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
         budget: PlateRigidImpactBudget,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, PlateRigidImpactError> {
+        Self::prepare_with_response(
+            dynamics, mesh, full_mass, point_xy, controls, budget, cancelled,
+        )
+        .map(|(prepared, _)| prepared)
+    }
+
+    // The simultaneous adapter reuses the first solved response; preparing a
+    // set must not solve its first mass column twice or repeat mass admission.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_with_response(
+        dynamics: PlateDynamics<'a, L>,
+        mesh: &'a PlateMesh,
+        full_mass: &'a Csr,
+        point_xy: [f64; 2],
+        controls: PlateRigidImpactControls,
+        budget: PlateRigidImpactBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, Vec<f64>), PlateRigidImpactError> {
         poll(cancelled)?;
         let model = dynamics.model();
         let n = model.free;
@@ -284,17 +324,20 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
             ));
         }
         poll(cancelled)?;
-        Ok(Self {
-            dynamics,
-            mesh,
-            full_mass,
-            point,
-            unit_impulse,
-            full_unit_impulse,
-            inverse_plate_mass,
-            controls,
-            native_workspace,
-        })
+        Ok((
+            Self {
+                dynamics,
+                mesh,
+                full_mass,
+                point,
+                unit_impulse,
+                full_unit_impulse,
+                inverse_plate_mass,
+                controls,
+                native_workspace,
+            },
+            response.value,
+        ))
     }
 
     #[must_use]
@@ -316,16 +359,7 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlateRigidImpactReport, PlateRigidImpactError> {
         poll(cancelled)?;
-        let n = self.unit_impulse.len();
-        if !plate.t.is_finite()
-            || [&plate.q, &plate.v, &plate.a]
-                .iter()
-                .any(|v| v.len() != n || v.iter().any(|x| !x.is_finite()))
-        {
-            return Err(PlateRigidImpactError::Invalid(
-                "finite matching plate checkpoint required",
-            ));
-        }
+        self.admit_state(plate)?;
         let sample = self
             .point
             .sample(&plate.q, &plate.v)
@@ -377,25 +411,7 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
         }
         let j = contact.normal_impulse;
         let impulse: Vec<_> = self.unit_impulse.iter().map(|&u| -j * u).collect();
-        let mut force = vec![f64::NAN; n];
-        self.dynamics
-            .forcing(plate.t, &mut force)
-            .map_err(PlateRigidImpactError::Load)?;
-        poll(cancelled)?;
-        // Do not clone potentially long telemetry. The native event only changes
-        // v/a; publication below keeps the entire original history in place.
-        let mut trial = SecondOrderState::new(plate.t, &plate.q, &plate.v, &plate.a);
-        let plate_receipt = second_order_impulse(
-            &mut trial,
-            &self.dynamics,
-            &impulse,
-            &force,
-            &self.dynamics.mass_preconditioner(),
-            self.controls.impulse,
-            self.native_workspace,
-            cancelled,
-        )
-        .map_err(PlateRigidImpactError::Plate)?;
+        let (trial, plate_receipt) = self.stage_plate_impulse(plate, &impulse, cancelled)?;
         let rigid = body
             .apply_impulse_at_body_point(properties, arm_body, Vec3::new(0.0, 0.0, j))
             .map_err(PlateRigidImpactError::Body)?;
@@ -407,28 +423,117 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
             self.controls.speed_tolerance_m_s
                 + rel * relative_before.abs().max(relative_after.abs()),
         )?;
-        let dp = rigid
-            .state_after
+        let balance = self.account_transfer(
+            plate,
+            &trial,
+            &plate_receipt,
+            *body,
+            rigid.state_after,
+            properties,
+            rigid.impulse_world,
+            rigid.angular_impulse_body,
+            |i| -j * self.full_unit_impulse[i],
+            -contact.dissipated_energy,
+            contact.dissipated_energy,
+            cancelled,
+        )?;
+        let report = PlateRigidImpactReport {
+            contact,
+            plate: Some(plate_receipt),
+            body: Some(rigid),
+            support_impulses: balance.support_impulses,
+            plate_linear_impulse_world: balance.plate_linear_impulse_world,
+            plate_angular_impulse_world: balance.plate_angular_impulse_world,
+            support_linear_impulse_world: balance.support_linear_impulse_world,
+            support_angular_impulse_world: balance.support_angular_impulse_world,
+            linear_balance_residual: balance.linear_balance_residual,
+            angular_balance_residual: balance.angular_balance_residual,
+            relative_normal_speed_after: relative_after,
+            kinetic_energy_change_j: balance.kinetic_energy_change_j,
+            energy_residual_j: balance.energy_residual_j,
+        };
+        poll(cancelled)?;
+        plate.v = trial.v;
+        plate.a = trial.a;
+        *body = rigid.state_after;
+        Ok(report)
+    }
+
+    fn admit_state(&self, plate: &SecondOrderState) -> Result<(), PlateRigidImpactError> {
+        let n = self.unit_impulse.len();
+        if !plate.t.is_finite()
+            || [&plate.q, &plate.v, &plate.a]
+                .iter()
+                .any(|v| v.len() != n || v.iter().any(|x| !x.is_finite()))
+        {
+            return Err(PlateRigidImpactError::Invalid(
+                "finite matching plate checkpoint required",
+            ));
+        }
+        Ok(())
+    }
+
+    fn stage_plate_impulse(
+        &self,
+        plate: &SecondOrderState,
+        impulse: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(SecondOrderState, SecondOrderImpulse), PlateRigidImpactError> {
+        let mut force = vec![f64::NAN; self.unit_impulse.len()];
+        self.dynamics
+            .forcing(plate.t, &mut force)
+            .map_err(PlateRigidImpactError::Load)?;
+        poll(cancelled)?;
+        // Keep arbitrarily long telemetry in place. Only native v/a publish.
+        let mut trial = SecondOrderState::new(plate.t, &plate.q, &plate.v, &plate.a);
+        let receipt = second_order_impulse(
+            &mut trial,
+            &self.dynamics,
+            impulse,
+            &force,
+            &self.dynamics.mass_preconditioner(),
+            self.controls.impulse,
+            self.native_workspace,
+            cancelled,
+        )
+        .map_err(PlateRigidImpactError::Plate)?;
+        Ok((trial, receipt))
+    }
+
+    // One owner for represented increments, complete support reactions and
+    // combined compensated kinetic work, independent of the contact law.
+    #[allow(clippy::too_many_arguments)]
+    fn account_transfer(
+        &self,
+        plate: &SecondOrderState,
+        trial: &SecondOrderState,
+        plate_receipt: &SecondOrderImpulse,
+        body: RigidBodyState,
+        next_body: RigidBodyState,
+        properties: MassProperties,
+        linear_impulse: Vec3,
+        angular_impulse: Vec3,
+        full_impulse: impl Fn(usize) -> f64,
+        relative_work: f64,
+        dissipated_energy: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlateImpulseBalance, PlateRigidImpactError> {
+        let n = self.unit_impulse.len();
+        let rel = self.controls.impulse.relative_impulse_tolerance;
+        let dp = next_body
             .linear_momentum_world()
             .sub(body.linear_momentum_world());
-        let dl = rigid
-            .state_after
+        let dl = next_body
             .angular_momentum_body()
             .sub(body.angular_momentum_body());
-        for (actual, commanded) in components(dp)
-            .into_iter()
-            .zip(components(rigid.impulse_world))
-        {
+        for (actual, commanded) in components(dp).into_iter().zip(components(linear_impulse)) {
             check(
                 "rigid linear transfer",
                 actual - commanded,
                 self.controls.linear_impulse_tolerance_ns + rel * actual.abs().max(commanded.abs()),
             )?;
         }
-        for (actual, commanded) in components(dl)
-            .into_iter()
-            .zip(components(rigid.angular_impulse_body))
-        {
+        for (actual, commanded) in components(dl).into_iter().zip(components(angular_impulse)) {
             check(
                 "rigid angular transfer",
                 actual - commanded,
@@ -454,7 +559,7 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
             }
             *value *= scale;
             if map[i].is_none() {
-                support[i] = *value + j * self.full_unit_impulse[i];
+                support[i] = *value - full_impulse(i);
                 support_impulses.push((i, support[i]));
             }
         }
@@ -471,7 +576,12 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
             check(
                 "pair linear balance",
                 residual,
-                self.controls.linear_impulse_tolerance_ns + rel * j,
+                self.controls.linear_impulse_tolerance_ns
+                    + rel
+                        * components(linear_impulse)
+                            .into_iter()
+                            .map(f64::abs)
+                            .fold(0.0, f64::max),
             )?;
         }
         for residual in components(angular_residual) {
@@ -490,33 +600,47 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
                     * dd(plate_receipt.momentum_change[i]);
         }
         for (increment, (before, after)) in components(dp).into_iter().zip(
-            components(rigid.point_kinematics_before.center_of_mass_velocity_world)
-                .into_iter()
-                .zip(components(
-                    rigid.point_kinematics_after.center_of_mass_velocity_world,
-                )),
+            components(
+                body.center_of_mass_velocity_world(properties)
+                    .map_err(PlateRigidImpactError::Body)?,
+            )
+            .into_iter()
+            .zip(components(
+                next_body
+                    .center_of_mass_velocity_world(properties)
+                    .map_err(PlateRigidImpactError::Body)?,
+            )),
         ) {
             energy = energy + dd(increment) * (dd(0.5 * before) + dd(0.5 * after));
         }
         for (increment, (before, after)) in components(dl).into_iter().zip(
-            components(rigid.point_kinematics_before.angular_velocity_body)
-                .into_iter()
-                .zip(components(
-                    rigid.point_kinematics_after.angular_velocity_body,
-                )),
+            components(
+                properties
+                    .angular_velocity_body_checked(body.angular_momentum_body())
+                    .map_err(PlateRigidImpactError::Body)?,
+            )
+            .into_iter()
+            .zip(components(
+                properties
+                    .angular_velocity_body_checked(next_body.angular_momentum_body())
+                    .map_err(PlateRigidImpactError::Body)?,
+            )),
         ) {
             energy = energy + dd(increment) * (dd(0.5 * before) + dd(0.5 * after));
         }
-        let energy_residual = (energy + dd(contact.dissipated_energy)).to_f64();
+        let energy_residual = (energy + dd(dissipated_energy)).to_f64();
+        let work_residual = (energy - dd(relative_work)).to_f64();
+        check(
+            "impact work",
+            work_residual,
+            self.controls.energy_tolerance_j,
+        )?;
         check(
             "impact energy",
             energy_residual,
             self.controls.energy_tolerance_j,
         )?;
-        let report = PlateRigidImpactReport {
-            contact,
-            plate: Some(plate_receipt),
-            body: Some(rigid),
+        Ok(PlateImpulseBalance {
             support_impulses,
             plate_linear_impulse_world: plate_linear,
             plate_angular_impulse_world: plate_angular,
@@ -524,28 +648,14 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
             support_angular_impulse_world: support_angular,
             linear_balance_residual: linear_residual,
             angular_balance_residual: angular_residual,
-            relative_normal_speed_after: relative_after,
             kinetic_energy_change_j: energy.to_f64(),
+            work_energy_residual_j: work_residual,
             energy_residual_j: energy_residual,
-        };
-        poll(cancelled)?;
-        plate.v = trial.v;
-        plate.a = trial.a;
-        *body = rigid.state_after;
-        Ok(report)
+        })
     }
 
     fn relative_speed(&self, motion: &PointKinematics, velocity: &[f64]) -> f64 {
-        // Subtract common translation before rounding the contact flow. Forming
-        // v_com + omega cross r in f64 first can erase real rotational approach
-        // and incorrectly classify an approaching contact as an inactive no-op.
-        let mut relative = dd(motion.center_of_mass_velocity_world.z)
-            + dd(motion.angular_velocity_world.x) * dd(motion.arm_world.y)
-            - dd(motion.angular_velocity_world.y) * dd(motion.arm_world.x);
-        for (&row, &v) in self.unit_impulse.iter().zip(velocity) {
-            relative = relative - dd(row) * dd(v);
-        }
-        relative.to_f64()
+        relative_speed(&self.unit_impulse, motion, velocity)
     }
 
     fn resultants(&self, impulse: &[f64]) -> (Vec3, Vec3) {
@@ -564,4 +674,15 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
             Vec3::new(lx.to_f64(), ly.to_f64(), 0.0),
         )
     }
+}
+
+fn relative_speed(row: &[f64], motion: &PointKinematics, velocity: &[f64]) -> f64 {
+    // Subtract common translation before rounding the point's rotational flow.
+    let mut relative = dd(motion.center_of_mass_velocity_world.z)
+        + dd(motion.angular_velocity_world.x) * dd(motion.arm_world.y)
+        - dd(motion.angular_velocity_world.y) * dd(motion.arm_world.x);
+    for (&row, &v) in row.iter().zip(velocity) {
+        relative = relative - dd(row) * dd(v);
+    }
+    relative.to_f64()
 }
