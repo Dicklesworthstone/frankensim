@@ -56,6 +56,8 @@ pub mod harmonic;
 
 mod mass;
 pub use mass::FrameMassFormulation;
+mod impulse;
+pub use impulse::FrameImpulse;
 mod modes;
 pub use modes::{FrameModalAnalysis, FrameMode, FrameModeStatus};
 mod viscosity;
@@ -496,6 +498,15 @@ impl DynamicHistory {
             .fold(0.0, f64::max)
             / peak
     }
+}
+
+/// The original full damping operators and unpublished reference tangent.
+/// Both continuous initialization and instantaneous impulses use this owner.
+struct DampingPreparation {
+    new_reference: Option<Vec<f64>>,
+    rayleigh_matrix: Vec<f64>,
+    material_damping: Option<FrameMaterialDamping>,
+    cmat: Vec<f64>,
 }
 
 /// Newton acceptance: the force residual meets `tol`, or the iteration has
@@ -1351,6 +1362,69 @@ impl Frame2d {
         self.rayleigh_reference_stiffness = None;
     }
 
+    fn prepare_damping(
+        &self,
+        m: &mass::MassMatrix,
+        damping: Rayleigh,
+        dt: f64,
+    ) -> Result<DampingPreparation, SolidError> {
+        if !dt.is_finite()
+            || dt <= 0.0
+            || !damping.a0.is_finite()
+            || damping.a0 < 0.0
+            || !damping.a1.is_finite()
+            || damping.a1 < 0.0
+        {
+            return Err(SolidError::InvalidInput {
+                what: "frame dynamics requires a finite positive continuation clock and nonnegative finite Rayleigh coefficients".into(),
+            });
+        }
+        let n = self.ndof();
+        // Capture once, after any static preload. Reassembling this tangent
+        // on every call changes physical damping when a nonlinear record is
+        // split or resumed after a failed step.
+        let new_reference = if self.rayleigh_reference_stiffness.is_none() {
+            Some(self.assemble(&self.u)?.1)
+        } else {
+            None
+        };
+        let k0 = self
+            .rayleigh_reference_stiffness
+            .as_ref()
+            .or(new_reference.as_ref())
+            .expect("existing or newly assembled Rayleigh reference");
+        let rayleigh_matrix: Vec<f64> = (0..n * n)
+            .map(|idx| {
+                let (i, j) = (idx / n, idx % n);
+                damping.a1 * k0[idx] + damping.a0 * m.entry(i, j)
+            })
+            .collect();
+        let material_damping = self.material_damping_operator()?;
+        if let Some(operator) = &material_damping {
+            operator.admit_timestep(dt)?;
+        }
+        let material_matrix = material_damping.as_ref().map(FrameMaterialDamping::entries);
+        let cmat: Vec<f64> = rayleigh_matrix
+            .iter()
+            .enumerate()
+            .map(|(i, value)| value + material_matrix.as_ref().map_or(0.0, |matrix| matrix[i]))
+            .collect();
+        if cmat.iter().any(|value| !value.is_finite()) {
+            return Err(SolidError::InvalidInput {
+                what: "combined frame damping is unrepresentable".into(),
+            });
+        }
+        if damping.a1 > 0.0 {
+            self.admit_damping_matrix(&cmat)?;
+        }
+        Ok(DampingPreparation {
+            new_reference,
+            rayleigh_matrix,
+            material_damping,
+            cmat,
+        })
+    }
+
     /// Implicit Newmark-β (average acceleration, γ = ½, β = ¼) response to a
     /// uniform base acceleration record `ground` (sampled every `dt`) acting
     /// along the global direction `(dir_x, dir_y)`, with authored Rayleigh
@@ -1443,43 +1517,13 @@ impl Frame2d {
             })
             .collect();
         let mass_influence: Vec<f64> = (0..n).map(|d| m.row_action(d, &infl)).collect();
-        // Capture once, after any static preload. Reassembling this tangent
-        // on every call changes physical damping when a nonlinear record is
-        // split or resumed after a failed step.
-        let new_reference = if self.rayleigh_reference_stiffness.is_none() {
-            Some(self.assemble(&self.u)?.1)
-        } else {
-            None
-        };
-        let k0 = self
-            .rayleigh_reference_stiffness
-            .as_ref()
-            .or(new_reference.as_ref())
-            .expect("existing or newly assembled Rayleigh reference");
-        let rayleigh_matrix: Vec<f64> = (0..n * n)
-            .map(|idx| {
-                let (i, j) = (idx / n, idx % n);
-                damping.a1 * k0[idx] + damping.a0 * m.entry(i, j)
-            })
-            .collect();
-        let material_damping = self.material_damping_operator()?;
-        if let Some(operator) = &material_damping {
-            operator.admit_timestep(dt)?;
-        }
+        let DampingPreparation {
+            new_reference,
+            rayleigh_matrix,
+            material_damping,
+            cmat,
+        } = self.prepare_damping(&m, damping, dt)?;
         let material_matrix = material_damping.as_ref().map(FrameMaterialDamping::entries);
-        let cmat: Vec<f64> = rayleigh_matrix
-            .iter()
-            .enumerate()
-            .map(|(i, value)| value + material_matrix.as_ref().map_or(0.0, |matrix| matrix[i]))
-            .collect();
-        if cmat.iter().any(|value| !value.is_finite()) {
-            return Err(SolidError::InvalidInput {
-                what: "combined frame damping is unrepresentable".into(),
-            });
-        }
-        if damping.a1 > 0.0 {
-            self.admit_damping_matrix(&cmat)?;
-        }
         let cv = |v: &[f64]| -> Vec<f64> {
             (0..n)
                 .map(|i| (0..n).map(|j| cmat[i * n + j] * v[j]).sum())

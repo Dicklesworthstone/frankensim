@@ -3409,6 +3409,50 @@ supported Rayleigh spectrum under mesh refinement. Source-layer tests check
 the full density-weighted spin inventory and its effect on the original
 Newmark trajectory.
 
+## Instantaneous native frame impulses
+
+`Frame2d::apply_impulse` applies a full node-major generalized impulse through
+the same reference mass used by Newmark: `M_ff * delta_v_f = J_f`. The original
+lumped path stays diagonal; the consistent path factors the free mass once and
+retains all endpoint, translation and rotation cross terms. Fixed coordinates
+keep zero velocity. The returned `FrameImpulse::support_impulse` is the impulse
+exerted by the supports **on the frame**, `M * delta_v - J` on fixed coordinates.
+Supported consistent-inertia coupling is retained, including when the applied
+impulse is entirely on free coordinates.
+
+The event reports the actual represented velocity and generalized momentum
+changes, endpoint kinetic energies, signed impulse work and kinetic-energy
+change. Work uses the mean of the two endpoint velocities; the energy change
+uses that mean dotted with `M * delta_v`, avoiding subtraction of large nearly
+equal kinetic energies. Each free momentum equation and the work balance must
+pass a scaled floating-point residual check. A jump lost when adding to a large
+existing velocity is refused rather than reported as applied.
+
+The caller supplies the complete finite `post_event_load`, Rayleigh coefficients
+and the real `continuation_dt`. Any uniform-base inertial force belongs in that
+full load vector. The method reequilibrates finite right-limit acceleration
+from `M * a_plus = post_event_load - C * v_plus - f_internal` using the original
+source viscosity and Rayleigh operators. `continuation_dt` admits those sources
+against the following sampled clock; it never scales the impulse or advances
+the material clock. Positions, section deformations and material histories are
+unchanged. Velocity, acceleration and any newly captured Rayleigh reference
+publish together only after every check succeeds.
+
+All free coordinates must have positive inertia. Free massless coordinates
+require a DAE velocity/acceleration projection that this event does not provide,
+even when their applied impulse entries vanish. Fixed massless coordinates and
+all-fixed support-only events are admitted. Timed constitutive laws retain the
+existing untimed-operation refusal. This is native generalized momentum under
+the frame's reference-inertia assumptions; it does not certify finite-rotation
+world angular momentum or reconstruct an impact contact law.
+
+`tests/frame2d_impulse.rs` checks independently integrated Hermite mass coupling,
+support impulse, signed work, finite-force and Rayleigh right limits, Newmark
+continuation, rotation covariance, lumped section spin, both all-fixed mass
+formulations, massless refusal and failure atomicity. The material-viscosity
+battery checks the original source loss in the event acceleration, independence
+from admitted continuation clocks and refusal of inadmissible clocks.
+
 ## Signed, mass-normalized frame modes and participation
 
 `Frame2d::modal_analysis` exposes the complete signed current-tangent spectrum,

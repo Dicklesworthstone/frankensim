@@ -502,9 +502,18 @@ fn with_harmonic_cx(f: impl FnOnce(&fs_exec::Cx<'_>)) {
     use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
     let gate = CancelGate::new();
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
-        f(&Cx::new(&gate, arena,
-            StreamKey { seed: 17, kernel_id: 5, tile: 0, iteration: 0 },
-            Budget::INFINITE, ExecMode::Deterministic));
+        f(&Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 17,
+                kernel_id: 5,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        ));
     });
 }
 
@@ -528,16 +537,19 @@ fn harmonic_response_retains_nonproportional_source_loss_and_consistent_mass() {
         let (c1, c2) = (2e4 * area / 0.5, 1.6e5 * area / 0.5);
         let force = [C64::new(0.7, -0.2), C64::new(-0.3, 0.5)];
         for omega in [0.0, 1000.0, 2300.0, 5000.0] {
-            let prepared = frame.prepare_harmonic_response(omega,
-                Rayleigh { a0: 0.0, a1: 0.0 }, controls, cx).unwrap();
+            let prepared = frame
+                .prepare_harmonic_response(omega, Rayleigh { a0: 0.0, a1: 0.0 }, controls, cx)
+                .unwrap();
             assert_eq!(prepared.free_dofs(), &[3, 6]);
             let entry = |k: f64, m: f64, c: f64| C64::new(k - omega * omega * m, -omega * c);
             let a = entry(2.0 * stiffness, 2.0 * member_mass / 3.0, c1 + c2);
             let b = entry(-stiffness, member_mass / 6.0, -c2);
             let d = entry(stiffness, member_mass / 3.0, c2);
             let determinant = a * d - b * b;
-            let expected = [(d * force[0] - b * force[1]) / determinant,
-                (a * force[1] - b * force[0]) / determinant];
+            let expected = [
+                (d * force[0] - b * force[1]) / determinant,
+                (a * force[1] - b * force[0]) / determinant,
+            ];
             let response = prepared.solve(&force, cx).unwrap();
             for (actual, reference) in response.displacement.iter().zip(expected) {
                 assert!((*actual - reference).abs() < 3e-12 * reference.abs());
@@ -545,8 +557,16 @@ fn harmonic_response_retains_nonproportional_source_loss_and_consistent_mass() {
             let v = expected.map(|q| C64::new(q.im, -q.re).scale(omega));
             // Original axial strain-rate ports: eta*A/L * |v_j-v_i|^2 / 2.
             let heat = 0.5 * (c1 * v[0].norm_sq() + c2 * (v[1] - v[0]).norm_sq());
-            near(response.average_viscous_power_w, heat, 5e-12 * heat.max(1e-30));
-            near(response.average_input_power_w, heat, 5e-12 * heat.max(1e-30));
+            near(
+                response.average_viscous_power_w,
+                heat,
+                5e-12 * heat.max(1e-30),
+            );
+            near(
+                response.average_input_power_w,
+                heat,
+                5e-12 * heat.max(1e-30),
+            );
         }
         assert_eq!(frame.displacements(), accepted);
     });
@@ -567,22 +587,35 @@ fn harmonic_viscosity_checks_original_frequency_band_and_counts_rayleigh_once() 
         let frame = guided(source(2e5, 4e6, (100.0, 5000.0)), 0);
         let rayleigh = Rayleigh { a0: 0.7, a1: 1e-7 };
         for omega in [0.0, 99.0, 5001.0] {
-            assert!(frame.prepare_harmonic_response(omega, rayleigh, controls, cx).is_err());
+            assert!(
+                frame
+                    .prepare_harmonic_response(omega, rayleigh, controls, cx)
+                    .is_err()
+            );
         }
         let area = core::f64::consts::PI * RADIUS.powi(2);
         let mass = RHO * area / 3.0;
         let stiffness = YOUNG * area;
         let damping = 2e5 * area + rayleigh.a0 * mass + rayleigh.a1 * stiffness;
         for omega in [100.0, 2500.0, 5000.0] {
-            let response = frame.prepare_harmonic_response(omega, rayleigh, controls, cx).unwrap()
-                .solve(&[C64::ONE], cx).unwrap();
+            let response = frame
+                .prepare_harmonic_response(omega, rayleigh, controls, cx)
+                .unwrap()
+                .solve(&[C64::ONE], cx)
+                .unwrap();
             let q = C64::ONE / C64::new(stiffness - omega * omega * mass, -omega * damping);
             assert!((response.displacement[0] - q).abs() < 3e-12 * q.abs());
             let heat = 0.5 * damping * omega * omega * q.norm_sq();
             near(response.average_viscous_power_w, heat, 5e-12 * heat);
             near(response.average_input_power_w, heat, 5e-12 * heat);
         }
-        assert_eq!(frame.material_viscous_section(0).unwrap().omega_band_rad_s(), (100.0, 5000.0));
+        assert_eq!(
+            frame
+                .material_viscous_section(0)
+                .unwrap()
+                .omega_band_rad_s(),
+            (100.0, 5000.0)
+        );
     });
 }
 
@@ -594,16 +627,21 @@ fn harmonic_source_frame_keeps_rigid_motion_and_its_elastic_resonance() {
     use fs_modal::harmonic::HarmonicResponseControls;
     with_harmonic_cx(|cx| {
         let mut frame = Frame2d::with_mass_formulation(
-            Geometry::Linear, FrameMassFormulation::ConsistentReference);
+            Geometry::Linear,
+            FrameMassFormulation::ConsistentReference,
+        );
         frame.add_node(0.0, 0.0);
         frame.add_node(1.0, 0.0);
         frame.fix(0, [false, true, true]);
         frame.fix(1, [false, true, true]);
-        frame.add_material_viscous_element(0, 1, 5, source(2e5, 4e6, BAND)).unwrap();
+        frame
+            .add_material_viscous_element(0, 1, 5, source(2e5, 4e6, BAND))
+            .unwrap();
         // Preserve the existing public transient owner's unresolved-mode rule.
         assert!(frame.material_damping_operator().is_err());
         let controls = HarmonicResponseControls {
-            maximum_coordinates: 6, maximum_payload_bytes: 1 << 20,
+            maximum_coordinates: 6,
+            maximum_payload_bytes: 1 << 20,
             maximum_relative_residual: 1e-12,
         };
         let area = core::f64::consts::PI * RADIUS.powi(2);
@@ -611,8 +649,9 @@ fn harmonic_source_frame_keeps_rigid_motion_and_its_elastic_resonance() {
         let stiffness = YOUNG * area;
         let damping = 2e5 * area;
         for omega in [1000.0, (12.0 * stiffness / mass).sqrt()] {
-            let prepared = frame.prepare_harmonic_response(omega,
-                Rayleigh { a0: 0.0, a1: 0.0 }, controls, cx).unwrap();
+            let prepared = frame
+                .prepare_harmonic_response(omega, Rayleigh { a0: 0.0, a1: 0.0 }, controls, cx)
+                .unwrap();
             assert_eq!(prepared.free_dofs(), &[0, 3]);
             let rigid = prepared.solve(&[C64::ONE, C64::ONE], cx).unwrap();
             let translation = -2.0 / (mass * omega * omega);
@@ -621,8 +660,11 @@ fn harmonic_source_frame_keeps_rigid_motion_and_its_elastic_resonance() {
             }
             assert!(rigid.average_viscous_power_w.abs() < 1e-22);
             let differential = prepared.solve(&[C64::ONE, C64::from_re(-1.0)], cx).unwrap();
-            let extension = C64::ONE / C64::new(2.0 * stiffness - omega * omega * mass / 6.0,
-                -2.0 * omega * damping);
+            let extension = C64::ONE
+                / C64::new(
+                    2.0 * stiffness - omega * omega * mass / 6.0,
+                    -2.0 * omega * damping,
+                );
             assert!((differential.displacement[0] - extension).abs() < 3e-12 * extension.abs());
             assert!((differential.displacement[1] + extension).abs() < 3e-12 * extension.abs());
             let heat = 2.0 * damping * omega * omega * extension.norm_sq();
@@ -630,4 +672,66 @@ fn harmonic_source_frame_keeps_rigid_motion_and_its_elastic_resonance() {
             near(differential.average_input_power_w, heat, 5e-12 * heat);
         }
     });
+}
+
+#[test]
+fn impulse_right_limit_uses_source_viscosity_and_actual_continuation_clock() {
+    let area = core::f64::consts::PI * RADIUS.powi(2);
+    let mass = RHO * area / 3.0;
+    let stiffness = YOUNG * area;
+    let eta = 2e5;
+    let material_c = eta * area;
+    let damping = Rayleigh { a0: 0.25, a1: 1e-6 };
+    let c = material_c + damping.a0 * mass + damping.a1 * stiffness;
+    let mut original = guided(source(eta, 4e6, BAND), 0);
+    let mut preload = vec![0.0; original.ndof()];
+    preload[3] = stiffness * 2e-6;
+    original.static_load(&preload, 1).unwrap();
+    let mut impulse = vec![0.0; original.ndof()];
+    impulse[3] = mass * 0.125;
+    let mut post_load = preload.clone();
+    post_load[3] *= 0.5;
+    let expected = (post_load[3] - stiffness * original.displacements()[3] - c * 0.125) / mass;
+    let mut first = original.clone();
+    let mut second = original.clone();
+    let a = first
+        .apply_impulse(&impulse, &post_load, damping, 1e-6)
+        .unwrap();
+    let b = second
+        .apply_impulse(&impulse, &post_load, damping, 2e-6)
+        .unwrap();
+    assert_eq!(
+        a, b,
+        "clock admission must not turn impulse into a duration-dependent force"
+    );
+    assert_eq!(first.velocities(), second.velocities());
+    assert_eq!(first.accelerations(), second.accelerations());
+    near(first.velocities()[3], 0.125, 1e-14);
+    near(first.accelerations()[3], expected, 2e-10);
+    near(a.impulse_work_j, 0.5 * mass * 0.125_f64.powi(2), 1e-14);
+    assert_eq!(first.displacements(), original.displacements());
+    assert_eq!(
+        first.section_deformations(0),
+        original.section_deformations(0)
+    );
+    let acceleration = first.accelerations().to_vec();
+    let history = first
+        .newmark_with_load(&[0.0], 1e-6, (0.0, 0.0), damping, &post_load)
+        .unwrap();
+    near(history.kinetic_energy[0], a.kinetic_energy_after_j, 1e-14);
+    assert_eq!(first.accelerations(), acceleration);
+    for dt in [1e-9, 1.0] {
+        let mut refused = original.clone();
+        let before = format!("{refused:?}");
+        assert!(
+            refused
+                .apply_impulse(&impulse, &post_load, damping, dt)
+                .is_err()
+        );
+        assert_eq!(
+            format!("{refused:?}"),
+            before,
+            "a source-band or complete-spectrum refusal must not publish the proposed velocity"
+        );
+    }
 }

@@ -33,6 +33,45 @@ pub(super) enum MassMatrix {
     Consistent { n: usize, entries: Vec<f64> },
 }
 
+/// One prepared free-coordinate inverse, shared by impulse and finite-force
+/// responses. The diagonal path neither allocates nor factors a dense matrix.
+pub(super) enum MassSolve<'a> {
+    Diagonal {
+        mass: &'a [f64],
+        fixed: &'a [bool],
+    },
+    Consistent {
+        n: usize,
+        dofs: Vec<usize>,
+        factor: Cholesky,
+    },
+}
+
+impl MassSolve<'_> {
+    pub(super) fn apply(&self, rhs: &[f64]) -> Vec<f64> {
+        match self {
+            Self::Diagonal { mass, fixed } => (0..mass.len())
+                .map(|i| {
+                    if !fixed[i] && mass[i] > 0.0 {
+                        rhs[i] / mass[i]
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            Self::Consistent { n, dofs, factor } => {
+                let mut free: Vec<f64> = dofs.iter().map(|&i| rhs[i]).collect();
+                factor.solve(&mut free);
+                let mut result = vec![0.0; *n];
+                for (&i, value) in dofs.iter().zip(free) {
+                    result[i] = value;
+                }
+                result
+            }
+        }
+    }
+}
+
 /// Retained mass factor for restoring all eigenvectors without refactorization.
 pub(super) enum MassBackTransform {
     Diagonal(Vec<f64>),
@@ -90,6 +129,19 @@ impl MassMatrix {
         }
     }
 
+    /// Componentwise allowance for a mass action, scaled before reduction so
+    /// a finite action need not form an overflowing unsigned total first.
+    pub(super) fn row_action_roundoff(&self, i: usize, x: &[f64], relative: f64) -> f64 {
+        match self {
+            Self::Lumped(m) => relative * (m[i] * x[i]).abs(),
+            Self::Consistent { n, entries } => entries[i * n..(i + 1) * n]
+                .iter()
+                .zip(x)
+                .map(|(m, x)| relative * (m * x).abs())
+                .sum(),
+        }
+    }
+
     pub(super) fn kinetic_energy(&self, v: &[f64]) -> f64 {
         0.5 * match self {
             Self::Lumped(m) => (0..m.len()).map(|i| m[i] * v[i] * v[i]).sum::<f64>(),
@@ -124,31 +176,32 @@ impl MassMatrix {
             .map_err(|_| invalid("reference inertia is not positive definite on massive free DOFs"))
     }
 
+    pub(super) fn prepare_solve<'a>(
+        &'a self,
+        fixed: &'a [bool],
+    ) -> Result<MassSolve<'a>, SolidError> {
+        match self {
+            Self::Lumped(m) => Ok(MassSolve::Diagonal { mass: m, fixed }),
+            Self::Consistent { n, .. } => {
+                let dofs: Vec<usize> = (0..*n)
+                    .filter(|&i| !fixed[i] && self.entry(i, i) > 0.0)
+                    .collect();
+                let factor = self.factor(&dofs)?;
+                Ok(MassSolve::Consistent {
+                    n: *n,
+                    dofs,
+                    factor,
+                })
+            }
+        }
+    }
+
     pub(super) fn acceleration(
         &self,
         force: &[f64],
         fixed: &[bool],
     ) -> Result<Vec<f64>, SolidError> {
-        let mut acceleration = vec![0.0; self.n()];
-        match self {
-            Self::Lumped(m) => {
-                for i in 0..m.len() {
-                    if !fixed[i] && m[i] > 0.0 {
-                        acceleration[i] = force[i] / m[i];
-                    }
-                }
-            }
-            Self::Consistent { .. } => {
-                let dofs: Vec<usize> = (0..self.n())
-                    .filter(|&i| !fixed[i] && self.entry(i, i) > 0.0)
-                    .collect();
-                let mut rhs: Vec<f64> = dofs.iter().map(|&i| force[i]).collect();
-                self.factor(&dofs)?.solve(&mut rhs);
-                for (&i, value) in dofs.iter().zip(rhs) {
-                    acceleration[i] = value;
-                }
-            }
-        }
+        let acceleration = self.prepare_solve(fixed)?.apply(force);
         if acceleration.iter().any(|a| !a.is_finite()) {
             return Err(invalid("nonfinite initial acceleration"));
         }
