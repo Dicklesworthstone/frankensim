@@ -1845,6 +1845,33 @@ a fixed-plane bilateral law, including tensile reactions. It does not claim
 exact energy conservation, symplecticity, global root uniqueness, unilateral
 contact, friction or moving supports.
 
+## Distance between independent finite rigid bodies
+
+`rigid_rattle::distance::RigidDistanceConstraint::advance` evolves two independent
+native rigid bodies with a positive fixed separation between arbitrary material
+points. Both finite masses recoil through native central equal-and-opposite
+impulses around the original full-inertia free steps. The initial impulses close
+endpoint distance; the endpoint impulses remove relative range rate. There is
+no pose repair, and internal reactions preserve total world linear and total
+orbital-plus-spin angular momentum. The receipt retains both pair impulse
+events, both smooth steps, actual endpoint residuals and signed constraint work.
+
+The bounded scalar solve reuses the original summed point mobility and the
+existing point/plane impulse, angular-travel and work controls. Each body's
+rotation and the change of connection direction must meet the local angular
+cap. The inputs must already satisfy the position and velocity constraints.
+Collapsed geometry, unrepresentable arithmetic, exhausted local bounds,
+nonconvergence and cancellation publish neither body. Evaluation allocates no
+heap storage. The force/world and torque/body conventions and shared uniform
+gravity are those of the original rigid integrator.
+
+`tests/rigid_distance_step.rs` checks analytic unequal-mass dimer recoil and
+orbital motion, differential forcing, full-tensor off-axis momentum/work balance,
+reversibility, second-order phase refinement, frame and boost covariance, body
+exchange and atomic refusals. This is one bilateral positive-length rod, with
+tension and compression. Zero-length ball joints, general joint graphs, unilateral
+cables, exact energy conservation and symplecticity remain outside this entry.
+
 ## Articulated point/plane impact response
 
 `articulated_impact::resolve_articulated_plane_impact` resolves one declared

@@ -21,6 +21,10 @@
 #[path = "rigid_rattle/step.rs"]
 pub mod step;
 
+/// Rigid distance between material points on two finite native rigid bodies.
+#[path = "rigid_rattle/distance.rs"]
+pub mod distance;
+
 use crate::{MassProperties, Vec3 as MbdVec3};
 use fs_ga::{Se3, So3Tangent, Twist, Vec3};
 use fs_time::se3::{RattleProjection, Se3Error};
