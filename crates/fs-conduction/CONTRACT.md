@@ -216,6 +216,12 @@ refusals.
 
 ## Steady source-backed thermal contact
 
+`TemperatureContact::new_pinned` admits a face-mean temperature law using an
+already selected claim. Native project bindings can retain their exact source
+selection even when the card contains competing claims. Missing pins, source
+domain exits, incompatible units and nonpositive answers retain the original
+source refusals; later queries cannot switch claims.
+
 `TemperatureContacts::solve_steady` couples the original steady spatial solver
 to the same pinned matching or nonmatching contact laws. The initial full
 Kelvin field is explicit; prescribed temperatures replace its fixed entries.

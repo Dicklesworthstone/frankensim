@@ -260,7 +260,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// to complete transient adjoints and native uncertainty calibration.
 /// Version 92 connects the steady open-cavity model to the complete thermal
 /// transpose with independently sourced emissivities and one black-bath control.
-pub const SOLVE_DRIVER_VERSION: u32 = 92;
+/// Version 93 connects native steady temperature-varying contact to the shared
+/// source-backed physical residual/heat gates without frozen-contact bounds.
+pub const SOLVE_DRIVER_VERSION: u32 = 93;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -306,6 +308,7 @@ mod mean_bound;
 mod nominal_adjoint;
 mod algebraic;
 mod conjugate;
+mod contact;
 mod natural;
 mod radiation;
 mod report_stage;
@@ -1470,6 +1473,8 @@ struct RungSolved {
     transient_fragment: Option<String>,
     /// Final accepted step's physical storage rate and numerical balance.
     transient_energy_w: Option<(f64, f64)>,
+    /// Fresh source-backed contact states and complete physical endpoint gates.
+    temperature_contact_fragment: Option<String>,
     /// Boundary-face slots of every declared surface on this rung's mesh.
     surface_slots: BTreeMap<String, Vec<usize>>,
     adjoint_data: Option<RungAdjointData>,
@@ -6535,11 +6540,15 @@ fn conduction_solve_receipt(
     let mean_bound_requested = mean_bound::requested(spec)?
         && flow_override.is_none() && htc_scale == 1.0
         && conductivity_side == 0.0 && geometry_side == 0.0;
+    let temperature_contact = contact::prepare(spec, cards)?;
+    if temperature_contact.is_some() {
+        contact::admit(spec, adjoint_requested, mean_bound_requested)?;
+    }
     // A timed partial field is never published: the ordinary staged refusal
     // retains the last completed pipeline prefix. Successful receipts replay
     // numerically without making their identity depend on replay machine speed.
     let deadline = (!resume
-        && (transient_requested || mixed_requested || spec
+        && (transient_requested || mixed_requested || temperature_contact.is_some() || spec
             .solver
             .as_ref()
             .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE)))
@@ -6553,6 +6562,16 @@ fn conduction_solve_receipt(
             Err(conduction_error(
                 "cli-solve-conduction-mixed-wall-budget",
                 "mixed steady convection exhausted the remaining solve-time budget between solid responses",
+                "increase budgets.solve-time and rerun; the accepted pipeline prefix remains retained",
+            ))
+        } else { Ok(()) }
+    } else if temperature_contact.is_some() {
+        if deadline.is_some_and(|(started, available_s)|
+            started.elapsed().as_secs_f64() >= available_s)
+        {
+            Err(conduction_error(
+                "cli-solve-conduction-contact-wall-budget",
+                "temperature-varying contact exhausted the remaining solve-time budget",
                 "increase budgets.solve-time and rerun; the accepted pipeline prefix remains retained",
             ))
         } else { Ok(()) }
@@ -6721,7 +6740,7 @@ fn conduction_solve_receipt(
         let ladder_region = ladder_target_region(spec, &region_ids);
         // The published solve bounds its maximum's roundoff; the propagation's
         // perturbed re-solves (which arrive with a flow override) do not.
-        let roundoff_wanted = !transient_requested
+        let roundoff_wanted = !transient_requested && temperature_contact.is_none()
             && setup.enclosure_radiation.is_none()
             && flow_override.is_none() && temperature_maximum_region(spec).is_some();
         // One solid solve on one rung of the h-ladder. Everything below the
@@ -6833,6 +6852,8 @@ fn conduction_solve_receipt(
         // exchange calls it once per outer iteration and once more at the
         // converged references so the published field is exactly the one
         // the balance audit describes.
+        let temperature_contact_fragment = std::cell::RefCell::new(None);
+        let temperature_contact_work = std::cell::RefCell::new(contact::Work::default());
         let solve_once = |derived: &BTreeMap<String, (f64, f64)>| -> Result<
             radiation::SolidSolution,
             SolveRefusal,
@@ -6849,8 +6870,9 @@ fn conduction_solve_receipt(
                 &surface_heat_inputs,
             )?;
             let boundary = lowering.boundary;
-            let interfaces =
-                lower_thermal_interfaces(spec, cards, &mesh, &boundary, &interface_resolution)?;
+            let interfaces = if temperature_contact.is_none() {
+                lower_thermal_interfaces(spec, cards, &mesh, &boundary, &interface_resolution)?
+            } else { None };
             let mut config = fs_conduction::SolveConfig::default();
             if let Some(solver) = &spec.solver {
                 config.stop.residual_rtol = solver.tolerance_rel;
@@ -6885,6 +6907,13 @@ fn conduction_solve_receipt(
                 element_materials: Some(&element_materials),
                 source: &source,
             };
+            if let Some(contacts) = &temperature_contact {
+                let (solid, receipt) = contacts.solve(&cx, problem, &interface_resolution,
+                    config, limits.max_selected_faces, &mut temperature_contact_work.borrow_mut())?;
+                check_deadline()?;
+                *temperature_contact_fragment.borrow_mut() = Some(receipt);
+                return Ok(solid);
+            }
             radiation::solve(&cx, problem, interfaces.as_ref(), config, radiation.as_ref())
             .map_err(|error| match error {
                 fs_conduction::ConductionError::Cancelled { .. } => cancelled(),
@@ -7201,6 +7230,7 @@ fn conduction_solve_receipt(
             natural_fragment,
             transient_fragment,
             transient_energy_w,
+            temperature_contact_fragment: temperature_contact_fragment.into_inner(),
             surface_slots,
             adjoint_data,
             algebraic: algebraic::MaximumEvidence::default(),
@@ -7340,6 +7370,7 @@ fn conduction_solve_receipt(
         natural_fragment,
         transient_fragment,
         transient_energy_w,
+        temperature_contact_fragment,
         surface_slots,
         adjoint_data: _,
         algebraic,
@@ -7519,6 +7550,8 @@ fn conduction_solve_receipt(
         };
     let transient_json = transient_fragment.as_ref().map_or_else(String::new,
         |fragment| format!(",\"transient\":{fragment}"));
+    let contact_json = temperature_contact_fragment.as_ref().map_or_else(String::new,
+        |fragment| format!(",\"temperature_contact\":{fragment}"));
     let receipt = format!(
         "{{\"schema\":{},\"run\":{},\"stage\":\"conduction\",\
          \"mesh\":{{\"vertices\":{},\"elements\":{},\"boundary_faces\":{},\
@@ -7533,7 +7566,7 @@ fn conduction_solve_receipt(
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
          \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}{space_time_json}}},\
-         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}{nominal_adjoint_fragment}{mean_bound_fragment}{transient_json}}}",
+         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}{nominal_adjoint_fragment}{mean_bound_fragment}{transient_json}{contact_json}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         mesh.vertex_count(),
@@ -7590,7 +7623,9 @@ fn conduction_solve_receipt(
         json_string(if transient_requested {
             "retained-promoted-mesh-plus-declared-region-seeds-plus-audited-labeled-volume-plus-matdb-backed-transient-conduction-and-declared-storage"
         } else { CONDUCTION_AUTHORITY }),
-        json_string(if transient_requested { transient::no_claim(spec) } else { CONDUCTION_NO_CLAIM }),
+        json_string(if transient_requested { transient::no_claim(spec) }
+            else if temperature_contact_fragment.is_some() { contact::NO_CLAIM }
+            else { CONDUCTION_NO_CLAIM }),
     );
     let charge = solution_bytes
         .len()

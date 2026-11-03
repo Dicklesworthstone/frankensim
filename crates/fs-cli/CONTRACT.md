@@ -661,6 +661,29 @@ record. `examples/heatsink-fan/heatsink-fan.fs` (Journey A) and
 
 ### Solve orchestration
 
+Native steady contact now consumes the existing source-backed temperature law
+when an admitted interface card varies with `T` (solve driver 93). The declared
+temperature coordinate is the arithmetic mean of the two independent P1 face
+means. Every local query retains the selected claim and manufactured joint
+state. Heterogeneous `k(T)`, prescribed boundaries, natural convection and
+transported-air responses use the same existing spatial and coupling owners.
+Base and uniform spatial ladders rebuild the contact faces on each mesh.
+
+The accepted field passes freshly evaluated physical free-node watt residual
+and global heat-balance gates. Published contact fluxes and physical energy
+refer to that unchanged field, while `temperature_contact` retains the outer
+thermal/Krylov work, both local temperatures, actual resistance and usage
+receipt identities. Equal curve endpoints cannot hide interior variation.
+Explicit claim pins disambiguate sources without bypassing validity checks.
+Radiation, transient storage, adaptive-goal refinement and derivative/bound
+requests on this varying-contact path refuse with
+`cli-solve-conduction-contact-composition`; no frozen-contact inverse or
+roundoff certificate is published. Constant-contact projects retain their
+existing solver and derivative paths. Tests in
+`native_contact_adjoint/temperature.rs` exercise real imported projects,
+nonlinear bulk conductivity, transported air, independent constant-resistance
+brackets and the unsupported-composition refusals.
+
 The library surface exposes `run_solve`, `resume_solve`, `SolveRunId`,
 `SolveStage`, `SolveDriverState`, `SolveOutcome`, and `SolveRefusal`. The
 `solve` verb wraps them with bounded project I/O and a real monotonic clock.

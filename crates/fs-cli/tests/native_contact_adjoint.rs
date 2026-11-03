@@ -12,6 +12,8 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedInterfa
 mod prescribed;
 #[path = "native_contact_adjoint/state_query.rs"]
 mod state_query;
+#[path = "native_contact_adjoint/temperature.rs"]
+mod temperature;
 
 const OUTPUT: &str = "temperature-max-contact-adjoint";
 const TARGET: &str = "contact-resistance-multiplier";

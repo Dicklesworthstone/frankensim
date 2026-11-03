@@ -127,6 +127,43 @@ fn source_support_and_quantity_refusals_never_choose_another_claim() {
     });
 }
 
+#[test]
+fn explicit_contact_pin_disambiguates_without_losing_source_support() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let bc = boundary(&mesh);
+        let original = card(false);
+        let (selected, first) = original.claims().claims_ordered().next().unwrap();
+        let mut claims = original.claims().clone();
+        let mut competing = first.clone();
+        competing.value = PropertyValue::Scalar { value: 0.9,
+            dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS };
+        competing.interpolation = InterpolationPolicy::ConstantWithinValidity;
+        competing.validity = ValidityDomain::unconstrained().with("T", 260., 420.)
+            .with("normal_pressure", 999_999., 1_000_001.);
+        claims.insert_claim(competing).unwrap();
+        let card = InterfaceSystemCard::assemble(original.surface_a().clone(),
+            original.surface_b().clone(), original.context().clone(), claims, vec![]).unwrap();
+        let pairs = ThermalInterfaces::coincident_face_pairs(&mesh).unwrap();
+        assert!(TemperatureContact::new("joint", pairs.clone(), &card, &point(300.),
+            "T", SelectionPolicy::SingleClaimOnly).is_err());
+        let law = TemperatureContact::new_pinned("joint", pairs.clone(), &card,
+            &point(300.), "T", selected).unwrap();
+        let set = TemperatureContacts::new(cx, &mesh, &bc, vec![], vec![law], 1).unwrap();
+        let state = set.evaluate(cx, &bc, &[350.; 8]).unwrap();
+        assert_eq!(state.states()[0].resistance.receipt().selected, selected);
+        assert!((state.states()[0].resistance.value_m2_k_per_w() - 0.52).abs() < 1e-14);
+        assert!(set.evaluate(cx, &bc, &[390.; 8]).is_err());
+        assert!(fs_conduction::InterfaceResistance::from_card("joint", &card,
+            &point(390.), SelectionPolicy::SingleClaimOnly).is_ok());
+        assert!(TemperatureContact::new_pinned("joint", pairs.clone(), &card,
+            &point(390.), "T", selected).is_err());
+        let missing = fs_matdb::ClaimId(fs_blake3::hash_bytes(b"missing-contact-claim"));
+        assert!(TemperatureContact::new_pinned("joint", pairs, &card,
+            &point(300.), "T", missing).is_err());
+    });
+}
+
 // Independent P1 roots: diagonal capacities [10/24;4],[20/24;4],
 // source loads [0;4],[30/24;4], K_e=grad(N) K(Tmean) grad(N)^T/6,
 // and contact blocks +/- (1+delta_ij)/(24 R(mean of the six trace nodes)).

@@ -84,6 +84,34 @@ impl<'a> TemperatureContact<'a> {
             TemperatureContactCoordinates::Mean(temperature_axis.into()), selection)
     }
 
+    /// Bind a mean-temperature law to an already selected source claim.
+    /// The pin disambiguates competing claims without bypassing source support,
+    /// units, positive resistance or the declared temperature coordinate.
+    ///
+    /// # Errors
+    /// Refuses missing or out-of-domain pins, incompatible units, nonpositive
+    /// resistance and invalid temperature coordinates or matching face sets.
+    pub fn new_pinned(
+        name: impl Into<String>,
+        face_pairs: Vec<InterfaceFacePair>,
+        card: &'a InterfaceSystemCard,
+        point: &QueryPoint,
+        temperature_axis: &str,
+        selected: fs_matdb::ClaimId,
+    ) -> Result<Self, ConductionError> {
+        let name = name.into();
+        let coordinates = TemperatureContactCoordinates::Mean(temperature_axis.into());
+        Self::admit_reference(&name, point, &coordinates)?;
+        let resistance = InterfaceResistance::from_card_pinned(&name, card, point, selected)?;
+        let reference = ContactSurface::Matching(
+            InterfaceSurface::new(name, face_pairs, resistance.clone())?,
+        );
+        Ok(Self {
+            card, reference_point: point.clone(), coordinates, reference,
+            resistance, face_references: Vec::new(), material_states: None,
+        })
+    }
+
     /// Bind R(T_A,T_B) to the independently resolved P1 trace means.
     ///
     /// The two named axes must be distinct, present in the original query,

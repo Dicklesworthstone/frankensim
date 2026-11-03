@@ -1140,7 +1140,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 90,
+        SOLVE_DRIVER_VERSION, 93,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -4318,6 +4318,16 @@ fn g0_conduction_stage_checks_interior_contact_resistance() {
         let cards = contact_cards_with_interface(interface_pack_bytes_with_peak(Some(peak)));
         let mut spec = multi_region_contact_project();
         spec.interface_cards.as_mut().unwrap()[0].card = cards.interfaces()[0].card().to_hex();
+        // Put the accepted trace inside the curve's peak, so this also proves
+        // that equal endpoint values cannot silently select a frozen law.
+        let boundaries = &mut spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries;
+        boundaries[0].condition = ThermalBoundaryCondition::FixedTemperature {
+            temperature: QtyAny::new(300.0, fs_project::spec::dims::TEMPERATURE),
+        };
+        boundaries[1].condition = ThermalBoundaryCondition::Convection {
+            coefficient: QtyAny::new(10.0, fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT),
+            reference_temperature: QtyAny::new(300.0, fs_project::spec::dims::TEMPERATURE),
+        };
         let bindings = fs_project::resolve_bindings(
             &spec,
             &cards.library(),
@@ -4341,19 +4351,23 @@ fn g0_conduction_stage_checks_interior_contact_resistance() {
         let gate = CancelGate::new_clock_free();
         let mut clock = benign_clock();
         let mut progress = Vec::new();
-        let result = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress);
+        let outcome = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress)
+            .expect("supported flat and temperature-varying contact curves both solve");
+        assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+        let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+        let receipt = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
         if peak == 0.1 {
-            assert!(
-                matches!(result.unwrap().status, fs_cli::SolveRunStatus::Completed),
-                "a continuously supported flat curve remains usable"
-            );
+            assert!(!receipt.contains("\"temperature_contact\""),
+                "a continuously flat curve retains the ordinary constant-contact owner");
         } else {
-            let refusal =
-                result.expect_err("equal endpoints cannot hide varying contact resistance");
-            assert_eq!(
-                refusal.code,
-                "cli-solve-conduction-interface-temperature-variation"
-            );
+            let contact = receipt.split("\"temperature_contact\":").nth(1)
+                .expect("interior variation selects the source-backed nonlinear contact owner");
+            let query = receipt_number_field(contact, "query_temperature_k");
+            assert!((300.0..305.0).contains(&query), "{receipt}");
+            assert!(receipt_number_field(contact, "resistance_m2_k_w") > 0.1,
+                "the accepted field queries the actual interior law: {receipt}");
+            assert!(receipt_number_field(contact, "residual_norm_w")
+                <= receipt_number_field(contact, "residual_tolerance_w"));
         }
     }
 }
