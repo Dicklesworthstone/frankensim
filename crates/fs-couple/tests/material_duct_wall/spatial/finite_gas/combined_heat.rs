@@ -1,4 +1,6 @@
 //! G1/G3: both original gas-loss channels pay one caloric and native-wave account.
+#[path = "combined_heat/transport.rs"]
+mod transport;
 use super::*;
 use fs_couple::bernoulli_aperture::wall::material::FiniteGasDgHeatBudget;
 use fs_duct::dg::DgWallResolution;

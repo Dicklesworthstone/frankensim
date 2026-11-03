@@ -10,6 +10,7 @@ pub mod assembly;
 use super::{FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgPortStep, admit_initial};
 use crate::bernoulli_aperture::wall::material::{
     FiniteGasDgTransportCandidate, FiniteGasDgTransportStep, FiniteGasTransportNode,
+    FiniteGasDgInternalHeat, FiniteGasTransportAccounts,
     advance_finite_gas_transport_with_paths, finite_gas_transport_candidate_with_paths,
 };
 pub use crate::bernoulli_aperture::wall::material::{
@@ -79,7 +80,7 @@ impl FiniteGasTransportNode for DgPortLoad {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &FiniteGasDgTransportInput,
-        molecular_heat_j: f64,
+        heat: FiniteGasDgInternalHeat,
         evolve: impl FnMut(
             &ClosedGasParcel,
             f64,
@@ -88,9 +89,9 @@ impl FiniteGasTransportNode for DgPortLoad {
         ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
-        if molecular_heat_j != 0.0 {
+        if heat != FiniteGasDgInternalHeat::default() {
             return Err(FiniteGasDgError::Invalid(
-                "complete passive loads do not own the source-wall molecular heat integral",
+                "complete passive loads do not own source-wall gas heat integrals",
             ));
         }
         self.step_with_finite_gas_controlled(
@@ -102,13 +103,13 @@ impl FiniteGasTransportNode for DgPortLoad {
         )
     }
 
-    fn accounts<S>(step: &Self::Step<S>) -> [f64; 4] {
-        [
-            step.acoustic.ledger.port_work_step_j,
-            step.acoustic_dissipation_j,
-            step.refresh.parameter_work_j,
-            0.0,
-        ]
+    fn accounts<S>(step: &Self::Step<S>) -> FiniteGasTransportAccounts {
+        FiniteGasTransportAccounts {
+            port_work_j: step.acoustic.ledger.port_work_step_j,
+            acoustic_dissipation_j: step.acoustic_dissipation_j,
+            parameter_work_j: step.refresh.parameter_work_j,
+            heat: FiniteGasDgInternalHeat::default(),
+        }
     }
 
     fn source<S>(step: &Self::Step<S>) -> &S { &step.background }

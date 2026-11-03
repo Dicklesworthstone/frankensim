@@ -528,8 +528,8 @@ impl MaterialWallDg {
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<FiniteGasDgStep<S>, FiniteGasDgError<E>> {
-        self.step_with_prepared_molecular_heat_controlled(
-            state, propagator, gas, ports, controls, 0.0, evolve, cancelled,
+        self.step_with_prepared_internal_heat_controlled(
+            state, propagator, gas, ports, controls, FiniteGasDgInternalHeat::default(), evolve, cancelled,
         )
     }
 
@@ -539,22 +539,23 @@ impl MaterialWallDg {
     /// returned boundary heat, so the native reciprocal account cancels it once.
     /// This is not a public arbitrary-heat override.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn step_with_prepared_molecular_heat_controlled<S, E, C: FnMut() -> bool>(
+    pub(crate) fn step_with_prepared_internal_heat_controlled<S, E, C: FnMut() -> bool>(
         &mut self, state: &mut DgState, propagator: &mut DgPropagator,
         gas: &mut ClosedGasParcel, ports: &[PortInput], controls: FiniteGasDgSolve,
-        molecular_heat_j: f64,
+        heat: FiniteGasDgInternalHeat,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<FiniteGasDgStep<S>, FiniteGasDgError<E>> {
         check(cancelled)?;
-        if molecular_heat_j != 0.0
+        heat.total_j()?;
+        if heat.molecular_heat_j != 0.0
             && !matches!(controls.loss, FiniteGasDgLoss::UniformMolecularDiffusion { .. })
         {
             return Err(FiniteGasDgError::Invalid("prepared molecular heat requires its original diffusion owner"));
         }
         let candidate = prepare(&self.duct, state, propagator, gas, ports, controls,
-            molecular_heat_j, 0.0, evolve, cancelled)?;
+            heat.molecular_heat_j, heat.viscous_heat_j, evolve, cancelled)?;
         self.duct = candidate.duct;
         *state = candidate.state;
         *propagator = candidate.propagator;
@@ -673,29 +674,30 @@ impl RegionalMaterialWallDg {
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<FiniteGasDgStep<S>, FiniteGasDgError<E>> {
-        self.step_with_prepared_molecular_heat_controlled(
-            state, propagator, gas, ports, controls, 0.0, evolve, cancelled,
+        self.step_with_prepared_internal_heat_controlled(
+            state, propagator, gas, ports, controls, FiniteGasDgInternalHeat::default(), evolve, cancelled,
         )
     }
 
     /// Regional counterpart of the private source-integral composition seam.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn step_with_prepared_molecular_heat_controlled<S, E, C: FnMut() -> bool>(
+    pub(crate) fn step_with_prepared_internal_heat_controlled<S, E, C: FnMut() -> bool>(
         &mut self, state: &mut DgState, propagator: &mut DgPropagator,
         gas: &mut ClosedGasParcel, ports: &[PortInput], controls: FiniteGasDgSolve,
-        molecular_heat_j: f64,
+        heat: FiniteGasDgInternalHeat,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<FiniteGasDgStep<S>, FiniteGasDgError<E>> {
         check(cancelled)?;
-        if molecular_heat_j != 0.0
+        heat.total_j()?;
+        if heat.molecular_heat_j != 0.0
             && !matches!(controls.loss, FiniteGasDgLoss::UniformMolecularDiffusion { .. })
         {
             return Err(FiniteGasDgError::Invalid("prepared molecular heat requires its original diffusion owner"));
         }
         let candidate = prepare(&self.duct, state, propagator, gas, ports, controls,
-            molecular_heat_j, 0.0, evolve, cancelled)?;
+            heat.molecular_heat_j, heat.viscous_heat_j, evolve, cancelled)?;
         self.duct = candidate.duct;
         *state = candidate.state;
         *propagator = candidate.propagator;

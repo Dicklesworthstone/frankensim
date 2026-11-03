@@ -18,7 +18,8 @@ pub mod electrical;
 
 use super::{AcousticMotionError, AcousticMotionFace, AcousticMotionSolve, AcousticMotionStep};
 use crate::bernoulli_aperture::wall::material::{
-    FiniteGasTransportNode, finite_gas_transport_candidate_with_paths,
+    FiniteGasTransportNode, FiniteGasDgInternalHeat, FiniteGasTransportAccounts,
+    finite_gas_transport_candidate_with_paths,
 };
 use crate::cavity_phs::piston::PistonError;
 use crate::cavity_phs::piston::double_acting::{
@@ -223,7 +224,7 @@ impl FiniteGasTransportNode for StagedPort<'_> {
         &self,
         input: &Self::Input,
         cancelled: &mut C,
-    ) -> Result<f64, FiniteGasDgError<E>> {
+    ) -> Result<FiniteGasDgInternalHeat, FiniteGasDgError<E>> {
         <DgPortLoad as FiniteGasTransportNode>::prepare_internal_heat(
             self.original, input, cancelled,
         )
@@ -233,7 +234,7 @@ impl FiniteGasTransportNode for StagedPort<'_> {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
-        molecular_heat_j: f64,
+        heat: FiniteGasDgInternalHeat,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
@@ -243,11 +244,11 @@ impl FiniteGasTransportNode for StagedPort<'_> {
             ));
         }
         // Retain the complete-load owner's admission. Its native decrement is
-        // exported loss; only source-wall owners supply a molecular heat integral.
+        // exported loss; only source-wall owners supply these gas heat integrals.
         // An unsupported transfer must not disappear during staged completion.
-        if molecular_heat_j != 0.0 {
+        if heat != FiniteGasDgInternalHeat::default() {
             return Err(FiniteGasDgError::Invalid(
-                "complete passive loads do not own the source-wall molecular heat integral",
+                "complete passive loads do not own source-wall gas heat integrals",
             ));
         }
         let controls = input.acoustic.ok_or(FiniteGasDgError::Invalid(
@@ -267,7 +268,7 @@ impl FiniteGasTransportNode for StagedPort<'_> {
         Ok(candidate.step)
     }
 
-    fn accounts<S>(step: &Self::Step<S>) -> [f64; 4] {
+    fn accounts<S>(step: &Self::Step<S>) -> FiniteGasTransportAccounts {
         <DgPortLoad as FiniteGasTransportNode>::accounts(step)
     }
 

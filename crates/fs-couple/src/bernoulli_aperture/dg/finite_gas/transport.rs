@@ -14,6 +14,7 @@ use crate::bernoulli_aperture::tube::TubeDrive;
 use crate::bernoulli_aperture::two_sided::LoadedAperture;
 use crate::bernoulli_aperture::wall::material::{
     FiniteGasDgTransportCandidate, FiniteGasDgTransportStep, FiniteGasTransportNode,
+    FiniteGasDgInternalHeat, FiniteGasTransportAccounts,
     advance_finite_gas_transport_with_paths, finite_gas_transport_candidate_with_paths,
 };
 pub use crate::dg_port::finite_gas::transport::{
@@ -127,7 +128,7 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
-        molecular_heat_j: f64,
+        heat: FiniteGasDgInternalHeat,
         evolve: impl FnMut(
             &ClosedGasParcel,
             f64,
@@ -136,9 +137,9 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
-        if molecular_heat_j != 0.0 {
+        if heat != FiniteGasDgInternalHeat::default() {
             return Err(FiniteGasDgError::Invalid(
-                "moving apertures do not own the source-wall molecular heat integral",
+                "moving apertures do not own source-wall gas heat integrals",
             ));
         }
         let source = input.source.expect("admitted moving-source input");
@@ -153,18 +154,18 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         )
     }
 
-    fn accounts<S>(step: &Self::Step<S>) -> [f64; 4] {
+    fn accounts<S>(step: &Self::Step<S>) -> FiniteGasTransportAccounts {
         let frame = &step.coupled;
         // The valve/duct pressure-flow work is INTERNAL to this node. Only
         // original prescribed drives and signed exterior exchange cross its
         // boundary. Modal pressure work is already in mechanical_work_j.
-        [
-            frame.upstream_work_j + frame.body_work_j + frame.aperture.mechanical_work_j
+        FiniteGasTransportAccounts {
+            port_work_j: frame.upstream_work_j + frame.body_work_j + frame.aperture.mechanical_work_j
                 - sum_terminal_work(&frame.terminals),
-            frame.inferred_total_dissipation_j,
-            frame.parameter_work_j,
-            0.0,
-        ]
+            acoustic_dissipation_j: frame.inferred_total_dissipation_j,
+            parameter_work_j: frame.parameter_work_j,
+            heat: FiniteGasDgInternalHeat::default(),
+        }
     }
 
     fn source<S>(step: &Self::Step<S>) -> &S { &step.gas.background }

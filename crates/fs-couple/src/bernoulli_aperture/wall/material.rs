@@ -25,6 +25,7 @@ pub use local::finite_gas::{
     FiniteGasDgStep, FiniteGasDgHeatBudget,
 };
 pub(crate) use local::finite_gas::{
+    FiniteGasDgInternalHeat,
     admit_controls as admit_finite_gas_controls, field as finite_gas_field,
     heated as heated_finite_gas, stored_change as finite_gas_stored_change,
 };
@@ -36,7 +37,8 @@ pub use local::finite_gas::transport::{
     finite_gas_dg_transport_candidate_with_paths, advance_finite_gas_dg_transport_with_paths,
 };
 pub(crate) use local::finite_gas::transport::{
-    FiniteGasTransportNode, FiniteGasTransportEvolution, advance_finite_gas_transport_with_paths,
+    FiniteGasTransportNode, FiniteGasTransportAccounts, FiniteGasTransportEvolution,
+    advance_finite_gas_transport_with_paths,
     finite_gas_transport_candidate_with_paths, finite_gas_transport_candidate_with_evolution,
     prepare_finite_gas_transport,
 };

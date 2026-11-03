@@ -266,14 +266,16 @@ fn fixture(law: &GasReaction) -> (Parcels, MixedNodes, MixedInputs) {
 fn thermal(input: &FiniteGasAcousticInput) -> &FiniteGasDgTransportInput {
     match input {
         FiniteGasAcousticInput::Passive(row) => row,
-        FiniteGasAcousticInput::MolecularWall { thermal, .. } => thermal,
+        FiniteGasAcousticInput::MolecularWall { thermal, .. }
+        | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. } => thermal,
         FiniteGasAcousticInput::Aperture(row) => &row.thermal,
     }
 }
 fn thermal_mut(input: &mut FiniteGasAcousticInput) -> &mut FiniteGasDgTransportInput {
     match input {
         FiniteGasAcousticInput::Passive(row) => row,
-        FiniteGasAcousticInput::MolecularWall { thermal, .. } => thermal,
+        FiniteGasAcousticInput::MolecularWall { thermal, .. }
+        | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. } => thermal,
         FiniteGasAcousticInput::Aperture(row) => &mut row.thermal,
     }
 }

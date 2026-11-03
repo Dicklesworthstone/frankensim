@@ -8,7 +8,8 @@ use super::{
     FiniteGasApertureDgStep, FiniteGasApertureTransportInput, FiniteGasApertureTransportStep,
     FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgTransportCandidate,
     FiniteGasDgTransportError, FiniteGasDgTransportInput, FiniteGasDgTransportSolve,
-    FiniteGasTransportNode, GasCompositionStep, GasTransportPaths, LoadedApertureDg,
+    FiniteGasTransportNode, FiniteGasDgInternalHeat, FiniteGasTransportAccounts,
+    GasCompositionStep, GasTransportPaths, LoadedApertureDg,
     advance_finite_gas_transport_with_paths, finite_gas_transport_candidate_with_paths,
 };
 use crate::bernoulli_aperture::dg::ApertureDg;
@@ -77,15 +78,15 @@ impl FiniteGasTransportNode for ApertureDg {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
-        molecular_heat_j: f64,
+        heat: FiniteGasDgInternalHeat,
         evolve: impl FnMut(
             &ClosedGasParcel, f64, f64, &mut C,
         ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
-        if molecular_heat_j != 0.0 {
+        if heat != FiniteGasDgInternalHeat::default() {
             return Err(FiniteGasDgError::Invalid(
-                "scalar apertures do not own a molecular heat integral",
+                "scalar apertures do not own source-wall gas heat integrals",
             ));
         }
         let source = input.source.expect("admitted scalar source drive");
@@ -96,7 +97,7 @@ impl FiniteGasTransportNode for ApertureDg {
         )
     }
 
-    fn accounts<S>(step: &Self::Step<S>) -> [f64; 4] {
+    fn accounts<S>(step: &Self::Step<S>) -> FiniteGasTransportAccounts {
         <LoadedApertureDg as FiniteGasTransportNode>::accounts(step)
     }
 

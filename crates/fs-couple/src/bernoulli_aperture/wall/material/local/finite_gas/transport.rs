@@ -9,6 +9,7 @@
 
 use super::{
     FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgLoss, FiniteGasDgSolve, FiniteGasDgStep,
+    FiniteGasDgHeatBudget, FiniteGasDgInternalHeat,
     MaterialWallDg, RegionalMaterialWallDg, stored_change,
 };
 use fs_duct::dg::{DgDuct, DgPropagator, DgState, PortInput};
@@ -104,7 +105,7 @@ pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>, R =
     pub acoustic_storage_change_j: f64,
     /// Heat entering the gas/acoustic boundary. A thermal companion's reciprocal
     /// transfer is included here and cancels only in its enclosing body account.
-    /// Molecular heating is internal to this boundary and is excluded.
+    /// Molecular and fluid-viscosity heating are internal and excluded.
     pub supplied_heat_j: f64,
     /// Net external work into bound nodes, including mechanical drives and
     /// subtracting signed exterior exchange. Internal source/load work cancels.
@@ -112,16 +113,19 @@ pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>, R =
     /// Complete native mechanical/gas/wall/boundary decrement, without clamping.
     pub acoustic_dissipation_j: f64,
     /// Independently integrated original molecular loss deposited into gas once.
-    /// Numerical, wall, viscous and boundary losses are never inferred as heat.
+    /// This retains molecular identity when fluid-viscosity heat is also returned.
     pub molecular_heat_j: f64,
-    /// Compensated sum of each native decrement minus its internal molecular heat.
+    /// Independently integrated fluid-viscosity loss deposited into gas once.
+    /// Numerical, thermal-wall, solid and boundary losses are never inferred here.
+    pub viscous_heat_j: f64,
+    /// Compensated sum of each native decrement minus both internal gas heats.
     /// Other losses retain their existing exported-energy meaning and roundoff.
     pub exported_acoustic_dissipation_j: f64,
     /// Internal gas-to-wave transfer, already included in the storage changes.
     pub parameter_work_j: f64,
     pub total_mass_residual_kg: f64,
     /// Gas + complete bound-node storage + exported loss - boundary heat - port work.
-    /// Internal molecular heat, enthalpy transfer and gas-to-wave work cancel once.
+    /// Both gas heats, enthalpy transfer and gas-to-wave work cancel once.
     pub combined_energy_residual_j: f64,
 }
 
@@ -151,10 +155,18 @@ impl<N, A, R> FiniteGasDgTransportCandidate<N, A, R> {
     ) { (self.parcels, self.nodes, self.step) }
 }
 
+/// Original native energy terms without erasing the identity of either heat source.
+pub(crate) struct FiniteGasTransportAccounts {
+    /// Signed net work, including any original exterior terminal exchange.
+    pub port_work_j: f64,
+    pub acoustic_dissipation_j: f64,
+    pub parameter_work_j: f64,
+    pub heat: FiniteGasDgInternalHeat,
+}
+
 /// Only bound-node ownership and its typed physical source inputs vary across
-/// wall, complete-load and moving-source adapters.
-/// Native transport, caloric feedback input, endpoint gates, global accounts
-/// and atomic publication stay in the single transaction below.
+/// wall, complete-load and moving-source adapters. Transport, caloric feedback,
+/// endpoint gates, accounts and publication stay in the single transaction.
 pub(crate) trait FiniteGasTransportNode: Clone {
     type Step<S>;
     type Input;
@@ -184,30 +196,45 @@ pub(crate) trait FiniteGasTransportNode: Clone {
         &self,
         _input: &Self::Input,
         cancelled: &mut C,
-    ) -> Result<f64, FiniteGasDgError<E>> {
+    ) -> Result<FiniteGasDgInternalHeat, FiniteGasDgError<E>> {
         super::check(cancelled)?;
-        Ok(0.0)
+        Ok(FiniteGasDgInternalHeat::default())
     }
 
     fn advance<S, E, C: FnMut() -> bool>(
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
-        molecular_heat_j: f64,
+        heat: FiniteGasDgInternalHeat,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>>;
 
-    /// Net port work, total native decrement, gas-to-wave work and molecular heat [J].
+    /// Net port work, total native decrement, gas-to-wave work and both source heats.
     /// Net port work already accounts for any represented exterior terminal.
-    fn accounts<S>(step: &Self::Step<S>) -> [f64; 4];
+    fn accounts<S>(step: &Self::Step<S>) -> FiniteGasTransportAccounts;
 
     /// The actual accepted background, never a side effect of a rejected trial.
     fn source<S>(step: &Self::Step<S>) -> &S;
 }
 
 impl FiniteGasDgNode {
+    /// Both original gas channels on the accepted snapshot, each with its own
+    /// complete preparation allowance and before all transport/work trials.
+    pub(crate) fn prepare_viscous_molecular_heat<E, C: FnMut() -> bool>(
+        &self,
+        input: &FiniteGasDgTransportInput,
+        budgets: FiniteGasDgHeatBudget,
+        cancelled: &mut C,
+    ) -> Result<FiniteGasDgInternalHeat, FiniteGasDgError<E>> {
+        let controls = input.acoustic.ok_or(FiniteGasDgError::Invalid(
+            "gas-loss heating requires original acoustic controls",
+        ))?;
+        super::prepare_internal_heat(self.binding.duct(), &self.state, &self.propagator,
+            &input.ports, controls, budgets, cancelled)
+    }
+
     /// Observe the complete original molecular trajectory under the actual held
     /// ports. No accepted state advances, and no aggregate energy deficit is
     /// substituted for the native source-positive slip-square integral.
@@ -292,27 +319,34 @@ impl FiniteGasTransportNode for FiniteGasDgNode {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &FiniteGasDgTransportInput,
-        molecular_heat_j: f64,
+        heat: FiniteGasDgInternalHeat,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
         let solve = input.acoustic.expect("validated acoustic input");
         match &mut self.binding {
-            FiniteGasDgBinding::Uniform(wall) => wall.step_with_prepared_molecular_heat_controlled(
+            FiniteGasDgBinding::Uniform(wall) => wall.step_with_prepared_internal_heat_controlled(
                 &mut self.state, &mut self.propagator, gas, &input.ports,
-                solve, molecular_heat_j, evolve, cancelled,
+                solve, heat, evolve, cancelled,
             ),
-            FiniteGasDgBinding::Regional(wall) => wall.step_with_prepared_molecular_heat_controlled(
+            FiniteGasDgBinding::Regional(wall) => wall.step_with_prepared_internal_heat_controlled(
                 &mut self.state, &mut self.propagator, gas, &input.ports,
-                solve, molecular_heat_j, evolve, cancelled,
+                solve, heat, evolve, cancelled,
             ),
         }
     }
 
-    fn accounts<S>(step: &Self::Step<S>) -> [f64; 4] {
-        [step.acoustic.ledger.port_work_step_j, step.acoustic_dissipation_j,
-            step.refresh.parameter_work_j, step.molecular_heat_j]
+    fn accounts<S>(step: &Self::Step<S>) -> FiniteGasTransportAccounts {
+        FiniteGasTransportAccounts {
+            port_work_j: step.acoustic.ledger.port_work_step_j,
+            acoustic_dissipation_j: step.acoustic_dissipation_j,
+            parameter_work_j: step.refresh.parameter_work_j,
+            heat: FiniteGasDgInternalHeat {
+                molecular_heat_j: step.molecular_heat_j,
+                viscous_heat_j: step.viscous_heat_j,
+            },
+        }
     }
 
     fn source<S>(step: &Self::Step<S>) -> &S { &step.background }
@@ -436,7 +470,7 @@ impl Sum {
 /// boundary heat exactly, including its signed zero.
 fn compose_heat(heat: f64, transfer: f64) -> Result<f64, GasEnergyError> {
     if !heat.is_finite() || !transfer.is_finite() {
-        return Err(GasEnergyError::Invalid("molecular and boundary heat must be finite"));
+        return Err(GasEnergyError::Invalid("internal gas and boundary heat must be finite"));
     }
     if transfer == 0.0 {
         return Ok(heat);
@@ -444,7 +478,7 @@ fn compose_heat(heat: f64, transfer: f64) -> Result<f64, GasEnergyError> {
     let total = heat + transfer;
     if !total.is_finite() || total == heat || (heat != 0.0 && total == transfer) {
         return Err(GasEnergyError::Invalid(
-            "molecular transfer or boundary heat disappears in energy coordinates",
+            "internal gas transfer or boundary heat disappears in energy coordinates",
         ));
     }
     Ok(total)
@@ -596,7 +630,7 @@ pub(crate) struct PreparedFiniteGasTransport<'a, N: FiniteGasTransportNode> {
     transported: BTreeMap<u64, ClosedGasParcel>,
     transport: GasTransportStep,
     /// Original source observations, never recomputed by body/heat/work probes.
-    molecular_heat: BTreeMap<u64, f64>,
+    internal_heat: BTreeMap<u64, FiniteGasDgInternalHeat>,
     duration_s: f64,
     controls: FiniteGasDgTransportSolve,
 }
@@ -648,22 +682,20 @@ pub(crate) fn prepare_finite_gas_transport<
     }
     // Every source/owner is admitted before the first original heat observation.
     // The material transport and all later nonlinear trials reuse these values.
-    let mut molecular_heat = BTreeMap::new();
+    let mut internal_heat = BTreeMap::new();
     for (&id, node) in nodes {
         check(cancelled)?;
         let heat = node.prepare_internal_heat(&inputs[&id], cancelled)
             .map_err(|error| acoustic_error::<T>(id, error))?;
-        if !heat.is_finite() || heat < 0.0 {
-            return Err(Error::Invalid("original internal molecular heat must be finite and nonnegative"));
-        }
-        molecular_heat.insert(id, heat);
+        heat.total_j().map_err(|error| acoustic_error::<T>(id, error))?;
+        internal_heat.insert(id, heat);
     }
     let (transported, transport) = material::step_candidate_with_paths(
         parcels, paths, duration_s, &endpoints, controls.transport, &mut *cancelled,
     ).map_err(transport_error)?.into_parts();
     check(cancelled)?;
     Ok(PreparedFiniteGasTransport {
-        parcels, nodes, inputs, transported, transport, molecular_heat, duration_s, controls,
+        parcels, nodes, inputs, transported, transport, internal_heat, duration_s, controls,
     })
 }
 
@@ -695,20 +727,23 @@ impl<N: FiniteGasTransportNode> PreparedFiniteGasTransport<'_, N> {
     let mut port_work = Sum::default();
     let mut losses = Sum::default();
     let mut molecular_heat = Sum::default();
+    let mut viscous_heat = Sum::default();
     let mut exported_losses = Sum::default();
     let mut parameter_work = Sum::default();
     for (&id, node_input) in inputs {
         check(cancelled)?;
         let input = N::transport_input(node_input, nodes.contains_key(&id)).map_err(Error::Invalid)?;
         if let Some(node) = next_nodes.get_mut(&id) {
-            let internal_heat = self.molecular_heat[&id];
+            let internal_heat = self.internal_heat[&id];
+            let internal_heat_j = internal_heat.total_j()
+                .map_err(|error| acoustic_error::<T>(id, error))?;
             // The original chemistry/thermal owner receives the actual heat.
             // Only the enclosing acoustic/gas account removes this transfer.
-            let heated_input = if internal_heat == 0.0 {
+            let heated_input = if internal_heat_j == 0.0 {
                 None
             } else {
                 let mut heated = input.clone();
-                heated.supplied_heat_j = compose_heat(input.supplied_heat_j, internal_heat)
+                heated.supplied_heat_j = compose_heat(input.supplied_heat_j, internal_heat_j)
                     .map_err(|error| gas_error::<T>(id, error.into()))?;
                 Some(heated)
             };
@@ -724,7 +759,7 @@ impl<N: FiniteGasTransportNode> PreparedFiniteGasTransport<'_, N> {
                     id, transported_gas, endpoint_input, duration_s, work, cancel,
                 )?;
                 let supplied_heat_j = compose_heat(
-                    evolution.node_supplied_heat_j(endpoint_input, &source), -internal_heat,
+                    evolution.node_supplied_heat_j(endpoint_input, &source), -internal_heat_j,
                 ).map_err(T::Error::from)?;
                 Ok::<_, T::Error>(FiniteGasDgBackground {
                     gas: endpoint, supplied_heat_j,
@@ -737,17 +772,18 @@ impl<N: FiniteGasTransportNode> PreparedFiniteGasTransport<'_, N> {
                 .map_err(|error| gas_error::<T>(id, error))?;
             heat.add(compose_heat(
                 evolution.node_supplied_heat_j(endpoint_input, N::source::<T::Source>(&step)),
-                -internal_heat,
+                -internal_heat_j,
             ).map_err(|error| gas_error::<T>(id, error.into()))?)?;
-            let [net_port_work, acoustic_loss, gas_work, accepted_heat] = N::accounts::<T::Source>(&step);
-            if accepted_heat != internal_heat {
-                return Err(Error::Invalid("native owner did not retain its one prepared molecular transfer"));
+            let account = N::accounts::<T::Source>(&step);
+            if account.heat != internal_heat {
+                return Err(Error::Invalid("native owner did not retain both original prepared gas transfers"));
             }
-            port_work.add(net_port_work)?;
-            losses.add(acoustic_loss)?;
-            molecular_heat.add(accepted_heat)?;
-            exported_losses.add(acoustic_loss - accepted_heat)?;
-            parameter_work.add(gas_work)?;
+            port_work.add(account.port_work_j)?;
+            losses.add(account.acoustic_dissipation_j)?;
+            molecular_heat.add(account.heat.molecular_heat_j)?;
+            viscous_heat.add(account.heat.viscous_heat_j)?;
+            exported_losses.add(account.acoustic_dissipation_j - internal_heat_j)?;
+            parameter_work.add(account.parameter_work_j)?;
             next_parcels.insert(id, gas);
             acoustics.insert(id, step);
         } else {
@@ -789,6 +825,7 @@ impl<N: FiniteGasTransportNode> PreparedFiniteGasTransport<'_, N> {
         acoustic_storage_change_j: acoustic_storage.value,
         supplied_heat_j: heat.value, port_work_j: port_work.value,
         acoustic_dissipation_j: losses.value, molecular_heat_j: molecular_heat.value,
+        viscous_heat_j: viscous_heat.value,
         exported_acoustic_dissipation_j: exported_losses.value,
         parameter_work_j: parameter_work.value,
         total_mass_residual_kg: mass.value, combined_energy_residual_j: residual,
