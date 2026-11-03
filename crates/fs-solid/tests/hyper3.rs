@@ -1021,3 +1021,327 @@ fn skew_tet_preserves_force_energy_and_tangent_under_large_translation() {
         });
     }
 }
+
+fn vibration_settings() -> fs_solid::hyper3::vibration::VibrationSettings {
+    fs_solid::hyper3::vibration::VibrationSettings {
+        maximum_free_dofs: 128,
+        relative_residual_tolerance: 1e-9,
+    }
+}
+
+fn vibration_close(actual: f64, expected: f64, tolerance: f64) {
+    assert!(actual.is_finite() && expected.is_finite());
+    assert!(
+        (actual - expected).abs() <= tolerance * expected.abs().max(1e-14),
+        "{actual:e} vs {expected:e}, tolerance {tolerance:e}"
+    );
+}
+
+#[test]
+fn g1_finite_strain_vibration_matches_loaded_neo_hookean_tangent() {
+    let (mu, lame, rho, length) = (2e5, 8e5, 1100.0, 0.02);
+    let nodes = [
+        [0.0; 3],
+        [length, 0.0, 0.0],
+        [0.0, length, 0.0],
+        [0.0, 0.0, length],
+    ];
+    let tets = [[0, 1, 2, 3]];
+    let fixed: Vec<_> = (0..12)
+        .filter(|&dof| dof != 3)
+        .map(|dof| (dof, 0.0))
+        .collect();
+    let material = neo_hookean(mu, lame);
+    let volume = length * length * length / 6.0;
+    for stretch in [1.0_f64, 1.3, 1.6] {
+        // F=diag(stretch,1,1), with the axial coordinate selected by dead load.
+        // Direct differentiation of the scalar NH potential gives P11 and A1111.
+        let piola = mu * stretch + (lame * stretch.ln() - mu) / stretch;
+        let tangent = mu + (mu + lame * (1.0 - stretch.ln())) / (stretch * stretch);
+        let forces = [(3, volume * piola / length)];
+        let p = problem(&nodes, &tets, &material, &fixed, &forces, 4);
+        with_cx(|cx| {
+            let spectrum = p.solve_vibration(&[rho], vibration_settings(), cx).unwrap();
+            assert_eq!(spectrum.free_dofs(), &[3]);
+            assert_eq!(spectrum.modes().len(), 1);
+            vibration_close(
+                1.0 + spectrum.equilibrium().displacement_m[1][0] / length,
+                stretch,
+                2e-9,
+            );
+            vibration_close(
+                spectrum.stiffness_n_m()[0],
+                volume * tangent / (length * length),
+                2e-9,
+            );
+            // The original reference mass does not grow with det F.
+            vibration_close(spectrum.mass_kg()[0], rho * volume / 10.0, 2e-14);
+            let expected = 10.0 * tangent / (rho * length * length);
+            vibration_close(spectrum.modes()[0].lambda, expected, 2e-9);
+            vibration_close(
+                spectrum.modes()[0].phi[0].powi(2) * spectrum.mass_kg()[0],
+                1.0,
+                2e-13,
+            );
+            assert!(spectrum.modes()[0].interval.0 > 0.0);
+        });
+    }
+}
+
+#[test]
+fn g0_source_bound_vibration_retains_native_equilibrium_and_complete_pencil() {
+    use fs_material::hyper::cards::ResolvedHyperelastic;
+    let (nodes, tets) = box_mesh([2, 1, 1], [2.0, 1.0, 1.0]);
+    let prescribed = layered_constraints(&nodes, 0.4);
+    let cards = [layered_source_card(1.0), layered_source_card(5.0)];
+    let sides: Vec<_> = tets
+        .iter()
+        .map(|tet| usize::from(tet.iter().map(|&node| nodes[node][0]).sum::<f64>() / 4.0 > 1.0))
+        .collect();
+    let laws: Vec<_> = sides
+        .iter()
+        .map(|&side| ResolvedHyperelastic::try_from_model_card(&cards[side]).unwrap())
+        .collect();
+    let density: Vec<_> = sides.iter().map(|&side| [1000.0, 1600.0][side]).collect();
+    let p = HyperTetProblem {
+        nodes_m: &nodes,
+        tetrahedra: &tets,
+        material: HyperelasticLawField::PerElement(&laws),
+        prescribed_m: &prescribed,
+        nodal_forces_n: &[],
+        body_force_n_m3: [0.0; 3],
+        budget: TetAssemblyBudget::standard(),
+        settings: HyperTetSettings {
+            load_steps: 4,
+            ..HyperTetSettings::default()
+        },
+    };
+    with_cx(|cx| {
+        let spectrum = p
+            .solve_vibration(&density, vibration_settings(), cx)
+            .unwrap();
+        assert_eq!(spectrum.equilibrium(), &p.solve(cx).unwrap());
+        assert_eq!(spectrum.reference_density_kg_m3(), density);
+        let HyperelasticLawField::PerElement(retained) = spectrum.problem().material else {
+            panic!("spatial source field was replaced");
+        };
+        assert!(core::ptr::eq(retained.as_ptr(), laws.as_ptr()));
+        let displacement: Vec<_> = spectrum
+            .equilibrium()
+            .displacement_m
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let tangent = p.tangent_matrix(&displacement, cx).unwrap();
+        let mass = p.reference_mass_matrix(&density, cx).unwrap();
+        let n = spectrum.free_dofs().len();
+        assert_eq!(n, 4);
+        assert_eq!(spectrum.modes().len(), n);
+        for (i, &row) in spectrum.free_dofs().iter().enumerate() {
+            for (j, &col) in spectrum.free_dofs().iter().enumerate() {
+                assert_eq!(
+                    spectrum.stiffness_n_m()[i * n + j].to_bits(),
+                    tangent.get(row, col).to_bits()
+                );
+                assert_eq!(
+                    spectrum.mass_kg()[i * n + j].to_bits(),
+                    mass.get(row, col).to_bits()
+                );
+            }
+        }
+        let doubled: Vec<_> = density.iter().map(|rho| 2.0 * rho).collect();
+        let heavier = p
+            .solve_vibration(&doubled, vibration_settings(), cx)
+            .unwrap();
+        assert_eq!(spectrum.equilibrium(), heavier.equilibrium());
+        for (mode, doubled_mass) in spectrum.modes().iter().zip(heavier.modes()) {
+            vibration_close(doubled_mass.lambda, 0.5 * mode.lambda, 2e-12);
+            let norm: f64 = (0..n)
+                .map(|i| {
+                    (0..n)
+                        .map(|j| mode.phi[i] * spectrum.mass_kg()[i * n + j] * mode.phi[j])
+                        .sum::<f64>()
+                })
+                .sum();
+            vibration_close(norm, 1.0, 2e-12);
+        }
+    });
+}
+
+#[test]
+fn g1_finite_strain_vibration_preserves_reference_deformation_adapter() {
+    use fs_material::hyper::cards::HyperelasticMaterial;
+    #[derive(Debug)]
+    struct Expanded {
+        law: Hyperelastic,
+        stretch: f64,
+    }
+    impl HyperelasticMaterial for Expanded {
+        fn hyperelastic(&self) -> &Hyperelastic {
+            &self.law
+        }
+        fn energy_density(&self, f: &[f64; 9]) -> f64 {
+            self.stretch.powi(3) * self.law.energy(&f.map(|v| v / self.stretch))
+        }
+        fn first_piola(&self, f: &[f64; 9]) -> Result<[f64; 9], fs_material::MaterialError> {
+            Ok(self
+                .law
+                .piola(&f.map(|v| v / self.stretch))?
+                .map(|v| self.stretch.powi(2) * v))
+        }
+        fn consistent_tangent(
+            &self,
+            f: &[f64; 9],
+        ) -> Result<[[f64; 9]; 9], fs_material::MaterialError> {
+            Ok(self
+                .law
+                .tangent(&f.map(|v| v / self.stretch))?
+                .map(|row| row.map(|v| self.stretch * v)))
+        }
+    }
+    let (mu, lame, expansion, rho) = (2e5, 8e5, 1.2, 1100.0);
+    let material = Expanded {
+        law: neo_hookean(mu, lame),
+        stretch: expansion,
+    };
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let fixed: Vec<_> = (0..12)
+        .filter(|&dof| dof != 3)
+        .map(|dof| {
+            (
+                dof,
+                if matches!(dof, 7 | 11) {
+                    expansion - 1.0
+                } else {
+                    0.0
+                },
+            )
+        })
+        .collect();
+    let p = HyperTetProblem {
+        nodes_m: &nodes,
+        tetrahedra: &tets,
+        material: HyperelasticLawField::Uniform(&material),
+        prescribed_m: &fixed,
+        nodal_forces_n: &[],
+        body_force_n_m3: [0.0; 3],
+        budget: TetAssemblyBudget::standard(),
+        settings: HyperTetSettings {
+            load_steps: 4,
+            ..HyperTetSettings::default()
+        },
+    };
+    let spectrum = with_cx(|cx| p.solve_vibration(&[rho], vibration_settings(), cx)).unwrap();
+    vibration_close(
+        1.0 + spectrum.equilibrium().displacement_m[1][0],
+        expansion,
+        2e-9,
+    );
+    // W_ref(F)=a^3 W(F/a) gives A_ref=a*A(I); inertia stays in the original mesh.
+    vibration_close(
+        spectrum.modes()[0].lambda,
+        10.0 * expansion * (2.0 * mu + lame) / rho,
+        2e-9,
+    );
+}
+
+#[test]
+fn g0_finite_strain_vibration_retains_unstable_and_rigid_modes() {
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let material = neo_hookean(1.0, 100.0);
+    let fixed: Vec<_> = (0..12)
+        .filter(|&dof| dof != 3)
+        .map(|dof| (dof, 0.0))
+        .collect();
+    let stretch = 4.0_f64;
+    let forces = [(3, (stretch + (100.0 * stretch.ln() - 1.0) / stretch) / 6.0)];
+    let p = problem(&nodes, &tets, &material, &fixed, &forces, 1);
+    let mut initial = [0.0; 12];
+    initial[3] = stretch - 1.0;
+    with_cx(|cx| {
+        let spectrum = p
+            .solve_vibration_from(&initial, &[1.0], vibration_settings(), cx)
+            .unwrap();
+        let expected = 10.0 * (1.0 + (1.0 + 100.0 * (1.0 - stretch.ln())) / stretch.powi(2));
+        assert!(expected < 0.0);
+        vibration_close(spectrum.modes()[0].lambda, expected, 2e-12);
+        assert!(spectrum.modes()[0].interval.1 < 0.0);
+        let free = problem(&nodes, &tets, &material, &[], &[], 1)
+            .solve_vibration(&[1.0], vibration_settings(), cx)
+            .unwrap();
+        assert_eq!(free.modes().len(), 12);
+        let scale = free
+            .modes()
+            .iter()
+            .map(|mode| mode.lambda.abs())
+            .fold(0.0, f64::max);
+        assert!(
+            free.modes()[..6]
+                .iter()
+                .all(|mode| mode.lambda.abs() < 1e-10 * scale)
+        );
+        assert!(free.modes()[6..].iter().all(|mode| mode.interval.0 > 0.0));
+    });
+}
+
+#[test]
+fn g0_finite_strain_vibration_preserves_budgets_mass_domains_and_cancellation() {
+    use fs_solid::hyper3::vibration::VibrationError;
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let material = neo_hookean(1.0, 2.0);
+    let fixed: Vec<_> = (0..12)
+        .filter(|&dof| dof != 3)
+        .map(|dof| (dof, 0.0))
+        .collect();
+    let p = problem(&nodes, &tets, &material, &fixed, &[], 1);
+    with_cx(|cx| {
+        let mut settings = vibration_settings();
+        settings.maximum_free_dofs = 0;
+        assert!(matches!(
+            p.solve_vibration(&[1.0], settings, cx),
+            Err(VibrationError::Solid(HyperTetError::InvalidInput { .. }))
+        ));
+        for density in [&[][..], &[0.0][..], &[f64::NAN][..]] {
+            assert!(matches!(
+                p.solve_vibration(density, vibration_settings(), cx),
+                Err(VibrationError::Solid(HyperTetError::InvalidInput { .. }))
+            ));
+        }
+        let mut initial = [0.0; 12];
+        initial[3] = 5.0; // F11=6 lies beyond the original law's stretch limit.
+        assert!(matches!(
+            p.solve_vibration_from(&initial, &[1.0], vibration_settings(), cx),
+            Err(VibrationError::Solid(HyperTetError::MaterialRefused { .. }))
+        ));
+        let (large_nodes, large_tets) = box_mesh([3, 3, 3], [1.0; 3]);
+        let large = problem(&large_nodes, &large_tets, &material, &[], &[], 1);
+        assert!(matches!(
+            large.solve_vibration(&vec![1.0; large_tets.len()], vibration_settings(), cx),
+            Err(VibrationError::Solid(HyperTetError::InvalidInput { .. }))
+        ));
+    });
+    let gate = CancelGate::new();
+    gate.request();
+    ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 3,
+                kernel_id: 17,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        assert!(matches!(
+            p.solve_vibration(&[1.0], vibration_settings(), &cx),
+            Err(VibrationError::Solid(HyperTetError::Cancelled))
+        ));
+    });
+}

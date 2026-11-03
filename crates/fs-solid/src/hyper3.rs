@@ -86,6 +86,9 @@ pub mod gravity;
 /// Immutable reference preparation for repeated finite-deformation evaluation.
 pub mod prepared;
 
+/// Complete signed vibration spectra about the native finite-strain equilibrium.
+pub mod vibration;
+
 /// Retained multiplicative finite-strain plastic history on the native mesh.
 pub mod plastic;
 
