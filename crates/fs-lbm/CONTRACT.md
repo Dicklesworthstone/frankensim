@@ -857,6 +857,26 @@ carried kinetic energy and actual kinetic change; independent local mass,
 momentum, enthalpy and enthalpy-plus-kinetic defects must all fit their budgets.
 The co-moving signed exchange API and its arithmetic remain unchanged.
 
+Several streams can enter the same cell in one atomic native update. Each
+stream independently fits the original liquid caloric chart and speed bound;
+averaging cannot admit an invalid source or imply a new composition law.
+Mass-weighted enthalpy and velocity retain a central kinetic-energy variance
+`q = sum(m_i*|v_i-v_mean|^2)/(2*sum(m_i))`. Represented incoming kinetic energy
+includes `dm*q`, and the same amount becomes additional local mixing heat
+exactly once. Opposing jets therefore retain their energy even at zero mean
+velocity. Stable relative-velocity reduction follows the authored stream order;
+permutations agree to floating-point roundoff. The existing stream-count bound
+continues to bound work.
+
+Each shared cell yields one sample with its summed requested and actual
+represented mass. All its source owners use that sample's common
+represented/requested ratio to debit their own mass, momentum and carried
+energy. Separately supplied heat is summed without mass scaling. Single-stream
+and co-moving arithmetic are retained, with no intermediate material refresh
+between co-located streams. Focused numerical tests cover independent stream
+budgets, boosts, density/datum shifts, permutations and overflow refusal; the
+public native fixture covers opposing streams and whole-transaction refusal.
+
 This bounded filling boundary retains positive interface capacity and the
 original liquid density/phase assumptions. It does not resolve jet impact,
 nucleate cells, supply arbitrary outflow recoil, advance the clock or establish

@@ -15,7 +15,7 @@ pub use outflow::{FreeSurfaceMassOutflow, FreeSurfaceMassOutflowReport};
 
 #[derive(Clone, Copy)]
 enum TransferMomentum<'a> {
-    Mixing(&'a BTreeMap<MassLocation3, [f64; 3]>),
+    Mixing(&'a BTreeMap<MassLocation3, inflow::IncomingMixture>),
     Ejection {
         velocities: &'a BTreeMap<MassLocation3, [f64; 3]>,
         maximum_work_j: f64,
@@ -23,9 +23,19 @@ enum TransferMomentum<'a> {
 }
 
 impl TransferMomentum<'_> {
-    fn velocities(&self) -> &BTreeMap<MassLocation3, [f64; 3]> {
+    fn velocity_at(&self, location: &MassLocation3) -> Option<[f64; 3]> {
         match self {
-            Self::Mixing(velocities) | Self::Ejection { velocities, .. } => velocities,
+            Self::Mixing(mixtures) => mixtures.get(location).map(|m| m.velocity_m_s),
+            Self::Ejection { velocities, .. } => velocities.get(location).copied(),
+        }
+    }
+
+    fn kinetic_variance_at(&self, location: &MassLocation3) -> f64 {
+        match self {
+            Self::Mixing(mixtures) => mixtures
+                .get(location)
+                .map_or(0.0, |m| m.specific_kinetic_variance_j_kg),
+            Self::Ejection { .. } => 0.0,
         }
     }
 
@@ -33,17 +43,27 @@ impl TransferMomentum<'_> {
     // Ejection is not a negative-mass continuation of the mixing heat law.
     fn state(
         self,
+        location: &MassLocation3,
         old_mass: f64,
         dm: f64,
         new_mass: f64,
         velocity: [f64; 3],
-        carried: [f64; 3],
     ) -> Option<([f64; 3], f64, f64)> {
+        let carried = self.velocity_at(location)?;
         match self {
-            Self::Mixing(_) => inflow::mixing_state(old_mass, dm, new_mass, velocity, carried)
-                .map(|(next, heat)| (next, heat, 0.0)),
-            Self::Ejection { .. } => outflow::ejection_state(old_mass, dm, new_mass, velocity, carried)
-                .map(|(next, work)| (next, 0.0, work)),
+            Self::Mixing(_) => {
+                let (next, mut heat) =
+                    inflow::mixing_state(old_mass, dm, new_mass, velocity, carried)?;
+                let variance = self.kinetic_variance_at(location);
+                if variance != 0.0 {
+                    heat += dm * variance;
+                }
+                heat.is_finite().then_some((next, heat, 0.0))
+            }
+            Self::Ejection { .. } => {
+                outflow::ejection_state(old_mass, dm, new_mass, velocity, carried)
+                    .map(|(next, work)| (next, 0.0, work))
+            }
         }
     }
 }
@@ -330,19 +350,33 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             let old_h = self.h[&location];
             // The actual native dm owns the transfer. Center the update on the
             // old datum so a common caloric offset cannot manufacture heat.
-            let mut relative_supply = dm * (transfer.specific_enthalpy_j_kg - old_h) + transfer.heat_j;
+            let mut relative_supply =
+                dm * (transfer.specific_enthalpy_j_kg - old_h) + transfer.heat_j;
             if let Some(momentum) = momentum {
-                let before = self.flow.lattice.sample_at(
-                    transfer.coordinates[0], transfer.coordinates[1], transfer.coordinates[2],
-                ).expect("admitted interface");
+                let before = self
+                    .flow
+                    .lattice
+                    .sample_at(
+                        transfer.coordinates[0],
+                        transfer.coordinates[1],
+                        transfer.coordinates[2],
+                    )
+                    .expect("admitted interface");
                 let mut velocity = [0.0; 3];
                 for d in 0..3 {
                     velocity[d] = self.flow.scaling.velocity_si(before.velocity[d])?;
                 }
-                let (next, heat, _) = momentum.state(
-                    projection.initial_mass_kg, dm, new_mass_kg, velocity,
-                    momentum.velocities()[&location],
-                ).ok_or(Error::Invalid("interface stream momentum is unrepresentable"))?;
+                let (next, heat, _) = momentum
+                    .state(
+                        &location,
+                        projection.initial_mass_kg,
+                        dm,
+                        new_mass_kg,
+                        velocity,
+                    )
+                    .ok_or(Error::Invalid(
+                        "interface stream momentum is unrepresentable",
+                    ))?;
                 let scale = self.flow.scaling.velocity_si(1.0)?;
                 let native = next.map(|u| u / scale);
                 inflow::admit_velocity(native, self.flow.scaling.flow().u_lattice)?;
@@ -419,7 +453,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                     .flow
                     .scaling
                     .velocity_si(after.velocity[axis] - before.velocity[axis])?;
-                let carried = momentum.as_ref().and_then(|motion| motion.velocities().get(&location))
+                let carried = momentum
+                    .as_ref()
+                    .and_then(|motion| motion.velocity_at(&location))
                     .map_or(dm * u, |incoming| dm * incoming[axis]);
                 let change = dm * u + new_mass * du;
                 old_velocity[axis] = u;
@@ -429,14 +465,20 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 report.absolute_momentum_defect_kg_m_s += (change - carried).abs();
             }
             let heat = if let Some(momentum) = momentum {
-                let incoming = momentum.velocities().get(&location).copied().unwrap_or(old_velocity);
+                let incoming = momentum.velocity_at(&location).unwrap_or(old_velocity);
                 let (heat, work) = if transfer.is_some() {
-                    let (_, heat, work) = momentum.state(
-                        old_mass * mass_unit, dm, new_mass, old_velocity, incoming,
-                    ).ok_or(Error::Invalid("interface stream energy is unrepresentable"))?;
+                    let (_, heat, work) = momentum
+                        .state(&location, old_mass * mass_unit, dm, new_mass, old_velocity)
+                        .ok_or(Error::Invalid("interface stream energy is unrepresentable"))?;
                     (heat, work)
-                } else { (0.0, 0.0) };
-                let carried = 0.5 * dm * incoming.iter().map(|u| u * u).sum::<f64>();
+                } else {
+                    (0.0, 0.0)
+                };
+                let mut carried = 0.5 * dm * incoming.iter().map(|u| u * u).sum::<f64>();
+                let variance = momentum.kinetic_variance_at(&location);
+                if variance != 0.0 {
+                    carried += dm * variance;
+                }
                 let kinetic = inflow::kinetic_change(dm, new_mass, old_velocity, delta_velocity);
                 kinetic_balance.carried_kinetic_energy_j += carried;
                 kinetic_balance.kinetic_energy_change_j += kinetic;
@@ -450,8 +492,14 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                     TransferMomentum::Ejection { .. } => (total_defect - work).abs(),
                 };
                 heat
-            } else { 0.0 };
-            let caloric_supply = if momentum.is_some() { supplied_relative + heat } else { supplied_relative };
+            } else {
+                0.0
+            };
+            let caloric_supply = if momentum.is_some() {
+                supplied_relative + heat
+            } else {
+                supplied_relative
+            };
             report.absolute_energy_defect_j += (new_mass * dh - caloric_supply).abs();
         }
         if [

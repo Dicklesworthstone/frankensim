@@ -154,9 +154,40 @@ fn g4_inflow_refusals_do_not_publish_fill_momentum_heat_or_sources() {
                     .is_err()
             );
         }
+        // Each source fits by itself; the shared cell cannot store their sum.
+        let individually_storable = FreeSurfaceMassInflow {
+            exchange: FreeSurfaceMassExchange {
+                mass_kg: 4e-7,
+                ..valid.exchange
+            },
+            ..valid
+        };
         assert!(
             liquid
-                .mix_interface_inflow(&[valid, valid], controls(), gate)
+                .mix_interface_inflow(
+                    &[individually_storable, individually_storable],
+                    controls(),
+                    gate,
+                )
+                .is_err()
+        );
+        // An average inside the chart cannot admit an invalid source stream.
+        assert!(
+            liquid
+                .mix_interface_inflow(
+                    &[
+                        valid,
+                        FreeSurfaceMassInflow {
+                            exchange: FreeSurfaceMassExchange {
+                                specific_enthalpy_j_kg: -1.0,
+                                ..valid.exchange
+                            },
+                            ..valid
+                        }
+                    ],
+                    controls(),
+                    gate,
+                )
                 .is_err()
         );
         let cancelled = CancelGate::new_clock_free();
@@ -173,6 +204,90 @@ fn g4_inflow_refusals_do_not_publish_fill_momentum_heat_or_sources() {
         );
         assert_eq!(liquid.total_enthalpy_j().unwrap(), energy);
         assert_eq!(liquid.material_at(INTERFACE).unwrap(), &material);
+        assert_eq!(liquid.physical_time_s(), 0.0);
+    });
+}
+
+#[test]
+fn g1_opposing_inflows_share_native_mass_projection_and_retain_all_mixing_heat() {
+    with_liquid(0.0, |liquid, gate| {
+        let before = liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+        let mass = before.density_kg_m3 * before.fill_fraction * 1e-9;
+        let energy_before = liquid.total_enthalpy_j().unwrap();
+        let sources = [
+            FreeSurfaceMassInflow {
+                exchange: FreeSurfaceMassExchange {
+                    mass_kg: 5e-8,
+                    specific_enthalpy_j_kg: 100_000.0,
+                    heat_j: 0.0,
+                    ..inflow(0.0).exchange
+                },
+                velocity_m_s: [0.06, 0.0, 0.0],
+            },
+            FreeSurfaceMassInflow {
+                exchange: FreeSurfaceMassExchange {
+                    mass_kg: 5e-8,
+                    specific_enthalpy_j_kg: 300_000.0,
+                    heat_j: 0.0,
+                    ..inflow(0.0).exchange
+                },
+                velocity_m_s: [-0.06, 0.0, 0.0],
+            },
+        ];
+        let report = liquid
+            .mix_interface_inflow(&sources, controls(), gate)
+            .unwrap();
+        let after = liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+        let dm = report.exchange.mass_change_kg;
+        let represented = dm / sources.iter().map(|s| s.exchange.mass_kg).sum::<f64>();
+        let remaining = mass + dm;
+        let incoming_kinetic: f64 = sources
+            .iter()
+            .map(|s| {
+                0.5 * represented
+                    * s.exchange.mass_kg
+                    * s.velocity_m_s.iter().map(|u| u * u).sum::<f64>()
+            })
+            .sum();
+        let incoming_enthalpy: f64 = sources
+            .iter()
+            .map(|s| represented * s.exchange.mass_kg * s.exchange.specific_enthalpy_j_kg)
+            .sum();
+        let old_kinetic = 0.5 * mass * before.velocity_m_s.iter().map(|u| u * u).sum::<f64>();
+        let new_kinetic = 0.5 * remaining * after.velocity_m_s.iter().map(|u| u * u).sum::<f64>();
+        for d in 0..3 {
+            let carried: f64 = sources
+                .iter()
+                .map(|s| represented * s.exchange.mass_kg * s.velocity_m_s[d])
+                .sum();
+            near(
+                remaining * after.velocity_m_s[d],
+                mass * before.velocity_m_s[d] + carried,
+                2e-13,
+            );
+            near(report.exchange.carried_momentum_kg_m_s[d], carried, 2e-14);
+        }
+        assert_eq!(report.exchange.samples.len(), 1);
+        assert_eq!(report.exchange.heat_j, 0.0);
+        assert_eq!(before.density_kg_m3, after.density_kg_m3);
+        near(after.fill_fraction, 0.5, 2e-14);
+        near(report.carried_kinetic_energy_j, incoming_kinetic, 1e-16);
+        near(report.exchange.carried_enthalpy_j, incoming_enthalpy, 1e-15);
+        near(
+            report.mixing_heat_j,
+            incoming_kinetic + old_kinetic - new_kinetic,
+            1e-16,
+        );
+        assert!(report.mixing_heat_j >= 0.99 * incoming_kinetic);
+        assert!(
+            (liquid.total_enthalpy_j().unwrap() - energy_before + new_kinetic
+                - old_kinetic
+                - incoming_enthalpy
+                - incoming_kinetic)
+                .abs()
+                < controls().energy_tolerance_j
+        );
+        assert!(report.absolute_total_energy_defect_j < controls().energy_tolerance_j);
         assert_eq!(liquid.physical_time_s(), 0.0);
     });
 }
