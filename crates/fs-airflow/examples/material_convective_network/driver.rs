@@ -92,7 +92,7 @@ fn with_runtime<R>(run: impl FnOnce(&fs_exec::Cx<'_>) -> R) -> R {
         fs_exec::StreamKey { seed: 71, kernel_id: 3, tile: 0, iteration: 0 },
         fs_exec::Budget::INFINITE, fs_exec::ExecMode::Deterministic)))
 }
-fn heat_law(input: &str) -> Result<GasHeatLaw> {
+fn heat_law(input: &str) -> Result<GasHeatLaw<'static>> {
     let geometry = contacts(1.0)[0].surface;
     if input == "natural" || input.starts_with("natural:") {
         let gravity: f64 = match input.strip_prefix("natural:") {
@@ -118,7 +118,7 @@ fn heat_law(input: &str) -> Result<GasHeatLaw> {
 fn run(fraction: f64, speed: f64, steps: usize, emit: bool) -> Result<Outcome> {
     run_with_law(fraction, GasHeatLaw::ForcedConvection(contacts(speed)[0].surface), steps, emit)
 }
-fn run_with_law(fraction: f64, law: GasHeatLaw, steps: usize, emit: bool) -> Result<Outcome> {
+fn run_with_law(fraction: f64, law: GasHeatLaw<'_>, steps: usize, emit: bool) -> Result<Outcome> {
     with_runtime(|cx| fixture(|binding, mut thermal, mut circuit| {
         let electrical = ElectricalContactNetwork { bulk: binding, contacts: &[], electrical_bases: &BASES };
         let assembly = MaterialExchangeNetwork { electrical: &electrical, thermal_contacts: &[], radiation: None };
@@ -170,6 +170,8 @@ fn main() -> Result<()> {
         GasHeatLaw::NaturalConvection(surface) =>
             eprintln!("natural convection: gravity {} m/s²", surface.gravity_m_s2),
         GasHeatLaw::Conduction(_) => eprintln!("conductive gas boundary"),
+        GasHeatLaw::FilmConvection(_) => eprintln!("source-pinned film convection"),
+        GasHeatLaw::ForcedSphereConvection(_) => eprintln!("source-pinned forced-sphere convection"),
     }
     let out = run_with_law(fraction, law, steps, true)?;
     eprintln!("final cell={} K, charge={} C, velocity={} m/s, sound={} m/s, balance={} J",

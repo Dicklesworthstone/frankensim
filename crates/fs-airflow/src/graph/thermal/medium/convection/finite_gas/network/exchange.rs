@@ -1,7 +1,11 @@
 //! Mixed material gas heat laws on the original reacting/radiative assembly.
 //! Each patch selects its actual law; no material-name or phase-name dispatch.
 use super::*;
-use super::super::NaturalGasSurface;
+use super::super::{
+    NaturalGasSurface,
+    film::{FilmGasConvectionSample, FilmGasSurface},
+    sphere::{ForcedSphereGasSurface, SphereGasConvectionSample},
+};
 use fs_couple::cavity_phs::piston::thermal::ConductanceSample;
 use fs_couple::cavity_phs::piston::thermal::boundary::network::material::GasConductionGeometry;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::{
@@ -23,20 +27,26 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::{
 };
 
 /// Constitutive choice for a disjoint physical patch, not an object preset.
+/// Borrowed property banks supply the original sources at each actual trial's
+/// composition and pressure; they hold no chamber mass or thermal storage.
 #[derive(Clone, Copy, Debug)]
-pub enum GasHeatLaw {
+pub enum GasHeatLaw<'a> {
     /// Original source-backed gas and body layers in series.
     Conduction(GasConductionGeometry),
     /// Original forced correlation at the actual gas energy midpoint.
     ForcedConvection(ForcedGasSurface),
     /// Buoyant vertical-plate transfer from the same material gas and wall state.
     NaturalConvection(NaturalGasSurface),
+    /// Source-pinned mean-film forced, oriented natural or aiding mixed convection.
+    FilmConvection(FilmGasSurface<'a>),
+    /// Bulk transport with separately sourced viscosity at the actual wall.
+    ForcedSphereConvection(ForcedSphereGasSurface<'a>),
 }
 /// One patch using the same chamber/cell IDs as the complete assembly.
 #[derive(Clone, Copy, Debug)]
-pub struct ExchangeContact {
+pub struct ExchangeContact<'a> {
     pub contact: Contact,
-    pub law: GasHeatLaw,
+    pub law: GasHeatLaw<'a>,
 }
 /// Preserve the actual source result; no synthetic common material receipt.
 #[derive(Debug)]
@@ -44,6 +54,8 @@ pub enum GasHeatSample {
     Conduction(ResolvedMaterialStatePoint),
     ForcedConvection(FiniteGasConvectionSample),
     NaturalConvection(FiniteGasConvectionSample),
+    FilmConvection(FilmGasConvectionSample),
+    ForcedSphereConvection(SphereGasConvectionSample),
 }
 /// Preserve the original domain refusal, not an invented substitute coefficient.
 #[derive(Debug)]
@@ -58,7 +70,7 @@ impl core::fmt::Display for GasHeatError {
 }
 impl std::error::Error for GasHeatError {}
 
-impl GasHeatLaw {
+impl GasHeatLaw<'_> {
     fn area(self) -> Result<f64, &'static str> {
         match self {
             Self::Conduction(geometry) => {
@@ -76,6 +88,12 @@ impl GasHeatLaw {
             }
             Self::NaturalConvection(surface) => {
                 surface.validate().map_err(|_| "invalid natural-convection geometry")?;
+                Ok(surface.area_m2)
+            }
+            Self::FilmConvection(surface) => surface.law.area()
+                .map_err(|_| "invalid film-convection geometry"),
+            Self::ForcedSphereConvection(surface) => {
+                surface.validate().map_err(|_| "invalid forced-sphere geometry")?;
                 Ok(surface.area_m2)
             }
         }
@@ -96,21 +114,31 @@ impl GasHeatLaw {
         let phase = source.bulk.cells.iter().find(|c| c.cell == contact.cell)
             .ok_or_else(|| GasHeatError::Convection(
                 invalid("gas patch lacks its actual cell phase")))?.phase;
-        let (sample, natural) = match self {
-            Self::ForcedConvection(surface) => (surface.resolve(gas, phase), false),
-            Self::NaturalConvection(surface) => (surface.resolve(gas, phase), true),
+        match self {
+            Self::ForcedConvection(surface) => convection_sample(
+                surface.resolve(gas, phase), GasHeatSample::ForcedConvection),
+            Self::NaturalConvection(surface) => convection_sample(
+                surface.resolve(gas, phase), GasHeatSample::NaturalConvection),
+            Self::FilmConvection(surface) => convection_sample(
+                surface.resolve(gas, phase), GasHeatSample::FilmConvection),
+            Self::ForcedSphereConvection(surface) => convection_sample(
+                surface.resolve(gas, phase), GasHeatSample::ForcedSphereConvection),
             Self::Conduction(_) => unreachable!("conduction returned above"),
-        };
-        let sample = sample.map_err(GasHeatError::Convection)?;
-        Ok(ConductanceSample { conductance_w_k: sample.conductance_w_k,
-            source: if natural { GasHeatSample::NaturalConvection(sample.source) }
-                else { GasHeatSample::ForcedConvection(sample.source) } })
+        }
     }
 }
 
-fn flow_patches<'a>(
-    cx: &Cx<'_>, patches: &'a [ExchangeContact], controls: NetworkSolve,
-) -> Result<(BTreeMap<u64, &'a ExchangeContact>, Vec<GasSurface>), MaterialGasLawFlowError<GasHeatError>> {
+fn convection_sample<S>(
+    sample: Result<ConductanceSample<S>, MaterialConvectionError>,
+    retain: impl FnOnce(S) -> GasHeatSample,
+) -> Result<ConductanceSample<GasHeatSample>, GasHeatError> {
+    let sample = sample.map_err(GasHeatError::Convection)?;
+    Ok(ConductanceSample { conductance_w_k: sample.conductance_w_k, source: retain(sample.source) })
+}
+
+fn flow_patches<'a, 'source>(
+    cx: &Cx<'_>, patches: &'a [ExchangeContact<'source>], controls: NetworkSolve,
+) -> Result<(BTreeMap<u64, &'a ExchangeContact<'source>>, Vec<GasSurface>), MaterialGasLawFlowError<GasHeatError>> {
     if patches.len() > controls.maximum_contacts {
         return Err(MaterialGasLawFlowError::Invalid("mixed heat-law contact capacity exceeded"));
     }
@@ -137,6 +165,11 @@ fn flow_patches<'a>(
 /// the gas's ideal EOS, viscosity, conductivity and heat capacity. Its bulk-gas
 /// property convention and unconfined vertical-plate assumptions must fit the
 /// physical patch; a chamber ID does not establish enclosure applicability.
+/// Film laws instead query their bank at the mean of this trial's gas and wall
+/// temperatures. Sphere laws retain bulk transport and query only surface
+/// viscosity. Both pin the actual reacted/transported composition, pressure and
+/// source identities; a bank's initial fractions never replace the trial gas.
+/// Their full temperature contrast and source/correlation domains remain active.
 ///
 /// Each chemical stage runs once on its original gas (including optional
 /// chemical subcycling). Then the existing coupled owner solves every thermal
@@ -159,7 +192,7 @@ pub fn step_candidate<'m>(
     prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
     thermal: &DepositionSimulation<'m>, target_s: f64,
     circuit: &MaterialCircuit, ports: &[f64], chambers: &[Chamber<'_>],
-    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact<'_>],
     controls: NetworkSolve, guess_j: &[f64],
 ) -> Result<ReactiveExchangeCandidate<'m, GasHeatSample>, ReactiveExchangeError<GasHeatError>> {
     let check = || -> Result<(), ReactiveExchangeError<GasHeatError>> {
@@ -194,7 +227,7 @@ pub fn flow_step_candidate<'m>(
     state: &MaterialExchangeState<'m>,
     prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
     target_s: f64, ports: &[f64], drives: &[ChamberDrive],
-    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact<'_>],
     links: &[GasNetworkLink], flow_controls: GasNetworkSolve,
     controls: NetworkSolve, guess_j: &[f64],
 ) -> Result<(MaterialExchangeState<'m>, MaterialFlowAdvance<GasNetworkStep, GasHeatSample>),
@@ -212,7 +245,7 @@ pub fn advance_with_flow<'m>(
     state: &mut MaterialExchangeState<'m>,
     prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
     target_s: f64, ports: &[f64], drives: &[ChamberDrive],
-    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact<'_>],
     links: &[GasNetworkLink], flow_controls: GasNetworkSolve,
     controls: NetworkSolve, guess_j: &[f64],
 ) -> Result<MaterialFlowAdvance<GasNetworkStep, GasHeatSample>,
@@ -228,8 +261,8 @@ pub fn advance_with_flow<'m>(
 /// reacting/electrical/thermal/mechanical assembly with mixed gas heat laws.
 ///
 /// Both transport mechanisms consume one original species budget, reconstruct
-/// each chamber once and carry partial enthalpy once. Conduction, forced and
-/// natural patches all receive the actual transported/reacted trial gas. Thus
+/// each chamber once and carry partial enthalpy once. All conduction, bulk,
+/// film and sphere patches receive the actual transported/reacted trial gas. Thus
 /// diffusion changes heat transfer, storage and sound speed through shared
 /// material data even at equal total pressure, with no ambient composition cache.
 ///
@@ -243,7 +276,7 @@ pub fn transport_step_candidate<'m>(
     state: &MaterialExchangeState<'m>,
     prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
     target_s: f64, ports: &[f64], drives: &[ChamberDrive],
-    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact<'_>],
     nozzles: &[SnapshotNozzleLink], diffusion: &[DiffusionNetworkLink<'_>],
     transport_controls: GasTransportSolve, controls: NetworkSolve, guess_j: &[f64],
 ) -> Result<(MaterialExchangeState<'m>, MaterialFlowAdvance<GasTransportStep, GasHeatSample>),
@@ -267,7 +300,7 @@ pub fn transport_paths_step_candidate<'m>(
     state: &MaterialExchangeState<'m>,
     prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
     target_s: f64, ports: &[f64], drives: &[ChamberDrive],
-    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact<'_>],
     paths: GasTransportPaths<'_>, transport_controls: GasTransportSolve,
     controls: NetworkSolve, guess_j: &[f64],
 ) -> Result<(MaterialExchangeState<'m>, MaterialFlowAdvance<GasTransportStep, GasHeatSample>),
@@ -286,7 +319,7 @@ pub fn advance_with_transport<'m>(
     state: &mut MaterialExchangeState<'m>,
     prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
     target_s: f64, ports: &[f64], drives: &[ChamberDrive],
-    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact<'_>],
     nozzles: &[SnapshotNozzleLink], diffusion: &[DiffusionNetworkLink<'_>],
     transport_controls: GasTransportSolve, controls: NetworkSolve, guess_j: &[f64],
 ) -> Result<MaterialFlowAdvance<GasTransportStep, GasHeatSample>,
@@ -306,7 +339,7 @@ pub fn advance_with_transport_paths<'m>(
     state: &mut MaterialExchangeState<'m>,
     prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
     target_s: f64, ports: &[f64], drives: &[ChamberDrive],
-    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact<'_>],
     paths: GasTransportPaths<'_>, transport_controls: GasTransportSolve,
     controls: NetworkSolve, guess_j: &[f64],
 ) -> Result<MaterialFlowAdvance<GasTransportStep, GasHeatSample>,

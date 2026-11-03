@@ -24,6 +24,9 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{GasNozzl
 #[allow(dead_code)]
 mod chemical_source;
 
+#[path = "source_law_tests.rs"]
+mod source_law_tests;
+
 fn scoped<R>(run:impl FnOnce(&Cx<'_>,&CancelGate)->R)->R {
     let gate=CancelGate::new();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -32,7 +35,7 @@ fn scoped<R>(run:impl FnOnce(&Cx<'_>,&CancelGate)->R)->R {
         run(&cx,&gate)
     })
 }
-fn mixed(speed:f64)->[ExchangeContact;3] {
+fn mixed(speed:f64)->[ExchangeContact<'static>;3] {
     let base=contacts(speed);
     [ExchangeContact {contact:base[0].contact,law:GasHeatLaw::NaturalConvection(
             NaturalGasSurface {area_m2:base[0].surface.area_m2,
@@ -118,6 +121,8 @@ fn mixed_laws_use_reacted_midpoints_and_material_changes_reach_charge_heat_and_m
                         if entry.id==10 {assert_eq!(sample.gas.components().len(),2);}
                     }
                     GasHeatSample::Conduction(material)=>assert_eq!(Some(material),cell.conductivity.as_ref()),
+                    GasHeatSample::FilmConvection(_) | GasHeatSample::ForcedSphereConvection(_) =>
+                        panic!("legacy mixed-law fixture changed its constitutive law"),
                 }
             }}
             let (t,c,report,_)=result.into_parts();
@@ -211,6 +216,8 @@ fn live_transport_changes_the_mixture_seen_by_mixed_heat_before_atomic_publish()
                         GasHeatSample::ForcedConvection(sample) | GasHeatSample::NaturalConvection(sample)=>
                             assert_eq!(&sample.gas,&chamber.boundary.piston.midpoint),
                         GasHeatSample::Conduction(_) => {}
+                        GasHeatSample::FilmConvection(_) | GasHeatSample::ForcedSphereConvection(_) =>
+                            panic!("legacy mixed-law fixture changed its constitutive law"),
                     }
                 }
             }

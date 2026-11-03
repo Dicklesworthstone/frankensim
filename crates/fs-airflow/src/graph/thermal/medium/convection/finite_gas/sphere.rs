@@ -13,6 +13,7 @@ use fs_qty::Temperature;
 /// Exposed patch of an isolated isothermal sphere in a prescribed free stream.
 /// Surface coverage belongs to the body owner. The sphere correlation includes
 /// its conductive contribution once; do not add a parallel stagnant-gas link.
+#[derive(Debug)]
 pub struct ForcedSphereGasSurface<'a, M: FilmGasSource = ThermochemicalGasModel> {
     pub model: &'a M,
     pub area_m2: f64,
@@ -35,7 +36,7 @@ pub struct SphereGasConvectionSample<S = ResolvedThermochemicalGasState, W = Equ
 }
 
 impl<M: FilmGasSource> ForcedSphereGasSurface<'_, M> {
-    fn validate(self) -> Result<(), MaterialConvectionError> {
+    pub(super) fn validate(self) -> Result<(), MaterialConvectionError> {
         let diameter = self.diameter.value();
         if !self.area_m2.is_finite()
             || self.area_m2 < 0.0

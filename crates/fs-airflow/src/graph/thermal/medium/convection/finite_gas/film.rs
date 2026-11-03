@@ -50,6 +50,7 @@ impl AidingVerticalPlateGasSurface {
 /// The bank may contain more species than the current gas, or different initial
 /// fractions. Each query reconstructs the ACTUAL active gas composition and
 /// preserves its original source claims before evaluating film properties.
+#[derive(Debug)]
 pub struct FilmGasSurface<'a, M: FilmGasSource = ThermochemicalGasModel> {
     pub model: &'a M,
     pub law: FilmGasHeatLaw,
@@ -69,7 +70,7 @@ pub struct FilmGasConvectionSample<S = ResolvedThermochemicalGasState, W = Equil
 }
 
 impl FilmGasHeatLaw {
-    fn area(self) -> Result<f64, MaterialConvectionError> {
+    pub(super) fn area(self) -> Result<f64, MaterialConvectionError> {
         match self {
             Self::Forced(surface) => {
                 surface.validate()?;

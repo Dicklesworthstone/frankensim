@@ -1183,6 +1183,24 @@ disjoint exposed patches, with aggregate area admission and one energy owner.
 Accepted samples retain the exact queried gas and wall states. Candidate solves,
 atomic flow-step publication and cancellation use the existing network path.
 
+`GasHeatLaw::{FilmConvection, ForcedSphereConvection}` carries the source-pinned
+film and sphere laws through these same reacting, electrical, moving-wall and
+conservative-transport assemblies. Film laws include forced, natural and aiding
+mixed convection. Explicit property banks are queried at the actual trial's
+pressure and composition: their initialization fractions never replace reacted
+or transported gas. Film properties use the mean wall/bulk temperature; forced
+spheres retain bulk Re/Pr/k and separately resolve wall-temperature viscosity.
+The complete temperature contrast and original source domains remain binding.
+Concrete property and source records survive in `GasHeatSample`; every patch
+shares the original exposure budget, signed contact heat and atomic publication.
+The network retains its existing ideal thermochemical gas storage owner.
+
+`tests/finite_gas_convection/natural_network/source_laws.rs` and
+`examples/material_convective_network/source_law_tests.rs` exercise simultaneous
+sensible/latent exchange, changing transported and reacted composition, finite
+circuit and wall-motion energy, source/domain refusal and rollback. They retain
+admitted sphere Prandtl and viscosity-ratio ranges without clipping properties.
+
 These are unconfined isothermal geometry correlations; they do not resolve
 buoyant velocity or supply enclosure corrections. The caller must admit the
 geometry, characteristic length and temperature contrast. Horizontal-plate

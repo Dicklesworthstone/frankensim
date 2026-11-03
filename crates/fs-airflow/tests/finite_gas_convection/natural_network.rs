@@ -32,7 +32,15 @@ const HOT: CellId = CellId(10);
 const COLD: CellId = CellId(20);
 const MASS: f64 = 0.001;
 
+#[path = "natural_network/source_laws.rs"]
+mod source_laws;
+
 fn fixture<R>(run: impl FnOnce(&MaterialExchangeNetwork<'_>, DepositionSimulation<'_>, MaterialCircuit) -> R) -> R {
+    fixture_at([260000.0, 50000.0], run)
+}
+
+fn fixture_at<R>(enthalpies: [f64; 2],
+    run: impl FnOnce(&MaterialExchangeNetwork<'_>, DepositionSimulation<'_>, MaterialCircuit) -> R) -> R {
     // The same deliberately synthetic card and caloric chart as the other
     // finite-body tests. Neither cell claims an unsupplied conductivity.
     let card = MaterialCard::assemble(MaterialStateId { chemistry: "synthetic body".into(),
@@ -46,14 +54,14 @@ fn fixture<R>(run: impl FnOnce(&MaterialExchangeNetwork<'_>, DepositionSimulatio
     let bulk = MaterialNetwork { cells: &bindings, resistors: &[], links: &[] };
     let electrical = ElectricalContactNetwork { bulk: &bulk, contacts: &[], electrical_bases: &[] };
     let assembly = MaterialExchangeNetwork { electrical: &electrical, thermal_contacts: &[], radiation: None };
-    let events = [(HOT, 260000.0), (COLD, 50000.0)].map(|(id, enthalpy)| TimedEvent {
+    let events = [HOT, COLD].into_iter().zip(enthalpies).map(|(id, enthalpy)| TimedEvent {
         time_s: 0.0, event: Event::Birth(DepositedCell { id, segment_id: id.0, body_id: id.0,
             material_id: MaterialId(0), mass_kg: MASS, specific_h_j_kg: enthalpy,
             geometry: CellGeometry { start_m: [0.0; 3], end_m: [0.1, 0.0, 0.0],
                 volume_m3: 1e-6, surface_area_m2: 0.02 },
             boundary: Boundary { ambient_k: 400.0, htc_w_m2_k: 0.0, reservoir: None, source_w: 0.0 },
         })
-    }).to_vec();
+    }).collect();
     let thermal = DepositionSimulation::new(events, &[(MaterialId(0), &chart as &dyn ThermalLaw)],
         DepositionBudget { max_cells: 2, max_links: 0, max_events: 2, max_substeps: 16 }).unwrap()
         .advance_to(0.0, StepConfig { max_dt_s: DT, energy_tolerance_j: 1e-7 }, || Ok(())).unwrap().0;
@@ -64,7 +72,7 @@ fn fixture<R>(run: impl FnOnce(&MaterialExchangeNetwork<'_>, DepositionSimulatio
     run(&assembly, thermal, circuit)
 }
 
-fn patches() -> [ExchangeContact; 3] {
+fn patches() -> [ExchangeContact<'static>; 3] {
     let natural = |area_m2| NaturalGasSurface {
         geometry: fs_convection::NaturalConvectionGeometry::VerticalPlate,
         area_m2, characteristic_length: Length::new(0.1), gravity_m_s2: 9.81 };
