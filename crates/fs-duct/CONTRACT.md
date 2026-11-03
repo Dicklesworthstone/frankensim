@@ -2981,3 +2981,38 @@ and ambiguous-source refusal, cancellation, and the original feedback bound.
 These establish numerical composition within the rigid-frame plane-wave model,
 not experimental qualification or finite-room/frame-wave behavior.
 <!-- porous-passive-termination:end -->
+
+## Free DG resonance and material decay
+
+`DgDuct::resonance_pole` refines one finite free mode of the original complete
+continuous DG generator through `fs-la::nonlinear_eig`. The pencil is `s I - L`,
+with constant scalar equilibration and its exact derivative. Every pressure,
+axial-flow, viscothermal, molecular and compliant-wall coordinate is retained;
+all declared inflows are zero and original boundary conditions remain active.
+The returned physical nodal fields and port pressure participation use the
+original mass/observation maps. Internal modes are not removed when their port
+participation is zero.
+
+The complex pole reports oscillation frequency and signed amplitude decay;
+positive growth is not clipped and a real relaxation mode receives no Q.
+`stored_energy_j = x* x / 2` and the independently evaluated original wall,
+molecular and matched-boundary losses expose the numerical envelope identity
+defect `2 Re(s) H + D`. These Hermitian quantities are not finite-cycle
+averages of a decaying real trajectory. The signed power defect is exposed,
+not used to manufacture dissipation. The original source residual is
+reported independently of the shared eigensolver's convergence status.
+
+Observation payload/work are reserved before the shared solver's admission;
+capacity never reduces states or mode order. Oscillatory seeds and results
+must lie in any retained wall-law frequency band. Real internal relaxation
+modes remain available with zero oscillation frequency. Real-axis wall-law
+admission does not bound continuation error at complex poles. Local isolated
+root convergence does not certify a full spectrum, continuum accuracy,
+transfer-pole observability or nonlinear resonance. Source and numerical
+refusals and cancellation leave all accepted simulation history unchanged.
+
+`tests/dg_resonance_poles.rs` checks cylinder pole/standing-wave spatial
+convergence, the independent gas-loaded compliant-wall oscillator and its
+physical heat, scalar diffusive-telegraph pole convergence with all memories,
+an analytic real thermal-relaxation mode, and band/capacity/cancellation/seed
+refusals (G0/G1/G3/G4).

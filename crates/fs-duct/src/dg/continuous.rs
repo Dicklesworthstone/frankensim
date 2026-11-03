@@ -6,6 +6,8 @@
 use super::*;
 /// Transactional source-bound adoption after a complete coupled trajectory.
 pub mod state;
+/// Free resonance and decay of the complete original material-memory operator.
+pub mod poles;
 use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
 
