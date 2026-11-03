@@ -13,6 +13,9 @@ use std::cell::Cell;
 #[path = "stokes_motion/planar.rs"]
 mod planar;
 
+#[path = "stokes_motion/translating.rs"]
+mod translating;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

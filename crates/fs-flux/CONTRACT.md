@@ -3317,9 +3317,19 @@ Velocity, NaturalTraction and OpenReservoir boundaries are supported. Reservoir
 velocities use the same world-to-relative conversion as prescribed velocities;
 world momentum uses the upwind reservoir velocity during inflow. The original
 DissipativeBackflow law is fixed-frame and refuses rather than silently
-changing its reference velocity. This entry supplies prescribed translation,
-not rotating/deforming ALE, a moving-mesh rigid-body solve, topology change,
-a nonlinear adjoint, or a whole-domain energy/passivity theorem.
+changing its reference velocity. Direct `step` calls prescribe translation.
+`candidate` solves exactly the same endpoint while uniquely borrowing its
+original owner. Dropping it preserves all accepted histories; `commit` publishes
+the admitted candidate without another source query or flow solve. The unique
+borrow prevents stale or wrong-owner acceptance. Coupled owners finish their
+own mechanical and cancellation gates before this infallible publication.
+The candidate explicitly accepts the original nonlinear owner's absolute
+normal-velocity correction tolerance; direct step calls pass zero. Neither
+criterion removes the independent nonlinear equation residual gates.
+`fs-couple::stokes_motion::translating::GuidedTranslationMotion` uses these
+candidates to solve finite guided body translation from the original discrete
+fluid reaction. Neither entry supplies rotating/deforming ALE, topology
+change, a nonlinear adjoint, or a whole-domain energy/passivity theorem.
 
 Five authored G1/G3/G4 regression groups cover acceleration-induced pressure
 and reaction; preservation of uniform world flow under changing mesh speed

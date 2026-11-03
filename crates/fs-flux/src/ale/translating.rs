@@ -13,9 +13,9 @@
 //! rotation, deformation, changing topology, or a whole-domain energy audit.
 
 use crate::{
-    FluxSystem, MaterialBoundaryLoad, MaterialFluxError, MaterialFluxNumerics,
-    MaterialFluxSystem, MaterialNavierStokesBoundary, MaterialNavierStokesStep,
-    NavierStokesControls, OpenBoundaryPolicy,
+    FluxSystem, MaterialBoundaryLoad, MaterialFluxError, MaterialFluxNumerics, MaterialFluxSystem,
+    MaterialNavierStokesBoundary, MaterialNavierStokesStep, NavierStokesControls,
+    OpenBoundaryPolicy,
 };
 use fs_material::fluid_transport::FluidTransport;
 
@@ -127,25 +127,30 @@ impl TranslatingAleStep {
         if !origin_world_m.iter().chain(&origin).all(|x| x.is_finite()) {
             return Err(TranslatingAleError::Invalid("nonfinite world load origin"));
         }
-        let mut load = self.relative_flow.solution.boundary_loads(
-            edges,
-            origin,
-            pressure_offsets_pa,
-        )?;
-        let (mass_flux, first_moment) = self.relative_flow.solution
+        let mut load =
+            self.relative_flow
+                .solution
+                .boundary_loads(edges, origin, pressure_offsets_pa)?;
+        let (mass_flux, first_moment) = self
+            .relative_flow
+            .solution
             .outward_mass_flux_moments(edges, origin)?;
         for axis in 0..2 {
-            load.outward_momentum.force_n_per_m[axis] +=
-                self.mesh_velocity_m_s[axis] * mass_flux;
+            load.outward_momentum.force_n_per_m[axis] += self.mesh_velocity_m_s[axis] * mass_flux;
         }
-        load.outward_momentum.moment_n +=
-            first_moment[0] * self.mesh_velocity_m_s[1]
-                - first_moment[1] * self.mesh_velocity_m_s[0];
+        load.outward_momentum.moment_n += first_moment[0] * self.mesh_velocity_m_s[1]
+            - first_moment[1] * self.mesh_velocity_m_s[0];
         load.origin_m = origin_world_m;
-        if !load.outward_momentum.force_n_per_m.iter().all(|v| v.is_finite())
+        if !load
+            .outward_momentum
+            .force_n_per_m
+            .iter()
+            .all(|v| v.is_finite())
             || !load.outward_momentum.moment_n.is_finite()
         {
-            return Err(TranslatingAleError::Invalid("world momentum-flux conversion overflow"));
+            return Err(TranslatingAleError::Invalid(
+                "world momentum-flux conversion overflow",
+            ));
         }
         Ok(load)
     }
@@ -158,6 +163,38 @@ pub struct TranslatingAleFlow<'s, 'm, 'a, F: FluidTransport + ?Sized> {
     system: &'s FluxSystem<'m>,
     fluid: MaterialFluxSystem<'s, 'm, 'a, F>,
     state: TranslatingAleState,
+}
+
+/// One fully solved endpoint borrowing its original owner until acceptance.
+/// Dropping a candidate preserves every accepted history and clock. The unique
+/// borrow prevents accepting it on another owner or after an intervening step.
+pub struct TranslatingAleCandidate<'o, 's, 'm, 'a, F: FluidTransport + ?Sized> {
+    owner: &'o mut TranslatingAleFlow<'s, 'm, 'a, F>,
+    state: TranslatingAleState,
+    step: TranslatingAleStep,
+}
+
+impl<F: FluidTransport + ?Sized> TranslatingAleCandidate<'_, '_, '_, '_, F> {
+    /// Original nonlinear solution, physical loads and world storage.
+    #[must_use]
+    pub const fn step(&self) -> &TranslatingAleStep {
+        &self.step
+    }
+
+    /// Complete proposed physical history; the accepted owner is unchanged.
+    #[must_use]
+    pub const fn state(&self) -> &TranslatingAleState {
+        &self.state
+    }
+
+    /// Publish this already admitted endpoint without another solve or query.
+    /// A coupled owner must finish its own admission and cancellation checks
+    /// before this infallible publication.
+    #[must_use]
+    pub fn commit(self) -> TranslatingAleStep {
+        self.owner.state = self.state;
+        self.step
+    }
 }
 
 impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
@@ -237,12 +274,50 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
         force_world: &dyn Fn([f64; 2]) -> [f64; 2],
         boundaries_world: &[MaterialNavierStokesBoundary<'_>],
         controls: NavierStokesControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<TranslatingAleStep, TranslatingAleError> {
+        Ok(self
+            .candidate(
+                timestep_s,
+                requested_mesh_velocity_m_s,
+                mesh_velocity_tolerance_m_s,
+                force_world,
+                boundaries_world,
+                controls,
+                0.0,
+                cancelled,
+            )?
+            .commit())
+    }
+
+    /// Solve the SAME native endpoint without publishing motion or fluid history.
+    /// This permits a finite mechanical owner to close its momentum equation
+    /// against the actual discrete boundary reaction before either side moves.
+    /// Rejected coupling trials drop their candidates; every retry starts from
+    /// the same accepted relative velocity, frame rate, geometry and clock.
+    /// Inputs, nonlinear controls, callbacks and refusals are those of [`Self::step`].
+    /// `absolute_velocity_tolerance_m_s` additionally permits an explicitly
+    /// bounded unrelaxed correction in the native affine normal-velocity traces;
+    /// both nonlinear equation residuals still pass their original gates.
+    /// Zero retains the direct step's relative-only correction criterion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn candidate(
+        &mut self,
+        timestep_s: f64,
+        requested_mesh_velocity_m_s: [f64; 2],
+        mesh_velocity_tolerance_m_s: f64,
+        force_world: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries_world: &[MaterialNavierStokesBoundary<'_>],
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TranslatingAleCandidate<'_, 's, 'm, 'a, F>, TranslatingAleError> {
         poll(&mut cancelled)?;
         let dt = timestep_s;
         let time = self.state.time_s + dt;
         if !dt.is_finite()
+            || !absolute_velocity_tolerance_m_s.is_finite()
+            || absolute_velocity_tolerance_m_s < 0.0
             || dt <= 0.0
             || !dt.recip().is_finite()
             || !time.is_finite()
@@ -250,13 +325,15 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
             || !mesh_velocity_tolerance_m_s.is_finite()
             || mesh_velocity_tolerance_m_s <= 0.0
             || !requested_mesh_velocity_m_s.iter().all(|v| v.is_finite())
-            || boundaries_world.iter().any(|b| matches!(
-                b,
-                MaterialNavierStokesBoundary::Open {
-                    backflow: OpenBoundaryPolicy::DissipativeBackflow,
-                    ..
-                }
-            ))
+            || boundaries_world.iter().any(|b| {
+                matches!(
+                    b,
+                    MaterialNavierStokesBoundary::Open {
+                        backflow: OpenBoundaryPolicy::DissipativeBackflow,
+                        ..
+                    }
+                )
+            })
         {
             return Err(TranslatingAleError::Invalid(
                 "finite representable timestep/motion and literal-traction or velocity boundaries required",
@@ -265,19 +342,22 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
         let translation: [f64; 2] = core::array::from_fn(|i| {
             self.state.translation_m[i] + dt * requested_mesh_velocity_m_s[i]
         });
-        let velocity: [f64; 2] = core::array::from_fn(|i| {
-            (translation[i] - self.state.translation_m[i]) / dt
-        });
-        let acceleration: [f64; 2] = core::array::from_fn(|i| {
-            (velocity[i] - self.state.mesh_velocity_m_s[i]) / dt
-        });
-        if !translation.iter().chain(&velocity).chain(&acceleration).all(|v| v.is_finite())
+        let velocity: [f64; 2] =
+            core::array::from_fn(|i| (translation[i] - self.state.translation_m[i]) / dt);
+        let acceleration: [f64; 2] =
+            core::array::from_fn(|i| (velocity[i] - self.state.mesh_velocity_m_s[i]) / dt);
+        if !translation
+            .iter()
+            .chain(&velocity)
+            .chain(&acceleration)
+            .all(|v| v.is_finite())
             || (0..2).any(|i| {
-                (velocity[i] - requested_mesh_velocity_m_s[i]).abs()
-                    > mesh_velocity_tolerance_m_s
+                (velocity[i] - requested_mesh_velocity_m_s[i]).abs() > mesh_velocity_tolerance_m_s
             })
         {
-            return Err(TranslatingAleError::Invalid("mesh displacement and velocity are not jointly representable"));
+            return Err(TranslatingAleError::Invalid(
+                "mesh displacement and velocity are not jointly representable",
+            ));
         }
         // Convex cells and their quadrature points lie within these translated
         // vertex bounds. The metric is retained in the reference coordinate
@@ -285,10 +365,11 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
         for vertices in self.system.mesh.verts.chunks(64) {
             poll(&mut cancelled)?;
             if vertices.iter().any(|point| {
-                !(point[0] + translation[0]).is_finite()
-                    || !(point[1] + translation[1]).is_finite()
+                !(point[0] + translation[0]).is_finite() || !(point[1] + translation[1]).is_finite()
             }) {
-                return Err(TranslatingAleError::Invalid("translated world coordinates overflow"));
+                return Err(TranslatingAleError::Invalid(
+                    "translated world coordinates overflow",
+                ));
             }
         }
         let rho = self.fluid.transport().density_kg_m3();
@@ -297,36 +378,54 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
             [f[0] - rho * acceleration[0], f[1] - rho * acceleration[1]]
         };
         // Homogeneous closure vectors avoid a box allocation per boundary.
-        let velocities: Vec<_> = boundaries_world.iter().map(|boundary| {
-            move |point: [f64; 2]| match boundary {
-                MaterialNavierStokesBoundary::Velocity { value, .. }
-                | MaterialNavierStokesBoundary::OpenReservoir { velocity: value, .. } => {
-                    let u = value([point[0] + translation[0], point[1] + translation[1]]);
-                    [u[0] - velocity[0], u[1] - velocity[1]]
+        let velocities: Vec<_> = boundaries_world
+            .iter()
+            .map(|boundary| {
+                move |point: [f64; 2]| match boundary {
+                    MaterialNavierStokesBoundary::Velocity { value, .. }
+                    | MaterialNavierStokesBoundary::OpenReservoir {
+                        velocity: value, ..
+                    } => {
+                        let u = value([point[0] + translation[0], point[1] + translation[1]]);
+                        [u[0] - velocity[0], u[1] - velocity[1]]
+                    }
+                    MaterialNavierStokesBoundary::Open { .. } => {
+                        unreachable!("only velocity edges request velocity samples")
+                    }
                 }
-                MaterialNavierStokesBoundary::Open { .. } => {
-                    unreachable!("only velocity edges request velocity samples")
+            })
+            .collect();
+        let tractions: Vec<_> = boundaries_world
+            .iter()
+            .map(|boundary| {
+                move |point: [f64; 2], normal| match boundary {
+                    MaterialNavierStokesBoundary::Open { traction, .. }
+                    | MaterialNavierStokesBoundary::OpenReservoir { traction, .. } => traction(
+                        [point[0] + translation[0], point[1] + translation[1]],
+                        normal,
+                    ),
+                    MaterialNavierStokesBoundary::Velocity { .. } => {
+                        unreachable!("only open edges request traction samples")
+                    }
                 }
-            }
-        }).collect();
-        let tractions: Vec<_> = boundaries_world.iter().map(|boundary| {
-            move |point: [f64; 2], normal| match boundary {
-                MaterialNavierStokesBoundary::Open { traction, .. }
-                | MaterialNavierStokesBoundary::OpenReservoir { traction, .. } => {
-                    traction([point[0] + translation[0], point[1] + translation[1]], normal)
-                }
-                MaterialNavierStokesBoundary::Velocity { .. } => {
-                    unreachable!("only open edges request traction samples")
-                }
-            }
-        }).collect();
-        let boundaries: Vec<_> = boundaries_world.iter().enumerate().map(|(i, boundary)| {
-            match *boundary {
+            })
+            .collect();
+        let boundaries: Vec<_> = boundaries_world
+            .iter()
+            .enumerate()
+            .map(|(i, boundary)| match *boundary {
                 MaterialNavierStokesBoundary::Velocity { edge, .. } => {
-                    MaterialNavierStokesBoundary::Velocity { edge, value: &velocities[i] }
+                    MaterialNavierStokesBoundary::Velocity {
+                        edge,
+                        value: &velocities[i],
+                    }
                 }
                 MaterialNavierStokesBoundary::Open { edge, backflow, .. } => {
-                    MaterialNavierStokesBoundary::Open { edge, traction: &tractions[i], backflow }
+                    MaterialNavierStokesBoundary::Open {
+                        edge,
+                        traction: &tractions[i],
+                        backflow,
+                    }
                 }
                 MaterialNavierStokesBoundary::OpenReservoir { edge, .. } => {
                     MaterialNavierStokesBoundary::OpenReservoir {
@@ -335,16 +434,19 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
                         velocity: &velocities[i],
                     }
                 }
-            }
-        }).collect();
+            })
+            .collect();
         poll(&mut cancelled)?;
-        let flow = self.fluid.bdf1_navier_stokes_mixed_step(
-            &force,
-            &boundaries,
-            &self.state.relative_velocity,
-            dt,
-            controls,
-        )?;
+        let flow = self
+            .fluid
+            .bdf1_navier_stokes_mixed_step_with_velocity_tolerance(
+                &force,
+                &boundaries,
+                &self.state.relative_velocity,
+                dt,
+                controls,
+                absolute_velocity_tolerance_m_s,
+            )?;
         poll(&mut cancelled)?;
         let world = shifted_velocity(self.system, flow.solution.velocity_dofs(), velocity)?;
         let kinetic = rho * self.system.kinetic_energy(&world);
@@ -369,17 +471,19 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
             }
         }
         if !mass.is_finite() || !kinetic.is_finite() || !momentum.iter().all(|v| v.is_finite()) {
-            return Err(TranslatingAleError::Invalid("world storage conversion overflow"));
+            return Err(TranslatingAleError::Invalid(
+                "world storage conversion overflow",
+            ));
         }
         let relative_velocity = flow.solution.velocity_dofs().to_vec();
         poll(&mut cancelled)?;
-        self.state = TranslatingAleState {
+        let state = TranslatingAleState {
             translation_m: translation,
             mesh_velocity_m_s: velocity,
             relative_velocity,
             time_s: time,
         };
-        Ok(TranslatingAleStep {
+        let step = TranslatingAleStep {
             relative_flow: flow,
             world_velocity_dofs: world,
             translation_m: translation,
@@ -389,6 +493,11 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
             mass_kg_per_m: mass,
             world_momentum_n_s_per_m: momentum,
             world_kinetic_energy_j_per_m: kinetic,
+        };
+        Ok(TranslatingAleCandidate {
+            owner: self,
+            state,
+            step,
         })
     }
 }
@@ -398,17 +507,19 @@ fn shifted_velocity(
     original: &[f64],
     shift: [f64; 2],
 ) -> Result<Vec<f64>, TranslatingAleError> {
-    if original.len() != system.n_u
-        || !original.iter().chain(&shift).all(|v| v.is_finite())
-    {
-        return Err(TranslatingAleError::Invalid("finite full velocity history and frame rate required"));
+    if original.len() != system.n_u || !original.iter().chain(&shift).all(|v| v.is_finite()) {
+        return Err(TranslatingAleError::Invalid(
+            "finite full velocity history and frame rate required",
+        ));
     }
     let mut shifted = original.to_vec();
     for (edge, geometry) in system.mesh.edges.iter().enumerate() {
         shifted[2 * edge] += shift[0] * geometry.normal[0] + shift[1] * geometry.normal[1];
     }
     if !shifted.iter().all(|v| v.is_finite()) {
-        return Err(TranslatingAleError::Invalid("velocity-frame conversion overflow"));
+        return Err(TranslatingAleError::Invalid(
+            "velocity-frame conversion overflow",
+        ));
     }
     Ok(shifted)
 }

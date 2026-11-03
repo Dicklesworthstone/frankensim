@@ -475,3 +475,65 @@ fn absolute_velocity_acceptance_keeps_nonlinear_residuals_mandatory() {
             fs_flux::FluxRheologyError::NonlinearConvergence { residual, .. }
         )) if residual > controls().relative_tolerance));
 }
+
+#[test]
+fn discarded_coupling_candidates_keep_native_history_and_commit_reuses_the_solve() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let material = source();
+    let make = || {
+        TranslatingAleFlow::new(
+            &system,
+            &material,
+            MaterialFluxNumerics::default(),
+            [0.0; 2],
+            &vec![0.0; system.n_u],
+        )
+        .unwrap()
+    };
+    let mut owner = make();
+    let mut reference = make();
+    let speed = [0.12, -0.03];
+    let wall = |_: [f64; 2]| speed;
+    let boundaries: Vec<_> = (0..mesh.edges.len())
+        .filter(|&e| mesh.is_boundary(e))
+        .map(|edge| MaterialNavierStokesBoundary::Velocity { edge, value: &wall })
+        .collect();
+    let before = owner.state().clone();
+    let candidate = owner
+        .candidate(
+            0.02,
+            speed,
+            1e-12,
+            &zero,
+            &boundaries,
+            controls(),
+            0.0,
+            || false,
+        )
+        .unwrap();
+    assert!(candidate.state().time_s() > before.time_s());
+    assert!(candidate.step().world_momentum_n_s_per_m[0] > 0.0);
+    drop(candidate);
+    assert_eq!(owner.state(), &before);
+    let expected = reference
+        .step(0.02, speed, 1e-12, &zero, &boundaries, controls(), || false)
+        .unwrap();
+    let candidate = owner
+        .candidate(
+            0.02,
+            speed,
+            1e-12,
+            &zero,
+            &boundaries,
+            controls(),
+            0.0,
+            || false,
+        )
+        .unwrap();
+    let proposed = candidate.state().clone();
+    let actual = candidate.commit();
+    assert_eq!(owner.state(), &proposed);
+    assert_eq!(owner.state(), reference.state());
+    assert_eq!(actual.world_velocity_dofs, expected.world_velocity_dofs);
+}

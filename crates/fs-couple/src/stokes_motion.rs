@@ -32,6 +32,9 @@ use fs_mbd::{DynamicsError, MassProperties, MomentumImpulseReceipt, Pose, RigidB
 
 pub mod planar;
 
+/// Finite guided translation on the original nonlinear moving-domain flow.
+pub mod translating;
+
 /// Fixed physical and approximation data; all mechanical values cover the
 /// explicit out-of-plane depth, rather than being per-unit-depth quantities.
 #[derive(Clone, Copy, Debug, PartialEq)]

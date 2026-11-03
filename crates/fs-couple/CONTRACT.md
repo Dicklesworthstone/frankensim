@@ -462,6 +462,59 @@ off-center reciprocal cross impedances, viscosity response, native pose/work,
 rotation traces, axis admission and atomic late-cancellation continuation.
 Native compilation/test execution remains a separate verification obligation.
 
+## Finite guided translation from the original nonlinear moving-domain fluid
+
+`stokes_motion::translating::GuidedTranslationMotion`, under the existing
+`experimental-stokes-motion` feature, couples a finite native body to
+`fs-flux::ale::translating::TranslatingAleFlow`. The same reference mesh moves
+through world space as x = X(t) + y; there is no small-displacement bound.
+Original BDM1/P0 convection, pressure, viscosity, source density and frame
+acceleration remain with the nonlinear ALE owner. No fitted drag, prescribed
+body trajectory, added-mass coefficient or second fluid model is introduced.
+
+For each trial endpoint speed the original flow solves its own nonlinear
+equations from the same accepted relative-velocity history. Its retained
+discrete pressure/viscous reaction, including strong-normal constraints and
+full weak tangential SIP flux, drives the original native rigid impulse owner.
+Depth converts N/m into whole-body N. The actual stored momentum increment
+closes m(v1-v0)/dt = F_fluid + F_external - k*q1 - c*v1. Outward advective
+momentum is separate and is never added to the impermeable body's wall load.
+Pressure datums retain their native component-local meanings. The native COM
+pose supplies the moving load origin; transverse guide force and guide couple
+are reported explicitly.
+
+The caller supplies an ascending physical speed bracket and a maximum number
+of native flow solves, including rejected trials. Safeguarded secants with
+periodic bisection require an actual sign bracket; this does not assert that
+every nonlinear problem has a unique root. Every trial retains the native
+fluid's nonlinear acceptance. Represented body/mesh/drift rates and the maximum
+unrelaxed normal-velocity trace correction use the same authored m/s tolerance;
+both nonlinear equation residual gates remain active. Body momentum, pose,
+fluid history,
+world translation and clock publish only after momentum, mechanical work and
+final cancellation admission. Unbracketed roots, budgets, native failures and
+cancellation preserve both continuing physical owners.
+
+Spring storage, signed external/interface work, physical mechanical dashpot
+loss and numerical backward-Euler body/spring loss remain separate. The native
+fluid report retains world kinetic energy, momentum and moving-surface flux.
+The body work identity is not a complete fluid/body energy or passivity proof;
+no viscous heat or thermal-pressure feedback is inferred. The entire outer
+mesh boundary also translates: endpoint callbacks supply WORLD conditions on
+that moving control surface, not stationary obstacles left behind by the
+body. Rotation, deformation, changing topology, variable density and general
+mesh remapping remain outside this guided rung.
+
+Four focused regression groups cover signed motion farther than one domain
+width with independently integrated fluid/body mass and momentum, physical
+forces sampled at the translated endpoint with spring/dashpot work, nonlinear
+viscous recoil and continuation, and rejected-root/budget/datum/late-cancellation
+atomicity. A native ALE regression additionally compares discard and commit
+with the unchanged direct-step path. All four coupling groups and nine
+ALE/absolute-correction cases passed in the selected-original-source native
+build. Full Cargo/dependency integration remains separate; unrelated source
+adapters and runtime wrappers were excluded from this bounded build.
+
 ## Implicit pressure and viscous loads driving guided rigid motion
 
 The opt-in `experimental-stokes-motion` feature exposes `GuidedStokesMotion`.
@@ -491,7 +544,8 @@ heat. Fluid kinetic change and conjugate interface work are exposed, but the
 body-work identity is not a global fluid/body energy or passivity proof. Native
 fluid viscous and SIP terms have not acquired an independent whole-system audit.
 
-This is fixed-reference, small-displacement linear incompressible Stokes. The
+`GuidedStokesMotion` remains fixed-reference, small-displacement linear
+incompressible Stokes, distinct from the finite-translation owner above. The
 caller authors a geometrically appropriate displacement bound, and every
 endpoint enforces it. The mesh does not move; no ALE, transported volume,
 convection, finite-motion, thermal pressure-work or rheological evolution is
