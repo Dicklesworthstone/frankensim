@@ -56,8 +56,8 @@ fn noise_table_sweep_export_and_synth_round_trip() {
     // The dipole strength vs velocity is REPORTED, not prescribed:
     // the saturated limit-cycle amplitude of this low-Re tonal rig
     // is NOT monotone in u near mode switches (executed:
-    // [4.9e-5, 3.5e-5, 8.0e-5] across the sweep — multi-stability,
-    // consistent with the staging suite's hysteresis findings), and
+    // mode changes across the sweep, consistent with the staging
+    // suite's hysteresis findings), and
     // a broadband U^6-style power law does not apply to a coherent
     // limit cycle. The table carries the measured exponent as DATA;
     // the assertion is only that the fit is finite.
@@ -168,4 +168,36 @@ fn noise_table_refusals_are_typed() {
         table.synthesize(0.08, 4096, 1),
         Err(AeroacError::InvalidParameter { .. })
     ));
+}
+
+/// G0/G3: a flat dimensionless shape is a band-limited version of the input
+/// uniform noise. The inverse FFT already includes 1/N, so duration must not
+/// amplify it by N. Its variance is approximately band_fraction / 12.
+#[test]
+fn noise_shape_synthesis_has_duration_independent_amplitude() {
+    let mut g = geometry();
+    // St = 4 f: the table covers f in [0.005, 0.5] cycles/sample,
+    // including the self-conjugate Nyquist bin.
+    g.slot_half = 0.16;
+    let table = fs_aeroac::noisetable::NoiseTable {
+        entries: vec![fs_aeroac::noisetable::NoiseEntry {
+            u_jet: 0.08,
+            reynolds: 100.0,
+            mach_max_lattice: 0.08,
+            flux_imbalance: 0.0,
+            force_rms: 100.0, // A shape-only synth must not use this as gain.
+            band_db: [0.0; N_BANDS],
+        }],
+        power_exponent: 0.0,
+        geometry: g,
+        scope: SCOPE_STATEMENT,
+    };
+    for n in [4096, 8192, 16384] {
+        let samples = table.synthesize(0.08, n, 4242).unwrap();
+        let mean_square = samples.iter().map(|v| v * v).sum::<f64>() / n as f64;
+        assert!(
+            (mean_square / (0.99 / 12.0) - 1.0).abs() < 0.05,
+            "N={n}: mean square {mean_square} changed with duration"
+        );
+    }
 }

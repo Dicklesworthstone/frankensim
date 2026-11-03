@@ -602,10 +602,20 @@ chemical evolution, acoustic radiation, turbulence-convergence or SPL claim.
     width ratio, executed) over a velocity sweep with per-entry
     regime gates and real-amplitude floors; the JSON export embeds
     the scope statement (marketing-mutation guard) and the MEASURED
-    power exponent as data (the saturated tonal limit cycle is NOT
+    source-force mean-square exponent as data (the saturated tonal limit cycle is NOT
     monotone in u near mode switches — multi-stability, reported not
     prescribed); the demo synth consumes the table and its output's
     band densities match within 6 dB (measured worst 2.5 dB).
+    Band-limited force RMS integrates the one-sided periodogram BEFORE
+    dividing each band's power by its bin count. It uses `N * sum(w²)`
+    normalization for the symmetric Hann window; interior bins have their
+    conjugate partners, while Nyquist is counted once and DC is excluded.
+    This is a windowed finite-record estimate with leakage, not an isolated
+    tone's coherent-gain correction or a radiated-power estimate. Relative
+    density shapes still normalize their strongest band to 0 dB. The
+    dimensionless shape-only synth filters uniform [-0.5, 0.5] input noise
+    through the normalized inverse FFT, without a duration-dependent gain
+    or implicit conversion to force or microphone pressure.
 12. Refusals typed by name (non-positive wavenumber, coincident
    observer/source, non-finite inputs, bad solver parameters,
    non-convergence with residual); Hankel functions outside their
@@ -693,8 +703,10 @@ Brown + Vaik/Paal published values; fine-lattice slit-fix regression
 turbulent-regime probe (stability-boundary bracket + tonal-window +
 typed-destabilization pins).
 
-`tests/noisetable.rs` (2): sweep + export + synth round trip;
-typed refusals.
+`tests/noisetable.rs` (3): sweep + export + synth round trip;
+typed refusals; duration-independent dimensionless synthesis amplitude.
+Inline `noisetable` G1/G3 tests independently check windowed Parseval with
+Nyquist and two-tone RMS under changed duration, source scale and band mapping.
 
 `tests/jetlab.rs` (5): edge-tone oscillation + diagnostics +
 radiation with scope; typed refusals; bitwise determinism; ramp

@@ -6,8 +6,9 @@
 //! Everything here is a SHAPE/SCALING authority
 //! ([`crate::SCOPE_STATEMENT`]): spectra are stored as RELATIVE dB
 //! over log-spaced Strouhal bands, normalized per entry; the
-//! velocity scaling of total radiated dipole power is reported as a
-//! MEASURED exponent, never asserted equal to a textbook value.
+//! velocity scaling of the band-limited force mean square is reported as a
+//! MEASURED exponent. It is not the radiated-power exponent: propagation
+//! weights source frequencies and directions separately.
 
 use crate::jetlab::{JetLabiumConfig, run_jet_labium};
 use crate::{AeroacError, SCOPE_STATEMENT};
@@ -31,7 +32,8 @@ pub struct NoiseEntry {
     /// Plate-vs-fringe flux imbalance of the run.
     pub flux_imbalance: f64,
     /// Transverse-force RMS [lattice units] WITHIN the table's
-    /// Strouhal band range (Parseval over the banded periodogram) —
+    /// Strouhal band range (one-sided periodogram, normalized by the
+    /// symmetric Hann window's mean square, not its coherent gain) —
     /// the oscillatory dipole strength, excluding out-of-band drift
     /// (executed: total RMS was drift-dominated and read a flat
     /// velocity scaling).
@@ -52,8 +54,8 @@ pub struct NoiseTable {
     /// Sweep entries, ascending in `u_jet`.
     pub entries: Vec<NoiseEntry>,
     /// Least-squares slope of `ln(force_rms^2)` vs `ln(u_jet)` — the
-    /// MEASURED dipole-power scaling exponent (reported, not
-    /// prescribed).
+    /// MEASURED source-force mean-square scaling exponent (reported, not
+    /// prescribed). It does not include a frequency-dependent radiation law.
     pub power_exponent: f64,
     /// Geometry provenance (the config of the first entry, which
     /// fixes everything but `u_jet`).
@@ -92,6 +94,67 @@ pub fn band_of(st: f64) -> Option<usize> {
     Some(((t * N_BANDS as f64) as usize).min(N_BANDS - 1))
 }
 
+// The existing rig admits a power-of-two record. Keep its band-integrated
+// amplitude separate from its relative density shape: dividing by each band's
+// bin count before integration makes RMS depend on record length and on the
+// jet velocity used to map frequency to Strouhal number.
+fn force_band_spectrum(
+    force_series: &[[f64; 2]],
+    delta: f64,
+    u: f64,
+) -> Result<(f64, [f64; N_BANDS]), AeroacError> {
+    let n = force_series.len();
+    let nf = n as f64;
+    let mean = force_series.iter().map(|f| f[1]).sum::<f64>() / nf;
+    let mut window_energy = 0.0;
+    let fft = fs_fft::Fft::new(n);
+    let mut buf: Vec<fs_fft::C64> = force_series
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let w = 0.5 - 0.5 * det::cos(core::f64::consts::TAU * i as f64 / (nf - 1.0));
+            window_energy += w * w;
+            fs_fft::C64::new((f[1] - mean) * w, 0.0)
+        })
+        .collect();
+    let mut scratch = vec![fs_fft::C64::new(0.0, 0.0); n];
+    fft.forward(&mut buf, &mut scratch);
+    let mut band_pow = [0.0_f64; N_BANDS];
+    let mut band_bins = [0_usize; N_BANDS];
+    for (k, c) in buf[..=n / 2].iter().enumerate().skip(1) {
+        let st = (k as f64 / nf) * delta / u;
+        if let Some(b) = band_of(st) {
+            // A real record has a conjugate negative-frequency partner for
+            // each interior bin, but the Nyquist bin is self-conjugate.
+            let sidedness = if k == n / 2 { 1.0 } else { 2.0 };
+            band_pow[b] += sidedness * c.norm_sq();
+            band_bins[b] += 1;
+        }
+    }
+    // Parseval for an unnormalized DFT: sum |X|² = N sum |w*x|².
+    // Divide by sum w² to undo the window's energy loss. Coherent gain
+    // belongs to an isolated tone estimate, not integrated source power.
+    let force_rms = det::sqrt(band_pow.iter().sum::<f64>() / (nf * window_energy));
+    if !force_rms.is_finite() || force_rms <= 0.0 {
+        return Err(AeroacError::InvalidParameter {
+            what: "no finite band energy in the Strouhal range (degenerate run)",
+        });
+    }
+    // The shape remains mean power density per band; common DFT/window/bin
+    // width factors cancel when normalizing its strongest band to 0 dB.
+    for (p, &m) in band_pow.iter_mut().zip(&band_bins) {
+        if m > 0 {
+            *p /= m as f64;
+        }
+    }
+    let peak = band_pow.iter().copied().fold(0.0_f64, f64::max);
+    let mut band_db = [0.0_f64; N_BANDS];
+    for (db, p) in band_db.iter_mut().zip(&band_pow) {
+        *db = 10.0 * det::ln((p / peak).max(1e-30)) / det::ln(10.0);
+    }
+    Ok((force_rms, band_db))
+}
+
 /// Build the table by sweeping `u_values` over the fixed `geometry`
 /// (its `u_jet` field is overwritten per entry).
 ///
@@ -120,59 +183,7 @@ pub fn fit_noise_table(
                 what: "sweep point left the low-Mach regime (diagnostic gate)",
             });
         }
-        let n = run.force_series.len();
-        #[allow(clippy::cast_precision_loss)]
-        let nf = n as f64;
-        let mean = run.force_series.iter().map(|f| f[1]).sum::<f64>() / nf;
-        // Band power via a Hann-windowed periodogram folded into the
-        // Strouhal bands.
-        let fft = fs_fft::Fft::new(n);
-        let mut buf: Vec<fs_fft::C64> = run
-            .force_series
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                #[allow(clippy::cast_precision_loss)]
-                let w = 0.5 - 0.5 * det::cos(2.0 * core::f64::consts::PI * i as f64 / (nf - 1.0));
-                fs_fft::C64::new((f[1] - mean) * w, 0.0)
-            })
-            .collect();
-        let mut scratch = vec![fs_fft::C64::new(0.0, 0.0); n];
-        fft.forward(&mut buf, &mut scratch);
-        let delta = 2.0 * cfg.slot_half;
-        let mut band_pow = [0.0f64; N_BANDS];
-        let mut band_bins = [0usize; N_BANDS];
-        for (k, c) in buf[..n / 2].iter().enumerate().skip(1) {
-            #[allow(clippy::cast_precision_loss)]
-            let st = (k as f64 / nf) * delta / u;
-            if let Some(b) = band_of(st) {
-                band_pow[b] += c.norm_sq();
-                band_bins[b] += 1;
-            }
-        }
-        // Density: divide each band by its bin count (empty bands
-        // stay zero and read the -30 dB floor below).
-        for (p, &m) in band_pow.iter_mut().zip(&band_bins) {
-            if m > 0 {
-                #[allow(clippy::cast_precision_loss)]
-                let mf = m as f64;
-                *p /= mf;
-            }
-        }
-        let peak = band_pow.iter().copied().fold(f64::MIN, f64::max);
-        if !peak.is_finite() || peak <= 0.0 {
-            return Err(AeroacError::InvalidParameter {
-                what: "no band energy in the Strouhal range (degenerate run)",
-            });
-        }
-        // Band-limited RMS via Parseval (relative units; the Hann
-        // window's coherent-gain factor is common to every entry so
-        // the SCALING claim is unaffected).
-        let force_rms = det::sqrt(band_pow.iter().sum::<f64>() / (nf * nf));
-        let mut band_db = [0.0f64; N_BANDS];
-        for (db, p) in band_db.iter_mut().zip(&band_pow) {
-            *db = 10.0 * det::ln((p / peak).max(1e-30)) / det::ln(10.0);
-        }
+        let (force_rms, band_db) = force_band_spectrum(&run.force_series, 2.0 * cfg.slot_half, u)?;
         entries.push(NoiseEntry {
             u_jet: u,
             reynolds: d.reynolds,
@@ -236,7 +247,9 @@ impl NoiseTable {
     /// to the table entry nearest `u_jet`, returning `n` samples
     /// whose smoothed spectrum follows the entry's band shape
     /// (RELATIVE shape only — the output is dimensionless and the
-    /// scope law applies).
+    /// scope law applies). The reference noise is uniform in [-0.5, 0.5]
+    /// before filtering, independent of record length. This does not scale
+    /// the output to the measured `force_rms` or fabricate a pressure level.
     ///
     /// # Errors
     /// [`AeroacError::InvalidParameter`] on an empty table,
@@ -300,7 +313,71 @@ impl NoiseTable {
             *c = fs_fft::C64::new(c.re * gain, c.im * gain);
         }
         fft.inverse(&mut noise, &mut scratch);
-        #[allow(clippy::cast_precision_loss)]
-        Ok(noise.iter().map(|c| c.re * nf).collect())
+        Ok(noise.iter().map(|c| c.re).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G1: every positive bin, including Nyquist, lies inside this declared
+    /// band. Compare the spectral integral with a time-domain Parseval value,
+    /// accounting for the discarded DC of the windowed, detrended signal.
+    #[test]
+    fn force_rms_matches_windowed_parseval_including_nyquist() {
+        let n = 64;
+        let forces: Vec<_> = (0..n)
+            .map(|i| {
+                let phase = core::f64::consts::TAU * i as f64 / n as f64;
+                [
+                    0.0,
+                    3.0 + 2.4 * (8.0 * phase).cos()
+                        + 0.7 * (18.0 * phase).sin()
+                        + if i % 2 == 0 { 0.4 } else { -0.4 },
+                ]
+            })
+            .collect();
+        let mean = forces.iter().map(|f| f[1]).sum::<f64>() / n as f64;
+        let (mut energy, mut dc, mut window_energy) = (0.0, 0.0, 0.0);
+        for (i, force) in forces.iter().enumerate() {
+            let window = 0.5 * (1.0 - (core::f64::consts::TAU * i as f64 / (n - 1) as f64).cos());
+            let sample = (force[1] - mean) * window;
+            energy += sample * sample;
+            dc += sample;
+            window_energy += window * window;
+        }
+        let expected_square = (energy - dc * dc / n as f64) / window_energy;
+        let (actual, _) = force_band_spectrum(&forces, 4.0, 1.0).unwrap();
+        assert!((actual * actual - expected_square).abs() < 2e-13);
+    }
+
+    /// G1/G3: two resolved tones have RMS sqrt((2.3²+0.7²)/2) = 1.7.
+    /// Changing duration or the Strouhal mapping redistributes bins across
+    /// unequal log bands; it must not change the integrated source amplitude.
+    #[test]
+    fn force_rms_preserves_amplitude_across_duration_and_band_population() {
+        for n in [512, 1024, 2048] {
+            for scale in [0.01, 1.0, 3.0] {
+                let forces: Vec<_> = (0..n)
+                    .map(|i| {
+                        let phase = core::f64::consts::TAU * i as f64;
+                        [
+                            0.0,
+                            scale * (6.0 + 2.3 * (phase / 32.0).cos() + 0.7 * (phase / 8.0).sin()),
+                        ]
+                    })
+                    .collect();
+                for speed in [0.08, 0.16, 0.24] {
+                    let (rms, shape) = force_band_spectrum(&forces, 1.0, speed).unwrap();
+                    let expected = 1.7 * scale;
+                    assert!(
+                        (rms / expected - 1.0).abs() < 2e-7,
+                        "N={n}, scale={scale}, speed={speed}: {rms} vs {expected}"
+                    );
+                    assert_eq!(shape.into_iter().fold(f64::NEG_INFINITY, f64::max), 0.0);
+                }
+            }
+        }
     }
 }
