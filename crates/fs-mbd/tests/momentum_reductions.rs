@@ -1,8 +1,8 @@
 //! G0/G3: small physical transfers amid large, cancelling momenta and work.
 use fs_ga::{Mat3, Se3, Twist, Vec3 as GaVec, Wrench as GaWrench};
 use fs_mbd::articulated::{
-    ArticulatedModel, FreeFloatingBaseState, JointModel, Link, SpatialInertia,
-    apply_free_floating_impulses, free_floating_momentum,
+    ArticulatedModel, BaseState, FreeFloatingBaseState, JointModel, Link, SpatialInertia,
+    apply_free_floating_impulses, apply_prescribed_base_impulses, free_floating_momentum,
 };
 use fs_mbd::{
     MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3,
@@ -206,4 +206,98 @@ fn free_articulated_impulse_retains_small_signed_work_on_a_large_translation() {
     assert_eq!(result.kinetic_energy_change, 64.5);
     assert_eq!(result.impulse_work, 64.5);
     assert_eq!(result.kinetic_work_residual, 0.0);
+}
+
+#[test]
+fn prescribed_joints_and_body_loads_retain_the_same_small_impulse_work() {
+    let axes = [
+        GaVec::new(1.0, 0.0, 0.0),
+        GaVec::new(0.0, 1.0, 0.0),
+        GaVec::new(0.0, 0.0, 1.0),
+    ];
+    let mut links = vec![Link::new(
+        "root",
+        None,
+        Se3::identity(),
+        JointModel::FIXED,
+        inertia(),
+    )];
+    for (index, axis) in axes.iter().enumerate() {
+        links.push(Link::new(
+            format!("slider{index}"),
+            Some(0),
+            Se3::identity(),
+            JointModel::prismatic(*axis, None).unwrap(),
+            inertia(),
+        ));
+    }
+    let model = ArticulatedModel::new(links).unwrap();
+    let jumps = [8.0, 1.0, -8.0];
+    for body_loads in [false, true] {
+        let mut loads = [GaWrench::default(); 4];
+        if body_loads {
+            for i in 0..3 {
+                loads[i + 1] = GaWrench::new(GaVec::default(), axes[i].scale(jumps[i]));
+            }
+        }
+        let result = apply_prescribed_base_impulses(
+            &model,
+            BaseState::prescribed(Se3::identity(), Twist::zero(), Twist::zero()),
+            &[0.0; 3],
+            &[LARGE, 0.0, LARGE],
+            if body_loads { &[0.0; 3] } else { &jumps },
+            &loads,
+        )
+        .unwrap();
+        assert_eq!(result.kinetic_energy_change, 64.5);
+        assert_eq!(result.applied_impulse_work, 64.5);
+        assert_eq!(result.support_work, 0.0);
+        assert_eq!(result.kinetic_work_residual, 0.0);
+        assert_eq!(result.linear_momentum_residual_world, GaVec::default());
+    }
+}
+
+#[test]
+fn prescribed_support_balances_a_small_couple_at_a_distant_world_origin() {
+    let model = ArticulatedModel::new(vec![
+        Link::new("root", None, Se3::identity(), JointModel::FIXED, inertia()),
+        Link::new(
+            "child",
+            Some(0),
+            Se3::identity(),
+            JointModel::FIXED,
+            inertia(),
+        ),
+    ])
+    .unwrap();
+    let base = BaseState::prescribed(
+        Se3::from_parts(fs_ga::So3::identity(), GaVec::new(LARGE, 0.0, 0.0)).unwrap(),
+        Twist::zero(),
+        Twist::zero(),
+    );
+    let result = apply_prescribed_base_impulses(
+        &model,
+        base,
+        &[],
+        &[],
+        &[],
+        &[
+            GaWrench::new(GaVec::new(0.0, 0.0, 1.0), GaVec::new(0.0, 1.0, 0.0)),
+            GaWrench::new(GaVec::default(), GaVec::new(0.0, -1.0, 0.0)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(result.external_impulse_world.force, GaVec::default());
+    assert_eq!(
+        result.external_impulse_world.torque,
+        GaVec::new(0.0, 0.0, 1.0)
+    );
+    assert_eq!(result.support_impulse_world.force, GaVec::default());
+    assert_eq!(
+        result.support_impulse_world.torque,
+        GaVec::new(0.0, 0.0, -1.0)
+    );
+    assert_eq!(result.angular_momentum_residual_world, GaVec::default());
+    assert_eq!(result.kinetic_energy_change, 0.0);
+    assert_eq!(result.impulse_work, 0.0);
 }
