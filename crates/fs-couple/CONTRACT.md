@@ -21538,6 +21538,42 @@ check clamped/sliding support couples, propagate a reciprocal strike into native
 bending/torsion, and reject sub-resolution parallel kicks while retaining the
 stable energy of a resolved transverse kick against large baseline momentum.
 
+## Reciprocal isolated impacts between native rods and finite rigid bodies
+
+`rod_motion::RodMotion::apply_rigid_normal_impact` resolves one authored normal
+contact between an original rod material attachment and an original finite
+`fs_mbd::RigidBodyState`. It derives the rod's point mobility from its actual
+mass, central tensor, centroid offset and supported degrees of freedom. The
+rigid participant supplies its native full-inertia point mobility. The existing
+`fs_contact::impact::solve_normal_impact` selects the restitution impulse; the
+original rod and rigid impulse owners apply equal and opposite actions. Both
+continuing states are returned together, retaining poses, elastic/material
+history, clocks and step counts. Inactive or separating witnesses preserve the
+original state bits and require no native impulse event.
+
+The witnesses must have a nonnegative signed gap and share the declared normal
+line within the geometry bound. Their actual separation still contributes to
+the angular-momentum admission check. Stationary rod supports receive their
+original physical force impulses and pure couples, with zero support work.
+Actual stored momentum changes, endpoint relative velocity, and pair kinetic
+work must satisfy independent absolute bounds. Double-double sums of the
+momentum changes retain small collision losses during large common translation;
+the relative speed subtracts common translation before adding point rotation.
+An unresolved linear impulse cannot be hidden by a resolved angular response.
+Failure or cancellation publishes neither participant, including a final pair
+balance refusal after both native impulse candidates have been prepared.
+
+The original contact report's dissipation is mechanical restitution loss,
+without an inferred heat partition or damage law. This is a frozen-pose isolated
+frictionless impact, not contact discovery, a simultaneous contact solver,
+persistent contact, penetration repair or an additional rod integrator. Existing
+rod support restrictions remain binding. Contact/mobility preparation is
+constant work; the original rod impulse path is O(nodes). Focused tests compare
+collinear finite masses with the closed-form collision law, offset/full-tensor
+response with an independent six-dimensional spatial-mass solve, rotated and
+translated systems, support reactions, continuing motion, small loss during
+large common translation, and refused/cancelled events with a valid retry.
+
 ## Source-backed ellipsoidal fluid carriers
 
 `material_immersed::RetainedFluidEllipsoids` binds one centered uniform

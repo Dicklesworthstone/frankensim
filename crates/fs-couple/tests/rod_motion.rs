@@ -37,6 +37,9 @@ mod bending_loss;
 #[path = "rod_motion/impulse.rs"]
 mod impulse;
 
+#[path = "rod_motion/rigid_impact.rs"]
+mod rigid_impact;
+
 fn section(scale:f64)->ConcentricShearSection {
     let mut claims=ClaimSet::new();let mut requirements=Vec::new();
     for (name,value,dims) in [("density",1000.0,Density::DIMS),

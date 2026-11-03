@@ -11,7 +11,7 @@
 //! Eccentric link inventory is endpoint-lumped at original rotating offsets.
 //! Free nodes and stationary frame clamps are supported. An eccentric free rotor
 //! with constrained centerline translation needs a coupled constraint integrator
-//! and refuses. No distributed cable inertia, moving supports, contact, material
+//! and refuses. No distributed cable inertia, moving supports, persistent contact, material
 //! axial/shear damping, damage or live solid-source replacement is inferred.
 //! Explicit source-bound bending and torsional viscosities use passive loss flows.
 //! Prescribed hydrostatic fluid refresh retains this trajectory and accounts for the
@@ -377,6 +377,9 @@ pub use bending_loss::{PreparedRodBendingLoss, RodAngularLosses, RodBendingHeat}
 
 /// Instantaneous terminal and attachment impulses on the same trajectory.
 pub mod impulse;
+
+/// Reciprocal isolated normal impacts with an original finite rigid body.
+pub mod rigid_impact;
 
 /// A force AT the material node and a pure couple held in the WORLD frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
