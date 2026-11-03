@@ -39,12 +39,16 @@ use fs_thermochem::{
         thermodynamics::acid_base::{
             AcidBaseError, AcidBaseSpeciation, IdealAcidBaseSystem, SpeciationOptions, SpectatorIon,
         },
+        thermodynamics::gas_liquid::GasLiquidError,
     },
 };
 use std::{collections::BTreeSet, sync::Arc};
 
 /// Finite gas/liquid oxygen exchange coupled to the original cyanidation owner.
 pub mod gas_transfer;
+
+/// Prescribed-pressure oxygen uptake and stripping with a maintained gas reservoir.
+pub mod aeration;
 
 /// Explicit empirical coefficient in m6/(mol2 s).
 pub type CyanidationRateConstant = Qty<6, 0, -1, 0, 0, -2>;
@@ -89,6 +93,8 @@ pub enum CyanidationError {
     Source(MatDbError),
     /// Original coupled acid/base solver refusal.
     Speciation(AcidBaseError),
+    /// Original gas/aqueous equilibrium or source admission refused.
+    GasEquilibrium(GasLiquidError),
     /// Original exact chemical equation/amount refusal.
     Reaction(ReactionBalanceError),
     /// Original shared-species definition admission failed.
@@ -125,6 +131,11 @@ impl From<MatDbError> for CyanidationError {
 impl From<AcidBaseError> for CyanidationError {
     fn from(e: AcidBaseError) -> Self {
         Self::Speciation(e)
+    }
+}
+impl From<GasLiquidError> for CyanidationError {
+    fn from(e: GasLiquidError) -> Self {
+        Self::GasEquilibrium(e)
     }
 }
 impl From<ReactionBalanceError> for CyanidationError {

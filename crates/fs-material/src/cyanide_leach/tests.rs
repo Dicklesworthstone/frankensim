@@ -24,12 +24,12 @@ use fs_thermochem::{
     },
 };
 
-const REFERENCE: &str = "source-elemental-reference-authored-cyanidation-test";
+pub(super) const REFERENCE: &str = "source-elemental-reference-authored-cyanidation-test";
 const TEMPERATURE: f64 = 298.15;
 fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()
 }
-fn point(name: &str) -> QueryPoint {
+pub(super) fn point(name: &str) -> QueryPoint {
     let aqueous = name != "H2O(l)";
     let ionic = !["H2O(l)", HCN, "H2CO3(aq)", OXYGEN].contains(&name);
     let mut point = QueryPoint::new()
@@ -75,7 +75,7 @@ fn point(name: &str) -> QueryPoint {
     }
     point
 }
-fn pack(name: &str, gibbs: f64, point: &QueryPoint) -> NormalizedPack {
+pub(super) fn pack(name: &str, gibbs: f64, point: &QueryPoint) -> NormalizedPack {
     let artifact = hash_domain("cyanidation-gibbs-fixture-v1", name.as_bytes());
     let provenance = Provenance {
         source: "authored Gibbs fixture; not measured HCN/carbonate thermochemistry".into(),
@@ -145,7 +145,7 @@ fn sources<'a>(
         })
         .collect()
 }
-fn system(buffer: bool) -> IdealAcidBaseSystem {
+pub(super) fn system(buffer: bool) -> IdealAcidBaseSystem {
     let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * TEMPERATURE;
     let records = [
         ("H+(aq)", 0.0),
@@ -213,7 +213,7 @@ fn system(buffer: bool) -> IdealAcidBaseSystem {
     }
     IdealAcidBaseSystem::new(water, families).unwrap()
 }
-fn card(rate: f64) -> ConstitutiveModelCard {
+pub(super) fn card(rate: f64) -> ConstitutiveModelCard {
     let mut validity = ValidityDomain::unconstrained();
     for (axis, dims, low, high) in [
         (PH_AXIS, Dims::NONE, -1.0, 15.0),
@@ -257,7 +257,7 @@ fn card(rate: f64) -> ConstitutiveModelCard {
         },
     }
 }
-fn options() -> SpeciationOptions {
+pub(super) fn options() -> SpeciationOptions {
     SpeciationOptions {
         ph_tolerance: Dimensionless::new(1e-12),
         absolute_charge_tolerance: Amount::new(1e-16),
@@ -266,7 +266,7 @@ fn options() -> SpeciationOptions {
         ..SpeciationOptions::default()
     }
 }
-fn charge(sodium: f64) -> CyanidationCharge {
+pub(super) fn charge(sodium: f64) -> CyanidationCharge {
     CyanidationCharge {
         accessible_gold: Amount::new(1.0),
         uncomplexed_cyanide: Amount::new(2.0),

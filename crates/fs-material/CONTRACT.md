@@ -1,5 +1,50 @@
 # fs-material — CONTRACT
 
+## Prescribed-pressure oxygen contact during cyanidation
+
+`cyanide_leach::aeration::AeratedGoldCyanidationBatch` couples the original
+speciated gold law to a maintained oxygen partial pressure. The existing
+`IdealGasLiquidPartition` supplies the equilibrium dissolved amount from
+original gas/aqueous formation-Gibbs receipts, explicit solvent activity basis,
+species partial pressure and the retained standard reference pressure. A
+separate version-one `prescribed-pressure-oxygen-transfer` source card supplies
+nonnegative `volumetric-transfer-coefficient` kLa in inverse seconds; no rate is
+inferred from equilibrium data.
+
+At fixed volume, `J=kLa*(O_sat-O)` and the coupled balances are `dx/dt=r_Au`,
+`dO/dt=J-r_Au/4`. Actual DO is independently integrated, so an initially
+oxygen-free charge can start reacting after uptake. The finite chemical
+ceiling is `min(Au0,CN0/2)`; closed-batch initial DO is not an open-boundary
+ceiling. The original chemical evaluator, simultaneous acid/base speciation,
+conserved equation and empirical source admission remain authoritative.
+
+The owner separately integrates gross uptake and gross stripping and preserves
+interval and cumulative accounts over calls. Original stoichiometric oxygen
+consumption independently closes `O+x/4+out=O0+in`. The reported accumulated
+arithmetic allowance never repairs a stock. Partial pressure can change between
+advances; zero pressure strips under active contact, whereas zero kLa stops
+exchange. Finite headspace and metered dosing belong to the existing
+`gas_transfer` owner, not this maintained-reservoir boundary.
+
+Both kinetic cards admit actual conditions at every stage and endpoint.
+Caller coordinates cannot override chemistry, gas pressure or saturation.
+Gas and chemical sources share temperature, reference pressure and elemental
+convention; the exact network joins original species definitions. The external
+gas identity is excluded from liquid families and spectators, even for empty
+inventories. Original gas-equilibrium errors are retained in the public refusal.
+
+Bounded full/two-half RK4 trials evolve gold, DO and both gross transfer accounts.
+Raw componentwise discrepancies control local numerical estimates without
+assuming smooth error scaling across uptake/stripping reversal. Each call starts
+fresh interval transfer coordinates, so large historical totals cannot hide
+small increments. Negative or unrepresentable positive stocks, unresolved clock
+stages, unsupported source points, exhausted budgets and cancellation refuse
+without publishing any candidate state. Numerical estimates are not certified
+global bounds or calibration uncertainty.
+
+The prescribed boundary asserts no finite gas-feed capacity, gas power, changing
+volume, heat feedback, nonideal activity correction or measured ore calibration.
+
 ## Finite gas/liquid oxygen supply during cyanidation
 
 `cyanide_leach::gas_transfer::AeratedGoldCyanidation` attaches a finite,
