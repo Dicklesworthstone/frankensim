@@ -19,7 +19,7 @@
 
 use super::{
     FrictionalContactConfig, FrictionalContactError, PsdImpulseWorkWitness, PsdVelocityCriterion,
-    PsdVelocityWitness, poll,
+    PsdVelocityWitness, locked_tangents, poll,
 };
 use fs_solver::orthant::active_set::SpdOrthantConfig;
 
@@ -62,7 +62,8 @@ pub(super) fn admit_positive_definite(
 }
 
 /// Work differences between two roots are v_before dot delta_p. First reuse
-/// the already checked full mobility range. If necessary, omit only tangent
+/// the already checked full mobility range. Exact locked-slip identities can
+/// reduce that work covector without changing W. If necessary, omit only tangent
 /// coordinates that the EXACT zero-friction law fixes to zero. For their
 /// complementary index set S, positive semidefiniteness gives
 /// ker(W_SS) = {z_S : W * embed_S(z_S) = 0}. Thus v_S in range(W_SS)
@@ -72,10 +73,19 @@ pub(super) fn impulse_work_witness(
     original: &[f64],
     velocity: &[f64],
     mu: &[f64],
+    point: &[f64],
     config: FrictionalContactConfig,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PsdImpulseWorkWitness, FrictionalContactError> {
     let d = range.dimension;
+    // A small raw slip is not a small work ambiguity when the pressure gauge
+    // can be large. Exact locked-slip identities and their work-specific bound
+    // must precede ANY acceptance by the original velocity tolerance.
+    if let Some(witness) =
+        locked_tangents::work_witness(range, original, velocity, mu, point, config, cancelled)?
+    {
+        return Ok(witness);
+    }
     let mut witness = range.work_projection(
         velocity,
         (0..d).collect(),
@@ -259,6 +269,8 @@ impl RangeAdmission {
         Ok(PsdImpulseWorkWitness {
             impulse_coordinates,
             rank: self.retained.len(),
+            locked_tangent_substitutions: Vec::new(),
+            locked_tangent_work_admission: None,
             range_velocity_residual: residual,
             allowed_range_velocity_residual: allowed,
             spectral_residual: self.spectral_residual,

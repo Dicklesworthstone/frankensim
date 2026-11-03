@@ -27,6 +27,7 @@ use fs_solver::{
 };
 use std::cell::{Cell, RefCell};
 
+mod locked_tangents;
 mod natural;
 mod normal_gauge;
 pub(crate) mod range;
@@ -117,8 +118,10 @@ pub struct PsdVelocityWitness {
 /// Two admissible impulses differ by `z` with `W*z=0`. Their midpoint-work
 /// difference is `v_before dot z`; it vanishes when the preimpact velocity is
 /// in the mobility range. Exactly frictionless tangent coordinates can be
-/// omitted because every law-satisfying impulse is zero there. This remains a
-/// floating range admission, not an interval theorem or a local heat partition.
+/// omitted because every law-satisfying impulse is zero there. Structurally
+/// locked sliding tangent pairs may instead use the explicit Coulomb-work
+/// substitutions below before the same original-mobility range check. This
+/// remains a floating admission, not an interval theorem or local heat partition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PsdImpulseWorkWitness {
     /// Coordinates of the checked original principal mobility, indexed into
@@ -127,14 +130,63 @@ pub struct PsdImpulseWorkWitness {
     pub impulse_coordinates: Vec<usize>,
     /// Numerically separated rank of that principal mobility.
     pub rank: usize,
-    /// Euclidean norm of the preimpact velocity's nullspace projection [m/s].
+    /// Exact-law reductions applied to the incoming work covector before its
+    /// range check. Empty means the original preimpact velocity is tested.
+    /// These do not modify physical W or identify individual redundant loads.
+    pub locked_tangent_substitutions: Vec<LockedTangentWorkSubstitution>,
+    /// Work-specific admission for exact locked-slip substitutions. Its bound
+    /// applies to EVERY same-motion cone representative, not just the returned
+    /// impulse. Empty uses the original numerical velocity-range witness.
+    pub locked_tangent_work_admission: Option<LockedTangentWorkAdmission>,
+    /// Euclidean residual of the checked work-covector range admission [m/s].
     pub range_velocity_residual: f64,
-    /// Declared velocity tolerance plus the numerical range margin [m/s].
+    /// Allowance of the selected range proof [m/s]. Locked-slip work uses its
+    /// energy allowance divided by the admitted impulse-difference bound;
+    /// the original velocity-range lane uses its declared velocity tolerance.
     pub allowed_range_velocity_residual: f64,
     /// Original-matrix eigen-equation residual after mobility normalization.
     pub spectral_residual: f64,
     /// Orthogonality residual of the checked range/nullspace basis.
     pub orthogonality_residual: f64,
+}
+
+/// An inspectable total-work identity for one exactly locked sliding pair.
+///
+/// Both original active tangent rows AND columns are exactly zero, so every
+/// law root has the same nonzero tangent velocity and p_t = -p_n*mu*v_t/|v_t|.
+/// Its work covector [v_n,v_t] can therefore be replaced by
+/// [v_n-mu*|v_t|,0,0] when comparing impulse representatives. A zero-slip disk
+/// is never given a unique traction direction by this reduction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LockedTangentWorkSubstitution {
+    /// Contact index in the result's canonical `active_indices` order.
+    pub active_contact: usize,
+    /// mu*v_t/|v_t| in the original pair of tangent coordinates.
+    pub weighted_slip_direction: [f64; 2],
+    /// -mu*|v_t|, added to its normal work-covector coordinate [m/s].
+    pub normal_velocity_shift: f64,
+    /// Retained DD low component of that shift, before adding it to v_n.
+    pub normal_velocity_shift_low: f64,
+}
+
+/// Numerical work uncertainty for all admitted same-motion Coulomb roots.
+///
+/// The original-matrix row-space residual r and a positive cone-dual witness
+/// give |delta work| <= 2*B*|r|, where B bounds EVERY feasible impulse norm.
+/// This is a bounded floating sufficient admission, not exact or interval
+/// uniqueness. No bounded cone witness means refusal unless r is exactly zero.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LockedTangentWorkAdmission {
+    /// Scalar active tangent coordinates with mu=0, whose work coefficients
+    /// are exactly irrelevant because every admitted impulse is zero there.
+    pub zero_friction_coordinates: Vec<usize>,
+    /// Upper numerical bound on every admissible impulse's Euclidean norm
+    /// [N s]; None means an exactly zero row-space residual needed no bound.
+    pub impulse_norm_bound: Option<f64>,
+    /// Upper numerical bound on work differences between representatives [J].
+    pub maximum_work_difference: f64,
+    /// The original selected event's energy allowance, including roundoff [J].
+    pub allowed_work_difference: f64,
 }
 
 /// Explicit choice of normal endpoint law; these alternatives are not aliases.
@@ -282,13 +334,14 @@ pub enum FrictionalContactError {
         work: f64,
         allowed: f64,
     },
-    /// Determined velocity alone does not determine total work. Preimpact
-    /// relative motion has an unresolved component along the impulse gauge;
-    /// no arbitrary dissipation or source-work allocation is published.
+    /// Determined velocity alone does not determine total work. The checked
+    /// work covector, including any exact locked-slip reductions, retains an
+    /// unresolved mobility-null component. No arbitrary loss is published.
     UnresolvedWork {
-        /// Nullspace projection of the tested velocity vector [m/s].
+        /// Range projection or original-matrix work-covector residual [m/s].
         range_velocity_residual: f64,
-        /// Numerical range and caller velocity allowance [m/s].
+        /// Numerical admission allowance [m/s]. Locked sliding covectors
+        /// derive this from the all-root impulse bound and energy allowance.
         allowed: f64,
     },
     /// Both witnesses satisfy the physical law and passivity gates and have
@@ -390,6 +443,7 @@ pub fn solve_frictional_contacts(
             }
         }
     }
+    let has_locked_tangent_pairs = locked_tangents::has_locked_pair(&matrix, d);
     let (minimum_pivot, range_admission) =
         match solve_spd_orthant(&matrix, &vec![0.0; d], config.matrix, &mut cancelled) {
             Ok(admission) => (admission.min_normalized_pivot, None),
@@ -398,6 +452,9 @@ pub fn solve_frictional_contacts(
                 error @ (SpdOrthantError::NotPositiveDefinite { .. }
                 | SpdOrthantError::Degenerate { .. }),
             ) => {
+                if (0..active.len()).any(|k| matrix[(3 * k) * d + 3 * k] <= 0.0) {
+                    return Err(E::MobilityNotAdmitted(error));
+                }
                 let admission = range::admit(&matrix, d, config.matrix, &mut cancelled)?;
                 match admission {
                     Some(admission) => (0.0, Some(admission)),
@@ -411,14 +468,14 @@ pub fn solve_frictional_contacts(
         let a = 3 * k;
         let rn = 1.0 / matrix[a * d + a];
         // One common step preserves the Euclidean Coulomb disk in both axes.
-        let tangent_mobility = matrix[(a + 1) * d + a + 1] + matrix[(a + 2) * d + a + 2];
-        // For admitted exact-zero tangent rows, any positive finite natural-
-        // map step describes the same Coulomb law. Reuse the normal scale;
-        // the physical mobility remains exactly zero in those directions.
-        let rt = if tangent_mobility == 0.0 {
+        let tangent_diagonal = matrix[(a + 1) * d + a + 1] + matrix[(a + 2) * d + a + 2];
+        // Any finite positive projection step defines the SAME Coulomb law.
+        // A truly locked pair can use the existing normal mobility scale;
+        // this is numerical solver scaling, never an entry added to W.
+        let rt = if tangent_diagonal == 0.0 {
             rn
         } else {
-            2.0 / tangent_mobility
+            2.0 / tangent_diagonal
         };
         if !rn.is_finite() || !rt.is_finite() || rn <= 0.0 || rt <= 0.0 {
             return Err(E::NonFinite);
@@ -470,6 +527,15 @@ pub fn solve_frictional_contacts(
         if !report.report.converged {
             return Err(E::NotConverged(report.report));
         }
+        if has_locked_tangent_pairs {
+            locked_tangents::complete_tractions(
+                &matrix,
+                &free,
+                &mu,
+                &mut state.x,
+                &mut **cancel.borrow_mut(),
+            )?;
+        }
         Ok((state.x, report.report))
     };
     let (point, report) = if d == 0 {
@@ -512,7 +578,16 @@ pub fn solve_frictional_contacts(
                     config,
                     &mut **cancel.borrow_mut(),
                 )?;
-                if let Some((candidate, directions)) = proposed {
+                if let Some((mut candidate, directions)) = proposed {
+                    if has_locked_tangent_pairs {
+                        locked_tangents::complete_tractions(
+                            &matrix,
+                            &free,
+                            &mu,
+                            &mut candidate,
+                            &mut **cancel.borrow_mut(),
+                        )?;
+                    }
                     // A numerical gauge proposal never bypasses the original
                     // full matrix, unilateral law, circular cone or work gate.
                     let checked = audit(
@@ -577,6 +652,7 @@ pub fn solve_frictional_contacts(
         }
     }
     if let Some(witness) = range_witness {
+        let accepted_point: Vec<_> = active.iter().flat_map(|&i| result.impulses[i]).collect();
         result.impulse_work_witness = Some(range::impulse_work_witness(
             // Only a checked semidefinite range creates range_witness above.
             range_admission
@@ -585,6 +661,7 @@ pub fn solve_frictional_contacts(
             &matrix,
             &free,
             &mu,
+            &accepted_point,
             config,
             &mut **cancel.borrow_mut(),
         )?);

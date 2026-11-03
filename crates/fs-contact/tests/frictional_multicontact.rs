@@ -8,6 +8,9 @@ mod normal_gauge;
 #[path = "frictional_multicontact/range.rs"]
 mod range;
 
+#[path = "frictional_multicontact/locked_tangents.rs"]
+mod locked_tangents;
+
 #[path = "frictional_multicontact/elliptic.rs"]
 mod elliptic;
 

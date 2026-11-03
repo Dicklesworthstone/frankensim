@@ -1243,6 +1243,17 @@ step as its common tangent numerical scale. The original zero mobility and
 Coulomb disk remain unchanged; positive tangent mobility retains the original
 step. Positive normal mobility is still required.
 
+When both original active tangent rows and columns are exactly zero, their
+relative slip is fixed independently of every impulse. The original Coulomb
+disk then fixes `p_t = -mu*p_n*v_t/|v_t|` for every nonzero slip. This exact
+traction is completed before the unchanged full-law/work audit, including
+slips below the numerical velocity tolerance and coherent-gauge proposals.
+The zero columns make this a law identity with no velocity change, rather than
+a sequential approximation to coupled recoil. Zero slip retains the static
+disk as a representative load; it earns no unique local traction claim.
+Genuine nonzero mobility is never declared locked, and the existing admitted
+single-axis static/frictionless cases retain their original range proof.
+
 `UniqueImpulses` retains the independent-row contraction result. When that
 sufficient bound fails, the same checked candidate energy criterion may admit
 the full positive spectrum without dropping any direction. Then
@@ -1266,6 +1277,36 @@ residual/allowance and original spectral/orthogonality residuals. Unresolved
 work returns typed `UnresolvedWork`; a chosen passive representative is not
 enough to assign a physical dissipation.
 
+Before any raw-velocity work admission, an exactly locked sliding pair admits
+the work identity
+`v_before dot delta_p = (v_n - mu*|v_t|)*delta_p_n` for its three coordinates.
+`impulse_work_witness.locked_tangent_substitutions` records each canonical
+active contact, weighted slip direction and DD normal covector shift. Incoming
+normal velocity and friction terms stay separate in DD arithmetic, preserving
+a finite friction coefficient that ordinary subtraction would erase. Neither
+physical W nor any state is transformed.
+
+A cached-range dual supplies a candidate `y`; the ORIGINAL-matrix residual
+`r = work_covector - W^T*y` is reconstructed with signed DD products. For a
+cone-dual probe `x`, every same-motion root satisfies `(W^T*x) dot p = D`.
+If every normal margin `g_k = (W^T*x)_n - mu*|(W^T*x)_t|` is positive,
+`|p| <= hypot(1,max(mu))*D/min(g)` bounds ALL admissible representatives.
+The candidate impulse and a fixed normal-only probe are tried; a selected
+representative's norm alone is never taken as a bound. Original product
+magnitudes set cancellation-aware numerical allowances. Unresolved or
+underflowed positive bounds refuse conservatively.
+
+`locked_tangent_work_admission` records the resulting maximum work variation
+`2*B*|r|`, the actual event energy allowance in joules, the all-root impulse
+bound, and any identically zero-friction coordinates. An absolute small
+velocity residual cannot establish small work under a large pressure gauge.
+Only work variation within that numerical energy allowance is admitted;
+there is no exact/interval uniqueness claim. Compatible redundant loads
+remain admissible, while differing losses, tiny slip amplified by large loads,
+and swallowed normal-covector shifts refuse. The original velocity proofs
+remain separate, and the result conservatively retains `UniqueVelocity` even
+when fixed sliding happens to determine all impulses.
+
 Exactly zero-friction tangents have zero impulse under the original law. If
 their independent velocities defeat the full-range check, one bounded checked
 principal-mobility analysis may omit only those coordinates. This admits
@@ -1283,9 +1324,21 @@ zero-friction/mixed-coordinate work admission.
 Three added groups in `tests/frictional_multicontact/range.rs` cover normal
 capture with one or both exact-zero tangent directions, frictionless null-space
 slip with restitution, and refusal of tiny nonzero couplings or negative
-diagonals. The existing work witness remains necessary: frictional null-space
-slip whose work it cannot prove still returns `UnresolvedWork`. These three
-added groups were not executed in the constrained editing environment.
+diagonals. The full-lock sliding case now retains its finite physical friction
+and admitted total work through the explicit law reduction above. Eleven groups
+in `tests/frictional_multicontact/locked_tangents.rs` additionally cover both
+tangent axes, basis changes, tiny nonzero slip, static load nonuniqueness,
+normal coupling, compatible/incompatible redundant loss, directional ellipses,
+original matrix limits, passivity and late cancellation. A private exact-root
+regression exercises the real DD work admission for a sub-ULP friction shift
+whose finite loss survives at very large pressure; the public seam retains its
+earlier physical-complementarity refusal when its natural map cannot resolve
+that pressure. Five native groups in
+`fs-mbd/tests/articulated_locked_tangents.rs` use actual one-axis sliders and
+full-tensor hinges: full support force/couple, signed base/plane work, real
+linear/angular momentum, directional friction, endpoint limits and atomic
+refusal. No tangent compliance, heavy support, collision discovery, finite-step
+friction law or impact-to-heat partition is inferred by this extension.
 
 Sixteen focused integration groups pass: the twelve earlier groups plus physical four-foot cube stick/threshold/oblique sliding with two independently constructed pressure allocations, independent tangent-frame covariance and permutation, an exact heterogeneous-friction example with two passive motions, and tiny heterogeneous-friction refusal. Three original analytic-action/preconditioner tests also pass. Native body motion follows for an actual mechanical Gram matrix; whole-workspace Cargo/DSR verification and broader Moreau-Jean scope remain separate.
 

@@ -421,18 +421,18 @@ fn exact_zero_tangent_slip_keeps_the_native_impulse_work_admission() {
     assert_eq!(work.rank, 1);
     assert!(work.range_velocity_residual <= work.allowed_range_velocity_residual);
 
-    // Nonzero friction retains both tangent coordinates in the original
-    // work proof. This admission does not certify frictional null-space slip.
+    // The exact locked-pair Coulomb identity now proves the finite frictional
+    // work without assigning compliance or dropping either tangent impulse.
     c.friction_coefficient = 0.3;
-    let error = solve_frictional_contacts(&[c], &w, Default::default(), || false).unwrap_err();
-    let FrictionalContactError::UnresolvedWork {
-        range_velocity_residual,
-        allowed,
-    } = error
-    else {
-        panic!("expected the unchanged work-determinacy refusal: {error:?}");
-    };
-    assert!(range_velocity_residual > allowed);
+    let out = solve(&[c], &w);
+    let slip = 2.0_f64.hypot(3.0);
+    close(out.impulses[0][0], 3.0);
+    close(out.impulses[0][1], -1.8 / slip);
+    close(out.impulses[0][2], 2.7 / slip);
+    close(out.dissipated_energy, 0.75 + 0.9 * slip);
+    let work = out.impulse_work_witness.as_ref().unwrap();
+    assert_eq!(work.locked_tangent_substitutions.len(), 1);
+    assert!(work.range_velocity_residual <= work.allowed_range_velocity_residual);
 }
 
 #[test]
