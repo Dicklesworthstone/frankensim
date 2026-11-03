@@ -82,6 +82,31 @@ impl PeriodicDynamicComponents {
                 "at least three cells per periodic axis and one component required",
             ));
         }
+        Self::new_geometry(
+            shape,
+            FilterGeometry::Periodic,
+            component_count,
+            maximum_bytes,
+        )
+    }
+
+    pub(in super::super) fn new_geometry(
+        shape: [usize; 3],
+        geometry: FilterGeometry,
+        component_count: usize,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        geometry.validate_shape(shape)?;
+        if component_count == 0 {
+            return Err(DynamicSgsError::Invalid("at least one component required"));
+        }
+        if let FilterGeometry::Channel(normal) = geometry {
+            if shape[normal] < 3 {
+                return Err(DynamicSgsError::Invalid(
+                    "component wall derivatives require three normal fluid cells",
+                ));
+            }
+        }
         let cells = shape
             .into_iter()
             .try_fold(1usize, |n, d| n.checked_mul(d))
@@ -96,8 +121,12 @@ impl PeriodicDynamicComponents {
                 maximum: maximum_bytes,
             });
         }
+        let mut scalar = PeriodicDynamicScalar::new_geometry(shape, geometry, maximum_bytes)?;
+        if matches!(geometry, FilterGeometry::Channel(_)) {
+            scalar.boundary_gradient = ScalarBoundaryGradient::Interior;
+        }
         let result = Self {
-            scalar: PeriodicDynamicScalar::new(shape, maximum_bytes)?,
+            scalar,
             contractions: allocated(cells, [0.0; 2])?,
             components: component_count,
         };
@@ -127,7 +156,11 @@ impl PeriodicDynamicComponents {
         self.scalar.diffusivities()
     }
 
-    fn measure_scale(
+    pub(in super::super) fn shape(&self) -> [usize; 3] {
+        self.scalar.shape
+    }
+
+    pub(in super::super) fn measure_scale(
         &self,
         values: &impl Fn(usize, usize) -> f64,
         cancelled: &mut impl FnMut() -> bool,
@@ -151,7 +184,7 @@ impl PeriodicDynamicComponents {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_from(
+    pub(in super::super) fn prepare_from(
         &mut self,
         flow: &PeriodicDynamicSgs,
         config: DynamicComponentsConfig,
@@ -228,6 +261,11 @@ impl PeriodicDynamicComponents {
             numerator.add(pair[0]);
             denominator.add(pair[1]);
         }
+        // Sum raw component contractions first, then average each plane once.
+        // Averaging every component separately adds sweeps and can discard a
+        // small component's weight before the common objective is formed.
+        flow.geometry
+            .average_planes(self.scalar.shape, &mut self.scalar.contraction, cancelled)?;
         self.scalar.fit_from(
             flow,
             config.fit_config(),

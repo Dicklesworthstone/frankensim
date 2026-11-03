@@ -74,6 +74,7 @@ pub struct DynamicScalarReport {
 pub struct PeriodicDynamicScalar {
     pub(super) shape: [usize; 3],
     walls: [ScalarWall; 2],
+    boundary_gradient: ScalarBoundaryGradient,
     scalar: Vec<f64>,
     filtered: Vec<f64>,
     basis: Vec<[f64; 3]>,
@@ -81,11 +82,21 @@ pub struct PeriodicDynamicScalar {
     diffusivity: Vec<f64>,
 }
 
+/// A flux owner may constrain a coupled flux without prescribing the scalar's
+/// normal gradient. Such components use interior reconstruction at both scales.
+#[derive(Clone, Copy)]
+pub(super) enum ScalarBoundaryGradient {
+    Declared,
+    Interior,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn gradient(
     shape: [usize; 3],
     metric: [f64; 3],
     geometry: FilterGeometry,
     walls: [ScalarWall; 2],
+    boundary_gradient: ScalarBoundaryGradient,
     filtered: bool,
     cell: usize,
     field: &[f64],
@@ -94,7 +105,9 @@ fn gradient(
     let mut gradient = [0.0; 3];
     for axis in 0..3 {
         let stencil = geometry.stencil(shape, metric, cell, at, axis);
-        gradient[axis] = if filtered {
+        gradient[axis] = if matches!(boundary_gradient, ScalarBoundaryGradient::Interior) {
+            stencil.interior_scalar_derivative(field)?
+        } else if filtered {
             stencil.filtered_scalar_derivative(field, walls)?
         } else {
             stencil.derivative(|j| field[j], walls)?
@@ -134,6 +147,7 @@ impl PeriodicDynamicScalar {
         let result = Self {
             shape,
             walls: [ScalarWall::ZeroGradient; 2],
+            boundary_gradient: ScalarBoundaryGradient::Declared,
             scalar: allocated(n, 0.0)?,
             filtered: allocated(n, 0.0)?,
             basis: allocated(n, [0.0; 3])?,
@@ -245,6 +259,8 @@ impl PeriodicDynamicScalar {
             });
         }
         let domain = self.prepare_contractions(flow, density, scales, cancelled)?;
+        flow.geometry
+            .average_planes(self.shape, &mut self.contraction, cancelled)?;
         self.fit_from(flow, config, scales, domain, cancelled)
     }
 
@@ -267,6 +283,7 @@ impl PeriodicDynamicScalar {
                 flow.derivative_metric,
                 flow.geometry,
                 self.walls,
+                self.boundary_gradient,
                 false,
                 cell,
                 &self.scalar,
@@ -317,6 +334,7 @@ impl PeriodicDynamicScalar {
                 flow.derivative_metric,
                 flow.geometry,
                 self.walls,
+                self.boundary_gradient,
                 true,
                 cell,
                 &self.filtered,
@@ -339,8 +357,6 @@ impl PeriodicDynamicScalar {
             numerator.add(pair[0]);
             denominator.add(pair[1]);
         }
-        flow.geometry
-            .average_planes(self.shape, &mut self.contraction, cancelled)?;
         Ok([numerator.value, denominator.value])
     }
 

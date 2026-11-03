@@ -36,6 +36,10 @@
 use super::scalar::{DynamicScalarConfig, DynamicScalarReport, PeriodicDynamicScalar};
 use super::*;
 
+/// Common component diffusion without an invented composition wall gradient.
+#[path = "channel/components.rs"]
+pub mod components;
+
 /// Spatially uniform scalar data at one physical half-cell wall.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScalarWall {
@@ -327,22 +331,32 @@ impl AxisStencil {
         field: &[f64],
         walls: [ScalarWall; 2],
     ) -> Result<f64, DynamicSgsError> {
-        if let StencilSpan::Wall { near, far, side } = self.span {
+        if let StencilSpan::Wall { side, .. } = self.span {
             if walls[side] == ScalarWall::ZeroGradient {
-                let far = far.ok_or(DynamicSgsError::Invalid(
-                    "Neumann scalar filtering requires three normal fluid cells",
-                ))?;
-                let d1 = field[near] - field[self.cell];
-                let d2 = field[far] - field[self.cell];
-                let difference = if side == 0 {
-                    4.0 * d1 - d2
-                } else {
-                    d2 - 4.0 * d1
-                };
-                return self.checked(difference, 0.5 * difference * self.metric);
+                return self.interior_scalar_derivative(field);
             }
         }
         self.derivative(|j| field[j], walls)
+    }
+
+    // No scalar boundary datum is inferred. This also handles physical
+    // composition gradients when an impermeable wall constrains a coupled
+    // molecular flux (including thermal diffusion), rather than grad(Y).
+    pub(super) fn interior_scalar_derivative(self, field: &[f64]) -> Result<f64, DynamicSgsError> {
+        if let StencilSpan::Wall { near, far, side } = self.span {
+            let far = far.ok_or(DynamicSgsError::Invalid(
+                "interior scalar wall derivatives require three normal fluid cells",
+            ))?;
+            let d1 = field[near] - field[self.cell];
+            let d2 = field[far] - field[self.cell];
+            let difference = if side == 0 {
+                4.0 * d1 - d2
+            } else {
+                d2 - 4.0 * d1
+            };
+            return self.checked(difference, 0.5 * difference * self.metric);
+        }
+        self.derivative(|j| field[j], [ScalarWall::ZeroGradient; 2])
     }
 }
 

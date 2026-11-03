@@ -1933,6 +1933,26 @@ scratch is usable only after a successful preparation. This is a wall-resolved
 planar closure, not a wall function, rough-wall model, arbitrary solid/open
 boundary filter, nonuniform mesh method or DNS qualification.
 
+`channel::components::ChannelDynamicComponents` fits one common component
+diffusivity from that same current channel flow, alongside independent momentum
+and heat. All species, including a closure species, enter one same-unit
+normalization and joint least-squares objective. Raw component contractions
+are summed before a single plane reduction, retaining physical relative
+weights without a component-by-cell copy. Storage adds 80 numerical bytes per
+fluid cell, independent of component count; preparation remains allocation-free.
+
+Both physical and Favre-filtered component gradients use second-order
+three-fluid-centre interior reconstruction at the walls. No composition wall
+value or zero gradient is inferred: an impermeable Maxwell--Stefan flux can
+balance composition and thermal-diffusion driving terms. The native owner must
+retain its actual species-wall flux, absent-species rule, discrete zero-sum
+mass flux, partial-enthalpy transport and physical diffusivity limit. This
+component path therefore requires three normal fluid cells. Momentum and heat
+retain their separate declared wall conditions; existing periodic arithmetic
+and scalar wall APIs remain unchanged. Focused tests cover quadratic profiles,
+same-unit basis/species-order invariance, trace weighting, a zero-flux thermal
+diffusion balance with nonzero composition gradient, and bounded refusal/retry.
+
 `Grid3::{channel_dynamic_sgs_workspace, prepare_channel_dynamic_sgs,
 step_serial_with_channel_dynamic_sgs, step_pooled_with_channel_dynamic_sgs}`
 connects this closure to the original isothermal lattice collision/streaming
