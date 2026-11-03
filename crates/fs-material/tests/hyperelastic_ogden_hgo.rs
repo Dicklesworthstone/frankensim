@@ -319,6 +319,162 @@ fn g0_frame_indifference_and_material_symmetry() {
     close(laws[0].energy(&fr), laws[0].energy(&f), MU, 1e-12);
 }
 
+#[test]
+fn g3_neo_hookean_tangent_transforms_with_the_physical_frame() {
+    let law = Hyperelastic::new(
+        HyperelasticModel::NeoHookean {
+            mu: MU,
+            lambda: 4.0 * MU,
+        },
+        8.0,
+    )
+    .unwrap();
+    let q = rotation([0.0, 0.0, 1.0], 0.73);
+    // Noncoaxial F exercises every Hessian block in both the original finite
+    // deformation expression and the stable small-strain expression.
+    for f in [
+        [1.25, 0.17, -0.09, 0.04, 0.91, 0.06, 0.03, -0.08, 1.07],
+        [
+            1.0002, 0.0001, -0.0003, 0.0, 0.9998, 0.0002, 0.0, 0.0, 1.0001,
+        ],
+    ] {
+        let qf = flat(matmul3(&q, &matrix(&f)));
+        let original = law.tangent(&f).unwrap();
+        let rotated = law.tangent(&qf).unwrap();
+        let scale = original
+            .iter()
+            .flatten()
+            .map(|v| v.abs())
+            .fold(0.0, f64::max);
+        for row in 0..9 {
+            for col in 0..9 {
+                let expected: f64 = (0..3)
+                    .flat_map(|i| {
+                        (0..3).map(move |k| {
+                            q[row / 3][i]
+                                * original[3 * i + row % 3][3 * k + col % 3]
+                                * q[col / 3][k]
+                        })
+                    })
+                    .sum();
+                close(rotated[row][col], expected, scale, 2e-12);
+            }
+        }
+        fd_tangent(&law, f);
+        fd_tangent(&law, qf);
+    }
+}
+
+#[test]
+fn g1_neo_hookean_retains_small_shear_storage_and_work() {
+    let mu = 3.2e6;
+    let law = Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda: 7.1e6 }, 4.0).unwrap();
+    for amplitude in [1e-2, 1e-6, 1e-8, 1e-12] {
+        for shear in [-amplitude, amplitude] {
+            let mut f = I;
+            f[1] = shear;
+            let expected_energy = 0.5 * mu * shear * shear;
+            close(law.energy(&f), expected_energy, expected_energy, 2e-14);
+            close(
+                law.isochoric_energy(&f),
+                expected_energy,
+                expected_energy,
+                2e-14,
+            );
+            close(
+                law.piola(&f).unwrap()[1],
+                mu * shear,
+                mu * shear.abs(),
+                2e-14,
+            );
+            close(law.tangent(&f).unwrap()[1][1], mu, mu, 2e-14);
+            // The derivative of the resolved stored energy agrees with the
+            // independent exact work conjugate; an erased scalar energy
+            // cannot pass this check merely because its AD stress is correct.
+            let step = amplitude * 1e-3;
+            let (mut plus, mut minus) = (f, f);
+            plus[1] += step;
+            minus[1] -= step;
+            close(
+                (law.energy(&plus) - law.energy(&minus)) / (2.0 * step),
+                mu * shear,
+                mu * shear.abs(),
+                2e-12,
+            );
+        }
+    }
+}
+
+#[test]
+fn g1_neo_hookean_small_hydrostatic_storage_matches_scalar_series() {
+    let (mu, lambda) = (4.3e5, 2.7e6);
+    let law = Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, 4.0).unwrap();
+    for authored in [-1e-3, -1e-8, -1e-12, 1e-12, 1e-8, 1e-3] {
+        let stretch = 1.0 + authored;
+        // Use the ACTUAL representable stretch, not its authored increment.
+        let e: f64 = stretch - 1.0;
+        let log = e.ln_1p();
+        let mut remainder = 0.0;
+        for degree in (2..=14).rev() {
+            let sign = if degree % 2 == 0 { 1.0 } else { -1.0 };
+            remainder = e * remainder + sign / f64::from(degree);
+        }
+        // W(a I) = 3 mu/2 [e²+2(e-ln(1+e))] + 9 lambda/2 ln²(1+e).
+        let expected = 1.5 * mu * e * e * (1.0 + 2.0 * remainder) + 4.5 * lambda * log * log;
+        let f = diag([stretch; 3]);
+        close(law.energy(&f), expected, expected, 3e-14);
+        let piola = mu * e * (2.0 + e) / stretch + 3.0 * lambda * log / stretch;
+        for i in [0, 4, 8] {
+            close(law.piola(&f).unwrap()[i], piola, piola.abs(), 4e-14);
+        }
+    }
+}
+
+#[test]
+fn g0_neo_hookean_stable_energy_branch_preserves_the_tangent() {
+    let law = Hyperelastic::new(
+        HyperelasticModel::NeoHookean {
+            mu: 3.2e6,
+            lambda: 7.1e6,
+        },
+        4.0,
+    )
+    .unwrap();
+    let boundary = det::sqrt(1.0 + 1.0 / 64.0);
+    for side in [-1.0, 1.0] {
+        // The existing finite-difference step crosses the numerical branch.
+        // The stored energy representation changes; the physical derivative
+        // must still be the original smooth Neo-Hookean tangent.
+        fd_tangent(&law, diag([boundary + side * 1e-8, 1.0, 1.0]));
+    }
+}
+
+#[test]
+fn g3_small_strain_storage_remains_objective_after_finite_rotation() {
+    let mu = 3.2e6;
+    let law = Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda: 7.1e6 }, 4.0).unwrap();
+    for q in [
+        rotation([0.0, 0.0, 1.0], 0.73),
+        rotation([0.0, 1.0, 0.0], 2.4),
+    ] {
+        assert!(law.energy(&flat(q)).abs() <= 100.0 * mu * f64::EPSILON.powi(2));
+        for shear in [1e-4, 1e-8, 1e-12] {
+            let mut f = I;
+            f[1] = shear;
+            let qf = flat(matmul3(&q, &matrix(&f)));
+            let expected = 0.5 * mu * shear * shear;
+            // Forming QF itself has absolute f64 input error O(epsilon).
+            // Its relative effect on a strain of size gamma is O(epsilon/gamma).
+            close(
+                law.energy(&qf),
+                expected,
+                expected,
+                32.0 * f64::EPSILON / shear,
+            );
+        }
+    }
+}
+
 fn hgo_incompressible(lambda: f64, families: usize) -> f64 {
     let e = lambda * lambda - 1.;
     2. * C10 * (lambda * lambda - 1. / lambda)

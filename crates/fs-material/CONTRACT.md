@@ -1513,6 +1513,25 @@ oracles for all four schemas, work/Maxwell and thermal derivatives, capacity
 bounds, source pinning and domain/kink refusals. Targeted Cargo metadata checks
 pass; numerical execution and experimental validation are separate evidence.
 
+### Coupled elastic shear from declared cylindrical-bending probes
+
+`LaminateSection::try_new_equilibrated_shear` prepares a full transverse shear
+stiffness from two explicit orthogonal cylindrical-bending probes. Complete
+rotated ply stiffness, membrane-bending coupling and transverse compliance
+enter the equilibrium traction fields and their cross-energy. Resultants are
+normalized before positive three-point Gauss integration of the quartic energy.
+Preparation is linear in layer count; existing shell consumers use the cached
+2x2 stiffness with no extra constitutive integration in their element loops.
+
+`shear_model()` retains the selected closure and physical bending-axis angle.
+Coordinate covariance requires co-rotating those axes with the laminate. This
+is an explicit elastic reduction, not a load-independent 3-D warping or free-edge
+solution. Prony layers refuse. The original directional Whitney constructor
+and its thermal derivatives remain unchanged; derivatives of this new closure
+are not supplied. Focused regressions include homogeneous 5Gh/6, an independent
+exact-rational off-axis cross-energy result, frame/reference invariance and
+actual MITC shell work for positive and negative mixed shear.
+
 ### Nonlocal thermal derivatives of native laminate shear
 
 `laminate::thermal::shear::ResolvedLaminateShearThermoelastic` differentiates
@@ -1760,6 +1779,19 @@ material-state identity. Isotropic and orthotropic constructors use the existing
 elastic laws and their strain ceilings. Full tensors, including normal/shear
 coupling, use the same orthonormal basis and transformations as native mechanics;
 no material-name table or assumed isotropy is introduced.
+
+The same immutable state implements `SmallStrainLaw`, so the native plane,
+tetrahedral and hexahedral material consumers can use the complete tensor,
+including off-axis normal/shear coupling. Its tensor-Voigt tangent is
+`D^-1 C_M D`, with `D=diag(1,1,1,sqrt(2),sqrt(2),sqrt(2))`; symmetry is in the
+work-conjugate tensor metric. The checked `strain_response` returns Mandel
+stress and `epsilon:sigma/2` with the original identity and componentwise
+strain ceiling. Infallible trait calls return nonfinite values outside that
+ceiling so checked consumers refuse; they cannot silently widen the source
+domain. This is one frozen, state-free elastic law, with no plastic history
+or thermal eigenstrain. G1/G3 tests compare native P1/Q1 plane stress and
+strain against an independent three-dimensional block solve, retained
+transverse shear relaxation, tangent finite differences and frame covariance.
 
 Hydrostatic compliance solves `C s = I`, giving compressibility `I:s`, bulk
 modulus `1/(I:s)`, pressure strain `-p s` and stored energy `p^2(I:s)/2`.
@@ -2612,6 +2644,15 @@ homogenization, the P2 milestone.
   HGO variants offer quadratic or log-squared
   bulk energies and separate distortional/bulk accessors. Full-invariant
   HGO's fibre accessor intentionally retains volume dependence.
+  Compressible Neo-Hookean energy retains tiny elastic storage near any rigid
+  rotation through the objective increment `A=F^T F-I`. Its small-increment
+  branch evaluates `trace(A)-log(det(I+A))` without subtracting unit-size
+  invariants; a bounded atanh series keeps its value, gradient and Hessian
+  consistent. The ordinary invariant expression remains outside that numerical
+  branch. Full and split Neo-Hookean energy use the same helper. This addresses
+  the zero-energy cancellation of tiny simple shear without changing the
+  physical potential or the original stretch domain; it does not establish
+  equivalent small-strain accuracy for the other energy families.
 - `hyper::acoustic` prepares the original full finite-strain tangent once and
   evaluates current-direction wave modes without repeating constitutive AD.
   It uses the 3-D compressible law, not a plane-stress/incompressibility

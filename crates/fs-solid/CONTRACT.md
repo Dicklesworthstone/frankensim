@@ -706,6 +706,12 @@ All three isotropic source choices lower through
 `fs-material::state_point::ResolvedIsotropicElasticModuli`; derived E/nu values are not
 inserted into the card or relabeled as measurements. The selected pair, source
 receipts and reference inventory remain bound to the native material identity.
+The source owner's Mandel tensor carries the retained K/G or E/G moduli directly
+into mechanical, modal and thermal assembly. It never reconstructs them through
+a rounded Poisson ratio near incompressibility or the auxetic limit. Canonical
+E/nu input preserves its original tensor arithmetic. The same direct K/G tensor
+construction serves the acoustic owner; this numerical correction does not
+remove the existing displacement elements' volumetric locking.
 Changing temperature re-resolves the same selected source schema before
 rebuilding stiffness, thermal stress and vibration inputs, while reference mass
 and inertia remain unchanged. G1/G3 tests exercise equivalent source pairs,

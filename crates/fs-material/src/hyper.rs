@@ -166,6 +166,66 @@ fn cauchy_green_invariants<T: Real>(f: &[T; 9]) -> (T, T) {
     (i1, tr_c2)
 }
 
+// The original coupled NH potential, evaluated in objective strain coordinates
+// near ANY rigid rotation. Directly subtracting I1-3 and ln(J) loses quadratic
+// storage at acoustic strain amplitudes even while the AD stress stays nonzero.
+fn neo_hookean_energy<T: Real>(f: &[T; 9], mu: f64, lambda: f64) -> T {
+    let j = det3(f);
+    let mut a = [T::zero(); 9]; // A = C-I = F^T F-I.
+    for i in 0..3 {
+        let pivot = (1..3).fold(0, |p, k| {
+            if f[3 * k + i].value().abs() > f[3 * p + i].value().abs() {
+                k
+            } else {
+                p
+            }
+        });
+        // Cancel the unit diagonal against the largest square first. In a
+        // small simple shear the remaining square must not be added to 1.
+        let lead = f[3 * pivot + i];
+        let mut diagonal = lead.mul_add(lead, -T::one());
+        for k in 0..3 {
+            if k != pivot {
+                diagonal = f[3 * k + i].mul_add(f[3 * k + i], diagonal);
+            }
+        }
+        a[3 * i + i] = diagonal;
+        for j in 0..i {
+            let value = (0..3).fold(T::zero(), |s, k| f[3 * k + i].mul_add(f[3 * k + j], s));
+            a[3 * i + j] = value;
+            a[3 * j + i] = value;
+        }
+    }
+    if j.value() > 0.0 && a.iter().all(|v| v.value().abs() <= 1.0 / 64.0) {
+        let quadratic =
+            a[0] * a[4] + a[0] * a[8] + a[4] * a[8] - a[1] * a[3] - a[2] * a[6] - a[5] * a[7];
+        let cubic = det3(&a);
+        let d = a[0] + a[4] + a[8] + quadratic + cubic; // det(C)-1.
+        let s = d / (T::from_f64(2.0) + d);
+        let s2 = s * s;
+        let mut power = s;
+        let mut tail = T::zero();
+        for k in 1..16 {
+            power = power * s2;
+            tail = tail + power / T::from_f64(f64::from(2 * k + 1));
+        }
+        tail = T::from_f64(2.0) * tail;
+        let log_c = T::from_f64(2.0) * s + tail;
+        let remainder = d * d / (T::from_f64(2.0) + d) - tail;
+        // ln det(C)=2 ln J and tr(A)-ln det(C)=-Q(A)-det(A)
+        // +[d-ln(1+d)]. Here |s|<0.073; the omitted atanh tail and its
+        // first two derivatives are <1e-32, below f64 roundoff throughout
+        // this branch. AD differentiates this same stable expression.
+        T::from_f64(0.5 * mu) * (-quadratic - cubic + remainder)
+            + T::from_f64(0.125 * lambda) * log_c * log_c
+    } else {
+        let (i1, _) = cauchy_green_invariants(f);
+        let ln_j = j.ln();
+        T::from_f64(0.5 * mu) * (i1 - T::from_f64(3.0)) - T::from_f64(mu) * ln_j
+            + T::from_f64(0.5 * lambda) * ln_j * ln_j
+    }
+}
+
 impl Hyperelastic {
     /// Construct with parameter checks.
     ///
@@ -255,19 +315,15 @@ impl Hyperelastic {
     ///
     /// Requires an admissible F. Ogden's spectral lift carries the exact
     /// value, gradient and Hessian at the primal point, including repeated
-    /// stretches; derivatives above second order are not claimed.
+    /// stretches; derivatives above second order are not claimed. Neo-Hookean
+    /// storage uses the equivalent `C-I` expression near rigid rotations so
+    /// small elastic energies are not lost by subtraction of unit invariants.
     pub fn energy<T: Real>(&self, f: &[T; 9]) -> T {
-        let j = det3(f);
-        let (i1, tr_c2) = cauchy_green_invariants(f);
         match &self.model {
-            HyperelasticModel::NeoHookean { mu, lambda } => {
-                let mu_t = T::from_f64(*mu);
-                let la = T::from_f64(*lambda);
-                let ln_j = j.ln();
-                let half = T::from_f64(0.5);
-                half * mu_t * (i1 - T::from_f64(3.0)) - mu_t * ln_j + half * la * ln_j * ln_j
-            }
+            HyperelasticModel::NeoHookean { mu, lambda } => neo_hookean_energy(f, *mu, *lambda),
             HyperelasticModel::MooneyRivlin { c10, c01, kappa } => {
+                let j = det3(f);
+                let (i1, tr_c2) = cauchy_green_invariants(f);
                 let i2 = T::from_f64(0.5) * (i1 * i1 - tr_c2);
                 let ln_j = j.ln();
                 // J^(−2/3) and J^(−4/3) via exp/ln (J > 0 enforced upstream).
@@ -279,7 +335,7 @@ impl Hyperelastic {
                     + T::from_f64(0.5 * *kappa) * (j - T::one()) * (j - T::one())
             }
             HyperelasticModel::Ogden { .. } | HyperelasticModel::HolzapfelGasserOgden { .. } => {
-                self.isochoric_energy(f) + self.volumetric_energy(j)
+                self.isochoric_energy(f) + self.volumetric_energy(det3(f))
             }
         }
     }
@@ -288,13 +344,14 @@ impl Hyperelastic {
     /// consumer. For full-invariant HGO the fibre part intentionally depends
     /// on J. This accessor does not add a bulk penalty.
     pub fn isochoric_energy<T: Real>(&self, f: &[T; 9]) -> T {
+        if let HyperelasticModel::NeoHookean { mu, .. } = &self.model {
+            return neo_hookean_energy(f, *mu, 0.0);
+        }
         let j = det3(f);
         let jm23 = (T::from_f64(-2.0 / 3.0) * j.ln()).exp();
         let (i1, tr_c2) = cauchy_green_invariants(f);
         match &self.model {
-            HyperelasticModel::NeoHookean { mu, .. } => {
-                T::from_f64(0.5 * mu) * (i1 - T::from_f64(3.0)) - T::from_f64(*mu) * j.ln()
-            }
+            HyperelasticModel::NeoHookean { .. } => unreachable!("handled above"),
             HyperelasticModel::MooneyRivlin { c10, c01, .. } => {
                 let jm43 = (T::from_f64(-4.0 / 3.0) * j.ln()).exp();
                 T::from_f64(*c10) * (jm23 * i1 - T::from_f64(3.0))
