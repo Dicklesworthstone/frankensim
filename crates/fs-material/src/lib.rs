@@ -85,6 +85,8 @@ pub mod relaxation;
 pub mod section;
 /// Source-bound particle classification with solids, element and water balances.
 pub mod separation;
+/// Finite aqueous/organic extraction and stripping from original source isotherms.
+pub mod solvent_extraction;
 /// Laminate (layered) plate/shell sections (IRP M1.2-W7).
 pub mod laminate;
 /// Source-bound viscoelastic surface films and explicit isotropic tensor lifts.
@@ -270,3 +272,4 @@ impl fmt::Display for MaterialError {
 }
 
 impl std::error::Error for MaterialError {}
+
