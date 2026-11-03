@@ -1,5 +1,7 @@
 //! Native phase, conduction, finite walls and electrical heat share one clock.
 
+#[path = "conduction/momentum.rs"]
+mod momentum;
 #[path = "conduction/radiation.rs"]
 mod radiation;
 

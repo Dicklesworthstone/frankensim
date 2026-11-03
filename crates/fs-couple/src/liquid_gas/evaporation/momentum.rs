@@ -20,8 +20,12 @@ use kinematics::kinetic_energy;
 
 /// Source-relative species, bulk momentum and internal energy in one gas update.
 pub mod boundary;
+/// Phase drift followed by the original finite-wall/gas thermal and flow step.
+pub mod conduction;
 /// Many native interfaces sharing one retained moving gas and donor inventory.
 pub mod multiple;
+/// Original finite-gas chemistry retaining momentum through the same phase step.
+pub mod reactive;
 
 /// Original finite gas plus an explicitly initialized bulk momentum.
 ///

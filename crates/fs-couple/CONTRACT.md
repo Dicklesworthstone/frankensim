@@ -3597,6 +3597,47 @@ accounts, a real attached electrical core, post-thermal pressure, original-owner
 agreement, independent whole inventories, one clock and late refusal/retry.
 They require native execution before any numerical validation claim.
 
+### Retained moving gas through native thermal and chemical owners
+
+`liquid_gas::evaporation::momentum::conduction` connects distributed phase
+transport to the same finite-gas/wall conduction, liquid and wall radiation,
+attached electrical heat, optional viscous heat and native pressure/flow owner.
+Every phase donor uses its actual retained velocity. Receiver mixing heats the
+original receiver before thermal exchange; the original post-phase gas enters
+the thermal owner without a new EOS or caloric model. Exact gas mass, volume and
+composition checks at the thermal boundary make preservation of its post-phase
+bulk momentum also preserve its kinetic inventory. Optional pressure uses the
+actual post-thermal EOS in the one native flow step.
+
+`GasReaction::moving_gas_evaporating_liquid_candidate`, the distributed and
+sensible-heat variants, and the conducting/radiative-conducting variants use
+the original reaction integrator and shared reactive admission path. Homogeneous
+chemistry preserves exact original parcel mass and applies no external impulse.
+The moving adapter explicitly verifies mass and volume before reattaching the
+same momentum; formation energy remains in the original chemical/internal-energy
+owner. The reacted donor inventory then enters the original moving phase owner.
+Chemical, post-phase/mixing and final thermal gas endpoints are checked against
+the original reactive temperature allowance. All finite walls publish with the
+liquid, gas and its momentum only after the complete transaction succeeds.
+
+Signed and absolute defects retain original accounting boundaries: the single
+phase receipt contributes its mechanical defect once, distributed phase already
+includes it, and complete conduction adds only the additional finite-gas caloric
+defect. There is one physical interval and one native flow step, with no second
+chemical heat, receiver-mixing heat or whole-thermal-flow defect. Existing
+canonical surface order, deterministic original solvers, source/geometry/work
+admission and cancellation checkpoints remain binding.
+
+These first-order fixed-volume compositions retain a source-only momentum
+account. They do not infer resolved gas flow, wall drag, photon momentum,
+compression work or a closed mechanical balance for native pressure/wall forces.
+G1/G3/G4 fixture definitions in `conduction/momentum.rs` and
+`reactive/momentum.rs` specify opposing phase streams, independent caloric plus
+source-kinetic inventories, exact original-owner chain agreement, one clock,
+post-thermal pressure and atomic late refusal/cancellation. Those full material
+integration fixtures were authored but not compiled or executed in the delivery
+environment; parsing/source review is not numerical validation.
+
 ### Liquid radiation on complete reactive and phase timelines
 
 `advance_liquid_surfaces_with_gas_and_radiative_conduction` passes the original

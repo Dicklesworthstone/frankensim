@@ -18,7 +18,11 @@ use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use super::{
     CancelGate, ClosedGasParcel, EvaporatingLiquidGasError, LiquidGasEvaporationSurface,
     MaterialFreeSurfaceEnthalpy3, ThermochemicalGasModel,
-    multiple::{DistributedLiquidGasReport, DistributedLiquidGasSolve, advance_native_with_flow},
+    momentum::multiple::DistributedPhaseMomentumReport,
+    multiple::{
+        DistributedLiquidGasReport, DistributedLiquidGasSolve,
+        advance_native_with_momentum_and_flow,
+    },
     poll,
 };
 
@@ -188,10 +192,64 @@ pub fn advance_liquid_surfaces_with_gas_and_radiative_conduction<'s, 'm, 'catalo
     with_viscous_heating: bool,
     gate: &CancelGate,
 ) -> Result<ConductingLiquidGasCandidate<'s, 'm, 'catalog, 'b>, Error> {
+    advance_native_with_momentum_and_conduction(
+        liquid,
+        gas,
+        catalog,
+        surfaces,
+        bodies,
+        faces,
+        heat,
+        contacts,
+        interfaces,
+        exposed,
+        radiation,
+        phase_controls,
+        thermal_controls,
+        gas_controls,
+        maximum_density_excursion,
+        with_viscous_heating,
+        None,
+        gate,
+    )
+    .map(|(candidate, _)| candidate)
+}
+
+// The original thermal owner receives the post-phase gas from either native
+// phase path. Thermal exchange preserves that parcel's exact mass; a moving
+// gas therefore retains its post-phase momentum AND kinetic inventory without
+// an extra heat correction, gas reconstruction or native flow step.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_native_with_momentum_and_conduction<'s, 'm, 'catalog, 'b>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surfaces: &[LiquidGasEvaporationSurface<'_>],
+    bodies: &[FreeSurfaceThermalBody<'b>],
+    faces: &[FreeSurfaceConductionFace],
+    heat: &[FreeSurfaceCellHeat],
+    contacts: &[FreeSurfaceBodyContact],
+    interfaces: &[FreeSurfaceBodyInterface<'_>],
+    exposed: &[FreeSurfaceGasFace],
+    radiation: &[FreeSurfaceRadiationFace],
+    phase_controls: DistributedLiquidGasSolve,
+    thermal_controls: FreeSurfaceConductionControls,
+    gas_controls: GasEnergySolve,
+    maximum_density_excursion: Option<f64>,
+    with_viscous_heating: bool,
+    gas_momentum: Option<[f64; 3]>,
+    gate: &CancelGate,
+) -> Result<
+    (
+        ConductingLiquidGasCandidate<'s, 'm, 'catalog, 'b>,
+        Option<DistributedPhaseMomentumReport>,
+    ),
+    Error,
+> {
     poll(gate)?;
     let mut next_bodies = bodies.to_vec();
     let mut thermal_result = None;
-    let candidate = advance_native_with_flow(
+    let (candidate, momentum) = advance_native_with_momentum_and_flow(
         liquid,
         gas,
         catalog,
@@ -199,6 +257,7 @@ pub fn advance_liquid_surfaces_with_gas_and_radiative_conduction<'s, 'm, 'catalo
         phase_controls,
         None,
         maximum_density_excursion,
+        gas_momentum,
         gate,
         |next_liquid, phase_gas| {
             if phase_gas.volume_m3() != gas.volume_m3() {
@@ -224,8 +283,8 @@ pub fn advance_liquid_surfaces_with_gas_and_radiative_conduction<'s, 'm, 'catalo
                 with_viscous_heating,
                 gate,
             )?;
-            if thermal_gas.mass_kg() != phase_gas.mass_kg()
-                || thermal_gas.volume_m3() != phase_gas.volume_m3()
+            if thermal_gas.mass_kg().to_bits() != phase_gas.mass_kg().to_bits()
+                || thermal_gas.volume_m3().to_bits() != phase_gas.volume_m3().to_bits()
                 || thermal_gas.model() != phase_gas.model()
             {
                 return Err(Error::Invalid(
@@ -279,17 +338,20 @@ pub fn advance_liquid_surfaces_with_gas_and_radiative_conduction<'s, 'm, 'catalo
         });
     }
     poll(gate)?;
-    Ok(ConductingLiquidGasCandidate {
-        liquid,
-        gas,
-        catalog,
-        bodies: next_bodies,
-        report: ConductingLiquidGasReport {
-            phase,
-            thermal,
-            thermal_gas_temperature_k,
-            energy_residual_j,
-            absolute_energy_defect_j,
+    Ok((
+        ConductingLiquidGasCandidate {
+            liquid,
+            gas,
+            catalog,
+            bodies: next_bodies,
+            report: ConductingLiquidGasReport {
+                phase,
+                thermal,
+                thermal_gas_temperature_k,
+                energy_residual_j,
+                absolute_energy_defect_j,
+            },
         },
-    })
+        momentum,
+    ))
 }

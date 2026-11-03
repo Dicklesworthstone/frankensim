@@ -108,17 +108,17 @@ pub struct ReactiveLiquidPhaseReport<R> {
 }
 
 /// No accepted input changes until the caller publishes both original owners.
-pub struct ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R> {
+pub struct ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R, G = ClosedGasParcel> {
     liquid: MaterialFreeSurfaceEnthalpy3<'s, 'm>,
-    gas: ClosedGasParcel,
+    gas: G,
     catalog: &'catalog ThermochemicalGasModel,
     report: ReactiveLiquidPhaseReport<R>,
 }
-impl<'s, 'm, 'catalog, R> ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R> {
+impl<'s, 'm, 'catalog, R, G> ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R, G> {
     pub const fn liquid(&self) -> &MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         &self.liquid
     }
-    pub const fn gas(&self) -> &ClosedGasParcel {
+    pub const fn gas(&self) -> &G {
         &self.gas
     }
     pub const fn catalog(&self) -> &'catalog ThermochemicalGasModel {
@@ -131,7 +131,7 @@ impl<'s, 'm, 'catalog, R> ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R> {
         self,
     ) -> (
         MaterialFreeSurfaceEnthalpy3<'s, 'm>,
-        ClosedGasParcel,
+        G,
         &'catalog ThermochemicalGasModel,
         ReactiveLiquidPhaseReport<R>,
     ) {
@@ -141,15 +141,22 @@ impl<'s, 'm, 'catalog, R> ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R> {
 
 /// Chemical, phase and full native thermal/flow candidate with every finite
 /// wall retained. All original owners publish together through this value.
-pub struct ReactiveConductingLiquidGasCandidate<'s, 'm, 'catalog, 'b> {
-    phase: ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, ConductingLiquidGasReport>,
-    bodies: Vec<FreeSurfaceThermalBody<'b>>,
+pub struct ReactiveConductingLiquidGasCandidate<
+    's,
+    'm,
+    'catalog,
+    'b,
+    R = ConductingLiquidGasReport,
+    G = ClosedGasParcel,
+> {
+    pub(super) phase: ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R, G>,
+    pub(super) bodies: Vec<FreeSurfaceThermalBody<'b>>,
 }
-impl<'s, 'm, 'catalog, 'b> ReactiveConductingLiquidGasCandidate<'s, 'm, 'catalog, 'b> {
+impl<'s, 'm, 'catalog, 'b, R, G> ReactiveConductingLiquidGasCandidate<'s, 'm, 'catalog, 'b, R, G> {
     pub fn liquid(&self) -> &MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         self.phase.liquid()
     }
-    pub fn gas(&self) -> &ClosedGasParcel {
+    pub fn gas(&self) -> &G {
         self.phase.gas()
     }
     pub fn catalog(&self) -> &'catalog ThermochemicalGasModel {
@@ -158,20 +165,36 @@ impl<'s, 'm, 'catalog, 'b> ReactiveConductingLiquidGasCandidate<'s, 'm, 'catalog
     pub fn bodies(&self) -> &[FreeSurfaceThermalBody<'b>] {
         &self.bodies
     }
-    pub fn report(&self) -> &ReactiveLiquidPhaseReport<ConductingLiquidGasReport> {
+    pub fn report(&self) -> &ReactiveLiquidPhaseReport<R> {
         self.phase.report()
     }
     pub fn into_parts(
         self,
     ) -> (
         MaterialFreeSurfaceEnthalpy3<'s, 'm>,
-        ClosedGasParcel,
+        G,
         &'catalog ThermochemicalGasModel,
         Vec<FreeSurfaceThermalBody<'b>>,
-        ReactiveLiquidPhaseReport<ConductingLiquidGasReport>,
+        ReactiveLiquidPhaseReport<R>,
     ) {
         let (liquid, gas, catalog, report) = self.phase.into_parts();
         (liquid, gas, catalog, self.bodies, report)
+    }
+}
+
+// Chemistry still runs exclusively on the original parcel owner. A gas with
+// an explicit mechanical inventory must reattach it only after that owner's
+// mass-preserving reaction candidate has passed every original admission.
+pub(super) trait PhaseGas: Sized {
+    fn parcel(&self) -> &ClosedGasParcel;
+    fn with_reacted(&self, reacted: ClosedGasParcel) -> Result<Self, ReactiveLiquidPhaseError>;
+}
+impl PhaseGas for ClosedGasParcel {
+    fn parcel(&self) -> &ClosedGasParcel {
+        self
+    }
+    fn with_reacted(&self, reacted: ClosedGasParcel) -> Result<Self, ReactiveLiquidPhaseError> {
+        Ok(reacted)
     }
 }
 
@@ -658,24 +681,25 @@ impl GasReaction {
         Ok(ReactiveConductingLiquidGasCandidate { phase, bodies })
     }
 
-    fn native_phase_candidate<'s, 'm, 'catalog, R: PhaseAccount>(
+    pub(super) fn native_phase_candidate<'s, 'm, 'catalog, R: PhaseAccount, G: PhaseGas>(
         &'catalog self,
         liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
-        gas: &ClosedGasParcel,
+        gas: &G,
         controls: ReactiveLiquidPhaseSolve,
         gate: &CancelGate,
         exchange: impl FnOnce(
-            &ClosedGasParcel,
+            &G,
         ) -> Result<
             (
                 MaterialFreeSurfaceEnthalpy3<'s, 'm>,
-                ClosedGasParcel,
+                G,
                 &'catalog ThermochemicalGasModel,
                 R,
             ),
             EvaporatingLiquidGasError,
         >,
-    ) -> Result<ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R>, ReactiveLiquidPhaseError> {
+    ) -> Result<ReactiveLiquidPhaseCandidate<'s, 'm, 'catalog, R, G>, ReactiveLiquidPhaseError>
+    {
         type Error = ReactiveLiquidPhaseError;
         let poll = || {
             if gate.is_requested() {
@@ -696,7 +720,7 @@ impl GasReaction {
             ));
         }
         let duration_s = liquid.flow().scaling().timestep_s();
-        let initial_temperature = gas.state().state().temperature;
+        let initial_temperature = gas.parcel().state().state().temperature;
         let admit_temperature = |candidate: &ClosedGasParcel| {
             let increment = candidate.state().state().temperature - initial_temperature;
             if !increment.is_finite()
@@ -710,15 +734,18 @@ impl GasReaction {
             }
         };
         let reaction =
-            self.parcel_candidate(gas, duration_s, controls.reaction, || gate.is_requested())?;
+            self.parcel_candidate(gas.parcel(), duration_s, controls.reaction, || {
+                gate.is_requested()
+            })?;
         admit_temperature(reaction.gas())?;
         let (reacted, reaction) = reaction.into_parts();
+        let reacted = gas.with_reacted(reacted)?;
         poll()?;
         let (next_liquid, next_gas, catalog, phase) = exchange(&reacted)?;
-        admit_temperature(&next_gas)?;
+        admit_temperature(next_gas.parcel())?;
         if phase.duration_s().to_bits() != duration_s.to_bits()
             || liquid.accepted_steps().checked_add(1) != Some(next_liquid.accepted_steps())
-            || next_gas.volume_m3().to_bits() != gas.volume_m3().to_bits()
+            || next_gas.parcel().volume_m3().to_bits() != gas.parcel().volume_m3().to_bits()
         {
             return Err(Error::Invalid(
                 "chemistry/phase/flow lost its original single interval or fixed gas volume",
