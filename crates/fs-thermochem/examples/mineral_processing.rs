@@ -16,6 +16,9 @@
 //! uses the same zinc references and compatible USGS copper references.
 //! Zinc-ferrite modes distinguish free zincite from ferrite-bound zinc and
 //! account for ferric iron, acid consumption and the net goethite endpoint.
+//! Tin modes retain cassiterite, white solid tin, graphite and ideal CO/CO2
+//! gases from one USGS source family. These are standard-state reduction
+//! balances; liquid tin and furnace conditions are not inferred.
 //! Gold cyanidation uses six matched historical NBS/1989-errata references,
 //! including the individual aqueous CN-, Au(CN)2- and OH- ions.
 //! Separate NBS cases resolve molecular HCN dissociation, water dissociation,
@@ -71,7 +74,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 46] = [
+const REACTIONS: [&str; 49] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "lime-hydration-nbs1989",
@@ -92,6 +95,9 @@ const REACTIONS: [&str; 46] = [
     "zinc-ferrite-formation",
     "zinc-ferrite-acid-leach",
     "zinc-ferrite-goethite-leach",
+    "cassiterite-co-reduction",
+    "cassiterite-graphite-reduction",
+    "graphite-gasification",
     "gold-cyanidation",
     "gold-cyanidation-dissolved-oxygen",
     "oxygen-dissolution",
@@ -495,6 +501,54 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-aqueous",
             ],
             equation: "2 Cu[2+](aq) + 2 H2O(l) -> 2 Cu(s) + O2(g) + 4 H+(aq), oxygen-evolving electrowinning endpoint",
+        },
+        "cassiterite-co-reduction" => ReactionCase {
+            reaction: MineralReaction::CassiteriteCarbonMonoxideReduction,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "cassiterite-solid-usgs-b2131-thermochemistry",
+                "carbon-monoxide-gas-usgs-b2131",
+                "tin-white-solid-usgs-b2131",
+                "carbon-dioxide-gas-usgs-b2131",
+            ],
+            species: &["SnO2(s)", "CO(g)", "Sn(s)", "CO2(g)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-solid",
+                "source-phase-gas",
+            ],
+            equation: "SnO2(cassiterite) + 2 CO(g) -> Sn(white solid) + 2 CO2(g), reference CO-reduction endpoint",
+        },
+        "cassiterite-graphite-reduction" => ReactionCase {
+            reaction: MineralReaction::CassiteriteGraphiteReduction,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "cassiterite-solid-usgs-b2131-thermochemistry",
+                "graphite-solid-usgs-b2131",
+                "tin-white-solid-usgs-b2131",
+                "carbon-monoxide-gas-usgs-b2131",
+            ],
+            species: &["SnO2(s)", "C(s)", "Sn(s)", "CO(g)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-solid",
+                "source-phase-solid",
+                "source-phase-gas",
+            ],
+            equation: "SnO2(cassiterite) + 2 C(graphite) -> Sn(white solid) + 2 CO(g), aggregate carbon-to-CO endpoint",
+        },
+        "graphite-gasification" => ReactionCase {
+            reaction: MineralReaction::GraphiteCarbonDioxideGasification,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "graphite-solid-usgs-b2131",
+                "carbon-dioxide-gas-usgs-b2131",
+                "carbon-monoxide-gas-usgs-b2131",
+            ],
+            species: &["C(s)", "CO2(g)", "CO(g)"],
+            phase_axes: &["source-phase-solid", "source-phase-gas", "source-phase-gas"],
+            equation: "C(graphite) + CO2(g) -> 2 CO(g), Boudouard reference endpoint",
         },
         "sphalerite-roasting" => ReactionCase {
             reaction: MineralReaction::SphaleriteRoastingToZincite,
@@ -1149,6 +1203,9 @@ fn reference_point(
         "zincite-solid-usgs-b2131-thermochemistry" => Some("source-phase-zincite"),
         "franklinite-solid-usgs-b2131-thermochemistry" => Some("source-phase-franklinite"),
         "hematite-solid-usgs-b2131-thermochemistry" => Some("source-phase-hematite"),
+        "cassiterite-solid-usgs-b2131-thermochemistry" => Some("source-phase-cassiterite"),
+        "tin-white-solid-usgs-b2131" => Some("source-phase-tin-white-tetragonal"),
+        "graphite-solid-usgs-b2131" => Some("source-phase-graphite"),
         "sodium-cyanide-cubic-solid-nbs1989-thermochemistry" => {
             Some("source-phase-sodium-cyanide-cubic")
         }

@@ -9,6 +9,11 @@ The [MIBC frother reference](MINING_FLOTATION_REAGENTS.md) supplies product
 density endpoints, minimum purity and separately named saturated-phase mass
 fractions for explicit dosing and material accounting.
 
+The [cassiterite reduction guide](MINING_TIN_REDUCTION.md) connects five
+compatible USGS material packs to CO reduction, graphite gasification and
+the aggregate carbon-reduction endpoint, with finite reagent inventories
+and separate reference enthalpy and Gibbs calculations.
+
 Peroxide oxidation, cyanate hydrolysis and ammonia speciation now have matched
 material references and finite-inventory and coupled-pH examples; see
 [cyanide treatment](MINING_CYANIDE_TREATMENT.md).

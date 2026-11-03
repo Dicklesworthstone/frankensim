@@ -87,6 +87,14 @@
 //! Cu(cr), CO(g), CO2(g) and O2(g) endpoints from the same JANAF reference.
 //! A carbon-monoxide reduction equation does not select an industrial reductant
 //! mixture, operating atmosphere, temperature, rate or metal recovery.
+//! Cassiterite reduction separates the CO/SnO2 endpoint from graphite
+//! gasification (C + CO2 -> 2 CO). Their sum, with two gasification extents,
+//! gives SnO2 + 2 C -> Sn + 2 CO. Graphite/CO coupling is described by
+//! the primary reduction study <https://doi.org/10.1016/0040-6031(88)87012-6>.
+//! These declared reference endpoints use tetragonal cassiterite, white
+//! tetragonal tin, graphite and ideal gases from USGS B2131 pp5,9,15,19.
+//! They do not resolve SnO intermediates, liquid tin, volatilization, slag,
+//! hardhead alloys, coke composition or furnace-temperature heat duty.
 //! CuO acid leaching instead retains tenorite, H+(aq), Cu(II)(aq) and liquid
 //! water from USGS Bulletin 2131, printed pages 6, 7 and 16. It is a declared
 //! conserved ionic endpoint; the material references do not supply a rate.
@@ -333,6 +341,16 @@ pub enum MineralReaction {
     /// NaCN(s, cubic cr I) -> Na+(aq) + CN-(aq).
     /// The dissolved cyanide pool remains subject to protonation and complexation.
     SodiumCyanideDissolution,
+    /// SnO2(s, cassiterite) + 2 CO(g) -> Sn(s, white) + 2 CO2(g).
+    /// Complete reference endpoint; no molten-tin or intermediate-SnO claim.
+    CassiteriteCarbonMonoxideReduction,
+    /// SnO2(s, cassiterite) + 2 C(s, graphite) -> Sn(s, white) + 2 CO(g).
+    /// Aggregate carbon-to-CO endpoint, not an elementary reaction mechanism.
+    CassiteriteGraphiteReduction,
+    /// C(s, graphite) + CO2(g) -> 2 CO(g).
+    /// Explicit Boudouard endpoint; finite gas/solid stocks and temperature
+    /// support remain with the original inventory and property owners.
+    GraphiteCarbonDioxideGasification,
 }
 
 // One species: stable phase/charge id, element counts, charge, signed coefficient.
@@ -775,6 +793,35 @@ impl MineralReaction {
                     ("CO(g)", &[0, 1, 1], 0, -1),
                     ("Cu(s)", &[1, 0, 0], 0, 2),
                     ("CO2(g)", &[0, 1, 2], 0, 1),
+                ],
+            ),
+            Self::CassiteriteCarbonMonoxideReduction => (
+                "cassiterite-carbon-monoxide-reduction",
+                &["Sn", "C", "O"],
+                &[
+                    ("SnO2(s)", &[1, 0, 2], 0, -1),
+                    ("CO(g)", &[0, 1, 1], 0, -2),
+                    ("Sn(s)", &[1, 0, 0], 0, 1),
+                    ("CO2(g)", &[0, 1, 2], 0, 2),
+                ],
+            ),
+            Self::CassiteriteGraphiteReduction => (
+                "cassiterite-graphite-reduction",
+                &["Sn", "C", "O"],
+                &[
+                    ("SnO2(s)", &[1, 0, 2], 0, -1),
+                    ("C(s)", &[0, 1, 0], 0, -2),
+                    ("Sn(s)", &[1, 0, 0], 0, 1),
+                    ("CO(g)", &[0, 1, 1], 0, 2),
+                ],
+            ),
+            Self::GraphiteCarbonDioxideGasification => (
+                "graphite-carbon-dioxide-gasification",
+                &["C", "O"],
+                &[
+                    ("C(s)", &[1, 0], 0, -1),
+                    ("CO2(g)", &[1, 2], 0, -1),
+                    ("CO(g)", &[1, 1], 0, 2),
                 ],
             ),
             Self::PyriteRoastingToHematite => (

@@ -1,0 +1,82 @@
+frankensim.matdb-source.v1
+observation	identity	Tetragonal cassiterite SnO2, pure reference	USGS Bulletin 2131 printed page 19, original standard-state row	Formula weight 150.709 g/mol is retained at the source precision. The source standard-state table identifies cassiterite. Its measured entropy row is 49.0 with magnitude 0.2 J/(mol K); the distinct fitted high-temperature table on printed page 219 has 49.02 at 298.15 K and is not substituted. This pure end-member reference is not a tin-ore assay, stannite, mixed concentrate, liberated fraction or a producer specimen.
+observation	standard	Literal USGS standard-state quantities	USGS Bulletin 2131 printed page 19	The row gives formation enthalpy -577.6 kJ/mol, independently tabulated formation Gibbs energy -515.8 kJ/mol and standard molar entropy 49.0 J/(mol K). Formation Gibbs energy is not formation enthalpy minus temperature times absolute species entropy alone. These printed values remain unreconciled with other compilations.
+observation	uncertainty	Reported magnitudes without invented coverage	USGS Bulletin 2131 printed pages 3 and 19	Retained source magnitudes: reported-formation-enthalpy-uncertainty-magnitude 0.2 kJ/mol; reported-formation-gibbs-energy-uncertainty-magnitude 0.2 kJ/mol; reported-standard-entropy-uncertainty-magnitude 0.2 J/mol/K. The source compilation does not give a universal per-row probability distribution or cross-species covariance. These metadata are neither independent Gaussian standard deviations nor guaranteed bounds; all claims retain Unstated uncertainty. No uncertainty is invented for the formula weight or elemental formation zeros.
+observation	scope	One named USGS elemental-reference state	USGS Bulletin 2131 printed pages 1 and 3	Every claim requires 298.15 K, 100000 Pa and source-elemental-reference-usgs-b2131. The compilation uses stable elemental reference forms and ideal elemental gases at the named temperature. No temperature extrapolation, furnace heat duty, coke demand, reaction kinetics, equilibrium conversion, slag behavior, metal activity or ore recovery is supplied. Rounded formula weights may leave a small source-mass residual even for exactly conserved atoms and charge.
+scalar	molar-mass	identity,standard,uncertainty,scope	mass	150.709	g/mol	tabulated
+scalar	standard-molar-formation-enthalpy	identity,standard,uncertainty,scope	hf	-577.6	kJ/mol	tabulated
+scalar	standard-molar-formation-gibbs-energy	identity,standard,uncertainty,scope	gf	-515.8	kJ/mol	tabulated
+scalar	standard-molar-entropy	identity,standard,uncertainty,scope	s0	49.0	J/mol/K	tabulated
+scalar	reported-formation-enthalpy-uncertainty-magnitude	identity,standard,uncertainty,scope	hf_uncertainty	0.2	kJ/mol	tabulated
+scalar	reported-formation-gibbs-energy-uncertainty-magnitude	identity,standard,uncertainty,scope	gf_uncertainty	0.2	kJ/mol	tabulated
+scalar	reported-standard-entropy-uncertainty-magnitude	identity,standard,uncertainty,scope	s_uncertainty	0.2	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	standard-molar-formation-enthalpy	unstated	-	-	-	-
+uncertainty	standard-molar-formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-molar-entropy	unstated	-	-	-	-
+uncertainty	reported-formation-enthalpy-uncertainty-magnitude	unstated	-	-	-	-
+uncertainty	reported-formation-gibbs-energy-uncertainty-magnitude	unstated	-	-	-	-
+uncertainty	reported-standard-entropy-uncertainty-magnitude	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	standard-molar-formation-enthalpy	temperature	298.15	298.15	K
+validity	standard-molar-formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-molar-entropy	temperature	298.15	298.15	K
+validity	reported-formation-enthalpy-uncertainty-magnitude	temperature	298.15	298.15	K
+validity	reported-formation-gibbs-energy-uncertainty-magnitude	temperature	298.15	298.15	K
+validity	reported-standard-entropy-uncertainty-magnitude	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	standard-molar-formation-enthalpy	pressure	100000	100000	Pa
+validity	standard-molar-formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-molar-entropy	pressure	100000	100000	Pa
+validity	reported-formation-enthalpy-uncertainty-magnitude	pressure	100000	100000	Pa
+validity	reported-formation-gibbs-energy-uncertainty-magnitude	pressure	100000	100000	Pa
+validity	reported-standard-entropy-uncertainty-magnitude	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	standard-molar-formation-enthalpy	standard	1	1	1
+validity	standard-molar-formation-gibbs-energy	standard	1	1	1
+validity	standard-molar-entropy	standard	1	1	1
+validity	reported-formation-enthalpy-uncertainty-magnitude	standard	1	1	1
+validity	reported-formation-gibbs-energy-uncertainty-magnitude	standard	1	1	1
+validity	reported-standard-entropy-uncertainty-magnitude	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	standard-molar-formation-enthalpy	convention	1	1	1
+validity	standard-molar-formation-gibbs-energy	convention	1	1	1
+validity	standard-molar-entropy	convention	1	1	1
+validity	reported-formation-enthalpy-uncertainty-magnitude	convention	1	1	1
+validity	reported-formation-gibbs-energy-uncertainty-magnitude	convention	1	1	1
+validity	reported-standard-entropy-uncertainty-magnitude	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	standard-molar-formation-enthalpy	phase	1	1	1
+validity	standard-molar-formation-gibbs-energy	phase	1	1	1
+validity	standard-molar-entropy	phase	1	1	1
+validity	reported-formation-enthalpy-uncertainty-magnitude	phase	1	1	1
+validity	reported-formation-gibbs-energy-uncertainty-magnitude	phase	1	1	1
+validity	reported-standard-entropy-uncertainty-magnitude	phase	1	1	1
+validity	molar-mass	polymorph	1	1	1
+validity	standard-molar-formation-enthalpy	polymorph	1	1	1
+validity	standard-molar-formation-gibbs-energy	polymorph	1	1	1
+validity	standard-molar-entropy	polymorph	1	1	1
+validity	reported-formation-enthalpy-uncertainty-magnitude	polymorph	1	1	1
+validity	reported-formation-gibbs-energy-uncertainty-magnitude	polymorph	1	1	1
+validity	reported-standard-entropy-uncertainty-magnitude	polymorph	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	standard-molar-formation-enthalpy	pure	1	1	1
+validity	standard-molar-formation-gibbs-energy	pure	1	1	1
+validity	standard-molar-entropy	pure	1	1	1
+validity	reported-formation-enthalpy-uncertainty-magnitude	pure	1	1	1
+validity	reported-formation-gibbs-energy-uncertainty-magnitude	pure	1	1	1
+validity	reported-standard-entropy-uncertainty-magnitude	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	standard-molar-formation-enthalpy	reference	1	1	1
+validity	standard-molar-formation-gibbs-energy	reference	1	1	1
+validity	standard-molar-entropy	reference	1	1	1
+validity	reported-formation-enthalpy-uncertainty-magnitude	reference	1	1	1
+validity	reported-formation-gibbs-energy-uncertainty-magnitude	reference	1	1	1
+validity	reported-standard-entropy-uncertainty-magnitude	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	standard-molar-formation-enthalpy	specimen	0	0	1
+validity	standard-molar-formation-gibbs-energy	specimen	0	0	1
+validity	standard-molar-entropy	specimen	0	0	1
+validity	reported-formation-enthalpy-uncertainty-magnitude	specimen	0	0	1
+validity	reported-formation-gibbs-energy-uncertainty-magnitude	specimen	0	0	1
+validity	reported-standard-entropy-uncertainty-magnitude	specimen	0	0	1
