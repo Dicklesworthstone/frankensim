@@ -221,6 +221,11 @@ mod tests {
                 triangles: vec![[0, 1, 2]],
                 dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
             };
+            claim.validity =
+                claim
+                    .validity
+                    .with("T", 280.0, 320.0)
+                    .with("normal_pressure", 0.9e6, 1.0e6);
             claim.interpolation = InterpolationPolicy::LinearInside;
             claims.insert_claim(claim).unwrap();
             let pack = NormalizedPack::new(
@@ -268,6 +273,13 @@ mod tests {
             .spec;
             // Native box-support admission currently accepts a Surface2D at
             // a point; source-cell corners alone do not prove an interval.
+            let envelope = spec.envelope.as_mut().unwrap();
+            envelope.ambient_lo.value = 300.0;
+            envelope.ambient_hi.value = 300.0;
+            for limit in spec.requirements.as_mut().unwrap() {
+                limit.limit.value = 300.0;
+                limit.margin.value = 0.0;
+            }
             for material in spec.materials.as_mut().unwrap() {
                 material.temp_lo.value = 300.0;
                 material.temp_hi.value = 300.0;
