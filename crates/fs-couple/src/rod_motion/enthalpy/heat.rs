@@ -113,7 +113,8 @@ impl<I: RodMotionInertia> RodThermoelasticSystem<'_, '_, '_, I> {
         if !routes.is_empty() {
             return Err(invalid("rod heat assembly cannot discard electrical contact work").into());
         }
-        let result = self.step_with_transport(thermal, target_s, loads, viscosity, &trial,
+        let result = self.step_with_transport(thermal, target_s, loads,
+            RodAngularViscosity { bending: None, torsional: viscosity }, &trial,
             mechanical_controls, controls, energy_guess_j, gate);
         match result {
             Err(CircuitEnthalpyError::Invalid(SOURCE_REFUSAL)) => match trial.failure.into_inner() {

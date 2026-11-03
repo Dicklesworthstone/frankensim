@@ -19,10 +19,12 @@ use fs_solid::rod::material_field::thermal::source::{
 use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::*;
 
-#[path = "enthalpy/torsional.rs"]
-mod torsional;
+#[path = "enthalpy/bending.rs"]
+mod bending;
 #[path = "enthalpy/heat.rs"]
 mod heat;
+#[path = "enthalpy/torsional.rs"]
+mod torsional;
 
 const LENGTH: f64 = 0.8;
 const RADIUS: f64 = 0.05;
@@ -51,6 +53,7 @@ struct Spec {
     mechanical_upper_k: f64,
     kinked_shear: bool,
     viscosity: Option<ViscositySpec>,
+    bending_viscosity: Option<ViscositySpec>,
 }
 impl Default for Spec {
     fn default() -> Self {
@@ -65,6 +68,7 @@ impl Default for Spec {
             mechanical_upper_k: 500.0,
             kinked_shear: false,
             viscosity: None,
+            bending_viscosity: None,
         }
     }
 }
@@ -114,7 +118,12 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
             0.0,
             THERMAL_CONDUCTIVITY_DIMS,
         ),
-        (fs_conduction::SURFACE_EMISSIVITY_PROPERTY, 0.6, 0.0, fs_conduction::EMISSIVITY_DIMS),
+        (
+            fs_conduction::SURFACE_EMISSIVITY_PROPERTY,
+            0.6,
+            0.0,
+            fs_conduction::EMISSIVITY_DIMS,
+        ),
     ] {
         let upper = if matches!(
             name,
@@ -166,12 +175,16 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
             })
             .unwrap();
     }
-    if let Some(eta) = spec.viscosity {
+    for (property, eta) in [
+        ("shear_viscosity", spec.viscosity),
+        ("bending_viscosity", spec.bending_viscosity),
+    ] {
+        let Some(eta) = eta else { continue };
         let dims = fs_qty::DynViscosity::DIMS;
         let curve = eta.slope_pa_s_k != 0.0;
         claims
             .insert_claim(PropertyClaim {
-                key: PropertyKey::new("shear_viscosity", dims),
+                key: PropertyKey::new(property, dims),
                 value: if curve {
                     PropertyValue::Curve {
                         abscissa: "T".into(),
@@ -203,7 +216,11 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
                 },
                 observations: vec![],
                 provenance: Provenance {
-                    source: "manufactured temperature-dependent shaft viscosity".into(),
+                    source: if property == "bending_viscosity" {
+                        "manufactured temperature-dependent bending viscosity".into()
+                    } else {
+                        "manufactured temperature-dependent shaft viscosity".into()
+                    },
                     license: "test-only".into(),
                     artifact: None,
                 },
@@ -227,8 +244,14 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
             heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
             density: &PropertyKey::new("density", Density::DIMS),
             temperature_axis: "T",
-            lower: &context_point(200.0, spec.viscosity.is_some()),
-            upper: &context_point(500.0, spec.viscosity.is_some()),
+            lower: &context_point(
+                200.0,
+                spec.viscosity.is_some() || spec.bending_viscosity.is_some(),
+            ),
+            upper: &context_point(
+                500.0,
+                spec.viscosity.is_some() || spec.bending_viscosity.is_some(),
+            ),
             selection: SelectionPolicy::SingleClaimOnly,
         },
         SolidLiquidPhase::Solid,
@@ -304,7 +327,12 @@ fn fixture<R>(
         .map(|(i, s)| material(i, *s))
         .collect();
     let cards: Vec<_> = sources.iter().map(|s| &s.0).collect();
-    let context = context_point(300.0, specs.iter().any(|s| s.viscosity.is_some()));
+    let context = context_point(
+        300.0,
+        specs
+            .iter()
+            .any(|s| s.viscosity.is_some() || s.bending_viscosity.is_some()),
+    );
     let source = source_with_context(&cards, segments, &context);
     let routes = destinations(specs.len(), segments);
     assert_eq!(temperatures.len(), routes.len());
@@ -792,11 +820,23 @@ fn prepared_world_loads_preserve_native_motion_and_finite_heat() {
             let mut other_thermal = thermal.clone();
             let routes = destinations(1, 1);
             let mut world = RodThermoelasticSystem::try_new(
-                motion.clone(), source, &thermal, network, &routes, 1e-11, &gate,
+                motion.clone(),
+                source,
+                &thermal,
+                network,
+                &routes,
+                1e-11,
+                &gate,
             )
             .unwrap();
             let mut spatial = RodThermoelasticSystem::try_new(
-                motion, source, &other_thermal, network, &routes, 1e-11, &gate,
+                motion,
+                source,
+                &other_thermal,
+                network,
+                &routes,
+                1e-11,
+                &gate,
             )
             .unwrap();
             let loads = [
@@ -808,11 +848,25 @@ fn prepared_world_loads_preserve_native_motion_and_finite_heat() {
             ];
             let prepared = PreparedRodLoads::new(&loads, &[[0.0; 3]; 2], &[], &gate).unwrap();
             let a = world
-                .step(&mut thermal, dt, &loads, controls(dt), solve(), &[0.0], &gate)
+                .step(
+                    &mut thermal,
+                    dt,
+                    &loads,
+                    controls(dt),
+                    solve(),
+                    &[0.0],
+                    &gate,
+                )
                 .unwrap();
             let b = spatial
                 .step_spatial(
-                    &mut other_thermal, dt, &prepared, controls(dt), solve(), &[0.0], &gate,
+                    &mut other_thermal,
+                    dt,
+                    &prepared,
+                    controls(dt),
+                    solve(),
+                    &[0.0],
+                    &gate,
                 )
                 .unwrap();
             assert_eq!(world.mechanical().pose(), spatial.mechanical().pose());
@@ -843,22 +897,42 @@ fn rotating_material_loads_and_finite_heat_keep_physical_work_and_atomic_retry()
         mechanical_upper_k: 300.5,
         ..Spec::default()
     };
-    fixture(&[spec], 1, &[300.0], &[0.5], false, |source, mut thermal, network| {
+    fixture(
+        &[spec],
+        1,
+        &[300.0],
+        &[0.5],
+        false,
+        |source, mut thermal, network| {
         let gate = CancelGate::new();
         let model = Arc::new(
-            source.resolve_at(&[300.0], &gate).unwrap()
-                .into_motion_model(RodRootBoundary::Free, &gate).unwrap(),
+                source
+                    .resolve_at(&[300.0], &gate)
+                    .unwrap()
+                    .into_motion_model(RodRootBoundary::Free, &gate)
+                    .unwrap(),
         );
         let mut pose = model.initial_pose();
         pose.frames
             .fill(So3::exp(So3Tangent::new(Vec3::new(0.4, 0.0, 0.0))).unwrap());
         let original = RodMotion::new(
-            model, pose, &[[0.0; 3]; 2], &[[2.0, 0.0, 0.0]; 2], 0.0, &gate,
+                model,
+                pose,
+                &[[0.0; 3]; 2],
+                &[[2.0, 0.0, 0.0]; 2],
+                0.0,
+                &gate,
         )
         .unwrap();
         let original_thermal = thermal.clone();
         let mut owner = RodThermoelasticSystem::try_new(
-            original.clone(), source, &thermal, network, &destinations(1, 1), 1e-11, &gate,
+                original.clone(),
+                source,
+                &thermal,
+                network,
+                &destinations(1, 1),
+                1e-11,
+                &gate,
         )
         .unwrap();
         let original_layers = owner.layers().to_vec();
@@ -869,8 +943,16 @@ fn rotating_material_loads_and_finite_heat_keep_physical_work_and_atomic_retry()
             &[RodNodalWrench::default(); 2],
             &[couple; 2],
             &[
-                RodPointForce { node: 0, offset_body_m: offset, force_world_n: force },
-                RodPointForce { node: 1, offset_body_m: offset, force_world_n: force },
+                    RodPointForce {
+                        node: 0,
+                        offset_body_m: offset,
+                        force_world_n: force,
+                    },
+                    RodPointForce {
+                        node: 1,
+                        offset_body_m: offset,
+                        force_world_n: force,
+                    },
             ],
             &gate,
         )
@@ -881,18 +963,28 @@ fn rotating_material_loads_and_finite_heat_keep_physical_work_and_atomic_retry()
             .step_spatial_candidate(0.01, &prepared, controls(0.01), &gate)
             .unwrap();
         assert!(
-            owner.step_spatial(
-                &mut thermal, 0.01, &prepared, controls(0.01), solve(), &[0.0], &gate,
-            ).is_err()
+                owner
+                    .step_spatial(
+                        &mut thermal,
+                        0.01,
+                        &prepared,
+                        controls(0.01),
+                        solve(),
+                        &[0.0],
+                        &gate,
+                    )
+                    .is_err()
         );
         assert_eq!(thermal.cells(), original_thermal.cells());
         assert_eq!(thermal.time_s(), 0.0);
         assert_eq!(owner.mechanical().pose(), original.pose());
         assert_eq!(
-            owner.mechanical().linear_momenta_kg_m_s(), original.linear_momenta_kg_m_s()
+                owner.mechanical().linear_momenta_kg_m_s(),
+                original.linear_momenta_kg_m_s()
         );
         assert_eq!(
-            owner.mechanical().body_spins_kg_m2_s(), original.body_spins_kg_m2_s()
+                owner.mechanical().body_spins_kg_m2_s(),
+                original.body_spins_kg_m2_s()
         );
         assert_eq!(owner.mechanical().time_s(), 0.0);
         assert_eq!(owner.mechanical().accepted_steps(), 0);
@@ -900,22 +992,35 @@ fn rotating_material_loads_and_finite_heat_keep_physical_work_and_atomic_retry()
 
         let dt = 0.001;
         let (frozen, native) = original
-            .step_spatial_candidate(dt, &prepared, controls(dt), &gate).unwrap();
-        let report = owner.step_spatial(
-            &mut thermal, dt, &prepared, controls(dt), solve(), &[0.0], &gate,
-        ).unwrap();
+                .step_spatial_candidate(dt, &prepared, controls(dt), &gate)
+                .unwrap();
+            let report = owner
+                .step_spatial(
+                    &mut thermal,
+                    dt,
+                    &prepared,
+                    controls(dt),
+                    solve(),
+                    &[0.0],
+                    &gate,
+                )
+                .unwrap();
         assert_eq!(owner.mechanical().pose(), frozen.pose());
         assert_eq!(
-            owner.mechanical().linear_momenta_kg_m_s(), frozen.linear_momenta_kg_m_s()
+                owner.mechanical().linear_momenta_kg_m_s(),
+                frozen.linear_momenta_kg_m_s()
         );
         assert_eq!(
-            owner.mechanical().body_spins_kg_m2_s(), frozen.body_spins_kg_m2_s()
+                owner.mechanical().body_spins_kg_m2_s(),
+                frozen.body_spins_kg_m2_s()
         );
         assert_eq!(
-            report.mechanical.source_work_quadrature_j, native.source_work_quadrature_j
+                report.mechanical.source_work_quadrature_j,
+                native.source_work_quadrature_j
         );
         assert_eq!(
-            report.mechanical.integration_defect_j, native.integration_defect_j
+                report.mechanical.integration_defect_j,
+                native.integration_defect_j
         );
 
         // Reconstruct torque about the fixed world origin from physical point
@@ -927,37 +1032,54 @@ fn rotating_material_loads_and_finite_heat_keep_physical_work_and_atomic_retry()
                 let frame = state.pose().frames[node];
                 let point = vector(state.pose().positions_m[node])
                     + frame.rotate(vector(offset)).unwrap();
-                torque = torque + point.cross(vector(force))
-                    + frame.rotate(vector(couple)).unwrap();
+                    torque =
+                        torque + point.cross(vector(force)) + frame.rotate(vector(couple)).unwrap();
             }
             torque
         };
-        let expected = (total_moment(&original) + total_moment(owner.mechanical())).scale(0.5 * dt);
+            let expected =
+                (total_moment(&original) + total_moment(owner.mechanical())).scale(0.5 * dt);
         let stale = total_moment(&original).scale(dt);
         assert!((expected - stale).norm() > 1e-10);
         let expected = [expected.x, expected.y, expected.z];
         for c in 0..3 {
-            near(report.mechanical.external_angular_impulse_nm_s[c], expected[c], 2e-12);
+                near(
+                    report.mechanical.external_angular_impulse_nm_s[c],
+                    expected[c],
+                    2e-12,
+                );
             near(
                 report.mechanical.after.angular_momentum_kg_m2_s[c]
                     - report.mechanical.before.angular_momentum_kg_m2_s[c],
-                expected[c], 2e-12,
+                    expected[c],
+                    2e-12,
             );
             near(
                 report.mechanical.after.linear_momentum_kg_m_s[c]
                     - report.mechanical.before.linear_momentum_kg_m_s[c],
-                2.0 * force[c] * dt, 2e-12,
+                    2.0 * force[c] * dt,
+                    2e-12,
             );
         }
 
         let temperature = thermal.temperature_k(CellId(0)).unwrap();
         assert!((300.0..300.5).contains(&temperature));
         let (area, second_moment) = geometry(0, 1);
-        let strain = owner.mechanical().model()
-            .segment_strain_states(owner.mechanical().pose(), &gate).unwrap()[0];
-        let material_energy = LENGTH * independent_potential(
-            spec, area, second_moment, temperature, strain.gamma, strain.curvature,
-        ).2;
+            let strain = owner
+                .mechanical()
+                .model()
+                .segment_strain_states(owner.mechanical().pose(), &gate)
+                .unwrap()[0];
+            let material_energy = LENGTH
+                * independent_potential(
+                    spec,
+                    area,
+                    second_moment,
+                    temperature,
+                    strain.gamma,
+                    strain.curvature,
+                )
+                .2;
         let mut kinetic = 0.0;
         for node in 0..2 {
             let inertia = &owner.mechanical().model().inertia()[node];
@@ -971,17 +1093,21 @@ fn rotating_material_loads_and_finite_heat_keep_physical_work_and_atomic_retry()
         // Initial strain/entropy vanish. Reconstruct complete actual storage;
         // retain the native defect separately rather than injecting it as heat.
         let change = kinetic + material_energy + total_heat(&thermal)
-            - native.before.kinetic_energy_j - total_heat(&original_thermal);
+                - native.before.kinetic_energy_j
+                - total_heat(&original_thermal);
         near(
             change - 0.5 * dt - native.source_work_quadrature_j,
-            native.integration_defect_j, 5e-10,
+                native.integration_defect_j,
+                5e-10,
         );
         near(
             RHO * area * LENGTH * spec.cp * (temperature - 300.0) - 0.5 * dt,
-            report.reversible_heat_j, 2e-11,
+                report.reversible_heat_j,
+                2e-11,
         );
         near(report.coupling_energy_residual_j, 0.0, 5e-10);
-    });
+        },
+    );
 }
 
 #[test]

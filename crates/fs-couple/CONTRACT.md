@@ -22054,6 +22054,38 @@ Focused manufactured fixtures check unequal-layer partition and temperature rise
 changing eta(T) across continuing steps, energy/entropy closure, zero-loss parity,
 prepared spatial loads, and late endpoint-source refusal.
 
+## Finite-cell heating from simultaneous rod bending and torsion
+
+`RodThermoelasticSystem::step_angular_viscous` and
+`step_spatial_angular_viscous` connect the existing native bending-loss owner to
+the same accepted rod and whole-layer caloric history. `RodAngularViscosity`
+selects bending and torsional viscosity independently. Each enabled mechanism
+resolves its explicit property from the original accepted material state; an
+absent selection does not assert a lossless material. Explicit zero retains a
+zero physical heat account.
+
+The single native motion step retains both angular-loss flows and their separate
+per-segment heat receipts. Bending heat is distributed by the original material
+owner's layer `eta_b I` contributions, common to both circular bending axes;
+torsion retains its independent `eta_s J` partition. The original fixed cell
+mapping, rather than cell mass or a temperature average, determines every heat
+destination. Each bending segment and the total deposited heat must match the
+native loss within the declared coupling tolerance before publication.
+
+Both deposits enter the original enthalpy residual exactly once, alongside the
+signed reversible thermoelastic exchange. Physical bending loss is excluded
+from external supply and reported as a separate nonnegative endpoint
+`sum(Q_bending/T_end)` entropy-production quadrature. Native integration error,
+caloric temporal error and thermoelastic temporal error retain their original
+accounts. This is the existing first-order thermal split, not an exact
+continuous entropy integral or unconditional time-accuracy claim.
+
+The next accepted interval resolves viscosity from its actual heated state.
+The current interval's selected bending and torsional claims must also support
+the complete thermal endpoint. Source, thermal, energy or cancellation refusal
+leaves both original histories unchanged. This adds no material law, loss
+ratio, phase transition, deformation-dependent heat geometry or second clock.
+
 ## Compensated translation on native rod trajectories
 
 Native rod drift retains one private world-coordinate translation remainder
