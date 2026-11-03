@@ -9438,6 +9438,64 @@ Nonpositive populations, unsupported sources, exhausted query bounds and
 cancellation return no candidate. The broader deforming/melting boundary,
 pressure-projection and elastic-history obligations remain open.
 
+### Simultaneous liquid throughflow on the original native inventory
+
+`MaterialFreeSurfaceEnthalpy3::{exchange_interface_throughflow,
+prepare_interface_throughflow}` accepts incoming and powered outgoing streams
+in one original mass/enthalpy/population transaction. Equal gross inlet and
+outlet masses can transfer nonzero momentum and caloric energy while keeping
+the native fill unchanged. The shared owner creates one lattice/enthalpy
+candidate, applies each cell's velocity once, refreshes the original material
+and force sources once, and gates actual native endpoint balances before
+publication. A prepared proposal borrows the accepted owner exclusively and
+can be discarded or published with the finite source owners.
+
+The selected local law holds the streams' velocity, enthalpy and relative
+mass-flow proportions over integrated progress `s` in `[0,1]`. For gross
+incoming mass `a` and outgoing `b`, `m(s)=m0+s*(a-b)` and
+`p(s)=m0*u0+s*(a*v_in-b*v_out)`. Both directions use this SAME `u(s)=p(s)/m(s)`.
+Inlet mixing heat integrates `a*|v_in-u(s)|²/2`; outlet actuator work integrates
+`b*|v_out-u(s)|²/2`. Each co-located stream group's central velocity variance
+adds its own nonnegative gross-mass energy. Thus
+`delta_K + mixing_heat = carried_K + actuator_work`; mixing heat enters the
+original caloric owner once, and outlet work remains an external debit.
+No inlet-first/outlet-first split chooses a different finite-transfer loss.
+
+Analytic Gram weights evaluate the relative-speed integral as a sum of
+nonnegative squares. A bounded 64-term positive series handles near-equal
+initial/final mass; deterministic `fs-math` logarithms handle separated masses.
+The equal-mass limit is regular. Double-double signed stream sums preserve
+small net momentum/enthalpy beside common velocity or caloric references.
+Single-direction cells delegate the original mixing/ejection state arithmetic.
+
+The native net mass projection remains authoritative. Its rounding adjusts
+only the larger directional mass batch; the smaller batch is unchanged.
+Each per-cell receipt reports requested and represented incoming/outgoing
+masses separately, so external owners debit/credit their own gross streams.
+Gross representation defects and their net closure consume the original mass
+budget. No effective velocity or enthalpy is formed by division by net mass.
+Original stream-count, source, speed, capacity, work, cancellation and complete
+state-publication bounds apply. The accepted clock advances only through the
+original subsequent flow/thermal step.
+
+This is a local held-stream complete-mixing/ideal-actuator model. It does not
+resolve jets, infer nozzle pressure work, evolve finite donor mechanics or
+remove existing phase-front/contact/surface-history restrictions. Positive
+initial and final native mass bound the linear mass path; source evolution
+and detailed spatial transport remain with their original owners.
+
+Six new numerical regressions compare the simultaneous path with an
+independent RK4 control-volume integration and an analytic equal-mass pump,
+and check one-way parity, individual stream dispersion, frame/datum/order
+covariance, near-balanced projection, extreme mass-ratio limits and refusal.
+All six and eleven existing stream numerical tests pass in a bounded native
+build of the actual numerical source with genuine `fs-math`. Three additional
+material/population regression definitions exercise zero-net continuation,
+complete original one-way results and atomic refusal/publication; those full
+fixtures could not be compiled or run with the available dependency products.
+Full Cargo/RCH/DSR validation remains unrun; numerical-kernel execution is not
+claimed as end-to-end material or experimental validation.
+
 ### Multiple missing-film faces on one finite carrier
 
 `CarrierLubricationFace3`, `SharedLubricationSurface3` and

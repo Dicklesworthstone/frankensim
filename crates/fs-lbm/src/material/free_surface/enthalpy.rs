@@ -50,7 +50,9 @@ pub use mass_exchange::{
     FreeSurfaceMassExchange, FreeSurfaceMassExchangeControls, FreeSurfaceMassExchangeReport,
     FreeSurfaceMassExchangeSample, FreeSurfaceMassInflow, FreeSurfaceMassInflowReport,
     FreeSurfaceMassOutflow, FreeSurfaceMassOutflowReport, FreeSurfaceMassProjection,
+    FreeSurfaceMassThroughflowReport, FreeSurfaceMassThroughflowSample,
     PreparedFreeSurfaceMassInflow, PreparedFreeSurfaceMassOutflow,
+    PreparedFreeSurfaceMassThroughflow,
 };
 
 mod phase_conduction;

@@ -7,6 +7,7 @@ use fs_lbm::material::free_surface::enthalpy::{
 
 mod inflow;
 mod outflow;
+mod throughflow;
 
 #[allow(dead_code)]
 #[path = "../nsf3_thermochemical/source.rs"]

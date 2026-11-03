@@ -16,6 +16,11 @@ mod outflow;
 pub use outflow::{
     FreeSurfaceMassOutflow, FreeSurfaceMassOutflowReport, PreparedFreeSurfaceMassOutflow,
 };
+mod throughflow;
+pub use throughflow::{
+    FreeSurfaceMassThroughflowReport, FreeSurfaceMassThroughflowSample,
+    PreparedFreeSurfaceMassThroughflow,
+};
 
 // Only fields actually changed by the native transaction are proposed. Source
 // bindings, coupled histories and the original physical clock stay in place.
@@ -43,12 +48,23 @@ enum TransferMomentum<'a> {
         mixtures: &'a BTreeMap<MassLocation3, inflow::IncomingMixture>,
         maximum_work_j: f64,
     },
+    Throughflow {
+        cells: &'a BTreeMap<MassLocation3, throughflow::ThroughflowCell>,
+        maximum_work_j: f64,
+    },
 }
 
-impl TransferMomentum<'_> {
+impl<'a> TransferMomentum<'a> {
+    fn throughflow_at(self, location: &MassLocation3) -> Option<&'a throughflow::ThroughflowCell> {
+        match self {
+            Self::Throughflow { cells, .. } => cells.get(location),
+            _ => None,
+        }
+    }
+
     fn velocity_at(&self, location: &MassLocation3) -> Option<[f64; 3]> {
         match self {
-            Self::Comoving => None,
+            Self::Comoving | Self::Throughflow { .. } => None,
             Self::Mixing(mixtures) | Self::Ejection { mixtures, .. } => {
                 mixtures.get(location).map(|m| m.velocity_m_s)
             }
@@ -60,7 +76,7 @@ impl TransferMomentum<'_> {
             Self::Mixing(mixtures) | Self::Ejection { mixtures, .. } => mixtures
                 .get(location)
                 .map_or(0.0, |m| m.specific_kinetic_variance_j_kg),
-            Self::Comoving => 0.0,
+            Self::Comoving | Self::Throughflow { .. } => 0.0,
         }
     }
 
@@ -76,6 +92,9 @@ impl TransferMomentum<'_> {
     ) -> Option<([f64; 3], f64, f64)> {
         let carried = match self {
             Self::Comoving => velocity,
+            Self::Throughflow { cells, .. } => {
+                return cells.get(location)?.state(old_mass, dm, new_mass, velocity);
+            }
             _ => self.velocity_at(location)?,
         };
         match self {
@@ -101,6 +120,7 @@ impl TransferMomentum<'_> {
                 }
                 (work.is_finite() && work >= 0.0).then_some((next, 0.0, work))
             }
+            Self::Throughflow { .. } => unreachable!("throughflow returned above"),
         }
     }
 }
@@ -438,10 +458,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             lattice.transport_set_interface_mass(location, new_mass, gate)?;
             let new_mass_kg = projection.final_mass_kg;
             let old_h = self.h[&location];
+            let throughflow = momentum.and_then(|model| model.throughflow_at(&location));
             // The actual native dm owns the transfer. Center the update on the
             // old datum so a common caloric offset cannot manufacture heat.
-            let mut relative_supply =
-                dm * (transfer.specific_enthalpy_j_kg - old_h) + transfer.heat_j;
+            let mut relative_supply = throughflow.map_or_else(
+                || dm * (transfer.specific_enthalpy_j_kg - old_h),
+                |cell| cell.relative_enthalpy(dm, old_h),
+            ) + transfer.heat_j;
             if let Some(momentum) = momentum {
                 let before = self
                     .flow
@@ -488,14 +511,21 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             }
             h.insert(location, new_h);
             report.mass_change_kg += dm;
-            report.absolute_mass_defect_kg += (dm - transfer.mass_kg).abs();
-            report.carried_enthalpy_j += dm * transfer.specific_enthalpy_j_kg;
+            report.absolute_mass_defect_kg += throughflow.map_or_else(
+                || (dm - transfer.mass_kg).abs(),
+                |cell| cell.mass_defect(dm),
+            );
+            let carried_enthalpy = throughflow.map_or_else(
+                || dm * transfer.specific_enthalpy_j_kg,
+                |cell| cell.carried_enthalpy(dm),
+            );
+            report.carried_enthalpy_j += carried_enthalpy;
             report.heat_j += transfer.heat_j;
             report.samples.push(FreeSurfaceMassExchangeSample {
                 coordinates: transfer.coordinates,
                 requested_mass_kg: transfer.mass_kg,
                 mass_change_kg: dm,
-                carried_enthalpy_j: dm * transfer.specific_enthalpy_j_kg,
+                carried_enthalpy_j: carried_enthalpy,
                 heat_j: transfer.heat_j,
                 specific_enthalpy_j_kg: [old_h, new_h],
             });
@@ -525,8 +555,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             let dm = (endpoint_masses[&location] - old_mass) * mass_unit;
             let dh = h[&location] - self.h[&location];
             let transfer = ordered.get(&location);
+            let throughflow = momentum.and_then(|model| model.throughflow_at(&location));
             let supplied_relative = transfer.map_or(0.0, |t| {
-                dm * (t.specific_enthalpy_j_kg - self.h[&location]) + t.heat_j
+                throughflow.map_or_else(
+                    || dm * (t.specific_enthalpy_j_kg - self.h[&location]),
+                    |cell| cell.relative_enthalpy(dm, self.h[&location]),
+                ) + t.heat_j
             });
             report.enthalpy_change_j += dm * self.h[&location] + new_mass * dh;
             let before = self
@@ -543,10 +577,15 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                     .flow
                     .scaling
                     .velocity_si(after.velocity[axis] - before.velocity[axis])?;
-                let carried = momentum
-                    .as_ref()
-                    .and_then(|motion| motion.velocity_at(&location))
-                    .map_or(dm * u, |incoming| dm * incoming[axis]);
+                let carried = throughflow.map_or_else(
+                    || {
+                        momentum
+                            .as_ref()
+                            .and_then(|motion| motion.velocity_at(&location))
+                            .map_or(dm * u, |incoming| dm * incoming[axis])
+                    },
+                    |cell| cell.carried_momentum(dm, axis),
+                );
                 let change = dm * u + new_mass * du;
                 old_velocity[axis] = u;
                 delta_velocity[axis] = du;
@@ -569,6 +608,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 if variance != 0.0 {
                     carried += dm * variance;
                 }
+                if let Some(cell) = throughflow {
+                    carried = cell.carried_kinetic(dm);
+                }
                 let kinetic = inflow::kinetic_change(dm, new_mass, old_velocity, delta_velocity);
                 kinetic_balance.carried_kinetic_energy_j += carried;
                 kinetic_balance.kinetic_energy_change_j += kinetic;
@@ -579,7 +621,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 // zero, while accounting for authored actuator work on exit.
                 kinetic_balance.absolute_total_energy_defect_j += match momentum {
                     TransferMomentum::Comoving | TransferMomentum::Mixing(_) => total_defect.abs(),
-                    TransferMomentum::Ejection { .. } => (total_defect - work).abs(),
+                    TransferMomentum::Ejection { .. } | TransferMomentum::Throughflow { .. } => {
+                        (total_defect - work).abs()
+                    }
                 };
                 heat
             } else {
@@ -612,7 +656,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             || report.absolute_energy_defect_j > controls.energy_tolerance_j
             || report.absolute_momentum_defect_kg_m_s > controls.momentum_tolerance_kg_m_s
             || !kinetic_balance.admitted(controls.energy_tolerance_j)
-            || matches!(momentum, Some(TransferMomentum::Ejection { maximum_work_j, .. })
+            || matches!(momentum, Some(TransferMomentum::Ejection { maximum_work_j, .. }
+                | TransferMomentum::Throughflow { maximum_work_j, .. })
                 if kinetic_balance.mechanical_work_j > maximum_work_j)
         {
             return Err(Error::Invalid(
