@@ -3645,3 +3645,44 @@ Rust. Native compilation and tests were unavailable and are not claimed passing.
 Independent moving obstacles, mesh deformation/topology change, coupled body
 dynamics, variable density, rotating-domain rheology, nonlinear adjoints and
 automatic thermodynamic deposition remain outside this bounded owner.
+
+## Source-owned nonlinear rheology on rigid moving domains
+
+`ale::rigid::RigidAleFlow::{candidate_with_rheology,step_with_rheology}`
+resolve generalized-Newtonian transport from each original absolute-velocity
+candidate's objective strain invariant sqrt(2 D(u):D(u)). The original mixed
+Picard owner rebuilds BOTH constitutive stress and relative mesh advection at
+the returned endpoint. Constant-density inertia, covariant history quadrature,
+physical source conversion, pressure, slip/reservoir laws, stress reactions and
+transport retain the same native owners as the Newtonian rigid-domain path.
+
+The existing material response cache now accepts an optional physical-position
+map. Every resolver query and retained response uses the endpoint WORLD cell
+centroid, while original cell identity and strain-keyed caching remain intact.
+This adds no centroid vector or mesh remapping. The Newtonian entry performs
+no new strain evaluation/allocation; both entries reuse the same relative
+advection workspace and original sparse/native nonlinear solver.
+
+`RigidAleStep<G = ()>` and `RigidAleCandidate<..., G = ()>` preserve ordinary
+Newtonian call sites. The step's `rheology_samples()` returns exact original
+endpoint material owners in cell order, including world position, physical
+strain and validated transport. It is empty for ordinary Newtonian steps.
+Typed source refusals and changed density refuse before publication. Geometry,
+clock, history and all material samples remain one dropped/committed candidate;
+reading returned responses does not query the source again.
+
+Four focused native regressions cover changing translation/spin and
+inhomogeneous thinning/thickening with an independent layered constant-stress
+solution, world-position ownership and objective zero-strain free streams,
+parity with the original stationary nonlinear material owner, and typed source/
+density refusal plus dropped/finally-cancelled candidate retry. The layered
+fixture changes both old shear rates and angular speed, checks nonzero physical
+stress/torque and density-scaled momentum, and admits literal reservoir inflow.
+Pinned Rust parsing passed. Native compilation and numerical tests remain
+unrun because local storage is full and remote build tools are unavailable.
+
+Reference density remains fixed. Captured thermal/composition fields are fixed
+within each solve; thermal evolution, viscoelastic memory, constitutive fitting
+and multiphase density transport are outside this owner. The existing rigid
+BDF1 geometry/time truncation limits remain unchanged; nonlinear material
+closure does not establish exact finite-step whole-fluid angular conservation.

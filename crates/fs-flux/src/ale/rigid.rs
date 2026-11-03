@@ -16,16 +16,19 @@
 //! This is a first-order covariant time discretization. Angular inventory and
 //! boundary torque are physical, but finite-step moving-geometry angular or
 //! energy conservation is not an exact theorem of this BDF1 map. Refine time.
-//! Only prescribed global rigid mesh motion and a fixed Newtonian material
-//! snapshot are owned here; mechanics, deformation, independent moving
-//! obstacles, topology change and thermodynamic work/heat remain external.
+//! Prescribed global rigid motion uses one fixed-density source snapshot;
+//! generalized-Newtonian steps resolve its actual endpoint shear response in
+//! world coordinates. Mechanics, deformation, independently moving obstacles,
+//! topology change and thermodynamic work/heat remain external.
 
 use crate::{
     FluxSystem, MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
-    MaterialFluxError, MaterialFluxNumerics, MaterialFluxSystem, MaterialNavierStokesBoundary,
-    MaterialNavierStokesStep, NavierStokesControls, OpenBoundaryPolicy,
+    MaterialFluxError, MaterialFluxNumerics, MaterialFluxRheologyPoint, MaterialFluxRheologySample,
+    MaterialFluxSystem, MaterialNavierStokesBoundary, MaterialNavierStokesStep,
+    NavierStokesControls, OpenBoundaryPolicy,
 };
-use fs_material::fluid_transport::FluidTransport;
+use fs_material::MaterialError;
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
 /// Physical motion of the reference pivot and the entire rigid mesh.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,7 +138,7 @@ impl From<MaterialFluxError> for RigidAleError {
 }
 
 /// One solved rigid moving-domain endpoint, in coherent SI per unit depth.
-pub struct RigidAleStep {
+pub struct RigidAleStep<G = ()> {
     /// Original nonlinear material solve. Its absolute velocity and vector
     /// reactions use current MESH axes; pressure and kinetic energy are physical.
     pub flow: MaterialNavierStokesStep,
@@ -159,8 +162,19 @@ pub struct RigidAleStep {
     pub world_angular_momentum_about_pivot_n_s: f64,
     /// Original native kinetic quadrature, rotation invariant [J/m].
     pub world_kinetic_energy_j_per_m: f64,
+    rheology_samples: Vec<MaterialFluxRheologySample<G>>,
 }
-impl RigidAleStep {
+impl<G> RigidAleStep<G> {
+    /// Original endpoint material owners in cell order. Positions are WORLD
+    /// centroids and rates are the objective absolute-velocity strain invariant.
+    /// These are the responses used in the accepted nonlinear residual and
+    /// physical stress/reaction query. Reading them never re-queries a source.
+    /// Ordinary Newtonian steps return an empty slice.
+    #[must_use]
+    pub fn rheology_samples(&self) -> &[MaterialFluxRheologySample<G>] {
+        &self.rheology_samples
+    }
+
     /// Convert a reference-chart point to its physical endpoint position.
     pub fn point_world(&self, point_reference_m: [f64; 2]) -> Result<[f64; 2], RigidAleError> {
         let point = mapped_point(
@@ -263,15 +277,15 @@ pub struct RigidAleFlow<'s, 'm, 'a, F: FluidTransport + ?Sized> {
 }
 
 /// Solved trial borrowing its original owner until atomic acceptance.
-pub struct RigidAleCandidate<'o, 's, 'm, 'a, F: FluidTransport + ?Sized> {
+pub struct RigidAleCandidate<'o, 's, 'm, 'a, F: FluidTransport + ?Sized, G = ()> {
     owner: &'o mut RigidAleFlow<'s, 'm, 'a, F>,
     state: RigidAleState,
-    step: RigidAleStep,
+    step: RigidAleStep<G>,
 }
-impl<F: FluidTransport + ?Sized> RigidAleCandidate<'_, '_, '_, '_, F> {
+impl<F: FluidTransport + ?Sized, G> RigidAleCandidate<'_, '_, '_, '_, F, G> {
     /// Solved physical endpoint and native boundary queries.
     #[must_use]
-    pub const fn step(&self) -> &RigidAleStep {
+    pub const fn step(&self) -> &RigidAleStep<G> {
         &self.step
     }
     /// Proposed complete history; accepted owner is still unchanged.
@@ -282,7 +296,7 @@ impl<F: FluidTransport + ?Sized> RigidAleCandidate<'_, '_, '_, '_, F> {
     /// Publish only after every mechanical/thermal consumer has accepted.
     /// A dropped candidate leaves the original owner unchanged.
     #[must_use]
-    pub fn commit(self) -> RigidAleStep {
+    pub fn commit(self) -> RigidAleStep<G> {
         self.owner.state = self.state;
         self.step
     }
@@ -450,6 +464,41 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> RigidAleFlow<'s, 'm, 'a, F> {
             .commit())
     }
 
+    /// Advance and commit the same rigid-domain endpoint with a source-owned
+    /// generalized-Newtonian response at each actual candidate's cell strain.
+    ///
+    /// The resolver receives endpoint WORLD centroids and the objective strain
+    /// rate sqrt(2 D(u):D(u)) [1/s], using absolute fluid velocity. The original
+    /// source density is fixed. Temperature/composition captured by the pure
+    /// resolver must stay fixed throughout this step; their evolution is external.
+    /// Exact endpoint owners are retained by RigidAleStep::rheology_samples.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_rheology<G: FluidTransport>(
+        &mut self,
+        timestep_s: f64,
+        requested: RigidAleMotion,
+        tolerance: RigidAleMotionTolerance,
+        force_world: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries_world: &[MaterialNavierStokesBoundary<'_>],
+        controls: NavierStokesControls,
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RigidAleStep<G>, RigidAleError> {
+        Ok(self
+            .candidate_with_rheology(
+                timestep_s,
+                requested,
+                tolerance,
+                force_world,
+                boundaries_world,
+                controls,
+                0.0,
+                resolve,
+                cancelled,
+            )?
+            .commit())
+    }
+
     /// Solve the original nonlinear equations without publishing any state.
     ///
     /// Callbacks receive endpoint WORLD positions/normals and provide physical
@@ -473,8 +522,103 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> RigidAleFlow<'s, 'm, 'a, F> {
         boundaries_world: &[MaterialNavierStokesBoundary<'_>],
         controls: NavierStokesControls,
         absolute_velocity_tolerance_m_s: f64,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<RigidAleCandidate<'_, 's, 'm, 'a, F>, RigidAleError> {
+        self.candidate_with_solver(
+            timestep_s,
+            requested,
+            tolerance,
+            force_world,
+            boundaries_world,
+            absolute_velocity_tolerance_m_s,
+            cancelled,
+            |fluid, force, boundaries, previous, rotation, mesh_velocity, _| {
+                let flow = fluid.bdf1_navier_stokes_mixed_rigid_ale_step(
+                    force,
+                    boundaries,
+                    previous,
+                    rotation,
+                    mesh_velocity,
+                    timestep_s,
+                    controls,
+                    absolute_velocity_tolerance_m_s,
+                )?;
+                Ok((flow, Vec::new()))
+            },
+        )
+    }
+
+    /// Trial version of step_with_rheology, preserving the same geometry,
+    /// boundary, candidate ownership and cancellation semantics as candidate.
+    ///
+    /// Both constitutive stress and relative advection are rebuilt at the
+    /// accepted absolute velocity. The original material cache preserves typed
+    /// source errors and rejects density changes before any endpoint publishes.
+    /// No frozen-viscosity approximation, zero-shear probe or viscosity floor
+    /// is introduced. Source callbacks and boundary/load callbacks must be pure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn candidate_with_rheology<G: FluidTransport>(
+        &mut self,
+        timestep_s: f64,
+        requested: RigidAleMotion,
+        tolerance: RigidAleMotionTolerance,
+        force_world: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries_world: &[MaterialNavierStokesBoundary<'_>],
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RigidAleCandidate<'_, 's, 'm, 'a, F, G>, RigidAleError> {
+        self.candidate_with_solver(
+            timestep_s,
+            requested,
+            tolerance,
+            force_world,
+            boundaries_world,
+            absolute_velocity_tolerance_m_s,
+            cancelled,
+            |fluid, force, boundaries, previous, rotation, mesh_velocity, world_point| {
+                fluid.bdf1_navier_stokes_mixed_rigid_ale_rheology_step(
+                    force,
+                    boundaries,
+                    previous,
+                    rotation,
+                    mesh_velocity,
+                    timestep_s,
+                    controls,
+                    absolute_velocity_tolerance_m_s,
+                    world_point,
+                    resolve,
+                )
+            },
+        )
+    }
+
+    // All motion, callback transforms, storage integration and atomic
+    // publication are shared. Only the native constitutive solve varies.
+    #[allow(clippy::too_many_arguments)]
+    fn candidate_with_solver<G>(
+        &mut self,
+        timestep_s: f64,
+        requested: RigidAleMotion,
+        tolerance: RigidAleMotionTolerance,
+        force_world: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries_world: &[MaterialNavierStokesBoundary<'_>],
+        absolute_velocity_tolerance_m_s: f64,
+        mut cancelled: impl FnMut() -> bool,
+        solve: impl FnOnce(
+            &MaterialFluxSystem<'s, 'm, 'a, F>,
+            &dyn Fn([f64; 2]) -> [f64; 2],
+            &[MaterialNavierStokesBoundary<'_>],
+            &[f64],
+            [f64; 2],
+            &[f64],
+            &dyn Fn([f64; 2]) -> [f64; 2],
+        ) -> Result<
+            (MaterialNavierStokesStep, Vec<MaterialFluxRheologySample<G>>),
+            MaterialFluxError,
+        >,
+    ) -> Result<RigidAleCandidate<'_, 's, 'm, 'a, F, G>, RigidAleError> {
         poll(&mut cancelled)?;
         let motion = self.kinematics(timestep_s, requested, tolerance)?;
         if !absolute_velocity_tolerance_m_s.is_finite()
@@ -601,15 +745,14 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> RigidAleFlow<'s, 'm, 'a, F> {
             })
             .collect();
         poll(&mut cancelled)?;
-        let flow = self.fluid.bdf1_navier_stokes_mixed_rigid_ale_step(
+        let (flow, rheology_samples) = solve(
+            &self.fluid,
             &force,
             &boundaries,
             &self.state.absolute_velocity,
             history_rotation,
             &mesh_velocity,
-            timestep_s,
-            controls,
-            absolute_velocity_tolerance_m_s,
+            &world_point,
         )?;
         poll(&mut cancelled)?;
         let velocity = flow.solution.velocity_dofs();
@@ -665,6 +808,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> RigidAleFlow<'s, 'm, 'a, F> {
             world_momentum_n_s_per_m: [px, py],
             world_angular_momentum_about_pivot_n_s: angular,
             world_kinetic_energy_j_per_m: kinetic,
+            rheology_samples,
         };
         poll(&mut cancelled)?;
         Ok(RigidAleCandidate {

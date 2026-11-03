@@ -200,6 +200,56 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         self.material_navier_stokes_step(endpoint)
     }
 
+    // Generalized-Newtonian rigid ALE retains the same source cache, constant
+    // physical density and typed refusal as stationary material-bound flow.
+    // The query map changes only source positions; cell identities and the
+    // objective absolute-velocity strain come from the original native owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf1_navier_stokes_mixed_rigid_ale_rheology_step<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        history_rotation: [f64; 2],
+        mesh_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+        position_world: &dyn Fn([f64; 2]) -> [f64; 2],
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+    ) -> Result<(MaterialNavierStokesStep, Vec<MaterialFluxRheologySample<G>>), MaterialFluxError>
+    {
+        let density = self.transport.density_kg_m3();
+        let field = RheologyField::new_mapped(
+            &self.system.mesh.centroids,
+            &self.transport,
+            resolve,
+            position_world,
+        );
+        let result = with_kinematic_boundaries(density, boundaries, |native| {
+            self.system
+                .bdf1_navier_stokes_mixed_rigid_ale_rheology_step_checked(
+                    self.params,
+                    &|cell, _, rate| field.viscosity(cell, rate),
+                    &|point| {
+                        let f = force_density(point);
+                        [f[0] / density, f[1] / density]
+                    },
+                    native,
+                    previous_velocity,
+                    history_rotation,
+                    mesh_velocity,
+                    timestep_s,
+                    controls,
+                    absolute_velocity_tolerance_m_s,
+                    &|| field.is_valid(),
+                )
+        })
+        .map_err(MaterialFluxError::Boundary);
+        let (endpoint, samples) = field.finish(result)?;
+        Ok((self.material_navier_stokes_step(endpoint)?, samples))
+    }
+
     /// Advance pressure-driven generalized-Newtonian BDF1 with the original
     /// material law resolved at each candidate's actual cell strain [1/s].
     /// The returned velocity must satisfy BOTH implicit convection and the

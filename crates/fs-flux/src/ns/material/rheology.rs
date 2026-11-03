@@ -7,6 +7,7 @@ use std::cell::RefCell;
 
 pub(super) struct RheologyField<'a, G, R> {
     centroids: &'a [[f64; 2]],
+    position_map: Option<&'a dyn Fn([f64; 2]) -> [f64; 2]>,
     reference: &'a FluidTransportState,
     resolve: RefCell<R>,
     samples: RefCell<Vec<Option<MaterialFluxRheologySample<G>>>>,
@@ -24,11 +25,25 @@ where
     ) -> Self {
         Self {
             centroids,
+            position_map: None,
             reference,
             resolve: RefCell::new(resolve),
             samples: RefCell::new((0..centroids.len()).map(|_| None).collect()),
             source_error: RefCell::new(None),
         }
+    }
+
+    // A moving chart keeps its original cell identity/cache while the source
+    // and retained response use the actual physical query position.
+    pub(super) fn new_mapped(
+        centroids: &'a [[f64; 2]],
+        reference: &'a FluidTransportState,
+        resolve: R,
+        position_map: &'a dyn Fn([f64; 2]) -> [f64; 2],
+    ) -> Self {
+        let mut field = Self::new(centroids, reference, resolve);
+        field.position_map = Some(position_map);
+        field
     }
 
     pub(super) fn is_valid(&self) -> bool {
@@ -54,9 +69,18 @@ where
                     "physical shear rate must be finite and nonnegative",
                 ));
             }
+            let reference_position = self.centroids[cell];
+            let position = self
+                .position_map
+                .map_or(reference_position, |map| map(reference_position));
+            if position.iter().any(|value| !value.is_finite()) {
+                return Err(MaterialFluxError::Invalid(
+                    "physical rheology query position must be finite",
+                ));
+            }
             let point = MaterialFluxRheologyPoint {
                 cell,
-                position_m: self.centroids[cell],
+                position_m: position,
                 shear_rate_per_s: rate,
             };
             let material = self.resolve.borrow_mut()(point, self.reference)?;

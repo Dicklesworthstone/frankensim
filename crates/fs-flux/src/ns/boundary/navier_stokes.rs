@@ -326,9 +326,8 @@ impl<'m> FluxSystem<'m> {
 
     // Rigid ALE transports ABSOLUTE velocity in current mesh axes with the
     // relative advector u-w_mesh. Q rotates the original history field into
-    // those axes under its original mass quadrature. This is a native endpoint
-    // solve: the same relative advection is rebuilt for endpoint acceptance and
-    // retained for reactions/transport, never reconstructed from a stale guess.
+    // those axes under its original mass quadrature. Both material laws use
+    // this same nonlinear endpoint/reaction/transport assembly.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn bdf1_navier_stokes_mixed_rigid_ale_step(
         &self,
@@ -342,8 +341,67 @@ impl<'m> FluxSystem<'m> {
         controls: NavierStokesControls,
         absolute_velocity_tolerance_m_s: f64,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
-        if !params.nu.is_finite()
-            || params.nu <= 0.0
+        self.solve_navier_stokes_mixed_rigid_ale(
+            params,
+            None,
+            force,
+            boundaries,
+            previous_velocity,
+            history_rotation,
+            mesh_velocity,
+            timestep_s,
+            controls,
+            absolute_velocity_tolerance_m_s,
+            &|| true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf1_navier_stokes_mixed_rigid_ale_rheology_step_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        history_rotation: [f64; 2],
+        mesh_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_rigid_ale(
+            params,
+            Some(law),
+            force,
+            boundaries,
+            previous_velocity,
+            history_rotation,
+            mesh_velocity,
+            timestep_s,
+            controls,
+            absolute_velocity_tolerance_m_s,
+            source_is_valid,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_navier_stokes_mixed_rigid_ale(
+        &self,
+        params: FluxParams,
+        law: Option<&dyn Fn(usize, [f64; 2], f64) -> f64>,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        history_rotation: [f64; 2],
+        mesh_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        if (law.is_none() && (!params.nu.is_finite() || params.nu <= 0.0))
             || mesh_velocity.len() != self.n_u
             || mesh_velocity.iter().any(|v| !v.is_finite())
             || history_rotation.iter().any(|v| !v.is_finite())
@@ -373,9 +431,23 @@ impl<'m> FluxSystem<'m> {
                         "rigid ALE relative advection overflow",
                     ));
                 }
+                // D(u) is objective and unchanged by subtraction of a rigid
+                // mesh field. Use the ORIGINAL absolute candidate so the law
+                // never mistakes frame angular speed for physical shear.
+                // The Newtonian path adds no strain evaluation/allocation.
+                let rates = law.map(|_| self.shear_rates(velocity));
+                if rates
+                    .as_ref()
+                    .is_some_and(|rates| rates.iter().any(|rate| !rate.is_finite()))
+                {
+                    return Err(StokesBoundaryError::InvalidInput("nonfinite shear rate"));
+                }
                 self.assemble_stokes_admitted_rotated_history(
                     params,
-                    &|_, _| params.nu,
+                    &|cell, point| match (law, rates.as_ref()) {
+                        (Some(law), Some(rates)) => law(cell, point, rates[cell]),
+                        _ => params.nu,
+                    },
                     force,
                     admitted,
                     None,
@@ -385,7 +457,7 @@ impl<'m> FluxSystem<'m> {
                     Some(history_rotation),
                 )
             },
-            &|| true,
+            source_is_valid,
         )
     }
 

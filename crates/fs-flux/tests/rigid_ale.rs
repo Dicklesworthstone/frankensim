@@ -662,3 +662,6 @@ fn g4_motion_preview_dropped_candidate_and_terminal_cancel_preserve_one_owner() 
     assert_eq!(calls.get(), before_calls);
     assert_eq!(owner.state(), &accepted);
 }
+
+#[path = "rigid_ale/rheology.rs"]
+mod rheology;
