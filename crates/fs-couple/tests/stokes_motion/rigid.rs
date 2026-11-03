@@ -14,6 +14,9 @@ use fs_material::fluid_transport::FluidTransportState;
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_solid::Mesh2;
 
+#[path = "rigid/rheology.rs"]
+mod rheology;
+
 fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:.16e} versus {b:.16e}");
 }

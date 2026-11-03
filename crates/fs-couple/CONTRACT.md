@@ -28270,3 +28270,45 @@ pose/inertia, small losses beside common kinetic motion, refused source and
 geometry cases, lost rigid momentum, and continued material/radiation evolution.
 The owner-local test exercises late receiving-state refusal and cancellation
 immediately before joint publication.
+
+## Material rheology in finite planar fluid-body momentum
+
+With `experimental-stokes-motion`,
+`stokes_motion::rigid::PlanarRigidMotion::step_with_rheology` closes the same
+three actual body momentum equations with shear-dependent constitutive stress
+inside each original rigid ALE nonlinear solve. Newtonian and rheological
+entries share one mechanical loop, original native impulse construction,
+represented wall/mesh kinematics, response search, stress force/torque, work
+gates and joint candidate commit. A statically dispatched trial policy selects
+only the original native constitutive solve; no duplicate body solver, boxed
+per-cell law or frozen initial-viscosity surrogate is introduced.
+
+The resolver receives the endpoint WORLD centroid, invariant physical strain
+rate and immutable reference transport snapshot. Each accepted response must
+retain that source density. All native constitutive, nonlinear, boundary and
+source refusals propagate. Temperature/composition can be captured in a spatial
+resolver, but thermal state and composition are held during this mechanical
+interval; mechanical pressure is never substituted for an EOS query. The
+callback must be repeatable for identical input. Its external side effects
+remain outside transactional state ownership.
+
+`PlanarRigidStep<G = ()>` retains the original material owners in its generic
+`RigidAleStep<G>`; `flow.rheology_samples()` exposes only the accepted endpoint
+responses in cell order without querying the source again. The ordinary
+Newtonian result keeps the default type and an empty response collection. The
+same accepted body and fluid history may continue with either constitutive
+entry. No-slip and finite Navier slip retain physical stress and dissipation;
+a Newtonian slip-length formula is not used as a nonlinear constitutive law.
+
+Three G1/G3/G4 regression groups independently manufacture changing rigid
+translation/spin and changing Carreau shear, including thinning/thickening,
+finite slip, shared boosts, force/torque/work and world-position source owners;
+check the closed-fluid added-mass/zero-strain Newtonian limit and continuation;
+and refuse source failure, changed density and final cancellation with exact
+retry. Pinned nightly Rust parsing is separate from native compilation and
+numerical execution, which remain unrun in this session.
+
+Scope remains constant-density generalized-Newtonian flow on one globally rigid
+two-dimensional domain with a principal-z body. Viscoelastic memory, density
+evolution, thermal deposition, independent obstacles, exact finite-step whole-
+fluid angular conservation and a full coupled passivity theorem are not added.

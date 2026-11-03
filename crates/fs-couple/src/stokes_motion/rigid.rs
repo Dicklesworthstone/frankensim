@@ -6,6 +6,9 @@
 //! The whole domain follows this body's translation and rotation. This is not
 //! independent obstacle motion, deformation, or a complete coupled-energy theorem.
 
+mod rheology;
+
+use self::rheology::{FlowTrial, Newtonian};
 use super::search::{EndpointSearch, Observation, SearchError, maximum, sum};
 use super::{nonnegative, positive};
 use fs_flux::ale::rigid::{
@@ -112,8 +115,9 @@ impl From<SearchError<3>> for PlanarRigidError {
 }
 
 /// One jointly accepted body, original flow, moving geometry and physical clock.
-pub struct PlanarRigidStep {
-    pub flow: RigidAleStep,
+pub struct PlanarRigidStep<G = ()> {
+    /// Native flow and, for a rheological step, its original endpoint material owners.
+    pub flow: RigidAleStep<G>,
     /// Original physical stress and transport, per unit depth, about the new COM.
     pub boundary_load: MaterialBoundaryLoad,
     /// Actual native fixed-pose momentum kick, before the subsequent rigid drift.
@@ -362,8 +366,39 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
         external_torque_n_m: f64,
         fluid_controls: NavierStokesControls,
         controls: PlanarRigidControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PlanarRigidStep, PlanarRigidError> {
+        self.step_impl(
+            timestep_s,
+            force_world,
+            exterior,
+            pressure_offsets_pa,
+            external_force_n,
+            external_torque_n_m,
+            fluid_controls,
+            controls,
+            Newtonian,
+            cancelled,
+        )
+    }
+
+    // Constitutive dispatch changes only the original native fluid trial.
+    // Geometry, actual body momentum, stress loads, work and atomic commit
+    // retain one implementation for Newtonian and rheological materials.
+    #[allow(clippy::too_many_arguments)]
+    fn step_impl<G>(
+        &mut self,
+        timestep_s: f64,
+        force_world: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialNavierStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: [f64; 2],
+        external_torque_n_m: f64,
+        fluid_controls: NavierStokesControls,
+        controls: PlanarRigidControls,
+        mut flow_trial: impl FlowTrial<F, G>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PlanarRigidStep<G>, PlanarRigidError> {
         poll(&mut cancelled)?;
         let dt = timestep_s;
         let bounds = [
@@ -525,7 +560,8 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
                     "body and mesh pose/rates are not jointly representable",
                 ));
             }
-            let candidate = self.flow.candidate(
+            let candidate = flow_trial.candidate(
+                &mut self.flow,
                 dt,
                 motion(velocity),
                 motion_tolerance,
