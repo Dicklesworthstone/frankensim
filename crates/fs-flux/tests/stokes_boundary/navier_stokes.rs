@@ -158,7 +158,8 @@ fn nonlinear_pressure_flow_has_live_convection_and_keeps_its_datum() {
                     NavierStokesBoundary::Velocity { edge, value } => {
                         StokesBoundary::Velocity { edge, value }
                     }
-                    NavierStokesBoundary::Open { edge, traction, .. } => {
+                    NavierStokesBoundary::Open { edge, traction, .. }
+                    | NavierStokesBoundary::OpenReservoir { edge, traction, .. } => {
                         StokesBoundary::TotalTraction {
                             edge,
                             value: traction,

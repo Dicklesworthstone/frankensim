@@ -4242,3 +4242,41 @@ claims for unrepresentable state increments or arbitrary timesteps. The existing
 integrator, constitutive laws, admission, and cancellation boundaries remain in
 force. `articulated_load_reduction` exercises actual supported/free trajectories,
 off-center moments, and held/world/axial/bushing cancellation.
+
+## Point-parcel release with retained rigid recoil
+
+`assembly::release::release_point_mass` removes a caller-identified point parcel
+already included in the original body mass and inertia. For original mass T,
+parcel mass m, retained mass M=T-m and original COM-relative arm r, the retained
+COM shifts by `-m*r/M` and its central inertia becomes
+`I - (m*T/M)(|r|² 1-r r^T)`. The original native full-tensor admission rejects
+nonpositive or physically inconsistent retained inertia; no eigenvalue clipping,
+diagonal replacement or fictitious parcel radius is introduced. Admissible
+moments alone cannot establish the caller's geometric inventory.
+
+Both outputs inherit the original rigid velocity field before a declared
+internal impulse acts on the parcel and its exact negative on the retained
+body at the same physical point. The parcel has no intrinsic spin or free
+couple. Rotational recoil uses the point arm measured from the retained COM.
+Separation work is a nonnegative sum of translational and full-inertia impulse
+quadratics; the pre-event point velocities coincide, so initial-spin cross
+terms cancel. Its energy source must be debited by the caller.
+
+The retained body uses the original native momentum state; the free parcel
+stores canonical world momentum with a checked velocity query. The returned
+COM shift must be subtracted from original body points before continuation.
+Actual returned momenta and both positions enter linear and spin-plus-orbital
+angular residuals, including any rounded first-moment defect. FMA-centered
+momenta and polarized spin changes give the common-frame energy/work audit.
+These are caller-budgeted floating balances, not exact-state certificates.
+
+Positive release consumes two part slots, and only a nonzero impulse consumes
+an impulse slot. Zero mass with zero impulse is an exact identity; zero mass
+cannot receive an impulse. Unrepresented depletion, inadmissible inertia,
+nonfinite arithmetic, balance refusal and late cancellation publish no result.
+The event uses fixed-size impulse algebra and the existing bounded native
+inertia decomposition. Six focused G0/G1/G3/G4 test groups cover analytic
+central/spinning recoil, full-tensor frame covariance, capture/release
+interoperability, large boosts, lost geometry and atomic refusal. This is
+instantaneous material detachment; no fracture, contact discovery, finite
+parcel extent, slosh, continuous mass flux or thermodynamic source is inferred.
