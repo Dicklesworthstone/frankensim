@@ -57,10 +57,17 @@ fn fixture(enthalpy: bool, scheduled: bool) -> Fixture {
             reference_density: QtyAny::new(DENSITY, dims::DENSITY),
             initial_specific_enthalpy: QtyAny::new(0.0, dims::SPECIFIC_ENTHALPY),
             phase_conductivity: None,
-            knots: [253.15, 393.15].into_iter().map(|temperature| TransientEnthalpyKnot {
-                specific_enthalpy: QtyAny::new(CP * (temperature - INITIAL_K), dims::SPECIFIC_ENTHALPY),
+            // The phase owner requires complete solid-to-liquid charts. The
+            // unused upper latent interval leaves Cp exactly constant throughout
+            // every temperature reached by the capacity-equivalence fixtures.
+            knots: [
+                (CP * (253.15 - INITIAL_K), 253.15, 0.0),
+                (CP * (393.15 - INITIAL_K), 393.15, 0.0),
+                (CP * (393.15 - INITIAL_K) + 1000.0, 393.15, 1.0),
+            ].into_iter().map(|(h, temperature, fraction)| TransientEnthalpyKnot {
+                specific_enthalpy: QtyAny::new(h, dims::SPECIFIC_ENTHALPY),
                 temperature: QtyAny::new(temperature, dims::TEMPERATURE),
-                liquid_mass_fraction: 0.0,
+                liquid_mass_fraction: fraction,
             }).collect(),
         }).collect(),
     });
@@ -111,7 +118,11 @@ fn fixture(enthalpy: bool, scheduled: bool) -> Fixture {
 }
 
 fn solve(f: &Fixture, ordinal: usize) -> (J, J) {
-    let (source, contact, ledger) = prepare(f, ordinal, None);
+    solve_with_pack(f, ordinal, temperature_pack())
+}
+
+fn solve_with_pack(f: &Fixture, ordinal: usize, pack: (Vec<u8>, String, String)) -> (J, J) {
+    let (source, contact, ledger) = prepare_with_pack(f, ordinal, None, pack);
     let result = run(f, &source, &contact, &ledger);
     assert_eq!(
         result.exit_code,
@@ -149,7 +160,8 @@ fn check_contact(row: &J, selected_claim: &str) -> f64 {
     let contact = row.get("temperature_contact").unwrap();
     assert!(matches!(
         contact.str_field("method"),
-        Some("source-backed-contact-newton" | "source-backed-contact-enthalpy-newton")
+        Some("source-backed-contact-newton" | "source-backed-contact-enthalpy-newton"
+            | "source-backed-contact-enthalpy-fixed-point")
     ));
     assert!(contact.f64_field("thermal_responses").unwrap() >= 1.0);
     assert!(
@@ -373,8 +385,7 @@ fn contact_trajectory_refuses_unimplemented_history_derivatives() {
     }
 }
 
-#[test]
-fn contact_heat_changes_phase_fraction_on_a_latent_plateau_without_duplicate_storage() {
+fn latent_fixture() -> Fixture {
     let mut f = fixture(true, false);
     f.project.power.as_mut().unwrap()[0].watts.value = 0.0;
     let transient = time(&mut f);
@@ -402,6 +413,12 @@ fn contact_heat_changes_phase_fraction_on_a_latent_plateau_without_duplicate_sto
             material.initial_specific_enthalpy.value = CP * (300.0 - INITIAL_K);
         }
     }
+    f
+}
+
+#[test]
+fn contact_heat_changes_phase_fraction_on_a_latent_plateau_without_duplicate_storage() {
+    let f = latent_fixture();
     let (receipt, field) = solve(&f, 44);
     let transient = receipt.get("transient").unwrap();
     let endpoint = transient.get("endpoint").unwrap();
@@ -448,4 +465,117 @@ fn contact_heat_changes_phase_fraction_on_a_latent_plateau_without_duplicate_sto
         4.0 * ENERGY_TOLERANCE_J,
     );
     assert!(interface_heat(&receipt) < 0.0);
+}
+
+fn temperature_surface_pack() -> (Vec<u8>, String, String) {
+    let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
+    temperature_pack_from_value(PropertyValue::Surface2D {
+        axes: ["T".into(), "normal_pressure".into()],
+        axis_dims: [dims::TEMPERATURE, dims::PRESSURE],
+        samples: [[200.0, 0.5e6], [450.0, 0.5e6], [200.0, 1.5e6], [450.0, 1.5e6]]
+            .into_iter().map(|p| (p, 0.001 * p[0] + 1e-8 * (p[1] - 1e6))).collect(),
+        triangles: vec![[0, 1, 2], [1, 3, 2]], dims,
+    })
+}
+
+fn check_surface_work(transient: &J, claim: &str) {
+    let summary = transient.get("temperature_contact").unwrap();
+    assert_eq!(summary.str_field("method"), Some("source-backed-contact-enthalpy-fixed-point"));
+    assert_eq!(summary.f64_field("max_thermal_responses_per_step"), Some(64.0));
+    let mut responses = 0.0;
+    let mut updates = 0.0;
+    let mut krylov = 0.0;
+    for grid in ["coarse", "fine"] {
+        let rows = transient.get(grid).unwrap().as_array().unwrap();
+        let mut grid_responses = 0.0;
+        for row in rows {
+            check_contact(row, claim);
+            let contact = row.get("temperature_contact").unwrap();
+            grid_responses += contact.f64_field("thermal_responses").unwrap();
+            updates += contact.f64_field("nonlinear_updates").unwrap();
+            krylov += contact.f64_field("krylov_iterations").unwrap();
+        }
+        assert!(grid_responses > rows.len() as f64);
+        close(summary.f64_field(&format!("{grid}_thermal_responses")).unwrap(), grid_responses, 0.0);
+        responses += grid_responses;
+    }
+    close(summary.f64_field("total_thermal_responses").unwrap(), responses, 0.0);
+    close(summary.f64_field("total_nonlinear_updates").unwrap(), updates, 0.0);
+    close(summary.f64_field("total_krylov_iterations").unwrap(), krylov, 0.0);
+    let nonlinear = transient.get("nonlinear").unwrap();
+    assert!(updates <= nonlinear.f64_field("total_newton_limit").unwrap());
+    assert!(krylov <= nonlinear.f64_field("total_krylov_limit").unwrap());
+    assert_eq!(nonlinear.str_field("history_scope"),
+        Some("final-inner-newton-solve-of-each-accepted-contact-endpoint"));
+}
+
+#[test]
+fn source_surface_enthalpy_matches_curve_heat_transfer_through_a_latent_plateau() {
+    let f = latent_fixture();
+    let (_, reference_field) = solve(&f, 70);
+    let surface = temperature_surface_pack();
+    let claim = surface.2.clone();
+    let (receipt, field) = solve_with_pack(&f, 71, surface);
+    let transient = receipt.get("transient").unwrap();
+    check_surface_work(transient, &claim);
+    for (actual, expected) in values(&field, "temperature").into_iter().zip(values(&reference_field, "temperature")) {
+        close(actual, expected, 2e-6);
+    }
+    let endpoint = transient.get("endpoint").unwrap();
+    let mass = values(endpoint, "reference_nodal_mass_kg");
+    let h = values(endpoint, "specific_enthalpy_j_kg");
+    let f = values(endpoint, "liquid_mass_fraction");
+    let final_energy: f64 = mass.iter().zip(&h).map(|(m, h)| m * h).sum();
+    close(final_energy, DENSITY * (CP * (300.0 - INITIAL_K) + 1000.0), 4e-6);
+    assert!(f.iter().any(|&fraction| fraction > 0.0 && fraction < 0.5));
+    for ((&h, &fraction), t) in h.iter().zip(&f).zip(values(&field, "temperature")) {
+        if fraction > 0.0 {
+            close(t, 350.0, 1e-11);
+            close(fraction, (h - 500.0) / 1000.0, 1e-12);
+        }
+    }
+    assert!(interface_heat(&receipt) < 0.0);
+}
+
+#[test]
+fn source_surface_enthalpy_keeps_scheduled_bath_jumps_and_original_storage() {
+    let mut f = fixture(true, false);
+    f.project.power.as_mut().unwrap()[0].watts.value = 0.0;
+    let setup = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.boundaries.iter_mut().find(|row| row.target == "cold").unwrap().condition =
+        ThermalBoundaryCondition::FixedTemperature { temperature: QtyAny::new(315.0, dims::TEMPERATURE) };
+    let time = setup.transient.as_mut().unwrap();
+    time.initial_temperature = TransientInitialTemperature::FromRegionalEnthalpy;
+    for material in &mut time.enthalpy.as_mut().unwrap().materials {
+        material.initial_specific_enthalpy.value = CP * (if material.region == "cold" { 300.0 } else { 350.0 } - INITIAL_K);
+    }
+    time.boundary_schedules = vec![TransientBoundarySchedule {
+        target: "cold".into(), kind: TransientBoundaryTarget::FixedTemperature,
+        source: "independently prescribed thermal bath changes, not a storage reset".into(),
+        steps: [(0.25, 315.0), (0.75, 305.0), (1.0, 320.0)].into_iter()
+            .map(|(until, t)| TransientBoundaryStep {
+                until: QtyAny::new(until, dims::TIME), value: QtyAny::new(t, dims::TEMPERATURE),
+            }).collect(),
+    }];
+    let surface = temperature_surface_pack(); let claim = surface.2.clone();
+    let (receipt, _) = solve_with_pack(&f, 72, surface);
+    let transient = receipt.get("transient").unwrap();
+    check_surface_work(transient, &claim);
+    for (grid, times) in [("coarse", vec![0.25, 0.75, 1.0]),
+        ("fine", vec![0.125, 0.25, 0.5, 0.75, 0.875, 1.0])] {
+        let actual: Vec<_> = transient.get(grid).unwrap().as_array().unwrap().iter()
+            .map(|row| row.f64_field("time_s").unwrap()).collect();
+        assert_eq!(actual, times);
+    }
+    let rows = transient.get("fine").unwrap().as_array().unwrap();
+    let bath_heat: f64 = rows.iter().map(|row|
+        row.f64_field("dt_s").unwrap() * row.f64_field("physical_dirichlet_in_w").unwrap()).sum();
+    assert!(rows.iter().any(|row| row.f64_field("physical_dirichlet_in_w").unwrap().abs() > 100.0));
+    let endpoint = transient.get("endpoint").unwrap();
+    let mass = values(endpoint, "reference_nodal_mass_kg");
+    let enthalpy = values(endpoint, "specific_enthalpy_j_kg");
+    let initial = DENSITY * CP * (300.0 + 350.0 - 2.0 * INITIAL_K);
+    let final_energy: f64 = mass.iter().zip(enthalpy).map(|(m, h)| m * h).sum();
+    close(final_energy - initial, bath_heat, 6e-6);
+    close(transient.get("energy").unwrap().f64_field("window_residual_j").unwrap(), 0.0, 6e-6);
 }

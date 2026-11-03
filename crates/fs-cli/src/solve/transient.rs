@@ -755,15 +755,16 @@ pub(super) fn solve(
         ));
     }
     if policy.enthalpy.is_some() {
-        if temperature_contacts.is_some() && !coupled_contact_newton {
+        if temperature_contacts.is_some() && !coupled_contact_newton && radiation.is_some() {
             return Err(conduction_error(
                 "cli-solve-conduction-contact-composition",
-                "temperature-varying enthalpy contact requires scalar or continuous linear source curves for its complete Newton tangent",
-                "use admitted source curves for total-enthalpy storage, or retain surface-law contact fixed points on the capacity path",
+                "pointwise radiation with enthalpy contact requires scalar or continuous linear source curves for its complete Newton tangent",
+                "use admitted source curves for coupled pointwise radiation, or use surface-law enthalpy contact with prescribed thermal boundaries",
             ));
         }
         return enthalpy::solve(
-            cx, spec, problem, interfaces, temperature_contacts, max_contact_pairs, labels, region_ids, radiation,
+            cx, spec, problem, interfaces, temperature_contacts, coupled_contact_newton,
+            max_contact_pairs, labels, region_ids, radiation,
             airflow, natural, pressure_pa, linear, deadline,
         );
     }

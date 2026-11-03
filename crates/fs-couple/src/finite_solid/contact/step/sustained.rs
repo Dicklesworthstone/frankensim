@@ -275,7 +275,8 @@ impl<'a> FiniteSolidBody<'a> {
     /// Advance the complete declared sphere scene through loaded sustained contact.
     ///
     /// Forces use the same conventions as `rigid_free_flight_candidate`: rigid
-    /// gravity is separate; any solid gravity belongs in explicit solid loads.
+    /// gravity is separate. A bound solid gravity field is already included in
+    /// its native kick and potential work; do not duplicate it in explicit loads.
     /// Solid history records actual kinetic-subflow solves, with original smooth
     /// endpoint acceleration. Newton targets use pre-force contact velocity;
     /// explicit target-speed laws remain explicit. Geometry, source coefficients

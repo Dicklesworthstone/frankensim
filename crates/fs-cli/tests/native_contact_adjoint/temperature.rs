@@ -14,16 +14,21 @@ fn temperature_pack() -> (Vec<u8>, String, String) {
 
 fn temperature_pack_from_knots(knots: Vec<(f64, f64)>) -> (Vec<u8>, String, String) {
     let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
+    temperature_pack_from_value(PropertyValue::Curve {
+        abscissa: "T".into(),
+        abscissa_dims: fs_project::spec::dims::TEMPERATURE,
+        knots,
+        dims,
+    })
+}
+
+fn temperature_pack_from_value(value: PropertyValue) -> (Vec<u8>, String, String) {
+    let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
     let claims = pack(
         "synthetic-temperature-contact",
         fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
         dims,
-        PropertyValue::Curve {
-            abscissa: "T".into(),
-            abscissa_dims: fs_project::spec::dims::TEMPERATURE,
-            knots,
-            dims,
-        },
+        value,
         InterpolationPolicy::LinearInside,
     );
     let state = |chemistry: &str| MaterialStateId {

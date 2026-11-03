@@ -213,7 +213,7 @@ fn g3_adaptive_radiative_contact_observer_resume_preserves_accepted_heat_and_exa
             .unwrap();
         let mut visits = 0;
         let mut integrated = 0.;
-        let mut previous_time = 0.;
+        let mut previous_time = 0.0_f64;
         let mut observe =
             |trial: fs_conduction::transient::enthalpy::adaptive::EnthalpyAcceptedTrial<'_>| {
                 visits += 1;

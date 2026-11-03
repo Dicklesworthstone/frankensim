@@ -10,7 +10,9 @@ use crate::{AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationRepor
 use crate::transient::enthalpy::{
     EnthalpyEndpointEvaluation, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
 };
-use crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyBackwardEuler;
+use crate::transient::enthalpy::heterogeneous::{
+    HeterogeneousEnthalpyBackwardEuler, HeterogeneousEnthalpyError,
+};
 use super::{ContactIterationConfig, TemperatureContactEvaluation, TemperatureContacts, invalid, poll};
 
 /// One accepted enthalpy field and the original and re-evaluated contact laws.
@@ -253,9 +255,11 @@ impl TemperatureContacts<'_, '_> {
     /// The original contact residual target and energy tolerance never widen.
     /// Inner Newton tolerances must be tight enough to satisfy those gates.
     ///
-    /// Prescribed Neumann/Robin data and fixed contact geometry are supported.
-    /// Dirichlet enthalpy, radiation/air feedback and nonlinear-contact adjoints
-    /// are not supplied by this entry point. No state is returned on failure.
+    /// Prescribed temperatures, Neumann/Robin data and fixed contact geometry
+    /// are supported. The original old enthalpy includes prescribed-node storage
+    /// in the reservoir reaction exactly once; an ambiguous latent-temperature
+    /// prescription still refuses. Radiation/air feedback and nonlinear-contact
+    /// adjoints are not supplied by this entry point. No state is returned on failure.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_enthalpy(
         &self,
@@ -312,9 +316,6 @@ impl TemperatureContacts<'_, '_> {
     ) -> Result<ContactEnthalpyStep, EnthalpyError> {
         poll(cx, 0)?;
         self.check_mesh(problem.mesh)?;
-        if !problem.boundary.dirichlet().is_empty() {
-            return Err(EnthalpyError::UnsupportedDirichlet);
-        }
         step_config.newton.validate().map_err(EnthalpyError::Newton)?;
         let radiation_factor = match radiation {
             Some((patches, config)) => {
@@ -340,10 +341,19 @@ impl TemperatureContacts<'_, '_> {
         {
             return Err(EnthalpyError::InvalidInput("contact enthalpy history and reference mesh differ"));
         }
+        // A prescribed-temperature jump changes the trial endpoint, never the
+        // accepted caloric history. Reuse the native chart inversion so a latent
+        // plateau cannot silently select a phase fraction. Every inner solve and
+        // physical audit below still receives the original `old_h`.
+        let initial = engine.prescribed_endpoint_initial_guess(cx, problem.boundary, old_h)
+            .map_err(|error| match error {
+                HeterogeneousEnthalpyError::Enthalpy(error) => error,
+                other => invalid("<contact-enthalpy-step>", other.to_string()).into(),
+            })?;
         let mut guess = Vec::new();
         guess.try_reserve_exact(old_h.len())
             .map_err(|_| EnthalpyError::InvalidInput("contact enthalpy query field allocation refused"))?;
-        for (vertex, &h) in old_h.iter().enumerate() {
+        for (vertex, &h) in initial.iter().enumerate() {
             if vertex % 256 == 0 { poll(cx, vertex)?; }
             let curve = engine.phase_curve_at(vertex)
                 .ok_or(EnthalpyError::InvalidInput("contact enthalpy vertex has no phase chart"))?;

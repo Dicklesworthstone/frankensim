@@ -728,7 +728,8 @@ it provides no continuous-time peak or continuum error certificate.
 
 Solve driver 99 extends pinned matching-contact scalar and continuous-curve
 sources to primary specific-enthalpy trajectories through the native coupled
-Newton/FGMRES owner. Surface-law enthalpy contacts remain explicitly refused.
+Newton/FGMRES owner. Driver 102 additionally admits temperature-source surfaces
+through the existing bounded physical contact fixed point described below.
 The contact-temperature tangent and each regional phase chart share one
 endpoint residual. Original reference mass and old enthalpy remain fixed in
 every trial; latent heat stays in specific enthalpy alone. Both existing time
@@ -3256,3 +3257,30 @@ independent scalar heat balances and fresh perturbed forward solves, including
 ambient radiation and intermediate sampled peaks. All changed Rust
 sources passed the pinned formatter's syntax parser through stdin. Native
 builds and these regressions were not executed in the full-disk environment.
+
+
+### Temperature-source surfaces in total-enthalpy trajectories — driver 102
+
+The source-shape admission now selects the existing enthalpy fixed point for
+sampled resistance surfaces, while scalar and continuous-curve sources retain
+the complete Newton path. Every one of at most 64 contact responses advances the
+same original old enthalpy; only the accepted physical endpoint becomes history.
+Both prescribed-temperature jumps and Neumann/Robin boundaries use the original
+regional charts, reference mass and physical reservoir accounting. The source is
+re-queried at the candidate face temperature, and the complete nodal joule
+residual and storage/heat balance must both pass before publication.
+
+Contact response, Newton and Krylov counts include every discarded outer trial.
+The declared response factor expands the existing work budgets before marching;
+retained numerical histories still describe the final inner solve per endpoint.
+Latent heat remains in specific enthalpy, and contact heat remains internal.
+Pointwise radiation continues to require the admitted scalar/continuous-curve
+Newton tangent. Surface-law radiation, natural/airflow feedback and trajectory
+derivatives remain explicitly unsupported by this CLI composition.
+
+The actual CLI regression cases cover source-surface latent-plateau exchange,
+curve/surface agreement at fixed pressure, scheduled bath jumps and all-trial
+work counts. Their constant-Cp fixtures carry an explicit unused terminal latent
+interval so they satisfy the shared phase-chart domain without changing the
+simulated storage law. These CLI cases are authored; runtime execution is not
+claimed by this change.

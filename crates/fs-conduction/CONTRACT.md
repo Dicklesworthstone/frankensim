@@ -3863,3 +3863,23 @@ Sampling rebuilds the original prescribed-node lift. Existing capacity and
 total-enthalpy solvers retain their old physical state and account prescribed
 jumps through their existing boundary-node storage reactions. This interface
 adds no boundary-aware trajectory adjoint or temporal accuracy claim.
+
+
+### Prescribed baths with source-backed enthalpy contact fixed points
+
+`TemperatureContacts::advance_enthalpy` now admits prescribed-temperature
+boundaries through the original heterogeneous enthalpy owner. Its initial
+contact query uses that owner's boundary-compatible endpoint candidate; every
+inner transport response and fresh physical audit still receives the original
+accepted `old_h`. The prescribed-node storage jump therefore contributes to the
+reservoir reaction exactly once. Ambiguous latent-plateau bath temperatures,
+source-domain errors, work exhaustion and cancellation still refuse without
+publishing a changed caloric history. The existing ambient-radiation fixed-point
+entry shares the same boundary initialization; no new radiation law is introduced.
+
+The G1/G3 surface-contact regression compares positive and negative bath jumps
+against an independent eight-node temperature system with analytic reference
+mass, tetrahedral stiffness and consistent triangular contact blocks. Separate
+regressions retain the independent spatial-melting roots and verify latent-bath,
+work-limit and cancellation refusals. These prove the bounded discrete model;
+they do not establish arbitrary source-surface convergence or continuum error.

@@ -279,7 +279,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// only air exchange without an artificial convection bath.
 /// Version 101 adds pointwise ambient and enclosure radiation to the existing
 /// source-contact enthalpy owner, retaining its complete physical endpoint gates.
-pub const SOLVE_DRIVER_VERSION: u32 = 101;
+/// Version 102 integrates source-surface enthalpy contact fixed points and
+/// prescribed-bath storage through the shared physical endpoint owner.
+pub const SOLVE_DRIVER_VERSION: u32 = 102;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

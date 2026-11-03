@@ -1,4 +1,6 @@
 //! Heterogeneous phase-change contact: independent eight-node P1 references.
+#[path = "temperature_contact_enthalpy/surface_dirichlet.rs"]
+mod surface_dirichlet;
 #[path = "temperature_contact_enthalpy/radiation.rs"]
 mod radiation;
 #[path = "temperature_contact_enthalpy/pointwise.rs"]
