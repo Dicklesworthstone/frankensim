@@ -24943,3 +24943,37 @@ check transported composition reaching chemistry, complete species changes
 against original stoichiometry, whole-inventory thermal energy, finite walls,
 radiation and pressure, chemical driving-force reversal rollback, and
 empty-path/caloric-control agreement with the original reactive owner.
+
+### Finite-vessel effusive recoil with inertial exhaust accounts
+
+`rocket_blowdown::effusion` connects original angular-qualified molecular
+outlets to the native variable-mass exhaust owner. `GasRocketState` retains one
+gas inventory and one dry mass; simultaneous outlets spend their original
+species allowances and share one caloric reconstruction. Their accepted
+species losses determine molecular momentum and energy without resampling an
+endpoint flow or adding a continuum pressure-thrust term. Opposed outlets can
+cancel recoil while the reservoir continues to cool and fractionate.
+
+Explicit unit outward normals share the state's inertial frame. The exported
+momentum and energy include the changing vessel velocity. Accepted-stream rate
+rounding and the remap to the actual gas inventory are included in absolute
+momentum and energy budgets before either endpoint is published. The raw native
+report remains available; corrected physical exports belong to the coupled
+step. This closes the gas, vessel and exhaust account without subtracting large
+formation-energy baselines. Cancellation or a late physical refusal leaves all
+accepted input state unchanged.
+
+The scope is a free translating, locally mixed vessel with fixed inertial
+aperture normals and an absorbing vacuum. Rotation, gravity, external work,
+slosh, wall accommodation and finite receivers require other owners. The gas
+flux is held on each explicit step; changing temperature and composition need
+caller-controlled time refinement. Focused G0/G1/G3/G4 fixtures cover analytic
+half-pressure recoil, mixtures, opposed apertures, inertial-frame covariance,
+full mass/momentum/energy accounts and atomic refusal, including loss of small
+recoil under an enormous common boost. Native execution remains unverified
+because the required constellation siblings are absent from this checkout.
+
+The `effusion_recoil` example accepts the existing bounded synthetic gas file,
+dry mass and authored thin-aperture geometry. It emits accepted gas state,
+position/velocity, species fractions and cumulative inertial exhaust accounts
+through the same public physical owner; it does not introduce another solver.

@@ -20,6 +20,9 @@
 /// Frame-checked atmosphere, relative-flow loads and central gravity.
 pub mod environment;
 
+/// Molecular vacuum escape and recoil with complete inertial exhaust accounts.
+pub mod effusion;
+
 /// Source-bearing gas coupled to native attitude and explicit closed-valve coast.
 #[path = "rocket_blowdown/rigid.rs"]
 pub mod rigid;
