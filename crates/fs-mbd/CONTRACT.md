@@ -5661,3 +5661,29 @@ partition, rotating contact frames or interacting sliding body-pair surfaces.
 `tests/articulated_sustained_contact.rs` covers exact resting support, moving
 belts, raising planes, accelerating prescribed supports, zero-force detachment
 and atomic path/impact/budget/cancellation/native-limit refusals.
+
+## Full passive bushings in rigid bilateral-loop motion
+
+`implicit::distance::step_free_floating_bilateral_loops_with_coupled_bushings`
+and its `_and_effort` entry point compose the existing full passive six-coordinate
+stiffness/damping law with distance and material-point coincidence closures.
+The original loop engine now consumes the existing `BushingLaw`; there is no
+second constitutive or dynamics implementation. Cross-axis and
+translation/rotation terms enter every simultaneous midpoint residual and the
+independent actual-impulse verification. Existing diagonal and empty-bushing
+paths retain their semantics.
+
+Original reciprocal material-frame wrenches, full link inertias, carrier recoil,
+both native constraint impulses, and separate actuator/storage/damping/work
+accounts remain authoritative. Feedback uses the same repeatable trial contract.
+The original matrix, geometry/chart, physical-limit, mobility, nonlinear-budget
+and cancellation refusals apply. Finite-step constraint work remains visible;
+this integration adds no energy-exactness, arbitrary active-law passivity or
+general nonlinear-branch claim.
+
+Four native test groups pass using an independent two-coordinate midpoint solution with
+translation/rotation stiffness and damping, both carrier recoils and rigid-loop
+reactions. Additional cases check diagonal/empty parity and atomic refusal.
+All 21 existing distance, point-loop, bilateral-effort and coupled-effort cases
+also pass with the original native owners. Full Cargo/DSR qualification and the
+broader multibody bead remain outstanding.

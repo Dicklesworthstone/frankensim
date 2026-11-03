@@ -14,18 +14,17 @@ use super::super::{
     PayloadAttachment, PayloadError, PayloadState, account_boost, energy_in_frame, finite,
     payload_at_link, poll, replace_link_inertia, twist_in_frame,
 };
-use super::{SupportedPayloadBalance, SupportedPayloadControls, admit, audit_momentum, negate};
 use super::constraints::{
-    ConstrainedSupportedPayloadRelease, SupportedPayloadConstraintControls,
-    impulse_response, passive_reaction,
+    ConstrainedSupportedPayloadRelease, SupportedPayloadConstraintControls, impulse_response,
+    passive_reaction,
 };
+use super::{SupportedPayloadBalance, SupportedPayloadControls, admit, audit_momentum, negate};
 use crate::articulated::motion::prescribed::PrescribedBaseMotionState;
 use crate::articulated::motion::reconfigure::constraints::JointConstraint;
 use crate::articulated::motion::{SpatialSum, kinetic_link_increment, sum_products};
 use crate::articulated::{
-    ArticulatedModel, BaseState, forward_kinematics,
-    inverse_dynamics, momentum_from_kinematics, solve_floating_base_system, validate_twist,
-    validate_wrench,
+    ArticulatedModel, BaseState, forward_kinematics, inverse_dynamics, momentum_from_kinematics,
+    solve_floating_base_system, validate_twist, validate_wrench,
 };
 use fs_ga::{Vec3, Wrench};
 use fs_math::dd::Dd;
@@ -102,8 +101,10 @@ pub fn release_payload(
     controls: SupportedPayloadReleaseControls<'_>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SupportedPayloadRelease, PayloadError> {
-    release_evaluated(model, state, attachment, None, controls, 0.0, None, cancelled)
-        .map(|result| result.release)
+    release_evaluated(
+        model, state, attachment, None, controls, 0.0, None, cancelled,
+    )
+    .map(|result| result.release)
 }
 
 /// Detach and drive separation by one internal point impulse and free couple.
@@ -400,8 +401,10 @@ pub(super) fn release_evaluated(
         &projected,
     )?
     .generalized_force;
-    for (index, (residual, &applied)) in joint_momentum_residual.iter_mut()
-        .zip(&reaction.joint_impulse).enumerate()
+    for (index, (residual, &applied)) in joint_momentum_residual
+        .iter_mut()
+        .zip(&reaction.joint_impulse)
+        .enumerate()
     {
         if index % 64 == 0 {
             poll(&mut cancelled)?;
@@ -516,14 +519,14 @@ pub(super) fn release_evaluated(
     poll(&mut cancelled)?;
     Ok(ConstrainedSupportedPayloadRelease {
         release: SupportedPayloadRelease {
-        model_after,
-        state_after,
-        payload_after,
-        supplied_work_j,
-        applied_impulse: impulse,
-        impulse_on_payload_body,
-        impulse_on_retained_link,
-        balance,
+            model_after,
+            state_after,
+            payload_after,
+            supplied_work_j,
+            applied_impulse: impulse,
+            impulse_on_payload_body,
+            impulse_on_retained_link,
+            balance,
         },
         reaction,
     })

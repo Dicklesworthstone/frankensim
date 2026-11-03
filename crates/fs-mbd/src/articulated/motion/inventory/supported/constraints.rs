@@ -18,17 +18,15 @@
 //! subtracts both plus support work. Passive release admits rows without
 //! projecting their finite tangent residuals or applying a reaction.
 
-use super::{
-    SupportedPayloadCapture, SupportedPayloadControls, capture_evaluated,
-};
 use super::release::{
     SupportedPayloadRelease, SupportedPayloadReleaseControls, SupportedPayloadSeparationControls,
     release_evaluated,
 };
+use super::{SupportedPayloadCapture, SupportedPayloadControls, capture_evaluated};
+use crate::articulated::motion::inventory::release::SeparationImpulse;
 use crate::articulated::motion::inventory::{
     PayloadAttachment, PayloadError, PayloadState, finite, poll,
 };
-use crate::articulated::motion::inventory::release::SeparationImpulse;
 use crate::articulated::motion::prescribed::PrescribedBaseMotionState;
 use crate::articulated::motion::reconfigure::constraints::{
     ConstraintError, JointConstraint, PreparedJointConstraints, admit_constraints, apply_rows,
@@ -144,7 +142,6 @@ pub fn capture_payload(
     )
 }
 
-
 /// Original accepted release and the ideal joint impulse on the retained tree.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConstrainedSupportedPayloadRelease {
@@ -173,8 +170,14 @@ pub fn release_payload(
     cancelled: impl FnMut() -> bool,
 ) -> Result<ConstrainedSupportedPayloadRelease, PayloadError> {
     release_evaluated(
-        model, state, attachment, None, controls, 0.0,
-        Some((rows, constraint_controls)), cancelled,
+        model,
+        state,
+        attachment,
+        None,
+        controls,
+        0.0,
+        Some((rows, constraint_controls)),
+        cancelled,
     )
 }
 
@@ -210,8 +213,14 @@ pub fn release_payload_with_impulse(
     cancelled: impl FnMut() -> bool,
 ) -> Result<ConstrainedSupportedPayloadRelease, PayloadError> {
     release_evaluated(
-        model, state, attachment, Some(impulse), controls.balance,
-        controls.maximum_separation_work_j, Some((rows, constraint_controls)), cancelled,
+        model,
+        state,
+        attachment,
+        Some(impulse),
+        controls.balance,
+        controls.maximum_separation_work_j,
+        Some((rows, constraint_controls)),
+        cancelled,
     )
 }
 
@@ -222,76 +231,112 @@ pub(super) fn impulse_response(
     body_impulses: &[Wrench],
     constraints: Option<(&[JointConstraint], SupportedPayloadConstraintControls)>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(PrescribedBaseImpulseResponse, SupportedPayloadConstraintReaction), PayloadError> {
+) -> Result<
+    (
+        PrescribedBaseImpulseResponse,
+        SupportedPayloadConstraintReaction,
+    ),
+    PayloadError,
+> {
     let Some((rows, controls)) = constraints else {
         return Ok((
             apply_prescribed_base_impulses(
-                model, state.base, &state.joint_position, &state.joint_velocity,
-                zero, body_impulses,
+                model,
+                state.base,
+                &state.joint_position,
+                &state.joint_velocity,
+                zero,
+                body_impulses,
             )?,
             SupportedPayloadConstraintReaction::empty(),
         ));
     };
     admit_controls(controls)?;
     let initial = admit_constraints(
-        rows, &state.joint_position, &state.joint_velocity, cancelled,
+        rows,
+        &state.joint_position,
+        &state.joint_velocity,
+        cancelled,
     )?;
     if rows.is_empty() {
         return Ok((
             apply_prescribed_base_impulses(
-                model, state.base, &state.joint_position, &state.joint_velocity,
-                zero, body_impulses,
+                model,
+                state.base,
+                &state.joint_position,
+                &state.joint_velocity,
+                zero,
+                body_impulses,
             )?,
             SupportedPayloadConstraintReaction::empty(),
         ));
     }
     let mut prepared = PreparedJointConstraints::prescribed_trial(
-        model, &state.joint_position, rows,
-        controls.minimum_reciprocal_condition, cancelled,
+        model,
+        &state.joint_position,
+        rows,
+        controls.minimum_reciprocal_condition,
+        cancelled,
     )?;
     poll(cancelled)?;
-    let free = prescribed_base_impulse_delta(
-        model, &state.joint_position, zero, body_impulses,
-    )?;
+    let free = prescribed_base_impulse_delta(model, &state.joint_position, zero, body_impulses)?;
     poll(cancelled)?;
     let mut candidate = Vec::with_capacity(model.dof_count());
-    for (index, (&old, &delta)) in state.joint_velocity.iter().zip(&free.velocity.joint).enumerate() {
+    for (index, (&old, &delta)) in state
+        .joint_velocity
+        .iter()
+        .zip(&free.velocity.joint)
+        .enumerate()
+    {
         if index % 64 == 0 {
             poll(cancelled)?;
         }
         candidate.push(finite(old + delta, "supported payload free joint rate")?);
     }
     let rhs = apply_rows(rows, &candidate, cancelled)?
-        .into_iter().map(|value| -value).collect::<Vec<_>>();
+        .into_iter()
+        .map(|value| -value)
+        .collect::<Vec<_>>();
     let reaction = prepared.solve_response(&rhs, cancelled)?;
     poll(cancelled)?;
     // Reapply the simultaneous physical inputs through the original event
     // owner. Its native reaction and actual endpoint guards remain independent
     // of cached columns, rather than accepting a projected/clipped velocity.
     let response = apply_prescribed_base_impulses(
-        model, state.base, &state.joint_position, &state.joint_velocity,
-        &reaction.joint_effort, body_impulses,
+        model,
+        state.base,
+        &state.joint_position,
+        &state.joint_velocity,
+        &reaction.joint_effort,
+        body_impulses,
     )?;
     poll(cancelled)?;
     let final_rows = admit_constraints(
-        rows, &state.joint_position, &response.joint_velocity_after, cancelled,
+        rows,
+        &state.joint_position,
+        &response.joint_velocity_after,
+        cancelled,
     )?;
     let mut midpoint = Dd::ZERO;
     let mut final_pairing = Dd::ZERO;
-    for (index, ((&applied, &old), &new)) in reaction.joint_effort.iter()
-        .zip(&state.joint_velocity).zip(&response.joint_velocity_after).enumerate()
+    for (index, ((&applied, &old), &new)) in reaction
+        .joint_effort
+        .iter()
+        .zip(&state.joint_velocity)
+        .zip(&response.joint_velocity_after)
+        .enumerate()
     {
         if index % 64 == 0 {
             poll(cancelled)?;
         }
         let applied = Dd::from_f64(applied);
-        midpoint = midpoint + applied
-            * (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new));
+        midpoint = midpoint + applied * (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new));
         final_pairing = final_pairing + applied * Dd::from_f64(new);
     }
     let midpoint_work_j = finite(midpoint.to_f64(), "supported payload reaction work")?;
     let final_rate_pairing_j = finite(
-        final_pairing.to_f64(), "supported payload final reaction pairing",
+        final_pairing.to_f64(),
+        "supported payload final reaction pairing",
     )?;
     if midpoint_work_j.abs() > controls.maximum_reaction_work_j {
         return Err(PayloadError::ConstraintWork {
@@ -300,16 +345,19 @@ pub(super) fn impulse_response(
         });
     }
     poll(cancelled)?;
-    Ok((response, SupportedPayloadConstraintReaction {
-        multipliers: reaction.multipliers,
-        joint_impulse: reaction.joint_effort,
-        position_residuals: initial.position,
-        velocity_residuals_before: initial.velocity,
-        velocity_residuals_after: final_rows.velocity,
-        midpoint_work_j,
-        final_rate_pairing_j,
-        reciprocal_condition: prepared.reciprocal_condition,
-    }))
+    Ok((
+        response,
+        SupportedPayloadConstraintReaction {
+            multipliers: reaction.multipliers,
+            joint_impulse: reaction.joint_effort,
+            position_residuals: initial.position,
+            velocity_residuals_before: initial.velocity,
+            velocity_residuals_after: final_rows.velocity,
+            midpoint_work_j,
+            final_rate_pairing_j,
+            reciprocal_condition: prepared.reciprocal_condition,
+        },
+    ))
 }
 
 fn admit_controls(controls: SupportedPayloadConstraintControls) -> Result<(), PayloadError> {
@@ -331,14 +379,20 @@ pub(super) fn passive_reaction(
     };
     admit_controls(controls)?;
     let initial = admit_constraints(
-        rows, &state.joint_position, &state.joint_velocity, cancelled,
+        rows,
+        &state.joint_position,
+        &state.joint_velocity,
+        cancelled,
     )?;
     if rows.is_empty() {
         return Ok(SupportedPayloadConstraintReaction::empty());
     }
     let prepared = PreparedJointConstraints::prescribed_trial(
-        model, &state.joint_position, rows,
-        controls.minimum_reciprocal_condition, cancelled,
+        model,
+        &state.joint_position,
+        rows,
+        controls.minimum_reciprocal_condition,
+        cancelled,
     )?;
     poll(cancelled)?;
     Ok(SupportedPayloadConstraintReaction {

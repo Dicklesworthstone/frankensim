@@ -20,6 +20,9 @@ pub mod constraints;
 #[path = "supported/release.rs"]
 pub mod release;
 
+use self::constraints::{
+    ConstrainedSupportedPayloadCapture, SupportedPayloadConstraintControls, impulse_response,
+};
 use super::super::prescribed::PrescribedBaseMotionState;
 use super::super::reconfigure::{self, ReconfigurationControls, ReconfigurationError};
 use super::super::{
@@ -29,15 +32,11 @@ use super::{
     PayloadAttachment, PayloadError, PayloadState, account_boost, add_wrench, combine_inertias,
     energy_in_frame, finite, payload_at_link, poll, replace_link_inertia, twist_in_frame,
 };
-use crate::articulated::{
-    ArticulatedModel, ArticulatedMomentum, BaseState,
-    forward_kinematics, inverse_dynamics, momentum_from_kinematics, validate_twist,
-    validate_wrench,
-};
-use self::constraints::{
-    ConstrainedSupportedPayloadCapture, SupportedPayloadConstraintControls, impulse_response,
-};
 use crate::articulated::motion::reconfigure::constraints::JointConstraint;
+use crate::articulated::{
+    ArticulatedModel, ArticulatedMomentum, BaseState, forward_kinematics, inverse_dynamics,
+    momentum_from_kinematics, validate_twist, validate_wrench,
+};
 use fs_ga::{Vec3, Wrench};
 use fs_math::dd::Dd;
 
@@ -153,8 +152,16 @@ pub fn capture_payload(
     controls: SupportedPayloadControls<'_>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SupportedPayloadCapture, PayloadError> {
-    capture_evaluated(model, state, target_link, payload, controls, None, cancelled)
-        .map(|result| result.capture)
+    capture_evaluated(
+        model,
+        state,
+        target_link,
+        payload,
+        controls,
+        None,
+        cancelled,
+    )
+    .map(|result| result.capture)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -321,8 +328,10 @@ fn capture_evaluated(
         &projected,
     )?
     .generalized_force;
-    for (index, (residual, &applied)) in joint_momentum_residual.iter_mut()
-        .zip(&reaction.joint_impulse).enumerate()
+    for (index, (residual, &applied)) in joint_momentum_residual
+        .iter_mut()
+        .zip(&reaction.joint_impulse)
+        .enumerate()
     {
         if index % 64 == 0 {
             poll(&mut cancelled)?;
@@ -414,18 +423,18 @@ fn capture_evaluated(
     poll(&mut cancelled)?;
     Ok(ConstrainedSupportedPayloadCapture {
         capture: SupportedPayloadCapture {
-        model_after,
-        state_after,
-        attachment: PayloadAttachment {
-            target_link,
-            retained_link: model.links()[target_link].clone(),
-            loaded_inertia,
-            link_from_payload,
-            payload_inertia: payload.inertia,
-        },
-        payload_after,
-        removed_relative_energy_j,
-        balance,
+            model_after,
+            state_after,
+            attachment: PayloadAttachment {
+                target_link,
+                retained_link: model.links()[target_link].clone(),
+                loaded_inertia,
+                link_from_payload,
+                payload_inertia: payload.inertia,
+            },
+            payload_after,
+            removed_relative_energy_j,
+            balance,
         },
         reaction,
     })

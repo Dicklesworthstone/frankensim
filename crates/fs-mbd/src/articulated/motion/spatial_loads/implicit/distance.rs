@@ -14,7 +14,8 @@
 //! exact differential supplies the A-side geometric couple away from closure.
 
 use super::super::MaterialPoint;
-use super::super::bushing::{self, SpatialBushing};
+use super::super::bushing::coupled::CoupledSpatialBushing;
+use super::super::bushing::{self, BushingLaw, SpatialBushing};
 use super::{
     ArticulatedModel, Cell, EffortLaw, FallibleFiniteDifference, FiniteDifferenceError,
     FreeFloatingBaseState, FreeFloatingMotionError, FreeFloatingMotionState, ImplicitSpatialConfig,
@@ -485,12 +486,74 @@ pub fn step_free_floating_bilateral_loops_with_effort(
     )
 }
 
-fn step_bilateral_evaluated(
+/// Advance rigid loops with the original full passive stiffness and damping laws.
+///
+/// Every entry of the prepared six-coordinate matrices acts at the same trial
+/// midpoint as the rigid closures. Translation/rotation and cross-axis forces
+/// use the existing reciprocal material-frame wrench lift; they cannot inject
+/// external momentum. The original loop impulse work, bushing storage and
+/// damping loss remain separate in the returned mechanics account.
+///
+/// An empty slice gives the original bilateral-loop motion. Diagonal matrices
+/// have the same physical meaning as the diagonal-bushing entry point.
+pub fn step_free_floating_bilateral_loops_with_coupled_bushings(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
     loads: SpatialMotionLoads<'_>,
     loops: &[BilateralLoop],
-    bushings: &[SpatialBushing],
+    bushings: &[CoupledSpatialBushing],
+    duration: f64,
+    config: BilateralLoopConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BilateralLoopStep, BilateralLoopError> {
+    step_bilateral_evaluated(
+        model, state, loads, loops, bushings, duration, config, None, cancelled,
+    )
+}
+
+/// Simultaneously solve rigid closures, full passive bushings and joint feedback.
+///
+/// The callback has the same repeatable-trial contract as
+/// [`step_free_floating_bilateral_loops_with_effort`]. Its actual midpoint
+/// effort is the actuator-work source; passive bushing reactions and the two
+/// rigid-loop impulse events remain in their existing storage/loss/work owners.
+/// Neither the matrix law nor the rigid constraints waive native effort,
+/// speed, geometry, regularity, cancellation or nonlinear-budget admission.
+#[allow(clippy::too_many_arguments)]
+pub fn step_free_floating_bilateral_loops_with_coupled_bushings_and_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    loops: &[BilateralLoop],
+    bushings: &[CoupledSpatialBushing],
+    duration: f64,
+    config: BilateralLoopConfig,
+    mut effort: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BilateralLoopStep, BilateralLoopError> {
+    step_bilateral_evaluated(
+        model,
+        state,
+        loads,
+        loops,
+        bushings,
+        duration,
+        config,
+        Some(&mut effort),
+        cancelled,
+    )
+}
+
+fn step_bilateral_evaluated<B: BushingLaw>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    loops: &[BilateralLoop],
+    bushings: &[B],
     duration: f64,
     config: BilateralLoopConfig,
     effort: Option<&mut EffortLaw<'_>>,
