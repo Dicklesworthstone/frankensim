@@ -24,6 +24,8 @@ use fs_thermal::evaporation::{EvaporationError, EvaporationLaw, GasFilm, surface
 mod fixture;
 #[path = "evaporating_liquid_gas/multiple.rs"]
 mod multiple;
+#[path = "evaporating_liquid_gas/reactive.rs"]
+mod reactive;
 use fixture::*;
 
 fn near(a: f64, b: f64, tolerance: f64) {

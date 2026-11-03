@@ -8,6 +8,8 @@
 //! film inventory or a reset of the atmosphere on subsequent calls.
 
 pub mod multiple;
+/// Chemistry, optional sensible heat and phase transfer on one native clock.
+pub mod reactive;
 
 use fs_exec::CancelGate;
 use fs_lbm::material::free_surface::enthalpy::{
