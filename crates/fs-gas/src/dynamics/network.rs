@@ -435,6 +435,7 @@ fn empty_report() -> StepReport {
         gravity_work: 0.0,
         wall_momentum_impulse: 0.0,
         wall_heat: 0.0,
+        wall_work: 0.0,
         conservation_residual: Totals::default(),
     }
 }

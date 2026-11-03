@@ -119,11 +119,14 @@ pub struct StepReport {
     /// Work by gravity on the gas [J], using the same transported mass flux.
     pub gravity_work: f64,
     /// Signed wall impulse on this branch's gas [kg m/s], in its own axial
-    /// coordinate. The stationary support receives the opposite impulse.
+    /// coordinate. The wall/drive receives the opposite impulse.
     pub wall_momentum_impulse: f64,
     /// Actual heat transferred into this branch's gas [J]. Drag converts kinetic
     /// to internal energy at fixed total energy and is not added to this term.
     pub wall_heat: f64,
+    /// Mechanical work entering gas from prescribed sliding radial walls [J].
+    /// End-wall pressure work, when present, remains in boundary_change.
+    pub wall_work: f64,
     /// `after - before - boundary_change - geometric/gravitational/wall sources`.
     pub conservation_residual: Totals,
 }
@@ -503,6 +506,7 @@ impl Euler1d {
                         gravity_work,
                         wall_momentum_impulse: 0.0,
                         wall_heat: 0.0,
+                        wall_work: 0.0,
                         conservation_residual: residual,
                     });
                 }

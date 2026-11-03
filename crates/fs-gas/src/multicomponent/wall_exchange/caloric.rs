@@ -559,15 +559,16 @@ pub(crate) fn exchange_caloric_with_heat_storage(
     let actual_conductance = conductance_at(actual_wall.contact)?;
     let actual_integrated = actual_conductance * duration.value();
     let wall_change = actual_wall.energy_change_j;
-    let energy_residual = actual_heat + wall_change;
+    let energy_residual = update.report.energy_residual_j + actual_heat + wall_change;
     let thermal_residual =
         actual_heat - actual_integrated * (actual_wall.temperature_k - actual_gas.temperature);
-    let tolerance = control.tolerance(actual_heat.abs().max(wall_change.abs()));
+    let scale = actual_heat.abs().max(wall_change.abs());
     if !nonnegative(actual_integrated)
         || !energy_residual.is_finite()
         || !thermal_residual.is_finite()
-        || energy_residual.abs() > tolerance
-        || thermal_residual.abs() > tolerance
+        || energy_residual.abs()
+            > control.tolerance(scale.max(update.report.mechanical_work_to_gas_j.abs()))
+        || thermal_residual.abs() > control.tolerance(scale)
     {
         return Err(WallExchangeError::Balance {
             energy_residual_j: energy_residual,

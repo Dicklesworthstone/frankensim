@@ -508,6 +508,65 @@ fn finite_wall_exchange_uses_drag_heated_original_gas_calorics_once() {
 }
 
 #[test]
+fn moving_wall_native_wave_step_keeps_drive_work_separate_from_heat() {
+    let velocities = [0.0, 0.7, -0.7];
+    let wall_speeds = [0.8, 0.2, -0.4];
+    for darcy in [false, true] {
+        let mut network = periodic(&velocities);
+        let initial: Vec<_> = network.branches().iter().map(|b| b.states()[0]).collect();
+        let mut walls = NetworkWallOperator::new(&network, vec![], || false).unwrap()
+            .with_branch_contacts(&network,
+                wall_speeds.iter().map(|&speed| {
+                    let drag = if darcy {
+                        WallDrag::MovingDarcy {
+                            friction_factor: 0.6, hydraulic_diameter_m: 0.3,
+                            wall_velocity_m_s: speed,
+                        }
+                    } else {
+                        WallDrag::MovingLinear { rate_per_s: 2.0, wall_velocity_m_s: speed }
+                    };
+                    Some(vec![contact(drag, WallThermal::Adiabatic); 4])
+                }).collect(), || false).unwrap();
+        let report = network.step_with_walls(Time::new(0.08), StepControl::default(),
+            &mut walls, controls(), || false).unwrap();
+        let dt = report.elapsed.value();
+        let mut total_work = 0.0;
+        let mut total_heating = 0.0;
+        for (b, (&velocity, &speed)) in velocities.iter().zip(&wall_speeds).enumerate() {
+            let slip: f64 = velocity - speed;
+            let final_slip = if darcy { slip / (1.0 + dt * slip.abs()) }
+                else { slip * (-2.0 * dt).exp() };
+            let final_velocity = speed + final_slip;
+            let slip_loss = 0.5 * (slip * slip - final_slip * final_slip);
+            let temperature = temperature_from_caloric(2.5 * 2.0 + 0.2 * 4.0 + slip_loss);
+            let work = 0.7 * speed * (final_velocity - velocity);
+            for &q in network.branches()[b].states() {
+                let actual = network.gas().primitive(q, || false).unwrap();
+                close(actual.velocity, final_velocity, 3e-14);
+                close(actual.temperature, temperature, 3e-11);
+                assert_eq!(q.density, initial[b].density);
+                close(q.energy - initial[b].energy, speed * (q.momentum - initial[b].momentum), 3e-14);
+            }
+            let branch = network.accepted_branch_reports().unwrap()[b];
+            close(branch.wall_momentum_impulse, 0.7 * (final_velocity - velocity), 3e-14);
+            close(branch.wall_work, work, 3e-14);
+            assert_eq!(branch.wall_heat, 0.0);
+            close(branch.conservation_residual.momentum, 0.0, 3e-14);
+            close(branch.conservation_residual.energy, 0.0, 3e-14);
+            total_work += work;
+            total_heating += 0.7 * slip_loss;
+        }
+        let thermal = report.thermal.unwrap();
+        close(thermal.source.mechanical_work_to_gas_j, total_work, 3e-14);
+        close(thermal.source.drag_heating_j, total_heating, 3e-14);
+        assert_eq!(thermal.source.heat_to_gas_j, 0.0);
+        close(report.after.energy - report.before.energy, total_work, 3e-14);
+        close(report.conservation_residual.energy, 0.0, 3e-14);
+        close(thermal.gas_wall_conservation_residual_j, 0.0, 3e-14);
+    }
+}
+
+#[test]
 fn distributed_heat_drives_gravity_flow_with_closed_wall_energy_and_gauge_invariance() {
     let mut base = chain(0.0, 0.0);
     let shift = 2.0_f64.powi(40);

@@ -1,7 +1,9 @@
-//! Stationary-wall momentum loss and conservative heat exchange.
+//! Relative wall momentum exchange and conservative heat/work exchange.
 //!
 //! This source uses original mixture energy and Cv, preserves species, and
-//! retains total gas energy during drag. Thermal conductance is h*A [W/K].
+//! retains total gas energy during stationary drag. A prescribed sliding wall
+//! supplies its actual momentum work; relative slip thermalizes once in the
+//! same gas energy. Thermal conductance is h*A [W/K].
 //! Linear/Darcy coefficients are explicit frozen engineering inputs; no
 //! unsteady shock boundary-layer or universal heat-transfer closure is implied.
 
@@ -9,6 +11,7 @@ use super::{Cell, Error as FlowError, MixtureGas, positive};
 use fs_math::det;
 use fs_qty::{DynViscosity, Length, Time};
 
+mod drag;
 mod gas;
 pub(crate) mod shared;
 use gas::MixtureCaloric;
@@ -21,7 +24,11 @@ pub(crate) use caloric::exchange_caloric_with_heat_storage;
 pub(crate) use caloric::exchange_cell_with_heat_storage_and_conductance;
 pub use caloric::{MaterialWallCaloric, WallCaloricConstraint, exchange_cell_with_heat_storage};
 
-/// Stationary radial wall drag; its lost kinetic energy stays in the gas.
+/// Axial drag at a stationary or prescribed axially sliding radial wall.
+///
+/// Sliding changes neither the gas volume nor the flow coordinate. Its speed
+/// is constant over one source interval; the external drive receives the
+/// opposite impulse and work. Relative-slip dissipation stays in the gas.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WallDrag {
     /// No radial momentum sink.
@@ -37,6 +44,22 @@ pub enum WallDrag {
         friction_factor: f64,
         /// Positive hydraulic diameter [m].
         hydraulic_diameter_m: f64,
+    },
+    /// Frozen relaxation of relative velocity, d(u-U)/dt = -rate*(u-U).
+    MovingLinear {
+        /// Nonnegative momentum relaxation rate [1/s].
+        rate_per_s: f64,
+        /// Prescribed axial wall velocity in the gas coordinate [m/s].
+        wall_velocity_m_s: f64,
+    },
+    /// Frozen Darcy law on slip, d(u-U)/dt = -f*(u-U)*abs(u-U)/(2*Dh).
+    MovingDarcy {
+        /// Nonnegative Darcy factor, four times the Fanning factor.
+        friction_factor: f64,
+        /// Positive hydraulic diameter [m].
+        hydraulic_diameter_m: f64,
+        /// Prescribed axial wall velocity in the gas coordinate [m/s].
+        wall_velocity_m_s: f64,
     },
 }
 impl WallDrag {
@@ -74,11 +97,28 @@ impl WallDrag {
                 friction_factor,
                 hydraulic_diameter_m,
             } => nonnegative(friction_factor) && positive(hydraulic_diameter_m),
+            Self::MovingLinear { rate_per_s, wall_velocity_m_s } => {
+                nonnegative(rate_per_s) && wall_velocity_m_s.is_finite()
+            }
+            Self::MovingDarcy {
+                friction_factor, hydraulic_diameter_m, wall_velocity_m_s,
+            } => nonnegative(friction_factor)
+                && positive(hydraulic_diameter_m)
+                && wall_velocity_m_s.is_finite(),
         };
         if valid {
             Ok(())
         } else {
             Err(WallExchangeError::Invalid("wall drag inputs"))
+        }
+    }
+
+    /// Prescribed wall motion, retained when source-owned coefficients refresh.
+    pub(crate) const fn moving_velocity(self) -> Option<f64> {
+        match self {
+            Self::MovingLinear { wall_velocity_m_s, .. }
+            | Self::MovingDarcy { wall_velocity_m_s, .. } => Some(wall_velocity_m_s),
+            _ => None,
         }
     }
 }
@@ -120,7 +160,7 @@ pub enum WallThermal {
     },
 }
 
-/// One cell's stationary radial momentum and thermal contact.
+/// One cell's radial-wall momentum and thermal contact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WallContact {
     /// Radial momentum-loss law.
@@ -325,9 +365,15 @@ impl From<fs_material::thermochemical_gas::nonideal::flash::ThermochemicalFlashE
 pub struct WallCellReport {
     /// Physical source duration, with no flow-clock mutation.
     pub elapsed: Time,
-    /// Opposite impulse on the fixed support, in the local gas axis [N s].
+    /// Opposite impulse on the wall/drive, in the local gas axis [N s].
     pub wall_impulse_ns: f64,
-    /// Lost gas kinetic energy retained as sensible energy [J].
+    /// Mechanical work entering gas from the prescribed wall motion [J]. The
+    /// wall/drive receives its negative. Zero for a stationary wall; this is
+    /// distinct from both heat transfer and internal slip dissipation.
+    pub mechanical_work_to_gas_j: f64,
+    /// Nonnegative loss of relative-slip kinetic energy retained as sensible
+    /// energy [J]. It is already present in total energy minus bulk kinetic
+    /// energy, and is never added again as external heat.
     pub drag_heating_j: f64,
     /// Actual heat entering gas [J].
     pub heat_to_gas_j: f64,
@@ -336,7 +382,7 @@ pub struct WallCellReport {
     pub wall_energy_change_j: f64,
     /// Heat entering gas from a prescribed reservoir only [J].
     pub external_heat_to_gas_j: f64,
-    /// Actual gas-plus-wall thermal-storage change minus reservoir heat [J].
+    /// Actual gas-plus-wall energy change minus reservoir heat and drive work [J].
     /// An enthalpy wall retains its original pressure-work convention.
     pub energy_residual_j: f64,
     /// Actual implicit heat-equation residual [J].
@@ -409,41 +455,25 @@ pub(crate) fn exchange_caloric(
     }
     let initial = gas.primitive(initial_momentum, initial_energy, &mut cancelled)?;
     let dt = duration.value();
-    let factor = match contact.drag {
-        WallDrag::None => 1.0,
-        WallDrag::Linear { rate_per_s } => {
-            let exponent = rate_per_s * dt;
-            if !nonnegative(exponent) {
-                return Err(WallExchangeError::Invalid("wall drag exponent"));
-            }
-            det::exp(-exponent)
-        }
-        WallDrag::Darcy {
-            friction_factor,
-            hydraulic_diameter_m,
-        } => {
-            let damping =
-                0.5 * friction_factor * dt * (initial.velocity.abs() / hydraulic_diameter_m);
-            if !nonnegative(damping) {
-                return Err(WallExchangeError::Invalid("wall Darcy increment"));
-            }
-            1.0 / (1.0 + damping)
-        }
-    };
-    let momentum = initial_momentum * factor;
-    let old_kinetic = 0.5 * initial_momentum * (initial_momentum / initial.density);
+    let drag = drag::advance(
+        contact.drag, initial_momentum, initial_energy, initial.density,
+        initial.velocity, volume_m3, dt,
+    )?;
+    let momentum = drag.momentum;
     let kinetic = 0.5 * momentum * (momentum / initial.density);
-    let mut energy = initial_energy;
+    let mechanical_energy = drag.energy;
+    let mut energy = mechanical_energy;
     let primitive = gas.primitive(momentum, energy, &mut cancelled)?;
     let mut updated = contact;
     let mut report = WallCellReport {
         elapsed: duration,
         wall_impulse_ns: (initial_momentum - momentum) * volume_m3,
-        drag_heating_j: (old_kinetic - kinetic) * volume_m3,
+        mechanical_work_to_gas_j: drag.work_j,
+        drag_heating_j: drag.heating_j,
         heat_to_gas_j: 0.0,
         wall_energy_change_j: 0.0,
         external_heat_to_gas_j: 0.0,
-        energy_residual_j: 0.0,
+        energy_residual_j: drag.energy_residual_j,
         thermal_residual_j: 0.0,
         iterations: 0,
     };
@@ -481,7 +511,7 @@ pub(crate) fn exchange_caloric(
                     c / (1.0 + c / integrated)
                 }
             });
-            let target = initial_energy - kinetic;
+            let target = mechanical_energy - kinetic;
             let domain = gas.domain();
             let lo = primitive
                 .temperature
@@ -514,9 +544,9 @@ pub(crate) fn exchange_caloric(
             )?;
             report.iterations = iterations;
             let (thermal, _) = gas.caloric(temperature)?;
-            energy = initial_energy + (thermal - target);
+            energy = mechanical_energy + (thermal - target);
             let actual = gas.primitive(momentum, energy, &mut cancelled)?;
-            report.heat_to_gas_j = (energy - initial_energy) * volume_m3;
+            report.heat_to_gas_j = (energy - mechanical_energy) * volume_m3;
             let actual_wall_t = if let Some(capacity) = capacity {
                 let fraction = effective / capacity;
                 let next = if fraction <= 0.5 {
@@ -537,15 +567,15 @@ pub(crate) fn exchange_caloric(
             };
             report.thermal_residual_j =
                 report.heat_to_gas_j - integrated * (actual_wall_t - actual.temperature);
-            report.energy_residual_j =
+            report.energy_residual_j +=
                 report.heat_to_gas_j + report.wall_energy_change_j - report.external_heat_to_gas_j;
             let scale = report
                 .heat_to_gas_j
                 .abs()
                 .max(report.wall_energy_change_j.abs());
-            let tolerance = control.tolerance(scale);
-            if report.energy_residual_j.abs() > tolerance
-                || report.thermal_residual_j.abs() > tolerance
+            if report.energy_residual_j.abs()
+                > control.tolerance(scale.max(report.mechanical_work_to_gas_j.abs()))
+                || report.thermal_residual_j.abs() > control.tolerance(scale)
             {
                 return Err(WallExchangeError::Balance {
                     energy_residual_j: report.energy_residual_j,
@@ -559,6 +589,7 @@ pub(crate) fn exchange_caloric(
         momentum,
         energy,
         report.wall_impulse_ns,
+        report.mechanical_work_to_gas_j,
         report.drag_heating_j,
         report.heat_to_gas_j,
         report.wall_energy_change_j,
@@ -570,6 +601,17 @@ pub(crate) fn exchange_caloric(
     .all(|x| x.is_finite())
     {
         return Err(WallExchangeError::Invalid("wall extensive source balance"));
+    }
+    let scale = report.mechanical_work_to_gas_j.abs()
+        .max(report.heat_to_gas_j.abs())
+        .max(report.wall_energy_change_j.abs());
+    if report.drag_heating_j < 0.0
+        || report.energy_residual_j.abs() > control.tolerance(scale)
+    {
+        return Err(WallExchangeError::Balance {
+            energy_residual_j: report.energy_residual_j,
+            thermal_residual_j: report.thermal_residual_j,
+        });
     }
     poll(&mut cancelled)?;
     Ok(WallUpdate {

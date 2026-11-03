@@ -526,6 +526,7 @@ impl Group<'_> {
         Ok(WallCellReport {
             elapsed: duration,
             wall_impulse_ns: 0.0,
+            mechanical_work_to_gas_j: 0.0,
             drag_heating_j: 0.0,
             heat_to_gas_j: sums[0],
             wall_energy_change_j: wall.change,

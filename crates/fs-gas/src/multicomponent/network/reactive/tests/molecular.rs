@@ -348,3 +348,45 @@ fn reacting_molecular_wall_composition_closes_independent_gas_and_wall_energy() 
         close(report.absolute_energy_residual_j, 0.0, 3e-9);
     }
 }
+
+#[test]
+fn moving_wall_drive_closes_actual_reacting_molecular_network_energy() {
+    use crate::multicomponent::network::wall_exchange::NetworkWallOperator;
+    use crate::multicomponent::wall_exchange::{WallContact, WallControl, WallDrag, WallThermal};
+    let mechanism = mechanism(4.0, 10.0, 2.0);
+    let initial = network(&mechanism, 4, false, 1.0);
+    let drive = WallContact {
+        drag: WallDrag::MovingLinear { rate_per_s: 2.0, wall_velocity_m_s: 0.4 },
+        thermal: WallThermal::Adiabatic,
+    };
+    let mut wall = NetworkWallOperator::new(&initial,
+        initial.branches().iter().map(|b| vec![drive; b.cell_count()]).collect(),
+        vec![WallContact { drag: WallDrag::None, ..drive }; initial.plenums().len()],
+        || false).unwrap();
+    let mut molecular = operator(&initial, 0.02, 0.001, 0.01);
+    let mut flow = ReactingNetwork1d::new(initial, mechanism, chemistry(), || false).unwrap();
+    let energy = |flow: &ReactingNetwork1d| {
+        flow.branches().iter().flat_map(|b| {
+            b.mesh().volumes().iter().enumerate().map(move |(i, volume)| {
+                volume * flow.gas().absolute_energy_density(b.cell(i).unwrap()).unwrap()
+            })
+        }).sum::<f64>() + flow.plenums().iter().map(|p| {
+            p.volume_m3() * flow.gas().absolute_energy_density(p.state()).unwrap()
+        }).sum::<f64>()
+    };
+    let before = energy(&flow);
+    let mut work = 0.0;
+    for _ in 0..4 {
+        let report = flow.step_with_dissipation_and_wall(&mut molecular, &mut wall,
+            Time::new(0.01), ReactiveStepControl::default(), DissipationControl::default(),
+            WallControl::default(), || false).unwrap();
+        let drive_work = wall.last_report().unwrap().mechanical_work_to_gas_j;
+        assert!(drive_work > 0.0);
+        assert!(report.chemistry.species_change_kg[0].abs() > 0.0);
+        assert_eq!(wall.last_report().unwrap().heat_to_gas_j, 0.0);
+        close(report.boundary_change.energy, drive_work, 3e-10);
+        close(report.absolute_energy_residual_j, 0.0, 3e-9);
+        work += drive_work;
+        close(energy(&flow) - before, work, 3e-8);
+    }
+}

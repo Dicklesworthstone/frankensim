@@ -69,7 +69,9 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                         energy: sum([molecular.first.boundary_change.energy, transport.boundary_change.energy,
                             molecular.second.boundary_change.energy]) };
                     if let Some(w) = wall_report {
-                        boundary_change.energy = sum([boundary_change.energy, w.first.heat_to_gas_j, w.second.heat_to_gas_j]);
+                        boundary_change.energy = sum([boundary_change.energy,
+                            w.first.heat_to_gas_j, w.second.heat_to_gas_j,
+                            w.first.mechanical_work_to_gas_j, w.second.mechanical_work_to_gas_j]);
                     }
                     // Valve energy and species transfers are internal. Actual
                     // storage defects remain in the whole-step residual below.

@@ -1,7 +1,7 @@
 //! Original wall loss and implicit storage on unpublished gas candidates.
 
 use super::{
-    Conserved, Error, Euler1d, FrozenGas, GasNetwork1d, Totals, allocated, poll, positive,
+    Conserved, Error, Euler1d, FrozenGas, GasNetwork1d, allocated, poll, positive,
 };
 use crate::dynamics::{CaloricDomain, Mesh1d};
 use crate::multicomponent::network::wall_exchange::NetworkWallReport;
@@ -31,8 +31,8 @@ pub use crate::multicomponent::wall_exchange::shared::SharedWallStorage as Plenu
 pub struct NetworkThermalReport {
     /// Original implicit wall equation and represented gas/wall transfers.
     pub source: NetworkWallReport,
-    /// Gas plus finite-wall change minus external gas/heat transport and
-    /// resolved gravitational work, in the original formation-energy gauge [J].
+    /// Gas plus finite-wall change minus external gas/heat transport, sliding
+    /// wall work and gravity work, in the original formation-energy gauge [J].
     pub gas_wall_conservation_residual_j: f64,
     /// Gas plus finite-wall and centered-potential balance [J], when gravity
     /// is declared. External potential transport is counted exactly once.
@@ -45,9 +45,9 @@ pub struct NetworkThermalReport {
 /// Prepared branch/plenum wall exchange using the original common wall kernel.
 ///
 /// Gas amount and volume are fixed during each source. Branch drag converts
-/// kinetic to sensible energy at fixed total energy; it does no extra heat or
-/// gravitational work. Plenums have no bulk momentum and admit no drag. Original
-/// wall h/u and latent inventory retain their declared physical convention.
+/// relative kinetic to sensible energy. Prescribed wall motion supplies its
+/// momentum work separately from heat. Plenums have no bulk momentum and admit
+/// no drag. Original wall h/u and latent inventory retain their physical convention.
 /// The source is applied after transport, over its ACTUAL accepted duration:
 /// this is first-order thermal/transport splitting, not a second-order IMEX
 /// method. Stiff heat exchange is backward Euler with bounded source inversion.
@@ -55,7 +55,7 @@ pub struct NetworkWallOperator<'law> {
     gas: FrozenGas,
     plenum_count: usize,
     branches: Vec<Option<BranchBinding>>,
-    branch_source_candidate: Vec<Totals>,
+    branch_source_candidate: Vec<BranchSource>,
     volumes: Vec<f64>,
     contacts: Vec<WallContact>,
     candidate_contacts: Vec<WallContact>,
@@ -67,6 +67,14 @@ pub struct NetworkWallOperator<'law> {
 /// Original plenum API name for the same prepared wall owner. Branch contacts
 /// are absent unless explicitly supplied through `with_branch_contacts`.
 pub type PlenumThermalOperator<'law> = NetworkWallOperator<'law>;
+
+/// Actual branch-axis source terms; heat and drive work remain distinct.
+#[derive(Clone, Copy, Default)]
+pub(super) struct BranchSource {
+    pub momentum: f64,
+    pub heat: f64,
+    pub work: f64,
+}
 
 impl<'law> NetworkWallOperator<'law> {
     /// Bind exactly one original contact to each retained compact volume.
@@ -88,7 +96,7 @@ impl<'law> NetworkWallOperator<'law> {
             gas: network.gas().clone(),
             plenum_count: count,
             branches: allocated(network.branches.len(), None)?,
-            branch_source_candidate: allocated(network.branches.len(), Totals::default())?,
+            branch_source_candidate: allocated(network.branches.len(), BranchSource::default())?,
             volumes: allocated(count, 0.0)?,
             contacts: allocated(count, empty)?,
             candidate_contacts: allocated(count, empty)?,
@@ -155,7 +163,7 @@ impl<'law> NetworkWallOperator<'law> {
         Ok(())
     }
 
-    pub(super) fn branch_source_candidates(&self) -> &[Totals] {
+    pub(super) fn branch_source_candidates(&self) -> &[BranchSource] {
         &self.branch_source_candidate
     }
 
@@ -168,7 +176,7 @@ impl<'law> NetworkWallOperator<'law> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkWallReport, Error> {
         let mut total = HeatSum::default();
-        self.branch_source_candidate.fill(Totals::default());
+        self.branch_source_candidate.fill(BranchSource::default());
         for (i, state) in candidates.iter_mut().enumerate() {
             poll(cancelled)?;
             let report = self.prepare_cell(i, state, duration, controls, cancelled)?;
@@ -184,8 +192,8 @@ impl<'law> NetworkWallOperator<'law> {
                 continue;
             };
             let start = binding.start;
-            let mut source = [0.0; 2];
-            let mut correction = [0.0; 2];
+            let mut source = [0.0; 3];
+            let mut correction = [0.0; 3];
             for (i, state) in branch.work.candidate.iter_mut().enumerate() {
                 poll(cancelled)?;
                 let report = self.prepare_cell(start + i, state, duration, controls, cancelled)?;
@@ -194,14 +202,15 @@ impl<'law> NetworkWallOperator<'law> {
                 accumulate(
                     &mut source,
                     &mut correction,
-                    [-report.wall_impulse_ns, report.heat_to_gas_j],
+                    [-report.wall_impulse_ns, report.heat_to_gas_j,
+                        report.mechanical_work_to_gas_j],
                 )?;
                 total.add(report)?;
             }
-            self.branch_source_candidate[b] = Totals {
-                mass: 0.0,
+            self.branch_source_candidate[b] = BranchSource {
                 momentum: source[0],
-                energy: source[1],
+                heat: source[1],
+                work: source[2],
             };
         }
         if let Some(shared) = &mut self.shared {
@@ -304,8 +313,8 @@ fn admit_contact(
 
 #[derive(Default)]
 struct HeatSum {
-    values: [f64; 5],
-    correction: [f64; 5],
+    values: [f64; 6],
+    correction: [f64; 6],
     maximum_thermal_residual_j: f64,
     maximum_iterations: usize,
 }
@@ -321,6 +330,7 @@ impl HeatSum {
                 report.external_heat_to_gas_j,
                 report.energy_residual_j,
                 report.drag_heating_j,
+                report.mechanical_work_to_gas_j,
             ],
         )?;
         self.maximum_thermal_residual_j = self
@@ -338,6 +348,7 @@ impl HeatSum {
             external_heat_to_gas_j: self.values[2],
             energy_residual_j: self.values[3],
             drag_heating_j: self.values[4],
+            mechanical_work_to_gas_j: self.values[5],
             maximum_thermal_residual_j: self.maximum_thermal_residual_j,
             maximum_iterations: self.maximum_iterations,
         }

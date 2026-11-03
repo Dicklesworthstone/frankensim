@@ -6,6 +6,7 @@ use super::{
     Accumulator, BranchEnd, GasNetwork1d, NetworkGravityReport, NetworkStepReport,
     NetworkThermalReport, NetworkTotals, NetworkWallOperator, PlenumThermalOperator, PortExchange,
 };
+use super::thermal::BranchSource;
 use crate::multicomponent::network::wall_exchange::NetworkWallReport;
 use crate::multicomponent::wall_exchange::WallControl;
 use fs_qty::Time;
@@ -515,7 +516,7 @@ impl GasNetwork1d {
         halvings: usize,
         first_order_retry: bool,
         heat: Option<NetworkWallReport>,
-        branch_sources: Option<&[Totals]>,
+        branch_sources: Option<&[BranchSource]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
         let factor = 0.5 * dt;
@@ -548,14 +549,14 @@ impl GasNetwork1d {
             let gravity_impulse = factor * (a.gravity_force + b.gravity_force);
             let gravity_work = factor * (a.gravity_power + b.gravity_power);
             gravity_work_sum.add(0.0, gravity_work)?;
-            let wall = branch_sources.map_or(Totals::default(), |sources| sources[index]);
+            let wall = branch_sources.map_or(BranchSource::default(), |sources| sources[index]);
             let residual = Totals::from_array(core::array::from_fn(|k| {
                 branch_after.array()[k]
                     - branch_before.array()[k]
                     - end_change.array()[k]
                     - match k {
                         1 => impulse + gravity_impulse + wall.momentum,
-                        2 => gravity_work + wall.energy,
+                        2 => gravity_work + wall.heat + wall.work,
                         _ => 0.0,
                     }
             }));
@@ -586,7 +587,8 @@ impl GasNetwork1d {
                 gravity_momentum_impulse: gravity_impulse,
                 gravity_work,
                 wall_momentum_impulse: wall.momentum,
-                wall_heat: wall.energy,
+                wall_heat: wall.heat,
+                wall_work: wall.work,
                 conservation_residual: residual,
             };
             after.add(branch_after.mass, branch_after.energy)?;
@@ -665,13 +667,15 @@ impl GasNetwork1d {
         let (after, boundary_change) = (after.totals(), boundary.totals());
         let gravity_work = gravity_work_sum.totals().energy;
         let heat_to_gas = heat.map_or(0.0, |report| report.heat_to_gas_j);
+        let wall_work = heat.map_or(0.0, |report| report.mechanical_work_to_gas_j);
         let conservation_residual = NetworkTotals {
             mass: after.mass - before.mass - boundary_change.mass,
             energy: after.energy
                 - before.energy
                 - boundary_change.energy
                 - gravity_work
-                - heat_to_gas,
+                - heat_to_gas
+                - wall_work,
         };
         if !conservation_residual.mass.is_finite() || !conservation_residual.energy.is_finite() {
             return Err(Error::Invalid("non-finite complete network balance"));
@@ -684,7 +688,7 @@ impl GasNetwork1d {
             // reference. Merely differencing absolute potential storage would
             // discard small resolved gravity work under a large common datum.
             let total_residual =
-                (after.energy - before.energy - boundary_change.energy - heat_to_gas)
+                (after.energy - before.energy - boundary_change.energy - heat_to_gas - wall_work)
                     + (after_centered_potential_energy
                         - potential_before
                         - boundary_centered_potential_energy_change);

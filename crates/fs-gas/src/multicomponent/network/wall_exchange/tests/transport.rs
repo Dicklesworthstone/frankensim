@@ -14,6 +14,42 @@ fn geometry() -> CircularLaminarWall {
 }
 
 #[test]
+fn moving_wall_material_refresh_uses_relative_flow_and_preserves_motion() {
+    let g = gas(1, false, 0.0);
+    let (mu, dt) = (0.004, 0.2);
+    let diameter = geometry().diameter.value();
+    let rate = 32.0 * mu / (diameter * diameter);
+    for boost in [0.0, 20.0] {
+        let speed = 0.2 + boost;
+        let initial_velocity = 0.4 + boost;
+        let mut n = network(&g, &[initial_velocity], false);
+        let mut wall = uniform_operator(&n, WallContact {
+            drag: WallDrag::MovingLinear { rate_per_s: 999.0, wall_velocity_m_s: speed },
+            thermal: WallThermal::Adiabatic,
+        }).with_circular_laminar_transport(
+            law(&g, mu, 0.0, 0.0, 0.0), vec![Some(geometry())], || false).unwrap();
+        let report = wall.advance_for(&mut n, Time::new(dt), controls(), || false).unwrap();
+        let slip = 0.2 * (-rate * dt).exp();
+        let expected_temperature = 2.0 + (0.04 - slip * slip) / 5.0;
+        for i in 0..2 {
+            let state = n.branches()[0].cell(i).unwrap();
+            let actual = g.primitive(state, || false).unwrap();
+            close(actual.velocity, speed + slip, 3e-13);
+            close(actual.temperature, expected_temperature, 3e-11);
+            match wall.branch_contacts(0).unwrap()[i].drag {
+                WallDrag::MovingLinear { rate_per_s, wall_velocity_m_s } => {
+                    close(rate_per_s, rate, 3e-13);
+                    assert_eq!(wall_velocity_m_s, speed);
+                }
+                _ => panic!("material coefficient refresh discarded prescribed wall motion"),
+            }
+        }
+        close(report.mechanical_work_to_gas_j, 0.4 * speed * (slip - 0.2), 3e-12);
+        close(report.drag_heating_j, 0.2 * (0.04 - slip * slip), 3e-13);
+    }
+}
+
+#[test]
 fn current_density_and_source_coefficients_drive_drag_heat_and_wall_storage() {
     let g = gas(1, false, 0.0);
     let diameter = geometry().diameter.value();

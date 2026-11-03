@@ -1,4 +1,4 @@
-//! Stationary radial wall sources for every branch cell and finite plenum.
+//! Radial-wall momentum, work and heat sources for branches and finite plenums.
 //!
 //! Original mixture calorics remain authoritative. Each contact is explicitly
 //! authored: linear or Darcy drag and adiabatic, prescribed-temperature, or
@@ -46,8 +46,9 @@ pub use conduction::{MaterialWallConduction, PhaseWallConductionSource, WallCond
 ///
 /// Heat is positive into gas. Stationary-wall drag retains total gas energy:
 /// `drag_heating_j` is kinetic energy converted to sensible energy, not an
-/// additional heat input. Gas plus finite-wall energy changes equal external
-/// reservoir heat, up to the separately retained numerical residual.
+/// additional heat input. Prescribed sliding walls exchange mechanical work
+/// with the gas. Gas plus finite-wall energy changes equal external reservoir
+/// heat plus that drive work, up to the separately retained numerical residual.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NetworkWallReport {
     /// Total duration covered by the wall operator [s].
@@ -59,9 +60,12 @@ pub struct NetworkWallReport {
     pub wall_energy_change_j: f64,
     /// Heat into gas from prescribed-temperature reservoirs only [J].
     pub external_heat_to_gas_j: f64,
-    /// Gas kinetic energy thermalized by stationary-wall drag [J].
+    /// Mechanical work entering gas from prescribed sliding-wall drives [J].
+    /// The drives receive the opposite work; this is separate from heat.
+    pub mechanical_work_to_gas_j: f64,
+    /// Relative-slip kinetic energy thermalized by wall drag [J].
     pub drag_heating_j: f64,
-    /// Sum of local gas-plus-wall energy changes minus reservoir heat [J].
+    /// Gas-plus-wall energy changes minus reservoir heat and drive work [J].
     pub energy_residual_j: f64,
     /// Largest absolute original implicit thermal-equation residual [J].
     pub maximum_thermal_residual_j: f64,
@@ -562,16 +566,16 @@ impl<'law> NetworkWallOperator<'law> {
 }
 
 struct Balance {
-    values: [f64; 5],
-    corrections: [f64; 5],
+    values: [f64; 6],
+    corrections: [f64; 6],
     maximum_residual: f64,
     maximum_iterations: usize,
 }
 impl Balance {
     fn new() -> Self {
         Self {
-            values: [0.0; 5],
-            corrections: [0.0; 5],
+            values: [0.0; 6],
+            corrections: [0.0; 6],
             maximum_residual: 0.0,
             maximum_iterations: 0,
         }
@@ -583,6 +587,7 @@ impl Balance {
             report.external_heat_to_gas_j,
             report.drag_heating_j,
             report.energy_residual_j,
+            report.mechanical_work_to_gas_j,
         ];
         for (i, term) in terms.into_iter().enumerate() {
             accumulate(&mut self.values[i], &mut self.corrections[i], term)?;
@@ -602,6 +607,7 @@ impl Balance {
             external_heat_to_gas_j: self.values[2],
             drag_heating_j: self.values[3],
             energy_residual_j: self.values[4],
+            mechanical_work_to_gas_j: self.values[5],
             maximum_thermal_residual_j: self.maximum_residual,
             maximum_iterations: self.maximum_iterations,
         }
@@ -619,6 +625,7 @@ fn combine(
         sum([a.external_heat_to_gas_j, b.external_heat_to_gas_j]),
         sum([a.drag_heating_j, b.drag_heating_j]),
         sum([a.energy_residual_j, b.energy_residual_j]),
+        sum([a.mechanical_work_to_gas_j, b.mechanical_work_to_gas_j]),
     ];
     if !values.iter().all(|x| x.is_finite()) {
         return Err(WallExchangeError::Invalid("composed wall balance"));
@@ -630,6 +637,7 @@ fn combine(
         external_heat_to_gas_j: values[3],
         drag_heating_j: values[4],
         energy_residual_j: values[5],
+        mechanical_work_to_gas_j: values[6],
         maximum_thermal_residual_j: a
             .maximum_thermal_residual_j
             .max(b.maximum_thermal_residual_j),

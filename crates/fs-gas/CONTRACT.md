@@ -2075,6 +2075,24 @@ energy while lost kinetic energy becomes sensible energy, and the stationary
 support receives the opposite signed axial impulse. No second viscous-heating
 term is added to total energy.
 
+Opt-in `WallDrag::MovingLinear` and `WallDrag::MovingDarcy` prescribe constant
+axial wall velocity U over a source interval at fixed gas volume. They exactly
+relax relative velocity u-U using the same frozen linear/Darcy laws. Gas receives
+mechanical work U times its actual accepted momentum change; the wall/drive
+receives the opposite impulse and work. Loss of relative-slip kinetic energy
+becomes sensible gas energy once, even during entrainment or braking.
+`mechanical_work_to_gas_j` remains separate from `heat_to_gas_j` and
+`drag_heating_j`, and frozen branch reports retain `wall_work` separately from
+`wall_heat`. Both frozen and reacting/molecular mixture network balances include
+drive work. Original caloric wall storage and material-derived coefficients use
+the same owner; coefficient refresh preserves wall motion and admits Reynolds
+and Mach numbers in the wall frame. Stationary cases retain their original
+arithmetic. This is a prescribed sliding-wall source, not resolved wall inertia,
+moving geometry or an unsteady boundary-layer model; zero-momentum plenums
+continue to refuse drag. Four numerical-kernel and eight native integration
+regressions cover analytic slip relaxation, frame covariance, weak/strong drag,
+finite calorics, network composition and transactional refusal.
+
 Thermal contacts may be adiabatic, a prescribed-temperature reservoir, or a
 finite lumped wall with explicit heat capacity in J/K. A contact's conductance
 is the complete exposed h*A in W/K. A safeguarded backward-Euler temperature

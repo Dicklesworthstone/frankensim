@@ -170,6 +170,38 @@ fn source_capacity_integral_matches_quadratic_reference_and_preserves_drag_heat(
 }
 
 #[test]
+fn moving_wall_drive_precedes_original_material_caloric_exchange_once() {
+    let g = gas(1, false, 0.0);
+    let q = g.conserved(&[1.0], 0.2, 2.0).unwrap();
+    let (volume, dt, speed) = (0.2, 0.2, 0.8);
+    let law = source(1.0, 0.2, 4.8, 5.2);
+    let contact = law.contact(5.0, 0.3, WallDrag::MovingLinear {
+        rate_per_s: 2.0, wall_velocity_m_s: speed,
+    }).unwrap();
+    let update = exchange_cell_with_heat_storage(&g, q.as_cell(), volume,
+        Time::new(dt), contact, &law, controls(), || false).unwrap();
+    let final_slip = (0.2 - speed) * (-2.0_f64 * dt).exp();
+    let gas_t = 2.0 + (0.36 - final_slip * final_slip) / 5.0;
+    let actual = crate::multicomponent::Cell {
+        partial_densities: &q.partial_densities,
+        momentum: update.momentum, energy: update.energy,
+    };
+    let primitive = g.primitive(actual, || false).unwrap();
+    close(primitive.velocity, speed + final_slip, 3e-14);
+    close(primitive.temperature, gas_t + update.report.heat_to_gas_j / 0.5, 3e-11);
+    let wall_t = wall_temperature(update.contact);
+    let stored = wall_t - 5.0 + 0.1 * (wall_t * wall_t - 25.0);
+    let work = speed * (update.momentum - q.momentum) * volume;
+    close(update.report.mechanical_work_to_gas_j, work, 3e-14);
+    close(update.report.wall_energy_change_j, stored, 3e-11);
+    close(update.report.heat_to_gas_j + stored, 0.0, 3e-11);
+    close((update.energy - q.energy) * volume + stored, work, 3e-11);
+    close(update.report.drag_heating_j, 0.5 * volume * (0.36 - final_slip * final_slip), 3e-14);
+    assert_eq!(update.contact.drag, contact.drag);
+    assert_eq!(update.report.external_heat_to_gas_j, 0.0);
+}
+
+#[test]
 fn material_substitution_changes_actual_network_and_keeps_one_wall_state() {
     let g = gas(1, false, 0.0);
     let mut outcomes = Vec::new();

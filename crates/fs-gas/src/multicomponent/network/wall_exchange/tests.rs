@@ -372,6 +372,7 @@ fn thermal_exchange_uses_original_variable_mixture_heat_capacity() {
 }
 
 mod coupled;
+mod moving_wall;
 mod transport;
 #[cfg(feature = "material")]
 mod caloric;

@@ -224,7 +224,7 @@ impl SharedWalls<'_> {
         gas: &FrozenGas,
         branches: &mut [Euler1d],
         plenums: &mut [Conserved],
-        branch_sources: &mut [Totals],
+        branch_sources: &mut [BranchSource],
         duration: Time,
         control: WallControl,
         cancelled: &mut impl FnMut() -> bool,
@@ -270,13 +270,13 @@ impl SharedWalls<'_> {
                 gas_state(port.gas, branches, plenums).energy = group.energies[i];
                 if let SharedWallGas::Branch { branch, .. } = port.gas {
                     let increment = group.heat[i] - self.branch_correction[branch];
-                    let next = branch_sources[branch].energy + increment;
+                    let next = branch_sources[branch].heat + increment;
                     if !next.is_finite() {
                         return Err(Error::Invalid("shared wall branch heat"));
                     }
                     self.branch_correction[branch] =
-                        (next - branch_sources[branch].energy) - increment;
-                    branch_sources[branch].energy = next;
+                        (next - branch_sources[branch].heat) - increment;
+                    branch_sources[branch].heat = next;
                 }
             }
         }
@@ -304,6 +304,7 @@ impl SharedWalls<'_> {
                 total.add(WallCellReport {
                     elapsed: duration,
                     wall_impulse_ns: 0.0,
+                    mechanical_work_to_gas_j: 0.0,
                     drag_heating_j: 0.0,
                     heat_to_gas_j: 0.0,
                     wall_energy_change_j: receipt.energy_residual_j,
@@ -334,6 +335,7 @@ impl SharedWalls<'_> {
         Ok(WallCellReport {
             elapsed: duration,
             wall_impulse_ns: 0.0,
+            mechanical_work_to_gas_j: 0.0,
             drag_heating_j: 0.0,
             heat_to_gas_j: report.heat_to_gas_j,
             wall_energy_change_j: report.wall_energy_change_j,

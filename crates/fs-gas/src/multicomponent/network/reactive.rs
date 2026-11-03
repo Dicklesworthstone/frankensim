@@ -50,7 +50,7 @@ pub enum ReactiveNetworkError {
     Flow(FlowError),
     /// Original molecular constitutive law or complete diffusive interval refused.
     Dissipation(DissipationError),
-    /// Stationary-wall drag, heat exchange or finite-wall storage refused.
+    /// Wall drag/work, heat exchange or finite-wall storage refused.
     Wall(WallExchangeError),
     /// Original finite-volume valve transfer refused.
     Valve(ValveError),
@@ -114,7 +114,7 @@ pub struct ReactiveNetworkReport {
     pub before: NetworkTotals,
     /// Final complete inventories after all source stages.
     pub after: NetworkTotals,
-    /// External transport, molecular transfers and heat into gas from walls.
+    /// External transport, molecular transfers and wall heat/work into gas.
     /// Add the reported finite-wall storage to close gas-plus-wall energy.
     /// Inter-plenum valve transfers are deliberately excluded from this account.
     pub boundary_change: NetworkTotals,

@@ -103,7 +103,7 @@ pub struct DissipatingNetworkReport {
     pub before: NetworkTotals,
     /// Complete final storage across branches and plenums.
     pub after: NetworkTotals,
-    /// External molecular/advection exchange and heat into gas from walls.
+    /// External molecular/advection exchange and wall heat/work into gas.
     /// Add finite-wall storage to close gas-plus-wall energy. Internal valve
     /// transfers are excluded; they cannot create an external energy supply.
     pub boundary_change: NetworkTotals,

@@ -277,6 +277,7 @@ pub(super) fn reported_step(
         gravity_work: 0.0,
         wall_momentum_impulse: 0.0,
         wall_heat: 0.0,
+        wall_work: 0.0,
         conservation_residual: residual,
     })
 }

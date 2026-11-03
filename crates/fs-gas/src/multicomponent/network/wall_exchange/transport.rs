@@ -188,8 +188,10 @@ impl CircularWallTransport {
             ));
         }
         let diameter = model.diameter.value();
-        let reynolds = primitive.density * primitive.velocity.abs() * diameter / viscosity;
-        let mach = primitive.velocity.abs() / primitive.sound_speed;
+        let motion = contact.drag.moving_velocity();
+        let slip = primitive.velocity - motion.unwrap_or(0.0);
+        let reynolds = primitive.density * slip.abs() * diameter / viscosity;
+        let mach = slip.abs() / primitive.sound_speed;
         let [minimum, maximum] = model.reynolds_number;
         admit("Reynolds number", reynolds, minimum, maximum)?;
         admit("Mach number", mach, 0.0, model.maximum_mach_number)?;
@@ -198,6 +200,12 @@ impl CircularWallTransport {
             primitive.density,
             model.diameter,
         )?;
+        if let Some(wall_velocity_m_s) = motion {
+            let WallDrag::Linear { rate_per_s } = contact.drag else {
+                unreachable!("circular laminar drag is linear")
+            };
+            contact.drag = WallDrag::MovingLinear { rate_per_s, wall_velocity_m_s };
+        }
         // The original source solver owns wall storage and energy exchange;
         // this binding supplies only its instantaneous constitutive coefficients.
         let conductance =

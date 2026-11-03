@@ -405,6 +405,7 @@ pub fn exchange_mixture_parcel(
         heat: WallCellReport {
             elapsed: duration,
             wall_impulse_ns: 0.0,
+            mechanical_work_to_gas_j: 0.0,
             drag_heating_j: 0.0,
             heat_to_gas_j: actual,
             wall_energy_change_j: endpoint.change,

@@ -10,6 +10,39 @@ use crate::multicomponent::{Boundary, Conserved};
 
 type Flow = DissipatingNetwork1d<ConstantTransport>;
 
+#[test]
+fn moving_wall_drive_survives_both_halves_of_actual_molecular_wave_step() {
+    let g = gas(1, false, 0.0);
+    let n = network(&g, &[0.2], false);
+    let mut wall = uniform_operator(&n, WallContact {
+        drag: WallDrag::MovingLinear { rate_per_s: 2.0, wall_velocity_m_s: 0.8 },
+        thermal: WallThermal::Lumped {
+            temperature_k: 1.0, heat_capacity_j_per_k: 0.5, conductance_w_per_k: 0.3,
+        },
+    });
+    let mut flow = DissipatingNetwork1d::new(n,
+        law(&g, 0.004, 0.0, 0.02, 0.0), vec![], || false).unwrap();
+    let initial = inventory(&flow, &wall);
+    let mut supplied_work = 0.0;
+    for _ in 0..4 {
+        let report = flow.step_with_wall(&mut wall, Time::new(0.01),
+            DissipatingStepControl::default(), controls(), || false).unwrap();
+        let halves = report.wall.unwrap();
+        let work = halves.first.mechanical_work_to_gas_j + halves.second.mechanical_work_to_gas_j;
+        let heat = halves.first.heat_to_gas_j + halves.second.heat_to_gas_j;
+        close(report.boundary_change.energy, heat + work, 3e-12);
+        close(wall.last_report().unwrap().mechanical_work_to_gas_j, work, 3e-12);
+        assert!(work > 0.0);
+        assert!(heat < 0.0);
+        assert_eq!(wall.last_report().unwrap().external_heat_to_gas_j, 0.0);
+        close(report.absolute_energy_residual_j, 0.0, 3e-11);
+        supplied_work += work;
+        let current = inventory(&flow, &wall);
+        close(current.0, initial.0, 3e-12);
+        close(current.1 - initial.1, supplied_work, 3e-10);
+    }
+}
+
 fn coupled(g: &MixtureGas, contact: WallContact) -> (Flow, NetworkWallOperator<'static>) {
     let branch = MixtureEuler1d::new(
         g.clone(),
