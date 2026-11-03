@@ -41,6 +41,18 @@
 //! <https://doi.org/10.1038/s41598-019-43383-4> and the EPA 1994 report
 //! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=2000EF6J.TXT>.
 //! The dissolved-oxygen Elsner endpoint keeps O2(aq) distinct from O2(g).
+//! Silver uses the corresponding native-metal/dicyanoargentate endpoint.
+//! Zinc cementation retains the cyanide ligands in Zn(CN)4(2-), with two
+//! dissolved monovalent precious-metal complexes displaced per zinc atom.
+//! The silver balance is reported in Aya's Zgounder technical report,
+//! section 13.3.8 (effective 2025-12-16):
+//! <https://www.sec.gov/Archives/edgar/data/1826836/000162828026024934/exhibit9986-technicalrepor.htm>.
+//! EPA's Gold and Silver process description identifies this zinc-precipitation
+//! route for both metals: <https://semspub.epa.gov/work/HQ/189773.pdf>.
+//! These productive endpoints do not include zinc side reactions, oxygen
+//! removal, filtration, sulfide-silver dissolution, or alloy activities.
+//! Shared zinc demand must be admitted against the original finite stock;
+//! no gold/silver recovery priority or kinetic selectivity is implied.
 //! Aqueous HCN dissociation and water dissociation retain the molecular/ionic
 //! states in the NBS tables, printed pages 2-37, 2-38 and 2-89, and the
 //! standard-state definitions in sections 5.5-5.8:
@@ -150,6 +162,18 @@ pub enum MineralReaction {
     /// O2(g) -> O2(aq), neutral molecular oxygen dissolution.
     /// The reference-state equilibrium does not supply a gas-transfer rate.
     OxygenDissolution,
+    /// 4 Ag(s) + 8 CN- + O2(g) + 2 H2O(l) -> 4 Ag(CN)2- + 4 OH-.
+    /// Native-silver endpoint; silver sulfides require separate reactions.
+    SilverCyanidation,
+    /// 4 Ag(s) + 8 CN- + O2(aq) + 2 H2O(l) -> 4 Ag(CN)2- + 4 OH-.
+    /// Dissolved oxygen is consumed from the explicit aqueous inventory.
+    SilverCyanidationDissolvedOxygen,
+    /// 2 Au(CN)2-(aq) + Zn(s) -> 2 Au(s) + Zn(CN)4(2-)(aq).
+    /// Productive zinc-cementation endpoint; extent is an explicit input.
+    GoldCyanideCementationWithZinc,
+    /// 2 Ag(CN)2-(aq) + Zn(s) -> 2 Ag(s) + Zn(CN)4(2-)(aq).
+    /// One zinc stock can be shared with the gold endpoint in ReactionNetwork.
+    SilverCyanideCementationWithZinc,
     /// HCN(aq) -> H+(aq) + CN[-](aq).
     /// HCN is the neutral undissociated solute, not the ionized source component.
     HydrogenCyanideDissociation,
@@ -384,6 +408,50 @@ impl MineralReaction {
                 "oxygen-dissolution",
                 &["O"],
                 &[("O2(g)", &[2], 0, -1), ("O2(aq)", &[2], 0, 1)],
+            ),
+            Self::SilverCyanidation => (
+                "silver-cyanidation-elsner",
+                &["Ag", "C", "N", "O", "H"],
+                &[
+                    ("Ag(s)", &[1, 0, 0, 0, 0], 0, -4),
+                    ("CN[-](aq)", &[0, 1, 1, 0, 0], -1, -8),
+                    ("O2(g)", &[0, 0, 0, 2, 0], 0, -1),
+                    ("H2O(l)", &[0, 0, 0, 1, 2], 0, -2),
+                    ("Ag(CN)2[-](aq)", &[1, 2, 2, 0, 0], -1, 4),
+                    ("OH[-](aq)", &[0, 0, 0, 1, 1], -1, 4),
+                ],
+            ),
+            Self::SilverCyanidationDissolvedOxygen => (
+                "silver-cyanidation-elsner-dissolved-oxygen",
+                &["Ag", "C", "N", "O", "H"],
+                &[
+                    ("Ag(s)", &[1, 0, 0, 0, 0], 0, -4),
+                    ("CN[-](aq)", &[0, 1, 1, 0, 0], -1, -8),
+                    ("O2(aq)", &[0, 0, 0, 2, 0], 0, -1),
+                    ("H2O(l)", &[0, 0, 0, 1, 2], 0, -2),
+                    ("Ag(CN)2[-](aq)", &[1, 2, 2, 0, 0], -1, 4),
+                    ("OH[-](aq)", &[0, 0, 0, 1, 1], -1, 4),
+                ],
+            ),
+            Self::GoldCyanideCementationWithZinc => (
+                "gold-cyanide-cementation-with-zinc",
+                &["Au", "Zn", "C", "N"],
+                &[
+                    ("Au(CN)2[-](aq)", &[1, 0, 2, 2], -1, -2),
+                    ("Zn(s)", &[0, 1, 0, 0], 0, -1),
+                    ("Au(s)", &[1, 0, 0, 0], 0, 2),
+                    ("Zn(CN)4[2-](aq)", &[0, 1, 4, 4], -2, 1),
+                ],
+            ),
+            Self::SilverCyanideCementationWithZinc => (
+                "silver-cyanide-cementation-with-zinc",
+                &["Ag", "Zn", "C", "N"],
+                &[
+                    ("Ag(CN)2[-](aq)", &[1, 0, 2, 2], -1, -2),
+                    ("Zn(s)", &[0, 1, 0, 0], 0, -1),
+                    ("Ag(s)", &[1, 0, 0, 0], 0, 2),
+                    ("Zn(CN)4[2-](aq)", &[0, 1, 4, 4], -2, 1),
+                ],
             ),
             Self::HydrogenCyanideDissociation => (
                 "hydrogen-cyanide-dissociation",

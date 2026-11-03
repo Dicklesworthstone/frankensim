@@ -1,0 +1,44 @@
+frankensim.matdb-source.v1
+observation	identity	Crystalline zinc Zn, NBS reference	NBS Table 33:Zn, printed page 2-138, Zn state cr	The source molar mass is 65.3700 g/mol. This is the pure crystalline elemental reference, not zinc amalgam, an alloy, commercial zinc powder purity or a particle-size distribution. Formation enthalpy and Gibbs energy are zero by the source elemental-reference convention, not measured cementation heats. The historical source molar mass is retained rather than replaced with a modern atomic weight or the separate USGS zinc profile.
+observation	standard	Literal NBS 298.15 K thermodynamic row	https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf	The row gives standard molar formation enthalpy 0 kJ/mol, independently tabulated standard molar formation Gibbs energy 0 kJ/mol, and absolute standard molar entropy 41.63 J/(mol K). All signs and printed precision are retained. The source's neutral pure-species standard state and absolute molar entropy are retained. The source does not supply a per-row confidence distribution or cross-species covariance; uncertainty remains Unstated.
+observation	scope	NBS reference convention with literal original-row provenance	https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf, sections 5.5 to 5.8; https://doi.org/10.6028/jres.125.007	All four claims require 298.15 K, 100000 Pa and source-elemental-reference-nbs1989. Numerical claims retain the cited 1982 table row. The nbs1989 selector identifies the shared NBS reference family distributed by NIST with the 1989 errata, not a claim that this row was re-evaluated in 1989; the corrected CSV and separate erratum were not independently verified for this profile. Direct formation-G and H-minus-T-S calculations must preserve any source discrepancy. No property is reconciled with JANAF, USGS B2131 or USBM IC 9429 by relabelling. No temperature extrapolation, activity coefficient, zinc-surface passivation, reaction rate, commercial zinc dosage, side-reaction yield, heat of mixing or plant recovery is supplied.
+scalar	molar-mass	identity,scope	mass	65.3700	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	0	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	0	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	41.63	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1

@@ -58,6 +58,29 @@ charge cancellation, empty and trace inventories, source identity and bounded
 work/refusal. Actual matched NBS Cu(I)/CN/HCN/water packs separately exercise
 source-backed competition and its coupling to the gold-leaching runtime.
 
+## Native silver and zinc cementation of precious-metal cyanides
+
+`MineralReaction` includes gas- and dissolved-oxygen native-silver cyanidation
+and separate gold/silver zinc-cementation endpoints. Every equation is
+admitted by the original exact atom/charge owner. The cyanide complexes retain
+their full ligand inventory; Zn(CN)4(2-) is distinct from Zn(II), free cyanide
+and solid zinc cyanide. Native silver does not represent sulfide ore or an
+electrum activity model.
+
+The original `ReactionNetwork` admits both cementation extents against one
+initial zinc stock, with no clipping, inferred priority or same-stage product
+borrowing. Actual NBS packs supply point-state standard enthalpy and independent
+Gibbs diagnostics. Literal 1982-row provenance and the unverified separate
+1989-erratum qualification are retained in the four new material profiles.
+Ionic entropy remains conventional; source disagreements and unstated
+uncertainty are not reconciled. No plant recovery, rate, side-reaction demand,
+deaeration, filtration or operating heat duty follows from these endpoints.
+
+The `precious_metal_recovery` example supplies explicit finite leach or mixed
+cementation stages. `xtask/tests/mining_precious_metal_sources.rs` compiles the
+actual packs, checks all 16 new facts and four H/G/S balances, shared-zinc
+refusal, source-mass closure, stage separation and source applicability.
+
 ## Source-bound ideal gas/aqueous partition
 
 `stoichiometry::thermodynamics::gas_liquid::IdealGasLiquidPartition` binds an

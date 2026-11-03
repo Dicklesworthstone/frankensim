@@ -1,5 +1,9 @@
 # Mineral processing: public sources and callable physics
 
+Native-silver cyanidation and shared-zinc gold/silver cementation now have
+matched material references, finite-inventory reactions and a runnable
+source-pack consumer; see [precious-metal recovery](MINING_PRECIOUS_METALS.md).
+
 These source profiles provide reusable mineral
 and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and
