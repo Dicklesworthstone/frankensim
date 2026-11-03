@@ -7,9 +7,60 @@
 
 use super::{ModalCouplingError, SharedCavity, network_invalid};
 use crate::render::schedule::force::coupled::impulse::ModalImpulseReceipt;
+use crate::render::schedule::force::coupled::impulse::impact::{
+    ModalImpactError, ModalImpactReceipt, PreparedModalImpact,
+};
 use fs_exec::CancelGate;
 
 impl SharedCavity {
+    /// Resolve one frictionless impact between the original moving surfaces.
+    /// Prepare its physical attachments against [`Self::network`]. A free-mass
+    /// striker can be an ordinary surface with zero cavity-volume projection;
+    /// its finite inertia then participates in the same reciprocal impact.
+    ///
+    /// Surface motion changes immediately. The finite neck, viscous auxiliaries,
+    /// compression, thermal/molecular and radiation histories, volume and clock
+    /// stay continuous and respond through subsequent native cavity evolution.
+    /// Actual physical flow and every original native jump gate succeed before
+    /// either surface publishes. Acoustic auxiliary coordinates cannot be used
+    /// as mechanical contact partners. No shock, contact locator or simultaneous
+    /// impact law is implied; the original scalar Newton-law limits apply.
+    pub fn apply_surface_impact(
+        &mut self,
+        impact: &PreparedModalImpact,
+        gate: &CancelGate,
+    ) -> Result<ModalImpactReceipt, ModalImpactError> {
+        poll(gate)?;
+        if impact
+            .components()
+            .iter()
+            .any(|&index| index >= self.neck_component)
+        {
+            return Err(network_invalid(
+                "cavity impact must attach only to original physical surfaces",
+            )
+            .into());
+        }
+        let column = &self.column;
+        let surface_modes = self.surface_modes;
+        let neck_shape = self.source.neck_volume_shape_m2_per_sqrt_kg();
+        let neck_area = self.source.neck_area_m2();
+        self.system
+            .apply_normal_impact_with_admission(impact, gate, |components| {
+                validate_volume_flows(
+                    components
+                        .iter()
+                        .flat_map(|model| model.states())
+                        .map(|state| state.velocity_m_sqrt_kg_per_s),
+                    column,
+                    surface_modes,
+                    neck_shape,
+                    neck_area,
+                    gate,
+                )
+            })
+    }
+
     /// Apply simultaneous surface momentum inputs and an exterior neck pressure
     /// impulse without restarting the coupled cavity or advancing its clock.
     ///
@@ -123,34 +174,53 @@ impl SharedCavity {
         // publication. Reusing its arithmetic also catches a large normalized
         // intermediate that cannot be represented even if a later area scale
         // would make the physical result small.
-        let mut surface_rate = 0.0;
-        for (index, state) in self
-            .system
-            .components()
-            .iter()
-            .flat_map(|component| component.states())
-            .take(self.surface_modes)
-            .enumerate()
-        {
-            if index % 64 == 0 {
-                poll(gate)?;
-            }
-            surface_rate +=
-                self.column[index] * (state.velocity_m_sqrt_kg_per_s + self.external[index]);
-            if !surface_rate.is_finite() {
-                return Err(network_invalid("cavity impulse surface flow overflow"));
-            }
-        }
-        let neck = self.system.components()[self.neck_component].states()[0];
-        let neck_flow = self.source.neck_volume_shape_m2_per_sqrt_kg()
-            * (neck.velocity_m_sqrt_kg_per_s + self.external[self.surface_modes]);
-        if !(surface_rate * self.source.neck_area_m2()).is_finite() || !neck_flow.is_finite() {
-            return Err(network_invalid(
-                "cavity impulse physical volume flow overflow",
-            ));
-        }
+        validate_volume_flows(
+            self.system
+                .components()
+                .iter()
+                .flat_map(|component| component.states())
+                .enumerate()
+                .map(|(index, state)| state.velocity_m_sqrt_kg_per_s + self.external[index]),
+            &self.column,
+            self.surface_modes,
+            self.source.neck_volume_shape_m2_per_sqrt_kg(),
+            self.source.neck_area_m2(),
+            gate,
+        )?;
         self.system.apply_modal_impulse(&self.external, gate)
     }
+}
+
+fn validate_volume_flows(
+    mut velocities: impl Iterator<Item = f64>,
+    column: &[f64],
+    surface_modes: usize,
+    neck_shape: f64,
+    neck_area: f64,
+    gate: &CancelGate,
+) -> Result<(), ModalCouplingError> {
+    let mut surface_rate = 0.0;
+    for (index, &shape) in column.iter().take(surface_modes).enumerate() {
+        if index % 64 == 0 {
+            poll(gate)?;
+        }
+        let velocity = velocities
+            .next()
+            .ok_or_else(|| network_invalid("cavity impulse surface layout changed"))?;
+        surface_rate += shape * velocity;
+        if !surface_rate.is_finite() {
+            return Err(network_invalid("cavity impulse surface flow overflow"));
+        }
+    }
+    let neck_velocity = velocities
+        .next()
+        .ok_or_else(|| network_invalid("cavity impulse neck layout changed"))?;
+    if !(surface_rate * neck_area).is_finite() || !(neck_shape * neck_velocity).is_finite() {
+        return Err(network_invalid(
+            "cavity impulse physical volume flow overflow",
+        ));
+    }
+    Ok(())
 }
 
 fn pressure_momentum(shape: f64, pressure_impulse: f64) -> Result<f64, ModalCouplingError> {

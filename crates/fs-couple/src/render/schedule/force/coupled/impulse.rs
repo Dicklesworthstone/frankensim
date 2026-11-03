@@ -13,6 +13,9 @@ use super::{
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 
+/// Reciprocal single-contact impacts on continuing physical modal ports.
+pub mod impact;
+
 /// Accepted external work at one instantaneous momentum transfer.
 /// This is separate from the preceding finite-time frame and port window.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,9 +69,24 @@ impl CoupledModalSystem {
         impulses: &[f64],
         gate: Option<&CancelGate>,
     ) -> Result<ModalImpulseReceipt, ModalCouplingError> {
+        self.stage_scaled_modal_impulse(impulses, 1.0, gate)
+    }
+
+    // A prepared contact owns its complete reciprocal column. Scaling it here
+    // reuses the original native scratch and gates without a second impulse
+    // vector, state clone, or unit-impulse simulation.
+    fn stage_scaled_modal_impulse(
+        &mut self,
+        impulses: &[f64],
+        impulse_scale: f64,
+        gate: Option<&CancelGate>,
+    ) -> Result<ModalImpulseReceipt, ModalCouplingError> {
         poll(gate)?;
         self.require_time_domain()?;
-        if impulses.len() != self.mode_count() || impulses.iter().any(|j| !j.is_finite()) {
+        if impulses.len() != self.mode_count()
+            || impulses.iter().any(|j| !j.is_finite())
+            || !impulse_scale.is_finite()
+        {
             return Err(invalid(
                 "modal impulse must cover the complete finite mechanical basis",
             ));
@@ -90,10 +108,14 @@ impl CoupledModalSystem {
                     poll(gate)?;
                 }
                 let before = old.velocity_m_sqrt_kg_per_s;
-                let after = finite(before + impulses[index])?;
+                let applied = finite(impulse_scale * impulses[index])?;
+                if applied == 0.0 && impulse_scale != 0.0 && impulses[index] != 0.0 {
+                    return Err(invalid("modal impulse projection loses nonzero momentum"));
+                }
+                let after = finite(before + applied)?;
                 let change = finite(after - before)?;
-                let residual = finite(change - impulses[index])?;
-                let scale = impulses[index].abs().max(change.abs());
+                let residual = finite(change - applied)?;
+                let scale = applied.abs().max(change.abs());
                 let relative = if scale == 0.0 {
                     0.0
                 } else {
@@ -111,7 +133,7 @@ impl CoupledModalSystem {
                 // opposite large works can leave only the quadratic kick energy.
                 let mean = Dd::from_f64(0.5 * before) + Dd::from_f64(0.5 * after);
                 kinetic.add(Dd::from_f64(change) * mean)?;
-                work.add(Dd::from_f64(impulses[index]) * mean)?;
+                work.add(Dd::from_f64(applied) * mean)?;
                 // Subtract before multiplying: large kinetic backgrounds or
                 // cancelling modal works cannot hide a lost momentum input.
                 defect.add(Dd::from_f64(residual) * mean)?;
