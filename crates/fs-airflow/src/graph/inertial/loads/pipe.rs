@@ -51,6 +51,9 @@ pub(super) struct FlowInterval {
     pub density_kg_m3: f64,
     pub pressures_pa: [f64; 2],
     pub exterior_pressure_pa: f64,
+    // Internal assembly cuts carry equal/opposite interface tractions; omit
+    // them analytically from its total, retaining all fluid storage and weight.
+    pub exposed_ports: [bool; 2],
     pub gravity_m_s2: [f64; 3],
 }
 
@@ -126,6 +129,18 @@ impl PipeLoadGeometry {
         })
     }
 
+    // Normal points OUT of the point junction and INTO this adjacent pipe.
+    pub(super) fn junction_port(&self, at_start: bool) -> ([f64; 3], [f64; 3]) {
+        if at_start {
+            (self.vertices_m[0], self.tangents[0])
+        } else {
+            (
+                *self.vertices_m.last().unwrap(),
+                mul(self.tangents[1], -1.0),
+            )
+        }
+    }
+
     // The hydraulic trial supplies its actual interval, datum and refreshed
     // body-force density. No source query, flow root or second step occurs here.
     pub(super) fn evaluate(
@@ -142,6 +157,7 @@ impl PipeLoadGeometry {
             density_kg_m3: rho,
             pressures_pa: [p0, p1],
             exterior_pressure_pa: exterior,
+            exposed_ports: exposed,
             gravity_m_s2: g,
         } = flow;
         if !positive(dt)
@@ -155,26 +171,43 @@ impl PipeLoadGeometry {
         }
         // The flux is EVEN in Q: reversing both velocity and mass flux preserves
         // the outward momentum flux. Squaring average Q loses reversal loading.
-        let mean = 0.5 * q0 + 0.5 * q1;
-        let half_change = 0.5 * q1 - 0.5 * q0;
-        let q2 = number(mean * mean + half_change * (half_change / 3.0))?;
+        let q2 = affine_mean_square([q0, q1])?;
         let flux = number(dt * rho * (q2 / self.area_m2))?;
         let stored = number(rho * (q1 - q0))?;
-        let pressure_in = number(dt * number((p0 - exterior) * self.area_m2)?)?;
-        let pressure_out = number(dt * number((p1 - exterior) * self.area_m2)?)?;
+        let pressure_in = if exposed[0] {
+            number(dt * number((p0 - exterior) * self.area_m2)?)?
+        } else {
+            0.0
+        };
+        let pressure_out = if exposed[1] {
+            number(dt * number((p1 - exterior) * self.area_m2)?)?
+        } else {
+            0.0
+        };
+        let flux_direction = std::array::from_fn(|axis| {
+            (if exposed[1] {
+                self.tangents[1][axis]
+            } else {
+                0.0
+            }) - (if exposed[0] {
+                self.tangents[0][axis]
+            } else {
+                0.0
+            })
+        });
         let outlet_moment = cross(self.chord, self.tangents[1]);
         let mut impulse = sub(
             sub(
                 mul(self.tangents[0], pressure_in),
                 mul(self.tangents[1], pressure_out),
             ),
-            add(
-                mul(sub(self.tangents[1], self.tangents[0]), flux),
-                mul(self.chord, stored),
-            ),
+            add(mul(flux_direction, flux), mul(self.chord, stored)),
         );
         let mut angular = sub(
-            mul(outlet_moment, -pressure_out - flux),
+            mul(
+                outlet_moment,
+                -pressure_out - if exposed[1] { flux } else { 0.0 },
+            ),
             mul(self.line_moment, stored),
         );
         // Local source densities supply weight, while the native reference rho
@@ -209,10 +242,22 @@ impl PipeLoadGeometry {
     }
 }
 
-fn positive(x: f64) -> bool {
+pub(super) fn affine_mean_square([a, b]: [f64; 2]) -> Result<f64> {
+    let mean = 0.5 * a + 0.5 * b;
+    let half_change = 0.5 * b - 0.5 * a;
+    number(mean * mean + half_change * (half_change / 3.0))
+}
+
+pub(super) fn affine_mean_cube([a, b]: [f64; 2]) -> Result<f64> {
+    let mean = 0.5 * a + 0.5 * b;
+    let half_change = 0.5 * b - 0.5 * a;
+    number(mean * number(mean * mean + half_change * half_change)?)
+}
+
+pub(super) fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0
 }
-fn number(x: f64) -> Result<f64> {
+pub(super) fn number(x: f64) -> Result<f64> {
     if x.is_finite() {
         Ok(x)
     } else {
@@ -221,32 +266,32 @@ fn number(x: f64) -> Result<f64> {
         ))
     }
 }
-fn vector(v: [f64; 3]) -> Result<[f64; 3]> {
+pub(super) fn vector(v: [f64; 3]) -> Result<[f64; 3]> {
     for x in v {
         number(x)?;
     }
     Ok(v)
 }
-fn check(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
+pub(super) fn check(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     if cancelled() {
         Err(PipeLoadError::Cancelled)
     } else {
         Ok(())
     }
 }
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(super) fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|i| a[i] - b[i])
 }
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(super) fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|i| a[i] + b[i])
 }
-fn mul(a: [f64; 3], s: f64) -> [f64; 3] {
+pub(super) fn mul(a: [f64; 3], s: f64) -> [f64; 3] {
     a.map(|x| x * s)
 }
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub(super) fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     (0..3).map(|i| a[i] * b[i]).sum()
 }
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(super) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],

@@ -9,8 +9,9 @@
 //!
 //! Geometry is fixed during the native step. The wrench can drive a mechanical
 //! load case or a one-way mechanical step; moving pipes require a relative-flow
-//! momentum/energy owner. Different branch areas do not supply an unresolved
-//! reducer or junction model. All coordinates use one caller-declared inertial
+//! momentum/energy owner. Junction loads retain the native common static
+//! pressure; reducer recovery and mixing/thermal closure remain external.
+//! All coordinates use one caller-declared inertial
 //! Cartesian frame; no rotation or frame conversion is inferred.
 
 use super::{InertialGraphError, InertialGraphTrial, checkpoint};
@@ -19,31 +20,18 @@ use fs_qty::Pressure;
 
 mod pipe;
 pub use pipe::{PipeLoad, PipeLoadError, PipeLoadGeometry};
+mod junction;
+pub use junction::JunctionLoad;
+mod assembly;
+pub use assembly::HydraulicAssemblyLoads;
 
 impl InertialGraphTrial {
-    /// Resolve the fluid's net load on one original pipe, about `about_m`.
-    ///
-    /// The supplied path runs from the branch's `from` node to its `to` node.
-    /// `exterior_pressure` is the uniform surrounding interval-average pressure in the
-    /// same datum as the original nodal pressures. It supplies the exterior
-    /// pressure traction; an arbitrary gauge offset cannot create a pipe load.
-    /// Original gravity densities are retained after constitutive rechecking.
-    /// The path must match original length/area and, when bound, gravity's
-    /// original endpoints and every distributed section.
-    ///
-    /// Flux uses the exact integral of Q(t)^2 for the native affine trajectory,
-    /// including both halves of a reversal. This is a time reconstruction of
-    /// the midpoint method, not a higher-order fluid solution. The returned
-    /// candidate load may be used in coupling trials; publish it only after
-    /// the SAME trial passes `accept`'s impulse and energy gates.
-    pub fn pipe_load(
+    fn admit_pipe(
         &self,
         cx: &Cx<'_>,
         branch: usize,
         geometry: &PipeLoadGeometry,
-        exterior_pressure: Pressure,
-        about_m: [f64; 3],
-    ) -> Result<PipeLoad, InertialGraphError> {
+    ) -> Result<(), InertialGraphError> {
         checkpoint(cx)?;
         let c = &self.initial.compiled;
         let original = c.branches.get(branch).ok_or(InertialGraphError::Invalid(
@@ -76,6 +64,47 @@ impl InertialGraphTrial {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Resolve the fluid's net load on one original pipe, about `about_m`.
+    ///
+    /// The supplied path runs from the branch's `from` node to its `to` node.
+    /// `exterior_pressure` is the uniform surrounding interval-average pressure in the
+    /// same datum as the original nodal pressures. It supplies the exterior
+    /// pressure traction; an arbitrary gauge offset cannot create a pipe load.
+    /// Original gravity densities are retained after constitutive rechecking.
+    /// The path must match original length/area and, when bound, gravity's
+    /// original endpoints and every distributed section.
+    ///
+    /// Flux uses the exact integral of Q(t)^2 for the native affine trajectory,
+    /// including both halves of a reversal. This is a time reconstruction of
+    /// the midpoint method, not a higher-order fluid solution. The returned
+    /// candidate load may be used in coupling trials; publish it only after
+    /// the SAME trial passes `accept`'s impulse and energy gates.
+    pub fn pipe_load(
+        &self,
+        cx: &Cx<'_>,
+        branch: usize,
+        geometry: &PipeLoadGeometry,
+        exterior_pressure: Pressure,
+        about_m: [f64; 3],
+    ) -> Result<PipeLoad, InertialGraphError> {
+        self.pipe_load_with_ports(cx, branch, geometry, exterior_pressure, about_m, [true; 2])
+    }
+
+    fn pipe_load_with_ports(
+        &self,
+        cx: &Cx<'_>,
+        branch: usize,
+        geometry: &PipeLoadGeometry,
+        exterior_pressure: Pressure,
+        about_m: [f64; 3],
+        exposed_ports: [bool; 2],
+    ) -> Result<PipeLoad, InertialGraphError> {
+        self.admit_pipe(cx, branch, geometry)?;
+        let c = &self.initial.compiled;
+        let edge = &c.topology.branches()[branch];
         let report = &self.report;
         let rho = c.reference_density.value();
         let result = geometry.evaluate(
@@ -91,6 +120,7 @@ impl InertialGraphTrial {
                     report.average_pressures_pa[edge.to],
                 ],
                 exterior_pressure_pa: exterior_pressure.value(),
+                exposed_ports,
                 gravity_m_s2: self
                     .gravity
                     .as_ref()

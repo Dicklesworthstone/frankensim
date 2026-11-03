@@ -21,6 +21,7 @@ fn flow(q: [f64; 2]) -> FlowInterval {
         density_kg_m3: 3.0,
         pressures_pa: [10.0, 4.0],
         exterior_pressure_pa: 2.0,
+        exposed_ports: [true; 2],
         gravity_m_s2: [0.0; 3],
     }
 }

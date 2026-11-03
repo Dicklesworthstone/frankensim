@@ -2758,6 +2758,42 @@ balance. This is a slender plug-flow load on a fixed control volume, with no
 inferred shaft torque, swirl, reducer/junction closure or moving-pipe feedback.
 Publish candidate loads only after that same hydraulic trial is accepted.
 
+### Multiport fitting and complete hydraulic assembly loads
+
+`InertialGraphTrial::junction_load` now resolves each original zero-storage
+junction's force, torque and impulses from every incident pipe. A starting
+pipe's outward junction normal is its first tangent and its outward flow is Q;
+an ending pipe uses minus its last tangent and -Q. The endpoint positions must
+coincide, the original area and length remain admitted, and both endpoint flow
+balances must close. No additional junction mass, gravity load or species/
+enthalpy transport is created. The common STATIC pressure remains the original
+graph approximation; unequal areas do not imply ideal reducer recovery.
+
+Each junction retains signed outward kinetic-energy transport
+`integral sum(rho*q_out^3/(2*A^2)) dt`, using the exact cubic integral of the
+same affine native flow trajectory. The quadratic momentum integral remains
+nonzero through a zero-average reversal. Signed energy transport is an
+unresolved physical term, not a passive-loss claim or an automatic heat credit.
+Positive and negative terms require their own pressure/thermal closure; equal-
+speed turning can close this term naturally. Per-junction values remain visible
+even when their assembly sum cancels.
+
+`assembly_loads` retains original branch-order pipe loads and node-order fitting
+loads. Its total omits internal endpoint tractions/fluxes analytically before
+summation, retaining all stored-fluid acceleration and original local weight.
+It can therefore recover small net support loads without subtracting large
+internal pressure forces. Apply either the separate component loads or their
+total, not both. Free nodes are internal; pressure nodes remain external stream
+cuts unless explicitly declared enclosed pressure datums. Such a declaration
+means no external stream and independently requires endpoint continuity.
+
+`accept_with_assembly_loads` publishes the hydraulic state and load package only
+after the original impulse, mechanical-energy and cancellation gates pass.
+The same fixed-geometry and one-way mechanical scope as pipe loads applies.
+Native regression kernels exercise original descriptor startup and an actual
+articulated support impulse, equal-speed turning, unequal-area signed energy,
+reversal/subdivision, closed-loop fluid spin recoil and exterior-load cancellation.
+
 ### Joint branched momentum and finite enthalpy convection
 
 With `transient-transport`,
