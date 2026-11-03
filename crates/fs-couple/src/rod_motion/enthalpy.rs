@@ -72,6 +72,15 @@ pub struct RodAngularViscosity<'a> {
     pub torsional: Option<RodTorsionalViscosity<'a>>,
 }
 
+impl<'a> From<Option<RodTorsionalViscosity<'a>>> for RodAngularViscosity<'a> {
+    fn from(torsional: Option<RodTorsionalViscosity<'a>>) -> Self {
+        Self {
+            bending: None,
+            torsional,
+        }
+    }
+}
+
 /// Existing joule-coordinate nonlinear solve with independent physical gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RodThermoelasticSolve {

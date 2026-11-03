@@ -22136,6 +22136,14 @@ the complete thermal endpoint. Source, thermal, energy or cancellation refusal
 leaves both original histories unchanged. This adds no material law, loss
 ratio, phase transition, deformation-dependent heat geometry or second clock.
 
+The existing `step_heat_assembly` and `step_spatial_heat_assembly` entrypoints
+accept the same independent angular selections while retaining compatibility
+with `Option<RodTorsionalViscosity>`. Complete source contact, radiation,
+finite-coolant and reservoir transport therefore shares the original motion,
+finite-cell energy solve and atomic publication with both intrinsic losses.
+Additional-link conductances remain live assembly outputs at every thermal
+trial; their cold admission values are never substituted for evolving physics.
+
 ## Compensated translation on native rod trajectories
 
 Native rod drift retains one private world-coordinate translation remainder
