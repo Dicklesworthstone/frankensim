@@ -1,6 +1,7 @@
 use super::*;
 
 mod molecular;
+mod molecular_coupled;
 mod reactive;
 mod reservoir;
 use crate::compressible::{AxisBoundaries, Euler2d, FrozenGas, SIDES, State};

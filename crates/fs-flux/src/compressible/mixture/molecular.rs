@@ -19,6 +19,9 @@ use fs_gas::multicomponent::{MixtureGas, NormalPrimitive};
 use fs_qty::Time;
 use interval::{Action, Stage, parabolic};
 
+mod coupled;
+pub use coupled::{MolecularEuler2d, MolecularStepControl, MolecularStepReport};
+
 // The shared face/capture loops require only cancellation and invalid-input
 // cases. Remaining trait methods retain the original molecular refusal types.
 impl cartesian::Failure for DissipationError {

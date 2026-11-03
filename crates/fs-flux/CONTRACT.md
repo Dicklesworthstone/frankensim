@@ -1831,6 +1831,43 @@ stack scratch and supplied transport-law storage/evaluation allocations are
 outside this numerical-buffer budget. No whole-process/provider memory or
 generic material-law allocation-free claim is made.
 
+`mixture::molecular::MolecularEuler2d` consumes the original mixture field and
+its already-prepared molecular operator without requiring chemistry. It composes
+D(dt/2), A(dt), D(dt/2) over one accepted physical duration. `step_with_forcing`
+uses the existing held acceleration/force-density transaction in the middle;
+the actual evolving species sum remains the source-stage density. Molecular
+species enthalpy, Fourier heat and stress work retain their original owners.
+There is no separate reaction, heat-release or viscous-heating source.
+
+A shortened central interval or refused phase restarts both molecular halves
+from the original accepted field. Forced paths also admit the complete endpoint
+Mach and acoustic rate after the second molecular half. The published report
+and face loads include all three phases, with body impulse/work separate from
+boundary exchange. Absolute chemical-energy residuals apply the original species
+references to conservative differences, so source work is subtracted once.
+The borrowed Euler metadata describes the middle phase; the molecular operator's
+published report describes the second half. Final cancellation or exhausted work
+preserves both owners' accepted fields, reports, clock and face loads.
+
+Construction admits the exact original gas, grid, boundary conditions and held
+reservoir metadata before preparing the duplicate field. Only immutable owner
+access is exposed. The stored total byte budget includes both fields, prepared
+molecular buffers, combined boundary buffers, incoming excess capacity and
+retained reservoir rows. Supplied forcing scratch counts even for an exactly
+zero source; zero forcing otherwise preserves the ordinary path's bits. Buffers
+are prepared once and reused across retries, with the same immutable-source,
+bounded-stack and provider-allocation exclusions as the standalone operator.
+
+Six focused G0/G1/G3/G4 tests exercise an accelerating advective/diffusive species
+wave with analytic velocity, signed work and impulse; complete reservoir species,
+momentum and chemical-energy balance; common-duration replay; late cancellation
+and work refusal; zero-source/budget behavior; and molecular cooling that violates
+the force Mach bound only after the admitted central transport. The manufactured
+wave uses identical occupied-species caloric/formation laws to retain uniform
+temperature, while the reservoir case uses unequal calorics and references.
+These checks do not certify general temporal order, entropy stability or a
+calibrated transport model.
+
 `ReactingEuler2d::step_with_dissipation` composes D(dt/2), C(dt/2), A(dt),
 C(dt/2), D(dt/2). Heat-driven acoustic shortening restarts all five phases at
 one common interval. Final molecular heating must retain the chemistry source
