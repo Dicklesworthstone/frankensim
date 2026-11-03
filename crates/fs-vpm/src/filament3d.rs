@@ -22,6 +22,10 @@
 
 use fs_blake3::hash_domain;
 
+#[path = "filament3d/advection.rs"]
+mod advection;
+pub use advection::SelfInducedShed;
+
 /// Typed refusal (workspace convention; the 3-D filament lane's own —
 /// the 2-D lane keeps its `VpmError`, untouched).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,8 +196,8 @@ impl FilamentWake {
     }
 
     /// Shed one row: capture the CURRENT bound circulations and convect
-    /// every existing node by `convect` (rigid prescribed step at this
-    /// tier; free-wake self-induction is not implemented).
+    /// every existing node by `convect` (rigid prescribed step). Use
+    /// [`Self::shed_self_induced`] to resolve motion induced by the wake.
     ///
     /// # Errors
     /// `filament-shed-invalid` (gamma count/finiteness),

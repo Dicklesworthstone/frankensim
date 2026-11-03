@@ -340,6 +340,50 @@ wakes through repeated coarsening and length rescaling. A late incompatible pair
 checks atomic refusal after an earlier pair is prepared. Analytical rectangular
 pairs check independently scaled area/circulation, including signed cancellation.
 
+## Self-induced attached near-wake motion
+
+`FilamentWake::shed_self_induced` convects the existing connected near wake
+using its own finite-core Biot–Savart velocity plus a uniform imposed flow,
+then emits the supplied circulation at the fixed lifting line. Each shedding
+interval is `1 / shed_hz` seconds with an explicit positive substep count.
+Every substep evaluates the old source sheet, moves a private midpoint sheet,
+rebuilds its physical edges, and evaluates that midpoint before updating nodes.
+The captured old circulations remain constant during the interval; the supplied
+new circulation enters at its endpoint. The midpoint scheme is second order
+for the smooth held-circulation problem, without an order claim across arbitrary
+discontinuous changes of boundary circulation.
+
+`SelfInducedShed` supplies the emitted positive core radius and the existing
+`WakeCoreEvolutionMode`. Existing base cores remain intact; initial and
+midpoint evaluations use their elapsed age plus the stage fraction. On
+publication existing row ages advance once and the emitted row has age zero.
+Moving shared material vertices transports the filament geometry, including
+line stretching, while preserving every retained quad circulation and nodal
+Kelvin balance. The fixed line can exchange hydrodynamic impulse with the
+wake; full vector impulse conservation is not imposed on this supported system.
+
+Admission includes a conservative direct-work bound covering both RK stages,
+source assembly and node updates even for zero circulation. Every active source
+needs a finite positive core. Both stages limit each full-substep displacement
+against the declared fraction of active core radii and resolved edge lengths.
+Edges exactly zero-length at interval start are newborn edges: the core guard
+applies immediately, and their length joins the edge guard in later intervals.
+This permits finite-core release from the line. Excessive motion refuses and
+can be resolved by increasing the fixed substep count. The guard is a resolution
+condition, not a certified integration-error estimate. Cancellation is checked
+within 256 source-target contributions and before publishing the private
+candidate; any refusal preserves the original state.
+
+This operation is a direct all-pairs near-wake solver. An attached far-field
+interface refuses rather than moving only one end of shared filaments. Images,
+nonuniform external fields, remeshing and resolved viscous tube-strain dynamics
+remain separate. Its focused tests use the independently integrated velocity
+of a rectangular ring: with one span edge fixed, the opposite edge rotates at
+an analytic angular rate. They check second-order temporal refinement,
+circulation reversal, support-relative vector impulse, stage-dependent core
+spreading, three-dimensional frame covariance, uniform transport, repeated
+positive-circulation emission, exact age accounting and transactional refusals.
+
 ## Finite-core connected 3-D wake
 
 `FilamentWake` stores captured **quad strengths**, positive along the current
