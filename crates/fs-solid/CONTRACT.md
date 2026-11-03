@@ -544,6 +544,18 @@ or an accelerating-coordinate model. An inverse-square field sampled at vertices
 retains P1 spatial approximation error and requires explicit resampling if its
 physical owner changes position or time.
 
+`TetLoadGeometry3::assemble_acceleration_with_nodal_reference_density` and
+`TetLoadHistory3::at_with_nodal_reference_density` explicitly bind a positive
+P1 reference-density field instead. They use the same exact cubic mass kernel
+as graded elastic inertia, preserving density-weighted gravity moments and
+the product of spatially varying density and acceleration. Full supported-node
+forces remain available to the original static stress/reaction owner; surface
+and point forces are superposed once. Uniform fields retain the original bits.
+This entry projects a held force for static use; it does not replace the mass
+in the separate `loads3` transient constructors. Three focused G1/G3 regressions
+in `load_history3` cover independent barycentric integration, graded `M*a`,
+weight/torque/reactions, scalar parity and refusals.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,
@@ -3643,6 +3655,16 @@ accepted solid to explicit original reference density and initial nodal velocity
 Consistent `P1ReferenceMass` is prepared once and shared between candidates;
 current volume and viscous deformation do not change mass. Previously relaxed
 or deformed material histories and elapsed time are retained.
+
+`try_new_with_nodal_density` uses the same native reference-mass owner for a
+positive P1 nodal density. It retains the complete original field and exposes
+cell means only as inventory diagnostics. `reference_acceleration_load_n`
+projects acceleration through this exact matrix, including supported rows.
+Candidates share the mass and preserve all accepted Maxwell histories; neither
+viscous deformation nor a new temperature query changes the closed inventory.
+G1/G3 regressions in `tests/hyper_visco_dynamics/nodal_density.rs` cover graded
+gravity/free flight, a relaxed-memory oscillator with analytic recurrence,
+kinetic-loss rollback, uniform bit parity and invalid-input refusal.
 
 `advance` uses the same positive physical interval for the native branch update
 and `BackwardEulerInertia`. The original hyper3 Newton owner assembles material

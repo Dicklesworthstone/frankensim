@@ -2,8 +2,9 @@
 //!
 //! Traction is a world Cartesian polar vector [Pa]; pressure is a scalar [Pa]
 //! acting on the retained reference normals. A declared acceleration uses the
-//! CURRENT problem's uniform/per-element reference density, never a second
-//! unrelated density table. This is external acceleration loading, not an
+//! CURRENT problem's uniform/per-element reference density, or an explicitly
+//! supplied original nodal density through `at_with_nodal_reference_density`.
+//! This is external acceleration loading, not an
 //! accelerating-coordinate formulation: no inertial/Coriolis terms are inferred.
 //! Sampling yields one quasi-static load case with the original thermal/solver
 //! interfaces. It does not integrate mechanical dynamics or update geometry.
@@ -102,8 +103,9 @@ pub struct TetLoadHistory3<'a> {
     pub frames: &'a FrameTree,
 }
 
-/// An endpoint borrows its exact problem as well as its load geometry. Material
-/// density cannot change between acceleration integration and the solve.
+/// An endpoint borrows its exact solve problem as well as its load geometry.
+/// Acceleration forces retain the reference-density projection, including an
+/// explicitly supplied nodal field; the static solve consumes those same forces.
 pub struct TetLoadSample3<'g, 'm, 'p, 's> {
     case: TetLoadCase3<'g, 'm>,
     problem: &'p TetLinearElasticProblem<'s>,
@@ -131,6 +133,41 @@ impl TetLoadHistory3<'_> {
     pub fn at<'g, 'm, 'p, 's>(&self, geometry: &'g TetLoadGeometry3<'m>,
         problem: &'p TetLinearElasticProblem<'s>, time_s: f64, cx: &Cx<'_>)
         -> Result<TetLoadSample3<'g, 'm, 'p, 's>, LoadHistoryError3> {
+        self.at_reference_density(geometry, problem, None, time_s, cx)
+    }
+
+    /// Sample an acceleration history using the original positive P1 nodal
+    /// reference density [kg/m³], with the same exact graded mass integration
+    /// as native linear elasticity. Surface histories, physical frame clocks
+    /// and explicit point forces retain their existing owners and semantics.
+    ///
+    /// Only `Acceleration` and `FixedAcceleration` volume histories are
+    /// accepted. The returned endpoint feeds native static equilibrium,
+    /// including restrained-node forces and reactions. This is force projection;
+    /// it does not bind graded inertia to `begin_transient` or `advance_history`.
+    /// Retain the same original field across heated/deformed snapshots of a
+    /// closed specimen; current-density queries must not replace its inventory.
+    ///
+    /// # Errors
+    /// Invalid history kind, density/acceleration, mesh/source/frame mismatch,
+    /// unrepresentable mass/force or cancellation publishes no partial load.
+    pub fn at_with_nodal_reference_density<'g, 'm, 'p, 's>(
+        &self, geometry: &'g TetLoadGeometry3<'m>,
+        problem: &'p TetLinearElasticProblem<'s>, reference_density_kg_m3: &[f64],
+        time_s: f64, cx: &Cx<'_>,
+    ) -> Result<TetLoadSample3<'g, 'm, 'p, 's>, LoadHistoryError3> {
+        poll(cx)?;
+        if !matches!(self.volume, VolumeHistory3::Acceleration(_) | VolumeHistory3::FixedAcceleration(_)) {
+            return Err(LoadHistoryError3::Invalid("nodal reference density requires an acceleration history"));
+        }
+        self.at_reference_density(geometry, problem, Some(reference_density_kg_m3), time_s, cx)
+    }
+
+    fn at_reference_density<'g, 'm, 'p, 's>(
+        &self, geometry: &'g TetLoadGeometry3<'m>,
+        problem: &'p TetLinearElasticProblem<'s>, reference_density_kg_m3: Option<&[f64]>,
+        time_s: f64, cx: &Cx<'_>,
+    ) -> Result<TetLoadSample3<'g, 'm, 'p, 's>, LoadHistoryError3> {
         poll(cx)?;
         if !time_s.is_finite() || self.surfaces.len() > 1024 {
             return Err(LoadHistoryError3::Invalid("finite time and at most 1024 surface histories required"));
@@ -155,6 +192,12 @@ impl TetLoadHistory3<'_> {
                 }
             });
         }
+        let acceleration_case = |acceleration| match reference_density_kg_m3 {
+            Some(density) => geometry.assemble_acceleration_with_nodal_reference_density(
+                &surfaces, density, acceleration, self.nodal_forces_n, cx),
+            None => geometry.assemble_acceleration(&surfaces, problem.materials,
+                acceleration, self.nodal_forces_n, cx),
+        };
         let case = match self.volume {
             VolumeHistory3::Fixed(value) => geometry.assemble(
                 &surfaces, value, self.nodal_forces_n, cx)?,
@@ -163,11 +206,9 @@ impl TetLoadHistory3<'_> {
                 self.nodal_forces_n, cx)?,
             VolumeHistory3::Acceleration(value) => {
                 let acceleration = sample(value, ACCELERATION_DIMS, self.frames, time_s, cx)?;
-                geometry.assemble_acceleration(&surfaces, problem.materials,
-                    AccelerationField3::Uniform(acceleration), self.nodal_forces_n, cx)?
+                acceleration_case(AccelerationField3::Uniform(acceleration))?
             }
-            VolumeHistory3::FixedAcceleration(value) => geometry.assemble_acceleration(
-                &surfaces, problem.materials, value, self.nodal_forces_n, cx)?,
+            VolumeHistory3::FixedAcceleration(value) => acceleration_case(value)?,
         };
         poll(cx)?;
         Ok(TetLoadSample3 { case, problem, time_s })

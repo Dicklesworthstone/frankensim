@@ -265,3 +265,128 @@ fn g0_fixed_gravity_shares_uniform_history_and_refuses_malformed_spatial_fields(
         assert_eq!(history.at(&g, &p, 0.5, cx).unwrap().nodal_forces_n(), expected.nodal_forces_n());
     });
 }
+
+#[test]
+fn g1_graded_reference_acceleration_matches_cubic_moments_and_native_mass() {
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let rho = [1.0, 2.0, 4.0, 9.0];
+    let acceleration = [[0.0; 3], [2.0, -1.0, 3.0], [-1.0, 4.0, 2.0], [5.0, -3.0, 1.0]];
+    let mat = material(4.0);
+    let problem = TetLinearElasticProblem { nodes_m: &nodes, tetrahedra: &tets,
+        materials: TetMaterialField::Uniform(&mat), fixed_dofs: &[], budget: Default::default() };
+    let frames = FrameTree::new();
+    let history = TetLoadHistory3 { surfaces: &[], nodal_forces_n: &[], frames: &frames,
+        volume: VolumeHistory3::FixedAcceleration(AccelerationField3::PerNode(&acceleration)) };
+    with_cx(|cx| {
+        let geometry = TetLoadGeometry3::new(&nodes, &tets, problem.budget, 4, cx).unwrap();
+        let sample = history.at_with_nodal_reference_density(&geometry, &problem, &rho, 0.0, cx).unwrap();
+        let assembly = problem.assemble_with_nodal_reference_density(&rho, cx).unwrap();
+        let mut mass_action = vec![0.0; 12];
+        assembly.mass.spmv(acceleration.as_flattened(), &mut mass_action);
+        let factorial = [1.0, 1.0, 2.0, 6.0];
+        for node in 0..4 { for c in 0..3 {
+            // Independent exact simplex integral of N_node * rho_P1 * a_P1:
+            // product(p_i!)/6! on the unit tetrahedron for total degree three.
+            let mut expected = 0.0;
+            for i in 0..4 { for j in 0..4 {
+                let mut powers = [0usize; 4];
+                powers[node] += 1; powers[i] += 1; powers[j] += 1;
+                let integral = powers.into_iter().map(|p| factorial[p]).product::<f64>() / 720.0;
+                expected += rho[i] * acceleration[j][c] * integral;
+            } }
+            let actual = force_component(sample.nodal_forces_n(), 3*node+c);
+            close(actual, expected, 2e-15);
+            close(actual, mass_action[3*node+c], 2e-15);
+        } }
+        assert!(force_component(sample.nodal_forces_n(), 0) > 0.05);
+        // A supported node retains the off-diagonal load even though its own
+        // acceleration sample is zero. The complete load precedes elimination.
+        let constrained = TetLinearElasticProblem { fixed_dofs: &[0, 1, 2], ..problem };
+        assert_eq!(history.at_with_nodal_reference_density(&geometry, &constrained, &rho, 0.0, cx)
+            .unwrap().nodal_forces_n(), sample.nodal_forces_n());
+        let element_acceleration = [acceleration];
+        let case = geometry.assemble_acceleration_with_nodal_reference_density(&[], &rho,
+            AccelerationField3::PerElement(&element_acceleration), &[], cx).unwrap();
+        assert_eq!(case.nodal_forces_n(), sample.nodal_forces_n());
+    });
+}
+
+#[test]
+fn g1_graded_gravity_uses_mass_centroid_and_native_static_support_reactions() {
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let rho = [1.0, 2.0, 4.0, 9.0];
+    let mat = material(4.0); let thermal = thermal(); let frames = FrameTree::new();
+    let problem = TetLinearElasticProblem { nodes_m: &nodes, tetrahedra: &tets,
+        materials: TetMaterialField::Uniform(&mat), fixed_dofs: &[0,1,2,3,4,5,6,7,8],
+        budget: Default::default() };
+    let gravity = [0.0, 0.0, -10.0];
+    let source = vector_source(ACCELERATION_DIMS, WORLD, gravity, gravity, OutsideDomainPolicy::Clamp);
+    let history = TetLoadHistory3 { surfaces: &[], nodal_forces_n: &[], frames: &frames,
+        volume: VolumeHistory3::Acceleration(&source) };
+    with_cx(|cx| {
+        let geometry = TetLoadGeometry3::new(&nodes, &tets, problem.budget, 4, cx).unwrap();
+        let sample = history.at_with_nodal_reference_density(&geometry, &problem, &rho, 0.5, cx).unwrap();
+        let fixed = TetLoadHistory3 { volume: VolumeHistory3::FixedAcceleration(
+            AccelerationField3::Uniform(gravity)), ..history };
+        assert_eq!(fixed.at_with_nodal_reference_density(&geometry, &problem, &rho, 0.5, cx)
+            .unwrap().nodal_forces_n(), sample.nodal_forces_n());
+        let (force, moment) = sample.resultant([0.0; 3], cx).unwrap();
+        close(force[2], -20.0/3.0, 3e-15);
+        close(moment[0], -5.0/3.0, 1e-15);
+        close(moment[1], 1.5, 1e-15);
+        // Equal cell mean preserves total weight but would put the force at
+        // (1/4,1/4,1/4), erasing this physical first-moment difference.
+        let uniform = history.at(&geometry, &problem, 0.5, cx).unwrap().resultant([0.0; 3], cx).unwrap();
+        close(uniform.0[2], force[2], 3e-15);
+        assert!((uniform.1[1] - moment[1]).abs() > 0.1);
+        let solution = sample.solve(TetThermalStrainField::Uniform(&thermal), Default::default(),
+            ContentHash([9; 32]), 0.01, cx).unwrap();
+        let mut support_moment = [0.0; 3];
+        for (x, r) in nodes.iter().zip(&solution.support_reactions_n) {
+            support_moment[0] += x[1]*r[2] - x[2]*r[1];
+            support_moment[1] += x[2]*r[0] - x[0]*r[2];
+            support_moment[2] += x[0]*r[1] - x[1]*r[0];
+        }
+        for c in 0..3 {
+            close(solution.support_reactions_n.iter().map(|r| r[c]).sum::<f64>() + force[c], 0.0, 1e-8);
+            close(support_moment[c] + moment[c], 0.0, 1e-8);
+        }
+    });
+}
+
+#[test]
+fn g0_graded_acceleration_retains_uniform_bits_and_refuses_invalid_inventory() {
+    let mesh = block([1; 3], [1.0; 3]); let mat = material(2.0); let frames = FrameTree::new();
+    let problem = TetLinearElasticProblem { nodes_m: &mesh.nodes, tetrahedra: &mesh.tets,
+        materials: TetMaterialField::Uniform(&mat), fixed_dofs: &[], budget: Default::default() };
+    let history = TetLoadHistory3 { surfaces: &[], nodal_forces_n: &[(1, 7.0)], frames: &frames,
+        volume: VolumeHistory3::FixedAcceleration(AccelerationField3::Uniform([1.0, -2.0, -9.80665])) };
+    let density = vec![2.0; mesh.nodes.len()];
+    with_cx(|cx| {
+        let geometry = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, problem.budget, 100, cx).unwrap();
+        let expected = history.at(&geometry, &problem, 0.0, cx).unwrap();
+        assert_eq!(history.at_with_nodal_reference_density(&geometry, &problem, &density, 0.0, cx)
+            .unwrap().nodal_forces_n(), expected.nodal_forces_n());
+        assert!(history.at_with_nodal_reference_density(&geometry, &problem, &[], 0.0, cx).is_err());
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut values = density.clone(); values[1] = bad;
+            assert!(history.at_with_nodal_reference_density(&geometry, &problem, &values, 0.0, cx).is_err());
+        }
+        let tiny = vec![f64::from_bits(1); density.len()];
+        assert!(history.at_with_nodal_reference_density(&geometry, &problem, &tiny, 0.0, cx).is_err());
+        let unrelated = TetLoadHistory3 { volume: VolumeHistory3::Fixed(VolumeLoad3::None), ..history };
+        assert!(unrelated.at_with_nodal_reference_density(&geometry, &problem, &density, 0.0, cx).is_err());
+        let gate = fs_exec::CancelGate::new_clock_free(); gate.request();
+        fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
+            let stopped = fs_exec::Cx::new(&gate, arena, fs_exec::StreamKey {
+                seed: 58, kernel_id: 58, tile: 0, iteration: 0,
+            }, fs_exec::Budget::INFINITE, fs_exec::ExecMode::Deterministic);
+            assert!(matches!(history.at_with_nodal_reference_density(&geometry, &problem, &density, 0.0, &stopped),
+                Err(LoadHistoryError3::Cancelled)));
+        });
+        assert_eq!(history.at_with_nodal_reference_density(&geometry, &problem, &density, 0.0, cx)
+            .unwrap().nodal_forces_n(), expected.nodal_forces_n());
+    });
+}

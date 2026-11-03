@@ -35,6 +35,7 @@ pub struct FiniteViscoTetMotion<'a> {
     solid: FiniteViscoTetSolid<'a>,
     velocity_mps: Vec<[f64; 3]>,
     reference_density_kg_m3: Arc<[f64]>,
+    reference_nodal_density_kg_m3: Option<Arc<[f64]>>,
     mass: Arc<P1ReferenceMass>,
 }
 
@@ -85,6 +86,54 @@ impl<'a> FiniteViscoTetMotion<'a> {
             solid,
             velocity_mps: velocity_mps.to_vec(),
             reference_density_kg_m3: Arc::from(reference_density_kg_m3),
+            reference_nodal_density_kg_m3: None,
+            mass: Arc::new(mass),
+        })
+    }
+
+    /// Bind positive P1 nodal reference density to the original momentum owner.
+    ///
+    /// The shared consistent mass integrates `rho*N_a*N_b` exactly. Cell means
+    /// remain inventory diagnostics; they do not replace the graded mass matrix.
+    /// The accepted solid's deformation, elapsed time and every Maxwell branch
+    /// history are retained. Density is an authored reference inventory, not a
+    /// new material-source claim, and stays fixed through subsequent motion.
+    ///
+    /// # Errors
+    /// Invalid density/velocity, unrepresentable reference mass, or cancellation.
+    pub fn try_new_with_nodal_density(
+        solid: FiniteViscoTetSolid<'a>,
+        reference_nodal_density_kg_m3: &[f64],
+        velocity_mps: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteViscoTetError> {
+        checkpoint(cx)?;
+        if velocity_mps.len() != solid.displacement_m.len()
+            || velocity_mps
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid(
+                "one finite initial velocity per original node required",
+            ));
+        }
+        let (mass, means) = P1ReferenceMass::from_nodal_density(
+            solid
+                .elements
+                .iter()
+                .map(|element| (element.nodes, element.volume)),
+            reference_nodal_density_kg_m3,
+            solid.displacement_m.as_flattened().len(),
+            cx,
+        )
+        .map_err(inertia_error)?;
+        checkpoint(cx)?;
+        Ok(Self {
+            solid,
+            velocity_mps: velocity_mps.to_vec(),
+            reference_density_kg_m3: Arc::from(means),
+            reference_nodal_density_kg_m3: Some(Arc::from(reference_nodal_density_kg_m3)),
             mass: Arc::new(mass),
         })
     }
@@ -95,11 +144,61 @@ impl<'a> FiniteViscoTetMotion<'a> {
     pub fn velocity_mps(&self) -> &[[f64; 3]] {
         &self.velocity_mps
     }
+    /// Reference cell means in original tetrahedron order. Cellwise bindings
+    /// retain their supplied values; graded bindings retain their complete
+    /// field separately because means alone do not reproduce their inertia.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
         &self.reference_density_kg_m3
     }
+    /// Complete original nodal field, or None for the cellwise-density model.
+    pub fn reference_nodal_density_kg_m3(&self) -> Option<&[f64]> {
+        self.reference_nodal_density_kg_m3.as_deref()
+    }
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+
+    /// Project a P1 acceleration field through the actual reference mass, M*a.
+    ///
+    /// One world acceleration [m/s²] per original node gives the exact nodal
+    /// load [N] for the retained density, including uniform gravity on a graded
+    /// body. Pass these held loads to `advance` without adding the same force
+    /// again as a body-force density. Evolving field values, potential and
+    /// tangent remain the external field owner's responsibility.
+    ///
+    /// # Errors
+    /// Wrong shape, nonfinite acceleration/force, or cancellation.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, FiniteViscoTetError> {
+        checkpoint(cx)?;
+        if acceleration_m_s2.len() != self.velocity_mps.len()
+            || acceleration_m_s2
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid(
+                "one finite acceleration vector per original node required",
+            ));
+        }
+        let forces = self
+            .mass
+            .action(acceleration_m_s2.as_flattened(), cx)
+            .map_err(inertia_error)?;
+        let mut loads = Vec::with_capacity(forces.len());
+        for (dof, force) in forces.into_iter().enumerate() {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if force != 0.0 {
+                loads.push((dof, force));
+            }
+        }
+        checkpoint(cx)?;
+        Ok(loads)
     }
 
     /// Advance one positive physical interval with absolute supports and held
@@ -165,6 +264,10 @@ impl<'a> FiniteViscoTetMotion<'a> {
                 solid: step.solid,
                 velocity_mps,
                 reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                reference_nodal_density_kg_m3: self
+                    .reference_nodal_density_kg_m3
+                    .as_ref()
+                    .map(Arc::clone),
                 mass: Arc::clone(&self.mass),
             },
             equilibrium: step.equilibrium,

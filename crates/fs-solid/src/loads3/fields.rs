@@ -11,6 +11,12 @@
 use super::*;
 use crate::linear3::{TetMaterialField, p1_tet_mass_scale};
 
+#[derive(Clone, Copy)]
+enum AccelerationDensity3<'a> {
+    Material(TetMaterialField<'a>),
+    NodalReference(&'a [f64]),
+}
+
 /// P1 surface fields in the canonical node order of each selected `LoadFace3`.
 /// The outer value array follows `faces`; shared vertices need not share values.
 #[derive(Debug, Clone, Copy)]
@@ -74,11 +80,55 @@ impl<'m> TetLoadGeometry3<'m> {
         &'g self, surfaces: &[SurfaceLoad3<'_>], materials: TetMaterialField<'_>,
         acceleration: AccelerationField3<'_>, nodal: &[(usize, f64)], cx: &Cx<'_>,
     ) -> Result<TetLoadCase3<'g, 'm>, LoadError3> {
+        self.assemble_acceleration_density(surfaces, AccelerationDensity3::Material(materials),
+            acceleration, nodal, cx)
+    }
+
+    /// Integrate acceleration against a positive P1 reference-density field.
+    ///
+    /// The original nodal density [kg/m³] uses the same interpolation and exact
+    /// cubic mass kernel as `TetLinearElasticProblem::assemble_with_nodal_reference_density`.
+    /// Uniform or P1 acceleration [m/s²] therefore produces the full consistent
+    /// `M*a`, including supported-node forces and density-weighted moments.
+    /// The field is authored reference inventory, not a current-density refresh
+    /// or material-source claim. Surface and point forces are superposed once.
+    ///
+    /// The returned load feeds native static equilibrium. This method only
+    /// projects forces: it does not replace the mass of a transient run, whose
+    /// existing constructors still use the solve material's cellwise density.
+    ///
+    /// # Errors
+    /// Wrong counts, nonpositive/nonfinite density, nonfinite acceleration,
+    /// unrepresentable mass/force, invalid surface selections or cancellation.
+    pub fn assemble_acceleration_with_nodal_reference_density<'g>(
+        &'g self, surfaces: &[SurfaceLoad3<'_>], reference_density_kg_m3: &[f64],
+        acceleration: AccelerationField3<'_>, nodal: &[(usize, f64)], cx: &Cx<'_>,
+    ) -> Result<TetLoadCase3<'g, 'm>, LoadError3> {
+        self.assemble_acceleration_density(surfaces,
+            AccelerationDensity3::NodalReference(reference_density_kg_m3),
+            acceleration, nodal, cx)
+    }
+
+    fn assemble_acceleration_density<'g>(
+        &'g self, surfaces: &[SurfaceLoad3<'_>], density: AccelerationDensity3<'_>,
+        acceleration: AccelerationField3<'_>, nodal: &[(usize, f64)], cx: &Cx<'_>,
+    ) -> Result<TetLoadCase3<'g, 'm>, LoadError3> {
         poll(cx)?;
         if nodal.len() > self.nodes.len() * 3 { return Err(LoadError3::Budget); }
-        if let TetMaterialField::PerElement(values) = materials {
+        if let AccelerationDensity3::Material(TetMaterialField::PerElement(values)) = density {
             if values.len() != self.tets.len() {
                 return Err(LoadError3::Invalid("acceleration needs one material per tetrahedron"));
+            }
+        }
+        if let AccelerationDensity3::NodalReference(values) = density {
+            if values.len() != self.nodes.len() {
+                return Err(LoadError3::Invalid("one reference density per original node required"));
+            }
+            for &value in values {
+                poll(cx)?;
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(LoadError3::Invalid("positive finite nodal reference density required"));
+                }
             }
         }
         match acceleration {
@@ -93,18 +143,33 @@ impl<'m> TetLoadGeometry3<'m> {
         let mut forces = self.surface_forces(surfaces, cx)?;
         for (element, &tet) in self.tets.iter().enumerate() {
             poll(cx)?;
-            let density = match materials {
-                TetMaterialField::Uniform(material) => material.density_kg_m3,
-                TetMaterialField::PerElement(values) => values[element].density_kg_m3,
+            let (density, graded) = match density {
+                AccelerationDensity3::Material(TetMaterialField::Uniform(material)) =>
+                    (material.density_kg_m3, None),
+                AccelerationDensity3::Material(TetMaterialField::PerElement(values)) =>
+                    (values[element].density_kg_m3, None),
+                AccelerationDensity3::NodalReference(values) => {
+                    let rho = tet.map(|node| values[node]);
+                    let graded = if rho.iter().all(|value| value.to_bits() == rho[0].to_bits()) {
+                        None
+                    } else {
+                        Some(crate::inertia::p1_tet_nodal_mass(self.volumes[element], rho)
+                            .map_err(|_| LoadError3::Invalid("nodal reference density yields unrepresentable mass"))?)
+                    };
+                    (rho[0], graded)
+                }
             };
             if !density.is_finite() || density <= 0.0 {
                 return Err(LoadError3::Invalid("positive finite reference density required for acceleration"));
             }
-            let scale = finite(p1_tet_mass_scale(self.volumes[element], density))?;
-            if scale <= 0.0 {
-                return Err(LoadError3::Invalid("reference mass is unrepresentable"));
-            }
-            if let AccelerationField3::Uniform(value) = acceleration {
+            let scale = if graded.is_none() {
+                let value = finite(p1_tet_mass_scale(self.volumes[element], density))?;
+                if value <= 0.0 {
+                    return Err(LoadError3::Invalid("reference mass is unrepresentable"));
+                }
+                value
+            } else { 0.0 };
+            if let (AccelerationField3::Uniform(value), None) = (acceleration, &graded) {
                 let value = vector(value)?;
                 let share = finite(5.0 * scale)?;
                 for node in tet { for c in 0..3 {
@@ -114,13 +179,14 @@ impl<'m> TetLoadGeometry3<'m> {
                 continue;
             }
             let values = match acceleration {
-                AccelerationField3::Uniform(_) => unreachable!("uniform acceleration handled above"),
+                AccelerationField3::Uniform(value) => [value; 4],
                 AccelerationField3::PerNode(values) => tet.map(|node| values[node]),
                 AccelerationField3::PerElement(values) => values[element],
             };
             for value in values { vector(value)?; }
             for i in 0..4 { for j in 0..4 {
-                let weight = if i == j { finite(2.0 * scale)? } else { scale };
+                let weight = if let Some(local) = &graded { local.coefficients[i][j] }
+                    else if i == j { finite(2.0 * scale)? } else { scale };
                 for c in 0..3 {
                     let dof = 3 * tet[i] + c;
                     forces[dof] = finite(forces[dof] + finite(weight * values[j][c])?)?;
