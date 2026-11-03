@@ -6,6 +6,8 @@
 //! through the ideal-gas species/EOS lane to perform this bookkeeping.
 
 pub mod minerals;
+/// Shared-inventory stages of independently admitted, exactly conserved reactions.
+pub mod network;
 
 use std::collections::BTreeMap;
 
@@ -85,7 +87,16 @@ pub struct ReactionTerm {
 pub struct ConservedReaction {
     id: ReactionId,
     terms: Vec<ReactionTerm>,
+    definitions: Vec<SpeciesDefinition>,
     conservation: ConservationCertificate,
+}
+
+// Aligned with active terms; absent/zero element rows have the same identity.
+// Retained from fs-qty's admitted artifacts, not reparsed from species labels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpeciesDefinition {
+    elements: Vec<(crate::ElementId, i128)>,
+    charge: i128,
 }
 
 impl ConservedReaction {
@@ -114,6 +125,7 @@ impl ConservedReaction {
             .binary_search(&id)
             .map_err(|_| ReactionBalanceError::Invalid("reaction id is absent from matrix"))?;
         let mut terms = Vec::new();
+        let mut definitions = Vec::new();
         for (row, species) in stoichiometric.species().iter().enumerate() {
             let coefficient =
                 stoichiometric
@@ -127,6 +139,24 @@ impl ConservedReaction {
                 ));
             }
             if coefficient != 0 {
+                let mut elements = Vec::new();
+                for (element_row, element) in elemental.elements().iter().enumerate() {
+                    let count =
+                        elemental
+                            .get(element_row, row)
+                            .ok_or(ReactionBalanceError::Invalid(
+                                "invalid elemental matrix shape",
+                            ))?;
+                    if count != 0 {
+                        elements.push((element.clone(), count));
+                    }
+                }
+                definitions.push(SpeciesDefinition {
+                    elements,
+                    charge: charge
+                        .get(row)
+                        .ok_or(ReactionBalanceError::Invalid("invalid charge vector shape"))?,
+                });
                 terms.push(ReactionTerm {
                     species: species.clone(),
                     coefficient,
@@ -143,6 +173,7 @@ impl ConservedReaction {
         Ok(Self {
             id,
             terms,
+            definitions,
             conservation,
         })
     }

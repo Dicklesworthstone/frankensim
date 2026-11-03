@@ -19,10 +19,11 @@ inventory resolution refuse rather than clipping or disappearing. The exact
 certificate proves the integer equation; binary64 final amounts are separately
 evaluated, with no claim of exact numerical mass conservation.
 
-`stoichiometry::minerals::MineralReaction` provides nineteen explicit reference
+`stoichiometry::minerals::MineralReaction` provides twenty-one explicit reference
 endpoints: lime hydration, calcite/dolomite acid neutralization to dissolved
 CO2 or retained bicarbonate, hydrated-lime neutralization, malachite acid
-leaching to dissolved copper and CO2, the net ionic Elsner gold-cyanidation
+leaching to dissolved copper and CO2, separate calcite/malachite pathways to
+the USGS source-defined un-ionized H2CO3(aq), the net ionic Elsner gold-cyanidation
 balance, pyrite oxidation to either ferrous ions or ideal ferric hydroxide,
 magnesite calcination to crystalline MgO and gaseous CO2, magnetite
 oxidation to hematite, cuprous-oxide oxidation, and carbon-monoxide reduction
@@ -80,6 +81,35 @@ authenticate caller species-to-pack associations, solve aqueous speciation,
 predict reaction rates/recovery/current efficiency, or supply heat of dilution.
 Independently rounded source molar masses need not sum bit-exactly even when
 elemental conservation is exact; they are not a new mass-conservation proof.
+
+### Shared finite reagent inventories and source-bound heat
+
+`stoichiometry::network::ReactionNetwork` joins admitted equations while
+retaining each active species' exact nonzero element counts and charge. A
+shared identifier with conflicting chemical definitions refuses. Reactions
+and the union of active species have canonical order; inventory and extent
+inputs must cover their complete axes, including explicit zeros.
+
+`advance_inventory` checks every reaction's gross withdrawals against one
+initial inventory before crediting products. Calcite gangue and malachite
+therefore cannot independently spend the same protons. Products are available
+to a later caller-declared stage; they never fund simultaneous withdrawals or
+an otherwise empty reaction cycle. Results retain per-reaction extents and
+amounts, complete gross consumed/formed accounts and final species inventories.
+The private floating-point reduction retains product residuals when checking
+shared stock, so an overdraw that rounds back onto stock still refuses.
+Inventory, extent and numerical-range failures return no partial result.
+
+`advance_with_standard_enthalpy` also requires exactly one formation source
+for every species in the network. A shared species uses the same original
+source in every reaction. All selected sources must declare one common typed
+temperature, pressure and elemental reference, including disconnected or
+zero-extent reactions. The result contains each admitted extent, each original
+`ReactionEnthalpy` with its evidence/receipts, its extent-scaled energy and the
+compensated sum in joules. This is standard chemical enthalpy, not heat of
+mixing/dilution, sensible heat, aqueous activities or a reactor temperature.
+No material source or exact equation supplies a reaction rate or acid-allocation
+policy; a caller must declare those separately.
 
 ## Prepared fixed-pressure reaction calorics
 

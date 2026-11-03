@@ -45,11 +45,13 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
     for recipe in [
         LimeHydration,
         CalciteAcidNeutralization,
+        CalciteCarbonicAcidNeutralization,
         DolomiteAcidNeutralization,
         CalciteBicarbonateNeutralization,
         DolomiteBicarbonateNeutralization,
         HydratedLimeNeutralization,
         MalachiteAcidLeach,
+        MalachiteCarbonicAcidLeach,
         GoldCyanidation,
         PyriteOxidationFerrous,
         PyriteOxidationFerricHydroxide,
@@ -124,6 +126,34 @@ fn carbonate_neutralization_and_lime_amounts() {
     close(amount(&lime, 3.0, "CaO(s)"), 3.0);
     close(amount(&lime, 3.0, "H2O(l)"), 3.0);
     close(amount(&lime, 3.0, "Ca(OH)2(s)"), 3.0);
+}
+
+#[test]
+fn carbonic_acid_endpoints_retain_distinct_species_and_water_balance() {
+    let calcite = MineralReaction::CalciteCarbonicAcidNeutralization
+        .build()
+        .unwrap();
+    let malachite = MineralReaction::MalachiteCarbonicAcidLeach.build().unwrap();
+    close(amount(&calcite, 1.0, "H+(aq)"), 2.0);
+    close(amount(&calcite, 1.0, "H2CO3(aq)"), 1.0);
+    assert!(
+        !calcite
+            .terms()
+            .iter()
+            .any(|term| term.species == id("H2O(l)"))
+    );
+    close(amount(&malachite, 1.0, "H+(aq)"), 4.0);
+    close(amount(&malachite, 1.0, "Cu[2+](aq)"), 2.0);
+    close(amount(&malachite, 1.0, "H2CO3(aq)"), 1.0);
+    close(amount(&malachite, 1.0, "H2O(l)"), 2.0);
+    for reaction in [calcite, malachite] {
+        assert!(
+            !reaction
+                .terms()
+                .iter()
+                .any(|term| term.species == id("CO2(aq)"))
+        );
+    }
 }
 
 #[test]

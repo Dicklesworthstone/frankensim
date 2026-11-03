@@ -14,6 +14,11 @@
 //! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=20007H0I.TXT>.
 //! Malachite's net ionic acid balance is equation 10 in
 //! <https://doi.org/10.3390/met10060833>; the pathway here retains dissolved CO2.
+//! Separate carbonic-acid endpoints retain the literal un-ionized H2CO3(aq)
+//! species in USGS Bulletin 2131, printed pages 15 and 25:
+//! <https://pubs.usgs.gov/bul/2131/report.pdf>. They are atom/charge-balanced
+//! source-reference reactions, not a prediction of aqueous speciation or a
+//! substitution of H2CO3 formation data for a CO2(aq) property.
 //! Net ionic Elsner cyanidation follows
 //! <https://doi.org/10.1038/s41598-019-43383-4> and the EPA 1994 report
 //! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=2000EF6J.TXT>.
@@ -46,6 +51,9 @@ pub enum MineralReaction {
     /// CaCO3(s) + 2 H+ -> Ca2+ + CO2(aq) + H2O(l).
     /// Acidic dissolved-CO2 endpoint; bicarbonate buffering is a different equation.
     CalciteAcidNeutralization,
+    /// CaCO3(s) + 2 H+ -> Ca2+ + H2CO3(aq).
+    /// Literal un-ionized carbonic-acid endpoint for the USGS B2131 reference.
+    CalciteCarbonicAcidNeutralization,
     /// CaMg(CO3)2(s) + 4 H+ -> Ca2+ + Mg2+ + 2 CO2(aq) + 2 H2O(l).
     DolomiteAcidNeutralization,
     /// CaCO3(s) + H+ -> Ca2+ + HCO3-; bicarbonate remains in solution.
@@ -57,6 +65,9 @@ pub enum MineralReaction {
     /// Cu2CO3(OH)2(s) + 4 H+ -> 2 Cu2+ + CO2(aq) + 3 H2O(l).
     /// Stoichiometric dissolved-copper endpoint, not an ore-recovery prediction.
     MalachiteAcidLeach,
+    /// Cu2CO3(OH)2(s) + 4 H+ -> 2 Cu2+ + H2CO3(aq) + 2 H2O(l).
+    /// The source-defined H2CO3(aq) endpoint remains distinct from CO2(aq).
+    MalachiteCarbonicAcidLeach,
     /// 4 Au(s) + 8 CN- + O2(g) + 2 H2O(l) -> 4 Au(CN)2- + 4 OH-.
     /// Net ionic Elsner balance; gas supply does not imply a dissolution rate.
     GoldCyanidation,
@@ -121,6 +132,16 @@ impl MineralReaction {
                     ("H2O(l)", &[0, 0, 2, 1], 0, 1),
                 ],
             ),
+            Self::CalciteCarbonicAcidNeutralization => (
+                "calcite-acid-carbonic",
+                &["Ca", "C", "H", "O"],
+                &[
+                    ("CaCO3(s)", &[1, 1, 0, 3], 0, -1),
+                    ("H+(aq)", &[0, 0, 1, 0], 1, -2),
+                    ("Ca[2+](aq)", &[1, 0, 0, 0], 2, 1),
+                    ("H2CO3(aq)", &[0, 1, 2, 3], 0, 1),
+                ],
+            ),
             Self::DolomiteAcidNeutralization => (
                 "dolomite-acid-co2",
                 &["Ca", "Mg", "C", "H", "O"],
@@ -173,6 +194,17 @@ impl MineralReaction {
                     ("Cu[2+](aq)", &[1, 0, 0, 0], 2, 2),
                     ("CO2(aq)", &[0, 1, 0, 2], 0, 1),
                     ("H2O(l)", &[0, 0, 2, 1], 0, 3),
+                ],
+            ),
+            Self::MalachiteCarbonicAcidLeach => (
+                "malachite-acid-carbonic",
+                &["Cu", "C", "H", "O"],
+                &[
+                    ("Cu2CO3(OH)2(s)", &[2, 1, 2, 5], 0, -1),
+                    ("H+(aq)", &[0, 0, 1, 0], 1, -4),
+                    ("Cu[2+](aq)", &[1, 0, 0, 0], 2, 2),
+                    ("H2CO3(aq)", &[0, 1, 2, 3], 0, 1),
+                    ("H2O(l)", &[0, 0, 2, 1], 0, 2),
                 ],
             ),
             Self::GoldCyanidation => (
