@@ -486,3 +486,460 @@ fn redundant_motion_and_atomic_locked_limited_cancelled_events() {
         assert_eq!(small[0].boundary, Boundary::Prescribed(base));
     }
 }
+
+fn source_close(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() < 3e-8,
+        "{actual:e} != {expected:e}"
+    );
+}
+
+fn source_vector(actual: Vec3, expected: Vec3) {
+    source_close(actual.x, expected.x);
+    source_close(actual.y, expected.y);
+    source_close(actual.z, expected.z);
+}
+
+#[test]
+fn mixed_source_ellipse_retains_full_tensor_reaction_texture_and_driven_work() {
+    use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
+    use fs_contact::frictional_multicontact::{FrictionalContactConfig, NormalVelocityLaw};
+    use fs_mbd::articulated_contacts::friction::ArticulatedFrictionalContact;
+    use fs_mbd::articulated_contacts::friction::elliptic::ArticulatedEllipticSourceResult;
+    use fs_mbd::articulated_contacts::mixed::{
+        resolve_mixed_articulated_elliptic_contacts,
+        resolve_mixed_articulated_elliptic_contacts_with,
+    };
+
+    // Accepted source histories deliberately have no Clone bound.
+    struct History {
+        samples: usize,
+        texture_world: Vec3,
+    }
+    let free_model = single(JointModel::FIXED, inertia(3., Vec3::default(), 1.));
+    let hinge = single(
+        JointModel::revolute(Vec3::new(0., 0., 1.), None).unwrap(),
+        SpatialInertia::new(
+            2.,
+            Vec3::new(1., 0.4, 0.2),
+            Mat3 {
+                m: [2., 0.3, 0.2, 0.3, 1.5, 0.1, 0.2, 0.1, 1.],
+            },
+        )
+        .unwrap(),
+    );
+    let arm = Vec3::new(2., 1., 0.5);
+    let rotation = So3::exp(So3Tangent::new(Vec3::new(0.2, -0.3, 0.1))).unwrap();
+    let h = 3.32;
+    let wnn = 1. / 3. + 4. / h;
+    let wnt = -2. / h;
+    let wtt = 1. / 3. + 1. / h;
+    for mu in [[0.25_f64, 0.5], [0., 0.5]] {
+        // The endpoint slip direction is d=(.6,.8), and the material
+        // principal axes are a=(.8,.6), b=(-.6,.8). Maximum dissipation gives
+        // pt/pn = -A*d/sqrt(d^T*A*d), A=mu_a^2 aa^T + mu_b^2 bb^T.
+        // The second case retains exact free slip in the original a direction.
+        let denominator = (0.96 * mu[0]).hypot(0.28 * mu[1]);
+        let ratio = [
+            -(0.8 * mu[0] * mu[0] * 0.96 - 0.6 * mu[1] * mu[1] * 0.28) / denominator,
+            -(0.6 * mu[0] * mu[0] * 0.96 + 0.8 * mu[1] * mu[1] * 0.28) / denominator,
+        ];
+        let pn = 3. / (wnn + wnt * ratio[0]);
+        let pt = [pn * ratio[0], pn * ratio[1]];
+        let before = [-2., 1.8 - wnt * pn - wtt * pt[0], 2.4 - pt[1] / 3.];
+        let delta = (-2. * pn + pt[0]) / h;
+        let impulse = Vec3::new(pt[0], pn, -pt[1]);
+        let reaction = Vec3::new(-0.8 * delta + pt[0], 2. * delta + pn, -pt[1]);
+        // The support inertia's z column is [-.2,-.06,3.32].
+        let couple = Vec3::new(
+            -0.2 * delta - pt[1] - 0.5 * pn,
+            -0.06 * delta + 0.5 * pt[0] + 2. * pt[1],
+            0.,
+        );
+        let loss = -0.5 * (-pn + pt[0] * (before[1] + 1.8) + pt[1] * (before[2] + 2.4));
+        for (rotation, origin, omega, translation, angle) in [
+            (
+                So3::identity(),
+                Vec3::default(),
+                Vec3::default(),
+                Vec3::default(),
+                0_f64,
+            ),
+            (
+                So3::identity(),
+                Vec3::default(),
+                Vec3::new(0.4, 0., 0.3),
+                Vec3::new(0., 2., 0.),
+                0.,
+            ),
+            (
+                rotation,
+                Vec3::new(4., -2., 3.),
+                Vec3::new(0.4, 0., 0.3),
+                Vec3::new(4., 0., 1.),
+                0.43,
+            ),
+        ] {
+            let support = BaseState::prescribed(
+                Se3::from_parts(rotation, origin).unwrap(),
+                Twist::new(omega, translation),
+                Twist::zero(),
+            );
+            let world_point = forward_kinematics(&hinge, support, &[0.], &[0.])
+                .unwrap()
+                .world_from_link[0]
+                .transform_point(arm)
+                .unwrap();
+            let free = FreeFloatingBaseState::new(
+                Se3::from_parts(rotation, world_point).unwrap(),
+                Twist::new(
+                    Vec3::default(),
+                    translation + omega.cross(arm) + Vec3::new(before[1], before[0], -before[2]),
+                ),
+            );
+            let systems = [
+                System {
+                    model: &free_model,
+                    boundary: Boundary::Free(free),
+                    joint_position: &[],
+                    joint_velocity: &[],
+                },
+                System {
+                    model: &hinge,
+                    boundary: Boundary::Prescribed(support),
+                    joint_position: &[0.],
+                    joint_velocity: &[0.],
+                },
+            ];
+            let tangent = rotation
+                .rotate(Vec3::new(angle.cos(), 0., -angle.sin()))
+                .unwrap();
+            let contact = ArticulatedFrictionalContact {
+                id: 20,
+                point: point(0, 0, Vec3::default()),
+                other: ContactCounterpart::Body(point(1, 0, arm)),
+                normal_world: rotation.rotate(Vec3::new(0., 1., 0.)).unwrap(),
+                tangent_world: tangent,
+                activation_tolerance: 1e-10,
+                normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 0.5 },
+                friction_coefficient: (),
+            };
+            let histories = [History {
+                samples: 7,
+                texture_world: rotation.rotate(Vec3::new(0.8, 0., -0.6)).unwrap(),
+            }];
+            let mut queries = 0;
+            let mut sampled = None;
+            let result: ArticulatedEllipticSourceResult<History, Response> =
+                resolve_mixed_articulated_elliptic_contacts_with(
+                    &systems,
+                    &[contact],
+                    &histories,
+                    FrictionalContactConfig::default(),
+                    |accepted, query| {
+                        queries += 1;
+                        assert_eq!((query.contact_id, query.original_index), (20, 0));
+                        source_vector(query.point_world, world_point);
+                        source_vector(query.counterpart_point_world, world_point);
+                        source_close(query.relative_velocity_m_s[0], before[0]);
+                        source_close(
+                            query.relative_velocity_m_s[1],
+                            angle.cos() * before[1] + angle.sin() * before[2],
+                        );
+                        source_close(
+                            query.relative_velocity_m_s[2],
+                            -angle.sin() * before[1] + angle.cos() * before[2],
+                        );
+                        let law = EllipticFriction {
+                            coefficients_mu: mu,
+                            principal_axis: [
+                                accepted.texture_world.dot(query.axes_world[1]),
+                                accepted.texture_world.dot(query.axes_world[2]),
+                            ],
+                        };
+                        sampled = Some(law);
+                        Ok::<_, &'static str>((
+                            law,
+                            History {
+                                samples: accepted.samples + 1,
+                                texture_world: accepted.texture_world,
+                            },
+                        ))
+                    },
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(queries, 1);
+            assert_eq!(histories[0].samples, 7);
+            assert_eq!(result.candidates.len(), 1);
+            assert_eq!(result.candidates[0].state.samples, 8);
+            let result = result.mechanical;
+            let jacobian = [2., -angle.cos(), angle.sin()];
+            for i in 0..3 {
+                for j in 0..3 {
+                    source_close(
+                        result.delassus[3 * i + j],
+                        if i == j { 1. / 3. } else { 0. } + jacobian[i] * jacobian[j] / h,
+                    );
+                }
+            }
+            let p = result.contact.impulses[0];
+            source_close(p[0], pn);
+            source_close(p[1], angle.cos() * pt[0] + angle.sin() * pt[1]);
+            source_close(p[2], -angle.sin() * pt[0] + angle.cos() * pt[1]);
+            if mu[0] == 0. {
+                source_close(
+                    0.8 * (angle.cos() * p[1] - angle.sin() * p[2])
+                        + 0.6 * (angle.sin() * p[1] + angle.cos() * p[2]),
+                    0.,
+                );
+            }
+            let velocity = result.relative_velocities_after[0];
+            source_close(velocity[0], 1.);
+            source_close(velocity[1], angle.cos() * 1.8 + angle.sin() * 2.4);
+            source_close(velocity[2], -angle.sin() * 1.8 + angle.cos() * 2.4);
+            let Response::Free(free_after) = &result.responses[0] else {
+                panic!("wrong boundary")
+            };
+            let Response::Prescribed(hinge_after) = &result.responses[1] else {
+                panic!("wrong boundary")
+            };
+            source_close(hinge_after.joint_velocity_after[0], delta);
+            source_vector(
+                free_after.linear_momentum_change_world,
+                rotation.rotate(impulse).unwrap(),
+            );
+            source_vector(hinge_after.support_impulse_body.force, reaction);
+            source_vector(hinge_after.support_impulse_body.torque, couple);
+            source_vector(
+                hinge_after.support_impulse_world.force,
+                rotation.rotate(reaction).unwrap(),
+            );
+            source_vector(
+                hinge_after.support_impulse_world.torque,
+                rotation.rotate(couple).unwrap() + origin.cross(rotation.rotate(reaction).unwrap()),
+            );
+            source_close(
+                result.support_work,
+                reaction.dot(translation) + couple.dot(omega),
+            );
+            source_close(result.plane_work, 0.);
+            source_close(
+                result.boundary_work,
+                result.support_work + result.plane_work,
+            );
+            source_close(result.contact.dissipated_energy, loss);
+            source_close(
+                free_after.kinetic_energy_change + hinge_after.kinetic_energy_change,
+                result.boundary_work - loss,
+            );
+            source_close(result.energy_balance_residual, 0.);
+            source_close(result.endpoint_velocity_residual, 0.);
+            source_vector(result.linear_momentum_residual, Vec3::default());
+            source_vector(result.angular_momentum_residual, Vec3::default());
+            assert_eq!(hinge_after.base_after, support);
+            // Identical sampled laws follow the exact already-published path.
+            let supplied = ArticulatedFrictionalContact {
+                id: contact.id,
+                point: contact.point,
+                other: contact.other,
+                normal_world: contact.normal_world,
+                tangent_world: contact.tangent_world,
+                activation_tolerance: contact.activation_tolerance,
+                normal_law: contact.normal_law,
+                friction_coefficient: sampled.unwrap(),
+            };
+            let direct = resolve_mixed_articulated_elliptic_contacts(
+                &systems,
+                &[supplied],
+                FrictionalContactConfig::default(),
+                || false,
+            )
+            .unwrap();
+            assert_eq!(result.responses, direct.responses);
+            assert_eq!(result.contact, direct.contact);
+            assert_eq!(
+                result.boundary_work.to_bits(),
+                direct.boundary_work.to_bits()
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_source_candidates_stay_private_through_source_limit_and_cancel_refusals() {
+    use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
+    use fs_contact::frictional_multicontact::{FrictionalContactConfig, NormalVelocityLaw};
+    use fs_mbd::articulated_contacts::friction::ArticulatedFrictionalContact;
+    use fs_mbd::articulated_contacts::friction::elliptic::ArticulatedEllipticSourceError;
+    use fs_mbd::articulated_contacts::mixed::resolve_mixed_articulated_elliptic_contacts_with;
+
+    #[derive(Debug, PartialEq)]
+    struct History(u32);
+    let model = single(
+        JointModel::prismatic(
+            Vec3::new(0., 1., 0.),
+            Some(JointLimits::new(-1., 1., 0.25, 1e-9).unwrap()),
+        )
+        .unwrap(),
+        inertia(2., Vec3::default(), 1.),
+    );
+    let base = BaseState::stationary(Se3::identity());
+    let systems = [System {
+        model: &model,
+        boundary: Boundary::Prescribed(base),
+        joint_position: &[0.],
+        joint_velocity: &[-0.1],
+    }];
+    let active = ArticulatedFrictionalContact {
+        id: 20,
+        point: point(0, 0, Vec3::default()),
+        other: ContactCounterpart::PrescribedPlane {
+            point_world: Vec3::default(),
+            velocity_world: Vec3::default(),
+        },
+        normal_world: Vec3::new(0., 1., 0.),
+        tangent_world: Vec3::new(1., 0., 0.),
+        activation_tolerance: 1e-10,
+        normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 0. },
+        friction_coefficient: (),
+    };
+    let inactive = ArticulatedFrictionalContact {
+        id: 5,
+        other: ContactCounterpart::PrescribedPlane {
+            point_world: Vec3::new(0., -1., 0.),
+            velocity_world: Vec3::default(),
+        },
+        ..active
+    };
+    let law = EllipticFriction {
+        coefficients_mu: [0.25, 0.5],
+        principal_axis: [0.8, 0.6],
+    };
+    let histories = [History(7), History(11)];
+    let mut seen = Vec::new();
+    let mut total_polls = 0;
+    let result = resolve_mixed_articulated_elliptic_contacts_with(
+        &systems,
+        &[active, inactive],
+        &histories,
+        FrictionalContactConfig::default(),
+        |old, query| {
+            seen.push((query.contact_id, query.original_index));
+            Ok::<_, &'static str>((law, History(old.0 + 1)))
+        },
+        || {
+            total_polls += 1;
+            false
+        },
+    )
+    .unwrap();
+    assert_eq!(seen, [(20, 0)]);
+    assert_eq!(result.mechanical.contact_ids, [5, 20]);
+    assert_eq!(result.candidates.len(), 1);
+    assert_eq!(
+        (
+            result.candidates[0].contact_id,
+            result.candidates[0].original_index
+        ),
+        (20, 0)
+    );
+    assert_eq!(result.candidates[0].state, History(8));
+    source_close(result.mechanical.responses[0].joint_velocity_after()[0], 0.);
+    source_close(result.mechanical.contact.dissipated_energy, 0.01);
+    source_close(result.mechanical.boundary_work, 0.);
+
+    let mut queries = 0;
+    let later = ArticulatedFrictionalContact { id: 30, ..active };
+    let error = resolve_mixed_articulated_elliptic_contacts_with(
+        &systems,
+        &[active, later],
+        &histories,
+        FrictionalContactConfig::default(),
+        |old, query| {
+            queries += 1;
+            if query.contact_id == 30 {
+                Err("later source")
+            } else {
+                Ok((law, History(old.0 + 1)))
+            }
+        },
+        || false,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ArticulatedEllipticSourceError::Source {
+            contact_id: 30,
+            original_index: 1,
+            source: "later source"
+        }
+    ));
+    assert_eq!(queries, 2);
+
+    let driven = BaseState::prescribed(
+        Se3::identity(),
+        Twist::new(Vec3::default(), Vec3::new(0., -1., 0.)),
+        Twist::zero(),
+    );
+    let limited = [System {
+        boundary: Boundary::Prescribed(driven),
+        joint_velocity: &[0.],
+        ..systems[0]
+    }];
+    let mut queries = 0;
+    let error = resolve_mixed_articulated_elliptic_contacts_with(
+        &limited,
+        &[active],
+        &histories[..1],
+        FrictionalContactConfig::default(),
+        |old, _| {
+            queries += 1;
+            Ok::<_, &'static str>((law, History(old.0 + 1)))
+        },
+        || false,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ArticulatedEllipticSourceError::Mechanics(ArticulatedContactError::Dynamics {
+            error: ArticulatedError::JointVelocityLimitViolation { .. },
+            ..
+        })
+    ));
+    assert_eq!(queries, 1);
+    for checkpoint in [1, total_polls / 2, total_polls] {
+        let mut polls = 0;
+        assert!(matches!(
+            resolve_mixed_articulated_elliptic_contacts_with(
+                &systems,
+                &[active, inactive],
+                &histories,
+                FrictionalContactConfig::default(),
+                |old, _| Ok::<_, &'static str>((law, History(old.0 + 1))),
+                || {
+                    polls += 1;
+                    polls == checkpoint
+                },
+            ),
+            Err(ArticulatedEllipticSourceError::Mechanics(
+                ArticulatedContactError::Cancelled
+            ))
+        ));
+    }
+    let retry = resolve_mixed_articulated_elliptic_contacts_with(
+        &systems,
+        &[active, inactive],
+        &histories,
+        FrictionalContactConfig::default(),
+        |old, _| Ok::<_, &'static str>((law, History(old.0 + 1))),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(retry.mechanical.responses, result.mechanical.responses);
+    assert_eq!(retry.mechanical.contact, result.mechanical.contact);
+    assert_eq!(histories, [History(7), History(11)]);
+    assert_eq!(systems[0].joint_velocity, &[-0.1]);
+    assert_eq!(limited[0].joint_velocity, &[0.]);
+    assert_eq!(limited[0].boundary, Boundary::Prescribed(driven));
+}

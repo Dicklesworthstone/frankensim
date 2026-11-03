@@ -2182,6 +2182,18 @@ response of free-floating jointed bodies. It reuses the existing source binding
 and preimpact coefficient sampler, with the native link-point kinematics,
 joint constraints, base recoil and full cross-contact mobility.
 
+`resolve_source_mixed_articulated_elliptic_contacts` applies that same source
+sampler to free and prescribed-base trees through the native mixed callback
+owner. Its generic candidate retains the actual native response type, including
+full support reactions and signed work. Total `boundary_work` includes both
+plane and base-support work; under nonunique impulses only the total is
+identified by the native work witness. The original free API keeps its default
+response type. Mixed regressions specify both joint recoils, driven support
+work, pinned source histories and late angular-momentum refusal with retry.
+Additional native source tests cover full-tensor anisotropy, rotated material
+frames and exact free-slip directions. These new tests have not been compiled
+or executed in the constrained editing environment.
+
 Each geometrically active contact is sampled once in canonical contact-ID
 order using its actual incoming tangent speed and caller-owned local
 conditions. The exact normalized frame, both physical witness positions and

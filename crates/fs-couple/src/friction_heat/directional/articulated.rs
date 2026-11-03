@@ -1,8 +1,9 @@
 //! Original source friction through simultaneous articulated impact response.
 //!
 //! The original articulated owner retains joint constraints, floating-base
-//! recoil and every cross-contact influence. This adapter samples the same
-//! ordered interface claims as the independent rigid-body path and returns one
+//! recoil, prescribed support reactions and every cross-contact influence.
+//! This adapter samples the same ordered interface claims as the independent
+//! rigid-body path and returns one
 //! complete mechanical/source candidate, without mutating any accepted state.
 
 use super::impact::{SourceRigidImpactBinding, SourceRigidImpactError};
@@ -13,10 +14,15 @@ use fs_contact::interface_binding::thermal_friction::elliptic::{
     SourceFrictionConditions, SourceThermalEllipticState,
 };
 use fs_exec::CancelGate;
+use fs_mbd::articulated::FreeFloatingImpulseResponse;
 use fs_mbd::articulated_contacts::friction::ArticulatedImpactKinematics;
 use fs_mbd::articulated_contacts::friction::elliptic::{
     ArticulatedEllipticContactResult, ArticulatedEllipticSourceError, ArticulatedImpactGeometry,
     resolve_articulated_elliptic_contacts_with,
+};
+use fs_mbd::articulated_contacts::mixed::{
+    MixedArticulatedContactSystem, MixedArticulatedImpulseResponse,
+    resolve_mixed_articulated_elliptic_contacts_with,
 };
 use fs_mbd::articulated_contacts::{ArticulatedContactError, ArticulatedContactSystem};
 
@@ -35,8 +41,8 @@ pub struct SourceArticulatedImpactReceipt {
 /// coordinates remain unchanged. Inactive histories are absent and stay as
 /// accepted; each source receipt identifies its original input index.
 #[derive(Clone, Debug)]
-pub struct SourceArticulatedImpactCandidate {
-    pub mechanical: ArticulatedEllipticContactResult,
+pub struct SourceArticulatedImpactCandidate<R = FreeFloatingImpulseResponse> {
+    pub mechanical: ArticulatedEllipticContactResult<R>,
     /// Geometrically active contacts in ascending stable contact-ID order.
     pub sources: Vec<SourceArticulatedImpactReceipt>,
 }
@@ -95,33 +101,14 @@ pub fn resolve_source_articulated_elliptic_contacts<E>(
         &markers,
         config,
         |_, kinematics| {
-            let index = kinematics.original_index;
-            let accepted = &histories[index];
-            let binding = bindings[index];
-            let boundary =
-                conditions(accepted, kinematics).map_err(SourceRigidImpactError::Conditions)?;
-            let sample = binding
-                .law
-                .sample_preimpact_coefficients(
-                    accepted,
-                    [
-                        kinematics.relative_velocity_m_s[1],
-                        kinematics.relative_velocity_m_s[2],
-                    ],
-                    &boundary,
-                    binding.coefficient_role,
-                    &mut || gate.is_requested(),
-                )
-                .map_err(SourceRigidImpactError::Coefficients)?;
-            let friction = EllipticFriction {
-                coefficients_mu: sample.coefficients_mu,
-                principal_axis: sample.state.constitutive_state().principal_axis(),
-            };
-            sources.push(SourceArticulatedImpactReceipt {
-                kinematics: *kinematics,
-                sample,
-            });
-            Ok((friction, ()))
+            sample_source(
+                histories,
+                bindings,
+                &mut conditions,
+                &mut sources,
+                kinematics,
+                gate,
+            )
         },
         || gate.is_requested(),
     )?;
@@ -130,4 +117,101 @@ pub fn resolve_source_articulated_elliptic_contacts<E>(
         mechanical: result.mechanical,
         sources,
     })
+}
+
+/// Resolve original material friction across free and prescribed-base systems.
+///
+/// The same source sampler and history/condition semantics as
+/// [`resolve_source_articulated_elliptic_contacts`] apply. Native constrained
+/// mobility supplies prescribed support reactions and work without an effective
+/// support mass. The returned mechanical `boundary_work` includes both plane
+/// and base-support work; under nonunique impulses individual source-work
+/// contributions remain representative, as admitted by the original contact law.
+/// Source candidates and all native responses remain unpublished until the
+/// complete event passes the original endpoint, momentum and work gates.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_source_mixed_articulated_elliptic_contacts<E>(
+    systems: &[MixedArticulatedContactSystem<'_>],
+    contacts: &[ArticulatedImpactGeometry],
+    histories: &[SourceThermalEllipticState],
+    bindings: &[SourceRigidImpactBinding<'_>],
+    config: FrictionalContactConfig,
+    mut conditions: impl FnMut(
+        &SourceThermalEllipticState,
+        &ArticulatedImpactKinematics,
+    ) -> Result<SourceFrictionConditions, E>,
+    gate: &CancelGate,
+) -> Result<
+    SourceArticulatedImpactCandidate<MixedArticulatedImpulseResponse>,
+    ArticulatedEllipticSourceError<SourceRigidImpactError<E>>,
+> {
+    if histories.len() != contacts.len() || bindings.len() != contacts.len() {
+        return Err(ArticulatedEllipticSourceError::Mechanics(
+            ArticulatedContactError::Invalid(
+                "one original source history and binding per articulated contact required",
+            ),
+        ));
+    }
+    let markers = vec![(); contacts.len()];
+    let mut sources = Vec::new();
+    let result = resolve_mixed_articulated_elliptic_contacts_with(
+        systems,
+        contacts,
+        &markers,
+        config,
+        |_, kinematics| {
+            sample_source(
+                histories,
+                bindings,
+                &mut conditions,
+                &mut sources,
+                kinematics,
+                gate,
+            )
+        },
+        || gate.is_requested(),
+    )?;
+    Ok(SourceArticulatedImpactCandidate {
+        mechanical: result.mechanical,
+        sources,
+    })
+}
+
+fn sample_source<E>(
+    histories: &[SourceThermalEllipticState],
+    bindings: &[SourceRigidImpactBinding<'_>],
+    conditions: &mut impl FnMut(
+        &SourceThermalEllipticState,
+        &ArticulatedImpactKinematics,
+    ) -> Result<SourceFrictionConditions, E>,
+    sources: &mut Vec<SourceArticulatedImpactReceipt>,
+    kinematics: &ArticulatedImpactKinematics,
+    gate: &CancelGate,
+) -> Result<(EllipticFriction, ()), SourceRigidImpactError<E>> {
+    let index = kinematics.original_index;
+    let accepted = &histories[index];
+    let binding = bindings[index];
+    let boundary = conditions(accepted, kinematics).map_err(SourceRigidImpactError::Conditions)?;
+    let sample = binding
+        .law
+        .sample_preimpact_coefficients(
+            accepted,
+            [
+                kinematics.relative_velocity_m_s[1],
+                kinematics.relative_velocity_m_s[2],
+            ],
+            &boundary,
+            binding.coefficient_role,
+            &mut || gate.is_requested(),
+        )
+        .map_err(SourceRigidImpactError::Coefficients)?;
+    let friction = EllipticFriction {
+        coefficients_mu: sample.coefficients_mu,
+        principal_axis: sample.state.constitutive_state().principal_axis(),
+    };
+    sources.push(SourceArticulatedImpactReceipt {
+        kinematics: *kinematics,
+        sample,
+    });
+    Ok((friction, ()))
 }
