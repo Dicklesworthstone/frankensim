@@ -5150,3 +5150,46 @@ independent rational-oracle checks passed; native compilation and execution
 remain unrun in this session. This is instantaneous point detachment, not a
 continuous nozzle/rocket law, pressure-thrust model, finite-fragment release,
 fracture model or propellant caloric source.
+
+## Atomic finite point-material transfer between moving bodies
+
+`assembly::transfer::transfer_point_masses` connects the native simultaneous
+release and capture owners in one atomic local event. Donor descriptors and
+receiver attachment arms use their respective original COMs and body axes.
+Both bodies receive full central-inertia updates and shared recoil. No free
+parcel endpoint is published alongside the receiver, preventing duplicate
+material inventory at this interface.
+
+Attachment admission checks origin-relative geometry before forming large
+absolute world positions, and also checks the represented release/capture
+locations. This is instantaneous handoff at a common physical point, not
+teleportation across a gap or a free-flight/contact-discovery law. The caller
+still owns geometry membership, material identity and the choice of event.
+
+`PointMassMomentumCapture` and `capture_point_masses_with_momenta` add direct
+canonical momentum ingress to the same batch projection used by authored
+velocities. They do not divide momentum by mass and multiply back to form the
+receiver's momentum. Fused subtraction of the common boost supplies relative
+momenta for spin and loss. The original velocity API and singleton fast path
+remain available; zero canonical mass requires zero momentum.
+
+A combined gate reconstructs actual two-body mass, linear momentum, spin plus
+orbital angular momentum about the declared original donor COM, and kinetic
+change minus separation work plus sticking loss. Polarized changes and a
+common translating frame retain small exchanges under a large uniform boost;
+actual first-moment changes remain in the angular balance. Separation work
+requires a caller-owned source, and sticking loss a caller-owned destination.
+Neither is silently deposited as heat or given thermodynamic authority.
+
+The work cap counts both original bodies and every descriptor, including
+zeros. Positive capture impulses and nonzero separation impulses share one
+aggregate impulse cap. The O(N) native passes and staging remain bounded;
+each phase admits one aggregate inertia, with no per-parcel factorization.
+All refusals and cancellation leave both borrowed bodies unchanged.
+
+Seven focused regressions cover canonical handoff, independently known
+finite-body recoil/work/loss, full tensors and independent rotating frames,
+common boosts, batch permutation/subdivision, attachment gaps hidden by large
+coordinates, combined angular rejection, zero identities, invalid inventory,
+global budgets and late cancellation. Native execution is required before
+claiming numerical conformance; formatter parsing is not that evidence.

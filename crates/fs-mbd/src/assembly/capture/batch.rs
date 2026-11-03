@@ -6,8 +6,8 @@
 
 use super::{
     AssemblyBalance, AssemblyControls, AssemblyError, ENTRIES, MassProperties, PointMassCapture,
-    PointMassCaptureResult, Pose, RigidBodyState, Sum, Vec3, VectorSum, array, finite, poll,
-    relative_momentum, vector,
+    PointMassCaptureResult, PointMassMomentumCapture, Pose, RigidBodyState, Sum, Vec3, VectorSum,
+    array, finite, poll, relative_momentum, vector,
 };
 
 /// Capture all supplied point parcels in one instantaneous physical event.
@@ -37,15 +37,46 @@ pub fn capture_point_masses(
     controls: AssemblyControls,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PointMassCaptureResult, AssemblyError> {
+    if let [single] = incoming {
+        poll(&mut cancelled)?;
+        controls.validate(2, 0)?;
+        return super::capture_point_mass(body, properties, *single, controls, cancelled);
+    }
+    capture_batch(body, properties, incoming, controls, cancelled)
+}
+
+/// Capture canonical parcel momenta in one simultaneous sticking event.
+///
+/// Uses the same COM, full-inertia, shared-recoil and positive loss calculation
+/// as velocity-authored capture. Canonical incoming momenta are added directly;
+/// relative velocities are reconstructed with fused common-boost subtraction.
+/// This avoids changing momentum by dividing by mass and multiplying back.
+/// Controls count every descriptor, including zeros, plus the original body;
+/// each positive parcel consumes one impulse slot. Inputs remain unchanged
+/// on invalid inventory, nonfinite arithmetic, failed balance or cancellation.
+pub fn capture_point_masses_with_momenta(
+    body: &RigidBodyState,
+    properties: MassProperties,
+    incoming: &[PointMassMomentumCapture],
+    controls: AssemblyControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PointMassCaptureResult, AssemblyError> {
+    capture_batch(body, properties, incoming, controls, cancelled)
+}
+
+fn capture_batch<P: CaptureParcel>(
+    body: &RigidBodyState,
+    properties: MassProperties,
+    incoming: &[P],
+    controls: AssemblyControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PointMassCaptureResult, AssemblyError> {
     poll(&mut cancelled)?;
     let parts = incoming
         .len()
         .checked_add(1)
         .ok_or(AssemblyError::Invalid("capture part count overflow"))?;
     controls.validate(parts, 0)?;
-    if let [single] = incoming {
-        return super::capture_point_mass(body, properties, *single, controls, cancelled);
-    }
     properties.validate()?;
     let mass = properties.mass();
     let orientation = body.pose().orientation();
@@ -57,17 +88,17 @@ pub fn capture_point_masses(
     let mut all_at_center = true;
     for parcel in incoming {
         poll(&mut cancelled)?;
-        if !parcel.mass_kg.is_finite() || parcel.mass_kg < 0.0 {
+        if !parcel.mass().is_finite() || parcel.mass() < 0.0 {
             return Err(AssemblyError::Invalid(
                 "finite nonnegative captured mass required",
             ));
         }
-        vector(parcel.attachment_arm_body_m)?;
-        vector(parcel.velocity_world_m_s)?;
-        if parcel.mass_kg > 0.0 {
-            added.add(parcel.mass_kg);
+        vector(parcel.arm())?;
+        parcel.validate()?;
+        if parcel.mass() > 0.0 {
+            added.add(parcel.mass());
             active += 1;
-            all_at_center &= parcel.attachment_arm_body_m == Vec3::ZERO;
+            all_at_center &= parcel.arm() == Vec3::ZERO;
         }
     }
     controls.validate(parts, active)?;
@@ -98,10 +129,8 @@ pub fn capture_point_masses(
     let mut center = VectorSum::default();
     for parcel in incoming {
         poll(&mut cancelled)?;
-        if parcel.mass_kg > 0.0 {
-            center.add(vector(
-                parcel.attachment_arm_body_m.scale(parcel.mass_kg / total),
-            )?);
+        if parcel.mass() > 0.0 {
+            center.add(vector(parcel.arm().scale(parcel.mass() / total))?);
         }
     }
     let center_shift = vector(center.value())?;
@@ -122,16 +151,15 @@ pub fn capture_point_masses(
     linear.add(body.linear_momentum_world());
     for parcel in incoming {
         poll(&mut cancelled)?;
-        if parcel.mass_kg == 0.0 {
+        if parcel.mass() == 0.0 {
             continue;
         }
-        let arm = vector(parcel.attachment_arm_body_m.sub(center_shift))?;
-        add_parallel_axis(&mut entries, arm, parcel.mass_kg)?;
-        let relative = vector(
-            orientation.rotate_world_to_body(vector(parcel.velocity_world_m_s.sub(velocity))?),
-        )?;
-        angular.add(vector(arm.cross(vector(relative.scale(parcel.mass_kg))?))?);
-        linear.add(vector(parcel.velocity_world_m_s.scale(parcel.mass_kg))?);
+        let arm = vector(parcel.arm().sub(center_shift))?;
+        add_parallel_axis(&mut entries, arm, parcel.mass())?;
+        let relative =
+            vector(orientation.rotate_world_to_body(parcel.relative_momentum(velocity)?))?;
+        angular.add(vector(arm.cross(relative))?);
+        linear.add(parcel.momentum()?);
     }
     for (entry, (row, col)) in entries.into_iter().zip(ENTRIES) {
         let value = finite(entry.value())?;
@@ -202,23 +230,23 @@ pub fn capture_point_masses(
     energy_error.add(0.5 * spin.dot(next_omega.sub(omega)));
     for parcel in incoming {
         poll(&mut cancelled)?;
-        if parcel.mass_kg == 0.0 {
+        if parcel.mass() == 0.0 {
             continue;
         }
-        let world_arm = vector(orientation.rotate_body_to_world(parcel.attachment_arm_body_m))?;
-        let relative_world = vector(parcel.velocity_world_m_s.sub(velocity))?;
-        let imported_relative = vector(relative_world.scale(parcel.mass_kg))?;
+        let world_arm = vector(orientation.rotate_body_to_world(parcel.arm()))?;
+        let relative_world = parcel.relative_velocity(velocity)?;
+        let imported_relative = parcel.relative_momentum(velocity)?;
         let relative_body = vector(orientation.rotate_world_to_body(relative_world))?;
-        let arm = vector(parcel.attachment_arm_body_m.sub(center_shift))?;
+        let arm = vector(parcel.arm().sub(center_shift))?;
         let final_velocity = vector(after_body_velocity.add(next_omega.cross(arm)))?;
         removed.add(scaled_energy(
             vector(relative_body.sub(final_velocity))?,
-            parcel.mass_kg,
+            parcel.mass(),
         )?);
-        linear_error.add(vector(parcel.velocity_world_m_s.scale(-parcel.mass_kg))?);
+        linear_error.add(parcel.momentum()?.scale(-1.0));
         angular_error.add(vector(world_arm.cross(imported_relative).scale(-1.0))?);
-        first_moment_error.add(vector(world_arm.scale(-parcel.mass_kg))?);
-        energy_error.add(-scaled_energy(relative_world, parcel.mass_kg)?);
+        first_moment_error.add(vector(world_arm.scale(-parcel.mass()))?);
+        energy_error.add(-scaled_energy(relative_world, parcel.mass())?);
     }
     let removed = finite(removed.value())?;
     if removed < 0.0 {
@@ -262,4 +290,69 @@ fn add_parallel_axis(entries: &mut [Sum; 6], arm: Vec3, mass: f64) -> Result<(),
         })?);
     }
     Ok(())
+}
+
+// One physical projection, with distinct authored-velocity and canonical-
+// momentum ingress. The latter never rebuilds absolute momentum from velocity.
+trait CaptureParcel {
+    fn mass(&self) -> f64;
+    fn arm(&self) -> Vec3;
+    fn validate(&self) -> Result<(), AssemblyError>;
+    fn momentum(&self) -> Result<Vec3, AssemblyError>;
+    fn relative_momentum(&self, boost: Vec3) -> Result<Vec3, AssemblyError>;
+    fn relative_velocity(&self, boost: Vec3) -> Result<Vec3, AssemblyError>;
+}
+
+impl CaptureParcel for PointMassCapture {
+    fn mass(&self) -> f64 {
+        self.mass_kg
+    }
+    fn arm(&self) -> Vec3 {
+        self.attachment_arm_body_m
+    }
+    fn validate(&self) -> Result<(), AssemblyError> {
+        vector(self.velocity_world_m_s)?;
+        Ok(())
+    }
+    fn momentum(&self) -> Result<Vec3, AssemblyError> {
+        vector(self.velocity_world_m_s.scale(self.mass_kg))
+    }
+    fn relative_momentum(&self, boost: Vec3) -> Result<Vec3, AssemblyError> {
+        vector(self.relative_velocity(boost)?.scale(self.mass_kg))
+    }
+    fn relative_velocity(&self, boost: Vec3) -> Result<Vec3, AssemblyError> {
+        vector(self.velocity_world_m_s.sub(boost))
+    }
+}
+
+impl CaptureParcel for PointMassMomentumCapture {
+    fn mass(&self) -> f64 {
+        self.mass_kg
+    }
+    fn arm(&self) -> Vec3 {
+        self.attachment_arm_body_m
+    }
+    fn validate(&self) -> Result<(), AssemblyError> {
+        vector(self.linear_momentum_world_ns)?;
+        if self.mass_kg == 0.0 && self.linear_momentum_world_ns != Vec3::ZERO {
+            return Err(AssemblyError::Invalid(
+                "zero captured mass requires zero momentum",
+            ));
+        }
+        Ok(())
+    }
+    fn momentum(&self) -> Result<Vec3, AssemblyError> {
+        vector(self.linear_momentum_world_ns)
+    }
+    fn relative_momentum(&self, boost: Vec3) -> Result<Vec3, AssemblyError> {
+        relative_momentum(self.linear_momentum_world_ns, self.mass_kg, boost)
+    }
+    fn relative_velocity(&self, boost: Vec3) -> Result<Vec3, AssemblyError> {
+        let p = self.relative_momentum(boost)?;
+        vector(Vec3::new(
+            p.x / self.mass_kg,
+            p.y / self.mass_kg,
+            p.z / self.mass_kg,
+        ))
+    }
 }

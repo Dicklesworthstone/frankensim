@@ -12,7 +12,7 @@ use super::{
 use crate::{MassProperties, Pose, RigidBodyState, Vec3};
 
 mod batch;
-pub use batch::capture_point_masses;
+pub use batch::{capture_point_masses, capture_point_masses_with_momenta};
 
 /// Incoming mass at an explicitly identified material point, in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,6 +23,21 @@ pub struct PointMassCapture {
     pub attachment_arm_body_m: Vec3,
     /// Incoming parcel velocity in the body's world inertial frame [m/s].
     pub velocity_world_m_s: Vec3,
+}
+
+/// Incoming point material whose canonical momentum is already known.
+///
+/// Use this for handoff from native parcel release or another conservative
+/// owner, without a momentum/velocity/momentum round trip. The point has no
+/// intrinsic inertia; source inventory and physical attachment remain caller-owned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointMassMomentumCapture {
+    /// Nonnegative incoming mass [kg]. Zero mass requires zero momentum.
+    pub mass_kg: f64,
+    /// Attachment relative to the original COM, in original body axes [m].
+    pub attachment_arm_body_m: Vec3,
+    /// Canonical incoming world linear momentum [N s], retained directly.
+    pub linear_momentum_world_ns: Vec3,
 }
 
 /// One atomic capture; the original state and mass properties are unchanged.
@@ -242,7 +257,7 @@ pub fn capture_point_mass(
     })
 }
 
-fn relative_momentum(momentum: Vec3, mass: f64, boost: Vec3) -> Result<Vec3, AssemblyError> {
+pub(super) fn relative_momentum(momentum: Vec3, mass: f64, boost: Vec3) -> Result<Vec3, AssemblyError> {
     vector(Vec3::new(
         (-mass).mul_add(boost.x, momentum.x),
         (-mass).mul_add(boost.y, momentum.y),

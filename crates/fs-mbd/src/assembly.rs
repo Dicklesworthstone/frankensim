@@ -23,6 +23,9 @@ pub mod release;
 /// Prepared separation into retained rigid subassemblies.
 pub mod partition;
 
+/// Atomic local material transfer between finite moving rigid bodies.
+pub mod transfer;
+
 /// A component's original mass properties and COM pose in a common reference.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AssemblyPart {
@@ -67,7 +70,7 @@ pub struct SeparationImpulse {
 pub struct AssemblyBalance {
     /// Final minus initial total world linear momentum [N s].
     pub linear_momentum_residual_world_ns: Vec3,
-    /// Final minus initial spin plus orbital momentum about the event COM [N m s].
+    /// Final minus initial spin plus orbital momentum about one common event origin [N m s].
     pub angular_momentum_residual_world_nms: Vec3,
     /// Kinetic change minus supplied work, or plus removed relative energy [J].
     pub energy_residual_j: f64,
