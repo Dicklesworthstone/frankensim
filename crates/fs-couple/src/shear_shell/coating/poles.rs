@@ -25,7 +25,7 @@ use fs_phs::harmonic::{
     HarmonicBudget, HarmonicError, HarmonicModel, HarmonicPole, HarmonicPoleError,
     HarmonicSpectrumError, MAX_HARMONIC_DIMENSION,
 };
-use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, RelaxationBranch};
+use fs_phs::{DescriptorPortHamiltonian, PhsError, PortHamiltonian, QuadraticStorage, RelaxationBranch, Storage};
 
 pub use super::harmonic::loaded::ShellHarmonicPort;
 pub use fs_phs::harmonic::{BeynOptions, PoleOptions, ResonanceRegion};
@@ -48,16 +48,81 @@ pub struct ShellResonanceLoad<'a> {
     pub band_rad_s: (f64, f64),
 }
 
+/// An original constrained impedance, connected to physical shell flows.
+/// Every differential state and algebraic reaction remains in the joint model.
+/// Its exact quadratic storage acts only on differential coordinates; reaction
+/// coordinates enter port effort and resistance but store no energy.
+pub struct ShellResonanceDescriptorLoad<'a> {
+    pub system: DescriptorPortHamiltonian,
+    /// One original signed shell force/volume-flow projection per load input.
+    pub ports: &'a [ShellHarmonicPort],
+    /// Original real-frequency support of the explicitly selected continuation.
+    pub band_rad_s: (f64, f64),
+}
+
+enum ShellLoadSource<'a> {
+    Ode(ShellResonanceLoad<'a>),
+    Descriptor(ShellResonanceDescriptorLoad<'a>),
+}
+impl ShellLoadSource<'_> {
+    fn state_dim(&self) -> usize {
+        match self {
+            Self::Ode(load) => load.system.state_dim(),
+            Self::Descriptor(load) => load.system.state_dim(),
+        }
+    }
+    fn differential_dim(&self) -> usize {
+        match self {
+            Self::Ode(load) => load.system.state_dim(),
+            Self::Descriptor(load) => load.system.differential_dim(),
+        }
+    }
+    fn port_dim(&self) -> usize {
+        match self {
+            Self::Ode(load) => load.system.port_dim(),
+            Self::Descriptor(load) => load.system.port_dim(),
+        }
+    }
+    fn ports(&self) -> &[ShellHarmonicPort] {
+        match self {
+            Self::Ode(load) => load.ports,
+            Self::Descriptor(load) => load.ports,
+        }
+    }
+    fn band(&self) -> (f64, f64) {
+        match self {
+            Self::Ode(load) => load.band_rad_s,
+            Self::Descriptor(load) => load.band_rad_s,
+        }
+    }
+    fn storage(&self) -> &dyn Storage {
+        match self {
+            Self::Ode(load) => load.system.storage(),
+            Self::Descriptor(load) => load.system.storage(),
+        }
+    }
+    fn structure(&self) -> (&[f64], &[f64], &[f64]) {
+        match self {
+            Self::Ode(load) => load.system.structure(),
+            Self::Descriptor(load) => load.system.structure(),
+        }
+    }
+}
+
 /// Original dynamic load coordinates and separate envelope energy accounts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShellResonanceLoadResponse {
+    /// Original differential states followed by any algebraic reactions.
+    /// Prepared source ranges identify the two blocks without condensation.
     pub state: Vec<C64>,
     /// Work-conjugate shell flow and load opposing effort, in load port order.
     pub flow: Vec<C64>,
     pub effort: Vec<C64>,
     /// Re(conj(flow)*effort) at each original port; positive into the load.
     pub absorbed_port_power_w: Vec<f64>,
+    /// Original differential quadratic energy; reactions store none.
     pub stored_energy_j: f64,
+    /// Full original resistance evaluated on [Q_diff*z_diff, z_alg].
     pub dissipated_power_w: f64,
     /// 2 Re(s) H_load + D_load - sum(absorbed_port_power_w).
     pub decay_power_residual_w: f64,
@@ -69,7 +134,7 @@ pub struct ShellResonanceLoadResponse {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellResonanceBudget {
     /// q,p for EVERY retained mode, every selected material memory row and
-    /// every independently evolving load coordinate.
+    /// every original load coordinate, including algebraic reactions.
     pub maximum_coordinates: usize,
     /// Conservative simultaneous numerical payload; excludes borrowed source
     /// storage, allocator overhead and process RSS.
@@ -213,6 +278,7 @@ pub struct PreparedShellResonance<'a> {
 
 struct PreparedLoad {
     states: usize,
+    differential_states: usize,
     ports: usize,
     /// Original port-major physical shell projections.
     rows: Vec<f64>,
@@ -284,12 +350,28 @@ impl MaterialShellImage {
         budget: ShellResonanceBudget,
         gate: &CancelGate,
     ) -> Result<PreparedShellResonance<'_>, ShellResonanceError> {
-        self.prepare_coating_resonance_inner(Some(load), budget, gate)
+        self.prepare_coating_resonance_inner(Some(ShellLoadSource::Ode(load)), budget, gate)
+    }
+
+    /// Retain an original constrained attachment beside every selected material
+    /// memory coordinate. The shared descriptor owner keeps all constraint
+    /// reactions with zero storage and no artificial inertia or regularization.
+    /// Finite poles and forced responses use the same complete source model;
+    /// descriptor index and infinite-spectrum completeness are not certified.
+    pub fn prepare_coating_resonance_with_descriptor_load(
+        &self,
+        load: ShellResonanceDescriptorLoad<'_>,
+        budget: ShellResonanceBudget,
+        gate: &CancelGate,
+    ) -> Result<PreparedShellResonance<'_>, ShellResonanceError> {
+        self.prepare_coating_resonance_inner(
+            Some(ShellLoadSource::Descriptor(load)), budget, gate,
+        )
     }
 
     fn prepare_coating_resonance_inner(
         &self,
-        load: Option<ShellResonanceLoad<'_>>,
+        load: Option<ShellLoadSource<'_>>,
         budget: ShellResonanceBudget,
         gate: &CancelGate,
     ) -> Result<PreparedShellResonance<'_>, ShellResonanceError> {
@@ -330,12 +412,28 @@ impl MaterialShellAssemblyImage {
         budget: ShellResonanceBudget,
         gate: &CancelGate,
     ) -> Result<PreparedShellResonance<'_>, ShellResonanceError> {
-        self.prepare_coating_resonance_inner(Some(load), budget, gate)
+        self.prepare_coating_resonance_inner(Some(ShellLoadSource::Ode(load)), budget, gate)
+    }
+
+    /// Retain an original constrained attachment beside every selected material
+    /// memory coordinate. The shared descriptor owner keeps all constraint
+    /// reactions with zero storage and no artificial inertia or regularization.
+    /// Finite poles and forced responses use the same complete source model;
+    /// descriptor index and infinite-spectrum completeness are not certified.
+    pub fn prepare_coating_resonance_with_descriptor_load(
+        &self,
+        load: ShellResonanceDescriptorLoad<'_>,
+        budget: ShellResonanceBudget,
+        gate: &CancelGate,
+    ) -> Result<PreparedShellResonance<'_>, ShellResonanceError> {
+        self.prepare_coating_resonance_inner(
+            Some(ShellLoadSource::Descriptor(load)), budget, gate,
+        )
     }
 
     fn prepare_coating_resonance_inner(
         &self,
-        load: Option<ShellResonanceLoad<'_>>,
+        load: Option<ShellLoadSource<'_>>,
         budget: ShellResonanceBudget,
         gate: &CancelGate,
     ) -> Result<PreparedShellResonance<'_>, ShellResonanceError> {
@@ -368,7 +466,7 @@ impl<'a> PreparedShellResonance<'a> {
         image: Image<'a>,
         strain_source: CoatingStrainSource<'a>,
         mut band: (f64, f64),
-        load: Option<ShellResonanceLoad<'_>>,
+        load: Option<ShellLoadSource<'_>>,
         budget: ShellResonanceBudget,
         gate: &CancelGate,
     ) -> Result<Self, ShellResonanceError> {
@@ -377,8 +475,8 @@ impl<'a> PreparedShellResonance<'a> {
         let substrate_rows = image.substrate.map_or(0, |s| s.relaxation_times_s().len());
         let coating_rows = image.films.map_or(0, |s| s.relaxation_times_s().len());
         let shell_dimension = 2 * m + substrate_rows + coating_rows;
-        let load_dimension = load.as_ref().map_or(0, |load| load.system.state_dim());
-        let load_ports = load.as_ref().map_or(0, |load| load.system.port_dim());
+        let load_dimension = load.as_ref().map_or(0, |load| load.state_dim());
+        let load_ports = load.as_ref().map_or(0, |load| load.port_dim());
         let dimension =
             shell_dimension
                 .checked_add(load_dimension)
@@ -386,19 +484,20 @@ impl<'a> PreparedShellResonance<'a> {
                     "joint shell/load dimension overflow",
                 ))?;
         if let Some(load) = &load {
+            let load_band = load.band();
             if load_ports == 0
-                || load.ports.len() != load_ports
-                || !load.band_rad_s.0.is_finite()
-                || load.band_rad_s.0 < 0.0
-                || !load.band_rad_s.1.is_finite()
-                || load.band_rad_s.1 < load.band_rad_s.0
+                || load.ports().len() != load_ports
+                || !load_band.0.is_finite()
+                || load_band.0 < 0.0
+                || !load_band.1.is_finite()
+                || load_band.1 < load_band.0
             {
                 return Err(ShellResonanceError::Invalid(
                     "one physical shell port per load input and an ordered finite load band required",
                 ));
             }
-            band.0 = band.0.max(load.band_rad_s.0);
-            band.1 = band.1.min(load.band_rad_s.1);
+            band.0 = band.0.max(load_band.0);
+            band.1 = band.1.min(load_band.1);
         }
         let ports = image.force_ports.len() + 2;
         let n = dimension as u128;
@@ -514,9 +613,14 @@ impl<'a> PreparedShellResonance<'a> {
             .with_relaxation_branches(branches)
             .map_err(ShellResonanceError::PhysicalModel)?;
         poll(gate)?;
-        let (system, load) = if let Some(load) = load {
+        let harmonic_budget = HarmonicBudget {
+            max_dimension: budget.maximum_coordinates,
+            max_dense_bytes: budget.maximum_payload_bytes,
+            max_dense_work: budget.maximum_preparation_work,
+            relative_residual_tolerance: budget.physical_relative_tolerance,
+        };
+        let (model, load) = if let Some(load) = load {
             let q = load
-                .system
                 .storage()
                 .quadratic_part()
                 .filter(|q| q.exact)
@@ -530,10 +634,10 @@ impl<'a> PreparedShellResonance<'a> {
                     "complete finite original load storage matrix required",
                 ));
             }
-            let (j, r, g) = load.system.structure();
+            let (j, r, g) = load.structure();
             let mut rows = Vec::with_capacity(load_ports * m);
             let mut columns = vec![0.0; shell_dimension * load_ports];
-            for (p, port) in load.ports.iter().enumerate() {
+            for (p, port) in load.ports().iter().enumerate() {
                 poll(gate)?;
                 let row = match port {
                     ShellHarmonicPort::Force(index) => image
@@ -553,6 +657,7 @@ impl<'a> PreparedShellResonance<'a> {
             }
             let prepared = PreparedLoad {
                 states: load_dimension,
+                differential_states: load.differential_dim(),
                 ports: load_ports,
                 rows,
                 q: q.matrix,
@@ -561,25 +666,27 @@ impl<'a> PreparedShellResonance<'a> {
                 g: g.to_vec(),
             };
             poll(gate)?;
-            let system = system
-                .with_parallel_load_columns(load.system, &columns)
-                .map_err(ShellResonanceError::PhysicalModel)?;
-            poll(gate)?;
-            (system, Some(prepared))
+            let model = match load {
+                ShellLoadSource::Ode(load) => {
+                    let system = system
+                        .with_parallel_load_columns(load.system, &columns)
+                        .map_err(ShellResonanceError::PhysicalModel)?;
+                    poll(gate)?;
+                    HarmonicModel::from_ode(&system, harmonic_budget, || gate.is_requested())
+                }
+                ShellLoadSource::Descriptor(load) => {
+                    let system = system
+                        .with_parallel_descriptor_load_columns(load.system, &columns)
+                        .map_err(ShellResonanceError::PhysicalModel)?;
+                    poll(gate)?;
+                    HarmonicModel::from_descriptor(&system, harmonic_budget, || gate.is_requested())
+                }
+            }.map_err(ShellResonanceError::Preparation)?;
+            (model, Some(prepared))
         } else {
-            (system, None)
+            (HarmonicModel::from_ode(&system, harmonic_budget, || gate.is_requested())
+                .map_err(ShellResonanceError::Preparation)?, None)
         };
-        let model = HarmonicModel::from_ode(
-            &system,
-            HarmonicBudget {
-                max_dimension: budget.maximum_coordinates,
-                max_dense_bytes: budget.maximum_payload_bytes,
-                max_dense_work: budget.maximum_preparation_work,
-                relative_residual_tolerance: budget.physical_relative_tolerance,
-            },
-            || gate.is_requested(),
-        )
-        .map_err(ShellResonanceError::Preparation)?;
         poll(gate)?;
         Ok(Self {
             image,
@@ -611,8 +718,22 @@ impl<'a> PreparedShellResonance<'a> {
     pub fn coating_memory_count(&self) -> usize {
         self.coating_rows
     }
+    /// Every original load coordinate, including zero-storage reactions.
     pub fn load_state_count(&self) -> usize {
         self.load.as_ref().map_or(0, |load| load.states)
+    }
+    /// Original differential load suffix before its algebraic reactions.
+    pub fn load_differential_range(&self) -> Option<core::ops::Range<usize>> {
+        self.load.as_ref().map(|load| {
+            let start = self.dimension - load.states;
+            start..start + load.differential_states
+        })
+    }
+    /// Original zero-storage reactions; empty for an ordinary ODE load.
+    pub fn load_algebraic_range(&self) -> Option<core::ops::Range<usize>> {
+        self.load.as_ref().map(|load| {
+            self.dimension - load.states + load.differential_states..self.dimension
+        })
     }
     /// Real-axis support retained from the original sources, not an enclosure
     /// of the selected globally passive continuation's complex-frequency error.
@@ -909,7 +1030,11 @@ impl PreparedLoad {
         let mut effort = vec![C64::ZERO; self.ports];
         for (i, h) in effort_state.iter_mut().enumerate() {
             poll(gate)?;
-            *h = projection(&self.q[i * n..(i + 1) * n], state);
+            *h = if i < self.differential_states {
+                projection(&self.q[i * n..(i + 1) * n], state)
+            } else {
+                state[i]
+            };
         }
         for p in 0..self.ports {
             poll(gate)?;
@@ -922,6 +1047,7 @@ impl PreparedLoad {
             * state
                 .iter()
                 .zip(&effort_state)
+                .take(self.differential_states)
                 .map(|(z, h)| (z.conj() * *h).re)
                 .sum::<f64>();
         let mut dissipated_power_w = 0.0;
@@ -930,8 +1056,16 @@ impl PreparedLoad {
             poll(gate)?;
             let loss_row = projection(&self.r[i * n..(i + 1) * n], &effort_state);
             dissipated_power_w += (effort_state[i].conj() * loss_row).re;
-            let mut residual = rate * state[i];
-            let mut scale = rate.abs() * state[i].abs();
+            let mut residual = if i < self.differential_states {
+                rate * state[i]
+            } else {
+                C64::ZERO
+            };
+            let mut scale = if i < self.differential_states {
+                rate.abs() * state[i].abs()
+            } else {
+                0.0
+            };
             for (j, &h) in effort_state.iter().enumerate() {
                 let a = self.structure[i * n + j];
                 residual = residual - h.scale(a);

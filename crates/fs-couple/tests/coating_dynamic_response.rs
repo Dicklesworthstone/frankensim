@@ -950,3 +950,6 @@ fn g3_assembled_forcing_keeps_every_original_component_film_and_its_own_limit() 
     assert_eq!(factor.completed_strain_evaluations(), 3);
     assert_eq!(factor.strain_resources().coated_elements, 36);
 }
+
+#[path = "coating_dynamic_response/descriptor.rs"]
+mod descriptor;

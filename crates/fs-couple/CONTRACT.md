@@ -24281,3 +24281,12 @@ losses are outside this lossless interior model. Rational mouth work remains
 signed exchange; it is not reclassified as stored energy or heat.
 
 Native compilation of the edited runtime and analysis with the original mixed/zero-direct owners and production physical/numerical dependencies succeeded. All 10 focused `rational_modal_analysis` integration tests passed, including five regional tests for uniform equivalence, local cutoff/transfer convergence, loaded finite-pole convergence, exact-clock work/state subdivision, and source/refusal/history preservation. The bounded harness supplies BEM producer metadata for type linkage only; BEM producer execution and a full `fs-couple` Cargo gate are not claimed.
+
+
+### Original constrained attachments in complete shell resonance
+
+`ShellResonanceDescriptorLoad` and `prepare_coating_resonance_with_descriptor_load` on both material shell images and material shell assembly images retain every original shell/material coordinate, load differential state, and algebraic reaction. The shared physical interconnection and descriptor harmonic/pole owner preserve the original signed force/volume-flow maps and internal work. No constraint condensation, artificial inertia, or duplicate eigensolver is introduced; the existing ordinary-load path is preserved.
+
+Load observations use the original effort coordinates `[Q_diff*z_diff, z_alg]`. Reactions participate in the complete mutual resistance and port effort, while carrying zero stored energy and no derivative term. Every differential and algebraic load equation is independently checked. `load_differential_range()` and `load_algebraic_range()` identify the original coordinate blocks. The same complete load observer feeds forced response and the existing original coating-strain admission, including assemblies and source identities.
+
+Source-band intersections, complete coordinate/payload/work budgets and cancellation remain required. Singular or redundant constraints refuse without regularization. Finite-pole calculations do not newly certify descriptor index, infinite-spectrum completeness, source-basis convergence, or experimental continuation accuracy. Four regressions in `coating_dynamic_response/descriptor.rs` exercise constrained inertance, mutual algebraic resistance with all material memory, all-differential ODE parity with coating admission, and original assemblies with resource/support/cancellation refusals.
