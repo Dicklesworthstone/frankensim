@@ -4010,3 +4010,28 @@ The original `advance` entry selects zero additional spatial loads. Focused
 regressions in `rocket::rigid::tests` compare rotating-arm momentum against an
 independent planar RK4 solution and check world-couple impulse during mass
 and rotational-exhaust depletion (G0/G1).
+
+### Physical exhaust momentum and energy in free translation
+
+`rocket::exhaust` advances physical particle outflow on the original native
+variable-mass trajectory. Its comoving mass, outward momentum and complete
+energy moments are held during emission; exact burnout and subsequent coast
+remain owned by `RocketState`. The inertial exports integrate the changing
+vehicle velocity, including both the momentum cross term and advected kinetic
+energy. A physical particle momentum is distinct from effective nozzle thrust;
+pressure thrust, gravity, external work and rotation are excluded here.
+
+The original thermodynamic owner must debit the complete comoving energy once.
+The kinetic frame correction is retained separately from its possibly large or
+signed formation datum. Actual endpoint velocity and rounded propellant loss
+enter stable momentum and energy residuals. A common boost that erases recoil,
+or amplifies a mass-rounding defect, therefore remains visible to the caller's
+physical acceptance budgets. Mean velocity and mean squared speed support
+accepted-stream rounding corrections without a second dynamics solve. The
+mechanical step allocates no heap storage.
+
+G1/G3/G4 fixtures cover independent time quadrature of exported moments,
+Galilean transformations, opposed streams, signed energy references, burnout
+splitting, tiny depletion, representable extreme velocity variance and actual
+inventory/velocity rounding defects. Rustfmt and source review passed; native
+execution remains unverified in the checkout missing constellation siblings.

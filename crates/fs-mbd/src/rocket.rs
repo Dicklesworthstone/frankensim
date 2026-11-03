@@ -21,6 +21,10 @@ use fs_math::det;
 #[path = "rocket/rigid.rs"]
 pub mod rigid;
 
+/// Physical exported momentum and energy for free translating variable mass.
+#[path = "rocket/exhaust.rs"]
+pub mod exhaust;
+
 /// Inertial-frame point-vehicle state in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RocketState {
