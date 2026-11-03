@@ -22,8 +22,9 @@ mod density_projection;
 use density_projection::FrozenDensity;
 pub use density_projection::{
     DensityForceControls, DensityForceInput, DensityForcePrediction, DensityForceReport,
-    DensityProjection, DensityProjectionControls, DensityProjectionReport, ForcedDensityProjection,
-    ForcedDensityProjectionReport,
+    DensityMomentumReconstruction, DensityMomentumReconstructionControls,
+    DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls,
+    DensityProjectionReport, ForcedDensityProjection, ForcedDensityProjectionReport,
 };
 mod density_transport;
 pub use density_transport::{

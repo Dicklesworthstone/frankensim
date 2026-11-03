@@ -2775,12 +2775,34 @@ electronics cooling (the wedge's second physics after steady conduction).
   energy contribution of retained mass roundoff. Numerical losses never change
   enthalpy. The staggered projection retains pressure correction and its work;
   cell momentum does not receive that correction again. Force splitting, phase
-  mobility and cell/face reconstruction remain with the enclosing owner.
+  mobility and feedback from staggered pressure to cell momentum remain with
+  the enclosing owner.
   Altered public masses, missing incoming velocities, numerical budget failure
   or cancellation returns no candidate. Native G1/G3/G4 regressions check
   analytic graded transport on all axes, injection/extraction, impulse work,
   exact zero-flow continuation, closed circulation, velocity-datum invariance,
   actual phase-volume consumption and independent roundoff-energy refusal.
+- `FlowField::reconstruct_material_momentum` transfers authoritative cell mass
+  and extensive momentum onto the original staggered pressure inertias. Each
+  cell contributes `M/2` and `P_axis/2` to each corresponding face; internal
+  faces merge those quantities and divide by the native half-cell dual mass
+  computed from `rho=M/V`. Every fluid half-cell participates, including both
+  solid-interface orientations. Returned densities accompany the unprojected
+  fluxes for the enclosing owner's compatible force/pressure/volume solve.
+  Actual mass, momentum and kinetic-energy readbacks use independent budgets.
+  Stable relative velocities expose nonnegative averaging loss. Held fluxes
+  report support/controller impulse, reservoir work `I*u_held`, and the
+  nonnegative constraint-projection loss; stationary walls perform zero work.
+  Native dual-mass roundoff has a separate signed energy account whose absolute
+  magnitude is still bounded, so naming it cannot bypass admission. None of
+  these numerical losses becomes heat. The transfer is linear in cell count,
+  with no additional sparse solve. It consumes actual transported cell momenta
+  but supplies no reverse pressure feedback or complete Navier-Stokes timestep;
+  repeated reconstruction's numerical diffusion remains explicit. Native
+  regressions cover graded weighted velocities and mixing loss, large velocity
+  datums, held/solid reactions, mass-representation refusal, actual accepted
+  material-momentum transport followed by native pressure, and an independent
+  density-weighted circulation solution.
 - `FlowField::advance_coexistence_volume` supplies a bounded physical consumer
   of that conservative transport: one mobile, common-velocity material mixture
   on ONE adjacent isothermal solid/liquid coexistence interval of its original

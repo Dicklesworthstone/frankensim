@@ -225,7 +225,7 @@ impl MaterialEndpointCoupling {
                 thermal
                     .eddy_conductivity_w_m_k
                     .resize(domain.cell_count(), 0.0);
-                for (cell, (conductivity, &nu_t)) in thermal
+                for (cell, (conductivity, nu_t)) in thermal
                     .eddy_conductivity_w_m_k
                     .iter_mut()
                     .zip(marcher.solver.heat_eddy_viscosity())

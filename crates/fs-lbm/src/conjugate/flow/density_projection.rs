@@ -8,6 +8,11 @@ pub use forcing::{
     DensityForceControls, DensityForceInput, DensityForcePrediction, DensityForceReport,
     ForcedDensityProjection, ForcedDensityProjectionReport,
 };
+mod reconstruction;
+pub use reconstruction::{
+    DensityMomentumReconstruction, DensityMomentumReconstructionControls,
+    DensityMomentumReconstructionReport,
+};
 
 /// Physical step and independent readback budgets for a density projection.
 #[derive(Debug, Clone, Copy, PartialEq)]
