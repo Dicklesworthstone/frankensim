@@ -7,7 +7,7 @@ use fs_ga::{GaError, Se3, Vec3, Wrench};
 pub struct SpatialLorentzLoadLimits {
     /// Maximum original mesh vertices (one nodal load per original vertex).
     pub max_vertices: usize,
-    /// Maximum selected conducting tetrahedra.
+    /// Maximum selected conducting elements (tetrahedra or extruded triangles).
     pub max_cells: usize,
 }
 
@@ -108,52 +108,76 @@ impl SpatialLorentzLoads {
     }
 }
 
-pub(crate) struct CellLoad<'a> {
-    pub vertices: [u32; 4],
+pub(crate) struct CellLoad<'a, const N: usize = 4> {
+    pub vertices: [u32; N],
     pub volume_m3: f64,
-    pub force_density_n_m3: &'a [[f64; 3]; 4],
+    pub force_density_n_m3: &'a [[f64; 3]; N],
 }
 
-pub(crate) fn integrate<'a>(
+pub(crate) fn integrate<'a, const N: usize>(
     positions_m: &[[f64; 3]],
-    cells: impl ExactSizeIterator<Item = CellLoad<'a>>,
+    cells: impl ExactSizeIterator<Item = CellLoad<'a, N>>,
+    limits: SpatialLorentzLoadLimits,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SpatialLorentzLoads> {
+    integrate_mapped(
+        positions_m.len(),
+        |node| positions_m.get(node).copied(),
+        cells,
+        limits,
+        cancelled,
+    )
+}
+
+// A planar extrusion supplies its mid-depth positions lazily. This avoids a
+// second complete mesh-coordinate allocation while sharing the force scatter,
+// compensated sums, torque reduction and cancellation with tetrahedral loads.
+pub(crate) fn integrate_mapped<'a, const N: usize>(
+    vertex_count: usize,
+    position_m: impl Fn(usize) -> Option<[f64; 3]>,
+    cells: impl ExactSizeIterator<Item = CellLoad<'a, N>>,
     limits: SpatialLorentzLoadLimits,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<SpatialLorentzLoads> {
     use SpatialLorentzLoadError::Invalid;
     poll(cancelled)?;
-    if positions_m.is_empty()
-        || positions_m.len() > limits.max_vertices
+    if !matches!(N, 3 | 4)
+        || vertex_count == 0
+        || vertex_count > limits.max_vertices
         || cells.len() == 0
         || cells.len() > limits.max_cells
     {
         return Err(Invalid("empty or over-budget Lorentz load integration"));
     }
-    let mut nodal_forces_n = vec![[0.0; 3]; positions_m.len()];
-    let mut corrections = vec![[0.0; 3]; positions_m.len()];
+    let mut nodal_forces_n = vec![[0.0; 3]; vertex_count];
+    let mut corrections = vec![[0.0; 3]; vertex_count];
     let mut reference_m = None;
     for cell in cells {
         poll(cancelled)?;
         if !cell.volume_m3.is_finite() || cell.volume_m3 <= 0.0 {
             return Err(Invalid("Lorentz cell volume must be finite and positive"));
         }
-        let weight = cell.volume_m3 / 20.0;
+        let weight = cell.volume_m3 / (N * (N + 1)) as f64;
         if weight == 0.0 {
             return Err(Invalid("Lorentz cell mass weights are not representable"));
         }
         for vertex in cell.vertices {
-            let position = positions_m
-                .get(vertex as usize)
+            let position = position_m(vertex as usize)
                 .ok_or(Invalid("Lorentz cell vertex is outside its original mesh"))?;
-            for &value in position {
+            if vertex as usize >= vertex_count {
+                return Err(Invalid("Lorentz cell vertex exceeds admitted count"));
+            }
+            for value in position {
                 finite(value)?;
             }
-            reference_m.get_or_insert(*position);
+            reference_m.get_or_insert(position);
         }
-        for a in 0..4 {
+        for a in 0..N {
             let node = cell.vertices[a] as usize;
-            for b in 0..4 {
-                // Integral N_a N_b dV = V*(1 + delta_ab)/20.
+            for b in 0..N {
+                // Integral N_a N_b dV = V*(1 + delta_ab)/(N*(N+1)).
+                // An extruded triangle is constant through its thickness;
+                // its three in-plane shape functions therefore use V/12.
                 // Multiply the smaller mass weight first, avoiding the sum of
                 // possibly large force samples before their volume scaling.
                 let mass = if a == b { 2.0 * weight } else { weight };
@@ -179,7 +203,9 @@ pub(crate) fn integrate<'a>(
         // Unselected mesh vertices have no load; their coordinates need not
         // enter the selected body's moment reduction.
         if *force != [0.0; 3] {
-            let moment = (vector(positions_m[node]) - vector(reference_m)).cross(vector(*force));
+            let position = position_m(node)
+                .ok_or(Invalid("Lorentz load vertex is outside its original mesh"))?;
+            let moment = (vector(position) - vector(reference_m)).cross(vector(*force));
             for (axis, value) in [moment.x, moment.y, moment.z].into_iter().enumerate() {
                 add(&mut total[axis], &mut correction[axis], value)?;
             }

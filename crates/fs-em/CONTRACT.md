@@ -3300,3 +3300,38 @@ darkness and deterministic retry. The new inputs pass pinned-nightly
 rustfmt parsing/formatting. The Rust regressions remain unexecuted; no native
 typecheck, runtime performance benchmark or broader quality gate is claimed.
 
+## Planar moving-induction loads on mechanical receivers
+
+Both `MovingEddyCandidate::lorentz_loads` and
+`NonlinearMovingEddyCandidate::lorentz_loads` resolve the original conducting
+triangle selection into nodal force and arbitrary receiving-frame wrenches.
+They use the linear midpoint or nonlinear endpoint J cross B stage already
+used for native Lorentz work; no field re-solve, source substitution or second
+Maxwell-stress force is introduced. Saturation, admitted fixed recoil and
+explicit solid-current drive retain their native current and stage.
+
+The same compensated load-scatter and wrench owner as spatial induction now
+admits three or four simplex nodes. Extruded planar P1 weights are
+V*(1+delta_ij)/12; tetrahedral weights remain V*(1+delta_ij)/20. Uniform
+extrusions act at their physical mid-depth, preserving all three torque
+components about arbitrary origins. Planar coordinates are mapped lazily, so
+no additional full-mesh coordinate array is allocated. Selected triangles are
+canonicalized and checked for uniqueness, conductor membership and budgets;
+refusal/cancellation publishes no partial load.
+
+The exported `PlanarLorentzLoads` uses original vertex order, with local
+x/y forces and zero z force. Pairing with [vx,vy,0] recovers the selected
+native mechanical power; `wrench` applies the existing rigid placement and
+moment-origin transformation. A mechanical impulse uses the same duration.
+The receiving dynamics must close its actual work on the same time stage.
+This transfer does not evolve material geometry, close mechanical feedback,
+or add magnetization/interface forces. The original fixed Eulerian occupancy
+and source assumptions remain in force.
+
+Nine focused native load/mechanics tests pass: six existing tetrahedral
+regressions plus three extruded-triangle checks for analytic nonuniform torque,
+P1 virtual work, subdivision/shared-node scatter, and actual articulated
+linear/angular momentum and kinetic work. Linear and nonlinear field-integration
+tests also gain full/subset native-work and selection/cancellation checks;
+those two full field test binaries were not executed in this resource-limited
+session. No full Cargo, DSR or cross-platform result is claimed.

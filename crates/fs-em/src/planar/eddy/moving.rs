@@ -17,6 +17,9 @@
 //! described in COMSOL's AC/DC guide, "Velocity (Lorentz Term)":
 //! https://doc.comsol.com/6.4/doc/com.comsol.help.acdc/acdc_ug_magnetic_fields.08.040.html.
 
+/// Consistent source-bound nodal forces and receiving-body wrenches.
+pub mod mechanical;
+
 use super::{
     Conduction, EddyCellHeat, EddyConductor, EddyError, PlanarEddy, admit_algebraic, bind, finite,
     load, magnetic_load, poll, positive,

@@ -270,6 +270,44 @@ fn saturating_motion_matches_independent_nonlinear_field_and_three_way_quadratur
                 &mut || false,
             )
             .unwrap();
+        let selected: Vec<_> = (0..12).rev().collect();
+        let load_limits = fs_em::planar::eddy::moving::mechanical::PlanarLorentzLoadLimits {
+            max_vertices: 12,
+            max_cells: 12,
+        };
+        let loads = candidate
+            .lorentz_loads(&selected, load_limits, &mut || false)
+            .unwrap();
+        let velocity3: Vec<_> = velocity.iter().map(|v| [v[0], v[1], 0.0]).collect();
+        near(
+            dt * loads.power_w(&velocity3, &mut || false).unwrap(),
+            candidate.step().mechanical_work_j,
+        );
+        let subset = [7, 0, 3];
+        let partial = candidate
+            .lorentz_loads(&subset, load_limits, &mut || false)
+            .unwrap();
+        let expected: f64 = candidate
+            .step()
+            .cells
+            .iter()
+            .filter(|cell| subset.contains(&cell.joule.source.triangle))
+            .map(|cell| cell.mechanical_work_j)
+            .sum();
+        near(
+            dt * partial.power_w(&velocity3, &mut || false).unwrap(),
+            expected,
+        );
+        assert!(
+            candidate
+                .lorentz_loads(&[0, 0], load_limits, &mut || false)
+                .is_err()
+        );
+        assert!(
+            candidate
+                .lorentz_loads(&selected, load_limits, &mut || true)
+                .is_err()
+        );
         let reference = dense_reference(
             problem.mesh(),
             initial.potential_wb_m(),

@@ -296,3 +296,148 @@ fn extraction_limits_cancellation_and_invalid_values_refuse_atomically() {
         Err(SpatialLorentzLoadError::Cancelled)
     ));
 }
+
+const TRIANGLE_POSITIONS: [[f64; 3]; 3] = [[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]];
+const TRIANGLE_DENSITY: [[f64; 3]; 3] = [[0.0; 3], [0.0, 2.0, 0.0], [1.0, 0.0, 0.0]];
+
+fn triangle_fixture() -> SpatialLorentzLoads {
+    integrate_mapped(
+        TRIANGLE_POSITIONS.len(),
+        |node| TRIANGLE_POSITIONS.get(node).copied(),
+        [CellLoad {
+            vertices: [0, 1, 2],
+            volume_m3: 1.0,
+            force_density_n_m3: &TRIANGLE_DENSITY,
+        }]
+        .into_iter(),
+        LIMITS,
+        &mut || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn extruded_triangle_retains_nonuniform_torque_and_exact_planar_virtual_work() {
+    // Unit right triangle extruded from z=0 to 2; f=(y,2x,0).
+    // Independent monomials: int x=int y=1/3, int x²=int y²=1/6,
+    // int xy=1/12. A centroid or lumped nodal load gets the z moment wrong.
+    let loads = triangle_fixture();
+    let wrench = loads.wrench(&Se3::identity(), [0.0; 3]).unwrap();
+    for (a, b) in wrench.to_array().into_iter().zip([
+        -2.0 / 3.0,
+        1.0 / 3.0,
+        1.0 / 6.0,
+        1.0 / 3.0,
+        2.0 / 3.0,
+        0.0,
+    ]) {
+        near(a, b);
+    }
+    let velocity = TRIANGLE_POSITIONS.map(|p| [1.0 + 2.0 * p[0] - p[1], -3.0 + p[1], 0.0]);
+    near(loads.power_w(&velocity, &mut || false).unwrap(), -1.5);
+    let at_midplane = loads.wrench(&Se3::identity(), [0.0, 0.0, 1.0]).unwrap();
+    near(at_midplane.torque.x, 0.0);
+    near(at_midplane.torque.y, 0.0);
+    near(at_midplane.torque.z, 1.0 / 6.0);
+}
+
+#[test]
+fn extruded_triangle_refinement_and_shared_scatter_preserve_momentum_and_power() {
+    let positions = [
+        TRIANGLE_POSITIONS[0],
+        TRIANGLE_POSITIONS[1],
+        TRIANGLE_POSITIONS[2],
+        [0.5, 0.0, 1.0],
+        [0.5, 0.5, 1.0],
+        [0.0, 0.5, 1.0],
+    ];
+    let faces = [[0_u32, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]];
+    let fields = faces.map(|face| {
+        face.map(|node| {
+            let p = positions[node as usize];
+            [p[1], 2.0 * p[0], 0.0]
+        })
+    });
+    let refined = integrate(
+        &positions,
+        faces.iter().zip(&fields).map(|(face, density)| CellLoad {
+            vertices: *face,
+            volume_m3: 0.25,
+            force_density_n_m3: density,
+        }),
+        SpatialLorentzLoadLimits {
+            max_vertices: 6,
+            max_cells: 4,
+        },
+        &mut || false,
+    )
+    .unwrap();
+    let coarse = triangle_fixture();
+    for (a, b) in refined
+        .wrench(&Se3::identity(), [2.0, -3.0, 4.0])
+        .unwrap()
+        .to_array()
+        .into_iter()
+        .zip(
+            coarse
+                .wrench(&Se3::identity(), [2.0, -3.0, 4.0])
+                .unwrap()
+                .to_array(),
+        )
+    {
+        near(a, b);
+    }
+    let velocity = positions.map(|p| [1.0 + 2.0 * p[0] - p[1], -3.0 + p[1], 0.0]);
+    near(refined.power_w(&velocity, &mut || false).unwrap(), -1.5);
+}
+
+#[test]
+fn extruded_triangle_load_drives_original_articulated_spin_and_translation() {
+    use fs_mbd::articulated::{
+        ArticulatedModel, FreeFloatingBaseState, JointModel, Link, SpatialInertia,
+        apply_free_floating_impulses,
+    };
+    let load = triangle_fixture()
+        .wrench(&Se3::identity(), [0.0; 3])
+        .unwrap();
+    let dt = 0.3;
+    let impulse = Wrench::new(load.torque.scale(dt), load.force.scale(dt));
+    let model = ArticulatedModel::new(vec![Link::new(
+        "planar conductor",
+        None,
+        Se3::identity(),
+        JointModel::FIXED,
+        SpatialInertia::new(
+            5.0,
+            Vec3::new(0.0, 0.0, 0.0),
+            Mat3 {
+                m: [2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0],
+            },
+        )
+        .unwrap(),
+    )])
+    .unwrap();
+    let response = apply_free_floating_impulses(
+        &model,
+        FreeFloatingBaseState::stationary(Se3::identity()),
+        &[],
+        &[],
+        &[],
+        &[impulse],
+    )
+    .unwrap();
+    let actual = Wrench::new(
+        response.angular_momentum_change_world,
+        response.linear_momentum_change_world,
+    );
+    for (a, b) in actual.to_array().into_iter().zip(impulse.to_array()) {
+        near(a, b);
+    }
+    near(response.base_after.twist_body.angular.x, -0.1);
+    near(response.base_after.twist_body.angular.y, 1.0 / 30.0);
+    near(response.base_after.twist_body.angular.z, 0.0125);
+    near(response.base_after.twist_body.linear.x, 0.02);
+    near(response.base_after.twist_body.linear.y, 0.04);
+    near(response.kinetic_energy_change, 163.0 / 9600.0);
+    near(response.kinetic_work_residual, 0.0);
+}

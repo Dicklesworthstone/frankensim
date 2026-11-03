@@ -11,7 +11,7 @@
 //! body. Geometry and motion remain those admitted by the induction candidate;
 //! this transfer does not itself update motion or close mechanical feedback.
 
-mod load;
+pub(crate) mod load;
 
 pub use load::{SpatialLorentzLoadError, SpatialLorentzLoadLimits, SpatialLorentzLoads};
 
