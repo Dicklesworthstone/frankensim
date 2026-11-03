@@ -1,5 +1,8 @@
 //! G0/G1/G3/G4: original momentum exchange across a mixed contact graph.
 
+#[path = "graph/friction.rs"]
+mod friction;
+
 use super::*;
 use fs_contact::multicontact::{MultiImpactConfig, MultiImpactDeterminacy};
 use fs_couple::rod_motion::rigid_impact::graph::{

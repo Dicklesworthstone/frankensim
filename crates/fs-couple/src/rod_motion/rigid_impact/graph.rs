@@ -4,6 +4,8 @@
 //! supply the cross response, so a body-body collision, a rod-body collision and
 //! rod self-contact can participate in one contact law without a pair ordering.
 
+pub mod friction;
+
 use super::super::impulse::{RodImpulseReport, RodPointImpulse};
 use super::super::{RodMotion, RodMotionInertia, add, checkpoint, sub};
 use super::multiple::RodRigidMultiImpactError;

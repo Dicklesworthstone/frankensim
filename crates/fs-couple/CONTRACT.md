@@ -22511,6 +22511,66 @@ per-body unresolved-transfer refusal, bounded input, invalid geometry,
 cancelled/failed publication and deterministic retry. A sequential-subgroup
 falsifier establishes why the complete signed contact graph is required.
 
+## Simultaneous Coulomb contact graphs on native rods and finite bodies
+
+`rod_motion::RodMotion::apply_rigid_frictional_contact_graph` resolves normal
+and two-tangent impulses across an entire graph containing the original rod and
+multiple finite rigid bodies. Edges can connect a rod attachment and a rigid
+body, two distinct rigid bodies, or two distinct rod nodes. The original
+positive/negative endpoint identities determine the signs of both velocity
+observations and reciprocal forces. Contact between two attachments on the same
+rigid participant remains inadmissible.
+
+`rigid_impact::graph::friction::RodRigidFrictionalGraphContact` adds a caller
+tangent direction and an event-local resolved Coulomb coefficient to the common
+graph geometry. The published `RodRigidFrictionalControls` and
+`RodRigidFrictionalError` remain the controls and error boundary. Shared graph
+preparation supplies the original endpoint geometry and compensated relative
+velocities. The original frame owner supplies each work-conjugate contact
+frame. Shared signed graph mobility retains full original tensor inertia,
+eccentric arms, supported coordinates, all shared-participant cross terms, and
+independent tangent frames at different edges.
+
+The complete contact-major, normal-first `3N × 3N` matrix enters the original
+`fs_contact::frictional_multicontact::solve_frictional_contacts` owner. Its
+non-associated Coulomb law, Newton restitution, bounded nonlinear solve, global
+passivity, determinacy and total-work admission remain authoritative. Initially
+separating geometrically active contacts participate in that same solve.
+Redundant impulse coordinates retain the original `UniqueVelocity` and
+range/work witnesses; they are a representative, not unique local contact loads,
+pressures or per-edge heat allocations. Original unresolved/nonunique outcomes
+remain refusals.
+
+Common graph staging applies one original rod point-impulse batch and one
+aggregate native momentum update per affected rigid body. It checks the actual
+post-event velocity triple at every edge, actual stored momentum increments,
+stationary support reactions, aggregate kinetic work and the contact owner's
+original relative work and loss before returning any participant. Tangential
+impulses require actual witness collocation within the declared geometry bound.
+Unused bodies retain their state and input order. Rigid-only graphs leave the
+rod untouched; rod-only self-contact admits an empty body list. Zero-impulse
+graphs invoke no native impulse owner.
+
+The wrapper checks the original 21-edge / 63-row law bounds and the common
+explicit participant budget before allocating graph arrays. Shared assembly is
+quadratic in edge count with linear original inverse-inertia actions. Native
+staging is linear in rod nodes, body count and edges, without a trajectory clone
+per edge. Cancellation and any failed geometry, constitutive or balance check
+return no candidate. Poses, material history, physical clocks and accepted-step
+counts remain those of the original participants, which continue on their
+native integrators. Collision detection, event timing, moving supports,
+persistent friction history, multiple independent rod owners and thermal
+partition remain separate contracts.
+
+Focused G0/G1/G3/G4 groups compare a mixed three-mass chain to analytic
+simultaneous stick/slip and falsify sequential pair updates; reconstruct
+eccentric three-participant response from independent six-dimensional origin
+mass blocks in sticking and sliding regimes; exercise world/tangent-frame,
+edge and body-order changes; verify rod-only and rigid-only limits, original
+support reactions, redundant-load determinacy and original refusal parity; and
+check native continuation, bounded work, cancellation, exact no-ops and atomic
+late refusal/retry.
+
 ## Coulomb friction in isolated native rod/rigid impacts
 
 `rod_motion::RodMotion::apply_rigid_frictional_impact` resolves the normal and
