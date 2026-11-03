@@ -25,6 +25,9 @@ pub mod membrane;
 /// Original tetrahedral quadrature and consistent inertia in the same runtime.
 pub mod solid;
 
+/// Fixed-clock full tensor mechanics with exact shared material memory.
+pub mod prepared;
+
 mod inertia;
 use inertia::Inertia;
 
