@@ -1,5 +1,23 @@
 # CONTRACT: fs-mbd
 
+## Shared native free rotation
+
+The explicit kick-drift, symplectic and staged Verlet rigid-body paths use
+`fs-time::lie::gyrostat::InertiaTensor3::momentum_step` with zero internal
+rotor momentum. The original admitted principal moments and fixed
+principal-to-body frame enter that shared owner directly, without another
+eigensolve or a momentum-to-velocity round trip. The common Hamiltonian
+splitting advances attitude and body momentum together, including full
+nonprincipal inertia and the exact axisymmetric-top special case.
+
+The MBD boundary retains its normalized canonical quaternion and original
+force, torque, translation and diagnostic conventions. The implicit
+midpoint/Cayley path remains a separate integration method. The energy test
+entry includes an independent continuous rotated symmetric-top reference for
+all three explicit paths, with spatial momentum and kinetic-energy checks.
+Native group admission and representability limits apply to the shared drift.
+
+
 ## Native internal spatial-wrench impulse transfer
 
 `spatial_loads::internal_impulse::apply_internal_wrench_impulse` transfers a

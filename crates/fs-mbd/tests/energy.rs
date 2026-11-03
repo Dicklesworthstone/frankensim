@@ -308,6 +308,68 @@ fn explicit_symmetric_top_is_exact_for_every_symmetry_axis() {
 }
 
 #[test]
+fn full_tensor_free_drift_matches_the_analytic_top_in_every_explicit_path() {
+    let (_, posed) = body();
+    let basis = UnitQuaternion::from_axis_angle(Vec3::new(1.0, -0.7, 2.0), 0.83).unwrap();
+    let properties = MassProperties::from_principal_frame(
+        1.0,
+        Vec3::ZERO,
+        Vec3::new(2.0, 2.0, 3.5),
+        basis,
+    )
+    .unwrap();
+    let momentum = basis.rotate_body_to_world(Vec3::new(0.4, 0.7, 1.1));
+    let axis = basis.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
+    let initial = RigidBodyState::new(posed.pose(), Vec3::ZERO, momentum).unwrap();
+    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+    let before = integrator.diagnostics(initial, properties).unwrap();
+    for duration in [0.003, 2.3, 40.0] {
+        let axial = momentum.dot(axis);
+        let phase = duration * axial * (1.0 / 3.5 - 1.0 / 2.0);
+        // Independent continuous symmetric-top solution in a nonprincipal
+        // body frame: spatial precession followed by the axial correction.
+        let exact_q = initial
+            .pose()
+            .orientation()
+            .right_exp(momentum.scale(duration / 2.0))
+            .unwrap()
+            .right_exp(axis.scale(phase))
+            .unwrap();
+        let parallel = axis.scale(axial);
+        let exact_l = parallel
+            .add(momentum.sub(parallel).scale(phase.cos()))
+            .sub(axis.cross(momentum).scale(phase.sin()));
+        let steps = [
+            integrator.step_kick_drift(initial, properties, Wrench::ZERO, duration),
+            integrator.step_symplectic(initial, properties, Wrench::ZERO, duration),
+            integrator
+                .begin_verlet(initial, properties, Wrench::ZERO, duration)
+                .and_then(|stage| stage.finish(Wrench::ZERO)),
+        ];
+        for step in steps {
+            let step = step.unwrap();
+            let actual = step.state_after;
+            assert!(norm(actual.angular_momentum_body().sub(exact_l)) < 2e-12);
+            assert!(norm(
+                step.diagnostics_after.angular_momentum_world.sub(before.angular_momentum_world)
+            ) < 2e-12);
+            assert!((step.diagnostics_after.mechanical_energy - before.mechanical_energy).abs()
+                < 2e-12);
+            for probe in [
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            ] {
+                assert!(norm(
+                    actual.pose().orientation().rotate_body_to_world(probe)
+                        .sub(exact_q.rotate_body_to_world(probe))
+                ) < 2e-11);
+            }
+        }
+    }
+}
+
+#[test]
 fn explicit_body_torque_obeys_world_angular_impulse_balance() {
     let (properties, initial) = body();
     let integrator = RigidBodyIntegrator::new(Gravity::ZERO);

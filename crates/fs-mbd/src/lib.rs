@@ -2114,93 +2114,45 @@ fn solve_rotation_3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Result<[f64; 3], D
 }
 
 fn free_rotation_step(
-    mut orientation: UnitQuaternion,
-    mut momentum: Vec3,
+    orientation: UnitQuaternion,
+    momentum: Vec3,
     properties: MassProperties,
     duration_seconds: f64,
 ) -> Result<(UnitQuaternion, Vec3), DynamicsError> {
-    if properties.principal_to_body != UnitQuaternion::IDENTITY {
-        let (principal_increment, _) = free_rotation_step(
-            UnitQuaternion::IDENTITY,
-            properties.to_principal(momentum),
-            properties.principal_properties(),
-            duration_seconds,
-        )?;
-        let increment = properties.increment_in_body(principal_increment)?;
-        let q = orientation.multiply(increment);
-        return Ok((
-            UnitQuaternion::new(q.w, q.x, q.y, q.z)?,
-            increment.rotate_world_to_body(momentum),
-        ));
-    }
     properties.angular_velocity_body_checked(momentum)?;
-    let inertia = [
-        properties.principal_inertia_body.x,
-        properties.principal_inertia_body.y,
-        properties.principal_inertia_body.z,
-    ];
-    let mut axes = [0, 1, 2];
-    axes.sort_by(|&first, &second| inertia[first].total_cmp(&inertia[second]));
-    let [first, reference, second] = axes;
-    let reference_inertia = inertia[reference];
-
-    // Split H = |L|²/(2 Iref) + (1/Ia - 1/Iref) La²/2
-    //                           + (1/Ib - 1/Iref) Lb²/2.
-    // The spherical term commutes with both axis terms. Choosing the median
-    // inertia minimizes the product of their coefficient magnitudes and makes
-    // one vanish for ANY axisymmetric body, giving its exact free solution.
-    // Each axis flow has constant La: R <- R exp(theta ea),
-    // L <- exp(-theta ea) L. Hence R L is unchanged by construction.
-    // Symmetric a(h/2), b(h), a(h/2) composition is second-order and symplectic.
-    // See Dullweber--Leimkuhler--McLachlan, J. Chem. Phys. 107 (1997), 5840.
-    for (axis, duration) in [
-        (first, 0.5 * duration_seconds),
-        (second, duration_seconds),
-        (first, 0.5 * duration_seconds),
-    ] {
-        if inertia[axis] == reference_inertia {
-            continue;
-        }
-        let components = [momentum.x, momentum.y, momentum.z];
-        let angle = finite_derived(
-            duration * (components[axis] / inertia[axis] - components[axis] / reference_inertia),
-            "free_rotation.angle",
-        )?;
-        if angle == 0.0 {
-            continue;
-        }
-        let (sine_half, cosine_half) = (0.5 * angle).sin_cos();
-        let mut vector_half = [0.0; 3];
-        vector_half[axis] = sine_half;
-        let increment =
-            UnitQuaternion::new(cosine_half, vector_half[0], vector_half[1], vector_half[2])?;
-        let product = orientation.multiply(increment);
-        orientation = UnitQuaternion::new(product.w, product.x, product.y, product.z)?;
-
-        // Only the perpendicular plane changes. Reuse the quaternion's half
-        // angle instead of evaluating a second sine/cosine pair, and leave the
-        // conserved axial component bit-identical.
-        let half = increment.components()[axis + 1];
-        let sine = 2.0 * increment.w * half;
-        let cosine = increment.w.mul_add(increment.w, -(half * half));
-        let next = (axis + 1) % 3;
-        let last = (axis + 2) % 3;
-        let mut rotated = components;
-        rotated[next] = cosine.mul_add(components[next], sine * components[last]);
-        rotated[last] = cosine.mul_add(components[last], -(sine * components[next]));
-        momentum = Vec3::new(rotated[0], rotated[1], rotated[2]);
-    }
-
-    // The commuting spherical flow changes attitude but not body momentum.
-    // Divide before multiplying by h to avoid forming an overflowing h/Iref.
-    let spherical_rotation = Vec3::new(
-        momentum.x / reference_inertia,
-        momentum.y / reference_inertia,
-        momentum.z / reference_inertia,
+    let rotation = |q: UnitQuaternion| {
+        fs_ga::So3::try_from_quat(fs_ga::Quat {
+            w: q.w,
+            x: q.x,
+            y: q.y,
+            z: q.z,
+        })
+        .map_err(|_| DynamicsError::InvalidOrientation)
+    };
+    let moments = properties.principal_inertia_body;
+    // Reuse the already admitted principal frame: no eigensolve, velocity
+    // round trip, or second rigid-top splitting belongs in the MBD adapter.
+    // Zero internal momentum selects fs-time's rigid-body Hamiltonian drift.
+    let inertia = fs_time::lie::gyrostat::InertiaTensor3::from_principal(
+        fs_ga::Vec3::new(moments.x, moments.y, moments.z),
+        rotation(properties.principal_to_body)?,
     )
-    .scale(duration_seconds);
-    orientation = orientation.right_exp(spherical_rotation)?;
-    Ok((orientation, momentum))
+    .map_err(|_| DynamicsError::InvalidInertiaTensor)?;
+    let (next, momentum) = inertia
+        .momentum_step(
+            rotation(orientation)?,
+            fs_ga::Vec3::new(momentum.x, momentum.y, momentum.z),
+            fs_ga::Vec3::new(0.0, 0.0, 0.0),
+            duration_seconds,
+        )
+        .map_err(|_| DynamicsError::NonFinite("free_rotation"))?;
+    let q = next.as_quat();
+    // Keep the original MBD normalized/canonical transport boundary. The
+    // common time owner advances orientation and momentum as one paired map.
+    Ok((
+        UnitQuaternion::new(q.w, q.x, q.y, q.z)?,
+        Vec3::new(momentum.x, momentum.y, momentum.z),
+    ))
 }
 
 #[cfg(test)]
