@@ -296,6 +296,52 @@ evolving-core model or measured performance claim is added.
 `tests/conservative_viscous.rs` checks zero-viscosity equivalence, analytical
 dipole decay and travel, refinement, signed-cloud behavior and refusals.
 
+## Prescribed affine flow on conservative 2-D vortices
+
+`conservative::ambient::{simulate_with_cx, simulate_viscous_with_cx}` adds one
+held `AffineFlow2`, `u(x)=U+A(x-o)`, with `A=[[a,b],[c,-a]]`. Its three authored
+gradient entries make incompressibility structural. Translation, rigid
+rotation, simple or rotated shear, and planar extension use an exact affine
+half-map around the original native step. The viscous composition is
+`F(dt/2) D(dt/2) A(dt) D(dt/2) F(dt/2)`; here the central `A(dt)` denotes
+original conservative pair advection. All particle areas remain explicit and
+unchanged under this area-preserving source. Negative time is supported only
+by the inviscid entry.
+
+The half-map is prepared once, using Cayley–Hamilton, the original deterministic
+elementary functions and double-double arithmetic. Entire-series evaluation
+handles the zero-eigenvalue/shear limit without division by a small eigenvalue;
+spectral projectors preserve expanding and contracting strain components.
+Unrepresentable coefficients, endpoints or moment accounts refuse atomically.
+An exact affine stagnation point is retained; a nonzero endpoint displacement
+that disappears completely at the stored position refuses rather than silently
+turning the source off. No step subdivision, position snapping, core deformation
+or arbitrary spatially varying source is inferred.
+
+`AmbientVpmRun` retains the original `VpmRun` plus actual source increments in
+`sum Gamma*x`, `sum Gamma*y` and `sum Gamma*|x|²`, measured during the source
+substeps with compensated endpoint differences. No division by total
+circulation is used, so signed zero-net clouds remain valid. For inviscid motion
+the first moment obeys `M'=A(M-Gamma_total*o)+Gamma_total*U`; the source map
+integrates that balance exactly up to roundoff, independently of pair splitting.
+The quadratic moment can change under strain. The source accounts for those
+changes while pair advection retains its original impulse invariants. PSE still
+has its separate finite-cloud impulse error. These vortex moments do not claim
+finite-domain fluid/body momentum, reaction force, pressure work or a closed
+energy budget for a background extending to infinity.
+
+An active source adds exactly `2*N*S` logical visits to the original plan and
+no heap payload beyond its one particle vector. Map preparation and receipts
+use fixed stack storage. All phases share one original ambient account and
+bounded work checkpoints. Zero source, zero time, zero steps and empty-cloud
+paths preserve the original run and resource counts; within nonnegative time,
+zero viscosity also recovers the new inviscid result exactly. Fixed-source
+second-order time refinement is checked against an independent full ODE,
+alongside analytic affine motions, signed moment balance, reversal, world-frame
+and dimensional covariance, resource admission and atomic refusals in
+`tests/ambient_flow.rs` (G0/G1/G3/G4). This extension does not close the deferred
+3-D/FMM/BEM program or provide automatic remeshing under strain.
+
 ## Moment-preserving 2-D remeshing
 
 `remesh::remesh` redistributes signed particle circulation onto an explicitly
