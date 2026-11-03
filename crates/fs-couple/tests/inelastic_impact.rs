@@ -29,6 +29,12 @@ mod mixed;
 #[path = "inelastic_impact/elliptic.rs"]
 mod elliptic;
 
+#[path = "inelastic_impact/directional.rs"]
+mod directional;
+
+#[path = "inelastic_impact/surface.rs"]
+mod surface;
+
 const NODES: [[f64; 3]; 4] = [
     [0.0, 0.0, 0.0],
     [1.0, 0.0, 0.0],
@@ -268,7 +274,9 @@ fn relaxed_viscoelastic_body_collides_through_full_rigid_inertia_and_moving_supp
             Some(RHO.as_slice())
         );
         check_visco_manifold(&motion, cx);
+        surface::check_visco_geometry(&motion, cx);
         elliptic::check_visco_directional(&motion, cx);
+        directional::check_visco_sources(&motion, cx);
         let mut wrong_line = point;
         wrong_line[1] += 1e-5;
         assert!(matches!(
@@ -455,7 +463,9 @@ fn freely_moving_plastic_body_uses_original_graded_inverse_and_keeps_its_return_
         }
         let separating = rigid_at(point, 0.3);
         check_plastic_supported_manifold(&motion, cx);
+        surface::check_plastic_geometry(&motion, cx);
         elliptic::check_plastic_directional_supports(&motion, cx);
+        directional::check_plastic_sources(&motion, cx);
         let unchanged = plastic_rigid_impact_candidate(
             &motion,
             &[],

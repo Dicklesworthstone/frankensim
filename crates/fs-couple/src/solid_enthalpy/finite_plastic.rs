@@ -27,7 +27,10 @@
 
 pub mod impact;
 pub mod material;
-pub use impact::FiniteThermoplasticImpactError;
+pub use impact::{
+    FiniteThermoplasticEllipticImpactError, FiniteThermoplasticImpactError,
+    FiniteThermoplasticSourceImpactError,
+};
 pub use material::{CaloricReference, FiniteThermoplasticMaterial, FiniteThermoplasticQuery};
 
 use std::collections::{BTreeMap, BTreeSet};

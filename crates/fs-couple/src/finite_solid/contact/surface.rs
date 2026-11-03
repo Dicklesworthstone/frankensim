@@ -25,6 +25,7 @@ use fs_exec::Cx;
 use fs_mbd::{DynamicsError, RigidBodyState, Vec3};
 use fs_query::{PreparedTriangleSurface, TriangleFeature, TrianglePoint, TriangleQueryError};
 use fs_solid::hyper3::{HyperTetError, pressure::ClosedTetPressureSurface};
+use fs_solid::linear3::TetAssemblyBudget;
 
 /// One geometric sphere carried by an existing rigid body's material frame.
 /// Multiple offset spheres may form a declared compound rigid geometry; their
@@ -185,17 +186,28 @@ impl FiniteSolidContactSurface {
         maximum_face_entries: usize,
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteSolidSurfaceError> {
-        poll(cx)?;
         let problem = solid.problem();
-        let exterior = ClosedTetPressureSurface::new(
+        Self::from_reference(
             problem.nodes_m,
             problem.tetrahedra,
             problem.budget,
             maximum_face_entries,
             cx,
-        )?;
+        )
+    }
+
+    pub(crate) fn from_reference(
+        nodes_m: &[[f64; 3]],
+        tetrahedra: &[[usize; 4]],
+        budget: TetAssemblyBudget,
+        maximum_face_entries: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteSolidSurfaceError> {
+        poll(cx)?;
+        let exterior =
+            ClosedTetPressureSurface::new(nodes_m, tetrahedra, budget, maximum_face_entries, cx)?;
         let mut owners = BTreeMap::new();
-        for (tetrahedron, tet) in problem.tetrahedra.iter().enumerate() {
+        for (tetrahedron, tet) in tetrahedra.iter().enumerate() {
             poll(cx)?;
             for opposite in 0..4 {
                 let mut face = [0usize; 3];
@@ -229,7 +241,7 @@ impl FiniteSolidContactSurface {
             let tetrahedron = *owners.get(&key).ok_or(FiniteSolidSurfaceError::Invalid(
                 "exterior lost its original tet owner",
             ))?;
-            let tet = problem.tetrahedra[tetrahedron];
+            let tet = tetrahedra[tetrahedron];
             let mut local_nodes = [0usize; 3];
             for (slot, node) in nodes.into_iter().enumerate() {
                 local_nodes[slot] = tet.iter().position(|&id| id == node).ok_or(
@@ -249,21 +261,20 @@ impl FiniteSolidContactSurface {
             }
             triangles.push(tri);
         }
-        let triangle_surface = PreparedTriangleSurface::new(problem.nodes_m, &triangles, cx)?;
-        let mut reference_orientation = Vec::with_capacity(problem.tetrahedra.len());
-        for (tetrahedron, tet) in problem.tetrahedra.iter().enumerate() {
+        let triangle_surface = PreparedTriangleSurface::new(nodes_m, &triangles, cx)?;
+        let mut reference_orientation = Vec::with_capacity(tetrahedra.len());
+        for (tetrahedron, tet) in tetrahedra.iter().enumerate() {
             poll(cx)?;
             let cell = CurrentTet::new(
-                tet.map(|i| problem.nodes_m[i]),
+                tet.map(|i| nodes_m[i]),
                 tetrahedron,
                 None,
-                problem.budget.minimum_scaled_jacobian,
+                budget.minimum_scaled_jacobian,
             )?;
             reference_orientation.push(cell.determinant.signum());
         }
         let feature_count = u64::try_from(
-            problem
-                .nodes_m
+            nodes_m
                 .len()
                 .saturating_add(edges.len())
                 .saturating_add(material_faces.len()),
@@ -272,10 +283,10 @@ impl FiniteSolidContactSurface {
         Ok(Self {
             exterior,
             triangle_surface,
-            tetrahedra: problem.tetrahedra.to_vec(),
+            tetrahedra: tetrahedra.to_vec(),
             reference_orientation,
             material_faces,
-            node_count: problem.nodes_m.len(),
+            node_count: nodes_m.len(),
             edge_count: edges.len(),
             feature_count,
         })
@@ -308,6 +319,37 @@ impl FiniteSolidContactSurface {
             return Err(FiniteSolidSurfaceError::ReferenceMismatch);
         }
         Ok(solid.current_positions(cx)?)
+    }
+
+    /// Native complete displacements, admitted against the same exact reference
+    /// coordinates/connectivity as the original mechanical surface consumer.
+    pub(crate) fn current_positions_from_reference(
+        &self,
+        nodes_m: &[[f64; 3]],
+        tetrahedra: &[[usize; 4]],
+        displacement_m: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<[f64; 3]>, FiniteSolidSurfaceError> {
+        poll(cx)?;
+        if !self.exterior.matches_reference(nodes_m, tetrahedra) {
+            return Err(FiniteSolidSurfaceError::ReferenceMismatch);
+        }
+        if displacement_m.len() != self.node_count {
+            return Err(FiniteSolidSurfaceError::Invalid(
+                "complete original nodal displacement required",
+            ));
+        }
+        let mut positions = Vec::with_capacity(self.node_count);
+        for (node, (reference, displacement)) in nodes_m.iter().zip(displacement_m).enumerate() {
+            if node % 256 == 0 {
+                poll(cx)?;
+            }
+            positions.push(vector(core::array::from_fn(|axis| {
+                reference[axis] + displacement[axis]
+            }))?);
+        }
+        poll(cx)?;
+        Ok(positions)
     }
 
     /// Query current native coordinates. Raw negative gaps are retained so an

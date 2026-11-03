@@ -13,6 +13,11 @@
 /// Coupled frictional events retaining plastic, Maxwell and thermal histories.
 pub mod multiple;
 
+/// Original material-interface sources through native directional impacts.
+pub mod directional;
+/// Automatic sphere witnesses on the original deformed tetrahedral boundary.
+pub mod surface;
+
 use fs_contact::impact::{
     NormalImpactError, NormalImpactInput, NormalImpactResult, solve_normal_impact,
 };

@@ -15,7 +15,6 @@
 
 use crate::finite_solid::contact::{
     FiniteSolidRigidContactControls, FiniteSolidRigidContactError, FiniteSolidRigidContactReport,
-    mixed_contact_candidate_with,
 };
 use fs_contact::frictional_multicontact::{
     FrictionalContact, FrictionalContactError, FrictionalContactResult, solve_frictional_contacts,
@@ -64,7 +63,7 @@ pub struct InelasticMixedContactCandidate<M, R = FrictionalContactResult> {
     pub report: FiniteSolidRigidContactReport<R, SolidImpulseReport>,
 }
 
-fn moving_supports(velocity: Option<&[[f64; 3]]>, held: &[usize]) -> bool {
+pub(super) fn moving_supports(velocity: Option<&[[f64; 3]]>, held: &[usize]) -> bool {
     // Invalid/unbound supports still reach their original native error below.
     velocity.is_some_and(|velocity| {
         held.iter().any(|&dof| {
@@ -108,14 +107,14 @@ macro_rules! native_candidate {
     (@law $solid:expr, $held:expr, $bodies:expr, $properties:expr, $contacts:expr,
      $origin:expr, $controls:expr, $cx:expr, $velocity:expr, $candidate_field:ident,
      $solve:expr) => {{
-        let (solid, rigid_bodies, report) = mixed_contact_candidate_with(
+        let (solid, rigid_bodies, report) = $crate::finite_solid::contact::mixed_contact_candidate_with(
             $bodies,
             $properties,
             $contacts,
             $origin,
             $controls,
             $cx,
-            moving_supports($velocity, $held),
+            $crate::inelastic_impact::multiple::moving_supports($velocity, $held),
             |point| $solid.point_kinematics(point, $cx),
             |rows, maximum_rows| {
                 $solid.point_mobility_matrix_per_kg(
@@ -143,13 +142,14 @@ macro_rules! native_candidate {
             },
             $solve,
         )?;
-        Ok(InelasticMixedContactCandidate {
+        Ok($crate::inelastic_impact::multiple::InelasticMixedContactCandidate {
             solid,
             rigid_bodies,
             report,
         })
     }};
 }
+pub(super) use native_candidate;
 
 /// Directional friction ellipses through these same native material owners.
 pub mod elliptic;

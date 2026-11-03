@@ -252,6 +252,44 @@ equal-mass collision, exact source/caloric retention, stale and independently
 advanced heat refusal, and continuation on the original heat timeline with
 the original consistent-mass inertial load.
 
+`inelastic_impact::surface` prepares and queries the original deformed Tet4
+boundary for native plastic, viscoelastic and thermoplastic owners. It shares
+the existing closed-surface preparation, reference identity check, BVH refit,
+orientation admission and canonical face/edge/vertex witnesses. Queries borrow
+material history; the same barycentric witnesses feed one simultaneous native
+contact candidate with original graded mass, full rigid inertia and support
+reactions. Penetration and reference mismatch refuse without repairing geometry.
+This discrete adapter makes no swept-path claim and does not approximate Hex8
+or curved P2 boundaries with Tet4 faces.
+
+`inelastic_impact::directional` samples the original interface sources for all
+four native manifold owners before invoking the shared elliptic mechanical
+solve. One original history and explicit static/kinetic coefficient role bind
+each input contact. Active contacts sample the actual complete incoming tangent
+speed, including any principal free-slip direction; inactive rows do not query
+sources. Canonical contact IDs retain their original input indices. Local
+temperature, pressure and other source conditions come from the caller's typed
+callback rather than from an invented impulse duration or pressure. A source
+failure, mechanical refusal or cancellation publishes neither mechanical state
+nor sampled interface state. Source claims and accepted slip histories survive
+unchanged, and physical loss remains separate from any thermal allocation.
+
+The source-caloric `FiniteThermoplasticSolid` also provides
+`mixed_elliptic_contact_candidate` and `mixed_source_elliptic_contact_candidate`.
+Both admit the original caloric objects, enthalpies and clock before contact
+or source evaluation, then retain the complete source-bound mechanical owner.
+They share the circular entry's admission/adoption helpers and continue through
+the same coupled thermal advance. They do not rebind material sources or heat
+the body from contact loss without a declared partition.
+
+The existing native fixtures now exercise current deformed-surface geometry,
+independent graded-mass/full-tensor impact response, source speed and explicit
+coefficient roles, exact principal free slip, input permutation, late source
+failure and retained plastic/Maxwell/thermal histories. The original caloric
+seam adds directional parity and source admission ordering. Formatting and
+source/API checks pass; native test execution remains unverified while the
+required constellation sibling checkouts are unavailable.
+
 ## Physical pressure from an explicitly selected lumped duct
 
 `acoustic_realize::duct_observer::BaffledDuctObserver` also admits the existing

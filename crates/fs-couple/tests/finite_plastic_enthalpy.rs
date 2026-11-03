@@ -1331,7 +1331,10 @@ fn heterogeneous_cells_conduct_heat_with_opposing_reversible_sources_and_local_h
 
 #[test]
 fn hot_source_bound_impact_retains_caloric_timeline_and_continues_with_new_momentum() {
+    use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
     use fs_contact::frictional_multicontact::{FrictionalContactConfig, NormalVelocityLaw};
+    use fs_contact::interface_binding::thermal_friction::elliptic::SourceFrictionConditions;
+    use fs_couple::finite_solid::contact::FiniteSolidRigidContactError;
     use fs_couple::inelastic_impact::multiple::{
         FiniteSolidContactCounterpart, InelasticMixedContact, InelasticMixedContactControls,
         RigidImpactPoint,
@@ -1450,6 +1453,38 @@ fn hot_source_bound_impact_retains_caloric_timeline_and_continues_with_new_momen
                 cx,
             )
             .unwrap();
+        let elliptic = solid
+            .mixed_elliptic_contact_candidate(
+                &thermal,
+                &[],
+                &bodies,
+                &properties,
+                &contacts.map(|contact| {
+                    contact.with_friction(EllipticFriction {
+                        coefficients_mu: [0.0; 2],
+                        principal_axis: [1.0, 0.0],
+                    })
+                }),
+                [0.0; 3],
+                impact_controls,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(
+            elliptic.solid.mechanics().velocity_mps(),
+            event.solid.mechanics().velocity_mps()
+        );
+        assert_eq!(elliptic.solid.cells(), event.solid.cells());
+        assert_eq!(elliptic.solid.time_s(), event.solid.time_s());
+        assert_eq!(
+            elliptic.rigid_bodies[0].linear_momentum_world(),
+            event.rigid_bodies[0].linear_momentum_world()
+        );
+        close(
+            elliptic.report.contact.dissipated_energy,
+            event.report.contact.dissipated_energy,
+            1e-15,
+        );
         // At the centroid, the full consistent mass gives mobility 1/mass and
         // a uniform jump. Equal rigid mass, approach 1 and e=1/2 give J=3m/4.
         let impulse = 0.75 * mass;
@@ -1518,7 +1553,47 @@ fn hot_source_bound_impact_retains_caloric_timeline_and_continues_with_new_momen
                     FiniteThermoplasticError::Invalid(_)
                 ))
             ));
+            assert!(matches!(
+                solid.mixed_source_elliptic_contact_candidate(
+                    wrong,
+                    &[],
+                    &bodies,
+                    &properties,
+                    &contacts.map(|contact| contact.with_friction(())),
+                    &[],
+                    &[],
+                    [0.0; 3],
+                    impact_controls,
+                    |_, _| -> Result<SourceFrictionConditions, ()> {
+                        panic!("stale caloric state must refuse before interface sampling")
+                    },
+                    cx,
+                ),
+                Err(FiniteThermoplasticImpactError::Source(
+                    FiniteThermoplasticError::Invalid(_)
+                ))
+            ));
         }
+        assert!(matches!(
+            solid.mixed_source_elliptic_contact_candidate(
+                &thermal,
+                &[],
+                &bodies,
+                &properties,
+                &contacts.map(|contact| contact.with_friction(())),
+                &[],
+                &[],
+                [0.0; 3],
+                impact_controls,
+                |_, _| -> Result<SourceFrictionConditions, ()> {
+                    panic!("missing original interface histories must refuse before sampling")
+                },
+                cx,
+            ),
+            Err(FiniteThermoplasticImpactError::Contact(
+                FiniteSolidRigidContactError::Invalid(_)
+            ))
+        ));
         assert_eq!(thermal.cells(), &old_cells);
         assert_eq!(old.velocity_mps().unwrap(), old_velocity);
 
