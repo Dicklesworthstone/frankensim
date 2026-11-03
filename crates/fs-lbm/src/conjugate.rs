@@ -131,6 +131,7 @@ pub use energy::{
 pub use flow::{
     AdvectedMaterial, CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, DensityForceControls, DensityForceInput, DensityForcePrediction,
+    ConductiveThermalVolumeControls, ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
     DensityForceReport, DensityMomentumReconstruction, DensityMomentumReconstructionControls,
     DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls,
     DensityProjectionReport,

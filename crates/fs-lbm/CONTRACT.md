@@ -3015,6 +3015,30 @@ electronics cooling (the wedge's second physics after steady conduction).
   independent cross-branch mass/enthalpy/EOS solutions, graded internal mixing,
   both signs of knot-volume corrections, distinct affine-density branches,
   large caloric datums, exact total-work limits and atomic refusals.
+- `FlowField::advance_isotropic_conductive_thermal_volume` connects an original
+  `PreparedPhaseConductivity` to that full-chart volume owner. Calling it
+  explicitly declares the scalar source isotropic. One source sample per fluid
+  cell supplies original `T(h)`, phase and conductivity; the same borrowed
+  caloric chart supplies density throughout the accepted transport. Each
+  internal fluid/fluid face exchanges paired heat through its physical series
+  resistance `G=A/(d_left/k_left+d_right/k_right)`, with graded half-cell
+  distances. Zero conductivity, solid interfaces and exterior thermal faces
+  insulate. The explicit diffusion step requires each cell's sum of actual
+  nonnegative enthalpy-secant weights `Q_ij/(M_i*(h_j-h_i))` to be at most one;
+  true latent plateaus need no apparent heat capacity, clipping or hidden
+  thermal substeps. Excess duration or bounded face-work exhaustion refuses.
+  Conductive heat is added once to the caller's net caloric increments, then
+  native pressure, mass, enthalpy and nonlinear occupied-volume closure run
+  unchanged. Paired-heat imbalance and all heat-addition residuals share the
+  same enthalpy budget as caloric representation and native transport. Original
+  source/chart domains admit initial, incoming, heated and accepted states.
+  Required source-pressure work remains explicit and separate; the caller
+  retains momentum, phase mobility and thermomechanical closure. This is an
+  explicit-conduction/implicit-donor split requiring refinement, with no new
+  pressure-dependent EOS, solid mechanics or free-surface evolution. Native
+  regressions check analytic sealed heat-driven density flow on every axis,
+  graded resistances, liquid/latent crossing and continued inventories,
+  constant-density reduction, shared heat budgets and atomic refusals.
 - `lbm_duct_flow` -> `LbmFlow { field, velocity_m_s, pressure_pa, report }`:
   velocity inlet on `x-min`, pressure outlet on `x-max`,
   no-slip elsewhere and on solid voxels; derives `nu_lat`/`tau` from the

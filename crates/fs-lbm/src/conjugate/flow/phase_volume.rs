@@ -1,5 +1,10 @@
 //! Original-chart thermal volume evolution on the conservative flux owner.
 
+mod conduction;
+pub use conduction::{
+    ConductiveThermalVolumeControls, ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
+};
+
 use fs_material::phase::{
     EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseIntervalDensityLaw, PhaseStateError,
 };
