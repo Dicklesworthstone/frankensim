@@ -39,6 +39,11 @@ mod dynamics;
 pub use dynamics::{ViscoDynamicConfig, ViscoDynamicOperator, ViscoDynamicState, ViscoDynamicStep};
 mod harmonic;
 pub use harmonic::{ViscoHarmonicError, ViscoHarmonicOperator, ViscoHarmonicResponse};
+mod poles;
+pub use poles::{
+    PreparedViscoPoles, ViscoMemorySite, ViscoPole, ViscoPoleBudget, ViscoPoleError,
+    ViscoPoleSpectrum,
+};
 
 /// Geometry and explicit quadrature; material frames must already be resolved.
 #[derive(Clone, Copy)]

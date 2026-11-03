@@ -4448,3 +4448,49 @@ coupled spring/mass/resistance boundary on a hereditary solid, separate work and
 heat, exact zero-load response parity, and material/load/capacity/cancellation
 refusals (G0/G1/G3/G4). These bounded numerical checks do not establish broadband
 load passivity, a spatial convergence certificate or measured material accuracy.
+
+### Original hereditary free-decay poles
+
+`ViscoElements::prepare_resonance_poles` prepares the complete homogeneous
+fixed-support spatial pencil in `[free displacement; original Maxwell strain]`
+coordinates. Every six-component Mandel strain at every original quadrature
+point and branch remains present, including equal-time and zero-energy
+directions. The existing consistent mass, equilibrium stiffness and complete
+Kelvin tensor are retained. Under `exp(s*t)`, the original equations are
+`(K_eq+s*C_kv+s^2*M)u + sum(V*B^T*C_j*q_j)=0` and
+`(1+s*tau_j)q_j-s*tau_j*B*u=0`. Keeping the branch coordinates makes this
+pencil polynomial through material relaxation rates; eliminating them would
+introduce poles into the operator and invalidate holomorphic contour counts.
+
+Three real coefficient matrices and fixed two-sided scales are cached once.
+Subsequent operator/analytic-derivative evaluations cost O(N^2), with all dense
+factorization and contour iterations delegated to the existing `fs-la`
+Newton/Beyn owners. Source coordinate, numerical payload, preparation-work and
+per-query evaluation limits are admitted explicitly. The source budgets are
+separate from the shared solver's iteration/storage/work limits.
+
+Returned modes retain original coordinates and separately check mechanical
+force and material-strain residual families against their original coefficient
+envelopes. Negative real Laplace rate means decay; a purely real pole is
+relaxation, and an unobservable memory state is not an audible resonance.
+Eigenvectors have arbitrary common amplitude and are not admitted finite-strain
+histories. The original real-frequency material-band intersection is retained
+as a conservative `|s|` gate, including the complete contour region. Analytic
+continuation of the declared Prony model is not experimental validation at
+complex frequency or a material-data extrapolation certificate.
+
+Local refinement needs a supplied structural seed and refuses initialization
+exactly at an uncoupled material relaxation rate. Contour discovery keeps the
+shared numerical conditioning, nested-quadrature, count/rank and simple-root
+admissions. Two-moment Beyn cannot resolve more independent roots than its
+probe rank; a quadratic augmented pencil may therefore require contour
+subdivision even when every retained coordinate fits the resource budget.
+Unresolved multiplicities/defective roots refuse. Numerical residual and
+quadrature agreement do not certify spatial convergence, spectral completeness
+or rigorous damping enclosures.
+
+`tests/visco_poles.rs` checks an independently factorized scalar Prony cubic,
+its oscillatory pair and real relaxation pole, a live contour quadrature ladder,
+coupled tensor/Kelvin/consistent-mass roots against an independent determinant,
+source/resource/cancellation refusals, lossless roots and full-spectrum rank
+refusal (G0/G1/G3).
