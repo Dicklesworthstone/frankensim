@@ -3011,6 +3011,37 @@ step. This is not material-source inference or a new nonlinear-gravity
 quadrature, deformation-field solver, or thermal mass-transfer model.
 
 
+### Impulses with complete finite constitutive memory
+
+`FinitePlasticTetMotion::impulse_candidate` and
+`FiniteViscoTetMotion::impulse_candidate` share the original `ReferenceMass`
+owner for zero-duration momentum transfer. Native checked CG solves
+`M_ff delta_v_f = J_f` through borrowed sparse rows with diagonal
+preconditioning; it builds neither a dense inverse nor a second mass matrix.
+Both cellwise and graded nodal reference density retain their exact existing
+mass. Caller-supplied held DOFs keep their current velocity, including nonzero
+support motion. Repeated applied DOFs accumulate in input order.
+
+`SolidImpulseReport` resolves linear and angular momentum at the actual
+deformed positions, applied and support impulses, kinetic change, and signed
+applied/support work. Physical gates use the actual representable velocity
+change and include each free-DOF residual, so cancellation of net impulses
+cannot conceal lost local momentum. Kinetic change is evaluated through
+`average(v) dot M delta_v`; the work residual uses the independently
+recomputed impulse defect instead of subtracting large work totals.
+
+Only velocity changes. Original deformation, plastic metrics and accumulated
+flow, every Maxwell branch, stress, storage, material time, law bindings and
+reference inventory survive the event. Candidates publish only after solve,
+workspace, momentum, work and cancellation gates. Subsequent native motion
+continues the accepted material history. Impulses do not themselves generate
+relaxation/plastic heat or select a contact/restitution law. The caller owns
+the opposite impulse and any contact energy loss; mixed incompressibility
+constraints are outside these displacement-only P1 entry points.
+The `hyper_plastic_dynamics/impulse.rs` and `hyper_visco_dynamics/impulse.rs`
+regressions use independent cubic-simplex mass, deformed torque and support-work
+oracles, retained inelastic prehistory and subsequent native motion.
+
 ### Reference-aware finite-deformation response
 
 `hyper3` evaluates energy, Piola force and tangent through the original

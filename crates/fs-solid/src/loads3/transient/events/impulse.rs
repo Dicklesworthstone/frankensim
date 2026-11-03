@@ -50,6 +50,8 @@ pub struct NodalImpulse3 {
     pub work_residual_j: f64,
     /// Subsequent finite-force equilibrium, including changed damping forces.
     pub acceleration_solve_iterations: usize,
+    /// Refreshed acceleration solve residual; zero if velocity was unchanged
+    /// and the already accepted finite-force equilibrium needed no new solve.
     pub force_residual_n: f64,
 }
 

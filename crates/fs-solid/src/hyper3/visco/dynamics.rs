@@ -20,6 +20,7 @@ use super::{
 use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 
 pub use crate::inertia::InertialEnergy;
+pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
 
 /// Independent budgets for material work and numerical kinetic damping.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,6 +50,14 @@ pub struct FiniteViscoMotionStep<'a> {
     pub inertia: InertialEnergy,
     /// Momentum work residual plus the independent kinetic identity residual.
     pub balance_error_j: f64,
+}
+
+/// Instantaneous velocity change with the complete original material memory.
+#[derive(Debug)]
+pub struct FiniteViscoMotionImpulse<'a> {
+    pub motion: FiniteViscoTetMotion<'a>,
+    /// Applied and support impulses, actual momentum change and kinetic work.
+    pub impulse: SolidImpulseReport,
 }
 
 impl<'a> FiniteViscoTetMotion<'a> {
@@ -156,6 +165,87 @@ impl<'a> FiniteViscoTetMotion<'a> {
     }
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+
+    /// Apply an instantaneous nodal impulse through the original consistent mass.
+    ///
+    /// Each impulse is a full nodal DOF and a world component in kg m/s;
+    /// repeated impulse entries accumulate. Held DOFs keep their current
+    /// velocity, including nonzero moving-support velocity. Their reaction
+    /// impulses and work remain in the returned physical balance.
+    ///
+    /// The current deformed positions define angular momentum about `origin_m`.
+    /// The event has zero duration: displacement, every Maxwell branch, stress,
+    /// stored energy, elapsed material time and original density are unchanged.
+    /// Subsequent `advance` calls evolve this retained memory from the new
+    /// velocity. The caller owns the contact/restitution law and any opposite
+    /// body's impulse; this operation adds no relaxation heat.
+    ///
+    /// # Errors
+    /// Invalid input or controls, mass-solve/work/momentum refusal, or cancellation.
+    /// No part of the accepted motion changes on failure.
+    pub fn impulse_candidate(
+        &self,
+        held_velocity_dofs: &[usize],
+        nodal_impulses_kg_m_s: &[(usize, f64)],
+        origin_m: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteViscoMotionImpulse<'a>, FiniteViscoTetError> {
+        checkpoint(cx)?;
+        let mut positions_m = Vec::with_capacity(self.velocity_mps.len());
+        for (node, (reference, displacement)) in self
+            .solid
+            .nodes_m
+            .iter()
+            .zip(&self.solid.displacement_m)
+            .enumerate()
+        {
+            if node % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            positions_m.push(core::array::from_fn(|axis| {
+                reference[axis] + displacement[axis]
+            }));
+        }
+        let (velocity_mps, impulse) = self
+            .mass
+            .impulse_candidate(
+                &positions_m,
+                &self.velocity_mps,
+                held_velocity_dofs,
+                nodal_impulses_kg_m_s,
+                origin_m,
+                controls,
+                cx,
+            )
+            .map_err(inertia_error)?;
+        let solid = FiniteViscoTetSolid {
+            nodes_m: self.solid.nodes_m,
+            tetrahedra: self.solid.tetrahedra,
+            material: self.solid.material,
+            elements: Arc::clone(&self.solid.elements),
+            budget: self.solid.budget,
+            displacement_m: self.solid.displacement_m.clone(),
+            states: self.solid.states.clone(),
+            first_piola_pa: self.solid.first_piola_pa.clone(),
+            stored_energy_j: self.solid.stored_energy_j,
+            time_s: self.solid.time_s,
+        };
+        checkpoint(cx)?;
+        Ok(FiniteViscoMotionImpulse {
+            motion: Self {
+                solid,
+                velocity_mps,
+                reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                reference_nodal_density_kg_m3: self
+                    .reference_nodal_density_kg_m3
+                    .as_ref()
+                    .map(Arc::clone),
+                mass: Arc::clone(&self.mass),
+            },
+            impulse,
+        })
     }
 
     /// Project a P1 acceleration field through the actual reference mass, M*a.

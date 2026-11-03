@@ -6,6 +6,8 @@
 
 #[path = "hyper_plastic_dynamics/nodal_density.rs"]
 mod nodal_density;
+#[path = "hyper_plastic_dynamics/impulse.rs"]
+mod impulse;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

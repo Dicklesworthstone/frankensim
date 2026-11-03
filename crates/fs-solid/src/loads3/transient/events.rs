@@ -1,4 +1,4 @@
-//! Finite load jumps and explicit material reconfiguration at accepted times.
+//! Physical impulses, finite load jumps and material reconfiguration at accepted times.
 //! A load jump preserves velocity. A material rebind preserves REDUCED
 //! canonical momentum and reports the work required by the new Hamiltonian.
 use super::*;

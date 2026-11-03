@@ -27,12 +27,13 @@ use fs_material::plastic::finite::{FiniteJ2, FiniteJ2Material};
 use super::super::{HyperTetSettings, HyperTetSolution, inertia_error};
 use super::{
     FinitePlasticStepControls, FinitePlasticTetEnergy, FinitePlasticTetError,
-    FinitePlasticTetSolid, checkpoint, energy_gate, invalid,
+    FinitePlasticTetSolid, FinitePlasticTetState, checkpoint, energy_gate, invalid,
 };
 use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 
 /// Shared physical kinetic-work account; numerical loss is never plastic heat.
 pub use crate::inertia::InertialEnergy;
+pub use crate::inertia::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
 
 /// Separate material-work and inertial time-discretization tolerances.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,6 +68,14 @@ pub struct FinitePlasticMotionStep<'a, L: FiniteJ2Material = FiniteJ2> {
     pub inertia: InertialEnergy,
     /// Sum of the material/momentum work residual and kinetic identity residual.
     pub balance_error_j: f64,
+}
+
+/// Instantaneous motion candidate retaining complete plastic constitutive history.
+#[derive(Debug)]
+pub struct FinitePlasticMotionImpulse<'a, L: FiniteJ2Material = FiniteJ2> {
+    pub motion: FinitePlasticTetMotion<'a, L>,
+    /// Applied and support impulses, actual momentum change and kinetic work.
+    pub impulse: SolidImpulseReport,
 }
 
 impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
@@ -190,6 +199,86 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
     /// Total original mass, unchanged by current deformation or plastic flow.
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+
+    /// Apply an instantaneous nodal impulse through the original consistent mass.
+    ///
+    /// Impulses are full nodal DOFs and world components in kg m/s; repeated
+    /// entries accumulate. Held DOFs retain their existing velocity, including
+    /// nonzero moving supports. Support impulses and their work are reported.
+    /// Current deformed positions define angular momentum about `origin_m`.
+    ///
+    /// The event has zero duration and changes only velocity. Deformation,
+    /// plastic metrics, accumulated flow, first Piola stress, stored energy,
+    /// source laws and original density are retained exactly. Plastic flow
+    /// resumes through the native `advance` owner from the changed velocity;
+    /// an impulse itself is not plastic dissipation. The caller supplies the
+    /// contact/restitution law and any equal-and-opposite partner impulse.
+    ///
+    /// # Errors
+    /// Invalid input or controls, mass-solve/work/momentum refusal, or cancellation.
+    /// No part of the accepted motion changes on failure.
+    pub fn impulse_candidate(
+        &self,
+        held_velocity_dofs: &[usize],
+        nodal_impulses_kg_m_s: &[(usize, f64)],
+        origin_m: [f64; 3],
+        controls: SolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FinitePlasticMotionImpulse<'a, L>, FinitePlasticTetError> {
+        checkpoint(cx)?;
+        let state = &self.solid.state;
+        let mut positions_m = Vec::with_capacity(self.velocity_mps.len());
+        for (node, (reference, displacement)) in
+            state.nodes_m.iter().zip(&state.displacement_m).enumerate()
+        {
+            if node % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            positions_m.push(core::array::from_fn(|axis| {
+                reference[axis] + displacement[axis]
+            }));
+        }
+        let (velocity_mps, impulse) = self
+            .mass
+            .impulse_candidate(
+                &positions_m,
+                &self.velocity_mps,
+                held_velocity_dofs,
+                nodal_impulses_kg_m_s,
+                origin_m,
+                controls,
+                cx,
+            )
+            .map_err(inertia_error)?;
+        let solid = FinitePlasticTetSolid {
+            material: self.solid.material,
+            state: FinitePlasticTetState {
+                nodes_m: state.nodes_m,
+                tetrahedra: state.tetrahedra,
+                elements: Arc::clone(&state.elements),
+                budget: state.budget,
+                displacement_m: state.displacement_m.clone(),
+                element_deformation: state.element_deformation.clone(),
+                element_states: state.element_states.clone(),
+                element_first_piola_pa: state.element_first_piola_pa.clone(),
+                stored_energy_j: state.stored_energy_j,
+            },
+        };
+        checkpoint(cx)?;
+        Ok(FinitePlasticMotionImpulse {
+            motion: Self {
+                solid,
+                velocity_mps,
+                reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                reference_nodal_density_kg_m3: self
+                    .reference_nodal_density_kg_m3
+                    .as_ref()
+                    .map(Arc::clone),
+                mass: Arc::clone(&self.mass),
+            },
+            impulse,
+        })
     }
 
     /// Project an acceleration field with this body's actual consistent mass.

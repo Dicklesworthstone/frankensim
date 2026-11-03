@@ -8,6 +8,9 @@
 use fs_exec::Cx;
 use fs_sparse::{Coo, Csr};
 
+mod impulse;
+pub use impulse::{SolidImpulseControls, SolidImpulseReport, SolidMomentum};
+
 /// Inertia's contribution to the complete mechanical/thermal work balance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InertialEnergy {
