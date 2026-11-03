@@ -232,9 +232,9 @@ pub enum HbAnchor {
         /// Initial guess for the angular frequency.
         omega_guess: f64,
     },
-    /// Conservative BACKBONE point: amplitude of `X_1[0]` is pinned
-    /// (`Re X_1[0] = amplitude`, `Im X_1[0] = 0`), `omega` is the
-    /// unknown, and the redundant phase equation is dropped.
+    /// Conservative BACKBONE point: the first-harmonic peak amplitude of
+    /// state 0 is pinned by `2 |X_1[0]| = amplitude`. Every dynamical balance
+    /// stays enforced, `omega` is unknown, and phase remains free.
     Backbone {
         /// Pinned first-harmonic amplitude of state 0.
         amplitude: f64,
@@ -253,7 +253,10 @@ pub struct HbBudget {
     pub harmonics: usize,
     /// Newton iteration cap.
     pub max_newton: usize,
-    /// Relative residual tolerance.
+    /// Relative residual tolerance. For backbone solves this also bounds the
+    /// relative error in the requested first-harmonic peak amplitude,
+    /// independently of the other state coordinates, and must be finite and
+    /// strictly between zero and one.
     pub tolerance: f64,
     /// Deflate the equilibrium manifold for autonomous/backbone solves:
     /// multiply the residual used for STEPS by `1 + (s0/|X_ac|)^2`,
@@ -530,9 +533,32 @@ fn norm(v: &[f64]) -> f64 {
     det::sqrt(v.iter().map(|x| x * x).sum::<f64>())
 }
 
+fn admitted_backbone_amplitude(
+    anchor: HbAnchor,
+    tolerance: f64,
+) -> Result<Option<f64>, OrbitError> {
+    match anchor {
+        HbAnchor::Backbone { amplitude, .. } => {
+            if !tolerance.is_finite() || !(0.0 < tolerance && tolerance < 1.0) {
+                return Err(OrbitError::BadParameter {
+                    what: "backbone relative tolerance must be finite and strictly between zero and one",
+                });
+            }
+            if !amplitude.is_finite() || amplitude <= 0.0 || 0.5 * amplitude == 0.0 {
+                return Err(OrbitError::BadParameter {
+                    what: "backbone peak amplitude must be finite and positive with a representable Fourier coefficient",
+                });
+            }
+            Ok(Some(amplitude))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Solve a harmonic-balance orbit.
 ///
-/// `guess` seeds the first harmonic of state 0 (`Re X_1[0]`); richer
+/// `guess_amplitude` seeds the first-harmonic peak amplitude of state 0
+/// (`Re X_1[0] = guess_amplitude/2`); richer
 /// seeding goes through [`solve_hb_seeded`].
 ///
 /// # Errors
@@ -543,6 +569,7 @@ pub fn solve_hb<P: OrbitProblem>(
     guess_amplitude: f64,
     budget: &HbBudget,
 ) -> Result<HbOrbit, OrbitError> {
+    let backbone_amplitude = admitted_backbone_amplitude(anchor, budget.tolerance)?;
     let d = problem.dim();
     // Admission BEFORE any packed writes: `re_index(1,0)` for `n_harm = 0`
     // aliases past the coefficient block, and a zero state dimension makes
@@ -600,7 +627,7 @@ pub fn solve_hb<P: OrbitProblem>(
             u[pack.omega_slot.expect("slot")] = omega_guess;
         }
     }
-    if let HbAnchor::Backbone { amplitude, .. } = anchor {
+    if let Some(amplitude) = backbone_amplitude {
         u[pack.re_index(1, 0)] = 0.5 * amplitude;
     }
     solve_hb_seeded(problem, anchor, u, budget)
@@ -617,6 +644,7 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
     mut u: Vec<f64>,
     budget: &HbBudget,
 ) -> Result<HbOrbit, OrbitError> {
+    let amplitude_row = admitted_backbone_amplitude(anchor, budget.tolerance)?;
     let d = problem.dim();
     if d == 0 {
         return Err(OrbitError::BadParameter {
@@ -652,10 +680,6 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
     // family's phase nullspace is handled by the regularized step; a
     // converged point satisfies ALL equations at the pinned
     // amplitude, so omega is phase-independent).
-    let amplitude_row: Option<f64> = match anchor {
-        HbAnchor::Backbone { amplitude, .. } => Some(amplitude),
-        _ => None,
-    };
     let (fixed, dropped): (Vec<usize>, Vec<usize>) = match anchor {
         HbAnchor::Forced { .. } | HbAnchor::Backbone { .. } => (vec![], vec![]),
         HbAnchor::Autonomous { .. } => (vec![pack.im_index(1, 0)], vec![]),
@@ -696,7 +720,7 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         amplitude_row.map_or(0.0, |a| {
             let re = u[pack.re_index(1, 0)];
             let im = u[pack.im_index(1, 0)];
-            re * re + im * im - 0.25 * a * a
+            det::hypot(re, im) - 0.5 * a
         })
     };
     for iter in 0..budget.max_newton {
@@ -711,8 +735,17 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         // rad/s and would inflate the relative gate (measured: a
         // sub-threshold reed "converged" at 7.7e-7 because omega
         // ~1600 stretched the scale).
-        let scale = norm(&u[..pack.coeff_len()]).max(1.0);
-        if rn < budget.tolerance * scale {
+        // A prescribed physical displacement can be far below one SI unit.
+        // Its target supplies the floor; a unit floor would accept incorrect
+        // frequencies and amplitudes simply because the whole motion is small.
+        // Static preloads must not relax the dynamical accuracy of that motion.
+        let scale = amplitude_row.map_or_else(
+            || norm(&u[..pack.coeff_len()]).max(1.0),
+            |a| oscillatory_norm(&u).max(a),
+        );
+        let relative_amplitude_error =
+            amplitude_row.map_or(0.0, |a| 2.0 * (amp_residual(&u) / a).abs());
+        if rn < budget.tolerance * scale && relative_amplitude_error < budget.tolerance {
             let (finer, checked, sampling_defect) =
                 check_sampling(problem, &pack, &u, omega_fixed, &aft, &res)?;
             let mut checked_sq: f64 = kept.iter().map(|&i| checked[i] * checked[i]).sum();
@@ -737,7 +770,10 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
             // Only an unknown-period solve must exclude equilibrium:
             // a forced response can be DC, small, or contain no fundamental.
             // Count every non-DC harmonic when detecting autonomous collapse.
-            if autonomous_anchor && oscillatory_norm(&u) < 1.0e-9 {
+            // A backbone's independently resolved positive amplitude already
+            // excludes equilibrium. An absolute state-unit floor would reject
+            // correctly resolved nanometre-scale conservative motion.
+            if matches!(anchor, HbAnchor::Autonomous { .. }) && oscillatory_norm(&u) < 1.0e-9 {
                 return Err(OrbitError::TrivialCollapse);
             }
             let (coeffs, omega_u) = pack.unpack(&u);
@@ -760,15 +796,61 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         let mut jac = vec![0.0f64; nn * nn];
         let mut res2 = vec![0.0f64; pack.coeff_len()];
         let amp0 = amp_residual(&u);
+        let amplitude_gradient = amplitude_row.map(|_| {
+            let re = u[pack.re_index(1, 0)];
+            let im = u[pack.im_index(1, 0)];
+            let magnitude = det::hypot(re, im);
+            if magnitude > 0.0 {
+                [re / magnitude, im / magnitude]
+            } else {
+                // The norm is nonsmooth at zero. Positive-real is a valid
+                // deterministic departure direction for the free phase.
+                [1.0, 0.0]
+            }
+        });
+        let backbone_coordinate_scales = amplitude_row.map(|a| {
+            let mut scales = vec![0.0f64; d];
+            for n in 1..=pack.n_harm {
+                for (k, scale) in scales.iter_mut().enumerate() {
+                    *scale = scale
+                        .max(u[pack.re_index(n, k)].abs())
+                        .max(u[pack.im_index(n, k)].abs());
+                }
+            }
+            for scale in &mut scales {
+                if *scale == 0.0 {
+                    *scale = 0.5 * a;
+                }
+            }
+            scales
+        });
         let m0 = deflate(&u);
         for (col, &ui) in free.iter().enumerate() {
-            let h = 1.0e-7 * u[ui].abs().max(1.0);
+            // A unit-size perturbation probes a different nonlinear regime
+            // when the physical orbit is measured in micrometres. Keep each
+            // backbone state column on its own retained oscillation scale;
+            // zero coordinates use the admitted amplitude as a seed scale.
+            // Frequency and non-backbone solves retain their original rule.
+            let floor = backbone_coordinate_scales
+                .as_ref()
+                .filter(|_| ui < pack.coeff_len())
+                .map_or(1.0, |scales| scales[ui % d]);
+            let h = 1.0e-7 * u[ui].abs().max(floor);
             let saved = u[ui];
             u[ui] = saved + h;
             hb_residual(problem, &pack, &u, omega_fixed, &mut aft, &mut res2);
             let m1 = deflate(&u);
-            if amplitude_row.is_some() {
-                jac[kept.len() * nn + col] = (amp_residual(&u) - amp0) / h;
+            if let Some(gradient) = amplitude_gradient {
+                // Analytic norm derivative: a finite-difference step larger
+                // than a micron-scale coefficient changes its direction and
+                // corrupts this row even for an exactly linear oscillator.
+                jac[kept.len() * nn + col] = if ui == pack.re_index(1, 0) {
+                    gradient[0]
+                } else if ui == pack.im_index(1, 0) {
+                    gradient[1]
+                } else {
+                    0.0
+                };
             }
             u[ui] = saved;
             for (row, &ri) in kept.iter().enumerate() {
@@ -793,6 +875,16 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         };
         let m_now = deflate(&u);
         let mut step: Vec<f64> = r.iter().map(|v| v * m_now).collect();
+        if amplitude_row.is_some() {
+            // Deflation applies to the dynamical balance, not the prescribed
+            // amplitude row, whose analytic Jacobian is unscaled above.
+            step[kept.len()] = amp0;
+        }
+        let merit = if amplitude_row.is_some() {
+            norm(&step)
+        } else {
+            rn * m_now
+        };
         factorized.solve(&mut step);
         // Deterministic backtracking: halve the step (up to 8 times)
         // until the residual does not grow — the undamped Newton
@@ -808,17 +900,18 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
                 u_try[ui] -= alpha * step[col];
             }
             hb_residual(problem, &pack, &u_try, omega_fixed, &mut aft, &mut trial);
-            let mut tn: f64 = kept.iter().map(|&i| trial[i] * trial[i]).sum();
-            if amplitude_row.is_some() {
-                let ar = amp_residual(&u_try);
-                tn += ar * ar;
-            }
-            let tn = det::sqrt(tn) * deflate(&u_try);
+            let physical_sq: f64 = kept.iter().map(|&i| trial[i] * trial[i]).sum();
+            let physical_norm = det::sqrt(physical_sq) * deflate(&u_try);
+            let tn = if amplitude_row.is_some() {
+                det::hypot(physical_norm, amp_residual(&u_try))
+            } else {
+                physical_norm
+            };
             if tn < best_norm {
                 best_norm = tn;
                 best_alpha = alpha;
             }
-            if tn < rn * m_now {
+            if tn < merit {
                 break;
             }
             alpha *= 0.5;

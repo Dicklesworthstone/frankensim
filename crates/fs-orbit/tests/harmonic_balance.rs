@@ -469,6 +469,231 @@ impl OrbitProblem for LinearBackbone {
     }
 }
 
+fn linear_backbone_seed(amplitude: f64, phase: f64) -> Vec<f64> {
+    let x = C64::new(fs_math::det::cos(phase), fs_math::det::sin(phase)).scale(0.5 * amplitude);
+    let v = C64::new(0.0, 2.0) * x;
+    vec![0.0, 0.0, x.re, v.re, x.im, v.im, 2.0]
+}
+
+#[test]
+fn backbone_amplitude_is_relative_even_for_small_physical_displacements() {
+    for amplitude in [1.0e-6, 1.0e-12] {
+        for phase in [0.0, 0.7] {
+            for deflate_equilibrium in [false, true] {
+                // This seed satisfies every linear dynamical balance but has
+                // twice the requested displacement and four times its energy.
+                // A squared amplitude row used to accept 2 um for a 1 um
+                // target immediately at the default 1e-10 tolerance.
+                let orbit = fs_orbit::solve_hb_seeded(
+                    &LinearBackbone,
+                    HbAnchor::Backbone {
+                        amplitude,
+                        omega_guess: 2.0,
+                    },
+                    linear_backbone_seed(2.0 * amplitude, phase),
+                    &HbBudget {
+                        harmonics: 1,
+                        deflate_equilibrium,
+                        ..HbBudget::default()
+                    },
+                )
+                .expect("a prescribed nonzero small backbone is not equilibrium");
+                let actual = orbit.first_harmonic_amplitude(0);
+                assert!(
+                    (actual / amplitude - 1.0).abs() < 1.0e-9,
+                    "target {amplitude:e}, actual {actual:e}, phase {phase}, deflation {deflate_equilibrium}"
+                );
+                assert!((orbit.omega - 2.0).abs() < 1.0e-9);
+                assert_complex(
+                    orbit.coeffs[1][1],
+                    C64::new(0.0, orbit.omega) * orbit.coeffs[0][1],
+                    1.0e-9 * amplitude,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn backbone_amplitude_and_dynamics_cannot_hide_behind_an_unrelated_large_dc_state() {
+    struct BiasedBackbone;
+    impl OrbitProblem for BiasedBackbone {
+        fn dim(&self) -> usize {
+            3
+        }
+        fn island(&self, _t: f64, x: &[f64], out: &mut [f64]) {
+            out[0] = x[1];
+            out[1] = -4.0 * x[0];
+            out[2] = 1.0e9 - x[2];
+        }
+        fn autonomous(&self) -> bool {
+            true
+        }
+    }
+    // A 1e9 static third coordinate must not relax either the requested
+    // amplitude or the dynamical balance that determines the frequency.
+    for (coefficient, omega) in [(0.001, 2.0), (0.0005, 3.0)] {
+        let seed = vec![
+            0.0,
+            0.0,
+            1.0e9,
+            coefficient,
+            0.0,
+            0.0,
+            0.0,
+            2.0 * coefficient,
+            0.0,
+            omega,
+        ];
+        let anchor = HbAnchor::Backbone {
+            amplitude: 0.001,
+            omega_guess: omega,
+        };
+        let budget = HbBudget {
+            harmonics: 1,
+            max_newton: 1,
+            ..HbBudget::default()
+        };
+        let result = fs_orbit::solve_hb_seeded(&BiasedBackbone, anchor, seed.clone(), &budget);
+        assert!(matches!(result, Err(OrbitError::NewtonStalled { .. })));
+        let corrected = fs_orbit::solve_hb_seeded(
+            &BiasedBackbone,
+            anchor,
+            seed,
+            &HbBudget {
+                max_newton: 40,
+                ..budget
+            },
+        )
+        .expect("the small physical oscillator resolves beside a large static state");
+        assert!((corrected.first_harmonic_amplitude(0) / 0.001 - 1.0).abs() < 1.0e-9);
+        assert!((corrected.omega - 2.0).abs() < 1.0e-9);
+        assert_eq!(corrected.coeffs[2][0].re, 1.0e9);
+    }
+}
+
+#[test]
+fn nonlinear_backbone_is_invariant_under_physical_coordinate_units() {
+    struct ScaledDuffing {
+        scale: f64,
+    }
+    impl OrbitProblem for ScaledDuffing {
+        fn dim(&self) -> usize {
+            2
+        }
+        fn island(&self, _t: f64, x: &[f64], out: &mut [f64]) {
+            let displacement = x[0] / self.scale;
+            out[0] = x[1];
+            out[1] = -x[0] - self.scale * 0.1 * displacement.powi(3);
+        }
+        fn autonomous(&self) -> bool {
+            true
+        }
+    }
+    let budget = HbBudget {
+        harmonics: 5,
+        max_newton: 60,
+        tolerance: 1.0e-11,
+        ..HbBudget::default()
+    };
+    let solve = |scale| {
+        fs_orbit::solve_hb(
+            &ScaledDuffing { scale },
+            HbAnchor::Backbone {
+                amplitude: 0.5 * scale,
+                omega_guess: 1.0,
+            },
+            0.5 * scale,
+            &budget,
+        )
+        .expect("changing displacement units preserves the nonlinear backbone")
+    };
+    let reference = solve(1.0);
+    let small = solve(1.0e-6);
+    assert!((small.omega / reference.omega - 1.0).abs() < 1.0e-9);
+    assert!((small.first_harmonic_amplitude(0) / 0.5e-6 - 1.0).abs() < 1.0e-10);
+    // The conservative phase is free: align the entire retained spectrum by
+    // its first-state fundamental before comparing the physical waveform.
+    let phase = (reference.coeffs[0][1] / C64::from_re(reference.coeffs[0][1].abs()))
+        * (small.coeffs[0][1].conj() / C64::from_re(small.coeffs[0][1].abs()));
+    for k in 0..2 {
+        let mut rotation = C64::ONE;
+        for n in 0..=budget.harmonics {
+            assert_complex(
+                small.coeffs[k][n].scale(1.0e6) * rotation,
+                reference.coeffs[k][n],
+                1.0e-8,
+            );
+            rotation = rotation * phase;
+        }
+    }
+}
+
+#[test]
+fn invalid_backbone_amplitudes_and_tolerances_refuse_before_model_callbacks() {
+    struct Uncalled;
+    impl OrbitProblem for Uncalled {
+        fn dim(&self) -> usize {
+            panic!("invalid amplitude must be refused before model callbacks")
+        }
+        fn island(&self, _t: f64, _x: &[f64], _out: &mut [f64]) {
+            panic!("invalid amplitude must not evaluate the model")
+        }
+        fn autonomous(&self) -> bool {
+            true
+        }
+    }
+    for amplitude in [
+        0.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::from_bits(1),
+    ] {
+        let anchor = HbAnchor::Backbone {
+            amplitude,
+            omega_guess: 2.0,
+        };
+        assert!(matches!(
+            solve_hb(&Uncalled, anchor, 1.0, &HbBudget::default()),
+            Err(OrbitError::BadParameter { .. })
+        ));
+        assert!(matches!(
+            fs_orbit::solve_hb_seeded(&Uncalled, anchor, vec![], &HbBudget::default()),
+            Err(OrbitError::BadParameter { .. })
+        ));
+    }
+    // A relative tolerance >= 1 could admit the zero waveform for a positive
+    // target, undermining the amplitude-based equilibrium exclusion.
+    for tolerance in [
+        0.0,
+        -1.0,
+        1.0,
+        2.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        let anchor = HbAnchor::Backbone {
+            amplitude: 1.0e-6,
+            omega_guess: 2.0,
+        };
+        let budget = HbBudget {
+            tolerance,
+            ..HbBudget::default()
+        };
+        assert!(matches!(
+            solve_hb(&Uncalled, anchor, 0.0, &budget),
+            Err(OrbitError::BadParameter { .. })
+        ));
+        assert!(matches!(
+            fs_orbit::solve_hb_seeded(&Uncalled, anchor, vec![], &budget),
+            Err(OrbitError::BadParameter { .. })
+        ));
+    }
+}
+
 #[test]
 fn adaptive_order_relocates_the_solved_frequency_in_the_warm_seed() {
     let result = fs_orbit::solve_hb_adaptive(

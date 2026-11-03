@@ -28,7 +28,9 @@ API — never instrument-shaped.
   omega_guess }` (conservative backbone point closed by an APPENDED
   amplitude-norm equation `|X_1[0]| = a/2`; every balance row stays
   enforced and the phase stays free, so `omega` is
-  phase-independent).
+  phase-independent). The authored `a` is a positive finite physical peak
+  amplitude, with a representable half-amplitude Fourier coefficient; its
+  relative tolerance must be finite and strictly between zero and one.
 - `HbBudget` / `solve_hb` / `solve_hb_seeded` -> `HbOrbit` (omega,
   canonical coefficients, per-iteration residual trace, verified residual,
   final verification sample count, measured sampling defect).
@@ -139,10 +141,26 @@ conservative families and hybrid cycles remain outside this entry's claim.
   unknown-frequency seeds must remain positive and finite.
 - Canonical unknown ordering: DC block, then per-harmonic
   `Re`/`Im` blocks, state-major; the packing is the seed format.
+- Backbone acceptance independently bounds `|2|X_1[0]|/a - 1|` by the
+  requested tolerance. Other state coordinates and DC offsets cannot relax
+  this relative amplitude gate. The appended Newton row is the unsquared
+  norm difference `|X_1[0]|-a/2`, with its analytic norm gradient; this avoids
+  squared-unit scaling and differencing a norm with a perturbation larger
+  than the physical oscillation. The dynamical residual's coefficient scale
+  uses only the non-DC coefficients, with the prescribed amplitude as its
+  floor instead of one SI unit, so static preloads cannot hide an incorrect
+  frequency or unresolved oscillatory balance.
+  Backbone state-column differences use each coordinate's retained
+  oscillation scale (the target supplies a zero-coordinate fallback);
+  the frequency-column and non-backbone differencing rules are unchanged.
+  Deflation scales only the physical equations, consistently in the Jacobian,
+  right-hand side and line-search merit; it does not scale the amplitude row.
 - A converged residual below the declared tolerance is the ONLY
-  accepted discrete-balance evidence. Autonomous/backbone HB solves
+  accepted discrete-balance evidence. Unanchored autonomous HB solves
   refuse equilibrium by name (`TrivialCollapse`), checking the full
-  non-DC spectrum rather than the fundamental alone. The original
+  non-DC spectrum rather than the fundamental alone. A backbone's independently
+  resolved prescribed positive amplitude excludes equilibrium without an
+  arbitrary absolute displacement floor. The original
   absolute autonomous HB collapse threshold is 1e-9 in packed state units;
   the new branch uses its explicit scaled RMS `minimum_oscillation`.
   Forced HB solves admit DC, zero, arbitrarily small, and higher-harmonic
@@ -227,6 +245,19 @@ instead of the retained Galerkin answer 1.0); an independent shifted
 65-point quadrature checks the corrected coefficients. Further regressions
 verify truthful continuation residuals against the analytic scalar balance
 and a bounded named refusal for persistently unresolved forcing.
+
+Backbone regressions additionally correct a seed with twice the prescribed
+micrometre or picometre displacement, under phase shifts and optional
+deflation, without rejecting the resolved small motion as equilibrium. A
+large unrelated static coordinate cannot hide an unresolved amplitude or an
+incorrect frequency; adequate iterations recover both.
+A nonlinear Duffing coordinate-rescaling test compares the complete retained
+waveform and frequency after changing displacement scale by 1e-6; invalid
+zero, negative, nonfinite and unrepresentable-half amplitudes, and relative
+tolerances outside `(0,1)`, refuse before model callbacks. These verify the
+discrete amplitude constraint and scale
+handling, not continuous-orbit existence or a global nonlinear convergence
+guarantee.
 
 Adaptive-order regressions use the exactly soluble nonlinear cascade
 `x' = -x + cos(t), y' = -y + x^3`: the third harmonic is absent from an
