@@ -10,8 +10,8 @@
 //! never sees the temperature. Total energy `E = rho (c_v theta + |u|^2 / 2)` is a conservative finite-volume
 //! field on the same cells with the face flux `(E + p) u - sigma . u + q`, `q = -kappa grad T`; `sigma = -(1 -
 //! w/2) Pi_neq` comes from the same non-equilibrium moments that drive the momentum. Interior face values are
-//! single-valued, so the sum of E over the fluid cells changes only by the wall heat flux: ENERGY IS CONSERVED
-//! TO ROUND-OFF in a closed adiabatic box by flux telescoping (class: total-energy conservative). The internal
+//! single-valued, so the sum of E changes only by boundary heat/work and explicit source supplies: ENERGY IS CONSERVED
+//! TO ROUND-OFF in a source-free closed box with stationary adiabatic walls by flux telescoping (class: total-energy conservative). The internal
 //! energy is `E` minus the kinetic energy of the force-corrected velocity, so kinetic energy removed by
 //! viscosity or by a wall becomes internal energy; `theta = (gamma - 1) e` feeds back only through the force.
 //! Time coupling: the trapezoid rule on the flux divergences of the two time levels with a fixed number of
@@ -44,7 +44,7 @@
 //! LEDGER SPLIT. `pressure_work_j = -integral(p div u) dV dt` is the reversible kinetic-to-internal exchange
 //! (trapezoid of the two time levels, fourth-order central divergence). `viscous_heating_j` is DEFINED as
 //! `internal change - wall heat - pressure work - source energy` for heat-only volume sources.
-//! With no volume source, total-energy conservation makes it equal the kinetic energy loss net of pressure
+//! With no volume source or moving wall, total-energy conservation makes it equal the kinetic energy loss net of pressure
 //! work TERM BY TERM to round-off. Manufactured mass/momentum sources also do mechanical work; without a
 //! separately qualified source-work split, that signed remainder is reported as
 //! `unresolved_internal_exchange_j`, never as viscous heating. A localized reservoir aperture also
@@ -52,6 +52,10 @@
 //! reservoir-work split is qualified. The exact total source supply is still
 //! independently audited. These identities are bookkeeping, not evidence; the physical content of
 //! viscous heating is tested on a Taylor-Green vortex.
+//! Tangential moving walls supply stress work separately in `wall_work_j`.
+//! `wall_heat_j` contains only Fourier heat, including when heat and work cancel
+//! in the total-energy boundary flux. Mechanical wall work enters total energy
+//! once and is not subtracted from the internal-energy dissipation account.
 //!
 //! WHAT THIS IS NOT: not Boussinesq (`thermal.rs` and `d3q19/coupled.rs` are); not a thermal-LBM with an energy
 //! population; the thermal pressure enters as a force, so the lattice resolves the sound speed `sqrt(gamma
@@ -121,7 +125,9 @@ pub const MAX_QUALIFIED_MACH: f64 = 0.2;
 /// keeping formation-energy offsets out of thermal-flow arithmetic.
 /// 7: prescribed reservoirs extrapolate the physical post-collision distribution
 /// in the full Guo source frame, without density-dependent force-squared stress.
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 7;
+/// 8: separate wall heat and stress work in the physical energy account; the
+/// native total-energy flux and fluid trajectories are unchanged.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 8;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -360,8 +366,13 @@ pub struct EnergyLedger {
     pub unresolved_internal_exchange_j: f64,
     /// Reversible kinetic-to-internal exchange `-integral(p div u)` of the step [J].
     pub pressure_work_j: f64,
-    /// Heat entering through the walls during the step [J].
+    /// Fourier heat entering through impermeable walls during the step [J].
+    /// Excludes stress work even when both transfers occur on the same wall.
     pub wall_heat_j: f64,
+    /// Mechanical stress work entering through tangential moving walls [J].
+    /// Positive when the wall drives the fluid; negative when it extracts work.
+    /// Uses the same stress, wall velocity and time quadrature as total energy.
+    pub wall_work_j: f64,
     /// Net total energy entering the open faces [J], including enthalpy,
     /// conduction and viscous work. Zero without characteristic boundaries.
     pub open_boundary_energy_j: f64,
@@ -373,8 +384,28 @@ pub struct EnergyLedger {
     /// sensible chart. Heat-only sources supply heat; arbitrary manufactured
     /// mass/momentum sources need not. Negative values remove energy.
     pub source_energy_j: f64,
-    /// `|change of total energy - wall heat - open energy - source energy| / total energy`.
+    /// `|change of total energy - wall heat - wall work - open energy - source energy| / total energy`.
     pub residual_rel: f64,
+}
+
+/// One signed boundary energy flux before its outward-normal pullback.
+/// Keep the original total arithmetic as well as the independently resolved
+/// heat and work, so a small thermal transfer is not lost by subtracting work.
+#[derive(Clone, Copy)]
+struct WallEnergyFlux {
+    total: f64,
+    heat: f64,
+    work: f64,
+}
+
+impl WallEnergyFlux {
+    fn open(total: f64) -> Self {
+        Self {
+            total,
+            heat: 0.0,
+            work: 0.0,
+        }
+    }
 }
 
 /// Equilibrium populations (third-order Hermite about `THETA0`; `theta` corrects the second and third moments).
@@ -872,10 +903,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             &grid.material,
             &[],
         );
-        let (div, wall, _) =
+        let (div, wall, boundary) =
             grid.flux_divergence(&grid.e, &rho_g, &u, &grid.theta, &sig, &[], None)?;
         grid.div = div;
         grid.wall_out = wall;
+        grid.open_out = boundary;
         Ok(grid)
     }
 
@@ -1175,7 +1207,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         out
     }
 
-    /// Divergence of the total-energy flux at ONE time level and the total heat leaving through the walls.
+    /// Divergence of total energy at one time level and total energy leaving
+    /// through impermeable walls; the boundary moments retain heat and work separately.
     fn flux_divergence(
         &self,
         et: &[f64],
@@ -1254,11 +1287,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let plus: Vec<[f64; 3]> = plus.into_iter().collect::<Result<_, _>>()?;
         // wall face: flux in the +axis direction. Heat through the half cell; the viscous work `-sigma_{a b} u_{w b}` of a moving
         // edge wall (zero normal velocity, so no convective part; solid cells and still walls do no work).
-        let wall_flux = |i: usize, a: usize, s: i64| -> Result<f64, NsfError> {
+        let wall_flux = |i: usize, a: usize, s: i64| -> Result<WallEnergyFlux, NsfError> {
             if let Some(face) = self.characteristic_face(faces, i, a, s) {
                 return self
                     .open_energy_flux(face, i, a, s, rho, theta, sig, transport)
-                    .map(|f| f.0);
+                    .map(|f| WallEnergyFlux::open(f.0));
             }
             if let Some(b) = self.open_at(i, a, s) {
                 let sg = sig[i];
@@ -1281,7 +1314,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if let Some(local) = transport.get(i) {
                     k += local.turbulent_conductivity_lu;
                 }
-                return Ok(0.5 * (g[i][a] + gb) - (s as f64) * k * (b.theta - theta[i]));
+                return Ok(WallEnergyFlux::open(
+                    0.5 * (g[i][a] + gb) - (s as f64) * k * (b.theta - theta[i]),
+                ));
             }
             let heat = match wall_theta {
                 None => 0.0,
@@ -1301,7 +1336,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             };
             if !self.moving_walls || self.shifted(self.at(i), a, s).is_some() {
-                return Ok(heat);
+                return Ok(WallEnergyFlux {
+                    total: heat,
+                    heat,
+                    work: 0.0,
+                });
             }
             let uw = self.edge_velocity[a][usize::from(s > 0)];
             let sg = sig[i];
@@ -1310,7 +1349,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 1 => [sg[3], sg[1], sg[5]],
                 _ => [sg[4], sg[5], sg[2]],
             };
-            Ok(heat - (row[0] * uw[0] + row[1] * uw[1] + row[2] * uw[2]))
+            let stress_power = row[0] * uw[0] + row[1] * uw[1] + row[2] * uw[2];
+            Ok(WallEnergyFlux {
+                total: heat - stress_power,
+                heat,
+                work: -stress_power,
+            })
         };
         let mut div: Vec<Result<f64, NsfError>> = vec![Ok(0.0); n];
         par_fill(&mut div, self.spec.workers, &|i| {
@@ -1322,11 +1366,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             for a in 0..3 {
                 d += match self.fluid_at(x, a, 1) {
                     Some(_) => plus[i][a],
-                    None => wall_flux(i, a, 1)?,
+                    None => wall_flux(i, a, 1)?.total,
                 };
                 d -= match self.fluid_at(x, a, -1) {
                     Some(m) => plus[m][a],
-                    None => wall_flux(i, a, -1)?,
+                    None => wall_flux(i, a, -1)?.total,
                 };
             }
             Ok(d)
@@ -1352,11 +1396,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             open.patch_advected_out[1] += advected;
                         }
                     } else if self.open_at(i, a, 1).is_some() {
-                        let flux = wall_flux(i, a, 1)?;
+                        let flux = wall_flux(i, a, 1)?.total;
                         open.prescribed_out += flux;
                         self.accumulate_reservoir_work(i, a, 1, rho, u, theta, flux, &mut open);
                     } else {
-                        out += wall_flux(i, a, 1)?;
+                        let flux = wall_flux(i, a, 1)?;
+                        out += flux.total;
+                        open.wall_heat_out += flux.heat;
+                        open.wall_work_out += flux.work;
                     }
                 }
                 if self.fluid_at(x, a, -1).is_none() {
@@ -1371,11 +1418,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             open.patch_advected_out[0] -= advected;
                         }
                     } else if self.open_at(i, a, -1).is_some() {
-                        let flux = wall_flux(i, a, -1)?;
+                        let flux = wall_flux(i, a, -1)?.total;
                         open.prescribed_out -= flux;
                         self.accumulate_reservoir_work(i, a, -1, rho, u, theta, -flux, &mut open);
                     } else {
-                        out -= wall_flux(i, a, -1)?;
+                        let flux = wall_flux(i, a, -1)?;
+                        out -= flux.total;
+                        open.wall_heat_out -= flux.heat;
+                        open.wall_work_out -= flux.work;
                     }
                 }
             }
@@ -1383,6 +1433,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         if open.reservoir.iter().any(|flux| !flux.is_finite())
         {
             return Err(NsfError::Input("reservoir finite-volume pressure moments overflowed"));
+        }
+        if !open.wall_heat_out.is_finite() || !open.wall_work_out.is_finite() {
+            return Err(NsfError::Input("wall heat or mechanical power overflowed"));
         }
         Ok((div, out, open))
     }
@@ -1708,6 +1761,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
         }
         let wall_in = -0.5 * (wall1 + self.wall_out);
+        let wall_heat_in = -0.5 * (open1.wall_heat_out + self.open_out.wall_heat_out);
+        let wall_work_in = -0.5 * (open1.wall_work_out + self.open_out.wall_work_out);
         let open_in = -0.5
             * (open1.total_out.iter().sum::<f64>() + self.open_out.total_out.iter().sum::<f64>());
         let open_internal_in = -0.5
@@ -1733,9 +1788,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let d_int = d_total - d_kin;
         let pressure_work = -pw;
         let viscous = if self.open.is_some() {
-            d_int - wall_in - open_internal_in - pressure_work
+            d_int - wall_heat_in - open_internal_in - pressure_work
         } else {
-            let remainder = d_int - wall_in - pressure_work;
+            let remainder = d_int - wall_heat_in - pressure_work;
             if prescribed_in == 0.0 {
                 remainder
             } else {
@@ -1783,7 +1838,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             viscous_heating_j: unit * viscous,
             unresolved_internal_exchange_j: unit * unresolved,
             pressure_work_j: unit * pressure_work,
-            wall_heat_j: unit * wall_in,
+            wall_heat_j: unit * wall_heat_in,
+            wall_work_j: unit * wall_work_in,
             open_boundary_energy_j: unit * open_in,
             open_energy_j: unit * prescribed_in,
             source_energy_j: unit * source_in,
@@ -1832,6 +1888,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.cumulative.source_energy_j += ledger.source_energy_j;
         self.cumulative.pressure_work_j += ledger.pressure_work_j;
         self.cumulative.wall_heat_j += ledger.wall_heat_j;
+        self.cumulative.wall_work_j += ledger.wall_work_j;
         self.cumulative.open_boundary_energy_j += ledger.open_boundary_energy_j;
         self.cumulative.open_energy_j += ledger.open_energy_j;
         self.cumulative.internal_j = ledger.internal_j;
@@ -2098,6 +2155,9 @@ fn check_state(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod wall_work_tests;
 
 #[cfg(test)]
 mod tests {

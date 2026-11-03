@@ -161,6 +161,10 @@ pub struct NsfBoundaryExchange {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct BoundaryFlux {
+    /// Fourier heat leaving impermeable walls, excluding mechanical work.
+    pub wall_heat_out: f64,
+    /// Stress power leaving moving impermeable walls, excluding heat.
+    pub wall_work_out: f64,
     pub total_out: [f64; 2],
     pub internal_out: [f64; 2],
     /// Mass-carried stagnation enthalpy before Fourier/stress-work terms.

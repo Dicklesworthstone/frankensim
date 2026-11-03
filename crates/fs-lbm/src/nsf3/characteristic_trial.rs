@@ -271,6 +271,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             ledger.unresolved_internal_exchange_j += step.unresolved_internal_exchange_j;
             ledger.pressure_work_j += step.pressure_work_j;
             ledger.wall_heat_j += step.wall_heat_j;
+            ledger.wall_work_j += step.wall_work_j;
             ledger.open_boundary_energy_j += step.open_boundary_energy_j;
             ledger.open_energy_j += step.open_energy_j;
             ledger.source_energy_j += step.source_energy_j;
@@ -333,6 +334,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let energy = candidate.total_energy_j();
         ledger.residual_rel = (energy - energy_before_j - ledger.wall_heat_j
+            - ledger.wall_work_j
             - ledger.open_boundary_energy_j - ledger.open_energy_j - ledger.source_energy_j).abs()
             / energy_before_j.abs().max(energy.abs()).max(1e-300);
         if exchange.iter().chain(patch_exchange.iter().flatten()).any(|face| ![
@@ -347,7 +349,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             || ![mass_before_kg, energy_before_j, energy, candidate.total_mass_kg(),
                 ledger.internal_j, ledger.kinetic_j, ledger.viscous_heating_j,
                 ledger.unresolved_internal_exchange_j, ledger.pressure_work_j,
-                ledger.wall_heat_j, ledger.open_boundary_energy_j,
+                ledger.wall_heat_j, ledger.wall_work_j, ledger.open_boundary_energy_j,
                 ledger.open_energy_j, ledger.source_energy_j, ledger.residual_rel,
                 reservoir_mass_out_kg]
                 .iter().all(|x| x.is_finite())

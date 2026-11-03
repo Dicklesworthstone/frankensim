@@ -2200,7 +2200,8 @@ non-equilibrium `-F/2` that the regularised projection drops is added back so th
 Total energy `E = rho (c_v theta + |u|^2 / 2)` is a conservative finite-volume field on the same cells with the face flux
 `(E + p) u - sigma . u - kappa grad T` (`sigma` from the second moment of the pre-collision populations about `feq`, shifted by
 Guo's `(F u + u F) / 2` as described below; fourth-order face values away from walls, two-point beside walls). **Conservation class: total-energy conservative.** Interior face fluxes are single-valued,
-so the sum of `E` over the fluid cells changes only by the wall heat flux, to round-off, in a closed adiabatic box; mass and
+so the sum of `E` changes only by boundary heat/work and explicit source supplies, to round-off; a source-free closed box
+with stationary adiabatic walls conserves total energy. Mass and
 momentum are the lattice's. The temperature is `(E - KE) / (rho c_v)` and feeds back only through the force.
 Coupling in time: trapezoid on the flux divergences of the two levels with `COUPLING_PASSES` fixed
 predictor-corrector passes. `NSF3_BIT_SEMANTICS_VERSION` moves with any change of order, coefficient or coupling.
@@ -2314,11 +2315,27 @@ chunks; every reduction is serial in cell order. The result is bitwise independe
 tangential velocity: each link that crosses it gains the momentum `2 w_q rho (c_q . u_w) / theta0` (Ladd), and the energy flux
 through the wall face gains the viscous work `-sigma_{a b} u_{w b}` with `sigma` of the cell beside the wall (exact for a uniform
 stress, first order in `dx` for a developing flow). Solid cells inside the domain stay at rest, a velocity with a wall-normal
-component is refused (no mass crosses a wall), and the speed is held to the declared Mach bound. With a moving wall
-`wall_heat_j` is the net energy through the wall faces (heat plus work), and `viscous_heating_j`, defined as the remainder of
-the internal-energy budget, excludes that work: in a steady Couette flow the net wall energy vanishes (work in equals heat out),
-so the ledger carries no heating information there and the physical check is the temperature profile
-(`couette_viscous_heating_profile`).
+component is refused (no mass crosses a wall), and the speed is held to the declared Mach bound.
+`wall_heat_j` retains Fourier heat alone; `wall_work_j` separately retains the
+stress work of each wall at the same native face and time quadrature. Both are
+positive into the fluid, with work negative when the wall extracts energy.
+Heat and work are accumulated independently before their possible cancellation
+in the total-energy flux. Their history refreshes with the original boundary
+binding and publishes only with accepted steps. No extra field sweep, source
+query or numerical allocation is introduced.
+
+The internal-energy dissipation account subtracts thermal wall heat, without
+subtracting external mechanical work as though it were heat. A steady
+isothermal Couette flow can therefore retain positive wall work, equal
+negative wall heat and positive viscous heating while net boundary energy is
+zero. Version 8 records this corrected physical accounting; original combined
+energy-flux arithmetic, fluid trajectories and transport envelopes are unchanged.
+The local stress closure still has the original developing-flow boundary
+accuracy and does not assert exact equality with bounce-back link impulse work.
+Focused G0/G1 regressions exercise all six wall orientations and both work
+signs, cancelling heat/work, an evolving adiabatic Couette field and refused
+wall-law rollback. The independent steady temperature-profile qualification
+remains `couette_viscous_heating_profile`.
 
 **Prescribed open faces (pexfp.138).**
 `set_open_face(axis, high, Some(NsfOpenState))` declares the density [kg/m³],
@@ -2373,7 +2390,7 @@ error of that size after the first step and a density error that did not shrink 
 residual per step is `theta0 laplacian(S) / 4`, which is second order globally under acoustic scaling. A grid without sources
 is bitwise unchanged. The hooks exist for the qualification (`mms_full_nsf_order`) and are not an instrument source API.
 
-**Ledger.** `EnergyLedger` reports internal, kinetic, pressure-work, viscous-heating, wall-heat, boundary-energy and
+**Ledger.** `EnergyLedger` reports internal, kinetic, pressure-work, viscous-heating, wall-heat, wall-work, boundary-energy and
 volume-source terms in joules. `source_energy_j` is the exact trapezoid of the same `S_E` samples applied to fluid cells;
 solid cells and callback reevaluation cannot add an audit-only supply. Negative supplies remove energy. The total-energy
 residual subtracts wall, boundary and volume supplies independently; no internal-exchange remainder is a balancing credit.
@@ -2382,7 +2399,7 @@ Cumulative source energy is published only with an accepted step and uses the me
 `pressure_work_j = -integral(p div u) dV dt` is the reversible exchange (trapezoid in time, fourth-order divergence).
 For source-free and heat-only steps, `viscous_heating_j` is DEFINED as
 `internal change - wall heat - pressure work - source energy`, with the existing boundary terms where applicable.
-With no source, it equals the kinetic-energy loss net of pressure work term by term to round-off.
+With no source and no moving wall, it equals the kinetic-energy loss net of pressure work term by term to round-off.
 THAT IDENTITY IS BOOKKEEPING. The physical content (the heating is continuum dissipation) is the Taylor-Green decay rate.
 
 Manufactured mass/momentum sources also alter kinetic storage, and this owner has no separately qualified local
@@ -2390,7 +2407,7 @@ source-work split for its streamed mass source. Such steps report the signed res
 `unresolved_internal_exchange_j` and zero in `viscous_heating_j`; the unresolved term includes both dissipation and
 unseparated source mechanics and must not be deposited as heat. Uniform acceleration can give a negative unresolved
 term while the exact supplied energy becomes kinetic energy. This does not weaken the independent total-energy audit.
-Source-free arithmetic, dynamics and bit-semantics version are unchanged.
+This volume-source distinction does not change the fluid dynamics.
 
 Focused regressions in `tests/nsf3_thermochemical.rs` cover affine signed heating/cooling in both gas branches,
 solid-cell exclusion, one/three-worker replay, uniform source-driven acceleration, mass/energy supply, and existing

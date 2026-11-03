@@ -253,9 +253,12 @@ fn g1_g5_channel_nsf_reuses_buffers_and_balances_moving_wall_energy_across_worke
             assert_eq!(serial.sgs_transport, parallel.sgs_transport);
             assert!(ledger.residual_rel < 1e-12);
             assert!(
-                (serial.total_energy_j() - energy - ledger.wall_heat_j).abs()
+                (serial.total_energy_j() - energy - ledger.wall_heat_j - ledger.wall_work_j).abs()
                     < energy.abs() * 2e-12
             );
+            if matches!(wall, WallThermal::Adiabatic) {
+                assert_eq!(ledger.wall_heat_j, 0.0);
+            }
             let w = workspace(&serial);
             assert_eq!(w.momentum.viscosities().as_ptr(), allocation.0);
             assert_eq!(w.heat.diffusivities().as_ptr(), allocation.1);
