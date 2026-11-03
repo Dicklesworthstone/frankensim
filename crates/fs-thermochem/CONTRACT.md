@@ -1,5 +1,43 @@
 # CONTRACT: fs-thermochem
 
+## Finite calcium-sulfate phases and lime neutralization
+
+`MineralReaction` provides gypsum precipitation with both hydrate waters,
+anhydrite precipitation, anhydrite hydration, and the net hydrated-lime/sulfate
+neutralization endpoint. Original exact atom/charge admission governs all
+four. `CaSO4(s)` and `CaSO4.2H2O(s)` remain distinct participants; the latter
+contains four hydrogens and six oxygens per formula unit.
+
+The matched NBS anhydrite and gypsum-selenite packs retain eight literal
+molar-mass, formation-enthalpy, independent formation-Gibbs and entropy facts
+at 298.15 K and 100000 Pa. The insoluble anhydrite row is distinct from the
+source's soluble alpha/beta rows and hemihydrates. The selenite variety and its
+two waters of crystallization remain explicit. Uncertainty stays unstated;
+these source values do not replace the existing USGS evaluations.
+
+The `calcium_sulfate` example binds the actual seven compatible NBS packs to
+the existing single-reaction `equilibrate_ideal` owner. A caller selects gypsum
+or anhydrite and supplies free calcium, free sulfate, finite solid inventory,
+explicit charge-balancing Na+/Cl- spectators and a fixed ideal activity basis.
+Gypsum also tracks finite water and conserves water plus crystal-hydrate water.
+The activity-reference amount remains independently fixed; the model does not
+recompute solvent molality, solution volume or water activity from hydration.
+
+The result distinguishes an interior saturation equilibrium from exhaustion
+of the supplied solid, reports signed extent, remaining solid/source mass,
+calcium/sulfur/charge/water balances and signed standard reaction heat.
+A separate source-mass-driven lime example admits a prescribed finite extent
+against explicit lime, acid and sulfate stocks. Source receipts, independent
+direct/caloric Gibbs routes and finite-reactant refusal remain visible.
+
+The model follows one selected free-ion reaction coordinate. It does not
+jointly solve sulfate protonation, calcium-sulfate ion pairing, pH or competing
+solid-phase selection, and supplies no nucleation/scale-growth kinetics,
+electrolyte activity correction, operating heat duty or plant removal forecast.
+Actual-source tests check the eight facts and scope refusals, all four reaction
+energies and mass accounts, finite reagent limits, independently derived ideal
+saturation/common-ion results, complete solid dissolution and basis scaling.
+
 ## Immutable admitted species definitions
 
 `ConservedReaction::species_charge` and `species_elements` expose the exact
