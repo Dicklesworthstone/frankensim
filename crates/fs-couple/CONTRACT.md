@@ -17232,7 +17232,19 @@ driver seam preserves the prescribed/moving consumer's accepted and trial
 mechanical contact-pressure inputs.
 
 The circuit consumer admits fixed geometry, fixed authored C/L, source ports
-and ideal transformers. `new_with_material_resistors` and
+and ideal transformers. `new_with_couplings` additionally accepts fixed signed
+mutual-inductance links by original graph branch index. Their full positive-
+definite magnetic storage is preserved in every native field/thermal trial;
+independent storage work uses mean current `L^-1 mean(flux)` times flux change,
+including all cross terms. The same E/J solution supplies spatial heating, so
+finite magnetizing/leakage dynamics transfer power into the original thermal
+body without a separate transformer or heat approximation. Links and total
+flux linkages persist through continuation. Magnetic parameter changes still
+require an explicit reversible-work owner. The spatial circuit regression
+independently reconstructs a loaded transformer, local heat, complete stored
+energy and source work over three accepted steps and both winding orientations.
+
+`new_with_material_resistors` and
 `step_material_circuit_candidate` additionally admit ordinary graph resistors
 with complete original material sources and explicit whole-cell caloric receivers
 disjoint from spatial FE receiving volumes. Every nonlinear endpoint refreshes

@@ -13,20 +13,22 @@ use fs_em::spatial::conduction::SpatialConductanceMatrix;
 use fs_phs::{
     StepRecord,
     circuit::{
-        Branch, CircuitDae, CircuitError, CircuitGraph, assemble_circuit_with_conductance_polled,
-        conductance::ConductanceBlock,
+        Branch, CircuitDae, CircuitError, CircuitGraph, MutualInductance,
+        assemble_circuit_with_couplings_polled, conductance::ConductanceBlock,
     },
 };
 use std::collections::BTreeSet;
 
 /// Original electrical storage and spatial source history. The graph contains
-/// fixed authored C/L, source ports and optional ideal transformers. Each
+/// fixed authored C/L, reciprocal mutual inductance, source ports and optional
+/// ideal transformers. Each
 /// ordinary graph resistor requires its original complete material source and
 /// a separate whole-cell thermal receiver; the spatial field retains its own
 /// bulk/contact heat. Source-dependent storage requires a reversible-work owner.
 pub struct SpatialConductionCircuit<C = ResolvedConductorState> {
     problem: SpatialConduction<C>,
     graph: CircuitGraph,
+    mutual: Vec<MutualInductance>,
     terminals: Vec<Vec<usize>>,
     nodes: Vec<usize>,
     fluxes_wb: Vec<f64>,
@@ -49,8 +51,9 @@ pub struct SpatialConductionCircuitStep {
     pub heat_j: f64,
     pub stored_before_j: f64,
     pub stored_after_j: f64,
-    /// Independently evaluated fixed-C/L energy increment, with cancellation
-    /// avoided by midpoint-coordinate times coordinate-increment products.
+    /// Independently evaluated fixed-C/L energy increment, including every
+    /// mutual-inductance term. Midpoint constitutive efforts times coordinate
+    /// increments avoid subtraction of large stored-energy endpoints.
     pub stored_change_j: f64,
     /// Independent dt*sum(authored source input * native conjugate output).
     pub supplied_work_j: f64,
@@ -149,6 +152,7 @@ fn native_polled<T>(
 fn prepare<'p, C: SpatialConductorMaterial>(
     problem: &'p SpatialConduction<C>,
     graph: &CircuitGraph,
+    mutual: &[MutualInductance],
     terminals: &[Vec<usize>],
     nodes: &[usize],
     response: SpatialConductanceControls,
@@ -190,7 +194,12 @@ fn prepare<'p, C: SpatialConductorMaterial>(
         ConductanceBlock::try_new_polled(nodes.to_vec(), grounded, checkpoint)
     })?;
     let dae = native_polled(cancel, |checkpoint| {
-        assemble_circuit_with_conductance_polled(graph, std::slice::from_ref(&block), checkpoint)
+        assemble_circuit_with_couplings_polled(
+            graph,
+            mutual,
+            std::slice::from_ref(&block),
+            checkpoint,
+        )
     })?;
     Ok((matrix, block, dae))
 }
@@ -250,6 +259,49 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
         field_controls: ConductionControls,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
+        Self::new_with_couplings(
+            problem,
+            graph,
+            terminals,
+            nodes,
+            material_resistors,
+            Vec::new(),
+            time_s,
+            fluxes_wb,
+            charges_c,
+            ports,
+            response,
+            field_controls,
+            cancelled,
+        )
+    }
+
+    /// Couple fixed reciprocal windings to the complete spatial conductor and
+    /// original material resistors. Magnetic links use graph branch indices,
+    /// including their winding polarity, and persist across every thermal
+    /// trial and accepted endpoint. Initial fluxes are TOTAL linkages L i;
+    /// current is L^-1 flux, including all mutual terms.
+    ///
+    /// The full inductance matrix must have positive leakage energy. Its
+    /// coefficients are fixed here: changing permeability or geometry needs
+    /// a separate reversible parameter-work owner and is not inferred from
+    /// the spatial conductor's temperature.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_couplings(
+        problem: SpatialConduction<C>,
+        graph: CircuitGraph,
+        terminals: Vec<Vec<usize>>,
+        nodes: Vec<usize>,
+        material_resistors: Vec<MaterialResistor>,
+        mutual: Vec<MutualInductance>,
+        time_s: f64,
+        fluxes_wb: Vec<f64>,
+        charges_c: Vec<f64>,
+        ports: &[f64],
+        response: SpatialConductanceControls,
+        field_controls: ConductionControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         if !time_s.is_finite() || time_s < 0.0 {
@@ -260,6 +312,7 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
         let (matrix, _, dae) = prepare(
             &problem,
             &graph,
+            &mutual,
             &terminals,
             &nodes,
             response,
@@ -273,6 +326,7 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
         Ok(Self {
             problem,
             graph,
+            mutual,
             terminals,
             nodes,
             fluxes_wb,
@@ -286,6 +340,10 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
     }
     pub fn graph(&self) -> &CircuitGraph {
         &self.graph
+    }
+    /// Fixed reciprocal links in original graph-branch order.
+    pub fn mutual_inductance(&self) -> &[MutualInductance] {
+        &self.mutual
     }
     pub fn terminal_faces(&self) -> &[Vec<usize>] {
         &self.terminals
@@ -337,6 +395,7 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
         let (matrix, block, dae) = prepare(
             &problem,
             &graph,
+            &self.mutual,
             &self.terminals,
             &self.nodes,
             response,
@@ -458,15 +517,29 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
         }
         let fluxes_wb: Vec<_> = dae.flux_index.iter().map(|&i| native.x[i]).collect();
         let charges_c: Vec<_> = dae.charge_index.iter().map(|&i| native.x[i]).collect();
+        let mean_currents = if self.mutual.is_empty() {
+            None
+        } else {
+            // Independent constitutive work: dH = (L^-1 mean(lambda)) dot
+            // d(lambda). Dividing by individual self L discards magnetic
+            // exchange and can misclassify it as heat or source power.
+            let midpoint = x0
+                .iter()
+                .zip(&native.x)
+                .map(|(&a, &b)| f64::midpoint(a, b))
+                .collect::<Vec<_>>();
+            Some(dae.inductor_currents(&midpoint).map_err(electrical)?)
+        };
         let (mut l, mut c, mut stored_change_j) = (0, 0, 0.0);
         for &(_, _, branch) in &graph.branches {
             check(cancel)?;
             let work = match branch {
                 Branch::Inductor { henries } => {
-                    let work = finite(
-                        (f64::midpoint(self.fluxes_wb[l], fluxes_wb[l]) / henries)
-                            * finite(fluxes_wb[l] - self.fluxes_wb[l])?,
-                    )?;
+                    let mean_current = mean_currents.as_ref().map_or_else(
+                        || f64::midpoint(self.fluxes_wb[l], fluxes_wb[l]) / henries,
+                        |currents| currents[l],
+                    );
+                    let work = finite(mean_current * finite(fluxes_wb[l] - self.fluxes_wb[l])?)?;
                     l += 1;
                     work
                 }
@@ -511,6 +584,7 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
                 circuit: Self {
                     problem,
                     graph,
+                    mutual: self.mutual.clone(),
                     terminals: self.terminals.clone(),
                     nodes: self.nodes.clone(),
                     fluxes_wb,

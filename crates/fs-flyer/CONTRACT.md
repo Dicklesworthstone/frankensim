@@ -1059,6 +1059,17 @@ sensitivity + pinned golden. JSONL receipts per case.
 
 ## Transient wake, shaft and aircraft propulsion
 
+Steady `propcoupling::CoupledStep::power` carries both original BEMT disk
+power splits through the accepted coupling evaluation, including spatial
+disk adapters and `GearedPropulsion` results. Shaft power agrees with the
+physical aerodynamic torque and absolute shaft rate for either blade
+handedness. Thrust power uses actual local disk incident air, including the
+wing-induced velocity; it must not be mistaken for complete aircraft thrust
+work or a closed wing/wake energy balance. Annular induced transfer and
+profile-drag dissipation retain their native meanings rather than becoming
+additional body heating. The existing geared-propulsion battery checks the
+signed shaft-power ports of counterrotating rotors.
+
 `spine::rotors::propulsion::dynamic::DynamicPropulsion` couples two original
 uniform axial inflow states to the existing physical geared rotor/aircraft
 assembly. `DynamicState` retains both disk-induced velocities alongside native

@@ -19,7 +19,7 @@
 //! The spec tuple enters ModelId via its content digest.
 
 use crate::Refusal;
-use fs_airscrew::{Rotor, bemt_solve};
+use fs_airscrew::{BemtPower, Rotor, bemt_solve};
 use fs_blake3::hash_domain;
 use fs_wing::nonlinear::{
     InfluenceOperator, SectionClosure, StripSpec, solve_nonlinear, solve_nonlinear_with_incident,
@@ -119,6 +119,11 @@ pub struct CoupledStep {
     pub thrust_n: [f64; 2],
     /// L/R torque [N·m].
     pub torque_nm: [f64; 2],
+    /// L/R signed BEMT power at the accepted disk inflows and shaft speeds.
+    /// Thrust power uses local disk incident air, including the wing field;
+    /// it is not the complete aircraft/wake energy balance. Induced/profile
+    /// terms retain their original annular meanings and are not added as heat.
+    pub power: [BemtPower; 2],
     /// Wing total lift under the converged slipstream [N].
     pub wing_lift_n: f64,
     /// Converged per-panel circulations (the washed solve's Γ — the
@@ -345,7 +350,7 @@ fn coupled_step_impl(
     let mut unrelaxed_done = false;
     // One evaluation of the fixed-point map G(x): wing under slipstream x,
     // disk inflows, BEMT, momentum slipstream.
-    type EvalOut = ([f64; 2], [f64; 2], [f64; 2], f64, Vec<f64>);
+    type EvalOut = ([f64; 2], [f64; 2], [f64; 2], [BemtPower; 2], f64, Vec<f64>);
     let evaluate = |x: &[f64; 2]| -> Result<EvalOut, Refusal> {
         let du: Vec<f64> = if spatial.is_none() {
             wash.iter()
@@ -392,6 +397,13 @@ fn coupled_step_impl(
         let mut g = [0.0f64; 2];
         let mut thrust = [0.0f64; 2];
         let mut torque = [0.0f64; 2];
+        let mut power = [BemtPower {
+            shaft_power_w: 0.0,
+            thrust_power_w: 0.0,
+            induced_power_w: 0.0,
+            profile_drag_power_w: 0.0,
+            residual_w: 0.0,
+        }; 2];
         for k in 0..2 {
             let vi = induced_velocity_free(disks[k].center_m, panels, &wing.gamma, freestream);
             let axial = incident.map_or(freestream[0], |flow| flow.disk_velocity_mps[k][0]);
@@ -415,13 +427,14 @@ fn coupled_step_impl(
             let sol = bemt_solve(rotor, rho, v_disk, disks[k].omega_rad_s).map_err(map_err_a)?;
             thrust[k] = sol.thrust_n;
             torque[k] = sol.torque_nm;
+            power[k] = sol.power;
             let t_term = sol.thrust_n / (2.0 * rho * disk_area);
             g[k] = momentum_disk_root(v_disk, t_term)?;
         }
-        Ok((g, thrust, torque, wing.total_lift_n, wing.gamma))
+        Ok((g, thrust, torque, power, wing.total_lift_n, wing.gamma))
     };
     loop {
-        let (g, thrust, torque, lift, gamma) = evaluate(&x)?;
+        let (g, thrust, torque, power, lift, gamma) = evaluate(&x)?;
         let r = [g[0] - x[0], g[1] - x[1]];
         // det doctrine: sqrt is IEEE-exact; hypot is platform libm and
         // broke native-vs-wasm digest identity (E6.2 measurement).
@@ -439,6 +452,7 @@ fn coupled_step_impl(
                 w_slip: g,
                 thrust_n: thrust,
                 torque_nm: torque,
+                power,
                 wing_lift_n: lift,
                 gamma,
                 strip_velocity_mps: incident.map(|flow| {

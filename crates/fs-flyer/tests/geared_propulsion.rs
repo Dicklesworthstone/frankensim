@@ -353,6 +353,16 @@ fn g0_real_coupled_force_matches_existing_symmetric_aerodynamics_and_signed_port
         evaluation.coupled.torque_nm[1]
     );
     assert_eq!(evaluation.propeller_absolute_speed_rad_s, [35.0, -35.0]);
+    for k in 0..2 {
+        let power = evaluation.coupled.power[k];
+        assert_eq!(
+            power.shaft_power_w,
+            -evaluation.loads.aerodynamic_nm[k] * evaluation.propeller_absolute_speed_rad_s[k]
+        );
+        assert!(power.profile_drag_power_w > 0.0);
+        assert!(power.induced_power_w > 0.0);
+        assert!(power.residual_w.abs() < 2e-12 * power.shaft_power_w.abs());
+    }
 }
 
 #[test]
