@@ -7,6 +7,8 @@ use super::*;
 use crate::dynamics::CaloricDomain;
 use std::cell::Cell;
 
+pub(crate) mod links;
+
 /// One compact volume's thermal boundary and optional original finite storage.
 /// Distinct contacts represent distinct physical wall masses. A shared wall
 /// requires its own thermal owner, rather than duplicating its stored energy.

@@ -1,4 +1,6 @@
 //! G1 source calorimetry and G3/G4 continuing composition with one wall inventory.
+mod links;
+
 use super::*;
 use crate::chemistry::IsochoricKineticsSolve;
 use crate::multicomponent::network::dissipation::tests::owned;

@@ -5,7 +5,6 @@ use crate::multicomponent::wall_exchange::shared::{Group, Work};
 pub use crate::multicomponent::wall_exchange::shared::{
     SharedWall, SharedWallControl, SharedWallGas, SharedWallPort, SharedWallReport,
 };
-use crate::multicomponent::wall_exchange::solve_scalar;
 use std::cell::Cell;
 
 mod conduction;

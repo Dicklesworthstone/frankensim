@@ -8,6 +8,10 @@ pub use crate::multicomponent::wall_exchange::shared::{
 };
 use std::cell::Cell as Counter;
 
+mod links;
+use links::WallLinks;
+pub use links::{SharedWallLink, SharedWallLinkReport};
+
 struct BoundGroup<'law> {
     storage: Group<'law>,
     indices: Vec<usize>,
@@ -16,6 +20,7 @@ struct BoundGroup<'law> {
 pub(super) struct SharedWalls<'law> {
     groups: Vec<BoundGroup<'law>>,
     work: Work,
+    links: Option<WallLinks>,
     candidate_report: Option<SharedWallReport>,
     last_report: Option<SharedWallReport>,
 }
@@ -154,6 +159,7 @@ impl<'law> NetworkWallOperator<'law> {
         }
         self.shared = Some(SharedWalls {
             groups,
+            links: None,
             work: Work {
                 used: Counter::new(0),
                 contacts: Counter::new(0),
@@ -189,6 +195,9 @@ impl SharedWalls<'_> {
         self.candidate_report = None;
         self.work.used.set(0);
         self.work.contacts.set(0);
+        if let Some(links) = &mut self.links {
+            links.candidate.clear();
+        }
         for group in &mut self.groups {
             poll(cancelled)?;
             group.storage.candidate = group.storage.accepted.storage.thermal;
@@ -244,6 +253,43 @@ impl SharedWalls<'_> {
                 candidate_states[index][1] = energy;
             }
         }
+        if let Some(links) = &mut self.links {
+            // Prepared storage retains at most the two halves of one complete
+            // network transaction. A retry clears it before any new solve.
+            if links.candidate.len() > links.ports.len() {
+                return Err(WallExchangeError::Invalid("wall link source-stage count"));
+            }
+            for &link in &links.ports {
+                poll(cancelled)?;
+                let receipt = crate::multicomponent::wall_exchange::shared::links::exchange(
+                    link.walls.map(|i| &self.groups[i].storage),
+                    link,
+                    duration,
+                    controls,
+                    &self.work,
+                    cancelled,
+                )?;
+                for i in 0..2 {
+                    self.groups[link.walls[i]].storage.candidate = receipt.endpoint_state[i];
+                }
+                maximum_wall = maximum_wall.max(receipt.energy_residual_j.abs());
+                iterations = iterations
+                    .checked_add(receipt.iterations)
+                    .ok_or(WallExchangeError::Invalid("wall link iteration count"))?;
+                total.add(WallCellReport {
+                    elapsed: duration,
+                    wall_impulse_ns: 0.0,
+                    drag_heating_j: 0.0,
+                    heat_to_gas_j: 0.0,
+                    wall_energy_change_j: receipt.energy_residual_j,
+                    external_heat_to_gas_j: 0.0,
+                    energy_residual_j: receipt.energy_residual_j,
+                    thermal_residual_j: receipt.flux_residual_j,
+                    iterations: receipt.iterations,
+                })?;
+                links.candidate.push(receipt);
+            }
+        }
         let report = total.report(duration);
         let mut shared_report = SharedWallReport {
             elapsed: duration,
@@ -292,5 +338,8 @@ impl SharedWalls<'_> {
             group.storage.accepted.storage.thermal = group.storage.candidate;
         }
         self.last_report = self.candidate_report;
+        if let Some(links) = &mut self.links {
+            core::mem::swap(&mut links.accepted, &mut links.candidate);
+        }
     }
 }

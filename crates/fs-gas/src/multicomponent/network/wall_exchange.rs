@@ -27,8 +27,8 @@ mod caloric;
 mod shared;
 use shared::SharedWalls;
 pub use shared::{
-    SharedWall, SharedWallControl, SharedWallGas, SharedWallPort, SharedWallReport,
-    SharedWallStorage,
+    SharedWall, SharedWallControl, SharedWallGas, SharedWallLink, SharedWallLinkReport,
+    SharedWallPort, SharedWallReport, SharedWallStorage,
 };
 
 mod transport;

@@ -3120,6 +3120,33 @@ budget boundaries and late source-domain refusal; and atomic cancellation with
 bitwise checkpoint replay. Source-specific calorimetry, energy closure and
 temperature-hull checks do not claim experimental heat-transfer accuracy.
 
+### Connected walls in evolving-mixture transactions
+
+The multicomponent network wall owner also exposes `with_shared_wall_links`,
+`shared_wall_links` and `shared_wall_link_reports`, using the same port types
+and scalar exchange kernel as the frozen network. Each source half first
+solves its current gas/shared-wall groups, then the authored wall links. The
+next half starts from those candidate wall states and the newly transported
+or reacted gas composition. Wall-to-wall heat changes only the two original
+wall stores; it adds neither external heat nor another gas heating term.
+
+The complete source-attempt budget covers both gas and wall links across both
+halves. Report buffers are allocated at binding for two full link sequences.
+The accepted report slice contains one chunk in authored link order for each
+source half: one chunk for standalone `advance_for`, two for a composed
+network step. Every receipt retains its actual half duration and original
+stage endpoints. A later stage cannot replace the temperatures of an earlier
+flux equation. Accepted states and the full report sequence publish together;
+failure or cancellation preserves the previous complete transaction, and a
+retry resets every candidate state, receipt and source-work counter.
+
+Focused tests check independent three-wall staged calorimetry, transfer out of
+an original latent plateau into sensible cooling, both-half receipts and exact
+source-work limits, final cancellation with replay, and source-domain refusal
+after gas heating. The same first-order, uniform-wall, authored-conductance and
+source pressure-work limits apply. This extension adds no spatial gradient,
+empirical heat-transfer qualification or simultaneous graph-endpoint claim.
+
 ## Finite-time thermal exchange with multicomponent phase equilibrium
 
 With `material,experimental-euler`, `material::phase_thermal::exchange_mixture_parcel`
