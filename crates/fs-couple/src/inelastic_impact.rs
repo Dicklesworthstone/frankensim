@@ -17,6 +17,8 @@ pub mod multiple;
 pub mod directional;
 /// Automatic sphere witnesses on the original deformed tetrahedral boundary.
 pub mod surface;
+/// Native viscoelastic flight, bounded affine sweeps and continuing impacts.
+pub mod trajectory;
 
 use fs_contact::impact::{
     NormalImpactError, NormalImpactInput, NormalImpactResult, solve_normal_impact,

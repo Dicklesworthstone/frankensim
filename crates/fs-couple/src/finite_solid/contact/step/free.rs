@@ -312,88 +312,21 @@ impl<'a> FiniteSolidBody<'a> {
         let mut absolute_work_residual = 0.0;
         let mut rigid_next = Vec::with_capacity(bodies.len());
         let mut rigid = Vec::with_capacity(bodies.len());
-        let half = 0.5 * duration_s;
-        let integrator = RigidBodyIntegrator::new(gravity);
         for ((&old, &property), &wrench) in bodies.iter().zip(properties).zip(wrenches) {
-            poll(cx)?;
-            // The callback exposes the ACTUAL endpoint before the second kick.
-            let (receipt, drifted) =
-                integrator.step_verlet_with(old, property, wrench, duration_s, |drifted| {
-                    poll(cx)?;
-                    Ok::<_, FreeFlightError>((wrench, drifted))
-                })?;
-            let new = receipt.state_after;
-            let total_force = wrench
-                .force_world
-                .add(gravity.acceleration_world().scale(property.mass()));
-            let torque_half = wrench.torque_body.scale(half);
-            // Exactly the original first half-kick arithmetic. No guessed pose,
-            // reprojected momentum or replacement accepted body is constructed.
-            let kicked = old.angular_momentum_body().add(torque_half);
-            let rotational_drift =
-                rotational_change(property, kicked, drifted.angular_momentum_body())?;
-            let torque_work = torque_half.dot(
-                angular_average(property, old.angular_momentum_body(), kicked)?.add(
-                    angular_average(
-                        property,
-                        drifted.angular_momentum_body(),
-                        new.angular_momentum_body(),
-                    )?,
-                ),
-            );
-            let dx = new.pose().position_world().sub(old.pose().position_world());
-            let dp = new.linear_momentum_world().sub(old.linear_momentum_world());
-            let p_average = old
-                .linear_momentum_world()
-                .scale(0.5)
-                .add(new.linear_momentum_world().scale(0.5));
-            let body_kinetic_change = p_average.scale(property.mass().recip()).dot(dp)
-                + rotational_change(
-                    property,
-                    old.angular_momentum_body(),
-                    new.angular_momentum_body(),
-                )?;
-            let body_source_work = total_force.dot(dx) + torque_work;
-            kinetic_change_j += body_kinetic_change;
-            source_work_j += body_source_work;
-            drift_defect += rotational_drift;
-            absolute_defect += rotational_drift.abs();
-            linear_change = linear_change.add(dp);
-            let r_average = old
-                .pose()
-                .position_world()
-                .sub(origin)
-                .scale(0.5)
-                .add(new.pose().position_world().sub(origin).scale(0.5));
-            let dl = new.angular_momentum_body().sub(old.angular_momentum_body());
-            let body_angular_change = r_average
-                .cross(dp)
-                .add(dx.cross(p_average))
-                .add(old.pose().orientation().rotate_body_to_world(dl))
-                .add(rotation_difference(
-                    old.pose().orientation(),
-                    new.pose().orientation(),
-                    new.angular_momentum_body(),
-                ));
-            let force_half = total_force.scale(half);
-            let body_applied = force_half.add(force_half);
-            let body_applied_angular = old
-                .pose()
-                .position_world()
-                .sub(origin)
-                .cross(force_half)
-                .add(new.pose().position_world().sub(origin).cross(force_half))
-                .add(old.pose().orientation().rotate_body_to_world(torque_half))
-                .add(new.pose().orientation().rotate_body_to_world(torque_half));
-            angular_change = angular_change.add(body_angular_change);
-            applied = applied.add(body_applied);
-            applied_angular = applied_angular.add(body_applied_angular);
-            absolute_linear_residual += magnitude(dp.sub(body_applied));
-            absolute_angular_residual += magnitude(body_angular_change.sub(body_applied_angular));
-            absolute_work_residual +=
-                (body_kinetic_change - body_source_work - rotational_drift).abs();
-            rigid_next.push(new);
-            rigid.push(receipt);
+            let flight = rigid_free_flight(old, property, wrench, gravity, duration_s, origin, cx)?;
+            kinetic_change_j += flight.kinetic_change_j;
+            source_work_j += flight.source_work_j;
+            drift_defect += flight.drift_defect_j;
+            absolute_defect += flight.drift_defect_j.abs();
+            linear_change = linear_change.add(flight.linear_change);
+            angular_change = angular_change.add(flight.angular_change);
+            applied = applied.add(flight.applied);
+            applied_angular = applied_angular.add(flight.applied_angular);
+            absolute_linear_residual += magnitude(flight.linear_residual);
+            absolute_angular_residual += magnitude(flight.angular_residual);
+            absolute_work_residual += flight.work_residual_j.abs();
+            rigid_next.push(flight.receipt.state_after);
+            rigid.push(flight.receipt);
         }
         let integration_defect_j = solid_defect + drift_defect;
         let report = FreeFlightReport {
@@ -463,6 +396,112 @@ impl<'a> FiniteSolidBody<'a> {
         poll(cx)?;
         Ok((solid_next, rigid_next, report))
     }
+}
+
+/// One original rigid endpoint-kick/free-rotation step and its actual account.
+/// Consumers sum these receipts in body order alongside their native solid.
+#[derive(Clone, Debug)]
+pub(crate) struct RigidFreeFlight {
+    pub receipt: StepReceipt,
+    pub kinetic_change_j: f64,
+    pub source_work_j: f64,
+    pub drift_defect_j: f64,
+    pub linear_change: Vec3,
+    pub angular_change: Vec3,
+    pub applied: Vec3,
+    pub applied_angular: Vec3,
+    pub linear_residual: Vec3,
+    pub angular_residual: Vec3,
+    pub work_residual_j: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rigid_free_flight(
+    old: RigidBodyState,
+    property: MassProperties,
+    wrench: Wrench,
+    gravity: Gravity,
+    duration_s: f64,
+    origin: Vec3,
+    cx: &Cx<'_>,
+) -> Result<RigidFreeFlight, FreeFlightError> {
+    poll(cx)?;
+    let half = 0.5 * duration_s;
+    let integrator = RigidBodyIntegrator::new(gravity);
+    // The callback exposes the ACTUAL endpoint before the second kick.
+    let (receipt, drifted) =
+        integrator.step_verlet_with(old, property, wrench, duration_s, |drifted| {
+            poll(cx)?;
+            Ok::<_, FreeFlightError>((wrench, drifted))
+        })?;
+    let new = receipt.state_after;
+    let total_force = wrench
+        .force_world
+        .add(gravity.acceleration_world().scale(property.mass()));
+    let torque_half = wrench.torque_body.scale(half);
+    // Exactly the original first half-kick arithmetic; accepted momenta/poses
+    // are never reconstructed or projected by this shared account.
+    let kicked = old.angular_momentum_body().add(torque_half);
+    let drift_defect_j = rotational_change(property, kicked, drifted.angular_momentum_body())?;
+    let torque_work = torque_half.dot(
+        angular_average(property, old.angular_momentum_body(), kicked)?.add(angular_average(
+            property,
+            drifted.angular_momentum_body(),
+            new.angular_momentum_body(),
+        )?),
+    );
+    let dx = new.pose().position_world().sub(old.pose().position_world());
+    let dp = new.linear_momentum_world().sub(old.linear_momentum_world());
+    let p_average = old
+        .linear_momentum_world()
+        .scale(0.5)
+        .add(new.linear_momentum_world().scale(0.5));
+    let kinetic_change_j = p_average.scale(property.mass().recip()).dot(dp)
+        + rotational_change(
+            property,
+            old.angular_momentum_body(),
+            new.angular_momentum_body(),
+        )?;
+    let source_work_j = total_force.dot(dx) + torque_work;
+    let r_average = old
+        .pose()
+        .position_world()
+        .sub(origin)
+        .scale(0.5)
+        .add(new.pose().position_world().sub(origin).scale(0.5));
+    let dl = new.angular_momentum_body().sub(old.angular_momentum_body());
+    let angular_change = r_average
+        .cross(dp)
+        .add(dx.cross(p_average))
+        .add(old.pose().orientation().rotate_body_to_world(dl))
+        .add(rotation_difference(
+            old.pose().orientation(),
+            new.pose().orientation(),
+            new.angular_momentum_body(),
+        ));
+    let force_half = total_force.scale(half);
+    let applied = force_half.add(force_half);
+    let applied_angular = old
+        .pose()
+        .position_world()
+        .sub(origin)
+        .cross(force_half)
+        .add(new.pose().position_world().sub(origin).cross(force_half))
+        .add(old.pose().orientation().rotate_body_to_world(torque_half))
+        .add(new.pose().orientation().rotate_body_to_world(torque_half));
+    Ok(RigidFreeFlight {
+        receipt,
+        kinetic_change_j,
+        source_work_j,
+        drift_defect_j,
+        linear_change: dp,
+        angular_change,
+        applied,
+        applied_angular,
+        linear_residual: dp.sub(applied),
+        angular_residual: angular_change.sub(applied_angular),
+        work_residual_j: kinetic_change_j - source_work_j - drift_defect_j,
+    })
 }
 
 // Pressure admission precedes contact work in the trajectory consumer. The

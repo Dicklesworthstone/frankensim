@@ -24,6 +24,7 @@ use fs_solid::hyper3::{
 use fs_solid::linear3::TetAssemblyBudget;
 use fs_solver::CheckedCgConfig;
 
+#[path = "inelastic_impact/mixed.rs"]
 mod mixed;
 
 #[path = "inelastic_impact/elliptic.rs"]
@@ -34,6 +35,9 @@ mod directional;
 
 #[path = "inelastic_impact/surface.rs"]
 mod surface;
+
+#[path = "inelastic_impact/trajectory.rs"]
+mod trajectory;
 
 const NODES: [[f64; 3]; 4] = [
     [0.0, 0.0, 0.0],

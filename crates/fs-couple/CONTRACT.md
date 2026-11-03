@@ -290,6 +290,42 @@ seam adds directional parity and source admission ordering. Formatting and
 source/API checks pass; native test execution remains unverified while the
 required constellation sibling checkouts are unavailable.
 
+`inelastic_impact::trajectory::visco_sphere_trajectory_candidate` continues the
+native fixed-temperature Maxwell body and COM-centred rigid spheres through
+transient impacts. It composes the original implicit material advance, full
+consistent inertia, simultaneous contact solve and rigid endpoint-kick/free-spin
+integrator. Stationary held DOFs retain their accepted displacement. Dead solid
+loads, rigid wrenches and rigid gravity remain explicit external sources.
+
+The existing interval sweeps enclose the declared affine interpolation of each
+trial's native endpoint coordinates and preserve tetrahedron orientation. An
+unresolved path shortens the interval and recomputes the original material
+advance from the same accepted history. Rejected trials add no time, relaxation
+loss or contact impulse to the accepted account. Accepted endpoint geometry and
+contacts carry into the next interval without repeating its BVH query. A positive
+activation band localizes events without witness relocation; contact first
+entering that band at the requested final endpoint resolves on continuation.
+Accepted endpoints remain nonpenetrating.
+
+Each report retains exact accepted durations, native material/rigid receipts and
+path bounds. Physical Maxwell relaxation and contact loss remain separate from
+backward-Euler kinetic loss, signed material endpoint error and rigid drift.
+The native actual angular-momentum increment and support/external torque use the
+original consistent mass and current coordinates. Backward-Euler angular drift
+is reported and bounded independently, never booked as a physical torque. Final
+balances and sums of individual residual magnitudes must both pass the caller's
+whole-call tolerances, preventing cancellation of large numerical defects.
+
+Every failure preserves all input owners. This bounded isothermal, first-order
+trajectory does not certify the unknown continuum path, provide sustained
+contact, or assign contact heat. Offset spheres, unsupported sphere-pair
+encounters, unresolved grazing/Zeno behavior and exhausted budgets refuse.
+G1/G3 cases specify the analytic supported bounce (impulse 3 N s and loss
+0.75 J), accepted-duration Maxwell replay, free recoil/deformation, native
+continuation and late rollback. These new tests share the execution limitation
+stated above; formatting and bounded source review do not establish runtime
+convergence or a performance benchmark.
+
 ## Physical pressure from an explicitly selected lumped duct
 
 `acoustic_realize::duct_observer::BaffledDuctObserver` also admits the existing

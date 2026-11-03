@@ -84,6 +84,43 @@ impl Default for FiniteSolidSphereTrajectoryControls {
     }
 }
 
+/// Bounded interval work for the declared affine numerical collision path.
+/// These checks enclose the interpolation of admitted native endpoints, not
+/// the unknown nonlinear physical flow between those endpoints.
+#[derive(Clone, Copy, Debug)]
+pub struct FiniteSolidSpherePathControls {
+    pub maximum_path_windows: usize,
+    pub maximum_path_visits: usize,
+    pub maximum_path_candidates: usize,
+    pub sweep: LinearSweepControls,
+}
+impl From<FiniteSolidSphereTrajectoryControls> for FiniteSolidSpherePathControls {
+    fn from(c: FiniteSolidSphereTrajectoryControls) -> Self {
+        Self {
+            maximum_path_windows: c.maximum_path_windows,
+            maximum_path_visits: c.maximum_path_visits,
+            maximum_path_candidates: c.maximum_path_candidates,
+            sweep: c.sweep,
+        }
+    }
+}
+impl Default for FiniteSolidSpherePathControls {
+    fn default() -> Self {
+        FiniteSolidSphereTrajectoryControls::default().into()
+    }
+}
+impl FiniteSolidSpherePathControls {
+    pub(crate) fn valid(self) -> bool {
+        (1..=1 << 24).contains(&self.maximum_path_windows)
+            && (1..=1 << 26).contains(&self.maximum_path_visits)
+            && (1..=1 << 24).contains(&self.maximum_path_candidates)
+            && (1..=1 << 20).contains(&self.sweep.maximum_windows)
+            && self.sweep.fraction_tolerance.is_finite()
+            && self.sweep.fraction_tolerance > 0.0
+            && self.sweep.fraction_tolerance < 1.0
+    }
+}
+
 /// Complete path admission for accepted native endpoints.
 #[derive(Clone, Debug)]
 pub struct FiniteSolidSpherePathReport {
@@ -158,7 +195,7 @@ pub enum FiniteSolidSpherePathRefusal {
     },
 }
 impl FiniteSolidSpherePathRefusal {
-    fn start(self) -> f64 {
+    pub(crate) fn start(self) -> f64 {
         match self {
             Self::PossibleContact { fraction_start, .. }
             | Self::PossibleElementCollapse { fraction_start, .. }
@@ -708,6 +745,48 @@ fn admit_path(
 > {
     let start = surface.current_positions(before, cx)?;
     let end = surface.current_positions(after, cx)?;
+    admit_path_at_positions(
+        surface,
+        before.problem().tetrahedra,
+        &start,
+        &end,
+        rigid_before,
+        rigid_after,
+        spheres,
+        allow_sphere_pairs,
+        controls.into(),
+        cx,
+    )
+}
+
+/// Shared interval owner after the caller has checked the original reference
+/// mesh and built the actual native endpoint positions. No trajectory samples
+/// or velocity estimates replace these affine coordinate bounds.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn admit_path_at_positions(
+    surface: &FiniteSolidContactSurface,
+    tetrahedra: &[[usize; 4]],
+    start: &[[f64; 3]],
+    end: &[[f64; 3]],
+    rigid_before: &[RigidBodyState],
+    rigid_after: &[RigidBodyState],
+    spheres: &[FiniteSolidSphere],
+    allow_sphere_pairs: bool,
+    controls: FiniteSolidSpherePathControls,
+    cx: &Cx<'_>,
+) -> Result<
+    Result<FiniteSolidSpherePathReport, FiniteSolidSpherePathRefusal>,
+    FiniteSolidSphereTrajectoryError,
+> {
+    if !controls.valid()
+        || start.len() != end.len()
+        || tetrahedra.len() != surface.reference_orientations().len()
+        || rigid_before.len() != rigid_after.len()
+    {
+        return Err(FiniteSolidSphereTrajectoryError::Invalid(
+            "matching native affine-path endpoints and bounded interval work required",
+        ));
+    }
     let mut report = FiniteSolidSpherePathReport {
         triangle_candidates: 0,
         query_visits: 0,
@@ -716,7 +795,7 @@ fn admit_path(
         sphere_pairs_checked: 0,
         minimum_clearance_m: f64::INFINITY,
     };
-    for (i, tet) in before.problem().tetrahedra.iter().enumerate() {
+    for (i, tet) in tetrahedra.iter().enumerate() {
         poll(cx)?;
         let sweep = linear_tetrahedron_orientation(
             tet.map(|n| start[n]),
@@ -784,7 +863,7 @@ fn admit_path(
             }
         }
     }
-    let swept = surface.triangle_surface().refit_swept(&start, &end, cx)?;
+    let swept = surface.triangle_surface().refit_swept(start, end, cx)?;
     for sphere in spheres {
         poll(cx)?;
         let c0 = array(rigid_before[sphere.rigid_body].pose().position_world());
@@ -833,7 +912,7 @@ fn admit_path(
 }
 
 fn window_controls(
-    c: FiniteSolidSphereTrajectoryControls,
+    c: FiniteSolidSpherePathControls,
     r: &FiniteSolidSpherePathReport,
 ) -> Result<LinearSweepControls, FiniteSolidSphereTrajectoryError> {
     if r.interval_windows == c.maximum_path_windows {
@@ -865,17 +944,7 @@ fn validate(
         || c.maximum_steps == 0
         || c.maximum_steps > 65_536
         || c.maximum_rejections > 65_536
-        || c.maximum_path_windows == 0
-        || c.maximum_path_windows > 1 << 24
-        || c.maximum_path_visits == 0
-        || c.maximum_path_visits > 1 << 26
-        || c.maximum_path_candidates == 0
-        || c.maximum_path_candidates > 1 << 24
-        || c.sweep.maximum_windows == 0
-        || c.sweep.maximum_windows > 1 << 20
-        || !c.sweep.fraction_tolerance.is_finite()
-        || c.sweep.fraction_tolerance <= 0.0
-        || c.sweep.fraction_tolerance >= 1.0
+        || !FiniteSolidSpherePathControls::from(c).valid()
         || c.surface.activation_tolerance_m <= 0.0
         || c.surface.activation_tolerance_m > c.impact.geometry_tolerance_m
         || [
