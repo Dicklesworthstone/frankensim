@@ -4,9 +4,13 @@
 //! the original moisture stack owns water flux; this consumer shares interface
 //! mesh nodes and therefore assumes perfect mechanical bonding. Each original
 //! layer retains its own dry skeleton, source datum, elasticity and swelling
-//! directions. Reference-volume transport is not changed by the deformation.
+//! directions. Ordinary steps retain reference-volume transport. The explicit
+//! `advance_spatial_diffusion` path couples the axial spatial transport metric
+//! back to the actual compatible deformation while conserving the dry skeleton.
 
 use super::*;
+#[path = "layered/deforming.rs"]
+mod deforming;
 use crate::moisture::{
     adaptive::{LayeredMoistureAdvanceReport, MoistureAdvanceError, MoistureTimeControls},
     atmosphere::{
@@ -18,6 +22,7 @@ use crate::moisture::{
         atmosphere::LayeredAtmosphereMoistureCandidate,
     },
 };
+pub use deforming::MoistureSpatialDiffusionReport;
 
 /// Mechanical source choices for exactly one layer in original stack order.
 #[derive(Clone, Debug)]

@@ -8,8 +8,10 @@
 //!
 //! This is a slow, isothermal, quasistatic response. Prescribed surface moisture
 //! or the shared finite-atmosphere owner supplies its water boundary. Diffusion
-//! remains on the original reference-volume chart; deformation does not silently
-//! replace its water inventory or transport metric. Chemical reservoir work is
+//! ordinarily remains on the original reference-volume chart; deformation does
+//! not silently replace its water inventory or transport metric. The layered
+//! consumer's explicit spatial-diffusion path instead couples the metric through
+//! compatible axial swelling. Chemical reservoir work is
 //! outside this mechanical account. Sorption heat, stress-assisted diffusion,
 //! hysteresis, finite deformation and dynamic mode-state remapping are separate.
 
@@ -32,7 +34,10 @@ use fs_solid::{
     },
     prestress::PrestressedTetAssembly,
 };
-pub use layered::{MoistureLayerSolidSource, MoistureLayeredSolid, MoistureLayeredSolidStep};
+pub use layered::{
+    MoistureLayerSolidSource, MoistureLayeredSolid, MoistureLayeredSolidStep,
+    MoistureSpatialDiffusionReport,
+};
 
 /// Fixed source-principal and mesh frames, independent of elastic symmetry.
 #[derive(Clone, Copy, Debug)]

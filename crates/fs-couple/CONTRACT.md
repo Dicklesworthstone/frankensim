@@ -24234,3 +24234,14 @@ The fixture's load storage and heat are known independently from its authored
 relaxation law, not inferred for arbitrary rational fits. Native checks compile
 the exact production cold assembly with those real owners. They do not claim a
 complete renderer, workspace or DSR validation run.
+
+
+## Spatial moisture diffusion through compatible axial swelling
+
+`MoistureLayeredSolid::advance_spatial_diffusion` explicitly interprets the selected scalar source as current-frame isotropic dry-basis Fick diffusivity: `j = -rho_d,current D grad_x M`. This is not the concentration-gradient law `-D grad_x(rho_d M)`. Conserving the dry skeleton gives reference flux `-rho_d,reference F^-1 D F^-T grad_X M`; the admitted separable prism reduces this to a cellwise `1/lambda_x^2` metric. Existing area-specific activity-transfer laws consume the actual exposed/contact area. Dry inventory, original geometry and source selections remain unchanged.
+
+Every nonlinear moisture endpoint invokes the original compatible native solid solve. The original layered transport owner then evaluates its true residual and measured water balance with that endpoint's geometry, inside its existing bounded implicit iteration. Source, mechanics, work-limit and cancellation refusals publish no changed specimen. The result retains the original water accounts, measured axial stretches/current area, geometric residual and identity, and mechanical evaluation count.
+
+Focused G1 tests independently solve the one-cell swelling polynomial, finite current-area surface resistance, and unlike-layer inventory exchange. G3 tests cover the undeformed limit, identical-material layer splitting, and late work/source/non-axial refusals. The five new groups and six retained layered-solid tests passed against the current source and native dependencies. This is focused execution evidence, not a repository-level DSR verdict or experimental validation.
+
+Scope: explicitly opted-in spatial diffusivity, isothermal quasistatic small-strain mechanics, and axis-aligned rectangular common sections within the caller's nodal tolerance. Bending, shear and taper outside that tolerance refuse. Stress chemical potentials, strain-dependent diffusivity, sorption heat, general moving meshes, finite-strain constitutive mechanics and liquid transport are separate capabilities.

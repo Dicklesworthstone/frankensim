@@ -7,6 +7,7 @@ pub(super) fn half_conductance(
     diffusion: &KirchhoffMoistureDiffusivity,
     a: f64,
     b: f64,
+    pullback: f64,
 ) -> Result<f64, MoistureError> {
     let left = layer.sorption.moisture(a)?;
     let right = layer.sorption.moisture(b)?;
@@ -16,7 +17,7 @@ pub(super) fn half_conductance(
     }
     let capacity = layer.sorption.mean_capacity(a, b)?;
     let dx = layer.spacing();
-    let value = 2.0 * layer.slab.dry_mass_per_cell_kg / dx / dx * mean * capacity;
+    let value = 2.0 * layer.slab.dry_mass_per_cell_kg / dx / dx * mean * capacity * pullback;
     if !positive(value) {
         return Err(MoistureError::Invalid(
             "layered half-cell conductance overflow or underflow",
@@ -58,12 +59,13 @@ pub(super) fn join(
     layers: [&MoistureLayer; 2],
     profiles: [&KirchhoffMoistureDiffusivity; 2],
     activity: [f64; 2],
+    pullback: [f64; 2],
     cx: &Cx<'_>,
 ) -> Result<(f64, f64), MoistureError> {
     let evaluate = |fraction: f64| -> Result<(f64, f64), MoistureError> {
         let a = fraction.mul_add(activity[1] - activity[0], activity[0]);
-        let left = half_conductance(layers[0], profiles[0], activity[0], a)?;
-        let right = half_conductance(layers[1], profiles[1], a, activity[1])?;
+        let left = half_conductance(layers[0], profiles[0], activity[0], a, pullback[0])?;
+        let right = half_conductance(layers[1], profiles[1], a, activity[1], pullback[1])?;
         series(left, right)
     };
     locate(activity, evaluate, cx)
@@ -110,11 +112,12 @@ pub(super) fn surface(
     profile: &KirchhoffMoistureDiffusivity,
     activity: [f64; 2],
     conductance: Option<f64>,
+    pullback: f64,
     cx: &Cx<'_>,
 ) -> Result<(f64, f64), MoistureError> {
     match conductance {
         None => Ok((
-            half_conductance(layer, profile, activity[0], activity[1])?,
+            half_conductance(layer, profile, activity[0], activity[1], pullback)?,
             activity[1],
         )),
         Some(0.0) => Ok((0.0, activity[0])),
@@ -122,7 +125,10 @@ pub(super) fn surface(
             activity,
             |fraction| {
                 let a = fraction.mul_add(activity[1] - activity[0], activity[0]);
-                series(half_conductance(layer, profile, activity[0], a)?, h)
+                series(
+                    half_conductance(layer, profile, activity[0], a, pullback)?,
+                    h,
+                )
             },
             cx,
         ),
@@ -163,18 +169,31 @@ pub(super) fn transfer_join(
     profiles: [&KirchhoffMoistureDiffusivity; 2],
     activity: [f64; 2],
     conductance: Option<f64>,
+    pullback: [f64; 2],
     cx: &Cx<'_>,
 ) -> Result<(f64, [f64; 2]), MoistureError> {
     let Some(h) = conductance else {
-        let (g, a) = join(layers, profiles, activity, cx)?;
+        let (g, a) = join(layers, profiles, activity, pullback, cx)?;
         return Ok((g, [a; 2]));
     };
     if h == 0.0 {
         return Ok((0.0, activity));
     }
     let delta = activity[1] - activity[0];
-    let gl = half_conductance(layers[0], profiles[0], activity[0], activity[1])?;
-    let gr = half_conductance(layers[1], profiles[1], activity[0], activity[1])?;
+    let gl = half_conductance(
+        layers[0],
+        profiles[0],
+        activity[0],
+        activity[1],
+        pullback[0],
+    )?;
+    let gr = half_conductance(
+        layers[1],
+        profiles[1],
+        activity[0],
+        activity[1],
+        pullback[1],
+    )?;
     // A completely impermeable half path carries no water. Its interface
     // activities follow the transmitting neighbor and the finite transfer law.
     if gl == 0.0 || gr == 0.0 {
@@ -194,9 +213,9 @@ pub(super) fn transfer_join(
     let evaluate = |drops: [f64; 2]| -> Result<(f64, [f64; 2]), MoistureError> {
         let a = surfaces(drops);
         triple(
-            half_conductance(layers[0], profiles[0], activity[0], a[0])?,
+            half_conductance(layers[0], profiles[0], activity[0], a[0], pullback[0])?,
             h,
-            half_conductance(layers[1], profiles[1], a[1], activity[1])?,
+            half_conductance(layers[1], profiles[1], a[1], activity[1], pullback[1])?,
         )
     };
     // The affine case needs only one consistency check and retains a stable
@@ -216,7 +235,13 @@ pub(super) fn transfer_join(
             return Ok((checked.0, surfaces(checked.1)));
         }
         let left_surface = fraction.mul_add(delta, activity[0]);
-        let left = half_conductance(layers[0], profiles[0], activity[0], left_surface)?;
+        let left = half_conductance(
+            layers[0],
+            profiles[0],
+            activity[0],
+            left_surface,
+            pullback[0],
+        )?;
         let flux = left * fraction;
         let right_fraction = fraction + flux / h;
         if !right_fraction.is_finite() || right_fraction >= 1.0 {
@@ -226,7 +251,13 @@ pub(super) fn transfer_join(
             continue;
         }
         let right_surface = right_fraction.mul_add(delta, activity[0]);
-        let right = half_conductance(layers[1], profiles[1], right_surface, activity[1])?;
+        let right = half_conductance(
+            layers[1],
+            profiles[1],
+            right_surface,
+            activity[1],
+            pullback[1],
+        )?;
         if left == 0.0 && right == 0.0 {
             // Both actual half paths are impermeable at this common surface,
             // so the transfer jump and all three physical fluxes are zero.
@@ -239,8 +270,20 @@ pub(super) fn transfer_join(
         } else {
             bracket[1] = fraction;
         }
-        let dl = half_conductance(layers[0], profiles[0], left_surface, left_surface)?;
-        let dr = half_conductance(layers[1], profiles[1], right_surface, right_surface)?;
+        let dl = half_conductance(
+            layers[0],
+            profiles[0],
+            left_surface,
+            left_surface,
+            pullback[0],
+        )?;
+        let dr = half_conductance(
+            layers[1],
+            profiles[1],
+            right_surface,
+            right_surface,
+            pullback[1],
+        )?;
         let slope = dl + dr + (dl / h) * dr;
         let trial = fraction - residual / slope;
         let next =

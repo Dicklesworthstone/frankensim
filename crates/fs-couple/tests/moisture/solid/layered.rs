@@ -7,6 +7,9 @@ use fs_material::state_point::{
     resolve_material_state_point,
 };
 
+#[path = "layered/deforming.rs"]
+mod deforming;
+
 fn material(rho: f64, beta: [f64; 3], upper: f64, saturation: f64) -> MaterialCard {
     let original = card_with_swelling([0.01; 2], upper, beta);
     let mut claims = ClaimSet::new();

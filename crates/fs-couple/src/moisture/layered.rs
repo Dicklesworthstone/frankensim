@@ -8,8 +8,10 @@
 //! Backward Euler evolves the actual water inventory. Positive source storage
 //! secants and symmetric face conductances retain the existing tridiagonal
 //! solver. Explicit surface and interface activity conductances may add transfer
-//! resistance without an interface store. Hysteresis, sorption heat, liquid flow,
-//! moving geometry and an entropy certificate remain outside this reduction.
+//! resistance without an interface store. Ordinary steps hold reference geometry;
+//! the native solid consumer can explicitly pull a spatial law back through
+//! compatible axial swelling. Hysteresis, sorption heat, liquid flow, general
+//! moving-mesh transport and an entropy certificate remain outside this reduction.
 
 use super::*;
 use fs_la::tridiagonal::TridiagonalWorkspace;
@@ -134,6 +136,17 @@ pub struct MoistureLayeredSlab {
     interface_transfer: Vec<MoistureActivityTransfer>,
     identity: ContentHash,
 }
+
+/// Pullback of an explicitly spatial transport law onto the original dry
+/// skeleton. Storage is unchanged. Only the solid consumer may construct this
+/// metric, after checking that its deformation preserves the axial reduction.
+pub(super) struct MoistureLayeredMetric {
+    pub(super) inverse_axial_stretch_squared: Vec<f64>,
+    pub(super) face_area_ratio: f64,
+}
+
+type MetricResolver<'a> =
+    dyn FnMut(&MoistureLayeredSlab) -> Result<MoistureLayeredMetric, MoistureError> + 'a;
 
 /// Two material-specific surfaces with equal/opposite water transfer.
 #[derive(Clone, Debug)]
@@ -316,6 +329,21 @@ impl MoistureLayeredSlab {
         controls: MoistureNonlinearConfig,
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureLayeredReport), MoistureError> {
+        self.advance_with_metric(dt, faces, step, controls, None, cx)
+    }
+
+    /// The original nonlinear endpoint also owns geometry feedback. A supplied
+    /// resolver must evaluate the actual proposed state: its metric enters the
+    /// endpoint residual and physical face accounts before acceptance.
+    pub(super) fn advance_with_metric(
+        &self,
+        dt: f64,
+        faces: &[MoistureLayeredFace; 2],
+        step: MoistureStepConfig,
+        controls: MoistureNonlinearConfig,
+        mut resolve_metric: Option<&mut MetricResolver<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, MoistureLayeredReport), MoistureError> {
         poll(cx)?;
         controls.validate()?;
         let end = self.time_s() + dt;
@@ -379,8 +407,20 @@ impl MoistureLayeredSlab {
             .flat_map(|l| l.slab.moisture.iter().copied())
             .collect();
         let mut iterate = self.activity.clone();
-        let mut system =
-            self.system(dt, reservoir, &profiles, &original, &iterate, reference, cx)?;
+        let initial_metric = resolve_metric
+            .as_mut()
+            .map(|resolve| resolve(self))
+            .transpose()?;
+        let mut system = self.system(
+            dt,
+            reservoir,
+            &profiles,
+            &original,
+            &iterate,
+            reference,
+            initial_metric.as_ref(),
+            cx,
+        )?;
         let mut workspace =
             TridiagonalWorkspace::new(self.activity.len()).map_err(MoistureError::Tridiagonal)?;
         let mut solves = 0usize;
@@ -420,8 +460,24 @@ impl MoistureLayeredSlab {
                 moisture.push(m);
                 transport.push(source);
             }
+            let mut proposed = if resolve_metric.is_some() {
+                Some(self.with_profile(&candidate, &moisture, end, cx)?)
+            } else {
+                None
+            };
+            let metric = match (&mut resolve_metric, &proposed) {
+                (Some(resolve), Some(state)) => Some(resolve(state)?),
+                _ => None,
+            };
             let endpoint = self.system(
-                dt, reservoir, &profiles, &original, &candidate, reference, cx,
+                dt,
+                reservoir,
+                &profiles,
+                &original,
+                &candidate,
+                reference,
+                metric.as_ref(),
+                cx,
             )?;
             let (_, relative) = endpoint.operator.defect(&solution.x, &endpoint.rhs, cx)?;
             let boundary = std::array::from_fn(|side| {
@@ -479,19 +535,10 @@ impl MoistureLayeredSlab {
                     linear: solution.report,
                     nonlinear,
                 };
-                let mut next = self.clone();
-                next.activity = candidate;
-                let mut offset = 0;
-                for layer in &mut next.layers {
-                    poll(cx)?;
-                    let n = layer.slab.moisture.len();
-                    layer
-                        .slab
-                        .moisture
-                        .copy_from_slice(&moisture[offset..offset + n]);
-                    layer.slab.time_s = end;
-                    offset += n;
-                }
+                let next = match proposed.take() {
+                    Some(state) => state,
+                    None => self.with_profile(&candidate, &moisture, end, cx)?,
+                };
                 poll(cx)?;
                 return Ok((next, report));
             }
@@ -505,11 +552,61 @@ impl MoistureLayeredSlab {
                 for (a, candidate) in iterate.iter_mut().zip(candidate) {
                     *a = controls.relaxation.mul_add(candidate - *a, *a);
                 }
-                system =
-                    self.system(dt, reservoir, &profiles, &original, &iterate, reference, cx)?;
+                let metric = if let Some(resolve) = &mut resolve_metric {
+                    Some(resolve(&self.with_activity(&iterate, end, cx)?)?)
+                } else {
+                    None
+                };
+                system = self.system(
+                    dt,
+                    reservoir,
+                    &profiles,
+                    &original,
+                    &iterate,
+                    reference,
+                    metric.as_ref(),
+                    cx,
+                )?;
             }
         }
         unreachable!("validated positive layered iteration budget")
+    }
+
+    fn with_activity(
+        &self,
+        activity: &[f64],
+        time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        let mut moisture = Vec::with_capacity(activity.len());
+        for (&a, &layer) in activity.iter().zip(&self.layer_for_cell) {
+            poll(cx)?;
+            moisture.push(self.layers[layer].sorption.moisture(a)?);
+        }
+        self.with_profile(activity, &moisture, time_s, cx)
+    }
+
+    fn with_profile(
+        &self,
+        activity: &[f64],
+        moisture: &[f64],
+        time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        let mut next = self.clone();
+        next.activity.copy_from_slice(activity);
+        let mut offset = 0;
+        for layer in &mut next.layers {
+            poll(cx)?;
+            let n = layer.slab.moisture.len();
+            layer
+                .slab
+                .moisture
+                .copy_from_slice(&moisture[offset..offset + n]);
+            layer.slab.time_s = time_s;
+            offset += n;
+        }
+        Ok(next)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -521,9 +618,19 @@ impl MoistureLayeredSlab {
         original: &[f64],
         activity: &[f64],
         reference: f64,
+        metric: Option<&MoistureLayeredMetric>,
         cx: &Cx<'_>,
     ) -> Result<LayeredSystem, MoistureError> {
         let n = activity.len();
+        if metric.is_some_and(|m| {
+            m.inverse_axial_stretch_squared.len() != n
+                || !positive(m.face_area_ratio)
+                || m.inverse_axial_stretch_squared
+                    .iter()
+                    .any(|&x| !positive(x))
+        }) {
+            return Err(MoistureError::Invalid("invalid layered deformation metric"));
+        }
         let mut system = LayeredSystem {
             operator: DiffusionStep {
                 diagonal: Vec::with_capacity(n),
@@ -557,7 +664,13 @@ impl MoistureLayeredSlab {
             poll(cx)?;
             let left = self.layer_for_cell[i];
             let right = self.layer_for_cell[i + 1];
-            let conductance = if left == right {
+            let pullback = metric.map_or([1.0; 2], |m| {
+                [
+                    m.inverse_axial_stretch_squared[i],
+                    m.inverse_axial_stretch_squared[i + 1],
+                ]
+            });
+            let conductance = if left == right && pullback[0] == pullback[1] {
                 // One homogeneous full-cell path; no nonlinear interface root.
                 kirchhoff::scaled_diffusivity(
                     0.5,
@@ -566,6 +679,7 @@ impl MoistureLayeredSlab {
                         &profiles[left],
                         activity[i],
                         activity[i + 1],
+                        pullback[0],
                     )?,
                 )?
             } else {
@@ -573,20 +687,29 @@ impl MoistureLayeredSlab {
                     [&self.layers[left], &self.layers[right]],
                     [&profiles[left], &profiles[right]],
                     [activity[i], activity[i + 1]],
-                    self.interface_transfer[left]
-                        .conductance(self.layers[left].slab.geometry.cross_section_m2)?,
+                    if left == right {
+                        None
+                    } else {
+                        self.interface_transfer[left].conductance(
+                            self.layers[left].slab.geometry.cross_section_m2
+                                * metric.map_or(1.0, |m| m.face_area_ratio),
+                        )?
+                    },
+                    pullback,
                     cx,
                 )?;
-                system.interfaces.push(MoistureLayerInterfaceReport {
-                    layers: [left, right],
-                    relative_activity: a[0],
-                    right_relative_activity: a[1],
-                    moisture: [
-                        self.layers[left].sorption.moisture(a[0])?,
-                        self.layers[right].sorption.moisture(a[1])?,
-                    ],
-                    water_left_to_right_kg: dt * g * (activity[i] - activity[i + 1]),
-                });
+                if left != right {
+                    system.interfaces.push(MoistureLayerInterfaceReport {
+                        layers: [left, right],
+                        relative_activity: a[0],
+                        right_relative_activity: a[1],
+                        moisture: [
+                            self.layers[left].sorption.moisture(a[0])?,
+                            self.layers[right].sorption.moisture(a[1])?,
+                        ],
+                        water_left_to_right_kg: dt * g * (activity[i] - activity[i + 1]),
+                    });
+                }
                 g
             };
             let coefficient = kirchhoff::scaled_diffusivity(dt, conductance)?;
@@ -602,8 +725,11 @@ impl MoistureLayeredSlab {
                     &self.layers[k],
                     &profiles[k],
                     [activity[cell], a],
-                    self.exterior_transfer[side]
-                        .conductance(self.layers[k].slab.geometry.cross_section_m2)?,
+                    self.exterior_transfer[side].conductance(
+                        self.layers[k].slab.geometry.cross_section_m2
+                            * metric.map_or(1.0, |m| m.face_area_ratio),
+                    )?,
+                    metric.map_or(1.0, |m| m.inverse_axial_stretch_squared[cell]),
                     cx,
                 )?;
                 let coefficient = kirchhoff::scaled_diffusivity(dt, g)?;
