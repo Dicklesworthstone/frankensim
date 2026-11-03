@@ -193,6 +193,61 @@ impl GasReaction {
         )
     }
 
+    /// React, exchange heat, then load the liquid with the SAME finite gas pressure.
+    ///
+    /// The original gas EOS is reevaluated after chemistry and thermal exchange;
+    /// its final pressure drives every exposed native gas link during the one
+    /// liquid flow step. The finite-gas report retains the applied pressure and
+    /// fixed physical gas volume. No separate prescribed atmosphere is sampled.
+    ///
+    /// All native gas links must communicate with this one well-mixed parcel.
+    /// An explicit fixed pressure reference and a maximum fractional lattice
+    /// density excursion in (0,1) are required by the original pressure owner.
+    /// Fixed-volume gas, fixed liquid mass and stationary solid geometry remain
+    /// the admitted approximation: this adds no gas compression work, phase
+    /// transfer or whole-system mechanical-energy theorem. The first-order
+    /// reaction/thermal/flow split and atomic publication are unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pressurized_liquid_candidate<'s, 'm, 'b>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &IsochoricGasParcel,
+        bodies: &[FreeSurfaceThermalBody<'b>],
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        exposed: &[FreeSurfaceGasFace],
+        maximum_density_excursion: f64,
+        controls: ReactiveLiquidGasSolve,
+        gate: &CancelGate,
+    ) -> Result<ReactiveLiquidGasCandidate<'s, 'm, 'b>, ReactiveLiquidGasError> {
+        self.liquid_boundary_candidate(
+            liquid,
+            gas,
+            bodies,
+            exposed.len(),
+            controls,
+            gate,
+            |next_liquid, next_gas, next_bodies| {
+                next_liquid.step_with_pressurized_finite_gas_environment(
+                    faces,
+                    heat,
+                    controls.thermal,
+                    next_bodies,
+                    contacts,
+                    interfaces,
+                    next_gas,
+                    exposed,
+                    controls.reaction.gas,
+                    maximum_density_excursion,
+                    controls.with_viscous_heating,
+                    gate,
+                )
+            },
+        )
+    }
+
     /// React the finite atmosphere and solve the SAME liquid/gas/radiation
     /// interface before advancing its original native flow and enthalpy.
     ///
@@ -252,6 +307,58 @@ impl GasReaction {
         )
     }
 
+    /// React and solve the gas/radiation surface, then apply its final gas pressure.
+    ///
+    /// This connects the same chemical, finite-capacity, radiation and native
+    /// pressure owners as the two corresponding unpressurized entries. Surface
+    /// temperature and attached thermocapillary stresses retain their original
+    /// owner; pressure uses the post-thermal gas EOS, never the initial or
+    /// adiabatic intermediate pressure. Native flow advances exactly once.
+    /// The connectivity, pressure reference, fixed-volume approximation and
+    /// energy-claim limits of `pressurized_liquid_candidate` also apply here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pressurized_liquid_surface_candidate<'s, 'm, 'b>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &IsochoricGasParcel,
+        bodies: &[FreeSurfaceThermalBody<'b>],
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        surfaces: &[FreeSurfaceInterfaceFace],
+        surface_solve: FreeSurfaceInterfaceSolve,
+        maximum_density_excursion: f64,
+        controls: ReactiveLiquidGasSolve,
+        gate: &CancelGate,
+    ) -> Result<ReactiveLiquidGasCandidate<'s, 'm, 'b>, ReactiveLiquidGasError> {
+        self.liquid_boundary_candidate(
+            liquid,
+            gas,
+            bodies,
+            surfaces.len(),
+            controls,
+            gate,
+            |next_liquid, next_gas, next_bodies| {
+                next_liquid.step_with_pressurized_finite_gas_surface_exchange(
+                    faces,
+                    heat,
+                    controls.thermal,
+                    next_bodies,
+                    contacts,
+                    interfaces,
+                    next_gas,
+                    surfaces,
+                    controls.reaction.gas,
+                    surface_solve,
+                    maximum_density_excursion,
+                    controls.with_viscous_heating,
+                    gate,
+                )
+            },
+        )
+    }
+
     // All admitted boundaries share chemical staging, actual whole-interval
     // storage, source admission and atomic publication. The callback can only
     // evolve the private original-owner clones, never the accepted inputs.
@@ -276,11 +383,11 @@ impl GasReaction {
             || controls.maximum_gas_temperature_increment_k <= 0.0
             || !controls.total_energy_tolerance_j.is_finite()
             || controls.total_energy_tolerance_j < 0.0
-            || surface_count == 0
+            || (surface_count == 0 && bodies.iter().all(|body| body.gas_faces().is_empty()))
             || surface_count > controls.thermal.maximum_faces
         {
             return Err(ReactiveLiquidGasError::Invalid(
-                "bounded exposed patches and finite gas temperature/combined energy limits required",
+                "bounded exposed liquid or solid patches and finite gas temperature/combined energy limits required",
             ));
         }
         let duration_s = liquid.flow().scaling().timestep_s();
@@ -317,14 +424,26 @@ impl GasReaction {
         let gas_supply_j = match (&thermal.conduction.environment, &thermal.conduction.surface) {
             (Some(environment), None) => environment.heat_to_liquid_j,
             (None, Some(surface)) => surface.heat_from_gas_j,
+            // A finite wall may be the gas's only thermal connection. Its gas
+            // credit is already included in wall storage, not liquid external heat.
+            (None, None) if thermal.conduction.body_environment.is_some() => 0.0,
             _ => {
                 return Err(ReactiveLiquidGasError::Invalid(
-                    "finite atmosphere requires exactly one original boundary heat account",
+                    "finite atmosphere requires an original liquid or solid boundary heat account",
                 ));
             }
         };
         let flow = &thermal.conduction.flow;
-        let supplied_thermal_energy_j = flow.external_heat_j - gas_supply_j + flow.viscous_heat_j;
+        // The native liquid account excludes external radiation deposited
+        // directly in finite walls. Include that original source exactly once;
+        // gas/wall and wall/liquid exchange stay internal to this inventory.
+        let wall_radiation_j = thermal
+            .conduction
+            .body_radiation
+            .as_ref()
+            .map_or(0.0, |radiation| radiation.heat_to_solids_j);
+        let supplied_thermal_energy_j =
+            flow.external_heat_j - gas_supply_j + flow.viscous_heat_j + wall_radiation_j;
         let combined_energy_residual_j =
             gas_internal_energy_change_j + liquid_enthalpy_change_j + wall_enthalpy_change_j
                 - supplied_thermal_energy_j;

@@ -2295,6 +2295,25 @@ radiative and finite-capacity references, data-only kinetics and surface-tension
 changes reaching native populations, continuation and refusal rollback.
 These are manufactured model checks, not experimental validation.
 
+`GasReaction::pressurized_liquid_candidate` and
+`pressurized_liquid_surface_candidate` additionally select the native finite-gas
+pressure owner. The EOS pressure after chemistry and thermal exchange drives
+the original gas-link reconstruction during exactly one liquid flow step.
+They require an explicit fixed pressure reference, a bounded lattice-density
+excursion, stationary solid geometry, and one well-mixed atmosphere connected
+to every native gas link. Gas volume is a physical input; numerical fill never
+supplies compression work. The existing thermal audit remains distinct from a
+complete mechanical-energy or entropy theorem. G1/G3/G4 tests in
+`tests/reactive_liquid_gas/pressure.rs` check independent chemical/film pressure
+and native momentum, radiative feedback, the single clock and refusal rollback.
+
+All reacting thermal entries preserve the native wall source accounts. Gas may
+exchange heat only through exposed finite-solid faces; its subsequent contact
+heat reaches liquid without a fabricated direct gas/liquid film. Radiation
+deposited in those solids contributes once to the enclosing external supply.
+Gas/solid and solid/liquid transfers remain internal. The finite-wall regression
+checks both direct and wall-only gas paths with sourced wall radiation.
+
 ### Finite-rate condensation and evaporation on native moving liquid
 
 `liquid_gas::evaporation::advance_liquid_with_gas` joins the original
@@ -2339,6 +2358,25 @@ Neither path infers sealed-vessel displacement, gas traction/recoil,
 nucleation or phase-front overflow/exhaustion remap. Existing
 solved-surface stress and dynamic-contact histories retain their native refusal
 boundary. Exposure is held during this one interval and re-admitted on the next.
+
+`liquid_gas::evaporation::reactive` connects `GasReaction` to the single- and
+multiple-surface phase owners, each with an optional reciprocal sensible-heat
+route. Chemistry uses the same retained native timestep at conserved total
+internal energy. Its actual composition and temperature feed phase exchange
+from the identical original source catalog; native flow advances once.
+Formation energy is never a second heat source, and chemical production of the
+volatile species is distinct from its phase transfer. Original source, donor,
+geometry, mass-representability and attached-owner limits remain active.
+
+Chemical-intermediate and final temperature bounds plus sums of absolute
+chemical/phase/native mass and energy defects gate atomic publication.
+Cancellation or refusal preserves every accepted owner. This is a first-order
+reaction/heat/phase/flow split with a well-mixed fixed-volume gas; it adds no gas
+traction, sealed-vessel displacement, flame or global entropy theorem. Five
+G1/G3/G4 regressions in `tests/evaporating_liquid_gas/reactive.rs` cover chemical
+reversal of phase direction, independent whole inventories, all four routes,
+original-owner agreement, continuing species, equilibrium/zero-heat limits,
+canonical surface ordering and rollback.
 
 ## Assembled shell adhesive dissipation
 

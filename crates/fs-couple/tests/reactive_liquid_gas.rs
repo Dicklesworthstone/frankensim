@@ -38,6 +38,9 @@ mod gas_data;
 #[path = "reactive_liquid_gas/surface.rs"]
 mod surface;
 
+#[path = "reactive_liquid_gas/pressure.rs"]
+mod pressure;
+
 const EXPOSED: [usize; 3] = [3, 3, 3];
 const VOLUME: f64 = 1e-8;
 const DT: f64 = 0.001;
@@ -212,6 +215,14 @@ fn with_liquid<R>(
     moving: bool,
     run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
+    with_liquid_pressure(moving, None, run)
+}
+
+fn with_liquid_pressure<R>(
+    moving: bool,
+    reference_pressure_pa: Option<f64>,
+    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
     let card = liquid_card();
     let point = QueryPoint::new()
         .with("T", 400.0)
@@ -277,8 +288,11 @@ fn with_liquid<R>(
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        let flow = plan_free_surface_from_material(&source, 0.001, DT, 0.1)
-            .unwrap()
+        let mut scaling = plan_free_surface_from_material(&source, 0.001, DT, 0.1).unwrap();
+        if let Some(reference) = reference_pressure_pa {
+            scaling = scaling.with_pressure_reference(reference).unwrap();
+        }
+        let flow = scaling
             .free_surface3_from_cells(
                 MaterialFreeSurfaceDomain3 {
                     cells: [8; 3],
@@ -500,8 +514,10 @@ fn g1_continuation_keeps_cooled_inventory_and_counts_authored_and_viscous_heat_o
 #[test]
 fn g1_finite_material_wall_shares_the_same_energy_transaction() {
     use fs_lbm::material::free_surface::enthalpy::conduction::{
-        FreeSurfaceBodyContact, FreeSurfaceThermalBody,
+        FreeSurfaceBodyContact, FreeSurfaceBodyGasFace, FreeSurfaceBodyRadiationFace,
+        FreeSurfaceThermalBody,
     };
+    use fs_material::thermal::source::{EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY};
     let mut claims = ClaimSet::new();
     let conductivity = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
     claims
@@ -517,6 +533,24 @@ fn g1_finite_material_wall_shares_the_same_energy_transaction() {
             observations: vec![],
             provenance: Provenance {
                 source: "manufactured finite solid".into(),
+                license: "test-only".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS),
+            value: PropertyValue::Scalar {
+                value: 0.6,
+                dims: EMISSIVITY_DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with("T", 300.0, 500.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![],
+            provenance: Provenance {
+                source: "manufactured finite solid emissivity".into(),
                 license: "test-only".into(),
                 artifact: None,
             },
@@ -614,6 +648,76 @@ fn g1_finite_material_wall_shares_the_same_energy_transaction() {
         );
         assert_eq!(bodies[0].enthalpy_j(), initial_h);
         assert_eq!(body.enthalpy_j(), initial_h);
+
+        // A solid may connect gas to liquid without a direct gas/liquid film.
+        // Its original radiation source also lies outside the liquid account.
+        for direct_liquid_film in [false, true] {
+            let wall = body
+                .clone()
+                .with_gas_faces(vec![FreeSurfaceBodyGasFace {
+                    wall: [-1, 0, 3],
+                    gas: [0, 0, 3],
+                    area_m2: 1e-6,
+                    distances_m: [0.0005; 2],
+                }])
+                .with_radiation_faces(
+                    vec![FreeSurfaceBodyRadiationFace {
+                        wall: [-1, 0, 3],
+                        gas: [0, 0, 3],
+                        area_m2: 1e-6,
+                        surroundings_k: 600.0,
+                    }],
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .unwrap();
+            let films = if direct_liquid_film {
+                vec![face()]
+            } else {
+                vec![]
+            };
+            let next = law
+                .liquid_candidate(
+                    liquid,
+                    &original,
+                    &[wall],
+                    &[],
+                    &[],
+                    &[contact],
+                    &[],
+                    &films,
+                    controls(),
+                    gate,
+                )
+                .unwrap();
+            let report = next.report();
+            let native = &report.thermal.conduction;
+            assert_eq!(native.environment.is_some(), direct_liquid_film);
+            let gas_to_wall = native.body_environment.as_ref().unwrap().heat_to_solids_j;
+            let radiation = native.body_radiation.as_ref().unwrap().heat_to_solids_j;
+            let gas_to_liquid = native
+                .environment
+                .as_ref()
+                .map_or(0.0, |film| film.heat_to_liquid_j);
+            assert!(radiation > 0.0);
+            assert_ne!(gas_to_wall, 0.0);
+            near(report.supplied_thermal_energy_j, radiation, 1e-14);
+            near(
+                report.gas_internal_energy_change_j + gas_to_wall + gas_to_liquid,
+                0.0,
+                2e-11,
+            );
+            near(
+                report.liquid_enthalpy_change_j
+                    + report.wall_enthalpy_change_j
+                    + report.gas_internal_energy_change_j,
+                radiation,
+                2e-9,
+            );
+            assert!(report.combined_energy_residual_j.abs() < controls().total_energy_tolerance_j);
+            assert_eq!(next.liquid().accepted_steps(), 1);
+            assert_eq!(bodies[0].enthalpy_j(), initial_h);
+            assert_eq!(original, gas(&law));
+        }
     });
 }
 
