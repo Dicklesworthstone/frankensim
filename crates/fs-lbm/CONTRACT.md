@@ -6245,15 +6245,50 @@ For the incompressible pressure/shear-dependent constitutive model family see
 Bulíček, Majdoub and Málek (2010), <https://arxiv.org/abs/1004.0835>; its analytic
 existence results are not asserted for this discrete LBM/VOF implementation.
 
-This is isothermal generalized-Newtonian response on stationary walls, with the
-explicit numerical contact ghost inherited from the domain. It does not add
-thermal storage, viscous heat, viscoelastic or yield history, moving walls,
-variable-sigma traction, phase change or conservative surface-energy evolution.
+This is isothermal generalized-Newtonian response, with the explicit numerical
+contact ghost inherited from the domain. Stationary walls remain the default;
+the distributed tangential-wall entry below owns prescribed wall motion.
+Thermal storage, viscous heat, viscoelastic or yield history, variable-sigma
+traction, phase change and conservative surface energy remain outside this owner.
 Source and numerical admission are not stability or experimental-accuracy
 certificates. Focused tests in `tests/material_free_surface_rheology.rs` exercise
 an independent force-corrected tensor and analytical constitutive root, native
 Newtonian bit parity, source-only viscosity/capillary motion changes with mass
 conservation and deterministic replay, and endpoint source/convergence rollback.
+
+### Source viscosity with distributed wall motion
+
+`MaterialFreeSurfaceRheology3::step_with_planar_wall_velocity_field_si` admits
+the original nonuniform tangential wall field in SI units. Each wet cell's
+accepted source viscosity supplies relaxation in the same native collision and
+reflection that measure wall impulse, torque, face couples and actuator work.
+This lets the existing isothermal material assignment drive a shear wall without
+inventing heat capacity or conductivity. The original fixed source context and
+selected claims remain attached to the trajectory.
+
+Actual new liquid pressure and force-corrected strain close the next constitutive
+queries before publication. Pressure-dependent laws retain their fixed initial
+datum and interior pressure reconstruction. Wall pressure is not used as a
+substitute for the local source coordinate. The constitutive update is explicit
+in time; endpoint admission does not imply an implicit wall/material solve.
+The unchanged `MaterialPlanarWallFieldReport3` carries the measured SI exchange.
+Mechanical work is not converted into an undeclared heat source or a claim of
+total-energy closure; the thermal rheology owner remains the finite-heat path.
+
+Material and native field budgets precede one private candidate clone. The
+shared native candidate accepts the existing local relaxation map and allocates
+no thermal mass-route trace. Native mass/positivity/Mach, source validity,
+convergence, speed, SI conversion and cancellation all precede joint publication
+of populations, fill, carry, conversion counters and material/rate samples.
+The geometry remains a fixed, completely flooded plane with held tangential
+face velocities. Normal wall motion, contact-line evolution and simultaneous
+gas-pressure actuation are not added by this entry.
+
+`tests/material_free_surface_rheology/motion.rs` specifies exact constant-source
+population/work parity with the existing wall owner, independent pressure/shear
+roots and face-impulse work, shear-thinning/thickening changes to actual flow and
+actuator work, and late source refusal with cancellation and safe retry. These
+are synthetic constitutive regressions, not measured material validation.
 
 ## Pressure-dependent viscosity on the thermal VOF timeline
 

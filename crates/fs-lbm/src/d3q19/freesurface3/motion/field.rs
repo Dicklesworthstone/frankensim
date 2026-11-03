@@ -459,10 +459,22 @@ impl FreeSurface3 {
         controls: PlanarWallFieldControls3,
         gate: &CancelGate,
     ) -> Result<(Self, PlanarWallFieldReport3), FreeSurfaceError3> {
+        self.planar_wall_field_candidate_with_relaxation(motion, controls, None, gate)
+    }
+
+    // The source-rheology owner supplies its accepted cellwise viscosity to
+    // this same candidate. Isothermal flow needs no thermal mass-route trace.
+    pub(crate) fn planar_wall_field_candidate_with_relaxation(
+        &self,
+        motion: PlanarWallVelocityField3<'_>,
+        controls: PlanarWallFieldControls3,
+        tau: Option<&BTreeMap<(u64, usize), f64>>,
+        gate: &CancelGate,
+    ) -> Result<(Self, PlanarWallFieldReport3), FreeSurfaceError3> {
         let (mut exchange, mass_before, before_speed) =
             self.prepare_planar_wall_velocity_field(motion, controls, gate)?;
         let mut candidate = self.clone();
-        candidate.step_inner_with_wall(gate, None, None, None, Some(&mut exchange))?;
+        candidate.step_inner_with_wall(gate, None, tau, None, Some(&mut exchange))?;
         let report = candidate.finish_planar_wall_velocity_field(
             motion,
             controls,

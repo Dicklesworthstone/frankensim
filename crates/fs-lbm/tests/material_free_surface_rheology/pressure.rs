@@ -3,7 +3,7 @@
 use super::*;
 use fs_qty::Pressure;
 
-fn pressure_card(pressure_slope: f64, rate_slope: f64, half_width: f64) -> MaterialCard {
+pub(super) fn pressure_card(pressure_slope: f64, rate_slope: f64, half_width: f64) -> MaterialCard {
     let original = card(0.0, 1000.0, 0.001);
     let mut claims = ClaimSet::new();
     for (_, claim) in original.claims().claims_ordered() {
@@ -47,7 +47,7 @@ fn pressure_card(pressure_slope: f64, rate_slope: f64, half_width: f64) -> Mater
     MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap()
 }
 
-fn binding(source: &MaterialCard, pressure: f64) -> IsothermalRheologyLaw<'_> {
+pub(super) fn binding(source: &MaterialCard, pressure: f64) -> IsothermalRheologyLaw<'_> {
     let original = bundle(source);
     let query = original.query().with("pressure", pressure).unwrap();
     IsothermalRheologyLaw::try_new_with_pressure(

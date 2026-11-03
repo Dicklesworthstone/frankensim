@@ -3,6 +3,9 @@
 #[path = "material_free_surface_rheology/pressure.rs"]
 mod pressure;
 
+#[path = "material_free_surface_rheology/motion.rs"]
+mod motion;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

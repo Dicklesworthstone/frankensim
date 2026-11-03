@@ -28,6 +28,8 @@ use crate::material::{MaterialLbmError, plan_momentum_scaling};
 
 pub use crate::material::transport::rheology::RheologySolve;
 
+mod motion;
+
 /// Source, native flow or bounded constitutive solve refused this candidate.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FreeSurfaceRheologyError {
@@ -191,10 +193,9 @@ impl<'m> IsothermalRheologyLaw<'m> {
                 continue;
             }
             if material.property(name).is_some_and(|property| {
-                property
-                    .source_axes()
-                    .iter()
-                    .any(|(axis, _)| axis == shear_rate_axis || pressure_axis == Some(axis.as_str()))
+                property.source_axes().iter().any(|(axis, _)| {
+                    axis == shear_rate_axis || pressure_axis == Some(axis.as_str())
+                })
             }) {
                 return Err(Error::Invalid(
                     "isothermal VOF needs density and surface tension independent of evolving shear and pressure",
@@ -296,6 +297,7 @@ pub struct IsothermalRheologySample {
     pub relaxation_defect: f64,
 }
 
+#[derive(Clone)]
 struct CellMaterial {
     material: ResolvedLiquidSurfaceState,
     sample: IsothermalRheologySample,
@@ -308,6 +310,7 @@ struct CellMaterial {
 /// refusals preserve populations, fill, conversions, mass carry and receipts.
 /// This is explicit generalized-Newtonian BGK evolution. It does not evolve
 /// heat, viscoelastic memory, yield history, phase change or surface energy.
+#[derive(Clone)]
 pub struct MaterialFreeSurfaceRheology3<'s, 'm> {
     flow: MaterialFreeSurface3<'s>,
     law: &'s IsothermalRheologyLaw<'m>,
@@ -602,13 +605,7 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
         gas_pressure: Option<(f64, GasPressureField3<'_>)>,
     ) -> Result<(), Error> {
         poll(gate)?;
-        let mut tau = BTreeMap::new();
-        for (&location, cell) in &self.samples {
-            poll(gate)?;
-            if let MassLocation3::Cell(key, lane) = location {
-                tau.insert((key, lane), cell.sample.collision_tau);
-            }
-        }
+        let tau = self.local_relaxation(gate)?;
         let mut lattice = self.flow.lattice.clone();
         lattice.step_with_material_relaxation_and_pressure(gate, &tau, gas_pressure)?;
         let samples = self.sample_lattice(&lattice, gate)?;
@@ -616,6 +613,17 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
         self.flow.lattice = lattice;
         self.samples = samples;
         Ok(())
+    }
+
+    fn local_relaxation(&self, gate: &CancelGate) -> Result<BTreeMap<(u64, usize), f64>, Error> {
+        let mut tau = BTreeMap::new();
+        for (&location, cell) in &self.samples {
+            poll(gate)?;
+            if let MassLocation3::Cell(key, lane) = location {
+                tau.insert((key, lane), cell.sample.collision_tau);
+            }
+        }
+        Ok(tau)
     }
 
     fn sample_lattice(
