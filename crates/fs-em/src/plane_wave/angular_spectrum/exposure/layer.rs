@@ -57,7 +57,9 @@ pub struct AngularSpectrumExposureLayerDissipation {
 }
 
 /// Finite-window field/heat on one depth plane of the selected original film.
-/// Transverse heat/storage integrals are W/m of depth, not total film watts.
+/// Transverse heat/storage integrals are original-grid quadratures in W/m of
+/// depth, not total film watts; their products can require spatial refinement.
+/// The field's normal watts use continuous modal cell integration separately.
 #[derive(Debug)]
 pub struct AngularSpectrumExposureLayerField {
     field: AngularSpectrumExposureField,
@@ -403,27 +405,32 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             }
             sums.push([Dd::ZERO; 12]);
         }
+        let mut normal_power = Dd::ZERO;
         for (bank, proper) in ensemble::banks(self.mean, self.factors, self.statistics) {
             if proper {
-                self.accumulate_bank(
-                    bank,
-                    depth_m,
-                    true,
-                    |a, b| window.proper_product_kernel(a, b),
-                    proper_product,
-                    &mut sums,
-                    &mut cancelled,
-                )?;
+                normal_power = normal_power
+                    + self.accumulate_bank(
+                        bank,
+                        depth_m,
+                        true,
+                        |a, b| window.proper_product_kernel(a, b),
+                        proper_product,
+                        ProperHarmonicProduct::mean_real_product_parts_dd,
+                        &mut sums,
+                        &mut cancelled,
+                    )?;
             } else {
-                self.accumulate_bank(
-                    bank,
-                    depth_m,
-                    false,
-                    |a, b| window.product_kernel(a, b),
-                    product,
-                    &mut sums,
-                    &mut cancelled,
-                )?;
+                normal_power = normal_power
+                    + self.accumulate_bank(
+                        bank,
+                        depth_m,
+                        false,
+                        |a, b| window.product_kernel(a, b),
+                        product,
+                        HarmonicProduct::mean_real_product_parts_dd,
+                        &mut sums,
+                        &mut cancelled,
+                    )?;
             }
         }
         let mut points = Vec::new();
@@ -434,7 +441,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         dissipation
             .try_reserve_exact(n)
             .map_err(|_| bad("film exposure heat allocation failed"))?;
-        let mut totals = [Dd::ZERO; 3];
+        let mut totals = [Dd::ZERO; 2];
         for (point, sum) in sums.into_iter().enumerate() {
             if point % 64 == 0 {
                 poll(&mut cancelled)?;
@@ -460,13 +467,13 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 total_heat_w_m3: heat,
                 storage_rate_w_m3: value[11],
             });
-            totals[0] = totals[0] + sum[8];
-            totals[1] = totals[1] + sum[9] + sum[10];
-            totals[2] = totals[2] + sum[11];
+            totals[0] = totals[0] + sum[9] + sum[10];
+            totals[1] = totals[1] + sum[11];
         }
         let grid = self.anchor.grid();
         let totals = totals.map(|v| v.to_f64() * grid.spacing_m[0] * grid.spacing_m[1]);
-        if totals.iter().any(|v| !v.is_finite()) {
+        let normal_power_w = normal_power.to_f64();
+        if !normal_power_w.is_finite() || totals.iter().any(|v| !v.is_finite()) {
             return Err(bad("integrated film exposure is unrepresentable"));
         }
         poll(&mut cancelled)?;
@@ -474,11 +481,11 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             field: AngularSpectrumExposureField {
                 grid,
                 points,
-                normal_power_w: totals[0],
+                normal_power_w,
             },
             dissipation,
-            absorbed_power_per_depth_w_m: totals[1],
-            storage_rate_per_depth_w_m: totals[2],
+            absorbed_power_per_depth_w_m: totals[0],
+            storage_rate_per_depth_w_m: totals[1],
         })
     }
 
@@ -489,13 +496,14 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         proper: bool,
         make_kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
         product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
+        product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
         sums: &mut [[Dd; 12]],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), AngularSpectrumError> {
+    ) -> Result<Dd, AngularSpectrumError> {
         poll(cancelled)?;
         let f = bank.frequency_count();
         if f == 0 {
-            return Ok(());
+            return Ok(Dd::ZERO);
         }
         let mut kernels = Vec::new();
         kernels
@@ -536,12 +544,22 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 .map_err(|_| bad("original film frequency cache is missing"))?;
             let layer = &self.frequencies[index].layer;
             fields.push(
-                bank.frequency_field_with(group, cancelled, |line, cancelled| {
+                bank.frequency_modal_field_with(group, cancelled, |line, cancelled| {
                     line.modal_layer_field(layer.as_ref(), self.layer_index, depth, cancelled)
                 })?,
             );
             mapping.push(index);
             filtered.push([C64::ZERO; 6]);
+        }
+        let normal_power = integrate_cell_power(
+            self.anchor.grid(),
+            &fields,
+            &kernels,
+            |kernel, a, b| product_parts(kernel.product, a, b),
+            cancelled,
+        )?;
+        for (group, field) in fields.iter_mut().enumerate() {
+            bank.synthesize_frequency_field(group, field, cancelled)?;
         }
         for (point, sum) in sums.iter_mut().enumerate() {
             poll(cancelled)?;
@@ -589,7 +607,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             sum[10] = sum[10] + polarization_heat;
             sum[11] = sum[11] + storage;
         }
-        Ok(())
+        Ok(normal_power)
     }
 }
 

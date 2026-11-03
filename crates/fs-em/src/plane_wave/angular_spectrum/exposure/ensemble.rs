@@ -297,34 +297,38 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             }
             sums.push([Dd::ZERO; 9]);
         }
+        let mut normal_power = Dd::ZERO;
         for (bank, proper) in self.banks() {
             if proper {
-                accumulate_bank(
-                    bank,
-                    side,
-                    distance_from_face_m,
-                    |a, b| window.proper_product_kernel(a, b),
-                    proper_product,
-                    &mut sums,
-                    &mut cancelled,
-                )?;
+                normal_power = normal_power
+                    + accumulate_bank(
+                        bank,
+                        side,
+                        distance_from_face_m,
+                        |a, b| window.proper_product_kernel(a, b),
+                        proper_product,
+                        ProperHarmonicProduct::mean_real_product_parts_dd,
+                        &mut sums,
+                        &mut cancelled,
+                    )?;
             } else {
-                accumulate_bank(
-                    bank,
-                    side,
-                    distance_from_face_m,
-                    |a, b| window.product_kernel(a, b),
-                    product,
-                    &mut sums,
-                    &mut cancelled,
-                )?;
+                normal_power = normal_power
+                    + accumulate_bank(
+                        bank,
+                        side,
+                        distance_from_face_m,
+                        |a, b| window.product_kernel(a, b),
+                        product,
+                        HarmonicProduct::mean_real_product_parts_dd,
+                        &mut sums,
+                        &mut cancelled,
+                    )?;
             }
         }
         let mut points = Vec::new();
         points
             .try_reserve_exact(n)
             .map_err(|_| bad("exposure ensemble result allocation failed"))?;
-        let mut total = Dd::ZERO;
         for (i, sum) in sums.into_iter().enumerate() {
             if i % 64 == 0 {
                 poll(&mut cancelled)?;
@@ -333,7 +337,6 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             if value.iter().any(|x| !x.is_finite()) || value[..6].iter().any(|x| *x < 0.0) {
                 return Err(bad("exposure ensemble second moment is unrepresentable"));
             }
-            total = total + sum[8];
             points.push(AngularSpectrumExposurePoint {
                 electric_mean_squared_v2_m2: [value[0], value[1], value[2]],
                 magnetic_mean_squared_a2_m2: [value[3], value[4], value[5]],
@@ -341,7 +344,7 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             });
         }
         let grid = self.grid();
-        let normal_power_w = total.to_f64() * grid.spacing_m[0] * grid.spacing_m[1];
+        let normal_power_w = normal_power.to_f64();
         if !normal_power_w.is_finite() {
             return Err(bad("integrated exposure ensemble power is unrepresentable"));
         }
@@ -380,12 +383,13 @@ fn accumulate_bank<P: Copy>(
     distance: f64,
     kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
+    product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
     sums: &mut [[Dd; 9]],
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), AngularSpectrumError> {
+) -> Result<Dd, AngularSpectrumError> {
     poll(cancelled)?;
     if bank.line_count() == 0 {
-        return Ok(());
+        return Ok(Dd::ZERO);
     }
     let f = bank.frequency_count();
     let mut kernels = Vec::new();
@@ -406,7 +410,17 @@ fn accumulate_bank<P: Copy>(
         .try_reserve_exact(f)
         .map_err(|_| bad("exposure ensemble field allocation failed"))?;
     for group in 0..f {
-        fields.push(bank.frequency_field(group, side, distance, cancelled)?);
+        fields.push(bank.frequency_modal_field(group, side, distance, cancelled)?);
+    }
+    let normal_power = integrate_cell_power(
+        bank.anchor.grid(),
+        &fields,
+        &kernels,
+        product_parts,
+        cancelled,
+    )?;
+    for (group, field) in fields.iter_mut().enumerate() {
+        bank.synthesize_frequency_field(group, field, cancelled)?;
     }
     for (point, sum) in sums.iter_mut().enumerate() {
         poll(cancelled)?;
@@ -424,5 +438,5 @@ fn accumulate_bank<P: Copy>(
             *sum = *sum + value;
         }
     }
-    Ok(())
+    Ok(normal_power)
 }

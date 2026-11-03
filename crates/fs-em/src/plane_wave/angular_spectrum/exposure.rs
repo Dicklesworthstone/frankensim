@@ -81,7 +81,10 @@ impl AngularSpectrumExposureField {
     pub fn points(&self) -> &[AngularSpectrumExposurePoint] {
         &self.points
     }
-    /// Mean signed normal power over the original periodic cell, in watts.
+    /// Mean signed normal power integrated over the continuous periodic cell,
+    /// in watts. Modal orthogonality integrates the represented band-limited
+    /// fields exactly in space, without aliasing their quadratic products on
+    /// the original grid. This can differ from summing the point samples.
     pub fn normal_power_w(&self) -> f64 {
         self.normal_power_w
     }
@@ -351,14 +354,29 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             .try_reserve_exact(f)
             .map_err(|_| bad("exposure field allocation failed"))?;
         for group in 0..f {
-            fields.push(self.frequency_field(group, side, distance_from_face_m, &mut cancelled)?);
+            fields.push(self.frequency_modal_field(
+                group,
+                side,
+                distance_from_face_m,
+                &mut cancelled,
+            )?);
+        }
+        let normal_power_w = integrate_cell_power(
+            self.anchor.grid(),
+            &fields,
+            &kernels,
+            HarmonicProduct::mean_real_product_parts_dd,
+            &mut cancelled,
+        )?
+        .to_f64();
+        for (group, field) in fields.iter_mut().enumerate() {
+            self.synthesize_frequency_field(group, field, &mut cancelled)?;
         }
         let n = self.anchor.modes.len();
         let mut points = Vec::new();
         points
             .try_reserve_exact(n)
             .map_err(|_| bad("exposure result allocation failed"))?;
-        let mut total = Dd::ZERO;
         for point in 0..n {
             poll(&mut cancelled)?;
             let values = integrate_point(f, &kernels, |i| fields[i][point], &mut cancelled)
@@ -369,7 +387,6 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
                         bad("exposure second moment is unrepresentable")
                     }
                 })?;
-            add(&mut total, values[8]);
             points.push(AngularSpectrumExposurePoint {
                 electric_mean_squared_v2_m2: [values[0], values[1], values[2]],
                 magnetic_mean_squared_a2_m2: [values[3], values[4], values[5]],
@@ -377,7 +394,6 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             });
         }
         let grid = self.anchor.grid();
-        let normal_power_w = total.to_f64() * grid.spacing_m[0] * grid.spacing_m[1];
         if !normal_power_w.is_finite() {
             return Err(bad("integrated exposure power is unrepresentable"));
         }
@@ -403,7 +419,33 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         })
     }
 
+    fn frequency_modal_field(
+        &self,
+        group: usize,
+        side: ExposureSide,
+        distance: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<[C64; 6]>, AngularSpectrumError> {
+        self.frequency_modal_field_with(group, cancelled, |line, cancelled| {
+            line.modal_field(side, distance, cancelled)
+        })
+    }
+
     fn frequency_field_with<F: FnMut() -> bool>(
+        &self,
+        group: usize,
+        cancelled: &mut F,
+        modal_field: impl FnMut(
+            ExposureLine<'b, 's, 'm>,
+            &mut F,
+        ) -> Result<(Vec<[C64; 3]>, Vec<[C64; 3]>), AngularSpectrumError>,
+    ) -> Result<Vec<[C64; 6]>, AngularSpectrumError> {
+        let mut field = self.frequency_modal_field_with(group, cancelled, modal_field)?;
+        self.synthesize_frequency_field(group, &mut field, cancelled)?;
+        Ok(field)
+    }
+
+    fn frequency_modal_field_with<F: FnMut() -> bool>(
         &self,
         group: usize,
         cancelled: &mut F,
@@ -439,12 +481,8 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
                 }
             }
         }
-        let mut electric = Vec::new();
-        let mut magnetic = Vec::new();
-        electric
-            .try_reserve_exact(n)
-            .map_err(|_| bad("exposure group allocation failed"))?;
-        magnetic
+        let mut field = Vec::new();
+        field
             .try_reserve_exact(n)
             .map_err(|_| bad("exposure group allocation failed"))?;
         for (i, sum) in sums.into_iter().enumerate() {
@@ -456,28 +494,145 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             if value.iter().any(|&z| !finite(z)) {
                 return Err(bad("coherent exposure field is unrepresentable"));
             }
+            field.push(value);
+        }
+        Ok(field)
+    }
+
+    // Replace modal vectors with their original samples in the same retained
+    // frequency plane. The exact cell contraction runs first, so it needs no
+    // second FFT or second bank of frequency fields.
+    fn synthesize_frequency_field(
+        &self,
+        group: usize,
+        field: &mut [[C64; 6]],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AngularSpectrumError> {
+        let mut electric = Vec::new();
+        let mut magnetic = Vec::new();
+        electric
+            .try_reserve_exact(field.len())
+            .map_err(|_| bad("exposure group allocation failed"))?;
+        magnetic
+            .try_reserve_exact(field.len())
+            .map_err(|_| bad("exposure group allocation failed"))?;
+        for (i, value) in field.iter().enumerate() {
+            if i % 64 == 0 {
+                poll(cancelled)?;
+            }
             electric.push([value[0], value[1], value[2]]);
             magnetic.push([value[3], value[4], value[5]]);
         }
-        let source = self.lines.get(indices[0]).beam();
+        let source = self
+            .lines
+            .get(self.source_indices[self.group_offsets[group]])
+            .beam();
         let synthesized = source.synthesize(electric, magnetic, &mut *cancelled)?;
-        let mut field = Vec::new();
-        field
-            .try_reserve_exact(n)
-            .map_err(|_| bad("exposure group allocation failed"))?;
-        for (i, (e, h)) in synthesized
-            .electric_v_per_m
-            .into_iter()
+        for (i, ((value, e), h)) in field
+            .iter_mut()
+            .zip(synthesized.electric_v_per_m)
             .zip(synthesized.magnetic_a_per_m)
             .enumerate()
         {
             if i % 64 == 0 {
                 poll(cancelled)?;
             }
-            field.push([e[0], e[1], e[2], h[0], h[1], h[2]]);
+            *value = [e[0], e[1], e[2], h[0], h[1], h[2]];
         }
-        Ok(field)
+        Ok(())
     }
+}
+
+// Integrate over the continuous periodic cell BEFORE sampling the quadratic
+// product. The represented Fourier bins are signed integers, not integers
+// modulo the FFT length: a negative Nyquist bin has no positive partner.
+// For every nonzero pair k,-k, write the real field as C(t) cos(k.r) +
+// S(t) sin(k.r), with complex C=A_k+A_-k and S=-i(A_k-A_-k). Orthogonality
+// gives (mean(C_E*C_H)+mean(S_E*S_H))/2. This uses the original stable
+// temporal Gram kernel, retaining subcycle nulls without subtracting two
+// separately rounded sum/difference-frequency powers. Proper factors use
+// the same spatial algebra with their original proper temporal kernel.
+fn integrate_cell_power<P: Copy>(
+    grid: AngularSpectrumGrid,
+    fields: &[Vec<[C64; 6]>],
+    kernels: &[P],
+    product: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Dd, AngularSpectrumError> {
+    let f = fields.len();
+    let mut sum = Dd::ZERO;
+    for mode in 0..grid.width * grid.height {
+        if mode % 32 == 0 {
+            poll(cancelled)?;
+        }
+        let opposite = opposite_mode(grid, mode);
+        if opposite.is_some_and(|other| other < mode) {
+            continue;
+        }
+        let constant = opposite == Some(mode);
+        let partner = opposite.filter(|_| !constant);
+        for i in 0..f {
+            let a = spatial_quadratures(fields[i][mode], partner.map(|other| fields[i][other]));
+            for j in 0..f {
+                if j % 64 == 0 {
+                    poll(cancelled)?;
+                }
+                let b = spatial_quadratures(fields[j][mode], partner.map(|other| fields[j][other]));
+                let kernel = kernels[i * f + j];
+                let mut flux = Dd::ZERO;
+                for quadrature in 0..if constant { 1 } else { 2 } {
+                    flux = flux
+                        + product(kernel, a[quadrature][0], b[quadrature][4])
+                            .map_err(|_| bad("modal cell power product is unrepresentable"))?
+                        - product(kernel, a[quadrature][1], b[quadrature][3])
+                            .map_err(|_| bad("modal cell power product is unrepresentable"))?;
+                }
+                sum = sum + flux * Dd::from_f64(if constant { 1.0 } else { 0.5 });
+            }
+        }
+    }
+    let area = Dd::from_f64(grid.width as f64 * grid.spacing_m[0])
+        * Dd::from_f64(grid.height as f64 * grid.spacing_m[1]);
+    let power = sum * area;
+    if !power.hi.is_finite() || !power.lo.is_finite() {
+        return Err(bad("integrated modal cell power is unrepresentable"));
+    }
+    poll(cancelled)?;
+    Ok(power)
+}
+
+fn opposite_mode(grid: AngularSpectrumGrid, index: usize) -> Option<usize> {
+    let opposite = |bin: usize, count: usize| {
+        if bin == 0 {
+            Some(0)
+        } else if bin == count / 2 {
+            None
+        } else {
+            Some(count - bin)
+        }
+    };
+    Some(
+        opposite(index / grid.width, grid.height)? * grid.width
+            + opposite(index % grid.width, grid.width)?,
+    )
+}
+
+fn spatial_quadratures(a: [C64; 6], b: Option<[C64; 6]>) -> [[[Dd; 2]; 6]; 2] {
+    let b = b.unwrap_or([C64::ZERO; 6]);
+    // Conjugate both amplitudes for the shared negative-time convention.
+    let cosine = core::array::from_fn(|c| {
+        [
+            Dd::from_f64(a[c].re) + Dd::from_f64(b[c].re),
+            -Dd::from_f64(a[c].im) - Dd::from_f64(b[c].im),
+        ]
+    });
+    let sine = core::array::from_fn(|c| {
+        [
+            Dd::from_f64(a[c].im) - Dd::from_f64(b[c].im),
+            Dd::from_f64(a[c].re) - Dd::from_f64(b[c].re),
+        ]
+    });
+    [cosine, sine]
 }
 
 // Pure real-vector contraction, shared by the original-source exposure path

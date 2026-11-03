@@ -69,6 +69,208 @@ fn constant<'s, 'm>(
 }
 
 #[test]
+fn g1_subcycle_cell_power_integrates_signed_nyquist_modes_without_aliasing() {
+    use fs_em::plane_wave::angular_spectrum::AngularSpectrumFactorStatistics;
+    use fs_fft::harmonic_window::HarmonicWindowProfile;
+
+    let medium = material(E, M);
+    let omega = 1e9;
+    let stack = PlanarDielectricLayers::try_new(
+        &medium,
+        DielectricResponse::Lossless(&medium),
+        omega,
+        &[DielectricLayer {
+            response: DielectricResponse::Lossless(&medium),
+            thickness_m: 0.4,
+        }],
+    )
+    .unwrap();
+    for along_y in [false, true] {
+        let mut cell = grid();
+        if along_y {
+            cell.width = 1;
+            cell.height = 4;
+        }
+        let samples: Vec<_> = (0..4)
+            .map(|point| {
+                let amplitude = C64::from_re(if point % 2 == 0 { 1.0 } else { -1.0 });
+                if along_y {
+                    [amplitude, C64::ZERO]
+                } else {
+                    [C64::ZERO, amplitude]
+                }
+            })
+            .collect();
+        let lines = [PlanarAngularSpectrum::prepare(
+            &stack,
+            cell,
+            &samples,
+            AngularSpectrumLimits {
+                maximum_grid_points: 128,
+                maximum_workspace_bytes: 1 << 20,
+                maximum_fft_work: 1 << 20,
+            },
+            || false,
+        )
+        .unwrap()];
+        let bank = AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap();
+        let factors = [
+            AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap(),
+            AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap(),
+        ];
+        let statistics = [
+            AngularSpectrumFactorStatistics::Real,
+            AngularSpectrumFactorStatistics::ProperComplex,
+        ];
+        let ensemble = AngularSpectrumExposureEnsemble::try_new_with_statistics(
+            &lines[0],
+            Some(&bank),
+            &factors,
+            &statistics,
+            ensemble_limits(),
+            || false,
+        )
+        .unwrap();
+        let transverse = core::f64::consts::PI / cell.spacing_m[usize::from(along_y)];
+        let kz = (omega * omega * E * M - transverse * transverse).sqrt();
+        let admittance = kz / (omega * M);
+        let area = (cell.width * cell.height) as f64 * cell.spacing_m[0] * cell.spacing_m[1];
+        // The traveling field completes whole transverse periods in the cell.
+        // Its spatial integral is A*Y/2 at EVERY time, even below one cycle.
+        let expected = 0.5 * area * admittance;
+        let interior = bank.prepare_layer(0, heat_limits(), || false).unwrap();
+        let statistical_interior = ensemble.prepare_layer(0, heat_limits(), || false).unwrap();
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let window = HarmonicWindow::with_profile(0.0, 0.2 / omega, profile).unwrap();
+            let observed = bank.field(Side::Incident, 0.0, window, || false).unwrap();
+            near(observed.normal_power_w(), expected, 2e-13 * expected);
+            let sampled_power = observed
+                .points()
+                .iter()
+                .map(|p| p.poynting_w_m2[2])
+                .sum::<f64>()
+                * cell.spacing_m[0]
+                * cell.spacing_m[1];
+            // Negative control: squaring the Nyquist samples aliases to DC.
+            assert!(sampled_power > 1.9 * expected);
+            let statistical = ensemble
+                .field(Side::Incident, 0.0, window, || false)
+                .unwrap();
+            near(
+                statistical.normal_power_w(),
+                3.0 * expected,
+                6e-13 * expected,
+            );
+            for depth in [0.0, 0.17, 0.4] {
+                let field = interior.field(depth, window, || false).unwrap();
+                near(field.field().normal_power_w(), expected, 3e-13 * expected);
+                let field = statistical_interior.field(depth, window, || false).unwrap();
+                near(
+                    field.field().normal_power_w(),
+                    3.0 * expected,
+                    9e-13 * expected,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_cell_power_is_invariant_when_a_nyquist_wave_is_resampled_more_finely() {
+    let medium = material(E, M);
+    let stack =
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), 1e9, &[])
+            .unwrap();
+    let coarse = prepare(
+        &stack,
+        &[
+            [C64::ZERO, C64::ONE],
+            [C64::ZERO, -C64::ONE],
+            [C64::ZERO, C64::ONE],
+            [C64::ZERO, -C64::ONE],
+        ],
+    );
+    let phases = [C64::ONE, C64::new(0.0, 1.0), -C64::ONE, C64::new(0.0, -1.0)];
+    let fine_samples: Vec<_> = (0..8).map(|i| [C64::ZERO, phases[i % 4]]).collect();
+    let fine = PlanarAngularSpectrum::prepare(
+        &stack,
+        AngularSpectrumGrid {
+            width: 8,
+            height: 1,
+            spacing_m: [4.0, 3.0],
+        },
+        &fine_samples,
+        AngularSpectrumLimits {
+            maximum_grid_points: 128,
+            maximum_workspace_bytes: 1 << 20,
+            maximum_fft_work: 1 << 20,
+        },
+        || false,
+    )
+    .unwrap();
+    let coarse_lines = [coarse];
+    let fine_lines = [fine];
+    let a = AngularSpectrumExposure::try_new(&coarse_lines[0], &coarse_lines, limits(), || false)
+        .unwrap();
+    let b =
+        AngularSpectrumExposure::try_new(&fine_lines[0], &fine_lines, limits(), || false).unwrap();
+    for (start, duration, distance) in [(0.0, 0.2e-9, 0.0), (0.37e-9, 2.1e-9, 0.19)] {
+        let window = HarmonicWindow::new(start, duration).unwrap();
+        let coarse = a
+            .field(Side::Transmitted, distance, window, || false)
+            .unwrap();
+        let fine = b
+            .field(Side::Transmitted, distance, window, || false)
+            .unwrap();
+        near(
+            coarse.normal_power_w(),
+            fine.normal_power_w(),
+            2e-13 * fine.normal_power_w(),
+        );
+    }
+}
+
+#[test]
+fn g1_cell_power_keeps_opposite_mode_interference_at_a_subcycle_null() {
+    let medium = material(E, M);
+    let omega = 1e9;
+    let stack =
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), omega, &[])
+            .unwrap();
+    // Ey = 2 i cos(kx*x), a coherent pair of true opposite signed bins.
+    // Its real field is -2 cos(kx*x) sin(omega*t), initially exactly zero.
+    let lines = [prepare(
+        &stack,
+        &[
+            [C64::ZERO, C64::new(0.0, 2.0)],
+            [C64::ZERO, C64::ZERO],
+            [C64::ZERO, C64::new(0.0, -2.0)],
+            [C64::ZERO, C64::ZERO],
+        ],
+    )];
+    let bank = AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap();
+    let phase_width: f64 = 1e-8;
+    let field = bank
+        .field(
+            Side::Incident,
+            0.0,
+            HarmonicWindow::new(0.0, phase_width / omega).unwrap(),
+            || false,
+        )
+        .unwrap();
+    let transverse = core::f64::consts::TAU / (grid().width as f64 * grid().spacing_m[0]);
+    let admittance = (omega * omega * E * M - transverse * transverse).sqrt() / (omega * M);
+    let area = 4.0 * grid().spacing_m[0] * grid().spacing_m[1];
+    // mean(sin²) = theta²/3 + O(theta⁴), avoiding an oracle cancellation too.
+    let expected = 2.0 * area * admittance * phase_width.powi(2) / 3.0;
+    assert!(field.normal_power_w() > 0.0);
+    near(field.normal_power_w(), expected, 3e-13 * expected);
+}
+
+#[test]
 fn g1_proper_spectral_covariance_and_mean_match_authored_ensemble_through_a_film() {
     let medium = material(E, M);
     let film = finite_layers::debye(2.0 * E, E, 1.0, 1.0);

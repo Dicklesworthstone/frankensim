@@ -2445,7 +2445,17 @@ with explicit line, modal, pair, FFT and numerical-storage budgets. This is an
 operation count, not measured throughput. Cancellation returns no partial field.
 
 Results contain real componentwise mean-square E/H, signed mean Poynting flux
-and integrated mean normal watts over the original periodic cell. They do not
+and integrated mean normal watts over the original periodic cell. The integrated
+watts use exact spatial orthogonality of the represented signed Fourier modes,
+before their quadratic products are sampled. In particular, a negative Nyquist
+mode is not paired with itself as though it had a positive-frequency spatial
+partner. Opposite modes are combined into real sine/cosine quadratures and use
+the original stable temporal Gram kernel, preserving subcycle standing-wave
+nulls. This adds O(F²*N) modal contractions without another FFT or retained bank
+of frequency fields. Local samples are unchanged; summing them on the original
+grid need not equal the continuous cell integral when products exceed that
+grid's spatial bandwidth. Exactness here concerns the represented periodic
+field, not an isolated aperture or unrepresented source bandwidth. They do not
 assign a monochromatic reactive flux or infer dielectric heating from exterior
 field moments alone. The selected-layer reservoir owner below supplies explicit
 settled-harmonic heat and storage rates. Initial-value dispersive transients,
@@ -2454,7 +2464,9 @@ remain outside this prescribed linear spectral-line model. Source-bound G1/G3 re
 against independent real-time quadrature after a Debye film, and cover beats,
 subcycle shutters, polarization, signed reflection, exact cancellation and
 small residuals among large equal-frequency fields. G4 checks source identity,
-budget boundaries, cancellation and replay.
+budget boundaries, cancellation and replay. G1/G3 cell-power regressions cover
+x/y Nyquist traveling waves, mixed real/proper ensembles, spatial refinement
+of the same physical wave and a short-window opposite-mode interference null.
 
 ### Finite exposures of proper complex spectral covariance
 
@@ -2535,7 +2547,11 @@ are W/m³. Storage includes `epsilon_infinity*|E|²/2 + mu*|H|²/2` and every
 original polarization reservoir. Its rate is `(U_end-U_start)/duration`;
 multiplication by duration yields storage change in J/m³, not deposited heat.
 Transverse heat/storage-rate integrals are W/m of depth. Integrating their sum
-through the film balances the difference of signed normal boundary powers in W.
+through the film balances the difference of signed normal boundary powers in W
+in the continuous model. The reported heat/storage depth rates remain original-
+grid spatial quadratures and need refinement when their products exceed the
+field grid's bandwidth. Interior normal watts use the same continuous modal
+cell integral as exterior exposures; no aliased point sum replaces that power.
 Positive heating can coexist with net outward power when stored energy decreases.
 
 Preparation caps authored frequency groups, distinct-frequency layer/mode
