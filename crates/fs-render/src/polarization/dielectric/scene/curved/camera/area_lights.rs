@@ -7,8 +7,8 @@
 //! focusing and receiver obliquity exactly once. No inverse-square or additional
 //! refractive-index factor is introduced.
 //!
-//! These are incident-irradiance estimates, not additional camera radiance.
-//! Adding them to emitter-hit camera paths requires matching path-space MIS.
+//! The standalone irradiance estimates are composed with camera radiance by
+//! [`camera`], using matching light-sampling and emitter-hit MIS weights.
 //! Finite authored image seeds do not establish global image completeness.
 
 use super::{CameraRadianceError, CurvedCameraScene, EmissionSides, SurfaceEmitter};
@@ -43,6 +43,9 @@ use fs_math::det;
 
 /// Reciprocal optical-image densities and complementary camera MIS weights.
 pub mod mis;
+
+/// Finite-area next-event sampling and complementary native emitter hits.
+pub mod camera;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AreaEmitterError {

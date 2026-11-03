@@ -626,8 +626,37 @@ differentiable lift). Pure Rust throughout.
   Aggregate work includes all authored seed searches and retained replays.
   Unresolved or ambiguous searches refuse; finite seeds do not establish
   image completeness. This incident-irradiance consumer does not add a second
-  emission term to camera continuation. General area-emitter camera MIS,
+  emission term to camera continuation. Rough-receiver and participating-camera area MIS,
   singular caustic integration and coherent interference remain outside it.
+
+- `camera::area_lights::camera::CurvedAreaLightCameraScene` composes
+  original panel area samples with the native surface camera at declared
+  depolarizing diffuse receivers. Each regular refractive image receives its
+  own power-heuristic weight before the physical irradiance, diffuse factor
+  and camera-prefix index ratio are composed. The camera retains its original
+  continuation draws and native path. At an emitter hit, only the retained
+  last-diffuse suffix is reversed: original ordered object/geometry/frame/
+  feature, media and selected branches must agree, as must resolved directions
+  and actual scalar continuation proposals. The same authored light-seed
+  catalog is reevaluated at that source point without adding the known camera
+  direction as a light seed. Native angular-resolution, separation and parity
+  rules decide overlap; an unrepresented image keeps full emitter-hit weight.
+  Ambiguous or failed correspondence refuses the complete sample. Direct
+  emitter visibility and unsupported nondelta suffixes keep original emission.
+  One caller-owned bounded workspace retains source images and up to 64 delta
+  events; at most 64 source/receiver/side bindings are admitted. Cumulative
+  area-sample and trace limits are charged before new work, including reverse
+  reconstruction and overlap discovery. Sampling and tracing add no per-ray
+  allocation. This consumer has no molecular/free-flight proposal binding.
+- `camera::raster::area_lights` integrates that surface estimator into the
+  original physical-camera pixel and XYZ quadrature. All four wavelengths
+  independently trace their camera and source paths; raster, lens, wavelength
+  and continuation streams retain their identities. Area variates use a
+  separate absolute pixel/sample/event/binding/lane Philox domain. Pixel
+  results retain per-lane radiance and actual source work, and a failed lane
+  refuses the whole pixel. G0/G1 regressions cover analytic paired estimators,
+  unbound/direct sources, an unseeded ball-lens image, source ownership,
+  cumulative limits, aperture/sample identity and independent spectral NEE.
 
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original

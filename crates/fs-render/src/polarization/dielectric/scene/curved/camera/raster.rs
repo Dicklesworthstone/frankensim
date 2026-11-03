@@ -30,6 +30,9 @@ pub mod participating;
 #[cfg(feature = "photometry")]
 pub mod point_lights;
 
+/// Spectral pixels with finite-area refractive light and emitter-hit MIS.
+pub mod area_lights;
+
 /// Each pixel sample independently traces this many wavelengths.
 pub const CAMERA_WAVELENGTHS: usize = 4;
 
