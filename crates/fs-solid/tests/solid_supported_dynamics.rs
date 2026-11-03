@@ -570,3 +570,222 @@ fn g4_endpoint_energy_cannot_become_negative_within_an_operator_allowance() {
         assert_eq!(bits(&solid), original_state);
     });
 }
+
+#[test]
+fn g1_support_impulse_retains_cross_mass_reaction_work_and_continuation() {
+    with_cx(false, |cx| {
+        let dt = 0.02;
+        let acceleration = 0.4;
+        let force = [0.7, -0.3];
+        let mut solid = prepare(
+            dt,
+            [0.12, -0.03],
+            [0.22, -0.11],
+            acceleration,
+            controls(),
+            cx,
+        );
+        solid
+            .advance_affine_supports(&[acceleration], &force, &force, cx)
+            .unwrap();
+        let u: [f64; 2] = solid.displacement_m().try_into().unwrap();
+        let before: [f64; 2] = solid.velocity_mps().try_into().unwrap();
+        let applied_before = solid.cumulative_applied_work_j();
+        let support_before = solid.cumulative_support_work_j();
+        let j = [0.13, -0.29];
+        let after_support = 0.45;
+        let dc = after_support - before[1];
+        let df = (j[0] - 0.35 * dc) / 2.0;
+        let after = [before[0] + df, after_support];
+        let reaction = 0.35 * df + 1.5 * dc - j[1];
+        let mean = [0.5 * (before[0] + after[0]), 0.5 * (before[1] + after[1])];
+        let applied_work = j[0] * mean[0] + j[1] * mean[1];
+        let support_work = reaction * mean[1];
+        let report = solid
+            .apply_momentum_impulse(&j, &[after_support], 1e-12, cx)
+            .unwrap();
+        assert_eq!(solid.displacement_m(), &u);
+        assert_eq!(solid.support_acceleration_mps2(), &[acceleration]);
+        assert_eq!(solid.accepted_steps(), 1);
+        assert_eq!(solid.time_s(), dt);
+        assert_eq!(report.time_s, dt);
+        for i in 0..2 {
+            near(solid.velocity_mps()[i], after[i], 2e-14);
+            near(report.impulse_residual_kg_m_s[i], 0.0, 1e-13);
+        }
+        near(report.momentum_change_kg_m_s[0], j[0], 2e-14);
+        near(
+            report.momentum_change_kg_m_s[1],
+            0.35 * df + 1.5 * dc,
+            2e-14,
+        );
+        near(report.support_reaction_kg_m_s[0], reaction, 2e-14);
+        near(report.energy.applied_work_j, applied_work, 2e-14);
+        near(report.energy.support_work_j, support_work, 2e-14);
+        near(report.kinetic_change_j, applied_work + support_work, 2e-14);
+        near(
+            solid.cumulative_applied_work_j(),
+            applied_before + applied_work,
+            2e-14,
+        );
+        near(
+            solid.cumulative_support_work_j(),
+            support_before + support_work,
+            2e-14,
+        );
+        near(report.energy.cumulative_balance_error_j, 0.0, 2e-12);
+
+        // The native continuation must start at the event's new velocities,
+        // retaining the original step clock, support acceleration and all modes.
+        let reference = Reference {
+            support_u: u[1],
+            support_v: after[1],
+            support_a: acceleration,
+            jerk: 0.0,
+            relative_u: u[0] - u[1],
+            relative_v: after[0] - after[1],
+            f0: force[0],
+            f_rate: 0.0,
+            support_f0: force[1],
+            support_f_rate: 0.0,
+        };
+        let step = solid
+            .advance_affine_supports(&[acceleration], &force, &force, cx)
+            .unwrap();
+        let (expected_u, expected_v, _) = reference.state(dt);
+        for i in 0..2 {
+            near(solid.displacement_m()[i], expected_u[i], 2e-12);
+            near(solid.velocity_mps()[i], expected_v[i], 2e-12);
+        }
+        near(step.energy.cumulative_balance_error_j, 0.0, 2e-12);
+        assert_eq!(solid.accepted_steps(), 2);
+    });
+}
+
+#[test]
+fn g3_support_impulse_preserves_uniform_boost_and_source_partition() {
+    with_cx(false, |cx| {
+        let mut boosted = prepare(0.04, [0.2; 2], [0.1; 2], 0.0, controls(), cx);
+        let dv = 0.5;
+        let report = boosted
+            .apply_momentum_impulse(&[2.35 * dv, 1.85 * dv], &[0.6], 1e-12, cx)
+            .unwrap();
+        for &v in boosted.velocity_mps() {
+            near(v, 0.6, 2e-14);
+        }
+        near(report.support_reaction_kg_m_s[0], 0.0, 2e-14);
+        near(report.energy.support_work_j, 0.0, 2e-14);
+        near(
+            report.kinetic_change_j,
+            0.5 * 4.2 * (0.6 * 0.6 - 0.1 * 0.1),
+            2e-14,
+        );
+        boosted
+            .advance_affine_supports(&[0.0], &[0.0; 2], &[0.0; 2], cx)
+            .unwrap();
+        for &u in boosted.displacement_m() {
+            near(u, 0.224, 2e-12);
+        }
+
+        let mut a = prepare(0.02, [0.1, -0.02], [0.2, 0.4], 0.0, controls(), cx);
+        let mut b = prepare(0.02, [0.1, -0.02], [0.2, 0.4], 0.0, controls(), cx);
+        let first = a
+            .apply_momentum_impulse(&[0.2, 0.0], &[0.4], 1e-12, cx)
+            .unwrap();
+        let second = b
+            .apply_momentum_impulse(&[0.2, 5.0], &[0.4], 1e-12, cx)
+            .unwrap();
+        assert_eq!(a.velocity_mps(), b.velocity_mps());
+        near(
+            second.support_reaction_kg_m_s[0] - first.support_reaction_kg_m_s[0],
+            -5.0,
+            2e-14,
+        );
+        near(
+            second.energy.applied_work_j - first.energy.applied_work_j,
+            2.0,
+            2e-14,
+        );
+        near(
+            second.energy.support_work_j - first.energy.support_work_j,
+            -2.0,
+            2e-14,
+        );
+        near(second.kinetic_change_j, first.kinetic_change_j, 0.0);
+        // A no-op event must not round the accepted basis or cumulative accounts.
+        let before = bits(&b);
+        b.apply_momentum_impulse(&[0.0; 2], &[0.4], 0.0, cx)
+            .unwrap();
+        assert_eq!(bits(&b), before);
+        // An exact no-op also retains the original energy reference when one
+        // store is below the ULP of the other. It cannot invent a 0.75 J debt.
+        let mut separated = prepare(
+            0.02,
+            [2.0_f64.powi(50), 0.0],
+            [0.0, 1.0],
+            0.0,
+            controls(),
+            cx,
+        );
+        let before = bits(&separated);
+        separated
+            .apply_momentum_impulse(&[0.0; 2], &[1.0], 0.0, cx)
+            .unwrap();
+        assert_eq!(bits(&separated), before);
+    });
+}
+
+#[test]
+fn g4_support_impulse_refuses_before_either_owner_publishes() {
+    with_cx(false, |cx| {
+        let mut solid = prepare(0.02, [0.1, 0.0], [0.0; 2], 0.0, controls(), cx);
+        let mut witness = prepare(0.02, [0.1, 0.0], [0.0; 2], 0.0, controls(), cx);
+        let before = bits(&solid);
+        for (j, support, allowance) in [
+            (vec![0.0], vec![0.0], 1e-12),
+            (vec![0.0; 2], vec![], 1e-12),
+            (vec![f64::NAN, 0.0], vec![0.0], 1e-12),
+            (vec![0.0; 2], vec![f64::INFINITY], 1e-12),
+            (vec![0.0; 2], vec![0.0], -1.0),
+        ] {
+            assert!(
+                solid
+                    .apply_momentum_impulse(&j, &support, allowance, cx)
+                    .is_err()
+            );
+            assert_eq!(bits(&solid), before);
+        }
+        // The free trial is admissible, but this support's large applied and
+        // opposite reaction impulses cannot retain its 0.035 kg m/s cross-mass
+        // increment. The outer original-row audit must refuse AFTER that trial.
+        let error = solid
+            .apply_momentum_impulse(&[0.2, 2.0_f64.powi(80)], &[0.0], 1e-12, cx)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            fs_solid::dynamics::supported::SupportedSolidError::Impulse(
+                fs_solid::dynamics::LinearSolidImpulseError::Momentum { .. }
+            )
+        ));
+        assert_eq!(bits(&solid), before);
+        with_cx(true, |cancelled| {
+            assert!(
+                solid
+                    .apply_momentum_impulse(&[0.2, 0.0], &[0.3], 1e-12, cancelled)
+                    .is_err()
+            );
+        });
+        assert_eq!(bits(&solid), before);
+        solid
+            .advance_affine_supports(&[0.0], &[0.0; 2], &[0.0; 2], cx)
+            .unwrap();
+        witness
+            .advance_affine_supports(&[0.0], &[0.0; 2], &[0.0; 2], cx)
+            .unwrap();
+        assert_eq!(
+            bits(&solid),
+            bits(&witness),
+            "hidden free candidate must also roll back"
+        );
+    });
+}

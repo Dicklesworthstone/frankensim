@@ -5195,3 +5195,38 @@ G1/G3/G4/G5 regression definitions cover off-diagonal mass, viscous/affine
 continuation, a free tetrahedral mass's independent linear/angular balance,
 mixed rigid/elastic spectral response and analytic continuation, zero identity,
 rounded-basis work refusal and cancellation. Native execution remains outstanding.
+
+### Impulses and instantaneous support velocity changes
+
+`SupportedSpectralSolid::apply_momentum_impulse` accepts applied impulses
+in the original represented-coordinate order and the prescribed support
+velocities immediately after the event. Positions, clock, accepted-step count,
+prepared operators and retained support acceleration remain unchanged.
+Subsequent continuous intervals start from the new support and free velocities.
+
+The original consistent mass supplies
+`J_eff = J_f - M_fc * Delta v_c` to the complete free spectral owner.
+Support reactions are `R_c = M_cf * Delta v_f + M_cc * Delta v_c - J_c`.
+Both cross blocks remain active; applied impulses on support rows change the
+actuator reaction without changing the prescribed motion. The actual represented
+full velocity is independently checked against the original mass in every row,
+including whether large opposing applied/support impulses can represent their
+small required net transfer. A failed outer audit also discards the unpublished
+inner spectral candidate.
+
+Applied and support work are separately computed from their impulses dotted
+with average pre/post velocity. Their signed cumulative accounts continue through
+later native intervals. Compensated product accounting and direct momentum
+increments avoid subtracting large momentum totals. The existing rounded
+total-energy reference convention remains unchanged, so an exact zero event
+does not invent a debt when one store is below the ULP of another.
+The event borrows all prepared matrices and uses O(n²) operations with O(n)
+scratch. These are algorithmic bounds, not measured performance.
+
+G1/G3/G4 regression definitions cover independent consistent-mass reactions,
+actuator work, analytical post-event continuation, uniform boosts, support-load
+partition invariance, zero identity across separated energy scales, and late
+full-row refusal/cancellation followed by an unchanged native continuation.
+This API prescribes resolved impulses/support velocities; it does not choose
+contact, restitution, event timing or a compliant actuator law. Native test
+execution remains outstanding.

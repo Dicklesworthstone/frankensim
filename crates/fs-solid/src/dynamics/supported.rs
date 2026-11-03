@@ -12,8 +12,10 @@
 //! subsystem and full-system energy gates precede accepted-state publication.
 //! Omitted assembly coordinates remain homogeneous stationary supports; their
 //! reactions cannot be recovered from this already reduced input. There is no
-//! viscous law, changing topology, finite rotation or impulsive support motion.
+//! viscous law, changing topology or finite rotation. Instantaneous support
+//! velocity changes and applied impulses use the same original mass partition.
 
+use super::LinearSolidImpulseError;
 use super::spectral::{
     CompleteSpectralSolid, CompleteSpectralSolidControls, CompleteSpectralSolidError,
 };
@@ -22,6 +24,8 @@ use fs_exec::Cx;
 use fs_sparse::{Coo, Csr};
 
 mod admission;
+mod impulse;
+pub use impulse::SupportedSolidImpulse;
 
 /// Whole-system limits in addition to the free spectral owner's limits.
 #[derive(Clone, Copy, Debug)]
@@ -48,6 +52,7 @@ pub enum SupportedSolidError {
     Energy { defect_j: f64, allowance_j: f64 },
     FreeForce { residual_n: f64, allowance_n: f64 },
     Spectral(CompleteSpectralSolidError),
+    Impulse(LinearSolidImpulseError),
     Cancelled,
 }
 impl core::fmt::Display for SupportedSolidError {
@@ -61,6 +66,14 @@ impl From<CompleteSpectralSolidError> for SupportedSolidError {
         match error {
             CompleteSpectralSolidError::Cancelled => Self::Cancelled,
             other => Self::Spectral(other),
+        }
+    }
+}
+impl From<LinearSolidImpulseError> for SupportedSolidError {
+    fn from(error: LinearSolidImpulseError) -> Self {
+        match error {
+            LinearSolidImpulseError::Cancelled => Self::Cancelled,
+            other => Self::Impulse(other),
         }
     }
 }
