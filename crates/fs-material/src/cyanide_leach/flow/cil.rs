@@ -323,10 +323,23 @@ impl CarbonInLeachCstr {
             "counterion feed must cover all incoming accessible and complexed Au",
         )?;
 
-        // A zero-duration clone validates the complete feed/source surface with
-        // the original CSTR owner and cannot publish into this wrapper.
+        // Check the original feed and every current source in a private liquid
+        // interval. Published histories include retained carbon and are never
+        // passed to the liquid-only cumulative conservation check.
         let mut preflight = self.tank.clone();
-        preflight.advance(Time::new(0.0), flow, feed, numerics, || cancelled())?;
+        liquid_advance(
+            &mut preflight,
+            &self.populations,
+            &self.capacities,
+            self.counterion_index,
+            &self.adsorbed,
+            &self.vacant,
+            Time::new(0.0),
+            flow,
+            feed,
+            numerics,
+            &mut cancelled,
+        )?;
 
         let start = self.tank.elapsed().value();
         let end = add(start, duration.value())?;
@@ -354,6 +367,27 @@ impl CarbonInLeachCstr {
         let (mut clock, mut step) = (start, numerics.maximum_step.value().min(duration.value()));
         let (mut accepted, mut rejected) = (0usize, 0usize);
         let (mut largest, mut call_error) = (0.0_f64, 0.0_f64);
+        if self.populations.iter().all(|p| p.sorbent().model().rate().value() == 0.0) {
+            // A disabled local transfer law must recover the original liquid
+            // algorithm exactly. Original carbon sources still admit every
+            // actual liquid stage; fixed loadings do not bypass their domains.
+            let liquid = liquid_advance(
+                &mut current.tank,
+                &self.populations,
+                &self.capacities,
+                self.counterion_index,
+                &current.adsorbed,
+                &current.vacant,
+                duration,
+                flow,
+                feed,
+                numerics,
+                &mut cancelled,
+            )?;
+            accepted = liquid.accepted_steps;
+            rejected = liquid.rejected_steps;
+            clock = end;
+        }
 
         while clock < end {
             if cancelled() {
@@ -541,6 +575,60 @@ impl CarbonInLeachCstr {
     }
 }
 
+
+#[allow(clippy::too_many_arguments)]
+fn liquid_advance(
+    tank: &mut CyanidationCstr,
+    populations: &[CarbonPopulation],
+    capacities: &[f64],
+    counterion_index: usize,
+    adsorbed: &[f64],
+    vacant: &[f64],
+    duration: Time,
+    flow: VolumetricFlowRate,
+    feed: &CyanidationFeed,
+    numerics: FlowNumerics,
+    cancelled: &mut impl FnMut() -> bool,
+) -> CilFlowResult<CyanidationFlowAdvance> {
+    // This is a private liquid interval after explicit pair exchange. It
+    // contains no carbon transfer, so the original liquid accounts apply
+    // exactly to its own initial stocks and independently integrated streams.
+    // The outer tank retains its original layout, charge and complete history.
+    let original_layout = tank.layout.clone();
+    let mut interval = tank.clone();
+    Arc::make_mut(&mut interval.layout).initial = interval.raw.clone();
+    interval.inlet.fill(0.0);
+    interval.outlet.fill(0.0);
+    interval.gold_dissolved = 0.0;
+    interval.accumulated_error = 0.0;
+    let mut admit = |solution: &CyanidationFlowState| {
+        admit_solution(
+            &original_layout, solution, populations, capacities,
+            counterion_index, adsorbed, vacant,
+        ).map(|_| ())
+    };
+    let answer = interval.advance_admitted(
+        duration, flow, feed, numerics, cancelled, &mut admit,
+    ).map_err(|error| match error {
+        FlowAdvanceError::Cyanidation(error) => FlowCilError::from(error),
+        FlowAdvanceError::Admission(error) => error,
+    })?;
+
+    let inlet = tank.inlet.iter().zip(&interval.inlet)
+        .map(|(old, added)| add(*old, *added)).collect::<Result<Vec<_>>>()?;
+    let outlet = tank.outlet.iter().zip(&interval.outlet)
+        .map(|(old, added)| add(*old, *added)).collect::<Result<Vec<_>>>()?;
+    let gold = add(tank.gold_dissolved, interval.gold_dissolved)?;
+    let error = sum([tank.accumulated_error, interval.accumulated_error].into_iter())?;
+    tank.raw = interval.raw;
+    tank.state = interval.state;
+    tank.inlet = inlet;
+    tank.outlet = outlet;
+    tank.gold_dissolved = gold;
+    tank.accumulated_error = error;
+    Ok(answer)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn split(
     mut state: CoupledTrial,
@@ -567,7 +655,13 @@ fn split(
         numerics.maximum_work,
         cancelled,
     )?;
-    state.tank.advance(
+    liquid_advance(
+        &mut state.tank,
+        populations,
+        capacities,
+        counterion_index,
+        &state.adsorbed,
+        &state.vacant,
         Time::new(end - start),
         flow,
         feed,
@@ -575,7 +669,7 @@ fn split(
             maximum_step: Time::new(numerics.maximum_step.value().min(end - start)),
             ..numerics
         },
-        || cancelled(),
+        cancelled,
     )?;
     adsorption_step(
         &mut state,
@@ -834,12 +928,30 @@ fn admit_state(
     let mut proxy = || cancelled();
     let mut work = dosing::work(maximum_work, &mut proxy)?;
     let solution = evaluate(&tank.layout, &tank.raw, tank.elapsed().value(), &mut work)?;
-    let volume = tank.layout.charge.solution_volume;
-    let concentration = AmountConcentration::new(quotient(tank.raw[3], volume.value())?);
-    let counterion = tank.raw[counterion_index];
+    for _ in populations {
+        work.tick()?;
+    }
+    admit_solution(
+        &tank.layout, &solution, populations, capacities,
+        counterion_index, adsorbed, vacant,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_solution(
+    layout: &FlowLayout,
+    solution: &CyanidationFlowState,
+    populations: &[CarbonPopulation],
+    capacities: &[f64],
+    counterion_index: usize,
+    adsorbed: &[f64],
+    vacant: &[f64],
+) -> CilFlowResult<FlowCilState> {
+    let volume = layout.charge.solution_volume;
+    let concentration = AmountConcentration::new(quotient(solution.inventory.gold_complex.value(), volume.value())?);
+    let counterion = solution.inventory.spectators[counterion_index - 4 - layout.charge.other_families.len()].amount.value();
     let mut states = Vec::with_capacity(populations.len());
     for (index, population) in populations.iter().enumerate() {
-        work.tick()?;
         let sorbent = population.sorbent();
         let loading = AdsorbentLoading::new(quotient(adsorbed[index], sorbent.mass().value())?);
         let mut conditions = sorbent.conditions().clone();
@@ -848,7 +960,7 @@ fn admit_state(
                 continue;
             }
             let value = if axis == ELAPSED_TIME_AXIS {
-                tank.elapsed().value()
+                solution.elapsed.value()
             } else {
                 *solution
                     .conditions
@@ -873,7 +985,7 @@ fn admit_state(
             concentration,
             loading,
             volume,
-            tank.layout.charge.temperature,
+            layout.charge.temperature,
             &conditions,
         )?;
         states.push(CilSorbentState {
@@ -886,8 +998,8 @@ fn admit_state(
         });
     }
     let state = FlowCilState {
-        elapsed: tank.elapsed(),
-        solution,
+        elapsed: solution.elapsed,
+        solution: solution.clone(),
         populations: states,
         dissolved_counterion: Amount::new(counterion),
     };

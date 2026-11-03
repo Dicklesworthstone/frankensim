@@ -168,6 +168,48 @@ fn flowing_solution_and_retained_carbon_capture_gold_simultaneously() {
     assert_eq!(answer.state.populations.len(), 2);
     assert_eq!(tank.models().len(), 2);
     balanced(&answer);
+
+    let original_charge = tank.tank().initial_charge().clone();
+    let continued = tank.advance(
+        Time::new(0.1), VolumetricFlowRate::new(0.1), &feed,
+        flow_fixture::numerics(), || false,
+    ).unwrap();
+    balanced(&continued);
+    assert_eq!(tank.tank().initial_charge(), &original_charge);
+    flow_fixture::close(continued.previous_elapsed.value(), 0.6, 1e-15);
+    flow_fixture::close(continued.cumulative_inlet.accessible_gold.value(), 0.13, 2e-15);
+    flow_fixture::close(
+        continued.cumulative_outlet.gold_complex.value(),
+        answer.cumulative_outlet.gold_complex.value() + continued.outlet.gold_complex.value(),
+        2e-15,
+    );
+    let stored: f64 = continued.state.populations.iter().map(|p| p.adsorbed.value()).sum();
+    let mobile = &continued.state.solution.inventory;
+    let outgoing = &continued.cumulative_outlet;
+    let incoming = &continued.cumulative_inlet;
+    flow_fixture::close(
+        mobile.accessible_gold.value() + mobile.gold_complex.value() + stored
+            + outgoing.accessible_gold.value() + outgoing.gold_complex.value(),
+        original_charge.accessible_gold.value() + original_charge.gold_complex.value()
+            + incoming.accessible_gold.value() + incoming.gold_complex.value(),
+        4e-10,
+    );
+    flow_fixture::close(
+        mobile.cyanide_ligand.value() + 2.0 * (mobile.gold_complex.value() + stored)
+            + outgoing.cyanide_ligand.value() + 2.0 * outgoing.gold_complex.value(),
+        original_charge.uncomplexed_cyanide.value() + 2.0 * original_charge.gold_complex.value()
+            + incoming.cyanide_ligand.value() + 2.0 * incoming.gold_complex.value(),
+        4e-10,
+    );
+    let sodium = |inventory: &CyanidationInventory| inventory.spectators.iter()
+        .find(|ion| ion.species.as_str() == "Na[+](aq)").unwrap().amount.value();
+    let initial_sodium = original_charge.spectators.iter()
+        .find(|ion| ion.species.as_str() == "Na[+](aq)").unwrap().amount.value();
+    flow_fixture::close(
+        sodium(mobile) + stored + sodium(outgoing),
+        initial_sodium + sodium(incoming),
+        4e-10,
+    );
 }
 
 #[test]
@@ -216,4 +258,34 @@ fn counterion_feed_guard_is_atomic() {
         ))
     ));
     assert_eq!(format!("{:?}", tank.state()), before);
+}
+
+#[test]
+fn zero_carbon_rate_still_admits_original_sources_and_preserves_typed_refusal() {
+    use crate::aqueous_adsorption::AqueousAdsorptionError;
+    let charge = chemistry_fixture::charge(1.0);
+    let feed = flow_fixture::feed(&charge);
+    let base = CyanidationCstr::new(
+        flow_fixture::model(4.0, false), charge, QueryPoint::new(),
+        chemistry_fixture::options(),
+    ).unwrap();
+    let mut tank = CarbonInLeachCstr::from_tank(
+        base,
+        IonPairTransfer::sodium().unwrap(),
+        vec![cil_fixture::population(
+            "inert-source-qualified-carbon", CarbonRole::ProductCarbon,
+            1.0, 0.0, 0.6, 0.1, 0.0, 1e-8,
+        )],
+    ).unwrap();
+    let before = format!("{tank:?}");
+    assert!(matches!(
+        tank.advance(
+            Time::new(0.1), VolumetricFlowRate::new(0.2), &feed,
+            flow_fixture::numerics(), || false,
+        ),
+        Err(FlowCilError::Adsorption(AdsorptionFlowError::Source(
+            AqueousAdsorptionError::OutsideValidity { .. }
+        )))
+    ));
+    assert_eq!(format!("{tank:?}"), before);
 }

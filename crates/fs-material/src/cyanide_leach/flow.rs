@@ -251,6 +251,18 @@ pub struct CyanidationCstr {
     gold_dissolved: f64,
     accumulated_error: f64,
 }
+// Internal source callbacks keep their original error type across the liquid
+// owner. Public standalone calls still expose exactly CyanidationError.
+enum FlowAdvanceError<E> {
+    Cyanidation(CyanidationError),
+    Admission(E),
+}
+impl<E> From<CyanidationError> for FlowAdvanceError<E> {
+    fn from(error: CyanidationError) -> Self {
+        Self::Cyanidation(error)
+    }
+}
+
 /// One accepted interval. No partially accepted trial or failed dose is published.
 #[derive(Clone, Debug)]
 pub struct CyanidationFlowAdvance {
@@ -471,6 +483,31 @@ impl CyanidationCstr {
         numerics: FlowNumerics,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CyanidationFlowAdvance> {
+        self.advance_admitted(
+            duration,
+            flow,
+            feed,
+            numerics,
+            &mut cancelled,
+            &mut |_| Ok::<(), CyanidationError>(()),
+        )
+        .map_err(|error| match error {
+            FlowAdvanceError::Cyanidation(error) | FlowAdvanceError::Admission(error) => error,
+        })
+    }
+
+    // The liquid owner remains responsible for its own interval and cumulative
+    // accounts. Coupled owners may add source admission without replacing the
+    // accepted transport/reaction algorithm or erasing typed source errors.
+    fn advance_admitted<E>(
+        &mut self,
+        duration: Time,
+        flow: VolumetricFlowRate,
+        feed: &CyanidationFeed,
+        numerics: FlowNumerics,
+        mut cancelled: &mut dyn FnMut() -> bool,
+        admit: &mut dyn FnMut(&CyanidationFlowState) -> core::result::Result<(), E>,
+    ) -> core::result::Result<CyanidationFlowAdvance, FlowAdvanceError<E>> {
         nonnegative(
             duration.value(),
             "flow duration must be finite and nonnegative",
@@ -480,6 +517,10 @@ impl CyanidationCstr {
         let end = add(start, duration.value())?;
         let mut work = dosing::work(numerics.maximum_work, &mut cancelled)?;
         let concentration = feed_values(&self.layout, feed, &mut work)?;
+        let mut source = |state: &CyanidationFlowState| {
+            admit(state).map_err(FlowAdvanceError::Admission)
+        };
+        source(&self.state)?;
         let volume = self.layout.charge.solution_volume.value();
         let exposure = quotient(product(flow.value(), duration.value())?, volume)?;
         let target = concentration
@@ -514,14 +555,14 @@ impl CyanidationCstr {
         let (mut error_sum, mut largest) = (0.0_f64, 0.0_f64);
         // The transport-only case is exact; it needs no adaptive reaction trials.
         if self.model().rate.value() == 0.0 && duration.value() > 0.0 {
-            problem.transport(&mut current, duration.value(), end, &mut work)?;
+            problem.transport_admitted(&mut current, duration.value(), end, &mut work, &mut source)?;
             clock = end;
             accepted = 1;
         }
         while clock < end {
             work.tick()?;
             if accepted + rejected >= numerics.maximum_attempts {
-                return Err(CyanidationError::Budget);
+                return Err(CyanidationError::Budget.into());
             }
             let remaining = end - clock;
             // Integrate the last two steps as a pair, without leaving a
@@ -539,7 +580,7 @@ impl CyanidationCstr {
             if h <= 0.0 || middle <= clock || middle >= finish {
                 return Err(CyanidationError::Arithmetic(
                     "flow integration clock loses resolution",
-                ));
+                ).into());
             }
             let initial = Trial {
                 raw: current.raw.clone(),
@@ -547,16 +588,16 @@ impl CyanidationCstr {
                 gold: 0.0,
             };
             let trial = (|| {
-                let coarse = problem.split(initial.clone(), clock, finish, &mut work)?;
-                let first = problem.split(initial, clock, middle, &mut work)?;
-                let fine = problem.split(first, middle, finish, &mut work)?;
+                let coarse = problem.split_admitted(initial.clone(), clock, finish, &mut work, &mut source)?;
+                let first = problem.split_admitted(initial, clock, middle, &mut work, &mut source)?;
+                let fine = problem.split_admitted(first, middle, finish, &mut work, &mut source)?;
                 Ok((coarse, fine))
             })();
             let (coarse, fine) = match trial {
                 Ok(pair) => pair,
-                Err(
+                Err(FlowAdvanceError::Cyanidation(
                     CyanidationError::TrialDepletion | CyanidationError::OutsideValidity { .. },
-                ) => {
+                )) => {
                     rejected += 1;
                     step = h * 0.5;
                     continue;
@@ -593,6 +634,7 @@ impl CyanidationCstr {
             };
         }
         let state = evaluate(&self.layout, &current.raw, end, &mut work)?;
+        source(&state)?;
         let cumulative_inlet = self
             .inlet
             .iter()
@@ -626,7 +668,8 @@ impl CyanidationCstr {
         let stoichiometric_amounts = self
             .model()
             .reaction
-            .amounts(Amount::new(quotient(gold, 4.0)?))?;
+            .amounts(Amount::new(quotient(gold, 4.0)?))
+            .map_err(CyanidationError::from)?;
         let mut answer = CyanidationFlowAdvance {
             layout: self.layout.clone(),
             previous_elapsed: Time::new(start),
@@ -1025,17 +1068,18 @@ impl Problem<'_> {
         state.gold = add(state.gold, gold)?;
         Ok(())
     }
-    fn split(
+    fn split_admitted<E: From<CyanidationError>>(
         &self,
         mut state: Trial,
         start: f64,
         end: f64,
         work: &mut Work<'_, impl FnMut() -> bool>,
-    ) -> Result<Trial> {
+        admit: &mut impl FnMut(&CyanidationFlowState) -> core::result::Result<(), E>,
+    ) -> core::result::Result<Trial, E> {
         let h = end - start;
-        self.transport(&mut state, product(h, 0.5)?, start, work)?;
-        self.reaction(&mut state, start, end, work)?;
-        self.transport(&mut state, product(h, 0.5)?, end, work)?;
+        self.transport_admitted(&mut state, product(h, 0.5)?, start, work, admit)?;
+        self.reaction_admitted(&mut state, start, end, work, admit)?;
+        self.transport_admitted(&mut state, product(h, 0.5)?, end, work, admit)?;
         Ok(state)
     }
 }
