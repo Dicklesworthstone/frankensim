@@ -672,6 +672,21 @@ domain; the existing prescribed held-torque and instantaneous-impulse APIs
 retain theirs. The analytical drag/oscillator, full-tensor trajectory, source
 work and late-refusal regressions live in `tests/rotor_spine/passive.rs`.
 
+`ShaftMotion::advance_with` evaluates a smooth carrier/motor/aerodynamic load law
+on the accepted state and a native half-interval prediction of every carrier and
+shaft coordinate. Both stages start from retained canonical momentum; the
+midpoint load advances the original state through the full interval. Full- and
+half-interval native factors are prepared once, so successful stepping adds no
+allocation beyond caller callbacks. Only the accepted full interval supplies
+work, spring storage and viscous heat; predictor transfers are never committed
+or credited. This explicit midpoint composition retains second order for smooth
+admitted laws, with refinement required for load feedback; it is not an implicit
+coupling or event locator. Clock collapse, callback refusal and late accounting
+failure leave both stored states unchanged; callback side effects remain the
+caller's responsibility. `tests/rotor_spine/passive/stages.rs` checks native
+full-tensor stages after impulses, independent work/momentum accounting, a
+coupled ODE refinement oracle, exact held-law parity and refusal/retry.
+
 ### Ideal gears and real propeller/airframe motion
 
 `spine::rotors::geared` admits one ideal relative gear coordinate and 1–64

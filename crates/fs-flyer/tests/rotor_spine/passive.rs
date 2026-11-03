@@ -305,3 +305,6 @@ fn g0_native_admission_and_late_refusal_preserve_the_complete_accepted_state() {
 
 #[path = "passive/impulse.rs"]
 mod impulse;
+
+#[path = "passive/stages.rs"]
+mod stages;

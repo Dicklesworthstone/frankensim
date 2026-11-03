@@ -5,11 +5,14 @@
 //! act between shafts and carrier; their recoil, phase and physical energy
 //! account come from the same fs-time owner. Translation uses the original
 //! Flyer impulse admission and drift/kick/drift map.
+//! State-dependent loads use two real native stages while only the accepted
+//! full interval contributes physical work, heat and committed shaft history.
 //!
 //! This lane requires total angular momentum to resolve the carrier velocity.
 //! It never falls back to a different state representation. The existing
 //! instantaneous and prescribed held-torque Flyer APIs keep their own domains.
 
+use super::super::admit_time_interval;
 use super::{
     CarrierImpulse, Loads, RotorAssembly, RotorState, RotorTorques, admit_derived_state,
     admit_loads, admitted_state_and_rotation, array, dd, dot_dd, finite, impulse_kinematics,
@@ -54,13 +57,15 @@ impl<const N: usize> Default for ShaftProperties<N> {
 ///
 /// Native canonical momentum is authoritative and is never reconstructed from
 /// the published carrier velocity at later steps. A failed advance changes
-/// neither this momentum nor the published Flyer state. Preparation may
-/// allocate the native 3-by-3 factor; successful advances allocate no storage.
+/// neither this momentum nor the published Flyer state. Preparation retains
+/// native full- and half-interval 3-by-3 factors; successful advances allocate
+/// no storage except any allocation performed by a caller's load law.
 #[derive(Debug)]
 pub struct ShaftMotion<const N: usize> {
     assembly: RotorAssembly<N>,
     bank: RotorBank<N>,
     stepper: TorsionalRotorStepper<N>,
+    half_stepper: TorsionalRotorStepper<N>,
     native_state: NativeState<N>,
     state: RotorState<N>,
 }
@@ -151,6 +156,14 @@ impl<const N: usize> RotorAssembly<N> {
                 duration_s,
             )
             .map_err(native_refusal)?;
+        let half_stepper = bank
+            .torsional_stepper(
+                properties.stiffness_nm_per_rad,
+                properties.rest_phase_rad,
+                properties.damping_nms_per_rad,
+                0.5 * duration_s,
+            )
+            .map_err(native_refusal)?;
         stepper
             .potential_energy(&native_state)
             .map_err(native_refusal)?;
@@ -162,6 +175,7 @@ impl<const N: usize> RotorAssembly<N> {
             assembly: *self,
             bank,
             stepper,
+            half_stepper,
             native_state,
             state: RotorState { rigid, ..*initial },
         })
@@ -200,15 +214,83 @@ impl<const N: usize> ShaftMotion<N> {
     /// separately supplied aerodynamic rotor torques. Internal motor drive
     /// changes shaft momentum; aerodynamic drive changes both shaft and total
     /// momentum exactly once. Native phases, spring storage, viscous heat and
-    /// drift error remain distinct. State-dependent load laws require the
-    /// caller's coupled stage and timestep refinement.
+    /// drift error remain distinct. [`Self::advance_with`] evaluates smooth
+    /// state-dependent load laws at native start and midpoint states.
     ///
     /// # Errors
     /// Nonfinite loads, native shaft/phase/recoil refusal, unresolved translational
     /// impulse, or nonfinite endpoint/accounting. The accepted state is unchanged.
-    #[allow(clippy::too_many_lines)] // Stage all physical accounts before atomic publication.
     pub fn advance(
         &mut self,
+        loads: Loads,
+        torques: RotorTorques<N>,
+        angular_origin_world: [f64; 3],
+    ) -> Result<ShaftStep<N>, Refusal> {
+        let receipt = self.trial_step(&self.stepper, loads, torques, angular_origin_world)?;
+        self.native_state = receipt.native.motion.state_after;
+        self.state = receipt.state;
+        Ok(receipt)
+    }
+
+    /// Couple a smooth force/motor/aerodynamic law to the actual passive shafts.
+    ///
+    /// The law is called at `t_s` on the accepted state, then at half time on
+    /// a native half-step prediction of ALL carrier and shaft coordinates.
+    /// The second load advances the ORIGINAL accepted canonical state through
+    /// the full interval. Spring recoil, viscous losses and relative phases
+    /// therefore participate in the prediction without being applied twice.
+    /// Only the full interval's physical work and heat enter the receipt.
+    ///
+    /// This retains second order for smooth admitted load laws under timestep
+    /// refinement. It is an explicit midpoint coupling, not an implicit
+    /// load-feedback solve, an event locator or a fluid energy theorem. Reuse
+    /// the original law at a new time after each accepted step or impulse;
+    /// no conversion through published angular velocity recreates momentum.
+    ///
+    /// # Errors
+    /// All native/load refusals propagate without changing accepted state.
+    /// Start, midpoint and end times must be finite and distinct. A successful
+    /// step calls the law exactly twice; callback side effects belong to the
+    /// caller and are not rolled back if a later trial refuses. A load law may
+    /// poll its execution context and refuse before either state is published.
+    pub fn advance_with<F>(
+        &mut self,
+        t_s: f64,
+        angular_origin_world: [f64; 3],
+        mut loads: F,
+    ) -> Result<ShaftStep<N>, Refusal>
+    where
+        F: FnMut(f64, &RotorState<N>) -> Result<(Loads, RotorTorques<N>), Refusal>,
+    {
+        let end = admit_time_interval(t_s, self.duration_s())?;
+        let midpoint_time = t_s + 0.5 * self.duration_s();
+        if !(t_s < midpoint_time && midpoint_time < end) {
+            return Err(Refusal {
+                code: "shaft-stage-time-unresolved",
+                message: "shaft start, midpoint and end times must remain distinct".into(),
+                ranked_repairs: vec![
+                    "use a resolved simulation clock for the prepared interval".into(),
+                ],
+            });
+        }
+        if !finite(vec(angular_origin_world)) {
+            return Err(reject("angular momentum origin must be finite"));
+        }
+        let (initial_loads, initial_torques) = loads(t_s, &self.state)?;
+        let predictor = self.trial_step(
+            &self.half_stepper,
+            initial_loads,
+            initial_torques,
+            angular_origin_world,
+        )?;
+        let (midpoint_loads, midpoint_torques) = loads(midpoint_time, &predictor.state)?;
+        self.advance(midpoint_loads, midpoint_torques, angular_origin_world)
+    }
+
+    #[allow(clippy::too_many_lines)] // Stage all physical accounts before atomic publication.
+    fn trial_step(
+        &self,
+        stepper: &TorsionalRotorStepper<N>,
         loads: Loads,
         torques: RotorTorques<N>,
         angular_origin_world: [f64; 3],
@@ -224,7 +306,7 @@ impl<const N: usize> ShaftMotion<N> {
         {
             return Err(reject("shaft torques and angular origin must be finite"));
         }
-        let dt = self.duration_s();
+        let dt = stepper.duration_s();
         let drive = core::array::from_fn(|i| torques.motor_nm[i] + torques.aerodynamic_nm[i]);
         let mut external = loads.moment_nm.map(dd);
         for (rotor, aerodynamic) in self.assembly.rotors.iter().zip(torques.aerodynamic_nm) {
@@ -233,8 +315,7 @@ impl<const N: usize> ShaftMotion<N> {
             }
         }
         let external = vec(external.map(|value| value.to_f64()));
-        let native = self
-            .stepper
+        let native = stepper
             .step(&self.native_state, drive, HeldTorque::Body(external))
             .map_err(native_refusal)?;
         let impulse = vec(loads.force_n).scale(dt);
@@ -274,12 +355,10 @@ impl<const N: usize> ShaftMotion<N> {
             .bank
             .relative_rates(&native.motion.state_after)
             .map_err(native_refusal)?;
-        let before_elastic = self
-            .stepper
+        let before_elastic = stepper
             .potential_energy(&self.native_state)
             .map_err(native_refusal)?;
-        let after_elastic = self
-            .stepper
+        let after_elastic = stepper
             .potential_energy(&native.motion.state_after)
             .map_err(native_refusal)?;
         let mut motor_work = dd(0.0);
@@ -339,8 +418,6 @@ impl<const N: usize> ShaftMotion<N> {
             linear_momentum_residual: array(linear_residual),
             angular_momentum_residual: array(angular_residual),
         };
-        self.native_state = native.motion.state_after;
-        self.state = next;
         Ok(receipt)
     }
 }
