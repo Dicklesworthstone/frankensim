@@ -25,7 +25,9 @@
 //! P1 finite solid, including its volumetric-locking limitations. Optional
 //! inertia uses the same fixed reference mass and endpoint solve.
 
+pub mod impact;
 pub mod material;
+pub use impact::FiniteThermoplasticImpactError;
 pub use material::{CaloricReference, FiniteThermoplasticMaterial, FiniteThermoplasticQuery};
 
 use std::collections::{BTreeMap, BTreeSet};

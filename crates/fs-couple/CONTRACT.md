@@ -138,6 +138,46 @@ and retained plastic/Maxwell histories. This is a bounded single-contact event;
 collision detection, event-time localization, simultaneous manifolds, friction
 and persistent-contact evolution retain their existing owners.
 
+`inelastic_impact::multiple` extends this to simultaneous circular Coulomb
+contact for native plastic, viscoelastic, thermal Tet4 and thermal Hex8 owners.
+It shares the existing mixed rigid/solid mechanical core: original paired
+witnesses and stable IDs build the complete solid cross-point mobility and
+signed shared-rigid response, including the full inertia tensor. One existing
+`fs-contact` solve determines the coupled impulses; one summed native update
+per body retains their cross-contact work. Material history is borrowed while
+building mobility and copied only into the complete candidate. Native source
+errors, mass-solve reports and the full `SolidImpulseReport` remain available.
+
+The paired witnesses, caller contact/row/workspace budgets, original contact
+determinacy and endpoint momentum/work gates remain binding. Held solid DOFs
+retain their accepted velocity. The combined report separates external
+`support_work_j` and checks kinetic change minus this work against contact
+dissipation. Velocity-only determinacy with moving solid supports returns
+`UnresolvedSupportWork` with the original contact receipt before staging an
+update; it does not choose an unestablished support-work partition. Stationary
+supports and rigid-only redundant manifolds retain their existing admission.
+Temperature, density, plastic/Maxwell/quadrature history, storage and clock stay
+unchanged. Contact loss remains a mechanical account, without inferred heat.
+
+The existing inelastic regression fixtures now exercise coupled two-point
+sticking and sliding, independent graded-mass/full-tensor cross terms, contact
+order invariance, moving-support restitution/work, retained histories and
+native budget/cancellation refusals. This fixed-pose event does not supply
+collision detection, event localization or persistent-contact time integration.
+
+`solid_enthalpy::finite_plastic::FiniteThermoplasticSolid::mixed_contact_candidate`
+binds the thermal Tet4 event to the original source-backed caloric trajectory.
+The accepted clock, cell enthalpies, reference geometry/mass and exact caloric
+objects must match before the native event is proposed. The returned source
+owner retains its cells, source families and clock while adopting the new
+mechanical velocity; the borrowed thermal simulation remains unchanged. The
+original coupled `advance` then continues from that complete accepted state.
+Impact loss stays separately reported, without an invented heat partition.
+The existing finite-plastic enthalpy seam checks a hot, plastically deformed
+equal-mass collision, exact source/caloric retention, stale and independently
+advanced heat refusal, and continuation on the original heat timeline with
+the original consistent-mass inertial load.
+
 ## Physical pressure from an explicitly selected lumped duct
 
 `acoustic_realize::duct_observer::BaffledDuctObserver` also admits the existing

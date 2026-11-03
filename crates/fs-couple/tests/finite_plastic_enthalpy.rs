@@ -1328,3 +1328,260 @@ fn heterogeneous_cells_conduct_heat_with_opposing_reversible_sources_and_local_h
         );
     });
 }
+
+#[test]
+fn hot_source_bound_impact_retains_caloric_timeline_and_continues_with_new_momentum() {
+    use fs_contact::frictional_multicontact::{FrictionalContactConfig, NormalVelocityLaw};
+    use fs_couple::inelastic_impact::multiple::{
+        FiniteSolidContactCounterpart, InelasticMixedContact, InelasticMixedContactControls,
+        RigidImpactPoint,
+    };
+    use fs_couple::solid_enthalpy::finite_plastic::FiniteThermoplasticImpactError;
+    use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
+    use fs_solid::hyper3::plastic::thermal::{SolidImpulseControls, TetImpulsePoint};
+    use fs_solver::CheckedCgConfig;
+
+    context(|cx| {
+        let fixture = Fixture::new(CP, 0);
+        let endpoints = path(&fixture, true);
+        let original_thermal = initial(&fixture, &endpoints);
+        let original_solid = bind(&fixture, &original_thermal, true, cx);
+        let first = &endpoints[0];
+        let accepted = original_solid
+            .advance(
+                &original_thermal,
+                &(),
+                first.time_s,
+                &first.prescribed(),
+                &[(3, first.free_force_n)],
+                [0.0; 3],
+                settings(),
+                controls(),
+                thermal_config(),
+                config(),
+                cx,
+            )
+            .unwrap();
+        let (thermal, solid, (), _) = accepted.into_parts();
+        let old = solid.mechanics();
+        let old_velocity = old.velocity_mps().unwrap().to_vec();
+        assert!(old.element_states()[0].alpha > 0.14);
+        close(old.temperatures_k()[0], 310.0, 2e-7);
+        let point = TetImpulsePoint {
+            tetrahedron: 0,
+            weights: [0.25; 4],
+        };
+        let trace = old.point_kinematics(point, cx).unwrap();
+        let mass = RHO * V;
+        let properties = [MassProperties::new(
+            mass,
+            Vec3::ZERO,
+            Vec3::new(mass * L * L, mass * L * L, mass * L * L),
+        )
+        .unwrap()];
+        let bodies = [RigidBodyState::new(
+            Pose::new(
+                Vec3::new(
+                    trace.position_m[0],
+                    trace.position_m[1],
+                    trace.position_m[2],
+                ),
+                UnitQuaternion::IDENTITY,
+            )
+            .unwrap(),
+            Vec3::new(
+                mass * (trace.velocity_mps[0] - 1.0),
+                mass * trace.velocity_mps[1],
+                mass * trace.velocity_mps[2],
+            ),
+            Vec3::ZERO,
+        )
+        .unwrap()];
+        let contacts = [InelasticMixedContact {
+            id: 17,
+            point: RigidImpactPoint {
+                body: 0,
+                arm_body: Vec3::ZERO,
+            },
+            counterpart: FiniteSolidContactCounterpart::Solid(point),
+            normal_world: Vec3::new(1.0, 0.0, 0.0),
+            tangent_world: Vec3::new(0.0, 1.0, 0.0),
+            activation_tolerance_m: 1e-12,
+            friction_coefficient: 0.0,
+            normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 0.5 },
+        }];
+        let impact_controls = InelasticMixedContactControls {
+            maximum_rigid_bodies: 1,
+            geometry_tolerance_m: 1e-12,
+            velocity_tolerance_m_s: 1e-10,
+            linear_tolerance_kg_m_s: 1e-12,
+            angular_tolerance_kg_m2_s: 1e-12,
+            energy_tolerance_j: 1e-12,
+            solid_impulse: SolidImpulseControls {
+                solve: CheckedCgConfig {
+                    tolerance: 1e-13,
+                    max_iterations: 64,
+                    max_corrections: 2,
+                },
+                maximum_workspace_components: 4096,
+                linear_tolerance_kg_m_s: 1e-12,
+                angular_tolerance_kg_m2_s: 1e-12,
+                work_tolerance_j: 1e-12,
+            },
+            contact: FrictionalContactConfig {
+                maximum_contacts: 1,
+                velocity_tolerance: 1e-10,
+                impulse_tolerance: 1e-12,
+                complementarity_tolerance: 1e-12,
+                energy_tolerance: 1e-12,
+                ..Default::default()
+            },
+        };
+        let old_cells = thermal.cells().clone();
+        let event = solid
+            .mixed_contact_candidate(
+                &thermal,
+                &[],
+                &bodies,
+                &properties,
+                &contacts,
+                [0.0; 3],
+                impact_controls,
+                cx,
+            )
+            .unwrap();
+        // At the centroid, the full consistent mass gives mobility 1/mass and
+        // a uniform jump. Equal rigid mass, approach 1 and e=1/2 give J=3m/4.
+        let impulse = 0.75 * mass;
+        close(event.report.contact_mobility_per_kg[0], 2.0 / mass, 1e-8);
+        close(event.report.contact.dissipated_energy, 0.1875 * mass, 1e-12);
+        close(event.report.kinetic_change_j, -0.1875 * mass, 1e-12);
+        close(event.report.support_work_j, 0.0, 1e-15);
+        close(
+            event.rigid_bodies[0].linear_momentum_world().x,
+            bodies[0].linear_momentum_world().x + impulse,
+            1e-12,
+        );
+        let after = event.solid.mechanics();
+        for node in 0..4 {
+            for axis in 0..3 {
+                close(
+                    after.velocity_mps().unwrap()[node][axis],
+                    old.velocity_mps().unwrap()[node][axis] - if axis == 0 { 0.75 } else { 0.0 },
+                    1e-10,
+                );
+            }
+        }
+        assert_eq!(event.solid.time_s(), solid.time_s());
+        assert_eq!(event.solid.cells(), solid.cells());
+        assert_eq!(thermal.cells(), &old_cells);
+        assert_eq!(after.element_states(), old.element_states());
+        assert_eq!(after.element_first_piola_pa(), old.element_first_piola_pa());
+        assert_eq!(after.displacement_m(), old.displacement_m());
+        assert_eq!(after.temperatures_k(), old.temperatures_k());
+        assert_eq!(after.free_energy_j(), old.free_energy_j());
+        assert_eq!(after.internal_energy_j(), old.internal_energy_j());
+        assert_eq!(after.reference_mass_kg(), Some(mass));
+        assert!(std::ptr::eq(
+            after.families()[0].caloric_source(),
+            &fixture.caloric
+        ));
+        assert_eq!(
+            after.families()[0].query().card.content_hash(),
+            fixture.card.content_hash()
+        );
+
+        // Neither a stale clock nor heat advanced without the coupled plastic
+        // source can be substituted for this accepted caloric snapshot.
+        let uncoupled = original_thermal
+            .advance_to(first.time_s, thermal_config(), || Ok(()))
+            .unwrap()
+            .0;
+        assert_eq!(uncoupled.time_s(), thermal.time_s());
+        assert_ne!(
+            uncoupled.cells()[&CELL].specific_h_j_kg.to_bits(),
+            old_cells[&CELL].specific_h_j_kg.to_bits()
+        );
+        for wrong in [&original_thermal, &uncoupled] {
+            assert!(matches!(
+                solid.mixed_contact_candidate(
+                    wrong,
+                    &[],
+                    &bodies,
+                    &properties,
+                    &contacts,
+                    [0.0; 3],
+                    impact_controls,
+                    cx,
+                ),
+                Err(FiniteThermoplasticImpactError::Source(
+                    FiniteThermoplasticError::Invalid(_)
+                ))
+            ));
+        }
+        assert_eq!(thermal.cells(), &old_cells);
+        assert_eq!(old.velocity_mps().unwrap(), old_velocity);
+
+        // Retain the next manufactured deformation/temperature, but correct
+        // its free force by the ORIGINAL consistent M times the impact jump.
+        let jump: [[f64; 3]; 4] = core::array::from_fn(|node| {
+            core::array::from_fn(|axis| {
+                after.velocity_mps().unwrap()[node][axis] - old.velocity_mps().unwrap()[node][axis]
+            })
+        });
+        let next = &endpoints[1];
+        let duration = next.time_s - event.solid.time_s();
+        let continued = event
+            .solid
+            .advance(
+                &thermal,
+                &(),
+                next.time_s,
+                &next.prescribed(),
+                &[(3, next.free_force_n - mass_action(&jump)[1][0] / duration)],
+                [0.0; 3],
+                settings(),
+                controls(),
+                thermal_config(),
+                config(),
+                cx,
+            )
+            .unwrap();
+        close(continued.solid().time_s(), next.time_s, 0.0);
+        close(
+            continued.thermal().temperature_k(CELL).unwrap(),
+            next.temperature_k,
+            2e-7,
+        );
+        close(
+            continued
+                .report()
+                .inertia
+                .as_ref()
+                .unwrap()
+                .kinetic_before_j,
+            event.report.solid_impulse.kinetic_after_j,
+            2e-12,
+        );
+        close(
+            continued.report().external_heat_j,
+            next.boundary_heat_j,
+            2e-9,
+        );
+        close(
+            continued.report().material_energy.caloric_heat_j,
+            V * next.increment.caloric_heat_j_m3(),
+            2e-9,
+        );
+        close(
+            continued.solid().mechanics().element_states()[0].alpha,
+            next.increment.mechanical.state.alpha,
+            3e-9,
+        );
+        close(
+            continued.report().combined_residual_j,
+            0.0,
+            config().energy_tolerance_j,
+        );
+    });
+}
