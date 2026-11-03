@@ -91,6 +91,9 @@ impl MultiBowStringBank {
     /// The same source basis projects it into both selected transverse planes;
     /// a missing plane refuses, rather than silently dropping force. Already
     /// bound geometric stretching stays in the same joint constitutive solve.
+    /// With residual flexibility, the omitted bending tail adds its condensed
+    /// bridge reaction alongside the original receiver, including a receiver
+    /// on a different body. Both reactions use the same closure/force map.
     /// Prescribed support translation follows the declared fixed normals.
     /// `with_stop_station_motion` also admits migration along the original span,
     /// retaining the complete source basis and accounting for attachment work.
@@ -116,10 +119,11 @@ impl MultiBowStringBank {
         } else { None };
         let contacts = stops.iter().zip(geometry).map(|(stop, geometry)|
             (ModalContact { left: geometry.left, right: geometry.right, law: stop.law.clone() }, stop.limits)).collect();
-        self.system = self.system.with_obstacles(contacts, limits, gate).map_err(RenderError::Friction)?;
-        if let Some(compliance) = residual {
-            self.system = self.system.with_obstacle_residual_compliance(compliance, gate).map_err(RenderError::Friction)?;
-        }
+        self.system = match residual {
+            Some((corrections, compliance)) => self.system
+                .with_obstacle_residual_ports_and_corrections(contacts, corrections, compliance, limits, gate),
+            None => self.system.with_obstacles(contacts, limits, gate),
+        }.map_err(RenderError::Friction)?;
         self.source.stops = stops;
         Ok(self)
     }
@@ -140,17 +144,15 @@ impl MultiBowStringBank {
     // With residual flexibility (pexfp.299): each fixed stop's closure gains its
     // bridge's cross term, minus k_eff G_sb times the bridge link's string and
     // body columns, and the stops share the condensed omitted-mode compliance
-    // (bank/residual.rs). Receiver stops are not wired. Returns that compliance.
+    // (bank/residual.rs). Retain the actual receiver and return the additional
+    // bridge-body correction separately: a stop can have three participants.
     fn residual_stop_geometry(&self, stops: &[MaterialStringStop], geometry: &mut [ObstacleGeometry],
-        gate: &CancelGate) -> Result<Vec<f64>, RenderError>
+        gate: &CancelGate) -> Result<(Vec<ModalAttachment>, Vec<f64>), RenderError>
     {
         let strings = self.source.bank().strings();
         let string_count = self.cards.len();
         let mut ports = Vec::with_capacity(stops.len());
         for stop in stops {
-            if stop.body.is_some() {
-                return Err(error("a receiver stop is not wired with residual flexibility"));
-            }
             let member = strings.get(stop.location.string).ok_or_else(|| error("stop names an unknown string"))?;
             let unsigned = match stop.side {
                 StringStopSide::Along(direction) => direction.components(),
@@ -169,6 +171,7 @@ impl MultiBowStringBank {
         }
         let bridges = residual_bridges(strings, &self.cards).map_err(source_error)?;
         let (cross, compliance) = stop_residual(&bridges, &ports).map_err(source_error)?;
+        let mut corrections = Vec::with_capacity(stops.len());
         for ((stop, geometry), factor) in stops.iter().zip(geometry.iter_mut()).zip(cross) {
             if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
             let index = stop.location.string;
@@ -179,11 +182,13 @@ impl MultiBowStringBank {
                 return Err(error("stop and bridge maps differ from the string's actual basis"));
             }
             for (left, b) in geometry.left.shapes.iter_mut().zip(&bridge) { *left -= factor*b; }
-            // Closure is left minus right, so the body part +factor*B enters as right = -factor*B.
-            geometry.right = ModalAttachment { component: string_count + connection.body.component,
-                shapes: connection.body.shapes.iter().map(|b| -factor*b).collect() };
+            // Closure is left - receiver + factor*bridge_body. Its transpose
+            // must load ALL participants; substituting the bridge for the
+            // receiver would disconnect the stop's actual opposite reaction.
+            corrections.push(ModalAttachment { component: string_count + connection.body.component,
+                shapes: connection.body.shapes.iter().map(|b| factor*b).collect() });
         }
-        Ok(compliance)
+        Ok((corrections, compliance))
     }
 
     // One source projection for initial and moving stops. Material/gas-loaded

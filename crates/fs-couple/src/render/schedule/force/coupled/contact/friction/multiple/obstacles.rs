@@ -30,6 +30,7 @@ pub struct FrictionObstacleConfig {
     /// Conservative combined setup bound: s*(n*(k+2)+(k+1)^2)+n*s^2,
     /// where s is normal + friction ports, n modes and k bilateral links.
     /// This includes existing friction setup; it is not an incremental allowance.
+    /// Condensed third-participant maps add at most n*q terms for q normals.
     pub max_setup_terms: usize,
 }
 
@@ -87,10 +88,45 @@ impl MultiFrictionModalSystem {
     /// Released-friction preload solves these same stationary potentials jointly
     /// with any bound conservative material/geometric storage.
     /// Existing linear bandwidth checks are not a nonlinear anti-aliasing proof.
-    pub fn with_obstacles(mut self, contacts: Vec<(ModalContact, ModalContactConfig)>,
+    pub fn with_obstacles(self, contacts: Vec<(ModalContact, ModalContactConfig)>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
+        self.bind_obstacles(contacts, None, limits, gate)
+    }
+
+    /// Bind omitted-mode normal compliance while retaining both contact
+    /// participants and an additional signed support map for each contact.
+    ///
+    /// The complete closure and reciprocal force map is
+    /// `left - right + correction`. A string support Schur complement can
+    /// therefore load its bridge without replacing the actual receiving body.
+    /// All normal/normal and normal/friction responses use that complete map.
+    /// The producer must derive corrections and the row-major compliance from
+    /// the same omitted spectrum; no new force law or receiving mass is added.
+    ///
+    /// This is one initial binding, with the fixed-map restrictions and separate
+    /// numerical-loss accounting of `with_obstacle_residual_compliance`.
+    /// Local attachments returned by `obstacle` retain the contact participants;
+    /// `obstacle_normal_column` exposes the complete retained map.
+    pub fn with_obstacle_residual_ports_and_corrections(self,
+        contacts: Vec<(ModalContact, ModalContactConfig)>, corrections: Vec<ModalAttachment>,
+        compliance: Vec<f64>, limits: FrictionObstacleConfig, gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        if contacts.is_empty() {
+            return Err(invalid("condensed obstacle binding needs nonempty original contacts").into());
+        }
+        self.bind_obstacles(contacts, Some(&corrections), limits, gate)?
+            .with_obstacle_residual_compliance(compliance, gate)
+    }
+
+    fn bind_obstacles(mut self, contacts: Vec<(ModalContact, ModalContactConfig)>,
+        corrections: Option<&[ModalAttachment]>, limits: FrictionObstacleConfig,
+        gate: &CancelGate) -> Result<Self, ModalFrictionError>
+    {
         poll(Some(gate))?;
+        if corrections.is_some_and(|maps| maps.len() != contacts.len()) {
+            return Err(invalid("condensed obstacles need one signed retained correction per contact").into());
+        }
         if contacts.is_empty() { return Ok(self); }
         if self.friction_residual.is_some() {
             return Err(invalid("normal contacts need joint normal/tangential omitted-mode cross-compliance").into());
@@ -98,7 +134,7 @@ impl MultiFrictionModalSystem {
         if self.samples_rendered() != 0 || self.obstacles.is_some() {
             return Err(invalid("friction obstacles bind once before the first physical sample").into());
         }
-        let set = ObstacleSet::new(&self, contacts, limits, gate)?;
+        let set = ObstacleSet::new(&self, contacts, corrections, limits, gate)?;
         let energy = finite(self.core.total_energy_j()? + set.energy(self.components())?)?;
         limit("initial energy including friction obstacles", energy,
             self.core.network.config.maximum_total_energy_j)?;
@@ -466,6 +502,7 @@ impl ObstacleSet {
     pub(super) fn take_endpoint_miss(&mut self) -> bool { std::mem::take(&mut self.endpoint_missed) }
     pub(super) fn set_headroom(&mut self, headroom: bool) { self.headroom = headroom; }
     fn new(system: &MultiFrictionModalSystem, contacts: Vec<(ModalContact, ModalContactConfig)>,
+        corrections: Option<&[ModalAttachment]>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, ModalCouplingError>
     {
         let q = contacts.len(); let p = system.points.len(); let s = p+q;
@@ -476,12 +513,28 @@ impl ObstacleSet {
         let terms = n.checked_mul(k+2).and_then(|v| v.checked_add((k+1)*(k+1)))
             .and_then(|v| v.checked_mul(s))
             .and_then(|v| n.checked_mul(s*s).and_then(|w| v.checked_add(w)))
+            .and_then(|v| if corrections.is_some() {
+                n.checked_mul(q).and_then(|w| v.checked_add(w))
+            } else { Some(v) })
             .ok_or_else(|| invalid("normal/friction setup work overflows"))?;
         if terms > limits.max_setup_terms { return Err(invalid("normal/friction setup exceeds max_setup_terms")); }
         let mut points = Vec::with_capacity(q);
-        for (contact, config) in contacts {
+        for (index, (contact, config)) in contacts.into_iter().enumerate() {
             poll(Some(gate))?;
-            let column = contact_column(network, &contact, config)?;
+            let mut column = contact_column(network, &contact, config)?;
+            if let Some(corrections) = corrections {
+                let correction = &corrections[index];
+                let model = network.models.get(correction.component)
+                    .ok_or_else(|| invalid("condensed obstacle correction names an unknown retained component"))?;
+                if correction.shapes.len() != model.modes().len()
+                    || correction.shapes.iter().any(|shape| !shape.is_finite()) {
+                    return Err(invalid("condensed obstacle correction must match its finite retained basis"));
+                }
+                let offset = network.offsets[correction.component];
+                for (local, shape) in correction.shapes.iter().enumerate() {
+                    column[offset+local] = finite(column[offset+local]+shape)?;
+                }
+            }
             let old = extension(network.components(), &column, 0.0)?;
             let law = OpeningContactStep::new(&contact.law, -old).map_err(ModalCouplingError::ContactLaw)?;
             let storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.law.clone()])

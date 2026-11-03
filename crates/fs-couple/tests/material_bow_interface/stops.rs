@@ -103,6 +103,69 @@ fn opposite_side_and_receiver_use_the_same_signed_displacement_force_pair() {
     });
 }
 
+#[test]
+fn residual_string_stops_keep_the_actual_receiver_and_bridge_body_connected() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::residual::{
+        condense_bridge, residual_compliance_m_n,
+    };
+    with_cx(|cx, gate| {
+        for separate_receiver in [false, true] {
+            for side in [StringStopSide::Positive, StringStopSide::Negative] {
+                let original = build(cx, gate, interface(0.4, 10.0));
+                let mut bodies = original.system().components()[1..].to_vec();
+                if separate_receiver { bodies.push(bodies[0].clone()); }
+                let bank = ReciprocalStringBank::new(cx, original.source().strings().to_vec(),
+                    *original.source().gas(), bodies, original.system().port().law.clone(), options(), gate)
+                    .unwrap().with_residual_flexibility(gate).unwrap()
+                    .with_additional_bows(vec![], MultiFrictionConfig { max_ports: 4, max_sweeps: 128,
+                        max_setup_terms: 100_000 }, gate).unwrap();
+                let member = &bank.source().bank().strings()[0];
+                let bridge = &member.connections[0];
+                let mut receiver = bridge.body.clone();
+                if separate_receiver { receiver.component = 1; }
+                let sign = if side == StringStopSide::Negative { -1.0 } else { 1.0 };
+                let factor = sign*condense_bridge(&member.source, &bank.cards()[0], bridge).unwrap().stiffness_n_m
+                    *residual_compliance_m_n(&bank.cards()[0], port().location.station_fraction,
+                        bridge.station_fraction).unwrap();
+                assert!(factor.abs() > 1e-6, "fixture must exercise the bridge cross term");
+                let uncorrected = bank.string_force_columns(&[port()], 1000, gate).unwrap().remove(0);
+                let bridge_map = bank.string_force_columns(&[StringForcePort {
+                    location: StringBowLocation { string: 0, station_fraction: bridge.station_fraction },
+                    coupling: StringForceCoupling::Centreline,
+                }], 1000, gate).unwrap().remove(0);
+                let n_string = bank.system().components()[0].modes().len();
+                let n_body = bank.system().components()[1].modes().len();
+                let mut expected = uncorrected.iter().map(|x| sign*x).collect::<Vec<_>>();
+                for i in 0..n_string { expected[i] -= factor*bridge_map[i]; }
+                for (i, b) in receiver.shapes.iter().enumerate() {
+                    expected[n_string+receiver.component*n_body+i] -= sign*b;
+                }
+                for (i, b) in bridge.body.shapes.iter().enumerate() {
+                    expected[n_string+bridge.body.component*n_body+i] += factor*b;
+                }
+                let mut stop = stop(); stop.side = side; stop.body = Some(receiver.clone());
+                let mut bank = bank.with_string_stops(vec![stop], limits(), gate).unwrap();
+                assert_eq!(bank.system().obstacle_normal_column(0).unwrap(), expected);
+                assert_eq!(bank.system().obstacle(0).unwrap().right.component, 1+receiver.component);
+                assert_eq!(bank.source().stops()[0].body.as_ref(), Some(&receiver));
+                let load: Vec<_> = uncorrected.iter().map(|x| sign*0.001*x).collect();
+                let mut peak_reaction = 0.0_f64;
+                for _ in 0..96 {
+                    let frame = bank.step(&load, &[FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 }])
+                        .unwrap().clone();
+                    peak_reaction = peak_reaction.max(bank.system().last_obstacle_frames().unwrap()[0].normal_force_n);
+                    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+                }
+                assert!(peak_reaction > 0.0);
+                for component in [1, 1+receiver.component] {
+                    assert!(bank.system().components()[component].states().iter()
+                        .any(|s| s.velocity_m_sqrt_kg_per_s != 0.0), "participant {component} never receives reaction");
+                }
+            }
+        }
+    });
+}
+
 fn schedule() -> GestureSchedule {
     GestureSchedule::try_new(1000, ["first", "second"].into_iter().zip(drivers()).zip([0.2, 0.31])
         .map(|((id, d), station)| GestureTrack { id: id.into(), target: GestureTarget::BowStroke { string: 0 },

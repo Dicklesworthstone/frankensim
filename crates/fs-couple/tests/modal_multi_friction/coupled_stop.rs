@@ -182,3 +182,86 @@ fn row_a_one_sweep_is_rescued_to_the_oracle() { known_answer(A, 1); }
 fn row_b_one_sweep_is_rescued_to_the_oracle() { known_answer(B, 1); }
 #[test]
 fn row_c_one_sweep_is_rescued_to_the_oracle() { known_answer(C, 1); }
+
+#[test]
+fn residual_stop_retains_three_participant_reactions_and_independent_work_balance() {
+    let gate = CancelGate::new_clock_free();
+    let omega: [f64; 3] = [800.0, 1100.0, 600.0];
+    // String, physical contact receiver, then its distinct bridge body.
+    let normal = [100.0, -60.0, 35.0];
+    let tail = 2e-5;
+    let stiffness = 50_000.0;
+    let network = CoupledModalSystem::new(omega.iter().map(|w| image(*w, 0.0, 0.0)).collect(),
+        vec![], budgets(), &gate).unwrap();
+    let contact = ModalContact {
+        left: ModalAttachment { component: 0, shapes: vec![normal[0]] },
+        right: ModalAttachment { component: 1, shapes: vec![-normal[1]] },
+        law: Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], stiffness, 1.0,
+            "manufactured linear contact for reciprocal residual test".into()).unwrap(),
+    };
+    let mut bank = FrictionModalSystem::new(network, ModalFrictionPort {
+        left: attachment(0), right: None, law: law(),
+    }, config(), &gate).unwrap().with_additional_ports(vec![], joint_config(), &gate).unwrap()
+        .with_obstacle_residual_ports_and_corrections(vec![(contact.clone(), stop_config())],
+            vec![ModalAttachment { component: 2, shapes: vec![normal[2]] }], vec![tail],
+            FrictionObstacleConfig { max_contacts: 4, max_setup_terms: 100_000 }, &gate).unwrap();
+    assert_eq!(bank.obstacle(0).unwrap().right, contact.right);
+    assert_eq!(bank.obstacle_normal_column(0).unwrap(), normal);
+
+    let external = [1.0, 0.0, 0.0];
+    let response: Vec<_> = omega.iter().map(|w| (1.0-(w*DT).cos())/(w*w)).collect();
+    let free = normal[0]*response[0]*external[0];
+    let compliance: f64 = normal.iter().zip(&response).map(|(n, d)| n*n*d).sum();
+    // From rest, the linear contact's discrete-gradient force is k*x_end/2,
+    // x_end = N^T D external - (N^T D N + G)*R. This is independent of
+    // the normal solver and tests the bridge AND the physical receiver.
+    let reaction = stiffness*free/(2.0+stiffness*(compliance+tail));
+    let closure = 2.0*reaction/stiffness;
+    let frame = bank.step(&external, &[drive(0.0, 0.0)]).unwrap().clone();
+    let stop = bank.last_obstacle_frames().unwrap()[0];
+    assert!((stop.normal_force_n-reaction).abs() < 2e-12);
+    let mut mechanical_energy = 0.0;
+    let mut external_work = 0.0;
+    for i in 0..3 {
+        let force = external[i]-normal[i]*reaction;
+        let q = response[i]*force;
+        let v = (omega[i]*DT).sin()/omega[i]*force;
+        let actual = bank.components()[i].states()[0];
+        assert!((actual.displacement_m_sqrt_kg-q).abs() < 2e-15, "coordinate {i}");
+        assert!((actual.velocity_m_sqrt_kg_per_s-v).abs() < 2e-11, "reaction {i}");
+        mechanical_energy += 0.5*(v*v+omega[i]*omega[i]*q*q);
+        external_work += external[i]*q;
+    }
+    assert!(bank.components()[1].states()[0].velocity_m_sqrt_kg_per_s > 0.0);
+    assert!(bank.components()[2].states()[0].velocity_m_sqrt_kg_per_s < 0.0);
+    let contact_energy = 0.5*stiffness*closure*closure;
+    let residual_energy = 0.5*tail*reaction*reaction;
+    assert!((stop.stored_energy_j-contact_energy).abs() < 1e-16);
+    assert!((stop.residual_energy_j-residual_energy).abs() < 1e-16);
+    assert_eq!(stop.residual_loss_j, stop.residual_energy_j);
+    assert!((mechanical_energy+contact_energy+2.0*residual_energy-external_work).abs() < 1e-16);
+    assert!((bank.total_energy_j().unwrap()-mechanical_energy-contact_energy-residual_energy).abs() < 1e-16);
+    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+}
+
+#[test]
+fn residual_stop_refuses_incomplete_or_invalid_retained_corrections() {
+    let gate = CancelGate::new_clock_free();
+    for case in 0..4 {
+        let contact = ModalContact {
+            left: attachment(0), right: attachment(1),
+            law: Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 5000.0, 1.0,
+                "synthetic correction admission".into()).unwrap(),
+        };
+        let mut corrections = vec![attachment(1)];
+        match case {
+            0 => corrections.clear(),
+            1 => corrections[0].component = 2,
+            2 => corrections[0].shapes.push(1.0),
+            _ => corrections[0].shapes[0] = f64::NAN,
+        }
+        assert!(joint(false).with_obstacle_residual_ports_and_corrections(
+            vec![(contact, stop_config())], corrections, vec![2e-5],
+            FrictionObstacleConfig { max_contacts: 4, max_setup_terms: 100_000 }, &gate).is_err());
+    }
+}
