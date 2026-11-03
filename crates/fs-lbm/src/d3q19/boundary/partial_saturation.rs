@@ -34,7 +34,7 @@ mod multiple;
 pub use multiple::{PartialSaturationBodiesExchange3, PartialSaturationBodyResponse3};
 pub(super) mod lubrication;
 pub use lubrication::{
-    FiniteLubricationPlane3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3,
+    FiniteLubricationPlane3, LubricationSurface3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3,
     PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,
 };
 

@@ -47,6 +47,26 @@ impl FiniteLubricationPlane3 {
         Ok(self)
     }
 
+    // Keep finite state packaging shared by the mixed-surface entry point.
+    pub(super) fn driven(self, external: [f64; 6]) -> Result<LubricationPlane3> {
+        if !external.into_iter().all(f64::is_finite) {
+            return Err(invalid("nonfinite finite-surface external impulse"));
+        }
+        Ok(LubricationPlane3 {
+            recoil: Some(FinitePlaneInput {
+                body: self.body,
+                external,
+            }),
+            ..self.geometry
+        })
+    }
+
+    // Called only after the common owner has checked and published its candidate.
+    pub(super) fn accept(&mut self, after: PartialSaturationBody3) {
+        self.body = after;
+        self.geometry.velocity = after.velocity;
+    }
+
     /// Accepted spatial body state; geometry and inertia are unchanged by a tick.
     pub fn body(self) -> PartialSaturationBody3 {
         self.body

@@ -8,6 +8,8 @@ use fs_math::dd::Dd;
 
 mod finite_planes;
 pub use finite_planes::{FiniteLubricationPlane3, FinitePlaneResponse3};
+mod surfaces;
+pub use surfaces::LubricationSurface3;
 mod pairs;
 pub(in crate::d3q19::boundary) mod planes;
 #[cfg(test)]

@@ -37,7 +37,7 @@ pub use boundary::{
     DryBodyCouplingConfig3, DryBodyExchange3, DryLubricatedPlanesExchange3, Face3, FaceBoundary3,
     FiniteLubricationPlane3, FiniteMassWall3, FiniteMassWallReceipt3, FinitePlaneResponse3,
     ImmersedMomentum3, InletFlux3, LinkMaskTile3,
-    LubricatedPlanesExchange3, LubricationPlane3, MovingLubricatedPlanesExchange3,
+    LubricatedPlanesExchange3, LubricationPlane3, LubricationSurface3, MovingLubricatedPlanesExchange3,
     MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3,
     MovingPartialSaturationExchange3, PartialSaturationBodiesExchange3, PartialSaturationBody3,
     PartialSaturationBodyExchange3, PartialSaturationBodyResponse3, PartialSaturationError3,

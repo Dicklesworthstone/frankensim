@@ -9239,3 +9239,37 @@ through stdin; the three new files were formatted. Independent scalar response
 and 101 unequal-mass scatter identities were evaluated, with the latter closing
 within 2.23e-15 J. Native Rust typechecking, tests and runtime benchmarks remain
 unexecuted because the shared filesystem is full and memory is constrained.
+
+### Mixed prescribed and finite-inertia film surfaces
+
+`LubricationSurface3::{Prescribed, Finite}` and
+`step_with_lubricated_partial_saturation_surfaces` compose driven and finite
+planar film ports in one original simultaneous sphere/fluid resistance solve.
+Finite recoil changes the same shared film impulses received by prescribed
+surfaces; no sequential wall kick or second fluid stream is introduced. One
+bounded descriptor array preserves stable surface order. Original film/mode
+caps, positive gaps, local speed admission and missing-resistance laws apply.
+
+The external-load slice matches the surface count exactly. Each finite slot
+owns one independent spatial carrier and accepts its center impulse/couple.
+Prescribed slots require zero authored impulse: their known motion and received
+film work already define the actuator port. Reports retain one reaction per
+surface; `finite_body: Some(_)` identifies actual finite kinetic change and
+external work, while `None` identifies prescribed reservoir work. Aggregate
+`coupling.lubrication.plane_work` includes both and is not wholly external work.
+
+All sphere, finite-carrier and population updates publish through the original
+checked owner. The final finite assignments are infallible; refusal/cancellation
+preserve accepted state. Prescribed descriptors are unchanged. Homogeneous and
+empty inputs retain native arithmetic. Geometry and world inertia stay frozen;
+there is no moving-wall geometry, dry-body trajectory, gyroscopic pose update,
+solid contact, shared multi-face carrier identity or thermal destination added.
+
+Four new native production-source G1/G3/G4 tests pass with six existing spin
+regressions. Coverage includes an independent two-inertia velocity oracle with
+fluid response, full-wrench finite recoil beside axial spin, frame covariance,
+momentum/work, homogeneous/empty bit continuation and refusal/retry. Three
+public BGK/TRT grid integration tests additionally cover actual population
+momentum and two-tick state, native parity and joint rollback; these parsed but
+were not executed in the delivery environment. No full workspace/grid pass or
+experimental calibration is claimed.
