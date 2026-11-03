@@ -133,7 +133,8 @@ cost/poll refusal without partial publication.
   geometry and reduced finite-core model are specified below.
 - The HYBRID BEM+VPM airfoil (pitching/plunging unsteady lift vs Theodorsen —
   the flapping credential) composes this core with fs-bem downstream.
-- Spatial adaptivity (particle insertion/merging, remeshing) is a follow-on.
+- Automatic spatial adaptivity and 3-D remeshing remain follow-ons; explicit
+  moment-preserving 2-D remeshing is specified below.
 - Logical live bytes exclude the borrowed input, allocator metadata, capacity
   rounding, allocator fragmentation, and process RSS. Admission cannot promise
   allocator success; reservation failure remains typed.
@@ -144,7 +145,8 @@ cost/poll refusal without partial publication.
   establish cancellation under multi-threaded signal races or a wall-time
   latency bound.
 - Retired from v1 (owner decision 2026-09-01, bead frankensim-rc-root-q61wp.25):
-  FMM-accelerated Biot–Savart, 3-D particle-strength-exchange viscosity, remeshing,
+  FMM-accelerated Biot–Savart, 3-D particle-strength-exchange viscosity, general
+  adaptive remeshing,
   and the BEM+VPM hybrid are NOT scheduled; the promise is preserved in deferred
   epic frankensim-rc-root-q61wp.43 and un-parks only behind a consumer journey.
 
@@ -293,6 +295,51 @@ No complete fluid/body momentum balance, viscous heat, wall condition,
 evolving-core model or measured performance claim is added.
 `tests/conservative_viscous.rs` checks zero-viscosity equivalence, analytical
 dipole decay and travel, refinement, signed-cloud behavior and refusals.
+
+## Moment-preserving 2-D remeshing
+
+`remesh::remesh` redistributes signed particle circulation onto an explicitly
+authored `CartesianGrid2` with the tensor-product M4' interpolation kernel.
+The stencil reproduces `sum Gamma`, `sum Gamma*x`, `sum Gamma*y` and all three
+quadratic position moments to floating-point roundoff, including zero-net
+circulation clouds. No net-circulation division or global correction is used.
+The unchanged shared velocity core stays separate from grid spacing and the
+returned uniform quadrature area `dx*dy`. These are point-vortex moments;
+they do not assert momentum in an arbitrary finite fluid control volume.
+
+A nonzero stencil lobe outside the authored grid refuses the complete operation.
+No tail clipping, circulation threshold, inferred wall or periodic wrap is
+applied. Exact existing grid coordinates reproduce their original node even
+with decimal spacing and at the boundary. All grid nodes, including zero
+circulation, remain in the result to supply diffusion quadrature. Signed outer
+lobes are required for second-moment reproduction: this remap does not promise
+positive weights, a maximum principle or enstrophy contraction.
+
+There are exactly sixteen stencil visits per input and
+`17*N_input + 2*N_grid` logical work units. `RemeshBudget` admits input count,
+grid count, work and logical live bytes before fallible allocation. Only a
+particle buffer and an f64 buffer are owned; compensated deposition uses the
+latter as scratch before replacing it with uniform areas. Input is borrowed
+and immutable. Cancellation polls at entry, within 256 logical visits and
+before final publication; a supplied callback can poll the caller's execution
+scope. Invalid geometry, inadequate support, arithmetic/resource refusal and
+cancellation return no partial cloud.
+
+The interpolation follows Siemaszko et al., *International Journal for
+Numerical Methods in Fluids* (2025), equations 34–35,
+<https://doi.org/10.1002/fld.70002>. `tests/remesh2.rs` checks all quadratic
+monomials, signed cancellation, repeated-grid identity, translation and length
+rescaling, induced-velocity refinement, full-support/resource/cancellation
+refusal, and an actual remesh–PSE–remesh evolution with explicit new padding.
+
+The returned particles and areas directly feed either checked viscous owner.
+Remeshing restores regular quadrature at an explicit time, not an automatic
+adaptation schedule. Finite-cloud PSE retains its own spatial, temporal and
+domain-padding errors; its circulation conservation does not become exact
+impulse conservation after remeshing. The whole-plane diffusion equation has
+`d(integral |x|²*omega dxdy)/dt = 4*nu*Gamma_total` for decaying finite moments,
+rather than an invariant second moment at nonzero circulation. This bounded 2-D
+operation does not implement 3-D remeshing or close the deferred FMM epic.
 
 ## Three-dimensional impulse and conservative coarsening
 

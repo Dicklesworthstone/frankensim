@@ -31,6 +31,8 @@ pub mod filament3d;
 pub mod images3d;
 /// Allocation-free exact flow for a pair sharing the algebraic velocity core.
 pub mod pairwise;
+/// Moment-preserving redistribution onto explicit Cartesian quadrature.
+pub mod remesh;
 
 /// Maximum completed logical work units between production-path checkpoints.
 ///
