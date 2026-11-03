@@ -193,6 +193,28 @@ stream adapter has a separate real-pack mass/volume-basis regression.
 `cargo run -p fs-material --example mineral_pipe -- 0.005 0.6` exposes an
 authored pressure-sizing example; its parameters are not a plant calibration.
 
+## Conserved size redistribution and particle-stream mixing
+
+`comminution::breakage::SizeRedistributionCard` retains a complete source-declared
+per-pass mass-transfer matrix over at most 128 named size classes. Every column
+closes to unit mass within its documented binary64 allowance without
+normalization. Positive off-diagonal transfers must enter strictly smaller
+diameters; diagonal entries retain the original class. Daughter material inherits
+each parent's explicit elemental composition. This is congruent redistribution,
+not inferred mineral liberation, selection-rate kinetics or chemical reaction.
+Water passes unchanged. Original context, typed validity, columns and independent
+retained/fragmented fractions remain available. Exact feed layouts and original
+source coordinates are required; positive transfer underflow refuses atomically.
+
+`ParticleStream::mix` conserves the same explicit class/element/water layout,
+rejecting incompatible diameters or missing assays. Magnitude-ordered compensated
+sums make inlet order irrelevant. `scaled` preserves layout even at zero flow.
+`discrete_passing_size` returns an existing representative diameter from the
+dry-solids CDF, grouping equal sizes without inventing within-bin interpolation.
+Six redistribution and six stream tests cover known Cu/Fe/water balances,
+identity, scaling/order invariance, tiny retained tails, numerical refusal,
+typed applicability and discrete quantile boundaries.
+
 ## Source-specific comminution references
 
 `comminution` supplies a typed, uncorrected Bond grinding-energy closure,

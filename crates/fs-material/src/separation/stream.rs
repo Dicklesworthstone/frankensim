@@ -187,6 +187,159 @@ impl ParticleStream {
         Ok(Some(Dimensionless::new(super::fraction(element / total)?)))
     }
 
+    /// Combine streams with exactly the same class identities, representative
+    /// diameters and declared elemental axes. Missing assays never become zeroes.
+    /// Each extensive rate is summed with compensation in magnitude order;
+    /// inlet permutation cannot change the result. No composition is normalized.
+    pub fn mix(streams: &[&Self]) -> Result<Self, SeparationError> {
+        let first = streams.first().ok_or(SeparationError::Invalid(
+            "mixing requires at least one particle stream",
+        ))?;
+        for stream in &streams[1..] {
+            require(
+                stream.classes.len() == first.classes.len(),
+                "mixed particle streams require the same class layout",
+            )?;
+            for (left, right) in first.classes.iter().zip(&stream.classes) {
+                require(
+                    left.id == right.id && left.diameter == right.diameter,
+                    "mixed class identities and representative diameters must match",
+                )?;
+                require(
+                    left.elements.keys().eq(right.elements.keys()),
+                    "mixed classes require the same explicit elemental axes",
+                )?;
+            }
+        }
+        let classes = first
+            .classes
+            .iter()
+            .enumerate()
+            .map(|(index, class)| {
+                let dry_solids = mix_sum(
+                    streams
+                        .iter()
+                        .map(|stream| stream.classes[index].dry_solids.value()),
+                )?;
+                let elements =
+                    class
+                        .elements
+                        .keys()
+                        .map(|element| {
+                            Ok((
+                                element.clone(),
+                                MassFlowRate::new(mix_sum(streams.iter().map(|stream| {
+                                    stream.classes[index].elements[element].value()
+                                }))?),
+                            ))
+                        })
+                        .collect::<Result<_, SeparationError>>()?;
+                ParticleClass::new(
+                    class.id.clone(),
+                    class.diameter,
+                    MassFlowRate::new(dry_solids),
+                    elements,
+                )
+            })
+            .collect::<Result<Vec<_>, SeparationError>>()?;
+        Self::new(
+            classes,
+            MassFlowRate::new(mix_sum(streams.iter().map(|stream| stream.water.value()))?),
+        )
+    }
+
+    /// Multiply every dry-solid, elemental and water flow by a finite factor
+    /// greater than or equal to zero. Factors above one are admitted. A zero
+    /// factor retains every class and measured-zero axis; positive underflow
+    /// and overflow refuse without modifying the original stream.
+    pub fn scaled(&self, factor: Dimensionless) -> Result<Self, SeparationError> {
+        let factor = nonnegative(
+            factor.value(),
+            "stream scale must be finite and nonnegative",
+        )?;
+        Self::new(
+            self.classes
+                .iter()
+                .map(|class| class.scaled(factor))
+                .collect::<Result<_, _>>()?,
+            MassFlowRate::new(product(self.water.value(), factor)?),
+        )
+    }
+
+    /// Least representative diameter whose dry-mass cumulative fraction reaches
+    /// the requested quantile in `(0, 1]`. Equal diameters form one mass group;
+    /// zero-mass classes do not set a passing size. No within-bin interpolation,
+    /// continuous PSD, breakage or liberation is inferred. Carrier water is excluded.
+    pub fn discrete_passing_size(
+        &self,
+        fraction: Dimensionless,
+    ) -> Result<Length, SeparationError> {
+        let fraction = positive(
+            fraction.value(),
+            "passing fraction must be finite and positive",
+        )?;
+        require(fraction <= 1.0, "passing fraction cannot exceed one")?;
+        let total = positive(
+            self.dry_solids()?.value(),
+            "passing size requires positive dry solids",
+        )?;
+        let mut classes: Vec<_> = self
+            .classes
+            .iter()
+            .filter(|class| class.dry_solids.value() > 0.0)
+            .collect();
+        classes.sort_by(|left, right| {
+            left.diameter
+                .value()
+                .total_cmp(&right.diameter.value())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let largest = classes
+            .last()
+            .ok_or(SeparationError::Invalid(
+                "passing size requires a positive class",
+            ))?
+            .diameter;
+        // A rounded total must never erase a positive coarse tail at the 100th percentile.
+        if fraction == 1.0 {
+            return Ok(largest);
+        }
+        let mut start = 0;
+        let mut cumulative = 0.0_f64;
+        let mut correction = 0.0_f64;
+        while start < classes.len() {
+            let diameter = classes[start].diameter;
+            let mut end = start + 1;
+            while end < classes.len() && classes[end].diameter == diameter {
+                end += 1;
+            }
+            let group_mass = sum(classes[start..end]
+                .iter()
+                .map(|class| class.dry_solids.value()))?;
+            let next = cumulative + group_mass;
+            correction += if cumulative >= group_mass {
+                (cumulative - next) + group_mass
+            } else {
+                (group_mass - next) + cumulative
+            };
+            cumulative = next;
+            let prefix = cumulative + correction;
+            if !prefix.is_finite() {
+                return Err(SeparationError::Arithmetic(
+                    "cumulative dry-solids flow is unrepresentable",
+                ));
+            }
+            // Dividing avoids underflow of total*fraction for tiny positive quantiles.
+            if prefix / total >= fraction {
+                return Ok(diameter);
+            }
+            start = end;
+        }
+        // The complete discrete distribution has CDF=1 by definition, including
+        // when its size-ordered sum differs by rounding from the ID-ordered total.
+        Ok(largest)
+    }
+
     /// Split every homogeneous solid class with its explicit partition and water
     /// with an independent partition. Input order is arbitrary; exactly one
     /// supplied split per class is required. Both small tails are retained, and
@@ -272,3 +425,13 @@ fn sum(values: impl Iterator<Item = f64>) -> Result<f64, SeparationError> {
         ))
     }
 }
+
+fn mix_sum(values: impl Iterator<Item = f64>) -> Result<f64, SeparationError> {
+    let mut values: Vec<_> = values.collect();
+    values.sort_by(f64::total_cmp);
+    sum(values.into_iter())
+}
+
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod tests;

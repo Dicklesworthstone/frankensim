@@ -28,6 +28,10 @@ pub use blend::{AdditiveGrindingBlend, GrindingFeed};
 #[path = "comminution/inverse.rs"]
 mod inverse;
 
+/// Source-declared congruent per-pass size redistribution with conserved elements.
+#[path = "comminution/breakage.rs"]
+pub mod breakage;
+
 /// Grinding energy per dry mass, in coherent SI joules per kilogram.
 pub type SpecificGrindingEnergy = Qty<2, 0, -2, 0, 0, 0>;
 
