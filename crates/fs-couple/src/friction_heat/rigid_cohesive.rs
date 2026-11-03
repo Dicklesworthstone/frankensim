@@ -253,11 +253,7 @@ fn apply_rigid_cohesive_heat_inner<'a, 't, P, E>(
         }
     }
     let old_energy = mechanical.total_energy_j()?;
-    let next_step = mechanical
-        .steps()
-        .checked_add(1)
-        .ok_or(RigidCohesiveHeatError::Invalid("native clock overflow"))?;
-    let target = next_step as f64 * mechanical.step_duration_s();
+    let target = mechanical.next_step_time_s()?;
     let routes: Vec<_> = ordered.iter().map(|c| c.route).collect();
     let guesses: Vec<_> = ordered.iter().map(|c| c.temperature_guess_k).collect();
     let network =

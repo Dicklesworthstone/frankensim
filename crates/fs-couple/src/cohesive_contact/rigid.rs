@@ -43,11 +43,13 @@ use fs_mbd::{
 };
 
 mod friction;
+mod interval;
 mod solve;
 mod temperature;
 pub use friction::{
     RigidDamageFrictionConfig, RigidDamageFrictionSite, RigidDamageFrictionSiteFrame,
 };
+pub use interval::{RigidCohesiveInterval, RigidCohesiveIntervalConfig, RigidCohesiveIntervalSite};
 
 /// The same physical state bounds apply at admission and after each real step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -288,6 +290,11 @@ pub enum RigidCohesiveError {
     Friction(super::frictional_damage::DamageFrictionError),
     Cancelled,
     Budget(&'static str),
+    /// A resolved local tangential velocity reverses within one native path.
+    /// An explicit interval can refine this site without changing its law.
+    UnresolvedFrictionReversal {
+        site: usize,
+    },
     Range {
         what: &'static str,
         value: f64,
@@ -344,6 +351,9 @@ pub struct RigidCohesiveSystem<'a> {
     config: RigidCohesiveConfig,
     steps: u64,
     time_s: f64,
+    // Ordinary steps retain their original multiplication clock. An explicit
+    // variable-duration interval starts a new nominal-step segment at its end.
+    clock_anchor: Option<(u64, f64)>,
     linear_solve: LuWorkspace,
     staged_sites: Vec<Option<SourceBoundObjectiveCohesiveStep<'a>>>,
     staged_temperature: Vec<Option<SourceBoundObjectiveCohesiveTemperatureStep<'a>>>,
@@ -428,6 +438,7 @@ impl<'a> RigidCohesiveSystem<'a> {
             config,
             steps: 0,
             time_s: 0.0,
+            clock_anchor: None,
             linear_solve: LuWorkspace::new(12)?,
             staged_sites,
             staged_temperature,
@@ -464,6 +475,22 @@ impl<'a> RigidCohesiveSystem<'a> {
     }
     pub const fn time_s(&self) -> f64 {
         self.time_s
+    }
+    /// Endpoint of the next ordinary nominal-duration step. Explicit intervals
+    /// can end between nominal ticks; subsequent steps start from that endpoint.
+    pub fn next_step_time_s(&self) -> Result<f64, RigidCohesiveError> {
+        let next = self
+            .steps
+            .checked_add(1)
+            .ok_or(RigidCohesiveError::Budget("clock"))?;
+        let at = finite(match self.clock_anchor {
+            None => next as f64 * self.dt_s,
+            Some((step, time)) => time + (next - step) as f64 * self.dt_s,
+        })?;
+        if at <= self.time_s {
+            return Err(RigidCohesiveError::Budget("clock resolution"));
+        }
+        Ok(at)
     }
     pub const fn last_frame(&self) -> Option<&RigidCohesiveFrame> {
         self.last_frame.as_ref()
@@ -520,6 +547,17 @@ impl<'a> RigidCohesiveSystem<'a> {
         gate: Option<&CancelGate>,
         accept: impl FnOnce(&RigidCohesiveFrame, &[Option<RigidCohesiveSiteFrame>]) -> Result<P, E>,
     ) -> Result<P, E> {
+        let next_time = self.next_step_time_s()?;
+        self.step_at_with_acceptance(loads, next_time, gate, accept)
+    }
+
+    fn step_at_with_acceptance<P, E: From<RigidCohesiveError>>(
+        &mut self,
+        loads: [RigidCohesiveLoad; 2],
+        next_time: f64,
+        gate: Option<&CancelGate>,
+        accept: impl FnOnce(&RigidCohesiveFrame, &[Option<RigidCohesiveSiteFrame>]) -> Result<P, E>,
+    ) -> Result<P, E> {
         poll(gate)?;
         for load in loads {
             finite_vector(load.force_world_n)?;
@@ -529,7 +567,7 @@ impl<'a> RigidCohesiveSystem<'a> {
             .steps
             .checked_add(1)
             .ok_or(RigidCohesiveError::Budget("clock"))?;
-        let next_time = finite(next_step as f64 * self.dt_s)?;
+        finite(next_time)?;
         if next_time <= self.time_s {
             return Err(RigidCohesiveError::Budget("clock resolution").into());
         }

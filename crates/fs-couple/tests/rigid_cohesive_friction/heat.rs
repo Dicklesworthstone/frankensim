@@ -697,3 +697,68 @@ fn thermal_damage_and_source_work_stay_outside_heat_and_late_refusals_preserve_s
     }
     assert_eq!(owner.steps(), 2);
 }
+
+#[test]
+fn ordinary_native_heat_continues_from_an_interval_between_nominal_ticks() {
+    let (source, friction) = sources([0.6, 0.3], false);
+    let point = failed(&source);
+    let mut owner = system(
+        &source,
+        Some(&friction),
+        point,
+        &[[0.0; 3]],
+        UnitQuaternion::IDENTITY,
+        zero(),
+        zero(),
+        0.002,
+        config(),
+    );
+    let load = balanced_load(Vec3::new(-0.4, 0.16, 0.0), v(point.jump_m()));
+    owner
+        .advance_interval(
+            load,
+            0.0037,
+            RigidCohesiveIntervalConfig {
+                minimum_step_s: 1e-12,
+                reversal_time_tolerance_s: 1e-10,
+                maximum_trials: 16,
+                maximum_substeps: 16,
+                maximum_total_evaluations: 1_000_000,
+                maximum_total_material_evaluations: 2_000_000,
+                maximum_total_iterations: 1024,
+            },
+        )
+        .unwrap();
+    let mut heat = thermal([0.0; 2])
+        .advance_to(
+            owner.time_s(),
+            StepConfig {
+                max_dt_s: 0.002,
+                energy_tolerance_j: 1e-10,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0;
+    let route = FrictionHeatRoute::from_link(&heat, 7, K).unwrap();
+    let target = owner.next_step_time_s().unwrap();
+    assert_eq!(target, 0.0037 + 0.002);
+    assert_ne!(target, (owner.steps() + 1) as f64 * owner.step_duration_s());
+    let report = apply_rigid_cohesive_heat(
+        &mut owner,
+        load,
+        &mut heat,
+        bodies(&source),
+        &contact(&route),
+        controls(),
+        &[0.0; 2],
+        |_, ids, _| Ok::<_, &'static str>(inputs(ids)),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    assert_eq!(owner.time_s(), target);
+    assert_eq!(heat.time_s(), target);
+    assert_eq!(owner.steps(), 3);
+    assert_eq!(report.heat.dissipated_j, 0.0);
+    close(report.combined_energy_residual_j, 0.0, 3e-10);
+}

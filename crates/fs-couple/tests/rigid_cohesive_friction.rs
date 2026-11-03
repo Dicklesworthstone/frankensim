@@ -1,6 +1,8 @@
 //! G1/G3/G4: original finite-rotation bodies with damaged-area tangent disks.
 #[path = "rigid_cohesive_friction/heat.rs"]
 mod heat;
+#[path = "rigid_cohesive_friction/interval.rs"]
+mod interval;
 #[path = "rigid_cohesive_friction/temperature.rs"]
 mod temperature;
 
@@ -798,9 +800,7 @@ fn g4_unresolved_midpoint_capture_refuses_reflection_and_keeps_original_motion()
         .unwrap_err();
     assert_eq!(
         error,
-        RigidCohesiveError::Invalid(
-            "unresolved friction stop reverses endpoint slip; subdivide the step"
-        )
+        RigidCohesiveError::UnresolvedFrictionReversal { site: 0 }
     );
     assert_eq!(owner.bodies(), &bodies);
     assert_eq!(owner.damaged_area_friction_states().unwrap(), states);
@@ -926,9 +926,7 @@ fn actual_stop_restores_static_capacity_and_nonzero_slip_reversal_refuses() {
         if factor < 1.0 {
             assert_eq!(
                 result.unwrap_err(),
-                RigidCohesiveError::Invalid(
-                    "unresolved friction stop reverses endpoint slip; subdivide the step"
-                )
+                RigidCohesiveError::UnresolvedFrictionReversal { site: 0 }
             );
             assert_eq!(owner.bodies(), &bodies);
             assert_eq!(owner.damaged_area_friction_states().unwrap(), states);

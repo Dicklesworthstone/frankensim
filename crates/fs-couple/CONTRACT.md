@@ -23952,6 +23952,36 @@ cell heating, heating/cooling with fixed-jump damage excluded from heat, and
 late conductivity/cancellation rollback of both source owners and both physical
 states (G1/G3/G4).
 
+### Native rigid adhesive stopping and interval continuation
+
+`RigidCohesiveSystem::advance_interval` continues the original finite-rotation
+pair under constant loads, using its existing nominal timestep as the maximum
+substep. Only a typed unresolved local Coulomb reversal triggers refinement
+from the same accepted predecessor. Actual objective endpoint velocity can
+resolve stopping and restore the original static disk; no projected velocity,
+new impulse, compliance, or numerical heat changes the physics. This brackets
+an admissible boundary of the discrete path model, without certifying the first
+continuous event or a unique softening branch. Source coefficients remain at
+their currently accepted temperature; this operation performs no heat solve or
+additional temperature transfer.
+
+Reusable native solver matrices are retained. Three bounded accepted-state
+buffers preserve both original body motions, every site history, source
+reference, friction branch/effort, observations and clock. Any outer failure
+restores the incoming state, including after successful internal substeps.
+Separate cumulative trial, substep, evaluation, material and iteration ceilings
+bound rejected work as well as accepted work. Physical acceptance tolerances
+are unchanged. Whole-interval endpoint energy and momentum are checked against
+the sums of actual accepted work, impulses and per-site fracture, viscosity and
+friction losses. Final native observations still describe the last substep.
+
+Ordinary stepping retains its original multiplication clock until an explicit
+interval is used; subsequent nominal steps start from that interval's endpoint.
+`next_step_time_s` exposes this shared endpoint to coupled owners. The focused
+native regressions cover an unaligned analytic translation-limit stop at cold
+and previously transferred hot sources, resticking and renewed sliding, exact
+rotating multisite native-path parity, and late outer rollback with retry.
+
 ## Independently dynamic loads in causal shell resonance
 
 `MaterialShellImage::prepare_coating_resonance_with_load` and the corresponding

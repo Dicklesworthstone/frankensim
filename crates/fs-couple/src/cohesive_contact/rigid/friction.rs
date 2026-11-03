@@ -177,6 +177,13 @@ pub(super) struct Friction<'a> {
     linear: LuWorkspace,
 }
 
+/// Only accepted fixed-coefficient history; solver matrices and thermal stages
+/// remain reusable scratch. Interval stepping never changes the source/law.
+pub(super) struct Checkpoint<'a> {
+    states: Vec<DamageFrictionState<'a>>,
+    forces: [[f64; 2]; 64],
+}
+
 #[derive(Clone, Copy)]
 struct TemperatureStage<'a> {
     law: LocalDamageFriction<'a>,
@@ -207,6 +214,53 @@ impl Joint {
 }
 
 impl<'a> Friction<'a> {
+    pub(super) fn checkpoint(&self) -> Result<Checkpoint<'a>, RigidCohesiveError> {
+        let mut states = Vec::new();
+        states
+            .try_reserve_exact(self.states.len())
+            .map_err(|_| RigidCohesiveError::Budget("interval friction checkpoint"))?;
+        states.extend_from_slice(&self.states);
+        Ok(Checkpoint {
+            states,
+            forces: self.last_forces,
+        })
+    }
+
+    pub(super) fn save(&self, checkpoint: &mut Checkpoint<'a>) {
+        checkpoint.states.copy_from_slice(&self.states);
+        checkpoint.forces = self.last_forces;
+    }
+
+    pub(super) fn restore(&mut self, checkpoint: &Checkpoint<'a>) {
+        self.states.copy_from_slice(&checkpoint.states);
+        self.last_forces = checkpoint.forces;
+    }
+
+    pub(super) fn iteration_limit(&self) -> usize {
+        self.config.maximum_iterations
+    }
+
+    pub(super) fn set_iteration_limit(&mut self, limit: usize) {
+        self.config.maximum_iterations = limit;
+    }
+
+    pub(super) fn resolved_stop(
+        &self,
+        system: &RigidCohesiveSystem<'a>,
+        site: usize,
+    ) -> Result<bool, RigidCohesiveError> {
+        if site >= system.sites.len() {
+            return Err(RigidCohesiveError::Invalid(
+                "reversal site outside original system",
+            ));
+        }
+        let velocity =
+            local_slip_velocity(system, site, &system.bodies.each_ref().map(|b| b.state))?;
+        // Stay inside the ORIGINAL capture resolution with a roundoff margin.
+        // Neither this check nor interval continuation alters actual velocity.
+        Ok(velocity[0].hypot(velocity[1]) <= 0.25 * self.config.velocity_absolute_tolerance_m_s)
+    }
+
     fn new(
         system: &RigidCohesiveSystem<'a>,
         sources: Vec<RigidDamageFrictionSite<'a>>,
@@ -753,9 +807,7 @@ impl<'a> Friction<'a> {
                 && old_velocity[0] * new_velocity[0] + old_velocity[1] * new_velocity[1]
                     < -tolerance * tolerance
             {
-                return Err(RigidCohesiveError::Invalid(
-                    "unresolved friction stop reverses endpoint slip; subdivide the step",
-                ));
+                return Err(RigidCohesiveError::UnresolvedFrictionReversal { site: p });
             }
             let regime = if value.pressure[p] == 0.0 {
                 DamageFrictionRegime::Inactive
