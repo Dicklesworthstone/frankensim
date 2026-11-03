@@ -405,3 +405,25 @@ limit, density/speed scaling, actual swirl-induced force changes, and bounded
 and inadmissible solves. They do not establish transient swirl, resolved
 helical wake, radial pressure, contraction, skew-flow swirl, compressibility,
 historical rotor calibration, full-workspace or cross-platform validation.
+
+## Spatially varying incident flow at propeller blade sections
+
+`AzimuthQuadrature::evaluate_with_incident_variation` samples an explicit
+addition to hub-relative incident velocity at each original station/azimuth
+point, using the unchanged blade force, self-induction, tilt and section-domain
+owners. `section_offsets` exposes the identical ordered geometry for one-time
+preparation. The callback can use cached coefficients; no allocation is added
+to the force quadrature itself.
+
+`incident_variation_work_w = sum(dF dot delta_V)` is a separate signed air-work
+channel in the section power identity. It is neither carrier shaft work nor
+profile heat. Spatial variation can create transverse hub moments absent from
+a hub-mean flow. Zero variation retains the original loads exactly; a late
+callback or section-domain refusal returns no partial load. Callback side
+effects remain caller-owned.
+
+The native `oblique` tests independently reconstruct attached loads and work
+with 8192 midpoint azimuth samples, check frame covariance and exact zero-field
+parity, and exercise late refusals. This interface does not itself provide wake
+transport, conservation of the external flow field, spanwise section force,
+reversed-flow physics, or a whole-wake energy balance.

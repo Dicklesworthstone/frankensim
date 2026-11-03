@@ -171,10 +171,16 @@ pub struct ObliqueLoads {
     /// Sum of section forces dotted with actual blade velocity relative to
     /// incident air, excluding the induced air velocity [W].
     pub kinematic_power_w: f64,
+    /// Sum of section force dotted with the supplied incident-velocity
+    /// variation about the hub reference [W]. This signed air-work channel
+    /// belongs in the section power identity, not in carrier shaft work or
+    /// profile heat. It is exactly zero for spatially uniform incident air.
+    pub incident_variation_work_w: f64,
     /// Sum of section thrust times its actual induction [W], with its sign.
     /// In the uniform path this is exactly `thrust_n * induced_mps`.
     pub induced_work_w: f64,
-    /// Hub force/tilt/absolute-spin power + induced work + profile loss [W].
+    /// Hub force/tilt/absolute-spin power + incident-variation work + induced
+    /// work + profile loss [W].
     /// This is a section-law identity, not a whole-wake energy theorem.
     pub power_residual_w: f64,
     /// Largest ignored spanwise velocity [m/s], exposing the strip assumption.
@@ -216,6 +222,35 @@ impl AzimuthQuadrature {
         self.cos_sin.len()
     }
 
+    /// Actual section offsets from the hub, in station-major then prepared
+    /// azimuth order. They use the identical geometry as force evaluation;
+    /// callers can prepare fixed-geometry external-flow coefficients once.
+    /// The sample index supplied by [`Self::evaluate_with_incident_variation`]
+    /// indexes this array. No phase or physical blade count is inferred.
+    ///
+    /// # Errors
+    /// Native rotor admission, or `oblique-rotor-invalid` for offset overflow.
+    pub fn section_offsets(
+        &self,
+        rotor: &Rotor,
+        frame: DiskFrame,
+    ) -> Result<Vec<[f64; 3]>, Refusal> {
+        rotor.admit()?;
+        let mut offsets = Vec::with_capacity(rotor.stations.len() * self.points());
+        for station in &rotor.stations {
+            let radius = station.r_over_r * rotor.radius_m;
+            for &[c, s] in &self.cos_sin {
+                let arm =
+                    core::array::from_fn(|j| radius * (c * frame.radial[j] + s * frame.azimuth[j]));
+                if !arm.into_iter().all(f64::is_finite) {
+                    return Err(invalid("section offset overflow"));
+                }
+                offsets.push(arm);
+            }
+        }
+        Ok(offsets)
+    }
+
     /// Integrate native blade sections over azimuth at the supplied uniform
     /// induction. `omega_rad_s` is positive ABSOLUTE spin about the physical
     /// spin axis. The carrier's axial rate is already included in that speed;
@@ -249,6 +284,7 @@ impl AzimuthQuadrature {
             },
             omega_rad_s,
             false,
+            |_, _| Ok([0.0; 3]),
         )
     }
 
@@ -267,6 +303,47 @@ impl AzimuthQuadrature {
         induction: HarmonicInduction,
         omega_rad_s: f64,
     ) -> Result<ObliqueLoads, Refusal> {
+        self.evaluate_with_incident_variation(
+            rotor,
+            density_kg_m3,
+            frame,
+            hub_velocity_mps,
+            carrier_angular_velocity_rad_s,
+            induction,
+            omega_rad_s,
+            |_, _| Ok([0.0; 3]),
+        )
+    }
+
+    /// Resolve spatial incident-air variation at every actual blade section.
+    /// `variation(sample, arm)` returns an ADDITION to the hub-relative air
+    /// velocity, in the same frame and m/s. Rigid tilt motion and this rotor's
+    /// own induction are already owned here and must not be supplied again.
+    /// Both uniform and first-harmonic self-induction use the original law.
+    ///
+    /// The callback may read prepared geometry without allocating. A finite
+    /// result and the original normal-flow section domain are checked at every
+    /// sample. Its signed force/velocity work remains separate from body work,
+    /// self-induced work and profile dissipation. No load is published if a
+    /// later sample fails; caller callback side effects remain caller-owned.
+    ///
+    /// # Errors
+    /// As [`Self::evaluate_first_harmonic`], plus callback refusals unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_with_incident_variation<F>(
+        &self,
+        rotor: &Rotor,
+        density_kg_m3: f64,
+        frame: DiskFrame,
+        hub_velocity_mps: [f64; 3],
+        carrier_angular_velocity_rad_s: [f64; 3],
+        induction: HarmonicInduction,
+        omega_rad_s: f64,
+        variation: F,
+    ) -> Result<ObliqueLoads, Refusal>
+    where
+        F: FnMut(usize, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
         if !induction.modes().into_iter().all(f64::is_finite)
             || induction.first_mps[0].hypot(induction.first_mps[1])
                 > dot(hub_velocity_mps, frame.axis) + induction.mean_mps
@@ -284,11 +361,12 @@ impl AzimuthQuadrature {
             induction,
             omega_rad_s,
             induction.first_mps != [0.0; 2],
+            variation,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_modes(
+    fn evaluate_modes<F>(
         &self,
         rotor: &Rotor,
         density_kg_m3: f64,
@@ -298,7 +376,11 @@ impl AzimuthQuadrature {
         induction: HarmonicInduction,
         omega_rad_s: f64,
         distributed: bool,
-    ) -> Result<ObliqueLoads, Refusal> {
+        mut variation: F,
+    ) -> Result<ObliqueLoads, Refusal>
+    where
+        F: FnMut(usize, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
         rotor.admit()?;
         let induced_mps = induction.mean_mps;
         let axial = dot(hub_velocity_mps, frame.axis);
@@ -324,6 +406,7 @@ impl AzimuthQuadrature {
         let mut torque_nm = 0.0;
         let mut profile_dissipation_w = 0.0;
         let mut kinematic_power_w = 0.0;
+        let mut incident_variation_work_w = 0.0;
         let mut section_induced_work_w = 0.0;
         let mut maximum_spanwise_speed_mps: f64 = 0.0;
         let mut minimum_tangential_speed_mps = f64::INFINITY;
@@ -331,12 +414,19 @@ impl AzimuthQuadrature {
         for (index, station) in rotor.stations.iter().enumerate() {
             let radius = station.r_over_r * rotor.radius_m;
             let weight = rotor.station_width_m(index) / self.points() as f64;
-            for &[c, s] in &self.cos_sin {
+            for (azimuth, &[c, s]) in self.cos_sin.iter().enumerate() {
                 let radial = core::array::from_fn(|j| c * frame.radial[j] + s * frame.azimuth[j]);
                 let tangent = cross(frame.axis, radial).map(|x| frame.spin.sign() * x);
                 let arm = radial.map(|x| radius * x);
                 let tilt_velocity = cross(tilt, arm);
-                let incident = core::array::from_fn(|j| hub_velocity_mps[j] + tilt_velocity[j]);
+                let delta = variation(index * self.points() + azimuth, arm)?;
+                if !delta.into_iter().all(f64::is_finite) {
+                    return Err(invalid("nonfinite section incident variation"));
+                }
+                let mut incident = core::array::from_fn(|j| hub_velocity_mps[j] + tilt_velocity[j]);
+                if delta != [0.0; 3] {
+                    incident = core::array::from_fn(|j| incident[j] + delta[j]);
+                }
                 let local_axial = dot(incident, frame.axis);
                 let tangential = omega_rad_s * radius + dot(incident, tangent);
                 let local_induced = if distributed {
@@ -392,6 +482,9 @@ impl AzimuthQuadrature {
                 let section_speed = (throughflow * throughflow + tangential * tangential).sqrt();
                 profile_dissipation_w += loads.profile_drag * section_speed * weight;
                 kinematic_power_w += dot(d_force, material_velocity);
+                if delta != [0.0; 3] {
+                    incident_variation_work_w += dot(d_force, delta);
+                }
                 maximum_spanwise_speed_mps =
                     maximum_spanwise_speed_mps.max(dot(incident, radial).abs());
                 minimum_tangential_speed_mps = minimum_tangential_speed_mps.min(tangential);
@@ -403,10 +496,13 @@ impl AzimuthQuadrature {
         } else {
             thrust_n * induced_mps
         };
-        let power_residual_w = dot(force_n, hub_velocity_mps) + dot(hub_moment_nm, tilt)
+        let mut power_residual_w = dot(force_n, hub_velocity_mps) + dot(hub_moment_nm, tilt)
             - torque_nm * omega_rad_s
             + induced_work_w
             + profile_dissipation_w;
+        if incident_variation_work_w != 0.0 {
+            power_residual_w += incident_variation_work_w;
+        }
         if !force_n
             .iter()
             .chain(&hub_moment_nm)
@@ -415,6 +511,7 @@ impl AzimuthQuadrature {
                 torque_nm,
                 profile_dissipation_w,
                 kinematic_power_w,
+                incident_variation_work_w,
                 induced_work_w,
                 power_residual_w,
                 maximum_spanwise_speed_mps,
@@ -431,6 +528,7 @@ impl AzimuthQuadrature {
             torque_nm,
             profile_dissipation_w,
             kinematic_power_w,
+            incident_variation_work_w,
             induced_work_w,
             power_residual_w,
             maximum_spanwise_speed_mps,

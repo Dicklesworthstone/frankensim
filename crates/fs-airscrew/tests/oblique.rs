@@ -3,6 +3,9 @@ use fs_airscrew::dynamic_inflow::UniformAxialInflow;
 use fs_airscrew::oblique::{AzimuthQuadrature, DiskFrame, ObliqueLoads, SpinDirection};
 use fs_airscrew::{BladeStation, Rotor};
 
+#[path = "oblique/incident_variation.rs"]
+mod incident_variation;
+
 const AXIS: [f64; 3] = [1.0, 0.0, 0.0];
 const RADIAL: [f64; 3] = [0.0, 1.0, 0.0];
 const ZERO: [f64; 3] = [0.0; 3];
