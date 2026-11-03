@@ -124,6 +124,8 @@ impl BoundaryGrid3 {
             config,
             gate,
             Some((model, planes)),
+            None,
         )
+        .map(|(report, _)| report)
     }
 }

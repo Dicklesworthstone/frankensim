@@ -5,6 +5,7 @@ use super::super::{
     LubricationPlane3, PartialSaturationBodiesExchange3, PlaneLubricationExchange3,
     SphereLubrication3,
 };
+use super::surfaces::{PreparedSurfaces, SurfaceCandidate};
 use super::*;
 
 /// Accepted assembly trajectory with per-body pose, impulse and work accounts.
@@ -173,7 +174,9 @@ impl BoundaryGrid3 {
             gate,
             lubrication,
             true,
+            None,
         )
+        .map(|(report, _)| report)
     }
 
     // The dry-assembly owner must evaluate one simultaneous streamed candidate
@@ -189,7 +192,8 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
         lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
         publish: bool,
-    ) -> Result<MovingLubricatedPlanesExchange3<N>> {
+        surfaces: Option<&PreparedSurfaces>,
+    ) -> Result<(MovingLubricatedPlanesExchange3<N>, Option<SurfaceCandidate>)> {
         checkpoint(gate)?;
         if N == 0 || !origin.into_iter().all(f64::is_finite) {
             return Err(invalid(
@@ -199,13 +203,17 @@ impl BoundaryGrid3 {
         let initial = *bodies;
         let planes = lubrication.map_or(&[][..], |(_, planes)| planes);
         let mut midpoint_planes = Vec::new();
-        midpoint_planes
-            .try_reserve_exact(planes.len())
-            .map_err(|_| invalid("moving lubrication plane allocation refused"))?;
-        for plane in planes {
-            checkpoint(gate)?;
-            midpoint_planes.push(plane.translated(0.5)?);
+        if surfaces.is_none() {
+            midpoint_planes
+                .try_reserve_exact(planes.len())
+                .map_err(|_| invalid("moving lubrication plane allocation refused"))?;
+            for plane in planes {
+                checkpoint(gate)?;
+                midpoint_planes.push(plane.translated(0.5)?);
+            }
         }
+        let midpoint_planes =
+            surfaces.map_or(midpoint_planes.as_slice(), |s| s.midpoint_planes.as_slice());
         let mut midpoint = initial;
         let mut radii = [0.0; N];
         let mut volumes = [[0.0; 3]; N];
@@ -284,19 +292,28 @@ impl BoundaryGrid3 {
             radii,
             gate,
         )?;
-        admit_plane_positions(planes, initial.map(|b| b.center), radii, 0.0, gate)?;
-        admit_plane_positions(planes, midpoint.map(|b| b.center), radii, 0.5, gate)?;
+        if let Some(surfaces) = surfaces {
+            surfaces.admit_first_half(
+                initial.map(|b| b.center),
+                midpoint.map(|b| b.center),
+                radii,
+                gate,
+            )?;
+        } else {
+            admit_plane_positions(planes, initial.map(|b| b.center), radii, 0.0, gate)?;
+            admit_plane_positions(planes, midpoint.map(|b| b.center), radii, 0.5, gate)?;
+        }
         let frozen_before = frozen;
         let fields = core::array::from_fn(|a| samplers[a].fractions.as_slice());
-        let (_, (accepted, report), planes) = self.partial_saturation_resistance_transition(
+        let response = self.partial_saturation_resistance_transition(
             fields,
             &mut frozen,
             external,
             origin,
             gate,
-            lubrication.map(|(model, _)| (model, radii, midpoint_planes.as_slice())),
+            lubrication.map(|(model, _)| (model, radii, midpoint_planes)),
             publish,
-            |grid, exchanged, coupling| {
+            |grid, exchanged, coupling, plane_reports| {
                 let mut accepted = initial;
                 let mut reports = [None; N];
                 for a in 0..N {
@@ -415,20 +432,42 @@ impl BoundaryGrid3 {
                     radii,
                     gate,
                 )?;
-                admit_plane_positions(planes, accepted.map(|b| b.center), radii, 1.0, gate)?;
+                let surface_candidate = if let Some(surfaces) = surfaces {
+                    Some(surfaces.finish(
+                        plane_reports,
+                        midpoint.map(|b| b.center),
+                        accepted.map(|b| b.center),
+                        radii,
+                        origin,
+                        gate,
+                    )?)
+                } else {
+                    admit_plane_positions(
+                        planes,
+                        accepted.map(|b| b.center),
+                        radii,
+                        1.0,
+                        gate,
+                    )?;
+                    None
+                };
                 let report = MovingPartialSaturationBodiesExchange3 {
                     coupling: *coupling,
                     bodies: reports
                         .map(|report| report.expect("every assembly body was finalized")),
                 };
-                Ok((accepted, report))
+                Ok((accepted, report, surface_candidate))
             },
         )?;
+        let (_, (accepted, report, surface_candidate), planes) = response;
         *bodies = accepted;
-        Ok(MovingLubricatedPlanesExchange3 {
-            motion: report,
-            planes,
-        })
+        Ok((
+            MovingLubricatedPlanesExchange3 {
+                motion: report,
+                planes,
+            },
+            surface_candidate,
+        ))
     }
 }
 

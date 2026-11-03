@@ -1,5 +1,6 @@
 //! Simultaneous physical dry bodies with coupled retained-fluid corrections.
 
+use super::super::surfaces::{PreparedSurfaces, SurfaceCandidate};
 use super::*;
 use crate::d3q19::{
     LubricationPlane3, PartialSaturationBodiesExchange3, PlaneLubricationExchange3,
@@ -37,7 +38,8 @@ pub struct DryBodiesExchange3<const N: usize> {
     /// Per-body changes minus authored, corrected hydrodynamic and film impulses.
     pub body_momentum_residuals: [[f64; 6]; N],
     /// Exterior fluid plus all dry bodies minus all physical sources and fluxes,
-    /// including the opposite reaction received by any prescribed film planes.
+    /// including the opposite reaction received by every film surface. Finite
+    /// carriers are outside this sphere/exterior-fluid subsystem account.
     pub combined_momentum_residual: [f64; 6],
     /// Authored load work at each native midpoint rigid velocity.
     pub physical_external_work: [f64; N],
@@ -74,6 +76,7 @@ struct AssemblyStep<'a, const N: usize> {
     inside_before: [ImmersedMomentum3; N],
     interior_forcing: Option<[[f64; 6]; N]>,
     lubrication: Option<(SphereLubrication3, &'a [LubricationPlane3])>,
+    surfaces: Option<&'a PreparedSurfaces>,
     maximum_relative_volume_change: f64,
     gate: &'a CancelGate,
 }
@@ -82,6 +85,7 @@ struct AssemblyCandidate<const N: usize> {
     bodies: [MovingPartialSaturationBody3; N],
     native: MovingPartialSaturationBodiesExchange3<N>,
     planes: Vec<PlaneLubricationExchange3>,
+    surfaces: Option<SurfaceCandidate>,
     interior: [ImmersedMomentum3; N],
     slip: [f64; N],
     residual: [[f64; 6]; N],
@@ -131,13 +135,13 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
     ) -> Result<DryBodiesExchange3<N>> {
         self.step_with_dry_partial_saturation_resistance(
-            samplers, shapes, bodies, external, origin, config, gate, None,
+            samplers, shapes, bodies, external, origin, config, gate, None, None,
         )
-        .map(|report| report.motion)
+        .map(|(report, _)| report.motion)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    fn step_with_dry_partial_saturation_resistance<const N: usize>(
+    pub(in crate::d3q19::boundary::body_motion) fn step_with_dry_partial_saturation_resistance<const N: usize>(
         &mut self,
         samplers: &mut [BodyFrameSampler3; N],
         shapes: [&dyn BodyFrameShape3; N],
@@ -147,7 +151,8 @@ impl BoundaryGrid3 {
         config: DryBodyCouplingConfig3,
         gate: &CancelGate,
         lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
-    ) -> Result<DryLubricatedPlanesExchange3<N>> {
+        surfaces: Option<&PreparedSurfaces>,
+    ) -> Result<(DryLubricatedPlanesExchange3<N>, Option<SurfaceCandidate>)> {
         checkpoint(gate)?;
         config.admit()?;
         if !(1..=8).contains(&N) || !origin.into_iter().all(f64::is_finite) {
@@ -167,10 +172,16 @@ impl BoundaryGrid3 {
                 config,
                 gate,
             )?;
-            return Ok(DryLubricatedPlanesExchange3 {
-                motion: singleton(single),
-                planes: Vec::new(),
-            });
+            return Ok((
+                DryLubricatedPlanesExchange3 {
+                    motion: singleton(single),
+                    planes: Vec::new(),
+                },
+                surfaces.map(|_| SurfaceCandidate {
+                    states: Vec::new(),
+                    reports: Vec::new(),
+                }),
+            ));
         }
         let initial = *bodies;
         let mut radii = [0.0; N];
@@ -224,6 +235,7 @@ impl BoundaryGrid3 {
             inside_before,
             interior_forcing: None,
             lubrication,
+            surfaces,
             maximum_relative_volume_change: config.maximum_relative_volume_change,
             gate,
         };
@@ -354,10 +366,13 @@ impl BoundaryGrid3 {
         self.next = Some(next);
         self.topology_locked = true;
         *bodies = current.bodies;
-        Ok(DryLubricatedPlanesExchange3 {
-            motion: receipt,
-            planes: current.planes,
-        })
+        Ok((
+            DryLubricatedPlanesExchange3 {
+                motion: receipt,
+                planes: current.planes,
+            },
+            current.surfaces,
+        ))
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -536,8 +551,8 @@ impl BoundaryGrid3 {
         }
         let fluid_delta = difference(receipt.fluid[1].momentum, fluid_before.momentum);
         for i in 0..6 {
-            // The plane receipt is the wrench RECEIVED by the prescribed
-            // surface. Its opposite is an external source for this system;
+            // The plane receipt is the wrench RECEIVED by every film
+            // surface. Its opposite is a source for this open subsystem;
             // internal sphere-pair film impulses must cancel independently.
             receipt.combined_momentum_residual[i] +=
                 fluid_delta[i] - boundary[i] - represented_forcing[i] + plane_reaction[i];
@@ -589,7 +604,7 @@ impl BoundaryGrid3 {
             core::array::from_fn(|i| step.external[a][i] + impulse[i])
         });
         let mut bodies = step.initial;
-        let coupled = self.moving_partial_saturation_resistance_transition(
+        let (coupled, surfaces) = self.moving_partial_saturation_resistance_transition(
             samplers,
             step.shapes,
             &mut bodies,
@@ -598,6 +613,7 @@ impl BoundaryGrid3 {
             step.gate,
             step.lubrication,
             false,
+            step.surfaces,
         )?;
         let native = coupled.motion;
         for body in &native.bodies {
@@ -667,6 +683,7 @@ impl BoundaryGrid3 {
             bodies,
             native,
             planes: coupled.planes,
+            surfaces,
             interior,
             slip,
             residual,

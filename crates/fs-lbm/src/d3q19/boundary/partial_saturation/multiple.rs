@@ -322,7 +322,7 @@ impl BoundaryGrid3 {
             gate,
             lubrication,
             true,
-            finish,
+            |grid, after, report, _| finish(grid, after, report),
         )
     }
 
@@ -343,6 +343,7 @@ impl BoundaryGrid3 {
             &Self,
             &[PartialSaturationBody3; N],
             &PartialSaturationBodiesExchange3<N>,
+            &[PlaneLubricationExchange3],
         ) -> Result<T>,
     ) -> Result<(
         PartialSaturationBodiesExchange3<N>,
@@ -380,7 +381,7 @@ impl BoundaryGrid3 {
                         population_impulse_residual: [0.0; 3],
                         population_angular_impulse_residual: [0.0; 3],
                     };
-                    let value = finish(grid, &proposed, &receipt)?;
+                    let value = finish(grid, &proposed, &receipt, &[])?;
                     Ok((receipt, value))
                 },
             )?;
@@ -745,7 +746,9 @@ impl BoundaryGrid3 {
                 return Err(error);
             }
         };
-        let value = match checkpoint(gate).and_then(|()| finish(self, &proposed, &report)) {
+        let value = match checkpoint(gate)
+            .and_then(|()| finish(self, &proposed, &report, &plane_reports))
+        {
             Ok(value) => value,
             Err(error) => {
                 self.next = Some(next);

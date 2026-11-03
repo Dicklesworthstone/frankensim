@@ -18,7 +18,12 @@ type Result<T> = core::result::Result<T, PartialSaturationError3>;
 
 mod multiple;
 mod quadrature;
+mod surfaces;
 pub use multiple::{MovingLubricatedPlanesExchange3, MovingPartialSaturationBodiesExchange3};
+pub use surfaces::{
+    DryLubricatedSurfacesExchange3, MovingFiniteLubricationPlane3, MovingFinitePlaneExchange3,
+    MovingLubricatedSurfacesExchange3, MovingLubricationSurface3, MovingSurfaceExchange3,
+};
 mod dry;
 pub use dry::{
     DryBodiesExchange3, DryBodyCouplingConfig3, DryBodyExchange3, DryLubricatedPlanesExchange3,

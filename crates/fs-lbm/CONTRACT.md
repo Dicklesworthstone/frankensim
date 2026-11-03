@@ -9358,3 +9358,45 @@ exterior-fluid-plus-dry-body inventories for a single body, delegated singleton
 and simultaneous pair. The earlier unsupported-model regression now refuses
 an unrepresentable reciprocal viscous time and moving walls, reflecting the
 newly admitted moment collision and open boundary capabilities.
+
+### Moving finite film carriers on the dry sphere/fluid clock
+
+`MovingLubricationSurface3::{Prescribed, Finite}` and the moving/dry
+`step_with_*lubricated_spheres_and_surfaces` entries attach each finite plane
+to the original `MovingPartialSaturationBody3` using a body-frame point and
+normal. Original cached full inertia and momentum-preserving free half-drifts
+advance both pose and world mobility. Actual midpoint geometry enters the
+existing simultaneous film/fluid solve. The direct received film spin impulse
+and authored center couple kick the carrier's momentum before its second free
+half-drift. Prescribed translation also advances once to the accepted endpoint.
+
+The dry 6N retained-fluid correction evaluates every candidate from the same
+accepted finite-carrier state. Its mobility participates in every shared
+resistance response; probes never publish or advance a surface. Accepted
+spheres, surfaces and the single streamed fluid candidate publish together,
+after all allocations, endpoint geometry checks and diagnostics. Exact surface
+load counts, the 64-surface ceiling and original physical-film/scalar-mode
+budgets remain authoritative; prescribed load slots must be zero.
+
+Conservative angular-travel bounds exclude sphere/plane contact and duplicate
+planes throughout both numerical half-drifts, including the exchanged second
+half rate. They can refuse valid near-gap trajectories and are not exact CCD.
+Finite reports separate actual fixed-origin momentum change, authored loads,
+film work, kinetic change and native free-rotation energy defect. The existing
+dry sphere/exterior-fluid balance remains an open subsystem containing all
+received surface reactions; finite carrier work is not prescribed reservoir
+work or deposited heat.
+
+Each finite slot is an independent film-only carrier. No resolved wall,
+sampled carrier interior, displaced volume, buoyancy, inferred weight,
+carrier-carrier shape contact, shared multi-face body identity, moving-wall
+cover/vacate conservation or thermal destination is supplied. Refusal preserves
+all accepted physical states; reusable numerical scratch may change.
+
+Focused native tests cover moving full-inertia recoil beside a spinning
+prescribed surface, independent population/body momentum closure across ticks,
+origin covariance, exact legacy prescribed/empty continuation, dry probe and
+late-carrier-refusal rollback/retry, and swept collisions hidden by clear
+endpoints. These tests were authored but could not be compiled or executed in
+the delivery environment: the pinned runtime compiler was killed before this
+crate, and the execution environment subsequently became unavailable.

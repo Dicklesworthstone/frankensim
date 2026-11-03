@@ -48,7 +48,10 @@ impl FiniteLubricationPlane3 {
     }
 
     // Keep finite state packaging shared by the mixed-surface entry point.
-    pub(super) fn driven(self, external: [f64; 6]) -> Result<LubricationPlane3> {
+    pub(in crate::d3q19::boundary) fn driven(
+        self,
+        external: [f64; 6],
+    ) -> Result<LubricationPlane3> {
         if !external.into_iter().all(f64::is_finite) {
             return Err(invalid("nonfinite finite-surface external impulse"));
         }

@@ -36,6 +36,8 @@ pub use partial_saturation::{
 };
 mod body_motion;
 pub use body_motion::{
+    DryLubricatedSurfacesExchange3, MovingFiniteLubricationPlane3, MovingFinitePlaneExchange3,
+    MovingLubricatedSurfacesExchange3, MovingLubricationSurface3, MovingSurfaceExchange3,
     BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, DryBodiesExchange3,
     DryBodyCouplingConfig3, DryBodyExchange3, DryLubricatedPlanesExchange3, ImmersedMomentum3,
     MovingLubricatedPlanesExchange3, MovingPartialSaturationBodiesExchange3,
