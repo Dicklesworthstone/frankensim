@@ -6,12 +6,13 @@
 
 use super::super::prescribed::{
     EvaluatedPrescribedStep, PrescribedBaseMotionError, PrescribedBaseMotionState,
-    PrescribedBaseMotionStep, PrescribedBasePath, PrescribedStage, step_evaluated,
+    PrescribedBaseMotionStep, PrescribedBasePath, PrescribedStage, external_sources,
+    step_evaluated,
 };
 use super::super::{FreeFloatingBaseState, MomentumMap, poll, validate_slice};
 use super::bushing::{self, BushingLaw, SpatialBushing};
 use super::{SpatialMotionLoads, separation, storage};
-use crate::articulated::ArticulatedModel;
+use crate::articulated::{ArticulatedModel, Kinematics};
 
 /// Accepted supported motion and original finite-attachment energy accounts.
 #[derive(Debug, Clone, PartialEq)]
@@ -124,7 +125,9 @@ pub fn step_prescribed_base_bushings(
         loads.held,
         duration,
         &mut cancelled,
-        |stage, _, cancelled| evaluate_shared(model, stage, loads, bushings, cancelled),
+        |stage, kinematics, cancelled| {
+            evaluate_shared(model, stage, kinematics, loads, bushings, cancelled)
+        },
         None,
     )?;
     finish(model, evaluated, loads, bushings, &mut cancelled)
@@ -161,7 +164,9 @@ pub fn step_prescribed_base_bushings_with_effort(
         loads.held,
         duration,
         &mut cancelled,
-        |stage, _, cancelled| evaluate_shared(model, stage, loads, bushings, cancelled),
+        |stage, kinematics, cancelled| {
+            evaluate_shared(model, stage, kinematics, loads, bushings, cancelled)
+        },
         Some(&mut effort),
     )?;
     finish(model, evaluated, loads, bushings, &mut cancelled)
@@ -170,6 +175,7 @@ pub fn step_prescribed_base_bushings_with_effort(
 fn evaluate_shared<'a, B: BushingLaw>(
     model: &ArticulatedModel,
     stage: &PrescribedBaseMotionState,
+    kinematics: &Kinematics,
     loads: SpatialMotionLoads<'a>,
     bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
@@ -184,8 +190,39 @@ fn evaluate_shared<'a, B: BushingLaw>(
     )?;
     let base = FreeFloatingBaseState::new(stage.base.world_from_base, stage.base.twist_body);
     let evaluated = bushing::evaluate(&map, base, loads, bushings, cancelled)?;
+    // Preserve original source loads; internal connection rounding must never
+    // become an external impulse in the supported motion receipt.
+    let mut external = external_sources(
+        model,
+        stage.base.world_from_base,
+        kinematics,
+        &map.shape,
+        loads.held,
+        cancelled,
+    )?;
+    for (i, applied) in loads.world_points.iter().enumerate() {
+        if i % 64 == 0 {
+            poll(cancelled)?;
+        }
+        external.add_world_wrench(
+            applied.force_world,
+            applied.couple_world,
+            &[
+                stage.base.world_from_base.translation(),
+                stage
+                    .base
+                    .world_from_base
+                    .rotation()
+                    .rotate(map.shape.world_from_link[applied.point.link].translation())?,
+                kinematics.world_from_link[applied.point.link]
+                    .rotation()
+                    .rotate(applied.point.point_body)?,
+            ],
+        );
+    }
     Ok(PrescribedStage {
         body_wrench: evaluated.body_wrench,
+        external,
         external_power: evaluated.load.body_wrench_power,
         internal_power: evaluated.load.internal_body_power,
         stored_energy: evaluated.load.stored_energy,

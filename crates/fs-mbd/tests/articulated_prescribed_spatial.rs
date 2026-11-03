@@ -251,6 +251,15 @@ fn moving_support_retains_connection_reaction_work_without_double_counting_it() 
     close(b.motion.support_work, -dt * force * speed, 2e-13);
     close(b.motion.internal_body_work, -dt * force * vh, 2e-13);
     close(b.motion.external_work, 0.0, 0.0);
+    // The connection's original two body wrenches enter dynamics and support
+    // recovery, while the independently supplied external impulse remains zero.
+    for step in [&a.motion, &b.motion] {
+        assert_eq!(step.external_linear_impulse_world, Vec3::default());
+        assert_eq!(step.external_angular_impulse_world, Vec3::default());
+        close(step.support_linear_impulse_world.x, -dt * force, 2e-14);
+        close(step.linear_momentum_change_world.x, -dt * force, 2e-14);
+        close(step.linear_momentum_residual_world.norm(), 0.0, 2e-14);
+    }
     close(
         a.mechanical_work_residual,
         b.mechanical_work_residual,
@@ -341,6 +350,21 @@ fn inertial_point_force_is_rebuilt_on_a_rotating_support_with_a_scalar_root() {
         step.motion.external_work,
         dt * (5.0 * point_velocity_y + 0.2 * omega),
         3e-13,
+    );
+    close(
+        (step.motion.external_linear_impulse_world - applied.force_world.scale(dt)).norm(),
+        0.0,
+        3e-14,
+    );
+    // Original midpoint point position: rotate both the scalar root displacement
+    // and the local attachment arm before forming the force moment.
+    let point_x = angle_h.cos() * qh - angle_h.sin() * applied.point.point_body.y;
+    close(
+        (step.motion.external_angular_impulse_world
+            - Vec3::new(0.0, 0.0, dt * (5.0 * point_x + 0.2)))
+        .norm(),
+        0.0,
+        3e-14,
     );
 }
 

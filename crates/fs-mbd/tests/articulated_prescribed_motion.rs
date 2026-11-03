@@ -81,6 +81,23 @@ fn scalar_root_support_transmits_actuation_and_external_loads_once() {
     close(step.support_work, 0.0, 0.0);
     close(step.kinetic_energy_change, 0.48, 3e-14);
     close(step.kinetic_work_residual, 0.0, 3e-14);
+    vector(
+        step.external_linear_impulse_world,
+        Vec3::new(0.2, 0.0, 0.0),
+        2e-15,
+    );
+    vector(
+        step.support_linear_impulse_world,
+        Vec3::new(0.6, 0.0, 0.0),
+        2e-15,
+    );
+    vector(
+        step.linear_momentum_change_world,
+        Vec3::new(0.8, 0.0, 0.0),
+        2e-15,
+    );
+    vector(step.linear_momentum_residual_world, Vec3::default(), 3e-15);
+    vector(step.angular_momentum_residual_world, Vec3::default(), 0.0);
     assert_eq!(initial, snapshot);
 }
 
@@ -144,6 +161,19 @@ fn moving_accelerating_support_retains_relative_and_support_work() {
             5e-14,
         );
         close(step.kinetic_work_residual, 0.0, 5e-14);
+        vector(step.external_linear_impulse_world, Vec3::default(), 0.0);
+        vector(
+            step.support_linear_impulse_world,
+            Vec3::new(effort * dt, 0.0, 0.0),
+            2e-14,
+        );
+        vector(
+            step.linear_momentum_change_world,
+            Vec3::new(effort * dt, 0.0, 0.0),
+            2e-14,
+        );
+        vector(step.linear_momentum_residual_world, Vec3::default(), 2e-14);
+        vector(step.angular_momentum_residual_world, Vec3::default(), 0.0);
         assert_eq!(step.state_after.base, base_at(dt));
     }
 }
@@ -206,6 +236,35 @@ fn fixed_root_full_tensor_and_offset_keep_support_force_and_couple() {
         vector(step.support_wrench_body.torque, expected_torque, 8e-14);
         close(step.support_work, 0.0, 2e-14);
         close(step.kinetic_energy_change, 0.0, 1e-13);
+        let dt = 0.05;
+        let midpoint = rotation(omega.scale(0.5 * dt));
+        let endpoint = rotation(omega.scale(dt));
+        let p0 = omega.cross(arm + center).scale(2.0);
+        let dp = endpoint.rotate(p0).unwrap() - p0;
+        let l0 = inertia.inertia_com().apply(omega) + (arm + center).cross(p0);
+        let dl = endpoint.rotate(l0).unwrap() - l0 + origin.cross(dp);
+        let applied_force = midpoint.rotate(expected_force).unwrap().scale(dt);
+        let applied_moment =
+            midpoint.rotate(expected_torque).unwrap().scale(dt) + origin.cross(applied_force);
+        vector(step.external_linear_impulse_world, Vec3::default(), 0.0);
+        vector(step.external_angular_impulse_world, Vec3::default(), 0.0);
+        vector(step.support_linear_impulse_world, applied_force, 2e-13);
+        vector(step.support_angular_impulse_world, applied_moment, 2e-10);
+        vector(step.linear_momentum_change_world, dp, 2e-13);
+        vector(step.angular_momentum_change_world, dl, 2e-10);
+        vector(
+            step.linear_momentum_residual_world,
+            dp - applied_force,
+            2e-13,
+        );
+        vector(
+            step.angular_momentum_residual_world,
+            dl - applied_moment,
+            2e-10,
+        );
+        // Finite midpoint quadrature is not the exact integral of a rotating
+        // force. A nonzero defect must remain visible, never supplied as heat.
+        assert!(step.linear_momentum_residual_world.norm() > 1e-5);
         assert!(step.state_after.joint_position.is_empty());
     }
 }
@@ -321,7 +380,301 @@ fn rigid_frame_changes_preserve_work_and_small_gravity_displacements() {
             reference.kinetic_energy_change,
             3e-13,
         );
+        vector(
+            actual.external_linear_impulse_world,
+            r.rotate(reference.external_linear_impulse_world).unwrap(),
+            3e-13,
+        );
+        vector(
+            actual.support_linear_impulse_world,
+            r.rotate(reference.support_linear_impulse_world).unwrap(),
+            3e-13,
+        );
+        vector(
+            actual.linear_momentum_change_world,
+            r.rotate(reference.linear_momentum_change_world).unwrap(),
+            3e-13,
+        );
+        if translation.norm() < 10.0 {
+            vector(
+                actual.external_angular_impulse_world,
+                r.rotate(reference.external_angular_impulse_world).unwrap()
+                    + translation.cross(actual.external_linear_impulse_world),
+                3e-12,
+            );
+            vector(
+                actual.support_angular_impulse_world,
+                r.rotate(reference.support_angular_impulse_world).unwrap()
+                    + translation.cross(actual.support_linear_impulse_world),
+                3e-12,
+            );
+            vector(
+                actual.angular_momentum_change_world,
+                r.rotate(reference.angular_momentum_change_world).unwrap()
+                    + translation.cross(actual.linear_momentum_change_world),
+                3e-12,
+            );
+        }
     }
+}
+
+#[test]
+fn stationary_support_balances_original_external_and_gravity_impulses() {
+    let center = Vec3::new(0.25, -0.5, 0.125);
+    let arm = Vec3::new(0.5, 0.25, -0.125);
+    let model = ArticulatedModel::new(vec![Link::new(
+        "fixed_offset",
+        None,
+        Se3::from_parts(So3::identity(), arm).unwrap(),
+        JointModel::FIXED,
+        SpatialInertia::new(2.0, center, Mat3::identity()).unwrap(),
+    )])
+    .unwrap();
+    let frame = Se3::from_parts(
+        rotation(Vec3::new(0.2, -0.3, 0.1)),
+        Vec3::new(4.0, -3.0, 2.0),
+    )
+    .unwrap();
+    let initial = PrescribedBaseMotionState {
+        time_s: 0.0,
+        base: BaseState::stationary(frame),
+        joint_position: vec![],
+        joint_velocity: vec![],
+    };
+    let body = Wrench::new(Vec3::new(0.25, -0.125, 0.5), Vec3::new(1.0, 2.0, -1.0));
+    let gravity = Vec3::new(0.0, 0.0, -9.5);
+    let dt = 0.125;
+    let step = step_prescribed_base(
+        &model,
+        &initial,
+        PrescribedBasePath::stationary(frame),
+        FreeFloatingMotionLoads {
+            generalized_force: &[],
+            external_body_wrench: &[body],
+            gravity_world: gravity,
+        },
+        dt,
+        || false,
+    )
+    .unwrap();
+    let force = frame.rotation().rotate(body.force).unwrap();
+    let couple = frame.rotation().rotate(body.torque).unwrap();
+    let expected_linear = (force + gravity.scale(2.0)).scale(dt);
+    let expected_angular = (couple
+        + frame.transform_point(arm).unwrap().cross(force)
+        + frame
+            .transform_point(arm + center)
+            .unwrap()
+            .cross(gravity.scale(2.0)))
+    .scale(dt);
+    vector(step.external_linear_impulse_world, expected_linear, 2e-13);
+    vector(step.external_angular_impulse_world, expected_angular, 2e-13);
+    vector(
+        step.support_linear_impulse_world,
+        expected_linear.scale(-1.0),
+        2e-13,
+    );
+    vector(
+        step.support_angular_impulse_world,
+        expected_angular.scale(-1.0),
+        2e-13,
+    );
+    vector(step.linear_momentum_change_world, Vec3::default(), 0.0);
+    vector(step.angular_momentum_change_world, Vec3::default(), 0.0);
+    vector(step.linear_momentum_residual_world, Vec3::default(), 2e-13);
+    vector(step.angular_momentum_residual_world, Vec3::default(), 2e-13);
+    assert_eq!(step.support_work, 0.0);
+}
+
+fn three_branches(moving: bool) -> ArticulatedModel {
+    let inertia = SpatialInertia::new(1.0, Vec3::default(), Mat3::identity()).unwrap();
+    let mut links = vec![Link::new(
+        "root",
+        None,
+        Se3::identity(),
+        JointModel::FIXED,
+        inertia,
+    )];
+    for i in 0..3 {
+        let joint = if moving {
+            JointModel::prismatic(Vec3::new(1.0, 0.0, 0.0), None).unwrap()
+        } else {
+            JointModel::FIXED
+        };
+        links.push(Link::new(
+            format!("child{i}"),
+            Some(0),
+            Se3::identity(),
+            joint,
+            inertia,
+        ));
+    }
+    ArticulatedModel::new(links).unwrap()
+}
+
+#[test]
+fn actual_momentum_change_survives_large_translation_and_rounded_endpoint_totals() {
+    let model = three_branches(true);
+    let large = (1u64 << 52) as f64;
+    let origin = Vec3::new(0.0, (1u64 << 20) as f64, -((1u64 << 19) as f64));
+    let frame = Se3::from_parts(So3::identity(), origin).unwrap();
+    let initial = PrescribedBaseMotionState {
+        time_s: 0.0,
+        base: BaseState::stationary(frame),
+        joint_position: vec![0.0; 3],
+        joint_velocity: vec![large, 0.0, large],
+    };
+    let step = step_prescribed_base(
+        &model,
+        &initial,
+        PrescribedBasePath::stationary(frame),
+        FreeFloatingMotionLoads {
+            generalized_force: &[6.0, 1.0, -6.0],
+            external_body_wrench: &[Wrench::default(); 4],
+            gravity_world: Vec3::default(),
+        },
+        1.0,
+        || false,
+    )
+    .unwrap();
+    // Each unit-mass velocity increment is represented. The total's one-unit
+    // change is nevertheless below the resolution of the absolute 2^53 total.
+    assert_eq!(
+        step.momentum_before.linear_momentum_world,
+        step.momentum_after.linear_momentum_world
+    );
+    let change = Vec3::new(1.0, 0.0, 0.0);
+    vector(step.linear_momentum_change_world, change, 0.0);
+    vector(
+        step.angular_momentum_change_world,
+        origin.cross(change),
+        0.0,
+    );
+    vector(step.external_linear_impulse_world, Vec3::default(), 0.0);
+    vector(step.external_angular_impulse_world, Vec3::default(), 0.0);
+    // Internal actuation reaches the stationary support through native RNEA;
+    // it is not counted again as a prescribed external body impulse.
+    vector(step.support_linear_impulse_world, change, 0.0);
+    vector(
+        step.support_angular_impulse_world,
+        origin.cross(change),
+        0.0,
+    );
+    vector(step.linear_momentum_residual_world, Vec3::default(), 0.0);
+    vector(step.angular_momentum_residual_world, Vec3::default(), 0.0);
+    assert_eq!(step.kinetic_energy_change, 36.5);
+    assert_eq!(step.actuator_work, 36.5);
+    assert_eq!(step.support_work, 0.0);
+}
+
+#[test]
+fn imposed_motion_keeps_half_ulp_kinetic_increment_separate_from_midpoint_source_work() {
+    let model = ArticulatedModel::new(vec![Link::new(
+        "body",
+        None,
+        Se3::identity(),
+        JointModel::FIXED,
+        SpatialInertia::new(1.0, Vec3::default(), Mat3::identity()).unwrap(),
+    )])
+    .unwrap();
+    let large = (1u64 << 55) as f64;
+    let velocity = Vec3::new(large, 0.0, large);
+    let acceleration = Vec3::new(8.0, 1.0, -8.0);
+    let at = |t: f64| {
+        BaseState::prescribed(
+            Se3::from_parts(
+                So3::identity(),
+                velocity.scale(t) + acceleration.scale(0.5 * t * t),
+            )
+            .unwrap(),
+            Twist::new(Vec3::default(), velocity + acceleration.scale(t)),
+            Twist::new(Vec3::default(), acceleration),
+        )
+    };
+    let initial = PrescribedBaseMotionState {
+        time_s: 0.0,
+        base: at(0.0),
+        joint_position: vec![],
+        joint_velocity: vec![],
+    };
+    let step = step_prescribed_base(
+        &model,
+        &initial,
+        PrescribedBasePath {
+            midpoint: at(0.5),
+            endpoint: at(1.0),
+        },
+        FreeFloatingMotionLoads {
+            generalized_force: &[],
+            external_body_wrench: &[Wrench::default()],
+            gravity_world: Vec3::default(),
+        },
+        1.0,
+        || false,
+    )
+    .unwrap();
+    // The endpoint velocity increments are all representable and v dot delta-v
+    // cancels. Its quadratic increment is (8² + 1² + 8²)/2 = 64.5 J.
+    assert_eq!(step.kinetic_energy_change, 64.5);
+    vector(step.linear_momentum_change_world, acceleration, 0.0);
+    vector(step.support_linear_impulse_world, acceleration, 0.0);
+    vector(step.linear_momentum_residual_world, Vec3::default(), 0.0);
+    // This supplied midpoint twist rounds the first half-ULP away. Keep that
+    // actual source quadrature and report the resulting defect independently.
+    assert_eq!(step.support_work, 32.5);
+    assert_eq!(step.kinetic_work_residual, 32.0);
+}
+
+#[test]
+fn source_impulse_retains_small_force_and_couple_between_opposite_large_loads() {
+    let model = three_branches(false);
+    let large = (1u64 << 55) as f64;
+    let origin = Vec3::new((1u64 << 40) as f64, 0.0, 0.0);
+    let frame = Se3::from_parts(So3::identity(), origin).unwrap();
+    let initial = PrescribedBaseMotionState {
+        time_s: 0.0,
+        base: BaseState::stationary(frame),
+        joint_position: vec![],
+        joint_velocity: vec![],
+    };
+    let external = [
+        Wrench::default(),
+        Wrench::new(Vec3::default(), Vec3::new(0.0, large, 0.0)),
+        Wrench::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
+        Wrench::new(Vec3::default(), Vec3::new(0.0, -large, 0.0)),
+    ];
+    let dt = 0.125;
+    let step = step_prescribed_base(
+        &model,
+        &initial,
+        PrescribedBasePath::stationary(frame),
+        FreeFloatingMotionLoads {
+            generalized_force: &[],
+            external_body_wrench: &external,
+            gravity_world: Vec3::default(),
+        },
+        dt,
+        || false,
+    )
+    .unwrap();
+    let applied = Vec3::new(0.0, dt, 0.0);
+    let moment = origin.cross(applied) + Vec3::new(0.0, 0.0, dt);
+    vector(step.external_linear_impulse_world, applied, 0.0);
+    vector(step.external_angular_impulse_world, moment, 0.0);
+    vector(step.linear_momentum_change_world, Vec3::default(), 0.0);
+    vector(step.angular_momentum_change_world, Vec3::default(), 0.0);
+    // The source is independent of whatever rounding the native reaction pass
+    // retains. Its visible balance defect is not used to replace that source.
+    vector(
+        step.linear_momentum_residual_world,
+        (applied + step.support_linear_impulse_world).scale(-1.0),
+        0.0,
+    );
+    vector(
+        step.angular_momentum_residual_world,
+        (moment + step.support_angular_impulse_world).scale(-1.0),
+        0.0,
+    );
 }
 
 #[test]

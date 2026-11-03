@@ -78,6 +78,26 @@ pub struct PrescribedBaseMotionStep {
     pub momentum_before: ArticulatedMomentum,
     /// Native whole-tree momentum and kinetic storage at the endpoint.
     pub momentum_after: ArticulatedMomentum,
+    /// Midpoint external body/world force impulse including uniform gravity, N s.
+    /// Internal actuators, spatial connections and the support are excluded.
+    pub external_linear_impulse_world: Vec3,
+    /// The same source angular impulse about the world origin, in N m s.
+    pub external_angular_impulse_world: Vec3,
+    /// Midpoint native RNEA support force ON the tree, integrated in N s.
+    pub support_linear_impulse_world: Vec3,
+    /// Support angular impulse about the world origin, in N m s.
+    /// Original root arms and central couples remain separate until reduction.
+    pub support_angular_impulse_world: Vec3,
+    /// Actual per-link linear-momentum increments, reduced before rounding, N s.
+    /// This is not a difference of rounded whole-tree endpoint totals.
+    pub linear_momentum_change_world: Vec3,
+    /// Actual central-spin plus orbital increments about the world origin, N m s.
+    pub angular_momentum_change_world: Vec3,
+    /// Actual change minus independent midpoint external and support impulses.
+    /// This measures numerical/path error; it is not repaired or assigned to heat.
+    pub linear_momentum_residual_world: Vec3,
+    /// Angular counterpart of linear_momentum_residual_world about the same origin.
+    pub angular_momentum_residual_world: Vec3,
     /// Kinetic change from polarized link COM and central-spin increments, J.
     /// Absolute endpoint energy totals are retained separately as diagnostics.
     pub kinetic_energy_change: f64,
@@ -190,7 +210,7 @@ pub fn step_prescribed_base(
         loads,
         duration,
         &mut cancelled,
-        |_, kinematics, cancelled| held_stage(loads, kinematics, cancelled),
+        |stage, kinematics, cancelled| held_stage(model, stage, loads, kinematics, cancelled),
         None,
     )?
     .step)
@@ -227,7 +247,7 @@ pub fn step_prescribed_base_with_effort(
         loads,
         duration,
         &mut cancelled,
-        |_, kinematics, cancelled| held_stage(loads, kinematics, cancelled),
+        |stage, kinematics, cancelled| held_stage(model, stage, loads, kinematics, cancelled),
         Some(&mut effort),
     )?
     .step)
@@ -238,6 +258,8 @@ pub(super) type EffortLaw<'a> = dyn FnMut(f64, &PrescribedBaseMotionState, &mut 
 
 pub(super) struct PrescribedStage<'a> {
     pub(super) body_wrench: Cow<'a, [Wrench]>,
+    /// Original external sources before internal forces enter body_wrench.
+    pub(super) external: SpatialSum,
     pub(super) external_power: f64,
     pub(super) internal_power: f64,
     pub(super) stored_energy: f64,
@@ -391,6 +413,27 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
     let support_wrench_world = support_wrench_body.transform_by(&midpoint.base.world_from_base);
     validate_wrench(support_wrench_body, "prescribed_motion.support_body")?;
     validate_wrench(support_wrench_world, "prescribed_motion.support_world")?;
+    // Integrate the actual midpoint reaction, independently of endpoint momentum.
+    // Do not round a small root couple into a large world-origin force moment.
+    let mut support = SpatialSum::default();
+    support.add_world_wrench(
+        middle.world_from_link[0]
+            .rotation()
+            .rotate(inverse.body_wrench[0].force)?,
+        middle.world_from_link[0]
+            .rotation()
+            .rotate(inverse.body_wrench[0].torque)?,
+        &[
+            midpoint.base.world_from_base.translation(),
+            midpoint
+                .base
+                .world_from_base
+                .rotation()
+                .rotate(base_from_root.translation())?,
+        ],
+    );
+    let support = support.scaled(duration);
+    let external = midpoint_load.external.scaled(duration);
 
     let state_after = PrescribedBaseMotionState {
         time_s: endpoint_time,
@@ -411,7 +454,7 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
     poll(cancelled)?;
     let momentum_after = momentum_from_kinematics(model, &after)?;
     poll(cancelled)?;
-    let (kinetic_change, gravity_work) = increments(
+    let (kinetic_change, gravity_work, momentum_change) = increments(
         model,
         &before,
         &after,
@@ -420,6 +463,12 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
         loads.gravity_world,
         cancelled,
     )?;
+    let momentum_residual = momentum_change.subtract(external).subtract(support);
+    let external = external.checked_wrench("prescribed_motion.external_impulse")?;
+    let support = support.checked_wrench("prescribed_motion.support_impulse")?;
+    let momentum_change = momentum_change.checked_wrench("prescribed_motion.momentum_change")?;
+    let momentum_residual =
+        momentum_residual.checked_wrench("prescribed_motion.momentum_residual")?;
     let actuator_power = sum_products(
         stage_effort.iter().copied(),
         midpoint.joint_velocity.iter().copied(),
@@ -458,6 +507,14 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
             state_after,
             momentum_before,
             momentum_after,
+            external_linear_impulse_world: external.force,
+            external_angular_impulse_world: external.torque,
+            support_linear_impulse_world: support.force,
+            support_angular_impulse_world: support.torque,
+            linear_momentum_change_world: momentum_change.force,
+            angular_momentum_change_world: momentum_change.torque,
+            linear_momentum_residual_world: momentum_residual.force,
+            angular_momentum_residual_world: momentum_residual.torque,
             kinetic_energy_change: kinetic_change.to_f64(),
             support_wrench_body,
             support_wrench_world,
@@ -473,6 +530,8 @@ pub(super) fn step_evaluated<'a, C: FnMut() -> bool>(
 }
 
 fn held_stage<'a>(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
     loads: FreeFloatingMotionLoads<'a>,
     kinematics: &Kinematics,
     cancelled: &mut impl FnMut() -> bool,
@@ -489,8 +548,31 @@ fn held_stage<'a>(
         }
         power = power + sum_products(wrench.to_array(), velocity.to_array());
     }
+    // Native relative geometry retains local arms under a distant world origin.
+    let relative = if state.base.world_from_base == Se3::identity() {
+        Cow::Borrowed(kinematics)
+    } else {
+        poll(cancelled)?;
+        let relative = forward_kinematics(
+            model,
+            BaseState::stationary(Se3::identity()),
+            &state.joint_position,
+            &state.joint_velocity,
+        )?;
+        poll(cancelled)?;
+        Cow::Owned(relative)
+    };
+    let external = external_sources(
+        model,
+        state.base.world_from_base,
+        kinematics,
+        &relative,
+        loads,
+        cancelled,
+    )?;
     Ok(PrescribedStage {
         body_wrench: Cow::Borrowed(loads.external_body_wrench),
+        external,
         external_power: power.to_f64(),
         internal_power: 0.0,
         stored_energy: 0.0,
@@ -499,6 +581,9 @@ fn held_stage<'a>(
 }
 
 fn admit_stage(stage: &PrescribedStage<'_>) -> Result<(), PrescribedBaseMotionError> {
+    stage
+        .external
+        .checked_wrench("prescribed_motion.stage_sources")?;
     validate_slice(
         &[
             stage.external_power,
@@ -539,6 +624,109 @@ fn advance(
         .collect()
 }
 
+// Spatial reductions keep local couples and each orbital contribution separate
+// until after cancellation. A Wrench's f64 torque alone cannot retain those tails.
+#[derive(Clone, Copy, Default)]
+pub(super) struct SpatialSum {
+    linear: [Dd; 3],
+    angular: [Dd; 3],
+}
+
+impl SpatialSum {
+    fn add_force(&mut self, force: [Dd; 3], position_parts: &[Vec3]) {
+        add_components(&mut self.linear, force);
+        for arm in position_parts {
+            add_components(
+                &mut self.angular,
+                cross_dd(components(*arm).map(Dd::from_f64), force),
+            );
+        }
+    }
+
+    pub(super) fn add_world_wrench(&mut self, force: Vec3, couple: Vec3, position_parts: &[Vec3]) {
+        self.add_force(components(force).map(Dd::from_f64), position_parts);
+        add_components(&mut self.angular, components(couple).map(Dd::from_f64));
+    }
+
+    fn scaled(self, duration: f64) -> Self {
+        let dt = Dd::from_f64(duration);
+        Self {
+            linear: self.linear.map(|value| dt * value),
+            angular: self.angular.map(|value| dt * value),
+        }
+    }
+
+    fn subtract(self, other: Self) -> Self {
+        Self {
+            linear: core::array::from_fn(|i| self.linear[i] - other.linear[i]),
+            angular: core::array::from_fn(|i| self.angular[i] - other.angular[i]),
+        }
+    }
+
+    fn checked_wrench(self, label: &'static str) -> Result<Wrench, PrescribedBaseMotionError> {
+        for value in self.linear.iter().chain(&self.angular) {
+            validate_slice(&[value.hi, value.lo], label)?;
+        }
+        let vector = |v: [Dd; 3]| Vec3::new(v[0].to_f64(), v[1].to_f64(), v[2].to_f64());
+        Ok(Wrench::new(vector(self.angular), vector(self.linear)))
+    }
+}
+
+fn add_components(sum: &mut [Dd; 3], value: [Dd; 3]) {
+    for (sum, value) in sum.iter_mut().zip(value) {
+        *sum = *sum + value;
+    }
+}
+
+fn cross_dd(a: [Dd; 3], b: [Dd; 3]) -> [Dd; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Original held external loads and gravity, before any internal additions.
+/// The caller already owns native world and base-relative stage geometry.
+pub(super) fn external_sources(
+    model: &ArticulatedModel,
+    world_from_base: Se3,
+    world: &Kinematics,
+    relative: &Kinematics,
+    loads: FreeFloatingMotionLoads<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SpatialSum, PrescribedBaseMotionError> {
+    let mut sources = SpatialSum::default();
+    for (i, (link, wrench)) in model
+        .links()
+        .iter()
+        .zip(loads.external_body_wrench)
+        .enumerate()
+    {
+        if i % 64 == 0 {
+            poll(cancelled)?;
+        }
+        let rotation = world.world_from_link[i].rotation();
+        let origin = world_from_base.translation();
+        let arm = world_from_base
+            .rotation()
+            .rotate(relative.world_from_link[i].translation())?;
+        sources.add_world_wrench(
+            rotation.rotate(wrench.force)?,
+            rotation.rotate(wrench.torque)?,
+            &[origin, arm],
+        );
+        let inertia = link.inertia();
+        let gravity_force =
+            components(loads.gravity_world).map(|g| Dd::from_f64(inertia.mass()) * Dd::from_f64(g));
+        sources.add_force(
+            gravity_force,
+            &[origin, arm, rotation.rotate(inertia.center_of_mass())?],
+        );
+    }
+    Ok(sources)
+}
+
 fn increments(
     model: &ArticulatedModel,
     before: &Kinematics,
@@ -547,31 +735,27 @@ fn increments(
     state_after: &PrescribedBaseMotionState,
     gravity: Vec3,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(Dd, Dd), PrescribedBaseMotionError> {
+) -> Result<(Dd, Dd, SpatialSum), PrescribedBaseMotionError> {
     let mut kinetic = Dd::ZERO;
     let mut gravitational = Dd::ZERO;
-    // Native relative FK keeps small joint displacements separate from large
-    // world translations. Skip these two passes when gravity is exactly zero.
-    let relative = if gravity == Vec3::default() {
-        None
-    } else {
-        poll(cancelled)?;
-        let first = forward_kinematics(
-            model,
-            BaseState::stationary(Se3::identity()),
-            &state.joint_position,
-            &state.joint_velocity,
-        )?;
-        poll(cancelled)?;
-        let last = forward_kinematics(
-            model,
-            BaseState::stationary(Se3::identity()),
-            &state_after.joint_position,
-            &state_after.joint_velocity,
-        )?;
-        poll(cancelled)?;
-        Some((first, last))
-    };
+    let mut momentum = SpatialSum::default();
+    // Native relative FK keeps original local arms and their changes separate
+    // from the base translation, including for orbital momentum without gravity.
+    poll(cancelled)?;
+    let first = forward_kinematics(
+        model,
+        BaseState::stationary(Se3::identity()),
+        &state.joint_position,
+        &state.joint_velocity,
+    )?;
+    poll(cancelled)?;
+    let last = forward_kinematics(
+        model,
+        BaseState::stationary(Se3::identity()),
+        &state_after.joint_position,
+        &state_after.joint_velocity,
+    )?;
+    poll(cancelled)?;
     for (i, link) in model.links().iter().enumerate() {
         if i % 64 == 0 {
             poll(cancelled)?;
@@ -583,26 +767,78 @@ fn increments(
         let pose0 = before.world_from_link[i];
         let pose1 = after.world_from_link[i];
         kinetic = kinetic + kinetic_link_increment(inertia, pose0, old, pose1, new)?;
-        if let Some((first, last)) = &relative {
-            let arm0 = state
+        // Translational polarization in world axes prevents changing body frames
+        // from manufacturing work from a large common inertial translation.
+        let v0 = pose0
+            .rotation()
+            .rotate(old.linear + old.angular.cross(center))?;
+        let v1 = pose1
+            .rotation()
+            .rotate(new.linear + new.angular.cross(center))?;
+        let old_parts = [
+            state.base.world_from_base.translation(),
+            state
                 .base
                 .world_from_base
                 .rotation()
-                .rotate(first.world_from_link[i].transform_point(center)?)?;
-            let arm1 = state_after
+                .rotate(first.world_from_link[i].translation())?,
+            pose0.rotation().rotate(center)?,
+        ];
+        let new_parts = [
+            state_after.base.world_from_base.translation(),
+            state_after
                 .base
                 .world_from_base
                 .rotation()
-                .rotate(last.world_from_link[i].transform_point(center)?)?;
-            let displacement = (state_after.base.world_from_base.translation()
-                - state.base.world_from_base.translation())
-                + (arm1 - arm0);
-            gravitational = gravitational
-                + Dd::from_f64(inertia.mass())
-                    * sum_products(components(gravity), components(displacement));
+                .rotate(last.world_from_link[i].translation())?,
+            pose1.rotation().rotate(center)?,
+        ];
+        let mut displacement = [Dd::ZERO; 3];
+        let mut mean_position = [Dd::ZERO; 3];
+        for (old_part, new_part) in old_parts.into_iter().zip(new_parts) {
+            for ((axis, a), b) in components(old_part)
+                .into_iter()
+                .enumerate()
+                .zip(components(new_part))
+            {
+                displacement[axis] = displacement[axis] + Dd::from_f64(b) - Dd::from_f64(a);
+                mean_position[axis] =
+                    mean_position[axis] + Dd::from_f64(0.5 * a) + Dd::from_f64(0.5 * b);
+            }
+        }
+        let old_v = components(v0);
+        let new_v = components(v1);
+        let mass = Dd::from_f64(inertia.mass());
+        let change = core::array::from_fn(|axis| {
+            mass * (Dd::from_f64(new_v[axis]) - Dd::from_f64(old_v[axis]))
+        });
+        let mean_momentum = core::array::from_fn(|axis| {
+            mass * (Dd::from_f64(0.5 * old_v[axis]) + Dd::from_f64(0.5 * new_v[axis]))
+        });
+        add_components(&mut momentum.linear, change);
+        // Polarization: delta(r cross p) = mean(r) cross delta(p)
+        //                                    + delta(r) cross mean(p).
+        add_components(&mut momentum.angular, cross_dd(mean_position, change));
+        add_components(&mut momentum.angular, cross_dd(displacement, mean_momentum));
+        let spin0 = components(
+            pose0
+                .rotation()
+                .rotate(inertia.inertia_com().apply(old.angular))?,
+        );
+        let spin1 = components(
+            pose1
+                .rotation()
+                .rotate(inertia.inertia_com().apply(new.angular))?,
+        );
+        add_components(
+            &mut momentum.angular,
+            core::array::from_fn(|axis| Dd::from_f64(spin1[axis]) - Dd::from_f64(spin0[axis])),
+        );
+        for (g, dx) in components(gravity).into_iter().zip(displacement) {
+            gravitational = gravitational + mass * Dd::from_f64(g) * dx;
         }
     }
-    Ok((kinetic, gravitational))
+    Ok((kinetic, gravitational, momentum))
 }
 
 pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PrescribedBaseMotionError> {
