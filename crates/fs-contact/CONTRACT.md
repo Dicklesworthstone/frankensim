@@ -2167,3 +2167,33 @@ trapezoids and compensated accumulation avoid endpoint-energy cancellation.
 Extrapolation, invalid segments, discontinuous public node energy and
 unrepresentable work refuse. Source identities and interpolation estimate
 authority remain unchanged; no table refinement accuracy is newly claimed.
+
+## Sustained normal and Coulomb forces through original mechanics
+
+`sustained` evaluates held forces in N against the original mechanical owner's
+endpoint gap and accumulated tangential slip in m. The normal equation enforces
+nonnegative force/gap complementarity. The tangential equation uses the shared
+material-owner Euclidean disk projection and isotropic Coulomb maximum
+dissipation. Positive N/m natural-map scales condition these equations; they add
+no spring, compliance, stored energy, damping, or physical regularization.
+
+`sustained::solve` couples up to 21 contacts through the original
+`NewtonKrylovState` and FGMRES. At each iterate it retains fixed analytic
+contact-law derivative blocks and differences only the supplied original
+mechanical response. Every response starts from the same accepted physical
+state. One shifted response suffices per nonzero Jacobian action; no finite
+difference crosses the contact projection itself. Initial forces are explicit
+warm starts. Original source errors, cancellation, non-finite responses and
+bounded work/workspace failures refuse without substituting a physical state.
+
+A successful solve always replays the original response at its returned forces
+and independently checks the force residual. The receiving owner must still
+audit actual nonpenetration, contact modes, unresolved velocity reversals,
+conjugate contact work, original material loss, and complete energy balance
+before adoption. Numerical convergence alone is not physical admission. This is
+a local nonlinear continuation interface, not a uniqueness or arbitrary
+Painleve-regime theorem, a general impact integrator, or a geometry/CCD owner.
+
+Focused exact-source tests exercise loaded rest, static/sliding/breakaway
+friction, full off-diagonal inertia, shared contacts, elastic midpoint storage,
+fixed derivative actions, final replay, errors, cancellation and resource limits.

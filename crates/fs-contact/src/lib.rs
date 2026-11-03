@@ -47,6 +47,8 @@ pub mod multicontact;
 
 /// Ordered fs-matdb interface-card binding for generic contact consumers.
 pub mod interface_binding;
+/// Sustained contact force laws against original mechanical displacement paths.
+pub mod sustained;
 /// Solver-facing tangential contact adapters.
 pub mod tangential;
 
