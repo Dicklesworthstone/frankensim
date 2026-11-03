@@ -4429,3 +4429,32 @@ Focused tests include stiff axial and cross-coupled translation/rotation
 oracles, second-order resolved oscillation, jointly implicit feedback and
 external loads, translating/accelerating/rotating supports, scalar root
 actuation, zero-DOF trees, exact diagonal parity and atomic refusal.
+
+
+## Rigid payload capture on prescribed supports
+
+`articulated::motion::inventory::supported::capture_payload` connects the
+original payload inventory to fixed and driven articulated mechanisms. It
+combines the incoming full rotated inertia with the target link, maps the
+actual incoming-versus-attached momentum mismatch through the original
+prescribed-base impulse owner, and returns the loaded model with the same
+native supported motion state used by explicit and implicit continuation.
+Time, base boundary, joint coordinates and topology are retained; joint rates
+respond simultaneously, including scalar root joints.
+
+The support supplies the external linear/angular impulse and may perform
+signed work. Whole-system momentum includes both the incoming payload and
+retained bodies. Actual per-body increments and a separate zero-bias RNEA
+projection audit world and joint momentum. Capture loss is the nonnegative
+sum of relative-velocity kinetic quadratics, not the lab-frame energy decrease.
+A common inertial accounting frame retains support work and exposes the
+remaining numerical energy defect. Caller-supplied absolute residual and loss
+budgets, original endpoint speed limits and cancellation precede publication.
+
+The attachment token retains the exact original link inventory. This event
+models instantaneous perfectly inelastic attachment at supplied geometry;
+contact discovery, finite grasp dynamics, extra gear/loop constraints and a
+thermal destination remain separate owners. Independent tests cover fixed and
+moving support catches, mobile roots, branched response, full off-centre inertia,
+world-frame and inertial-boost covariance, loaded gravity continuation and
+atomic refusal.

@@ -1,4 +1,7 @@
-//! Instantaneous rigid payload capture on a freely moving articulated tree.
+//! Rigid payload capture and release on articulated trees.
+//!
+//! The root API describes free motion; [`supported`] retains fixed or driven
+//! support reactions and work during a prescribed-base capture.
 //!
 //! An admitted attachment preserves the target link frame and every joint.
 //! Full rotated centroidal inertia and COM orbital inertia enter the original
@@ -10,6 +13,10 @@
 /// Conservative payload release with optional internal separation impulses.
 #[path = "inventory/release.rs"]
 pub mod release;
+
+/// Rigid payload capture with fixed or driven prescribed support momentum/work.
+#[path = "inventory/supported.rs"]
+pub mod supported;
 
 use super::reconfigure::constraints::{
     self, ConstraintControls, ConstraintError, JointConstraint, PreparedJointConstraints,
