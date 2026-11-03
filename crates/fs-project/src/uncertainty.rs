@@ -69,6 +69,12 @@ pub enum Target {
     /// Absolute prescribed temperature of one uniform Dirichlet boundary.
     /// This is a solid-boundary value, not an ambient-fluid temperature.
     FixedTemperature,
+    /// Whole-solid uniform initial temperature with constant-capacity storage.
+    /// The sole entity is `initial-state`; this does not change a boundary bath.
+    InitialTemperature,
+    /// One region's original initial specific enthalpy. Requires explicit
+    /// `from-regional-enthalpy` initialization and retains its chart and density.
+    InitialSpecificEnthalpy,
     /// Nominal dry-contact clamping pressure; the manufacturing band is retained.
     ContactPressure,
     /// Nominal TIM or adhesive thickness, not a change to the material card.
@@ -99,7 +105,8 @@ impl Target {
             Self::ConvectionCoefficient => "W/m^2/K",
             Self::ConvectionTemperature | Self::AirInletTemperature
             | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature
-            | Self::FixedTemperature => "K",
+            | Self::FixedTemperature | Self::InitialTemperature => "K",
+            Self::InitialSpecificEnthalpy => "J/kg",
             Self::HeatFlux => "W/m^2",
             Self::FanSpeedRatio | Self::PowerScheduleScale => "1",
             Self::ContactPressure => "Pa",
@@ -114,7 +121,8 @@ impl Target {
             Self::ConvectionCoefficient => dims::HEAT_TRANSFER_COEFFICIENT,
             Self::ConvectionTemperature | Self::AirInletTemperature
             | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature
-            | Self::FixedTemperature => dims::TEMPERATURE,
+            | Self::FixedTemperature | Self::InitialTemperature => dims::TEMPERATURE,
+            Self::InitialSpecificEnthalpy => dims::SPECIFIC_ENTHALPY,
             Self::HeatFlux => dims::HEAT_FLUX,
             Self::FanSpeedRatio | Self::PowerScheduleScale => Dims::NONE,
             Self::ContactPressure => dims::PRESSURE,
@@ -134,7 +142,8 @@ pub struct UniformParameter {
     pub target: Target,
     /// Region, boundary target, air branch, fan bank, or radiating-surface name
     /// according to `target`; a radiating surface is not its geometric target.
-    /// Contact inputs name the exact interface-card binding.
+    /// Contact inputs name the exact interface-card binding. Initial temperature
+    /// uses `initial-state`; initial specific enthalpy names its original region.
     pub entity: String,
     /// Closed distribution support in coherent SI units; equality is deterministic.
     pub low: f64,
@@ -265,6 +274,8 @@ fn parse_target(node: &Node) -> Result<Target> {
             "natural-convection-ambient" => Target::NaturalConvectionAmbient,
             "radiation-reservoir-temperature" => Target::RadiationReservoirTemperature,
             "fixed-temperature" => Target::FixedTemperature,
+            "initial-temperature" => Target::InitialTemperature,
+            "initial-specific-enthalpy" => Target::InitialSpecificEnthalpy,
             "contact-pressure" => Target::ContactPressure,
             "contact-thickness" => Target::ContactThickness,
             "contact-gap" => Target::ContactGap,
@@ -440,7 +451,7 @@ impl UncertaintyStudy {
                 || (matches!(target, Target::ConvectionCoefficient | Target::ConvectionTemperature
                     | Target::AirInletTemperature | Target::FanSpeedRatio
                     | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature
-                    | Target::FixedTemperature) && low <= 0.0)
+                    | Target::FixedTemperature | Target::InitialTemperature) && low <= 0.0)
                 || (target.contact_axis().is_some() && low <= 0.0) {
                 return Err(error("invalid probability support for the physical target"));
             }
@@ -637,7 +648,36 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
         return schedule::apply(project, parameter, value);
     }
     let mut matches = 0;
-    if parameter.target == Target::Power {
+    if matches!(parameter.target, Target::InitialTemperature | Target::InitialSpecificEnthalpy) {
+        let time = project.cooling.as_mut().and_then(|c| c.conduction.as_mut())
+            .and_then(|c| c.transient.as_mut())
+            .ok_or_else(|| error("initial-state inputs require a declared transient trajectory"))?;
+        match parameter.target {
+            Target::InitialTemperature => {
+                if parameter.entity != "initial-state" || time.enthalpy.is_some() {
+                    return Err(error("initial-temperature names initial-state with constant-capacity storage"));
+                }
+                let crate::TransientInitialTemperature::Uniform(temperature) = &mut time.initial_temperature
+                    else { return Err(error("initial-temperature requires an explicit uniform initial state")); };
+                temperature.value = value;
+                matches += 1;
+            }
+            Target::InitialSpecificEnthalpy => {
+                if time.initial_temperature != crate::TransientInitialTemperature::FromRegionalEnthalpy {
+                    return Err(error("initial-specific-enthalpy requires explicit from-regional-enthalpy initialization"));
+                }
+                let storage = time.enthalpy.as_mut()
+                    .ok_or_else(|| error("initial-specific-enthalpy requires total-enthalpy storage"))?;
+                for material in &mut storage.materials {
+                    if material.region == parameter.entity {
+                        material.initial_specific_enthalpy.value = value;
+                        matches += 1;
+                    }
+                }
+            }
+            _ => return Err(error("unsupported initial-state target")),
+        }
+    } else if parameter.target == Target::Power {
         for row in project.power.as_mut().ok_or_else(|| error("missing power map"))? {
             if row.region == parameter.entity { row.watts = QtyAny::new(value, parameter.target.dims()); matches += 1; }
         }
@@ -726,3 +766,6 @@ mod boundary_temperature_tests;
 mod fixed_temperature_tests;
 #[cfg(test)]
 mod sensitivity_tests;
+
+#[cfg(test)]
+mod initial_state_tests;

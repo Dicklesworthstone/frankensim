@@ -594,6 +594,22 @@ uncertainty box. Case power denotes delivered watts with unchanged duty; a
 schedule that overrides static case power or the power control is refused.
 
 
+## Native transient initial-state inputs
+
+The existing uncertainty study and authored operating-case binder admit
+`initial-temperature` in K for entity `initial-state`, the whole-solid uniform
+initial declaration under constant-capacity storage. `initial-specific-enthalpy`
+in J/kg selects one exact regional storage declaration and requires explicit
+`from-regional-enthalpy` initialization. It retains that region's original chart,
+reference density, source/card identity and phase-conductivity law. Finite
+negative enthalpies remain admissible inside the original chart because its
+energy origin is arbitrary. Positive kelvin and every chart/domain check remain
+mandatory at support endpoints and actual samples. A steady project, unknown
+region, wrong storage family or implicit replacement of a uniform-temperature
+assertion refuses. Samples start from the unchanged base; no thermal boundary,
+time grid or previously accepted sample is changed. These coordinates declare
+uncertainty in startup state without inferring a distribution from source bands.
+
 ## No-claim boundaries
 
 Native probability studies accept `:qoi "temperature-peak"` for a declared

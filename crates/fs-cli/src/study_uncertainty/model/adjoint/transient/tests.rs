@@ -59,6 +59,41 @@ const POWER: &str =
     r#", "regional_power":[{"region":"solid","dtemperature_duniform_added_watts_k_per_w":2.0}]"#;
 
 #[test]
+fn g0_initial_state_controls_use_the_original_storage_coordinate_and_region() {
+    let capacity = base();
+    let temperature = parameter(Target::InitialTemperature, "initial-state");
+    let controls = r#", "dtemperature_duniform_initial_k_per_k":0.4"#;
+    assert_eq!(coefficients(&receipt(false, controls), &capacity,
+        std::slice::from_ref(&temperature), 301.0, "solid").unwrap(), [0.4]);
+    assert!(coefficients(&receipt(false, controls), &capacity,
+        &[parameter(Target::InitialTemperature, "solid")], 301.0, "solid").is_err());
+    assert!(coefficients(&receipt(false, ""), &capacity, &[temperature], 301.0, "solid").is_err());
+
+    let mut enthalpy = fs_project::parse_sexpr_migrating(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project/cooling-enthalpy.fsim"
+    ))).unwrap().decoded.spec;
+    enthalpy.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient.as_mut().unwrap()
+        .initial_temperature = fs_project::TransientInitialTemperature::FromRegionalEnthalpy;
+    let initial = parameter(Target::InitialSpecificEnthalpy, "solid");
+    let controls = r#", "regional_storage":[{"region":"solid","material_index":0,"reference_density_kg_m3":1,"dtemperature_dinitial_specific_enthalpy_k_kg_per_j":0.025}]"#;
+    assert_eq!(coefficients(&receipt(true, controls), &enthalpy,
+        std::slice::from_ref(&initial), 301.0, "solid").unwrap(), [0.025]);
+    for invalid in [controls.replace("\"region\":\"solid\"", "\"region\":\"other\""),
+        controls.replace("\"material_index\":0", "\"material_index\":1"),
+        controls.replace("\"reference_density_kg_m3\":1", "\"reference_density_kg_m3\":2"),
+        controls.replace("0.025", "null")]
+    {
+        assert!(coefficients(&receipt(true, &invalid), &enthalpy,
+            std::slice::from_ref(&initial), 301.0, "solid").is_err());
+    }
+    assert!(coefficients(&receipt(true, controls), &capacity,
+        std::slice::from_ref(&initial), 301.0, "solid").is_err());
+    enthalpy.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient.as_mut().unwrap()
+        .initial_temperature = fs_project::TransientInitialTemperature::Uniform(QtyAny::new(293.15, dims::TEMPERATURE));
+    assert!(coefficients(&receipt(true, controls), &enthalpy, &[initial], 301.0, "solid").is_err());
+}
+
+#[test]
 fn g0_calibration_requests_final_history_without_changing_physics_or_existing_intent() {
     for existing in [None, Some(FINAL), Some(FINAL_MATERIAL)] {
         let mut spec = base();

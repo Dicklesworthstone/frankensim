@@ -1356,6 +1356,21 @@ derivative of the original declared law. Natural reservoirs, air branches, fan
 banks and radiating surfaces retain their distinct physical identities.
 Varying unsupported coordinates refuse with a secant alternative.
 
+Transient initial-state inputs use those same native trajectories. The
+`initial-temperature` coordinate for entity `initial-state` changes the original
+uniform temperature under constant-capacity storage and consumes the original
+uniform-initial-temperature adjoint. `initial-specific-enthalpy` names one
+original region in explicit `from-regional-enthalpy` mode and consumes that
+region's specific-enthalpy derivative, preserving its material index and
+reference density. Neither converts a temperature derivative to an enthalpy
+derivative or edits a constitutive chart. Both support final-time and sampled
+peak mean calibration; an initial selected peak retains its direct initial-state
+sensitivity even though future power and boundary controls have zero influence.
+Raw probability samples and existing replay retain their unchanged semantics.
+The startup-control regressions use real sampled projects and native solves;
+the controls remain local discrete derivatives, with the original chart-knot,
+maximum-tie and physical-evidence limits.
+
 Both storage modes supply independent uniform prescribed-bath temperatures and
 original outward heat-flux densities held through the full selected trajectory.
 Calibration checks the exact sampled kelvin or W/m2 value, the original boundary

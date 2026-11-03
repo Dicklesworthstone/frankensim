@@ -89,6 +89,8 @@ fn target_name(target: Target) -> &'static str {
         Target::AirInletTemperature => "air-inlet-temperature",
         Target::FanSpeedRatio => "fan-speed-ratio",
         Target::FixedTemperature => "fixed-temperature",
+        Target::InitialTemperature => "initial-temperature",
+        Target::InitialSpecificEnthalpy => "initial-specific-enthalpy",
         Target::NaturalConvectionAmbient => "natural-convection-ambient",
         Target::RadiationReservoirTemperature => "radiation-reservoir-temperature",
         // These rows are normalized resistance controls until contact::convert

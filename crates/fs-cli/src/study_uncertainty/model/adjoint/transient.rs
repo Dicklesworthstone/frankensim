@@ -39,6 +39,13 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
             Target::PowerScheduleScale => time.power_schedules.iter()
                 .filter(|row| row.region == parameter.entity).count() == 1
                 && setup.regions.iter().any(|row| row.region == parameter.entity),
+            Target::InitialTemperature => parameter.entity == "initial-state"
+                && time.enthalpy.is_none()
+                && matches!(time.initial_temperature, fs_project::TransientInitialTemperature::Uniform(_)),
+            Target::InitialSpecificEnthalpy => time.initial_temperature
+                == fs_project::TransientInitialTemperature::FromRegionalEnthalpy
+                && time.enthalpy.as_ref().is_some_and(|storage| storage.materials.iter()
+                    .filter(|row| row.region == parameter.entity).count() == 1),
             Target::ConvectionCoefficient | Target::ConvectionTemperature => true,
             Target::AirInletTemperature
             | Target::FanSpeedRatio
@@ -364,6 +371,22 @@ pub(super) fn coefficients_with_reference(
         if parameter.low == parameter.high { return Ok(0.0); }
         let entity = parameter.entity.as_str();
         let derivative = match parameter.target {
+            Target::InitialTemperature => number(report, "dtemperature_duniform_initial_k_per_k")?,
+            Target::InitialSpecificEnthalpy => {
+                let storage = time.enthalpy.as_ref()
+                    .ok_or_else(|| invalid("initial enthalpy control lost its storage owner"))?;
+                let (index, material) = storage.materials.iter().enumerate()
+                    .find(|(_, row)| row.region == entity)
+                    .ok_or_else(|| invalid("initial enthalpy control lost its original region"))?;
+                let row = named(report, "regional_storage", "region", entity)?;
+                if row.f64_field("material_index") != Some(index as f64)
+                    || number(row, "reference_density_kg_m3")?.to_bits()
+                        != material.reference_density.value.to_bits()
+                {
+                    return Err(invalid("initial enthalpy derivative differs from its original storage region"));
+                }
+                number(row, "dtemperature_dinitial_specific_enthalpy_k_kg_per_j")?
+            }
             Target::PowerScheduleScale => {
                 let (original, coordinates) = reference
                     .ok_or_else(|| invalid("schedule sensitivity requires its immutable original workload"))?;
