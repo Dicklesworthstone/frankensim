@@ -18,7 +18,7 @@
 pub mod coupled;
 
 use super::super::{
-    ArticulatedModel, EvaluatedStage, FreeFloatingMotionError, FreeFloatingMotionState,
+    ArticulatedModel, EffortLaw, EvaluatedStage, FreeFloatingMotionError, FreeFloatingMotionState,
     MAX_FREE_FLOATING_STEP_LINKS, MomentumMap, Se3, StageLoadAccumulator, Vec3, Wrench, poll,
     step_evaluated, validate_slice, validate_twist, validate_vec3,
 };
@@ -156,20 +156,9 @@ pub fn step_free_floating_bushings(
     loads: SpatialMotionLoads<'_>,
     bushings: &[SpatialBushing],
     duration: f64,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
-    poll(&mut cancelled)?;
-    admit(model, loads, bushings, &mut cancelled)?;
-    let evaluated = step_evaluated(
-        model,
-        state,
-        loads.held,
-        duration,
-        &mut cancelled,
-        |map, base, cancelled| evaluate(map, base, loads, bushings, cancelled),
-        None,
-    )?;
-    finish_with_bushings(model, evaluated, loads, bushings, &mut cancelled)
+    step_with_bushings_and_effort(model, state, loads, bushings, duration, None, cancelled)
 }
 
 /// Advance finite bushings and spatial loads with state-dependent joint effort
@@ -201,6 +190,28 @@ pub fn step_free_floating_bushings_with_effort(
         &FreeFloatingMotionState,
         &mut [f64],
     ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
+    step_with_bushings_and_effort(
+        model,
+        state,
+        loads,
+        bushings,
+        duration,
+        Some(&mut effort),
+        cancelled,
+    )
+}
+
+/// Shared explicit lifecycle for diagonal and full passive constitutive laws.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn step_with_bushings_and_effort<B: BushingLaw>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
+    duration: f64,
+    effort: Option<&mut EffortLaw<'_>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
     poll(&mut cancelled)?;
@@ -212,7 +223,7 @@ pub fn step_free_floating_bushings_with_effort(
         duration,
         &mut cancelled,
         |map, base, cancelled| evaluate(map, base, loads, bushings, cancelled),
-        Some(&mut effort),
+        effort,
     )?;
     finish_with_bushings(model, evaluated, loads, bushings, &mut cancelled)
 }

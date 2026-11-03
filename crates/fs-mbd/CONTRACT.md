@@ -4718,3 +4718,27 @@ contact, finite separation dynamics and an ejection energy source remain
 separate models. Focused regressions specify a capture through actual implicit
 gravity-loaded carry into release, driven rotational offset velocity, nested
 and repeated inventory, and atomic refusal.
+
+
+## Full passive bushing feedback in free flight
+
+`articulated::motion::spatial_loads::bushing::coupled` now exposes
+`step_free_floating_bushings_with_effort` and
+`step_free_floating_bushings_implicit_with_effort`. The original complete
+passive 6x6 stiffness/damping law and smooth internal actuator feedback use the
+same actual native stage, including finite carrier recoil. Original spatial
+loads, axial attachments, bushing storage/loss and actuator work retain their
+existing owners.
+
+Diagonal and full-matrix explicit entries share one lifecycle; the implicit
+entry uses the original bounded nonlinear solve and final residual check.
+No additional dynamics pass, controller approximation or constitutive law is
+introduced. Trial feedback retains native effort limits, repeatability,
+cancellation and immutable-input semantics. Explicit stability and implicit
+midpoint phase/geometric limits remain unchanged.
+
+Three focused regressions independently solve a coaxial translating/spinning
+mechanism with reduced inertias 6/5 and 10/7, verify both carrier recoils and
+complete momentum/work accounts, solve stiff full K/C plus feedback through
+an independent 2x2 midpoint map, and retain exact diagonal parity for both
+native integrators.

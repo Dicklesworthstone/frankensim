@@ -115,20 +115,44 @@ pub fn step_free_floating_bushings(
     loads: SpatialMotionLoads<'_>,
     bushings: &[CoupledSpatialBushing],
     duration: f64,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
-    poll(&mut cancelled)?;
-    super::admit(model, loads, bushings, &mut cancelled)?;
-    let evaluated = step_evaluated(
+    super::step_with_bushings_and_effort(model, state, loads, bushings, duration, None, cancelled)
+}
+
+/// Advance full passive bushings and internal actuator feedback together.
+///
+/// The callback receives the complete actual free-carrier stage at elapsed
+/// times zero and duration/2, with effort reset to the held values. Full
+/// constitutive coupling, finite-body recoil and feedback use that same stage.
+/// Actuator work remains separate from bushing storage and physical damping.
+///
+/// The original rate/effort limits, cancellation and chart admission apply.
+/// Resolve the fastest attachment/controller mode with this explicit step.
+/// Callback side effects remain caller-owned on any refusal.
+#[allow(clippy::too_many_arguments)]
+pub fn step_free_floating_bushings_with_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[CoupledSpatialBushing],
+    duration: f64,
+    mut effort: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
+    super::step_with_bushings_and_effort(
         model,
         state,
-        loads.held,
+        loads,
+        bushings,
         duration,
-        &mut cancelled,
-        |map, base, cancelled| super::evaluate(map, base, loads, bushings, cancelled),
-        None,
-    )?;
-    finish_with_bushings(model, evaluated, loads, bushings, &mut cancelled)
+        Some(&mut effort),
+        cancelled,
+    )
 }
 
 /// Advance full K/C coupling through the SAME native simultaneous implicit solve.
@@ -146,6 +170,45 @@ pub fn step_free_floating_bushings_implicit(
 ) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
     super::super::implicit::step_with_bushings(
         model, state, loads, bushings, duration, config, cancelled,
+    )
+}
+
+/// Solve full passive bushing coupling and smooth feedback at one midpoint.
+///
+/// Uses the existing native nonlinear owner, including physical base recoil,
+/// all spatial loads and the independent final residual check. The callback
+/// receives elapsed time duration/2 and the actual trial state; its effort
+/// buffer is reset to held values before each call. Numerical derivative and
+/// nonlinear trials may repeat in nonmonotone order, so the law must be smooth
+/// and deterministic. Callback-owned effects cannot be rolled back.
+///
+/// Physical actuator work, bushing storage and damping retain separate accounts.
+/// The original bounded solve, cancellation and geometric refusals apply.
+/// Implicit midpoint is not L-stable; refine for phase and nonlinear geometry.
+#[allow(clippy::too_many_arguments)]
+pub fn step_free_floating_bushings_implicit_with_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[CoupledSpatialBushing],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    mut effort: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
+    super::super::implicit::step_with_bushings_and_effort(
+        model,
+        state,
+        loads,
+        bushings,
+        duration,
+        config,
+        Some(&mut effort),
+        cancelled,
     )
 }
 
