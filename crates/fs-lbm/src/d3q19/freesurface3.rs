@@ -62,7 +62,9 @@ pub use conversion_momentum::ConversionMomentumReport3;
 mod geometry;
 mod motion;
 pub use motion::{
-    PlanarPistonRemapReport3, PlanarRigidWallMotion3, PlanarRigidWallReport3, PlanarWallMotionReport3,
+    PlanarPistonRemapReport3, PlanarRigidWallMotion3, PlanarRigidWallReport3,
+    PlanarWallFaceExchange3, PlanarWallFieldControls3, PlanarWallFieldReport3,
+    PlanarWallMotionReport3, PlanarWallVelocityField3,
 };
 pub(crate) mod thermocapillary;
 pub(crate) mod transport;

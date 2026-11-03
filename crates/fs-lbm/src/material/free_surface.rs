@@ -34,7 +34,10 @@ mod pressure;
 pub use pressure::MaterialGasPressureLink3;
 mod motion;
 pub use motion::{
-    MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3, MaterialPlanarWallMotionReport3,
+    MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3,
+    MaterialPlanarWallFaceExchange3, MaterialPlanarWallFieldReport3,
+    MaterialPlanarWallMotionReport3, MaterialPlanarWallVelocityField3,
+    MaterialWallWrenchExchange3,
 };
 /// Geometric, moment-preserving ingress of an already-liquid tetrahedral body.
 pub mod transfer;

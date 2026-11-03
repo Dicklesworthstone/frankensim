@@ -6,6 +6,11 @@ use crate::d3q19::freesurface3::{FreeSurfaceError3, PlanarWallMotionReport3};
 
 mod rigid;
 pub use rigid::{MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3};
+mod field;
+pub use field::{
+    MaterialPlanarWallFaceExchange3, MaterialPlanarWallFieldReport3,
+    MaterialPlanarWallVelocityField3, MaterialWallWrenchExchange3,
+};
 
 /// One accepted isothermal wall-driven free-surface timestep in SI units.
 ///

@@ -9490,3 +9490,49 @@ owner/cancellation refusal. Original response, Cholesky, DD arithmetic and
 cancellation code executed. The public entry point compiled against the exact
 original transition signature; populated-grid streaming/publication was not
 executed in this seam. No full Cargo/workspace verdict is claimed.
+
+
+### Nonuniform in-plane wall fields on the original free surface
+
+`FreeSurface3::planar_wall_velocity_field_candidate` and the material
+`planar_wall_velocity_field_candidate_si` accept a tangent-velocity pair at
+every Cartesian face of one fixed, completely flooded domain plane. The
+cyclic tangent axes and row-major field order are explicit. Every crossing
+link arriving in one liquid cell uses that face's same quadrature velocity;
+opposed diagonals therefore cancel added mass locally even for nonuniform
+shear or in-plane stretching. Actual rounded incoming-minus-outgoing
+population mass is measured and checked per face, alongside the original
+whole-liquid mass gate.
+
+Original reflection, collision, streaming, capillarity and conversion remain
+the only liquid evolution operators. Each face returns actual reciprocal
+impulse, original link angular impulse about a declared origin, a separately
+accumulated residual couple about its face center, and velocity paired with
+actual impulse. Force at the face center alone generally loses a transverse
+moment; downstream transfer must retain the couple. Its constrained tilt has
+zero angular speed in this fixed-normal face kinematics. Mechanical work is
+not deposited heat or a whole-fluid energy certificate.
+
+The same traversal measures the two diagonal tangent-impulse derivatives.
+Cross-face and cross-tangent entries are zero for this single original
+D3Q19 reflection from the unchanged input state; no steady-state or future
+fluid response is claimed. A changed field still requires native replay and
+endpoint admission. Added storage is linear in wall faces, with explicit
+face and complete-domain ceilings checked before the native fluid clone.
+Local Mach, relative wall/liquid speed, population positivity, mass,
+representability and cancellation checks precede candidate publication.
+
+The material adapter retains the original source, units and scenario speed
+limit at every wall face and actual liquid endpoint. Raw population impulses,
+reference-pressure impulses/moments, perturbation loads and optional absolute
+loads remain distinct. Geometry has fixed normal position; this does not add
+cover/vacate, normal motion, moving contact lines, finite plate edges, a solid
+constitutive law or complete MR69 coupling. The existing rigid-link and
+uniform-wall operators retain their population arithmetic.
+
+Six regression definitions cover independent nonuniform link and liquid
+moment balances in all six orientations, per-face couples/work/mass, affine
+replay, origin covariance, continued native motion, exact uniform-path parity,
+physical source/pressure units and atomic refusal/retry. Targeted Rust syntax,
+format and whitespace checks passed. Native typechecking and test execution
+remain outstanding in the delivery environment.

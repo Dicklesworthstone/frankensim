@@ -11,6 +11,11 @@ use crate::d3q19::W3;
 
 mod rigid;
 pub use rigid::{PlanarRigidWallMotion3, PlanarRigidWallReport3};
+mod field;
+pub use field::{
+    PlanarWallFaceExchange3, PlanarWallFieldControls3, PlanarWallFieldReport3,
+    PlanarWallVelocityField3,
+};
 
 /// One accepted exact one-cell geometry translation of a complete planar piston.
 ///
@@ -112,6 +117,7 @@ pub(super) struct PlanarWallStep3 {
     velocity: [f64; 3],
     impulse: [f64; 3],
     rigid: Option<rigid::RigidWallExchange3>,
+    field: Option<field::WallFieldExchange3>,
 }
 
 impl PlanarWallStep3 {
@@ -139,7 +145,15 @@ impl PlanarWallStep3 {
             .as_ref()
             .map(|exchange| exchange.link(source, direction))
             .transpose()?;
-        let velocity = link.as_ref().map_or(self.velocity, |link| link.velocity);
+        let face_link = self
+            .field
+            .as_ref()
+            .map(|exchange| exchange.link(source, q))
+            .transpose()?;
+        let velocity = face_link.as_ref().map_or_else(
+            || link.as_ref().map_or(self.velocity, |link| link.velocity),
+            |link| link.velocity,
+        );
         let projected = (0..3).map(|d| direction[d] * velocity[d]).sum::<f64>();
         let correction = 2.0 * W3[q] * density * projected / CS2_3;
         // Preserve the exact stationary reflection when the correction is zero.
@@ -168,6 +182,15 @@ impl PlanarWallStep3 {
                 link,
                 direction,
                 incoming + outgoing,
+                2.0 * W3[q] * density / CS2_3,
+            )?;
+        }
+        if let (Some(exchange), Some(link)) = (self.field.as_mut(), face_link) {
+            exchange.record(
+                link,
+                direction,
+                incoming,
+                outgoing,
                 2.0 * W3[q] * density / CS2_3,
             )?;
         }
@@ -688,6 +711,7 @@ impl FreeSurface3 {
             velocity,
             impulse: [0.0; 3],
             rigid: None,
+            field: None,
         };
         let mut candidate = self.clone();
         candidate.step_inner_with_wall(

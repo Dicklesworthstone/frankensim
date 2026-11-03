@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "motion/field.rs"]
+mod field;
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance * expected.abs().max(1.0),

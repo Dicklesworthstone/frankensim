@@ -305,6 +305,7 @@ impl FreeSurface3 {
             velocity: motion.velocity_at_origin,
             impulse: [0.0; 3],
             rigid: Some(RigidWallExchange3::new(motion)),
+            field: None,
         };
         let mut candidate = self.clone();
         candidate.step_inner_with_wall(gate, None, None, None, Some(&mut exchange))?;
