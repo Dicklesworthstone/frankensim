@@ -3,6 +3,12 @@
 use super::*;
 use crate::core2::{UnderResolvedCylinderPair2, UnderResolvedLubricationExchange2};
 
+mod slider;
+use slider::PreparedSlider2;
+pub use slider::{
+    DryLubricatedSlidersExchange2, FiniteLubricationSlider2, SliderLubricationExchange2,
+};
+
 /// A translating prescribed plane, with its unit normal directed into fluid.
 ///
 /// Coordinates describe the start of a lattice tick. This is a momentum/work
@@ -179,7 +185,7 @@ pub struct PlaneLubricationExchange2 {
     /// The angular component includes its center couple and force lever arm
     /// about the requested fixed origin.
     pub body_impulse: [f64; 3],
-    /// Exactly opposite complete impulse received by the prescribed plane,
+    /// Exactly opposite complete impulse received by the plane surface,
     /// about that SAME fixed origin.
     pub plane_impulse: [f64; 3],
     /// Intrinsic disk-center angular impulse; normal and pure sliding films
@@ -196,7 +202,8 @@ pub struct PlaneLubricationExchange2 {
     pub tangential_resistance_increment: f64,
     /// Impulse work delivered to the dry disk at its solved midpoint velocity.
     pub body_work: f64,
-    /// Impulse work received by the prescribed plane reservoir.
+    /// Impulse work received by the plane surface. The finite-slider adapter
+    /// stores this in slider kinetic energy; prescribed planes use a reservoir.
     pub plane_work: f64,
     /// Nonnegative normal plus sliding/spinning loss per lattice tick.
     pub dissipated_energy: f64,
@@ -215,7 +222,8 @@ pub struct DryLubricatedDiskExchange2 {
     pub body_impulse: [f64; 3],
     /// Film work received by the disk, separate from authored/source work.
     pub body_work: f64,
-    /// Film work received by the prescribed plane reservoirs.
+    /// Film work received by the planes: reservoir work for prescribed planes,
+    /// or kinetic transfer when nested in the finite-slider receipt.
     pub plane_work: f64,
     /// Nonnegative missing-film loss: `-(body_work + plane_work)` up to roundoff.
     /// No thermal destination is invented or advanced by this owner.
@@ -278,6 +286,7 @@ impl DryDisk2 {
             cancel,
             Some(&prepared),
         )
+        .map(|receipt| receipt.motion)
     }
 }
 
@@ -296,6 +305,7 @@ struct PreparedPlane2 {
     tangential_resistance: f64,
     footpoint: [f64; 2],
     endpoint: LubricationPlane2,
+    slider: Option<PreparedSlider2>,
 }
 pub(super) struct PreparedPlanes2(Vec<PreparedPlane2>);
 impl PreparedPlanes2 {
@@ -425,6 +435,7 @@ impl PreparedPlane2 {
             tangential_resistance,
             footpoint,
             endpoint: plane.translated(1.0)?,
+            slider: None,
         })
     }
 
@@ -456,9 +467,24 @@ impl PreparedPlane2 {
         let mut dissipated_energy = -native.solid_pair_work;
         if self.tangential_resistance != 0.0 {
             let k = self.tangential_resistance;
-            let slip = dot(subtract(velocity, pair.surface_velocities[1]), self.tangent);
+            let (slip, tangent_load, wall_speed) = if let Some(slider) = &self.slider {
+                let speed = dot(velocity, self.tangent);
+                let delta = speed - slider.free_midpoint;
+                (
+                    slider.retained_fraction * delta,
+                    -slider.effective_resistance * delta,
+                    slider.midpoint(speed),
+                )
+            } else {
+                let slip = dot(subtract(velocity, pair.surface_velocities[1]), self.tangent);
+                (
+                    slip,
+                    -k * slip,
+                    dot(pair.surface_velocities[1], self.tangent),
+                )
+            };
             let spin_speed = pair.reduced_radius * angular_velocity;
-            let tangent_impulse = self.tangent.map(|t| -k * slip * t);
+            let tangent_impulse = self.tangent.map(|t| tangent_load * t);
             body_center_couple = if spin_speed == 0.0 {
                 0.0
             } else {
@@ -474,8 +500,13 @@ impl PreparedPlane2 {
                     tangent_impulse,
                 );
             body_work += dot(tangent_impulse, velocity) + body_center_couple * angular_velocity;
-            plane_work -= dot(tangent_impulse, pair.surface_velocities[1]);
-            dissipated_energy += k * (slip * slip + spin_speed * spin_speed);
+            if self.slider.is_some() {
+                plane_work -= tangent_load * wall_speed;
+                dissipated_energy += -tangent_load * slip + k * spin_speed * spin_speed;
+            } else {
+                plane_work -= dot(tangent_impulse, pair.surface_velocities[1]);
+                dissipated_energy += k * (slip * slip + spin_speed * spin_speed);
+            }
         }
         let plane_impulse = body_impulse.map(|j| if j == 0.0 { 0.0 } else { -j });
         let scale = body_work.abs().max(plane_work.abs()).max(dissipated_energy);

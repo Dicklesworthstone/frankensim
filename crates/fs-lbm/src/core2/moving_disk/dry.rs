@@ -26,7 +26,10 @@ use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 
 mod lubricated;
-pub use lubricated::{DryLubricatedDiskExchange2, LubricationPlane2, PlaneLubricationExchange2};
+pub use lubricated::{
+    DryLubricatedDiskExchange2, DryLubricatedSlidersExchange2, FiniteLubricationSlider2,
+    LubricationPlane2, PlaneLubricationExchange2, SliderLubricationExchange2,
+};
 use lubricated::{FilmTotals2, PreparedPlanes2};
 
 /// Bounded numerical admission for the three coupled correction impulses.
@@ -284,7 +287,7 @@ impl DryDisk2 {
             cancel,
             None,
         )
-        .map(|receipt| receipt.motion)
+        .map(|receipt| receipt.motion.motion)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -297,7 +300,7 @@ impl DryDisk2 {
         config: DryDiskCouplingConfig2,
         cancel: &CancelGate,
         planes: Option<&PreparedPlanes2>,
-    ) -> Result<DryLubricatedDiskExchange2, DryDiskError2> {
+    ) -> Result<DryLubricatedSlidersExchange2, DryDiskError2> {
         checkpoint(cancel)?;
         config.admit()?;
         admit_grid(grid, self.disk.dims)?;
@@ -539,6 +542,17 @@ impl DryDisk2 {
             body_work: candidate.films.body_work,
             plane_work: candidate.films.plane_work,
             dissipated_energy: candidate.films.dissipation,
+        };
+        // Finite slider motion, guide reactions and their independent balance
+        // are prepared before the sole accepted body/fluid publication.
+        let receipt = if let Some(planes) = planes {
+            planes.finish_sliders(receipt, moment_origin, cancel)?
+        } else {
+            DryLubricatedSlidersExchange2 {
+                combined_momentum_residual: receipt.motion.combined_momentum_residual,
+                motion: receipt,
+                sliders: Vec::new(),
+            }
         };
         checkpoint(cancel)?;
         grid.stream_from(&self.disk.post);

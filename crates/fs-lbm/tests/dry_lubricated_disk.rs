@@ -822,3 +822,361 @@ fn active_spin_film_refusal_preserves_state_and_exact_retry() {
     assert_eq!(disk.body(), clean_disk.body());
     assert_eq!(disk.angle(), clean_disk.angle());
 }
+
+// Finite guided surfaces exercise the same actual dry-body/fluid transaction.
+use fs_lbm::core2::moving_disk::FiniteLubricationSlider2;
+
+fn slider_momentum(slider: FiniteLubricationSlider2, origin: [f64; 2]) -> [f64; 3] {
+    let p = slider.velocity().map(|v| slider.mass() * v);
+    let center = slider.center();
+    [
+        p[0],
+        p[1],
+        cross([center[0] - origin[0], center[1] - origin[1]], p),
+    ]
+}
+
+#[test]
+fn finite_sliders_share_native_motion_and_close_actual_momentum_storage_and_guide_work() {
+    let origin = [-7.0, 26.0];
+    let viscosity = 0.001;
+    let (mut grid, mut disk) = fixture(0.4);
+    grid.rebind_gravity([1e-6, -2e-6], &mut Vec::new()).unwrap();
+    let normals = [[0.0, 1.0], [0.6, 0.8]];
+    let mut sliders = core::array::from_fn::<_, 2, _>(|i| {
+        let surface = plane(&disk, normals[i], 0.018, [0.0; 2])
+            .with_tangential(0.03, 0.001)
+            .unwrap();
+        FiniteLubricationSlider2::new(
+            surface,
+            [0.02, 0.7][i],
+            [8.1 + i as f64, 6.3],
+            [0.003, -0.002][i],
+        )
+        .unwrap()
+    });
+    let before_sliders = sliders;
+    let mut before = joint(&grid, &disk, origin);
+    for slider in sliders {
+        let p = slider_momentum(slider, origin);
+        for a in 0..3 {
+            before[a] += p[a];
+        }
+    }
+    let loads = [0.0002, -0.0003];
+    let radius = disk.radius();
+    let receipt = disk
+        .step_with_lubrication_sliders(
+            &mut grid,
+            [0.0005, -0.0002],
+            0.0003,
+            origin,
+            viscosity,
+            &mut sliders,
+            &loads,
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let native = &receipt.motion.motion;
+    let mut actual = joint(&grid, &disk, origin);
+    let mut expected = core::array::from_fn::<_, 3, _>(|a| {
+        native.physical_external_impulse[a]
+            + native.represented_fluid_forcing_impulse[a]
+            + native.boundary_fluid_impulse[a]
+            + if a == 2 {
+                native.periodic_angular_impulse
+            } else {
+                0.0
+            }
+    });
+    for i in 0..2 {
+        let before_slider = before_sliders[i];
+        let slider = sliders[i];
+        let response = receipt.sliders[i];
+        let film = receipt.motion.planes[i];
+        let normal = normals[i];
+        let tangent = [-normal[1], normal[0]];
+        let disk_speed = dot(native.native.velocity_midpoint, tangent);
+        let initial_speed = before_slider.tangential_velocity();
+        let midpoint = 0.5 * (initial_speed + slider.tangential_velocity());
+        let gap = dot(
+            [
+                native.collision_center[0] - slider.plane().point()[0],
+                native.collision_center[1] - slider.plane().point()[1],
+            ],
+            normal,
+        ) - radius;
+        let k = std::f64::consts::PI
+            * viscosity
+            * (8.0 * radius).sqrt()
+            * (gap.max(0.001).powf(-0.5) - 0.03_f64.powf(-0.5));
+        let effective = k / (1.0 + k / (2.0 * slider.mass()));
+        let disk_tangent_impulse =
+            -effective * (disk_speed - initial_speed - loads[i] / (2.0 * slider.mass()));
+        close(
+            dot([film.body_impulse[0], film.body_impulse[1]], tangent),
+            disk_tangent_impulse,
+            3e-16,
+        );
+        close(response.velocity_midpoint, midpoint, 1e-16);
+        close(
+            slider.mass() * (slider.tangential_velocity() - initial_speed),
+            loads[i] - disk_tangent_impulse,
+            3e-16,
+        );
+        assert_eq!(slider.plane(), before_slider.plane());
+        for a in 0..2 {
+            close(
+                slider.center()[a] - before_slider.center()[a],
+                midpoint * tangent[a],
+                2e-15,
+            );
+        }
+        let measured_kinetic_change =
+            0.5 * slider.mass() * (slider.tangential_velocity().powi(2) - initial_speed.powi(2));
+        close(
+            measured_kinetic_change,
+            loads[i] * midpoint + film.plane_work,
+            2e-18,
+        );
+        close(
+            response.kinetic_energy_change,
+            measured_kinetic_change,
+            2e-18,
+        );
+        close(response.work_residual, 0.0, 2e-18);
+        close(
+            dot(
+                [response.guide_impulse[0], response.guide_impulse[1]],
+                tangent,
+            ),
+            0.0,
+            1e-16,
+        );
+        let arm = [
+            response.collision_center[0] - origin[0],
+            response.collision_center[1] - origin[1],
+        ];
+        let film_tangent = tangent.map(|t| -disk_tangent_impulse * t);
+        close(
+            response.guide_impulse[2],
+            -film.plane_impulse[2] + cross(arm, film_tangent),
+            1e-15,
+        );
+        close(
+            film.body_center_couple,
+            -k * radius * radius * native.native.angular_velocity_midpoint,
+            3e-16,
+        );
+        vector(response.momentum_residual, [0.0; 3], 2e-15);
+        let p = slider_momentum(slider, origin);
+        for a in 0..3 {
+            actual[a] += p[a];
+            expected[a] += response.external_impulse[a] + response.guide_impulse[a];
+        }
+    }
+    for a in 0..3 {
+        close(actual[a] - before[a], expected[a], 2e-11);
+    }
+    vector(receipt.combined_momentum_residual, [0.0; 3], 2e-11);
+    close(
+        receipt.motion.body_work + receipt.motion.plane_work + receipt.motion.dissipated_energy,
+        0.0,
+        2e-17,
+    );
+    assert!(receipt.motion.dissipated_energy >= 0.0);
+}
+
+#[test]
+fn finite_stiff_slider_recoils_inside_the_actual_fluid_candidate() {
+    let (mut grid, disk) = fixture(0.4);
+    let mut body = disk.body();
+    body.velocity = [0.004, 0.0];
+    body.angular_velocity = 0.0;
+    let mut disk = DryDisk2::new(&grid, disk.radius(), body, disk.angle()).unwrap();
+    let surface = plane(&disk, [0.0, 1.0], 0.008, [0.0; 2])
+        .with_tangential(0.03, 0.001)
+        .unwrap();
+    let mass = 1e-5;
+    let initial_speed = 0.003;
+    let mut sliders =
+        [FiniteLubricationSlider2::new(surface, mass, [8.0, 5.0], initial_speed).unwrap()];
+    let receipt = disk
+        .step_with_lubrication_sliders(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [-7.0, 26.0],
+            0.002,
+            &mut sliders,
+            &[0.0],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let film = receipt.motion.planes[0];
+    let k = film.tangential_resistance_increment;
+    assert!(k / (2.0 * mass) > 1000.0);
+    let disk_speed = -receipt.motion.motion.native.velocity_midpoint[0];
+    let expected = (mass * initial_speed + 0.5 * k * disk_speed) / (mass + 0.5 * k);
+    close(receipt.sliders[0].velocity_midpoint, expected, 2e-17);
+    close(
+        sliders[0].tangential_velocity(),
+        2.0 * expected - initial_speed,
+        4e-17,
+    );
+    assert!(film.plane_impulse[0].abs() <= 2.0 * mass * (disk_speed - initial_speed).abs());
+    close(
+        receipt.sliders[0].kinetic_energy_change,
+        film.plane_work,
+        2e-20,
+    );
+    vector(receipt.combined_momentum_residual, [0.0; 3], 2e-11);
+}
+
+#[test]
+fn inactive_and_empty_sliders_retain_the_ordinary_native_result_and_free_acceleration() {
+    let (mut grid, mut disk) = fixture(0.4);
+    let mut expected_grid = grid.clone();
+    let mut expected_disk = disk.clone();
+    let expected = expected_disk
+        .step(
+            &mut expected_grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let mut empty_grid = grid.clone();
+    let mut empty_disk = disk.clone();
+    let empty = empty_disk
+        .step_with_lubrication_sliders(
+            &mut empty_grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &mut [],
+            &[],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(empty.motion.motion, expected);
+    assert_eq!(empty_grid.f, expected_grid.f);
+    let surface = plane(&disk, [0.0, 1.0], 0.8, [0.0; 2])
+        .with_tangential(0.03, 0.001)
+        .unwrap();
+    let mut sliders = [FiniteLubricationSlider2::new(surface, 2.0, [8.0, 5.0], 0.003).unwrap()];
+    let receipt = disk
+        .step_with_lubrication_sliders(
+            &mut grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &mut sliders,
+            &[0.004],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(receipt.motion.motion, expected);
+    assert_eq!(grid.f, expected_grid.f);
+    assert_eq!(disk.body(), expected_disk.body());
+    close(sliders[0].tangential_velocity(), 0.005, 1e-18);
+    assert_eq!(receipt.motion.body_impulse, [0.0; 3]);
+    vector(receipt.sliders[0].guide_impulse, [0.0; 3], 0.0);
+    close(
+        receipt.sliders[0].kinetic_energy_change,
+        receipt.sliders[0].external_work,
+        2e-20,
+    );
+}
+
+#[test]
+fn finite_slider_refusal_and_cancellation_preserve_all_state_and_exact_retry() {
+    let (mut grid, mut disk) = fixture(0.4);
+    let surface = plane(&disk, [0.0, 1.0], 0.8, [0.0; 2])
+        .with_tangential(0.03, 0.001)
+        .unwrap();
+    let mut sliders = [FiniteLubricationSlider2::new(surface, 1.0, [8.0, 5.0], 0.003).unwrap()];
+    let initial_grid = grid.clone();
+    let initial_disk = disk.clone();
+    let initial_sliders = sliders;
+    // Inactive films let the original fluid/disk candidate succeed. Only the
+    // late finite-slider endpoint exceeds the speed limit.
+    assert!(
+        disk.step_with_lubrication_sliders(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut sliders,
+            &[1.0],
+            Default::default(),
+            &gate(),
+        )
+        .is_err()
+    );
+    assert_eq!(grid.f, initial_grid.f);
+    assert_eq!(disk.body(), initial_disk.body());
+    assert_eq!(disk.angle(), initial_disk.angle());
+    assert_eq!(sliders, initial_sliders);
+    let cancelled = gate();
+    cancelled.request();
+    assert_eq!(
+        disk.step_with_lubrication_sliders(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut sliders,
+            &[0.0],
+            Default::default(),
+            &cancelled,
+        )
+        .unwrap_err(),
+        DryDiskError2::Cancelled
+    );
+    assert_eq!(grid.f, initial_grid.f);
+    assert_eq!(sliders, initial_sliders);
+    let mut fresh_grid = initial_grid;
+    let mut fresh_disk = initial_disk;
+    let mut fresh_sliders = initial_sliders;
+    let actual = disk
+        .step_with_lubrication_sliders(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut sliders,
+            &[0.0],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let expected = fresh_disk
+        .step_with_lubrication_sliders(
+            &mut fresh_grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut fresh_sliders,
+            &[0.0],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(grid.f, fresh_grid.f);
+    assert_eq!(disk.body(), fresh_disk.body());
+    assert_eq!(sliders, fresh_sliders);
+}

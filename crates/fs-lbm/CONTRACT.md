@@ -10017,3 +10017,41 @@ Five synthetic regression definitions cover zero-field parity with thermal and b
 The immutable thermal rigid-wall candidate methods use the existing link-resolved rigid reflection with current cellwise material relaxation and the original Guo force frame. That same native tick records the actual mass routes consumed by extensive-enthalpy transport. Final source/rheology, wetting, wall mass, population/Mach, material speed, SI conversion and cancellation checks precede return.
 
 A private evolved-state tick separates preparation from publication without cloning prepared source or electrical operators. Each thermal rigid-wall trial clones the original native fluid once and retains the same material/caloric bindings and physical clock. The existing electrical/conduction ownership gate remains operative. Optional molecular heating reuses the original held initial-state stress-power source; actuator work and numerical loss are not additional caloric inputs. Fixed flooded-plane and single-phase limits remain. Focused regression definitions exercise isothermal parity, heat and buoyancy, actual rigid replay, original molecular source reuse, and refusal/retry. Formatting, parsing and scoped whitespace checks passed; native compilation and execution remain outstanding.
+
+
+### Finite guided plane sliders on the physical D2Q9 disk
+
+The native dry-disk owner now accepts FiniteLubricationSlider2 through
+DryDisk2::step_with_lubrication_sliders. Each source supplies a positive
+physical mass per out-of-plane depth, a distinct center of mass, a signed
+tangential velocity and the original stationary plane/film geometry.
+The guide fixes normal position and orientation. Infinite-plane geometry
+therefore stays exactly unchanged under travel; no finite face extent,
+rotary inertia, resolved-fluid wall or free normal recoil is inferred.
+
+Every original three-unknown dry-fluid candidate condenses the finite
+slider midpoint with k_eff = k/(1+k/(2m)) and
+u_free = u_before + J_authored/(2m). The stiff branch avoids overflow of
+k/(2m). The disk receives the film load inside its existing native solve;
+the slider receives the opposite tangent impulse and actual kinetic work.
+Normal traction and the complete distributed-traction couple go to a
+separate ideal guide port, whose work is zero. The original cylinder spin
+resistance is retained; translating recoil does not silently remove it.
+
+Slider centers undergo both free half-drifts around the same impulse.
+Receipts separately retain authored work, true endpoint momentum/kinetic
+change, guide impulse/couple and their measured balance. The combined
+exterior-fluid/dry-disk/slider momentum account includes guide reactions
+as external inputs. Every slider endpoint, work and momentum check is
+prepared before the original sole body/fluid publication, followed only
+by infallible assignments of the already-admitted slider states.
+
+Focused native-source checks cover simultaneous oblique sliders with
+Guo acceleration and authored loads, independent fixed-origin momentum
+and kinetic-work reconstruction, stiff recoil, original inactive/empty
+bit parity, late refusal and cancellation with exact retry. The bounded
+stiff limit is also checked without forming the overflowing raw ratio.
+Implicit midpoint remains passive but is not L-stable: unresolved stiff
+films may reverse relative velocity during a tick, so physical relaxation
+still needs time resolution. Existing model cutoffs, positive-gap
+admission, 64-plane limit, no contact and no film-heat destination remain.
