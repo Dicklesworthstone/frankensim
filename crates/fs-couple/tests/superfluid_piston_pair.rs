@@ -523,3 +523,327 @@ fn second_body_refusal_and_late_cancellation_preserve_all_owners_and_retry() {
     ));
     assert_eq!(snapshot(&fluid, bodies), before);
 }
+
+mod thermal_tests {
+    use super::*;
+    use fs_couple::superfluid::piston_pair::{
+        PistonPairHeatError, advance_balanced_piston_pair_with_heat,
+    };
+    use fs_couple::superfluid::{FrictionHeatControls, FrictionHeatError};
+    use fs_thermal::enthalpy::{
+        Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
+        DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, ThermalStorageBasis,
+        TimedEvent,
+    };
+
+    const N: usize = 8;
+    const CELL_MASS: f64 = RHO * AREA / N as f64;
+
+    struct Caloric {
+        maximum_specific_energy_j_kg: f64,
+    }
+
+    impl ThermalLaw for Caloric {
+        fn storage_basis(&self) -> ThermalStorageBasis {
+            ThermalStorageBasis::InternalEnergy
+        }
+        fn temperature_k(&self, energy: f64) -> Result<f64, DepositionError> {
+            if !energy.is_finite() || !(0.0..=self.maximum_specific_energy_j_kg).contains(&energy) {
+                return Err(DepositionError::MaterialDomain);
+            }
+            // Authored calorics differ from the acoustic cp: the composition
+            // must use the original receiving owner, not copy a wave-law cp.
+            Ok(2.0 + energy / 8.0)
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            0.125
+        }
+    }
+
+    fn heat_controls() -> FrictionHeatControls {
+        FrictionHeatControls {
+            thermal: StepConfig {
+                max_dt_s: 0.001,
+                energy_tolerance_j: 1e-13,
+            },
+            cell_heat_tolerance_j: 1e-15,
+            heat_energy_tolerance_j: 1e-14,
+            combined_energy_tolerance_j: 1e-12,
+        }
+    }
+
+    fn destinations() -> Vec<CellId> {
+        (0..N).map(|i| CellId(i as u64 + 10)).collect()
+    }
+
+    fn thermal(law: &dyn ThermalLaw, source_w: f64) -> DepositionSimulation<'_> {
+        let schedule = destinations()
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id,
+                    segment_id: i as u64,
+                    body_id: 1,
+                    material_id: MaterialId(1),
+                    mass_kg: CELL_MASS,
+                    specific_h_j_kg: 0.0,
+                    geometry: CellGeometry {
+                        start_m: [i as f64 / N as f64, 0.0, 0.0],
+                        end_m: [(i + 1) as f64 / N as f64, 0.0, 0.0],
+                        volume_m3: AREA / N as f64,
+                        surface_area_m2: AREA,
+                    },
+                    boundary: Boundary {
+                        ambient_k: 2.0,
+                        htc_w_m2_k: 0.0,
+                        reservoir: None,
+                        source_w,
+                    },
+                }),
+            })
+            .collect();
+        let original = DepositionSimulation::new(
+            schedule,
+            &[(MaterialId(1), law)],
+            DepositionBudget {
+                max_cells: N,
+                max_links: 0,
+                max_events: N,
+                max_substeps: 100,
+            },
+        )
+        .unwrap();
+        original
+            .advance_to(0.0, heat_controls().thermal, || Ok(()))
+            .unwrap()
+            .0
+    }
+
+    fn thermal_snapshot(thermal: &DepositionSimulation<'_>) -> (f64, Vec<DepositedCell>) {
+        (
+            thermal.time_s(),
+            thermal.cells().values().cloned().collect(),
+        )
+    }
+
+    #[test]
+    fn driven_pair_deposits_each_friction_increment_once_and_closes_full_storage() {
+        let law = Caloric {
+            maximum_specific_energy_j_kg: 2.0,
+        };
+        let source = 1e-5;
+        let mut thermal = thermal(&law, source);
+        let mut fluid = channel(N, 0.1, 0.4, 0.003, 0.02, 4.0);
+        let original_material = *fluid.material();
+        let (mut bodies, properties, boundaries) = mechanics([0.02, 0.035], 0.003);
+        let ids = destinations();
+        let force = BodyForce::Uniform(ComponentForceDensity {
+            normal_n_m3: 0.08,
+            superfluid_n_m3: -0.08,
+        });
+        let external = [0.001, -0.002];
+        let dt = 0.4 * fluid.maximum_step_s();
+        let e0 = total_energy(&fluid, bodies, properties) + thermal.energy_j();
+        let p0 = total_momentum(&fluid, bodies, properties);
+        let mut source_energy = 0.0;
+        let mut total_heat = 0.0;
+        for _ in 0..12 {
+            let old_energy: Vec<_> = ids
+                .iter()
+                .map(|id| thermal.cells()[id].specific_h_j_kg)
+                .collect();
+            let report = advance_balanced_piston_pair_with_heat(
+                &mut fluid,
+                &mut bodies,
+                properties,
+                boundaries,
+                &mut thermal,
+                &ids,
+                dt,
+                force,
+                external,
+                MutualFriction::Linear { gamma_kg_m3_s: 1.5 },
+                controls(),
+                heat_controls(),
+                || false,
+            )
+            .unwrap();
+            total_heat += report.pair.channel.mutual_friction_heat_j;
+            source_energy +=
+                report.pair.total_external_work_j + report.heat.thermal_march.external_heat_j;
+            assert_eq!(thermal.time_s(), fluid.time_s());
+            assert_eq!(fluid.material(), &original_material);
+            assert!(thermal.uses_material_law(MaterialId(1), &law));
+            close(
+                report.heat.thermal_march.external_heat_j,
+                N as f64 * source * dt,
+                1e-18,
+            );
+            close(
+                report.heat.heat_intake.external_heat_j,
+                report.pair.channel.mutual_friction_heat_j,
+                1e-18,
+            );
+            close(report.combined_storage_residual_j, 0.0, 1e-16);
+            for (i, id) in ids.iter().enumerate() {
+                let energy = thermal.cells()[id].specific_h_j_kg;
+                close(
+                    CELL_MASS * (energy - old_energy[i]),
+                    source * dt + fluid.last_mutual_friction_heat_j()[i],
+                    1e-18,
+                );
+                close(
+                    thermal.temperature_k(*id).unwrap(),
+                    2.0 + energy / 8.0,
+                    1e-15,
+                );
+                assert_eq!(thermal.cells()[id].boundary.source_w, source);
+            }
+            close(
+                total_energy(&fluid, bodies, properties) + thermal.energy_j() - e0,
+                source_energy,
+                5e-16,
+            );
+            close(
+                total_momentum(&fluid, bodies, properties),
+                p0 + (-external[0] + external[1]) * fluid.time_s(),
+                5e-16,
+            );
+            close(
+                thermal.energy_j(),
+                N as f64 * source * fluid.time_s() + total_heat,
+                1e-17,
+            );
+        }
+        assert!(total_heat > 0.0);
+        assert!(
+            bodies
+                .iter()
+                .zip(boundaries)
+                .any(|(body, boundary)| body.pose().position_world().y
+                    != boundary.equilibrium_position_world.y)
+        );
+    }
+
+    #[test]
+    fn caloric_and_final_cancellation_refusals_publish_none_of_the_four_owners() {
+        let make = || {
+            (
+                channel(N, 0.1, 0.4, 0.003, 0.02, 4.0),
+                mechanics([0.02, 0.035], 0.003),
+            )
+        };
+        let good = Caloric {
+            maximum_specific_energy_j_kg: 2.0,
+        };
+        let refused = Caloric {
+            maximum_specific_energy_j_kg: 0.0,
+        };
+        let ids = destinations();
+        let (mut fluid, (mut bodies, properties, boundaries)) = make();
+        let dt = 0.4 * fluid.maximum_step_s();
+        let before = snapshot(&fluid, bodies);
+        let mut cold = thermal(&refused, 0.0);
+        let cold_before = thermal_snapshot(&cold);
+        let result = advance_balanced_piston_pair_with_heat(
+            &mut fluid,
+            &mut bodies,
+            properties,
+            boundaries,
+            &mut cold,
+            &ids,
+            dt,
+            BodyForce::Acceleration(0.1),
+            [0.001, -0.002],
+            MutualFriction::Linear { gamma_kg_m3_s: 1.5 },
+            controls(),
+            heat_controls(),
+            || false,
+        );
+        assert!(matches!(
+            result,
+            Err(PistonPairHeatError::Heat(FrictionHeatError::Thermal(
+                DepositionError::MaterialDomain
+            )))
+        ));
+        assert_eq!(snapshot(&fluid, bodies), before);
+        assert_eq!(thermal_snapshot(&cold), cold_before);
+
+        let (mut baseline, (mut baseline_bodies, _, _)) = make();
+        let mut baseline_thermal = thermal(&good, 0.0);
+        let calls = Cell::new(0usize);
+        let expected_report = advance_balanced_piston_pair_with_heat(
+            &mut baseline,
+            &mut baseline_bodies,
+            properties,
+            boundaries,
+            &mut baseline_thermal,
+            &ids,
+            dt,
+            BodyForce::Acceleration(0.1),
+            [0.001, -0.002],
+            MutualFriction::Linear { gamma_kg_m3_s: 1.5 },
+            controls(),
+            heat_controls(),
+            || {
+                calls.set(calls.get() + 1);
+                false
+            },
+        )
+        .unwrap();
+        let expected = snapshot(&baseline, baseline_bodies);
+        let expected_thermal = thermal_snapshot(&baseline_thermal);
+        for stop in [1, calls.get()] {
+            let (mut fluid, (mut bodies, _, _)) = make();
+            let mut thermal = thermal(&good, 0.0);
+            let before = snapshot(&fluid, bodies);
+            let thermal_before = thermal_snapshot(&thermal);
+            let count = Cell::new(0usize);
+            let result = advance_balanced_piston_pair_with_heat(
+                &mut fluid,
+                &mut bodies,
+                properties,
+                boundaries,
+                &mut thermal,
+                &ids,
+                dt,
+                BodyForce::Acceleration(0.1),
+                [0.001, -0.002],
+                MutualFriction::Linear { gamma_kg_m3_s: 1.5 },
+                controls(),
+                heat_controls(),
+                || {
+                    count.set(count.get() + 1);
+                    count.get() >= stop
+                },
+            );
+            assert!(
+                matches!(result, Err(PistonPairHeatError::Cancelled)),
+                "stop={stop}, result={result:?}"
+            );
+            assert_eq!(snapshot(&fluid, bodies), before);
+            assert_eq!(thermal_snapshot(&thermal), thermal_before);
+            let retried = advance_balanced_piston_pair_with_heat(
+                &mut fluid,
+                &mut bodies,
+                properties,
+                boundaries,
+                &mut thermal,
+                &ids,
+                dt,
+                BodyForce::Acceleration(0.1),
+                [0.001, -0.002],
+                MutualFriction::Linear { gamma_kg_m3_s: 1.5 },
+                controls(),
+                heat_controls(),
+                || false,
+            )
+            .unwrap();
+            assert_eq!(retried, expected_report);
+            assert_eq!(snapshot(&fluid, bodies), expected);
+            assert_eq!(thermal_snapshot(&thermal), expected_thermal);
+        }
+    }
+}

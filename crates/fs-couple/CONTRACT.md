@@ -25628,3 +25628,47 @@ optional adaptive mode plus world gravity and force vectors. Its CSV includes
 all three position, velocity and momentum components, cumulative external
 impulse/work, gravity reserves and accepted/rejected step counts. It uses the
 same explicitly synthetic gas fixture and authored aperture qualification.
+
+
+## Atomic two-piston superfluid heating
+
+`superfluid::piston_pair::advance_balanced_piston_pair_with_heat` composes
+the same reciprocal fluid/two-body proposal with the original finite thermal
+timeline. Active unique destinations receive the current interval's per-cell
+friction joules exactly once. Original thermal sources, events and contacts
+advance through `DepositionSimulation::advance_to`; the original caloric
+owner accepts heat through `apply_heat_j`. No alternate solver, repeated
+mechanical step, copied damping update or cumulative-heat replay is used.
+
+The complete storage gate adds the pair's mechanical-fluid residual to the
+original thermal march, caloric intake and friction-transfer residuals. It
+counts neither friction nor the original wave residual twice. Channel fields,
+heat and clock, both native body positions/momenta, and thermal cells remain
+unchanged on caloric refusal or final cancellation. Publication follows the
+original private-candidate boundary, with only infallible assignments after
+acceptance. Frozen material coefficients and the first-order endpoint heat
+split are unchanged; native thermal storage conventions remain authoritative.
+
+The seven-test `superfluid_piston_pair` suite includes repeated driven
+heating, independent per-cell intake and whole-system source/storage balances,
+caloric refusal, late cancellation and exact retry. Thirty-six distinct
+channel/coupling tests passed native source-module validation in this increment.
+
+Run the complete example with:
+
+```sh
+cargo run -p fs-couple --features superfluid --example superfluid_piston_pair
+```
+
+The example uses the original sourced 1.8 K helium reference, two unequal
+native pistons, and physical reference-cell masses. Its explicit local
+isochoric caloric tangent uses the reference cv and permits at most 1 mK of
+dissipative heating; it is not a nonlinear helium EOS or coefficient-feedback
+model. Geometry, excitation and mutual-friction coefficient are authored demo
+inputs. At default 64 cells, 926 intervals cover 5 ms. The native executable
+completed independent cumulative momentum, represented-energy, heat-transfer
+and clock checks. Observed relative energy defect was 3.66e-13, momentum defect
+9.84e-22 N s, and heat-transfer defect 1.85e-26 J. These are numerical balance
+results for this fixture, not accuracy bounds against an experiment. Full
+workspace Cargo verification remains unavailable under the current resource
+limits.

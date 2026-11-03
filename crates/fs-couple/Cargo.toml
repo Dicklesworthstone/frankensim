@@ -136,3 +136,7 @@ required-features = ["superfluid"]
 [[test]]
 name = "superfluid_piston_pair"
 required-features = ["superfluid"]
+
+[[example]]
+name = "superfluid_piston_pair"
+required-features = ["superfluid"]

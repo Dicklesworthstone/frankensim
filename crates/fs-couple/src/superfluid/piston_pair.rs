@@ -24,6 +24,11 @@ use super::piston::{
     prepare_motion, validate_controls,
 };
 
+mod thermal;
+pub use thermal::{
+    PistonPairHeatError, PistonPairHeatReport, advance_balanced_piston_pair_with_heat,
+};
+
 /// One original native body's motion and its separate fluid half-cell account.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PistonEndStep {
