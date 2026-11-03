@@ -11,6 +11,10 @@ use super::{
 };
 use fs_airscrew::dynamic_inflow::{InflowStep, UniformAxialInflow};
 
+/// Native first-harmonic and skew wake storage on independent shafts.
+#[path = "dynamic/first_harmonic.rs"]
+pub mod first_harmonic;
+
 /// Physical snapshot supplied to a joint shaft/body/wake load law.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DynamicShaftState<const N: usize> {

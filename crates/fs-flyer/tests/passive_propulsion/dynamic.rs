@@ -537,3 +537,6 @@ fn g0_late_full_wake_refusal_cannot_publish_native_mechanics() {
     assert_eq!(motion.native_state(), &canonical);
     assert_eq!(induced, before_wake);
 }
+
+#[path = "dynamic/first_harmonic.rs"]
+mod first_harmonic;

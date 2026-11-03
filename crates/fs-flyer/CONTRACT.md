@@ -763,6 +763,37 @@ check shared-owner parity, post-impulse native stage oracles, independent physic
 source accounts, joint second-order refinement, shaft-axis invariance and late
 refusal/retry.
 
+### First-harmonic and skew wakes through independent shafts
+
+`propulsion::passive::dynamic::first_harmonic::HarmonicShaftPropulsion` adds
+the original physical mean and two first-harmonic modes per disk to retained
+`ShaftMotion`. A private `HarmonicWake` shares prepared geometry, pointwise
+blade/wing evaluation, modal admission, normal/skew transport and coupling-work
+accounting with the existing geared and continued harmonic consumers. Native
+modal laws and their bounded skew solver are unchanged. Each independent rotor
+still supplies its actual signed `p/J`; no ideal gear is introduced.
+
+The six induction velocities retain their fixed body disk frames through
+changing incident wind. Carrier frame-rate terms remain distinct from physical
+shaft speed. Oblique hub forces/moments, axial aerodynamic shaft torque, apparent
+fluid storage, signed skew cross work, spring energy, bearing heat and motor
+work keep the original owners and enter each accepted account once.
+
+Initial loads predict both canonical mechanics and every wake mode. The full
+modal/skew proposal and finite coupling-work defect are computed inside the
+second load callback, before mechanical publication. Any aerodynamic, wake,
+coupling-accounting or late native mechanical failure preserves both stored
+mechanical states and all caller-owned modes; acceptance ends with an infallible
+mode assignment. Predictor transfers are not accepted work or heat.
+
+Normal/skew snapshot parity, asymmetric post-impulse stage oracles, independent
+mechanical and modal momentum/work, signed transport decomposition and late
+refusal/retry are checked in
+`tests/passive_propulsion/dynamic/first_harmonic.rs`. Smooth coupled trajectories
+still require timestep refinement; no whole-fluid momentum/passivity theorem,
+dynamic swirl, transported wake geometry, unsteady wing memory or independent-
+shaft wing-continuation API is claimed.
+
 ### Ideal gears and real propeller/airframe motion
 
 `spine::rotors::geared` admits one ideal relative gear coordinate and 1–64
