@@ -10,11 +10,13 @@
 use super::FrictionHeatRoute;
 use super::cohesive::{CohesiveHeatError, solve_frozen_cohesive_heat};
 use super::network::{FrictionHeatNetworkReport, FrictionHeatNetworkStep};
+use crate::cohesive_contact::reclosure::ResidualCoulombSource;
 use crate::cohesive_contact::rigid::{
     RigidCohesiveError, RigidCohesiveFrame, RigidCohesiveLoad, RigidCohesiveSystem,
 };
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
+use fs_material::cohesive::source::ResolvedBilinearCohesive;
 use fs_solver::NewtonReport;
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation, MaterialId};
 use std::collections::BTreeSet;
@@ -37,6 +39,16 @@ pub struct RigidCohesiveHeatContact<'a> {
     pub site_index: usize,
     pub route: &'a FrictionHeatRoute,
     pub temperature_guess_k: f64,
+}
+
+/// Prescribed temperature successors of the original selected interface claims.
+/// Arrays retain native site order, independent of the thermal route ordering.
+/// Enabled damaged-area friction requires its own paired source successors.
+#[derive(Clone, Copy)]
+pub struct RigidCohesiveHeatTemperature<'s, 'm> {
+    pub cohesive: &'s [&'m ResolvedBilinearCohesive],
+    pub friction: Option<&'s [&'m ResidualCoulombSource]>,
+    pub axis: &'s str,
 }
 
 #[derive(Debug)]
@@ -77,7 +89,8 @@ pub struct HeatedRigidCohesiveReport<P> {
     /// Original site indices in canonical ascending thermal-link order.
     pub site_indices: Vec<usize>,
     pub fracture_work_j: f64,
-    /// Delta(native kinetic/gravity/bond + H) + fracture - load work - other heat.
+    /// Delta(native kinetic/gravity/bond + H) + fracture - load work - source
+    /// parameter work - other heat. Prescribed source work is not caloric heat.
     pub combined_energy_residual_j: f64,
     pub summed_energy_residual_j: f64,
 }
@@ -101,6 +114,74 @@ pub struct HeatedRigidCohesiveReport<P> {
 pub fn apply_rigid_cohesive_heat<'a, 't, P, E>(
     mechanical: &mut RigidCohesiveSystem<'a>,
     loads: [RigidCohesiveLoad; 2],
+    thermal: &mut DepositionSimulation<'t>,
+    bodies: [RigidCohesiveHeatBody<'_>; 2],
+    contacts: &[RigidCohesiveHeatContact<'_>],
+    controls: CohesiveHeatControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'t>, &[u64], &[f64]) -> Result<CohesiveHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<HeatedRigidCohesiveReport<P>, RigidCohesiveHeatError<E>> {
+    apply_rigid_cohesive_heat_inner(
+        mechanical,
+        loads,
+        None,
+        thermal,
+        bodies,
+        contacts,
+        controls,
+        energy_guess_j,
+        resolve,
+        gate,
+    )
+}
+
+/// Change prescribed source temperature and advance native motion and finite
+/// body heat in one transaction. The original source transfer occurs once at
+/// accepted geometry before mechanics; caloric Newton trials never repeat it.
+/// Fixed-jump damage and subsequent mechanical fracture retain the original
+/// surface-creation account. Only actual viscous and sliding losses become heat.
+///
+/// `mechanical.parameter_work_j` records signed work supplied by the prescribed
+/// coefficient change. It is an external input to the combined balance, not an
+/// extra heat source or a debit from body enthalpy. This is explicit temperature
+/// control, with coefficients frozen over the motion increment. It does not
+/// infer cohesive free-energy temperature derivatives or surface entropy, or
+/// claim a closed thermomechanical feedback solve. The optional entropy audit
+/// covers the original caloric transport and irreversible heat destinations.
+/// All geometric restrictions of `apply_rigid_cohesive_heat` still apply.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_rigid_cohesive_heat_with_temperature<'a, 't, P, E>(
+    mechanical: &mut RigidCohesiveSystem<'a>,
+    loads: [RigidCohesiveLoad; 2],
+    temperature: RigidCohesiveHeatTemperature<'_, 'a>,
+    thermal: &mut DepositionSimulation<'t>,
+    bodies: [RigidCohesiveHeatBody<'_>; 2],
+    contacts: &[RigidCohesiveHeatContact<'_>],
+    controls: CohesiveHeatControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'t>, &[u64], &[f64]) -> Result<CohesiveHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<HeatedRigidCohesiveReport<P>, RigidCohesiveHeatError<E>> {
+    apply_rigid_cohesive_heat_inner(
+        mechanical,
+        loads,
+        Some(temperature),
+        thermal,
+        bodies,
+        contacts,
+        controls,
+        energy_guess_j,
+        resolve,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn apply_rigid_cohesive_heat_inner<'a, 't, P, E>(
+    mechanical: &mut RigidCohesiveSystem<'a>,
+    loads: [RigidCohesiveLoad; 2],
+    temperature: Option<RigidCohesiveHeatTemperature<'_, 'a>>,
     thermal: &mut DepositionSimulation<'t>,
     bodies: [RigidCohesiveHeatBody<'_>; 2],
     contacts: &[RigidCohesiveHeatContact<'_>],
@@ -181,75 +262,90 @@ pub fn apply_rigid_cohesive_heat<'a, 't, P, E>(
     let guesses: Vec<_> = ordered.iter().map(|c| c.temperature_guess_k).collect();
     let network =
         FrictionHeatNetworkStep::new(thermal, target, &routes, controls.maximum_interfaces, check)?;
-    let (solved, report) = mechanical.step_with_acceptance(loads, Some(gate), |frame, sites| {
-        if frame.time_s != target || frame.parameter_work_j != 0.0 {
-            return Err(RigidCohesiveHeatError::Invalid(
-                "frozen source native increment required",
-            ));
-        }
-        let mut losses = Vec::with_capacity(ordered.len());
-        let mut total_heat = 0.0;
-        for contact in &ordered {
-            check()?;
-            let site =
-                sites[contact.site_index]
-                    .as_ref()
-                    .ok_or(RigidCohesiveHeatError::Invalid(
-                        "incomplete native site observation",
-                    ))?;
-            let friction = site.friction.map_or(0.0, |f| f.friction_dissipation_j);
-            if site.jump_m[0] > 0.0
-                || [
-                    friction,
-                    site.viscous_dissipation_j,
-                    site.fracture_dissipation_j,
-                ]
-                .iter()
-                .any(|v| !v.is_finite() || *v < 0.0)
-            {
+    let accept =
+        |frame: &RigidCohesiveFrame,
+         sites: &[Option<crate::cohesive_contact::rigid::RigidCohesiveSiteFrame>]| {
+            if frame.time_s != target || (temperature.is_none() && frame.parameter_work_j != 0.0) {
                 return Err(RigidCohesiveHeatError::Invalid(
-                    "closed nonnegative physical native site losses required",
+                    "frozen source native increment required",
                 ));
             }
-            let loss = friction + site.viscous_dissipation_j;
-            total_heat += loss;
-            losses.push(loss);
-        }
-        if !total_heat.is_finite()
-            || (total_heat - frame.friction_dissipation_j - frame.viscous_dissipation_j).abs()
-                > controls.combined_energy_tolerance_j
-        {
-            return Err(RigidCohesiveHeatError::Invalid(
-                "site heat differs from original native loss",
-            ));
-        }
-        let solved = solve_frozen_cohesive_heat(
-            thermal,
-            &network,
-            &guesses,
-            &losses,
-            controls,
-            energy_guess_j,
-            resolve,
-            gate,
-        )?;
-        let combined = frame.mechanical_energy_j + frame.cohesive_stored_energy_j - old_energy
-            + solved.heat.thermal.stored_energy_change_j
-            + frame.fracture_dissipation_j
-            - frame.external_work_j
-            - solved.heat.external_heat_j;
-        let summed = frame.energy_residual_j + solved.heat.total_energy_residual_j;
-        if [combined, summed]
-            .iter()
-            .any(|r| !r.is_finite() || r.abs() > controls.combined_energy_tolerance_j)
-        {
-            return Err(RigidCohesiveHeatError::Invalid(
-                "original native mechanics and finite heat do not balance",
-            ));
-        }
-        let report = (*frame, combined, summed);
-        Ok((solved, report))
-    })?;
+            let mut losses = Vec::with_capacity(ordered.len());
+            let mut total_heat = 0.0;
+            for contact in &ordered {
+                check()?;
+                let site =
+                    sites[contact.site_index]
+                        .as_ref()
+                        .ok_or(RigidCohesiveHeatError::Invalid(
+                            "incomplete native site observation",
+                        ))?;
+                let friction = site.friction.map_or(0.0, |f| f.friction_dissipation_j);
+                if site.jump_m[0] > 0.0
+                    || [
+                        friction,
+                        site.viscous_dissipation_j,
+                        site.fracture_dissipation_j,
+                    ]
+                    .iter()
+                    .any(|v| !v.is_finite() || *v < 0.0)
+                {
+                    return Err(RigidCohesiveHeatError::Invalid(
+                        "closed nonnegative physical native site losses required",
+                    ));
+                }
+                let loss = friction + site.viscous_dissipation_j;
+                total_heat += loss;
+                losses.push(loss);
+            }
+            if !total_heat.is_finite()
+                || (total_heat - frame.friction_dissipation_j - frame.viscous_dissipation_j).abs()
+                    > controls.combined_energy_tolerance_j
+            {
+                return Err(RigidCohesiveHeatError::Invalid(
+                    "site heat differs from original native loss",
+                ));
+            }
+            let solved = solve_frozen_cohesive_heat(
+                thermal,
+                &network,
+                &guesses,
+                &losses,
+                controls,
+                energy_guess_j,
+                resolve,
+                gate,
+            )?;
+            let combined = frame.mechanical_energy_j + frame.cohesive_stored_energy_j - old_energy
+                + solved.heat.thermal.stored_energy_change_j
+                + frame.fracture_dissipation_j
+                - frame.external_work_j
+                - frame.parameter_work_j
+                - solved.heat.external_heat_j;
+            let summed = frame.energy_residual_j + solved.heat.total_energy_residual_j;
+            if [combined, summed]
+                .iter()
+                .any(|r| !r.is_finite() || r.abs() > controls.combined_energy_tolerance_j)
+            {
+                return Err(RigidCohesiveHeatError::Invalid(
+                    "original native mechanics and finite heat do not balance",
+                ));
+            }
+            let report = (*frame, combined, summed);
+            Ok((solved, report))
+        };
+    let (solved, report) = if let Some(temperature) = temperature {
+        mechanical.step_with_temperature_acceptance(
+            loads,
+            temperature.cohesive,
+            temperature.friction,
+            temperature.axis,
+            Some(gate),
+            accept,
+        )?
+    } else {
+        mechanical.step_with_acceptance(loads, Some(gate), accept)?
+    };
     // Native publication has passed its final cancellation gate. This move is
     // infallible and publishes the corresponding accepted caloric endpoint.
     *thermal = solved.thermal;

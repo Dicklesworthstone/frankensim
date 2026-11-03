@@ -23903,3 +23903,31 @@ The shared finite thermal solver is also used by the deformable cohesive owner.
 bond-viscosity work, analytic unequal finite-cell heating with signed ordinary
 conduction, continued exact native-mechanics parity, progressive fracture kept
 out of heat, and late thermal-source/cancellation rollback (G1/G3/G4).
+
+### Prescribed source temperature with native cohesive heating
+
+`apply_rigid_cohesive_heat_with_temperature` stages one successor of each
+original cohesive source, plus its paired damaged-area friction source when
+enabled, before the same native mechanical increment and finite-body heat solve.
+Selected claims, ordered surfaces, held query coordinates and source history
+remain pinned by the original transfer owners. The transfer runs once at
+accepted geometry; nonlinear heat trials never repeat thermal damage or advance
+the mechanical clock. The complete temperature/mechanical/caloric transaction
+publishes only after the original audits and final cancellation gate succeed.
+
+The prescribed coefficient change contributes signed `parameter_work_j` as an
+external input to the combined energy balance. It is neither deposited as heat
+nor silently taken from caloric storage. Fixed-jump thermal damage remains in
+the fracture account; only actual bond viscosity and residual sliding heat the
+finite receivers. Mechanical coefficients remain frozen during each increment.
+This explicit temperature control does not provide cohesive free-energy
+temperature derivatives, surface entropy, or closed thermomechanical feedback;
+the optional entropy audit covers the original caloric transport and physical
+heat destinations. The fixed-reference, closed-path geometric restrictions of
+the ordinary heat operation remain in force.
+
+The native heat regression target verifies exact parity with the original
+paired-source mechanical step, independent hot friction/viscosity and finite
+cell heating, heating/cooling with fixed-jump damage excluded from heat, and
+late conductivity/cancellation rollback of both source owners and both physical
+states (G1/G3/G4).

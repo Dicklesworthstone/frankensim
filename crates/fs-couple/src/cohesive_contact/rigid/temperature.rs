@@ -98,29 +98,58 @@ impl<'a> RigidCohesiveSystem<'a> {
         temperature_axis: &str,
         gate: Option<&CancelGate>,
     ) -> Result<&RigidCohesiveFrame, RigidCohesiveError> {
+        self.step_with_temperature_acceptance(
+            loads,
+            next_sources,
+            next_friction_sources,
+            temperature_axis,
+            gate,
+            |_, _| Ok::<(), RigidCohesiveError>(()),
+        )?;
+        Ok(self
+            .last_frame
+            .as_ref()
+            .expect("native step published frame"))
+    }
+
+    /// Stage the same prescribed source transfer and native solve, then let a
+    /// coupled owner audit its candidate before either accepted state changes.
+    pub(crate) fn step_with_temperature_acceptance<P, E: From<RigidCohesiveError>>(
+        &mut self,
+        loads: [RigidCohesiveLoad; 2],
+        next_sources: &[&'a ResolvedBilinearCohesive],
+        next_friction_sources: Option<&[&'a ResidualCoulombSource]>,
+        temperature_axis: &str,
+        gate: Option<&CancelGate>,
+        accept: impl FnOnce(&RigidCohesiveFrame, &[Option<RigidCohesiveSiteFrame>]) -> Result<P, E>,
+    ) -> Result<P, E> {
         poll(gate)?;
         match (self.friction.is_some(), next_friction_sources) {
             (true, None) => {
                 return Err(RigidCohesiveError::Invalid(
                     "damaged-area friction requires paired temperature successors",
-                ));
+                )
+                .into());
             }
             (false, Some(_)) => {
                 return Err(RigidCohesiveError::Invalid(
                     "temperature friction sources require the original enabled friction owner",
-                ));
+                )
+                .into());
             }
             (_, Some(sources)) if sources.len() != self.sites.len() => {
                 return Err(RigidCohesiveError::Invalid(
                     "one temperature successor per original friction site required",
-                ));
+                )
+                .into());
             }
             _ => {}
         }
         if next_sources.len() != self.sites.len() {
             return Err(RigidCohesiveError::Invalid(
                 "one temperature successor per original cohesive site required",
-            ));
+            )
+            .into());
         }
         // Inactive partial stages are scratch only and cannot affect ordinary
         // steps or retries. All entries are overwritten before activation.
@@ -128,15 +157,15 @@ impl<'a> RigidCohesiveSystem<'a> {
         for (index, (site, source)) in self.sites.iter().zip(next_sources).enumerate() {
             poll(gate)?;
             if index >= self.config.maximum_material_evaluations {
-                return Err(RigidCohesiveError::Budget(
-                    "original cohesive temperature transfers",
-                ));
+                return Err(
+                    RigidCohesiveError::Budget("original cohesive temperature transfers").into(),
+                );
             }
-            self.staged_temperature[index] = Some(site.point.transfer_temperature(
-                *source,
-                temperature_axis,
-                self.config.objective,
-            )?);
+            self.staged_temperature[index] = Some(
+                site.point
+                    .transfer_temperature(*source, temperature_axis, self.config.objective)
+                    .map_err(RigidCohesiveError::from)?,
+            );
         }
         if let Some(next) = next_friction_sources {
             // Move only the reusable owner while validating its staged source
@@ -149,16 +178,11 @@ impl<'a> RigidCohesiveSystem<'a> {
         }
         poll(gate)?;
         self.thermal_active = true;
-        // Drop the returned frame borrow before restoring the scratch selector.
         // Every Result path, including late physical/cancellation refusals, exits
         // with ordinary evaluation bound to the original accepted site owners.
-        let result = self.step_inner(loads, gate).map(|_| ());
+        let result = self.step_with_acceptance(loads, gate, accept);
         self.thermal_active = false;
-        result?;
-        Ok(self
-            .last_frame
-            .as_ref()
-            .expect("native step published frame"))
+        result
     }
 
     pub(super) fn point_for_step(

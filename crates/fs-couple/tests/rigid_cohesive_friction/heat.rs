@@ -463,3 +463,237 @@ fn late_thermal_source_and_cancellation_refuse_without_advancing_either_native_o
     );
     assert_eq!(owner.time_s(), heat.time_s());
 }
+
+fn cold_sources(
+    card: &InterfaceSystemCard,
+    viscous: bool,
+) -> (ResolvedBilinearCohesive, ResidualCoulombSource) {
+    let query = QueryPoint::new().with("T", 280.0).unwrap();
+    let selection = MaterialPropertySelection::SingleClaimOnly;
+    let bond = if viscous {
+        resolve_viscous_bilinear_cohesive(
+            card,
+            &query,
+            selection.clone(),
+            CohesiveEnvelope::CommonMode,
+            0.05,
+            10.0,
+        )
+    } else {
+        resolve_bilinear_cohesive(card, &query, selection.clone(), 0.05)
+    }
+    .unwrap();
+    let friction = resolve_residual_coulomb(card, &query, selection).unwrap();
+    (bond, friction)
+}
+
+#[test]
+fn prescribed_hot_sources_and_finite_heat_accept_the_same_native_increment() {
+    let card = source_card([0.6, 0.3], true, Some([0.3, 0.1]));
+    let (bond, residual) = cold_sources(&card, true);
+    let hot_bond = bond.at_temperature(&card, "T", 320.0).unwrap();
+    let hot_residual = residual.at_temperature(&card, "T", 320.0).unwrap();
+    let point = partial(&bond);
+    let dt = 0.01;
+    let delta = Vec3::new(0.0, 6e-5, 8e-5);
+    let make = || {
+        system(
+            &bond,
+            Some(&residual),
+            point,
+            &[[0.0; 3]],
+            UnitQuaternion::IDENTITY,
+            [Vec3::ZERO, delta.scale(1.0 / dt)],
+            zero(),
+            dt,
+            config(),
+        )
+    };
+    let mut owner = make();
+    let mut reference = make();
+    let viscosity = 6000.0 * (1.0 - point.damage()) * AREA;
+    let load = balanced_load(
+        Vec3::new(-0.6, 0.028125, 0.0375).add(delta.scale(viscosity / dt)),
+        v(point.jump_m()).add(delta.scale(0.5)),
+    );
+    let expected = *reference
+        .step_with_temperature_and_friction(load, &[&hot_bond], &[&hot_residual], "T")
+        .unwrap();
+    let initial = [10.0, 0.0];
+    let mut heat = thermal(initial);
+    let route = FrictionHeatRoute::from_link(&heat, 7, K).unwrap();
+    let report = apply_rigid_cohesive_heat_with_temperature(
+        &mut owner,
+        load,
+        RigidCohesiveHeatTemperature {
+            cohesive: &[&hot_bond],
+            friction: Some(&[&hot_residual]),
+            axis: "T",
+        },
+        &mut heat,
+        bodies(&bond),
+        &contact(&route),
+        controls(),
+        &[0.0; 2],
+        |_, ids, _| Ok::<_, &'static str>(inputs(ids)),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    assert_eq!(report.mechanical, expected);
+    assert_eq!(owner.bodies(), reference.bodies());
+    assert_eq!(owner.site_frames(), reference.site_frames());
+    assert_eq!(owner.steps(), 1);
+    close(report.mechanical.parameter_work_j, 20e-6, 3e-12);
+    let actual_heat = 0.1 * 0.625 * 0.6 * 1e-4 + viscosity * 1e-8 / dt;
+    close(report.heat.dissipated_j, actual_heat, 3e-11);
+    let (expected_h, expected_face) = thermal_reference(initial, dt, actual_heat);
+    for (cell, expected) in heat.cells().values().zip(expected_h) {
+        close(cell.specific_h_j_kg, expected, 2e-8);
+    }
+    close(
+        report.heat.interfaces[0].interface_temperature_k,
+        expected_face,
+        2e-8,
+    );
+    close(
+        report.heat.thermal.stored_energy_change_j,
+        actual_heat,
+        3e-10,
+    );
+    close(report.combined_energy_residual_j, 0.0, 3e-10);
+    assert!(core::ptr::eq(owner.sites()[0].point().source(), &hot_bond));
+    assert!(core::ptr::eq(
+        owner.damaged_area_friction_sources().unwrap()[0].source,
+        &hot_residual,
+    ));
+    assert_eq!(owner.time_s(), heat.time_s());
+}
+
+#[test]
+fn thermal_damage_and_source_work_stay_outside_heat_and_late_refusals_preserve_sources() {
+    let card = source_card([0.6, 0.3], false, Some([0.3, 0.1]));
+    let (bond, residual) = cold_sources(&card, false);
+    let hot_bond = bond.at_temperature(&card, "T", 320.0).unwrap();
+    let hot_residual = residual.at_temperature(&card, "T", 320.0).unwrap();
+    let jump = [-2e-4, 1.8e-4, 0.0];
+    let point = bond.law().bonded_point().trial(jump, 1e-8).unwrap().point;
+    let mut owner = system(
+        &bond,
+        Some(&residual),
+        point,
+        &[[0.0; 3]],
+        UnitQuaternion::IDENTITY,
+        zero(),
+        zero(),
+        0.002,
+        config(),
+    );
+    let mut heat = thermal([0.0; 2]);
+    let route = FrictionHeatRoute::from_link(&heat, 7, K).unwrap();
+    let damage = (0.00125 / (0.00125 - 0.00016)) * (1.0 - 0.00016 / 0.00018);
+    let load = balanced_load(Vec3::new(-0.6, (1.0 - damage) * 0.09 + 0.02, 0.0), v(jump));
+    let before_bodies = owner.bodies().clone();
+    let before_sites = owner.sites().to_vec();
+    let before_friction = owner.damaged_area_friction_states().unwrap().to_vec();
+    let before_cells = heat.cells().clone();
+    for cancel in [false, true] {
+        let gate = CancelGate::new_clock_free();
+        let calls = Cell::new(0);
+        let refused = apply_rigid_cohesive_heat_with_temperature(
+            &mut owner,
+            load,
+            RigidCohesiveHeatTemperature {
+                cohesive: &[&hot_bond],
+                friction: Some(&[&hot_residual]),
+                axis: "T",
+            },
+            &mut heat,
+            bodies(&bond),
+            &contact(&route),
+            controls(),
+            &[0.0; 2],
+            |_, ids, _| {
+                calls.set(calls.get() + 1);
+                if cancel {
+                    gate.request();
+                    Ok(inputs(ids))
+                } else {
+                    Err("outside caloric conductivity domain")
+                }
+            },
+            &gate,
+        );
+        assert!(refused.is_err());
+        assert!(calls.get() > 0);
+        assert_eq!(owner.bodies(), &before_bodies);
+        assert_eq!(owner.sites(), before_sites);
+        assert_eq!(
+            owner.damaged_area_friction_states().unwrap(),
+            before_friction
+        );
+        assert!(core::ptr::eq(owner.sites()[0].point().source(), &bond));
+        assert!(core::ptr::eq(
+            owner.damaged_area_friction_sources().unwrap()[0].source,
+            &residual
+        ));
+        assert_eq!(owner.steps(), 0);
+        assert!(owner.last_frame().is_none());
+        assert!(owner.site_frames().iter().all(Option::is_none));
+        assert_eq!(heat.cells(), &before_cells);
+        assert_eq!(heat.time_s(), 0.0);
+    }
+    // Both successful source directions are still real mechanical increments;
+    // the imposed equilibrium loads keep geometry fixed without a projection.
+    for (next_bond, next_friction, force, parameter_work, fracture) in [
+        (
+            &hot_bond,
+            &hot_residual,
+            Vec3::new(-0.6, (1.0 - damage) * 0.09 + 0.02, 0.0),
+            11.9e-6,
+            8.1 * damage * AREA,
+        ),
+        (
+            &bond,
+            &residual,
+            Vec3::new(-0.4, (1.0 - damage) * 0.18 + 0.02, 0.0),
+            (-20.0 + 8.1 * (1.0 - damage)) * AREA,
+            0.0,
+        ),
+    ] {
+        let report = apply_rigid_cohesive_heat_with_temperature(
+            &mut owner,
+            balanced_load(force, v(jump)),
+            RigidCohesiveHeatTemperature {
+                cohesive: &[next_bond],
+                friction: Some(&[next_friction]),
+                axis: "T",
+            },
+            &mut heat,
+            bodies(&bond),
+            &contact(&route),
+            controls(),
+            &[0.0; 2],
+            |_, ids, _| Ok::<_, &'static str>(inputs(ids)),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+        close(report.mechanical.parameter_work_j, parameter_work, 3e-11);
+        close(report.fracture_work_j, fracture, 3e-11);
+        close(
+            report.mechanical.thermal_damage_dissipation_j,
+            fracture,
+            3e-11,
+        );
+        close(report.heat.dissipated_j, 0.0, 1e-15);
+        close(report.heat.thermal.stored_energy_change_j, 0.0, 1e-12);
+        close(report.combined_energy_residual_j, 0.0, 3e-10);
+        close(
+            owner.sites()[0].point().numerical().material().damage(),
+            damage,
+            3e-10,
+        );
+        assert!(core::ptr::eq(owner.sites()[0].point().source(), next_bond));
+        assert_eq!(owner.time_s(), heat.time_s());
+    }
+    assert_eq!(owner.steps(), 2);
+}
