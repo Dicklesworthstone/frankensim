@@ -1,4 +1,4 @@
-//! Material-driven physical units for the existing sparse 3-D free surface.
+//! Material-driven physical units for the existing 2-D and sparse 3-D free surfaces.
 //!
 //! This is the frozen, isothermal, single-liquid rung: the existing VOF owner
 //! evolves momentum, fill and its conservative mass ledger. The complete source
@@ -24,6 +24,8 @@ use crate::{CS2, ScalingPlan};
 
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
+mod two_dimensional;
+pub use two_dimensional::{MaterialFreeSurface2, MaterialFreeSurfaceDomain2, MaterialFreeSurfaceSample2};
 mod pressure;
 pub use pressure::MaterialGasPressureLink3;
 mod motion;

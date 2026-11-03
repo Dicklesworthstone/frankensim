@@ -193,3 +193,88 @@ fn directly_sourced_angles_keep_original_refresh_behavior() {
     let refreshed = boundary.at_query_point(&card, &point(310.0)).unwrap();
     assert_eq!(refreshed.contact_angle_radians(), FRAC_PI_2);
 }
+
+fn domain2() -> fs_lbm::material::free_surface::MaterialFreeSurfaceDomain2 {
+    fs_lbm::material::free_surface::MaterialFreeSurfaceDomain2 {
+        cells: [18, 14],
+        gravity_m_s2: [0.0; 2],
+        contact: fs_lbm::freesurface::ContactModel::Neutral,
+        max_cells: 18 * 14,
+    }
+}
+
+fn drop2(x: usize, y: usize) -> bool {
+    let x = x as f64 - 8.5;
+    let y = y as f64 - 0.5;
+    x * x + y * y < 25.0
+}
+
+#[test]
+fn g1_g3_adhesion_drives_dense_capillary_flow_with_mass_per_depth() {
+    use fs_lbm::freesurface::PlanarWall2;
+    let liquid = liquid(0, 300.0, Some(0.05));
+    let cards = [adhesion_card(&liquid, Some(work(0.025))),
+        adhesion_card(&liquid, Some(work(0.075)))];
+    let boundaries: Vec<_> = cards.iter().map(|card| resolve_young_dupre_wetting(
+        card, &liquid, MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap()).collect();
+    let make = |boundary| plan(&liquid).with_planar_wetting(PlanarWall3::YMin, boundary)
+        .unwrap().free_surface2(domain2(), drop2).unwrap();
+    let mut flows: Vec<_> = boundaries.iter().map(make).collect();
+    let mut replay = make(&boundaries[0]);
+    let initial = flows[0].ledger_mass_kg_per_m().unwrap();
+    let expected = flows[0].lattice().ledger_mass() * liquid.density_kg_m3() * 1e-6;
+    assert!((initial - expected).abs() < 1e-14);
+    for _ in 0..12 {
+        for flow in &mut flows { flow.step(); }
+        replay.step();
+    }
+    assert_ne!(flows[0].lattice().grid.f, flows[1].lattice().grid.f);
+    assert_eq!(flows[0].lattice().grid.f, replay.lattice().grid.f);
+    assert_eq!(flows[0].lattice().mass, replay.lattice().mass);
+    for (flow, boundary) in flows.iter().zip(&boundaries) {
+        assert_eq!(flow.lattice().planar_contact_angle(),
+            Some((PlanarWall2::YMin, boundary.contact_angle_radians())));
+        assert!((flow.ledger_mass_kg_per_m().unwrap() - initial).abs() / initial < 1e-10);
+        let sample = flow.sample_at_si(8, 1).unwrap().unwrap();
+        assert!(sample.density_kg_m3 > 0.0);
+        assert!(sample.velocity_m_s.iter().all(|v| v.is_finite()));
+        assert_eq!(flow.sample_at_si(0, 0).unwrap(), None);
+        assert_eq!(flow.sample_at_si(usize::MAX, 1).unwrap(), None);
+    }
+}
+
+#[test]
+fn g3_dense_equilibrium_ninety_degrees_is_exactly_neutral() {
+    let liquid = liquid(0, 300.0, Some(0.05));
+    let boundary = wetting(&liquid, FRAC_PI_2);
+    let mut neutral = plan(&liquid).free_surface2(domain2(), drop2).unwrap();
+    let mut sourced = plan(&liquid).with_planar_wetting(PlanarWall3::YMin, &boundary)
+        .unwrap().free_surface2(domain2(), drop2).unwrap();
+    for _ in 0..12 { neutral.step(); sourced.step(); }
+    assert_eq!(neutral.lattice().grid.f, sourced.lattice().grid.f);
+    assert_eq!(neutral.lattice().mass, sourced.lattice().mass);
+    assert_eq!(neutral.ledger_mass_kg_per_m().unwrap(), sourced.ledger_mass_kg_per_m().unwrap());
+}
+
+#[test]
+fn dense_source_and_domain_refusals_precede_geometry_evaluation() {
+    use fs_lbm::freesurface::ContactModel;
+    let liquid = liquid(0, 300.0, Some(0.05));
+    let boundary = wetting(&liquid, PI / 3.0);
+    let fail = |_: usize, _: usize| -> bool { panic!("refused input evaluated geometry") };
+    for wall in [PlanarWall3::ZMin, PlanarWall3::ZMax] {
+        assert!(plan(&liquid).with_planar_wetting(wall, &boundary).unwrap()
+            .free_surface2(domain2(), fail).is_err());
+    }
+    let scaling = plan(&liquid).with_planar_wetting(PlanarWall3::YMin, &boundary).unwrap();
+    for domain in [
+        fs_lbm::material::free_surface::MaterialFreeSurfaceDomain2 { contact: ContactModel::Wetting, ..domain2() },
+        fs_lbm::material::free_surface::MaterialFreeSurfaceDomain2 { max_cells: 10, ..domain2() },
+        fs_lbm::material::free_surface::MaterialFreeSurfaceDomain2 { cells: [3, 10], ..domain2() },
+        fs_lbm::material::free_surface::MaterialFreeSurfaceDomain2 { cells: [usize::MAX, 10], ..domain2() },
+        fs_lbm::material::free_surface::MaterialFreeSurfaceDomain2 { gravity_m_s2: [f64::NAN, 0.0], ..domain2() },
+    ] {
+        assert!(scaling.free_surface2(domain, fail).is_err());
+    }
+}

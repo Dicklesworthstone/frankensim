@@ -8,10 +8,13 @@
 //! (fluid ↔ interface ↔ gas) redistribute their excess/deficit mass
 //! conservatively — with a carry accumulator so NOTHING is ever
 //! silently dropped. The battery gates the ledger at 1e-10 relative
-//! EVERY step; contact-line physics is deliberately MODEL-BRACKETED
-//! (neutral vs wetting wall ghosts), not pretended-certain.
+//! EVERY step. Legacy contact-line fixtures remain MODEL-BRACKETED;
+//! an explicitly assigned planar equilibrium angle also reaches the actual
+//! curvature stencil, without claiming calibrated moving-contact-line physics.
 
 mod curvature;
+mod wetting;
+pub use wetting::{ContactAngleError2, PlanarWall2};
 
 use crate::core2::{Cell, Grid};
 use crate::{CS2, E, OPP, Q, equilibrium};
@@ -318,6 +321,7 @@ pub struct FreeSurface {
     scratch: Vec<[f64; Q]>,
     fill_raw: Vec<f64>,
     fill_smooth: Vec<f64>,
+    planar_contact: Option<wetting::PlanarContactAngle2>,
 }
 
 /// Cumulative conversion ledger.
@@ -391,6 +395,7 @@ impl FreeSurface {
             scratch: Vec::new(),
             fill_raw: vec![0.0; nx * ny],
             fill_smooth: vec![0.0; nx * ny],
+            planar_contact: None,
         };
         fs.assert_closure();
         fs
@@ -503,6 +508,12 @@ impl FreeSurface {
         // Normal components at the four face neighbors via one-sided
         // gradients of the smoothed field; divergence by differencing.
         let phi = |dx: i32, dy: i32| -> f64 {
+            if let Some(value) = self.planar_angle_ghost([
+                x as i64 + i64::from(dx),
+                y as i64 + i64::from(dy),
+            ]) {
+                return value;
+            }
             let xx = offset_coord(x, dx, g.nx, g.periodic_x);
             let yy = offset_coord(y, dy, g.ny, g.periodic_y);
             match (xx, yy) {
@@ -562,7 +573,13 @@ impl FreeSurface {
                 let mut acc = self.fill_raw[i];
                 let mut count = 1.0;
                 for q in 1..Q {
-                    if let Some(nb) = neighbor(&self.grid, x, y, q)
+                    if let Some(value) = self.planar_angle_ghost_in([
+                        x as i64 + i64::from(E[q][0]),
+                        y as i64 + i64::from(E[q][1]),
+                    ], &self.fill_raw) {
+                        acc += value;
+                        count += 1.0;
+                    } else if let Some(nb) = neighbor(&self.grid, x, y, q)
                         && self.grid.flags[nb] != Cell::Wall
                     {
                         acc += self.fill_raw[nb];
@@ -580,11 +597,19 @@ impl FreeSurface {
     /// # Panics
     /// If the publicly editable surface tension leaves the conservative
     /// explicit capillary-wave domain. Refuses before mutating physical state.
+    /// Also refuses a changed planar wall topology or a conflicting legacy
+    /// contact model after assigning an equilibrium angle.
     pub fn step(&mut self) {
         assert!(
             crate::admit_explicit_capillary_coefficient(self.sigma),
             "surface tension exceeds conservative explicit capillary-wave domain"
         );
+        if let Some(contact) = self.planar_contact {
+            assert_eq!(self.contact, ContactModel::Neutral,
+                "a planar contact angle requires neutral fallback walls");
+            self.admit_planar_wall(contact.wall)
+                .expect("planar wetting wall topology changed after admission");
+        }
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         self.refresh_fill();
         self.grid.collide_into(&mut self.scratch);

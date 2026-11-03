@@ -2607,10 +2607,10 @@ Their presence does not claim native execution or empirical gas validation.
   wave decay rate — honesty-labeled in lbm-108; the post-collision
   (Filippova–Hänel-style) second-order transfer, general octree topologies,
   and dwr-adaptivity-driven refinement signals are recorded successors.
-- Dense contact-line fixtures remain MODEL-BRACKETED (neutral vs wetting
-  fill ghosts; lbm-107 reports the sensitivity band). The opt-in sparse 3-D
-  planar equilibrium-angle closure retains its separate, bounded convention
-  and does not claim calibrated dynamic wetting.
+- Legacy dense contact-line fixtures remain MODEL-BRACKETED (neutral vs wetting
+  fill ghosts; lbm-107 reports the sensitivity band). The opt-in dense 2-D and
+  sparse 3-D planar equilibrium-angle closures retain their separate, bounded
+  conventions and do not claim calibrated dynamic wetting.
 - ADJOINT HONESTY (plan §8.7 [M]): free-surface LBM adjoints are NOT
   promised — cell-conversion events make the map non-differentiable;
   gradients for free-surface objectives go through surrogate or
@@ -4008,6 +4008,39 @@ descriptors as the existing surface bundle; only the angle comes from this
 ordered substrate/liquid interface. The original source/scaling owner continues
 to supply rho, viscosity and sigma. The caller assigns substrate and named
 environment to the receiving geometry; this does not resolve a gas EOS.
+
+The same binding now reaches the dense D2Q9 owner through `free_surface2`.
+`MaterialFreeSurfaceDomain2` supplies an explicitly bounded, stationary closed
+rectangle including its wall rows. X/Y faces map to `freesurface::PlanarWall2`;
+Z faces and a conflicting legacy Wetting ghost refuse before classification or
+allocation. The source still owns rho, viscosity and sigma; the geometric
+boundary can consume either a direct angle or the existing Young–Dupré
+work-of-adhesion resolution. The original liquid/query consistency checks are
+unchanged. Dense gravity retains its native density-dependent rho*g convention.
+
+`FreeSurface::set_planar_contact_angle` extends frozen fill before smoothing
+and extends smoothed fill through the selected complete wall row and the second
+ghost layer used by curvature. This preserves a planar fill field at the wall
+instead of introducing curvature by truncating its smoothing stencil.
+With inward wall normal it imposes `dphi/dn_wall=-|grad_t(phi)|cot(theta)` without
+clipping that derivative or changing tracked mass. Other walls remain neutral;
+corner intersections do not acquire inferred contact angles. Exactly pi/2
+preserves the original dense neutral trajectory bit for bit. Invalid angles,
+periodic normal directions, incomplete wall rows or missing inward stencils
+refuse assignment; changing the admitted topology or fallback model later
+panics before native step mutation, as documented by that dense API.
+
+`MaterialFreeSurface2` retains the original native evolution and read-only SI
+sampling. Its mass ledger and carry are **kg per metre of out-of-plane depth**,
+using rho*dx², rather than treating a 2-D cell as a 3-D volume. This is a
+translationally invariant section, with no out-of-plane curvature or friction.
+The dense owner still has its original panic/conversion semantics and no
+transactional cancellation API. G1 planar-gradient/zero-curvature checks cover
+all four orientations; G3 source-to-pressure trajectory, mass conservation,
+replay, exact neutrality and pre-allocation refusal checks reuse
+`tests/material_free_surface3/adhesion.rs`. They establish this bounded
+equilibrium closure, not contact-line kinetics, calibrated sessile-drop
+accuracy, a surface-energy conservation law or a completed MR26 delivery.
 
 `FreeSurface3::set_planar_contact_angle` imposes the equilibrium angle through
 liquid at that one domain face. With wall normal pointing into fluid, its
