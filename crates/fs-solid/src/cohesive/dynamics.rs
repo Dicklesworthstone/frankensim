@@ -202,6 +202,16 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
     pub fn velocity_m_s(&self) -> &[f64] {
         &self.velocity_m_s
     }
+
+    /// Original reduced consistent inertia, shared by physical motion and
+    /// contact mobility. A mobility query must not apply a unit impulse as an
+    /// accepted event: that would mix linear response with velocity admission
+    /// and unnecessarily clone constitutive history. This borrowed operator
+    /// retains its original purity, symmetry and positive-definiteness contract.
+    #[must_use]
+    pub fn mass_operator(&self) -> &'m dyn LinearOp {
+        self.mass
+    }
     #[must_use]
     pub fn time_s(&self) -> f64 {
         self.time_s

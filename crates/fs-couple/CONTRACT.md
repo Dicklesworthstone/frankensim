@@ -17438,6 +17438,47 @@ independent Maxwell/acoustic physical ODEs; coefficient/refusal/cancellation
 atomicity and deterministic retry. These are native test targets; source review
 or formatting checks alone are not evidence of numerical execution.
 
+## Simultaneous impacts of retained cohesive bodies
+
+`cohesive_contact::impact::normal_impacts_candidate` connects the original
+`CohesiveMotion` states to the existing simultaneous normal-contact owner.
+Caller-owned signed sparse traces sample relative velocity and scatter their
+transpose impulses. For the actual retained reduced masses, checked CG forms
+every entry of `W = sum B_b M_b^-1 B_b^T`, including cross-contact coupling.
+The bounded contact matrix is passed unchanged to
+`fs-contact::multicontact::solve_normal_impacts`. No diagonal approximation,
+matrix averaging, successive pairwise impact law or dense structural inverse
+replaces those owners.
+
+Each body receives its complete summed generalized impulse once through
+`CohesiveMotion::impulse_candidate`. Original damage, source-bound viscosity,
+friction/contact bindings, displacement, clock and step budget survive. Exact
+zero-impulse bodies retain their accepted state without another mass solve.
+All bodies must share physical time; supplying the same accepted body twice
+refuses. All candidates are staged before any result is returned, so one
+body's velocity-limit, numerical or cancellation refusal rejects the event.
+
+Returned velocities are re-sampled through the original traces. With prescribed
+relative velocity `c`, external work on the retained bodies is `-sum c*p`.
+Separate gates check the native velocity prediction, the sum of absolute body
+work defects, `sum Delta K - prescribed_work - actual_relative_work`, and
+`sum Delta K - prescribed_work + native_impact_loss`. Compensated accounts
+retain opposing body-work contributions. The contact owner's positive-work
+allowance remains visible in its original receipt; it is not subtracted from
+the physical dissipation residual or relabeled as heat.
+
+Mass solves, native SPD/PSD contact work, traces and numerical workspace have
+explicit bounds; the workspace admission includes the original factorization
+packing scratch. Redundant contacts retain the native velocity-determinacy
+witness and representative-only impulse semantics. This supplies no individual
+pressure or heat authority for an impulse gauge.
+
+Contact discovery, nonpenetrating gaps, frozen event geometry, common frames
+and system-level restitution are supplied explicitly. Arbitrary reduced traces
+establish generalized work/momentum, not Cartesian angular momentum without
+geometric point maps. Tangential impact, event-time search, persistent contact
+and automatic heat/damage allocation are outside this normal-event adapter.
+
 ## Finite cohesive patch load line
 
 `cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.

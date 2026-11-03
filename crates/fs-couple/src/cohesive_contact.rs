@@ -382,6 +382,9 @@ mod tests;
 /// Finite bonded patches with complete cross-site mechanical compliance.
 pub mod patch;
 
+/// Simultaneous contact impulses on original cohesive motion and inertia.
+pub mod impact;
+
 /// Objective cohesive transport and exact finite-rotation work ports.
 pub mod objective;
 
