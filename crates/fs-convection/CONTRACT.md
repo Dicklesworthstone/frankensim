@@ -21,7 +21,7 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names eighteen implemented relations: circular-duct 3.66 and
+- `CorrelationId` names nineteen implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
@@ -33,10 +33,13 @@ correlation.
   rows of ASHRAE 2025 Fundamentals, Chapter 4, Table 9 (T9.7--T9.9); and
   Manning--Qureshi aiding laminar mixed convection over an isothermal vertical
   plate, including its pure forced and natural boundary-layer limits; and
-  Churchill isolated-sphere natural convection, including its conductive limit.
+  Churchill isolated-sphere natural convection, including its conductive limit;
+  and Whitaker forced convection over an isolated sphere with explicit
+  bulk/surface viscosity correction.
 - `CorrelationCard` combines an `fs-evidence::ModelCard`, bibliographic
   provenance, and `DiscrepancyBasis`.
-- `CorrelationInputs` makes Re, Pr, L/Dh, aspect ratio, Ra, and the
+- `CorrelationInputs` makes Re, Pr, L/Dh, aspect ratio, Ra, bulk/surface
+  viscosity ratio, and the
   heating/cooling convention explicit. Pe is deterministically derived from
   Re and Pr when both exist; Gz is deterministically derived as
   `Re Pr/(L/Dh)` when all three inputs exist. `mixed(Re, Ra, Pr)` supplies both
@@ -137,6 +140,9 @@ None.
   homogeneity down to tiny drivers, and analytic derivatives including the
   Prandtl-dependent mixing exponent and a representable derivative whose
   intermediate power weight underflows;
+- G0/G3 forced-sphere checks of independent 70-decimal-digit source-formula
+  arithmetic, explicit viscosity correction, original data-domain refusals,
+  analytic input partials and dimensional sensitivity propagation;
 - direct `fs-vvreg` execution bindings for both Level-A circular-duct limits,
   with a complete two-row family partition, JSON comparison verdicts, and
   frozen rectangular-duct square values;
@@ -180,6 +186,24 @@ None.
   heat removal.
 
 ## No-claim boundaries
+
+- `WhitakerSphere` implements the average isolated-isothermal-sphere relation
+  in [Whitaker (1972), Eq. (33), Table 1](https://doi.org/10.1002/aic.690180219).
+  It admits the source data ranges inclusively: `Re in [3.5,76000]`,
+  `Pr in [0.71,380]`, and `mu_bulk_over_surface in [1,3.2]`. The caller must
+  supply the viscosity ratio explicitly. All other transport properties,
+  including conductivity in `h=Nu k/D`, use the bulk/free-stream temperature;
+  the wall temperature supplies only the surface viscosity. Film-property
+  substitution, silently assuming equal viscosities, and clamping the ratio
+  change the source model and are not allowed. Heating a gas with a hotter
+  sphere commonly produces a ratio below one and therefore refuses this card.
+  The source's steady conductive term Nu=2 is retained, but zero flow remains
+  outside the fitted data domain and is not extrapolated. No buoyancy blend,
+  evaporation, rarefaction, confinement or particle-array effects are supplied.
+  The 30% engineering allowance reflects the paper's maximum observed scatter;
+  it is neither a statistical confidence interval nor independent validation.
+  Analytic Re, Pr and viscosity-ratio partials are available only when the
+  corresponding input does not move a validity endpoint.
 
 - `ManningQureshiAidingVerticalPlate` implements the **average**, aiding-only
   isothermal vertical-plate correlation in Manning and Qureshi, Journal of Heat

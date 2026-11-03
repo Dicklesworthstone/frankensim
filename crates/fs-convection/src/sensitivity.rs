@@ -8,14 +8,17 @@ use super::{
 };
 use super::mixed::AidingVerticalPlate;
 
-const INPUT_AXES: [&str; 5] = ["Re", "Pr", "L_over_Dh", "aspect_ratio", "Ra"];
+const INPUT_AXES: [&str; 6] = [
+    "Re", "Pr", "L_over_Dh", "aspect_ratio", "Ra", "mu_bulk_over_surface",
+];
 
 impl CorrelationInputs {
     /// Evaluate a card and attach its analytic input partials to the returned
     /// evidence's `sensitivity.d_qoi` map.
     ///
     /// Entries are **absolute** derivatives `dNu/dx` for the supplied
-    /// independent inputs `Re`, `Pr`, `L_over_Dh`, `aspect_ratio`, and `Ra`.
+    /// independent inputs `Re`, `Pr`, `L_over_Dh`, `aspect_ratio`, `Ra`, and
+    /// `mu_bulk_over_surface`.
     /// Pe and Gz are dependent groups: their chain rules are included, never
     /// exposed as extra independent coordinates. The heating/cooling branch
     /// stays fixed, including at Pr = 1 where its two values coincide but its
@@ -90,6 +93,7 @@ fn input_is_interior(evaluation: &NusseltEvaluation, axis: &'static str) -> bool
         "L_over_Dh" => &["L_over_Dh", "Gz"],
         "aspect_ratio" => &["aspect_ratio"],
         "Ra" => &["Ra"],
+        "mu_bulk_over_surface" => &["mu_bulk_over_surface"],
         _ => return false,
     };
     evaluation.evidence().model.in_domain
@@ -224,6 +228,11 @@ fn input_elasticity(
                 _ => 0.0,
             }
         }
+        CorrelationId::WhitakerSphere => match axis {
+            "Pr" => 0.4 * (nu - 2.0) / nu,
+            "mu_bulk_over_surface" => 0.25 * (nu - 2.0) / nu,
+            _ => 0.0,
+        },
     };
     finite_derivative(value, "Nusselt input elasticity").map(Some)
 }
@@ -317,9 +326,11 @@ impl NusseltEvaluation {
     }
 
     /// `d ln(Nu) / d ln(Re)` at fixed Pr, length ratio, aspect and heat-flow
-    /// direction. At fixed geometry/fluid properties this is also dln(h)/dln(Re).
+    /// direction and viscosity ratio. At fixed geometry/fluid properties this
+    /// is also dln(h)/dln(Re).
     ///
-    /// Supports the smooth duct, flat-plate, aiding mixed plate and cylinder formulas. Returns
+    /// Supports the smooth duct, flat-plate, aiding mixed plate, cylinder and
+    /// forced-sphere formulas. Returns
     /// None for the piecewise developing table, natural convection, or a
     /// Reynolds-dependent validity-axis endpoint. A caller must not interpret
     /// None as zero. Analytic laminar constants return Some(0); this does not
@@ -376,6 +387,13 @@ impl NusseltEvaluation {
                 AidingVerticalPlate::new(group("Re")?, self.groups()["Ra"], group("Pr")?)
                     .elasticity("Re")
             }
+            CorrelationId::WhitakerSphere => {
+                let re = group("Re")?;
+                let laminar = 0.4 * det::sqrt(re);
+                let wake = 0.06 * det::pow(re, 2.0 / 3.0);
+                (nu - 2.0) / nu * (0.5 * laminar + (2.0 / 3.0) * wake)
+                    / (laminar + wake)
+            }
             _ => return Ok(None),
         };
         if !value.is_finite() { return Err(CorrelationError::NonFiniteResult {
@@ -396,6 +414,7 @@ mod tests {
             "L_over_Dh" => &mut inputs.length_over_hydraulic_diameter,
             "aspect_ratio" => &mut inputs.aspect_ratio,
             "Ra" => &mut inputs.rayleigh,
+            "mu_bulk_over_surface" => &mut inputs.viscosity_ratio,
             _ => panic!("not an independent input: {axis}"),
         };
         *value.as_mut().expect("supplied input") *= factor;

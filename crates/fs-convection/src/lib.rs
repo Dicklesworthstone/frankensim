@@ -82,12 +82,14 @@ pub enum CorrelationId {
     ManningQureshiAidingVerticalPlate,
     /// Isolated isothermal sphere in natural convection; length is diameter.
     ChurchillSphere,
+    /// Isolated isothermal sphere in forced flow, Whitaker's bulk-property relation.
+    WhitakerSphere,
 }
 
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 18] = [
+    pub const ALL: [CorrelationId; 19] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -106,6 +108,7 @@ impl CorrelationId {
         Self::HorizontalPlateStable,
         Self::ManningQureshiAidingVerticalPlate,
         Self::ChurchillSphere,
+        Self::WhitakerSphere,
     ];
 
     /// Stable model-card identifier.
@@ -136,6 +139,7 @@ impl CorrelationId {
                 "convection.manning-qureshi-aiding-vertical-plate"
             }
             Self::ChurchillSphere => "convection.churchill-sphere",
+            Self::WhitakerSphere => "convection.whitaker-sphere",
         }
     }
 
@@ -180,6 +184,9 @@ impl CorrelationId {
             }
             Self::ChurchillSphere => {
                 "Nu_D = 2 + 0.589 Ra_D^(1/4)/(1+(0.469/Pr)^(9/16))^(4/9)"
+            }
+            Self::WhitakerSphere => {
+                "Nu_D = 2 + (0.4 Re_D^(1/2) + 0.06 Re_D^(2/3)) Pr^0.4 (mu_bulk/mu_surface)^(1/4)"
             }
         }
     }
@@ -257,6 +264,7 @@ pub struct CorrelationInputs {
     length_over_hydraulic_diameter: Option<f64>,
     aspect_ratio: Option<f64>,
     rayleigh: Option<f64>,
+    viscosity_ratio: Option<f64>,
     direction: ThermalDirection,
 }
 
@@ -270,6 +278,7 @@ impl CorrelationInputs {
             length_over_hydraulic_diameter: None,
             aspect_ratio: None,
             rayleigh: None,
+            viscosity_ratio: None,
             direction: ThermalDirection::HeatingFluid,
         }
     }
@@ -283,6 +292,7 @@ impl CorrelationInputs {
             length_over_hydraulic_diameter: None,
             aspect_ratio: None,
             rayleigh: Some(rayleigh),
+            viscosity_ratio: None,
             direction: ThermalDirection::HeatingFluid,
         }
     }
@@ -302,6 +312,7 @@ impl CorrelationInputs {
             length_over_hydraulic_diameter: None,
             aspect_ratio: None,
             rayleigh: Some(rayleigh),
+            viscosity_ratio: None,
             direction: ThermalDirection::HeatingFluid,
         }
     }
@@ -327,6 +338,20 @@ impl CorrelationInputs {
         self
     }
 
+    /// Declare `mu_bulk / mu_surface` for a variable-viscosity correlation.
+    ///
+    /// The two viscosities belong to the SAME fluid at its bulk/free-stream
+    /// temperature and at the wall temperature. For [`CorrelationId::WhitakerSphere`],
+    /// Re, Pr and the conductivity in `h = Nu k/D` all use the bulk state;
+    /// substituting film properties or silently assuming a unit ratio changes
+    /// the source model. The card requires the ratio explicitly and admits
+    /// only its source range `[1, 3.2]`, including the unit-ratio limit.
+    #[must_use]
+    pub const fn with_viscosity_ratio(mut self, mu_bulk_over_surface: f64) -> Self {
+        self.viscosity_ratio = Some(mu_bulk_over_surface);
+        self
+    }
+
     fn groups(self, id: CorrelationId) -> Result<BTreeMap<String, f64>, CorrelationError> {
         let mut groups = BTreeMap::new();
         let mixed = id == CorrelationId::ManningQureshiAidingVerticalPlate;
@@ -349,6 +374,9 @@ impl CorrelationInputs {
                 value,
                 mixed || id == CorrelationId::ChurchillSphere,
             )?;
+        }
+        if let Some(value) = self.viscosity_ratio {
+            insert_group(&mut groups, "mu_bulk_over_surface", value, false)?;
         }
         if let (Some(re), Some(pr)) = (self.reynolds, self.prandtl) {
             insert_group(&mut groups, "Pe", re * pr, mixed)?;
@@ -822,6 +850,12 @@ fn evaluate_formula(
             let denominator = det::pow(1.0 + det::pow(0.469 / group("Pr"), 9.0 / 16.0), 4.0 / 9.0);
             2.0 + 0.589 * det::pow(group("Ra"), 0.25) / denominator
         }
+        CorrelationId::WhitakerSphere => {
+            let re = group("Re");
+            2.0 + (0.4 * det::sqrt(re) + 0.06 * det::pow(re, 2.0 / 3.0))
+                * det::pow(group("Pr"), 0.4)
+                * det::pow(group("mu_bulk_over_surface"), 0.25)
+        }
     }
 }
 
@@ -929,6 +963,10 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
     const CHURCHILL_SPHERE: SourceProvenance = SourceProvenance {
         citation: "Churchill isolated-sphere relation; COMSOL 6.4 Heat Transfer Theory, External Natural Convection, Sphere, Eq. (4-194), citing Incropera et al., Fundamentals of Heat and Mass Transfer, 6th ed., Eq. (9.35); also ASHRAE Fundamentals 2025, Ch. 4, Table 9 (T9.11), citing Churchill (1990)",
         identifier: "https://doc.comsol.com/6.4/doc/com.comsol.help.heat/heat_ug_theory.07.100.html",
+    };
+    const WHITAKER_SPHERE: SourceProvenance = SourceProvenance {
+        citation: "S. Whitaker, Forced Convection Heat Transfer Correlations for Flow in Pipes, Past Flat Plates, Single Cylinders, Single Spheres, and for Flow in Packed Beds and Tube Bundles, AIChE Journal 18(2), 1972, 361-371, Eq. (33), Table 1",
+        identifier: "doi:10.1002/aic.690180219",
     };
 
     let fully_developed = || {
@@ -1233,6 +1271,30 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
                 "strong property variation, transient fluid diffusion or non-Boussinesq density response",
             ],
             0.20,
+            DiscrepancyBasis::EngineeringAllowance,
+        ),
+        CorrelationId::WhitakerSphere => (
+            WHITAKER_SPHERE,
+            ValidityDomain::unconstrained()
+                .with("Re", 3.5, 7.6e4)
+                .with("Pr", 0.71, 380.0)
+                .with("mu_bulk_over_surface", 1.0, 3.2),
+            vec![
+                "average coefficient over an isolated isothermal sphere; characteristic length is diameter",
+                "single-phase Newtonian fluid in uniform external forced flow, without buoyancy or particle interactions",
+                "Re, Pr and conductivity use bulk/free-stream properties; only surface viscosity uses wall temperature",
+                "bulk/surface dynamic-viscosity ratio is explicit; no film-property substitution or unit-ratio default",
+                "Table 1 data ranges are admitted inclusively; no zero-flow extension of the fitted domain",
+                "the 0.30 engineering allowance echoes source-reported maximum scatter, not a confidence interval or independently validated bound",
+                "the conductive Nu=2 contribution is included once and must not be added as a second heat-transfer link",
+            ],
+            vec![
+                "natural or mixed convection, confinement or packed-particle arrays",
+                "evaporation, rarefaction, nonspherical particles or non-isothermal surfaces",
+                "gas heating with bulk/surface viscosity ratio below one; no extrapolation or automatic clamping",
+                "compressibility or strong density/conductivity/heat-capacity variation",
+            ],
+            0.30,
             DiscrepancyBasis::EngineeringAllowance,
         ),
         CorrelationId::HorizontalPlateUnstableLaminar
