@@ -78,6 +78,80 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         domain: MaterialFreeSurfaceDomain2,
         fluid: impl Fn(usize, usize) -> bool,
     ) -> Result<MaterialFreeSurface2<'a>, MaterialLbmError> {
+        self.free_surface2_with_density(domain, fluid, None, |_| Ok(1.0))
+    }
+
+    /// Construct a liquid at physical rest with an absolute initial pressure [Pa].
+    ///
+    /// Requires [`Self::with_pressure_reference`]. The callback supplies positive
+    /// absolute LIQUID pressure at occupied cell centres [m], including any
+    /// hydrostatic gradient or capillary jump. It is sampled once per occupied
+    /// cell in row-major order, during construction only. Gas pressure during
+    /// evolution is supplied separately through
+    /// [`MaterialFreeSurface2::step_with_gas_pressure`] and the same fixed datum.
+    ///
+    /// Native density is `1 + (p-p_reference)/(rho_source*(dx/dt)^2*cs^2)`;
+    /// its departure from one must fit the finite supplied bound in `(0,1)`.
+    /// The original classifier and half-filled interface convention determine
+    /// geometry. Initial mass per depth is therefore
+    /// `fill*rho_lattice*rho_source*dx^2`. This includes numerical compressibility;
+    /// it is not a physical EOS or a mass-preserving pressure projection. Source
+    /// coefficients remain frozen. The caller owns pressure/geometry/traction
+    /// compatibility and refinement.
+    ///
+    /// The original held-force transform initializes physical zero velocity
+    /// using each cell's actual pressure-dependent density in `rho*g`. No
+    /// relaxation step or added damping is used to establish that source frame.
+    /// Pressure, geometry, population or cancellation refusal returns no flow;
+    /// cancellation is checked before construction, at each row and before return.
+    pub fn free_surface2_with_pressure(
+        self,
+        domain: MaterialFreeSurfaceDomain2,
+        fluid: impl Fn(usize, usize) -> bool,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn([f64; 2]) -> f64,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurface2<'a>, MaterialLbmError> {
+        check_initialization_cancel(Some(gate))?;
+        let reference = self.reference_pressure_pa.ok_or(MaterialLbmError::Invalid(
+            "initial absolute liquid pressure requires an explicit fixed pressure reference",
+        ))?;
+        if !maximum_density_excursion.is_finite()
+            || maximum_density_excursion <= 0.0
+            || maximum_density_excursion >= 1.0
+        {
+            return Err(MaterialLbmError::Invalid(
+                "initial density-excursion bound must be finite and in (0,1)",
+            ));
+        }
+        let dx = self.cell_size_m;
+        let unit = self.pressure_unit_pa;
+        self.free_surface2_with_density(domain, fluid, Some(gate), |coordinates| {
+            let position = coordinates.map(|c| (c as f64 + 0.5) * dx);
+            let pressure = pressure_perturbation(
+                reference, unit, pressure_pa(position), coordinates, &position,
+            )?;
+            let density = 1.0 + pressure / crate::CS2;
+            if !density.is_finite() || density <= 0.0
+                || (density - 1.0).abs() > maximum_density_excursion
+            {
+                return Err(FreeSurfacePressureError2::Invalid {
+                    coordinates: Some(coordinates),
+                    reason: "initial liquid pressure exceeds the declared density-excursion bound",
+                }.into());
+            }
+            Ok(density)
+        })
+    }
+
+    fn free_surface2_with_density(
+        self,
+        domain: MaterialFreeSurfaceDomain2,
+        fluid: impl Fn(usize, usize) -> bool,
+        gate: Option<&CancelGate>,
+        density: impl Fn([usize; 2]) -> Result<f64, MaterialLbmError>,
+    ) -> Result<MaterialFreeSurface2<'a>, MaterialLbmError> {
+        check_initialization_cancel(gate)?;
         self.require_frozen_source()?;
         let planar = match self.planar_wetting {
             None => None,
@@ -120,6 +194,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         grid.periodic_x = false;
         grid.periodic_y = false;
         for y in 0..ny {
+            check_initialization_cancel(gate)?;
             for x in 0..nx {
                 let i = grid.idx(x, y);
                 grid.flags[i] = if x == 0 || y == 0 || x + 1 == nx || y + 1 == ny {
@@ -129,6 +204,12 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 } else {
                     Cell::Gas
                 };
+                if grid.flags[i] == Cell::Fluid {
+                    let rho = density([x, y])?;
+                    if rho != 1.0 {
+                        grid.f[i] = crate::equilibrium(rho, 0.0, 0.0);
+                    }
+                }
             }
         }
         grid.rebind_gravity(gravity, &mut Vec::new()).map_err(|_| {
@@ -140,6 +221,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 MaterialLbmError::Invalid("2-D planar contact-angle stencil refused")
             })?;
         }
+        check_initialization_cancel(gate)?;
         Ok(MaterialFreeSurface2 {
             lattice,
             scaling: self,
@@ -343,6 +425,14 @@ impl<'a> MaterialFreeSurface2<'a> {
     }
 }
 
+fn check_initialization_cancel(gate: Option<&CancelGate>) -> Result<(), MaterialLbmError> {
+    if gate.is_some_and(CancelGate::is_requested) {
+        Err(FreeSurfacePressureError2::Cancelled.into())
+    } else {
+        Ok(())
+    }
+}
+
 fn pressure_perturbation(
     reference: f64,
     unit: f64,
@@ -356,7 +446,7 @@ fn pressure_perturbation(
     {
         return Err(FreeSurfacePressureError2::Invalid {
             coordinates: Some(coordinates),
-            reason: "absolute gas pressure and physical coordinates must admit a finite positive load",
+            reason: "absolute pressure and physical coordinates must admit a finite positive load",
         });
     }
     Ok(perturbation)

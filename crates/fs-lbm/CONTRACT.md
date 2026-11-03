@@ -1,5 +1,24 @@
 # CONTRACT: fs-lbm
 
+## Pressure-aware dense liquid initialization
+
+`MaterialFreeSurfaceScaling::free_surface2_with_pressure` initializes the
+original closed D2Q9 classifier with positive absolute liquid pressure at
+occupied cell centres. The field includes any hydrostatic or capillary
+contribution and is sampled only during construction; subsequent gas traction
+remains a separate prescribed field using the same fixed datum. Numerical
+density and the caller's excursion bound use the existing rho0*(dx/dt)^2
+conversion. The original native force transform establishes physical rest with
+each cell's actual rho*g before interface insertion and mass initialization.
+
+Mass per depth includes that numerical density and the existing half-filled
+boundary convention; this is neither a physical liquid EOS nor a mass-preserving
+projection. No relaxation, damping, second solver or stored pressure map is
+introduced. Row cancellation or refusal returns no incomplete flow. Regression
+definitions cover loaded equilibrium, gauge and material scaling, four discrete
+hydrostatic orientations, zero-load replay and late refusal/cancellation.
+Native execution of these new regressions remains unverified.
+
 ## Conservative material pressure defaults in D2Q9
 
 The established `MaterialFreeSurface2::step_with_gas_pressure` and
