@@ -1,9 +1,12 @@
 //! G0/G1/G3 full carrier/rotor momentum, work and phase integration.
 use fs_flyer::spine::{
     Loads, RigidBody, SixDofState,
-    rotors::{AxialRotor, RotorAssembly, RotorState, RotorTorques, step_held},
+    rotors::{
+        AxialRotor, CarrierImpulse, RotorAssembly, RotorImpulses, RotorState, RotorTorques,
+        apply_impulse, geared, step_held,
+    },
 };
-use fs_ga::{Quat, So3, Vec3};
+use fs_ga::{Mat3, Quat, So3, So3Tangent, Vec3};
 
 const ZERO: [f64; 3] = [0.0; 3];
 fn v(a: [f64; 3]) -> Vec3 {
@@ -433,4 +436,313 @@ fn g0_admission_is_bounded_and_refusal_never_changes_state() {
         step_held(&a, &s, no_loads(), torques, ZERO, 0.01).unwrap(),
         step_held(&a, &original, no_loads(), torques, ZERO, 0.01).unwrap()
     );
+}
+
+#[test]
+fn g1_instant_motor_and_aero_impulses_have_distinct_analytic_recoil_and_work() {
+    let a = RotorAssembly {
+        reduced_body: RigidBody::from_inertia_tensor(
+            3.0,
+            Mat3 {
+                m: [2.0, 1.0, 0.0, 1.0, 3.0, 0.0, 0.0, 0.0, 4.0],
+            },
+        )
+        .unwrap(),
+        rotors: [rotor([1.0, 0.0, 0.0])],
+    };
+    let s = a.state_from_relative_spin(rigid(), [0.37], [0.0]).unwrap();
+    let jump = apply_impulse(
+        &a,
+        &s,
+        RotorImpulses {
+            carrier: CarrierImpulse::default(),
+            motor_nms: [0.2],
+            aerodynamic_nms: [-0.05],
+        },
+        ZERO,
+    )
+    .unwrap();
+    // I^-1(-0.2,0,0) = (-0.12,0.04,0). Aerodynamic impulse
+    // changes absolute rotor spin, with no duplicate carrier reaction.
+    assert!((v(jump.state.rigid.omega_body) - v([-0.12, 0.04, 0.0])).norm() < 1e-14);
+    assert!((jump.state.axial_momentum[0] - 0.15).abs() < 1e-15);
+    assert!((jump.relative_speed_rad_s[0] - 0.87).abs() < 1e-14);
+    assert!((jump.motor_work_j - 0.087).abs() < 1e-14);
+    assert!((jump.external_work_j + 0.01875).abs() < 1e-14);
+    assert!((jump.kinetic_energy_after_j - 0.06825).abs() < 1e-14);
+    assert!(jump.kinetic_work_residual_j.abs() < 1e-14);
+    assert!(
+        (total(&a, &jump.state, ZERO).1 - total(&a, &s, ZERO).1 - v([-0.05, 0.0, 0.0])).norm()
+            < 1e-14
+    );
+    assert_eq!(jump.state.rigid.pos_m, s.rigid.pos_m);
+    assert_eq!(jump.state.rigid.quat, s.rigid.quat);
+    assert_eq!(jump.state.relative_phase_rad, s.relative_phase_rad);
+}
+
+fn set_rotation(state: &mut SixDofState, r: So3) {
+    let q = r.as_quat();
+    state.quat = [q.w, q.x, q.y, q.z];
+}
+fn array(a: Vec3) -> [f64; 3] {
+    [a.x, a.y, a.z]
+}
+
+#[test]
+fn g3_off_center_impulse_closes_global_momentum_and_is_world_frame_covariant() {
+    let a = RotorAssembly {
+        reduced_body: RigidBody::from_inertia_tensor(
+            3.0,
+            Mat3 {
+                m: [3.0, 0.2, 0.1, 0.2, 4.0, 0.3, 0.1, 0.3, 5.0],
+            },
+        )
+        .unwrap(),
+        rotors: [rotor([1.0, 0.0, 0.0]), rotor([0.0, 1.0, 0.0])],
+    };
+    let mut r = rigid();
+    r.vel_mps = [2.0, -1.0, 3.0];
+    r.omega_body = [0.2, -0.3, 0.4];
+    set_rotation(
+        &mut r,
+        So3::exp(So3Tangent::new(v([0.3, -0.4, 0.2]))).unwrap(),
+    );
+    let s = a
+        .state_from_relative_spin(r, [0.1, -0.2], [7.0, -4.0])
+        .unwrap();
+    let arm = [0.7, 0.2, -0.3];
+    let impulse = [1.2, -0.8, 0.5];
+    let origin = [4.0, 5.0, 6.0];
+    let inputs = RotorImpulses {
+        carrier: CarrierImpulse::at_body_point(&s.rigid, arm, impulse).unwrap(),
+        motor_nms: [0.12, -0.07],
+        aerodynamic_nms: [-0.03, 0.02],
+    };
+    let jump = apply_impulse(&a, &s, inputs, origin).unwrap();
+    let world = rotation(&s.rigid);
+    let point = v(s.rigid.pos_m) + world.rotate(v(arm)).unwrap();
+    let expected_angular =
+        (point - v(origin)).cross(v(impulse)) + world.rotate(v([-0.03, 0.02, 0.0])).unwrap();
+    let (p0, h0) = total(&a, &s, origin);
+    let (p1, h1) = total(&a, &jump.state, origin);
+    assert!((p1 - p0 - v(impulse)).norm() < 1e-12);
+    assert!((h1 - h0 - expected_angular).norm() < 1e-12);
+    assert!((v(jump.external_angular_impulse_world) - expected_angular).norm() < 1e-12);
+    assert!(v(jump.angular_momentum_residual).norm() < 1e-12);
+    assert!(jump.kinetic_work_residual_j.abs() < 1e-12);
+    assert!(
+        (jump.kinetic_energy_after_j
+            - jump.kinetic_energy_before_j
+            - jump.motor_work_j
+            - jump.external_work_j)
+            .abs()
+            < 1e-12
+    );
+    let q = So3::exp(So3Tangent::new(v([-0.2, 0.1, 0.3]))).unwrap();
+    let mut transformed = s;
+    transformed.rigid.pos_m = array(q.rotate(v(s.rigid.pos_m)).unwrap());
+    transformed.rigid.vel_mps = array(q.rotate(v(s.rigid.vel_mps)).unwrap());
+    set_rotation(&mut transformed.rigid, q.compose(world).unwrap());
+    let rotated_inputs = RotorImpulses {
+        carrier: CarrierImpulse::at_body_point(
+            &transformed.rigid,
+            arm,
+            array(q.rotate(v(impulse)).unwrap()),
+        )
+        .unwrap(),
+        ..inputs
+    };
+    let rotated = apply_impulse(
+        &a,
+        &transformed,
+        rotated_inputs,
+        array(q.rotate(v(origin)).unwrap()),
+    )
+    .unwrap();
+    assert!((v(rotated.state.rigid.omega_body) - v(jump.state.rigid.omega_body)).norm() < 1e-12);
+    assert!(
+        (v(rotated.state.rigid.vel_mps) - q.rotate(v(jump.state.rigid.vel_mps)).unwrap()).norm()
+            < 1e-12
+    );
+    assert!(
+        (v(rotated.external_angular_impulse_world) - q.rotate(expected_angular).unwrap()).norm()
+            < 1e-12
+    );
+    assert_eq!(rotated.state.relative_phase_rad, s.relative_phase_rad);
+}
+
+fn gear_momentum(a: &geared::GearedAssembly<2>, s: &geared::GearedState, origin: [f64; 3]) -> Vec3 {
+    let mut spin = a.locked_inertia_kgm2().apply(v(s.rigid.omega_body));
+    for rotor in a.rotors() {
+        spin = spin
+            + v(rotor.axis_body)
+                .scale(rotor.axial_inertia_kgm2 * rotor.ratio * a.speed(s).unwrap());
+    }
+    rotation(&s.rigid).rotate(spin).unwrap()
+        + (v(s.rigid.pos_m) - v(origin)).cross(v(s.rigid.vel_mps).scale(a.mass_kg()))
+}
+
+#[test]
+fn g1_geared_impulse_retains_signed_constraints_and_closes_all_physical_ports() {
+    let a = geared::GearedAssembly::new(
+        3.0,
+        Mat3 {
+            m: [4.0, 0.3, 0.2, 0.3, 5.0, 0.1, 0.2, 0.1, 6.0],
+        },
+        [
+            geared::GearedRotor {
+                axis_body: [1.0, 0.0, 0.0],
+                axial_inertia_kgm2: 0.3,
+                ratio: 1.0,
+            },
+            geared::GearedRotor {
+                axis_body: [0.0, 1.0, 0.0],
+                axial_inertia_kgm2: 0.2,
+                ratio: -2.0,
+            },
+        ],
+    )
+    .unwrap();
+    let mut r = rigid();
+    r.vel_mps = [2.0, -1.0, 3.0];
+    r.omega_body = [0.2, -0.3, 0.4];
+    let s = a.state_from_speed(r, 0.37, 7.0).unwrap();
+    let internal = geared::apply_impulse(
+        &a,
+        &s,
+        geared::GearedImpulses {
+            carrier: CarrierImpulse::default(),
+            motor_nms: 0.75,
+            aerodynamic_nms: [0.0; 2],
+        },
+        ZERO,
+    )
+    .unwrap();
+    assert!(
+        (gear_momentum(&a, &internal.state, ZERO) - gear_momentum(&a, &s, ZERO)).norm() < 1e-12
+    );
+    assert!(internal.kinetic_work_residual_j.abs() < 1e-12);
+    let input = geared::GearedImpulses {
+        carrier: CarrierImpulse::at_body_point(&s.rigid, [0.2, -0.7, 0.4], [1.0, -0.5, 0.2])
+            .unwrap(),
+        motor_nms: 0.75,
+        aerodynamic_nms: [-0.12, 0.08],
+    };
+    let jump = geared::apply_impulse(&a, &s, input, ZERO).unwrap();
+    assert!((jump.state.momentum - s.momentum - 0.47).abs() < 1e-14);
+    assert_eq!(
+        jump.relative_speed_rad_s[1],
+        -2.0 * jump.relative_speed_rad_s[0]
+    );
+    assert_eq!(jump.state.phase_rad, s.phase_rad);
+    assert_eq!(jump.state.rigid.pos_m, s.rigid.pos_m);
+    assert_eq!(jump.state.rigid.quat, s.rigid.quat);
+    assert!(
+        (gear_momentum(&a, &jump.state, ZERO)
+            - gear_momentum(&a, &s, ZERO)
+            - v(jump.external_angular_impulse_world))
+        .norm()
+            < 1e-12
+    );
+    let mean_w = (v(s.rigid.omega_body) + v(jump.state.rigid.omega_body)).scale(0.5);
+    let mean_speed = 0.5 * (a.speed(&s).unwrap() + jump.speed_rad_s);
+    let work = v(input.carrier.linear_world_ns)
+        .dot((v(s.rigid.vel_mps) + v(jump.state.rigid.vel_mps)).scale(0.5))
+        + v(input.carrier.angular_body_nms).dot(mean_w)
+        + input.aerodynamic_nms[0] * (mean_speed + mean_w.x)
+        + input.aerodynamic_nms[1] * (-2.0 * mean_speed + mean_w.y);
+    assert!((jump.external_work_j - work).abs() < 1e-12);
+    assert!((jump.motor_work_j - 0.75 * mean_speed).abs() < 1e-12);
+    assert!(
+        (jump.kinetic_energy_after_j
+            - jump.kinetic_energy_before_j
+            - jump.motor_work_j
+            - jump.external_work_j)
+            .abs()
+            < 1e-12
+    );
+    assert!(jump.kinetic_work_residual_j.abs() < 1e-12);
+    let mut unresolved = s;
+    unresolved.momentum = 1e30;
+    assert_eq!(
+        geared::apply_impulse(&a, &unresolved, input, ZERO)
+            .unwrap_err()
+            .code,
+        "impulse-unrepresentable"
+    );
+}
+
+#[test]
+fn g0_impulses_refuse_dropped_coordinates_but_resolve_recoil_beside_large_other_rotors() {
+    let a = RotorAssembly {
+        reduced_body: body(),
+        rotors: [rotor([1.0, 0.0, 0.0]); 2],
+    };
+    let s = a
+        .state_from_relative_spin(rigid(), [0.0; 2], [0.0; 2])
+        .unwrap();
+    let none = RotorImpulses {
+        carrier: CarrierImpulse::default(),
+        motor_nms: [0.0; 2],
+        aerodynamic_nms: [0.0; 2],
+    };
+    assert_eq!(apply_impulse(&a, &s, none, ZERO).unwrap().state, s);
+    let mut enormous = s;
+    enormous.axial_momentum[0] = 1e30;
+    let lost = RotorImpulses {
+        motor_nms: [1.0, 0.0],
+        ..none
+    };
+    assert_eq!(
+        apply_impulse(&a, &enormous, lost, ZERO).unwrap_err().code,
+        "impulse-unrepresentable"
+    );
+    let resolved = apply_impulse(
+        &a,
+        &enormous,
+        RotorImpulses {
+            motor_nms: [0.0, 1.0],
+            ..none
+        },
+        ZERO,
+    )
+    .unwrap();
+    assert_eq!(resolved.state.axial_momentum[1], 1.0);
+    assert_eq!(resolved.state.rigid.omega_body[0], -1.0);
+    assert!(v(resolved.angular_momentum_residual).norm() < 1e-14);
+    assert!(resolved.kinetic_work_residual_j.abs() < 1e-14);
+    let mut moving = s;
+    moving.rigid.vel_mps[0] = 1e30;
+    let contact = RotorImpulses {
+        carrier: CarrierImpulse {
+            linear_world_ns: [1.0, 0.0, 0.0],
+            ..CarrierImpulse::default()
+        },
+        ..none
+    };
+    assert_eq!(
+        apply_impulse(&a, &moving, contact, ZERO).unwrap_err().code,
+        "impulse-unrepresentable"
+    );
+    let mut spinning = s;
+    spinning.rigid.omega_body[0] = 1e30;
+    assert_eq!(
+        apply_impulse(&a, &spinning, lost, ZERO).unwrap_err().code,
+        "impulse-unrepresentable"
+    );
+    assert_eq!(enormous.axial_momentum, [1e30, 0.0]);
+    for bad in [f64::NAN, f64::INFINITY] {
+        assert!(
+            apply_impulse(
+                &a,
+                &s,
+                RotorImpulses {
+                    motor_nms: [bad, 0.0],
+                    ..none
+                },
+                ZERO
+            )
+            .is_err()
+        );
+    }
 }

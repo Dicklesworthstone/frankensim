@@ -12,7 +12,10 @@ use super::super::{
     Loads, SixDofState, TICK_HZ, admit_derived_state, admit_loads, admit_step, admit_time_interval,
     rotation_from_boundary, rotation_to_boundary,
 };
-use super::{MAX_ROTORS, array, finite, vec};
+use super::{
+    CarrierImpulse, MAX_ROTORS, array, dd, dot_dd, finite, impulse_increment, impulse_kinematics,
+    vec,
+};
 use crate::Refusal;
 use fs_ga::{Mat3, So3, Vec3};
 use fs_time::lie::gyrostat::{HeldTorque, InertiaTensor3};
@@ -63,6 +66,17 @@ pub struct GearedLoads<const N: usize> {
     pub aerodynamic_nm: [f64; N],
 }
 
+/// Simultaneous external carrier/shaft and internal ideal-gear impulses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GearedImpulses<const N: usize> {
+    /// External COM impulse; rotor axial aerodynamic ports are separate.
+    pub carrier: CarrierImpulse,
+    /// INTERNAL generalized impulse conjugate to the common gear angle [N m s].
+    pub motor_nms: f64,
+    /// EXTERNAL axial impulse along each physical rotor axis [N m s].
+    pub aerodynamic_nms: [f64; N],
+}
+
 /// Accepted gear/body state with work and global momentum accounting.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GearedStep<const N: usize> {
@@ -78,7 +92,8 @@ pub struct GearedStep<const N: usize> {
     pub external_linear_impulse_world: [f64; 3],
     /// External angular impulse about the requested fixed world origin [N m s].
     pub external_angular_impulse_world: [f64; 3],
-    /// Internal motor work `Q_motor * delta_s` [J].
+    /// Internal motor work [J]: `Q_motor * delta_s` for a finite step,
+    /// or motor impulse times the endpoint-average gear speed for a jump.
     pub motor_work_j: f64,
     /// Work of world force, carrier moment and aerodynamic shaft ports [J].
     pub external_work_j: f64,
@@ -87,6 +102,7 @@ pub struct GearedStep<const N: usize> {
     /// Physical total kinetic energy at the accepted endpoint [J].
     pub kinetic_energy_after_j: f64,
     /// Kinetic change minus declared work [J]; numerical error, not damping.
+    /// Impulses use polarized increments, avoiding large-energy subtraction.
     pub kinetic_work_residual_j: f64,
     /// Actual world linear momentum change minus external impulse [N s].
     pub linear_momentum_residual: [f64; 3],
@@ -262,6 +278,143 @@ impl<const N: usize> GearedAssembly<N> {
             + 0.5 * w.dot(self.reduced_inertia.momentum(w).map_err(map_lie)?)
             + 0.5 * state.momentum * (state.momentum / self.equivalent_inertia))
     }
+}
+
+/// Apply a simultaneous instantaneous gear/carrier momentum jump.
+///
+/// The canonical shaft impulse is `dp = J_motor + sum(g_a J_aero_a)`.
+/// Carrier recoil solves the cached full reduced tensor with
+/// `I_red d_omega = K_carrier + sum(e_a J_aero_a) - c dp/J_eq`.
+/// Internal drive therefore changes no total world angular momentum;
+/// signed gear ratios and cross-axis recoil remain coupled exactly.
+///
+/// No time passes: position, attitude, gear phase and caller-owned wake or
+/// aerodynamic history remain unchanged. Dynamic/harmonic consumers replace
+/// only their public `motion` field with the returned state; the next force
+/// evaluation recomputes local air and absolute shaft velocities. This does
+/// not choose a contact/restitution law or supply fluid impact added mass.
+///
+/// # Errors
+/// State/inertia admission, nonfinite inputs, or `impulse-unrepresentable`
+/// under the same per-coordinate transfer check as [`super::apply_impulse`].
+/// No partial state is published.
+pub fn apply_impulse<const N: usize>(
+    assembly: &GearedAssembly<N>,
+    state: &GearedState,
+    impulses: GearedImpulses<N>,
+    angular_origin_world: [f64; 3],
+) -> Result<GearedStep<N>, Refusal> {
+    admit_derived_state(&state.rigid, "geared impulse input")?;
+    let rotation = rotation_from_boundary(state.rigid.quat)?;
+    let origin = vec(angular_origin_world);
+    if !finite(origin)
+        || !finite(vec(impulses.carrier.linear_world_ns))
+        || !finite(vec(impulses.carrier.angular_body_nms))
+        || ![state.momentum, state.phase_rad, impulses.motor_nms]
+            .iter()
+            .chain(&impulses.aerodynamic_nms)
+            .all(|x| x.is_finite())
+    {
+        return Err(reject(
+            "gear impulse, phase, momentum and origin must be finite",
+        ));
+    }
+    let speed0 = assembly.speed(state)?;
+    let mut generalized = dd(impulses.motor_nms);
+    let mut external = impulses.carrier.angular_body_nms.map(dd);
+    for (rotor, impulse) in assembly.rotors.iter().zip(impulses.aerodynamic_nms) {
+        generalized = generalized + dd(rotor.ratio) * dd(impulse);
+        for (component, axis) in external.iter_mut().zip(rotor.axis_body) {
+            *component = *component + dd(axis) * dd(impulse);
+        }
+    }
+    let mut next = *state;
+    next.momentum = impulse_increment(state.momentum, generalized.to_f64())?;
+    let actual_dp = next.momentum - state.momentum;
+    let cross = array(assembly.cross_inertia);
+    let reduced = core::array::from_fn(|i| {
+        (external[i] - dd(cross[i] / assembly.equivalent_inertia) * generalized).to_f64()
+    });
+    let (rigid, linear_change, carrier_change) = impulse_kinematics(
+        assembly.mass_kg,
+        assembly.reduced_inertia,
+        &state.rigid,
+        impulses.carrier,
+        vec(reduced),
+    )?;
+    next.rigid = rigid;
+    next.rigid.quat = rotation_to_boundary(rotation);
+    let speed1 = assembly.speed(&next)?;
+    let mean_speed = 0.5 * speed0 + 0.5 * speed1;
+    let mean_velocity = vec(state.rigid.vel_mps).scale(0.5) + vec(next.rigid.vel_mps).scale(0.5);
+    let mean_omega = vec(state.rigid.omega_body).scale(0.5) + vec(next.rigid.omega_body).scale(0.5);
+    let motor_work = dd(impulses.motor_nms) * dd(mean_speed);
+    let mut external_work = dot_dd(vec(impulses.carrier.linear_world_ns), mean_velocity)
+        + dot_dd(vec(impulses.carrier.angular_body_nms), mean_omega);
+    let mut relative = [0.0; N];
+    let mut absolute = [0.0; N];
+    for i in 0..N {
+        let rotor = assembly.rotors[i];
+        external_work = external_work
+            + dd(impulses.aerodynamic_nms[i])
+                * dd(rotor.ratio * mean_speed + vec(rotor.axis_body).dot(mean_omega));
+        relative[i] = rotor.ratio * speed1;
+        absolute[i] = relative[i] + vec(rotor.axis_body).dot(vec(next.rigid.omega_body));
+    }
+    let kinetic_change = dot_dd(linear_change, mean_velocity)
+        + dot_dd(carrier_change, mean_omega)
+        + dd(actual_dp)
+            * dd((0.5 * state.momentum + 0.5 * next.momentum) / assembly.equivalent_inertia);
+    let spin_residual = vec(core::array::from_fn(|i| {
+        (dd(array(carrier_change)[i]) + dd(cross[i]) * dd(actual_dp / assembly.equivalent_inertia)
+            - external[i])
+            .to_f64()
+    }));
+    let external_spin = vec(external.map(|x| x.to_f64()));
+    let arm = vec(state.rigid.pos_m) - origin;
+    let linear_residual = linear_change - vec(impulses.carrier.linear_world_ns);
+    let angular_impulse = rotation
+        .rotate(external_spin)
+        .map_err(|_| reject("external impulse rotation overflow"))?
+        + arm.cross(vec(impulses.carrier.linear_world_ns));
+    let angular_residual = rotation
+        .rotate(spin_residual)
+        .map_err(|_| reject("angular impulse balance overflow"))?
+        + arm.cross(linear_residual);
+    let kinetic_before = assembly.energy(state)?;
+    let kinetic_after = assembly.energy(&next)?;
+    let residual = (kinetic_change - motor_work - external_work).to_f64();
+    if ![
+        kinetic_before,
+        kinetic_after,
+        residual,
+        motor_work.to_f64(),
+        external_work.to_f64(),
+    ]
+    .iter()
+    .chain(&relative)
+    .chain(&absolute)
+    .all(|x| x.is_finite())
+        || !finite(angular_impulse)
+        || !finite(angular_residual)
+    {
+        return Err(reject("gear impulse work or momentum accounting overflow"));
+    }
+    Ok(GearedStep {
+        state: next,
+        speed_rad_s: speed1,
+        relative_speed_rad_s: relative,
+        absolute_speed_rad_s: absolute,
+        external_linear_impulse_world: impulses.carrier.linear_world_ns,
+        external_angular_impulse_world: array(angular_impulse),
+        motor_work_j: motor_work.to_f64(),
+        external_work_j: external_work.to_f64(),
+        kinetic_energy_before_j: kinetic_before,
+        kinetic_energy_after_j: kinetic_after,
+        kinetic_work_residual_j: residual,
+        linear_momentum_residual: array(linear_residual),
+        angular_momentum_residual: array(angular_residual),
+    })
 }
 
 /// Advance under one fixed world force and fixed body carrier/aerodynamic

@@ -737,6 +737,27 @@ This remains an Estimated global induced-drag model, not a resolved-wake drag
 calculation. The historical longitudinal SimLoop, its coupling identity and
 browser startup golden remain on their existing path.
 
+### Instantaneous rotor and geared momentum transfer
+
+`spine::rotors::apply_impulse` and `geared::apply_impulse` apply simultaneous
+carrier, internal motor and external axial rotor impulses without advancing
+time. `CarrierImpulse::at_body_point` forms the COM angular impulse from a
+body-frame arm and world-frame linear impulse. Full-tensor carrier recoil and
+signed gear ratios preserve total world angular momentum under internal
+drive; external shaft impulses enter the total exactly once. Motor work uses
+mean relative rates, while external axial work uses mean absolute rates.
+
+Positions, orientation and shaft phases stay fixed. Dynamic and harmonic
+consumers replace only their public mechanical `motion` state, retaining wake
+induction and histories until the next actual force evaluation. No contact,
+restitution or fluid-added-mass impact law is inferred. Per-coordinate transfer
+checks refuse `impulse-unrepresentable` when the state cannot resolve the jump;
+large background momenta cannot hide a dropped impulse. Increment-based
+momentum and polarized kinetic-work balances retain small physical changes
+without subtracting large endpoint totals. The `rotor_spine` battery covers
+analytic recoil, signed gears, off-center impulses, world-frame covariance and
+representability with a large neighboring rotor momentum.
+
 ### Spatially mounted propellers
 
 `propcoupling::spatial::{DiskAxes, coupled_step}` and
