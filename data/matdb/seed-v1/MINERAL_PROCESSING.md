@@ -5,8 +5,8 @@ and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and
 `matdb-catalog` discovery. No separate material registry or schema is required.
 
-The physical consumers are `fs_material::comminution`, `fs_material::slurry`,
-`fs_material::recovery` and `fs_thermochem::stoichiometry`.
+The physical consumers are `fs_material::comminution`, `fs_material::separation`,
+`fs_material::slurry`, `fs_material::recovery` and `fs_thermochem::stoichiometry`.
 These are upstream building blocks: they do
 not implement a FrankenMining flowsheet or complete its site-calibration
 beads. In particular, FrankenMining's plan §13.10 keeps located ore tests
@@ -378,6 +378,60 @@ size window, or positive flow during zero utilization, refuses.
 from inside-liner diameter, ball diameter and explicit gravity:
 `n = sqrt(2*g/(D-d))/(2*pi)` revolutions/second.
 It is not an operating-speed recommendation, power-draw model or DEM solver.
+
+### Closing the mill/classifier recycle loop
+
+`comminution::breakage::SizeRedistributionCard` supplies a source-declared
+per-pass size-transfer matrix over at most 128 named classes. Columns retain
+unit mass within a stated binary64 allowance without normalization. Material
+either keeps its class or moves to a strictly smaller diameter; transferred
+fragments carry the parent's explicit elemental composition. Water passes
+unchanged. The card is a congruent size-redistribution approximation, not an
+inferred liberation or first-principles kinetic model.
+
+`comminution::circuit::ClosedGrindingCircuit` combines that card with the
+existing classifier. With fresh flow f, mill feed x, mill matrix B and classifier
+underflow fractions r, it solves `x = f + diag(r) B x` in decreasing-size order.
+No iterative circulating-load guess is required. Water closes independently.
+The source cards then evaluate the actual solved mill feed and discharge;
+source limits on solids fraction and dry mill throughput cannot be satisfied
+with caller-supplied substitute values. Every local and external dry-solid,
+element and water account is checked against an explicit numerical tolerance.
+The caller separately declares the maximum acceptable circulating load.
+
+```bash
+cargo run -p fs-material --example mineral_circuit
+cargo run -p fs-material --example mineral_circuit -- 0.75
+```
+
+The optional argument is the fraction of coarse material retained in its size
+class on each pass, default 0.5. The remaining coarse material becomes fine.
+The authored two-size example supplies fresh coarse/fine masses and copper
+assays, a 100 µm corrected classifier cut, sharpness 2 and water bypass 0.2.
+Its default closed balance is:
+
+| Stream | Dry solids, kg/s | Cu, kg/s | Water, kg/s | Discrete P80, µm |
+| --- | ---: | ---: | ---: | ---: |
+| Fresh feed | 12.000000 | 2.200000 | 12.000000 | 200 |
+| Mill feed | 38.333333 | 7.166667 | 15.000000 | 200 |
+| Mill discharge | 38.333333 | 7.166667 | 15.000000 | 200 |
+| Recycle underflow | 26.333333 | 4.966667 | 3.000000 | 200 |
+| Final overflow product | 12.000000 | 2.200000 | 12.000000 | 100 |
+
+Circulating load is 219.444% of fresh dry solids. The largest checked balance
+discrepancy is approximately 3.55e-15 kg/s. Raising coarse retention to 0.75
+increases mill feed to 52.826087 kg/s and circulating load to 340.217%, while
+the external solids, copper and water balances remain closed.
+
+The separate authored Bond estimate uses circuit F80=200 µm, P80=100 µm and
+Wi=15 kWh/dry metric tonne: 15816.234 J/kg of FRESH solids, requiring 210.883 kW
+net pinion power at 12 kg/s and 0.9 utilization. It is not multiplied by mill
+circulating tonnage, and no additional efficiency effect is inferred from the
+redistribution matrix. At retained fraction 1, discrete product P80 equals F80;
+the circuit remains reportable but this strict-size-reduction Bond estimate is
+unavailable. Discrete passing sizes come only from the declared bins, without
+within-bin interpolation. Site fits must justify the fixed coefficients and
+their operating domains; this example supplies no plant calibration.
 
 ## From dry mill throughput to slurry and process water
 

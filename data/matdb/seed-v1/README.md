@@ -12,6 +12,8 @@ executable source-backed lime-hydration, carbonate-calcination, iron-oxide
 oxidation and copper-oxide reduction/oxidation example. Shared physics now provide
 typed Bond milling energy/throughput, ideal ball-mill critical speed, exact
 reaction amounts, standard reaction enthalpy and Faraday product yield.
+Conservative size-redistribution cards now close grinding/classifier recycle,
+reporting actual circulating load, particle/element/water balances and discrete P80.
 Source-bound slurry streams connect dry throughput to carrier-water demand,
 pulp density and volumetric flow, with conservative mixing and splitting.
 Prescribed selective partitions retain the same density evidence through

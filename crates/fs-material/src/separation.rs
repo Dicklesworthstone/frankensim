@@ -231,6 +231,17 @@ impl ClassifierCard {
         {
             return Err(SeparationError::OutsideValidity);
         }
+        self.curve_partition(diameter)
+    }
+
+    // Frozen size coefficients for algebraic recycle closure. This is not a
+    // source admission: the circuit MUST subsequently call classify with its
+    // solved discharge and actual solids fraction before publishing a result.
+    pub(crate) fn curve_partition(&self, diameter: Length) -> Result<Partition, SeparationError> {
+        positive(
+            diameter.value(),
+            "particle size must be finite and positive",
+        )?;
         // Logarithms avoid an overflowing diameter ratio. The exponential tails
         // are evaluated separately so fine-product and coarse-reject flows are
         // not erased by subtraction from a rounded unit fraction.

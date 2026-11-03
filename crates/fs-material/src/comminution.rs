@@ -32,6 +32,10 @@ mod inverse;
 #[path = "comminution/breakage.rs"]
 pub mod breakage;
 
+/// Closed grinding/classification balances with explicit source applicability.
+#[path = "comminution/circuit.rs"]
+pub mod circuit;
+
 /// Grinding energy per dry mass, in coherent SI joules per kilogram.
 pub type SpecificGrindingEnergy = Qty<2, 0, -2, 0, 0, 0>;
 

@@ -215,6 +215,37 @@ Six redistribution and six stream tests cover known Cu/Fe/water balances,
 identity, scaling/order invariance, tiny retained tails, numerical refusal,
 typed applicability and discrete quantile boundaries.
 
+## Closed grinding and classifier recycle
+
+`comminution::circuit::ClosedGrindingCircuit` solves `x = f + diag(r) B x`
+for actual mill feed, with fresh feed f, the original per-pass redistribution B
+and the classifier's retained fractions r. Strictly smaller daughter classes
+allow a direct decreasing-size triangular solve: work is quadratic in at most
+128 declared classes and linear in the explicit element accounts. Positive
+product and fragmentation exits avoid cancellation near closed loops, while
+fused coefficient arithmetic does not erase representable physical transfers.
+There is no fitted circulating load or iterative convergence threshold.
+
+Water has its own recycle balance. The mill's optional solids-mass-fraction and
+mill-dry-solids-flow validity axes are bound from the solved mill feed; callers
+cannot override them. Its original transform and the classifier are then
+evaluated on actual streams and conditions. Admission therefore never treats a
+guessed initial feed as the final operating point. Recomputed class/element/water
+balances and external product-versus-fresh accounts must all satisfy the
+caller's absolute/relative allowance. A separate maximum circulating load is
+required. A fed class with no represented exit refuses; an unforced closed class
+retains the explicitly selected zero-circulation state. Failed solves publish
+no streams and never change the fresh input or source cards.
+
+Seven G0/G1/G3 tests cover independent rational balances, geometric-pass limits,
+very large circulation with retained small product tails, trapped classes,
+actual-domain/coordinate refusals, scaling and positive-flow numerical limits.
+The `mineral_circuit` example reports all streams, discrete P80, circulating
+load and residuals, with an independent Bond estimate on FRESH circuit throughput.
+It does not multiply circuit-specific Bond energy by recirculating mill tonnage.
+Fixed per-pass coefficients remain a source-declared approximation, without
+liberation, selection-rate kinetics, transient hold-up or a process calibration.
+
 ## Source-specific comminution references
 
 `comminution` supplies a typed, uncorrected Bond grinding-energy closure,
