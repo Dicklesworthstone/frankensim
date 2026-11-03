@@ -245,7 +245,6 @@ impl CarbonInLeachCstr {
         let populations = Arc::new(populations);
         let capacities = Arc::new(capacities);
         let initial_adsorbed = Arc::new(adsorbed.clone());
-        let accumulated = sum([self.coupling_error, call_error].into_iter())?;
         let state = admit_state(
             &tank,
             &pair,
@@ -442,6 +441,7 @@ impl CarbonInLeachCstr {
             };
         }
 
+        let accumulated = sum([self.coupling_error, call_error].into_iter())?;
         let state = admit_state(
             &current.tank,
             &self.pair,
