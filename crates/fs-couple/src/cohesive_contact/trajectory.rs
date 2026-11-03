@@ -33,6 +33,9 @@ pub use geometry::GeometryError;
 /// Coupled held-force contact on the original cohesive midpoint response.
 pub mod sustained;
 
+/// Actual-response localization of a positive-gap contact arrival.
+pub mod arrival;
+
 /// Mixed free motion, impacts and sustained contact with resolved sliding stops.
 pub mod evolution;
 
@@ -129,6 +132,10 @@ pub enum TrajectoryError {
     Geometry(GeometryError),
     Impact(ImpactError),
     Sustained(sustained::SegmentError),
+    Arrival {
+        contact_id: u64,
+        error: Box<arrival::ArrivalError<TrajectoryError>>,
+    },
     Body {
         body: usize,
         error: DynamicsError,
@@ -256,6 +263,20 @@ fn advance_shared<'m, 'a>(
         controls.maximum_workspace_entries,
         cancelled,
     )?;
+    // Geometry retains the caller's actual gaps and original positive admission
+    // bands. Mixed evolution refines only the event/force selection distance.
+    let refined_contacts = evolution.as_deref().map(|state| {
+        contacts
+            .iter()
+            .map(|contact| FrictionalContact {
+                activation_tolerance_m: contact
+                    .activation_tolerance_m
+                    .min(state.arrival_controls().gap_tolerance_m),
+                ..*contact
+            })
+            .collect::<Vec<_>>()
+    });
+    let event_contacts = refined_contacts.as_deref().unwrap_or(contacts);
     let mut initial_offsets = Vec::with_capacity(motions.len());
     let mut maximum_step_s = controls.maximum_step_s;
     for (body, motion) in motions.iter().enumerate() {
@@ -292,7 +313,7 @@ fn advance_shared<'m, 'a>(
             ));
         }
         if sampled
-            .closing_contact(contacts, controls.closing_velocity_tolerance_m_s)
+            .closing_contact(event_contacts, controls.closing_velocity_tolerance_m_s)
             .is_some()
         {
             if last_impact_time == Some(time_s) {
@@ -304,7 +325,7 @@ fn advance_shared<'m, 'a>(
             if events.len() >= controls.maximum_impacts {
                 return Err(TrajectoryError::Budget("impact events"));
             }
-            let active: Vec<_> = contacts
+            let active: Vec<_> = event_contacts
                 .iter()
                 .zip(&sampled.gaps_m)
                 .map(|(contact, &gap_m)| FrictionalContact { gap_m, ..*contact })
@@ -356,7 +377,7 @@ fn advance_shared<'m, 'a>(
         let remaining_s = finite(target_s - time_s)?;
         let mut h = remaining_s.min(maximum_step_s);
         let mut refinements = 0;
-        loop {
+        'proposal: loop {
             poll(cancelled)?;
             if h < controls.minimum_step_s && h != remaining_s {
                 return Err(TrajectoryError::NoProgress {
@@ -379,165 +400,220 @@ fn advance_shared<'m, 'a>(
                     trial_step_s: dt_s,
                 });
             }
-            if let Some(supported) = evolution.as_deref_mut() {
-                if let Some(mut segment) = supported.trial(
-                    &current,
-                    contacts,
-                    &sampled,
-                    loads,
-                    &initial_offsets,
-                    start_s,
-                    actual_duration_s,
-                    trial_target_s,
-                    controls,
-                    &mut work,
-                    cancelled,
-                )? {
-                    let actual_target_s = segment.step.report.target_time_s;
-                    let actual_dt_s = finite(actual_target_s - time_s)?;
-                    if actual_dt_s <= 0.0 || actual_target_s > trial_target_s {
-                        return Err(TrajectoryError::Invalid(
-                            "sustained segment must end inside its requested interval",
-                        ));
-                    }
-                    if actual_dt_s < controls.minimum_step_s && actual_target_s != target_s {
-                        return Err(TrajectoryError::NoProgress {
-                            time_s,
-                            trial_step_s: actual_dt_s,
-                        });
-                    }
-                    let positions: Vec<_> = segment
-                        .step
-                        .bodies
-                        .iter()
-                        .map(|step| step.motion.state().displacements_m())
-                        .collect();
-                    let velocities: Vec<_> = segment
-                        .step
-                        .bodies
-                        .iter()
-                        .map(|step| step.motion.velocity_m_s())
-                        .collect();
-                    let endpoint = geometry::sample(
-                        contacts,
-                        &reference_positions,
-                        &positions,
-                        &velocities,
-                        actual_target_s - start_s,
-                        cancelled,
-                    )?;
-                    // Open and separating contacts were absent from the held
-                    // force solve. They still constrain every accepted path.
-                    if endpoint.gaps_m.iter().any(|gap| *gap < 0.0) {
-                        rejected_trials += 1;
-                        refinements += 1;
-                        if refinements > controls.maximum_refinements_per_step {
-                            return Err(TrajectoryError::Refinement {
-                                time_s,
-                                attempts: refinements,
-                            });
-                        }
-                        h = geometry::shorter_step(
-                            contacts,
-                            &sampled.gaps_m,
-                            &endpoint.gaps_m,
-                            actual_dt_s,
-                        )?;
-                        continue;
-                    }
-                    balance.add_sustained(&segment.step)?;
-                    supported.accept(time_s, &mut segment, contacts)?;
-                    minimum_gap_m = minimum_gap_m.min(endpoint.minimum_gap_m);
-                    current = segment
-                        .step
-                        .bodies
-                        .into_iter()
-                        .map(|step| step.motion)
-                        .collect();
-                    sampled = endpoint;
-                    accepted_steps += 1;
-                    break;
-                }
-            }
-            let fraction = finite((trial_target_s - start_s) / actual_duration_s)?;
-            let mut stages = Vec::with_capacity(current.len());
-            let mut reverse = false;
-            for (body, motion) in current.iter().enumerate() {
-                poll(cancelled)?;
-                let offsets = offsets_at(
-                    &initial_offsets[body],
-                    loads[body].endpoint_prescribed_jumps_m,
-                    fraction,
-                    cancelled,
-                )?;
-                let reserve = work.reserve(motion, controls)?;
-                let trial = motion.advance_to_time_controlled(
-                    loads[body].mean_force_n,
-                    &offsets,
-                    trial_target_s,
-                    cancelled,
-                );
-                match trial {
-                    Ok(step) => {
-                        work.refund(reserve, &step)?;
-                        stages.push(step);
-                    }
-                    Err(DynamicsError::Model(CohesiveError::UnresolvedFrictionReversal {
-                        ..
-                    })) => {
-                        reverse = true;
-                        break;
-                    }
-                    Err(error) => return Err(TrajectoryError::Body { body, error }),
-                }
-            }
-            if reverse {
-                rejected_trials += 1;
-                refinements += 1;
-                if refinements > controls.maximum_refinements_per_step {
-                    return Err(TrajectoryError::Refinement {
-                        time_s,
-                        attempts: refinements,
-                    });
-                }
-                h = finite(0.5 * dt_s)?;
-                continue;
-            }
-            let positions: Vec<_> = stages
-                .iter()
-                .map(|s| s.motion.state().displacements_m())
-                .collect();
-            let velocities: Vec<_> = stages.iter().map(|s| s.motion.velocity_m_s()).collect();
-            let endpoint = geometry::sample(
+            let mut trial = match native_trial(
+                &current,
                 contacts,
+                &sampled,
+                loads,
+                &initial_offsets,
                 &reference_positions,
-                &positions,
-                &velocities,
-                trial_target_s - start_s,
+                start_s,
+                actual_duration_s,
+                target_s,
+                trial_target_s,
+                controls,
+                evolution.as_deref_mut(),
+                &mut work,
                 cancelled,
-            )?;
-            if endpoint.gaps_m.iter().any(|gap| *gap < 0.0) {
-                rejected_trials += 1;
-                refinements += 1;
-                if refinements > controls.maximum_refinements_per_step {
-                    return Err(TrajectoryError::Refinement {
-                        time_s,
-                        attempts: refinements,
-                    });
+            ) {
+                Ok(trial) => trial,
+                Err(TrajectoryError::Body {
+                    error: DynamicsError::Model(CohesiveError::UnresolvedFrictionReversal { .. }),
+                    ..
+                }) => {
+                    rejected_trials += 1;
+                    refine(&mut refinements, time_s, controls)?;
+                    h = finite(0.5 * dt_s)?;
+                    continue;
                 }
-                h = geometry::shorter_step(contacts, &sampled.gaps_m, &endpoint.gaps_m, dt_s)?;
-                continue;
+                Err(error) => return Err(error),
+            };
+            let mut located = None;
+            loop {
+                // Resolve penetration before recording an exact arrival. Every
+                // contact is checked, including those absent from a support solve.
+                let penetrating = contacts
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| trial.endpoint.gaps_m[*i] < 0.0)
+                    .min_by_key(|(_, contact)| contact.id)
+                    .map(|(i, _)| i);
+                let exact_arrival =
+                    if penetrating.is_none() && located.is_none() && evolution.is_some() {
+                        contacts
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| {
+                                sampled.gaps_m[*i] > 0.0 && trial.endpoint.gaps_m[*i] == 0.0
+                            })
+                            .min_by_key(|(_, contact)| contact.id)
+                            .map(|(i, _)| i)
+                    } else {
+                        None
+                    };
+                if let Some(index) = penetrating.or(exact_arrival) {
+                    refine(&mut refinements, time_s, controls)?;
+                    if let Some(state) = evolution.as_deref() {
+                        if sampled.gaps_m[index] > 0.0 {
+                            let mut arrival_controls = state.arrival_controls();
+                            arrival_controls.gap_tolerance_m = arrival_controls
+                                .gap_tolerance_m
+                                .min(contacts[index].activation_tolerance_m);
+                            let upper_target_s = trial.target_s;
+                            let upper_elapsed_s = finite(upper_target_s - time_s)?;
+                            let upper_gap_m = trial.endpoint.gaps_m[index];
+                            let upper_velocity_m_s = trial.endpoint.normal_velocities_m_s[index];
+                            // Never retain a rejected native history as a new
+                            // predecessor, nor retain it alongside another probe.
+                            drop(trial);
+                            rejected_trials += 1;
+                            let mut last = None;
+                            let result = arrival::locate(
+                                sampled.gaps_m[index],
+                                upper_elapsed_s,
+                                upper_gap_m,
+                                upper_velocity_m_s,
+                                arrival_controls,
+                                &mut |elapsed_s, cancelled| {
+                                    if last.take().is_some() {
+                                        rejected_trials += 1;
+                                    }
+                                    let requested_target_s = finite(time_s + elapsed_s)
+                                        .map_err(ArrivalProbeError::Mechanics)?;
+                                    if requested_target_s > upper_target_s {
+                                        return Err(ArrivalProbeError::Mechanics(
+                                            TrajectoryError::Invalid(
+                                                "arrival probe exceeds supplied native upper endpoint",
+                                            ),
+                                        ));
+                                    }
+                                    let candidate = native_trial(
+                                        &current,
+                                        contacts,
+                                        &sampled,
+                                        loads,
+                                        &initial_offsets,
+                                        &reference_positions,
+                                        start_s,
+                                        actual_duration_s,
+                                        target_s,
+                                        requested_target_s,
+                                        controls,
+                                        evolution.as_deref_mut(),
+                                        &mut work,
+                                        &mut || cancelled(),
+                                    )
+                                    .map_err(ArrivalProbeError::Mechanics)?;
+                                    let actual_elapsed_s = finite(candidate.target_s - time_s)
+                                        .map_err(ArrivalProbeError::Mechanics)?;
+                                    let values = (
+                                        actual_elapsed_s,
+                                        candidate.endpoint.gaps_m[index],
+                                        candidate.endpoint.normal_velocities_m_s[index],
+                                    );
+                                    let earlier_stop = candidate.stops_before(requested_target_s);
+                                    last = Some(candidate);
+                                    if earlier_stop {
+                                        Err(ArrivalProbeError::EarlierEndpoint)
+                                    } else {
+                                        Ok(values)
+                                    }
+                                },
+                                &mut || cancelled(),
+                            );
+                            let receipt = match result {
+                                Ok(report) => Some(report),
+                                Err(arrival::ArrivalError::Response(
+                                    ArrivalProbeError::EarlierEndpoint,
+                                )) => None,
+                                Err(arrival::ArrivalError::Response(
+                                    ArrivalProbeError::Mechanics(error),
+                                )) => return Err(error),
+                                Err(arrival::ArrivalError::Cancelled) => {
+                                    return Err(TrajectoryError::Cancelled);
+                                }
+                                Err(error) => {
+                                    return Err(TrajectoryError::Arrival {
+                                        contact_id: contacts[index].id,
+                                        error: Box::new(error.map_response(|error| match error {
+                                            ArrivalProbeError::Mechanics(error) => error,
+                                            ArrivalProbeError::EarlierEndpoint => {
+                                                TrajectoryError::Invalid(
+                                                    "unhandled earlier native endpoint",
+                                                )
+                                            }
+                                        })),
+                                    });
+                                }
+                            };
+                            trial = last.ok_or(TrajectoryError::Invalid(
+                                "arrival search must retain its actual final native replay",
+                            ))?;
+                            if let Some(report) = &receipt {
+                                if report.elapsed_s != trial.target_s - time_s
+                                    || report.gap_m != trial.endpoint.gaps_m[index]
+                                    || report.normal_velocity_m_s
+                                        != trial.endpoint.normal_velocities_m_s[index]
+                                {
+                                    return Err(TrajectoryError::Invalid(
+                                        "arrival receipt differs from retained original response",
+                                    ));
+                                }
+                            }
+                            // A different contact can arrive sooner. Retarget
+                            // from the same predecessor before admitting any state.
+                            located = receipt.map(|report| (contacts[index].id, report));
+                            continue;
+                        }
+                    }
+                    // A zero-gap outward departure needs a positive predecessor
+                    // before this positive-gap locator applies. Keep the bounded
+                    // original shortening rule and its honest no-progress refusal.
+                    h = geometry::shorter_step(
+                        contacts,
+                        &sampled.gaps_m,
+                        &trial.endpoint.gaps_m,
+                        finite(trial.target_s - time_s)?,
+                    )?;
+                    rejected_trials += 1;
+                    continue 'proposal;
+                }
+                if let Some((contact_id, report)) = located {
+                    evolution
+                        .as_deref_mut()
+                        .ok_or(TrajectoryError::Invalid("arrival requires mixed evolution"))?
+                        .accept_arrival(contact_id, time_s, report)?;
+                }
+                match trial.candidate {
+                    NativeCandidate::Free(stages) => {
+                        for step in &stages {
+                            balance.add_smooth(step)?;
+                        }
+                        current = stages.into_iter().map(|step| step.motion).collect();
+                    }
+                    NativeCandidate::Supported(mut segment) => {
+                        balance.add_sustained(&segment.step)?;
+                        evolution
+                            .as_deref_mut()
+                            .ok_or(TrajectoryError::Invalid(
+                                "supported candidate requires mixed evolution",
+                            ))?
+                            .accept(time_s, &mut segment, contacts)?;
+                        current = segment
+                            .step
+                            .bodies
+                            .into_iter()
+                            .map(|step| step.motion)
+                            .collect();
+                    }
+                }
+                // Both endpoints are actual native states. Every supplied gap
+                // is affine on this one declared straight displacement path.
+                minimum_gap_m = minimum_gap_m.min(trial.endpoint.minimum_gap_m);
+                sampled = trial.endpoint;
+                accepted_steps += 1;
+                break 'proposal;
             }
-            // Both endpoints are actual native states. Every declared contact
-            // gap is affine on this one native straight displacement path.
-            for step in &stages {
-                balance.add_smooth(step)?;
-            }
-            minimum_gap_m = minimum_gap_m.min(endpoint.minimum_gap_m);
-            current = stages.into_iter().map(|step| step.motion).collect();
-            sampled = endpoint;
-            accepted_steps += 1;
-            break;
         }
     }
     let report = balance.finish(
@@ -573,6 +649,183 @@ fn advance_shared<'m, 'a>(
     Ok(TrajectoryCandidate {
         motions: current,
         report,
+    })
+}
+
+enum NativeCandidate<'m, 'a> {
+    Free(Vec<DynamicsStep<'m, 'a>>),
+    Supported(sustained::SegmentCandidate<'m, 'a>),
+}
+
+/// One unpublished response from the same accepted predecessor. Repeated event
+/// probes may replace this candidate; only the admitted final replay is adopted.
+struct NativeTrial<'m, 'a> {
+    candidate: NativeCandidate<'m, 'a>,
+    endpoint: geometry::Sample,
+    target_s: f64,
+}
+
+impl NativeTrial<'_, '_> {
+    fn stops_before(&self, requested_target_s: f64) -> bool {
+        self.target_s < requested_target_s
+            && matches!(
+                &self.candidate,
+                NativeCandidate::Supported(segment) if segment.report.stopping.is_some()
+            )
+    }
+}
+
+enum ArrivalProbeError {
+    Mechanics(TrajectoryError),
+    /// Preserve a real native tangential stop before continuing normal arrival.
+    EarlierEndpoint,
+}
+
+fn refine(
+    refinements: &mut usize,
+    time_s: f64,
+    controls: TrajectoryControls,
+) -> Result<(), TrajectoryError> {
+    *refinements = checked_add(*refinements, 1)?;
+    if *refinements > controls.maximum_refinements_per_step {
+        return Err(TrajectoryError::Refinement {
+            time_s,
+            attempts: *refinements,
+        });
+    }
+    Ok(())
+}
+
+/// Evaluate original free or supported mechanics without accepting any history,
+/// physical work or warm force. All computational work shares the window budget.
+#[allow(clippy::too_many_arguments)]
+fn native_trial<'m, 'a>(
+    current: &[CohesiveMotion<'m, 'a>],
+    contacts: &[FrictionalContact<'_>],
+    sampled: &geometry::Sample,
+    loads: &[BodyLoad<'_>],
+    initial_offsets: &[Vec<[f64; 3]>],
+    reference_positions: &[&[f64]],
+    start_s: f64,
+    duration_s: f64,
+    window_target_s: f64,
+    requested_target_s: f64,
+    controls: TrajectoryControls,
+    evolution: Option<&mut evolution::State<'_>>,
+    work: &mut Work,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<NativeTrial<'m, 'a>, TrajectoryError> {
+    poll(cancelled)?;
+    let time_s = current[0].time_s();
+    let requested_dt_s = finite(requested_target_s - time_s)?;
+    if requested_dt_s <= 0.0
+        || (requested_dt_s < controls.minimum_step_s && requested_target_s != window_target_s)
+    {
+        return Err(TrajectoryError::NoProgress {
+            time_s,
+            trial_step_s: requested_dt_s,
+        });
+    }
+    let supported = if let Some(state) = evolution {
+        state.trial(
+            current,
+            contacts,
+            sampled,
+            loads,
+            initial_offsets,
+            start_s,
+            duration_s,
+            requested_target_s,
+            controls,
+            work,
+            cancelled,
+        )?
+    } else {
+        None
+    };
+    let candidate = if let Some(segment) = supported {
+        NativeCandidate::Supported(segment)
+    } else {
+        let fraction = finite((requested_target_s - start_s) / duration_s)?;
+        let mut stages = Vec::with_capacity(current.len());
+        for (body, motion) in current.iter().enumerate() {
+            poll(cancelled)?;
+            let offsets = offsets_at(
+                &initial_offsets[body],
+                loads[body].endpoint_prescribed_jumps_m,
+                fraction,
+                cancelled,
+            )?;
+            let reserve = work.reserve(motion, controls)?;
+            let step = motion
+                .advance_to_time_controlled(
+                    loads[body].mean_force_n,
+                    &offsets,
+                    requested_target_s,
+                    cancelled,
+                )
+                .map_err(|error| TrajectoryError::Body { body, error })?;
+            work.refund(reserve, &step)?;
+            stages.push(step);
+        }
+        NativeCandidate::Free(stages)
+    };
+    let stages = match &candidate {
+        NativeCandidate::Free(stages) => stages,
+        NativeCandidate::Supported(segment) => &segment.step.bodies,
+    };
+    if stages.len() != current.len() {
+        return Err(TrajectoryError::Invalid(
+            "complete original native body response required",
+        ));
+    }
+    let target_s = stages[0].motion.time_s();
+    let actual_dt_s = finite(target_s - time_s)?;
+    if actual_dt_s <= 0.0
+        || target_s > requested_target_s
+        || stages.iter().any(|step| step.motion.time_s() != target_s)
+    {
+        return Err(TrajectoryError::Invalid(
+            "native segment must share a clock inside its requested interval",
+        ));
+    }
+    if actual_dt_s < controls.minimum_step_s && target_s != window_target_s {
+        return Err(TrajectoryError::NoProgress {
+            time_s,
+            trial_step_s: actual_dt_s,
+        });
+    }
+    if let NativeCandidate::Supported(segment) = &candidate {
+        if segment.step.report.target_time_s != target_s {
+            return Err(TrajectoryError::Invalid(
+                "supported receipt must retain the native clock",
+            ));
+        }
+    } else if target_s != requested_target_s {
+        return Err(TrajectoryError::Invalid(
+            "free response must retain its requested native clock",
+        ));
+    }
+    let positions: Vec<_> = stages
+        .iter()
+        .map(|step| step.motion.state().displacements_m())
+        .collect();
+    let velocities: Vec<_> = stages
+        .iter()
+        .map(|step| step.motion.velocity_m_s())
+        .collect();
+    let endpoint = geometry::sample(
+        contacts,
+        reference_positions,
+        &positions,
+        &velocities,
+        target_s - start_s,
+        cancelled,
+    )?;
+    Ok(NativeTrial {
+        candidate,
+        endpoint,
+        target_s,
     })
 }
 

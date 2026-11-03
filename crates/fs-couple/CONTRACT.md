@@ -18357,6 +18357,53 @@ general Moreau--Jean scheme. Native regression cases cover sliding to sustained
 rest, stopping then genuine opposite breakaway, zero-gap plastic impact followed
 by loaded support, and contact release followed by free flight.
 
+### Normal arrival before cohesive impact and support
+
+Mixed trajectories now use `EvolutionControls::arrival` to distinguish a
+declared coarse activation band from the requested physical gap accuracy.
+Impact selection, all metadata passed to the simultaneous impact solve, and
+sustained-force selection use the smaller of those two distances. An initially
+open body inside the coarse band therefore retains its original free mechanics
+until the refined band is reached. A zero arrival gap tolerance requests an
+actual numerical zero; it never authorizes changing a position or gap.
+
+When an original free or supported proposal crosses an open contact, the
+arrival locator reevaluates the original response from the same accepted
+predecessors. Scaled secant proposals alternate with bisection; neither an
+interpolated state nor a rejected material history becomes a successor.
+Approximate acceptance requires both a time bracket within the requested bound
+and an actual nonnegative lower-endpoint gap within the spatial bound. An
+actual zero gap can give an exact numerical point bracket. Every result is
+freshly replayed at its represented native clock, with unchanged gap and normal
+velocity, before the retained original body candidate can be adopted.
+
+Every declared contact still participates in geometry admission. If another
+contact penetrates at the proposed arrival, its earlier bracket is resolved
+from the same original predecessors. An earlier actual sliding stop is retained
+as its own endpoint before normal arrival continues. Arrivals can therefore
+occur during an existing sustained segment, while simultaneous impulse
+coupling and the subsequent force solve remain with their original owners.
+Starting at zero gap with outward motion still needs a positive-gap predecessor;
+the existing bounded shortening and explicit no-progress refusals apply there.
+
+`EvolutionReport::arrival_events` retains the selected contact, actual native
+time, relative bracket, outward-rounded absolute bracket, actual gap, relative
+normal velocity, and response evaluation count for each admitted arrival.
+Retained receipts are bounded by the accepted-step limit. All discarded native
+probes spend the shared body/residual/Newton budget; supported probes also spend
+the shared contact-solve and mechanical-response budgets. They contribute no
+physical work, loss, history, or warm-force acceptance. Original source failures,
+cancellation, clock-resolution limits and exhausted budgets remain refusals.
+
+The unchanged normal-kinematic, momentum and work audits remain decisive after
+arrival and impact. A small positive gap is still positive and does not
+guarantee a support handoff at every later step size. Brackets describe the
+sampled original numerical response, not the earliest collision of an exact
+continuous trajectory or arbitrary changing contact geometry. Native cases
+exercise accelerated arrival, a translating wall with its actual source work,
+an arrival during existing support, activation-band refinement, and atomic
+budget/cancellation refusal.
+
 ## Finite cohesive patch load line
 
 `cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.

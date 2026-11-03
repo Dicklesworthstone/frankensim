@@ -4,6 +4,8 @@
 //! enter the original sustained force solve; a bracketed sliding stop ends one
 //! native segment and the next force solve decides sticking or breakaway. No
 //! body velocity or gap is projected. Open contacts remain in geometry checks.
+//! Arrivals narrow activation to a separately requested gap accuracy and retain
+//! the original response at the accepted endpoint of the arrival bracket.
 //!
 //! Geometry and straight native displacement paths have the same approximation
 //! as the transient owner. A positive impact activation gap is not silently
@@ -11,6 +13,7 @@
 //! refuse that handoff. This does not certify exact-flow event times, arbitrary
 //! nonlinear contact uniqueness, or a general Moreau--Jean discretization.
 
+pub use super::arrival::{ArrivalControls, ArrivalReport};
 use super::sustained::{
     NaturalMapScales, SegmentCandidate, SegmentControls, StoppingReport, SustainedContact,
     segment_candidate_controlled,
@@ -30,6 +33,10 @@ pub struct EvolutionControls {
     /// Workspace includes the supported adapter and contact solver reservations.
     pub trajectory: TrajectoryControls,
     pub sustained: SegmentControls,
+    /// Arrival search accuracy. Impacts and support activate only inside the
+    /// smaller of this gap tolerance and each authored activation band. Zero
+    /// requests an actual zero gap; it never permits position projection.
+    pub arrival: ArrivalControls,
     /// Across all accepted and geometrically rejected sustained segments.
     pub maximum_contact_solves: usize,
     pub maximum_response_evaluations: usize,
@@ -47,6 +54,17 @@ pub struct TimedStoppingReport {
     pub stopping: StoppingReport,
 }
 
+/// One original native endpoint accepted at a contact arrival. The absolute
+/// bracket includes outward rounding of the relative bracket's clock offset.
+#[derive(Clone, Copy, Debug)]
+pub struct TimedArrivalReport {
+    pub contact_id: u64,
+    pub time_s: f64,
+    pub segment_start_time_s: f64,
+    pub bracket_time_s: [f64; 2],
+    pub arrival: ArrivalReport,
+}
+
 /// The complete physical window. External Coulomb loss is separate from the
 /// original material friction and instantaneous impact loss in `trajectory`.
 #[derive(Debug)]
@@ -57,6 +75,9 @@ pub struct EvolutionReport {
     pub trajectory: TrajectoryReport,
     pub sustained_steps: usize,
     pub stopping_events: Vec<TimedStoppingReport>,
+    /// At most one arrival is retained per accepted positive native segment.
+    /// All unpublished arrival probes still charge `trajectory`'s body work.
+    pub arrival_events: Vec<TimedArrivalReport>,
     pub contact_friction_loss_j: f64,
     pub absolute_sustained_energy_defect_j: f64,
     pub absolute_sustained_native_energy_defect_j: f64,
@@ -143,6 +164,7 @@ pub(super) struct State<'s> {
     warm_forces: Vec<[f64; 3]>,
     sustained_steps: usize,
     stopping_events: Vec<TimedStoppingReport>,
+    arrival_events: Vec<TimedArrivalReport>,
     contact_solves: usize,
     response_evaluations: usize,
     friction_loss: Sum,
@@ -170,6 +192,12 @@ impl<'s> State<'s> {
             || controls.trajectory.closing_velocity_tolerance_m_s
                 > controls.sustained.step.audit.velocity_tolerance_m_s
             || controls.sustained.stopping.minimum_step_s < controls.trajectory.minimum_step_s
+            || !positive(controls.arrival.minimum_step_s)
+            || !positive(controls.arrival.time_tolerance_s)
+            || !controls.arrival.gap_tolerance_m.is_finite()
+            || controls.arrival.gap_tolerance_m < 0.0
+            || controls.arrival.maximum_trials == 0
+            || controls.arrival.minimum_step_s < controls.trajectory.minimum_step_s
         {
             return Err(TrajectoryError::Invalid(
                 "complete supported controls and compatible normal/progress tolerances required",
@@ -194,7 +222,8 @@ impl<'s> State<'s> {
         // The original transient adapter keeps its own workspace allowance.
         // Reserve the simultaneously live sustained buffers and contact-solver
         // scratch separately; original body/material scratch stays owner-bound.
-        let mut extra = checked_add(256, checked_mul(contacts.len(), 32)?)?;
+        // Includes the refined impact-contact view kept by the shared loop.
+        let mut extra = checked_add(256, checked_mul(contacts.len(), 48)?)?;
         extra = checked_add(extra, checked_mul(motions.len(), 16)?)?;
         for motion in motions {
             extra = checked_add(extra, checked_mul(motion.state().points().len(), 3)?)?;
@@ -205,6 +234,12 @@ impl<'s> State<'s> {
         extra = checked_add(
             extra,
             checked_mul(controls.maximum_stopping_events, event_entries)?,
+        )?;
+        let arrival_entries =
+            core::mem::size_of::<TimedArrivalReport>().div_ceil(core::mem::size_of::<f64>());
+        extra = checked_add(
+            extra,
+            checked_mul(controls.trajectory.maximum_accepted_steps, arrival_entries)?,
         )?;
         if !contacts.is_empty() {
             extra = checked_add(extra, controls.sustained.step.maximum_workspace_entries)?;
@@ -225,6 +260,7 @@ impl<'s> State<'s> {
             warm_forces: initial_forces_n.to_vec(),
             sustained_steps: 0,
             stopping_events: Vec::with_capacity(controls.maximum_stopping_events),
+            arrival_events: Vec::with_capacity(controls.trajectory.maximum_accepted_steps),
             contact_solves: 0,
             response_evaluations: 0,
             friction_loss: Sum::default(),
@@ -240,6 +276,64 @@ impl<'s> State<'s> {
         // The event changed velocity; a previously sustained force is only a
         // guess, so restart its continuation from zero after this mode change.
         self.warm_forces.fill([0.0; 3]);
+    }
+
+    pub(super) fn arrival_controls(&self) -> ArrivalControls {
+        self.controls.arrival
+    }
+
+    /// Called once after a complete positive native segment and every contact's
+    /// geometry have passed. Scalar probes are already charged through the
+    /// shared trajectory Work; retaining metadata does not adopt another state.
+    pub(super) fn accept_arrival(
+        &mut self,
+        contact_id: u64,
+        segment_start_time_s: f64,
+        arrival: ArrivalReport,
+    ) -> Result<(), TrajectoryError> {
+        if self.arrival_events.len() >= self.controls.trajectory.maximum_accepted_steps {
+            return Err(TrajectoryError::Budget("retained contact-arrival events"));
+        }
+        if !segment_start_time_s.is_finite()
+            || segment_start_time_s < 0.0
+            || !positive(arrival.elapsed_s)
+            || !arrival.bracket_s[0].is_finite()
+            || !arrival.bracket_s[1].is_finite()
+            || arrival.bracket_s[0] < 0.0
+            || arrival.bracket_s[0] > arrival.elapsed_s
+            || arrival.elapsed_s > arrival.bracket_s[1]
+        {
+            return Err(TrajectoryError::Invalid(
+                "complete finite arrival bracket required",
+            ));
+        }
+        let time_s = finite(segment_start_time_s + arrival.elapsed_s)?;
+        if time_s <= segment_start_time_s {
+            return Err(TrajectoryError::NoProgress {
+                time_s: segment_start_time_s,
+                trial_step_s: arrival.elapsed_s,
+            });
+        }
+        let bracket_time_s = if arrival.bracket_s[0] == arrival.bracket_s[1] {
+            // An exact numerical endpoint is a point in the represented clock.
+            [time_s; 2]
+        } else {
+            let low = if arrival.bracket_s[0] == 0.0 {
+                segment_start_time_s
+            } else {
+                finite(finite(segment_start_time_s + arrival.bracket_s[0])?.next_down())?
+            };
+            let high = finite(finite(segment_start_time_s + arrival.bracket_s[1])?.next_up())?;
+            [low, high]
+        };
+        self.arrival_events.push(TimedArrivalReport {
+            contact_id,
+            time_s,
+            segment_start_time_s,
+            bracket_time_s,
+            arrival,
+        });
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -263,14 +357,17 @@ impl<'s> State<'s> {
         let mut initial = Vec::with_capacity(contacts.len());
         for (i, contact) in contacts.iter().enumerate() {
             poll(cancelled)?;
-            if sampled.gaps_m[i] <= contact.activation_tolerance_m
+            let activation_tolerance_m = contact
+                .activation_tolerance_m
+                .min(self.controls.arrival.gap_tolerance_m);
+            if sampled.gaps_m[i] <= activation_tolerance_m
                 && sampled.normal_velocities_m_s[i].abs()
                     <= trajectory.closing_velocity_tolerance_m_s
             {
                 active.push(SustainedContact {
                     id: contact.id,
                     gap_m: sampled.gaps_m[i],
-                    activation_tolerance_m: contact.activation_tolerance_m,
+                    activation_tolerance_m,
                     friction_coefficient: contact.friction_coefficient,
                     prescribed_velocity_m_s: contact.prescribed_velocity_m_s,
                     trace: contact.trace,
@@ -433,6 +530,7 @@ impl<'s> State<'s> {
             trajectory,
             sustained_steps: self.sustained_steps,
             stopping_events: self.stopping_events,
+            arrival_events: self.arrival_events,
             contact_friction_loss_j: self.friction_loss.total()?,
             absolute_sustained_energy_defect_j: self.energy_defect.total()?,
             absolute_sustained_native_energy_defect_j: self.native_defect.total()?,
