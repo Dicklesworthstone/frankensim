@@ -91,6 +91,72 @@ fn g1_g3_each_face_uses_one_donor_enthalpy_with_datum_and_direction_invariance()
 }
 
 #[test]
+fn g3_small_physical_heat_survives_large_positive_and_negative_enthalpy_datums() {
+    // The arbitrary zero of h must not erase a small real source in either
+    // the assembled equation or its independently evaluated boundary flux.
+    // Each tangent retains the same resolved sensible heat around 300 K.
+    let source_w = 4.5e-4;
+    let middle = source_w / (24.0 - 2.0 / 14.0 - 3.0 / 45.0);
+    let expected = [middle / 14.0, middle, middle * 3.0 / 45.0];
+    for reverse in [false, true] {
+        let (domain, flow, mut setup) = setup(reverse);
+        setup.power_w = vec![0.0, source_w, 0.0];
+        for scheme in [ConvectionScheme::Upwind, ConvectionScheme::EnthalpyMinmod] {
+            for datum in [0.0, 2_f64.powi(40), -2_f64.powi(40)] {
+                let mut cp = [1.0, 2.0, 4.0];
+                if reverse {
+                    cp.reverse();
+                }
+                let cells = cp.map(|heat_capacity_j_kg_k| {
+                    Some(AffineSpecificEnthalpy {
+                        temperature_k: 300.0,
+                        enthalpy_j_kg: datum,
+                        heat_capacity_j_kg_k,
+                    })
+                });
+                let field = AdvectiveEnthalpyField {
+                    cells: &cells,
+                    boundary_j_kg: [Some(datum), Some(datum), None, None, None, None],
+                };
+                let config = EnergyConfig {
+                    scheme,
+                    ..EnergyConfig::default()
+                };
+                let (solution, record) = config
+                    .step_with_enthalpy(
+                        &domain,
+                        &properties(999.0),
+                        &[],
+                        &flow,
+                        &setup,
+                        &[[1.0; 3]; 3],
+                        field,
+                        &cp,
+                        &[300.0; 3],
+                        0.1,
+                        &CancelGate::new(),
+                    )
+                    .unwrap();
+                for cell in 0..3 {
+                    let index = if reverse { 2 - cell } else { cell };
+                    assert!(
+                        (solution.temperature[cell] - 300.0 - expected[index]).abs() < 1e-10,
+                        "datum={datum}, scheme={scheme:?}, reverse={reverse}, cell={cell}: {:?}",
+                        solution.temperature,
+                    );
+                }
+                assert!(record.closure_j.abs() < 1e-10, "{record:?}");
+                assert!(
+                    (solution.report.balance.advective_outflow_w - 4.0 * expected[2]).abs() < 1e-10,
+                    "datum={datum}: {:?}",
+                    solution.report.balance,
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn g0_invalid_caloric_fields_and_nonconservative_flow_refuse_before_publication() {
     let (domain, flow, setup) = setup(false);
     let h = AffineSpecificEnthalpy {

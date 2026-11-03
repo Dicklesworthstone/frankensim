@@ -7812,7 +7812,21 @@ to audit the same physical faces without constructing another grid topology.
 
 The returned native balance describes the frozen linearization. Its open-face
 audit evaluates centered enthalpy and temperature differences to reduce affine
-cancellation. Nonlinear callers must independently check true chart storage and
+cancellation. The operator subtracts the first fluid cell's h0 from every donor
+and inlet/backflow enthalpy before forming affine intercepts, limiter corrections
+and boundary fluxes. Local continuity makes this one common reference cancel
+from each physical balance; its admission is unchanged. This avoids cancellation
+of large formation-energy fluxes hiding small heat sources and uses no additional
+per-cell allocation. Net boundary transport is reference-independent when net
+boundary mass flow vanishes. With fixed-temperature fluid cells on open faces,
+the separately reported fixed-cell injection and nonfixed boundary outflow use
+this same centered convention; their combined physical balance is invariant.
+The nonlinear material audit likewise subtracts the common h0 before its Cp*dT
+prediction, so a small actual face-law defect cannot round to a false zero.
+Focused regressions retain a small source and detect a sub-ULP affine mismatch
+under positive/negative common datum shifts, both flow directions and both
+supported enthalpy reconstructions.
+Nonlinear callers must independently check true chart storage and
 face fluxes before accepting state; neither raw coefficients nor a small global
 linear residual establish material-source validity or nonlinear conservation.
 Three native regressions cover differing donor Cp, reverse flow, common-datum

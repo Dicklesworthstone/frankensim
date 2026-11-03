@@ -365,8 +365,13 @@ fn defect_field(
             }; // Prescribed incoming h is already exact.
             let previous = applied[donor].expect("admitted fluid donor");
             let actual = endpoint[donor].expect("admitted fluid endpoint");
-            let mut specific_difference =
-                actual.enthalpy_j_kg - previous.at_temperature(temperatures[donor]);
+            // Subtract the common enthalpy datum before applying the sensible
+            // increment. Adding that increment to a large absolute h first
+            // can round it away and falsely certify a zero caloric defect.
+            let mut specific_difference = (-previous.heat_capacity_j_kg_k).mul_add(
+                temperatures[donor] - previous.temperature_k,
+                actual.enthalpy_j_kg - previous.enthalpy_j_kg,
+            );
             if neighbor.is_some() && let Some((applied_offsets, endpoint_offsets)) = &offsets {
                 let donor_face = if volume_rate > 0.0 { face } else { face ^ 1 };
                 let sign = if donor_face % 2 == 0 { -1.0 } else { 1.0 };
@@ -585,5 +590,55 @@ mod tests {
         let converged = defects(&domain, &flow, 1.0, ConvectionScheme::EnthalpyMinmod,
             &temperatures, &endpoint, &endpoint, &gate).unwrap();
         assert_eq!(converged, MaterialEnthalpyReport::default());
+    }
+
+    #[test]
+    fn small_caloric_defects_survive_large_positive_and_negative_enthalpy_datums() {
+        let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+        let mut faces = [FlowFace::Wall; 6];
+        faces[0] = FlowFace::Fixed;
+        faces[1] = FlowFace::Fixed;
+        let temperature_increment = 2_f64.powi(-16);
+        let temperatures = [300.0, 300.0 + temperature_increment, 300.0];
+        for reverse in [false, true] {
+            let flow = FlowField::from_face_velocity(&domain, faces, |axis, _| {
+                if axis == 0 {
+                    if reverse { -0.125 } else { 0.125 }
+                } else {
+                    0.0
+                }
+            })
+            .unwrap();
+            for datum in [2_f64.powi(40), -2_f64.powi(40)] {
+                let tangent = AffineSpecificEnthalpy {
+                    temperature_k: 300.0,
+                    enthalpy_j_kg: datum,
+                    heat_capacity_j_kg_k: 2.0,
+                };
+                let applied = [Some(tangent); 3];
+                let mut endpoint = applied;
+                endpoint[1].as_mut().unwrap().temperature_k = temperatures[1];
+                // The represented endpoint h is unchanged. A tangent with a
+                // nonzero Cp nevertheless predicts a small positive increment.
+                // Evaluating that tangent in absolute h would hide the defect.
+                assert_eq!(tangent.at_temperature(temperatures[1]), datum);
+                let expected = 2.0 * 0.125 * 2.0 * temperature_increment;
+                for scheme in [ConvectionScheme::Upwind, ConvectionScheme::EnthalpyMinmod] {
+                    let report = defects(
+                        &domain,
+                        &flow,
+                        2.0,
+                        scheme,
+                        &temperatures,
+                        &applied,
+                        &endpoint,
+                        &CancelGate::new(),
+                    )
+                    .unwrap();
+                    assert_eq!(report.maximum_face_flux_defect_w, expected);
+                    assert_eq!(report.maximum_cell_flux_defect_w, expected);
+                }
+            }
+        }
     }
 }

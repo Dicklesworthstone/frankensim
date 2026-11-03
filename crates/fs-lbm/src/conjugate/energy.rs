@@ -297,8 +297,9 @@ pub struct EnergyBalance {
     pub boundary_outflow_w: f64,
     /// Net upwind advective part of `boundary_outflow_w` (informational;
     /// constant-Cp mode references enthalpy to 0 K; an explicit caloric field
-    /// uses its common supplied datum. Net boundary mass flow must vanish for
-    /// this flux to be independent of that datum).
+    /// subtracts the first fluid cell's supplied h0 as one common numerical
+    /// reference. Local continuity is admitted separately. Net boundary mass
+    /// flow must vanish for this flux to be independent of that reference).
     pub advective_outflow_w: f64,
     /// Heat leaving through cell sinks (`ThermalSetup::cell_sinks`).
     pub sink_outflow_w: f64,
@@ -445,12 +446,21 @@ struct Context<'a> {
     rho_c: f64,
     density: f64,
     enthalpy: Option<AdvectiveEnthalpyField<'a>>,
+    /// One common datum drops out of each locally mass-conservative equation.
+    /// Remove it before affine assembly and heat audits, not after multiplying
+    /// and summing potentially much larger formation-energy fluxes.
+    enthalpy_reference_j_kg: f64,
     /// Frozen donor half-cell offsets, present only for limited enthalpy.
     enthalpy_offsets: Option<Vec<[f64; 3]>>,
     scheme: ConvectionScheme,
 }
 
 impl Context<'_> {
+    fn centered_enthalpy(&self, mut value: AffineSpecificEnthalpy) -> AffineSpecificEnthalpy {
+        value.enthalpy_j_kg -= self.enthalpy_reference_j_kg;
+        value
+    }
+
     fn checked_term(&self, c: usize, f: usize) -> Result<FaceTerm, ChtError> {
         let term = self.term(c, f);
         if !term.diag.is_finite()
@@ -549,14 +559,15 @@ impl Context<'_> {
         let field = self.enthalpy.expect("enthalpy path");
         let mass = self.density * self.flow.outward(self.domain, c, f);
         if mass >= 0.0 {
-            let enthalpy = field.cells[c].expect("admitted fluid boundary");
+            let enthalpy = self.centered_enthalpy(field.cells[c].expect("admitted fluid boundary"));
             FaceTerm {
                 diag: mass * enthalpy.heat_capacity_j_kg_k, off: None,
                 rhs: -mass * enthalpy.intercept(),
                 advective: Advective::Affine { mass_flow_kg_s: mass, enthalpy },
             }
         } else {
-            let j = mass * field.boundary_j_kg[f].expect("admitted boundary enthalpy");
+            let j = mass * (field.boundary_j_kg[f].expect("admitted boundary enthalpy")
+                - self.enthalpy_reference_j_kg);
             FaceTerm { diag: 0.0, off: None, rhs: -j, advective: Advective::Fixed(j) }
         }
     }
@@ -575,7 +586,9 @@ impl Context<'_> {
                 // exactly the same donor tangent, including its affine offset.
                 if mass != 0.0 {
                     let upstream = if mass > 0.0 { c } else { n };
-                    let mut h = field.cells[upstream].expect("admitted fluid donor");
+                    let mut h = self.centered_enthalpy(
+                        field.cells[upstream].expect("admitted fluid donor"),
+                    );
                     if let Some(offsets) = &self.enthalpy_offsets {
                         let donor_face = if mass > 0.0 { f } else { f ^ 1 };
                         let sign = if donor_face % 2 == 0 { -1.0 } else { 1.0 };
@@ -740,7 +753,7 @@ pub(crate) struct PseudoStep<'a> {
 /// declares a temperature-dependent conductivity. Each Picard pass evaluates
 /// the integrated bulk laws and their material/contact interface conditions,
 /// until the largest temperature change is below 1e-10 of its span.
-#[allow(clippy::too_many_arguments)] // physics inputs + step state
+#[allow(clippy::too_many_arguments)]// physics inputs + step state
 pub(crate) fn solve_energy_inner(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -1046,6 +1059,17 @@ fn solve_energy_field(
     } else {
         None
     };
+    // The reference follows any shift of the caller's arbitrary enthalpy zero.
+    // The same constant is used on every donor and inlet/backflow reservoir,
+    // including disconnected fluid components. No flow or material is changed.
+    let enthalpy_reference_j_kg = enthalpy.map_or(0.0, |field| {
+        field
+            .cells
+            .iter()
+            .flatten()
+            .next()
+            .map_or(0.0, |h| h.enthalpy_j_kg)
+    });
     let ctx = Context {
         domain,
         flow,
@@ -1058,6 +1082,7 @@ fn solve_energy_field(
         rho_c: fluid.volumetric_heat_capacity(),
         density: fluid.density_kg_m3,
         enthalpy,
+        enthalpy_reference_j_kg,
         enthalpy_offsets,
         scheme: config.scheme,
     };

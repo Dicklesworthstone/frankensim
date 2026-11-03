@@ -43,7 +43,10 @@ impl AffineSpecificEnthalpy {
 ///
 /// All entries and boundary values must share one enthalpy datum. The original
 /// `FluidProperties` supplies density; its reference Cp is not consumed by this
-/// transport path. The supplied flow must conserve volume locally. No species,
+/// transport path. Assembly and net heat accounting subtract the first fluid
+/// cell's h0 from all donor and reservoir values before forming fluxes, so a
+/// large common datum cannot erase a small sensible increment or source.
+/// The supplied flow must conserve volume locally. No species,
 /// changing density, compressibility, pressure work or phase transfer is added.
 #[derive(Debug, Clone, Copy)]
 pub struct AdvectiveEnthalpyField<'a> {

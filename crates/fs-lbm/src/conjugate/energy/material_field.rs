@@ -385,6 +385,7 @@ impl EnergySolution {
             face_contacts: self.face_contact_resistance_m2_k_w.clone(),
             // Isolate diffusion without subtracting large advective terms.
             rho_c: 0.0, density: 0.0, enthalpy: None, enthalpy_offsets: None,
+            enthalpy_reference_j_kg: 0.0,
             scheme: super::ConvectionScheme::Upwind,
         };
         let before = context(self.conductivity.clone());
