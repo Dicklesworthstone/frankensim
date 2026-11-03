@@ -1,6 +1,8 @@
 //! G1 source calorimetry and G3/G4 continuing composition with one wall inventory.
 mod links;
 #[cfg(feature = "material")]
+mod link_conduction;
+#[cfg(feature = "material")]
 mod material_conduction;
 
 use super::*;

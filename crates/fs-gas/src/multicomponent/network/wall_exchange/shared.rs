@@ -312,11 +312,13 @@ impl SharedWalls<'_> {
             if links.candidate.len() > links.ports.len() {
                 return Err(WallExchangeError::Invalid("wall link source-stage count"));
             }
-            for &link in &links.ports {
+            for index in 0..links.ports.len() {
                 poll(cancelled)?;
+                let link = links.ports[index];
                 let receipt = crate::multicomponent::wall_exchange::shared::links::exchange(
                     link.walls.map(|i| &self.groups[i].storage),
-                    link,
+                    links,
+                    index,
                     duration,
                     controls,
                     &self.work,
@@ -351,6 +353,8 @@ impl SharedWalls<'_> {
                     cancelled,
                 )?;
             }
+            #[cfg(feature = "material")]
+            links.admit_conduction_endpoints(|i| &self.groups[i].storage, &self.work, cancelled)?;
         }
         let report = total.report(duration);
         let mut shared_report = SharedWallReport {

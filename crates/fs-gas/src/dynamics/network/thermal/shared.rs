@@ -281,10 +281,19 @@ impl SharedWalls<'_> {
             }
         }
         if let Some(links) = &mut self.links {
-            for (link, receipt) in links.ports.iter().zip(&mut links.candidate) {
+            for index in 0..links.ports.len() {
                 poll(cancelled)?;
-                *receipt =
-                    conduction::exchange(&self.groups, *link, duration, control, &work, cancelled)?;
+                let link = links.ports[index];
+                let receipt = conduction::exchange(
+                    &self.groups,
+                    links,
+                    index,
+                    duration,
+                    control,
+                    &work,
+                    cancelled,
+                )?;
+                links.candidate[index] = receipt;
                 for i in 0..2 {
                     self.groups[link.walls[i]].candidate = receipt.endpoint_state[i];
                 }
@@ -308,6 +317,8 @@ impl SharedWalls<'_> {
             for group in &self.groups {
                 group.admit_conduction_endpoint(group.candidate, true, &work, cancelled)?;
             }
+            #[cfg(feature = "material")]
+            links.admit_conduction_endpoints(|i| &self.groups[i], &work, cancelled)?;
         }
         poll(cancelled)?;
         let report = total.report(duration);

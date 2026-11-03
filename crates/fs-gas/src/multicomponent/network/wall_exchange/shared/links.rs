@@ -68,6 +68,8 @@ impl NetworkWallOperator<'_> {
             ports: links,
             candidate,
             accepted,
+            #[cfg(feature = "material")]
+            conduction: None,
         });
         poll(&mut cancelled)?;
         Ok(self)
@@ -89,5 +91,55 @@ impl NetworkWallOperator<'_> {
         let shared = self.shared.as_ref()?;
         shared.last_report?;
         Some(&shared.links.as_ref()?.accepted)
+    }
+
+    /// Bind original bulk conductivity to either side of existing wall links.
+    ///
+    /// Rows follow link order, with each A/B material attached to that wall's
+    /// original state and caloric source. On a bound link the authored G is
+    /// the finite interface/contact conductance; selected L/(k A) resistances
+    /// add once in series. Unbound links retain complete G, and zero G remains
+    /// exact insulation. Perfect contact and spatial temperature profiles are
+    /// not inferred by this finite-interface, uniform-inventory model.
+    ///
+    /// Initial-state layers refresh at the actual start of each link stage;
+    /// implicit layers refresh per candidate without an invented derivative or
+    /// an initial-flux cap. Later links must leave every earlier material source
+    /// supported before publication. Both source halves share original storage,
+    /// source-work accounting, cancellation and the network's atomic commit.
+    #[cfg(feature = "material")]
+    pub fn with_shared_wall_link_conduction(
+        mut self,
+        layers: Vec<[Option<MaterialWallConduction>; 2]>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, WallExchangeError> {
+        poll(&mut cancelled)?;
+        if self.last_report.is_some() || self.trial_active {
+            return Err(WallExchangeError::Invalid(
+                "wall link material must bind before evolution",
+            ));
+        }
+        let shared = self.shared.as_mut().ok_or(WallExchangeError::Invalid(
+            "wall link material requires shared walls",
+        ))?;
+        let links = shared.links.as_mut().ok_or(WallExchangeError::Invalid(
+            "wall link material requires existing links",
+        ))?;
+        links.bind_conduction(layers, |i| &shared.groups[i].storage, &mut cancelled)?;
+        poll(&mut cancelled)?;
+        Ok(self)
+    }
+
+    /// Original material sources and resistance geometry in this link's A/B order.
+    #[cfg(feature = "material")]
+    pub fn shared_wall_link_conduction(
+        &self,
+        link: usize,
+    ) -> Option<&[Option<MaterialWallConduction>; 2]> {
+        self.shared
+            .as_ref()?
+            .links
+            .as_ref()?
+            .conduction_layers(link)
     }
 }

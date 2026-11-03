@@ -125,7 +125,7 @@ impl SharedConduction {
 // Stable resistance addition, preserving an explicitly disabled film without
 // reciprocal overflow. The authored film is immutable; the combined value is
 // never fed back as a second film in a later source half.
-fn series(film: f64, solid: f64) -> Result<f64, WallExchangeError> {
+pub(super) fn series(film: f64, solid: f64) -> Result<f64, WallExchangeError> {
     let smaller = film.min(solid);
     let combined = smaller / (1.0 + smaller / film.max(solid));
     if !combined.is_finite() || combined < 0.0 || film > 0.0 && combined == 0.0 {

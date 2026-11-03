@@ -252,8 +252,9 @@ impl Group<'_> {
 
     // Restrict the ORIGINAL storage's energy domain to the passive initial
     // temperature hull. Bisection never approximates or replaces its calorics.
-    fn bound(
+    pub(crate) fn bound(
         &self,
+        state: WallThermal,
         bound: f64,
         temperature: f64,
         lower: bool,
@@ -268,7 +269,7 @@ impl Group<'_> {
                 t <= temperature
             }
         };
-        if inside(self.after(bound, work)?.temperature) {
+        if inside(self.after_state(state, bound, work)?.temperature) {
             return Ok(bound);
         }
         let (mut outer, mut inner) = (bound, 0.0);
@@ -281,7 +282,7 @@ impl Group<'_> {
             {
                 return Ok(inner);
             }
-            if inside(self.after(mid, work)?.temperature) {
+            if inside(self.after_state(state, mid, work)?.temperature) {
                 inner = mid;
             } else {
                 outer = mid;
@@ -450,8 +451,24 @@ impl Group<'_> {
             if high > 0.0 {
                 high = high.next_down();
             }
-            low = self.bound(low, minimum, true, control, work, cancelled)?;
-            high = self.bound(high, maximum, false, control, work, cancelled)?;
+            low = self.bound(
+                self.initial_wall,
+                low,
+                minimum,
+                true,
+                control,
+                work,
+                cancelled,
+            )?;
+            high = self.bound(
+                self.initial_wall,
+                high,
+                maximum,
+                false,
+                control,
+                work,
+                cancelled,
+            )?;
             if !low.is_finite() || !high.is_finite() || low >= high {
                 return Err(WallExchangeError::Invalid(
                     "shared wall supported heat interval",

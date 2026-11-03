@@ -3110,8 +3110,9 @@ establish a continuous-path certificate or empirical heat-transfer accuracy.
 
 `NetworkWallOperator::with_shared_wall_links` connects the existing shared-wall
 inventories through ordered `SharedWallLink` thermal ports. Each has two
-distinct original wall indices and one complete nonnegative conductance in
-W/K. Cycles and parallel interfaces retain authored order; a zero-conductance
+distinct original wall indices and one nonnegative authored conductance in
+W/K, complete unless material resistance is explicitly bound below. Cycles and
+parallel interfaces retain authored order; a zero-conductance
 link transports no heat. No gas mass or species passes through these ports.
 
 After the original simultaneous gas/shared-wall solves, each link solves
@@ -3119,8 +3120,8 @@ After the original simultaneous gas/shared-wall solves, each link solves
 capacity integrals or T(h/u) charts supply both endpoint states, including
 latent plateaus and their conserved phase energy. Exact available tangents
 accelerate the same equation; absent local tangents use its bounded bisection.
-The heat interval intersects both original source domains and the passive
-initial-flux bound. No source extrapolation, fitted capacity, duplicate wall
+For fixed conductance the heat interval intersects both original source domains
+and the passive initial-flux bound. No source extrapolation, fitted capacity, duplicate wall
 mass or alternate nonlinear solver is introduced.
 
 Acceptance checks both actual represented storage changes and the stage heat
@@ -3180,6 +3181,44 @@ source-work limits, final cancellation with replay, and source-domain refusal
 after gas heating. The same first-order, uniform-wall, authored-conductance and
 source pressure-work limits apply. This extension adds no spatial gradient,
 empirical heat-transfer qualification or simultaneous graph-endpoint claim.
+
+### Original material resistance between finite walls
+
+Both network wall facades expose `with_shared_wall_link_conduction` and
+`shared_wall_link_conduction`. Rows follow authored link order; each row's
+two optional `MaterialWallConduction` bindings belong to that link's first
+and second wall. Each side retains its own original caloric chart, phase
+state, conductivity source and length/area. Distinct materials never share an
+averaged temperature, enthalpy datum or inferred conductivity law.
+
+On a bound link, the original authored G represents finite interface/contact
+conductance. Each supplied bulk resistance L/(k A) is added once in series
+with it using scaled conductance arithmetic. The authored G remains unchanged;
+zero still means insulation, and two absent layers retain the complete-G path.
+The finite interface model does not infer perfect contact. Geometry describes
+each bulk segment between its retained cell state and the common interface;
+it creates no additional mass or latent-energy account.
+
+Initial-state layers sample at that link's actual entering state, including
+changes made by earlier links. Implicit layers instead query each proposed
+endpoint; the two sides may use different evaluation modes. When conductivity
+is implicit, the heat bracket uses original passive storage limits rather than
+the initial-flux cap, because increasing k can make the accepted heat exceed
+that initial estimate. Safeguarded bisection avoids inventing dk/dh or claiming
+nonlinear uniqueness. Fixed and lagged links retain their available tangents.
+
+Every runtime conductivity query shares the complete gas/wall source budget.
+Lagged endpoints are admitted, and all bound link sources are checked again
+after the full ordered sequence: a later link cannot leave an earlier source's
+wall outside its support. Both facades retain the same original storage,
+physical heat receipts and atomic publication. The first-order composition,
+fixed-geometry, finite-cell and material-domain limits above still apply.
+
+Focused G1/G3 cases compare independent two-material calorimetry in both
+orientations and an increasing-conductivity latent root beyond the initial-flux
+bound. G4 cases check source-work limits, cancellation/replay and late-link
+material-domain refusal in both facades. Actual-source native compilation and
+28 focused gas tests pass; workspace/DSR verification remains separate.
 
 ## Finite-time thermal exchange with multicomponent phase equilibrium
 

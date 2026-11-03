@@ -15,13 +15,13 @@ use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermochem::{Composition, CompositionBasis};
 use std::sync::Arc;
 
-fn port(cell: usize, film: f64) -> SharedWallPort {
+pub(super) fn port(cell: usize, film: f64) -> SharedWallPort {
     SharedWallPort {
         gas: SharedWallGas::Branch { branch: 0, cell },
         conductance_w_per_k: film,
     }
 }
-fn mixture_at(g: &MixtureGas, temperature: f64) -> MixtureNetwork1d {
+pub(super) fn mixture_at(g: &MixtureGas, temperature: f64) -> MixtureNetwork1d {
     let branch = MixtureEuler1d::new(
         g.clone(),
         Length::new(0.5),
@@ -33,7 +33,7 @@ fn mixture_at(g: &MixtureGas, temperature: f64) -> MixtureNetwork1d {
     .unwrap();
     MixtureNetwork1d::new(vec![branch], vec![], vec![], || false).unwrap()
 }
-fn frozen_at(g: &MixtureGas, temperature: f64) -> GasNetwork1d {
+pub(super) fn frozen_at(g: &MixtureGas, temperature: f64) -> GasNetwork1d {
     let source = FrozenIdealGasMixtureModelV1::new(
         g.source().models().to_vec(),
         Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
@@ -52,7 +52,7 @@ fn frozen_at(g: &MixtureGas, temperature: f64) -> GasNetwork1d {
     .unwrap();
     GasNetwork1d::new(vec![branch], vec![], vec![], || false).unwrap()
 }
-fn frozen_walls(n: &GasNetwork1d, walls: Vec<SharedWall<'static>>) -> FrozenWalls<'static> {
+pub(super) fn frozen_walls(n: &GasNetwork1d, walls: Vec<SharedWall<'static>>) -> FrozenWalls<'static> {
     FrozenWalls::new(n, vec![], || false)
         .unwrap()
         .with_branch_contacts(
@@ -65,7 +65,7 @@ fn frozen_walls(n: &GasNetwork1d, walls: Vec<SharedWall<'static>>) -> FrozenWall
                     },
                     heat_storage: None,
                 };
-                2
+                n.branches()[0].states().len()
             ])],
             || false,
         )
@@ -73,7 +73,7 @@ fn frozen_walls(n: &GasNetwork1d, walls: Vec<SharedWall<'static>>) -> FrozenWall
         .with_shared_walls(n, walls, SharedWallControl::default(), || false)
         .unwrap()
 }
-fn phase_wall(
+pub(super) fn phase_wall(
     source: &Arc<PhaseWallConductionSource>,
     h: f64,
     ports: Vec<SharedWallPort>,
@@ -84,7 +84,7 @@ fn phase_wall(
         ports,
     )
 }
-fn phase_layer(
+pub(super) fn phase_layer(
     source: &Arc<PhaseWallConductionSource>,
     length: f64,
     evaluation: WallConductionEvaluation,
