@@ -1281,7 +1281,9 @@ pub fn attach_cavity_modes(p: &mut Piece, spec: &DrumSpec, f_max: f64) -> Result
 
 /// `attach_cavity_modes`, and with `wall_loss` (opt-in, MB 15788) each mode also carries the viscothermal
 /// boundary-layer loss on shell and heads (`cylinder_mode_wall_sigma`), stepped as a dashpot on the stretch
-/// (`AirModes`; form B, MB 17080). The form landed in 9d3b26242 damped the air coordinate's own velocity: it
+/// (`AirModes`; form B, MB 17080). Form B is a lower bound below each mode, but above each mode it charges about
+/// `sigma (omega / omega_m)^2` of the air spring's share, an overcharge against the layers' `sqrt(omega)` law, so
+/// it is not a lower bound there. The form landed in 9d3b26242 damped the air coordinate's own velocity: it
 /// overcharged the loss below the air modes and was not a lower bound there. Without `wall_loss` the result is
 /// `attach_cavity_modes`'s, bit for bit.
 pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall_loss: bool) -> Result<String, String> {
@@ -1351,7 +1353,7 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
         let (t_lo, t_hi) = band.iter().fold((f64::INFINITY, 0.0f64), |(x, y), &i| (x.min(t60(i)), y.max(t60(i))));
         let name = |i: usize| format!("({},{},{}) {:.0} Hz", modes[i].m, modes[i].n, modes[i].p, modes[i].omega / (2.0 * PI));
         format!(
-            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz, each as a dashpot in parallel with its air spring, on the stretch (form B, MB 17080: below a mode it charges the heads' motion almost nothing); no loss inside the air, none from the heads' own motion in the layers, and no wall scrub of the air the heads move below the modes (a lower bound). The form landed in 9d3b26242 damped the air coordinate's own velocity instead: it overcharged the loss below the air modes and was not a lower bound there",
+            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz, each as a dashpot in parallel with its air spring, on the stretch (form B, MB 17080). Below a mode it charges the heads' motion about sigma (f / f_m)^4 of the air's kinetic share, a lower bound there. Above a mode it charges about sigma (f / f_m)^2 of the air spring's share, more than the layers' sqrt(f) law gives, so above the modes it overcharges the loss and is not a lower bound there. No loss inside the air, none from the heads' own motion in the layers, and no wall scrub of the air the heads move below the modes. The form landed in 9d3b26242 damped the air coordinate's own velocity instead: it overcharged the loss below the air modes and was not a lower bound there",
             gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_heat_cp, gas.gamma, q(lo), name(lo), q(hi), name(hi), band.len()
         )
     } else {

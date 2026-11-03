@@ -2012,7 +2012,10 @@ pub struct Cavity {
 /// heads' velocity as the bodies' backward difference `(Y - Y-) / k`; the heads take the reaction. A held-head
 /// mode rings down as `exp(-sigma_m t)`. Below a mode, where `X` follows the heads, the dashpot charges their
 /// motion almost nothing (about `sigma_m (omega / omega_m)^4` times the air's share of the moving mass), so the
-/// loss is a lower bound there too. The form landed in 9d3b26242 damped `2 sigma_m dX/dt`, the air coordinate's
+/// loss is a lower bound there too. Above a mode, where `X` barely moves, the stretch moves with the heads and
+/// the dashpot sees their whole velocity: it charges about `sigma_m (omega / omega_m)^2` of the air spring's
+/// share, more than the boundary layers' `sqrt(omega)` law gives there, so above the modes the loss is an
+/// overcharge and not a lower bound. The form landed in 9d3b26242 damped `2 sigma_m dX/dt`, the air coordinate's
 /// own velocity: below a mode that charged each mode's own-frequency loss to the heads' motion at every
 /// frequency, so it overcharged the loss below the air modes and was not a lower bound there (MB 17080). The
 /// energy can rise in a step by at most `sum_m c_m (Y+ - 2Y + Y-)^2 / (16 k)`, the share of the heads' backward
