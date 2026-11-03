@@ -4027,6 +4027,36 @@ P1/Hex8 arithmetic, budget and cancellation. The existing creep example also
 offers `--dynamic` to release the deformed body and report physical and
 numerical losses independently.
 
+### Instantaneous impulses with retained mixed viscoelastic memory
+
+`MixedViscoTetMotion::impulse_candidate` transfers nodal impulses through the
+original signed consistent P2 mass for `VolumetricTreatment::OriginalMaterial`.
+The same shared mass owner supplies bounded CG, repeated-load accumulation,
+actual free-row/linear/angular momentum gates, kinetic change and signed
+support work. Held DOFs retain their current velocity, including nonzero
+support motion. Angular momentum uses the current deformed geometry.
+
+The complete mixed solid survives unchanged: continuous pressure, displacement,
+all original quadrature Maxwell metrics and accumulated relaxation loss,
+stresses, remainder and pressure-reconstructed bulk energy, physical clock,
+source laws, reference mesh and density. Only velocity changes. A later native
+`advance` continues these accepted histories. An instantaneous event creates no
+material relaxation loss or heat, and the caller retains ownership of its
+contact/restitution law and opposite body's impulse.
+
+This mass-only entry returns the typed
+`MixedViscoTetError::ExactIncompressibleImpulse` for an exact pressure
+constraint. It does not assign pressure a mass or silently project an
+incompatible velocity. All solve, input, budget, balance and cancellation
+refusals leave the accepted motion unchanged.
+
+The focused `mixed_visco_dynamics/impulse.rs` regressions use independent
+rational P2 integrals and signed corner loads, deformed angular impulse,
+moving-support work, nonzero retained pressure and relaxed Maxwell histories,
+subsequent native motion, typed formulation refusal and transactional retry.
+Native execution remains pending the existing dependency-build blocker; this
+addition is not a completed Cargo or DSR gate.
+
 ## Deformable cohesive dynamics with retained inertia
 
 `cohesive::dynamics::CohesiveMotion` adopts an existing `CohesiveState`, its

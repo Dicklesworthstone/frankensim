@@ -91,6 +91,8 @@ pub struct MixedViscoTetEnergy {
 #[derive(Clone, Debug, PartialEq)]
 pub enum MixedViscoTetError {
     Native(MixedUpError),
+    /// A mass-only impulse cannot enforce the exact pressure constraint.
+    ExactIncompressibleImpulse,
     EnergyGate {
         quantity: &'static str,
         value_j: f64,
@@ -107,6 +109,10 @@ impl core::fmt::Display for MixedViscoTetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Native(error) => error.fmt(f),
+            Self::ExactIncompressibleImpulse => write!(
+                f,
+                "exact-incompressible impulses require a constrained pressure solve"
+            ),
             Self::EnergyGate {
                 quantity,
                 value_j,

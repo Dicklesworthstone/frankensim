@@ -5,6 +5,8 @@
 //! density and the signed consistent P2 mass are immutable; no row-sum lumping
 //! or deformation-dependent mass update occurs. Material loss, signed material
 //! endpoint-work defect and numerical kinetic loss remain separate.
+//! Finite-compliance motion also admits instantaneous nodal impulses through
+//! this same consistent mass, retaining pressure and every material history.
 //!
 //! Exact pressure constrains endpoint volume weakly; velocity is the native
 //! backward-Euler displacement chord, not a separate tangent projection. A
@@ -24,7 +26,10 @@ use super::{
 use crate::inertia::{BackwardEulerInertia, ReferenceMass};
 
 pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
-pub use crate::inertia::InertialEnergy;
+pub use crate::inertia::{InertialEnergy, SolidImpulseControls, SolidImpulseReport};
+
+mod impulse;
+pub use impulse::MixedViscoMotionImpulse;
 
 /// Immutable accepted displacement, continuous pressure, memory and velocity.
 #[derive(Debug)]
