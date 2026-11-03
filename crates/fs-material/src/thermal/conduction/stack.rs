@@ -5,7 +5,7 @@
 //! contributes its explicit area-specific temperature jump. No internal layer
 //! storage, phase change, radiation, generation or lateral heat flow is inferred.
 
-use super::{ConductivityCurve, LayerConductionConfig};
+use super::{ConductivityCurve, LayerConductionConfig, TwoLayerConduction};
 use fs_thermal::enthalpy::DepositionError;
 
 /// Fixed response/workspace bound; successful evaluation allocates nothing.
@@ -56,6 +56,13 @@ struct Shot {
     last_inlet_k: f64,
 }
 
+enum ShotResult {
+    Supported(Shot),
+    /// Increasing the flux lowers every downstream interface temperature.
+    TooHot,
+    TooCold,
+}
+
 impl<'a> LayerStackConduction<'a> {
     pub fn new(
         curves: &'a [ConductivityCurve],
@@ -91,8 +98,10 @@ impl<'a> LayerStackConduction<'a> {
     }
 
     /// Solve a single monotone flux equation with safeguarded Newton/bisection.
-    /// All charts must cover the entire endpoint interval. A trial that would
-    /// cross the cold boundary supplies a bracket sign without extrapolation.
+    /// Each chart need only cover its own two physical faces. A trial outside
+    /// a layer's source supplies a monotone bracket sign without extrapolation:
+    /// too hot needs more flux, too cold needs less. Finite contact jumps can
+    /// bridge disjoint sources. Two layers share the original two-layer owner.
     /// Checkpoints run per layer and iteration; failed/cancelled trials publish
     /// no response. Numerical work is bounded by layers, knots and caller budget.
     pub fn evaluate(
@@ -112,11 +121,8 @@ impl<'a> LayerStackConduction<'a> {
         }
         let [ta, tb] = temperatures_k;
         let n = self.curves.len();
-        for curve in self.curves {
-            checkpoint()?;
-            curve.conductivity_w_m_k(ta)?;
-            curve.conductivity_w_m_k(tb)?;
-        }
+        self.curves[0].conductivity_w_m_k(ta)?;
+        self.curves[n - 1].conductivity_w_m_k(tb)?;
         if ta == tb {
             let mut resistance = 0.0;
             let mut correction = 0.0;
@@ -172,6 +178,29 @@ impl<'a> LayerStackConduction<'a> {
                 temperatures,
             });
         }
+        if n == 2 {
+            let response = TwoLayerConduction::new(
+                [&self.curves[0], &self.curves[1]],
+                [self.thicknesses[0], self.thicknesses[1]],
+                self.area,
+                self.contacts[0],
+            )?
+            .evaluate(temperatures_k, config, &mut checkpoint)?;
+            let mut temperatures = [[0.0; 2]; MAX_CONDUCTION_LAYERS];
+            temperatures[0] = [ta, response.interface_temperature_k[0]];
+            temperatures[1] = [response.interface_temperature_k[1], tb];
+            return Ok(LayerStackResponse {
+                power_a_to_b_w: response.power_a_to_b_w,
+                conductance_w_k: response.conductance_w_k,
+                endpoint_derivative_w_k: response.endpoint_derivative_w_k,
+                max_layer_heat_residual_w: response.layer_heat_residual_w.abs(),
+                max_contact_temperature_residual_k: response.contact_temperature_residual_k.abs(),
+                max_contact_roundoff_allowance_k: response.contact_roundoff_allowance_k,
+                iterations: response.iterations,
+                layer_count: 2,
+                temperatures,
+            });
+        }
         let forward = ta > tb;
         let (hot, cold, sign) = if forward {
             (ta, tb, 1.0)
@@ -183,8 +212,14 @@ impl<'a> LayerStackConduction<'a> {
         let mut upper = f64::INFINITY;
         for (i, curve) in self.curves.iter().enumerate() {
             checkpoint()?;
+            let [source_low, source_high] = curve.temperature_range_k();
+            let low = cold.max(source_low);
+            let high = hot.min(source_high);
+            if low >= high {
+                return Err(DepositionError::MaterialDomain);
+            }
             upper = upper.min(positive(
-                curve.integral_w_m(cold, hot)? / self.thicknesses[i],
+                curve.integral_w_m(low, high)? / self.thicknesses[i],
             )?);
         }
         let mut contact_sum = 0.0;
@@ -196,18 +231,36 @@ impl<'a> LayerStackConduction<'a> {
             upper = upper.min(positive((hot - cold) / contact_sum)?);
         }
         let mut lower = 0.0;
-        let mut flux = positive(0.5 * upper)?;
+        let mut flux = upper;
+        let mut lower_supported = false;
+        let mut upper_supported = false;
         for iteration in 0..config.max_iterations {
             checkpoint()?;
             let shot = self.shoot(flux, hot, cold, forward, &mut checkpoint)?;
-            let Some(shot) = shot else {
-                upper = flux;
-                let next = lower + 0.5 * (upper - lower);
-                if next <= lower || next >= upper {
-                    return Err(DepositionError::Arithmetic);
+            let shot = match shot {
+                ShotResult::Supported(shot) => shot,
+                miss => {
+                    match miss {
+                        ShotResult::TooHot => {
+                            if iteration == 0 {
+                                return Err(DepositionError::MaterialDomain);
+                            }
+                            lower = flux;
+                            lower_supported = false;
+                        }
+                        ShotResult::TooCold => {
+                            upper = flux;
+                            upper_supported = false;
+                        }
+                        ShotResult::Supported(_) => unreachable!(),
+                    }
+                    let next = lower + 0.5 * (upper - lower);
+                    if next <= lower || next >= upper {
+                        return Err(DepositionError::MaterialDomain);
+                    }
+                    flux = next;
+                    continue;
                 }
-                flux = next;
-                continue;
             };
             let power = positive(self.area * flux)?;
             let last_power = positive(self.area * shot.last_flux)?;
@@ -251,8 +304,13 @@ impl<'a> LayerStackConduction<'a> {
             }
             if residual > 0.0 {
                 upper = flux;
+                upper_supported = true;
             } else {
+                if iteration == 0 {
+                    return Err(DepositionError::MaterialDomain);
+                }
                 lower = flux;
+                lower_supported = true;
             }
             // Inverse residual derivative L_last/k_in /(L_last/k_in + b).
             // This bounded ratio avoids forming a potentially huge derivative.
@@ -265,7 +323,11 @@ impl<'a> LayerStackConduction<'a> {
                     lower + 0.5 * (upper - lower)
                 };
             if next == flux || next <= lower || next >= upper {
-                return Err(DepositionError::Arithmetic);
+                return Err(if lower_supported && upper_supported {
+                    DepositionError::Arithmetic
+                } else {
+                    DepositionError::MaterialDomain
+                });
             }
             flux = next;
         }
@@ -281,7 +343,7 @@ impl<'a> LayerStackConduction<'a> {
         cold: f64,
         forward: bool,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<Option<Shot>, DepositionError> {
+    ) -> Result<ShotResult, DepositionError> {
         let n = self.curves.len();
         let mut temperatures = [[0.0; 2]; MAX_CONDUCTION_LAYERS];
         let mut inlet = hot;
@@ -291,8 +353,12 @@ impl<'a> LayerStackConduction<'a> {
             checkpoint()?;
             let i = if forward { step } else { n - 1 - step };
             let curve = &self.curves[i];
-            if inlet <= cold {
-                return Ok(None);
+            let [source_low, source_high] = curve.temperature_range_k();
+            if inlet > source_high {
+                return Ok(ShotResult::TooHot);
+            }
+            if inlet <= cold || inlet < source_low {
+                return Ok(ShotResult::TooCold);
             }
             let inlet_k = curve.conductivity_w_m_k(inlet)?;
             if step == n - 1 {
@@ -301,7 +367,7 @@ impl<'a> LayerStackConduction<'a> {
                 } else {
                     [cold, inlet]
                 };
-                return Ok(Some(Shot {
+                return Ok(ShotResult::Supported(Shot {
                     temperatures,
                     last_flux: positive(curve.integral_w_m(cold, inlet)? / self.thicknesses[i])?,
                     last_index: i,
@@ -311,12 +377,19 @@ impl<'a> LayerStackConduction<'a> {
                 }));
             }
             let requested = positive(flux * self.thicknesses[i])?;
-            if requested > curve.integral_w_m(cold, inlet)? {
-                return Ok(None);
+            let limit = cold.max(source_low);
+            let available = curve.integral_w_m(limit, inlet)?;
+            let maximum_flux = available / self.thicknesses[i];
+            if flux > maximum_flux {
+                return Ok(ShotResult::TooCold);
             }
-            let outlet = curve.temperature_after_integral_w_m(inlet, -requested)?;
+            let outlet = if flux == maximum_flux {
+                limit
+            } else {
+                curve.temperature_after_integral_w_m(inlet, -requested)?
+            };
             if outlet < cold {
-                return Ok(None);
+                return Ok(ShotResult::TooCold);
             }
             temperatures[i] = if forward {
                 [inlet, outlet]
@@ -331,7 +404,7 @@ impl<'a> LayerStackConduction<'a> {
             let jump = finite(flux * contact)?;
             inlet = finite(outlet - jump)?;
             if inlet < cold {
-                return Ok(None);
+                return Ok(ShotResult::TooCold);
             }
             b = positive(b + contact)?;
         }

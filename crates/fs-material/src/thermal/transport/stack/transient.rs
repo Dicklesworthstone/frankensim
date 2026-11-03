@@ -130,7 +130,17 @@ impl PreparedLayeredThermalBody {
         let mut masses = Vec::with_capacity(queries.len());
         let mut counts = Vec::with_capacity(queries.len());
         let mut cells = Vec::with_capacity(count);
-        let mut span = conduction.temperature_span_k();
+        // This storage adapter still declares one shared evolving temperature
+        // interval. The steady stack's local source admission does not invent
+        // a common caloric domain for these finite cells.
+        let mut span = conduction
+            .common_temperature_span_k()
+            .filter(|[lo, hi]| lo < hi)
+            .ok_or_else(|| {
+                invalid(
+                    "transient layered body needs a positive-width common conductivity interval",
+                )
+            })?;
         let mut total_mass = 0.0;
         let mut total_volume = 0.0;
         let mut mass_correction = 0.0;

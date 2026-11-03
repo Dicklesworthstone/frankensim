@@ -551,7 +551,7 @@ fn g1_g3_sourced_wall_stack_drives_original_implicit_energy_and_entropy_owner() 
         source_layer(ids[i], &cards[i], &key, lengths[i], &lower[i], &upper[i])
     });
     let stack = PreparedLayerStackConduction::try_new(&queries, &contacts, area).unwrap();
-    assert_eq!(stack.temperature_span_k(), [288.15, 313.15]);
+    assert_eq!(stack.common_temperature_span_k(), Some([288.15, 313.15]));
     assert_eq!(stack.contact_resistances_m2_k_w(), &contacts);
     assert_eq!(stack.area_m2(), area);
     for (i, layer) in stack.layers().iter().enumerate() {

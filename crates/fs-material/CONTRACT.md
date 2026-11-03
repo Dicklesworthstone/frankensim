@@ -7399,9 +7399,19 @@ The shared `thermal::conduction::LayerStackConduction` kernel solves one
 conserved flux with exact piecewise-affine conductivity integrals. A signed
 analytic Kirchhoff inverse traverses original breakpoints; safeguarded
 Newton/bisection closes the final layer without a dense interface solve.
-Explicit contact jumps determine the layer-face temperatures. Every source
-chart must cover the entire endpoint-temperature interval, and trial steps
-that cross the cold boundary tighten the bracket without extrapolation.
+Explicit contact jumps determine the layer-face temperatures. Each original
+chart covers only its own physical layer, so finite contact jumps may bridge
+disjoint source intervals. A trial above a local source interval increases the
+flux bracket; a trial below it decreases the bracket, without extrapolation.
+Source-local Kirchhoff integrals bound the admissible flux. Two-layer stacks
+delegate to the same `TwoLayerConduction` owner and its physical residual gates.
+
+`PreparedLayerStackConduction::common_temperature_span_k()` returns the optional
+intersection of the original source intervals, retaining an exact touching
+point as `Some([T, T])` and disjoint sources as `None`. This describes supported
+uniform temperatures, not the validity of a nonuniform steady wall. The
+finite-cell transient constructor still requires a positive-width common
+conductivity/storage interval; no broader caloric support is inferred.
 
 The response exposes all ordered face temperatures, signed power, secant
 conductance, both physical endpoint derivatives, and separate layer-heat and

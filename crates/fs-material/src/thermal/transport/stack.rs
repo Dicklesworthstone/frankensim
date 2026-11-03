@@ -83,9 +83,11 @@ impl SourcedConductionLayer {
 /// Immutable material and geometry binding for repeated multilayer flux queries.
 ///
 /// Original source lines are retained separately; they are never resampled onto
-/// a common grid or merged into an invented effective conductivity. The common
-/// support is the intersection of the selected intervals. Layer order, thickness,
-/// area, contact resistance and original receipts all contribute to identity.
+/// a common grid or merged into an invented effective conductivity. Every
+/// selected source covers its own physical layer; disjoint sources can conduct
+/// across a finite contact jump. The optional common support describes only
+/// uniform temperatures shared by all layers. Layer order, thickness, area,
+/// contact resistance and original receipts all contribute to identity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedLayerStackConduction {
     layers: Vec<SourcedConductionLayer>,
@@ -97,7 +99,7 @@ pub struct PreparedLayerStackConduction {
     layer_bounds: Vec<[f64; 2]>,
     face_areas: Vec<f64>,
     area: f64,
-    span: [f64; 2],
+    common_span: Option<[f64; 2]>,
     identity: ContentHash,
 }
 
@@ -198,11 +200,7 @@ impl PreparedLayerStackConduction {
             });
             curves.push(curve);
         }
-        if span[0] >= span[1] {
-            return Err(invalid(
-                "sourced layers need a positive-width common temperature interval",
-            ));
-        }
+        let common_span = (span[0] <= span[1]).then_some(span);
         let reference_contacts = contact_resistances_m2_k_w
             .iter()
             .enumerate()
@@ -256,7 +254,7 @@ impl PreparedLayerStackConduction {
             layer_bounds,
             face_areas,
             area: area_m2,
-            span,
+            common_span,
             identity: hash.finalize(),
         })
     }
@@ -287,9 +285,12 @@ impl PreparedLayerStackConduction {
     pub fn layers(&self) -> &[SourcedConductionLayer] {
         &self.layers
     }
+    /// Uniform temperatures supported by every original layer. `None` means
+    /// disjoint sources, not an invalid nonuniform conduction problem. A point
+    /// interval is retained when sources touch at exactly one temperature.
     #[must_use]
-    pub const fn temperature_span_k(&self) -> [f64; 2] {
-        self.span
+    pub const fn common_temperature_span_k(&self) -> Option<[f64; 2]> {
+        self.common_span
     }
     #[must_use]
     pub fn contact_resistances_m2_k_w(&self) -> &[f64] {
