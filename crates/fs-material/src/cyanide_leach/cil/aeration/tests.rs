@@ -113,6 +113,22 @@ fn transfer(kla: f64) -> OxygenTransfer {
 }
 
 #[test]
+fn opening_oxygen_rechecks_the_expanded_counterion_demand() {
+    let mut initial = fixture::charge(0.1);
+    initial.dissolved_oxygen = Amount::new(0.0);
+    let closed = cil(initial, 1.0);
+    // Closed-bath progress is oxygen-limited to zero, so 0.1 mol Na+ is
+    // sufficient for that owner. Aeration raises the Au/CN ceiling to 1 mol
+    // and must refuse rather than invent the missing conserved counterion.
+    assert!(matches!(
+        AeratedCarbonInLeachBatch::from_batch(closed, transfer(0.3)),
+        Err(CilError::Invalid(
+            "insufficient counterion reserve for aerated CIL gold loading"
+        ))
+    ));
+}
+
+#[test]
 fn zero_transfer_matches_original_simultaneous_cil() {
     let initial = fixture::charge(1.0);
     let closed = cil(initial, 1.0);

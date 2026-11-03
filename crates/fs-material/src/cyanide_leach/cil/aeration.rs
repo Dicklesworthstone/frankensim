@@ -126,6 +126,17 @@ impl AeratedCarbonInLeachBatch {
             .accessible_gold
             .value()
             .min(product(0.5, dosing::cyanide_total(&leach)?)?);
+        // The closed CIL attachment may previously have admitted a smaller
+        // counterion reserve because finite liquid O2 limited attainable Au
+        // dissolution. Opening oxygen removes that ceiling, so re-admit the
+        // neutral-pair counterion against the expanded Au/CN progress limit.
+        let available_counterion = closed.state.dissolved_counterion.value();
+        let required_counterion =
+            sum([leach.charge.gold_complex.value(), leach.limit].into_iter())?;
+        ensure(
+            available_counterion >= required_counterion,
+            "insufficient counterion reserve for aerated CIL gold loading",
+        )?;
         layout.leach = Arc::new(leach);
         let layout = Arc::new(layout);
 
