@@ -131,6 +131,8 @@ pub mod speaker;
 pub mod solid_enthalpy;
 /// Shared conservative gravity and its analytic derivatives on deforming solids.
 pub mod solid_gravity;
+/// Original admitted rational radiation on the complete hereditary solid equations.
+pub mod solid_rational;
 /// Original stationary operating points on the shared Newton--Krylov owner.
 pub mod stationary_equilibrium;
 pub mod stribeck_friction;
