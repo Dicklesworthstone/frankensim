@@ -1,6 +1,9 @@
 //! Native profile -> original finite heat -> pressure/PCM, manufactured sources.
 use super::*;
-use fs_couple::air_path::input::convection::{ForcedGasBoundary, ForcedGasGeometry};
+use fs_couple::air_path::input::convection::{
+    ForcedGasBoundary, ForcedGasGeometry, GasConvectionBoundary,
+    NaturalConvectionGeometry, NaturalGasBoundary,
+};
 use fs_material::gas_species::input::temperature::IsobaricGasLaw;
 
 fn version_five(text: String, routes: &str) -> String {
@@ -20,8 +23,19 @@ fn gas_boundary_grammar_preserves_old_profiles_and_refuses_false_exposure() {
     assert_eq!(parsed.convection[0].cell, CellId(10));
     let sphere_text = text.replace("cylinder-crossflow 1e-6", "sphere 1e-7");
     let spherical = Profile::parse(sphere_text.as_bytes()).unwrap();
-    assert_eq!(spherical.convection[0].boundary.geometry, ForcedGasGeometry::Sphere);
+    assert!(matches!(spherical.convection[0].boundary,
+        GasConvectionBoundary::Forced(ForcedGasBoundary { geometry: ForcedGasGeometry::Sphere, .. })));
     assert!(Profile::parse(text.replace("cylinder-crossflow", "sphere").as_bytes()).is_err());
+    for geometry in ["natural-vertical-plate", "natural-horizontal-cylinder",
+        "natural-horizontal-plate-up", "natural-horizontal-plate-down", "natural-sphere"]
+    {
+        let natural = text.replace("cylinder-crossflow 1e-6 0.0003 1",
+            &format!("{geometry} 1e-7 0.0003 9.81"));
+        let parsed = Profile::parse(natural.as_bytes()).unwrap();
+        assert!(matches!(parsed.convection[0].boundary, GasConvectionBoundary::Natural(_)));
+        assert!(Profile::parse(natural.replace("9.81", "-9.81").as_bytes()).is_err());
+    }
+    assert!(Profile::parse(text.replace("cylinder-crossflow", "turbulent-flat-plate").as_bytes()).is_ok());
     for (old, new) in [
         ("convection 1", "convection 0"),
         ("convection-cell 10", "convection-cell 99"),
@@ -40,18 +54,28 @@ fn gas_boundary_grammar_preserves_old_profiles_and_refuses_false_exposure() {
 
 #[test]
 fn source_gas_cooling_enters_the_original_backward_euler_external_heat_once() {
+    for (route, boundary) in [
+        ("cylinder-crossflow 1e-6 0.0003 1",
+            GasConvectionBoundary::Forced(ForcedGasBoundary {
+                geometry: ForcedGasGeometry::CylinderCrossflow,
+                characteristic_length_m: 0.0003, exposed_area_m2: 1e-6, speed_m_s: 1.0,
+            })),
+        ("natural-sphere 1e-6 0.001 9.81",
+            GasConvectionBoundary::Natural(NaturalGasBoundary {
+                geometry: NaturalConvectionGeometry::Sphere,
+                characteristic_length_m: 0.001, exposed_area_m2: 1e-6, gravity_m_s2: 9.81,
+            })),
+    ] {
     scoped(|cx, gate| {
         let text = profile_text(false).replace("cells 8", "cells 9")
             .replace("dry-contacts 1", "cell 30 wire.fsmatpk 280 310 320 0 0 2 0.001 0 2 1e-9 1e-4\ndry-contacts 1");
         let profile = Profile::parse(version_five(text,
-            "convection 1\nconvection-cell 30 cylinder-crossflow 1e-6 0.0003 1\n").as_bytes()).unwrap();
+            &format!("convection 1\nconvection-cell 30 {route}\n")).as_bytes()).unwrap();
         let source = ready(cx, gate, &profile, false, 20.0, 37, 48000, None);
         let prepared = profile.prepare(&source, gate).unwrap();
         let original = prepared.network(gate).unwrap();
         let before = original.cells().clone();
         let law = IsobaricGasLaw::try_from_record(source.spec.gas_record.clone()).unwrap();
-        let boundary = ForcedGasBoundary { geometry: ForcedGasGeometry::CylinderCrossflow,
-            characteristic_length_m: 0.0003, exposed_area_m2: 1e-6, speed_m_s: 1.0 };
         let initial = 310.0;
         let capacity = 7800.0*1e-9*20.0;
         let dt = prepared.sample_period_s;
@@ -80,6 +104,7 @@ fn source_gas_cooling_enters_the_original_backward_euler_external_heat_once() {
         assert!(prepared.resolve(&next).is_err());
         assert_eq!(original.cells(), &before);
     });
+    }
 }
 
 #[test]

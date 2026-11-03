@@ -8,7 +8,9 @@ pub mod temperature;
 
 use super::{GasSpecies, resolve_gas_mixture};
 use crate::MaterialError;
-use crate::fluid_transport::{FluidTransport, FluidTransportState};
+use crate::fluid_transport::{
+    FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
+};
 use crate::gas::GasState;
 use fs_qty::semantic::{Composition, CompositionBasis};
 use crate::thermochemical_gas::{
@@ -75,6 +77,15 @@ impl FluidTransport for GasRecord {
         match self {
             Self::Thermochemical(gas) => gas.transport_state(),
             _ => self.state().transport_state(),
+        }
+    }
+}
+
+impl ThermalFluidTransport for GasRecord {
+    fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        match self {
+            Self::Thermochemical(gas) => gas.thermal_transport_state(),
+            Self::Legacy(gas) | Self::Mixture(gas, _) => gas.thermal_transport_state(),
         }
     }
 }

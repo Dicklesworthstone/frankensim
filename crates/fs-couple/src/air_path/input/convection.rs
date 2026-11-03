@@ -1,13 +1,19 @@
-//! Source-gas forced convection into an explicitly prescribed reservoir.
+//! Source-gas convection into an explicitly prescribed reservoir.
 //!
 //! The original isobaric gas law supplies each correlation's property state:
-//! mean-film rho, mu, Cp and k for plates/cylinders, or bulk properties plus
-//! surface viscosity for spheres. fs-convection owns every correlation and its
+//! mean-film rho, mu, Cp and k for plates/cylinders and natural convection,
+//! or bulk properties plus surface viscosity for forced spheres.
+//! fs-convection owns every correlation and its
 //! regime/evidence. This adapter
 //! supplies signed boundary heat, not a new thermal or fluid time integrator.
 //! Reservoir temperature, pressure, composition and velocity are prescribed.
-//! No finite gas inventory, buoyancy, rarefaction, radiation or moving exposure
-//! is inferred, and no transport coefficient is substituted from another gas.
+//! Natural convection uses explicit gravity and orientation with the original
+//! gas's thermal expansion. No finite gas inventory, rarefaction, radiation or
+//! moving exposure is inferred, and no coefficient is borrowed from another gas.
+
+mod natural;
+pub use natural::NaturalGasBoundary;
+pub use fs_convection::{HorizontalPlateFacing, NaturalConvectionGeometry};
 
 use fs_convection::{
     CorrelationError, CorrelationId, CorrelationInputs, HeatTransferCoefficient,
@@ -28,6 +34,9 @@ pub enum ForcedGasGeometry {
     CylinderCrossflow,
     /// Streamwise length; the shared laminar average isothermal-plate relation.
     LaminarFlatPlate,
+    /// Streamwise length; the shared turbulent average with its declared
+    /// laminar leading-edge correction and fixed transition Reynolds number.
+    TurbulentFlatPlate,
     /// Isolated isothermal sphere; diameter is the characteristic length.
     /// Whitaker's bulk/surface viscosity correction and its validity bounds
     /// apply. Nearby walls, contacts and mass-transfer blowing are not modeled.
@@ -42,6 +51,41 @@ pub struct ForcedGasBoundary {
     pub exposed_area_m2: f64,
     /// Prescribed free-stream speed relative to the stationary surface [m/s].
     pub speed_m_s: f64,
+}
+
+/// Explicit choice between a prescribed free stream and a quiescent reservoir.
+/// Zero stream speed never silently changes a forced correlation into a natural
+/// one; mixed convection requires its own declared model and flow alignment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GasConvectionBoundary {
+    Forced(ForcedGasBoundary),
+    Natural(NaturalGasBoundary),
+}
+
+impl GasConvectionBoundary {
+    pub fn validate(self) -> Result<(), GasConvectionError> {
+        match self {
+            Self::Forced(boundary) => boundary.validate(),
+            Self::Natural(boundary) => boundary.validate(),
+        }
+    }
+
+    #[must_use]
+    pub const fn exposed_area_m2(self) -> f64 {
+        match self {
+            Self::Forced(boundary) => boundary.exposed_area_m2,
+            Self::Natural(boundary) => boundary.exposed_area_m2,
+        }
+    }
+
+    pub fn evaluate(
+        self, gas: &IsobaricGasLaw, wall_temperature_k: f64,
+    ) -> Result<GasConvectionSample, GasConvectionError> {
+        match self {
+            Self::Forced(boundary) => boundary.evaluate(gas, wall_temperature_k),
+            Self::Natural(boundary) => boundary.evaluate(gas, wall_temperature_k),
+        }
+    }
 }
 
 /// Physical/source/regime refusal. No failed law silently selects another one.
@@ -71,17 +115,22 @@ impl From<CorrelationError> for GasConvectionError {
 /// The same evaluated gas and model evidence that produced the boundary heat.
 #[derive(Debug)]
 pub struct GasConvectionSample {
-    /// State used for Re, Pr and k: mean film for a plate/cylinder, free stream
-    /// for a sphere. Pressure, composition and source law are unchanged.
+    /// State used for the groups and k: mean film for film-property laws,
+    /// free stream for Whitaker spheres. Pressure/composition/source stay fixed.
     pub property_gas: GasRecord,
-    /// Same gas law evaluated at the wall, retained when the sphere relation
+    /// Same gas law evaluated at the wall, retained when the forced-sphere relation
     /// needs surface viscosity. Other geometries do not query this state.
     pub surface_gas: Option<GasRecord>,
-    pub nusselt: NusseltEvaluation,
-    pub coefficient: Evidence<HeatTransferCoefficient>,
+    /// None only for exact natural-convection equilibrium when the geometry's
+    /// correlation does not admit Ra=0. No out-of-range coefficient is inferred.
+    pub nusselt: Option<NusseltEvaluation>,
+    /// Paired with `nusselt`; an absent coefficient certifies zero heat only.
+    pub coefficient: Option<Evidence<HeatTransferCoefficient>>,
     pub wall_temperature_k: f64,
     pub reservoir_temperature_k: f64,
-    /// h A [W/K]; recomputed at every proposed wall temperature.
+    /// h A [W/K]; recomputed at every proposed wall temperature. Zero when
+    /// `coefficient` is absent is an equilibrium value, not an insulating law
+    /// or the derivative of heat with respect to wall temperature.
     pub conductance_w_k: f64,
     /// Positive INTO the wall; the external reservoir receives its negative.
     pub heat_into_wall_w: f64,
@@ -139,7 +188,8 @@ impl ForcedGasBoundary {
                 gas.reference().clone(),
                 Some(gas.at_temperature(Temperature::new(wall_temperature_k))?),
             ),
-            ForcedGasGeometry::CylinderCrossflow | ForcedGasGeometry::LaminarFlatPlate => (
+            ForcedGasGeometry::CylinderCrossflow | ForcedGasGeometry::LaminarFlatPlate
+                | ForcedGasGeometry::TurbulentFlatPlate => (
                 gas.at_temperature(Temperature::new(
                     0.5 * wall_temperature_k + 0.5 * reservoir_temperature_k,
                 ))?,
@@ -151,6 +201,7 @@ impl ForcedGasBoundary {
         let id = match self.geometry {
             ForcedGasGeometry::CylinderCrossflow => CorrelationId::ChurchillBernsteinCylinder,
             ForcedGasGeometry::LaminarFlatPlate => CorrelationId::FlatPlateLaminarAverage,
+            ForcedGasGeometry::TurbulentFlatPlate => CorrelationId::FlatPlateTurbulentAverage,
             ForcedGasGeometry::Sphere => CorrelationId::WhitakerSphere,
         };
         let mut inputs = CorrelationInputs::forced(reynolds, transport.prandtl());
@@ -161,28 +212,50 @@ impl ForcedGasBoundary {
             );
         }
         let nusselt = fs_convection::evaluate(id, inputs)?;
-        let coefficient = nusselt.heat_transfer_coefficient(
-            ThermalConductivity::new(transport.thermal_conductivity_w_m_k()),
-            Length::new(self.characteristic_length_m),
-        )?;
-        let conductance_w_k = coefficient.value.value() * self.exposed_area_m2;
-        let difference = reservoir_temperature_k - wall_temperature_k;
-        let heat_into_wall_w = conductance_w_k * difference;
-        // Use the original temperature difference rather than subtracting
-        // nearly equal reciprocal temperatures; avoid a potentially huge T*T.
-        let entropy_generation_w_k = (heat_into_wall_w / wall_temperature_k)
-            * (difference / reservoir_temperature_k);
-        if !conductance_w_k.is_finite() || conductance_w_k <= 0.0
-            || !heat_into_wall_w.is_finite()
-            || !entropy_generation_w_k.is_finite() || entropy_generation_w_k < 0.0
-            || (difference != 0.0 && (heat_into_wall_w == 0.0 || entropy_generation_w_k == 0.0))
-        {
-            return Err(GasConvectionError::Invalid("boundary heat or entropy is unrepresentable"));
-        }
-        Ok(GasConvectionSample { property_gas, surface_gas, nusselt, coefficient,
-            wall_temperature_k, reservoir_temperature_k, conductance_w_k,
-            heat_into_wall_w, entropy_generation_w_k })
+        finish_sample(property_gas, surface_gas, Some(nusselt),
+            transport.thermal_conductivity_w_m_k(), self.characteristic_length_m,
+            self.exposed_area_m2, wall_temperature_k, reservoir_temperature_k)
     }
+}
+
+/// One heat/entropy account shared by every prescribed gas boundary.
+#[allow(clippy::too_many_arguments)]
+fn finish_sample(
+    property_gas: GasRecord,
+    surface_gas: Option<GasRecord>,
+    nusselt: Option<NusseltEvaluation>,
+    conductivity_w_m_k: f64,
+    characteristic_length_m: f64,
+    exposed_area_m2: f64,
+    wall_temperature_k: f64,
+    reservoir_temperature_k: f64,
+) -> Result<GasConvectionSample, GasConvectionError> {
+    let coefficient = nusselt.as_ref().map(|evaluation| {
+        evaluation.heat_transfer_coefficient(
+            ThermalConductivity::new(conductivity_w_m_k),
+            Length::new(characteristic_length_m),
+        )
+    }).transpose()?;
+    let conductance_w_k = coefficient.as_ref()
+        .map_or(0.0, |value| value.value.value() * exposed_area_m2);
+    let difference = reservoir_temperature_k - wall_temperature_k;
+    let heat_into_wall_w = conductance_w_k * difference;
+    // Retain the full temperature difference and avoid reciprocal cancellation
+    // or a potentially overflowing product of absolute temperatures.
+    let entropy_generation_w_k = (heat_into_wall_w / wall_temperature_k)
+        * (difference / reservoir_temperature_k);
+    if !conductance_w_k.is_finite()
+        || (coefficient.is_some() && conductance_w_k <= 0.0)
+        || (coefficient.is_none() && difference != 0.0)
+        || !heat_into_wall_w.is_finite()
+        || !entropy_generation_w_k.is_finite() || entropy_generation_w_k < 0.0
+        || (difference != 0.0 && (heat_into_wall_w == 0.0 || entropy_generation_w_k == 0.0))
+    {
+        return Err(GasConvectionError::Invalid("boundary heat or entropy is unrepresentable"));
+    }
+    Ok(GasConvectionSample { property_gas, surface_gas, nusselt, coefficient,
+        wall_temperature_k, reservoir_temperature_k, conductance_w_k,
+        heat_into_wall_w, entropy_generation_w_k })
 }
 
 #[cfg(test)]

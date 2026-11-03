@@ -1,12 +1,15 @@
 //! Explicit exposed-cell heat to the SAME gas used by the native instrument.
 use super::*;
-use fs_couple::air_path::input::convection::{ForcedGasBoundary, ForcedGasGeometry};
+use fs_couple::air_path::input::convection::{
+    ForcedGasBoundary, ForcedGasGeometry, GasConvectionBoundary,
+    HorizontalPlateFacing, NaturalConvectionGeometry, NaturalGasBoundary,
+};
 use fs_material::gas_species::input::temperature::IsobaricGasLaw;
 
 #[derive(Clone, Debug)]
 pub(super) struct Route {
     pub cell: CellId,
-    pub boundary: ForcedGasBoundary,
+    pub boundary: GasConvectionBoundary,
 }
 
 pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
@@ -18,22 +21,36 @@ pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
     for _ in 0..count {
         let mut row = rows.row("convection-cell")?;
         let cell = CellId(row.parse()?);
-        let geometry = match row.word()? {
-            "cylinder-crossflow" => ForcedGasGeometry::CylinderCrossflow,
-            "laminar-flat-plate" => ForcedGasGeometry::LaminarFlatPlate,
-            "sphere" => ForcedGasGeometry::Sphere,
-            _ => return Err("convection-cell needs cylinder-crossflow, laminar-flat-plate or sphere".into()),
-        };
-        let boundary = ForcedGasBoundary {
-            geometry, exposed_area_m2: row.positive()?,
-            characteristic_length_m: row.positive()?, speed_m_s: row.positive()?,
+        let geometry = row.word()?;
+        let exposed_area_m2 = row.positive()?;
+        let characteristic_length_m = row.positive()?;
+        // The final field is prescribed speed for forced convection, or the
+        // explicitly declared gravity magnitude for a natural geometry.
+        let driving = row.parse()?;
+        let forced = |geometry| GasConvectionBoundary::Forced(ForcedGasBoundary {
+            geometry, exposed_area_m2, characteristic_length_m, speed_m_s: driving,
+        });
+        let natural = |geometry| GasConvectionBoundary::Natural(NaturalGasBoundary {
+            geometry, exposed_area_m2, characteristic_length_m, gravity_m_s2: driving,
+        });
+        let boundary = match geometry {
+            "cylinder-crossflow" => forced(ForcedGasGeometry::CylinderCrossflow),
+            "laminar-flat-plate" => forced(ForcedGasGeometry::LaminarFlatPlate),
+            "turbulent-flat-plate" => forced(ForcedGasGeometry::TurbulentFlatPlate),
+            "sphere" => forced(ForcedGasGeometry::Sphere),
+            "natural-vertical-plate" => natural(NaturalConvectionGeometry::VerticalPlate),
+            "natural-horizontal-cylinder" => natural(NaturalConvectionGeometry::HorizontalCylinder),
+            "natural-sphere" => natural(NaturalConvectionGeometry::Sphere),
+            "natural-horizontal-plate-up" => natural(NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Up)),
+            "natural-horizontal-plate-down" => natural(NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Down)),
+            _ => return Err("convection-cell needs an explicit forced or natural geometry".into()),
         };
         row.end()?;
         boundary.validate()?;
         let original = cells.iter().find(|c| c.id == cell)
             .ok_or("convection-cell must name an original finite cell")?;
         if routes.iter().any(|r| r.cell == cell)
-            || boundary.exposed_area_m2 > original.geometry.surface_area_m2
+            || boundary.exposed_area_m2() > original.geometry.surface_area_m2
         {
             return Err("convection cells must be unique and exposed area cannot exceed the original cell surface".into());
         }
@@ -46,7 +63,7 @@ pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
 // inside every nonlinear trial at the mechanical sample rate.
 struct BoundRoute {
     cell: CellId,
-    boundary: ForcedGasBoundary,
+    boundary: GasConvectionBoundary,
     geometry: CellGeometry,
     material_id: MaterialId,
     mass_kg: f64,
@@ -121,9 +138,18 @@ impl Reservoir {
         eprintln!("contact_thermal_gas_reservoir=T_K={}; p_Pa={}; exposed_cells={}; original composition; correlation-specific property temperatures; prescribed infinite reservoir; no flow/finite-gas integration",
             gas.temperature, gas.pressure, routes.len());
         for route in routes {
-            eprintln!("contact_thermal_convection_cell={}; geometry={:?}; area_m2={}; length_m={}; free_stream_m_s={}",
-                route.cell.0, route.boundary.geometry, route.boundary.exposed_area_m2,
-                route.boundary.characteristic_length_m, route.boundary.speed_m_s);
+            match route.boundary {
+                GasConvectionBoundary::Forced(boundary) => {
+                    eprintln!("contact_thermal_convection_cell={}; geometry={:?}; area_m2={}; length_m={}; free_stream_m_s={}",
+                        route.cell.0, boundary.geometry, boundary.exposed_area_m2,
+                        boundary.characteristic_length_m, boundary.speed_m_s);
+                }
+                GasConvectionBoundary::Natural(boundary) => {
+                    eprintln!("contact_thermal_convection_cell={}; natural_geometry={:?}; area_m2={}; length_m={}; gravity_m_s2={}",
+                        route.cell.0, boundary.geometry, boundary.exposed_area_m2,
+                        boundary.characteristic_length_m, boundary.gravity_m_s2);
+                }
+            }
         }
     }
 }
