@@ -17,6 +17,7 @@ use std::sync::Arc;
 mod external;
 mod gap;
 mod infrared;
+mod radiative_stack;
 mod transmitting_pair;
 mod transmitting_pair_states;
 

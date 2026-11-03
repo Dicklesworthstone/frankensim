@@ -15,6 +15,9 @@ pub mod external;
 /// Mutual radiation and two exterior baths for vacuum-facing transmitting bodies.
 pub mod transmitting_pair;
 
+/// Mutual screening and heat exchange through an ordered stack of coated bodies.
+pub mod radiative_stack;
+
 use super::{
     CoatingOpticsModel, NativeCoatingEmission, NativeCoatingEmissionError, StatefulCoatingLayer,
     SubstrateOpticsModel, SurfaceHeatingError, SurfaceHeatingReceiver,

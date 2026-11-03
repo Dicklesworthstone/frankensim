@@ -5768,3 +5768,53 @@ arXiv:1603.02720v5 section 6, and the existing local Kirchhoff emission owner.
 The caller must justify phase averaging; no finite-edge, rough, near-field,
 coherent-gap, internal-nonisothermal or bolometric extrapolation is implied.
 <!-- coating-radiative-stack:end -->
+
+<!-- native-coating-radiative-stack:start -->
+### Native thermal evolution of ordered radiative shields and coated bodies
+
+`heating::coating_exchange::radiative_stack::NativeCoatingRadiativeStack`
+connects one through sixteen independently stored isothermal bodies in each
+`CoatingRadiativeStack`. Bodies remain in authored physical left-to-right order;
+every original emitter's selected port is its LEFT face. Only assembly IDs are
+canonicalized. The common finite source band, vacuum on both sides of each body,
+parallel/coextensive geometry and phase-averaged propagating gaps are explicit.
+Coherent film interference remains inside the original optical owners.
+
+One complete `CoatingRadiativeStackResponse` includes screening and repeated
+reflections through all bodies. All body/body channels, including nonadjacent
+bodies reached through transmitting shields, enter conservative native
+`HeatTransfer`s. Body/bath channels alone enter external thermal heat. Direct
+bath throughput stays separate and cannot heat transparent bodies. Each body
+keeps its original mass, geometry, material and caloric/storage identity, with
+independent temperature/enthalpy optical laws. Native ambient baths follow the
+first and last bodies' exterior boundary temperatures, including events.
+
+Both faces charge `2 * area_m2` against each body's current exposed area;
+coverage is rechecked after native contact and boundary events. Bodies within an
+assembly need distinct receivers. Different assemblies may share receivers on
+explicitly disjoint patches, subject to their summed area. This owner neither
+proves geometric non-overlap nor detects another owner on the same ports/band.
+It adds no contact, finite-edge view factor, near-field exchange, coherent gap
+phase, unsupported spectral tails or internal nonisothermal-film radiation.
+
+Admission bounds assembly count, total body count, shared original optical-law
+rows, retained channel nodes, source evaluations and original face solves before
+copying or solving the model. Each assembly retains
+`N_lambda * (N_body + 1) * (N_body + 2) / 2` spectral slots and needs
+`2 * N_body * N_lambda * N_mu` coherent solves when its optics change. Body T/h
+caches preserve original state; immutable optical responses are shared across
+clones and reused when optical identities are unchanged. Source and transfer
+hooks reuse one prepared native start state. Positive frozen-optics conductances
+compose with native conduction limits; nonlinear state laws require timestep
+refinement rather than an unconditional stability claim.
+
+Accepted-start watts times actual accepted duration enter per-assembly pair,
+exterior-throughput and per-cell energy maps before endpoint refresh. Internal
+heat cancels in the whole-system account. Native candidate ownership preserves
+accepted states on domain, coverage, budget or cancellation refusal. Focused
+G1/G3 tests compare a three-body asymmetric infrared assembly to an independent
+unreduced gap-intensity solve and thermal RK4 refinement with unequal masses and
+ordinary conduction. Further tests exercise transparent intermediates, opaque
+screening, bath events, continuation, fixed-optics reuse, enthalpy-driven optics
+on a latent plateau, coverage and atomic refusal.
+<!-- native-coating-radiative-stack:end -->
