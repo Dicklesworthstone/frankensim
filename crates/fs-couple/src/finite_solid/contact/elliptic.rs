@@ -75,6 +75,13 @@ pub type SourceFiniteSolidRigidContactError<E> = FiniteSolidRigidContactError<
 >;
 
 impl ImpactResponse for EllipticFrictionalContactResult {
+    fn unique_impulses(&self) -> bool {
+        // Unique transformed impulses determine their physical image, including
+        // a zero ellipse axis. A velocity-only witness does not establish
+        // signed work at a moving support and retains the conservative refusal.
+        self.transformed.unique_impulses()
+    }
+
     fn physical(&self) -> PhysicalImpulseView<'_> {
         PhysicalImpulseView {
             impulses: &self.impulses,
@@ -90,7 +97,7 @@ impl<'a> FiniteSolidBody<'a> {
     ///
     /// The ellipse is expressed in the normalized contact tangent frame.
     /// Both zero coefficients use the native frictionless lane; a single zero
-    /// principal coefficient remains the contact owner's singular-law refusal.
+    /// principal coefficient retains exact free slip along that physical axis.
     /// Its transformed determinacy witness stays labeled in the contact report.
     /// A unique velocity does not promote representative redundant impulses
     /// into unique per-contact work or heat partitions.

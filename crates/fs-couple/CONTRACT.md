@@ -25355,3 +25355,40 @@ external-work and Galilean accounts, loaded closed-outlet motion, canonical
 inventory budgets, extreme-scale gravity reserves and atomic refusal. Rustfmt parsing and source/API review
 passed; numerical execution remains unverified while required constellation
 sibling dependencies are unavailable.
+
+## Directional momentum exchange in solids with material history
+
+`inelastic_impact::multiple::elliptic` extends the native plastic, Maxwell,
+thermal Tet4 and thermal Hex8 manifold entries with authored directional
+friction. Its four `*_mixed_elliptic_contact_candidate` functions retain the
+same material-point traces, full consistent cross-point mobility, rigid
+full-tensor response, support handling and single summed impulse update per
+body. A shared law callback selects the original
+`fs_contact::frictional_multicontact::elliptic` owner without copying mechanical
+assembly, contact search, material state or endpoint audits.
+
+Each contact supplies two nonnegative principal coefficients and its first
+principal direction in the admitted tangent frame. The complete work-conjugate
+ellipse transformation retains normal/tangent and intercontact blocks. Only
+original physical impulses and velocities enter the bodies; transformed
+determinacy witnesses remain labeled in the report. Equal coefficients recover
+the original circular response exactly, both zero recover frictionless contact,
+and a single zero coefficient retains exact free slip without small substitute
+traction.
+
+Unique transformed impulses determine their physical image and admit the
+original signed work at driven solid supports. A velocity-only witness still
+refuses unresolved moving-support work; a representative redundant impulse is
+not promoted into authoritative local work or heat. Native caloric storage,
+plastic history, every Maxwell branch, configuration and time remain unchanged.
+Impact dissipation remains separate from material dissipation and is not
+automatically deposited as heat.
+
+Regressions extend the existing nonzero plastic/Maxwell-history fixtures with
+circular/frictionless parity, collapsed ellipses, the physical principal-slip
+law, heterogeneous-contact permutation, joint texture/tangent-frame rotation,
+driven-support uniqueness and redundant-row refusal, retry and cancellation.
+The existing bounded solver, source-domain, native mass-solve and physical
+acceptance gates remain authoritative. This is a frozen-geometry mechanical
+event; evolving texture/source laws and sustained-contact stepping retain their
+separate original owners.

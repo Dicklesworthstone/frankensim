@@ -58,10 +58,10 @@ pub type InelasticMixedContactError<E> = FiniteSolidRigidContactError<
 
 /// Native candidates are published together only after all contact/work gates.
 #[derive(Debug)]
-pub struct InelasticMixedContactCandidate<M> {
+pub struct InelasticMixedContactCandidate<M, R = FrictionalContactResult> {
     pub solid: M,
     pub rigid_bodies: Vec<RigidBodyState>,
-    pub report: InelasticMixedContactReport,
+    pub report: FiniteSolidRigidContactReport<R, SolidImpulseReport>,
 }
 
 fn moving_supports(velocity: Option<&[[f64; 3]]>, held: &[usize]) -> bool {
@@ -81,6 +81,33 @@ fn moving_supports(velocity: Option<&[[f64; 3]]>, held: &[usize]) -> bool {
 macro_rules! native_candidate {
     ($solid:expr, $held:expr, $bodies:expr, $properties:expr, $contacts:expr,
      $origin:expr, $controls:expr, $cx:expr, $velocity:expr, $candidate_field:ident) => {{
+        native_candidate!(
+            @law $solid, $held, $bodies, $properties, $contacts,
+            $origin, $controls, $cx, $velocity, $candidate_field,
+            |queries: &[crate::finite_solid::contact::mixed::FiniteSolidMixedContactKinematics], matrix: &[f64]| {
+                let laws: Vec<_> = queries
+                    .iter()
+                    .map(|query| {
+                        let contact = $contacts[query.original_index];
+                        FrictionalContact {
+                            id: contact.id,
+                            gap: query.gap_m,
+                            activation_tolerance: contact.activation_tolerance_m,
+                            relative_velocity: query.relative_velocity_m_s,
+                            friction_coefficient: contact.friction_coefficient,
+                            normal_law: contact.normal_law,
+                        }
+                    })
+                    .collect();
+                solve_frictional_contacts(&laws, matrix, $controls.contact, || {
+                    $cx.checkpoint().is_err()
+                })
+            }
+        )
+    }};
+    (@law $solid:expr, $held:expr, $bodies:expr, $properties:expr, $contacts:expr,
+     $origin:expr, $controls:expr, $cx:expr, $velocity:expr, $candidate_field:ident,
+     $solve:expr) => {{
         let (solid, rigid_bodies, report) = mixed_contact_candidate_with(
             $bodies,
             $properties,
@@ -114,25 +141,7 @@ macro_rules! native_candidate {
                     .point_kinematics(point, $cx)
                     .map(|trace| trace.velocity_mps)
             },
-            |queries, matrix| {
-                let laws: Vec<_> = queries
-                    .iter()
-                    .map(|query| {
-                        let contact = $contacts[query.original_index];
-                        FrictionalContact {
-                            id: contact.id,
-                            gap: query.gap_m,
-                            activation_tolerance: contact.activation_tolerance_m,
-                            relative_velocity: query.relative_velocity_m_s,
-                            friction_coefficient: contact.friction_coefficient,
-                            normal_law: contact.normal_law,
-                        }
-                    })
-                    .collect();
-                solve_frictional_contacts(&laws, matrix, $controls.contact, || {
-                    $cx.checkpoint().is_err()
-                })
-            },
+            $solve,
         )?;
         Ok(InelasticMixedContactCandidate {
             solid,
@@ -141,6 +150,9 @@ macro_rules! native_candidate {
         })
     }};
 }
+
+/// Directional friction ellipses through these same native material owners.
+pub mod elliptic;
 
 /// Resolve a coupled impact while retaining every accepted plastic state.
 #[allow(clippy::too_many_arguments)]

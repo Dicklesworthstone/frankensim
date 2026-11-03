@@ -24,6 +24,9 @@ use fs_solid::hyper3::{
 use fs_solid::linear3::TetAssemblyBudget;
 use fs_solver::CheckedCgConfig;
 
+#[path = "inelastic_impact/elliptic.rs"]
+mod elliptic;
+
 const NODES: [[f64; 3]; 4] = [
     [0.0, 0.0, 0.0],
     [1.0, 0.0, 0.0],
@@ -263,6 +266,7 @@ fn relaxed_viscoelastic_body_collides_through_full_rigid_inertia_and_moving_supp
             Some(RHO.as_slice())
         );
         check_visco_manifold(&motion, cx);
+        elliptic::check_visco_directional(&motion, cx);
         let mut wrong_line = point;
         wrong_line[1] += 1e-5;
         assert!(matches!(
@@ -296,6 +300,7 @@ fn relaxed_viscoelastic_body_collides_through_full_rigid_inertia_and_moving_supp
             ))
         ));
         gate.request();
+        elliptic::check_cancelled_visco(&motion, rigid, cx);
         assert!(matches!(
             visco_rigid_impact_candidate(
                 &motion,
@@ -448,6 +453,7 @@ fn freely_moving_plastic_body_uses_original_graded_inverse_and_keeps_its_return_
         }
         let separating = rigid_at(point, 0.3);
         check_plastic_supported_manifold(&motion, cx);
+        elliptic::check_plastic_directional_supports(&motion, cx);
         let unchanged = plastic_rigid_impact_candidate(
             &motion,
             &[],
