@@ -279,7 +279,7 @@ pub struct FluxSystem<'m> {
     /// Total dof count (velocity + pressure).
     pub n: usize,
     /// Edge-connected fluid components, prepared once for every solver path.
-    pressure_component: Vec<usize>,
+    pub(crate) pressure_component: Vec<usize>,
     /// First triangle in each component, in increasing triangle order.
     pressure_roots: Vec<usize>,
 }
