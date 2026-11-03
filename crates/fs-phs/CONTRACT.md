@@ -1,5 +1,24 @@
 # fs-phs — Contract
 
+## Physical acoustic terminal flow
+
+`acoustic_outlet::acoustic_chain_with_outlet_flow` returns the original loaded
+chain and its physical outward-volume-flow functional. The row is derived from
+the actual quadratic storage, retaining terminal radiation and viscothermal
+inertia and alternating native coordinate orientation on cylinder/frustum chains.
+The automatically selected single widening spherical psi-line refuses: its
+loaded terminal neglects the Euler near-field term `(alpha/rho) integral(psi dt)`
+in physical volume flow. Its scaled radiation-port current therefore cannot
+silently become a physical microphone signal or claim physical DC continuity.
+The original cone source API and power balance are unchanged.
+A rigid closure exports exactly zero flow even from a nonzero disconnected
+retained flux. Evaluation is read-only and allocation-free; invalid state
+extent, nonfinite coordinates or arithmetic refuse. This does not add a power
+port, a radiation solver or side-opening observation. G1/G3 integration tests
+check independent compression-volume conservation for odd/even cell counts,
+the cylinder/frustum low-frequency through-flow limit, physical radiation work,
+rigid closure and spherical-observation refusal.
+
 ## Purpose and layer
 
 Layer L2. Port-Hamiltonian systems (bead

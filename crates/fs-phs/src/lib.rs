@@ -52,6 +52,8 @@ pub mod linear_exact;
 pub mod harmonic;
 /// Work-conjugate physical coupling of complete subsystems on different clocks.
 pub mod multirate;
+/// Physical outlet volume flow on the original acoustic-chain state.
+pub mod acoustic_outlet;
 
 /// Prepared collective lossless exchange of normalized coordinate banks.
 pub mod port_exchange;
@@ -4389,6 +4391,22 @@ pub enum ChainOutlet {
     Radiating(MouthFlange),
 }
 
+// Keep the state-layout choice shared with physical outlet observation.
+fn spherical_chain_section(
+    sections: &[AcousticSection],
+    outlet: ChainOutlet,
+) -> Option<&AcousticSection> {
+    match sections {
+        [section]
+            if outlet != ChainOutlet::Rigid
+                && section.outlet() - section.radius > 1.0e-15 * (1.0 + section.radius) =>
+        {
+            Some(section)
+        }
+        _ => None,
+    }
+}
+
 /// [`acoustic_chain_mouth_wall`] with an explicit [`ChainOutlet`], the only
 /// form that can impose a rigid closure (frankensim-gs17m).
 ///
@@ -4415,10 +4433,7 @@ pub fn acoustic_chain_outlet_wall(
     // cells). Narrowing tapers, multi-run chains with a taper and rigid
     // outlets are frustum cells: in psi variables U = 0 at the outlet needs a
     // negative near-field inertance, which no passive storage can hold.
-    if let [s] = sections
-        && outlet != ChainOutlet::Rigid
-        && s.outlet() - s.radius > 1.0e-15 * (1.0 + s.radius)
-    {
+    if let Some(s) = spherical_chain_section(sections, outlet) {
         return spherical_cone_wall(
             s.radius,
             s.outlet(),
