@@ -17,6 +17,9 @@
 //! energy. No compressible pressure-work, capillary-energy, remeshing accuracy
 //! or universal total-energy claim is added to the original native model.
 
+/// Remove a no-storage rigid constraint through the original thermal VOF handoff.
+pub mod rigid;
+
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::FreeSurfaceError3;
 use fs_lbm::material::free_surface::enthalpy::{
@@ -244,3 +247,4 @@ fn sum(values: [f64; 4]) -> f64 {
     }
     result + correction
 }
+

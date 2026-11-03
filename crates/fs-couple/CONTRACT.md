@@ -27058,3 +27058,50 @@ endpoint refusal with unchanged-state retry. Fixed flooded geometry excludes
 normal motion, tilt, finite plate edges, cover/vacate, moving contact lines and
 caloric heat. The implementation does not add a whole-liquid energy or complete
 coupled temporal-order claim.
+
+
+## Original rigid matter released into thermal free-surface motion
+
+`liquid_transfer::rigid::release_rigid_liquid` removes a no-storage rigid
+kinematic constraint from an already-liquid tetrahedral material body. The
+existing `TetrahedralDensityBody`, its actual `PrincipalFrame`, accepted
+`RigidBodyState`, nodal specific enthalpy and physical clock supply the
+source. The full original inertia and COM must match exactly. Native point
+kinematics derives every world vertex and `P/m + omega cross r` velocity;
+nominal inertia, caller-substituted velocity fields and zero-spin fallbacks
+are not used.
+
+Every original nodal density retains the receiving liquid's immutable card,
+selected density claim, nonthermal context, quantity conventions and constant
+reference density. Equal total mass alone cannot admit a different density
+distribution. The original `fs-lbm` tetrahedral overlap and thermal transfer
+owners then preserve per-piece mass, both momenta, caloric state and ingress
+lineage, including their P1 viscous-strain initialization and optional native
+rheology/Boussinesq attachments. Their complete source-domain, positivity,
+Mach, geometric-resolution, allocation and projection gates remain binding.
+
+Independent checks compare integrated P1 and actual native receiver M/P/L/h
+against the original rigid matter. Original cell masses supply a compensated
+source enthalpy integral. The report distinguishes rigid/P1 identity error
+from signed receiver kinetic and gravitational projection changes. Neither
+mechanical discrepancy is deposited as heat; the original enthalpy datum is
+retained without an invented internal-energy or pressure-work conversion.
+The receiver starts at the original accepted time and can continue through
+its ordinary thermal VOF step.
+
+Preparation is linear in original vertices and tetrahedra before the existing
+overlap work. It adds no eigensolve, constitutive law, fluid solver, trajectory
+clone or physical timestep. Refusal and cancellation return no receiver and
+leave the original source available for retry. Successful callers replace the
+rigid representation rather than evolving both representations of the matter.
+
+This entry requires material already fully liquid and a rigid model with no
+stored elastic, plastic, damage or other mechanical memory. It does not melt
+a stressed solid, detach stored cohesive bonds, supply density-change volume
+work, model melting kinetics, or introduce capillary energy or a pressure
+projection. Four focused G1/G3/G4 regression definitions cover independent
+rotated-cuboid inertia, world and per-piece momenta, enthalpy and clock
+continuation, frame/material/phase refusal, density-distribution refusal,
+budgets, cancellation and retry. Native compilation and test execution remain
+outstanding in the delivery environment; no measured performance or physical
+validation claim is added.
