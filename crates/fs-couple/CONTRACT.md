@@ -26785,3 +26785,32 @@ accounts, changing source samples, newly arriving species and bounded work,
 minimum-step and late-cancellation refusal. Scoped Rustfmt parsing and source/API
 review are available; native compilation and execution remain unverified with
 the missing constellation sibling manifests.
+
+### Runnable finite molecular exchange example
+
+`cargo run -p fs-couple --example molecular_exchange --
+crates/fs-material/examples/material_gas_spring/mixture-a.tsv --adaptive`
+uses the existing seven-column material source loader and one original species
+catalog for two finite moving-gas owners. Explicit SI inputs set each initial
+temperature, pressure, volume and bulk velocity, the common aperture velocity
+and oriented normal, its area and qualified molecular geometry, the maximum
+admitted relative speed, interval duration/count and optional native adaptive
+advance. Defaults are authored synthetic values. Arguments, source bytes,
+species count, total duration and adaptive work are bounded; malformed,
+duplicate, unknown and nonfinite options refuse.
+
+CSV rows carry both accepted gas states and species fractions, separate gross
+directional and signed net masses, transferred vector momentum, interval and
+compensated cumulative mass/momentum/energy residuals, and adaptive work counts.
+A refused interval emits no new endpoint. The original source, caloric and
+conservation owners remain authoritative in both fixed and adaptive modes.
+The example explicitly describes an interface stage: gas bulk velocities are
+not moving-container coordinates, no separated-vessel flight model is supplied,
+and the remaining wall/face momentum and gas-transport operators are required
+for complete closed-vessel equilibration or entropy/passivity conclusions.
+Reducing the timestep alone cannot supply those omitted physical operators.
+
+Scoped Rustfmt parsing, concrete API review and CSV column accounting passed.
+Native compilation/execution remains unverified because the constellation
+sibling manifests are unavailable in this checkout; no numerical run or
+performance result is asserted.
