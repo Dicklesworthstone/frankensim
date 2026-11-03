@@ -17,6 +17,9 @@
 //! deforming attachments and other state-dependent loads require their own
 //! stage evaluations; preparing them once does not make their motion second order.
 
+/// Work-conjugate Cayley stepping of the original prepared spatial loads.
+pub mod midpoint;
+
 use super::{
     AdvanceOutcome, DynamicsError, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState,
     StepReceipt, UnitQuaternion, Vec3, Wrench, finite_derived,
@@ -215,7 +218,7 @@ pub struct SpatialStepReceipt {
     /// Applied linear impulse, including uniform gravity, in N s.
     pub linear_impulse_world: Vec3,
     /// Applied angular impulse about the fixed world origin, including gravity,
-    /// from the two actual endpoint kicks, in N m s.
+    /// from the selected integrator's load quadrature, in N m s.
     pub angular_impulse_world: Vec3,
     /// Actual linear momentum change minus the applied impulse, in N s.
     pub linear_momentum_residual_world: Vec3,
@@ -223,8 +226,9 @@ pub struct SpatialStepReceipt {
     pub angular_momentum_residual_world: Vec3,
     /// Exact endpoint work of the held forces, excluding gravity, in J.
     pub force_work_j: f64,
-    /// Free-couple work from the two half-kick power quadratures, in J.
-    /// This is a second-order estimate, not an exact continuous work integral.
+    /// Free-couple work in J: half-kick power quadrature for `step_spatial`, or
+    /// the conjugate Cayley increment for `step_spatial_midpoint`. Both are
+    /// second-order estimates of continuous free-couple work.
     pub couple_work_j: f64,
     /// Mechanical-energy change minus force and couple work, in J. This is a
     /// numerical defect, never physical friction, heat, or hidden damping.

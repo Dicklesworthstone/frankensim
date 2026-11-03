@@ -1,4 +1,7 @@
 //! G0/G1/G3: torque frames, physical work, full inertia and scalar ODE oracles.
+#[path = "spatial_loads/midpoint.rs"]
+mod midpoint;
+
 use fs_mbd::spatial_loads::{
     MAX_WORLD_POINT_FORCES, PreparedSpatialLoads, SpatialLoadError, WorldPointForce,
 };

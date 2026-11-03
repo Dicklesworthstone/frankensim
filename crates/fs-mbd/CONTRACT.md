@@ -742,6 +742,40 @@ a dynamic, contact, grasp-stability, or force-closure result.
   curriculum code selects owner coordinates from this layout rather than
   reproducing a second robot-policy representation.
 
+## Work-conjugate finite steps for held spatial forces
+
+`RigidBodyIntegrator::step_spatial_midpoint` consumes the same
+`spatial_loads::PreparedSpatialLoads` as the existing Verlet lane. Held material
+point forces now have an explicitly selected finite-step lane whose native
+torque work equals force dotted with the actual material-point displacement.
+For `Rbar = (R0+R1)/2`, the mean spatial moment uses the mean material arms and
+is pulled back by `Rbar^-1`. A normalized midpoint attitude would change that
+work and its spatial angular impulse. World-held and body-held free couples
+retain their separate frames; their work uses the conjugate Cayley increment
+and remains a second-order continuous-work quadrature.
+
+A stack-only three-variable Newton solve uses an analytic full-inertia/load
+Jacobian and the original three prepared first moments. Per-step work and
+storage are independent of the point-force count. The selected torque is
+replayed through the original `step_cayley` owner; its actual returned momentum
+must satisfy the same held-load equation before publication. No momentum,
+energy or pose projection is added. Differential quadratic-energy evaluation
+avoids subtracting two large total kinetic energies.
+
+Explicit limits bound Newton corrections, backtracking, angular-momentum
+residual and the Cayley increment. Cancellation at every solver trial and
+before final return, failed native replay, nonfinite arithmetic or exhausted
+limits return no updated state. The full-inertia work balance closes to solve
+tolerance and roundoff; phase/trajectory accuracy still requires refinement.
+This is neither a symplecticity/global-uniqueness certificate nor a contact or
+state-dependent-force model, and numerical defects are never assigned as heat.
+
+Five G1/G3/G4 groups in `tests/spatial_loads/midpoint.rs` cover analytic
+translation/axial torque, physical point-force pendulum work and second-order
+refinement, long-time energy, full-tensor reversibility and coordinate
+covariance, spatial impulses, original held-body-load equality, cancellation at
+every publication boundary and bounded/nonfinite refusal with deterministic retry.
+
 ## Generalized articulated coupling
 
 `articulated::generalized::free_floating_terms` exposes the original admitted
