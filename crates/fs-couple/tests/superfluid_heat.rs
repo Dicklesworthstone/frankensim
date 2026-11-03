@@ -4,9 +4,11 @@ use std::cell::Cell;
 
 use fs_couple::superfluid::{
     FrictionHeatControls, FrictionHeatError, advance_closed_friction_heat,
+    advance_forced_closed_friction_heat,
 };
 use fs_duct::superfluid::{
-    CellSample, FaceSample, LinearizationLimits, MutualFriction, TwoFluidChannel,
+    BodyForce, CellSample, ComponentForceDensity, FaceSample, LinearizationLimits, MutualFriction,
+    TwoFluidChannel,
 };
 use fs_material::superfluid::{TwoFluidProperties, TwoFluidState};
 use fs_thermal::enthalpy::{
@@ -144,6 +146,7 @@ fn near(a: f64, b: f64, scale: f64) {
 #[derive(Debug, PartialEq)]
 struct Snapshot {
     channel_time: f64,
+    channel_momentum: f64,
     wave_energy: f64,
     cumulative_heat: f64,
     cells: Vec<CellSample>,
@@ -155,6 +158,7 @@ struct Snapshot {
 fn snapshot(channel: &TwoFluidChannel, thermal: &DepositionSimulation<'_>) -> Snapshot {
     Snapshot {
         channel_time: channel.time_s(),
+        channel_momentum: channel.resolved_momentum_kg_m_s().unwrap(),
         wave_energy: channel.wave_energy_j().unwrap(),
         cumulative_heat: channel.cumulative_mutual_friction_heat_j(),
         cells: (0..channel.cells())
@@ -380,6 +384,185 @@ fn cancellation_at_entry_and_after_thermal_acceptance_rolls_back_both_owners() {
             || false,
         )
         .unwrap();
+        assert_eq!(
+            snapshot(&flow, &heat),
+            snapshot(&accepted_flow, &accepted_heat)
+        );
+    }
+}
+
+#[test]
+fn sustained_opposite_component_forces_heat_original_cells_without_net_momentum() {
+    let law = CaloricLaw {
+        heat_capacity_j_kg_k: 8.0,
+        max_specific_energy_j_kg: 2.0,
+    };
+    let mut flow = channel();
+    // Start without stored wave energy: all eventual heating must be supplied
+    // by the authored component forces, not a pre-existing counterflow pulse.
+    flow.initialize(&[0.0; N], &[0.0; N], &[0.0; N + 1], &[0.0; N + 1], || false)
+        .unwrap();
+    let original_material = *flow.material();
+    let mut heat = thermal(&law, 0.0);
+    let ids = destinations();
+    let dt = 0.2 * flow.maximum_step_s();
+    let force = BodyForce::Uniform(ComponentForceDensity {
+        normal_n_m3: 0.04,
+        superfluid_n_m3: -0.04,
+    });
+    let mut supplied_work = 0.0;
+    let mut deposited_heat = 0.0;
+    for _ in 0..16 {
+        let old: Vec<_> = ids
+            .iter()
+            .map(|id| heat.cells()[id].specific_h_j_kg)
+            .collect();
+        let (forced, report) = advance_forced_closed_friction_heat(
+            &mut flow,
+            &mut heat,
+            &ids,
+            dt,
+            force,
+            friction(),
+            controls(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(forced.channel, report.channel);
+        assert_eq!(forced.body_impulse_n_s, 0.0);
+        near(forced.momentum_after_kg_m_s, 0.0, 1e-4);
+        near(forced.momentum_defect_n_s, 0.0, 1e-4);
+        supplied_work += forced.channel.body_force_work_j;
+        deposited_heat += report.heat_intake.external_heat_j;
+        near(report.thermal_march.external_heat_j, 0.0, 1e-4);
+        near(
+            report.heat_intake.external_heat_j,
+            forced.channel.mutual_friction_heat_j,
+            1e-4,
+        );
+        near(report.combined_storage_residual_j, 0.0, 1e-4);
+        for (i, id) in ids.iter().enumerate() {
+            let u = heat.cells()[id].specific_h_j_kg;
+            near(
+                MASS * (u - old[i]),
+                flow.last_mutual_friction_heat_j()[i],
+                1e-4,
+            );
+            near(heat.temperature_k(*id).unwrap(), 2.0 + u / 8.0, 2.0);
+        }
+        near(
+            flow.wave_energy_j().unwrap() + heat.energy_j(),
+            supplied_work,
+            1e-4,
+        );
+        near(heat.energy_j(), deposited_heat, 1e-4);
+        near(
+            flow.cumulative_mutual_friction_heat_j(),
+            deposited_heat,
+            1e-4,
+        );
+        assert_eq!(flow.time_s(), heat.time_s());
+        assert_eq!(flow.material(), &original_material);
+        assert!(heat.uses_material_law(MaterialId(1), &law));
+    }
+    assert!(supplied_work > 0.0);
+    assert!(deposited_heat > 0.01 * supplied_work);
+    assert!(ids.iter().any(|id| heat.temperature_k(*id).unwrap() > 2.0));
+}
+
+#[test]
+fn forced_thermal_refusal_preserves_component_momentum_and_both_histories() {
+    let law = CaloricLaw {
+        heat_capacity_j_kg_k: 16.0,
+        max_specific_energy_j_kg: 0.0,
+    };
+    let mut flow = channel();
+    let mut heat = thermal(&law, 0.0);
+    let before = snapshot(&flow, &heat);
+    let dt = 0.2 * flow.maximum_step_s();
+    let force = BodyForce::Uniform(ComponentForceDensity {
+        normal_n_m3: 0.04,
+        superfluid_n_m3: -0.02,
+    });
+    let result = advance_forced_closed_friction_heat(
+        &mut flow,
+        &mut heat,
+        &destinations(),
+        dt,
+        force,
+        friction(),
+        controls(),
+        || false,
+    );
+    assert!(matches!(
+        result,
+        Err(FrictionHeatError::Thermal(DepositionError::MaterialDomain))
+    ));
+    assert_eq!(snapshot(&flow, &heat), before);
+}
+
+#[test]
+fn forced_final_cancellation_preserves_source_work_momentum_and_heat_for_retry() {
+    let law = CaloricLaw {
+        heat_capacity_j_kg_k: 16.0,
+        max_specific_energy_j_kg: 2.0,
+    };
+    let force = BodyForce::Uniform(ComponentForceDensity {
+        normal_n_m3: 0.04,
+        superfluid_n_m3: -0.02,
+    });
+    let mut accepted_flow = channel();
+    let mut accepted_heat = thermal(&law, 0.0);
+    let dt = 0.2 * accepted_flow.maximum_step_s();
+    let calls = Cell::new(0);
+    let expected_reports = advance_forced_closed_friction_heat(
+        &mut accepted_flow,
+        &mut accepted_heat,
+        &destinations(),
+        dt,
+        force,
+        friction(),
+        controls(),
+        || {
+            calls.set(calls.get() + 1);
+            false
+        },
+    )
+    .unwrap();
+    assert!(expected_reports.0.channel.body_force_work_j > 0.0);
+    assert!(expected_reports.0.momentum_after_kg_m_s > expected_reports.0.momentum_before_kg_m_s);
+    for fail_at in [1, calls.get()] {
+        let mut flow = channel();
+        let mut heat = thermal(&law, 0.0);
+        let before = snapshot(&flow, &heat);
+        let count = Cell::new(0);
+        let result = advance_forced_closed_friction_heat(
+            &mut flow,
+            &mut heat,
+            &destinations(),
+            dt,
+            force,
+            friction(),
+            controls(),
+            || {
+                count.set(count.get() + 1);
+                count.get() == fail_at
+            },
+        );
+        assert!(matches!(result, Err(FrictionHeatError::Cancelled)));
+        assert_eq!(snapshot(&flow, &heat), before);
+        let retried = advance_forced_closed_friction_heat(
+            &mut flow,
+            &mut heat,
+            &destinations(),
+            dt,
+            force,
+            friction(),
+            controls(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(retried, expected_reports);
         assert_eq!(
             snapshot(&flow, &heat),
             snapshot(&accepted_flow, &accepted_heat)

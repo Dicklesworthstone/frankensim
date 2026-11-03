@@ -1,5 +1,30 @@
 # CONTRACT: fs-couple
 
+## Forced superfluid momentum and original caloric heating
+
+`superfluid::advance_forced_closed_friction_heat` composes the authored component
+body forces and full closed-channel momentum account with the same original
+thermal timeline used by `advance_closed_friction_heat`. Shared private routing
+and thermal-preparation helpers preserve the original caloric laws, sources,
+contacts, events, clocks and per-cell heat admission.
+
+External component-force work appears once in the original channel account.
+Only the interval's actual mutual-friction loss is deposited in the original
+thermal cells; it is an internal transfer in the combined account. A source
+force is not replaced by fake heat power, and cumulative heat is not replayed.
+Thermal refusal or final cancellation publishes neither source-driven momentum
+nor thermal storage. The returned reports retain physical body and wall
+impulses, signed source work, friction heat and the unchanged thermal audits.
+
+The fixed-reference wave model and first-order endpoint heat split remain
+explicit. Temperature evolution does not silently invent a new helium
+equation of state or relinearize the wave coefficients. The example
+`cargo run -p fs-couple --features superfluid --example superfluid_piston`
+separately demonstrates a sourced 1.8 K helium-II channel driving a native
+2 g piston, with independently recomputed combined momentum and energy.
+Its geometry, excitation and friction coefficient are authored inputs;
+exported heat is accounted for without claiming calibrated apparatus data.
+
 ## Reciprocal native superfluid piston
 
 The opt-in `superfluid::piston::advance_balanced_piston` connects the original

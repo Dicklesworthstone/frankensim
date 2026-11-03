@@ -18,7 +18,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_duct::superfluid::{
-    BoundaryVelocities, ChannelError, ChannelStep, HeatStepError, MutualFriction, TwoFluidChannel,
+    BodyForce, BoundaryVelocities, ChannelError, ChannelStep, ForcedChannelStep, HeatStepError,
+    MutualFriction, TwoFluidChannel,
 };
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionSimulation, EnergyAudit, StepConfig,
@@ -115,7 +116,80 @@ pub fn advance_closed_friction_heat(
     controls: FrictionHeatControls,
     cancelled: impl Fn() -> bool,
 ) -> Result<FrictionHeatReport, FrictionHeatError> {
-    check(&cancelled)?;
+    validate_heat_route(channel, thermal, destinations, controls, &cancelled)?;
+    let (_, (next_thermal, report)) = channel.step_with_heat(
+        dt_s,
+        BoundaryVelocities::CLOSED,
+        friction,
+        || cancelled(),
+        |wave, per_cell_heat| {
+            prepare_heat(
+                thermal,
+                destinations,
+                wave,
+                per_cell_heat,
+                controls,
+                &cancelled,
+            )
+        },
+    )?;
+    // Native channel publication has succeeded; this assignment cannot refuse.
+    *thermal = next_thermal;
+    Ok(report)
+}
+
+/// Drive a closed two-fluid channel and deposit its actual friction heat once.
+///
+/// The original physical source owner advances the component momenta and
+/// records external body-force work. The original thermal owner advances its
+/// authored timeline and accepts only the resulting per-cell friction joules.
+/// Force work is external to this composition; friction is an internal transfer.
+/// The channel's original wave balance already debits force work, so it must
+/// not be added again to the heat intake or combined residual.
+///
+/// Mapping, clocks, caloric laws and frozen-reference semantics are identical to
+/// [`advance_closed_friction_heat`]. A thermal refusal or cancellation preserves
+/// the accepted force response, wave fields, momentum, heat and thermal cells.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_forced_closed_friction_heat(
+    channel: &mut TwoFluidChannel,
+    thermal: &mut DepositionSimulation<'_>,
+    destinations: &[CellId],
+    dt_s: f64,
+    force: BodyForce<'_>,
+    friction: MutualFriction,
+    controls: FrictionHeatControls,
+    cancelled: impl Fn() -> bool,
+) -> Result<(ForcedChannelStep, FrictionHeatReport), FrictionHeatError> {
+    validate_heat_route(channel, thermal, destinations, controls, &cancelled)?;
+    let (forced, (next_thermal, report)) = channel.step_forced_closed_with_heat(
+        dt_s,
+        force,
+        friction,
+        || cancelled(),
+        |forced, per_cell_heat| {
+            prepare_heat(
+                thermal,
+                destinations,
+                &forced.channel,
+                per_cell_heat,
+                controls,
+                &cancelled,
+            )
+        },
+    )?;
+    *thermal = next_thermal;
+    Ok((forced, report))
+}
+
+fn validate_heat_route(
+    channel: &TwoFluidChannel,
+    thermal: &DepositionSimulation<'_>,
+    destinations: &[CellId],
+    controls: FrictionHeatControls,
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), FrictionHeatError> {
+    check(cancelled)?;
     if channel.time_s() != thermal.time_s() {
         return Err(FrictionHeatError::Invalid(
             "channel and thermal clocks must match",
@@ -141,7 +215,7 @@ pub fn advance_closed_friction_heat(
     let mut distinct = BTreeSet::new();
     for (i, &id) in destinations.iter().enumerate() {
         if i % 128 == 0 {
-            check(&cancelled)?;
+            check(cancelled)?;
         }
         if !thermal.cells().contains_key(&id) || !distinct.insert(id) {
             return Err(FrictionHeatError::Invalid(
@@ -149,67 +223,70 @@ pub fn advance_closed_friction_heat(
             ));
         }
     }
-    let (_, (next_thermal, report)) = channel.step_with_heat(
-        dt_s,
-        BoundaryVelocities::CLOSED,
-        friction,
-        || cancelled(),
-        |wave, per_cell_heat| {
-            check(&cancelled)?;
-            if per_cell_heat.len() != destinations.len() {
-                return Err(DepositionError::InvalidInput(
-                    "channel heat field and destination map differ",
-                ));
-            }
-            let mut heat = BTreeMap::new();
-            for (i, (&id, &joules)) in destinations.iter().zip(per_cell_heat).enumerate() {
-                if i % 128 == 0 {
-                    check(&cancelled)?;
-                }
-                if !joules.is_finite() || joules < 0.0 {
-                    return Err(DepositionError::InvalidInput(
-                        "channel returned invalid physical friction heat",
-                    ));
-                }
-                heat.insert(id, joules);
-            }
-            let (marched, thermal_march) =
-                thermal.advance_to(wave.time_s, controls.thermal, || check(&cancelled))?;
-            let (next, heat_intake) = marched.apply_heat_j(
-                &heat,
-                controls.cell_heat_tolerance_j,
-                controls.heat_energy_tolerance_j,
-                || check(&cancelled),
-            )?;
-            let transfer_residual_j = heat_intake.external_heat_j - wave.mutual_friction_heat_j;
-            // Preserve the owners' cell-relative residuals. Subtracting two
-            // large absolute thermal energies can erase a small heat deposit.
-            let combined_storage_residual_j = wave.wave_balance_defect_j
-                + thermal_march.residual_j
-                + heat_intake.residual_j
-                + transfer_residual_j;
-            if !transfer_residual_j.is_finite() || !combined_storage_residual_j.is_finite() {
-                return Err(DepositionError::Arithmetic);
-            }
-            if transfer_residual_j.abs() > controls.heat_energy_tolerance_j {
-                return Err(DepositionError::EnergyBalance(transfer_residual_j));
-            }
-            if combined_storage_residual_j.abs() > controls.combined_energy_tolerance_j {
-                return Err(DepositionError::EnergyBalance(combined_storage_residual_j));
-            }
-            let report = FrictionHeatReport {
-                channel: *wave,
-                thermal_march,
-                heat_intake,
-                transfer_residual_j,
-                combined_storage_residual_j,
-            };
-            Ok((next, report))
-        },
+    Ok(())
+}
+
+fn prepare_heat<'a>(
+    thermal: &DepositionSimulation<'a>,
+    destinations: &[CellId],
+    wave: &ChannelStep,
+    per_cell_heat: &[f64],
+    controls: FrictionHeatControls,
+    cancelled: &impl Fn() -> bool,
+) -> Result<(DepositionSimulation<'a>, FrictionHeatReport), DepositionError> {
+    check(cancelled)?;
+    if per_cell_heat.len() != destinations.len() {
+        return Err(DepositionError::InvalidInput(
+            "channel heat field and destination map differ",
+        ));
+    }
+    let mut heat = BTreeMap::new();
+    for (i, (&id, &joules)) in destinations.iter().zip(per_cell_heat).enumerate() {
+        if i % 128 == 0 {
+            check(cancelled)?;
+        }
+        if !joules.is_finite() || joules < 0.0 {
+            return Err(DepositionError::InvalidInput(
+                "channel returned invalid physical friction heat",
+            ));
+        }
+        heat.insert(id, joules);
+    }
+    let (marched, thermal_march) =
+        thermal.advance_to(wave.time_s, controls.thermal, || check(cancelled))?;
+    let (next, heat_intake) = marched.apply_heat_j(
+        &heat,
+        controls.cell_heat_tolerance_j,
+        controls.heat_energy_tolerance_j,
+        || check(cancelled),
     )?;
-    // Native channel publication has succeeded; this assignment cannot refuse.
-    *thermal = next_thermal;
-    Ok(report)
+    let transfer_residual_j = heat_intake.external_heat_j - wave.mutual_friction_heat_j;
+    // Preserve the owners' cell-relative residuals. The wave balance already
+    // accounts for any external force work; friction crosses this interface once.
+    // Subtracting large absolute thermal energies can erase a small heat deposit.
+    let combined_storage_residual_j = wave.wave_balance_defect_j
+        + thermal_march.residual_j
+        + heat_intake.residual_j
+        + transfer_residual_j;
+    if !transfer_residual_j.is_finite() || !combined_storage_residual_j.is_finite() {
+        return Err(DepositionError::Arithmetic);
+    }
+    if transfer_residual_j.abs() > controls.heat_energy_tolerance_j {
+        return Err(DepositionError::EnergyBalance(transfer_residual_j));
+    }
+    if combined_storage_residual_j.abs() > controls.combined_energy_tolerance_j {
+        return Err(DepositionError::EnergyBalance(combined_storage_residual_j));
+    }
+    Ok((
+        next,
+        FrictionHeatReport {
+            channel: *wave,
+            thermal_march,
+            heat_intake,
+            transfer_residual_j,
+            combined_storage_residual_j,
+        },
+    ))
 }
 
 fn check(cancelled: &impl Fn() -> bool) -> Result<(), DepositionError> {
