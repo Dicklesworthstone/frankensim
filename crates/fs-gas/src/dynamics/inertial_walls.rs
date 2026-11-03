@@ -42,12 +42,47 @@ pub struct InertialWallsControl {
     pub maximum_iterations: usize,
 }
 
+pub(crate) fn validate_controls(
+    walls: [Piston; 2],
+    maximum_duration: Time,
+    gas_controls: StepControl,
+    loads: [InertialWallLoad; 2],
+    controls: InertialWallsControl,
+) -> Result<(), PistonError> {
+    for i in 0..2 {
+        validate(
+            walls[i],
+            maximum_duration,
+            gas_controls,
+            PistonLoad {
+                exterior_pressure_pa: loads[i].exterior_pressure_pa,
+                external_force_n: loads[i].external_force_n,
+            },
+            PistonControl {
+                midpoint_velocity_bracket_m_s: controls.midpoint_velocity_bracket_m_s[i],
+                momentum_tolerance_n_s: controls.momentum_tolerance_n_s,
+                energy_tolerance_j: controls.energy_tolerance_j,
+                maximum_iterations: controls.maximum_iterations,
+            },
+        )?;
+        let [lo, hi] = controls.midpoint_velocity_bracket_m_s[i];
+        if !positive(hi - lo) {
+            return Err(PistonError::Invalid(
+                "wall speed interval width is unrepresentable",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Original accepted field and actual extensive exchanges; all arrays are
 /// [left, right]. There is no unmodeled fixed support supplying momentum.
+/// `R` retains the original frozen or evolving-species report, including all
+/// species balances and the source owner's energy-reference convention.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct InertialWallsStep {
+pub struct InertialWallsStep<R = StepReport> {
     /// Original extensive RK2 field and per-boundary exchange report.
-    pub gas: StepReport,
+    pub gas: R,
     /// Accepted input wall velocities along the common axial coordinate [m/s].
     pub velocity_before_m_s: [f64; 2],
     /// Jointly accepted endpoint wall velocities [m/s].
@@ -78,7 +113,7 @@ pub struct InertialWallsStep {
     pub gas_trials: usize,
 }
 
-impl InertialWallsStep {
+impl<R> InertialWallsStep<R> {
     fn residual_norm(&self) -> f64 {
         self.momentum_residual_n_s[0]
             .abs()
@@ -94,7 +129,7 @@ impl InertialWallsStep {
                 .max(self.total_energy_residual_j.abs()),
         )
     }
-    fn admitted(&self, controls: InertialWallsControl) -> bool {
+    pub(crate) fn admitted(&self, controls: InertialWallsControl) -> bool {
         let (momentum, energy) = self.defects();
         momentum <= controls.momentum_tolerance_n_s && energy <= controls.energy_tolerance_j
     }
@@ -134,29 +169,7 @@ impl Euler1d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<InertialWallsStep, PistonError> {
         poll(&mut cancelled)?;
-        for i in 0..2 {
-            validate(
-                walls[i],
-                maximum_duration,
-                gas_controls,
-                PistonLoad {
-                    exterior_pressure_pa: loads[i].exterior_pressure_pa,
-                    external_force_n: loads[i].external_force_n,
-                },
-                PistonControl {
-                    midpoint_velocity_bracket_m_s: controls.midpoint_velocity_bracket_m_s[i],
-                    momentum_tolerance_n_s: controls.momentum_tolerance_n_s,
-                    energy_tolerance_j: controls.energy_tolerance_j,
-                    maximum_iterations: controls.maximum_iterations,
-                },
-            )?;
-            let [lo, hi] = controls.midpoint_velocity_bracket_m_s[i];
-            if !positive(hi - lo) {
-                return Err(PistonError::Invalid(
-                    "wall speed interval width is unrepresentable",
-                ));
-            }
-        }
+        validate_controls(*walls, maximum_duration, gas_controls, loads, controls)?;
         if self.boundaries
             != (Boundaries::Ends {
                 left: Boundary::Reflecting,
@@ -249,9 +262,10 @@ impl Euler1d {
                     let after =
                         totals(&self.work.candidate, moving.mesh.volumes(), &mut cancelled)?;
                     let gas = reported_step(before, after, [a, b], dt, area)?;
+                    let exchange = MechanicalExchange::from(&gas);
                     let displacement = [0, self.states.len()]
                         .map(|end| moving.mesh.positions()[end] - self.mesh.positions()[end]);
-                    mechanical_report(gas, original, loads, speed, displacement, area)
+                    mechanical_report(gas, exchange, original, loads, speed, displacement, area)
                 },
             );
             match result {
@@ -294,15 +308,61 @@ impl Euler1d {
     }
 }
 
-fn mechanical_report(
-    gas: StepReport,
+// Only these original extensive exchanges enter the shared wall mechanics.
+// The complete species/source report remains on the accepted result.
+pub(crate) struct MechanicalExchange {
+    duration_s: f64,
+    momentum_change: f64,
+    energy_change: f64,
+    boundary_impulse: [f64; 2],
+    boundary_work: [f64; 2],
+}
+
+impl From<&StepReport> for MechanicalExchange {
+    fn from(report: &StepReport) -> Self {
+        Self {
+            duration_s: report.elapsed.value(),
+            momentum_change: report.after.momentum - report.before.momentum,
+            energy_change: report.after.energy - report.before.energy,
+            boundary_impulse: [
+                report.left_boundary_change.momentum,
+                report.right_boundary_change.momentum,
+            ],
+            boundary_work: [
+                report.left_boundary_change.energy,
+                report.right_boundary_change.energy,
+            ],
+        }
+    }
+}
+
+impl From<&crate::multicomponent::StepReport> for MechanicalExchange {
+    fn from(report: &crate::multicomponent::StepReport) -> Self {
+        Self {
+            duration_s: report.elapsed.value(),
+            momentum_change: report.after.momentum - report.before.momentum,
+            energy_change: report.after.energy - report.before.energy,
+            boundary_impulse: [
+                report.left_boundary_change.momentum,
+                report.right_boundary_change.momentum,
+            ],
+            boundary_work: [
+                report.left_boundary_change.energy,
+                report.right_boundary_change.energy,
+            ],
+        }
+    }
+}
+
+pub(crate) fn mechanical_report<R>(
+    gas: R,
+    exchange: MechanicalExchange,
     walls: [Piston; 2],
     loads: [InertialWallLoad; 2],
     speed: [f64; 2],
     displacement: [f64; 2],
     area: f64,
-) -> Result<InertialWallsStep, PistonError> {
-    let boundary = [gas.left_boundary_change, gas.right_boundary_change];
+) -> Result<InertialWallsStep<R>, PistonError> {
     let before = walls.map(|wall| wall.velocity_m_s());
     let after = core::array::from_fn(|i| speed[i] + (speed[i] - before[i]));
     let momentum: [f64; 2] = core::array::from_fn(|i| walls[i].mass_kg() * (after[i] - before[i]));
@@ -314,17 +374,18 @@ fn mechanical_report(
     });
     let external = core::array::from_fn(|i| loads[i].external_force_n * displacement[i]);
     let external_impulse: [f64; 2] = core::array::from_fn(|i| {
-        gas.elapsed.value()
+        exchange.duration_s
             * (loads[i].external_force_n - [-1.0, 1.0][i] * area * loads[i].exterior_pressure_pa)
     });
     let residual =
-        core::array::from_fn(|i| momentum[i] + boundary[i].momentum - external_impulse[i]);
-    let work =
-        core::array::from_fn(|i| kinetic[i] + boundary[i].energy + exterior[i] - external[i]);
-    let combined = (gas.after.momentum - gas.before.momentum)
+        core::array::from_fn(|i| momentum[i] + exchange.boundary_impulse[i] - external_impulse[i]);
+    let work = core::array::from_fn(|i| {
+        kinetic[i] + exchange.boundary_work[i] + exterior[i] - external[i]
+    });
+    let combined = exchange.momentum_change
         + (momentum[0] - external_impulse[0])
         + (momentum[1] - external_impulse[1]);
-    let total = (gas.after.energy - gas.before.energy)
+    let total = exchange.energy_change
         + (kinetic[0] + exterior[0] - external[0])
         + (kinetic[1] + exterior[1] - external[1]);
     if [
@@ -350,7 +411,7 @@ fn mechanical_report(
         velocity_after_m_s: after,
         midpoint_velocity_m_s: speed,
         displacement_m: displacement,
-        gas_impulse_n_s: boundary.map(|change| -change.momentum),
+        gas_impulse_n_s: exchange.boundary_impulse.map(|impulse| -impulse),
         kinetic_energy_change_j: kinetic,
         external_force_work_j: external,
         exterior_pressure_work_j: exterior,
@@ -363,11 +424,11 @@ fn mechanical_report(
     })
 }
 
-fn solve(
+pub(crate) fn solve<R>(
     initial: [f64; 2],
     controls: InertialWallsControl,
-    mut trial: impl FnMut([f64; 2]) -> Result<InertialWallsStep, PistonError>,
-) -> Result<InertialWallsStep, PistonError> {
+    mut trial: impl FnMut([f64; 2]) -> Result<InertialWallsStep<R>, PistonError>,
+) -> Result<InertialWallsStep<R>, PistonError> {
     let mut speed = initial;
     let mut current = trial(speed)?;
     for iteration in 0..=controls.maximum_iterations {
@@ -445,6 +506,11 @@ fn solve(
                     Err(PistonError::Cancelled) => return Err(PistonError::Cancelled),
                     Err(PistonError::Gas(Error::Allocation)) => {
                         return Err(PistonError::Gas(Error::Allocation));
+                    }
+                    Err(PistonError::MixtureGas(crate::multicomponent::Error::Allocation)) => {
+                        return Err(PistonError::MixtureGas(
+                            crate::multicomponent::Error::Allocation,
+                        ));
                     }
                     Err(error) => last = error,
                 }

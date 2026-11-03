@@ -18,6 +18,7 @@ mod characteristic;
 mod eos;
 mod evolve;
 mod flux;
+mod inertial_walls;
 mod moving;
 mod normal;
 mod piston;

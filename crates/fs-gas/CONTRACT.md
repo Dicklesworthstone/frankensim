@@ -1389,6 +1389,35 @@ This frozen-composition adiabatic lane does not yet compose the two moving
 walls with mixture chemistry, heat transfer, gravity, contact stops or
 transverse dynamics; it establishes no general FSI stability theorem.
 
+### Evolving mixtures with two finite end walls
+
+`MixtureEuler1d::step_with_inertial_walls` now uses the same simultaneous
+wall solve and physical acceptance with its original species-resolved ALE
+operator. Local partial densities and original caloric sources determine
+pressure at every stage. The complete native gas report retains canonical
+species masses, both boundary exchanges and independently referenced total
+energy. Each impermeable wall has zero flux of every species; absent species
+remain absent. No nominal frozen composition replaces the evolving field.
+
+`InertialWallsStep<R>` retains the frozen report as its public default. A
+small internal exchange record passes only actual gas momentum/energy changes
+and each boundary impulse/work to the shared mechanical equations; no species
+or source state enters a duplicate wall model. Trials reuse the native mixture
+candidate and geometry workspaces. Gas, all species, mesh, time and both walls
+publish only after the common physical checks and final cancellation gate.
+Original mixture failures retain their typed causes; cancellation and
+allocation failures propagate without numerical retries.
+
+Three focused regression groups cover unequal walls with heterogeneous
+composition and independent formation-gauge shifts; agreement with the
+original frozen owner for a fixed two-species composition; and early/late
+cancellation, failed roots and unsupported-boundary rollback. These tests
+are authored and formatting checked, but have not been compiled or executed
+in this constrained environment. Chemistry, molecular diffusion, viscosity
+and wall heat remain separate owners. The underlying conservative mixture
+scheme retains its pressure-oscillation limitation at generally advecting
+unequal-caloric contacts.
+
 ### Pressure-driven inertia of a resolved gas end wall
 
 `Euler1d::step_with_piston` couples the existing spatial Euler field to
