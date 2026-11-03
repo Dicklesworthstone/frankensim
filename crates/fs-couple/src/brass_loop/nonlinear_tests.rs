@@ -330,3 +330,43 @@ fn a_small_amplitude_nonlinear_bore_reproduces_the_linear_banks_input_impedance(
         assert!((q_nl / q_lin - 1.0).abs() <= 0.10);
     }
 }
+
+// NOZ#653 of the R5C Bb4 card: the face pressure p sat one ulp above the mouth pressure (a lip just opening at equilibrium) and the primitive recovered
+// from the end wave's conserved variables carried a pressure two ulp below p, hence below the mouth pressure. The outflow donor's pressure is p by
+// construction, so the metered flow must not depend on how far the recovered pressure fell short of it.
+#[test]
+fn the_outflow_donor_is_the_wave_pressure_not_its_rounded_recovery() {
+    let gas = specimen();
+    let mouth = state(&gas, 101_325.0, 0.0);
+    let p = mouth.pressure.next_up();
+    assert!(p > mouth.pressure);
+    let mut star = state(&gas, p, 0.0);
+    star.pressure = p.next_down().next_down();
+    assert!(star.pressure < mouth.pressure, "the planted star must sit below the mouth pressure");
+    let metered_low = metered(&gas, star, mouth, OPENING_M2, p).expect("outflow at equilibrium must not be refused");
+    assert!(metered_low.is_finite() && metered_low <= 0.0, "{metered_low}");
+    // Independent of the recovery's rounding: the same star with its pressure exactly p, and one ulp above, meter the same flow bit for bit.
+    for recovered in [p, p.next_up()] {
+        let exact = Primitive { pressure: recovered, ..star };
+        let metered_exact = metered(&gas, exact, mouth, OPENING_M2, p).unwrap();
+        assert_eq!(metered_low.to_bits(), metered_exact.to_bits());
+    }
+    // A real outflow, far above the mouth pressure, is still metered and still outward.
+    let high = mouth.pressure * 1.02;
+    let outward = metered(&gas, state(&gas, high, 0.0), mouth, OPENING_M2, high).unwrap();
+    assert!(outward < 0.0, "{outward}");
+}
+
+// The planted negative for the test above: the nozzle's precondition is untouched. A backpressure above a stationary donor by a real margin, or a
+// donor that is not exactly stationary, is still refused with the same message; equality is still accepted.
+#[test]
+fn the_nozzle_still_refuses_a_backpressure_above_its_stationary_donor() {
+    let gas = specimen();
+    let donor = state(&gas, 101_325.0, 0.0);
+    assert!(gas.nozzle_exit(donor, donor.pressure, || false).is_ok());
+    let above = gas.nozzle_exit(donor, donor.pressure * (1.0 + 1e-6), || false).unwrap_err();
+    assert!(format!("{above:?}").contains("stationary nozzle donor or backpressure"), "{above:?}");
+    let moving = Primitive { velocity: 1e-9, ..donor };
+    let moving = gas.nozzle_exit(moving, donor.pressure * (1.0 - 1e-6), || false).unwrap_err();
+    assert!(format!("{moving:?}").contains("stationary nozzle donor or backpressure"), "{moving:?}");
+}

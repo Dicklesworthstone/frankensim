@@ -333,8 +333,14 @@ fn metered(
         let (jet, _) = gas.nozzle_exit(mouth, p, || false)?;
         Ok(jet.density * jet.velocity * opening)
     } else {
+        // The star state is the end wave's state AT `p`: the caller solved it for that pressure, so the donor's pressure is `p` by construction. The
+        // primitive recovered from the conserved variables carries it only up to rounding. With `p` a few ulp above the mouth pressure (a lip just
+        // opening at equilibrium) that recovery can come back below the mouth pressure, and the nozzle then refuses a stationary donor at equality
+        // ("stationary nozzle donor or backpressure": NOZ#653 on the Bb4 card, p 1 ulp above the mouth, star 2 ulp below p). The nozzle's own
+        // precondition (0 < backpressure <= donor.pressure, donor.velocity == 0) is unchanged.
         let donor = Primitive {
             velocity: 0.0,
+            pressure: p,
             ..star
         };
         let (jet, _) = gas.nozzle_exit(donor, mouth.pressure, || false)?;
