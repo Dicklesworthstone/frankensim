@@ -27,6 +27,8 @@
 pub mod vacuum;
 /// Explicitly qualified molecular momentum moments for mechanical consumers.
 pub mod momentum;
+/// Source-qualified aperture incidence from a drifting local Maxwellian.
+pub mod drift;
 
 use super::{
     ClosedGasParcel, GasEnergyError, SpeciesId, Sum, catalog, invalid, poll, positive,

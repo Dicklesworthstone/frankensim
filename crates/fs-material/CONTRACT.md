@@ -11998,3 +11998,37 @@ synthetic source coefficients, not empirical validation. Native compilation
 and execution remain unverified while required constellation siblings are
 absent.
 
+### Drifting Maxwellian incidence through qualified molecular apertures
+
+`thermochemical_gas::energy::parcel::transfer::species::effusion::drift`
+binds the existing shifted-Maxwellian half-space owner to original gas calorics,
+species transmission and aperture area. `EffusiveDriftInterface` adds an authored
+relative-speed support and provenance to the original angular qualification.
+That declaration covers an undisturbed incident Maxwellian, exposed collisionless
+transmission and the original temperature/pressure/catalog range, including
+finite-thickness, grazing and counterstreaming-collision assumptions. Rest-frame
+thinness alone does not qualify moving incidence.
+
+`ClosedGasParcel::drifting_effusive_flux` receives source velocity minus aperture
+velocity and an outward unit normal. Each species retains original source
+enthalpy, its separate molecular crossing-energy correction, the complete
+conditional vector velocity and the original zero-drift beam. Accepted finite
+mass supplies both impulse and molecular energy. Area and original transmission
+are applied once. Incoming relative kinetic energy is already included; no
+additional thermalization heat or continuum pressure force is introduced.
+
+Exactly zero drift preserves the original beam. Tangential-only drift preserves
+its mass flux and adds tangential kinetic energy to the original thermal
+coordinate. The direct positive gross incidence preserves rare outward-drift
+thermal tails; a separately retained mass-rate change preserves small drift
+beside rounded equilibrium beams. This source adapter reuses the existing
+thermal kinetic kernel and does not implement a second Gaussian integrator.
+Zero area is inactive; a calibrated zero transmission still admits its source
+and drift support. Moving consumers must refresh the sampled relative velocity.
+
+Six focused genuine-source groups cover rest parity, tangential/internal-mode
+energy, opposing-halfspace conservation, positive tails and small increments,
+qualification/cancellation, and rotation/area/caloric-reference invariance.
+Rustfmt parsing and source/API checks passed. Native compilation and execution
+remain unavailable because required constellation siblings are missing.
+
