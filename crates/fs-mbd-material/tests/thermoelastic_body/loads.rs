@@ -186,3 +186,121 @@ fn unloaded_identity_and_refusal_preserve_the_accepted_snapshot() {
     });
     assert_eq!(plain,before);
 }
+
+// Remove the six rigid motions while leaving node 1's transverse y motion
+// free, so the independently known tensile stress also enters its vibration.
+const STRETCHED_SUPPORTS: [usize; 7] = [0, 1, 2, 3, 5, 6, 8];
+
+#[test]
+fn prescribed_material_extension_reaches_stress_mass_and_the_same_vibration_pencil() {
+    let cards = [card("a", 6., [1000., 700.], 1e-4)];
+    let original = reference(&cards);
+    let mesh = TetrahedralMass::bind(&original, &NODES[..4], &TETS[..1], &KEYS[..1], 4, || false).unwrap();
+    for (temperature, young) in [(300., 1000.), (400., 700.)] {
+        let body = with_cx(|cx| mesh.solve_thermal_with_prescribed_dofs(
+            &inputs(&cards, &[temperature]), &STRETCHED_SUPPORTS, &[(0, 2.)],
+            &[(3, 0.02)], config(), cx)).unwrap();
+        let free_strain = 1e-4 * (temperature - 300.);
+        let elastic_strain = 0.02 - free_strain;
+        let stress = young * elastic_strain;
+        let displacement = body.displacement().displacement_m();
+        // Independent uniaxial thermoelastic solution, nu=1/4, V=1/6.
+        near(displacement[1][0], 0.02);
+        near(displacement[2][1], free_strain - 0.25 * elastic_strain);
+        near(displacement[3][2], free_strain - 0.25 * elastic_strain);
+        near(body.stress().elements()[0].stress_mandel_pa()[0], stress);
+        near(body.stress().elements()[0].stress_mandel_pa()[1], 0.);
+        near(body.stress().elements()[0].stress_mandel_pa()[2], 0.);
+        near(body.stress().elastic_energy_j(), young * elastic_strain.powi(2) / 12.);
+        near(body.support_reactions_n()[0][0], -stress / 6. - 2.);
+        near(body.support_reactions_n()[1][0], stress / 6.);
+        near(body.body().nodes_m()[1][0], 1.02);
+        assert_eq!(body.prescribed_dofs_m(), &[(3, 0.02)]);
+        assert_eq!(body.body().inertia().mass(), original.inertia().mass());
+        let pencil = with_cx(|cx| body.initial_stress_pencil(cx)).unwrap();
+        assert_eq!(pencil.stress(), body.stress());
+        assert_eq!(pencil.pencil().free_dofs, vec![4, 7, 9, 10, 11]);
+        for (i, value) in pencil.geometric_stiffness().to_dense().iter().enumerate() {
+            near(*value, if i == 0 { stress / 6. } else { 0. });
+        }
+    }
+    let states = inputs(&cards, &[350.]);
+    let legacy = with_cx(|cx| mesh.solve_thermal_with_nodal_forces(
+        &states, &SUPPORT, &[(3, 1.)], config(), cx)).unwrap();
+    let empty = with_cx(|cx| mesh.solve_thermal_with_prescribed_dofs(
+        &states, &SUPPORT, &[(3, 1.)], &[], config(), cx)).unwrap();
+    assert_eq!(legacy, empty);
+}
+
+fn prestretched<'a>(
+    reference: &'a ResolvedBody, card: &'a MaterialCard, curve: &'a ResolvedHeatCapacityCurve,
+    cx: &Cx<'_>,
+) -> ConstrainedHeatedBody<'a> {
+    let template = heated(reference, card, curve, cx);
+    ConstrainedHeatedBody::new_with_prescribed_dofs(
+        template.mesh().clone(), template.regions().to_vec(), STRETCHED_SUPPORTS.to_vec(),
+        vec![(0, 2.)], vec![(3, 0.02)], config(),
+        vec![TimedEvent { time_s: 1., event: Event::Boundary(CellId(0), boundary(-100.)) }],
+        DepositionBudget { max_cells: 1, max_links: 0, max_events: 2, max_substeps: 100 },
+        step(), cx,
+    ).unwrap()
+}
+
+#[test]
+fn finite_heating_and_restart_preserve_support_prestrain_and_change_the_actual_modes() {
+    let cards = [heating_card(10.)];
+    let original = reference(&cards);
+    let curve = caloric(&cards[0]);
+    let initial = with_cx(|cx| prestretched(&original, &cards[0], &curve, cx));
+    let initial_shape = initial.configuration().clone();
+    let (hot, report) = with_cx(|cx| initial.advance_to(1., step(), 4, cx)).unwrap();
+    near(hot.thermal().temperature_k(CellId(0)).unwrap(), 310.);
+    near(report.thermal.external_heat_j, 100.);
+    assert_eq!(report.shape_solves, 4);
+    assert_eq!(hot.prescribed_dofs_m(), initial.prescribed_dofs_m());
+    assert_eq!(hot.configuration().prescribed_dofs_m(), initial.prescribed_dofs_m());
+    near(hot.configuration().displacement().displacement_m()[1][0], 0.02);
+    near(hot.configuration().stress().elements()[0].stress_mandel_pa()[0], 950. * 0.019);
+    assert_eq!(hot.configuration().body().inertia().mass(), original.inertia().mass());
+    for (warm, cold) in spectrum(&hot).iter().zip(spectrum(&initial)) {
+        assert!(*warm < cold);
+    }
+    let (prefix, _) = with_cx(|cx| initial.advance_to(0.5, step(), 2, cx)).unwrap();
+    let (resumed, _) = with_cx(|cx| prefix.clone().advance_to(1., step(), 2, cx)).unwrap();
+    assert_eq!(resumed.configuration(), hot.configuration());
+    assert_eq!(resumed.thermal().cells(), hot.thermal().cells());
+    let (cooled, report) = with_cx(|cx| hot.advance_to(2., step(), 4, cx)).unwrap();
+    near(report.thermal.external_heat_j, -100.);
+    assert_eq!(cooled.configuration(), &initial_shape);
+    assert_eq!(spectrum(&cooled), spectrum(&initial));
+
+    assert!(with_cx(|cx| initial.advance_to(1., step(), 3, cx)).is_err());
+    // Cooling past the admitted source range refuses the whole proposed history.
+    assert!(with_cx(|cx| hot.advance_to(3., step(), 8, cx)).is_err());
+    let gate = CancelGate::new();
+    gate.request();
+    ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+        let cx = Cx::new(&gate, arena, StreamKey { seed: 3, kernel_id: 17, tile: 0, iteration: 0 },
+            Budget::INFINITE, ExecMode::Deterministic);
+        assert!(initial.advance_to(1., step(), 4, &cx).is_err());
+    });
+    assert_eq!(initial.configuration(), &initial_shape);
+    near(initial.thermal().time_s(), 0.);
+    assert_eq!(initial.prescribed_dofs_m(), &[(3, 0.02)]);
+}
+
+#[test]
+fn incompatible_support_offsets_refuse_without_publishing_a_material_configuration() {
+    let cards = [card("a", 6., [1000., 700.], 1e-4)];
+    let original = reference(&cards);
+    let before = original.clone();
+    let mesh = TetrahedralMass::bind(&original, &NODES[..4], &TETS[..1], &KEYS[..1], 4, || false).unwrap();
+    for prescribed in [
+        vec![(3, f64::NAN)], vec![(3, 0.2)], vec![(4, 0.01)],
+        vec![(3, 0.01), (3, 0.02)], vec![(3, 0.01), (0, 0.)], vec![(12, 0.01)],
+    ] {
+        assert!(with_cx(|cx| mesh.solve_thermal_with_prescribed_dofs(
+            &inputs(&cards, &[350.]), &STRETCHED_SUPPORTS, &[], &prescribed, config(), cx)).is_err());
+    }
+    assert_eq!(original, before);
+}

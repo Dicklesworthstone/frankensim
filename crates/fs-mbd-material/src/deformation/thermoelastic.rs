@@ -152,6 +152,10 @@ impl<'a> ThermalBody<'a> {
     pub fn support_reactions_n(&self)->&[[f64; 3]] {&self.support_reactions_n}
     /// Exact accepted dead forces in sorted full node-major xyz DOF order [N].
     pub fn nodal_forces_n(&self)->&[(usize, f64)] {&self.linearization.nodal_forces_n}
+    /// Accepted absolute support offsets from the reference mesh [m].
+    /// Unlisted fixed components remain zero; incremental vibration fixes all
+    /// the same components about this equilibrium.
+    pub fn prescribed_dofs_m(&self)->&[(usize, f64)] {&self.linearization.prescribed_dofs_m}
     /// Existing admitted geometric update and its exact solution-bound identity.
     pub const fn geometry(&self)->&TetDeformedMesh {&self.geometry}
     /// Current constitutive sources in canonical reference-region order.
@@ -198,11 +202,31 @@ impl<'a> TetrahedralMass<'a> {
         &self, cells:&[ThermalCell<'_>], fixed_dofs:&[usize],
         nodal_forces_n:&[(usize, f64)], config:ThermalSolveConfig, cx:&Cx<'_>,
     )->Result<ThermalBody<'a>,ThermalBodyError> {
+        self.solve_thermal_with_prescribed_dofs(cells, fixed_dofs, nodal_forces_n, &[], config, cx)
+    }
+
+    /// Resolve material heating with finite support offsets and dead loads.
+    ///
+    /// Support offsets are absolute metres from the ORIGINAL reference mesh,
+    /// sorted unique full xyz DOFs that belong to `fixed_dofs`. Unlisted fixed
+    /// components stay zero. The original solid Dirichlet lift owns the solve
+    /// and stress recovery; no penalty force or free-expansion approximation is
+    /// introduced. `maximum_nodal_displacement_m` also bounds prescribed motion.
+    /// The exact offsets remain attached to geometry, reactions and vibration.
+    /// Empty offsets preserve the existing zero-support arithmetic and identity.
+    /// This is a quasistatic configuration, not an actuator-work or inertia law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_with_prescribed_dofs(
+        &self, cells:&[ThermalCell<'_>], fixed_dofs:&[usize],
+        nodal_forces_n:&[(usize, f64)], prescribed_dofs_m:&[(usize, f64)],
+        config:ThermalSolveConfig, cx:&Cx<'_>,
+    )->Result<ThermalBody<'a>,ThermalBodyError> {
         checkpoint(cx)?;
         if cells.len()!=self.reference.regions().len()
             || self.nodes_m.len()>config.assembly.maximum_nodes
             || self.tetrahedra.len()>config.assembly.maximum_tetrahedra
-            || nodal_forces_n.len()>self.nodes_m.len().saturating_mul(3) {
+            || nodal_forces_n.len()>self.nodes_m.len().saturating_mul(3)
+            || prescribed_dofs_m.len()>fixed_dofs.len() {
             return Err(invalid("complete cell states and adequate original solid budgets required"));
         }
         if !config.maximum_absolute_mandel_strain.is_finite() || config.maximum_absolute_mandel_strain<=0.0
@@ -248,7 +272,15 @@ impl<'a> TetrahedralMass<'a> {
         let problem=TetLinearElasticProblem {nodes_m:&self.nodes_m,tetrahedra:&self.tetrahedra,
             materials:TetMaterialField::PerElement(&materials),fixed_dofs,budget:config.assembly};
         let field=TetThermalStrainField::PerElement(&strains);
-        let (displacement, stress) = if nodal_forces_n.is_empty() {
+        let (displacement, stress) = if !prescribed_dofs_m.is_empty() {
+            let displacement=problem.solve_thermal_displacement_with_prescribed_dofs(
+                field,nodal_forces_n,prescribed_dofs_m,config.maximum_nodal_displacement_m,
+                config.solve,cx)?;
+            let stress=problem.recover_thermal_stress_with_prescribed_dofs(&displacement,
+                field,nodal_forces_n,prescribed_dofs_m,config.maximum_nodal_displacement_m,
+                config.mesh_frame,config.maximum_absolute_mandel_strain,cx)?;
+            (displacement, stress)
+        } else if nodal_forces_n.is_empty() {
             let displacement=problem.solve_thermal_displacement(field,config.solve,cx)?;
             let stress=problem.recover_thermal_stress(&displacement,field,config.mesh_frame,
                 config.maximum_absolute_mandel_strain,cx)?;
@@ -266,7 +298,8 @@ impl<'a> TetrahedralMass<'a> {
         checkpoint(cx)?;
         let linearization = vibration::Linearization {
             reference_nodes_m: self.nodes_m.clone(), materials, strains,
-            fixed_dofs: fixed_dofs.to_vec(), nodal_forces_n: nodal_forces_n.to_vec(), config,
+            fixed_dofs: fixed_dofs.to_vec(), nodal_forces_n: nodal_forces_n.to_vec(),
+            prescribed_dofs_m: prescribed_dofs_m.to_vec(), config,
         };
         checkpoint(cx)?;
         Ok(ThermalBody {body,displacement,stress,support_reactions_n,geometry,sources,linearization})

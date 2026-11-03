@@ -79,6 +79,7 @@ pub struct ConstrainedHeatedBody<'a> {
     regions: Vec<ConstrainedRegion<'a>>,
     fixed_dofs: Vec<usize>,
     nodal_forces_n: Vec<(usize, f64)>,
+    prescribed_dofs_m: Vec<(usize, f64)>,
     shape_limits: ThermalSolveConfig,
     thermal: DepositionSimulation<'a>,
     configuration: ThermalBody<'a>,
@@ -115,15 +116,39 @@ impl<'a> ConstrainedHeatedBody<'a> {
     /// mechanical work are not part of the existing heat-only energy audit.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_nodal_forces(
-        mesh: TetrahedralMass<'a>, mut regions: Vec<ConstrainedRegion<'a>>,
+        mesh: TetrahedralMass<'a>, regions: Vec<ConstrainedRegion<'a>>,
         fixed_dofs: Vec<usize>, nodal_forces_n: Vec<(usize, f64)>,
         shape_limits: ThermalSolveConfig, events: Vec<TimedEvent>,
         budget: DepositionBudget, config: StepConfig, cx: &Cx<'_>,
     ) -> Result<Self, ConstrainedHeatError> {
+        Self::new_with_prescribed_dofs(mesh, regions, fixed_dofs, nodal_forces_n,
+            Vec::new(), shape_limits, events, budget, config, cx)
+    }
+
+    /// Heat a specimen held at explicit, fixed support offsets from its
+    /// reference geometry. The same native Dirichlet lift supplies the initial
+    /// prestress and every later equilibrium as temperature/material laws evolve.
+    /// Offsets remain absolute: they are neither reset nor accumulated by steps,
+    /// events, restart or cooling. All increments of the vibration pencil use
+    /// the same fixed support components about the accepted equilibrium.
+    ///
+    /// Entries are sorted unique full xyz DOFs already present in `fixed_dofs`,
+    /// in metres, bounded by `shape_limits.maximum_nodal_displacement_m`.
+    /// Heating and generated-source histories publish only after shape accepts.
+    /// Supports do not move during this timeline: no actuator work is inserted
+    /// into the heat audit, and reciprocal thermoelastic heat is not inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_prescribed_dofs(
+        mesh: TetrahedralMass<'a>, mut regions: Vec<ConstrainedRegion<'a>>,
+        fixed_dofs: Vec<usize>, nodal_forces_n: Vec<(usize, f64)>,
+        prescribed_dofs_m: Vec<(usize, f64)>, shape_limits: ThermalSolveConfig,
+        events: Vec<TimedEvent>, budget: DepositionBudget, config: StepConfig, cx: &Cx<'_>,
+    ) -> Result<Self, ConstrainedHeatError> {
         poll(cx)?;
         if regions.len() != mesh.reference().regions().len()
             || fixed_dofs.len() > mesh.nodes_m().len().saturating_mul(3)
-            || nodal_forces_n.len() > mesh.nodes_m().len().saturating_mul(3) {
+            || nodal_forces_n.len() > mesh.nodes_m().len().saturating_mul(3)
+            || prescribed_dofs_m.len() > fixed_dofs.len() {
             return Err(HeatingError::Binding("complete thermal regions and bounded supports required").into());
         }
         regions.sort_by_key(|r| r.storage.key);
@@ -131,9 +156,10 @@ impl<'a> ConstrainedHeatedBody<'a> {
         let thermal = initialize(&[(mesh.reference(), &storage)], events, budget, config,
             &mut || poll(cx))?;
         let configuration = configure(&mesh, &regions, &fixed_dofs, &nodal_forces_n,
-            shape_limits, &thermal, cx)?;
+            &prescribed_dofs_m, shape_limits, &thermal, cx)?;
         poll(cx)?;
-        Ok(Self { mesh, regions, fixed_dofs, nodal_forces_n, shape_limits, thermal, configuration })
+        Ok(Self { mesh, regions, fixed_dofs, nodal_forces_n, prescribed_dofs_m,
+            shape_limits, thermal, configuration })
     }
 
     /// Original shared-node material mass map, never replaced while heating.
@@ -146,6 +172,8 @@ impl<'a> ConstrainedHeatedBody<'a> {
     pub fn regions(&self) -> &[ConstrainedRegion<'a>] { &self.regions }
     /// Immutable reference-frame mechanical dead loads shared by all endpoints.
     pub fn nodal_forces_n(&self) -> &[(usize, f64)] { &self.nodal_forces_n }
+    /// Immutable absolute support offsets, shared by heat, shape and vibration.
+    pub fn prescribed_dofs_m(&self) -> &[(usize, f64)] { &self.prescribed_dofs_m }
 
     /// Advance actual heat transport with a constrained configuration at EACH
     /// accepted substep, before endpoint events. A bad intermediate state cannot
@@ -206,7 +234,8 @@ impl DepositionObserver for ShapeObserver<'_, '_, '_> {
     ) -> Result<(), Self::Error> {
         checkpoint()?;
         let configuration = configure(&self.body.mesh, &self.body.regions, &self.body.fixed_dofs,
-            &self.body.nodal_forces_n, self.body.shape_limits, thermal, self.cx)?;
+            &self.body.nodal_forces_n, &self.body.prescribed_dofs_m,
+            self.body.shape_limits, thermal, self.cx)?;
         checkpoint()?;
         self.calls = self.calls.checked_add(1).ok_or(DepositionError::Budget("shape solves"))?;
         self.configuration = configuration;
@@ -214,9 +243,10 @@ impl DepositionObserver for ShapeObserver<'_, '_, '_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn configure<'a>(
     mesh: &TetrahedralMass<'a>, regions: &[ConstrainedRegion<'_>], fixed_dofs: &[usize],
-    nodal_forces_n: &[(usize, f64)], limits: ThermalSolveConfig,
+    nodal_forces_n: &[(usize, f64)], prescribed_dofs_m: &[(usize, f64)], limits: ThermalSolveConfig,
     thermal: &DepositionSimulation<'_>, cx: &Cx<'_>,
 ) -> Result<ThermalBody<'a>, ConstrainedHeatError> {
     poll(cx)?;
@@ -237,7 +267,8 @@ fn configure<'a>(
             expansion_model: region.expansion_model,
             expansion_selection: source.expansion_selection.clone() });
     }
-    Ok(mesh.solve_thermal_with_nodal_forces(&cells, fixed_dofs, nodal_forces_n, limits, cx)?)
+    Ok(mesh.solve_thermal_with_prescribed_dofs(&cells, fixed_dofs, nodal_forces_n,
+        prescribed_dofs_m, limits, cx)?)
 }
 
 fn poll(cx: &Cx<'_>) -> Result<(), DepositionError> {

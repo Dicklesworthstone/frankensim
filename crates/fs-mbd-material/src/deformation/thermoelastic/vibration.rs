@@ -12,13 +12,14 @@ pub(super) struct Linearization {
     pub strains: Vec<TetThermalStrainState>,
     pub fixed_dofs: Vec<usize>,
     pub nodal_forces_n: Vec<(usize, f64)>,
+    pub prescribed_dofs_m: Vec<(usize, f64)>,
     pub config: ThermalSolveConfig,
 }
 impl ThermalBody<'_> {
     /// Assemble the initial-stress vibration pencil of THIS accepted thermal state.
     ///
     /// Current source-resolved stiffness and material axes, reference density, thermal strains, mesh,
-    /// supports, mechanical dead forces and actual displacement are retained at
+    /// supports and their absolute offsets, mechanical dead forces and actual displacement are retained at
     /// the successful shape solve. No new card lookup, density query, stress multiplier or hand-entered
     /// modal coefficient is needed. The original solid owner rechecks solution
     /// binding and supplies the ordinary (K_e + K_g, M) carrier for fs-modal.
@@ -47,7 +48,12 @@ impl ThermalBody<'_> {
             budget: input.config.assembly,
         };
         let field = TetThermalStrainField::PerElement(&input.strains);
-        if input.nodal_forces_n.is_empty() {
+        if !input.prescribed_dofs_m.is_empty() {
+            Ok(problem.assemble_thermal_tangent_with_prescribed_dofs(&self.displacement,
+                field, &input.nodal_forces_n, &input.prescribed_dofs_m,
+                input.config.maximum_nodal_displacement_m, input.config.mesh_frame,
+                input.config.maximum_absolute_mandel_strain, cx)?)
+        } else if input.nodal_forces_n.is_empty() {
             Ok(problem.assemble_thermal_tangent(&self.displacement, field,
                 input.config.mesh_frame, input.config.maximum_absolute_mandel_strain, cx)?)
         } else {

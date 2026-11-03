@@ -105,6 +105,27 @@ impl TetLinearElasticProblem<'_> {
         self.assemble_tangent_from_stress(stress, cx)
     }
 
+    /// Initial-stress pencil about the same prescribed-displacement equilibrium.
+    ///
+    /// Recover stress through the original Dirichlet-lift owner, binding the
+    /// exact support positions, forces and thermal field to the accepted solve.
+    /// Incremental vibration is zero on these fixed components; the finite
+    /// support offset contributes through the recovered stress, not a new load.
+    /// This remains the reference-mesh small-displacement approximation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_thermal_tangent_with_prescribed_dofs(
+        &self, solution: &TetThermalDisplacementSolution,
+        thermal: TetThermalStrainField<'_>, nodal_forces_n: &[(usize, f64)],
+        prescribed_m: &[(usize, f64)], maximum_prescribed_displacement_m: f64,
+        mesh_frame: ContentHash, maximum_absolute_mandel_strain: f64, cx: &Cx<'_>,
+    ) -> Result<PrestressedTetAssembly, TetElasticError> {
+        let stress = self.recover_thermal_stress_with_prescribed_dofs(
+            solution, thermal, nodal_forces_n, prescribed_m,
+            maximum_prescribed_displacement_m, mesh_frame,
+            maximum_absolute_mandel_strain, cx)?;
+        self.assemble_tangent_from_stress(stress, cx)
+    }
+
     /// Preserve the original recovered stress while using an explicitly
     /// supplied INCREMENTAL material tangent. This is needed when eliminating
     /// a coupled state changes d(sigma)/d(strain), as for local adiabatic

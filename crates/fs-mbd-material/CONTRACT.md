@@ -169,6 +169,25 @@ Focused synthetic cases exercise density/weight, loaded softening and modes,
 correct support reactions, heterogeneous element order, heat/cool/restart and
 refusal. Native Rust execution remains a separate verification requirement.
 
+`TetrahedralMass::solve_thermal_with_prescribed_dofs` and
+`ConstrainedHeatedBody::new_with_prescribed_dofs` now carry absolute support
+offsets through this same source-backed path. The native solid Dirichlet lift
+owns equilibrium and stress recovery. Original reference-mesh offsets remain
+attached to the accepted configuration, reactions and initial-stress pencil;
+heating, cooling, generated-source observers and restart cannot reset or
+accumulate them. Empty offsets retain the existing zero-support identities.
+The prescribed displacement and total nodal displacement share the caller's
+metre bound. Invalid/free/duplicate support DOFs or a later material, geometry,
+budget or cancellation failure publish no candidate history.
+
+Supports remain fixed throughout this thermal timeline. This models a held
+prestrained specimen, not moving-actuator dynamics or reciprocal thermoelastic
+heat. Incremental vibration fixes the same support DOFs about the finite
+equilibrium. Native prestress recovery rechecks the exact offsets and dead
+loads, so a changed support cannot reuse a stale solution. Focused analytical
+tests exercise uniaxial thermal stress/Poisson motion, signed geometric
+stiffness, conserved mass, modal softening, heating/cooling replay and refusal.
+
 `ThermalCell` and `ConstrainedRegion` select the same explicit
 `ThermalStiffnessModel`: isotropic E/nu or nine oriented orthotropic engineering
 constants. The existing material-law owner admits the orthotropic compliance;

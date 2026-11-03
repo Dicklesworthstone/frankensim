@@ -69,6 +69,38 @@ fn g1_driven_extension_combines_thermal_strain_poisson_motion_and_support_reacti
 }
 
 #[test]
+fn prescribed_prestress_uses_the_accepted_offsets_and_rejects_stale_controls() {
+    with_cx(|cx| {
+        let mesh = block([2, 1, 1], [2.0, 0.5, 0.25]);
+        let mat = material(2000.0, 0.25);
+        let thermal = thermal(&mat, [0.0003, 0.0003, 0.0003, 0.0, 0.0, 0.0]);
+        let field = TetThermalStrainField::Uniform(&thermal);
+        let prescribed = grips(&mesh, 2.0, [0.001, -0.002, 0.003], 0.002);
+        let fixed: Vec<_> = prescribed.iter().map(|(dof, _)| *dof).collect();
+        let p = problem(&mesh, &mat, &fixed);
+        let solution = p.solve_thermal_displacement_with_prescribed_dofs(
+            field, &[(0, 2.0)], &prescribed, 0.1, Default::default(), cx).unwrap();
+        let pencil = p.assemble_thermal_tangent_with_prescribed_dofs(
+            &solution, field, &[(0, 2.0)], &prescribed, 0.1,
+            ContentHash([18; 32]), 0.1, cx).unwrap();
+        for stress in pencil.stress().elements() {
+            assert!((stress.stress_mandel_pa()[0] - 3.4).abs() < 1e-6);
+        }
+        let mut changed = prescribed.clone();
+        changed[0].1 += 0.0001;
+        assert!(p.assemble_thermal_tangent_with_prescribed_dofs(
+            &solution, field, &[(0, 2.0)], &changed, 0.1,
+            ContentHash([18; 32]), 0.1, cx).is_err());
+        assert!(p.assemble_thermal_tangent_with_prescribed_dofs(
+            &solution, field, &[], &prescribed, 0.1,
+            ContentHash([18; 32]), 0.1, cx).is_err());
+        // Prescribed finite motion must not silently enter the zero-support lane.
+        assert!(p.assemble_thermal_tangent_with_nodal_forces(
+            &solution, field, &[(0, 2.0)], ContentHash([18; 32]), 0.1, cx).is_err());
+    });
+}
+
+#[test]
 fn g1_heterogeneous_bar_preserves_series_compliance_and_nonuniform_free_strain() {
     with_cx(|cx| {
         let mesh = block([4, 1, 1], [1.0; 3]);
