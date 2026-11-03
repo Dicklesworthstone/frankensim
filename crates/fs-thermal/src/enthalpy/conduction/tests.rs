@@ -2,6 +2,9 @@ use super::*;
 use crate::observers::{CoupledObservers, ObserverCouplingError};
 use std::cell::Cell;
 
+#[path = "phase_layer_tests.rs"]
+mod phase_layers;
+
 struct Sensible;
 impl ThermalLaw for Sensible {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {

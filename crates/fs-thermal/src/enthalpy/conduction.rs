@@ -16,8 +16,12 @@
 //! storage, CFL, event splitting, cancellation and acceptance. It also supplies
 //! entropy when `advance_observed_with_entropy` is selected. No caloric law,
 //! material mixing rule, phase geometry or second stepping kernel is inferred.
-//! Reference geometry and mass remain frozen. The coefficient-freezing time
-//! error and cell-resolution error require independent refinement.
+//! Reference geometry and mass remain frozen by default. Explicit planar phase
+//! layers may instead grow or retreat at constant density and footprint: their
+//! current mass determines every normal centre-to-face distance. This changes
+//! thermal resistance, not the stored reference mesh or contact topology. The
+//! coefficient-freezing time error and cell-resolution error require independent
+//! refinement.
 
 use super::*;
 
@@ -63,6 +67,31 @@ pub struct ConductiveAmbient {
     pub surface_resistance_m2_k_w: f64,
 }
 
+/// Explicit uniform planar layer whose thickness follows its conserved mass.
+///
+/// All bound transport channels on this cell must be normal to one of its two
+/// fixed footprint faces. The initial reference volume, mass, density, total
+/// surface area and authored half-distances must describe that same layer.
+/// The caller owns this geometric/constitutive assertion; no orientation,
+/// porosity, density evolution, sidewall area, nucleation or moving mesh is
+/// inferred. The layer must retain strictly positive mass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanarPhaseLayer {
+    pub cell_id: CellId,
+    /// Fixed area of EACH normal face [m²], not their sum.
+    pub footprint_area_m2: f64,
+    /// Constant physical bulk density of this layer [kg/m³].
+    pub density_kg_m3: f64,
+}
+
+#[derive(Clone, Copy)]
+struct BoundPhaseLayer {
+    layer: PlanarPhaseLayer,
+    half_distance_m: f64,
+    exposed_area_m2: f64,
+    reservoir_area_m2: Option<f64>,
+}
+
 #[derive(Clone, Copy)]
 struct BoundAmbient {
     geometry: ConductiveAmbient,
@@ -76,6 +105,7 @@ struct BoundCell {
     segment_id: u64,
     mass_kg: f64,
     geometry: CellGeometry,
+    phase_layer: Option<BoundPhaseLayer>,
 }
 
 #[derive(Clone, Copy)]
@@ -84,6 +114,7 @@ struct BoundLink {
     a: CellId,
     b: CellId,
     area_m2: f64,
+    covered_area_m2: [f64; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -106,6 +137,7 @@ pub struct ConductionObserver<'a> {
     conductivity: BTreeMap<CellId, f64>,
     reservoir_values: BTreeMap<CellId, f64>,
     ambient_values: BTreeMap<CellId, f64>,
+    has_phase_layers: bool,
     prepared: bool,
 }
 
@@ -138,6 +170,7 @@ impl<'a> ConductionObserver<'a> {
             conductivity: BTreeMap::new(),
             reservoir_values: BTreeMap::new(),
             ambient_values: BTreeMap::new(),
+            has_phase_layers: false,
             prepared: false,
         };
         for (i, &(id, law)) in laws.iter().enumerate() {
@@ -173,6 +206,7 @@ impl<'a> ConductionObserver<'a> {
                 a: link.a,
                 b: link.b,
                 area_m2: link.area_m2,
+                covered_area_m2: thermal.contact_areas(link),
             };
             if result.links.insert(link.id, bound).is_some() {
                 return Err(DepositionError::InvalidInput(
@@ -216,6 +250,90 @@ impl<'a> ConductionObserver<'a> {
         Ok(result)
     }
 
+    /// Let selected already-bound cells change mass at fixed planar footprint.
+    ///
+    /// Before each actual heat substep, the current accepted mass sets
+    /// `d = (mass / density) / (2 * footprint)` in the ORIGINAL series-resistance
+    /// laws. Both link sides, reservoir faces and ambient faces use the same
+    /// refreshed distance and conductivity. The original heat owner continues
+    /// to use that same mass for storage and CFL, so thicker frost both stores
+    /// more energy and conducts less heat for a fixed conductivity.
+    ///
+    /// This is a caller-selected one-dimensional layer approximation. Reference
+    /// geometry and face coverage stay fixed; no volume is silently reassigned
+    /// to gas, and no mechanical displacement or pressure work is supplied.
+    /// Unselected cells retain the strict fixed-mass behavior.
+    pub fn with_planar_phase_layers(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        layers: &[PlanarPhaseLayer],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        checkpoint()?;
+        if layers.len() > self.cells.len() {
+            return Err(DepositionError::InvalidInput(
+                "planar phase bindings exceed existing conduction cells",
+            ));
+        }
+        let ids = layers.iter().map(|layer| layer.cell_id).collect::<Vec<_>>();
+        let exposed = thermal.exposed_areas_m2(&ids, &mut checkpoint)?;
+        for &layer in layers {
+            checkpoint()?;
+            let binding = self
+                .cells
+                .get(&layer.cell_id)
+                .ok_or(DepositionError::InvalidInput(
+                    "planar phase layer needs an existing conduction cell",
+                ))?;
+            if binding.phase_layer.is_some()
+                || !positive(layer.footprint_area_m2)
+                || !positive(layer.density_kg_m3)
+                || thermal.materials[&binding.material_id].storage_basis()
+                    != ThermalStorageBasis::Enthalpy
+            {
+                return Err(DepositionError::InvalidInput(
+                    "unique positive planar geometry and enthalpy storage required",
+                ));
+            }
+            let half_distance_m = layer.half_distance(binding.mass_kg)?;
+            let mass = finite(layer.density_kg_m3 * binding.geometry.volume_m3)?;
+            let area = finite(2.0 * layer.footprint_area_m2)?;
+            if !same_measure(mass, binding.mass_kg)
+                || !same_measure(area, binding.geometry.surface_area_m2)
+            {
+                return Err(DepositionError::InvalidInput(
+                    "planar phase reference mass, volume and two-face area disagree",
+                ));
+            }
+            let exposed_area_m2 = exposed[&layer.cell_id];
+            let reservoir_area_m2 = thermal.cells[&layer.cell_id]
+                .boundary
+                .reservoir
+                .map(|r| r.area_m2);
+            if reservoir_area_m2.is_some_and(|a| {
+                a > layer.footprint_area_m2 && !same_measure(a, layer.footprint_area_m2)
+            }) {
+                return Err(DepositionError::InvalidInput(
+                    "reservoir exceeds one planar footprint face",
+                ));
+            }
+            self.cells
+                .get_mut(&layer.cell_id)
+                .expect("admitted phase cell")
+                .phase_layer = Some(BoundPhaseLayer {
+                layer,
+                half_distance_m,
+                exposed_area_m2,
+                reservoir_area_m2,
+            });
+            self.has_phase_layers = true;
+        }
+        self.admit_planar_channels(thermal, &mut checkpoint)?;
+        self.prepare(thermal, &mut checkpoint)?;
+        checkpoint()?;
+        Ok(self)
+    }
+
     /// Bind selected complete exposed ambient faces to the same material owner.
     /// Coverage, reference geometry and material identities remain fixed. Bath
     /// temperatures may change through boundary events. Repeated cells refuse;
@@ -248,6 +366,20 @@ impl<'a> ConductionObserver<'a> {
                 ));
             }
             self.bind_cell(thermal, face.cell_id)?;
+            if let Some(phase) = self.cells[&face.cell_id].phase_layer {
+                if !same_measure(
+                    face.half_distance_m,
+                    phase
+                        .layer
+                        .half_distance(self.cells[&face.cell_id].mass_kg)?,
+                ) || area_m2 > 2.0 * phase.layer.footprint_area_m2
+                    && !same_measure(area_m2, 2.0 * phase.layer.footprint_area_m2)
+                {
+                    return Err(DepositionError::InvalidInput(
+                        "ambient face disagrees with the planar layer reference geometry",
+                    ));
+                }
+            }
             self.ambient_faces.insert(
                 face.cell_id,
                 BoundAmbient {
@@ -268,10 +400,19 @@ impl<'a> ConductionObserver<'a> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
-        if self.ambient_faces.is_empty() {
+        if self.ambient_faces.is_empty() && !self.has_phase_layers {
             return Ok(());
         }
-        let ids = self.ambient_faces.keys().copied().collect::<Vec<_>>();
+        let mut ids = self.ambient_faces.keys().copied().collect::<Vec<_>>();
+        if self.has_phase_layers {
+            ids.extend(
+                self.cells
+                    .iter()
+                    .filter_map(|(&id, cell)| cell.phase_layer.map(|_| id)),
+            );
+            ids.sort_unstable();
+            ids.dedup();
+        }
         let areas = thermal.exposed_areas_m2(&ids, &mut *checkpoint)?;
         for (&id, face) in &self.ambient_faces {
             checkpoint()?;
@@ -279,6 +420,18 @@ impl<'a> ConductionObserver<'a> {
                 return Err(DepositionError::InvalidInput(
                     "bound ambient conduction coverage changed",
                 ));
+            }
+        }
+        if self.has_phase_layers {
+            for (&id, cell) in &self.cells {
+                if let Some(phase) = cell.phase_layer {
+                    checkpoint()?;
+                    if areas[&id] != phase.exposed_area_m2 {
+                        return Err(DepositionError::InvalidInput(
+                            "bound planar layer face coverage changed",
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -303,6 +456,7 @@ impl<'a> ConductionObserver<'a> {
             segment_id: cell.segment_id,
             mass_kg: cell.mass_kg,
             geometry: cell.geometry,
+            phase_layer: None,
         });
         Ok(())
     }
@@ -314,7 +468,7 @@ impl<'a> ConductionObserver<'a> {
     ) -> Result<BTreeMap<u64, f64>, DepositionError> {
         self.prepared = false;
         checkpoint()?;
-        for (i, (&id, binding)) in self.cells.iter().enumerate() {
+        for (i, (&id, binding)) in self.cells.iter_mut().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
             }
@@ -324,12 +478,20 @@ impl<'a> ConductionObserver<'a> {
             if cell.material_id != binding.material_id
                 || cell.body_id != binding.body_id
                 || cell.segment_id != binding.segment_id
-                || cell.mass_kg != binding.mass_kg
+                || binding.phase_layer.is_none() && cell.mass_kg != binding.mass_kg
                 || cell.geometry != binding.geometry
             {
                 return Err(DepositionError::InvalidInput(
                     "spatial conduction cell binding changed",
                 ));
+            }
+            if let Some(phase) = &mut binding.phase_layer {
+                if cell.boundary.reservoir.map(|r| r.area_m2) != phase.reservoir_area_m2 {
+                    return Err(DepositionError::InvalidInput(
+                        "bound planar layer reservoir coverage changed",
+                    ));
+                }
+                phase.half_distance_m = phase.layer.half_distance(cell.mass_kg)?;
             }
             let k = self.laws[&binding.material_id].conductivity_w_m_k(cell.specific_h_j_kg)?;
             if !nonnegative(k) {
@@ -350,10 +512,22 @@ impl<'a> ConductionObserver<'a> {
                     "spatial conduction link binding changed",
                 ));
             }
+            if self.has_phase_layers
+                && (self.cells[&link.a].phase_layer.is_some()
+                    || self.cells[&link.b].phase_layer.is_some())
+                && thermal.contact_areas(link) != binding.covered_area_m2
+            {
+                return Err(DepositionError::InvalidInput(
+                    "bound planar conduction contact coverage changed",
+                ));
+            }
             let geometry = binding.geometry;
             let g = series_contact_conductance_w_k(
                 binding.area_m2,
-                geometry.half_distances_m,
+                [
+                    self.half_distance(binding.a, geometry.half_distances_m[0]),
+                    self.half_distance(binding.b, geometry.half_distances_m[1]),
+                ],
                 [self.conductivity[&binding.a], self.conductivity[&binding.b]],
                 geometry.contact_resistance_m2_k_w,
             )?;
@@ -379,7 +553,7 @@ impl<'a> ConductionObserver<'a> {
             let geometry = binding.geometry;
             let g = surface_conductance_w_k(
                 binding.area_m2,
-                geometry.half_distance_m,
+                self.half_distance(id, geometry.half_distance_m),
                 k,
                 geometry.surface_resistance_m2_k_w,
             )?;
@@ -391,7 +565,7 @@ impl<'a> ConductionObserver<'a> {
             let geometry = binding.geometry;
             let g = surface_conductance_w_k(
                 binding.area_m2,
-                geometry.half_distance_m,
+                self.half_distance(id, geometry.half_distance_m),
                 self.conductivity[&id],
                 geometry.surface_resistance_m2_k_w,
             )?;
@@ -406,6 +580,86 @@ impl<'a> ConductionObserver<'a> {
     /// They are diagnostics of that substep, not final-state material queries.
     pub fn last_conductivities_w_m_k(&self) -> &BTreeMap<CellId, f64> {
         &self.conductivity
+    }
+
+    /// Last starting-state half-thickness of an explicitly selected phase layer.
+    /// The reference cell geometry is unchanged; this is the transport distance.
+    pub fn last_planar_half_distance_m(&self, id: CellId) -> Option<f64> {
+        self.cells
+            .get(&id)?
+            .phase_layer
+            .map(|phase| phase.half_distance_m)
+    }
+
+    fn half_distance(&self, id: CellId, reference: f64) -> f64 {
+        if self.has_phase_layers {
+            self.last_planar_half_distance_m(id).unwrap_or(reference)
+        } else {
+            reference
+        }
+    }
+
+    fn admit_planar_channels(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        let admit = |id, distance: f64, area: f64| {
+            if let Some(binding) = self.cells.get(&id) {
+                if let Some(phase) = binding.phase_layer {
+                    let footprint = phase.layer.footprint_area_m2;
+                    if !same_measure(distance, phase.layer.half_distance(binding.mass_kg)?)
+                        || (area > footprint && !same_measure(area, footprint))
+                    {
+                        return Err(DepositionError::InvalidInput(
+                            "conduction channel disagrees with planar layer half-thickness or footprint",
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        };
+        // One canonical pass over faces; never scan every link for each layer.
+        for (&id, bound) in &self.links {
+            checkpoint()?;
+            let areas = thermal.contact_areas(&thermal.links[&id]);
+            for (side, cell_id) in [bound.a, bound.b].into_iter().enumerate() {
+                admit(
+                    cell_id,
+                    bound.geometry.half_distances_m[side],
+                    bound.area_m2,
+                )?;
+                admit(cell_id, bound.geometry.half_distances_m[side], areas[side])?;
+            }
+        }
+        for (&id, bound) in &self.reservoirs {
+            checkpoint()?;
+            admit(id, bound.geometry.half_distance_m, bound.area_m2)?;
+        }
+        for (&id, bound) in &self.ambient_faces {
+            checkpoint()?;
+            // One ambient channel aggregates all remaining portions of both
+            // normal faces at the same bath temperature.
+            admit(id, bound.geometry.half_distance_m, 0.5 * bound.area_m2)?;
+        }
+        Ok(())
+    }
+}
+
+fn same_measure(a: f64, b: f64) -> bool {
+    positive(a) && positive(b) && (a - b).abs() <= 128.0 * f64::EPSILON * a.abs().max(b.abs())
+}
+
+impl PlanarPhaseLayer {
+    fn half_distance(self, mass: f64) -> Result<f64, DepositionError> {
+        let volume = finite(mass / self.density_kg_m3)?;
+        let distance = finite((0.5 * volume) / self.footprint_area_m2)?;
+        if !positive(mass) || !positive(volume) || !positive(distance) {
+            return Err(DepositionError::InvalidInput(
+                "planar phase layer needs representable positive mass and thickness",
+            ));
+        }
+        Ok(distance)
     }
 }
 

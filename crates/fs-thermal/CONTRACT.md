@@ -11,7 +11,8 @@ cell's complete original exposed ambient area to the same finite half-cell
 material and declared surface-resistance law as conducting reservoirs:
 `G(h) = A / (d/k(h) + R_surface)`. The original ambient and reservoir baths
 remain separate and may change temperature through boundary events. Geometry,
-reference mass, material identity and coverage stay fixed; changing a bound
+reference mass (except explicitly bound planar phase layers), material identity
+and coverage stay fixed; changing a bound
 face refuses. Zero conductivity insulates exactly. Zero surface resistance
 prescribes temperature at the physical face while retaining the material
 half-cell resistance.
@@ -537,7 +538,7 @@ explicit substep and shares that value across incident faces. Internal links
 reuse the original series resistance owner. A surface reservoir adds the
 half-cell material resistance and an explicit areal film/contact resistance;
 zero external resistance prescribes temperature at the face, not at the cell
-centre. Zero conductivity explicitly insulates. Geometry, reference mass,
+centre. Zero conductivity explicitly insulates. Geometry, reference mass by default,
 material identities and face bindings remain fixed and are checked on reuse.
 Material selection and mixed-phase microstructure remain the constitutive
 owner's responsibility.
@@ -563,6 +564,34 @@ a time/spatial error certificate. Focused G0/G1/G3 tests cover series/Robin
 resistance, dynamic boundary CFL and entropy, exact event splitting, independent
 nonlinear transient and Stefan front/heat refinement, composition, insulation,
 domain/work limits and transactional cancellation.
+
+### Mass-dependent resistance of planar phase layers
+
+`ConductionObserver::with_planar_phase_layers` explicitly binds selected cells
+to constant bulk density and a fixed planar footprint. Current conserved mass
+sets each normal half-thickness to `d = (m / rho) / (2 A)`. The original
+Fourier/contact resistance owner uses this distance for both link sides,
+reservoirs and ambient faces, while the original caloric and CFL owner uses
+the same current mass. Growing frost therefore changes both storage and
+resistance; its conductivity still comes from one original query per cell.
+Unselected cells retain the fixed-mass refusal.
+
+Admission checks the reference mass against density times reference volume,
+the total two-face area against `2 A`, authored normal half-distances and
+per-side contact measures. Source identity, reference mesh, contact coverage
+and footprint remain fixed. A nonzero positive mass/thickness must remain
+representable. All selected channels must be normal to those planar faces;
+this is an explicit caller assertion, not an inferred geometric orientation.
+The fixed-mass implicit chain/graph constructor refuses this explicit mode.
+
+This closure supplies no mesh motion, sidewall growth, porosity, nucleation,
+complete extinction, gas displacement work or density evolution. In particular,
+mixed-phase calorics do not justify constant mixture density automatically.
+The existing first-order thermal/phase split requires timestep refinement.
+The four G0/G1/G3/G4 groups in `conduction/phase_layer_tests.rs` exercise growth
+and retreat resistance, both link sides, finite heat storage/conservation,
+temperature-dependent conductivity shared by both baths, per-side coverage,
+unchanged default admission, cancellation and the implicit-mode refusal.
 
 
 ## Implicit enthalpy transport on geometric conduction chains

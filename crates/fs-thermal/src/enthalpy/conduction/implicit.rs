@@ -251,6 +251,11 @@ impl<'a> ImplicitConductionChain<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
         checkpoint()?;
+        if conduction.has_phase_layers {
+            return Err(ImplicitConductionError::Invalid(
+                "mass-evolving planar phase layers require the explicit conduction observer",
+            ));
+        }
         let ids: Vec<_> = thermal.cells.keys().copied().collect();
         if ids.is_empty() || laws.len() != thermal.materials.len() {
             return Err(ImplicitConductionError::Invalid(
@@ -281,6 +286,7 @@ impl<'a> ImplicitConductionChain<'a> {
                             segment_id: cell.segment_id,
                             mass_kg: cell.mass_kg,
                             geometry: cell.geometry,
+                            phase_layer: None,
                         },
                     )
                 })
